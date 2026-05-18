@@ -566,6 +566,34 @@ A VPS não depende desse perfil para funcionar. Se o celular estiver offline, o 
 - O APK não executa comandos arbitrários recebidos da VPS.
 - A VPS continua só orquestrando; build Android pesado segue no phone worker.
 
+
+## Patch 64 — migração interna avançada do APK
+
+- O APK passa para `0.5.23` / `versionCode 38`.
+- O runtime interno ganha diagnósticos mais úteis sem depender do Termux:
+  - aparelho/bateria/permissões;
+  - rede/VPN/ping para a VPS;
+  - push/FCM/permissão de notificação;
+  - atualização do APK;
+  - runtime interno;
+  - armazenamento/cache interno;
+  - ponte APK interno ↔ Termux worker;
+  - pacote completo de status do APK.
+- Novos jobs internos seguros adicionados:
+  - `apk_device_diagnostic`;
+  - `apk_network_diagnostic`;
+  - `apk_push_diagnostic`;
+  - `apk_update_diagnostic`;
+  - `apk_runtime_diagnostic`;
+  - `apk_storage_diagnostic`;
+  - `apk_worker_bridge_status`;
+  - `apk_collect_status_bundle`;
+  - `apk_cleanup_runtime_cache`.
+- A VPS agenda diagnósticos internos automáticos com intervalos controlados e continua limitando tudo à allowlist.
+- A UI de detalhes técnicos agora separa **Diagnósticos APK** de **Runtime**, mostrando resumo, armazenamento, ponte, último job e histórico sem jogar JSON bruto na tela principal.
+- O painel `workers` passa a mostrar resumo de diagnóstico/armazenamento/ponte do APK interno junto do status do Termux worker.
+- Ainda não há shell, Python interno, build pelo APK nem acesso ao diretório do Termux. Jobs reais continuam no phone-worker/Termux.
+
 ## Patch 63 — runtime interno avançado do APK
 
 - O APK passa para `0.5.22` / `versionCode 37`.

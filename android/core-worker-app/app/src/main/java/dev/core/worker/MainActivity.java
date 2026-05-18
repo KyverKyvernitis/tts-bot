@@ -68,7 +68,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.22";
+    private static final String APP_VERSION = "0.5.23";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -119,6 +119,7 @@ public class MainActivity extends Activity {
     private TextView technicalAppText;
     private TextView technicalDeviceText;
     private TextView technicalRuntimeText;
+    private TextView technicalDiagnosticsText;
     private TextView technicalTermuxText;
     private TextView technicalDependenciesText;
     private TextView updateText;
@@ -183,6 +184,10 @@ public class MainActivity extends Activity {
     private volatile int internalLightJobsRunningCount = 0;
     private volatile int internalLightJobsPendingCount = 0;
     private volatile String internalLightJobsQueueSummary = "fila aguardando";
+    private volatile String internalDiagnosticsSummary = "diagnósticos aguardando";
+    private volatile String internalStorageSummary = "cache aguardando";
+    private volatile String internalBridgeSummary = "ponte aguardando";
+    private volatile long internalDiagnosticsLastAt = 0L;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -425,6 +430,7 @@ public class MainActivity extends Activity {
         technicalAppText = technicalInfoBlock(technicalDetailsContent, "App");
         technicalDeviceText = technicalInfoBlock(technicalDetailsContent, "Aparelho");
         technicalRuntimeText = technicalInfoBlock(technicalDetailsContent, "Runtime");
+        technicalDiagnosticsText = technicalInfoBlock(technicalDetailsContent, "Diagnósticos APK");
         technicalTermuxText = technicalInfoBlock(technicalDetailsContent, "Termux worker");
         technicalDependenciesText = technicalInfoBlock(technicalDetailsContent, "Ainda depende de");
 
@@ -1495,7 +1501,7 @@ public class MainActivity extends Activity {
         runtime.put("internal_runtime_path", internalRuntimePath == null ? "" : internalRuntimePath);
         runtime.put("termux_required_now", true);
         runtime.put("jobs_runtime", "termux+apk-light");
-        runtime.put("migration_stage", "apk-light-jobs");
+        runtime.put("migration_stage", "apk-advanced-diagnostics");
         runtime.put("light_jobs_state", internalLightJobsState == null ? "" : internalLightJobsState);
         runtime.put("light_jobs_last_check_at", internalLightJobsLastCheckAt);
         runtime.put("light_jobs_last_count", internalLightJobsLastCount);
@@ -1503,7 +1509,10 @@ public class MainActivity extends Activity {
         runtime.put("internal_jobs_queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
         runtime.put("internal_jobs_running", internalLightJobsRunningCount);
         runtime.put("internal_jobs_pending", internalLightJobsPendingCount);
-        runtime.put("summary", "APK já envia heartbeat/status direto e executa jobs internos seguros sem shell; Termux continua responsável por jobs reais.");
+        runtime.put("diagnostics_summary", internalDiagnosticsSummary == null ? "" : internalDiagnosticsSummary);
+        runtime.put("storage_summary", internalStorageSummary == null ? "" : internalStorageSummary);
+        runtime.put("bridge_summary", internalBridgeSummary == null ? "" : internalBridgeSummary);
+        runtime.put("summary", "APK já faz status, diagnósticos, histórico e jobs internos seguros sem shell; Termux continua responsável por jobs reais.");
         return runtime;
     }
 
@@ -1543,7 +1552,7 @@ public class MainActivity extends Activity {
             payload.put("profileLabel", profileLabel(appliedProfile()));
             payload.put("localAgentOnline", localAgentOnline);
             payload.put("termuxWorkerOnline", localAgentOnline);
-            payload.put("jobsRuntime", "termux+apk-light");
+            payload.put("jobsRuntime", "termux+apk-internal");
             safePutPayload(payload, "battery", batterySnapshot());
             safePutPayload(payload, "network", networkSnapshot(serverUrl));
             safePutPayload(payload, "update", updateSnapshot());
@@ -1699,7 +1708,16 @@ public class MainActivity extends Activity {
                 .put("apk_sync_runtime_state")
                 .put("apk_download_small")
                 .put("apk_verify_file")
-                .put("apk_job_history");
+                .put("apk_job_history")
+                .put("apk_device_diagnostic")
+                .put("apk_network_diagnostic")
+                .put("apk_push_diagnostic")
+                .put("apk_update_diagnostic")
+                .put("apk_runtime_diagnostic")
+                .put("apk_storage_diagnostic")
+                .put("apk_worker_bridge_status")
+                .put("apk_collect_status_bundle")
+                .put("apk_cleanup_runtime_cache");
     }
 
     private String summarizeLightJobs(JSONArray jobs, int okCount, int count) {
@@ -1903,7 +1921,82 @@ public class MainActivity extends Activity {
             result.put("message", "histórico local de jobs internos enviado");
             return result;
         }
-        if ("apk_clear_app_cache".equals(type) || "apk_cache_cleanup".equals(type)) {
+        if ("apk_device_diagnostic".equals(type)) {
+            JSONObject device = deviceDiagnosticSnapshot();
+            safePutPayload(result, "device", device);
+            internalDiagnosticsSummary = "aparelho ok · " + quickBatteryLabel();
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            result.put("message", "diagnóstico do aparelho concluído pelo APK");
+            return result;
+        }
+        if ("apk_network_diagnostic".equals(type)) {
+            JSONObject network = networkDiagnosticSnapshot(serverUrl);
+            safePutPayload(result, "network", network);
+            boolean ok = network.optBoolean("ok", false);
+            internalDiagnosticsSummary = ok ? "rede ok · " + quickNetworkLabel() : "rede com atenção";
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!ok) {
+                result.put("ok", false);
+                result.put("error", network.optString("error", "rede indisponível"));
+            }
+            result.put("message", ok ? "diagnóstico de rede concluído pelo APK" : "diagnóstico de rede encontrou problema");
+            return result;
+        }
+        if ("apk_push_diagnostic".equals(type)) {
+            JSONObject push = pushDiagnosticSnapshot();
+            safePutPayload(result, "push", push);
+            internalDiagnosticsSummary = "push " + fcmCompactLabel();
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            result.put("message", "diagnóstico de push concluído pelo APK");
+            return result;
+        }
+        if ("apk_update_diagnostic".equals(type)) {
+            JSONObject update = checkUpdateForJob(serverUrl);
+            safePutPayload(result, "update", update);
+            internalDiagnosticsSummary = "update " + updateChecklistLabel();
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!update.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", update.optString("error", "checagem de atualização falhou"));
+            }
+            result.put("message", update.optBoolean("ok", false) ? "diagnóstico de atualização concluído" : "diagnóstico de atualização falhou");
+            return result;
+        }
+        if ("apk_runtime_diagnostic".equals(type)) {
+            JSONObject runtime = runtimeDiagnosticSnapshot();
+            safePutPayload(result, "runtime", runtime);
+            internalDiagnosticsSummary = "runtime interno ok";
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            result.put("message", "diagnóstico do runtime interno concluído");
+            return result;
+        }
+        if ("apk_storage_diagnostic".equals(type)) {
+            JSONObject storage = storageSnapshot();
+            safePutPayload(result, "storage", storage);
+            internalStorageSummary = storageSummary(storage);
+            internalDiagnosticsSummary = "armazenamento " + internalStorageSummary;
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            result.put("message", "diagnóstico de armazenamento interno concluído");
+            return result;
+        }
+        if ("apk_worker_bridge_status".equals(type)) {
+            JSONObject bridge = workerBridgeStatusSnapshot();
+            safePutPayload(result, "bridge", bridge);
+            internalBridgeSummary = bridge.optString("summary", "ponte atualizada");
+            internalDiagnosticsSummary = internalBridgeSummary;
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            result.put("message", "estado da ponte APK/Termux reportado");
+            return result;
+        }
+        if ("apk_collect_status_bundle".equals(type)) {
+            JSONObject bundle = collectStatusBundle(serverUrl);
+            safePutPayload(result, "bundle", bundle);
+            internalDiagnosticsSummary = "pacote de status enviado";
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            result.put("message", "pacote completo de status do APK enviado para a VPS");
+            return result;
+        }
+        if ("apk_clear_app_cache".equals(type) || "apk_cache_cleanup".equals(type) || "apk_cleanup_runtime_cache".equals(type)) {
             long bytes = clearInternalJobCache();
             result.put("bytesCleared", bytes);
             result.put("message", "cache interno do APK limpo");
@@ -1944,6 +2037,147 @@ public class MainActivity extends Activity {
         return result;
     }
 
+    private JSONObject permissionsSnapshot() throws Exception {
+        JSONObject permissions = new JSONObject();
+        permissions.put("notifications", hasNotificationPermission() ? "granted" : "missing");
+        permissions.put("install_updates", hasInstallPermission() ? "granted" : "missing");
+        permissions.put("background", hasBatteryPermission() ? "allowed" : "restricted");
+        permissions.put("all_required", hasRequiredAppPermissions());
+        return permissions;
+    }
+
+    private JSONObject storageSnapshot() throws Exception {
+        JSONObject storage = new JSONObject();
+        File files = getFilesDir();
+        File cache = getCacheDir();
+        File runtime = internalRuntimePath == null || internalRuntimePath.trim().isEmpty() ? new File(files, "core-runtime") : new File(internalRuntimePath);
+        File jobCache = new File(cache, "core-worker-jobs");
+        storage.put("files_bytes", directorySize(files));
+        storage.put("cache_bytes", directorySize(cache));
+        storage.put("runtime_bytes", directorySize(runtime));
+        storage.put("job_cache_bytes", directorySize(jobCache));
+        storage.put("job_cache_files", directoryFileCount(jobCache));
+        storage.put("files_dir", files == null ? "" : files.getName());
+        storage.put("cache_dir", cache == null ? "" : cache.getName());
+        storage.put("scope", "app-specific-internal");
+        storage.put("summary", storageSummary(storage));
+        return storage;
+    }
+
+    private String storageSummary(JSONObject storage) {
+        try {
+            long cacheBytes = storage.optLong("cache_bytes", 0L);
+            long jobBytes = storage.optLong("job_cache_bytes", 0L);
+            return "cache " + humanBytes(cacheBytes) + " · jobs " + humanBytes(jobBytes);
+        } catch (Throwable ignored) {
+            return "cache interno ok";
+        }
+    }
+
+    private long directorySize(File file) {
+        if (file == null || !file.exists()) return 0L;
+        if (file.isFile()) return Math.max(0L, file.length());
+        long total = 0L;
+        File[] children = file.listFiles();
+        if (children != null) {
+            for (File child : children) total += directorySize(child);
+        }
+        return total;
+    }
+
+    private int directoryFileCount(File file) {
+        if (file == null || !file.exists()) return 0;
+        if (file.isFile()) return 1;
+        int total = 0;
+        File[] children = file.listFiles();
+        if (children != null) {
+            for (File child : children) total += directoryFileCount(child);
+        }
+        return total;
+    }
+
+    private String humanBytes(long bytes) {
+        if (bytes < 1024L) return bytes + " B";
+        double kb = bytes / 1024.0;
+        if (kb < 1024.0) return String.format(Locale.ROOT, "%.1f KiB", kb);
+        double mb = kb / 1024.0;
+        return String.format(Locale.ROOT, "%.1f MiB", mb);
+    }
+
+    private JSONObject deviceDiagnosticSnapshot() throws Exception {
+        JSONObject device = new JSONObject();
+        device.put("manufacturer", Build.MANUFACTURER);
+        device.put("model", Build.MODEL);
+        device.put("android_sdk", Build.VERSION.SDK_INT);
+        safePutPayload(device, "battery", batterySnapshot());
+        safePutPayload(device, "permissions", permissionsSnapshot());
+        device.put("summary", quickBatteryLabel() + " · Android " + Build.VERSION.SDK_INT);
+        return device;
+    }
+
+    private JSONObject networkDiagnosticSnapshot(String serverUrl) throws Exception {
+        JSONObject network = networkSnapshot(serverUrl);
+        boolean available = network.optBoolean("available", false);
+        int ping = network.optInt("vps_ping_ms", -1);
+        boolean ok = available && (serverUrl == null || serverUrl.trim().isEmpty() || ping >= 0);
+        network.put("ok", ok);
+        network.put("summary", quickNetworkLabel() + (ping >= 0 ? " · " + ping + "ms" : ""));
+        if (!ok) network.put("error", available ? "VPS não respondeu ao ping TCP" : "sem internet ativa");
+        return network;
+    }
+
+    private JSONObject pushDiagnosticSnapshot() throws Exception {
+        JSONObject push = new JSONObject();
+        push.put("enabled_in_build", FCM_ENABLED_IN_APK);
+        push.put("state", fcmState == null ? "" : fcmState);
+        push.put("token_registered_locally", prefs.getString("fcm_token", "").trim().length() > 0);
+        push.put("permission", hasNotificationPermission() ? "granted" : "missing");
+        push.put("fallback_local", true);
+        push.put("summary", "push " + fcmCompactLabel() + " · permissão " + (hasNotificationPermission() ? "ok" : "pendente"));
+        return push;
+    }
+
+    private JSONObject runtimeDiagnosticSnapshot() throws Exception {
+        JSONObject runtime = runtimeSnapshot();
+        runtime.put("last_diagnostic_at", internalDiagnosticsLastAt);
+        runtime.put("diagnostics_summary", internalDiagnosticsSummary == null ? "" : internalDiagnosticsSummary);
+        runtime.put("storage_summary", internalStorageSummary == null ? "" : internalStorageSummary);
+        runtime.put("bridge_summary", internalBridgeSummary == null ? "" : internalBridgeSummary);
+        runtime.put("job_history_text", internalJobHistoryText());
+        return runtime;
+    }
+
+    private JSONObject workerBridgeStatusSnapshot() throws Exception {
+        JSONObject bridge = new JSONObject();
+        bridge.put("mode", "hybrid");
+        bridge.put("apk_internal_online", internalRuntimeOnline);
+        bridge.put("termux_worker_online", localAgentOnline);
+        bridge.put("termux_agent_version", localAgentVersion == null ? "" : localAgentVersion);
+        bridge.put("termux_profile", localAgentProfile == null ? "" : localAgentProfile);
+        bridge.put("jobs_real_runtime", "termux-phone-worker");
+        bridge.put("jobs_internal_runtime", "apk-safe-internal-queue");
+        bridge.put("ready_for_termux_reduction", internalRuntimeOnline && hasPairing());
+        String summary = internalRuntimeOnline ? "APK interno online" : "APK aguardando";
+        summary += localAgentOnline ? " · Termux online" : " · Termux offline";
+        bridge.put("summary", summary);
+        return bridge;
+    }
+
+    private JSONObject collectStatusBundle(String serverUrl) throws Exception {
+        JSONObject bundle = new JSONObject();
+        safePutPayload(bundle, "status", statusSnapshot());
+        safePutPayload(bundle, "device", deviceDiagnosticSnapshot());
+        safePutPayload(bundle, "network", networkDiagnosticSnapshot(serverUrl));
+        safePutPayload(bundle, "push", pushDiagnosticSnapshot());
+        safePutPayload(bundle, "update", updateSnapshot());
+        safePutPayload(bundle, "runtime", runtimeDiagnosticSnapshot());
+        safePutPayload(bundle, "storage", storageSnapshot());
+        safePutPayload(bundle, "bridge", workerBridgeStatusSnapshot());
+        safePutPayload(bundle, "history", internalJobHistoryJson());
+        bundle.put("summary", "status completo do APK coletado sem Termux");
+        return bundle;
+    }
+
     private JSONObject diagnosticSnapshot(String serverUrl) throws Exception {
         JSONObject diagnostic = new JSONObject();
         diagnostic.put("timestamp", System.currentTimeMillis());
@@ -1958,7 +2192,12 @@ public class MainActivity extends Activity {
         safePutPayload(diagnostic, "network", networkSnapshot(serverUrl));
         safePutPayload(diagnostic, "update", updateSnapshot());
         safePutPayload(diagnostic, "appStatus", appStatusSnapshot());
+        safePutPayload(diagnostic, "permissions", permissionsSnapshot());
+        safePutPayload(diagnostic, "storage", storageSnapshot());
         safePutPayload(diagnostic, "runtime", runtimeSnapshot());
+        safePutPayload(diagnostic, "bridge", workerBridgeStatusSnapshot());
+        internalDiagnosticsSummary = "diagnóstico completo ok";
+        internalDiagnosticsLastAt = System.currentTimeMillis();
         return diagnostic;
     }
 
@@ -2658,6 +2897,8 @@ public class MainActivity extends Activity {
         safePutPayload(status, "battery", batterySnapshot());
         safePutPayload(status, "network", networkSnapshot(normalizedServerUrl()));
         safePutPayload(status, "update", updateSnapshot());
+        safePutPayload(status, "permissions", permissionsSnapshot());
+        safePutPayload(status, "storage", storageSnapshot());
         safePutPayload(status, "app_status", appStatusSnapshot());
         if (localAgentOnline) {
             status.put("local_agent_version", localAgentVersion);
@@ -3191,8 +3432,9 @@ public class MainActivity extends Activity {
             if (technicalAppText != null) technicalAppText.setText(blocks[0]);
             if (technicalDeviceText != null) technicalDeviceText.setText(blocks[1]);
             if (technicalRuntimeText != null) technicalRuntimeText.setText(blocks[2]);
-            if (technicalTermuxText != null) technicalTermuxText.setText(blocks[3]);
-            if (technicalDependenciesText != null) technicalDependenciesText.setText(blocks[4]);
+            if (technicalDiagnosticsText != null) technicalDiagnosticsText.setText(blocks[3]);
+            if (technicalTermuxText != null) technicalTermuxText.setText(blocks[4]);
+            if (technicalDependenciesText != null) technicalDependenciesText.setText(blocks[5]);
             if (systemChecklistText != null) {
                 systemChecklistText.setText(prepareChecklistText());
             }
@@ -3207,7 +3449,8 @@ public class MainActivity extends Activity {
                 + checkLine("APK", APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")") + "\n"
                 + checkLine("Push", fcmStatusLabel()) + "\n"
                 + checkLine("Perfil", profileLabel(appliedProfile())) + "\n"
-                + checkLine("Atualizações", updateChecklistLabel());
+                + checkLine("Atualizações", updateChecklistLabel()) + "\n"
+                + checkLine("Diagnóstico", emptyFallback(internalDiagnosticsSummary, "aguardando"));
 
         String battery = quickBatteryLabel();
         String tempNote = "";
@@ -3232,9 +3475,20 @@ public class MainActivity extends Activity {
                 + checkLine("Último heartbeat", ageLabel) + "\n"
                 + checkLine("Jobs internos", emptyFallback(internalLightJobsState, "aguardando")) + "\n"
                 + checkLine("Fila", emptyFallback(internalLightJobsQueueSummary, "aguardando")) + "\n"
+                + checkLine("Jobs reais", "Termux por enquanto");
+
+        String diagAge = "pendente";
+        if (internalDiagnosticsLastAt > 0L) {
+            long age = Math.max(0L, (System.currentTimeMillis() - internalDiagnosticsLastAt) / 1000L);
+            diagAge = age < 60 ? "agora" : (age / 60L) + " min atrás";
+        }
+        String diagnosticsBlock = "Diagnósticos APK\n"
+                + checkLine("Resumo", emptyFallback(internalDiagnosticsSummary, "aguardando")) + "\n"
+                + checkLine("Armazenamento", emptyFallback(internalStorageSummary, "aguardando")) + "\n"
+                + checkLine("Ponte", emptyFallback(internalBridgeSummary, "aguardando")) + "\n"
                 + checkLine("Último job", emptyFallback(internalLightJobsLastSummary, "nenhum")) + "\n"
                 + checkLine("Histórico", internalJobHistoryText()) + "\n"
-                + checkLine("Jobs reais", "Termux por enquanto")
+                + checkLine("Atualizado", diagAge)
                 + ((internalRuntimeLastError != null && !internalRuntimeLastError.trim().isEmpty()) ? "\n" + checkLine("Último erro APK", internalRuntimeLastError) : "");
 
         String sshd = emptyFallback(localAgentSshdSummary, "não informado");
@@ -3253,7 +3507,7 @@ public class MainActivity extends Activity {
                 + checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "Tailscale externo ainda necessário") + "\n"
                 + checkLine("VPS local", localAgentVpsConfigured ? "configurada" : "pendente");
 
-        return new String[]{appBlock, deviceBlock, runtimeBlock, termuxBlock, depsBlock};
+        return new String[]{appBlock, deviceBlock, runtimeBlock, diagnosticsBlock, termuxBlock, depsBlock};
     }
 
     private String prepareChecklistText() {

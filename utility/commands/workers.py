@@ -478,6 +478,18 @@ def _core_worker_app_jobs_text(worker_id: str) -> str:
     return " · ".join(pieces)
 
 
+def _core_worker_app_runtime_detail_text(worker_id: str) -> str:
+    record = _core_worker_app_runtime_record(str(worker_id or ""))
+    if not isinstance(record, dict):
+        return "APK interno: sem heartbeat direto ainda"
+    diag = _shorten(record.get("diagnosticsSummary") or "diagnóstico aguardando", limit=90)
+    storage = _shorten(record.get("storageSummary") or "armazenamento aguardando", limit=80)
+    bridge = _shorten(record.get("bridgeSummary") or "ponte aguardando", limit=80)
+    perm = _shorten(record.get("notificationPermission") or "notificação ?", limit=32)
+    jobs = _core_worker_app_jobs_text(worker_id)
+    return f"APK interno: diagnóstico {diag} · {storage} · {bridge} · notif {perm} · {jobs}"
+
+
 def _core_worker_app_runtime_text(worker_id: str) -> str:
     worker_id = str(worker_id or "").strip()
     if not worker_id:
@@ -523,8 +535,17 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
             network += f" · {ping}ms"
     except Exception:
         pass
+    diagnostics = _shorten(record.get("diagnosticsSummary") or "", limit=42)
+    storage = _shorten(record.get("storageSummary") or "", limit=34)
+    bridge = _shorten(record.get("bridgeSummary") or "", limit=34)
     prefix = "online" if online else "visto " + _format_age(age)
     pieces = [prefix, app_version, f"perfil {profile}", f"push {fcm_state}", battery, network, f"APK {update_state}", f"jobs: {jobs_runtime}"]
+    if diagnostics:
+        pieces.append(f"diag {diagnostics}")
+    if storage:
+        pieces.append(storage)
+    if bridge:
+        pieces.append(bridge)
     if internal_queue:
         pieces.append(f"fila {internal_queue}")
     pieces.append(_core_worker_app_jobs_text(worker_id))
@@ -1572,6 +1593,7 @@ def _worker_detail_text(worker: dict[str, Any] | None) -> str:
         f"**Boot automático:** {_boot_health_label(worker)}",
         f"**Canal wake:** {_wake_channel_text(worker) or 'não reportado'}",
         f"**Runtime:** {_runtime_health_label(worker)}",
+        f"**APK interno:** {_core_worker_app_runtime_detail_text(worker_id)}",
         "",
         "### Funções",
         _role_text(roles, limit=16),

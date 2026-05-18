@@ -361,6 +361,8 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
     network = payload.get("network") if isinstance(payload.get("network"), dict) else status.get("network") if isinstance(status.get("network"), dict) else {}
     update = payload.get("update") if isinstance(payload.get("update"), dict) else status.get("update") if isinstance(status.get("update"), dict) else {}
     app_status = payload.get("app_status") if isinstance(payload.get("app_status"), dict) else status.get("app_status") if isinstance(status.get("app_status"), dict) else {}
+    storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else status.get("storage") if isinstance(status.get("storage"), dict) else {}
+    permissions = payload.get("permissions") if isinstance(payload.get("permissions"), dict) else status.get("permissions") if isinstance(status.get("permissions"), dict) else {}
     record = {
         "receivedAt": now,
         "installId": install_id,
@@ -391,10 +393,16 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
         "updateAvailable": bool(update.get("available")) if isinstance(update, dict) else False,
         "lastAppError": _safe_short_text(app_status.get("last_error") if isinstance(app_status, dict) else "", 160),
         "ready": bool(app_status.get("ready")) if isinstance(app_status, dict) else False,
+        "diagnosticsSummary": _safe_short_text(runtime.get("diagnostics_summary") or status.get("diagnostics_summary"), 160),
+        "storageSummary": _safe_short_text(runtime.get("storage_summary") or (storage.get("summary") if isinstance(storage, dict) else ""), 120),
+        "bridgeSummary": _safe_short_text(runtime.get("bridge_summary"), 120),
+        "notificationPermission": _safe_short_text((permissions.get("notifications") if isinstance(permissions, dict) else ""), 32),
         "battery": battery if isinstance(battery, dict) else {},
         "network": network if isinstance(network, dict) else {},
         "update": update if isinstance(update, dict) else {},
         "appStatus": app_status if isinstance(app_status, dict) else {},
+        "storage": storage if isinstance(storage, dict) else {},
+        "permissions": permissions if isinstance(permissions, dict) else {},
         "remoteAddr": _safe_short_text(request.remote_addr or "", 64),
     }
     path = _core_worker_app_heartbeats_path()
@@ -457,6 +465,10 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
         "updateAvailable": bool(record.get("updateAvailable")),
         "lastAppError": _safe_short_text(record.get("lastAppError"), 160),
         "ready": bool(record.get("ready")),
+        "diagnosticsSummary": _safe_short_text(record.get("diagnosticsSummary"), 160),
+        "storageSummary": _safe_short_text(record.get("storageSummary"), 120),
+        "bridgeSummary": _safe_short_text(record.get("bridgeSummary"), 120),
+        "notificationPermission": _safe_short_text(record.get("notificationPermission"), 32),
         "internalJobsQueue": _safe_short_text(record.get("internalJobsQueue"), 120),
         "internalJobsRunning": int(record.get("internalJobsRunning") or 0),
         "internalJobsPending": int(record.get("internalJobsPending") or 0),
@@ -490,6 +502,15 @@ CORE_WORKER_APP_SAFE_JOB_TYPES = {
     "apk_download_small",
     "apk_verify_file",
     "apk_job_history",
+    "apk_device_diagnostic",
+    "apk_network_diagnostic",
+    "apk_push_diagnostic",
+    "apk_update_diagnostic",
+    "apk_runtime_diagnostic",
+    "apk_storage_diagnostic",
+    "apk_worker_bridge_status",
+    "apk_collect_status_bundle",
+    "apk_cleanup_runtime_cache",
 }
 
 CORE_WORKER_APP_JOB_MAX_DELIVER = 4
@@ -526,7 +547,7 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
         profile = _safe_short_text(payload.get("profile"), 40).lower()
         if profile in {"leve", "midia", "media", "normal", "completo", "builder", "turbo", "bedrock"}:
             clean["profile"] = profile
-    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_clear_app_cache"}:
+    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_clear_app_cache", "apk_cleanup_runtime_cache", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle"}:
         detail = _safe_short_text(payload.get("detail") or payload.get("reason"), 80)
         if detail:
             clean["detail"] = detail
@@ -671,6 +692,9 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
         auto_diag_interval = int(os.getenv("CORE_WORKER_APP_AUTO_DIAGNOSTIC_INTERVAL_SECONDS", "1800") or "1800")
         auto_update_interval = int(os.getenv("CORE_WORKER_APP_AUTO_UPDATE_CHECK_INTERVAL_SECONDS", "2700") or "2700")
         auto_report_interval = int(os.getenv("CORE_WORKER_APP_AUTO_REPORT_INTERVAL_SECONDS", "3600") or "3600")
+        auto_runtime_diag_interval = int(os.getenv("CORE_WORKER_APP_AUTO_RUNTIME_DIAGNOSTIC_INTERVAL_SECONDS", "2100") or "2100")
+        auto_storage_diag_interval = int(os.getenv("CORE_WORKER_APP_AUTO_STORAGE_DIAGNOSTIC_INTERVAL_SECONDS", "5400") or "5400")
+        auto_bundle_interval = int(os.getenv("CORE_WORKER_APP_AUTO_STATUS_BUNDLE_INTERVAL_SECONDS", "7200") or "7200")
 
         def _maybe_auto_job(kind: str, interval: int, title: str, reason: str) -> None:
             if len(deliver) >= CORE_WORKER_APP_JOB_MAX_DELIVER or interval <= 0 or kind not in supported_set:
@@ -691,6 +715,10 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
         _maybe_auto_job("apk_diagnostic", auto_diag_interval, "Diagnóstico interno seguro", "auto-diagnostic")
         _maybe_auto_job("apk_check_update", auto_update_interval, "Checar atualização pelo APK", "auto-update-check")
         _maybe_auto_job("apk_upload_app_logs", auto_report_interval, "Enviar relatório interno do APK", "auto-app-report")
+        _maybe_auto_job("apk_runtime_diagnostic", auto_runtime_diag_interval, "Diagnóstico do runtime do APK", "auto-runtime-diagnostic")
+        _maybe_auto_job("apk_worker_bridge_status", auto_runtime_diag_interval, "Estado da ponte APK/Termux", "auto-bridge-status")
+        _maybe_auto_job("apk_storage_diagnostic", auto_storage_diag_interval, "Diagnóstico de armazenamento do APK", "auto-storage-diagnostic")
+        _maybe_auto_job("apk_collect_status_bundle", auto_bundle_interval, "Pacote de status completo do APK", "auto-status-bundle")
 
         queue_stats = stats.get(key) if isinstance(stats.get(key), dict) else {}
         queue_stats["lastFetchAt"] = now
