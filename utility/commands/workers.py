@@ -1017,7 +1017,12 @@ def _automation_status_text() -> str:
             if _active_workers_need_agent_version(snapshot_workers, target):
                 parts.append(f"Worker: atualização pendente ({target})")
         if apk:
-            parts.append(f"APK: build pendente ({apk.get('versionName') or '?'})")
+            if apk.get("blocked_by_recent_failure") or (apk.get("ok") is False and not apk.get("pending")):
+                retry = apk.get("retry_after_seconds")
+                extra = f" · retry em {int(retry)}s" if retry else ""
+                parts.append(f"APK: build falhou ({apk.get('versionName') or '?'}){extra}")
+            else:
+                parts.append(f"APK: build pendente ({apk.get('versionName') or '?'})")
     if not parts:
         try:
             status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
@@ -1037,6 +1042,8 @@ def _automation_status_text() -> str:
             if apk:
                 if apk.get("already_published"):
                     parts.append(f"APK: publicado {apk.get('versionName') or '?'}")
+                elif apk.get("blocked_by_recent_failure") or (apk.get("ok") is False and not apk.get("pending")):
+                    parts.append(f"APK: build falhou ({apk.get('versionName') or '?'})")
                 elif apk.get("job"):
                     parts.append(f"APK: build em andamento ({apk.get('versionName') or '?'})")
                 else:
@@ -2912,6 +2919,74 @@ class WorkersCommandMixin:
         code_match = re.search(r"versionCode\s+(\d+)", text)
         return (name_match.group(1) if name_match else "0.0.0", int(code_match.group(1)) if code_match else 0)
 
+
+    def _load_google_services_payload_for_apk_build(self) -> dict[str, Any]:
+        """Carrega google-services.json local sem colocá-lo no Git ou no ZIP público.
+
+        O source ZIP fica público em /core-worker/app/*.zip para o worker baixar.
+        Por isso o Firebase Android config é enviado apenas dentro do payload do
+        job, que passa pelo canal autenticado do registry para o phone worker.
+        """
+        root = _repo_root()
+        candidates: list[Path] = []
+        for raw in (
+            os.getenv("CORE_WORKER_GOOGLE_SERVICES_JSON"),
+            os.getenv("CORE_WORKER_FIREBASE_ANDROID_CONFIG"),
+            os.getenv("GOOGLE_SERVICES_JSON"),
+        ):
+            if raw:
+                candidates.append(Path(str(raw)).expanduser())
+        candidates.append(root / "android" / "core-worker-app" / "app" / "google-services.json")
+
+        path = next((item for item in candidates if item.is_file()), None)
+        if path is None:
+            raise FileNotFoundError(
+                "google-services.json local não encontrado. Coloque em "
+                "android/core-worker-app/app/google-services.json na VPS/build env ou defina CORE_WORKER_GOOGLE_SERVICES_JSON."
+            )
+        raw = path.read_bytes()
+        if len(raw) > 512 * 1024:
+            raise ValueError("google-services.json grande demais")
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            raise ValueError(f"google-services.json inválido: {type(exc).__name__}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ValueError("google-services.json inválido: raiz não é objeto JSON")
+        project_info = data.get("project_info") if isinstance(data.get("project_info"), dict) else {}
+        project_id = str(project_info.get("project_id") or "").strip()
+        clients = data.get("client") if isinstance(data.get("client"), list) else []
+        matched_client: dict[str, Any] | None = None
+        for client in clients:
+            if not isinstance(client, dict):
+                continue
+            info = client.get("client_info") if isinstance(client.get("client_info"), dict) else {}
+            android = info.get("android_client_info") if isinstance(info.get("android_client_info"), dict) else {}
+            package_name = str(android.get("package_name") or "").strip()
+            if package_name == "dev.core.worker":
+                matched_client = client
+                break
+        if not project_id or matched_client is None:
+            raise ValueError("google-services.json precisa conter project_id e client Android package_name dev.core.worker")
+        info = matched_client.get("client_info") if isinstance(matched_client.get("client_info"), dict) else {}
+        mobile_app_id = str(info.get("mobilesdk_app_id") or "").strip()
+        api_keys = matched_client.get("api_key") if isinstance(matched_client.get("api_key"), list) else []
+        api_key = ""
+        for entry in api_keys:
+            if isinstance(entry, dict) and str(entry.get("current_key") or "").strip():
+                api_key = str(entry.get("current_key") or "").strip()
+                break
+        if not mobile_app_id or not api_key:
+            raise ValueError("google-services.json precisa conter mobilesdk_app_id e api_key para dev.core.worker")
+        sha = hashlib.sha256(raw).hexdigest()
+        return {
+            "googleServicesJsonB64": base64.b64encode(raw).decode("ascii"),
+            "googleServicesSha256": sha,
+            "googleServicesPackage": "dev.core.worker",
+            "googleServicesProjectId": project_id[:80],
+            "googleServicesSource": "local-vps-payload",
+        }
+
     def _prepare_core_worker_source_zip_sync(self) -> dict[str, Any]:
         root = _repo_root()
         project = root / "android" / "core-worker-app"
@@ -2920,13 +2995,28 @@ class WorkersCommandMixin:
         release_dir = project / "releases"
         release_dir.mkdir(parents=True, exist_ok=True)
         zip_path = release_dir / "source-core-worker-app.zip"
-        excluded_dirs = {"build", ".gradle", "releases"}
+        excluded_dirs = {"build", ".gradle", "releases", ".idea"}
+        excluded_names = {
+            ".env",
+            "local.properties",
+            "private.properties",
+            "vps.properties",
+            "google-services.json",
+            "firebase-service-account.json",
+        }
+        excluded_suffixes = (".jks", ".keystore", ".p12", ".pem", ".key")
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
             for path in sorted(project.rglob("*")):
                 rel_project = path.relative_to(project)
                 if any(part in excluded_dirs for part in rel_project.parts):
                     continue
                 if path.is_dir():
+                    continue
+                name = path.name.lower()
+                rel_text = rel_project.as_posix().lower()
+                if name in excluded_names or "service-account" in name or rel_text.endswith("/google-services.json"):
+                    continue
+                if any(name.endswith(suffix) for suffix in excluded_suffixes):
                     continue
                 arcname = Path("android/core-worker-app") / rel_project
                 zf.write(path, arcname.as_posix())
@@ -2937,16 +3027,20 @@ class WorkersCommandMixin:
             "bytes": len(raw),
             "sha256": hashlib.sha256(raw).hexdigest(),
             "url": f"{_public_base_url()}/core-worker/app/{zip_path.name}",
+            "firebase_config_delivery": "job_payload",
         }
 
     async def _build_apk_builder_payload(self, base_payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(base_payload or {})
         source = await asyncio.to_thread(self._prepare_core_worker_source_zip_sync)
         version_name, version_code = self._read_core_worker_app_version()
+        firebase_config = self._load_google_services_payload_for_apk_build()
         payload.update({
             "source_zip_url": source["url"],
             "source_sha256": source["sha256"],
             "source_bytes": source["bytes"],
+            "firebase_config_delivery": source.get("firebase_config_delivery") or "job_payload",
+            **firebase_config,
             "project_subdir": "android/core-worker-app",
             "publish": True,
             "versionName": version_name,
@@ -2954,7 +3048,7 @@ class WorkersCommandMixin:
             "filename": f"CoreWorker-v{version_name}-debug.apk",
             "coreWorkerVpsUrl": _public_base_url(),
             "coreWorkerVpsLabel": f"VPS privada · {_host_label(_public_base_url().replace('http://', '').replace('https://', '').split(':')[0])}:" + str(os.getenv("CORE_WORKER_PUBLIC_PORT") or os.getenv("PORT") or "10000"),
-            "changelog": ["APK compilado por worker builder", "VPS assinou e publicou o resultado", "URL da VPS injetada no build privado"],
+            "changelog": ["APK compilado por worker builder", "Phone worker compilou e assinou o APK; VPS só publicou o resultado", "URL da VPS injetada no build privado"],
         })
         return payload
 

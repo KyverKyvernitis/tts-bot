@@ -1,5 +1,26 @@
 # Core Worker APK privado
 
+## Patch 56 — APK builder sem segredos públicos e sem assinatura na VPS
+
+O Patch 56 corrige o fluxo de build automático com Firebase:
+
+- `google-services.json` continua fora do GitHub e fora do ZIP público de source.
+- A VPS lê o `google-services.json` local e envia o conteúdo somente no payload autenticado do job para o phone worker builder.
+- O phone worker grava esse arquivo apenas no workspace temporário de build.
+- O ZIP `source-core-worker-app.zip` não deve conter `google-services.json`, `.env`, keystore, service account, `local.properties` ou configs privadas.
+- O phone worker compila e gera o APK debug já assinado pelo Gradle.
+- A VPS Oracle não usa `gradle`, `apksigner`, Android SDK nem keystore no fluxo normal; ela só valida o ZIP/APK, publica `latest.json` e envia FCM.
+- Se a build falhar, a automação registra falha recente e evita repetir em loop.
+
+Arquivos locais esperados na VPS/build env:
+
+```text
+android/core-worker-app/app/google-services.json
+/home/ubuntu/secrets/firebase-service-account.json
+```
+
+Nenhum desses arquivos vai para GitHub. A service account também nunca vai para o phone worker.
+
 ## v0.5.15 — preparação do runtime interno
 
 A versão `0.5.15` complementa o Patch 55. Ela começa a reduzir a dependência futura do Termux sem remover nem quebrar o fluxo atual.
@@ -362,7 +383,7 @@ VPS detecta mudança / usuário aciona build
   -> phone worker builder baixa a base
   -> phone worker compila o APK
   -> worker envia o APK para POST /core-worker/app/publish
-  -> VPS assina/publica e atualiza latest.json
+  -> VPS publica e atualiza latest.json
 ```
 
 A VPS não deve executar `gradle`, `assembleDebug` ou Android build localmente. Em Oracle 1 GB RAM, ela deve ficar como cérebro/orquestradora.
@@ -417,10 +438,9 @@ O fluxo é:
 ```text
 VPS empacota android/core-worker-app em source-core-worker-app.zip
 worker builder baixa o source
-worker compila o APK
-worker envia APK + sha256 para a VPS
-VPS re-assina o APK com chave fixa local
-VPS atualiza latest.json com o SHA-256 do APK assinado
+phone worker compila o APK debug já assinado pelo Gradle
+phone worker envia APK + sha256 para a VPS
+VPS valida/publica o APK e atualiza latest.json com o SHA-256 final
 Core Worker APK mostra Atualizar no topo quando houver versão nova
 ```
 
@@ -431,19 +451,11 @@ No Android comum, a instalação ainda exige confirmação do usuário.
 
 ## Assinatura fixa ao publicar APK de worker builder
 
-Quando um worker builder compila o APK, ele pode assinar com a chave debug do próprio Termux. Isso causa conflito no Android se o APK instalado foi assinado por outra chave. Por isso o endpoint `POST /core-worker/app/publish` agora deve re-assinar o APK na VPS antes de publicar.
+Quando um worker builder compila o APK debug, o Gradle já assina o artefato no próprio phone worker. A VPS não deve depender de Android SDK/apksigner no fluxo normal: ela recebe o APK pronto, valida o ZIP/APK e publica. Assinatura fixa pela VPS fica opcional para um futuro release build, via variáveis locais, e não deve ser usada no Oracle VPS de 1 GB.
 
-Configuração recomendada na VPS:
+Configuração recomendada na VPS agora: **não definir** `CORE_WORKER_APK_SIGNING_MODE` ou deixar `disabled`. Assim a VPS aceita o APK debug já assinado pelo phone worker e não precisa de Android SDK.
 
-```env
-CORE_WORKER_APK_SIGNING_MODE=debug
-CORE_WORKER_APK_KEYSTORE=/home/ubuntu/.android/debug.keystore
-CORE_WORKER_APK_KEY_ALIAS=androiddebugkey
-CORE_WORKER_APK_KEYSTORE_PASSWORD=android
-CORE_WORKER_APK_KEY_PASSWORD=android
-```
-
-Para produção privada futura, troque por uma keystore release local da VPS:
+Para produção privada futura, use assinatura fixa em outro ambiente adequado ou como etapa separada, com keystore local fora do Git. Exemplo apenas futuro:
 
 ```env
 CORE_WORKER_APK_SIGNING_MODE=release
@@ -453,7 +465,7 @@ CORE_WORKER_APK_KEYSTORE_PASSWORD=...
 CORE_WORKER_APK_KEY_PASSWORD=...
 ```
 
-Nunca envie keystore ou senhas para GitHub. O APK publicado no `latest.json` deve ser o APK já assinado pela VPS, não o APK assinado pelo worker.
+Nunca envie keystore, senhas, `.env`, `google-services.json` ou service account para GitHub. No fluxo atual, o APK publicado no `latest.json` é o APK debug já assinado pelo phone worker. A service account fica só na VPS.
 
 ## Perfil Turbo / ajudar VPS
 

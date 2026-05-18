@@ -209,6 +209,71 @@ def _build_worker_update_payload(*, scripts_only: bool = False) -> dict[str, Any
     }
 
 
+def _load_google_services_payload_for_apk_build() -> dict[str, Any]:
+    """Envia google-services.json só pelo payload autenticado do job.
+
+    O source ZIP é servido por HTTP para o phone worker; por isso não deve conter
+    o google-services.json local. O arquivo continua fora do GitHub e fora do
+    ZIP público, mas chega ao worker builder no payload do job.
+    """
+    candidates: list[Path] = []
+    for raw_path in (
+        os.getenv("CORE_WORKER_GOOGLE_SERVICES_JSON"),
+        os.getenv("CORE_WORKER_FIREBASE_ANDROID_CONFIG"),
+        os.getenv("GOOGLE_SERVICES_JSON"),
+    ):
+        if raw_path:
+            candidates.append(Path(str(raw_path)).expanduser())
+    candidates.append(ROOT / "android" / "core-worker-app" / "app" / "google-services.json")
+    path = next((item for item in candidates if item.is_file()), None)
+    if path is None:
+        raise FileNotFoundError(
+            "google-services.json local não encontrado. Coloque em "
+            "android/core-worker-app/app/google-services.json na VPS/build env ou defina CORE_WORKER_GOOGLE_SERVICES_JSON."
+        )
+    raw = path.read_bytes()
+    if len(raw) > 512 * 1024:
+        raise ValueError("google-services.json grande demais")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise ValueError(f"google-services.json inválido: {type(exc).__name__}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("google-services.json inválido: raiz não é objeto JSON")
+    project_info = data.get("project_info") if isinstance(data.get("project_info"), dict) else {}
+    project_id = str(project_info.get("project_id") or "").strip()
+    clients = data.get("client") if isinstance(data.get("client"), list) else []
+    matched_client: dict[str, Any] | None = None
+    for client in clients:
+        if not isinstance(client, dict):
+            continue
+        info = client.get("client_info") if isinstance(client.get("client_info"), dict) else {}
+        android = info.get("android_client_info") if isinstance(info.get("android_client_info"), dict) else {}
+        if str(android.get("package_name") or "").strip() == "dev.core.worker":
+            matched_client = client
+            break
+    if not project_id or matched_client is None:
+        raise ValueError("google-services.json precisa conter project_id e client Android package_name dev.core.worker")
+    info = matched_client.get("client_info") if isinstance(matched_client.get("client_info"), dict) else {}
+    mobile_app_id = str(info.get("mobilesdk_app_id") or "").strip()
+    api_keys = matched_client.get("api_key") if isinstance(matched_client.get("api_key"), list) else []
+    api_key = ""
+    for entry in api_keys:
+        if isinstance(entry, dict) and str(entry.get("current_key") or "").strip():
+            api_key = str(entry.get("current_key") or "").strip()
+            break
+    if not mobile_app_id or not api_key:
+        raise ValueError("google-services.json precisa conter mobilesdk_app_id e api_key para dev.core.worker")
+    sha = hashlib.sha256(raw).hexdigest()
+    return {
+        "googleServicesJsonB64": base64.b64encode(raw).decode("ascii"),
+        "googleServicesSha256": sha,
+        "googleServicesPackage": "dev.core.worker",
+        "googleServicesProjectId": project_id[:80],
+        "googleServicesSource": "local-vps-payload",
+    }
+
+
 def _prepare_apk_source_zip() -> dict[str, Any]:
     project = ROOT / "android" / "core-worker-app"
     if not project.is_dir():
@@ -216,13 +281,28 @@ def _prepare_apk_source_zip() -> dict[str, Any]:
     release_dir = project / "releases"
     release_dir.mkdir(parents=True, exist_ok=True)
     zip_path = release_dir / "source-core-worker-app.zip"
-    excluded_dirs = {"build", ".gradle", "releases"}
+    excluded_dirs = {"build", ".gradle", "releases", ".idea"}
+    excluded_names = {
+        ".env",
+        "local.properties",
+        "private.properties",
+        "vps.properties",
+        "google-services.json",
+        "firebase-service-account.json",
+    }
+    excluded_suffixes = (".jks", ".keystore", ".p12", ".pem", ".key")
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for path in sorted(project.rglob("*")):
             rel = path.relative_to(project)
             if any(part in excluded_dirs for part in rel.parts):
                 continue
             if path.is_dir():
+                continue
+            name = path.name.lower()
+            rel_text = rel.as_posix().lower()
+            if name in excluded_names or "service-account" in name or rel_text.endswith("/google-services.json"):
+                continue
+            if any(name.endswith(suffix) for suffix in excluded_suffixes):
                 continue
             zf.write(path, (Path("android/core-worker-app") / rel).as_posix())
     raw = zip_path.read_bytes()
@@ -232,6 +312,7 @@ def _prepare_apk_source_zip() -> dict[str, Any]:
         "bytes": len(raw),
         "sha256": hashlib.sha256(raw).hexdigest(),
         "url": f"{_public_base_url()}/core-worker/app/{zip_path.name}",
+        "firebase_config_delivery": "job_payload",
     }
 
 
@@ -481,17 +562,64 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
         return {"ok": True, "target_version": target_version, "queued": [], "skipped": skipped[:16], "errors": [], "pending": False, "message": "todos os agents ativos já estão atualizados"}
     return {"ok": True, "target_version": target_version, "queued": queued, "skipped": skipped[:16], "errors": errors[:10], "pending": True}
 
+def _recent_failed_apk_build(version_name: str, source_fingerprint: str, *, cooldown_seconds: int | None = None) -> dict[str, Any]:
+    cooldown = max(60, int(cooldown_seconds or int(os.getenv("CORE_WORKER_APK_BUILD_FAILURE_COOLDOWN_SECONDS", "1800"))))
+    now = time.time()
+    short_fp = str(source_fingerprint or "")[:12]
+    try:
+        snapshot = _load_registry_snapshot()
+        jobs = snapshot.get("jobs") if isinstance(snapshot.get("jobs"), list) else []
+    except Exception:
+        jobs = []
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("type") or "") != "apk_build_debug":
+            continue
+        if str(job.get("status") or "").lower() != "failed":
+            continue
+        summary = str(job.get("summary") or "")
+        if version_name not in summary or (short_fp and short_fp not in summary):
+            continue
+        updated = float(job.get("updated_at") or job.get("finished_at") or job.get("created_at") or 0)
+        if updated and now - updated < cooldown:
+            return {
+                "job": job,
+                "cooldown_seconds": cooldown,
+                "retry_after_seconds": max(0, int(cooldown - (now - updated))),
+            }
+    return {}
+
+
 def queue_apk_build() -> dict[str, Any]:
     registry = get_core_workers_registry()
     version_name, version_code = _read_android_version()
     source = _prepare_apk_source_zip()
     source_fingerprint = str(_current_fingerprints().get("apk_source_hash") or source["sha256"])
     notification_id = f"apk-{version_code}-{source_fingerprint[:12]}"
+    try:
+        firebase_config = _load_google_services_payload_for_apk_build()
+    except Exception as exc:
+        pending = _load_pending()
+        pending["apk_build"] = {
+            "ok": False,
+            "pending": False,
+            "versionName": version_name,
+            "versionCode": version_code,
+            "source": source,
+            "error": f"{type(exc).__name__}: {_short(exc, 200)}",
+            "updated_at": time.time(),
+            "message": "google-services.json local ausente/inválido; build do APK não foi enfileirado",
+        }
+        _save_pending(pending)
+        return pending["apk_build"]
     payload = {
         "source_zip_url": source["url"],
         "source_sha256": source["sha256"],
         "sourceFingerprint": source_fingerprint,
         "source_bytes": source["bytes"],
+        "firebase_config_delivery": source.get("firebase_config_delivery") or "job_payload",
+        **firebase_config,
         "project_subdir": "android/core-worker-app",
         "publish": True,
         "versionName": version_name,
@@ -504,7 +632,7 @@ def queue_apk_build() -> dict[str, Any]:
         "coreWorkerVpsLabel": os.getenv("CORE_WORKER_VPS_LABEL") or "VPS principal",
         "changelog": [
             "APK compilado automaticamente por worker builder",
-            "VPS assina e publica o resultado",
+            "Phone worker compila e assina; VPS só publica o resultado",
             "O app mostra Atualizar no topo quando estiver disponível",
         ],
     }
@@ -525,6 +653,21 @@ def queue_apk_build() -> dict[str, Any]:
         pending.pop("apk_build", None)
         _save_pending(pending)
         return {"ok": True, "versionName": version_name, "versionCode": version_code, "already_published": True, "sourceSha256": source.get("sha256"), "sourceFingerprint": source_fingerprint, "message": "latest.json já está publicado nessa versão/source"}
+    failed_recent = _recent_failed_apk_build(version_name, source_fingerprint)
+    if failed_recent:
+        item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
+        item.update({
+            "ok": False,
+            "pending": False,
+            "blocked_by_recent_failure": True,
+            "last_failed_job_id": (failed_recent.get("job") or {}).get("job_id"),
+            "retry_after_seconds": failed_recent.get("retry_after_seconds"),
+            "updated_at": time.time(),
+            "message": "build do APK falhou recentemente; não vou repetir em loop automático",
+        })
+        pending["apk_build"] = item
+        _save_pending(pending)
+        return item
     if _active_job_exists(job_type="apk_build_debug", summary_contains=version_name):
         return {"ok": True, "versionName": version_name, "versionCode": version_code, "pending": True, "message": "build do APK já está na fila"}
     try:
@@ -537,7 +680,7 @@ def queue_apk_build() -> dict[str, Any]:
             ttl_seconds=7200,
             lease_seconds=7200,
             max_attempts=1,
-            summary=f"build automático APK {version_name}",
+            summary=f"build automático APK {version_name} {source_fingerprint[:12]}",
         )
         return {"ok": True, "versionName": version_name, "versionCode": version_code, "source": source, "job": result.get("job"), "pending": True}
     except Exception as exc:

@@ -479,9 +479,9 @@ def _find_android_build_tool(tool: str) -> str | None:
 def _strip_apk_signatures(source: str, target: str) -> None:
     """Recria o APK removendo assinaturas antigas.
 
-    Isso evita publicar APK assinado com a chave debug do worker. A regravação do
-    ZIP também remove blocos de assinatura v2/v3, e depois a VPS assina com uma
-    chave fixa local.
+    Usado apenas se a VPS for configurada explicitamente para assinatura fixa
+    via CORE_WORKER_APK_SIGNING_MODE. No fluxo padrão, a VPS aceita o APK debug
+    já assinado pelo phone worker builder e não precisa de Android SDK.
     """
     with zipfile.ZipFile(source, "r") as zin, zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zout:
         for info in zin.infolist():
@@ -497,8 +497,17 @@ def _strip_apk_signatures(source: str, target: str) -> None:
 
 
 def _fixed_apk_signing_config() -> dict[str, str] | None:
-    mode = str(os.getenv("CORE_WORKER_APK_SIGNING_MODE") or "debug").strip().lower()
-    if mode in {"off", "none", "disabled", "false", "0"} or _env_bool("CORE_WORKER_APK_SIGNING_DISABLED", False):
+    # A VPS Oracle de 1 GB não deve depender de Android SDK/apksigner para o
+    # fluxo normal. O phone worker builder gera o APK debug já assinado pelo
+    # Gradle; a VPS só valida, publica e notifica. Assinatura fixa na VPS fica
+    # opcional para um futuro release build via CORE_WORKER_APK_SIGNING_MODE.
+    raw_mode = os.getenv("CORE_WORKER_APK_SIGNING_MODE")
+    if _env_bool("CORE_WORKER_APK_SIGNING_DISABLED", False):
+        return None
+    if raw_mode is None or not str(raw_mode).strip():
+        return None
+    mode = str(raw_mode).strip().lower()
+    if mode in {"off", "none", "disabled", "false", "0", "worker", "uploaded", "phone-worker"}:
         return None
     if mode == "debug":
         keystore = _expand_path(os.getenv("CORE_WORKER_APK_KEYSTORE") or "~/.android/debug.keystore")
@@ -588,7 +597,7 @@ def _sign_core_worker_apk_with_vps_key(uploaded_apk: str, final_apk: str) -> dic
     cfg = _fixed_apk_signing_config()
     if cfg is None:
         shutil.copyfile(uploaded_apk, final_apk)
-        return {"signedByVps": False, "signingMode": "disabled"}
+        return {"signedByVps": False, "signingMode": "phone-worker-debug"}
     apksigner = _find_android_build_tool("apksigner")
     if not apksigner:
         raise RuntimeError("apksigner não encontrado na VPS; configure ANDROID_HOME ou CORE_WORKER_APK_APKSIGNER")
@@ -757,7 +766,7 @@ def core_worker_app_publish():
                 "ok": False,
                 "error": "falha assinando APK na VPS",
                 "detail": str(sign_exc)[:500],
-                "hint": "configure CORE_WORKER_APK_KEYSTORE/APKSIGNER ou preserve a chave fixa da VPS",
+                "hint": "assinatura na VPS é opcional; deixe CORE_WORKER_APK_SIGNING_MODE vazio/disabled para aceitar o APK debug já assinado pelo phone worker",
             }), 500
         with contextlib.suppress(Exception):
             os.remove(tmp)
@@ -772,9 +781,9 @@ def core_worker_app_publish():
             os.remove(target)
         return jsonify({
             "ok": False,
-            "error": "APK assinado, mas falhou na validação antes da publicação",
+            "error": "APK recebido, mas falhou na validação antes da publicação",
             "validation": validation,
-            "hint": "latest.json foi preservado; corrija o build/assinatura antes de publicar.",
+            "hint": "latest.json foi preservado; corrija o build no phone worker antes de publicar.",
         }), 500
 
     final_raw = open(target, "rb").read()

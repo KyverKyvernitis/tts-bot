@@ -42,7 +42,7 @@ _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.7.9"
+PHONE_WORKER_VERSION = "1.8.0"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2809,6 +2809,74 @@ def _prepare_termux_android_build(project_dir: Path, env: dict[str, str]) -> dic
     return info
 
 
+def _install_google_services_from_payload(project_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    """Grava google-services.json recebido pelo canal autenticado do job.
+
+    O arquivo não vem no ZIP público e não deve ir para GitHub. A VPS envia o
+    conteúdo em base64 no payload do job; o worker grava somente no workspace
+    temporário de build e ele é removido junto com o work_dir ao final.
+    """
+    target = project_dir / "app" / "google-services.json"
+    raw_b64 = str(payload.get("googleServicesJsonB64") or payload.get("google_services_json_b64") or "").strip()
+    expected_sha = str(payload.get("googleServicesSha256") or payload.get("google_services_sha256") or "").strip().lower()
+    expected_package = str(payload.get("googleServicesPackage") or payload.get("google_services_package") or "dev.core.worker").strip() or "dev.core.worker"
+
+    if raw_b64:
+        try:
+            raw = base64.b64decode(raw_b64.encode("ascii"), validate=True)
+        except Exception as exc:
+            raise ValueError(f"google-services payload inválido: {type(exc).__name__}: {_short_text(exc, limit=100)}") from exc
+        if len(raw) > 512 * 1024:
+            raise ValueError("google-services payload grande demais")
+        actual_sha = hashlib.sha256(raw).hexdigest()
+        if expected_sha and expected_sha != actual_sha:
+            raise ValueError("sha256 do google-services.json divergente no payload")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+        with contextlib.suppress(Exception):
+            target.chmod(0o600)
+    elif not target.is_file():
+        raise FileNotFoundError(
+            "google-services.json ausente no pacote de build. A VPS deve enviar googleServicesJsonB64 no payload do job; "
+            "não coloque esse arquivo no GitHub."
+        )
+    raw = target.read_bytes()
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise ValueError(f"google-services.json inválido no workspace: {type(exc).__name__}: {_short_text(exc, limit=100)}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("google-services.json inválido: raiz não é objeto JSON")
+    project_info = data.get("project_info") if isinstance(data.get("project_info"), dict) else {}
+    project_id = str(project_info.get("project_id") or "").strip()
+    clients = data.get("client") if isinstance(data.get("client"), list) else []
+    matched = False
+    has_app_id = False
+    has_api_key = False
+    for client in clients:
+        if not isinstance(client, dict):
+            continue
+        info = client.get("client_info") if isinstance(client.get("client_info"), dict) else {}
+        android = info.get("android_client_info") if isinstance(info.get("android_client_info"), dict) else {}
+        if str(android.get("package_name") or "").strip() != expected_package:
+            continue
+        matched = True
+        has_app_id = bool(str(info.get("mobilesdk_app_id") or "").strip())
+        keys = client.get("api_key") if isinstance(client.get("api_key"), list) else []
+        has_api_key = any(isinstance(item, dict) and str(item.get("current_key") or "").strip() for item in keys)
+        break
+    if not project_id or not matched or not has_app_id or not has_api_key:
+        raise ValueError(f"google-services.json não contém configuração Firebase completa para {expected_package}")
+    return {
+        "ok": True,
+        "path": "app/google-services.json",
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "package": expected_package,
+        "project_id": project_id[:80],
+        "source": "job_payload" if raw_b64 else "workspace",
+    }
+
+
 def _read_android_version(project_dir: Path) -> tuple[str, int]:
     build_gradle = project_dir / "app" / "build.gradle"
     text = build_gradle.read_text(encoding="utf-8", errors="ignore") if build_gradle.exists() else ""
@@ -2921,6 +2989,7 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
                 project_dir = alt.resolve()
             else:
                 raise FileNotFoundError(f"projeto Android não encontrado: {project_subdir}")
+        google_services = _install_google_services_from_payload(project_dir, payload)
         env = os.environ.copy()
         base_url, _token, _worker_id = _core_worker_auth_parts()
         injected_vps_url = str(payload.get("coreWorkerVpsUrl") or payload.get("core_worker_vps_url") or payload.get("vps_url") or base_url or "").strip().rstrip("/")
@@ -2929,6 +2998,13 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             env["CORE_WORKER_VPS_URL"] = injected_vps_url
             env["CORE_WORKER_VPS_LABEL"] = injected_vps_label
         builder_environment = _prepare_termux_android_build(project_dir, env)
+        builder_environment["google_services"] = {
+            "ok": bool(google_services.get("ok")),
+            "package": google_services.get("package"),
+            "project_id": google_services.get("project_id"),
+            "source": google_services.get("source"),
+            "sha256": str(google_services.get("sha256") or "")[:12],
+        }
         if injected_vps_url:
             builder_environment["injected_vps_url"] = True
         version_name, version_code = _read_android_version(project_dir)
@@ -2969,7 +3045,7 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             "versionName": version_name,
             "versionCode": version_code,
             "notificationId": notification_id,
-            "apk": {"filename": filename, "bytes": len(raw), "sha256": apk_sha},
+            "apk": {"filename": filename, "bytes": len(raw), "sha256": apk_sha, "signed": True, "signed_by": "gradle-debug-phone-worker"},
             "source": {"url": source_url, "bytes": download.get("bytes"), "sha256": download.get("sha256"), "files": members},
             "builder_environment": builder_environment,
             "duration_seconds": round(time.time() - started, 3),
@@ -2993,6 +3069,8 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             if not bool(publish.get("ok", False)):
                 result["ok"] = False
                 result["summary"] = "APK compilado, mas publicação na VPS falhou"
+                if publish.get("error"):
+                    result["publish_error"] = str(publish.get("error"))[:240]
         return result
     finally:
         if not keep_workdir:
