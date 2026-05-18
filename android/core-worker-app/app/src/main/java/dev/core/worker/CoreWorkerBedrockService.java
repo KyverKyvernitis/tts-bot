@@ -14,15 +14,24 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.FileWriter;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 public class CoreWorkerBedrockService extends Service {
@@ -32,16 +41,22 @@ public class CoreWorkerBedrockService extends Service {
     private static final String PREFS = "core_worker_private";
     private static final String CHANNEL_ID = "core_worker_bedrock_runtime";
     private static final int NOTIFICATION_ID = 4108;
-    private static final long TICK_MS = 45L * 1000L;
+    private static final long TICK_MS = 15L * 1000L;
+    private static final long LOG_LIMIT_BYTES = 512L * 1024L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private boolean active = false;
+    private volatile boolean active = false;
+    private volatile boolean runnerActive = false;
+    private volatile Process bedrockProcess = null;
+    private volatile long commandQueueOffset = 0L;
+    private Thread runnerThread;
+    private Thread commandThread;
+    private PrintWriter processInput;
 
     private final Runnable tickRunnable = new Runnable() {
         @Override
         public void run() {
             if (!active) return;
-            markState("serviço Bedrock ativo · aguardando start real");
             reportHeartbeat("bedrock_service_tick");
             handler.postDelayed(this, TICK_MS);
         }
@@ -59,6 +74,7 @@ public class CoreWorkerBedrockService extends Service {
         if (ACTION_STOP.equals(action)) {
             active = false;
             handler.removeCallbacks(tickRunnable);
+            stopRunnerGracefully("service_stop");
             prefs().edit()
                     .putBoolean("bedrock_runtime_service_active", false)
                     .putString("bedrock_runtime_service_state", "serviço Bedrock parado")
@@ -68,14 +84,16 @@ public class CoreWorkerBedrockService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
+
         active = true;
-        startForeground(NOTIFICATION_ID, buildNotification("Bedrock Manager ativo"));
+        startForeground(NOTIFICATION_ID, buildNotification("Bedrock runtime iniciando"));
         prefs().edit()
                 .putBoolean("bedrock_runtime_service_active", true)
-                .putString("bedrock_runtime_service_state", "serviço Bedrock ativo · aguardando start real")
+                .putString("bedrock_runtime_service_state", "serviço Bedrock ativo · preflight do runner")
                 .putLong("bedrock_runtime_service_started_at", System.currentTimeMillis())
                 .apply();
-        markState("serviço Bedrock ativo · aguardando start real");
+        writeRunnerState("starting", true, false, "serviço Bedrock ativo · preflight do runner", null, null);
+        startRunnerIfReady();
         reportHeartbeat("bedrock_service_start");
         handler.removeCallbacks(tickRunnable);
         handler.postDelayed(tickRunnable, TICK_MS);
@@ -86,6 +104,7 @@ public class CoreWorkerBedrockService extends Service {
     public void onDestroy() {
         active = false;
         handler.removeCallbacks(tickRunnable);
+        stopRunnerGracefully("service_destroy");
         prefs().edit()
                 .putBoolean("bedrock_runtime_service_active", false)
                 .putString("bedrock_runtime_service_state", "serviço Bedrock encerrado")
@@ -99,15 +118,286 @@ public class CoreWorkerBedrockService extends Service {
         return null;
     }
 
+    private synchronized void startRunnerIfReady() {
+        if (runnerActive && bedrockProcess != null) {
+            try {
+                if (bedrockProcess.isAlive()) {
+                    writeRunnerState("running", true, true, "Bedrock já está rodando", null, null);
+                    return;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        final Preflight preflight = preflight();
+        if (!preflight.ready) {
+            String summary = "Bedrock bloqueado · " + joinBlockers(preflight.blockers);
+            markState(summary);
+            appendLog("[preflight] " + summary);
+            writeRunnerState("blocked", true, false, summary, preflight.blockers, null);
+            updateNotification(summary);
+            return;
+        }
+
+        runnerThread = new Thread(() -> {
+            try {
+                List<String> command = new ArrayList<>();
+                command.add(preflight.box64.getAbsolutePath());
+                command.add(preflight.server.getAbsolutePath());
+
+                ProcessBuilder builder = new ProcessBuilder(command);
+                builder.directory(preflight.bedrockDir);
+                builder.redirectErrorStream(true);
+                builder.environment().put("LD_LIBRARY_PATH", ".");
+                builder.environment().put("HOME", preflight.bedrockDir.getAbsolutePath());
+
+                commandQueueOffset = commandQueueFile().length();
+                appendLog("[runner] iniciando: box64 ./bedrock_server");
+                bedrockProcess = builder.start();
+                processInput = new PrintWriter(new OutputStreamWriter(bedrockProcess.getOutputStream(), StandardCharsets.UTF_8), true);
+                runnerActive = true;
+                markState("servidor Bedrock rodando");
+                writeRunnerState("running", true, true, "Servidor Bedrock rodando", null, command);
+                updateNotification("Servidor Bedrock rodando");
+                startCommandLoop();
+                readProcessOutput(bedrockProcess.getInputStream());
+                int exit = bedrockProcess.waitFor();
+                runnerActive = false;
+                processInput = null;
+                String state = exit == 0 ? "stopped" : "crashed";
+                String summary = exit == 0 ? "Servidor Bedrock parado" : "Servidor Bedrock encerrou com código " + exit;
+                appendLog("[runner] " + summary);
+                markState(summary);
+                writeRunnerState(state, active, false, summary, null, command);
+                updateNotification(summary);
+            } catch (Throwable exc) {
+                runnerActive = false;
+                String summary = "falha ao iniciar Bedrock: " + shortThrowable(exc);
+                appendLog("[runner] " + summary);
+                markState(summary);
+                writeRunnerState("error", active, false, summary, preflight.blockers, null);
+                updateNotification(summary);
+            }
+        }, "core-worker-bedrock-runner");
+        runnerThread.start();
+    }
+
+    private void startCommandLoop() {
+        commandThread = new Thread(() -> {
+            while (active && runnerActive) {
+                try {
+                    File queue = commandQueueFile();
+                    if (queue.exists() && queue.length() > commandQueueOffset) {
+                        FileInputStream input = new FileInputStream(queue);
+                        long skipped = input.skip(commandQueueOffset);
+                        if (skipped < commandQueueOffset) commandQueueOffset = skipped;
+                        BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            commandQueueOffset += line.getBytes(StandardCharsets.UTF_8).length + 1;
+                            String command = extractCommand(line);
+                            if (command.isEmpty()) continue;
+                            PrintWriter writer = processInput;
+                            if (writer != null) {
+                                writer.println(command);
+                                writer.flush();
+                                appendLog("[console>] " + sanitize(command, 160));
+                            }
+                        }
+                        reader.close();
+                    }
+                    Thread.sleep(500L);
+                } catch (Throwable exc) {
+                    appendLog("[command-loop] " + shortThrowable(exc));
+                    try { Thread.sleep(1200L); } catch (Throwable ignored) {}
+                }
+            }
+        }, "core-worker-bedrock-console");
+        commandThread.start();
+    }
+
+    private String extractCommand(String jsonLine) {
+        try {
+            JSONObject obj = new JSONObject(jsonLine == null ? "{}" : jsonLine);
+            String command = sanitize(obj.optString("command", ""), 256).trim();
+            if (command.indexOf('\n') >= 0 || command.indexOf('\r') >= 0) return "";
+            return command;
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private void readProcessOutput(InputStream input) {
+        try {
+            BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                appendLog(line);
+            }
+            reader.close();
+        } catch (Throwable exc) {
+            appendLog("[stdout] " + shortThrowable(exc));
+        }
+    }
+
+    private void stopRunnerGracefully(String reason) {
+        try {
+            PrintWriter writer = processInput;
+            if (writer != null) {
+                writer.println("stop");
+                writer.flush();
+                appendLog("[runner] stop enviado · " + reason);
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            Process process = bedrockProcess;
+            if (process != null) {
+                long until = System.currentTimeMillis() + 4000L;
+                while (process.isAlive() && System.currentTimeMillis() < until) {
+                    try { Thread.sleep(250L); } catch (Throwable ignored) {}
+                }
+                if (process.isAlive()) {
+                    process.destroy();
+                    try { Thread.sleep(1200L); } catch (Throwable ignored) {}
+                }
+                if (process.isAlive()) {
+                    process.destroyForcibly();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        runnerActive = false;
+        processInput = null;
+        bedrockProcess = null;
+        writeRunnerState("stopped", active, false, "Servidor Bedrock parado", null, null);
+    }
+
+    private Preflight preflight() {
+        Preflight p = new Preflight();
+        p.coreLinuxDir = new File(getFilesDir(), "core-linux");
+        p.bedrockDir = new File(p.coreLinuxDir, "bedrock");
+        p.runtimeDir = new File(p.bedrockDir, "runtime");
+        p.server = new File(p.bedrockDir, "bedrock_server");
+        p.eula = new File(p.bedrockDir, "eula.txt");
+        p.properties = new File(p.bedrockDir, "server.properties");
+        File box64A = new File(p.coreLinuxDir, "bin/box64");
+        File box64B = new File(p.coreLinuxDir, "box64/box64");
+        p.box64 = box64A.exists() ? box64A : box64B;
+        File rootfsMarker = new File(p.coreLinuxDir, "rootfs/.core-worker-rootfs-ready");
+        p.rootfsReady = rootfsMarker.exists();
+        p.eulaAccepted = eulaAccepted(p.eula);
+        p.bedrockDir.mkdirs();
+        p.runtimeDir.mkdirs();
+        new File(p.bedrockDir, "logs").mkdirs();
+        if (!p.properties.exists()) p.blockers.put("server.properties ausente");
+        if (!p.eulaAccepted) p.blockers.put("EULA pendente");
+        if (!p.server.exists()) p.blockers.put("bedrock_server não instalado");
+        if (!p.rootfsReady) p.blockers.put("rootfs pendente");
+        if (p.box64 == null || !p.box64.exists()) p.blockers.put("Box64 pendente");
+        if (p.box64 != null && p.box64.exists() && !p.box64.canExecute()) p.box64.setExecutable(true, true);
+        if (p.server.exists() && !p.server.canExecute()) p.server.setExecutable(true, true);
+        p.ready = p.blockers.length() == 0;
+        return p;
+    }
+
+    private boolean eulaAccepted(File eula) {
+        try {
+            if (eula == null || !eula.exists()) return false;
+            BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(eula), StandardCharsets.UTF_8));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.toLowerCase().replace(" ", "").contains("eula=true")) {
+                    reader.close();
+                    return true;
+                }
+            }
+            reader.close();
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private File runtimeDir() {
+        File dir = new File(new File(getFilesDir(), "core-linux/bedrock"), "runtime");
+        dir.mkdirs();
+        return dir;
+    }
+
+    private File logFile() {
+        File logs = new File(new File(getFilesDir(), "core-linux/bedrock"), "logs");
+        logs.mkdirs();
+        return new File(logs, "bedrock-console.log");
+    }
+
+    private File commandQueueFile() {
+        return new File(runtimeDir(), "command-queue.jsonl");
+    }
+
+    private File stateFile() {
+        return new File(runtimeDir(), "runner-state.json");
+    }
+
+    private void appendLog(String line) {
+        try {
+            File log = logFile();
+            if (log.exists() && log.length() > LOG_LIMIT_BYTES) {
+                File old = new File(log.getParentFile(), "bedrock-console.old.log");
+                if (old.exists()) old.delete();
+                log.renameTo(old);
+            }
+            FileWriter writer = new FileWriter(log, true);
+            writer.write("[" + System.currentTimeMillis() + "] " + sanitize(line == null ? "" : line, 1000) + "\n");
+            writer.close();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void writeRunnerState(String state, boolean serviceActive, boolean running, String summary, JSONArray blockers, List<String> command) {
+        try {
+            JSONObject obj = new JSONObject();
+            obj.put("ok", true);
+            obj.put("state", state == null ? "unknown" : state);
+            obj.put("serviceActive", serviceActive);
+            obj.put("running", running);
+            obj.put("summary", summary == null ? "Bedrock runner atualizado" : sanitize(summary, 500));
+            obj.put("updatedAt", System.currentTimeMillis());
+            obj.put("appVersion", BuildConfig.VERSION_NAME);
+            obj.put("appVersionCode", BuildConfig.VERSION_CODE);
+            obj.put("commandQueue", commandQueueFile().getAbsolutePath());
+            obj.put("consoleLog", logFile().getAbsolutePath());
+            if (blockers != null) obj.put("blockers", blockers);
+            if (command != null) {
+                JSONArray arr = new JSONArray();
+                for (String item : command) arr.put(item == null ? "" : new File(item).getName());
+                obj.put("runnerCommand", arr);
+            }
+            FileOutputStream out = new FileOutputStream(stateFile());
+            out.write(obj.toString(2).getBytes(StandardCharsets.UTF_8));
+            out.close();
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void markState(String state) {
         try {
             prefs().edit()
-                    .putBoolean("bedrock_runtime_service_active", true)
-                    .putString("bedrock_runtime_service_state", state == null ? "serviço Bedrock ativo" : state)
+                    .putBoolean("bedrock_runtime_service_active", active)
+                    .putString("bedrock_runtime_service_state", state == null ? "serviço Bedrock ativo" : sanitize(state, 300))
                     .putLong("bedrock_runtime_service_last_tick_at", System.currentTimeMillis())
                     .apply();
         } catch (Throwable ignored) {
         }
+    }
+
+    private String joinBlockers(JSONArray blockers) {
+        if (blockers == null || blockers.length() == 0) return "sem bloqueios";
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < blockers.length() && i < 4; i++) {
+            if (builder.length() > 0) builder.append("; ");
+            builder.append(blockers.optString(i, "pendente"));
+        }
+        return builder.toString();
     }
 
     private void createChannel() {
@@ -116,10 +406,18 @@ public class CoreWorkerBedrockService extends Service {
                 NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
                 if (manager != null) {
                     NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Servidor Bedrock Core Worker", NotificationManager.IMPORTANCE_LOW);
-                    channel.setDescription("Mantém o gerenciador Bedrock visível enquanto o servidor estiver sendo preparado/rodado.");
+                    channel.setDescription("Mantém o servidor Bedrock visível enquanto estiver preparando ou rodando.");
                     manager.createNotificationChannel(channel);
                 }
             }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void updateNotification(String text) {
+        try {
+            NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (manager != null) manager.notify(NOTIFICATION_ID, buildNotification(text));
         } catch (Throwable ignored) {
         }
     }
@@ -135,7 +433,7 @@ public class CoreWorkerBedrockService extends Service {
                 : new Notification.Builder(this);
         builder.setSmallIcon(android.R.drawable.stat_sys_upload_done)
                 .setContentTitle("Core Worker Bedrock")
-                .setContentText(text == null ? "Bedrock Manager ativo" : text)
+                .setContentText(text == null ? "Bedrock runtime ativo" : sanitize(text, 80))
                 .setContentIntent(pending)
                 .setOngoing(true)
                 .setShowWhen(false);
@@ -159,11 +457,12 @@ public class CoreWorkerBedrockService extends Service {
                 payload.put("workerId", prefs().getString("worker_id", ""));
                 payload.put("installId", installId());
                 payload.put("deviceName", prefs().getString("device_name", ""));
-                payload.put("runtime_mode", "apk-bedrock-assisted-foreground-runtime");
-                payload.put("jobsRuntime", "bedrock-foreground-service-visible");
+                payload.put("runtime_mode", "apk-bedrock-runner-foreground-runtime");
+                payload.put("jobsRuntime", "bedrock-foreground-runner");
                 JSONObject status = new JSONObject();
-                status.put("bedrock_runtime_service_active", true);
-                status.put("bedrock_server_mode", "assisted-local-preflight");
+                status.put("bedrock_runtime_service_active", active);
+                status.put("bedrock_runner_active", runnerActive);
+                status.put("bedrock_server_mode", "foreground-runner-preflight");
                 status.put("notification_permission", hasNotificationPermission() ? "granted" : "missing");
                 status.put("termux_required_now", false);
                 payload.put("status", status);
@@ -229,6 +528,21 @@ public class CoreWorkerBedrockService extends Service {
         return builder.toString();
     }
 
+    private static String sanitize(String value, int limit) {
+        String clean = (value == null ? "" : value)
+                .replaceAll("(?i)(token|authorization|bearer|secret|password|passwd|firebase|fcm)[=: ]+[^\\s]+", "$1=[redacted]")
+                .replaceAll("([0-9]{1,3}\\.){3}[0-9]{1,3}", "[ip-redacted]")
+                .replace('\r', ' ');
+        if (clean.length() > limit) clean = clean.substring(0, limit) + "…";
+        return clean;
+    }
+
+    private static String shortThrowable(Throwable exc) {
+        if (exc == null) return "erro desconhecido";
+        String msg = exc.getMessage();
+        return exc.getClass().getSimpleName() + (msg == null || msg.isEmpty() ? "" : ": " + sanitize(msg, 180));
+    }
+
     private static final class HttpResult {
         final int status;
         final String body;
@@ -236,5 +550,19 @@ public class CoreWorkerBedrockService extends Service {
             this.status = status;
             this.body = body;
         }
+    }
+
+    private static final class Preflight {
+        File coreLinuxDir;
+        File bedrockDir;
+        File runtimeDir;
+        File server;
+        File eula;
+        File properties;
+        File box64;
+        boolean rootfsReady;
+        boolean eulaAccepted;
+        boolean ready;
+        JSONArray blockers = new JSONArray();
     }
 }

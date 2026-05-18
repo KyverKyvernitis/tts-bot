@@ -530,6 +530,13 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_minecraft_bedrock_runtime_start",
     "apk_minecraft_bedrock_runtime_stop",
     "apk_minecraft_bedrock_runtime_logs",
+    "apk_minecraft_bedrock_runner_status",
+    "apk_minecraft_bedrock_runner_preflight",
+    "apk_minecraft_bedrock_runner_start",
+    "apk_minecraft_bedrock_runner_stop",
+    "apk_minecraft_bedrock_console_tail",
+    "apk_minecraft_bedrock_console_command",
+    "apk_minecraft_bedrock_runtime_repair",
 }
 CORE_WORKER_APP_JOB_LABELS = {
     "apk_ping": "ping interno",
@@ -598,6 +605,13 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_minecraft_bedrock_runtime_start": "Bedrock runtime start",
     "apk_minecraft_bedrock_runtime_stop": "Bedrock runtime stop",
     "apk_minecraft_bedrock_runtime_logs": "Bedrock runtime logs",
+    "apk_minecraft_bedrock_runner_status": "Bedrock runner status",
+    "apk_minecraft_bedrock_runner_preflight": "Bedrock runner preflight",
+    "apk_minecraft_bedrock_runner_start": "Bedrock runner start",
+    "apk_minecraft_bedrock_runner_stop": "Bedrock runner stop",
+    "apk_minecraft_bedrock_console_tail": "Bedrock console tail",
+    "apk_minecraft_bedrock_console_command": "Bedrock console comando",
+    "apk_minecraft_bedrock_runtime_repair": "Bedrock runtime reparar",
 }
 
 
@@ -2484,6 +2498,10 @@ class WorkersPanelView(discord.ui.LayoutView):
                 {"label": "Iniciar Bedrock", "value": "_apk_minecraft_bedrock_runtime_start", "description": "Ativa serviço assistido", "emoji": "▶️", "panel_action": "apk_minecraft_bedrock_runtime_start", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_runtime_start"},
                 {"label": "Parar Bedrock", "value": "_apk_minecraft_bedrock_runtime_stop", "description": "Para runtime assistido", "emoji": "⏹️", "panel_action": "apk_minecraft_bedrock_runtime_stop", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_runtime_stop"},
                 {"label": "Logs runtime", "value": "_apk_minecraft_bedrock_runtime_logs", "description": "Logs do runner", "emoji": "📄", "panel_action": "apk_minecraft_bedrock_runtime_logs", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_runtime_logs"},
+                {"label": "Runner status", "value": "_apk_minecraft_bedrock_runner_status", "description": "Estado real do processo", "emoji": "🟢", "panel_action": "apk_minecraft_bedrock_runner_status", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_runner_status"},
+                {"label": "Runner preflight", "value": "_apk_minecraft_bedrock_runner_preflight", "description": "Bloqueios para iniciar", "emoji": "🛫", "panel_action": "apk_minecraft_bedrock_runner_preflight", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_runner_preflight"},
+                {"label": "Console tail", "value": "_apk_minecraft_bedrock_console_tail", "description": "Últimas linhas do console", "emoji": "💬", "panel_action": "apk_minecraft_bedrock_console_tail", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_console_tail"},
+                {"label": "Reparar runtime", "value": "_apk_minecraft_bedrock_runtime_repair", "description": "Recria fila/logs sem apagar mundos", "emoji": "🩹", "panel_action": "apk_minecraft_bedrock_runtime_repair", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_runtime_repair"},
                 {"label": "Runtime persist.", "value": "_apk_runtime_foreground_probe", "description": "Serviço com notificação", "emoji": "🟢", "panel_action": "apk_runtime_foreground_probe", "category": "apk", "apk_job_type": "apk_runtime_foreground_probe"},
                 {"label": "Ativar persist.", "value": "_apk_runtime_foreground_start", "description": "Inicia foreground runtime", "emoji": "▶️", "panel_action": "apk_runtime_foreground_start", "category": "apk", "apk_job_type": "apk_runtime_foreground_start"},
                 {"label": "Parar persist.", "value": "_apk_runtime_foreground_stop", "description": "Para foreground runtime", "emoji": "⏹️", "panel_action": "apk_runtime_foreground_stop", "category": "apk", "apk_job_type": "apk_runtime_foreground_stop"},

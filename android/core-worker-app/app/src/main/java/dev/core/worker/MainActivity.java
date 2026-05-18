@@ -78,7 +78,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.36";
+    private static final String APP_VERSION = "0.5.37";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -2291,13 +2291,13 @@ public class MainActivity extends Activity {
         if (bedrockCommandInput != null) {
             bedrockCommandInput.setText("");
         }
-        if (!bedrockRuntimeServiceActive) {
-            appendBedrockTerminal(command, "servidor desligado · comando não enviado");
-            refreshLocalStatus("Servidor Bedrock desligado. Ligue o servidor antes de enviar comandos.");
-            return;
-        }
-        appendBedrockTerminal(command, "comando registrado no console visual; envio real será ligado ao runner Bedrock quando o ambiente estiver pronto");
-        reportAppState("bedrock_console_command_visual", "Comando Bedrock registrado no console visual: " + sanitizeCommandOutput(command, 120));
+        runBusy("Enviando comando ao console Bedrock...", () -> {
+            JSONObject out = bedrockRuntimeSnapshot("console_command", command);
+            String summary = out.optString("summary", "comando registrado no console Bedrock");
+            appendBedrockTerminal(command, summary);
+            reportAppState("bedrock_console_command", "Comando Bedrock: " + sanitizeCommandOutput(command, 120));
+            refreshLocalStatus(summary);
+        });
     }
 
     private void appendBedrockTerminal(String command, String response) {
@@ -2407,7 +2407,7 @@ public class MainActivity extends Activity {
     private void startBedrockRuntimeFromUi() {
         runBusy("Ativando runtime Bedrock assistido...", () -> {
             startBedrockService("manual");
-            JSONObject out = bedrockRuntimeSnapshot("start_assisted");
+            JSONObject out = bedrockRuntimeSnapshot("start");
             reportAppState("bedrock_runtime_start", out.optString("summary", "Runtime Bedrock atualizado"));
             show(out.optString("summary", "Runtime Bedrock atualizado."));
         });
@@ -2416,7 +2416,7 @@ public class MainActivity extends Activity {
     private void stopBedrockRuntimeFromUi() {
         runBusy("Parando runtime Bedrock...", () -> {
             stopBedrockService("manual");
-            JSONObject out = bedrockRuntimeSnapshot("stop_assisted");
+            JSONObject out = bedrockRuntimeSnapshot("stop");
             reportAppState("bedrock_runtime_stop", out.optString("summary", "Runtime Bedrock parado"));
             show(out.optString("summary", "Runtime Bedrock parado."));
         });
@@ -2424,7 +2424,7 @@ public class MainActivity extends Activity {
 
     private void refreshBedrockRuntimeLogsFromUi() {
         runBusy("Coletando logs do Bedrock...", () -> {
-            JSONObject out = bedrockRuntimeSnapshot("logs_status");
+            JSONObject out = bedrockRuntimeSnapshot("console_tail");
             reportAppState("bedrock_runtime_logs", out.optString("summary", "Logs Bedrock atualizados"));
             show(out.optString("summary", "Logs Bedrock atualizados."));
         });
@@ -2473,10 +2473,15 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject bedrockRuntimeSnapshot(String action) throws Exception {
+        return bedrockRuntimeSnapshot(action, null);
+    }
+
+    private JSONObject bedrockRuntimeSnapshot(String action, String consoleCommand) throws Exception {
         prepareCoreLinuxRuntimeState();
         readBedrockServiceState();
         JSONObject extra = new JSONObject();
         extra.put("action", action == null ? "status" : action);
+        if (consoleCommand != null) extra.put("consoleCommand", consoleCommand);
         extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
         extra.put("bedrockDir", new File(coreLinuxDir(), "bedrock").getAbsolutePath());
         extra.put("foregroundRuntimeActive", foregroundRuntimeActive);
@@ -2491,10 +2496,15 @@ public class MainActivity extends Activity {
             bedrockRuntimeServiceActive = rt.optBoolean("serviceActive", bedrockRuntimeServiceActive);
         }
         if (py.optBoolean("readyToStart", false)) {
-            bedrockSummary = "Bedrock pronto para start assistido";
+            bedrockSummary = "Bedrock pronto para start real";
             bedrockReady = true;
         } else if (py.optJSONArray("blockers") != null) {
             bedrockSummary = py.optString("summary", bedrockSummary);
+        }
+        String logTail = py.optString("logTail", "");
+        if (logTail != null && !logTail.trim().isEmpty() && bedrockTerminalText != null) {
+            runOnUiThread(() -> bedrockTerminalText.setText("Core Bedrock Console
+" + sanitizeCommandOutput(logTail, 1800)));
         }
         bedrockLastCheckAt = System.currentTimeMillis();
         updateSystemChecklistText();
@@ -3494,7 +3504,14 @@ public class MainActivity extends Activity {
                 .put("apk_minecraft_bedrock_runtime_status")
                 .put("apk_minecraft_bedrock_runtime_start")
                 .put("apk_minecraft_bedrock_runtime_stop")
-                .put("apk_minecraft_bedrock_runtime_logs");
+                .put("apk_minecraft_bedrock_runtime_logs")
+                .put("apk_minecraft_bedrock_runner_status")
+                .put("apk_minecraft_bedrock_runner_preflight")
+                .put("apk_minecraft_bedrock_runner_start")
+                .put("apk_minecraft_bedrock_runner_stop")
+                .put("apk_minecraft_bedrock_console_tail")
+                .put("apk_minecraft_bedrock_console_command")
+                .put("apk_minecraft_bedrock_runtime_repair");
     }
 
     private String summarizeLightJobs(JSONArray jobs, int okCount, int count) {
@@ -4122,14 +4139,24 @@ public class MainActivity extends Activity {
         if ("apk_minecraft_bedrock_runtime_status".equals(type)
                 || "apk_minecraft_bedrock_runtime_start".equals(type)
                 || "apk_minecraft_bedrock_runtime_stop".equals(type)
-                || "apk_minecraft_bedrock_runtime_logs".equals(type)) {
+                || "apk_minecraft_bedrock_runtime_logs".equals(type)
+                || "apk_minecraft_bedrock_runner_status".equals(type)
+                || "apk_minecraft_bedrock_runner_preflight".equals(type)
+                || "apk_minecraft_bedrock_runner_start".equals(type)
+                || "apk_minecraft_bedrock_runner_stop".equals(type)
+                || "apk_minecraft_bedrock_console_tail".equals(type)
+                || "apk_minecraft_bedrock_console_command".equals(type)
+                || "apk_minecraft_bedrock_runtime_repair".equals(type)) {
             String action = "status";
-            if ("apk_minecraft_bedrock_runtime_start".equals(type)) action = "start_assisted";
-            if ("apk_minecraft_bedrock_runtime_stop".equals(type)) action = "stop_assisted";
-            if ("apk_minecraft_bedrock_runtime_logs".equals(type)) action = "logs_status";
-            if ("start_assisted".equals(action)) {
+            if ("apk_minecraft_bedrock_runtime_start".equals(type) || "apk_minecraft_bedrock_runner_start".equals(type)) action = "start";
+            if ("apk_minecraft_bedrock_runtime_stop".equals(type) || "apk_minecraft_bedrock_runner_stop".equals(type)) action = "stop";
+            if ("apk_minecraft_bedrock_runtime_logs".equals(type) || "apk_minecraft_bedrock_console_tail".equals(type)) action = "console_tail";
+            if ("apk_minecraft_bedrock_runner_preflight".equals(type)) action = "preflight";
+            if ("apk_minecraft_bedrock_console_command".equals(type)) action = "console_command_remote_blocked";
+            if ("apk_minecraft_bedrock_runtime_repair".equals(type)) action = "repair";
+            if ("start".equals(action)) {
                 startBedrockService("job");
-            } else if ("stop_assisted".equals(action)) {
+            } else if ("stop".equals(action)) {
                 stopBedrockService("job");
             }
             JSONObject runtime = bedrockRuntimeSnapshot(action);
