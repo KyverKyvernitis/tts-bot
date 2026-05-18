@@ -493,6 +493,12 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
         "diagnosticsSummary": _safe_short_text(runtime.get("diagnostics_summary") or status.get("diagnostics_summary"), 160),
         "storageSummary": _safe_short_text(runtime.get("storage_summary") or (storage.get("summary") if isinstance(storage, dict) else ""), 120),
         "bridgeSummary": _safe_short_text(runtime.get("bridge_summary"), 120),
+        "coreLinuxSummary": _safe_short_text(runtime.get("core_linux_summary") or status.get("core_linux_summary"), 160),
+        "coreLinuxState": _safe_short_text(runtime.get("core_linux_state") or status.get("core_linux_state"), 80),
+        "coreLinuxPrepared": bool(runtime.get("core_linux_prepared") or status.get("core_linux_prepared")),
+        "bedrockSummary": _safe_short_text(runtime.get("bedrock_summary") or status.get("bedrock_summary"), 160),
+        "bedrockState": _safe_short_text(runtime.get("bedrock_state") or status.get("bedrock_state"), 80),
+        "bedrockReady": bool(runtime.get("bedrock_ready") or status.get("bedrock_ready")),
         "notificationPermission": _safe_short_text((permissions.get("notifications") if isinstance(permissions, dict) else ""), 32),
         "battery": battery if isinstance(battery, dict) else {},
         "network": network if isinstance(network, dict) else {},
@@ -565,6 +571,12 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
         "diagnosticsSummary": _safe_short_text(record.get("diagnosticsSummary"), 160),
         "storageSummary": _safe_short_text(record.get("storageSummary"), 120),
         "bridgeSummary": _safe_short_text(record.get("bridgeSummary"), 120),
+        "coreLinuxSummary": _safe_short_text(record.get("coreLinuxSummary"), 160),
+        "coreLinuxState": _safe_short_text(record.get("coreLinuxState"), 80),
+        "coreLinuxPrepared": bool(record.get("coreLinuxPrepared")),
+        "bedrockSummary": _safe_short_text(record.get("bedrockSummary"), 160),
+        "bedrockState": _safe_short_text(record.get("bedrockState"), 80),
+        "bedrockReady": bool(record.get("bedrockReady")),
         "notificationPermission": _safe_short_text(record.get("notificationPermission"), 32),
         "internalJobsQueue": _safe_short_text(record.get("internalJobsQueue"), 120),
         "internalJobsRunning": int(record.get("internalJobsRunning") or 0),
@@ -612,6 +624,7 @@ CORE_WORKER_APP_AUTO_JOB_TYPES = {
     "apk_native_boot_status",
     "apk_local_shell_probe",
     "apk_python_runtime_probe",
+    "apk_linux_runtime_probe",
 }
 
 CORE_WORKER_APP_MANUAL_JOB_TYPES = {
@@ -640,6 +653,12 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_python_log_summary",
     "apk_python_network_diagnostic",
     "apk_python_runtime_files_check",
+    "apk_linux_runtime_probe",
+    "apk_linux_rootfs_probe",
+    "apk_linux_box64_probe",
+    "apk_minecraft_bedrock_probe",
+    "apk_minecraft_bedrock_status",
+    "apk_minecraft_bedrock_requirements",
 }
 
 CORE_WORKER_APP_SAFE_JOB_TYPES = (
@@ -688,6 +707,12 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_python_log_summary": "Python resumo de logs",
     "apk_python_network_diagnostic": "Python diagnóstico de rede",
     "apk_python_runtime_files_check": "Python arquivos runtime",
+    "apk_linux_runtime_probe": "Core Linux runtime",
+    "apk_linux_rootfs_probe": "Linux rootfs",
+    "apk_linux_box64_probe": "Box64",
+    "apk_minecraft_bedrock_probe": "Bedrock diagnóstico",
+    "apk_minecraft_bedrock_status": "Bedrock status",
+    "apk_minecraft_bedrock_requirements": "Bedrock requisitos",
 }
 
 def _core_worker_app_normalize_job_type(job_type: object) -> str:
@@ -738,7 +763,7 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
         profile = _safe_short_text(payload.get("profile"), 40).lower()
         if profile in {"leve", "midia", "media", "normal", "completo", "builder", "turbo", "bedrock"}:
             clean["profile"] = profile
-    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle", "apk_refresh_runtime", "apk_force_status_bundle", "apk_test_notification", "apk_repair_local_state", "apk_reset_job_history", "apk_trim_cache", "apk_sync_profile_now", "apk_verify_update_state", "apk_native_worker_status", "apk_native_boot_status", "apk_local_shell_probe", "apk_python_runtime_probe", "apk_python_health_check", "apk_python_runtime_info", "apk_python_status_bundle", "apk_python_storage_check", "apk_python_log_summary", "apk_python_network_diagnostic", "apk_python_runtime_files_check"}:
+    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle", "apk_refresh_runtime", "apk_force_status_bundle", "apk_test_notification", "apk_repair_local_state", "apk_reset_job_history", "apk_trim_cache", "apk_sync_profile_now", "apk_verify_update_state", "apk_native_worker_status", "apk_native_boot_status", "apk_local_shell_probe", "apk_python_runtime_probe", "apk_python_health_check", "apk_python_runtime_info", "apk_python_status_bundle", "apk_python_storage_check", "apk_python_log_summary", "apk_python_network_diagnostic", "apk_python_runtime_files_check", "apk_linux_runtime_probe", "apk_linux_rootfs_probe", "apk_linux_box64_probe", "apk_minecraft_bedrock_probe", "apk_minecraft_bedrock_status", "apk_minecraft_bedrock_requirements"}:
         detail = _safe_short_text(payload.get("detail") or payload.get("reason"), 80)
         if detail:
             clean["detail"] = detail
@@ -1043,6 +1068,7 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
             "apk_native_boot_status": int(os.getenv("CORE_WORKER_APP_AUTO_NATIVE_BOOT_STATUS_INTERVAL_SECONDS", "7200") or "7200"),
             "apk_local_shell_probe": int(os.getenv("CORE_WORKER_APP_AUTO_LOCAL_SHELL_PROBE_INTERVAL_SECONDS", "7200") or "7200"),
             "apk_python_runtime_probe": int(os.getenv("CORE_WORKER_APP_AUTO_PYTHON_RUNTIME_PROBE_INTERVAL_SECONDS", "7200") or "7200"),
+            "apk_linux_runtime_probe": int(os.getenv("CORE_WORKER_APP_AUTO_LINUX_RUNTIME_PROBE_INTERVAL_SECONDS", "10800") or "10800"),
         }
 
         def _maybe_auto_job(kind: str, interval: int, title: str, reason: str) -> None:

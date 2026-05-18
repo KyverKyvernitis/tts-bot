@@ -467,6 +467,7 @@ CORE_WORKER_APP_AUTO_JOB_TYPES = {
     "apk_native_boot_status",
     "apk_local_shell_probe",
     "apk_python_runtime_probe",
+    "apk_linux_runtime_probe",
 }
 CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_download_small",
@@ -494,6 +495,12 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_python_log_summary",
     "apk_python_network_diagnostic",
     "apk_python_runtime_files_check",
+    "apk_linux_runtime_probe",
+    "apk_linux_rootfs_probe",
+    "apk_linux_box64_probe",
+    "apk_minecraft_bedrock_probe",
+    "apk_minecraft_bedrock_status",
+    "apk_minecraft_bedrock_requirements",
 }
 CORE_WORKER_APP_JOB_LABELS = {
     "apk_ping": "ping interno",
@@ -529,6 +536,12 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_python_log_summary": "Python resumo de logs",
     "apk_python_network_diagnostic": "Python diagnóstico de rede",
     "apk_python_runtime_files_check": "Python arquivos runtime",
+    "apk_linux_runtime_probe": "Core Linux runtime",
+    "apk_linux_rootfs_probe": "Linux rootfs",
+    "apk_linux_box64_probe": "Box64",
+    "apk_minecraft_bedrock_probe": "Bedrock diagnóstico",
+    "apk_minecraft_bedrock_status": "Bedrock status",
+    "apk_minecraft_bedrock_requirements": "Bedrock requisitos",
 }
 
 
@@ -764,9 +777,11 @@ def _core_worker_app_runtime_detail_text(worker_id: str) -> str:
     diag = _shorten(record.get("diagnosticsSummary") or "diagnóstico aguardando", limit=90)
     storage = _shorten(record.get("storageSummary") or "armazenamento aguardando", limit=80)
     bridge = _shorten(record.get("bridgeSummary") or "ponte aguardando", limit=80)
+    linux = _shorten(record.get("coreLinuxSummary") or "Linux runtime aguardando", limit=80)
+    bedrock = _shorten(record.get("bedrockSummary") or "Bedrock aguardando", limit=80)
     perm = _shorten(record.get("notificationPermission") or "notificação ?", limit=32)
     jobs = _core_worker_app_jobs_text(worker_id)
-    return f"APK interno: diagnóstico {diag} · {storage} · {bridge} · notif {perm} · {jobs}"
+    return f"APK interno: diagnóstico {diag} · {storage} · {bridge} · {linux} · {bedrock} · notif {perm} · {jobs}"
 
 
 def _core_worker_app_runtime_text(worker_id: str) -> str:
@@ -817,6 +832,8 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
     diagnostics = _shorten(record.get("diagnosticsSummary") or "", limit=42)
     storage = _shorten(record.get("storageSummary") or "", limit=34)
     bridge = _shorten(record.get("bridgeSummary") or "", limit=34)
+    linux = _shorten(record.get("coreLinuxSummary") or "", limit=34)
+    bedrock = _shorten(record.get("bedrockSummary") or "", limit=34)
     prefix = "online" if online else "visto " + _format_age(age)
     pieces = [prefix, app_version, f"perfil {profile}", f"push {fcm_state}", battery, network, f"APK {update_state}", f"jobs: {jobs_runtime}"]
     if diagnostics:
@@ -825,6 +842,10 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
         pieces.append(storage)
     if bridge:
         pieces.append(bridge)
+    if linux:
+        pieces.append(linux)
+    if bedrock:
+        pieces.append(bedrock)
     if internal_queue and internal_queue != "fila vazia":
         pieces.append(f"fila {internal_queue}")
     pieces.append(_core_worker_app_jobs_text(worker_id))
@@ -2383,6 +2404,11 @@ class WorkersPanelView(discord.ui.LayoutView):
                 {"label": "Python logs", "value": "_apk_python_log_summary", "description": "Resumo local de jobs", "emoji": "🧾", "panel_action": "apk_python_log_summary", "category": "apk", "apk_job_type": "apk_python_log_summary"},
                 {"label": "Python rede", "value": "_apk_python_network_diagnostic", "description": "Diagnóstico de rede Python", "emoji": "🌐", "panel_action": "apk_python_network_diagnostic", "category": "apk", "apk_job_type": "apk_python_network_diagnostic"},
                 {"label": "Python arquivos", "value": "_apk_python_runtime_files_check", "description": "Runtime/sandbox internos", "emoji": "📁", "panel_action": "apk_python_runtime_files_check", "category": "apk", "apk_job_type": "apk_python_runtime_files_check"},
+                {"label": "Linux runtime", "value": "_apk_linux_runtime_probe", "description": "Base Linux interna", "emoji": "🐧", "panel_action": "apk_linux_runtime_probe", "category": "apk", "apk_job_type": "apk_linux_runtime_probe"},
+                {"label": "Linux rootfs", "value": "_apk_linux_rootfs_probe", "description": "Rootfs experimental", "emoji": "📦", "panel_action": "apk_linux_rootfs_probe", "category": "apk", "apk_job_type": "apk_linux_rootfs_probe"},
+                {"label": "Box64", "value": "_apk_linux_box64_probe", "description": "Camada x86_64 futura", "emoji": "🧱", "panel_action": "apk_linux_box64_probe", "category": "apk", "apk_job_type": "apk_linux_box64_probe"},
+                {"label": "Bedrock reqs", "value": "_apk_minecraft_bedrock_requirements", "description": "RAM/storage/Ubuntu", "emoji": "⛏️", "panel_action": "apk_minecraft_bedrock_requirements", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_requirements"},
+                {"label": "Bedrock status", "value": "_apk_minecraft_bedrock_status", "description": "Arquivos do servidor", "emoji": "🟫", "panel_action": "apk_minecraft_bedrock_status", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_status"},
                 {"label": "Renomear celular", "value": "_rename_worker", "description": "Troca o nome exibido", "emoji": "✏️", "panel_action": "rename", "category": "organize"},
                 {"label": "Editar funções", "value": "_edit_roles", "description": "Perfil + extras/remoções", "emoji": "🧩", "panel_action": "roles", "category": "organize"},
             ])
