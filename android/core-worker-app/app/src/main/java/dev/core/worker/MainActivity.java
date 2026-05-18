@@ -68,7 +68,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.24";
+    private static final String APP_VERSION = "0.5.25";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -1272,6 +1272,44 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String showInternalTestNotification() {
+        try {
+            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 4103);
+                return "permission_missing";
+            }
+            NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (manager == null) {
+                return "manager_unavailable";
+            }
+            String channelId = "core_worker_updates";
+            if (Build.VERSION.SDK_INT >= 26) {
+                NotificationChannel channel = new NotificationChannel(channelId, "Atualizações do Core Worker", NotificationManager.IMPORTANCE_DEFAULT);
+                manager.createNotificationChannel(channel);
+            }
+            Intent open = new Intent(this, MainActivity.class);
+            open.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= 23) {
+                flags |= PendingIntent.FLAG_IMMUTABLE;
+            }
+            PendingIntent pending = PendingIntent.getActivity(this, 4104, open, flags);
+            Notification.Builder builder = Build.VERSION.SDK_INT >= 26
+                    ? new Notification.Builder(this, channelId)
+                    : new Notification.Builder(this);
+            builder.setSmallIcon(android.R.drawable.stat_sys_download_done)
+                    .setContentTitle("Core Worker")
+                    .setContentText("Notificação de teste do runtime interno")
+                    .setContentIntent(pending)
+                    .setAutoCancel(true);
+            manager.notify(4104, builder.build());
+            return "displayed";
+        } catch (Throwable ignored) {
+            return "failed";
+        }
+    }
+
+
     private String notificationDetail(String state) {
         if ("displayed".equals(state)) return "notificação local exibida pelo APK";
         if ("background_displayed".equals(state)) return "notificação local exibida por checagem com app fechado";
@@ -1731,7 +1769,15 @@ public class MainActivity extends Activity {
                 .put("apk_storage_diagnostic")
                 .put("apk_worker_bridge_status")
                 .put("apk_collect_status_bundle")
-                .put("apk_cleanup_runtime_cache");
+                .put("apk_cleanup_runtime_cache")
+                .put("apk_refresh_runtime")
+                .put("apk_force_status_bundle")
+                .put("apk_test_notification")
+                .put("apk_repair_local_state")
+                .put("apk_reset_job_history")
+                .put("apk_trim_cache")
+                .put("apk_sync_profile_now")
+                .put("apk_verify_update_state");
     }
 
     private String summarizeLightJobs(JSONArray jobs, int okCount, int count) {
@@ -1856,9 +1902,12 @@ public class MainActivity extends Activity {
             result.put("runtime", runtimeStatusLabel());
             return result;
         }
-        if ("apk_status_refresh".equals(type)) {
+        if ("apk_status_refresh".equals(type) || "apk_refresh_runtime".equals(type)) {
+            prepareInternalRuntimePreview();
+            sendInternalRuntimeHeartbeat(false, "apk_refresh_runtime".equals(type) ? "job_refresh_runtime" : "job_status_refresh");
             safePutPayload(result, "status", statusSnapshot());
-            result.put("message", "status atualizado pelo APK");
+            safePutPayload(result, "runtime", runtimeSnapshot());
+            result.put("message", "runtime e status atualizados pelo APK");
             return result;
         }
         if ("apk_report_logs".equals(type)) {
@@ -1893,7 +1942,7 @@ public class MainActivity extends Activity {
             result.put("message", "diagnóstico interno do APK concluído");
             return result;
         }
-        if ("apk_check_update".equals(type)) {
+        if ("apk_check_update".equals(type) || "apk_verify_update_state".equals(type)) {
             JSONObject update = checkUpdateForJob(serverUrl);
             safePutPayload(result, "update", update);
             if (!update.optBoolean("ok", false)) {
@@ -2002,7 +2051,7 @@ public class MainActivity extends Activity {
             result.put("message", "estado da ponte APK/Termux reportado");
             return result;
         }
-        if ("apk_collect_status_bundle".equals(type)) {
+        if ("apk_collect_status_bundle".equals(type) || "apk_force_status_bundle".equals(type)) {
             JSONObject bundle = collectStatusBundle(serverUrl);
             safePutPayload(result, "bundle", bundle);
             internalDiagnosticsSummary = "pacote de status enviado";
@@ -2010,13 +2059,51 @@ public class MainActivity extends Activity {
             result.put("message", "pacote completo de status do APK enviado para a VPS");
             return result;
         }
-        if ("apk_clear_app_cache".equals(type) || "apk_cache_cleanup".equals(type) || "apk_cleanup_runtime_cache".equals(type)) {
+        if ("apk_test_notification".equals(type)) {
+            String state = showInternalTestNotification();
+            result.put("notificationState", state);
+            result.put("permission", hasNotificationPermission() ? "granted" : "missing");
+            if (!"displayed".equals(state)) {
+                result.put("ok", false);
+                result.put("error", notificationDetail(state));
+            }
+            result.put("message", "displayed".equals(state) ? "notificação de teste exibida pelo APK" : "notificação de teste não exibida: " + notificationDetail(state));
+            return result;
+        }
+        if ("apk_repair_local_state".equals(type)) {
+            clearTransientApkNetworkError();
+            prepareInternalRuntimePreview();
+            internalRuntimeOnline = true;
+            internalRuntimeHeartbeatState = "reparado por job interno";
+            internalRuntimeLastHeartbeatAt = System.currentTimeMillis();
+            internalDiagnosticsSummary = "estado local reparado";
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            prefs.edit()
+                    .remove("fcm_disabled_until")
+                    .remove("internal_jobs_wake_requested_at")
+                    .putString("internal_runtime_repair_at", String.valueOf(System.currentTimeMillis()))
+                    .apply();
+            sendInternalRuntimeHeartbeat(false, "job_repair_local_state");
+            safePutPayload(result, "status", statusSnapshot());
+            result.put("message", "estado local seguro reparado pelo APK");
+            return result;
+        }
+        if ("apk_reset_job_history".equals(type)) {
+            prefs.edit()
+                    .putString("internal_job_history", "[]")
+                    .putString("internal_completed_job_ids", "[]")
+                    .apply();
+            internalLightJobsLastSummary = "histórico local limpo";
+            result.put("message", "histórico local de jobs internos limpo");
+            return result;
+        }
+        if ("apk_clear_app_cache".equals(type) || "apk_cache_cleanup".equals(type) || "apk_cleanup_runtime_cache".equals(type) || "apk_trim_cache".equals(type)) {
             long bytes = clearInternalJobCache();
             result.put("bytesCleared", bytes);
             result.put("message", "cache interno do APK limpo");
             return result;
         }
-        if ("apk_sync_profile".equals(type)) {
+        if ("apk_sync_profile".equals(type) || "apk_sync_profile_now".equals(type)) {
             String requested = normalizeProfile(jobPayload.optString("profile", appliedProfile()));
             boolean localSynced = syncProfileToLocalAgent(requested);
             saveLocalFields(requested);
@@ -2446,6 +2533,13 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 JSONObject payload = statusSnapshot();
+                payload.put("appVersion", APP_VERSION);
+                payload.put("appVersionCode", BuildConfig.VERSION_CODE);
+                payload.put("versionName", APP_VERSION);
+                payload.put("versionCode", BuildConfig.VERSION_CODE);
+                payload.put("workerId", emptyFallback(localAgentWorkerId, prefs.getString("worker_id", "")));
+                payload.put("installId", installId());
+                payload.put("deviceName", prefs.getString("device_name", ""));
                 payload.put("fcmToken", token.trim());
                 payload.put("state", "registered");
                 payload.put("reason", reason == null ? "activity" : reason);

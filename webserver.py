@@ -276,6 +276,19 @@ def _register_core_worker_fcm_token(payload: dict) -> dict:
                 "lastErrorCode": "",
                 "lastError": "",
             })
+        # Ao receber um token novo do mesmo APK/instalação, o token antigo fica apenas em histórico local.
+        for other_hash, other in list(tokens.items()):
+            if other_hash == token_hash or not isinstance(other, dict):
+                continue
+            same_install = common["installId"] and str(other.get("installId") or "") == common["installId"]
+            same_worker = common["workerId"] and str(other.get("workerId") or "") == common["workerId"]
+            same_device = common["deviceName"] and str(other.get("deviceName") or "") == common["deviceName"]
+            if same_install or same_worker or same_device:
+                other["active"] = False
+                other["supersededAt"] = now
+                other["lastPushStatus"] = "superseded"
+                other["lastError"] = "token substituído por registro mais novo do APK"
+                tokens[other_hash] = other
         tokens[token_hash] = record
         data["tokens"] = tokens
         data["updatedAt"] = now
@@ -292,6 +305,7 @@ def _active_core_worker_fcm_records(*, max_age_days: int = 45) -> list[dict]:
     tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
     cutoff = int(time.time()) - max(1, int(max_age_days)) * 86400
     records: list[dict] = []
+    runtime_records = _core_worker_app_latest_runtime_records()
     for record in tokens.values():
         if not isinstance(record, dict) or not record.get("active"):
             continue
@@ -304,43 +318,126 @@ def _active_core_worker_fcm_records(*, max_age_days: int = 45) -> list[dict]:
             seen = 0
         if seen and seen < cutoff:
             continue
+        fresh, _reason = _core_worker_fcm_runtime_freshness(record, runtime_records)
+        if not fresh:
+            continue
         records.append(record)
     return records
+
+
+
+def _core_worker_app_latest_runtime_records() -> list[dict]:
+    path = _core_worker_app_heartbeats_path()
+    try:
+        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        return []
+    latest = data.get("latestByInstallId") if isinstance(data.get("latestByInstallId"), dict) else {}
+    records = [r for r in latest.values() if isinstance(r, dict)]
+    return records
+
+
+def _core_worker_fcm_runtime_freshness(record: dict, runtime_records: list[dict] | None = None) -> tuple[bool, str]:
+    if not isinstance(record, dict):
+        return False, "registro inválido"
+    runtime_records = runtime_records if runtime_records is not None else _core_worker_app_latest_runtime_records()
+    install_id = str(record.get("installId") or "").strip()
+    worker_id = str(record.get("workerId") or "").strip()
+    best = None
+    for runtime in runtime_records:
+        if not isinstance(runtime, dict):
+            continue
+        if install_id and str(runtime.get("installId") or "") == install_id:
+            best = runtime
+            break
+        if worker_id and str(runtime.get("workerId") or "") == worker_id:
+            best = runtime
+            break
+    if not best:
+        return True, "sem heartbeat comparável"
+    try:
+        runtime_code = int(best.get("appVersionCode") or 0)
+    except Exception:
+        runtime_code = 0
+    try:
+        token_code = int(record.get("appVersionCode") or 0)
+    except Exception:
+        token_code = 0
+    if runtime_code > 0 and token_code > 0 and token_code < runtime_code:
+        return False, f"token de APK antigo ({token_code} < {runtime_code})"
+    if runtime_code > 0 and token_code <= 0:
+        try:
+            seen = int(record.get("lastSeenAt") or record.get("registeredAt") or 0)
+            hb_seen = int(best.get("receivedAt") or 0)
+        except Exception:
+            seen = hb_seen = 0
+        if hb_seen and seen and seen < hb_seen - 300:
+            return False, "token sem versão anterior ao heartbeat atual"
+    return True, "compatível com heartbeat atual"
 
 
 def _core_worker_fcm_public_summary(worker_id: str = "") -> dict:
     worker_id = str(worker_id or "").strip()
     data = _load_core_worker_fcm_tokens()
     tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
+    runtime_records = _core_worker_app_latest_runtime_records()
     records = _active_core_worker_fcm_records(max_age_days=120)
     if worker_id:
-        records = [r for r in records if str(r.get("workerId") or "") == worker_id]
+        runtime_install_ids = {str(r.get("installId") or "") for r in runtime_records if isinstance(r, dict) and str(r.get("workerId") or "") == worker_id}
+        records = [r for r in records if str(r.get("workerId") or "") == worker_id or (str(r.get("installId") or "") in runtime_install_ids)]
     invalidated = []
+    stale = []
+    incomplete = []
     for item in tokens.values():
         if not isinstance(item, dict):
             continue
         if worker_id and str(item.get("workerId") or "") != worker_id:
+            runtime_install_ids = {str(r.get("installId") or "") for r in runtime_records if isinstance(r, dict) and str(r.get("workerId") or "") == worker_id}
+            if str(item.get("installId") or "") not in runtime_install_ids:
+                continue
+        token = str(item.get("token") or "").strip()
+        if len(token) < 20:
+            incomplete.append(item)
             continue
+        fresh, reason = _core_worker_fcm_runtime_freshness(item, runtime_records)
+        if not fresh:
+            stale_item = dict(item)
+            stale_item["staleReason"] = reason
+            stale.append(stale_item)
         if str(item.get("lastErrorCode") or "").upper() == "UNREGISTERED" or item.get("invalidatedAt"):
             invalidated.append(item)
     last = None
     for record in records:
         if last is None or int(record.get("lastSeenAt") or 0) > int(last.get("lastSeenAt") or 0):
             last = record
-    if last is None and invalidated:
-        for record in invalidated:
-            if last is None or int(record.get("lastSeenAt") or record.get("invalidatedAt") or 0) > int(last.get("lastSeenAt") or last.get("invalidatedAt") or 0):
-                last = record
+    if last is None:
+        for group in (invalidated, stale, incomplete):
+            for record in group:
+                if last is None or int(record.get("lastSeenAt") or record.get("invalidatedAt") or record.get("registeredAt") or 0) > int(last.get("lastSeenAt") or last.get("invalidatedAt") or last.get("registeredAt") or 0):
+                    last = record
+    status = "ok" if records else "missing"
+    if not records and invalidated:
+        status = "needs_refresh"
+    elif not records and stale:
+        status = "stale"
+    elif not records and incomplete:
+        status = "incomplete"
     return {
         "active": len(records),
         "needsRefresh": bool(not records and invalidated),
         "invalidated": len(invalidated),
+        "stale": len(stale),
+        "incomplete": len(incomplete),
+        "status": status,
         "lastSeenAt": int((last or {}).get("lastSeenAt") or 0),
         "lastPushAt": int((last or {}).get("lastPushAt") or 0),
         "lastPushStatus": _safe_short_text((last or {}).get("lastPushStatus"), 40),
-        "lastError": _safe_short_text((last or {}).get("lastError"), 120),
+        "lastError": _safe_short_text((last or {}).get("lastError") or (last or {}).get("staleReason"), 120),
         "lastErrorCode": _safe_short_text((last or {}).get("lastErrorCode"), 40),
         "lastAppVersion": _safe_short_text((last or {}).get("appVersion"), 48),
+        "lastAppVersionCode": int((last or {}).get("appVersionCode") or 0),
         "permission": _safe_short_text((last or {}).get("permission"), 40),
     }
 
@@ -492,6 +589,8 @@ CORE_WORKER_APP_JOB_ALIASES = {
     "apk_cleanup_runtime_cache": "apk_cache_cleanup",
     "apk_report_logs": "apk_upload_app_logs",
     "apk_status_refresh": "apk_sync_runtime_state",
+    "apk_trim_runtime_cache": "apk_trim_cache",
+    "apk_refresh_status": "apk_refresh_runtime",
 }
 
 CORE_WORKER_APP_AUTO_JOB_TYPES = {
@@ -518,6 +617,14 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_test_vps_connection",
     "apk_sync_profile",
     "apk_sync_runtime_state",
+    "apk_refresh_runtime",
+    "apk_force_status_bundle",
+    "apk_test_notification",
+    "apk_repair_local_state",
+    "apk_reset_job_history",
+    "apk_trim_cache",
+    "apk_sync_profile_now",
+    "apk_verify_update_state",
 }
 
 CORE_WORKER_APP_SAFE_JOB_TYPES = (
@@ -547,6 +654,14 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_test_vps_connection": "teste de conexão VPS",
     "apk_sync_profile": "sincronizar perfil",
     "apk_sync_runtime_state": "sincronizar runtime",
+    "apk_refresh_runtime": "atualizar runtime",
+    "apk_force_status_bundle": "forçar pacote de status",
+    "apk_test_notification": "teste de notificação",
+    "apk_repair_local_state": "reparar estado local",
+    "apk_reset_job_history": "limpar histórico",
+    "apk_trim_cache": "limpar cache",
+    "apk_sync_profile_now": "sincronizar perfil agora",
+    "apk_verify_update_state": "verificar atualização",
 }
 
 def _core_worker_app_normalize_job_type(job_type: object) -> str:
@@ -597,7 +712,7 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
         profile = _safe_short_text(payload.get("profile"), 40).lower()
         if profile in {"leve", "midia", "media", "normal", "completo", "builder", "turbo", "bedrock"}:
             clean["profile"] = profile
-    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle"}:
+    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle", "apk_refresh_runtime", "apk_force_status_bundle", "apk_test_notification", "apk_repair_local_state", "apk_reset_job_history", "apk_trim_cache", "apk_sync_profile_now", "apk_verify_update_state"}:
         detail = _safe_short_text(payload.get("detail") or payload.get("reason"), 80)
         if detail:
             clean["detail"] = detail

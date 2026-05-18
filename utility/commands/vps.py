@@ -21,6 +21,7 @@ from music_system.diagnostics import (
     build_music_diagnostics_archive,
     build_music_diagnostics_emergency_report,
     build_vps_snapshot_archive,
+    build_core_worker_apk_diagnostics_report,
     diagnostics_file_stamp,
 )
 
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 VPS_COMMAND_GUILD_ID = 927002914449424404
 VPS_COMMAND_GUILD = discord.Object(id=VPS_COMMAND_GUILD_ID)
 
-VpsItem = Literal["quick_status", "base_git", "music_diag", "full_diag", "snapshot", "servers", "tts"]
+VpsItem = Literal["quick_status", "base_git", "music_diag", "full_diag", "snapshot", "servers", "tts", "apk_diag"]
 
 VPS_QUICK_STATUS_TIMEOUT_SECONDS = 22.0
 VPS_BASE_TIMEOUT_SECONDS = 70.0
@@ -38,6 +39,7 @@ VPS_FULL_DIAG_TIMEOUT_SECONDS = 150.0
 VPS_SNAPSHOT_TIMEOUT_SECONDS = 75.0
 VPS_SERVERS_TIMEOUT_SECONDS = 25.0
 VPS_TTS_TIMEOUT_SECONDS = 18.0
+VPS_APK_DIAG_TIMEOUT_SECONDS = 25.0
 
 
 def _get_audio_router(bot: commands.Bot) -> AudioRouter:
@@ -97,7 +99,7 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
                     custom_id="vps_items",
                     placeholder="Escolha uma ou mais opções",
                     min_values=1,
-                    max_values=7,
+                    max_values=8,
                     options=[
                         discord.SelectOption(
                             label="Base Git leve",
@@ -126,9 +128,15 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
                         ),
                         discord.SelectOption(
                             label="Status rápido",
-                            description="RAM, disco, serviços, Git e 3 erros recentes.",
+                            description="RAM, disco, serviços, Git, APK e 3 erros recentes.",
                             value="quick_status",
                             emoji="⚡",
+                        ),
+                        discord.SelectOption(
+                            label="Diagnóstico APK",
+                            description="Bateria, rede/VPN, push, runtime, cache e jobs internos.",
+                            value="apk_diag",
+                            emoji="📲",
                         ),
                         discord.SelectOption(
                             label="Servidores",
@@ -156,7 +164,7 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
 
         self.items_input = discord.ui.TextInput(
             label="O que enviar?",
-            placeholder="base, musica, completo, snapshot, status, servidores, tts",
+            placeholder="base, apk, musica, completo, snapshot, status, servidores, tts",
             required=True,
             default="base",
             max_length=160,
@@ -169,7 +177,7 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
             with contextlib.suppress(Exception):
                 values = list(getattr(self.items_select, "values") or [])
             selected: list[VpsItem] = []
-            valid: set[str] = {"quick_status", "base_git", "music_diag", "full_diag", "snapshot", "servers", "tts"}
+            valid: set[str] = {"quick_status", "base_git", "music_diag", "full_diag", "snapshot", "servers", "tts", "apk_diag"}
             for value in values:
                 value = str(value or "").strip()
                 if value in valid and value not in selected:
@@ -184,6 +192,7 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
                 ("music_diag", "music_diag"),
                 ("full_diag", "full_diag"),
                 ("snapshot", "snapshot"),
+                ("apk_diag", "apk_diag"),
                 ("servers", "servers"),
                 ("tts", "tts"),
             ]
@@ -213,6 +222,12 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
             "full_diag": "full_diag",
             "diagnóstico completo": "full_diag",
             "diagnostico completo": "full_diag",
+            "apk": "apk_diag",
+            "apk_diag": "apk_diag",
+            "diagnóstico apk": "apk_diag",
+            "diagnostico apk": "apk_diag",
+            "core worker apk": "apk_diag",
+            "core-worker apk": "apk_diag",
             "snapshot": "snapshot",
             "vps": "snapshot",
             "status": "quick_status",
@@ -664,7 +679,7 @@ class VpsCommandMixin:
             return
 
         ordered_items: list[VpsItem] = [
-            item for item in ["quick_status", "tts", "servers", "base_git", "music_diag", "full_diag", "snapshot"] if item in selected_items
+            item for item in ["quick_status", "apk_diag", "tts", "servers", "base_git", "music_diag", "full_diag", "snapshot"] if item in selected_items
         ]
 
         stamp = diagnostics_file_stamp()
@@ -690,6 +705,18 @@ class VpsCommandMixin:
                 except Exception as exc:
                     logger.exception("[utility/vps] falha ao gerar status rápido")
                     error_lines.append(f"Status rápido falhou: {type(exc).__name__}: {str(exc)[:300]}")
+                continue
+
+            if item == "apk_diag":
+                try:
+                    report = await self._with_vps_timeout("diagnóstico APK", build_core_worker_apk_diagnostics_report(), timeout=VPS_APK_DIAG_TIMEOUT_SECONDS)
+                    report_bytes = (report or "Diagnóstico APK vazio.\n").encode("utf-8", "replace")
+                    files.append(discord.File(io.BytesIO(report_bytes), filename=f"core-worker-apk-diag-{stamp}.txt"))
+                    attachment_lines.append(f"📲 Diagnóstico APK anexado ({_format_attachment_size(len(report_bytes))}).")
+                    generated_any = True
+                except Exception as exc:
+                    logger.exception("[utility/vps] falha ao gerar diagnóstico APK")
+                    error_lines.append(f"Diagnóstico APK falhou: {type(exc).__name__}: {str(exc)[:300]}")
                 continue
 
             if item == "tts":

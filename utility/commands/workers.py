@@ -164,6 +164,7 @@ WORKER_ACTION_CATEGORIES: tuple[dict[str, str], ...] = (
     {"label": "Monitoramento", "value": "monitor", "description": "Rede, Tailscale, serviços", "emoji": "📊"},
     {"label": "Manutenção", "value": "maintenance", "description": "Reparar, reiniciar e boot", "emoji": "🛠️"},
     {"label": "Ajudar VPS", "value": "assist", "description": "Tarefas auxiliares seguras", "emoji": "🧠"},
+    {"label": "APK interno", "value": "apk", "description": "Jobs seguros sem shell", "emoji": "📲"},
     {"label": "Organizar", "value": "organize", "description": "Nome, funções, pausar/remover", "emoji": "🧩"},
     {"label": "Adicionar celular", "value": "add", "description": "Pareamento e guia simples", "emoji": "📲"},
 )
@@ -444,6 +445,8 @@ CORE_WORKER_APP_JOB_ALIASES = {
     "apk_cleanup_runtime_cache": "apk_cache_cleanup",
     "apk_report_logs": "apk_upload_app_logs",
     "apk_status_refresh": "apk_sync_runtime_state",
+    "apk_trim_runtime_cache": "apk_trim_cache",
+    "apk_refresh_status": "apk_refresh_runtime",
 }
 CORE_WORKER_APP_AUTO_JOB_TYPES = {
     "apk_ping",
@@ -468,6 +471,14 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_test_vps_connection",
     "apk_sync_profile",
     "apk_sync_runtime_state",
+    "apk_refresh_runtime",
+    "apk_force_status_bundle",
+    "apk_test_notification",
+    "apk_repair_local_state",
+    "apk_reset_job_history",
+    "apk_trim_cache",
+    "apk_sync_profile_now",
+    "apk_verify_update_state",
 }
 CORE_WORKER_APP_JOB_LABELS = {
     "apk_ping": "ping interno",
@@ -484,6 +495,14 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_update_diagnostic": "update",
     "apk_job_history": "histórico",
     "apk_cache_cleanup": "limpeza de cache",
+    "apk_refresh_runtime": "atualizar runtime",
+    "apk_force_status_bundle": "pacote de status",
+    "apk_test_notification": "teste de notificação",
+    "apk_repair_local_state": "reparar estado local",
+    "apk_reset_job_history": "limpar histórico",
+    "apk_trim_cache": "limpar cache",
+    "apk_sync_profile_now": "sincronizar perfil agora",
+    "apk_verify_update_state": "verificar atualização",
 }
 
 
@@ -577,7 +596,7 @@ def _queue_core_worker_app_internal_runtime_test(worker_id: str) -> dict[str, An
         created.append(typ)
     data["pending"] = pending[-160:]
     data["runningByJobId"] = running
-    data.setdefault("jobCatalog", {"automatic": sorted(CORE_WORKER_APP_AUTO_JOB_TYPES), "manual": sorted(CORE_WORKER_APP_MANUAL_JOB_TYPES), "aliases": CORE_WORKER_APP_JOB_ALIASES})
+    data["jobCatalog"] = {"automatic": sorted(CORE_WORKER_APP_AUTO_JOB_TYPES), "manual": sorted(CORE_WORKER_APP_MANUAL_JOB_TYPES), "aliases": CORE_WORKER_APP_JOB_ALIASES, "labels": CORE_WORKER_APP_JOB_LABELS}
     data["updatedAt"] = now
     data["ok"] = True
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -589,6 +608,70 @@ def _queue_core_worker_app_internal_runtime_test(worker_id: str) -> dict[str, An
     return {"ok": True, "created": len(created), "createdTypes": created, "workerId": worker_id, "installId": install_id}
 
 
+
+
+def _queue_core_worker_app_manual_job(worker_id: str, job_type: str, *, payload: dict[str, Any] | None = None, reason: str = "manual-apk-command") -> dict[str, Any]:
+    worker_id = str(worker_id or "").strip()
+    job_type = _core_worker_app_normalize_job_type(job_type)
+    if not worker_id:
+        return {"ok": False, "error": "worker não selecionado"}
+    if job_type not in CORE_WORKER_APP_MANUAL_JOB_TYPES and job_type not in CORE_WORKER_APP_AUTO_JOB_TYPES:
+        return {"ok": False, "error": f"job APK não permitido: {job_type}"}
+    hb = _core_worker_app_runtime_record(worker_id) or {}
+    install_id = str(hb.get("installId") or "").strip()
+    path = _repo_root() / "data" / "core_worker_app_jobs.json"
+    now = int(time.time())
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    pending = data.get("pending") if isinstance(data.get("pending"), list) else []
+    running = data.get("runningByJobId") if isinstance(data.get("runningByJobId"), dict) else {}
+
+    def matches(item: dict[str, Any]) -> bool:
+        if not isinstance(item, dict):
+            return False
+        item_worker = str(item.get("workerId") or "")
+        item_install = str(item.get("installId") or "")
+        return (worker_id and item_worker == worker_id) or (install_id and item_install == install_id)
+
+    for item in pending:
+        if isinstance(item, dict) and matches(item) and _core_worker_app_normalize_job_type(item.get("type")) == job_type:
+            return {"ok": True, "created": 0, "alreadyPending": True, "type": job_type, "workerId": worker_id, "installId": install_id}
+    for item in running.values():
+        if isinstance(item, dict) and matches(item) and _core_worker_app_normalize_job_type(item.get("type")) == job_type:
+            return {"ok": True, "created": 0, "alreadyRunning": True, "type": job_type, "workerId": worker_id, "installId": install_id}
+
+    clean_payload = dict(payload or {})
+    job_id = f"manual-{job_type.replace('_', '-')}-{(install_id or worker_id)[:16]}-{now}"
+    pending.append({
+        "id": job_id,
+        "type": job_type,
+        "jobClass": "manual" if job_type in CORE_WORKER_APP_MANUAL_JOB_TYPES else "automatic",
+        "reason": reason,
+        "issuedAt": now,
+        "title": CORE_WORKER_APP_JOB_LABELS.get(job_type, job_type),
+        "status": "pending",
+        "timeoutSec": 60,
+        "maxRetries": 1,
+        "installId": install_id,
+        "workerId": worker_id,
+        "payload": clean_payload,
+    })
+    data["pending"] = pending[-160:]
+    data["runningByJobId"] = running
+    data["jobCatalog"] = {"automatic": sorted(CORE_WORKER_APP_AUTO_JOB_TYPES), "manual": sorted(CORE_WORKER_APP_MANUAL_JOB_TYPES), "aliases": CORE_WORKER_APP_JOB_ALIASES, "labels": CORE_WORKER_APP_JOB_LABELS}
+    data["updatedAt"] = now
+    data["ok"] = True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    with contextlib.suppress(Exception):
+        path.chmod(0o600)
+    return {"ok": True, "created": 1, "type": job_type, "workerId": worker_id, "installId": install_id}
 
 def _core_worker_app_jobs_text(worker_id: str) -> str:
     worker_id = str(worker_id or "").strip()
@@ -1216,12 +1299,31 @@ def _core_worker_fcm_status_summary(worker_id: str = "") -> dict[str, Any]:
         data = {}
     tokens = data.get("tokens") if isinstance(data, dict) and isinstance(data.get("tokens"), dict) else {}
     now = time.time()
+    runtime = _core_worker_app_runtime_record(worker_id) if worker_id else None
+    runtime_code = 0
+    try:
+        runtime_code = int((runtime or {}).get("appVersionCode") or 0)
+    except Exception:
+        runtime_code = 0
+    runtime_seen = 0.0
+    try:
+        runtime_seen = float((runtime or {}).get("receivedAt") or 0)
+    except Exception:
+        runtime_seen = 0.0
+    runtime_install_id = str((runtime or {}).get("installId") or "")
     records: list[dict[str, Any]] = []
     invalidated: list[dict[str, Any]] = []
+    stale: list[dict[str, Any]] = []
+    incomplete: list[dict[str, Any]] = []
     for record in tokens.values():
         if not isinstance(record, dict):
             continue
         if worker_id and str(record.get("workerId") or "") != str(worker_id):
+            if not runtime_install_id or str(record.get("installId") or "") != runtime_install_id:
+                continue
+        token = str(record.get("token") or "").strip()
+        if len(token) < 20:
+            incomplete.append(record)
             continue
         if str(record.get("lastErrorCode") or "").upper() == "UNREGISTERED" or record.get("invalidatedAt"):
             invalidated.append(record)
@@ -1233,29 +1335,39 @@ def _core_worker_fcm_status_summary(worker_id: str = "") -> dict[str, Any]:
             seen = 0.0
         if seen and now - seen > 120 * 86400:
             continue
+        try:
+            record_code = int(record.get("appVersionCode") or 0)
+        except Exception:
+            record_code = 0
+        if runtime_code > 0 and record_code > 0 and record_code < runtime_code:
+            stale.append(record)
+            continue
+        if runtime_code > 0 and record_code <= 0 and runtime_seen and seen and seen < runtime_seen - 300:
+            stale.append(record)
+            continue
         records.append(record)
     last = None
-    for record in records:
-        if last is None or float(record.get("lastSeenAt") or 0) > float(last.get("lastSeenAt") or 0):
-            last = record
-    if last is None and invalidated:
-        for record in invalidated:
-            candidate_seen = float(record.get("lastSeenAt") or record.get("invalidatedAt") or 0)
-            last_seen = float((last or {}).get("lastSeenAt") or (last or {}).get("invalidatedAt") or 0)
+    for group in (records, invalidated, stale, incomplete):
+        for record in group:
+            candidate_seen = float(record.get("lastSeenAt") or record.get("invalidatedAt") or record.get("registeredAt") or 0)
+            last_seen = float((last or {}).get("lastSeenAt") or (last or {}).get("invalidatedAt") or (last or {}).get("registeredAt") or 0)
             if last is None or candidate_seen > last_seen:
                 last = record
-    if not records and not invalidated:
+    if not records and not invalidated and not stale and not incomplete:
         return {"active": 0}
     return {
         "active": len(records),
         "needsRefresh": bool(not records and invalidated),
         "invalidated": len(invalidated),
+        "stale": len(stale),
+        "incomplete": len(incomplete),
         "lastSeenAt": (last or {}).get("lastSeenAt"),
         "lastPushAt": (last or {}).get("lastPushAt"),
         "lastPushStatus": str((last or {}).get("lastPushStatus") or ""),
         "lastError": str((last or {}).get("lastError") or ""),
         "lastErrorCode": str((last or {}).get("lastErrorCode") or ""),
         "lastAppVersion": str((last or {}).get("appVersion") or ""),
+        "lastAppVersionCode": int((last or {}).get("appVersionCode") or 0),
         "permission": str((last or {}).get("permission") or ""),
     }
 
@@ -1265,7 +1377,11 @@ def _core_worker_push_status_text(worker_id: str = "") -> str:
     active = int(summary.get("active") or 0)
     if active <= 0:
         if summary.get("needsRefresh"):
-            return "Push: aguardando renovação do token pelo APK"
+            return "Push: token expirado · aguardando renovação pelo APK"
+        if int(summary.get("stale") or 0):
+            return "Push: token antigo · aguardando renovação pelo APK"
+        if int(summary.get("incomplete") or 0):
+            return "Push: token incompleto · aguardando confirmação do APK"
         return "Push: aguardando APK registrar FCM"
     permission = str(summary.get("permission") or "").lower()
     suffix = ""
@@ -2197,6 +2313,14 @@ class WorkersPanelView(discord.ui.LayoutView):
                 {"label": "Detalhes do celular", "value": "_worker_details", "description": "Resumo completo", "emoji": "📱", "panel_action": "details", "category": "quick"},
                 {"label": "Testar runtime APK", "value": "_apk_internal_test", "description": "Agenda jobs internos seguros", "emoji": "🧪", "panel_action": "apk_internal_test", "category": "quick"},
                 {"label": "Ver último resultado", "value": "_show_last_result", "description": "Detalhes do último job", "emoji": "📄", "panel_action": "last_result", "category": "quick"},
+                {"label": "Atualizar runtime", "value": "_apk_refresh_runtime", "description": "Heartbeat/status agora", "emoji": "🔄", "panel_action": "apk_refresh_runtime", "category": "apk", "apk_job_type": "apk_refresh_runtime"},
+                {"label": "Pacote de status", "value": "_apk_force_status_bundle", "description": "Bundle completo do APK", "emoji": "📦", "panel_action": "apk_force_status_bundle", "category": "apk", "apk_job_type": "apk_force_status_bundle"},
+                {"label": "Testar notificação", "value": "_apk_test_notification", "description": "Notificação local segura", "emoji": "🔔", "panel_action": "apk_test_notification", "category": "apk", "apk_job_type": "apk_test_notification"},
+                {"label": "Reparar estado local", "value": "_apk_repair_local_state", "description": "Limpa erro transitório", "emoji": "🛠️", "panel_action": "apk_repair_local_state", "category": "apk", "apk_job_type": "apk_repair_local_state"},
+                {"label": "Limpar histórico", "value": "_apk_reset_job_history", "description": "Histórico local de jobs", "emoji": "🧾", "panel_action": "apk_reset_job_history", "category": "apk", "apk_job_type": "apk_reset_job_history"},
+                {"label": "Limpar cache APK", "value": "_apk_trim_cache", "description": "Cache interno pequeno", "emoji": "🧹", "panel_action": "apk_trim_cache", "category": "apk", "apk_job_type": "apk_trim_cache"},
+                {"label": "Sincronizar perfil", "value": "_apk_sync_profile_now", "description": "Perfil APK/Termux", "emoji": "👤", "panel_action": "apk_sync_profile_now", "category": "apk", "apk_job_type": "apk_sync_profile_now"},
+                {"label": "Verificar update", "value": "_apk_verify_update_state", "description": "Manifesto/latest.json", "emoji": "⬆️", "panel_action": "apk_verify_update_state", "category": "apk", "apk_job_type": "apk_verify_update_state"},
                 {"label": "Renomear celular", "value": "_rename_worker", "description": "Troca o nome exibido", "emoji": "✏️", "panel_action": "rename", "category": "organize"},
                 {"label": "Editar funções", "value": "_edit_roles", "description": "Perfil + extras/remoções", "emoji": "🧩", "panel_action": "roles", "category": "organize"},
             ])
@@ -2505,6 +2629,10 @@ class WorkersPanelView(discord.ui.LayoutView):
         if action == "_show_last_result":
             await self._show_last_result(interaction)
             return
+        apk_spec = next((spec for spec in self._panel_action_specs_for_selected() if str(spec.get("value")) == action and spec.get("apk_job_type")), None)
+        if apk_spec is not None:
+            await self._queue_apk_manual_job(interaction, str(apk_spec.get("apk_job_type") or ""), label=str(apk_spec.get("label") or "job APK"))
+            return
         if action == "_rename_worker":
             await self._open_rename_modal(interaction)
             return
@@ -2542,6 +2670,29 @@ class WorkersPanelView(discord.ui.LayoutView):
             note = f"🧪 Teste do runtime APK agendado: {created} job(s) interno(s). Abra/aguarde o app sincronizar."
         else:
             note = f"⚠️ Não consegui agendar teste do runtime APK: {_shorten(result.get('error'), limit=120)}"
+        self.snapshot = await self.cog._collect_workers_snapshot(action_note=note)
+        self._ensure_selected_worker()
+        self._rebuild_layout()
+        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._send_ephemeral(interaction, note)
+
+    async def _queue_apk_manual_job(self, interaction: discord.Interaction, job_type: str, *, label: str = "job APK") -> None:
+        await interaction.response.defer(thinking=False)
+        worker = self._selected_worker()
+        worker_id = str((worker or {}).get("worker_id") or "").strip()
+        payload: dict[str, Any] = {}
+        if job_type in {"apk_sync_profile_now", "apk_sync_profile"} and isinstance(worker, dict):
+            payload["profile"] = _normalize_worker_profile((worker.get("profile") or (worker.get("status") if isinstance(worker.get("status"), dict) else {}).get("profile") or "midia"), default="midia")
+        result = await asyncio.to_thread(_queue_core_worker_app_manual_job, worker_id, job_type, payload=payload, reason="workers-panel-apk-command")
+        if result.get("ok"):
+            if result.get("alreadyPending"):
+                note = f"📲 {label}: já estava pendente no APK. Abra/aguarde o app sincronizar."
+            elif result.get("alreadyRunning"):
+                note = f"📲 {label}: já está rodando no APK. Aguarde o resultado."
+            else:
+                note = f"📲 {label} agendado no APK. Abra/aguarde o app sincronizar."
+        else:
+            note = f"⚠️ Não consegui agendar {label}: {_shorten(result.get('error'), limit=120)}"
         self.snapshot = await self.cog._collect_workers_snapshot(action_note=note)
         self._ensure_selected_worker()
         self._rebuild_layout()

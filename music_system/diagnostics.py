@@ -1655,6 +1655,7 @@ def build_music_diagnostics_report_sync(router: Any, options: DiagnosticsOptions
     sections.append(("Dry-run Spotify mirror/fallback (sem tocar áudio)", _spotify_dry_run_mirror_test(cfg)))
     sections.append(("Testes Lavalink REST", _lavalink_tests(cfg)))
     sections.append(("Marcos de restart/runtime", _service_restart_markers()))
+    sections.append(("Core Worker APK — diagnóstico interno", build_core_worker_apk_diagnostics_report_sync()))
     sections.append(("Teste yt-dlp local com cookies", _yt_dlp_test()))
     sections.append(("application.yml do Lavalink (sanitizado)", _application_yml_head()))
     if options.include_local_logs:
@@ -1810,6 +1811,7 @@ def build_music_diagnostics_emergency_report_sync(router: Any, options: Diagnost
     with contextlib.suppress(Exception):
         sections.append(("Estado TTS/música em memória", _tts_runtime_snapshot(router, options.guild_id)))
     sections.append(("Marcos de restart/runtime", _service_restart_markers()))
+    sections.append(("Core Worker APK — diagnóstico interno", build_core_worker_apk_diagnostics_report_sync()))
     sections.append((
         "journalctl musical recente",
         _run_cmd([
@@ -2177,6 +2179,274 @@ def _quick_recent_errors_lines() -> list[str]:
         result.append(f"{when} · {message}")
     return result or ["Nenhum erro recente encontrado."]
 
+
+def _diag_load_json(rel: str) -> dict[str, Any]:
+    try:
+        path = REPO_ROOT / rel
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _diag_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _diag_float(value: Any, default: float = -1.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _diag_age_from_epoch(epoch: Any) -> str:
+    try:
+        seconds = max(0, int(time.time() - float(epoch or 0)))
+    except Exception:
+        return "sem horário"
+    if seconds < 60:
+        return f"há {seconds}s"
+    if seconds < 3600:
+        return f"há {seconds // 60}min"
+    if seconds < 86400:
+        return f"há {seconds // 3600}h"
+    return f"há {seconds // 86400}d"
+
+
+def _diag_short(text: Any, limit: int = 120) -> str:
+    value = re.sub(r"\s+", " ", str(text or "").replace("\n", " ")).strip()
+    return value if len(value) <= limit else value[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _core_worker_expected_apk_version() -> tuple[str, int]:
+    path = REPO_ROOT / "android" / "core-worker-app" / "app" / "build.gradle"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        name = re.search(r'versionName\s+"([^"]+)"', text)
+        code = re.search(r"versionCode\s+(\d+)", text)
+        return (name.group(1) if name else "", int(code.group(1)) if code else 0)
+    except Exception:
+        return "", 0
+
+
+def _core_worker_published_apk_version() -> tuple[str, int]:
+    path = REPO_ROOT / "android" / "core-worker-app" / "releases" / "latest.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        if isinstance(data, dict):
+            return str(data.get("versionName") or data.get("version") or ""), int(data.get("versionCode") or 0)
+    except Exception:
+        pass
+    return "", 0
+
+
+def _core_worker_fcm_diag_summary(latest_records: list[dict[str, Any]]) -> list[str]:
+    data = _diag_load_json("data/core_worker_app_fcm_tokens.json")
+    tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
+    if not tokens:
+        return ["FCM: nenhum token registrado ainda."]
+    runtime_by_install = {str(r.get("installId") or ""): r for r in latest_records if isinstance(r, dict) and r.get("installId")}
+    runtime_by_worker = {str(r.get("workerId") or ""): r for r in latest_records if isinstance(r, dict) and r.get("workerId")}
+    active = stale = invalidated = incomplete = 0
+    current = 0
+    last: dict[str, Any] | None = None
+    for record in tokens.values():
+        if not isinstance(record, dict):
+            continue
+        seen = _diag_int(record.get("lastSeenAt") or record.get("registeredAt"), 0)
+        if last is None or seen > _diag_int(last.get("lastSeenAt") or last.get("registeredAt"), 0):
+            last = record
+        token = str(record.get("token") or "").strip()
+        if len(token) < 20:
+            incomplete += 1
+            continue
+        if str(record.get("lastErrorCode") or "").upper() == "UNREGISTERED" or record.get("invalidatedAt"):
+            invalidated += 1
+        if not record.get("active"):
+            continue
+        active += 1
+        runtime = runtime_by_install.get(str(record.get("installId") or "")) or runtime_by_worker.get(str(record.get("workerId") or ""))
+        runtime_code = _diag_int((runtime or {}).get("appVersionCode"), 0)
+        token_code = _diag_int(record.get("appVersionCode"), 0)
+        if runtime_code and token_code and token_code < runtime_code:
+            stale += 1
+        elif runtime_code and token_code <= 0:
+            stale += 1
+        else:
+            current += 1
+    lines = [f"FCM: {current} atual(is) · {active} ativo(s) · {stale} antigo(s) · {invalidated} expirado(s) · {incomplete} incompleto(s)."]
+    if last:
+        extra = []
+        if last.get("appVersion") or last.get("appVersionCode"):
+            extra.append(f"app {last.get('appVersion') or '?'} ({last.get('appVersionCode') or 0})")
+        if last.get("permission"):
+            extra.append(f"permissão {last.get('permission')}")
+        if last.get("lastPushStatus"):
+            extra.append(f"último push {last.get('lastPushStatus')}")
+        if last.get("lastError"):
+            extra.append(_diag_short(last.get("lastError"), 90))
+        if extra:
+            lines.append("FCM último: " + " · ".join(extra))
+    return lines
+
+
+def _core_worker_apk_latest_records() -> list[dict[str, Any]]:
+    data = _diag_load_json("data/core_worker_app_heartbeats.json")
+    latest = data.get("latestByWorkerId") if isinstance(data.get("latestByWorkerId"), dict) else {}
+    records = [r for r in latest.values() if isinstance(r, dict)]
+    if not records:
+        latest_install = data.get("latestByInstallId") if isinstance(data.get("latestByInstallId"), dict) else {}
+        records = [r for r in latest_install.values() if isinstance(r, dict)]
+    records.sort(key=lambda item: _diag_int(item.get("receivedAt"), 0), reverse=True)
+    return records
+
+
+def build_core_worker_apk_diagnostics_report_sync() -> str:
+    heartbeats = _diag_load_json("data/core_worker_app_heartbeats.json")
+    jobs = _diag_load_json("data/core_worker_app_jobs.json")
+    notifications = _diag_load_json("data/core_worker_app_notifications.json")
+    records = _core_worker_apk_latest_records()
+    expected_name, expected_code = _core_worker_expected_apk_version()
+    published_name, published_code = _core_worker_published_apk_version()
+    lines: list[str] = [
+        "# 📲 Diagnóstico Core Worker APK",
+        f"Gerado em: {_now_stamp()}",
+        "Fonte: arquivos locais da VPS enviados pelo heartbeat direto do APK; sem ler segredos.",
+        "",
+        "## Versões",
+        f"Código atual no repo: {expected_name or '?'} ({expected_code or 0})",
+        f"Publicado na VPS: {published_name or 'sem latest.json'} ({published_code or 0})",
+    ]
+    if not records:
+        lines.extend(["", "## Heartbeat", "Nenhum heartbeat direto do APK encontrado."])
+    else:
+        lines.extend(["", "## Heartbeat/estado atual"])
+        for idx, record in enumerate(records[:6], 1):
+            age = _diag_age_from_epoch(record.get("receivedAt"))
+            online = "online" if _diag_int(record.get("receivedAt"), 0) and time.time() - _diag_int(record.get("receivedAt"), 0) <= 180 else "offline/antigo"
+            version = f"{record.get('appVersion') or '?'} ({record.get('appVersionCode') or 0})"
+            installed_state = "em dia"
+            current_code = _diag_int(record.get("appVersionCode"), 0)
+            target_code = published_code or expected_code
+            if target_code and current_code and current_code < target_code:
+                installed_state = f"atrasado: {current_code} < {target_code}"
+            battery = []
+            pct = _diag_int(record.get("batteryPercent"), -1)
+            temp = _diag_float(record.get("batteryTemperatureC"), -1)
+            if pct >= 0:
+                battery.append(f"{pct}%")
+            if temp >= 0:
+                battery.append(f"{temp:.1f}°C")
+            if record.get("batteryCharging"):
+                battery.append("carregando")
+            network = _diag_short(record.get("networkType") or "rede ?", 40)
+            if record.get("networkVpn"):
+                network += "+VPN"
+            ping = _diag_int(record.get("vpsPingMs"), -1)
+            if ping >= 0:
+                network += f" · ping {ping}ms"
+            lines.extend([
+                f"### {idx}. {record.get('deviceName') or record.get('workerId') or record.get('installId') or 'APK'}",
+                f"Estado: {online} · visto {age} · versão {version} · {installed_state}",
+                f"Worker/instalação: {record.get('workerId') or '?'} / {record.get('installId') or '?'}",
+                f"Perfil/runtime: {record.get('profile') or '?'} · {record.get('runtimeMode') or '?'} · {record.get('jobsRuntime') or '?'}",
+                f"Bateria/rede: {' · '.join(battery) if battery else 'bateria ?'} · {network}",
+                f"Push/update: {record.get('fcmState') or 'push ?'} · {record.get('updateState') or 'update ?'} · perm notif {record.get('notificationPermission') or '?'}",
+                f"Runtime interno: {_diag_short(record.get('internalRuntimeState') or record.get('diagnosticsSummary'), 160)}",
+                f"Cache/ponte: {_diag_short(record.get('storageSummary') or 'cache ?', 90)} · {_diag_short(record.get('bridgeSummary') or 'ponte ?', 90)}",
+            ])
+            if record.get("lastAppError"):
+                lines.append(f"Último erro do app: {_diag_short(record.get('lastAppError'), 180)}")
+    lines.extend(["", "## Jobs internos"])
+    catalog = jobs.get("jobCatalog") if isinstance(jobs.get("jobCatalog"), dict) else {}
+    if catalog:
+        lines.append(f"Catálogo: {len(catalog.get('automatic') or [])} automáticos · {len(catalog.get('manual') or [])} manuais · {len(catalog.get('aliases') or {})} aliases.")
+    summaries = jobs.get("summaryByInstallId") if isinstance(jobs.get("summaryByInstallId"), dict) else {}
+    if not summaries:
+        lines.append("Sem resumo de jobs internos ainda.")
+    else:
+        for key, info in list(summaries.items())[:8]:
+            if not isinstance(info, dict):
+                continue
+            missing = info.get("autoMissing") if isinstance(info.get("autoMissing"), list) else []
+            failed = info.get("failedTypes") if isinstance(info.get("failedTypes"), list) else []
+            lines.append(f"- {key}: {info.get('status') or '?'} · auto {info.get('autoOk')}/{info.get('autoTotal')} · manuais {info.get('manualTotal')} · fila {info.get('pending')}/{info.get('running')} · faltam {len(missing)} · falhas {len(failed)}")
+    latest = jobs.get("latestResultByInstallId") if isinstance(jobs.get("latestResultByInstallId"), dict) else {}
+    if latest:
+        lines.append("")
+        lines.append("Últimos resultados:")
+        for key, rec in list(latest.items())[:8]:
+            if isinstance(rec, dict):
+                lines.append(f"- {key}: {rec.get('type') or rec.get('jobClass') or '?'} · ok={bool(rec.get('ok'))} · app {rec.get('appVersion') or '?'} ({rec.get('appVersionCode') or 0}) · {_diag_short(rec.get('message') or rec.get('error'), 120)}")
+    lines.extend(["", "## Push/FCM"])
+    lines.extend(_core_worker_fcm_diag_summary(records))
+    notif_events = notifications.get("events") if isinstance(notifications.get("events"), list) else []
+    if notif_events:
+        lines.append("")
+        lines.append("Últimos eventos de notificação/update:")
+        for event in notif_events[-5:]:
+            if isinstance(event, dict):
+                lines.append(f"- {event.get('state') or '?'} · v{event.get('versionName') or '?'} ({event.get('versionCode') or 0}) · {_diag_short(event.get('detail'), 120)}")
+    return redact("\n".join(lines).strip() + "\n")
+
+
+async def build_core_worker_apk_diagnostics_report() -> str:
+    return await asyncio.to_thread(build_core_worker_apk_diagnostics_report_sync)
+
+
+def _core_worker_apk_quick_lines() -> list[str]:
+    records = _core_worker_apk_latest_records()
+    if not records:
+        return ["APK interno: sem heartbeat direto ainda."]
+    record = records[0]
+    age = _diag_age_from_epoch(record.get("receivedAt"))
+    version = f"{record.get('appVersion') or '?'} ({record.get('appVersionCode') or 0})"
+    battery = []
+    pct = _diag_int(record.get("batteryPercent"), -1)
+    temp = _diag_float(record.get("batteryTemperatureC"), -1)
+    if pct >= 0:
+        battery.append(f"{pct}%")
+    if temp >= 0:
+        battery.append(f"{temp:.0f}°C")
+    network = _diag_short(record.get("networkType") or "rede ?", 24)
+    if record.get("networkVpn"):
+        network += "+VPN"
+    ping = _diag_int(record.get("vpsPingMs"), -1)
+    if ping >= 0:
+        network += f" {ping}ms"
+    jobs = _diag_load_json("data/core_worker_app_jobs.json")
+    summaries = jobs.get("summaryByInstallId") if isinstance(jobs.get("summaryByInstallId"), dict) else {}
+    install_id = str(record.get("installId") or "")
+    summary = summaries.get(install_id) if isinstance(summaries.get(install_id), dict) else next((v for v in summaries.values() if isinstance(v, dict)), {})
+    job_line = "jobs aguardando"
+    if isinstance(summary, dict) and summary:
+        job_line = f"jobs {summary.get('autoOk')}/{summary.get('autoTotal')} ok · {summary.get('manualTotal')} manuais · fila {summary.get('pending')}/{summary.get('running')}"
+    push_line = _core_worker_fcm_diag_summary(records)[0]
+    return [
+        f"APK {version} · visto {age} · {record.get('profile') or 'perfil ?'}",
+        f"{(' · '.join(battery) if battery else 'bateria ?')} · {network} · {job_line}",
+        push_line,
+    ]
+
+
+
+def _safe_core_worker_app_json_snapshot(rel: str, *, max_chars: int = 500_000) -> str:
+    """Lê JSON do APK para anexos de /vps sem expor tokens/secrets."""
+    path = REPO_ROOT / rel
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        text = json.dumps(_safe_report_obj(data), ensure_ascii=False, indent=2)
+    except Exception as exc:
+        if Path(rel).name == "core_worker_app_fcm_tokens.json":
+            text = f"ERRO ao sanitizar core_worker_app_fcm_tokens.json: {type(exc).__name__}: {exc}\nConteúdo bruto omitido por segurança.\n"
+        else:
+            text = _safe_read_file(path, max_chars=max_chars)
+    return redact(text)[:max_chars]
+
 def build_quick_vps_status_report_sync() -> str:
     """Resumo curto, legível e pronto para Components V2."""
     services = _quick_service_lines()
@@ -2186,6 +2456,7 @@ def build_quick_vps_status_report_sync() -> str:
     folders = _quick_folder_lines()
     git_lines = _quick_git_lines()
     errors = _quick_recent_errors_lines()
+    apk_lines = _core_worker_apk_quick_lines()
 
     sections = [
         "## ⚡ Status rápido",
@@ -2203,6 +2474,9 @@ def build_quick_vps_status_report_sync() -> str:
         "",
         "### 🌿 Git",
         *git_lines,
+        "",
+        "### 📲 Core Worker APK",
+        *apk_lines,
         "",
         "### ⚠️ Erros recentes",
         *errors,
@@ -2251,6 +2525,7 @@ def build_full_vps_diagnostics_report_sync(router: Any, options: DiagnosticsOpti
     sections.append(("Dry-run Spotify mirror/fallback (sem tocar áudio)", _spotify_dry_run_mirror_test(cfg)))
     sections.append(("Testes Lavalink REST", _lavalink_tests(cfg)))
     sections.append(("Marcos de restart/runtime", _service_restart_markers()))
+    sections.append(("Core Worker APK — diagnóstico interno", build_core_worker_apk_diagnostics_report_sync()))
     sections.append(("Teste yt-dlp local com cookies", _yt_dlp_test()))
     sections.append(("application.yml do Lavalink (sanitizado)", _application_yml_head()))
     sections.append(("Status do sistema e services", _system_status_report()))
@@ -2319,6 +2594,19 @@ def build_vps_snapshot_archive_sync() -> tuple[bytes | None, str, str]:
             "Snapshot sanitizado da VPS para diagnóstico.",
         ]) + "\n"))
         files.append(("meta/phone-worker.txt", _phone_worker_health_summary(timeout=2.5) + "\n"))
+        files.append(("core-worker-apk/diagnostico-apk.txt", build_core_worker_apk_diagnostics_report_sync()))
+        for rel in [
+            "data/core_worker_app_heartbeats.json",
+            "data/core_worker_app_jobs.json",
+            "data/core_worker_app_notifications.json",
+            "data/core_worker_app_fcm_tokens.json",
+        ]:
+            path = REPO_ROOT / rel
+            if path.exists():
+                arc_name = Path(rel).name
+                if arc_name == "core_worker_app_fcm_tokens.json":
+                    arc_name = "core_worker_app_fcm_tokens.sanitized.json"
+                files.append(("core-worker-apk/" + arc_name, _safe_core_worker_app_json_snapshot(rel, max_chars=500_000)))
 
         files.append(("bot/env.sanitized.txt", _sanitized_env_text()))
         for rel in ["config.py", "requirements.txt", "cogs/music.py", "cogs/utility.py"]:
