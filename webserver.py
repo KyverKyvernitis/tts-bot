@@ -608,6 +608,10 @@ CORE_WORKER_APP_AUTO_JOB_TYPES = {
     "apk_update_diagnostic",
     "apk_job_history",
     "apk_cache_cleanup",
+    "apk_native_worker_status",
+    "apk_native_boot_status",
+    "apk_local_shell_probe",
+    "apk_python_runtime_probe",
 }
 
 CORE_WORKER_APP_MANUAL_JOB_TYPES = {
@@ -625,6 +629,10 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_trim_cache",
     "apk_sync_profile_now",
     "apk_verify_update_state",
+    "apk_native_worker_status",
+    "apk_native_boot_status",
+    "apk_local_shell_probe",
+    "apk_python_runtime_probe",
 }
 
 CORE_WORKER_APP_SAFE_JOB_TYPES = (
@@ -662,6 +670,10 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_trim_cache": "limpar cache",
     "apk_sync_profile_now": "sincronizar perfil agora",
     "apk_verify_update_state": "verificar atualização",
+    "apk_native_worker_status": "worker nativo",
+    "apk_native_boot_status": "boot nativo",
+    "apk_local_shell_probe": "shell controlado",
+    "apk_python_runtime_probe": "python interno",
 }
 
 def _core_worker_app_normalize_job_type(job_type: object) -> str:
@@ -712,7 +724,7 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
         profile = _safe_short_text(payload.get("profile"), 40).lower()
         if profile in {"leve", "midia", "media", "normal", "completo", "builder", "turbo", "bedrock"}:
             clean["profile"] = profile
-    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle", "apk_refresh_runtime", "apk_force_status_bundle", "apk_test_notification", "apk_repair_local_state", "apk_reset_job_history", "apk_trim_cache", "apk_sync_profile_now", "apk_verify_update_state"}:
+    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle", "apk_refresh_runtime", "apk_force_status_bundle", "apk_test_notification", "apk_repair_local_state", "apk_reset_job_history", "apk_trim_cache", "apk_sync_profile_now", "apk_verify_update_state", "apk_native_worker_status", "apk_native_boot_status", "apk_local_shell_probe", "apk_python_runtime_probe"}:
         detail = _safe_short_text(payload.get("detail") or payload.get("reason"), 80)
         if detail:
             clean["detail"] = detail
@@ -1013,6 +1025,10 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
             "apk_update_diagnostic": int(os.getenv("CORE_WORKER_APP_AUTO_UPDATE_DIAGNOSTIC_INTERVAL_SECONDS", "3600") or "3600"),
             "apk_job_history": int(os.getenv("CORE_WORKER_APP_AUTO_JOB_HISTORY_INTERVAL_SECONDS", "3600") or "3600"),
             "apk_cache_cleanup": int(os.getenv("CORE_WORKER_APP_AUTO_CACHE_CLEANUP_INTERVAL_SECONDS", "21600") or "21600"),
+            "apk_native_worker_status": int(os.getenv("CORE_WORKER_APP_AUTO_NATIVE_WORKER_STATUS_INTERVAL_SECONDS", "2700") or "2700"),
+            "apk_native_boot_status": int(os.getenv("CORE_WORKER_APP_AUTO_NATIVE_BOOT_STATUS_INTERVAL_SECONDS", "7200") or "7200"),
+            "apk_local_shell_probe": int(os.getenv("CORE_WORKER_APP_AUTO_LOCAL_SHELL_PROBE_INTERVAL_SECONDS", "7200") or "7200"),
+            "apk_python_runtime_probe": int(os.getenv("CORE_WORKER_APP_AUTO_PYTHON_RUNTIME_PROBE_INTERVAL_SECONDS", "7200") or "7200"),
         }
 
         def _maybe_auto_job(kind: str, interval: int, title: str, reason: str) -> None:

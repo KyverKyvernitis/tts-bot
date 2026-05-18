@@ -463,6 +463,10 @@ CORE_WORKER_APP_AUTO_JOB_TYPES = {
     "apk_update_diagnostic",
     "apk_job_history",
     "apk_cache_cleanup",
+    "apk_native_worker_status",
+    "apk_native_boot_status",
+    "apk_local_shell_probe",
+    "apk_python_runtime_probe",
 }
 CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_download_small",
@@ -479,6 +483,10 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_trim_cache",
     "apk_sync_profile_now",
     "apk_verify_update_state",
+    "apk_native_worker_status",
+    "apk_native_boot_status",
+    "apk_local_shell_probe",
+    "apk_python_runtime_probe",
 }
 CORE_WORKER_APP_JOB_LABELS = {
     "apk_ping": "ping interno",
@@ -503,6 +511,10 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_trim_cache": "limpar cache",
     "apk_sync_profile_now": "sincronizar perfil agora",
     "apk_verify_update_state": "verificar atualização",
+    "apk_native_worker_status": "worker nativo",
+    "apk_native_boot_status": "boot nativo",
+    "apk_local_shell_probe": "shell controlado",
+    "apk_python_runtime_probe": "python interno",
 }
 
 
@@ -2321,6 +2333,10 @@ class WorkersPanelView(discord.ui.LayoutView):
                 {"label": "Limpar cache APK", "value": "_apk_trim_cache", "description": "Cache interno pequeno", "emoji": "🧹", "panel_action": "apk_trim_cache", "category": "apk", "apk_job_type": "apk_trim_cache"},
                 {"label": "Sincronizar perfil", "value": "_apk_sync_profile_now", "description": "Perfil APK/Termux", "emoji": "👤", "panel_action": "apk_sync_profile_now", "category": "apk", "apk_job_type": "apk_sync_profile_now"},
                 {"label": "Verificar update", "value": "_apk_verify_update_state", "description": "Manifesto/latest.json", "emoji": "⬆️", "panel_action": "apk_verify_update_state", "category": "apk", "apk_job_type": "apk_verify_update_state"},
+                {"label": "Worker nativo", "value": "_apk_native_worker_status", "description": "Heartbeat direto do APK", "emoji": "📡", "panel_action": "apk_native_worker_status", "category": "apk", "apk_job_type": "apk_native_worker_status"},
+                {"label": "Boot nativo", "value": "_apk_native_boot_status", "description": "Sem Termux:Boot", "emoji": "🚀", "panel_action": "apk_native_boot_status", "category": "apk", "apk_job_type": "apk_native_boot_status"},
+                {"label": "Shell APK", "value": "_apk_local_shell_probe", "description": "Allowlist no sandbox", "emoji": "🧰", "panel_action": "apk_local_shell_probe", "category": "apk", "apk_job_type": "apk_local_shell_probe"},
+                {"label": "Python APK", "value": "_apk_python_runtime_probe", "description": "Base interna Python", "emoji": "🐍", "panel_action": "apk_python_runtime_probe", "category": "apk", "apk_job_type": "apk_python_runtime_probe"},
                 {"label": "Renomear celular", "value": "_rename_worker", "description": "Troca o nome exibido", "emoji": "✏️", "panel_action": "rename", "category": "organize"},
                 {"label": "Editar funções", "value": "_edit_roles", "description": "Perfil + extras/remoções", "emoji": "🧩", "panel_action": "roles", "category": "organize"},
             ])

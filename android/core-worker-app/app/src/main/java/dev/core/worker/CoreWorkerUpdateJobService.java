@@ -89,6 +89,7 @@ public class CoreWorkerUpdateJobService extends JobService {
             return;
         }
         try {
+            reportRuntimeHeartbeat(serverUrl, params == null || params.getExtras() == null ? "scheduled" : params.getExtras().getString("reason", "scheduled"));
             JSONObject manifest = fetchLatestManifest(serverUrl);
             if (manifest == null) {
                 return;
@@ -145,6 +146,69 @@ public class CoreWorkerUpdateJobService extends JobService {
         }
     }
 
+
+    private void reportRuntimeHeartbeat(String serverUrl, String reason) {
+        try {
+            JSONObject payload = baseRuntimePayload(reason);
+            request("POST", serverUrl + "/core-worker/app/heartbeat", payload);
+        } catch (Throwable ignored) {
+        }
+        try {
+            String token = prefs().getString("worker_token", "").trim();
+            String workerId = prefs().getString("worker_id", "").trim();
+            if (token.isEmpty() || workerId.isEmpty()) {
+                return;
+            }
+            JSONObject payload = new JSONObject();
+            payload.put("worker_id", workerId);
+            payload.put("id", workerId);
+            payload.put("name", prefs().getString("device_name", "Core Worker APK"));
+            payload.put("version", BuildConfig.VERSION_NAME);
+            payload.put("source", "core-worker-apk-native-background");
+            payload.put("roles", new org.json.JSONArray().put("apk-native").put("diagnostics").put("internal-jobs"));
+            payload.put("capabilities", new org.json.JSONArray().put("apk-native").put("android-status").put("native-boot"));
+            payload.put("supported_tasks", new org.json.JSONArray());
+            JSONObject status = new JSONObject();
+            status.put("apk_native_worker", true);
+            status.put("background", true);
+            status.put("termux_required_now", false);
+            status.put("termux_role", "fallback-temporario");
+            status.put("native_heartbeat_reason", reason == null ? "scheduled" : reason);
+            status.put("runtime_mode", "apk-native-first");
+            payload.put("status", status);
+            request("POST", serverUrl + "/core-worker/heartbeat", payload, token);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private JSONObject baseRuntimePayload(String reason) throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("platform", "android");
+        payload.put("source", "core-worker-apk-native-background");
+        payload.put("state", "background_heartbeat");
+        payload.put("reason", reason == null ? "scheduled" : reason);
+        payload.put("appVersion", BuildConfig.VERSION_NAME);
+        payload.put("appVersionCode", BuildConfig.VERSION_CODE);
+        payload.put("versionName", BuildConfig.VERSION_NAME);
+        payload.put("versionCode", BuildConfig.VERSION_CODE);
+        payload.put("workerId", prefs().getString("worker_id", ""));
+        payload.put("installId", installId());
+        payload.put("deviceName", prefs().getString("device_name", ""));
+        payload.put("runtime_mode", "apk-native-first");
+        payload.put("internal_runtime", "apk-native-background");
+        payload.put("jobsRuntime", "apk-native-first");
+        JSONObject status = new JSONObject();
+        status.put("app", "background");
+        status.put("apk_companion", true);
+        status.put("android_sdk", Build.VERSION.SDK_INT);
+        status.put("native_boot", true);
+        status.put("termux_required_now", false);
+        status.put("termux_role", "fallback-temporario");
+        status.put("notification_permission", hasNotificationPermission() ? "granted" : "missing");
+        payload.put("status", status);
+        return payload;
+    }
+
     private JSONObject fetchLatestManifest(String serverUrl) throws Exception {
         String[] paths = new String[]{"/core-worker/app/latest.json", "/core-worker/latest.json"};
         for (String path : paths) {
@@ -198,11 +262,18 @@ public class CoreWorkerUpdateJobService extends JobService {
     }
 
     private HttpResult request(String method, String url, JSONObject payload) throws Exception {
+        return request(method, url, payload, null);
+    }
+
+    private HttpResult request(String method, String url, JSONObject payload, String token) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setRequestMethod(method);
         conn.setConnectTimeout(7000);
         conn.setReadTimeout(9000);
         conn.setRequestProperty("Accept", "application/json");
+        if (token != null && !token.trim().isEmpty()) {
+            conn.setRequestProperty("Authorization", "Bearer " + token.trim());
+        }
         if (payload != null) {
             conn.setDoOutput(true);
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
