@@ -486,34 +486,84 @@ def _core_worker_app_jobs_key(payload: dict) -> str:
     return install_id or worker_id or "unknown"
 
 
-CORE_WORKER_APP_SAFE_JOB_TYPES = {
+CORE_WORKER_APP_JOB_ALIASES = {
+    # Nomes antigos aceitos para não quebrar APKs/painéis entre patches.
+    "apk_clear_app_cache": "apk_cache_cleanup",
+    "apk_cleanup_runtime_cache": "apk_cache_cleanup",
+    "apk_report_logs": "apk_upload_app_logs",
+    "apk_status_refresh": "apk_sync_runtime_state",
+}
+
+CORE_WORKER_APP_AUTO_JOB_TYPES = {
     "apk_ping",
-    "apk_status_refresh",
-    "apk_report_logs",
     "apk_diagnostic",
     "apk_check_update",
-    "apk_test_vps_connection",
-    "apk_upload_report",
     "apk_upload_app_logs",
-    "apk_clear_app_cache",
-    "apk_cache_cleanup",
-    "apk_sync_profile",
-    "apk_sync_runtime_state",
-    "apk_download_small",
-    "apk_verify_file",
-    "apk_job_history",
+    "apk_runtime_diagnostic",
+    "apk_worker_bridge_status",
+    "apk_storage_diagnostic",
+    "apk_collect_status_bundle",
     "apk_device_diagnostic",
     "apk_network_diagnostic",
     "apk_push_diagnostic",
     "apk_update_diagnostic",
-    "apk_runtime_diagnostic",
-    "apk_storage_diagnostic",
-    "apk_worker_bridge_status",
-    "apk_collect_status_bundle",
-    "apk_cleanup_runtime_cache",
+    "apk_job_history",
+    "apk_cache_cleanup",
 }
 
-CORE_WORKER_APP_JOB_MAX_DELIVER = 4
+CORE_WORKER_APP_MANUAL_JOB_TYPES = {
+    "apk_download_small",
+    "apk_verify_file",
+    "apk_upload_report",
+    "apk_test_vps_connection",
+    "apk_sync_profile",
+    "apk_sync_runtime_state",
+}
+
+CORE_WORKER_APP_SAFE_JOB_TYPES = (
+    CORE_WORKER_APP_AUTO_JOB_TYPES
+    | CORE_WORKER_APP_MANUAL_JOB_TYPES
+    | set(CORE_WORKER_APP_JOB_ALIASES.keys())
+)
+
+CORE_WORKER_APP_JOB_LABELS = {
+    "apk_ping": "ping interno",
+    "apk_diagnostic": "diagnóstico geral",
+    "apk_check_update": "checagem de atualização",
+    "apk_upload_app_logs": "logs internos",
+    "apk_runtime_diagnostic": "diagnóstico do runtime",
+    "apk_worker_bridge_status": "ponte APK/Termux",
+    "apk_storage_diagnostic": "armazenamento",
+    "apk_collect_status_bundle": "pacote completo",
+    "apk_device_diagnostic": "aparelho",
+    "apk_network_diagnostic": "rede",
+    "apk_push_diagnostic": "push",
+    "apk_update_diagnostic": "update",
+    "apk_job_history": "histórico",
+    "apk_cache_cleanup": "limpeza de cache",
+    "apk_download_small": "download pequeno",
+    "apk_verify_file": "verificar arquivo",
+    "apk_upload_report": "enviar relatório",
+    "apk_test_vps_connection": "teste de conexão VPS",
+    "apk_sync_profile": "sincronizar perfil",
+    "apk_sync_runtime_state": "sincronizar runtime",
+}
+
+def _core_worker_app_normalize_job_type(job_type: object) -> str:
+    raw = _safe_short_text(job_type, 48)
+    return CORE_WORKER_APP_JOB_ALIASES.get(raw, raw)
+
+
+def _core_worker_app_job_class(job_type: object) -> str:
+    normalized = _core_worker_app_normalize_job_type(job_type)
+    if normalized in CORE_WORKER_APP_AUTO_JOB_TYPES:
+        return "automatic"
+    if normalized in CORE_WORKER_APP_MANUAL_JOB_TYPES:
+        return "manual"
+    return "unknown"
+
+
+CORE_WORKER_APP_JOB_MAX_DELIVER = 6
 CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS = 45
 CORE_WORKER_APP_JOB_DEFAULT_MAX_RETRIES = 1
 CORE_WORKER_APP_JOB_RESULT_LIMIT = 300
@@ -521,7 +571,7 @@ CORE_WORKER_APP_JOB_RESULT_LIMIT = 300
 
 def _core_worker_app_safe_job_payload(job: dict) -> dict:
     payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
-    job_type = _safe_short_text(job.get("type"), 48)
+    job_type = _core_worker_app_normalize_job_type(job.get("type"))
     clean: dict = {}
     if job_type == "apk_download_small":
         raw_url = _safe_short_text(payload.get("url") or payload.get("path") or "/core-worker/app/latest.json", 220)
@@ -547,7 +597,7 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
         profile = _safe_short_text(payload.get("profile"), 40).lower()
         if profile in {"leve", "midia", "media", "normal", "completo", "builder", "turbo", "bedrock"}:
             clean["profile"] = profile
-    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_clear_app_cache", "apk_cleanup_runtime_cache", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle"}:
+    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle"}:
         detail = _safe_short_text(payload.get("detail") or payload.get("reason"), 80)
         if detail:
             clean["detail"] = detail
@@ -607,6 +657,146 @@ def _core_worker_app_public_job(job: dict, now: int) -> dict:
     out["attempt"] = int(job.get("attempt") or 0)
     return out
 
+
+def _core_worker_app_job_catalog() -> dict:
+    return {
+        "automatic": sorted(CORE_WORKER_APP_AUTO_JOB_TYPES),
+        "manual": sorted(CORE_WORKER_APP_MANUAL_JOB_TYPES),
+        "aliases": dict(sorted(CORE_WORKER_APP_JOB_ALIASES.items())),
+        "labels": {k: CORE_WORKER_APP_JOB_LABELS.get(k, k) for k in sorted(CORE_WORKER_APP_AUTO_JOB_TYPES | CORE_WORKER_APP_MANUAL_JOB_TYPES)},
+    }
+
+
+def _core_worker_app_jobs_build_summaries(data: dict, now: int | None = None) -> dict:
+    now = int(now or time.time())
+    if not isinstance(data, dict):
+        return {}
+    results = data.get("results") if isinstance(data.get("results"), list) else []
+    pending = data.get("pending") if isinstance(data.get("pending"), list) else []
+    running = data.get("runningByJobId") if isinstance(data.get("runningByJobId"), dict) else {}
+    keys: set[str] = set()
+    for item in results:
+        if isinstance(item, dict):
+            key = str(item.get("installId") or item.get("workerId") or "unknown")
+            keys.add(key)
+    for item in pending:
+        if isinstance(item, dict):
+            keys.add(str(item.get("installId") or item.get("workerId") or "unknown"))
+    for item in running.values():
+        if isinstance(item, dict):
+            keys.add(str(item.get("installId") or item.get("workerId") or "unknown"))
+    summaries: dict[str, dict] = {}
+    for key in keys or {"unknown"}:
+        latest_by_type: dict[str, dict] = {}
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            item_key = str(item.get("installId") or item.get("workerId") or "unknown")
+            if item_key != key:
+                continue
+            typ = _core_worker_app_normalize_job_type(item.get("type"))
+            prev = latest_by_type.get(typ)
+            if prev is None or int(item.get("receivedAt") or 0) >= int(prev.get("receivedAt") or 0):
+                latest_by_type[typ] = item
+        auto_ok = 0
+        auto_failed = 0
+        auto_missing: list[str] = []
+        failed_types: list[str] = []
+        latest_public: dict[str, dict] = {}
+        for typ in sorted(CORE_WORKER_APP_AUTO_JOB_TYPES):
+            rec = latest_by_type.get(typ)
+            if not isinstance(rec, dict):
+                auto_missing.append(typ)
+                continue
+            ok = bool(rec.get("ok"))
+            if ok:
+                auto_ok += 1
+            else:
+                auto_failed += 1
+                failed_types.append(typ)
+            latest_public[typ] = {
+                "ok": ok,
+                "message": _safe_short_text(rec.get("message") or rec.get("error"), 120),
+                "receivedAt": int(rec.get("receivedAt") or 0),
+            }
+        pending_for_key = [j for j in pending if isinstance(j, dict) and str(j.get("installId") or j.get("workerId") or "unknown") == key]
+        running_for_key = [j for j in running.values() if isinstance(j, dict) and str(j.get("installId") or j.get("workerId") or "unknown") == key]
+        status = "ok"
+        if auto_failed:
+            status = "attention"
+        elif auto_missing:
+            status = "warming_up"
+        summaries[key] = {
+            "status": status,
+            "autoTotal": len(CORE_WORKER_APP_AUTO_JOB_TYPES),
+            "autoOk": auto_ok,
+            "autoFailed": auto_failed,
+            "autoMissing": auto_missing[:40],
+            "manualTotal": len(CORE_WORKER_APP_MANUAL_JOB_TYPES),
+            "manualTypes": sorted(CORE_WORKER_APP_MANUAL_JOB_TYPES),
+            "failedTypes": failed_types[:20],
+            "pending": len(pending_for_key),
+            "running": len(running_for_key),
+            "latestByType": latest_public,
+            "updatedAt": now,
+        }
+    return summaries
+
+
+def _core_worker_app_queue_internal_jobs_for_worker(worker_id: str = "", install_id: str = "", *, kinds: list[str] | None = None, reason: str = "manual-runtime-test") -> dict:
+    now = int(time.time())
+    worker_id = _safe_short_text(worker_id, 80)
+    install_id = _safe_short_text(install_id, 80)
+    key = install_id or worker_id or "unknown"
+    job_types = [_core_worker_app_normalize_job_type(k) for k in (kinds or sorted(CORE_WORKER_APP_AUTO_JOB_TYPES))]
+    job_types = [k for k in dict.fromkeys(job_types) if k in CORE_WORKER_APP_AUTO_JOB_TYPES]
+    path = _core_worker_app_jobs_path()
+    with _core_worker_app_jobs_lock:
+        try:
+            data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        pending = data.get("pending") if isinstance(data.get("pending"), list) else []
+        running = data.get("runningByJobId") if isinstance(data.get("runningByJobId"), dict) else {}
+        existing_types = set()
+        for item in pending:
+            if isinstance(item, dict) and _core_worker_app_job_matches(item, install_id, worker_id):
+                existing_types.add(_core_worker_app_normalize_job_type(item.get("type")))
+        for item in running.values():
+            if isinstance(item, dict) and _core_worker_app_job_matches(item, install_id, worker_id):
+                existing_types.add(_core_worker_app_normalize_job_type(item.get("type")))
+        created = []
+        for typ in job_types:
+            if typ in existing_types:
+                continue
+            job_id = f"manual-{typ.replace('_', '-')}-{key[:16]}-{now}-{len(created)}"
+            job = {
+                "id": job_id,
+                "type": typ,
+                "jobClass": "automatic",
+                "reason": reason,
+                "issuedAt": now,
+                "title": CORE_WORKER_APP_JOB_LABELS.get(typ, typ),
+                "status": "pending",
+                "timeoutSec": CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS,
+                "maxRetries": 1,
+                "installId": install_id,
+                "workerId": worker_id,
+            }
+            pending.append(job)
+            created.append(job)
+        data["pending"] = pending[-160:]
+        data["runningByJobId"] = running
+        data["jobCatalog"] = _core_worker_app_job_catalog()
+        data["summaryByInstallId"] = _core_worker_app_jobs_build_summaries(data, now)
+        data["updatedAt"] = now
+        data["ok"] = True
+        _atomic_write_json(path, data, mode=0o600)
+    return {"ok": True, "created": len(created), "requested": len(job_types), "workerId": worker_id, "installId": install_id, "types": [j.get("type") for j in created]}
+
+
 def _core_worker_app_jobs_fetch(payload: dict) -> dict:
     now = int(time.time())
     if not isinstance(payload, dict):
@@ -615,7 +805,11 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
     install_id = _safe_short_text(payload.get("installId") or payload.get("install_id"), 80)
     worker_id = _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80)
     supported = payload.get("supportedJobs") if isinstance(payload.get("supportedJobs"), list) else []
-    supported_set = {str(item) for item in supported if str(item or "").strip()} & set(CORE_WORKER_APP_SAFE_JOB_TYPES)
+    supported_set = {
+        _core_worker_app_normalize_job_type(item)
+        for item in supported
+        if str(item or "").strip()
+    } & set(CORE_WORKER_APP_SAFE_JOB_TYPES)
     if not supported_set:
         supported_set = set(CORE_WORKER_APP_SAFE_JOB_TYPES)
     path = _core_worker_app_jobs_path()
@@ -658,7 +852,7 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
         for job in pending:
             if not isinstance(job, dict):
                 continue
-            job_type = _safe_short_text(job.get("type"), 48)
+            job_type = _core_worker_app_normalize_job_type(job.get("type"))
             if job_type not in CORE_WORKER_APP_SAFE_JOB_TYPES or job_type not in supported_set:
                 remaining.append(job)
                 continue
@@ -675,6 +869,7 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
             out = dict(job)
             out["id"] = job_id
             out["type"] = job_type
+            out["jobClass"] = _core_worker_app_job_class(job_type)
             out["issuedAt"] = int(out.get("issuedAt") or now)
             out["status"] = "running"
             out["claimedAt"] = now
@@ -688,17 +883,33 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
             deliver.append(out)
             delivered_keys.add(job_id)
 
-        auto_interval = int(os.getenv("CORE_WORKER_APP_AUTO_PING_INTERVAL_SECONDS", "900") or "900")
-        auto_diag_interval = int(os.getenv("CORE_WORKER_APP_AUTO_DIAGNOSTIC_INTERVAL_SECONDS", "1800") or "1800")
-        auto_update_interval = int(os.getenv("CORE_WORKER_APP_AUTO_UPDATE_CHECK_INTERVAL_SECONDS", "2700") or "2700")
-        auto_report_interval = int(os.getenv("CORE_WORKER_APP_AUTO_REPORT_INTERVAL_SECONDS", "3600") or "3600")
-        auto_runtime_diag_interval = int(os.getenv("CORE_WORKER_APP_AUTO_RUNTIME_DIAGNOSTIC_INTERVAL_SECONDS", "2100") or "2100")
-        auto_storage_diag_interval = int(os.getenv("CORE_WORKER_APP_AUTO_STORAGE_DIAGNOSTIC_INTERVAL_SECONDS", "5400") or "5400")
-        auto_bundle_interval = int(os.getenv("CORE_WORKER_APP_AUTO_STATUS_BUNDLE_INTERVAL_SECONDS", "7200") or "7200")
+        auto_intervals = {
+            "apk_ping": int(os.getenv("CORE_WORKER_APP_AUTO_PING_INTERVAL_SECONDS", "900") or "900"),
+            "apk_diagnostic": int(os.getenv("CORE_WORKER_APP_AUTO_DIAGNOSTIC_INTERVAL_SECONDS", "1800") or "1800"),
+            "apk_check_update": int(os.getenv("CORE_WORKER_APP_AUTO_UPDATE_CHECK_INTERVAL_SECONDS", "2700") or "2700"),
+            "apk_upload_app_logs": int(os.getenv("CORE_WORKER_APP_AUTO_REPORT_INTERVAL_SECONDS", "3600") or "3600"),
+            "apk_runtime_diagnostic": int(os.getenv("CORE_WORKER_APP_AUTO_RUNTIME_DIAGNOSTIC_INTERVAL_SECONDS", "2100") or "2100"),
+            "apk_worker_bridge_status": int(os.getenv("CORE_WORKER_APP_AUTO_BRIDGE_INTERVAL_SECONDS", "2100") or "2100"),
+            "apk_storage_diagnostic": int(os.getenv("CORE_WORKER_APP_AUTO_STORAGE_DIAGNOSTIC_INTERVAL_SECONDS", "5400") or "5400"),
+            "apk_collect_status_bundle": int(os.getenv("CORE_WORKER_APP_AUTO_STATUS_BUNDLE_INTERVAL_SECONDS", "7200") or "7200"),
+            "apk_device_diagnostic": int(os.getenv("CORE_WORKER_APP_AUTO_DEVICE_DIAGNOSTIC_INTERVAL_SECONDS", "2400") or "2400"),
+            "apk_network_diagnostic": int(os.getenv("CORE_WORKER_APP_AUTO_NETWORK_DIAGNOSTIC_INTERVAL_SECONDS", "1800") or "1800"),
+            "apk_push_diagnostic": int(os.getenv("CORE_WORKER_APP_AUTO_PUSH_DIAGNOSTIC_INTERVAL_SECONDS", "3600") or "3600"),
+            "apk_update_diagnostic": int(os.getenv("CORE_WORKER_APP_AUTO_UPDATE_DIAGNOSTIC_INTERVAL_SECONDS", "3600") or "3600"),
+            "apk_job_history": int(os.getenv("CORE_WORKER_APP_AUTO_JOB_HISTORY_INTERVAL_SECONDS", "3600") or "3600"),
+            "apk_cache_cleanup": int(os.getenv("CORE_WORKER_APP_AUTO_CACHE_CLEANUP_INTERVAL_SECONDS", "21600") or "21600"),
+        }
 
         def _maybe_auto_job(kind: str, interval: int, title: str, reason: str) -> None:
+            kind = _core_worker_app_normalize_job_type(kind)
             if len(deliver) >= CORE_WORKER_APP_JOB_MAX_DELIVER or interval <= 0 or kind not in supported_set:
                 return
+            # Não cria outro job igual se já existe rodando/pendente para esta instalação/worker.
+            for existing in list(running.values()) + remaining + deliver:
+                if not isinstance(existing, dict):
+                    continue
+                if _core_worker_app_normalize_job_type(existing.get("type")) == kind and _core_worker_app_job_matches(existing, install_id, worker_id):
+                    return
             auto_key = f"{key}:{kind}"
             try:
                 last = int(auto_ping.get(auto_key) or 0)
@@ -706,19 +917,15 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
                 last = 0
             if now - last >= interval:
                 job_id = f"auto-{kind.replace('_', '-')}-{key[:16]}-{now}"
-                job = {"id": job_id, "type": kind, "reason": reason, "issuedAt": now, "title": title, "status": "running", "claimedAt": now, "deadlineAt": now + CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS, "attempt": 1, "installId": install_id, "workerId": worker_id}
+                job = {"id": job_id, "type": kind, "jobClass": "automatic", "reason": reason, "issuedAt": now, "title": title, "status": "running", "claimedAt": now, "deadlineAt": now + CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS, "attempt": 1, "installId": install_id, "workerId": worker_id}
                 running[job_id] = job
                 deliver.append(job)
                 auto_ping[auto_key] = now
 
-        _maybe_auto_job("apk_ping", auto_interval, "Verificação leve do APK", "auto-health-check")
-        _maybe_auto_job("apk_diagnostic", auto_diag_interval, "Diagnóstico interno seguro", "auto-diagnostic")
-        _maybe_auto_job("apk_check_update", auto_update_interval, "Checar atualização pelo APK", "auto-update-check")
-        _maybe_auto_job("apk_upload_app_logs", auto_report_interval, "Enviar relatório interno do APK", "auto-app-report")
-        _maybe_auto_job("apk_runtime_diagnostic", auto_runtime_diag_interval, "Diagnóstico do runtime do APK", "auto-runtime-diagnostic")
-        _maybe_auto_job("apk_worker_bridge_status", auto_runtime_diag_interval, "Estado da ponte APK/Termux", "auto-bridge-status")
-        _maybe_auto_job("apk_storage_diagnostic", auto_storage_diag_interval, "Diagnóstico de armazenamento do APK", "auto-storage-diagnostic")
-        _maybe_auto_job("apk_collect_status_bundle", auto_bundle_interval, "Pacote de status completo do APK", "auto-status-bundle")
+        for kind in sorted(CORE_WORKER_APP_AUTO_JOB_TYPES):
+            interval = int(auto_intervals.get(kind) or 0)
+            title = CORE_WORKER_APP_JOB_LABELS.get(kind, kind)
+            _maybe_auto_job(kind, interval, title, "auto-" + kind.replace("apk_", "").replace("_", "-"))
 
         queue_stats = stats.get(key) if isinstance(stats.get(key), dict) else {}
         queue_stats["lastFetchAt"] = now
@@ -736,9 +943,11 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
         data["lastAutoPingByInstallId"] = auto_ping
         data["updatedAt"] = now
         data["ok"] = True
+        data["jobCatalog"] = _core_worker_app_job_catalog()
+        data["summaryByInstallId"] = _core_worker_app_jobs_build_summaries(data, now)
         _atomic_write_json(path, data, mode=0o600)
     public_jobs = [_core_worker_app_public_job(job, now) for job in deliver]
-    return {"ok": True, "jobs": public_jobs, "count": len(public_jobs), "jobsRuntime": "apk-safe-internal-queue", "queue": {"pending": len(remaining), "running": len(running)}, "supported": sorted(CORE_WORKER_APP_SAFE_JOB_TYPES)}
+    return {"ok": True, "jobs": public_jobs, "count": len(public_jobs), "jobsRuntime": "apk-safe-internal-queue", "queue": {"pending": len(remaining), "running": len(running)}, "supported": sorted(CORE_WORKER_APP_SAFE_JOB_TYPES), "catalog": _core_worker_app_job_catalog()}
 
 
 def _core_worker_app_jobs_result(payload: dict) -> dict:
@@ -746,11 +955,11 @@ def _core_worker_app_jobs_result(payload: dict) -> dict:
     if not isinstance(payload, dict):
         payload = {}
     job_id = _safe_short_text(payload.get("jobId") or payload.get("job_id"), 64)
-    job_type = _safe_short_text(payload.get("type"), 48)
+    job_type = _core_worker_app_normalize_job_type(payload.get("type"))
     if not job_id:
         raise ValueError("jobId ausente")
     result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-    record = {"receivedAt": now, "jobId": job_id, "type": job_type, "installId": _safe_short_text(payload.get("installId") or payload.get("install_id"), 80), "workerId": _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80), "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48), "appVersionCode": int(payload.get("appVersionCode") or payload.get("app_version_code") or 0), "ok": bool(result.get("ok")), "message": _safe_short_text(result.get("message") or result.get("summary"), 160), "error": _safe_short_text(result.get("error"), 160), "result": result}
+    record = {"receivedAt": now, "jobId": job_id, "type": job_type, "jobClass": _core_worker_app_job_class(job_type), "installId": _safe_short_text(payload.get("installId") or payload.get("install_id"), 80), "workerId": _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80), "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48), "appVersionCode": int(payload.get("appVersionCode") or payload.get("app_version_code") or 0), "ok": bool(result.get("ok")), "message": _safe_short_text(result.get("message") or result.get("summary"), 160), "error": _safe_short_text(result.get("error"), 160), "result": result}
     path = _core_worker_app_jobs_path()
     with _core_worker_app_jobs_lock:
         try:
@@ -788,6 +997,8 @@ def _core_worker_app_jobs_result(payload: dict) -> dict:
         data["statsByInstallId"] = stats
         data["updatedAt"] = now
         data["ok"] = True
+        data["jobCatalog"] = _core_worker_app_job_catalog()
+        data["summaryByInstallId"] = _core_worker_app_jobs_build_summaries(data, now)
         _atomic_write_json(path, data, mode=0o600)
     return record
 

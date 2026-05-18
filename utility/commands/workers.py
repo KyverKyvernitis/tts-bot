@@ -439,7 +439,64 @@ def _core_worker_app_runtime_record(worker_id: str) -> dict[str, Any] | None:
     return record if isinstance(record, dict) else None
 
 
-def _core_worker_app_jobs_text(worker_id: str) -> str:
+CORE_WORKER_APP_JOB_ALIASES = {
+    "apk_clear_app_cache": "apk_cache_cleanup",
+    "apk_cleanup_runtime_cache": "apk_cache_cleanup",
+    "apk_report_logs": "apk_upload_app_logs",
+    "apk_status_refresh": "apk_sync_runtime_state",
+}
+CORE_WORKER_APP_AUTO_JOB_TYPES = {
+    "apk_ping",
+    "apk_diagnostic",
+    "apk_check_update",
+    "apk_upload_app_logs",
+    "apk_runtime_diagnostic",
+    "apk_worker_bridge_status",
+    "apk_storage_diagnostic",
+    "apk_collect_status_bundle",
+    "apk_device_diagnostic",
+    "apk_network_diagnostic",
+    "apk_push_diagnostic",
+    "apk_update_diagnostic",
+    "apk_job_history",
+    "apk_cache_cleanup",
+}
+CORE_WORKER_APP_MANUAL_JOB_TYPES = {
+    "apk_download_small",
+    "apk_verify_file",
+    "apk_upload_report",
+    "apk_test_vps_connection",
+    "apk_sync_profile",
+    "apk_sync_runtime_state",
+}
+CORE_WORKER_APP_JOB_LABELS = {
+    "apk_ping": "ping interno",
+    "apk_diagnostic": "diagnóstico geral",
+    "apk_check_update": "checagem de atualização",
+    "apk_upload_app_logs": "logs internos",
+    "apk_runtime_diagnostic": "runtime",
+    "apk_worker_bridge_status": "ponte APK/Termux",
+    "apk_storage_diagnostic": "armazenamento",
+    "apk_collect_status_bundle": "pacote completo",
+    "apk_device_diagnostic": "aparelho",
+    "apk_network_diagnostic": "rede",
+    "apk_push_diagnostic": "push",
+    "apk_update_diagnostic": "update",
+    "apk_job_history": "histórico",
+    "apk_cache_cleanup": "limpeza de cache",
+}
+
+
+def _core_worker_app_normalize_job_type(value: Any) -> str:
+    raw = str(value or "").strip()
+    return CORE_WORKER_APP_JOB_ALIASES.get(raw, raw)
+
+
+def _core_worker_app_job_key_from_record(record: dict[str, Any]) -> str:
+    return str(record.get("installId") or record.get("workerId") or "unknown")
+
+
+def _core_worker_app_jobs_summary_for_worker(worker_id: str) -> dict[str, Any]:
     worker_id = str(worker_id or "").strip()
     path = _repo_root() / "data" / "core_worker_app_jobs.json"
     try:
@@ -447,35 +504,122 @@ def _core_worker_app_jobs_text(worker_id: str) -> str:
     except Exception:
         data = {}
     if not isinstance(data, dict):
-        return "jobs internos: aguardando"
-    record = None
-    for item in reversed(data.get("results") or []):
+        return {}
+    hb = _core_worker_app_runtime_record(worker_id) or {}
+    install_id = str(hb.get("installId") or "")
+    summaries = data.get("summaryByInstallId") if isinstance(data.get("summaryByInstallId"), dict) else {}
+    for key in (install_id, worker_id, "unknown"):
+        summary = summaries.get(key) if key else None
+        if isinstance(summary, dict):
+            return summary
+    # Compatibilidade se o arquivo ainda não foi regravado pelo Patch 65.
+    latest_by_type: dict[str, dict[str, Any]] = {}
+    for item in data.get("results") or []:
         if not isinstance(item, dict):
             continue
-        if worker_id and str(item.get("workerId") or "") == worker_id:
-            record = item
-            break
-    pending = len(data.get("pending") or []) if isinstance(data.get("pending"), list) else 0
-    running = len(data.get("runningByJobId") or {}) if isinstance(data.get("runningByJobId"), dict) else 0
-    if not isinstance(record, dict):
-        queue_bits = []
-        if running:
-            queue_bits.append(f"{running} rodando")
-        if pending:
-            queue_bits.append(f"{pending} pend")
-        return "jobs internos: " + (" · ".join(queue_bits) if queue_bits else "aguardando")
-    age = max(0.0, time.time() - float(record.get("receivedAt") or 0))
-    typ = _shorten(record.get("type") or "job", limit=32)
-    status = "ok" if record.get("ok") else "falhou"
-    msg = _shorten(record.get("message") or record.get("error") or "", limit=60)
-    pieces = [f"jobs internos: {typ} {status}", f"visto {_format_age(age)}"]
+        if worker_id or install_id:
+            item_worker = str(item.get("workerId") or "")
+            item_install = str(item.get("installId") or "")
+            if not ((worker_id and item_worker == worker_id) or (install_id and item_install == install_id)):
+                continue
+        typ = _core_worker_app_normalize_job_type(item.get("type"))
+        previous = latest_by_type.get(typ)
+        if previous is None or float(item.get("receivedAt") or 0) >= float(previous.get("receivedAt") or 0):
+            latest_by_type[typ] = item
+    auto_ok = sum(1 for typ in CORE_WORKER_APP_AUTO_JOB_TYPES if bool((latest_by_type.get(typ) or {}).get("ok")))
+    auto_failed = sum(1 for typ in CORE_WORKER_APP_AUTO_JOB_TYPES if isinstance(latest_by_type.get(typ), dict) and not bool((latest_by_type.get(typ) or {}).get("ok")))
+    auto_missing = [typ for typ in sorted(CORE_WORKER_APP_AUTO_JOB_TYPES) if typ not in latest_by_type]
+    return {"autoTotal": len(CORE_WORKER_APP_AUTO_JOB_TYPES), "autoOk": auto_ok, "autoFailed": auto_failed, "autoMissing": auto_missing, "manualTotal": len(CORE_WORKER_APP_MANUAL_JOB_TYPES), "pending": len(data.get("pending") or []), "running": len(data.get("runningByJobId") or {}), "latestByType": {k: {"ok": bool(v.get("ok")), "message": str(v.get("message") or v.get("error") or ""), "receivedAt": int(v.get("receivedAt") or 0)} for k, v in latest_by_type.items()}}
+
+
+def _queue_core_worker_app_internal_runtime_test(worker_id: str) -> dict[str, Any]:
+    worker_id = str(worker_id or "").strip()
+    if not worker_id:
+        return {"ok": False, "error": "worker não selecionado"}
+    hb = _core_worker_app_runtime_record(worker_id) or {}
+    install_id = str(hb.get("installId") or "").strip()
+    path = _repo_root() / "data" / "core_worker_app_jobs.json"
+    now = int(time.time())
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    pending = data.get("pending") if isinstance(data.get("pending"), list) else []
+    running = data.get("runningByJobId") if isinstance(data.get("runningByJobId"), dict) else {}
+    def matches(item: dict[str, Any]) -> bool:
+        if not isinstance(item, dict):
+            return False
+        item_worker = str(item.get("workerId") or "")
+        item_install = str(item.get("installId") or "")
+        return (worker_id and item_worker == worker_id) or (install_id and item_install == install_id)
+    existing = {_core_worker_app_normalize_job_type(j.get("type")) for j in pending if isinstance(j, dict) and matches(j)}
+    existing.update({_core_worker_app_normalize_job_type(j.get("type")) for j in running.values() if isinstance(j, dict) and matches(j)})
+    created: list[str] = []
+    for typ in sorted(CORE_WORKER_APP_AUTO_JOB_TYPES):
+        if typ in existing:
+            continue
+        job_id = f"manual-{typ.replace('_', '-')}-{(install_id or worker_id)[:16]}-{now}-{len(created)}"
+        pending.append({
+            "id": job_id,
+            "type": typ,
+            "jobClass": "automatic",
+            "reason": "manual-runtime-test",
+            "issuedAt": now,
+            "title": CORE_WORKER_APP_JOB_LABELS.get(typ, typ),
+            "status": "pending",
+            "timeoutSec": 45,
+            "maxRetries": 1,
+            "installId": install_id,
+            "workerId": worker_id,
+        })
+        created.append(typ)
+    data["pending"] = pending[-160:]
+    data["runningByJobId"] = running
+    data.setdefault("jobCatalog", {"automatic": sorted(CORE_WORKER_APP_AUTO_JOB_TYPES), "manual": sorted(CORE_WORKER_APP_MANUAL_JOB_TYPES), "aliases": CORE_WORKER_APP_JOB_ALIASES})
+    data["updatedAt"] = now
+    data["ok"] = True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    with contextlib.suppress(Exception):
+        path.chmod(0o600)
+    return {"ok": True, "created": len(created), "createdTypes": created, "workerId": worker_id, "installId": install_id}
+
+
+
+def _core_worker_app_jobs_text(worker_id: str) -> str:
+    worker_id = str(worker_id or "").strip()
+    summary = _core_worker_app_jobs_summary_for_worker(worker_id)
+    if not summary:
+        return "jobs internos: aguardando"
+    total = int(summary.get("autoTotal") or len(CORE_WORKER_APP_AUTO_JOB_TYPES))
+    ok = int(summary.get("autoOk") or 0)
+    failed = int(summary.get("autoFailed") or 0)
+    pending = int(summary.get("pending") or 0)
+    running = int(summary.get("running") or 0)
+    missing = summary.get("autoMissing") if isinstance(summary.get("autoMissing"), list) else []
+    if failed:
+        label = f"jobs internos: {ok}/{total} ok · {failed} falha(s)"
+    elif ok >= total and total:
+        label = f"jobs internos: {ok}/{total} ok"
+    elif ok:
+        label = f"jobs internos: {ok}/{total} ok · aquecendo"
+    else:
+        label = "jobs internos: aguardando cobertura"
+    extra: list[str] = []
     if running:
-        pieces.append(f"{running} rodando")
+        extra.append(f"{running} rodando")
     if pending:
-        pieces.append(f"{pending} pend")
-    if msg:
-        pieces.append(msg)
-    return " · ".join(pieces)
+        extra.append(f"{pending} pend")
+    if missing and ok < total:
+        extra.append(f"faltam {len(missing)}")
+    manual_total = int(summary.get("manualTotal") or len(CORE_WORKER_APP_MANUAL_JOB_TYPES))
+    if manual_total:
+        extra.append(f"{manual_total} manuais")
+    return " · ".join([label] + extra)
 
 
 def _core_worker_app_runtime_detail_text(worker_id: str) -> str:
@@ -2051,6 +2195,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         if selected_worker is not None:
             specs.extend([
                 {"label": "Detalhes do celular", "value": "_worker_details", "description": "Resumo completo", "emoji": "📱", "panel_action": "details", "category": "quick"},
+                {"label": "Testar runtime APK", "value": "_apk_internal_test", "description": "Agenda jobs internos seguros", "emoji": "🧪", "panel_action": "apk_internal_test", "category": "quick"},
                 {"label": "Ver último resultado", "value": "_show_last_result", "description": "Detalhes do último job", "emoji": "📄", "panel_action": "last_result", "category": "quick"},
                 {"label": "Renomear celular", "value": "_rename_worker", "description": "Troca o nome exibido", "emoji": "✏️", "panel_action": "rename", "category": "organize"},
                 {"label": "Editar funções", "value": "_edit_roles", "description": "Perfil + extras/remoções", "emoji": "🧩", "panel_action": "roles", "category": "organize"},
@@ -2354,6 +2499,9 @@ class WorkersPanelView(discord.ui.LayoutView):
         if action == "_worker_details":
             await self._show_worker_details(interaction)
             return
+        if action == "_apk_internal_test":
+            await self._queue_apk_internal_runtime_test(interaction)
+            return
         if action == "_show_last_result":
             await self._show_last_result(interaction)
             return
@@ -2383,6 +2531,22 @@ class WorkersPanelView(discord.ui.LayoutView):
             payload=dict(spec.get("payload") or {}),
             summary=str(spec.get("summary") or spec.get("label") or action),
         )
+
+    async def _queue_apk_internal_runtime_test(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(thinking=False)
+        worker = self._selected_worker()
+        worker_id = str((worker or {}).get("worker_id") or "").strip()
+        result = await asyncio.to_thread(_queue_core_worker_app_internal_runtime_test, worker_id)
+        if result.get("ok"):
+            created = int(result.get("created") or 0)
+            note = f"🧪 Teste do runtime APK agendado: {created} job(s) interno(s). Abra/aguarde o app sincronizar."
+        else:
+            note = f"⚠️ Não consegui agendar teste do runtime APK: {_shorten(result.get('error'), limit=120)}"
+        self.snapshot = await self.cog._collect_workers_snapshot(action_note=note)
+        self._ensure_selected_worker()
+        self._rebuild_layout()
+        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._send_ephemeral(interaction, note)
 
     async def _edit_panel_after_response(self, interaction: discord.Interaction) -> None:
         try:

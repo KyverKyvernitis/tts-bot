@@ -68,7 +68,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.23";
+    private static final String APP_VERSION = "0.5.24";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -184,6 +184,9 @@ public class MainActivity extends Activity {
     private volatile int internalLightJobsRunningCount = 0;
     private volatile int internalLightJobsPendingCount = 0;
     private volatile String internalLightJobsQueueSummary = "fila aguardando";
+    private volatile int internalLightJobsAutoTotal = 0;
+    private volatile int internalLightJobsManualTotal = 0;
+    private volatile String internalLightJobsCatalogSummary = "catálogo aguardando";
     private volatile String internalDiagnosticsSummary = "diagnósticos aguardando";
     private volatile String internalStorageSummary = "cache aguardando";
     private volatile String internalBridgeSummary = "ponte aguardando";
@@ -1509,6 +1512,9 @@ public class MainActivity extends Activity {
         runtime.put("internal_jobs_queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
         runtime.put("internal_jobs_running", internalLightJobsRunningCount);
         runtime.put("internal_jobs_pending", internalLightJobsPendingCount);
+        runtime.put("internal_jobs_auto_total", internalLightJobsAutoTotal);
+        runtime.put("internal_jobs_manual_total", internalLightJobsManualTotal);
+        runtime.put("internal_jobs_catalog", internalLightJobsCatalogSummary == null ? "" : internalLightJobsCatalogSummary);
         runtime.put("diagnostics_summary", internalDiagnosticsSummary == null ? "" : internalDiagnosticsSummary);
         runtime.put("storage_summary", internalStorageSummary == null ? "" : internalStorageSummary);
         runtime.put("bridge_summary", internalBridgeSummary == null ? "" : internalBridgeSummary);
@@ -1634,6 +1640,14 @@ public class MainActivity extends Activity {
                     internalLightJobsPendingCount = 0;
                     internalLightJobsRunningCount = 0;
                     internalLightJobsQueueSummary = "fila sincronizada";
+                }
+                JSONObject catalog = body.optJSONObject("catalog");
+                if (catalog != null) {
+                    JSONArray automatic = catalog.optJSONArray("automatic");
+                    JSONArray manual = catalog.optJSONArray("manual");
+                    internalLightJobsAutoTotal = automatic == null ? 0 : automatic.length();
+                    internalLightJobsManualTotal = manual == null ? 0 : manual.length();
+                    internalLightJobsCatalogSummary = internalLightJobsAutoTotal + " automáticos · " + internalLightJobsManualTotal + " manuais";
                 }
                 if (count <= 0) {
                     internalLightJobsState = "fila vazia";
@@ -3474,6 +3488,7 @@ public class MainActivity extends Activity {
                 + checkLine("Heartbeat APK", internalRuntimeOnline ? "online direto na VPS" : emptyFallback(internalRuntimeHeartbeatState, "pendente")) + "\n"
                 + checkLine("Último heartbeat", ageLabel) + "\n"
                 + checkLine("Jobs internos", emptyFallback(internalLightJobsState, "aguardando")) + "\n"
+                + checkLine("Cobertura", emptyFallback(internalLightJobsCatalogSummary, "catálogo aguardando")) + "\n"
                 + checkLine("Fila", emptyFallback(internalLightJobsQueueSummary, "aguardando")) + "\n"
                 + checkLine("Jobs reais", "Termux por enquanto");
 

@@ -610,3 +610,20 @@ A VPS não depende desse perfil para funcionar. Se o celular estiver offline, o 
 - Transferências continuam usando armazenamento específico do app (`getCacheDir()`/diretório interno do APK), sem acessar Termux, armazenamento geral ou pastas externas.
 - FCM continua mínimo: ele marca solicitação de acordar/sincronizar e agenda a checagem local; trabalho real continua fora de `onMessageReceived`.
 - Ainda não há shell, Python interno, build Android pelo APK ou acesso a arquivos do Termux. Jobs reais continuam no phone-worker/Termux.
+
+## Patch 65 — runtime interno maduro e painel de controle dos jobs APK
+
+- O APK passa para `0.5.24` / `versionCode 39`.
+- A VPS normaliza nomes antigos de jobs internos por alias para evitar duplicação falsa:
+  - `apk_clear_app_cache` e `apk_cleanup_runtime_cache` viram `apk_cache_cleanup`;
+  - `apk_report_logs` vira `apk_upload_app_logs`;
+  - `apk_status_refresh` vira `apk_sync_runtime_state`.
+- Jobs internos agora são classificados entre:
+  - automáticos, que podem ser agendados periodicamente pela VPS;
+  - manuais, que precisam de payload/ação explícita e não contam como “sem resultado”.
+- A VPS agenda mais diagnósticos automáticos seguros do APK, incluindo aparelho, rede, push, update, runtime, armazenamento, ponte, histórico, pacote de status e limpeza controlada de cache.
+- O arquivo `data/core_worker_app_jobs.json` passa a guardar catálogo e resumo por instalação, com cobertura dos jobs automáticos, manuais, pendentes e rodando.
+- O painel `workers` ganhou a ação **Testar runtime APK**, que agenda todos os jobs automáticos seguros para o celular selecionado.
+- O resumo de jobs no painel mostra cobertura real, por exemplo `jobs internos: 12/14 ok · aquecendo · 6 manuais`, em vez de tratar jobs manuais como falhas.
+- A UI técnica do APK passa a mostrar a cobertura do catálogo de jobs recebido da VPS.
+- Continua sem shell, sem Python interno, sem build pelo APK e sem acesso ao Termux. Jobs reais seguem no phone-worker/Termux.
