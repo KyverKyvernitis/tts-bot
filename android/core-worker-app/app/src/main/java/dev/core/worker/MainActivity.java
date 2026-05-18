@@ -73,7 +73,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.30";
+    private static final String APP_VERSION = "0.5.31";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -156,7 +156,7 @@ public class MainActivity extends Activity {
     private volatile boolean localAgentOnline = false;
     private volatile String localAgentVersion = "";
     private volatile String localAgentProfile = "";
-    private volatile String runtimeMode = "apk-native-python-linux-provisioner";
+    private volatile String runtimeMode = "apk-native-python-linux-assisted-runtime";
     private volatile String internalRuntimeState = "não preparado";
     private volatile String internalRuntimePath = "";
     private volatile boolean internalRuntimeOnline = false;
@@ -215,6 +215,10 @@ public class MainActivity extends Activity {
     private volatile String bedrockState = "não configurado";
     private volatile boolean bedrockReady = false;
     private volatile long bedrockLastCheckAt = 0L;
+    private volatile String foregroundRuntimeSummary = "serviço persistente aguardando";
+    private volatile boolean foregroundRuntimeActive = false;
+    private volatile long foregroundRuntimeLastTickAt = 0L;
+    private volatile String linuxInstallStrategySummary = "estratégia Linux aguardando confirmação";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -226,6 +230,7 @@ public class MainActivity extends Activity {
         safeStartupTask(this::prepareInternalRuntimePreview);
         safeStartupTask(this::prepareNativeRuntimeState);
         safeStartupTask(this::prepareCoreLinuxRuntimeState);
+        safeStartupTask(this::readForegroundRuntimeState);
         safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "activity_create"));
         safeStartupTask(() -> reportAppState("app_opened", "APK aberto; versão instalada " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")"));
         safeStartupTask(() -> reportAppState("runtime_internal_ready", "runtime interno preparado em modo híbrido; heartbeat/status direto ativo"));
@@ -480,6 +485,14 @@ public class MainActivity extends Activity {
         heartbeatButton = secondaryButton("Sincronizar painel workers");
         heartbeatButton.setOnClickListener(v -> sendHeartbeat());
         technicalDetailsContent.addView(heartbeatButton);
+
+        Button foregroundStartButton = secondaryButton("Ativar runtime persistente");
+        foregroundStartButton.setOnClickListener(v -> startForegroundRuntimeFromUi());
+        technicalDetailsContent.addView(foregroundStartButton);
+
+        Button foregroundStopButton = secondaryButton("Parar runtime persistente");
+        foregroundStopButton.setOnClickListener(v -> stopForegroundRuntimeFromUi());
+        technicalDetailsContent.addView(foregroundStopButton);
 
         clearButton = dangerButton("Esquecer conexão local");
         clearButton.setBackground(makeButtonBackground(Color.rgb(91, 50, 57), BUTTON_DISABLED_BG));
@@ -1542,6 +1555,98 @@ public class MainActivity extends Activity {
     }
 
 
+
+    private void readForegroundRuntimeState() {
+        try {
+            foregroundRuntimeActive = prefs.getBoolean("foreground_runtime_active", false);
+            foregroundRuntimeLastTickAt = prefs.getLong("foreground_runtime_last_tick_at", 0L);
+            String detail = prefs.getString("foreground_runtime_state", "");
+            if (foregroundRuntimeActive) {
+                foregroundRuntimeSummary = detail == null || detail.trim().isEmpty()
+                        ? "serviço persistente ativo"
+                        : detail.trim();
+            } else {
+                foregroundRuntimeSummary = detail == null || detail.trim().isEmpty()
+                        ? "serviço persistente parado"
+                        : detail.trim();
+            }
+        } catch (Throwable exc) {
+            foregroundRuntimeActive = false;
+            foregroundRuntimeSummary = "serviço persistente indisponível · " + shortThrowable(exc);
+        }
+        updateSystemChecklistText();
+    }
+
+    private void startForegroundRuntimeFromUi() {
+        try {
+            JSONObject out = startForegroundRuntime("ui");
+            show(out.optString("summary", "Runtime persistente solicitado."));
+        } catch (Throwable exc) {
+            show("Não consegui ativar runtime persistente: " + shortThrowable(exc));
+        }
+    }
+
+    private void stopForegroundRuntimeFromUi() {
+        try {
+            JSONObject out = stopForegroundRuntime("ui");
+            show(out.optString("summary", "Runtime persistente parado."));
+        } catch (Throwable exc) {
+            show("Não consegui parar runtime persistente: " + shortThrowable(exc));
+        }
+    }
+
+    private JSONObject foregroundRuntimeSnapshot(String focus) throws Exception {
+        readForegroundRuntimeState();
+        JSONObject out = new JSONObject();
+        out.put("ok", true);
+        out.put("focus", focus == null ? "probe" : focus);
+        out.put("active", foregroundRuntimeActive);
+        out.put("lastTickAt", foregroundRuntimeLastTickAt);
+        out.put("summary", foregroundRuntimeSummary == null ? "serviço persistente aguardando" : foregroundRuntimeSummary);
+        out.put("mode", "foreground-service-visible-runtime");
+        out.put("androidModel", Build.MANUFACTURER + " " + Build.MODEL);
+        out.put("safety", "Foreground Service visível; sem instalar rootfs, sem baixar Bedrock, sem EULA automática e sem shell livre");
+        return out;
+    }
+
+    private JSONObject startForegroundRuntime(String reason) throws Exception {
+        Intent intent = new Intent(this, CoreWorkerRuntimeService.class);
+        intent.setAction(CoreWorkerRuntimeService.ACTION_START);
+        intent.putExtra("reason", reason == null ? "manual" : reason);
+        if (Build.VERSION.SDK_INT >= 26) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
+        prefs.edit()
+                .putBoolean("foreground_runtime_active", true)
+                .putString("foreground_runtime_state", "serviço persistente solicitado")
+                .putLong("foreground_runtime_last_requested_at", System.currentTimeMillis())
+                .apply();
+        readForegroundRuntimeState();
+        JSONObject out = foregroundRuntimeSnapshot("start");
+        out.put("started", true);
+        out.put("summary", "Runtime persistente solicitado com notificação fixa");
+        return out;
+    }
+
+    private JSONObject stopForegroundRuntime(String reason) throws Exception {
+        Intent intent = new Intent(this, CoreWorkerRuntimeService.class);
+        intent.setAction(CoreWorkerRuntimeService.ACTION_STOP);
+        intent.putExtra("reason", reason == null ? "manual" : reason);
+        startService(intent);
+        prefs.edit()
+                .putBoolean("foreground_runtime_active", false)
+                .putString("foreground_runtime_state", "serviço persistente parado")
+                .putLong("foreground_runtime_last_requested_at", System.currentTimeMillis())
+                .apply();
+        readForegroundRuntimeState();
+        JSONObject out = foregroundRuntimeSnapshot("stop");
+        out.put("stopped", true);
+        out.put("summary", "Runtime persistente parado; jobs curtos continuam por fetch manual/agendado");
+        return out;
+    }
+
     private void prepareNativeRuntimeState() {
         try {
             File runtimeDir = new File(getFilesDir(), "core-runtime");
@@ -1756,6 +1861,26 @@ public class MainActivity extends Activity {
         coreLinuxState = py.optString("state", "provisioner preparado");
         coreLinuxSummary = py.optString("summary", coreLinuxSummary);
         coreLinuxLastCheckAt = System.currentTimeMillis();
+        return py;
+    }
+
+
+    private JSONObject linuxAssistedInstallSnapshot(String focus) throws Exception {
+        prepareCoreLinuxRuntimeState();
+        JSONObject extra = new JSONObject();
+        extra.put("focus", focus == null ? "strategy" : focus);
+        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
+        extra.put("bedrockDir", new File(coreLinuxDir(), "bedrock").getAbsolutePath());
+        extra.put("termuxInstalled", isPackageInstalled("com.termux"));
+        extra.put("termuxApiInstalled", isPackageInstalled("com.termux.api"));
+        extra.put("termuxBootInstalled", isPackageInstalled("com.termux.boot"));
+        extra.put("foregroundRuntimeActive", foregroundRuntimeActive);
+        extra.put("officialLinux", "Ubuntu 22.04 LTS+");
+        extra.put("officialRamGb", 4);
+        JSONObject py = runEmbeddedPythonJob("linux_assisted_install", extra);
+        linuxInstallStrategySummary = py.optString("summary", linuxInstallStrategySummary);
+        internalDiagnosticsSummary = linuxInstallStrategySummary;
+        internalDiagnosticsLastAt = System.currentTimeMillis();
         return py;
     }
 
@@ -2040,6 +2165,9 @@ public class MainActivity extends Activity {
         ctx.put("runtimeDir", new File(getFilesDir(), "core-runtime").getAbsolutePath());
         ctx.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
         ctx.put("bedrockDir", new File(coreLinuxDir(), "bedrock").getAbsolutePath());
+        ctx.put("foregroundRuntimeActive", foregroundRuntimeActive);
+        ctx.put("foregroundRuntimeSummary", foregroundRuntimeSummary == null ? "" : foregroundRuntimeSummary);
+        ctx.put("linuxInstallStrategySummary", linuxInstallStrategySummary == null ? "" : linuxInstallStrategySummary);
         ctx.put("termuxInstalled", isPackageInstalled("com.termux"));
         ctx.put("termuxApiInstalled", isPackageInstalled("com.termux.api"));
         ctx.put("termuxBootInstalled", isPackageInstalled("com.termux.boot"));
@@ -2135,7 +2263,8 @@ public class MainActivity extends Activity {
                 || "linux_provision_plan".equals(script)
                 || "bedrock_requirements".equals(script)
                 || "bedrock_probe".equals(script)
-                || "bedrock_install_plan".equals(script);
+                || "bedrock_install_plan".equals(script)
+                || "linux_assisted_install".equals(script);
     }
 
 
@@ -2151,18 +2280,18 @@ public class MainActivity extends Activity {
             File state = new File(runtimeDir, "runtime-state.json");
             JSONObject meta = new JSONObject();
             meta.put("ok", true);
-            meta.put("mode", "apk-native-python-linux-provisioner");
+            meta.put("mode", "apk-native-python-linux-assisted-runtime");
             meta.put("active", true);
             meta.put("internal_runtime", "apk-native-runtime");
             meta.put("apk_version", APP_VERSION);
             meta.put("version_code", BuildConfig.VERSION_CODE);
             meta.put("created_by", "core-worker-apk");
-            meta.put("summary", "Runtime interno ativo para status, boot, jobs seguros, Python, shell controlado e Core Linux Runtime Manager. Termux fica só como fallback legado.");
-            meta.put("migration_stage", "apk-native-linux-provisioner-phase");
+            meta.put("summary", "Runtime interno ativo para status, boot, jobs seguros, Python, shell controlado, Foreground Service e Core Linux Runtime Manager. Termux fica só como fallback legado.");
+            meta.put("migration_stage", "apk-native-linux-assisted-install-phase");
             writeTextFile(state, meta.toString());
             internalRuntimeState = "preparado · heartbeat ativo";
             internalRuntimePath = runtimeDir.getAbsolutePath();
-            runtimeMode = "apk-native-python-linux-provisioner";
+            runtimeMode = "apk-native-python-linux-assisted-runtime";
         } catch (Throwable exc) {
             internalRuntimeState = "falha ao preparar · " + exc.getClass().getSimpleName();
             internalRuntimeOnline = false;
@@ -2185,7 +2314,7 @@ public class MainActivity extends Activity {
 
     private JSONObject runtimeSnapshot() throws Exception {
         JSONObject runtime = new JSONObject();
-        runtime.put("mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-provisioner" : runtimeMode.trim());
+        runtime.put("mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-assisted-runtime" : runtimeMode.trim());
         runtime.put("current_worker", nativeWorkerOnline ? "apk-native-worker" : (localAgentOnline ? "termux-fallback" : "apk-internal-heartbeat"));
         runtime.put("internal_runtime", "apk-native-runtime");
         runtime.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
@@ -2194,11 +2323,15 @@ public class MainActivity extends Activity {
         runtime.put("internal_runtime_last_heartbeat_at", internalRuntimeLastHeartbeatAt);
         runtime.put("internal_runtime_last_error", internalRuntimeLastError == null ? "" : internalRuntimeLastError);
         runtime.put("internal_runtime_path", internalRuntimePath == null ? "" : internalRuntimePath);
+        runtime.put("foreground_runtime_active", foregroundRuntimeActive);
+        runtime.put("foreground_runtime_summary", foregroundRuntimeSummary == null ? "" : foregroundRuntimeSummary);
+        runtime.put("foreground_runtime_last_tick_at", foregroundRuntimeLastTickAt);
+        runtime.put("linux_install_strategy_summary", linuxInstallStrategySummary == null ? "" : linuxInstallStrategySummary);
         runtime.put("termux_required_now", false);
         runtime.put("termux_fallback_available", localAgentOnline);
         runtime.put("advanced_jobs_require_termux", false);
-        runtime.put("jobs_runtime", "apk-native-python-linux-provisioner");
-        runtime.put("migration_stage", "apk-native-linux-provisioner-phase");
+        runtime.put("jobs_runtime", "apk-native-python-linux-assisted-runtime");
+        runtime.put("migration_stage", "apk-native-linux-assisted-install-phase");
         runtime.put("light_jobs_state", internalLightJobsState == null ? "" : internalLightJobsState);
         runtime.put("light_jobs_last_check_at", internalLightJobsLastCheckAt);
         runtime.put("light_jobs_last_count", internalLightJobsLastCount);
@@ -2257,7 +2390,7 @@ public class MainActivity extends Activity {
             payload.put("state", "internal_heartbeat");
             payload.put("reason", reason == null ? "manual" : reason);
             payload.put("source", "core-worker-apk-internal-runtime");
-            payload.put("runtime_mode", "apk-native-python-linux-provisioner");
+            payload.put("runtime_mode", "apk-native-python-linux-assisted-runtime");
             payload.put("internal_runtime", "apk-native-runtime");
             payload.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
             payload.put("internal_runtime_path", internalRuntimePath == null ? "" : internalRuntimePath);
@@ -2271,7 +2404,7 @@ public class MainActivity extends Activity {
             payload.put("localAgentOnline", localAgentOnline);
             payload.put("termuxWorkerOnline", localAgentOnline);
             payload.put("nativeWorkerOnline", nativeWorkerOnline);
-            payload.put("jobsRuntime", "apk-native-python-linux-provisioner");
+            payload.put("jobsRuntime", "apk-native-python-linux-assisted-runtime");
             safePutPayload(payload, "battery", batterySnapshot());
             safePutPayload(payload, "network", networkSnapshot(serverUrl));
             safePutPayload(payload, "update", updateSnapshot());
@@ -2479,7 +2612,13 @@ public class MainActivity extends Activity {
                 .put("apk_minecraft_bedrock_status")
                 .put("apk_minecraft_bedrock_requirements")
                 .put("apk_minecraft_bedrock_install_plan")
-                .put("apk_minecraft_bedrock_properties_template");
+                .put("apk_minecraft_bedrock_properties_template")
+                .put("apk_runtime_foreground_probe")
+                .put("apk_runtime_foreground_start")
+                .put("apk_runtime_foreground_stop")
+                .put("apk_linux_strategy_plan")
+                .put("apk_linux_manifest_plan")
+                .put("apk_minecraft_bedrock_assisted_install_plan");
     }
 
     private String summarizeLightJobs(JSONArray jobs, int okCount, int count) {
@@ -2935,6 +3074,46 @@ public class MainActivity extends Activity {
             result.put("message", python.optBoolean("ok", false) ? "arquivos do runtime verificados pelo Python interno" : "verificação Python de arquivos falhou");
             return result;
         }
+
+        if ("apk_runtime_foreground_probe".equals(type)) {
+            JSONObject foreground = foregroundRuntimeSnapshot("probe");
+            safePutPayload(result, "foregroundRuntime", foreground);
+            internalDiagnosticsSummary = foreground.optString("summary", "serviço persistente verificado");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            result.put("message", "runtime persistente do APK verificado");
+            return result;
+        }
+        if ("apk_runtime_foreground_start".equals(type)) {
+            JSONObject foreground = startForegroundRuntime("job");
+            safePutPayload(result, "foregroundRuntime", foreground);
+            internalDiagnosticsSummary = foreground.optString("summary", "serviço persistente iniciado");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            result.put("message", "runtime persistente iniciado pelo APK");
+            return result;
+        }
+        if ("apk_runtime_foreground_stop".equals(type)) {
+            JSONObject foreground = stopForegroundRuntime("job");
+            safePutPayload(result, "foregroundRuntime", foreground);
+            internalDiagnosticsSummary = foreground.optString("summary", "serviço persistente parado");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            result.put("message", "runtime persistente parado pelo APK");
+            return result;
+        }
+        if ("apk_linux_strategy_plan".equals(type) || "apk_linux_manifest_plan".equals(type) || "apk_minecraft_bedrock_assisted_install_plan".equals(type)) {
+            String focus = "strategy";
+            if ("apk_linux_manifest_plan".equals(type)) focus = "manifest";
+            if ("apk_minecraft_bedrock_assisted_install_plan".equals(type)) focus = "bedrock_assisted";
+            JSONObject plan = linuxAssistedInstallSnapshot(focus);
+            safePutPayload(result, "linuxAssistedInstall", plan);
+            internalDiagnosticsSummary = plan.optString("summary", "plano assistido Linux gerado");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!plan.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", plan.optString("error", "plano assistido pendente"));
+            }
+            result.put("message", plan.optBoolean("ok", false) ? "plano assistido Linux/Bedrock gerado sem baixar nada" : "plano assistido Linux/Bedrock pendente");
+            return result;
+        }
         if ("apk_linux_runtime_probe".equals(type) || "apk_linux_rootfs_probe".equals(type) || "apk_linux_box64_probe".equals(type)) {
             prepareCoreLinuxRuntimeState();
             String focus = "runtime";
@@ -3145,7 +3324,7 @@ public class MainActivity extends Activity {
 
     private JSONObject workerBridgeStatusSnapshot() throws Exception {
         JSONObject bridge = new JSONObject();
-        bridge.put("mode", "apk-native-python-linux-provisioner");
+        bridge.put("mode", "apk-native-python-linux-assisted-runtime");
         bridge.put("apk_internal_online", internalRuntimeOnline);
         bridge.put("apk_native_worker_online", nativeWorkerOnline);
         bridge.put("termux_worker_online", localAgentOnline);
@@ -3828,10 +4007,10 @@ public class MainActivity extends Activity {
         profileStatus.put("profile", profile);
         profileStatus.put("profile_label", profileLabel(profile));
         profileStatus.put("apk_scope", "native-runtime-python-linux-provisioner");
-        profileStatus.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-provisioner" : runtimeMode);
+        profileStatus.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-assisted-runtime" : runtimeMode);
         profileStatus.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
         profileStatus.put("runtime", runtimeSnapshot());
-        payload.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-provisioner" : runtimeMode);
+        payload.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-assisted-runtime" : runtimeMode);
         payload.put("status", profileStatus);
     }
 
@@ -3902,13 +4081,17 @@ public class MainActivity extends Activity {
         status.put("bedrock_summary", bedrockSummary == null ? "" : bedrockSummary);
         status.put("bedrock_state", bedrockState == null ? "" : bedrockState);
         status.put("bedrock_ready", bedrockReady);
+        status.put("foreground_runtime_active", foregroundRuntimeActive);
+        status.put("foreground_runtime_summary", foregroundRuntimeSummary == null ? "" : foregroundRuntimeSummary);
+        status.put("foreground_runtime_last_tick_at", foregroundRuntimeLastTickAt);
+        status.put("linux_install_strategy_summary", linuxInstallStrategySummary == null ? "" : linuxInstallStrategySummary);
         status.put("termux_installed", isPackageInstalled("com.termux"));
         status.put("termux_api_installed", isPackageInstalled("com.termux.api"));
         status.put("termux_boot_installed", isPackageInstalled("com.termux.boot"));
         status.put("tailscale_installed", isPackageInstalled("com.tailscale.ipn"));
         status.put("fcm_state", fcmState);
         status.put("fcm_token_preview", fcmTokenPreview);
-        status.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-provisioner" : runtimeMode);
+        status.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-assisted-runtime" : runtimeMode);
         status.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
         status.put("internal_runtime_online", internalRuntimeOnline);
         status.put("internal_runtime_heartbeat_state", internalRuntimeHeartbeatState == null ? "" : internalRuntimeHeartbeatState);
@@ -4516,6 +4699,7 @@ public class MainActivity extends Activity {
                 + checkLine("Jobs internos", emptyFallback(internalLightJobsState, "aguardando")) + "\n"
                 + checkLine("Cobertura", emptyFallback(internalLightJobsCatalogSummary, "catálogo aguardando")) + "\n"
                 + checkLine("Fila", emptyFallback(internalLightJobsQueueSummary, "aguardando")) + "\n"
+                + checkLine("Persistente", emptyFallback(foregroundRuntimeSummary, "serviço aguardando")) + "\n"
                 + checkLine("Jobs reais", nativePythonAvailable ? "APK Python interno" : (nativeWorkerOnline ? "APK nativo" : "APK interno · fallback legado")) + "\n"
                 + checkLine("Shell", emptyFallback(nativeShellSummary, "controlado aguardando")) + "\n"
                 + checkLine("Python", emptyFallback(nativePythonSummary, "aguardando health check")) + "\n"
@@ -4552,6 +4736,7 @@ public class MainActivity extends Activity {
                 + checkLine("Jobs Python", nativePythonAvailable ? "APK + Python interno" : "aguardando health check") + "\n"
                 + checkLine("Shell", emptyFallback(nativeShellSummary, "controlado aguardando")) + "\n"
                 + checkLine("Linux runtime", emptyFallback(coreLinuxSummary, "base preparada")) + "\n"
+                + checkLine("Instalação Linux", emptyFallback(linuxInstallStrategySummary, "aguardando plano")) + "\n"
                 + checkLine("Bedrock", emptyFallback(bedrockSummary, "diagnóstico pendente")) + "\n"
                 + checkLine("Termux", localAgentOnline ? "fallback legado online" : "fallback legado opcional") + "\n"
                 + checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "VPN externa ainda é etapa futura") + "\n"

@@ -506,6 +506,12 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_minecraft_bedrock_requirements",
     "apk_minecraft_bedrock_install_plan",
     "apk_minecraft_bedrock_properties_template",
+    "apk_runtime_foreground_probe",
+    "apk_runtime_foreground_start",
+    "apk_runtime_foreground_stop",
+    "apk_linux_strategy_plan",
+    "apk_linux_manifest_plan",
+    "apk_minecraft_bedrock_assisted_install_plan",
 }
 CORE_WORKER_APP_JOB_LABELS = {
     "apk_ping": "ping interno",
@@ -552,6 +558,12 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_minecraft_bedrock_requirements": "Bedrock requisitos",
     "apk_minecraft_bedrock_install_plan": "Bedrock plano instalação",
     "apk_minecraft_bedrock_properties_template": "Bedrock template propriedades",
+    "apk_runtime_foreground_probe": "runtime persistente",
+    "apk_runtime_foreground_start": "iniciar runtime persistente",
+    "apk_runtime_foreground_stop": "parar runtime persistente",
+    "apk_linux_strategy_plan": "estratégia Linux",
+    "apk_linux_manifest_plan": "manifesto Linux",
+    "apk_minecraft_bedrock_assisted_install_plan": "Bedrock assistido",
 }
 
 
@@ -2424,6 +2436,12 @@ class WorkersPanelView(discord.ui.LayoutView):
                 {"label": "Bedrock plano", "value": "_apk_minecraft_bedrock_install_plan", "description": "Instalação assistida", "emoji": "🧾", "panel_action": "apk_minecraft_bedrock_install_plan", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_install_plan"},
                 {"label": "Bedrock props", "value": "_apk_minecraft_bedrock_properties_template", "description": "Template server.properties", "emoji": "⚙️", "panel_action": "apk_minecraft_bedrock_properties_template", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_properties_template"},
                 {"label": "Bedrock status", "value": "_apk_minecraft_bedrock_status", "description": "Arquivos do servidor", "emoji": "🟫", "panel_action": "apk_minecraft_bedrock_status", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_status"},
+                {"label": "Runtime persist.", "value": "_apk_runtime_foreground_probe", "description": "Serviço com notificação", "emoji": "🟢", "panel_action": "apk_runtime_foreground_probe", "category": "apk", "apk_job_type": "apk_runtime_foreground_probe"},
+                {"label": "Ativar persist.", "value": "_apk_runtime_foreground_start", "description": "Inicia foreground runtime", "emoji": "▶️", "panel_action": "apk_runtime_foreground_start", "category": "apk", "apk_job_type": "apk_runtime_foreground_start"},
+                {"label": "Parar persist.", "value": "_apk_runtime_foreground_stop", "description": "Para foreground runtime", "emoji": "⏹️", "panel_action": "apk_runtime_foreground_stop", "category": "apk", "apk_job_type": "apk_runtime_foreground_stop"},
+                {"label": "Linux estratégia", "value": "_apk_linux_strategy_plan", "description": "Core Linux vs fallback", "emoji": "🧭", "panel_action": "apk_linux_strategy_plan", "category": "apk", "apk_job_type": "apk_linux_strategy_plan"},
+                {"label": "Linux manifesto", "value": "_apk_linux_manifest_plan", "description": "Plano de downloads", "emoji": "📜", "panel_action": "apk_linux_manifest_plan", "category": "apk", "apk_job_type": "apk_linux_manifest_plan"},
+                {"label": "Bedrock assist.", "value": "_apk_minecraft_bedrock_assisted_install_plan", "description": "Plano com EULA pendente", "emoji": "🧱", "panel_action": "apk_minecraft_bedrock_assisted_install_plan", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_assisted_install_plan"},
                 {"label": "Renomear celular", "value": "_rename_worker", "description": "Troca o nome exibido", "emoji": "✏️", "panel_action": "rename", "category": "organize"},
                 {"label": "Editar funções", "value": "_edit_roles", "description": "Perfil + extras/remoções", "emoji": "🧩", "panel_action": "roles", "category": "organize"},
             ])
