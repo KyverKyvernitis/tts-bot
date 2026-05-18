@@ -516,9 +516,6 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
         pass
     prefix = "online" if online else "visto " + _format_age(age)
     pieces = [prefix, app_version, f"perfil {profile}", f"push {fcm_state}", battery, network, f"APK {update_state}", f"jobs: {jobs_runtime}", _core_worker_app_jobs_text(worker_id)]
-    last_error = _shorten(record.get("lastAppError"), limit=80)
-    if last_error:
-        pieces.append(f"último erro: {last_error}")
     return " · ".join(str(x) for x in pieces if x)
 
 
@@ -1043,10 +1040,15 @@ def _core_worker_fcm_status_summary(worker_id: str = "") -> dict[str, Any]:
     tokens = data.get("tokens") if isinstance(data, dict) and isinstance(data.get("tokens"), dict) else {}
     now = time.time()
     records: list[dict[str, Any]] = []
+    invalidated: list[dict[str, Any]] = []
     for record in tokens.values():
-        if not isinstance(record, dict) or not record.get("active"):
+        if not isinstance(record, dict):
             continue
         if worker_id and str(record.get("workerId") or "") != str(worker_id):
+            continue
+        if str(record.get("lastErrorCode") or "").upper() == "UNREGISTERED" or record.get("invalidatedAt"):
+            invalidated.append(record)
+        if not record.get("active"):
             continue
         try:
             seen = float(record.get("lastSeenAt") or record.get("registeredAt") or 0)
@@ -1059,14 +1061,23 @@ def _core_worker_fcm_status_summary(worker_id: str = "") -> dict[str, Any]:
     for record in records:
         if last is None or float(record.get("lastSeenAt") or 0) > float(last.get("lastSeenAt") or 0):
             last = record
-    if not records:
+    if last is None and invalidated:
+        for record in invalidated:
+            candidate_seen = float(record.get("lastSeenAt") or record.get("invalidatedAt") or 0)
+            last_seen = float((last or {}).get("lastSeenAt") or (last or {}).get("invalidatedAt") or 0)
+            if last is None or candidate_seen > last_seen:
+                last = record
+    if not records and not invalidated:
         return {"active": 0}
     return {
         "active": len(records),
+        "needsRefresh": bool(not records and invalidated),
+        "invalidated": len(invalidated),
         "lastSeenAt": (last or {}).get("lastSeenAt"),
         "lastPushAt": (last or {}).get("lastPushAt"),
         "lastPushStatus": str((last or {}).get("lastPushStatus") or ""),
         "lastError": str((last or {}).get("lastError") or ""),
+        "lastErrorCode": str((last or {}).get("lastErrorCode") or ""),
         "lastAppVersion": str((last or {}).get("appVersion") or ""),
         "permission": str((last or {}).get("permission") or ""),
     }
@@ -1076,6 +1087,8 @@ def _core_worker_push_status_text(worker_id: str = "") -> str:
     summary = _core_worker_fcm_status_summary(worker_id)
     active = int(summary.get("active") or 0)
     if active <= 0:
+        if summary.get("needsRefresh"):
+            return "Push: aguardando renovação do token pelo APK"
         return "Push: aguardando APK registrar FCM"
     permission = str(summary.get("permission") or "").lower()
     suffix = ""
@@ -1083,9 +1096,10 @@ def _core_worker_push_status_text(worker_id: str = "") -> str:
     if last_push:
         suffix = f" · último push {_format_age(max(0, time.time() - float(last_push)))}"
     status = str(summary.get("lastPushStatus") or "")
+    if status == "unregistered" or str(summary.get("lastErrorCode") or "").upper() == "UNREGISTERED":
+        return "Push: token expirado · aguardando renovação"
     if status == "failed":
-        err = _shorten(_redact(summary.get("lastError") or "falha"), limit=70)
-        return f"Push: ativo, mas último envio falhou · {err}"
+        return "Push: falhou no último envio · detalhes no celular"
     if permission == "missing":
         return f"Push: token ativo · sem permissão visível{suffix}"
     if status == "sent":

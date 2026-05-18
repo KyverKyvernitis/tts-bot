@@ -537,3 +537,12 @@ A VPS não depende desse perfil para funcionar. Se o celular estiver offline, o 
 - Jobs leves suportados nesta etapa: `apk_ping`, `apk_status_refresh` e `apk_report_logs`.
 - Esses jobs não executam shell, não mexem no Termux, não compilam APK e não recebem comandos arbitrários.
 - Jobs reais e tarefas pesadas continuam no Termux/phone-worker por enquanto.
+
+## Patch 61 — hotfix jobs leves + FCM token cleanup
+
+- O APK passa para `0.5.20` / `versionCode 35`.
+- Heartbeat/status interno do APK agora roda em thread de background, evitando `NetworkOnMainThreadException`.
+- A tela de detalhes não faz ping TCP durante renderização; pings ficam em fluxos de background.
+- Resultados bons de jobs leves limpam erro transitório antigo de `NetworkOnMainThreadException`.
+- Se a VPS receber `UNREGISTERED`/HTTP 404 do FCM, o token é invalidado e o app força renovação segura do token.
+- O painel principal não mostra mais JSON bruto de erro FCM nem último erro técnico do APK; detalhes ficam recolhidos.

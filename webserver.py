@@ -203,6 +203,15 @@ def _fcm_token_hash(token: str) -> str:
     return hashlib.sha256(str(token or "").encode("utf-8", errors="ignore")).hexdigest()
 
 
+def _fcm_error_is_unregistered(detail: str) -> bool:
+    text = str(detail or "").lower()
+    return "unregistered" in text or ("http 404" in text and "requested entity was not found" in text)
+
+
+def _fcm_unregistered_public_error() -> str:
+    return "token FCM expirado/invalidado; aguardando novo token do APK"
+
+
 def _load_core_worker_fcm_tokens() -> dict:
     path = _core_worker_fcm_tokens_path()
     try:
@@ -232,28 +241,50 @@ def _register_core_worker_fcm_token(payload: dict) -> dict:
         data = _load_core_worker_fcm_tokens()
         tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
         record = tokens.get(token_hash) if isinstance(tokens.get(token_hash), dict) else {}
-        record.update({
-        "token": token,
-        "tokenHash": token_hash,
-        "workerId": _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80),
-        "installId": _safe_short_text(payload.get("installId") or payload.get("install_id"), 80),
-        "deviceName": _safe_short_text(payload.get("deviceName") or payload.get("device_name"), 80),
-        "platform": _safe_short_text(payload.get("platform") or "android", 32),
-        "source": _safe_short_text(payload.get("source") or "core-worker-apk", 48),
-        "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48),
-        "appVersionCode": int(payload.get("appVersionCode") or payload.get("app_version_code") or 0),
-        "permission": _safe_short_text(payload.get("permission"), 40),
-        "lastReason": _safe_short_text(payload.get("reason"), 64),
-        "lastRemoteAddr": _safe_short_text(request.remote_addr or "", 64),
-        "lastSeenAt": now,
-        "active": True,
-    })
+        was_unregistered = str(record.get("lastErrorCode") or "").upper() == "UNREGISTERED" or bool(record.get("invalidatedAt"))
+        common = {
+            "token": token,
+            "tokenHash": token_hash,
+            "workerId": _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80),
+            "installId": _safe_short_text(payload.get("installId") or payload.get("install_id"), 80),
+            "deviceName": _safe_short_text(payload.get("deviceName") or payload.get("device_name"), 80),
+            "platform": _safe_short_text(payload.get("platform") or "android", 32),
+            "source": _safe_short_text(payload.get("source") or "core-worker-apk", 48),
+            "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48),
+            "appVersionCode": int(payload.get("appVersionCode") or payload.get("app_version_code") or 0),
+            "permission": _safe_short_text(payload.get("permission"), 40),
+            "lastReason": _safe_short_text(payload.get("reason"), 64),
+            "lastRemoteAddr": _safe_short_text(request.remote_addr or "", 64),
+            "lastSeenAt": now,
+        }
+        record.update(common)
         record.setdefault("registeredAt", now)
+        if was_unregistered:
+            # A documentação FCM recomenda remover tokens UNREGISTERED/404 e obter um novo token no cliente.
+            record.update({
+                "active": False,
+                "refreshRequired": True,
+                "lastPushStatus": "unregistered",
+                "lastErrorCode": "UNREGISTERED",
+                "lastError": _fcm_unregistered_public_error(),
+                "lastRejectedRegistrationAt": now,
+            })
+        else:
+            record.update({
+                "active": True,
+                "refreshRequired": False,
+                "lastErrorCode": "",
+                "lastError": "",
+            })
         tokens[token_hash] = record
         data["tokens"] = tokens
         data["updatedAt"] = now
         _atomic_write_json(_core_worker_fcm_tokens_path(), data, mode=0o600)
-        return {k: v for k, v in record.items() if k != "token"}
+        public = {k: v for k, v in record.items() if k != "token"}
+        if was_unregistered:
+            public["refreshRequired"] = True
+            public["refreshReason"] = _fcm_unregistered_public_error()
+        return public
 
 
 def _active_core_worker_fcm_records(*, max_age_days: int = 45) -> list[dict]:
@@ -279,19 +310,36 @@ def _active_core_worker_fcm_records(*, max_age_days: int = 45) -> list[dict]:
 
 def _core_worker_fcm_public_summary(worker_id: str = "") -> dict:
     worker_id = str(worker_id or "").strip()
+    data = _load_core_worker_fcm_tokens()
+    tokens = data.get("tokens") if isinstance(data.get("tokens"), dict) else {}
     records = _active_core_worker_fcm_records(max_age_days=120)
     if worker_id:
         records = [r for r in records if str(r.get("workerId") or "") == worker_id]
+    invalidated = []
+    for item in tokens.values():
+        if not isinstance(item, dict):
+            continue
+        if worker_id and str(item.get("workerId") or "") != worker_id:
+            continue
+        if str(item.get("lastErrorCode") or "").upper() == "UNREGISTERED" or item.get("invalidatedAt"):
+            invalidated.append(item)
     last = None
     for record in records:
         if last is None or int(record.get("lastSeenAt") or 0) > int(last.get("lastSeenAt") or 0):
             last = record
+    if last is None and invalidated:
+        for record in invalidated:
+            if last is None or int(record.get("lastSeenAt") or record.get("invalidatedAt") or 0) > int(last.get("lastSeenAt") or last.get("invalidatedAt") or 0):
+                last = record
     return {
         "active": len(records),
+        "needsRefresh": bool(not records and invalidated),
+        "invalidated": len(invalidated),
         "lastSeenAt": int((last or {}).get("lastSeenAt") or 0),
         "lastPushAt": int((last or {}).get("lastPushAt") or 0),
         "lastPushStatus": _safe_short_text((last or {}).get("lastPushStatus"), 40),
         "lastError": _safe_short_text((last or {}).get("lastError"), 120),
+        "lastErrorCode": _safe_short_text((last or {}).get("lastErrorCode"), 40),
         "lastAppVersion": _safe_short_text((last or {}).get("appVersion"), 48),
         "permission": _safe_short_text((last or {}).get("permission"), 40),
     }
@@ -624,14 +672,30 @@ def _send_core_worker_apk_update_pushes(manifest: dict, *, reason: str = "apk_pu
         token_hash = str(record.get("tokenHash") or _fcm_token_hash(token))
         ok, detail = _fcm_send_v1(token, data_payload)
         current = tokens.get(token_hash) if isinstance(tokens.get(token_hash), dict) else record
+        unregistered = (not ok) and _fcm_error_is_unregistered(detail)
         current["lastPushAt"] = now
-        current["lastPushStatus"] = "sent" if ok else "failed"
         current["lastNotificationId"] = notification_id
-        current["lastError"] = "" if ok else _safe_short_text(detail, 180)
+        if ok:
+            current["lastPushStatus"] = "sent"
+            current["lastError"] = ""
+            current["lastErrorCode"] = ""
+            current["refreshRequired"] = False
+            current["active"] = True
+        elif unregistered:
+            current["lastPushStatus"] = "unregistered"
+            current["lastErrorCode"] = "UNREGISTERED"
+            current["lastError"] = _fcm_unregistered_public_error()
+            current["refreshRequired"] = True
+            current["active"] = False
+            current["invalidatedAt"] = now
+        else:
+            current["lastPushStatus"] = "failed"
+            current["lastError"] = _safe_short_text(detail, 180)
         tokens[token_hash] = current
+        event_detail = "push FCM enviado pela VPS" if ok else (_fcm_unregistered_public_error() if unregistered else detail)
         event = {
             "notificationId": notification_id,
-            "state": "fcm_sent" if ok else "fcm_failed",
+            "state": "fcm_sent" if ok else ("fcm_token_unregistered" if unregistered else "fcm_failed"),
             "delivered": False,
             "versionName": version_name,
             "versionCode": version_code,
@@ -640,7 +704,7 @@ def _send_core_worker_apk_update_pushes(manifest: dict, *, reason: str = "apk_pu
             "workerId": _safe_short_text(current.get("workerId"), 80),
             "installId": _safe_short_text(current.get("installId"), 80),
             "permission": _safe_short_text(current.get("permission"), 40),
-            "detail": "push FCM enviado pela VPS" if ok else detail,
+            "detail": event_detail,
         }
         with contextlib.suppress(Exception):
             with app.test_request_context(headers={"X-Internal-Core-Worker": "fcm"}):

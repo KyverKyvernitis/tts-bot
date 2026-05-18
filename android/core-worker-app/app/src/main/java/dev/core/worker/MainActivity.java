@@ -68,7 +68,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.19";
+    private static final String APP_VERSION = "0.5.20";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -1506,6 +1506,10 @@ public class MainActivity extends Activity {
     }
 
     private void sendInternalRuntimeHeartbeat(boolean showResult, String reason) {
+        new Thread(() -> sendInternalRuntimeHeartbeatInternal(showResult, reason), "core-worker-apk-heartbeat").start();
+    }
+
+    private void sendInternalRuntimeHeartbeatInternal(boolean showResult, String reason) {
         String serverUrl = normalizedServerUrl();
         if (serverUrl.isEmpty()) {
             internalRuntimeOnline = false;
@@ -1549,6 +1553,7 @@ public class MainActivity extends Activity {
                 internalRuntimeOnline = true;
                 internalRuntimeHeartbeatState = "online";
                 internalRuntimeLastError = "";
+                appStatusLastError = "";
                 internalRuntimeLastHeartbeatAt = System.currentTimeMillis();
                 appStatusLastSentAt = internalRuntimeLastHeartbeatAt;
                 vpsState = "ok";
@@ -1605,6 +1610,7 @@ public class MainActivity extends Activity {
                 internalLightJobsLastCount = count;
                 if (count <= 0) {
                     internalLightJobsState = "sem jobs pendentes";
+                    clearTransientApkNetworkError();
                     updateSystemChecklistText();
                     if (showResult) show("Runtime interno verificado. Nenhum job leve pendente.");
                     return;
@@ -1618,6 +1624,9 @@ public class MainActivity extends Activity {
                     postLightJobResult(serverUrl, job, result);
                 }
                 internalLightJobsState = "executados " + okCount + "/" + count;
+                if (okCount > 0) {
+                    clearTransientApkNetworkError();
+                }
                 updateSystemChecklistText();
                 if (showResult) show("Jobs leves do APK executados: " + okCount + "/" + count);
             } catch (Throwable exc) {
@@ -1627,6 +1636,17 @@ public class MainActivity extends Activity {
                 updateSystemChecklistText();
             }
         }, "core-worker-apk-light-jobs").start();
+    }
+
+    private void clearTransientApkNetworkError() {
+        String internal = internalRuntimeLastError == null ? "" : internalRuntimeLastError;
+        String app = appStatusLastError == null ? "" : appStatusLastError;
+        if (internal.contains("NetworkOnMainThreadException")) {
+            internalRuntimeLastError = "";
+        }
+        if (app.contains("NetworkOnMainThreadException")) {
+            appStatusLastError = "";
+        }
     }
 
     private JSONObject executeLightJob(JSONObject job) throws Exception {
@@ -1692,6 +1712,19 @@ public class MainActivity extends Activity {
                 payload.put("permission", hasNotificationPermission() ? "granted" : "missing");
                 HttpResult result = request("POST", serverUrl + "/core-worker/app/fcm-token", payload, null);
                 if (result.ok()) {
+                    boolean refreshRequired = false;
+                    try {
+                        JSONObject response = new JSONObject(result.body);
+                        JSONObject push = response.optJSONObject("push");
+                        refreshRequired = response.optBoolean("refreshRequired", false) || (push != null && push.optBoolean("refreshRequired", false));
+                    } catch (Throwable ignored) {
+                        refreshRequired = false;
+                    }
+                    if (refreshRequired) {
+                        markFcmState("renovando token", "VPS marcou o token antigo como inválido", false);
+                        refreshFcmTokenAfterServerReject(serverUrl, reason);
+                        return;
+                    }
                     markFcmState("ativo", "token registrado na VPS", false);
                     reportAppState("fcm_token_registered", "token FCM registrado na VPS");
                 } else {
@@ -1701,6 +1734,37 @@ public class MainActivity extends Activity {
                 markFcmState("token local · falha ao registrar", shortThrowable(err), false);
             }
         }, "core-worker-fcm-token").start();
+    }
+
+    private void refreshFcmTokenAfterServerReject(String serverUrl, String reason) {
+        if (!FCM_ENABLED_IN_APK) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long last = prefs.getLong("fcm_forced_refresh_at", 0L);
+        if (now - last < 10L * 60L * 1000L) {
+            markFcmState("aguardando token novo", "renovação recente já solicitada", false);
+            return;
+        }
+        prefs.edit().putLong("fcm_forced_refresh_at", now).apply();
+        try {
+            FirebaseMessaging.getInstance().deleteToken().addOnCompleteListener(task -> {
+                if (!task.isSuccessful()) {
+                    Throwable err = task.getException();
+                    markFcmState("token inválido · renovação falhou", err == null ? "deleteToken falhou" : shortThrowable(err), false);
+                    return;
+                }
+                prefs.edit()
+                        .remove("fcm_token")
+                        .putString("fcm_state", "renovando token")
+                        .apply();
+                fcmTokenPreview = "";
+                fcmState = "renovando token";
+                mainHandler.postDelayed(() -> safeStartupTask(() -> registerFcmTokenAsync((reason == null ? "server_rejected_token" : reason) + "_refresh")), 1800L);
+            });
+        } catch (Throwable err) {
+            markFcmState("token inválido · renovação indisponível", shortThrowable(err), false);
+        }
     }
 
     private String fcmCompactLabel() {
@@ -2637,8 +2701,7 @@ public class MainActivity extends Activity {
     private String[] prepareChecklistBlocks() {
         String server = normalizedServerUrl();
         try { batterySnapshot(); } catch (Throwable ignored) {}
-        try { networkSnapshot(server); } catch (Throwable ignored) {}
-
+        // Não faz ping/rede pesada aqui: este método roda na UI thread ao atualizar detalhes técnicos.
         String appBlock = "App\n"
                 + checkLine("APK", APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")") + "\n"
                 + checkLine("Push", fcmStatusLabel()) + "\n"
