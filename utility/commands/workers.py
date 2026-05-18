@@ -487,6 +487,11 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_native_boot_status",
     "apk_local_shell_probe",
     "apk_python_runtime_probe",
+    "apk_python_health_check",
+    "apk_python_runtime_info",
+    "apk_python_status_bundle",
+    "apk_python_storage_check",
+    "apk_python_log_summary",
 }
 CORE_WORKER_APP_JOB_LABELS = {
     "apk_ping": "ping interno",
@@ -515,6 +520,11 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_native_boot_status": "boot nativo",
     "apk_local_shell_probe": "shell controlado",
     "apk_python_runtime_probe": "python interno",
+    "apk_python_health_check": "Python health check",
+    "apk_python_runtime_info": "Python runtime info",
+    "apk_python_status_bundle": "Python status bundle",
+    "apk_python_storage_check": "Python storage check",
+    "apk_python_log_summary": "Python resumo de logs",
 }
 
 
@@ -2336,7 +2346,11 @@ class WorkersPanelView(discord.ui.LayoutView):
                 {"label": "Worker nativo", "value": "_apk_native_worker_status", "description": "Heartbeat direto do APK", "emoji": "📡", "panel_action": "apk_native_worker_status", "category": "apk", "apk_job_type": "apk_native_worker_status"},
                 {"label": "Boot nativo", "value": "_apk_native_boot_status", "description": "Sem Termux:Boot", "emoji": "🚀", "panel_action": "apk_native_boot_status", "category": "apk", "apk_job_type": "apk_native_boot_status"},
                 {"label": "Shell APK", "value": "_apk_local_shell_probe", "description": "Allowlist no sandbox", "emoji": "🧰", "panel_action": "apk_local_shell_probe", "category": "apk", "apk_job_type": "apk_local_shell_probe"},
-                {"label": "Python APK", "value": "_apk_python_runtime_probe", "description": "Base interna Python", "emoji": "🐍", "panel_action": "apk_python_runtime_probe", "category": "apk", "apk_job_type": "apk_python_runtime_probe"},
+                {"label": "Python APK", "value": "_apk_python_runtime_probe", "description": "Health check Python", "emoji": "🐍", "panel_action": "apk_python_runtime_probe", "category": "apk", "apk_job_type": "apk_python_runtime_probe"},
+                {"label": "Python runtime", "value": "_apk_python_runtime_info", "description": "Versão e módulos internos", "emoji": "🐍", "panel_action": "apk_python_runtime_info", "category": "apk", "apk_job_type": "apk_python_runtime_info"},
+                {"label": "Python status", "value": "_apk_python_status_bundle", "description": "Bundle gerado pelo Python", "emoji": "📦", "panel_action": "apk_python_status_bundle", "category": "apk", "apk_job_type": "apk_python_status_bundle"},
+                {"label": "Python storage", "value": "_apk_python_storage_check", "description": "Armazenamento via Python", "emoji": "💾", "panel_action": "apk_python_storage_check", "category": "apk", "apk_job_type": "apk_python_storage_check"},
+                {"label": "Python logs", "value": "_apk_python_log_summary", "description": "Resumo local de jobs", "emoji": "🧾", "panel_action": "apk_python_log_summary", "category": "apk", "apk_job_type": "apk_python_log_summary"},
                 {"label": "Renomear celular", "value": "_rename_worker", "description": "Troca o nome exibido", "emoji": "✏️", "panel_action": "rename", "category": "organize"},
                 {"label": "Editar funções", "value": "_edit_roles", "description": "Perfil + extras/remoções", "emoji": "🧩", "panel_action": "roles", "category": "organize"},
             ])

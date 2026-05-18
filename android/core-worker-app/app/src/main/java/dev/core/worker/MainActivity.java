@@ -46,6 +46,10 @@ import androidx.core.content.FileProvider;
 import com.google.firebase.FirebaseApp;
 import com.google.firebase.messaging.FirebaseMessaging;
 
+import com.chaquo.python.PyObject;
+import com.chaquo.python.Python;
+import com.chaquo.python.android.AndroidPlatform;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -69,7 +73,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.26";
+    private static final String APP_VERSION = "0.5.27";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -152,7 +156,7 @@ public class MainActivity extends Activity {
     private volatile boolean localAgentOnline = false;
     private volatile String localAgentVersion = "";
     private volatile String localAgentProfile = "";
-    private volatile String runtimeMode = "hybrid";
+    private volatile String runtimeMode = "apk-native-python-first";
     private volatile String internalRuntimeState = "não preparado";
     private volatile String internalRuntimePath = "";
     private volatile boolean internalRuntimeOnline = false;
@@ -197,7 +201,12 @@ public class MainActivity extends Activity {
     private volatile long nativeWorkerLastHeartbeatAt = 0L;
     private volatile String nativeBootSummary = "boot nativo aguardando";
     private volatile String nativeShellSummary = "shell controlado aguardando";
-    private volatile String nativePythonSummary = "python interno em preparação";
+    private volatile String nativePythonSummary = "python interno aguardando primeiro teste";
+    private volatile boolean nativePythonAvailable = false;
+    private volatile String nativePythonVersion = "";
+    private volatile long nativePythonLastRunAt = 0L;
+    private volatile String nativePythonLastScript = "";
+    private volatile String nativePythonLastError = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -1536,10 +1545,14 @@ public class MainActivity extends Activity {
             health.put("created_by", "core-worker-apk");
             health.put("summary", "Runtime nativo preparado no sandbox do app");
             writeTextFile(new File(runtimeDir, "native-health.json"), health.toString());
-            writeTextFile(new File(pythonDir, "health_check.py"), "import json\nprint(json.dumps({'ok': True, 'runtime': 'core-worker-python-scaffold'}))\n");
+            writeTextFile(new File(pythonDir, "runtime-marker.json"), new JSONObject()
+                    .put("ok", true)
+                    .put("runtime", "chaquopy-embedded-python")
+                    .put("arbitraryCode", false)
+                    .toString());
             nativeBootSummary = "boot receiver nativo pronto";
             nativeShellSummary = "shell controlado pronto";
-            nativePythonSummary = "base Python preparada · aguardando runtime embutido";
+            nativePythonSummary = "Python Chaquopy preparado · aguardando health check";
             if (prefs.getBoolean("paired_via_native_apk", false) && !prefs.getString("worker_token", "").trim().isEmpty()) {
                 nativeWorkerState = "pareado direto · aguardando heartbeat";
             }
@@ -1582,7 +1595,7 @@ public class MainActivity extends Activity {
             payload.put("endpoint", "apk://" + installId());
             putProfilePayload(payload, profile);
             payload.put("roles", new JSONArray().put("apk-native").put("diagnostics").put("internal-jobs"));
-            payload.put("capabilities", new JSONArray().put("apk-native").put("android-status").put("native-boot").put("safe-shell-probe").put("python-scaffold"));
+            payload.put("capabilities", new JSONArray().put("apk-native").put("android-status").put("native-boot").put("safe-shell-probe").put("python-embedded"));
             payload.put("supported_tasks", new JSONArray());
             payload.put("app_jobs", supportedLightJobsArray());
             JSONObject status = payload.optJSONObject("status");
@@ -1590,9 +1603,9 @@ public class MainActivity extends Activity {
             status.put("apk_native_worker", true);
             status.put("termux_required_now", false);
             status.put("termux_role", "fallback-temporario");
-            status.put("migration_stage", "apk-native-runtime-phase1");
+            status.put("migration_stage", "apk-native-runtime-python-phase2");
             status.put("native_shell", "allowlist-probe");
-            status.put("python_runtime", "scaffold");
+            status.put("python_runtime", nativePythonAvailable ? "embedded-ok" : "embedded-pending");
             safePutPayload(payload, "status", status);
             safePutPayload(payload, "battery", batterySnapshot());
             safePutPayload(payload, "network", networkSnapshot(serverUrl));
@@ -1643,7 +1656,7 @@ public class MainActivity extends Activity {
             payload.put("version", APP_VERSION);
             payload.put("source", "core-worker-apk-native");
             payload.put("roles", new JSONArray().put("apk-native").put("diagnostics").put("internal-jobs"));
-            payload.put("capabilities", new JSONArray().put("apk-native").put("android-status").put("native-boot").put("safe-shell-probe").put("python-scaffold"));
+            payload.put("capabilities", new JSONArray().put("apk-native").put("android-status").put("native-boot").put("safe-shell-probe").put("python-embedded"));
             payload.put("supported_tasks", new JSONArray());
             payload.put("app_jobs", supportedLightJobsArray());
             safePutPayload(payload, "battery", batterySnapshot());
@@ -1766,20 +1779,127 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject pythonRuntimeProbeSnapshot() throws Exception {
-        File pythonDir = new File(new File(getFilesDir(), "core-runtime"), "python");
-        if (!pythonDir.exists()) pythonDir.mkdirs();
-        File health = new File(pythonDir, "health_check.py");
-        if (!health.exists()) {
-            writeTextFile(health, "import json\nprint(json.dumps({'ok': True, 'runtime': 'core-worker-python-scaffold'}))\n");
+        return runEmbeddedPythonJob("health_check", new JSONObject().put("probe", true));
+    }
+
+    private JSONObject pythonRuntimeInfoSnapshot() throws Exception {
+        return runEmbeddedPythonJob("runtime_info", new JSONObject().put("probe", true));
+    }
+
+    private JSONObject pythonStorageCheckSnapshot() throws Exception {
+        return runEmbeddedPythonJob("storage_check", new JSONObject().put("probe", true));
+    }
+
+    private JSONObject pythonStatusBundleSnapshot(String serverUrl) throws Exception {
+        JSONObject extra = new JSONObject();
+        safePutPayload(extra, "diagnostic", diagnosticSnapshot(serverUrl));
+        safePutPayload(extra, "bundle", collectStatusBundle(serverUrl));
+        return runEmbeddedPythonJob("status_bundle", extra);
+    }
+
+    private JSONObject pythonLogSummarySnapshot() throws Exception {
+        JSONObject extra = new JSONObject();
+        safePutPayload(extra, "history", internalJobHistoryJson());
+        extra.put("historyText", internalJobHistoryText());
+        return runEmbeddedPythonJob("log_summarizer", extra);
+    }
+
+    private JSONObject buildPythonJobContext(JSONObject extra) throws Exception {
+        JSONObject ctx = new JSONObject();
+        ctx.put("appVersion", APP_VERSION);
+        ctx.put("appVersionCode", BuildConfig.VERSION_CODE);
+        ctx.put("installId", installId());
+        ctx.put("workerId", effectiveWorkerId());
+        ctx.put("deviceName", prefs == null ? "" : prefs.getString("device_name", defaultDeviceName()));
+        ctx.put("filesDir", getFilesDir().getAbsolutePath());
+        ctx.put("cacheDir", getCacheDir().getAbsolutePath());
+        ctx.put("runtimeDir", new File(getFilesDir(), "core-runtime").getAbsolutePath());
+        safePutPayload(ctx, "battery", batterySnapshot());
+        safePutPayload(ctx, "network", networkSnapshot(normalizedServerUrl()));
+        safePutPayload(ctx, "runtime", runtimeSnapshot());
+        safePutPayload(ctx, "status", statusSnapshot());
+        safePutPayload(ctx, "history", internalJobHistoryJson());
+        if (extra != null) {
+            JSONArray names = extra.names();
+            if (names != null) {
+                for (int i = 0; i < names.length(); i++) {
+                    String key = names.optString(i, "");
+                    if (!key.isEmpty()) ctx.put(key, extra.opt(key));
+                }
+            }
         }
-        JSONObject python = new JSONObject();
-        python.put("embedded", false);
-        python.put("scaffoldReady", health.exists());
-        python.put("script", health.getName());
-        python.put("path", pythonDir.getAbsolutePath());
-        python.put("arbitraryCode", false);
-        python.put("summary", "base Python preparada · runtime embutido pendente");
-        return python;
+        return ctx;
+    }
+
+    private JSONObject runEmbeddedPythonJob(String script, JSONObject extra) throws Exception {
+        long startedAt = System.currentTimeMillis();
+        JSONObject out = new JSONObject();
+        String cleanScript = script == null ? "" : script.trim();
+        if (!isAllowedPythonScript(cleanScript)) {
+            out.put("ok", false);
+            out.put("embedded", true);
+            out.put("script", cleanScript);
+            out.put("arbitraryCode", false);
+            out.put("error", "script Python não permitido pelo APK");
+            out.put("summary", "Python bloqueado por allowlist");
+            return out;
+        }
+        try {
+            if (!Python.isStarted()) {
+                Python.start(new AndroidPlatform(this));
+            }
+            Python py = Python.getInstance();
+            PyObject sys = py.getModule("sys");
+            nativePythonVersion = sys.get("version").toString();
+            PyObject module = py.getModule("coreworker." + cleanScript);
+            JSONObject context = buildPythonJobContext(extra);
+            PyObject response = module.callAttr("run", context.toString());
+            String raw = sanitizeCommandOutput(response == null ? "" : response.toString(), 8000);
+            try {
+                out = new JSONObject(raw);
+            } catch (Throwable parseError) {
+                out = new JSONObject();
+                out.put("ok", false);
+                out.put("raw", raw);
+                out.put("error", "Python retornou JSON inválido: " + shortThrowable(parseError));
+            }
+            out.put("embedded", true);
+            out.put("script", cleanScript);
+            out.put("module", "coreworker." + cleanScript);
+            out.put("pythonVersion", nativePythonVersion);
+            out.put("arbitraryCode", false);
+            out.put("durationMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+            nativePythonAvailable = out.optBoolean("ok", true);
+            nativePythonLastRunAt = System.currentTimeMillis();
+            nativePythonLastScript = cleanScript;
+            nativePythonLastError = out.optBoolean("ok", false) ? "" : out.optString("error", "erro Python");
+            nativePythonSummary = out.optBoolean("ok", false)
+                    ? "Python Chaquopy ok · " + cleanScript
+                    : "Python Chaquopy falhou · " + out.optString("error", "erro");
+            return out;
+        } catch (Throwable exc) {
+            nativePythonAvailable = false;
+            nativePythonLastRunAt = System.currentTimeMillis();
+            nativePythonLastScript = cleanScript;
+            nativePythonLastError = shortThrowable(exc);
+            nativePythonSummary = "Python Chaquopy indisponível · " + nativePythonLastError;
+            out.put("ok", false);
+            out.put("embedded", true);
+            out.put("script", cleanScript);
+            out.put("arbitraryCode", false);
+            out.put("durationMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+            out.put("error", nativePythonLastError);
+            out.put("summary", nativePythonSummary);
+            return out;
+        }
+    }
+
+    private boolean isAllowedPythonScript(String script) {
+        return "health_check".equals(script)
+                || "runtime_info".equals(script)
+                || "status_bundle".equals(script)
+                || "storage_check".equals(script)
+                || "log_summarizer".equals(script);
     }
 
 
@@ -1795,18 +1915,18 @@ public class MainActivity extends Activity {
             File state = new File(runtimeDir, "runtime-state.json");
             JSONObject meta = new JSONObject();
             meta.put("ok", true);
-            meta.put("mode", "apk-native-first");
+            meta.put("mode", "apk-native-python-first");
             meta.put("active", true);
             meta.put("internal_runtime", "apk-native-runtime");
             meta.put("apk_version", APP_VERSION);
             meta.put("version_code", BuildConfig.VERSION_CODE);
             meta.put("created_by", "core-worker-apk");
             meta.put("summary", "Runtime interno ativo para status, boot, jobs seguros e shell controlado no sandbox do app. Termux fica só como fallback temporário.");
-            meta.put("migration_stage", "apk-native-first");
+            meta.put("migration_stage", "apk-native-python-first");
             writeTextFile(state, meta.toString());
             internalRuntimeState = "preparado · heartbeat ativo";
             internalRuntimePath = runtimeDir.getAbsolutePath();
-            runtimeMode = "apk-native-first";
+            runtimeMode = "apk-native-python-first";
         } catch (Throwable exc) {
             internalRuntimeState = "falha ao preparar · " + exc.getClass().getSimpleName();
             internalRuntimeOnline = false;
@@ -1829,7 +1949,7 @@ public class MainActivity extends Activity {
 
     private JSONObject runtimeSnapshot() throws Exception {
         JSONObject runtime = new JSONObject();
-        runtime.put("mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-first" : runtimeMode.trim());
+        runtime.put("mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-first" : runtimeMode.trim());
         runtime.put("current_worker", nativeWorkerOnline ? "apk-native-worker" : (localAgentOnline ? "termux-fallback" : "apk-internal-heartbeat"));
         runtime.put("internal_runtime", "apk-native-runtime");
         runtime.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
@@ -1841,8 +1961,8 @@ public class MainActivity extends Activity {
         runtime.put("termux_required_now", false);
         runtime.put("termux_fallback_available", localAgentOnline);
         runtime.put("advanced_jobs_require_termux", true);
-        runtime.put("jobs_runtime", "apk-native-first");
-        runtime.put("migration_stage", "apk-native-runtime-phase1");
+        runtime.put("jobs_runtime", "apk-native-python-first");
+        runtime.put("migration_stage", "apk-native-runtime-python-phase2");
         runtime.put("light_jobs_state", internalLightJobsState == null ? "" : internalLightJobsState);
         runtime.put("light_jobs_last_check_at", internalLightJobsLastCheckAt);
         runtime.put("light_jobs_last_count", internalLightJobsLastCount);
@@ -1861,6 +1981,11 @@ public class MainActivity extends Activity {
         runtime.put("native_boot_summary", nativeBootSummary == null ? "" : nativeBootSummary);
         runtime.put("native_shell_summary", nativeShellSummary == null ? "" : nativeShellSummary);
         runtime.put("native_python_summary", nativePythonSummary == null ? "" : nativePythonSummary);
+        runtime.put("native_python_available", nativePythonAvailable);
+        runtime.put("native_python_version", nativePythonVersion == null ? "" : nativePythonVersion);
+        runtime.put("native_python_last_script", nativePythonLastScript == null ? "" : nativePythonLastScript);
+        runtime.put("native_python_last_error", nativePythonLastError == null ? "" : nativePythonLastError);
+        runtime.put("native_python_last_run_at", nativePythonLastRunAt);
         runtime.put("summary", "APK assume status, boot, jobs internos e shell controlado; Termux fica como fallback para jobs avançados/build.");
         return runtime;
     }
@@ -1888,7 +2013,7 @@ public class MainActivity extends Activity {
             payload.put("state", "internal_heartbeat");
             payload.put("reason", reason == null ? "manual" : reason);
             payload.put("source", "core-worker-apk-internal-runtime");
-            payload.put("runtime_mode", "apk-native-first");
+            payload.put("runtime_mode", "apk-native-python-first");
             payload.put("internal_runtime", "apk-native-runtime");
             payload.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
             payload.put("internal_runtime_path", internalRuntimePath == null ? "" : internalRuntimePath);
@@ -1902,7 +2027,7 @@ public class MainActivity extends Activity {
             payload.put("localAgentOnline", localAgentOnline);
             payload.put("termuxWorkerOnline", localAgentOnline);
             payload.put("nativeWorkerOnline", nativeWorkerOnline);
-            payload.put("jobsRuntime", "apk-native-first");
+            payload.put("jobsRuntime", "apk-native-python-first");
             safePutPayload(payload, "battery", batterySnapshot());
             safePutPayload(payload, "network", networkSnapshot(serverUrl));
             safePutPayload(payload, "update", updateSnapshot());
@@ -2087,7 +2212,12 @@ public class MainActivity extends Activity {
                 .put("apk_native_worker_status")
                 .put("apk_native_boot_status")
                 .put("apk_local_shell_probe")
-                .put("apk_python_runtime_probe");
+                .put("apk_python_runtime_probe")
+                .put("apk_python_health_check")
+                .put("apk_python_runtime_info")
+                .put("apk_python_status_bundle")
+                .put("apk_python_storage_check")
+                .put("apk_python_log_summary");
     }
 
     private String summarizeLightJobs(JSONArray jobs, int okCount, int count) {
@@ -2448,13 +2578,67 @@ public class MainActivity extends Activity {
             result.put("message", "shell controlado do APK verificado");
             return result;
         }
-        if ("apk_python_runtime_probe".equals(type)) {
+        if ("apk_python_runtime_probe".equals(type) || "apk_python_health_check".equals(type)) {
             JSONObject python = pythonRuntimeProbeSnapshot();
             safePutPayload(result, "python", python);
-            nativePythonSummary = python.optString("summary", "python interno preparado");
+            nativePythonSummary = python.optString("summary", "Python interno verificado");
             internalDiagnosticsSummary = nativePythonSummary;
             internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "base do Python interno verificada pelo APK");
+            if (!python.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", python.optString("error", "Python interno falhou"));
+            }
+            result.put("message", python.optBoolean("ok", false) ? "Python interno real verificado pelo APK" : "Python interno falhou no APK");
+            return result;
+        }
+        if ("apk_python_runtime_info".equals(type)) {
+            JSONObject python = pythonRuntimeInfoSnapshot();
+            safePutPayload(result, "python", python);
+            nativePythonSummary = python.optString("summary", "runtime Python reportado");
+            internalDiagnosticsSummary = nativePythonSummary;
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!python.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", python.optString("error", "runtime Python falhou"));
+            }
+            result.put("message", python.optBoolean("ok", false) ? "informações do runtime Python enviadas" : "runtime Python indisponível");
+            return result;
+        }
+        if ("apk_python_status_bundle".equals(type)) {
+            JSONObject python = pythonStatusBundleSnapshot(serverUrl);
+            safePutPayload(result, "python", python);
+            internalDiagnosticsSummary = python.optString("summary", "status Python enviado");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!python.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", python.optString("error", "status Python falhou"));
+            }
+            result.put("message", python.optBoolean("ok", false) ? "bundle de status gerado pelo Python interno" : "bundle Python falhou");
+            return result;
+        }
+        if ("apk_python_storage_check".equals(type)) {
+            JSONObject python = pythonStorageCheckSnapshot();
+            safePutPayload(result, "python", python);
+            internalStorageSummary = python.optString("summary", "storage Python verificado");
+            internalDiagnosticsSummary = internalStorageSummary;
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!python.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", python.optString("error", "storage Python falhou"));
+            }
+            result.put("message", python.optBoolean("ok", false) ? "armazenamento verificado pelo Python interno" : "checagem Python de armazenamento falhou");
+            return result;
+        }
+        if ("apk_python_log_summary".equals(type)) {
+            JSONObject python = pythonLogSummarySnapshot();
+            safePutPayload(result, "python", python);
+            internalDiagnosticsSummary = python.optString("summary", "resumo Python de logs enviado");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!python.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", python.optString("error", "resumo Python falhou"));
+            }
+            result.put("message", python.optBoolean("ok", false) ? "histórico resumido pelo Python interno" : "resumo Python de logs falhou");
             return result;
         }
         if ("apk_download_small".equals(type)) {
@@ -2594,7 +2778,7 @@ public class MainActivity extends Activity {
 
     private JSONObject workerBridgeStatusSnapshot() throws Exception {
         JSONObject bridge = new JSONObject();
-        bridge.put("mode", "apk-native-first");
+        bridge.put("mode", "apk-native-python-first");
         bridge.put("apk_internal_online", internalRuntimeOnline);
         bridge.put("apk_native_worker_online", nativeWorkerOnline);
         bridge.put("termux_worker_online", localAgentOnline);
@@ -3270,11 +3454,11 @@ public class MainActivity extends Activity {
         }
         profileStatus.put("profile", profile);
         profileStatus.put("profile_label", profileLabel(profile));
-        profileStatus.put("apk_scope", "native-runtime-phase1");
-        profileStatus.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "hybrid" : runtimeMode);
+        profileStatus.put("apk_scope", "native-runtime-python-phase2");
+        profileStatus.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-first" : runtimeMode);
         profileStatus.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
         profileStatus.put("runtime", runtimeSnapshot());
-        payload.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "hybrid" : runtimeMode);
+        payload.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-first" : runtimeMode);
         payload.put("status", profileStatus);
     }
 
@@ -3335,13 +3519,17 @@ public class MainActivity extends Activity {
         status.put("native_boot_summary", nativeBootSummary == null ? "" : nativeBootSummary);
         status.put("native_shell_summary", nativeShellSummary == null ? "" : nativeShellSummary);
         status.put("native_python_summary", nativePythonSummary == null ? "" : nativePythonSummary);
+        status.put("native_python_available", nativePythonAvailable);
+        status.put("native_python_version", nativePythonVersion == null ? "" : nativePythonVersion);
+        status.put("native_python_last_script", nativePythonLastScript == null ? "" : nativePythonLastScript);
+        status.put("native_python_last_error", nativePythonLastError == null ? "" : nativePythonLastError);
         status.put("termux_installed", isPackageInstalled("com.termux"));
         status.put("termux_api_installed", isPackageInstalled("com.termux.api"));
         status.put("termux_boot_installed", isPackageInstalled("com.termux.boot"));
         status.put("tailscale_installed", isPackageInstalled("com.tailscale.ipn"));
         status.put("fcm_state", fcmState);
         status.put("fcm_token_preview", fcmTokenPreview);
-        status.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "hybrid" : runtimeMode);
+        status.put("runtime_mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-first" : runtimeMode);
         status.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
         status.put("internal_runtime_online", internalRuntimeOnline);
         status.put("internal_runtime_heartbeat_state", internalRuntimeHeartbeatState == null ? "" : internalRuntimeHeartbeatState);
@@ -3951,7 +4139,7 @@ public class MainActivity extends Activity {
                 + checkLine("Fila", emptyFallback(internalLightJobsQueueSummary, "aguardando")) + "\n"
                 + checkLine("Jobs reais", nativeWorkerOnline ? "APK nativo" : "APK interno · fallback Termux") + "\n"
                 + checkLine("Shell", emptyFallback(nativeShellSummary, "controlado aguardando")) + "\n"
-                + checkLine("Python", emptyFallback(nativePythonSummary, "preparando"));
+                + checkLine("Python", emptyFallback(nativePythonSummary, "aguardando health check"));
 
         String diagAge = "pendente";
         if (internalDiagnosticsLastAt > 0L) {
@@ -3980,8 +4168,9 @@ public class MainActivity extends Activity {
                 + checkLine("Status aparelho", "APK nativo") + "\n"
                 + checkLine("Boot/autostart", emptyFallback(nativeBootSummary, "APK nativo")) + "\n"
                 + checkLine("Jobs internos", "APK nativo") + "\n"
+                + checkLine("Jobs Python", nativePythonAvailable ? "APK + Python interno" : "aguardando health check") + "\n"
                 + checkLine("Shell", emptyFallback(nativeShellSummary, "controlado aguardando")) + "\n"
-                + checkLine("Python", emptyFallback(nativePythonSummary, "base preparada")) + "\n"
+                + checkLine("Python", emptyFallback(nativePythonSummary, "runtime embutido aguardando")) + "\n"
                 + checkLine("Termux", localAgentOnline ? "fallback temporário online" : "não exigido para status/boot/jobs internos") + "\n"
                 + checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "VPN externa ainda é etapa futura") + "\n"
                 + checkLine("VPS", hasPairing() ? "conexão direta salva" : "pareamento pendente");

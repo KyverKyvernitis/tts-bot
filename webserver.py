@@ -633,6 +633,11 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_native_boot_status",
     "apk_local_shell_probe",
     "apk_python_runtime_probe",
+    "apk_python_health_check",
+    "apk_python_runtime_info",
+    "apk_python_status_bundle",
+    "apk_python_storage_check",
+    "apk_python_log_summary",
 }
 
 CORE_WORKER_APP_SAFE_JOB_TYPES = (
@@ -674,6 +679,11 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_native_boot_status": "boot nativo",
     "apk_local_shell_probe": "shell controlado",
     "apk_python_runtime_probe": "python interno",
+    "apk_python_health_check": "Python health check",
+    "apk_python_runtime_info": "Python runtime info",
+    "apk_python_status_bundle": "Python status bundle",
+    "apk_python_storage_check": "Python storage check",
+    "apk_python_log_summary": "Python resumo de logs",
 }
 
 def _core_worker_app_normalize_job_type(job_type: object) -> str:
@@ -724,7 +734,7 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
         profile = _safe_short_text(payload.get("profile"), 40).lower()
         if profile in {"leve", "midia", "media", "normal", "completo", "builder", "turbo", "bedrock"}:
             clean["profile"] = profile
-    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle", "apk_refresh_runtime", "apk_force_status_bundle", "apk_test_notification", "apk_repair_local_state", "apk_reset_job_history", "apk_trim_cache", "apk_sync_profile_now", "apk_verify_update_state", "apk_native_worker_status", "apk_native_boot_status", "apk_local_shell_probe", "apk_python_runtime_probe"}:
+    elif job_type in {"apk_upload_report", "apk_upload_app_logs", "apk_job_history", "apk_sync_runtime_state", "apk_cache_cleanup", "apk_device_diagnostic", "apk_network_diagnostic", "apk_push_diagnostic", "apk_update_diagnostic", "apk_runtime_diagnostic", "apk_storage_diagnostic", "apk_worker_bridge_status", "apk_collect_status_bundle", "apk_refresh_runtime", "apk_force_status_bundle", "apk_test_notification", "apk_repair_local_state", "apk_reset_job_history", "apk_trim_cache", "apk_sync_profile_now", "apk_verify_update_state", "apk_native_worker_status", "apk_native_boot_status", "apk_local_shell_probe", "apk_python_runtime_probe", "apk_python_health_check", "apk_python_runtime_info", "apk_python_status_bundle", "apk_python_storage_check", "apk_python_log_summary"}:
         detail = _safe_short_text(payload.get("detail") or payload.get("reason"), 80)
         if detail:
             clean["detail"] = detail

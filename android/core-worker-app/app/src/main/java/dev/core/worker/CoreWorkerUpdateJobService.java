@@ -166,7 +166,7 @@ public class CoreWorkerUpdateJobService extends JobService {
             payload.put("version", BuildConfig.VERSION_NAME);
             payload.put("source", "core-worker-apk-native-background");
             payload.put("roles", new org.json.JSONArray().put("apk-native").put("diagnostics").put("internal-jobs"));
-            payload.put("capabilities", new org.json.JSONArray().put("apk-native").put("android-status").put("native-boot"));
+            payload.put("capabilities", new org.json.JSONArray().put("apk-native").put("android-status").put("native-boot").put("python-embedded"));
             payload.put("supported_tasks", new org.json.JSONArray());
             JSONObject status = new JSONObject();
             status.put("apk_native_worker", true);
@@ -174,7 +174,8 @@ public class CoreWorkerUpdateJobService extends JobService {
             status.put("termux_required_now", false);
             status.put("termux_role", "fallback-temporario");
             status.put("native_heartbeat_reason", reason == null ? "scheduled" : reason);
-            status.put("runtime_mode", "apk-native-first");
+            status.put("runtime_mode", "apk-native-python-first");
+            status.put("python_runtime", "embedded-background-aware");
             payload.put("status", status);
             request("POST", serverUrl + "/core-worker/heartbeat", payload, token);
         } catch (Throwable ignored) {
@@ -194,14 +195,15 @@ public class CoreWorkerUpdateJobService extends JobService {
         payload.put("workerId", prefs().getString("worker_id", ""));
         payload.put("installId", installId());
         payload.put("deviceName", prefs().getString("device_name", ""));
-        payload.put("runtime_mode", "apk-native-first");
-        payload.put("internal_runtime", "apk-native-background");
-        payload.put("jobsRuntime", "apk-native-first");
+        payload.put("runtime_mode", "apk-native-python-first");
+        payload.put("internal_runtime", "apk-native-background-python-aware");
+        payload.put("jobsRuntime", "apk-native-python-first");
         JSONObject status = new JSONObject();
         status.put("app", "background");
         status.put("apk_companion", true);
         status.put("android_sdk", Build.VERSION.SDK_INT);
         status.put("native_boot", true);
+        status.put("python_runtime", "embedded-background-aware");
         status.put("termux_required_now", false);
         status.put("termux_role", "fallback-temporario");
         status.put("notification_permission", hasNotificationPermission() ? "granted" : "missing");
