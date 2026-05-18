@@ -540,9 +540,28 @@ A VPS não depende desse perfil para funcionar. Se o celular estiver offline, o 
 
 ## Patch 61 — hotfix jobs leves + FCM token cleanup
 
-- O APK passa para `0.5.20` / `versionCode 35`.
+- O APK passa para `0.5.21` / `versionCode 36`.
 - Heartbeat/status interno do APK agora roda em thread de background, evitando `NetworkOnMainThreadException`.
 - A tela de detalhes não faz ping TCP durante renderização; pings ficam em fluxos de background.
 - Resultados bons de jobs leves limpam erro transitório antigo de `NetworkOnMainThreadException`.
 - Se a VPS receber `UNREGISTERED`/HTTP 404 do FCM, o token é invalidado e o app força renovação segura do token.
 - O painel principal não mostra mais JSON bruto de erro FCM nem último erro técnico do APK; detalhes ficam recolhidos.
+
+## Patch 62 — jobs internos seguros do APK
+
+- O APK passa para `0.5.21` / `versionCode 36`.
+- O runtime interno executa jobs seguros em lista permitida, sem shell, sem Termux e sem build.
+- Jobs suportados nesta etapa:
+  - `apk_ping`;
+  - `apk_status_refresh`;
+  - `apk_report_logs`;
+  - `apk_diagnostic`;
+  - `apk_check_update`;
+  - `apk_test_vps_connection`;
+  - `apk_upload_report`;
+  - `apk_clear_app_cache`;
+  - `apk_sync_profile`;
+  - `apk_download_small` limitado a 256 KiB e restrito à própria VPS.
+- Jobs reais continuam no Termux/phone-worker.
+- O APK não executa comandos arbitrários recebidos da VPS.
+- A VPS continua só orquestrando; build Android pesado segue no phone worker.

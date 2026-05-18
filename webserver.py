@@ -468,6 +468,54 @@ def _core_worker_app_jobs_key(payload: dict) -> str:
     return install_id or worker_id or "unknown"
 
 
+CORE_WORKER_APP_SAFE_JOB_TYPES = {
+    "apk_ping",
+    "apk_status_refresh",
+    "apk_report_logs",
+    "apk_diagnostic",
+    "apk_check_update",
+    "apk_test_vps_connection",
+    "apk_upload_report",
+    "apk_clear_app_cache",
+    "apk_sync_profile",
+    "apk_download_small",
+}
+
+
+def _core_worker_app_safe_job_payload(job: dict) -> dict:
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    job_type = _safe_short_text(job.get("type"), 48)
+    clean: dict = {}
+    if job_type == "apk_download_small":
+        raw_url = _safe_short_text(payload.get("url") or payload.get("path") or "/core-worker/app/latest.json", 220)
+        # O APK também valida host/protocolo. Aqui só removemos entradas obviamente perigosas.
+        if raw_url.startswith("/") or raw_url.startswith("http://") or raw_url.startswith("https://"):
+            clean["url"] = raw_url
+        try:
+            max_bytes = int(payload.get("maxBytes") or payload.get("max_bytes") or 262144)
+        except Exception:
+            max_bytes = 262144
+        clean["maxBytes"] = max(1024, min(max_bytes, 262144))
+    elif job_type == "apk_sync_profile":
+        profile = _safe_short_text(payload.get("profile"), 40).lower()
+        if profile in {"leve", "midia", "media", "normal", "completo", "builder", "turbo", "bedrock"}:
+            clean["profile"] = profile
+    return clean
+
+
+def _core_worker_app_public_job(job: dict, now: int) -> dict:
+    out = {
+        "id": _safe_short_text(job.get("id"), 64),
+        "type": _safe_short_text(job.get("type"), 48),
+        "reason": _safe_short_text(job.get("reason"), 80),
+        "issuedAt": int(job.get("issuedAt") or now),
+        "title": _safe_short_text(job.get("title"), 80),
+    }
+    payload = _core_worker_app_safe_job_payload(job)
+    if payload:
+        out["payload"] = payload
+    return out
+
 def _core_worker_app_jobs_fetch(payload: dict) -> dict:
     now = int(time.time())
     if not isinstance(payload, dict):
@@ -476,9 +524,9 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
     install_id = _safe_short_text(payload.get("installId") or payload.get("install_id"), 80)
     worker_id = _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80)
     supported = payload.get("supportedJobs") if isinstance(payload.get("supportedJobs"), list) else []
-    supported_set = {str(item) for item in supported if str(item or "").strip()}
+    supported_set = {str(item) for item in supported if str(item or "").strip()} & set(CORE_WORKER_APP_SAFE_JOB_TYPES)
     if not supported_set:
-        supported_set = {"apk_ping", "apk_status_refresh", "apk_report_logs"}
+        supported_set = set(CORE_WORKER_APP_SAFE_JOB_TYPES)
     path = _core_worker_app_jobs_path()
     with _core_worker_app_jobs_lock:
         try:
@@ -499,7 +547,7 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
             target_install = str(job.get("installId") or job.get("install_id") or "").strip()
             target_worker = str(job.get("workerId") or job.get("worker_id") or "").strip()
             job_type = _safe_short_text(job.get("type"), 48)
-            if job_type not in supported_set:
+            if job_type not in CORE_WORKER_APP_SAFE_JOB_TYPES or job_type not in supported_set:
                 remaining.append(job)
                 continue
             matches = (target_install and target_install == install_id) or (target_worker and target_worker == worker_id) or (not target_install and not target_worker)
@@ -512,13 +560,24 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
             else:
                 remaining.append(job)
         auto_interval = int(os.getenv("CORE_WORKER_APP_AUTO_PING_INTERVAL_SECONDS", "900") or "900")
-        try:
-            last_auto = int(auto_ping.get(key) or 0)
-        except Exception:
-            last_auto = 0
-        if not deliver and auto_interval > 0 and now - last_auto >= auto_interval and "apk_ping" in supported_set:
-            deliver.append({"id": f"auto-apk-ping-{key[:16]}-{now}", "type": "apk_ping", "reason": "auto-health-check", "issuedAt": now, "title": "Verificação leve do APK"})
-            auto_ping[key] = now
+        auto_diag_interval = int(os.getenv("CORE_WORKER_APP_AUTO_DIAGNOSTIC_INTERVAL_SECONDS", "1800") or "1800")
+        auto_update_interval = int(os.getenv("CORE_WORKER_APP_AUTO_UPDATE_CHECK_INTERVAL_SECONDS", "2700") or "2700")
+
+        def _maybe_auto_job(kind: str, interval: int, title: str, reason: str) -> None:
+            if deliver or interval <= 0 or kind not in supported_set:
+                return
+            auto_key = f"{key}:{kind}"
+            try:
+                last = int(auto_ping.get(auto_key) or 0)
+            except Exception:
+                last = 0
+            if now - last >= interval:
+                deliver.append({"id": f"auto-{kind.replace('_', '-')}-{key[:16]}-{now}", "type": kind, "reason": reason, "issuedAt": now, "title": title})
+                auto_ping[auto_key] = now
+
+        _maybe_auto_job("apk_ping", auto_interval, "Verificação leve do APK", "auto-health-check")
+        _maybe_auto_job("apk_diagnostic", auto_diag_interval, "Diagnóstico interno seguro", "auto-diagnostic")
+        _maybe_auto_job("apk_check_update", auto_update_interval, "Checar atualização pelo APK", "auto-update-check")
         last_fetch[key] = {"at": now, "installId": install_id, "workerId": worker_id, "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48), "jobsReturned": len(deliver)}
         data["pending"] = remaining[-80:]
         data["results"] = results[-160:]
@@ -527,10 +586,8 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
         data["updatedAt"] = now
         data["ok"] = True
         _atomic_write_json(path, data, mode=0o600)
-    public_jobs = []
-    for job in deliver:
-        public_jobs.append({"id": _safe_short_text(job.get("id"), 64), "type": _safe_short_text(job.get("type"), 48), "reason": _safe_short_text(job.get("reason"), 80), "issuedAt": int(job.get("issuedAt") or now), "title": _safe_short_text(job.get("title"), 80)})
-    return {"ok": True, "jobs": public_jobs, "count": len(public_jobs), "jobsRuntime": "apk-light"}
+    public_jobs = [_core_worker_app_public_job(job, now) for job in deliver]
+    return {"ok": True, "jobs": public_jobs, "count": len(public_jobs), "jobsRuntime": "apk-safe-internal", "supported": sorted(CORE_WORKER_APP_SAFE_JOB_TYPES)}
 
 
 def _core_worker_app_jobs_result(payload: dict) -> dict:
@@ -542,7 +599,7 @@ def _core_worker_app_jobs_result(payload: dict) -> dict:
     if not job_id:
         raise ValueError("jobId ausente")
     result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-    record = {"receivedAt": now, "jobId": job_id, "type": job_type, "installId": _safe_short_text(payload.get("installId") or payload.get("install_id"), 80), "workerId": _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80), "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48), "appVersionCode": int(payload.get("appVersionCode") or payload.get("app_version_code") or 0), "ok": bool(result.get("ok")), "message": _safe_short_text(result.get("message"), 160), "error": _safe_short_text(result.get("error"), 160), "result": result}
+    record = {"receivedAt": now, "jobId": job_id, "type": job_type, "installId": _safe_short_text(payload.get("installId") or payload.get("install_id"), 80), "workerId": _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80), "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48), "appVersionCode": int(payload.get("appVersionCode") or payload.get("app_version_code") or 0), "ok": bool(result.get("ok")), "message": _safe_short_text(result.get("message") or result.get("summary"), 160), "error": _safe_short_text(result.get("error"), 160), "result": result}
     path = _core_worker_app_jobs_path()
     with _core_worker_app_jobs_lock:
         try:

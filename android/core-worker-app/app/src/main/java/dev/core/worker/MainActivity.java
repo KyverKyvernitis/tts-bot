@@ -68,7 +68,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.20";
+    private static final String APP_VERSION = "0.5.21";
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -179,6 +179,7 @@ public class MainActivity extends Activity {
     private volatile String internalLightJobsState = "aguardando primeira verificação";
     private volatile long internalLightJobsLastCheckAt = 0L;
     private volatile int internalLightJobsLastCount = 0;
+    private volatile String internalLightJobsLastSummary = "nenhum job executado ainda";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -1452,8 +1453,8 @@ public class MainActivity extends Activity {
             meta.put("apk_version", APP_VERSION);
             meta.put("version_code", BuildConfig.VERSION_CODE);
             meta.put("created_by", "core-worker-apk");
-            meta.put("summary", "Runtime interno ativo para heartbeat direto. Termux continua responsável por jobs reais nesta etapa.");
-            meta.put("migration_stage", "apk-heartbeat-no-jobs");
+            meta.put("summary", "Runtime interno ativo para heartbeat e jobs seguros sem shell. Termux continua responsável por jobs reais nesta etapa.");
+            meta.put("migration_stage", "apk-safe-internal-jobs");
             writeTextFile(state, meta.toString());
             internalRuntimeState = "preparado · heartbeat ativo";
             internalRuntimePath = runtimeDir.getAbsolutePath();
@@ -1495,7 +1496,8 @@ public class MainActivity extends Activity {
         runtime.put("light_jobs_state", internalLightJobsState == null ? "" : internalLightJobsState);
         runtime.put("light_jobs_last_check_at", internalLightJobsLastCheckAt);
         runtime.put("light_jobs_last_count", internalLightJobsLastCount);
-        runtime.put("summary", "APK já envia heartbeat/status direto e pode executar jobs leves sem shell; Termux continua responsável por jobs reais.");
+        runtime.put("light_jobs_last_summary", internalLightJobsLastSummary == null ? "" : internalLightJobsLastSummary);
+        runtime.put("summary", "APK já envia heartbeat/status direto e executa jobs internos seguros sem shell; Termux continua responsável por jobs reais.");
         return runtime;
     }
 
@@ -1595,7 +1597,7 @@ public class MainActivity extends Activity {
                 payload.put("installId", installId());
                 payload.put("workerId", emptyFallback(localAgentWorkerId, prefs.getString("worker_id", "")));
                 payload.put("reason", reason == null ? "background" : reason);
-                payload.put("supportedJobs", new JSONArray().put("apk_ping").put("apk_status_refresh").put("apk_report_logs"));
+                payload.put("supportedJobs", supportedLightJobsArray());
                 HttpResult response = request("POST", serverUrl + "/core-worker/app/jobs/fetch", payload, null);
                 internalLightJobsLastCheckAt = System.currentTimeMillis();
                 if (!response.ok()) {
@@ -1610,6 +1612,7 @@ public class MainActivity extends Activity {
                 internalLightJobsLastCount = count;
                 if (count <= 0) {
                     internalLightJobsState = "sem jobs pendentes";
+                    internalLightJobsLastSummary = "fila vazia";
                     clearTransientApkNetworkError();
                     updateSystemChecklistText();
                     if (showResult) show("Runtime interno verificado. Nenhum job leve pendente.");
@@ -1624,6 +1627,7 @@ public class MainActivity extends Activity {
                     postLightJobResult(serverUrl, job, result);
                 }
                 internalLightJobsState = "executados " + okCount + "/" + count;
+                internalLightJobsLastSummary = summarizeLightJobs(jobs, okCount, count);
                 if (okCount > 0) {
                     clearTransientApkNetworkError();
                 }
@@ -1631,11 +1635,45 @@ public class MainActivity extends Activity {
                 if (showResult) show("Jobs leves do APK executados: " + okCount + "/" + count);
             } catch (Throwable exc) {
                 internalLightJobsState = "falha · " + shortThrowable(exc);
+                internalLightJobsLastSummary = "falha: " + shortThrowable(exc);
                 internalRuntimeLastError = shortThrowable(exc);
                 appStatusLastError = internalRuntimeLastError;
                 updateSystemChecklistText();
             }
         }, "core-worker-apk-light-jobs").start();
+    }
+
+    private JSONArray supportedLightJobsArray() {
+        return new JSONArray()
+                .put("apk_ping")
+                .put("apk_status_refresh")
+                .put("apk_report_logs")
+                .put("apk_diagnostic")
+                .put("apk_check_update")
+                .put("apk_test_vps_connection")
+                .put("apk_upload_report")
+                .put("apk_clear_app_cache")
+                .put("apk_sync_profile")
+                .put("apk_download_small");
+    }
+
+    private String summarizeLightJobs(JSONArray jobs, int okCount, int count) {
+        try {
+            StringBuilder builder = new StringBuilder();
+            int limit = Math.min(count, 3);
+            for (int i = 0; i < limit; i++) {
+                JSONObject job = jobs == null ? null : jobs.optJSONObject(i);
+                if (job == null) continue;
+                if (builder.length() > 0) builder.append(", ");
+                builder.append(job.optString("type", "job"));
+            }
+            if (count > limit) builder.append(" +").append(count - limit);
+            if (builder.length() == 0) builder.append("jobs internos");
+            builder.append(" · ").append(okCount).append("/").append(count).append(" ok");
+            return builder.toString();
+        } catch (Throwable ignored) {
+            return "jobs internos · " + okCount + "/" + count + " ok";
+        }
     }
 
     private void clearTransientApkNetworkError() {
@@ -1651,10 +1689,14 @@ public class MainActivity extends Activity {
 
     private JSONObject executeLightJob(JSONObject job) throws Exception {
         String type = job == null ? "" : job.optString("type", "");
+        JSONObject jobPayload = job == null ? null : job.optJSONObject("payload");
+        if (jobPayload == null) jobPayload = new JSONObject();
+        String serverUrl = normalizedServerUrl();
         JSONObject result = new JSONObject();
         result.put("ok", true);
         result.put("type", type);
         result.put("executedBy", "core-worker-apk-internal-runtime");
+        result.put("safety", "whitelisted-no-shell");
         result.put("appVersion", APP_VERSION);
         result.put("appVersionCode", BuildConfig.VERSION_CODE);
         result.put("installId", installId());
@@ -1675,13 +1717,248 @@ public class MainActivity extends Activity {
             logs.put("internalRuntimeLastError", internalRuntimeLastError == null ? "" : internalRuntimeLastError);
             logs.put("fcmState", fcmStatusLabel());
             logs.put("lightJobs", internalLightJobsState == null ? "" : internalLightJobsState);
+            logs.put("lastLightJob", internalLightJobsLastSummary == null ? "" : internalLightJobsLastSummary);
             safePutPayload(result, "logs", logs);
             result.put("message", "logs leves reportados pelo APK");
             return result;
         }
+        if ("apk_diagnostic".equals(type)) {
+            safePutPayload(result, "diagnostic", diagnosticSnapshot(serverUrl));
+            result.put("message", "diagnóstico interno do APK concluído");
+            return result;
+        }
+        if ("apk_check_update".equals(type)) {
+            JSONObject update = checkUpdateForJob(serverUrl);
+            safePutPayload(result, "update", update);
+            if (!update.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", update.optString("error", "checagem de atualização falhou"));
+            }
+            result.put("message", update.optBoolean("ok", false) ? "checagem de atualização concluída pelo APK" : "checagem de atualização falhou");
+            return result;
+        }
+        if ("apk_test_vps_connection".equals(type)) {
+            JSONObject connection = vpsConnectionTest(serverUrl);
+            safePutPayload(result, "connection", connection);
+            if (!connection.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", connection.optString("error", "teste de conexão falhou"));
+            }
+            result.put("message", connection.optBoolean("ok", false) ? "teste de conexão VPS concluído pelo APK" : "teste de conexão VPS falhou");
+            return result;
+        }
+        if ("apk_upload_report".equals(type)) {
+            JSONObject report = new JSONObject();
+            safePutPayload(report, "status", statusSnapshot());
+            safePutPayload(report, "diagnostic", diagnosticSnapshot(serverUrl));
+            result.put("reportKind", "internal-status-report");
+            safePutPayload(result, "report", report);
+            result.put("message", "relatório interno enviado pelo APK");
+            return result;
+        }
+        if ("apk_clear_app_cache".equals(type)) {
+            long bytes = clearInternalJobCache();
+            result.put("bytesCleared", bytes);
+            result.put("message", "cache interno do APK limpo");
+            return result;
+        }
+        if ("apk_sync_profile".equals(type)) {
+            String requested = normalizeProfile(jobPayload.optString("profile", appliedProfile()));
+            boolean localSynced = syncProfileToLocalAgent(requested);
+            saveLocalFields(requested);
+            result.put("profile", requested);
+            result.put("profileLabel", profileLabel(requested));
+            result.put("localAgentSynced", localSynced);
+            result.put("message", localSynced ? "perfil sincronizado pelo APK" : "perfil salvo no APK; Termux ainda não confirmou");
+            return result;
+        }
+        if ("apk_download_small".equals(type)) {
+            JSONObject download = downloadSmallJobPayload(serverUrl, jobPayload);
+            safePutPayload(result, "download", download);
+            if (!download.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", download.optString("error", "download pequeno falhou"));
+            }
+            result.put("message", download.optBoolean("ok", false) ? "download pequeno concluído pelo APK" : "download pequeno falhou");
+            return result;
+        }
         result.put("ok", false);
-        result.put("error", "job leve não suportado pelo APK: " + type);
+        result.put("error", "job interno não suportado pelo APK: " + type);
         return result;
+    }
+
+    private JSONObject diagnosticSnapshot(String serverUrl) throws Exception {
+        JSONObject diagnostic = new JSONObject();
+        diagnostic.put("timestamp", System.currentTimeMillis());
+        diagnostic.put("runtimeLabel", runtimeStatusLabel());
+        diagnostic.put("lightJobs", internalLightJobsState == null ? "" : internalLightJobsState);
+        diagnostic.put("lastLightJob", internalLightJobsLastSummary == null ? "" : internalLightJobsLastSummary);
+        diagnostic.put("termuxWorkerOnline", localAgentOnline);
+        diagnostic.put("localAgentVersion", localAgentVersion == null ? "" : localAgentVersion);
+        safePutPayload(diagnostic, "battery", batterySnapshot());
+        safePutPayload(diagnostic, "network", networkSnapshot(serverUrl));
+        safePutPayload(diagnostic, "update", updateSnapshot());
+        safePutPayload(diagnostic, "appStatus", appStatusSnapshot());
+        safePutPayload(diagnostic, "runtime", runtimeSnapshot());
+        return diagnostic;
+    }
+
+    private JSONObject checkUpdateForJob(String serverUrl) throws Exception {
+        JSONObject update = new JSONObject();
+        if (serverUrl == null || serverUrl.trim().isEmpty()) {
+            update.put("ok", false);
+            update.put("error", "VPS não configurada");
+            return update;
+        }
+        HttpResult result = fetchLatestManifest(serverUrl);
+        update.put("httpStatus", result.status);
+        if (!result.ok()) {
+            update.put("ok", false);
+            update.put("error", compactResultBody(result.body));
+            return update;
+        }
+        JSONObject body = new JSONObject(result.body);
+        latestVersionName = body.optString("versionName", body.optString("version", ""));
+        latestVersionCode = body.optInt("versionCode", -1);
+        latestApkSha256 = body.optString("sha256", "");
+        latestApkUrl = resolveUpdateUrl(serverUrl, body.optString("downloadUrl", body.optString("directApkUrl", body.optString("apkUrl", body.optString("url", "")))));
+        latestNotificationId = body.optString("notificationId", latestNotificationId == null ? "" : latestNotificationId);
+        latestUpdateAvailable = isLatestUpdateAvailable();
+        update.put("ok", true);
+        update.put("installedVersion", APP_VERSION);
+        update.put("installedCode", BuildConfig.VERSION_CODE);
+        update.put("latestVersion", latestVersionName);
+        update.put("latestCode", latestVersionCode);
+        update.put("available", latestUpdateAvailable);
+        update.put("state", updateChecklistLabel());
+        updateUpdateUi("APK " + APP_VERSION + " · " + (latestUpdateAvailable ? "atualização pronta" : "em dia"), latestUpdateAvailable, true);
+        return update;
+    }
+
+    private JSONObject vpsConnectionTest(String serverUrl) throws Exception {
+        JSONObject connection = new JSONObject();
+        connection.put("serverConfigured", serverUrl != null && !serverUrl.trim().isEmpty());
+        if (serverUrl == null || serverUrl.trim().isEmpty()) {
+            connection.put("ok", false);
+            connection.put("error", "VPS não configurada");
+            return connection;
+        }
+        double tcp = measureTcpPingMs(serverUrl);
+        connection.put("tcpPingMs", tcp >= 0 ? Math.round(tcp) : -1);
+        HttpResult result = request("GET", serverUrl + "/core-worker/app/latest.json", null, null);
+        connection.put("httpStatus", result.status);
+        connection.put("ok", result.ok());
+        if (!result.ok()) connection.put("error", compactResultBody(result.body));
+        return connection;
+    }
+
+    private long clearInternalJobCache() {
+        File dir = new File(getCacheDir(), "core-worker-jobs");
+        return deleteChildren(dir);
+    }
+
+    private long deleteChildren(File file) {
+        if (file == null || !file.exists()) return 0L;
+        long total = 0L;
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) total += deleteChildren(child);
+            }
+        }
+        try {
+            total += file.length();
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (!file.equals(getCacheDir())) file.delete();
+        } catch (Throwable ignored) {
+        }
+        return total;
+    }
+
+    private JSONObject downloadSmallJobPayload(String serverUrl, JSONObject jobPayload) throws Exception {
+        JSONObject output = new JSONObject();
+        String raw = jobPayload == null ? "" : jobPayload.optString("url", jobPayload.optString("path", "/core-worker/app/latest.json"));
+        String url = resolveSafeJobUrl(serverUrl, raw);
+        int maxBytes = jobPayload == null ? 262144 : jobPayload.optInt("maxBytes", 262144);
+        if (maxBytes <= 0 || maxBytes > 262144) maxBytes = 262144;
+        File dir = new File(getCacheDir(), "core-worker-jobs");
+        if (!dir.exists()) dir.mkdirs();
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setConnectTimeout(6000);
+        conn.setReadTimeout(9000);
+        conn.setInstanceFollowRedirects(true);
+        conn.setRequestProperty("Accept", "application/json,text/plain,*/*");
+        int status = conn.getResponseCode();
+        output.put("url", safeUrlForReport(url));
+        output.put("httpStatus", status);
+        if (status < 200 || status >= 300) {
+            output.put("ok", false);
+            output.put("error", compactResultBody(readAll(conn.getErrorStream())));
+            conn.disconnect();
+            return output;
+        }
+        InputStream input = conn.getInputStream();
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        File target = new File(dir, "small-" + System.currentTimeMillis() + ".bin");
+        FileOutputStream out = new FileOutputStream(target, false);
+        byte[] buffer = new byte[8192];
+        int read;
+        int total = 0;
+        while ((read = input.read(buffer)) != -1) {
+            total += read;
+            if (total > maxBytes) {
+                out.close();
+                input.close();
+                conn.disconnect();
+                target.delete();
+                throw new Exception("download excedeu limite seguro de " + maxBytes + " bytes");
+            }
+            digest.update(buffer, 0, read);
+            out.write(buffer, 0, read);
+        }
+        out.flush();
+        out.close();
+        input.close();
+        conn.disconnect();
+        output.put("ok", true);
+        output.put("bytes", total);
+        output.put("sha256", bytesToHex(digest.digest()));
+        output.put("cacheFile", target.getName());
+        return output;
+    }
+
+    private String resolveSafeJobUrl(String serverUrl, String raw) throws Exception {
+        String value = raw == null || raw.trim().isEmpty() ? "/core-worker/app/latest.json" : raw.trim();
+        if (value.startsWith("/")) {
+            return serverUrl.replaceAll("/+$", "") + value;
+        }
+        URL base = new URL(serverUrl);
+        URL target = new URL(value);
+        if (!"http".equalsIgnoreCase(target.getProtocol()) && !"https".equalsIgnoreCase(target.getProtocol())) {
+            throw new Exception("URL de job não permitida");
+        }
+        if (!base.getHost().equalsIgnoreCase(target.getHost())) {
+            throw new Exception("download pequeno só permite a própria VPS");
+        }
+        return target.toString();
+    }
+
+    private String safeUrlForReport(String url) {
+        try {
+            URL parsed = new URL(url);
+            return parsed.getProtocol() + "://" + parsed.getHost() + parsed.getPath();
+        } catch (Throwable ignored) {
+            return "url";
+        }
+    }
+
+    private String bytesToHex(byte[] hash) {
+        StringBuilder builder = new StringBuilder();
+        if (hash == null) return "";
+        for (byte b : hash) builder.append(String.format(Locale.ROOT, "%02x", b));
+        return builder.toString();
     }
 
     private void postLightJobResult(String serverUrl, JSONObject job, JSONObject result) {
@@ -2153,6 +2430,7 @@ public class MainActivity extends Activity {
         status.put("internal_light_jobs_state", internalLightJobsState == null ? "" : internalLightJobsState);
         status.put("internal_light_jobs_last_check_at", internalLightJobsLastCheckAt);
         status.put("internal_light_jobs_last_count", internalLightJobsLastCount);
+        status.put("internal_light_jobs_last_summary", internalLightJobsLastSummary == null ? "" : internalLightJobsLastSummary);
         status.put("runtime", runtimeSnapshot());
         safePutPayload(status, "battery", batterySnapshot());
         safePutPayload(status, "network", networkSnapshot(normalizedServerUrl()));
@@ -2729,7 +3007,8 @@ public class MainActivity extends Activity {
                 + checkLine("Modo", runtimeStatusLabel()) + "\n"
                 + checkLine("Heartbeat APK", internalRuntimeOnline ? "online direto na VPS" : emptyFallback(internalRuntimeHeartbeatState, "pendente")) + "\n"
                 + checkLine("Último heartbeat", ageLabel) + "\n"
-                + checkLine("Jobs leves", emptyFallback(internalLightJobsState, "aguardando")) + "\n"
+                + checkLine("Jobs internos", emptyFallback(internalLightJobsState, "aguardando")) + "\n"
+                + checkLine("Último job", emptyFallback(internalLightJobsLastSummary, "nenhum")) + "\n"
                 + checkLine("Jobs reais", "Termux por enquanto")
                 + ((internalRuntimeLastError != null && !internalRuntimeLastError.trim().isEmpty()) ? "\n" + checkLine("Último erro APK", internalRuntimeLastError) : "");
 

@@ -447,7 +447,7 @@ def _core_worker_app_jobs_text(worker_id: str) -> str:
     except Exception:
         data = {}
     if not isinstance(data, dict):
-        return "jobs leves: aguardando"
+        return "jobs internos: aguardando"
     record = None
     for item in reversed(data.get("results") or []):
         if not isinstance(item, dict):
@@ -457,12 +457,12 @@ def _core_worker_app_jobs_text(worker_id: str) -> str:
             break
     pending = len(data.get("pending") or []) if isinstance(data.get("pending"), list) else 0
     if not isinstance(record, dict):
-        return f"jobs leves: {pending} pend" if pending else "jobs leves: aguardando"
+        return f"jobs internos: {pending} pend" if pending else "jobs internos: aguardando"
     age = max(0.0, time.time() - float(record.get("receivedAt") or 0))
     typ = _shorten(record.get("type") or "job", limit=32)
     status = "ok" if record.get("ok") else "falhou"
     msg = _shorten(record.get("message") or record.get("error") or "", limit=60)
-    pieces = [f"jobs leves: {typ} {status}", f"visto {_format_age(age)}"]
+    pieces = [f"jobs internos: {typ} {status}", f"visto {_format_age(age)}"]
     if pending:
         pieces.append(f"{pending} pend")
     if msg:
