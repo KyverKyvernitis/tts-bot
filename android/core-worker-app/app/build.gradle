@@ -58,8 +58,8 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 48
-        versionName "0.5.33"
+        versionCode 49
+        versionName "0.5.34"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -114,6 +114,7 @@ chaquopy {
 
 dependencies {
     implementation "androidx.core:core:1.13.1"
+    implementation "androidx.viewpager2:viewpager2:1.1.0"
     implementation platform("com.google.firebase:firebase-bom:34.13.0")
     implementation "com.google.firebase:firebase-messaging"
 }

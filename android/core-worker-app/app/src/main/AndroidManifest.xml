@@ -60,6 +60,11 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <service
+            android:name=".CoreWorkerBedrockService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
 
         <receiver

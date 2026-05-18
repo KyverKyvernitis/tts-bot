@@ -523,6 +523,10 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_minecraft_bedrock_prepare_environment_plan",
     "apk_minecraft_bedrock_download_manifest",
     "apk_minecraft_bedrock_final_preflight",
+    "apk_minecraft_bedrock_runtime_status",
+    "apk_minecraft_bedrock_runtime_start",
+    "apk_minecraft_bedrock_runtime_stop",
+    "apk_minecraft_bedrock_runtime_logs",
 }
 CORE_WORKER_APP_JOB_LABELS = {
     "apk_ping": "ping interno",
@@ -586,6 +590,10 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_minecraft_bedrock_prepare_environment_plan": "Bedrock preparar ambiente",
     "apk_minecraft_bedrock_download_manifest": "Bedrock manifesto downloads",
     "apk_minecraft_bedrock_final_preflight": "Bedrock preflight final",
+    "apk_minecraft_bedrock_runtime_status": "Bedrock runtime status",
+    "apk_minecraft_bedrock_runtime_start": "Bedrock runtime start",
+    "apk_minecraft_bedrock_runtime_stop": "Bedrock runtime stop",
+    "apk_minecraft_bedrock_runtime_logs": "Bedrock runtime logs",
 }
 
 
@@ -873,8 +881,11 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
 
     bedrock_summary = str(record.get("bedrockSummary") or "")
     bedrock_installer = str(record.get("bedrockInstallerSummary") or "")
-    bedrock_joined = (bedrock_summary + " " + bedrock_installer).lower()
-    if record.get("bedrockReady") or "pronto para iniciar" in bedrock_joined:
+    bedrock_runtime = str(record.get("bedrockRuntimeSummary") or "")
+    bedrock_joined = (bedrock_summary + " " + bedrock_installer + " " + bedrock_runtime).lower()
+    if record.get("bedrockRuntimeServiceActive") or "serviço bedrock ativo" in bedrock_joined:
+        parts.append("Bedrock runtime ativo")
+    elif record.get("bedrockReady") or "pronto para iniciar" in bedrock_joined:
         parts.append("Bedrock pronto")
     elif "servidor não instalado" in bedrock_joined or "não instalado" in bedrock_joined:
         parts.append("Bedrock não instalado")
@@ -2464,6 +2475,10 @@ class WorkersPanelView(discord.ui.LayoutView):
                 {"label": "Bedrock ambiente", "value": "_apk_minecraft_bedrock_prepare_environment_plan", "description": "Prepara plano seguro", "emoji": "🗂️", "panel_action": "apk_minecraft_bedrock_prepare_environment_plan", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_prepare_environment_plan"},
                 {"label": "Bedrock manifesto", "value": "_apk_minecraft_bedrock_download_manifest", "description": "Downloads sem baixar", "emoji": "📜", "panel_action": "apk_minecraft_bedrock_download_manifest", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_download_manifest"},
                 {"label": "Bedrock preflight", "value": "_apk_minecraft_bedrock_final_preflight", "description": "Últimos bloqueios", "emoji": "🛫", "panel_action": "apk_minecraft_bedrock_final_preflight", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_final_preflight"},
+                {"label": "Bedrock runtime", "value": "_apk_minecraft_bedrock_runtime_status", "description": "Runner assistido", "emoji": "🟢", "panel_action": "apk_minecraft_bedrock_runtime_status", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_runtime_status"},
+                {"label": "Iniciar Bedrock", "value": "_apk_minecraft_bedrock_runtime_start", "description": "Ativa serviço assistido", "emoji": "▶️", "panel_action": "apk_minecraft_bedrock_runtime_start", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_runtime_start"},
+                {"label": "Parar Bedrock", "value": "_apk_minecraft_bedrock_runtime_stop", "description": "Para runtime assistido", "emoji": "⏹️", "panel_action": "apk_minecraft_bedrock_runtime_stop", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_runtime_stop"},
+                {"label": "Logs runtime", "value": "_apk_minecraft_bedrock_runtime_logs", "description": "Logs do runner", "emoji": "📄", "panel_action": "apk_minecraft_bedrock_runtime_logs", "category": "apk", "apk_job_type": "apk_minecraft_bedrock_runtime_logs"},
                 {"label": "Runtime persist.", "value": "_apk_runtime_foreground_probe", "description": "Serviço com notificação", "emoji": "🟢", "panel_action": "apk_runtime_foreground_probe", "category": "apk", "apk_job_type": "apk_runtime_foreground_probe"},
                 {"label": "Ativar persist.", "value": "_apk_runtime_foreground_start", "description": "Inicia foreground runtime", "emoji": "▶️", "panel_action": "apk_runtime_foreground_start", "category": "apk", "apk_job_type": "apk_runtime_foreground_start"},
                 {"label": "Parar persist.", "value": "_apk_runtime_foreground_stop", "description": "Para foreground runtime", "emoji": "⏹️", "panel_action": "apk_runtime_foreground_stop", "category": "apk", "apk_job_type": "apk_runtime_foreground_stop"},
