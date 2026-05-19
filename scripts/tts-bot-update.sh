@@ -41,6 +41,14 @@ CORE_WORKER_APK_CHANGED=0
 CORE_WORKER_AUTOMATION_REQUIRED=0
 
 BOT_HEALTHCHECK_STATUS="não verificado"
+BOT_HEALTH_JSON=""
+BOT_HEALTH_DETAIL_STATUS="não verificado"
+BOT_COGS_STATUS="não verificado"
+BOT_WARNINGS_STATUS="sem avisos"
+PREFLIGHT_PY_STATUS="não verificado"
+PREFLIGHT_BASH_STATUS="não verificado"
+PREFLIGHT_COG_IMPORT_STATUS="não verificado"
+UPDATE_HAS_WARNINGS=0
 CALLKEEPER_STATUS="não alterado"
 AUDIO_SERVICES_STATUS="não alterado"
 CLEANUP_STATUS="não alterada"
@@ -249,6 +257,104 @@ wait_for_health() {
   return 1
 }
 
+fetch_bot_health_json() {
+  curl -fsS --max-time 4 "$BOT_HEALTH_URL" 2>/dev/null || true
+}
+
+bot_health_python() {
+  local mode="${1:?}"
+  BOT_HEALTH_JSON_INPUT="${BOT_HEALTH_JSON:-}" python3 - "$mode" <<'PYHEALTH' 2>/dev/null
+import json
+import os
+import sys
+
+mode = sys.argv[1]
+raw = os.environ.get("BOT_HEALTH_JSON_INPUT") or ""
+try:
+    data = json.loads(raw) if raw.strip() else {}
+except Exception as exc:
+    if mode == "is_healthy":
+        raise SystemExit(1)
+    print(f"health inválido: {type(exc).__name__}: {exc}")
+    raise SystemExit(0)
+
+if mode == "is_healthy":
+    if data.get("healthy") is True:
+        raise SystemExit(0)
+    raise SystemExit(1)
+
+if mode == "status":
+    status = data.get("status") or ("ok" if data.get("healthy") is True else "erro")
+    ready = data.get("discord_ready")
+    mongo = data.get("mongo_ok")
+    latency = data.get("latency_ms")
+    parts = [str(status)]
+    if ready is not None:
+        parts.append(f"discord={'online' if ready else 'não pronto'}")
+    if mongo is not None:
+        parts.append(f"mongo={'OK' if mongo else 'falhou'}")
+    if latency is not None:
+        parts.append(f"latência={latency}ms")
+    print("; ".join(parts))
+    raise SystemExit(0)
+
+if mode == "warnings":
+    warnings = data.get("warnings") or []
+    warnings = [str(item).strip() for item in warnings if str(item).strip()]
+    if warnings:
+        print("; ".join(warnings)[:900])
+    else:
+        print("sem avisos")
+    raise SystemExit(0)
+
+if mode == "cogs":
+    loaded = data.get("loaded_cogs_count")
+    failed = data.get("failed_cogs_count")
+    failed_cogs = data.get("failed_cogs") or {}
+    critical = data.get("critical_failed_cogs") or []
+    if loaded is None:
+        loaded = len(data.get("loaded_extensions") or [])
+    if failed is None:
+        failed = len(failed_cogs)
+    parts = [f"{loaded or 0} carregada(s)"]
+    if failed:
+        kind = "crítica(s)" if critical else "opcional(is)"
+        names = []
+        for name, details in list(failed_cogs.items())[:5]:
+            summary = ""
+            if isinstance(details, dict):
+                summary = str(details.get("summary") or "").strip()
+            names.append(f"{name}" + (f" — {summary}" if summary else ""))
+        details = "; ".join(names)
+        parts.append(f"{failed} com falha {kind}" + (f": {details}" if details else ""))
+    else:
+        parts.append("0 com falha")
+    print("; ".join(parts)[:1200])
+    raise SystemExit(0)
+
+print("—")
+PYHEALTH
+}
+
+refresh_bot_health_status() {
+  BOT_HEALTH_JSON="$(fetch_bot_health_json)"
+  if [[ -z "${BOT_HEALTH_JSON//[[:space:]]/}" ]]; then
+    BOT_HEALTH_DETAIL_STATUS="HTTP sem resposta"
+    BOT_COGS_STATUS="indisponível"
+    BOT_WARNINGS_STATUS="health indisponível"
+    return 1
+  fi
+
+  BOT_HEALTH_DETAIL_STATUS="$(bot_health_python status)"
+  BOT_COGS_STATUS="$(bot_health_python cogs)"
+  BOT_WARNINGS_STATUS="$(bot_health_python warnings)"
+
+  if bot_health_python is_healthy >/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
 
 service_restart_count() {
   local unit="${1:?}"
@@ -291,7 +397,7 @@ has_fatal_boot_logs() {
 
 run_preflight_checks() {
   local py="$REPO_DIR/.venv/bin/python"
-  local file checked_py=0 checked_sh=0
+  local file checked_py=0 checked_sh=0 import_checked=0 import_failed=0 import_output=""
   [[ -x "$py" ]] || py="$(command -v python3 || true)"
 
   if [[ -n "$py" ]]; then
@@ -302,6 +408,50 @@ run_preflight_checks() {
       checked_py=1
       sudo -u ubuntu -H "$py" -m py_compile "$REPO_DIR/$file"
     done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.py$' | grep -v '^activity ' || true)
+
+    if (( checked_py == 1 )); then
+      PREFLIGHT_PY_STATUS="OK"
+    else
+      PREFLIGHT_PY_STATUS="sem arquivos Python alterados"
+    fi
+
+    # `py_compile` não pega erro executado no import, como discord.ui.StringSelect.
+    # Para cogs alteradas, tentamos importar o módulo sem conectar ao Discord.
+    # Falha aqui vira aviso, não rollback automático: o bot.py decide no boot se
+    # a cog é opcional ou crítica.
+    STAGE="preflight import de cogs"
+    while IFS= read -r file; do
+      [[ -n "$file" ]] || continue
+      [[ -f "$REPO_DIR/$file" ]] || continue
+      [[ "$file" == cogs/*.py ]] || continue
+      [[ "$(basename "$file")" == "__init__.py" ]] && continue
+      import_checked=1
+      module="${file%.py}"
+      module="${module//\//.}"
+      if ! line="$(cd "$REPO_DIR" && sudo -u ubuntu -H "$py" - <<PYIMPORT 2>&1
+import importlib
+module = ${module@Q}
+importlib.import_module(module)
+print(f"OK {module}")
+PYIMPORT
+)"; then
+        import_failed=1
+        import_output+="FAIL $module: $(printf '%s' "$line" | tail -n 1)"$'\n'
+      fi
+    done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '^cogs/.*\.py$' || true)
+
+    if (( import_checked == 0 )); then
+      PREFLIGHT_COG_IMPORT_STATUS="sem cogs Python alteradas"
+    elif (( import_failed == 0 )); then
+      PREFLIGHT_COG_IMPORT_STATUS="OK"
+    else
+      UPDATE_HAS_WARNINGS=1
+      PREFLIGHT_COG_IMPORT_STATUS="aviso: ${import_failed} import(s) de cog falharam"
+      logger -t "$LOG_TAG" "Preflight import de cogs com aviso: ${import_output//$'\n'/ | }"
+    fi
+  else
+    PREFLIGHT_PY_STATUS="python indisponível"
+    PREFLIGHT_COG_IMPORT_STATUS="não executado; python indisponível"
   fi
 
   STAGE="preflight Bash"
@@ -312,11 +462,13 @@ run_preflight_checks() {
     bash -n "$REPO_DIR/$file"
   done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.sh$' || true)
 
-  if (( checked_py == 1 || checked_sh == 1 )); then
-    logger -t "$LOG_TAG" "Preflight OK: Python=$checked_py Bash=$checked_sh"
+  if (( checked_sh == 1 )); then
+    PREFLIGHT_BASH_STATUS="OK"
   else
-    logger -t "$LOG_TAG" "Preflight sem arquivos Python/Bash alterados"
+    PREFLIGHT_BASH_STATUS="sem scripts Bash alterados"
   fi
+
+  logger -t "$LOG_TAG" "Preflight: Python=$PREFLIGHT_PY_STATUS Bash=$PREFLIGHT_BASH_STATUS Cogs=$PREFLIGHT_COG_IMPORT_STATUS"
 }
 
 verify_bot_after_restart() {
@@ -355,15 +507,32 @@ verify_bot_after_restart() {
       return 1
     fi
 
-    if curl -fsS --max-time 3 "$BOT_HEALTH_URL" >/dev/null 2>&1; then
+    if refresh_bot_health_status; then
       health_ok=1
+    else
+      # Health HTTP pode estar em starting nos primeiros segundos; só falha
+      # no final se nunca ficar healthy.
+      if [[ -n "${BOT_HEALTH_DETAIL_STATUS//[[:space:]]/}" && "$BOT_HEALTH_DETAIL_STATUS" != "HTTP sem resposta" ]]; then
+        logger -t "$LOG_TAG" "Health ainda não saudável no checkpoint ${checkpoint}s: $BOT_HEALTH_DETAIL_STATUS"
+      fi
     fi
   done
 
   if (( health_ok == 1 )); then
-    BOT_HEALTHCHECK_STATUS="OK"
+    if [[ "$BOT_WARNINGS_STATUS" != "sem avisos" || "$BOT_COGS_STATUS" == *"com falha"* ]]; then
+      BOT_HEALTHCHECK_STATUS="OK com avisos"
+      UPDATE_HAS_WARNINGS=1
+    else
+      BOT_HEALTHCHECK_STATUS="OK"
+    fi
   else
-    BOT_HEALTHCHECK_STATUS="ativo; health HTTP sem resposta"
+    if [[ "$BOT_HEALTH_DETAIL_STATUS" == "HTTP sem resposta" ]]; then
+      BOT_HEALTHCHECK_STATUS="ativo; health HTTP sem resposta"
+      UPDATE_HAS_WARNINGS=1
+      return 0
+    fi
+    BOT_HEALTHCHECK_STATUS="falhou: health não saudável ($BOT_HEALTH_DETAIL_STATUS)"
+    return 1
   fi
   return 0
 }
@@ -833,10 +1002,21 @@ deploy_bot() {
   fi
 
   STAGE="healthcheck do bot"
-  if wait_for_health "$BOT_HEALTH_URL" 2 2; then
-    BOT_HEALTHCHECK_STATUS="OK"
+  if refresh_bot_health_status; then
+    if [[ "$BOT_WARNINGS_STATUS" != "sem avisos" || "$BOT_COGS_STATUS" == *"com falha"* ]]; then
+      BOT_HEALTHCHECK_STATUS="OK com avisos"
+      UPDATE_HAS_WARNINGS=1
+    else
+      BOT_HEALTHCHECK_STATUS="OK"
+    fi
   else
-    BOT_HEALTHCHECK_STATUS="não alterado; health HTTP sem resposta"
+    if [[ "$BOT_HEALTH_DETAIL_STATUS" == "HTTP sem resposta" ]]; then
+      BOT_HEALTHCHECK_STATUS="não alterado; health HTTP sem resposta"
+      UPDATE_HAS_WARNINGS=1
+    else
+      BOT_HEALTHCHECK_STATUS="falhou: health não saudável ($BOT_HEALTH_DETAIL_STATUS)"
+      return 1
+    fi
   fi
   return 0
 }
@@ -953,11 +1133,16 @@ rollback_after_failure() {
   local exit_code="${1:-1}"
   local failed_command="${2:-desconhecido}"
   register_error_context "$exit_code" "$failed_command"
+
   local rollback_bot_status="não executado"
   local rollback_front_status="não executado"
   local rollback_back_status="não executado"
   local rollback_activity_status="não executado"
+  local rollback_callkeeper_status="não executado"
+  local rollback_git_status="não executado"
+  local rollback_success=1
   local reset_status=1
+  local head_after_reset=""
 
   trap - ERR
   set +e
@@ -967,69 +1152,112 @@ rollback_after_failure() {
   fi
   ROLLBACK_DONE=1
 
-  logger -t "$LOG_TAG" "Erro fatal após update. Voltando de $(short_commit "$REMOTE_COMMIT") para $(short_commit "$PREVIOUS_COMMIT")"
+  logger -t "$LOG_TAG" "Erro fatal após update. Tentando rollback de $(short_commit "$REMOTE_COMMIT") para $(short_commit "$PREVIOUS_COMMIT")"
 
   STAGE="rollback git"
   sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1
   reset_status=$?
+  head_after_reset="$(sudo -u ubuntu -H git rev-parse HEAD 2>/dev/null || true)"
 
-  write_dirty_marker "$REMOTE_COMMIT" "$PREVIOUS_COMMIT" "$FAILED_STAGE" "$failed_command"
-  ROLLBACK_STATUS="aplicado para $(short_commit "$PREVIOUS_COMMIT") e commit remoto marcado como sujo"
-
-  if (( FRONT_CHANGED == 1 )); then
-    deploy_frontend
-    rollback_front_status="$FRONT_STATUS"
+  if (( reset_status == 0 )) && [[ -n "$head_after_reset" && "$head_after_reset" == "$PREVIOUS_COMMIT" ]]; then
+    rollback_git_status="OK: repositório voltou para $(short_commit "$PREVIOUS_COMMIT")"
+    write_dirty_marker "$REMOTE_COMMIT" "$PREVIOUS_COMMIT" "$FAILED_STAGE" "$failed_command"
+    ROLLBACK_STATUS="aplicado para $(short_commit "$PREVIOUS_COMMIT"); commit remoto marcado como sujo"
   else
-    rollback_front_status="não precisou republicar"
+    rollback_success=0
+    rollback_git_status="falhou: reset=$reset_status head=$(short_commit "$head_after_reset") esperado=$(short_commit "$PREVIOUS_COMMIT")"
+    ROLLBACK_STATUS="falhou antes de restaurar o commit anterior"
   fi
 
-  if (( BACK_CHANGED == 1 )); then
-    deploy_backend
-    rollback_back_status="$BACK_STATUS"
-    rollback_activity_status="$ACTIVITY_HEALTHCHECK_STATUS"
-  else
-    if wait_for_health "$BACK_HEALTH_URL" 2 2; then
-      rollback_activity_status="OK"
+  if (( rollback_success == 1 )); then
+    if (( FRONT_CHANGED == 1 )); then
+      if deploy_frontend; then
+        rollback_front_status="$FRONT_STATUS"
+      else
+        rollback_success=0
+        rollback_front_status="falhou: $FRONT_STATUS"
+      fi
     else
-      rollback_activity_status="falhou"
+      rollback_front_status="não precisou republicar"
     fi
-    rollback_back_status="não precisou reiniciar"
+
+    if (( BACK_CHANGED == 1 )); then
+      if deploy_backend; then
+        rollback_back_status="$BACK_STATUS"
+        rollback_activity_status="$ACTIVITY_HEALTHCHECK_STATUS"
+      else
+        rollback_success=0
+        rollback_back_status="falhou: $BACK_STATUS"
+        rollback_activity_status="$ACTIVITY_HEALTHCHECK_STATUS"
+      fi
+    else
+      if wait_for_health "$BACK_HEALTH_URL" 2 2; then
+        rollback_activity_status="OK"
+      else
+        rollback_activity_status="não verificada/indisponível"
+      fi
+      rollback_back_status="não precisou reiniciar"
+    fi
+
+    if deploy_bot; then
+      rollback_bot_status="$BOT_HEALTHCHECK_STATUS"
+    else
+      rollback_success=0
+      rollback_bot_status="falhou: $BOT_HEALTHCHECK_STATUS"
+    fi
+
+    if (( CALLKEEPER_CHANGED == 1 )); then
+      if deploy_callkeeper; then
+        rollback_callkeeper_status="$CALLKEEPER_STATUS"
+      else
+        rollback_success=0
+        rollback_callkeeper_status="falhou: $CALLKEEPER_STATUS"
+      fi
+    else
+      rollback_callkeeper_status="não precisou reiniciar"
+    fi
+  else
+    rollback_front_status="não executado porque o git reset falhou"
+    rollback_back_status="não executado porque o git reset falhou"
+    rollback_activity_status="não executado porque o git reset falhou"
+    rollback_bot_status="não executado porque o git reset falhou"
+    rollback_callkeeper_status="não executado porque o git reset falhou"
   fi
 
-  deploy_bot
-  rollback_bot_status="$BOT_HEALTHCHECK_STATUS"
-
-  local rollback_callkeeper_status="não precisou reiniciar"
-  if (( CALLKEEPER_CHANGED == 1 )); then
-    deploy_callkeeper
-    rollback_callkeeper_status="$CALLKEEPER_STATUS"
-  fi
-
-  local duration
+  local duration title summary commit_dirty
   duration="$(human_duration "$SECONDS")"
+  if (( rollback_success == 1 )); then
+    title="Rollback aplicado após erro fatal"
+    summary="O update falhou, mas o rollback voltou o repositório para o commit anterior e os serviços foram validados."
+    commit_dirty="sim"
+  else
+    title="Rollback falhou após erro fatal"
+    summary="O update falhou e o rollback não conseguiu restaurar completamente o estado anterior. Verificação manual necessária."
+    commit_dirty="não confirmado"
+  fi
 
   local body
-  body="Resumo: O update falhou de forma fatal. O repositório voltou para o commit anterior e o commit remoto foi marcado como sujo nesta VPS.
+  body="Resumo: $summary
 Host: $HOSTNAME
 Branch: $BRANCH
-Serviço: tts-bot-updater
-Serviço afetado: ${LAST_ERROR_SERVICE_UNIT:-$UPDATER_UNIT}
-Commit anterior: $(short_commit "$PREVIOUS_COMMIT")
-Commit alvo: $(short_commit "$REMOTE_COMMIT")
 Commit: $(short_commit "$PREVIOUS_COMMIT") ← $(short_commit "$REMOTE_COMMIT")
 Mudança: ${COMMIT_SUBJECT:-sem mensagem}
-Update: ${COMMIT_SUBJECT:-sem mensagem}
 Etapa: ${FAILED_STAGE:-$STAGE}
 Comando: $failed_command
 Código: $exit_code
+Validações:
+• Git reset: $rollback_git_status
+• Bot: $rollback_bot_status
+• Cogs: $BOT_COGS_STATUS
+• Health: $BOT_HEALTH_DETAIL_STATUS
+Serviços:
+• CallKeeper: $rollback_callkeeper_status
+• Frontend: $rollback_front_status
+• Backend: $rollback_back_status
+• Activity: $rollback_activity_status
 Rollback: $ROLLBACK_STATUS
-Commit sujo: sim
-Bot: $rollback_bot_status
-CallKeeper: $rollback_callkeeper_status
-Frontend: $rollback_front_status
-Backend: $rollback_back_status
-Activity: $rollback_activity_status
-Motivo: reset git=$reset_status
+Commit sujo: $commit_dirty
+Ação sugerida: Se o rollback falhou, verifique o serviço manualmente antes de aplicar outro update. Se foi aplicado, faça um novo commit corrigido para liberar o updater novamente.
 Stderr:
 ${LAST_ERROR_STDERR:-nenhuma saída adicional capturada}
 Últimas linhas:
@@ -1037,7 +1265,7 @@ ${LAST_ERROR_LOGS:-nenhum log adicional encontrado}
 Duração: $duration
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
-  send_error "Rollback aplicado após erro fatal" "$body"
+  send_error "$title" "$body"
   exit "$exit_code"
 }
 
@@ -1174,51 +1402,77 @@ run_core_worker_post_update_automation
 DURATION="$(human_duration "$SECONDS")"
 ROLLBACK_STATUS="não foi necessário"
 CHANGED_FILES="$(format_changed_files)"
+CHANGED_FILES_COUNT="$(printf '%s\n' "$CHANGED_FILES_RAW" | awk 'NF {c++} END {print c+0}')"
 PHONE_WORKER_UPDATE_ANALYSIS="$(phone_worker_log_summary_text "$RUN_LOG_FILE")"
 
-OVERALL_OK=1
-[[ "$BOT_HEALTHCHECK_STATUS" == "OK" ]] || OVERALL_OK=0
+# Atualiza o resumo do health no fim, mesmo que o bot não tenha reiniciado.
+refresh_bot_health_status >/dev/null 2>&1 || true
+
+OVERALL_FATAL=0
+if [[ "$BOT_HEALTHCHECK_STATUS" == falhou:* ]]; then
+  OVERALL_FATAL=1
+fi
 if (( CALLKEEPER_CHANGED == 1 )) && [[ "$CALLKEEPER_STATUS" != "OK" ]]; then
-  OVERALL_OK=0
+  OVERALL_FATAL=1
 fi
 if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then
-  [[ "$ACTIVITY_HEALTHCHECK_STATUS" == "OK" ]] || OVERALL_OK=0
+  [[ "$ACTIVITY_HEALTHCHECK_STATUS" == "OK" ]] || OVERALL_FATAL=1
+fi
+if [[ "$BOT_HEALTHCHECK_STATUS" == "OK com avisos" || "$BOT_HEALTHCHECK_STATUS" == *"sem resposta"* ]]; then
+  UPDATE_HAS_WARNINGS=1
+fi
+if [[ "$PREFLIGHT_COG_IMPORT_STATUS" == aviso:* || "$BOT_WARNINGS_STATUS" != "sem avisos" ]]; then
+  UPDATE_HAS_WARNINGS=1
 fi
 
-if (( OVERALL_OK == 1 )); then
+if (( OVERALL_FATAL == 0 && UPDATE_HAS_WARNINGS == 0 )); then
   ALERT_TYPE="success"
-  ALERT_TITLE="Update aplicado com sucesso"
-  ALERT_SUMMARY="O update foi aplicado e os healthchecks passaram."
+  ALERT_TITLE="Update aplicado"
+  ALERT_SUMMARY="O update foi aplicado, o serviço ficou online e as validações principais passaram."
+elif (( OVERALL_FATAL == 0 )); then
+  ALERT_TYPE="warn"
+  ALERT_TITLE="Update aplicado com avisos"
+  ALERT_SUMMARY="O update foi aplicado e o bot está online, mas há avisos que merecem revisão."
 else
   ALERT_TYPE="warn"
   ALERT_TITLE="Update aplicado com alerta"
-  ALERT_SUMMARY="O update foi aplicado, mas pelo menos um healthcheck falhou após as tentativas."
+  ALERT_SUMMARY="O update terminou, mas pelo menos uma validação ou serviço ficou em alerta."
 fi
 
 BODY="Resumo: $ALERT_SUMMARY
 Host: $HOSTNAME
 Branch: $BRANCH
 Commit: ${SHORT_FROM} → ${SHORT_TO}
-Mudança: $COMMIT_SUBJECT
+Mudança: ${COMMIT_SUBJECT:-sem mensagem}
 Arquivos:
 $CHANGED_FILES
-Bot: $BOT_HEALTHCHECK_STATUS
-Serviços de áudio: $AUDIO_SERVICES_STATUS
-Limpeza de áudio: $CLEANUP_STATUS
-Watcher Lavalink celular: $PHONE_LAVALINK_WATCH_STATUS
-Phone worker: $PHONE_WORKER_WATCH_STATUS
-Phone-worker sync: $PHONE_WORKER_SYNC_STATUS
-Core Worker agent auto-update: $CORE_WORKER_AGENT_UPDATE_STATUS
-Core Worker APK build: $CORE_WORKER_APK_BUILD_STATUS
-Notificação APK: $CORE_WORKER_NOTIFY_STATUS
-Análise phone-worker: $PHONE_WORKER_UPDATE_ANALYSIS
-CallKeeper: $CALLKEEPER_STATUS
-Frontend: $FRONT_STATUS
-Backend: $BACK_STATUS
-Activity: $ACTIVITY_HEALTHCHECK_STATUS
-Rollback: $ROLLBACK_STATUS
+Validações:
+• Python: $PREFLIGHT_PY_STATUS
+• Bash: $PREFLIGHT_BASH_STATUS
+• Import de cogs alteradas: $PREFLIGHT_COG_IMPORT_STATUS
+• Serviço do bot: $BOT_HEALTHCHECK_STATUS
+• Health: $BOT_HEALTH_DETAIL_STATUS
+Cogs: $BOT_COGS_STATUS
+Avisos: $BOT_WARNINGS_STATUS
+Serviços:
+• Áudio: $AUDIO_SERVICES_STATUS
+• Limpeza de áudio: $CLEANUP_STATUS
+• Watcher Lavalink celular: $PHONE_LAVALINK_WATCH_STATUS
+• Phone worker: $PHONE_WORKER_WATCH_STATUS
+• Phone-worker sync: $PHONE_WORKER_SYNC_STATUS
+• CallKeeper: $CALLKEEPER_STATUS
+• Frontend: $FRONT_STATUS
+• Backend: $BACK_STATUS
+• Activity: $ACTIVITY_HEALTHCHECK_STATUS
+Core Worker:
+• Agent auto-update: $CORE_WORKER_AGENT_UPDATE_STATUS
+• APK build: $CORE_WORKER_APK_BUILD_STATUS
+• Notificação APK: $CORE_WORKER_NOTIFY_STATUS
+• Análise phone-worker: $PHONE_WORKER_UPDATE_ANALYSIS
+Rollback: $ROLLBACK_STATUS; ponto salvo em $(short_commit "$PREVIOUS_COMMIT")
 Duração: $DURATION
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
 /home/ubuntu/bot/alert.sh "$ALERT_TYPE" "$ALERT_TITLE" "$BODY"
 logger -t "$LOG_TAG" "$ALERT_TITLE"
+
