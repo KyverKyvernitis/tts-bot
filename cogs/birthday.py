@@ -1573,11 +1573,16 @@ class BirthdayCog(commands.Cog):
         if member is not None:
             update["display_name"] = str(getattr(member, "display_name", None) or getattr(member, "name", None) or user_id)
             update["username"] = str(getattr(member, "name", "") or "")
-        if not existing:
-            update["created_at"] = now_iso
+        # created_at não pode aparecer ao mesmo tempo em $set e $setOnInsert.
+        # Em MongoDB isso causa conflito no upsert quando o registro ainda não existe.
         await db.coll.update_one(
             {"type": BIRTHDAY_DOC_ENTRY, "guild_id": int(guild_id), "user_id": int(user_id)},
-            {"$set": update, "$setOnInsert": {"created_at": now_iso}},
+            {
+                "$set": update,
+                "$setOnInsert": {
+                    "created_at": now_iso,
+                },
+            },
             upsert=True,
         )
         return bool(existing)
