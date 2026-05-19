@@ -317,14 +317,14 @@ class BirthdayMessageModal(discord.ui.Modal):
             self.panel.pending_template_key = self.template_key
             self.panel.pending_template_value = template
             self.panel.notice = "Variáveis desconhecidas: " + ", ".join(f"${{{v}}}" for v in unknown)
-            self.panel.screen = "confirm_template"
+            self.panel.go_to("confirm_template")
             self.panel._rebuild()
             await interaction.response.edit_message(view=self.panel)
             return
         await self.panel.cog._set_template(interaction.guild, self.template_key, template)
         self.panel.config = await self.panel.cog._get_config(int(interaction.guild.id))
         self.panel.notice = "Mensagem salva."
-        self.panel.screen = "messages"
+        self.panel.return_to("messages")
         self.panel._rebuild()
         if not interaction.response.is_done():
             await interaction.response.edit_message(view=self.panel)
@@ -385,7 +385,7 @@ class BirthdayTimeModal(discord.ui.Modal):
         await self.panel.cog._update_config(interaction.guild.id, {"announce_hour": hour, "announce_minute": minute, "timezone": tz_name})
         self.panel.config = await self.panel.cog._get_config(int(interaction.guild.id))
         self.panel.notice = "Horário salvo."
-        self.panel.screen = "preferences"
+        self.panel.return_to("preferences")
         self.panel._rebuild()
         await interaction.response.edit_message(view=self.panel)
 
@@ -460,7 +460,7 @@ class BirthdayPreferencesModal(discord.ui.Modal):
         await self.panel.cog._update_config(interaction.guild.id, {"options": options})
         self.panel.config = await self.panel.cog._get_config(int(interaction.guild.id))
         self.panel.notice = "Preferências salvas."
-        self.panel.screen = "preferences"
+        self.panel.return_to("preferences")
         self.panel._rebuild()
         await interaction.response.edit_message(view=self.panel)
         await self.panel.cog._sync_public_calendar(interaction.guild)
@@ -480,33 +480,28 @@ class _AdminMainSelect(discord.ui.Select):
                 discord.SelectOption(label="Variáveis", value="variables", emoji="📌", description="Lista de variáveis disponíveis."),
                 discord.SelectOption(label="Preferências", value="preferences", emoji="⚙️", description="Reação, idade, 29/02 e agrupamento."),
                 discord.SelectOption(label="Testes", value="tests", emoji="🧪", description="Prévia sem esperar o dia."),
-                discord.SelectOption(label="Cadastrados", value="entries", emoji="📋", description="Ver e gerenciar aniversários."),
+                discord.SelectOption(label="Aniversariantes", value="entries", emoji="📋", description="Ver e gerenciar aniversariantes."),
             ],
         )
 
     async def callback(self, interaction: discord.Interaction):
         target = str(self.values[0])
-        self.panel.screen = target
-        self.panel.notice = ""
         if target == "entries":
+            self.panel.entries_page = 0
             await self.panel._reload_entries()
+        self.panel.go_to(target)
+        self.panel.notice = ""
         self.panel._rebuild()
         await interaction.response.edit_message(view=self.panel)
 
 
-class _BackSelect(discord.ui.Select):
+class _BackButton(discord.ui.Button):
     def __init__(self, panel: "BirthdayAdminView"):
         self.panel = panel
-        super().__init__(
-            placeholder="Voltar",
-            min_values=1,
-            max_values=1,
-            options=[discord.SelectOption(label="Voltar ao painel principal", value="home", emoji="↩️")],
-        )
+        super().__init__(label="Voltar", emoji="↩️", style=discord.ButtonStyle.secondary)
 
     async def callback(self, interaction: discord.Interaction):
-        self.panel.screen = "home"
-        self.panel.notice = ""
+        self.panel.go_back()
         self.panel._rebuild()
         await interaction.response.edit_message(view=self.panel)
 
@@ -522,10 +517,17 @@ class _RegisterChannelSelect(discord.ui.ChannelSelect):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        channel = self.values[0] if self.values else None
-        if channel is None or not isinstance(channel, discord.TextChannel):
+        selected = self.values[0] if self.values else None
+        channel = await self.panel.cog._resolve_text_channel(interaction.guild, selected)
+        if channel is None:
             await interaction.response.send_message(
                 view=_make_notice_view("Canal inválido", "Escolha um canal de texto.", ok=False), ephemeral=True
+            )
+            return
+        missing = self.panel.cog._missing_channel_permissions(channel, for_register=True)
+        if missing:
+            await interaction.response.send_message(
+                view=_make_notice_view("Permissões insuficientes", missing, ok=False), ephemeral=True
             )
             return
         await interaction.response.defer()
@@ -548,10 +550,17 @@ class _AnnounceChannelSelect(discord.ui.ChannelSelect):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        channel = self.values[0] if self.values else None
-        if channel is None or not isinstance(channel, discord.TextChannel):
+        selected = self.values[0] if self.values else None
+        channel = await self.panel.cog._resolve_text_channel(interaction.guild, selected)
+        if channel is None:
             await interaction.response.send_message(
                 view=_make_notice_view("Canal inválido", "Escolha um canal de texto.", ok=False), ephemeral=True
+            )
+            return
+        missing = self.panel.cog._missing_channel_permissions(channel, for_register=False)
+        if missing:
+            await interaction.response.send_message(
+                view=_make_notice_view("Permissões insuficientes", missing, ok=False), ephemeral=True
             )
             return
         await interaction.response.defer()
@@ -610,13 +619,13 @@ class _TemplateActionSelect(discord.ui.Select):
             await self.panel.cog._send_template_preview(interaction, key)
             return
         if action == "vars":
-            self.panel.screen = "template_vars"
+            self.panel.go_to("template_vars")
             self.panel.notice = ""
             self.panel._rebuild()
             await interaction.response.edit_message(view=self.panel)
             return
         if action == "restore":
-            self.panel.screen = "confirm_restore"
+            self.panel.go_to("confirm_restore")
             self.panel.notice = ""
             self.panel._rebuild()
             await interaction.response.edit_message(view=self.panel)
@@ -644,14 +653,14 @@ class _RestoreConfirmSelect(discord.ui.Select):
             await self.panel.cog._send_template_preview(interaction, key, use_default=True)
             return
         if action == "cancel":
-            self.panel.screen = "messages"
+            self.panel.return_to("messages")
             self.panel.notice = "Nada foi alterado."
             self.panel._rebuild()
             await interaction.response.edit_message(view=self.panel)
             return
         await self.panel.cog._set_template(interaction.guild, key, DEFAULT_TEMPLATES.get(key, ""))
         self.panel.config = await self.panel.cog._get_config(int(interaction.guild.id))
-        self.panel.screen = "messages"
+        self.panel.return_to("messages")
         self.panel.notice = "Mensagem padrão restaurada."
         self.panel._rebuild()
         await interaction.response.edit_message(view=self.panel)
@@ -680,7 +689,7 @@ class _UnknownTemplateConfirmSelect(discord.ui.Select):
             return
         if action == "vars":
             self.panel.selected_template = key
-            self.panel.screen = "template_vars"
+            self.panel.go_to("template_vars")
             self.panel._rebuild()
             await interaction.response.edit_message(view=self.panel)
             return
@@ -688,7 +697,7 @@ class _UnknownTemplateConfirmSelect(discord.ui.Select):
         self.panel.pending_template_key = ""
         self.panel.pending_template_value = ""
         self.panel.config = await self.panel.cog._get_config(int(interaction.guild.id))
-        self.panel.screen = "messages"
+        self.panel.return_to("messages")
         self.panel.notice = "Mensagem salva."
         self.panel._rebuild()
         await interaction.response.edit_message(view=self.panel)
@@ -760,41 +769,26 @@ class _TestActionSelect(discord.ui.Select):
         await self.panel.cog._handle_test_action(interaction, str(self.values[0]))
 
 
-class _EntriesMonthSelect(discord.ui.Select):
-    def __init__(self, panel: "BirthdayAdminView"):
+class _EntriesPageButton(discord.ui.Button):
+    def __init__(self, panel: "BirthdayAdminView", *, direction: str):
         self.panel = panel
-        options = [discord.SelectOption(label="Todos os meses", value="0", default=(panel.entries_month == 0))]
-        for month in range(1, 13):
-            options.append(discord.SelectOption(label=f"{month:02d}", value=str(month), default=(panel.entries_month == month)))
-        super().__init__(placeholder="Filtrar por mês", min_values=1, max_values=1, options=options)
+        self.direction = direction
+        total_pages = max(1, (len(panel.entries_cache) + panel.entries_per_page - 1) // panel.entries_per_page)
+        if direction == "prev":
+            label = "Anterior"
+            emoji = "⬅️"
+            disabled = panel.entries_page <= 0
+        else:
+            label = "Próxima"
+            emoji = "➡️"
+            disabled = panel.entries_page >= total_pages - 1
+        super().__init__(label=label, emoji=emoji, style=discord.ButtonStyle.secondary, disabled=disabled)
 
     async def callback(self, interaction: discord.Interaction):
-        self.panel.entries_month = int(self.values[0])
-        self.panel.entries_page = 0
-        await self.panel._reload_entries()
-        self.panel._rebuild()
-        await interaction.response.edit_message(view=self.panel)
-
-
-class _EntriesActionSelect(discord.ui.Select):
-    def __init__(self, panel: "BirthdayAdminView"):
-        self.panel = panel
-        super().__init__(
-            placeholder="Navegação da lista",
-            min_values=1,
-            max_values=1,
-            options=[
-                discord.SelectOption(label="Página anterior", value="prev", emoji="⬅️"),
-                discord.SelectOption(label="Próxima página", value="next", emoji="➡️"),
-            ],
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        action = str(self.values[0])
         total_pages = max(1, (len(self.panel.entries_cache) + self.panel.entries_per_page - 1) // self.panel.entries_per_page)
-        if action == "prev":
+        if self.direction == "prev":
             self.panel.entries_page = max(0, self.panel.entries_page - 1)
-        elif action == "next":
+        else:
             self.panel.entries_page = min(total_pages - 1, self.panel.entries_page + 1)
         self.panel._rebuild()
         await interaction.response.edit_message(view=self.panel)
@@ -808,16 +802,32 @@ class BirthdayAdminView(discord.ui.LayoutView):
         self.guild_id = int(guild_id)
         self.config = cog._normalize_config(config)
         self.screen = "home"
+        self.screen_history: list[str] = []
         self.notice = ""
         self.selected_template = "calendar"
         self.variable_category = "member"
         self.pending_template_key = ""
         self.pending_template_value = ""
-        self.entries_month = 0
         self.entries_page = 0
         self.entries_per_page = 10
         self.entries_cache: list[CalendarEntry] = []
         self._rebuild()
+
+
+    def go_to(self, screen: str, *, remember: bool = True):
+        if remember and self.screen != screen:
+            self.screen_history.append(self.screen)
+        self.screen = screen
+
+    def go_back(self):
+        previous = self.screen_history.pop() if self.screen_history else "home"
+        self.screen = previous
+        self.notice = ""
+
+    def return_to(self, screen: str):
+        while self.screen_history and self.screen_history[-1] == screen:
+            self.screen_history.pop()
+        self.screen = screen
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if int(getattr(interaction.user, "id", 0) or 0) != self.owner_id:
@@ -859,7 +869,7 @@ class BirthdayAdminView(discord.ui.LayoutView):
             "",
             f"**Avisos**\n{_channel_mention(announce_channel_id)} às `{hour:02d}:{minute:02d}`",
             "",
-            f"**Calendário**\n{count} aniversário(s) cadastrado(s)",
+            f"**Calendário**\n{count} aniversariante(s) salvo(s)",
         ]
         if self.notice:
             lines.extend(["", self.notice])
@@ -925,7 +935,7 @@ class BirthdayAdminView(discord.ui.LayoutView):
             discord.ui.TextDisplay("\n".join(lines)),
             discord.ui.Separator(),
             discord.ui.ActionRow(_RegisterChannelSelect(self)),
-            discord.ui.ActionRow(_BackSelect(self)),
+            discord.ui.ActionRow(_BackButton(self)),
             accent_color=discord.Color.blurple(),
         ))
 
@@ -946,7 +956,7 @@ class BirthdayAdminView(discord.ui.LayoutView):
             discord.ui.TextDisplay("\n".join(lines)),
             discord.ui.Separator(),
             discord.ui.ActionRow(_AnnounceChannelSelect(self)),
-            discord.ui.ActionRow(_BackSelect(self)),
+            discord.ui.ActionRow(_BackButton(self)),
             accent_color=discord.Color.blurple(),
         ))
 
@@ -974,7 +984,7 @@ class BirthdayAdminView(discord.ui.LayoutView):
             discord.ui.Separator(),
             discord.ui.ActionRow(_TemplateSelect(self)),
             discord.ui.ActionRow(_TemplateActionSelect(self)),
-            discord.ui.ActionRow(_BackSelect(self)),
+            discord.ui.ActionRow(_BackButton(self)),
             accent_color=discord.Color.blurple(),
         ))
 
@@ -988,7 +998,7 @@ class BirthdayAdminView(discord.ui.LayoutView):
             discord.ui.TextDisplay(_trim("\n".join(lines))),
             discord.ui.Separator(),
             discord.ui.ActionRow(_TemplateActionSelect(self)),
-            discord.ui.ActionRow(_BackSelect(self)),
+            discord.ui.ActionRow(_BackButton(self)),
             accent_color=discord.Color.blurple(),
         ))
 
@@ -1025,7 +1035,7 @@ class BirthdayAdminView(discord.ui.LayoutView):
             discord.ui.TextDisplay(_trim("\n".join(lines))),
             discord.ui.Separator(),
             discord.ui.ActionRow(_VariableCategorySelect(self)),
-            discord.ui.ActionRow(_BackSelect(self)),
+            discord.ui.ActionRow(_BackButton(self)),
             accent_color=discord.Color.blurple(),
         ))
 
@@ -1050,7 +1060,7 @@ class BirthdayAdminView(discord.ui.LayoutView):
             discord.ui.TextDisplay("\n".join(lines)),
             discord.ui.Separator(),
             discord.ui.ActionRow(_PreferencesActionSelect(self)),
-            discord.ui.ActionRow(_BackSelect(self)),
+            discord.ui.ActionRow(_BackButton(self)),
             accent_color=discord.Color.blurple(),
         ))
 
@@ -1065,7 +1075,7 @@ class BirthdayAdminView(discord.ui.LayoutView):
             discord.ui.TextDisplay("\n".join(lines)),
             discord.ui.Separator(),
             discord.ui.ActionRow(_TestActionSelect(self)),
-            discord.ui.ActionRow(_BackSelect(self)),
+            discord.ui.ActionRow(_BackButton(self)),
             accent_color=discord.Color.blurple(),
         ))
 
@@ -1074,24 +1084,16 @@ class BirthdayAdminView(discord.ui.LayoutView):
         start = self.entries_page * self.entries_per_page
         page_entries = entries[start:start + self.entries_per_page]
         total_pages = max(1, (len(entries) + self.entries_per_page - 1) // self.entries_per_page)
-        lines = ["# 📋 Cadastrados"]
-        if self.entries_month:
-            lines.append(f"Mês: **{self.entries_month:02d}**")
-        else:
-            lines.append("Todos os meses")
-        lines.append(f"Página {self.entries_page + 1}/{total_pages}")
-        lines.append("")
+        lines = ["# 📋 Aniversariantes", f"{len(entries)} aniversariante(s) salvo(s)", f"Página {self.entries_page + 1}/{total_pages}", ""]
         if not page_entries:
-            lines.append("Nenhum aniversário encontrado.")
+            lines.append("Nenhum aniversariante encontrado.")
         else:
             for entry in page_entries:
-                lines.append(f"• {_birthday_date(entry.day, entry.month)} — {entry.display_name}")
+                lines.append(f"• {entry.display_name} — {_birthday_date(entry.day, entry.month)}")
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay(_trim("\n".join(lines))),
             discord.ui.Separator(),
-            discord.ui.ActionRow(_EntriesMonthSelect(self)),
-            discord.ui.ActionRow(_EntriesActionSelect(self)),
-            discord.ui.ActionRow(_BackSelect(self)),
+            discord.ui.ActionRow(_EntriesPageButton(self, direction="prev"), _EntriesPageButton(self, direction="next"), _BackButton(self)),
             accent_color=discord.Color.blurple(),
         ))
 
@@ -1100,7 +1102,7 @@ class BirthdayAdminView(discord.ui.LayoutView):
         if guild is None:
             self.entries_cache = []
             return
-        entries = await self.cog._calendar_entries(guild, month_filter=self.entries_month or None, cleanup_missing=False)
+        entries = await self.cog._calendar_entries(guild, cleanup_missing=False)
         self.entries_cache = entries
 
 
@@ -1218,6 +1220,48 @@ class BirthdayCog(commands.Cog):
             lock = asyncio.Lock()
             self._sync_locks[gid] = lock
         return lock
+
+
+    async def _resolve_text_channel(self, guild: discord.Guild | None, selected: Any) -> discord.TextChannel | None:
+        if guild is None or selected is None:
+            return None
+        if isinstance(selected, discord.TextChannel):
+            return selected
+        try:
+            channel_id = int(getattr(selected, "id", 0) or 0)
+        except Exception:
+            channel_id = 0
+        if not channel_id:
+            return None
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await guild.fetch_channel(channel_id)
+            except discord.HTTPException:
+                return None
+        return channel if isinstance(channel, discord.TextChannel) else None
+
+    def _missing_channel_permissions(self, channel: discord.TextChannel, *, for_register: bool) -> str:
+        guild = channel.guild
+        me = guild.me or (guild.get_member(int(self.bot.user.id)) if self.bot.user else None)
+        if me is None:
+            return "Não consegui verificar minhas permissões nesse canal."
+        perms = channel.permissions_for(me)
+        needed = [
+            ("view_channel", "ver o canal"),
+            ("send_messages", "enviar mensagens"),
+        ]
+        if for_register:
+            needed.extend([
+                ("create_public_threads", "criar threads públicas"),
+                ("send_messages_in_threads", "enviar mensagens em threads"),
+                ("read_message_history", "ler histórico de mensagens"),
+                ("add_reactions", "adicionar reações"),
+            ])
+        missing = [label for attr, label in needed if not bool(getattr(perms, attr, False))]
+        if not missing:
+            return ""
+        return "Não consigo usar esse canal ainda. Permissões necessárias: " + ", ".join(missing) + "."
 
     async def _set_register_channel(self, guild: discord.Guild, channel: discord.TextChannel):
         cfg = await self._get_config(int(guild.id))
@@ -1478,7 +1522,7 @@ class BirthdayCog(commands.Cog):
                 return
             values = await self._preview_values(interaction.guild, interaction.user, cfg)
             body = _replace_vars(cfg["templates"].get("announce_single") or DEFAULT_TEMPLATES["announce_single"], values)
-            await channel.send(view=_make_notice_view("🎂 Aniversários", body, ok=True), allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+            await channel.send(content=body, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
             await interaction.response.send_message(view=_make_notice_view("Teste enviado", f"Enviei a prévia em {channel.mention}.", ok=True), ephemeral=True)
             return
         key_map = {"calendar": "calendar", "saved": "saved", "invalid": "invalid", "single": "announce_single", "group": "announce_group"}
@@ -1607,7 +1651,7 @@ class BirthdayCog(commands.Cog):
         if bool(opts.get("group_announcements", True)) and len(unsent) > 1:
             values = await self._announcement_group_values(guild, unsent, cfg)
             body = _replace_vars(cfg["templates"].get("announce_group") or DEFAULT_TEMPLATES["announce_group"], values)
-            await channel.send(view=_make_notice_view("🎂 Aniversários", body, ok=True), allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+            await channel.send(content=body, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
             for entry in unsent:
                 await self._mark_sent(guild.id, entry.user_id, now.year)
         else:
@@ -1618,7 +1662,7 @@ class BirthdayCog(commands.Cog):
                 values = self._member_values(member, day=entry.day, month=entry.month, year=entry.year, cfg=cfg)
                 values.update(self._base_values(guild, cfg))
                 body = _replace_vars(cfg["templates"].get("announce_single") or DEFAULT_TEMPLATES["announce_single"], values)
-                await channel.send(view=_make_notice_view("🎂 Aniversários", body, ok=True), allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+                await channel.send(content=body, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
                 await self._mark_sent(guild.id, entry.user_id, now.year)
 
     async def _entries_for_today(self, guild: discord.Guild, *, now: datetime, cfg: dict[str, Any]) -> list[CalendarEntry]:
