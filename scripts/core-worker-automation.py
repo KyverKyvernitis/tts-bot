@@ -627,7 +627,8 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
 _APK_BUILD_PERMANENT_ERROR_RE = re.compile(
     r"(compiledebugjavawithjavac|javac|unclosed string literal|cannot find symbol|"
     r"manifest merger failed|processdebugmainmanifest|aapt|android resource linking failed|"
-    r"execution failed for task|coreworkerbedrockservice|mainactivity\.java)",
+    r"execution failed for task|cmake error|ninja:|clang|externalnativebuild|"
+    r"toolchain nativa incompleta|coreworkerbedrockservice|mainactivity\.java)",
     re.IGNORECASE,
 )
 
@@ -642,7 +643,7 @@ def _apk_build_job_matches_source(job: dict[str, Any], version_name: str, source
     payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
     for obj in (payload, result):
-        for key in ("versionName", "version_name", "sourceFingerprint", "source_fingerprint", "source_sha256"):
+        for key in ("versionName", "version_name", "versionCode", "version_code", "sourceFingerprint", "source_fingerprint", "sourceSha256", "source_sha256", "notificationId", "notification_id"):
             value = obj.get(key) if isinstance(obj, dict) else None
             if value:
                 haystacks.append(str(value))
@@ -659,7 +660,7 @@ def _apk_build_failure_detail(job: dict[str, Any]) -> str:
         if value:
             pieces.append(str(value))
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
-    for key in ("summary", "error", "stderr_tail", "stdout_tail", "tail", "message"):
+    for key in ("summary", "error", "stderr_tail", "stdout_tail", "gradle_log_tail", "tail", "message"):
         value = result.get(key) if isinstance(result, dict) else None
         if value:
             pieces.append(str(value))
@@ -784,7 +785,7 @@ def queue_apk_build() -> dict[str, Any]:
             "updated_at": time.time(),
             "permanent_failure": bool(failed_recent.get("permanent")),
             "last_failure_detail": failed_recent.get("detail"),
-            "message": "build do APK falhou recentemente; não vou repetir em loop automático",
+            "message": "build do APK falhou recentemente; retry automático bloqueado para evitar loop; use retry manual após corrigir o erro",
         })
         pending["apk_build"] = item
         _save_pending(pending)

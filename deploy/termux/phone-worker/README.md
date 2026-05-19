@@ -1,5 +1,9 @@
 # Phone Worker
 
+## v1.8.3 — hotfix build APK sem loop
+
+A versão `1.8.3` estabiliza o builder depois da entrada do NDK/CMake: agora o `apk_build_debug` usa lock local/cross-process para impedir dois Gradle ao mesmo tempo, grava o log persistente em `~/core-worker-apk-builds/logs/`, devolve `gradle_log_tail` no resultado do job e mantém metadados de versão/source mesmo quando o build falha. Isso evita retry automático cego e deixa o painel mostrar o erro real antes de tentar outro build.
+
 ## v1.8.2 — build nativo APK/NDK
 
 A versão `1.8.2` adiciona diagnóstico explícito de NDK/CMake para o build do Core Worker quando o app passa a usar `externalNativeBuild`. O worker continua sendo o único ambiente que compila APK; a VPS apenas orquestra, publica e notifica.
