@@ -1,5 +1,16 @@
+import json
 from pathlib import Path
 from .safe_json import load_context, ok_response, error_response, safe_path, dir_size, clean_text
+
+
+def _read_json(path):
+    try:
+        p = Path(path)
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        pass
+    return {}
 
 
 def _exists(path):
@@ -41,10 +52,15 @@ def run(context_json=None):
             "prootBinary": (bin_dir / "proot").exists(),
             "rootfsPrepared": _is_nonempty_dir(rootfs),
             "bedrockServerFound": (bedrock / "bedrock_server").exists(),
+            "internalState": (core_linux_dir / "runtime" / "core-linux-internal-state.json").exists(),
+            "internalManifest": (core_linux_dir / "manifests" / "core-linux-internal-manifest.json").exists(),
+            "executorState": (core_linux_dir / "runtime" / "executor-state.json").exists(),
         }
+        internal_state = _read_json(core_linux_dir / "runtime" / "core-linux-internal-state.json")
+        internal_preflight = internal_state.get("preflight") if isinstance(internal_state.get("preflight"), dict) else {}
         missing_base = [k for k in ["coreLinuxDir", "runtimeMarker", "rootfsDir", "binDir", "scriptsDir", "logsDir", "downloadsDir", "bedrockDir"] if not markers[k]]
-        rootfs_ready = bool(markers["rootfsPrepared"])
-        box64_ready = bool(markers["box64Binary"])
+        rootfs_ready = bool(markers["rootfsPrepared"] or internal_preflight.get("rootfsReady"))
+        box64_ready = bool(markers["box64Binary"] or internal_preflight.get("box64Ready"))
         prepared = bool(markers["coreLinuxDir"] and markers["runtimeMarker"] and not missing_base)
         ok = prepared
         if focus == "rootfs":
@@ -79,8 +95,9 @@ def run(context_json=None):
             termuxBootInstalled=bool(ctx.get("termuxBootInstalled")),
             coreLinuxDir=safe_path(core_linux_dir),
             markers=markers,
+            coreLinuxInternal=internal_state,
             missing=missing_base[:12],
-            size=dir_size(core_linux_dir, max_files=220),
+            size=dir_size(core_linux_dir, max_files=260),
             safety="diagnóstico somente leitura; não instala e não executa binário externo",
         )
     except Exception as exc:

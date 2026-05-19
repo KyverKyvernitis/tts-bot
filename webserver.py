@@ -635,6 +635,7 @@ CORE_WORKER_APP_AUTO_JOB_TYPES = {
     "apk_local_shell_probe",
     "apk_python_runtime_probe",
     "apk_linux_runtime_probe",
+    "apk_core_linux_internal_probe",
 }
 
 CORE_WORKER_APP_MANUAL_JOB_TYPES = {
@@ -670,6 +671,12 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_linux_provisioner_probe",
     "apk_linux_prepare_directories",
     "apk_linux_generate_setup_plan",
+    "apk_core_linux_internal_probe",
+    "apk_core_linux_internal_bootstrap",
+    "apk_core_linux_executor_probe",
+    "apk_core_linux_rootfs_manifest",
+    "apk_core_linux_box64_manifest",
+    "apk_core_linux_bedrock_preflight",
     "apk_minecraft_bedrock_probe",
     "apk_minecraft_bedrock_status",
     "apk_minecraft_bedrock_requirements",
@@ -758,6 +765,12 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_linux_provisioner_probe": "Linux provisioner",
     "apk_linux_prepare_directories": "preparar diretórios Linux",
     "apk_linux_generate_setup_plan": "plano setup Linux",
+    "apk_core_linux_internal_probe": "Core Linux interno",
+    "apk_core_linux_internal_bootstrap": "bootstrap interno",
+    "apk_core_linux_executor_probe": "executor interno",
+    "apk_core_linux_rootfs_manifest": "manifesto rootfs interno",
+    "apk_core_linux_box64_manifest": "manifesto Box64 interno",
+    "apk_core_linux_bedrock_preflight": "preflight Bedrock interno",
     "apk_minecraft_bedrock_probe": "Bedrock diagnóstico",
     "apk_minecraft_bedrock_status": "Bedrock status",
     "apk_minecraft_bedrock_requirements": "Bedrock requisitos",

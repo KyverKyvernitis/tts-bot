@@ -2576,6 +2576,9 @@ public class MainActivity extends Activity {
             File scripts = new File(base, "scripts");
             File logs = new File(base, "logs");
             File downloads = new File(base, "downloads");
+            File staging = new File(base, "staging");
+            File runtime = new File(base, "runtime");
+            File manifests = new File(base, "manifests");
             File bedrock = new File(base, "bedrock");
             File provision = new File(base, "provision");
             rootfs.mkdirs();
@@ -2583,12 +2586,17 @@ public class MainActivity extends Activity {
             scripts.mkdirs();
             logs.mkdirs();
             downloads.mkdirs();
+            staging.mkdirs();
+            runtime.mkdirs();
+            manifests.mkdirs();
             bedrock.mkdirs();
             provision.mkdirs();
             JSONObject marker = new JSONObject();
             marker.put("ok", true);
             marker.put("createdBy", "core-worker-apk");
-            marker.put("mode", "core-linux-runtime-manager");
+            marker.put("mode", "core-linux-internal-manager");
+            marker.put("primaryStrategy", "core-linux-internal");
+            marker.put("termuxRole", "fallback-legado");
             marker.put("rootfsPrepared", false);
             marker.put("box64Prepared", false);
             marker.put("bedrockBundled", false);
@@ -2596,13 +2604,19 @@ public class MainActivity extends Activity {
             marker.put("autoDownload", false);
             marker.put("eulaAccepted", false);
             marker.put("arbitraryShell", false);
-            marker.put("summary", "base do Core Linux Runtime preparada no sandbox do APK; Termux é fallback legado");
+            marker.put("androidWritableExecBlocked", Build.VERSION.SDK_INT >= 29);
+            marker.put("requiresEmbeddedExecutor", true);
+            marker.put("summary", "base do Core Linux interno preparada; Termux fica só como fallback legado");
             writeTextFile(new File(base, "runtime-marker.json"), marker.toString());
             writeTextFile(new File(scripts, "README.txt"), "Scripts internos do Core Worker. Não cole tokens, IP privado ou segredos aqui.\n");
             writeCoreLinuxProvisionerFiles(base);
+            try {
+                coreLinuxInternalSnapshot("bootstrap");
+            } catch (Throwable ignored) {
+            }
             coreLinuxPrepared = true;
-            coreLinuxState = "provisioner preparado";
-            coreLinuxSummary = "Core Linux provisioner pronto · rootfs/Box64 pendentes";
+            coreLinuxState = "core-linux-internal preparado";
+            coreLinuxSummary = "Core Linux interno preparado · executor/rootfs/Box64 pendentes";
             if (bedrockSummary == null || bedrockSummary.trim().isEmpty() || bedrockSummary.contains("aguardando")) {
                 bedrockSummary = "Bedrock Manager pronto para plano/diagnóstico";
             }
@@ -2707,6 +2721,60 @@ public class MainActivity extends Activity {
         coreLinuxLastCheckAt = System.currentTimeMillis();
         return py;
     }
+
+
+    private JSONObject coreLinuxInternalSnapshot(String action) throws Exception {
+        prepareCoreLinuxRuntimeStateWithoutRecursiveProbe();
+        JSONObject extra = new JSONObject();
+        extra.put("action", action == null ? "probe" : action);
+        extra.put("focus", action == null ? "probe" : action);
+        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
+        extra.put("bedrockDir", new File(coreLinuxDir(), "bedrock").getAbsolutePath());
+        extra.put("filesDir", getFilesDir().getAbsolutePath());
+        extra.put("cacheDir", getCacheDir().getAbsolutePath());
+        extra.put("nativeLibDir", getApplicationInfo() == null ? "" : getApplicationInfo().nativeLibraryDir);
+        extra.put("dataDir", getApplicationInfo() == null ? "" : getApplicationInfo().dataDir);
+        extra.put("androidSdk", Build.VERSION.SDK_INT);
+        extra.put("targetSdk", getApplicationInfo() == null ? 0 : getApplicationInfo().targetSdkVersion);
+        extra.put("primaryAbi", Build.SUPPORTED_ABIS != null && Build.SUPPORTED_ABIS.length > 0 ? Build.SUPPORTED_ABIS[0] : "");
+        JSONArray abis = new JSONArray();
+        if (Build.SUPPORTED_ABIS != null) {
+            for (String abi : Build.SUPPORTED_ABIS) {
+                abis.put(abi);
+            }
+        }
+        extra.put("supportedAbis", abis);
+        extra.put("termuxInstalled", isPackageInstalled("com.termux"));
+        extra.put("termuxApiInstalled", isPackageInstalled("com.termux.api"));
+        extra.put("termuxBootInstalled", isPackageInstalled("com.termux.boot"));
+        extra.put("officialLinux", "Ubuntu Linux 22.04 LTS ou superior");
+        extra.put("officialRamGb", 4);
+        JSONObject py = runEmbeddedPythonJob("core_linux_internal", extra);
+        coreLinuxPrepared = py.optBoolean("prepared", coreLinuxPrepared);
+        coreLinuxState = py.optString("state", py.optBoolean("ok", false) ? "core-linux-internal ok" : "core-linux-internal bloqueado");
+        coreLinuxSummary = py.optString("summary", coreLinuxSummary);
+        coreLinuxLastCheckAt = System.currentTimeMillis();
+        updateSystemChecklistText();
+        return py;
+    }
+
+    private void prepareCoreLinuxRuntimeStateWithoutRecursiveProbe() {
+        try {
+            File base = new File(getFilesDir(), "core-linux");
+            new File(base, "rootfs").mkdirs();
+            new File(base, "bin").mkdirs();
+            new File(base, "scripts").mkdirs();
+            new File(base, "logs").mkdirs();
+            new File(base, "downloads").mkdirs();
+            new File(base, "staging").mkdirs();
+            new File(base, "runtime").mkdirs();
+            new File(base, "manifests").mkdirs();
+            new File(base, "bedrock").mkdirs();
+            new File(base, "provision").mkdirs();
+        } catch (Throwable ignored) {
+        }
+    }
+
 
     private JSONObject bedrockRequirementsSnapshot() throws Exception {
         JSONObject extra = new JSONObject();
@@ -3504,6 +3572,12 @@ public class MainActivity extends Activity {
                 .put("apk_linux_provisioner_probe")
                 .put("apk_linux_prepare_directories")
                 .put("apk_linux_generate_setup_plan")
+                .put("apk_core_linux_internal_probe")
+                .put("apk_core_linux_internal_bootstrap")
+                .put("apk_core_linux_executor_probe")
+                .put("apk_core_linux_rootfs_manifest")
+                .put("apk_core_linux_box64_manifest")
+                .put("apk_core_linux_bedrock_preflight")
                 .put("apk_minecraft_bedrock_probe")
                 .put("apk_minecraft_bedrock_status")
                 .put("apk_minecraft_bedrock_requirements")
@@ -4043,8 +4117,37 @@ public class MainActivity extends Activity {
             result.put("message", plan.optBoolean("ok", false) ? "plano assistido Linux/Bedrock gerado sem baixar nada" : "plano assistido Linux/Bedrock pendente");
             return result;
         }
+
+        if ("apk_core_linux_internal_probe".equals(type)
+                || "apk_core_linux_internal_bootstrap".equals(type)
+                || "apk_core_linux_executor_probe".equals(type)
+                || "apk_core_linux_rootfs_manifest".equals(type)
+                || "apk_core_linux_box64_manifest".equals(type)
+                || "apk_core_linux_bedrock_preflight".equals(type)) {
+            String action = "probe";
+            if ("apk_core_linux_internal_bootstrap".equals(type)) action = "bootstrap";
+            if ("apk_core_linux_executor_probe".equals(type)) action = "executor";
+            if ("apk_core_linux_rootfs_manifest".equals(type)) action = "rootfs";
+            if ("apk_core_linux_box64_manifest".equals(type)) action = "box64";
+            if ("apk_core_linux_bedrock_preflight".equals(type)) action = "bedrock_preflight";
+            JSONObject core = coreLinuxInternalSnapshot(action);
+            safePutPayload(result, "coreLinuxInternal", core);
+            internalDiagnosticsSummary = core.optString("summary", "Core Linux interno atualizado");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!core.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", core.optString("error", core.optString("summary", "Core Linux interno bloqueado")));
+            }
+            result.put("message", core.optString("summary", "Core Linux interno atualizado sem Termux"));
+            return result;
+        }
+
         if ("apk_linux_runtime_probe".equals(type) || "apk_linux_rootfs_probe".equals(type) || "apk_linux_box64_probe".equals(type)) {
             prepareCoreLinuxRuntimeState();
+            try {
+                coreLinuxInternalSnapshot("probe");
+            } catch (Throwable ignored) {
+            }
             String focus = "runtime";
             if ("apk_linux_rootfs_probe".equals(type)) focus = "rootfs";
             if ("apk_linux_box64_probe".equals(type)) focus = "box64";

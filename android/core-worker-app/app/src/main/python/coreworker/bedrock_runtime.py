@@ -123,9 +123,13 @@ def _build_preflight(core_linux_dir, bedrock_dir, service_active, foreground_act
     properties = bedrock_dir / "server.properties"
     eula = bedrock_dir / "eula.txt"
     server = bedrock_dir / "bedrock_server"
-    rootfs_ready = (core_linux_dir / "rootfs" / ".core-worker-rootfs-ready").exists()
+    internal_state = _read_json(core_linux_dir / "runtime" / "core-linux-internal-state.json")
+    internal_preflight = internal_state.get("preflight") if isinstance(internal_state.get("preflight"), dict) else {}
+    internal_executor_ready = bool(internal_preflight.get("executorReady"))
+    rootfs_ready = bool((core_linux_dir / "rootfs" / ".core-worker-rootfs-ready").exists() or internal_preflight.get("rootfsReady"))
     box64_candidates = [core_linux_dir / "bin" / "box64", core_linux_dir / "box64" / "box64"]
     box64 = next((p for p in box64_candidates if p.exists()), None)
+    box64_ready = bool(box64 is not None or internal_preflight.get("box64Ready"))
     eula_ok = _eula_accepted(eula)
     server_installed = server.exists()
     props_ready = properties.exists()
@@ -137,9 +141,11 @@ def _build_preflight(core_linux_dir, bedrock_dir, service_active, foreground_act
         blockers.append("bedrock_server não instalado")
     if not eula_ok:
         blockers.append("EULA pendente")
+    if not internal_executor_ready:
+        blockers.append("executor interno pendente")
     if not rootfs_ready:
         blockers.append("rootfs pendente")
-    if box64 is None:
+    if not box64_ready:
         blockers.append("Box64 pendente")
     if not service_active and not foreground_active:
         blockers.append("runtime/serviço visível ainda não ativo")
@@ -153,6 +159,9 @@ def _build_preflight(core_linux_dir, bedrock_dir, service_active, foreground_act
         "eula": eula,
         "server": server,
         "box64": box64,
+        "box64Ready": box64_ready,
+        "internalExecutorReady": internal_executor_ready,
+        "coreLinuxInternal": internal_state,
         "rootfsReady": rootfs_ready,
         "eulaAccepted": eula_ok,
         "serverInstalled": server_installed,
@@ -253,7 +262,8 @@ def run(context_json=None):
             "serverProperties": preflight["serverProperties"],
             "eulaAccepted": preflight["eulaAccepted"],
             "rootfsReady": preflight["rootfsReady"],
-            "box64Ready": preflight["box64"] is not None,
+            "box64Ready": bool(preflight.get("box64Ready")),
+            "internalExecutorReady": bool(preflight.get("internalExecutorReady")),
             "readyToStart": preflight["readyToStart"],
             "blockers": preflight["blockers"],
             "bedrockDir": safe_path(bedrock_dir),
