@@ -57,6 +57,13 @@ class SettingsDB:
                 partialFilterExpression={"type": "guild"},
             )
             await self.coll.create_index([("guild_id", 1), ("user_id", 1), ("type", 1)], unique=True, name="guild_id_1_user_id_1_type_1")
+
+            # Índices do sistema de aniversários. Eles ficam no SettingsDB para
+            # não depender de sincronização slash nem de estado local do cog, e
+            # são compatíveis com o índice único legado (guild_id, user_id, type).
+            await self.coll.create_index([("type", 1), ("guild_id", 1)], name="birthday_type_guild")
+            await self.coll.create_index([("type", 1), ("guild_id", 1), ("user_id", 1)], name="birthday_entry_user")
+            await self.coll.create_index([("type", 1), ("guild_id", 1), ("month", 1), ("day", 1)], name="birthday_entry_date")
         except Exception as e:
             print(f"[db] Erro ao garantir índices: {e}")
 
