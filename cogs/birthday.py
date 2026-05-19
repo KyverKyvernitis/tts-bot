@@ -25,6 +25,20 @@ DEFAULT_TIMEZONE = "America/Sao_Paulo"
 DEFAULT_DELETE_AFTER = 10
 DEFAULT_REACTION = "✅"
 MAX_TEXT_DISPLAY = 3900
+PT_MONTHS = {
+    1: "Janeiro",
+    2: "Fevereiro",
+    3: "Março",
+    4: "Abril",
+    5: "Maio",
+    6: "Junho",
+    7: "Julho",
+    8: "Agosto",
+    9: "Setembro",
+    10: "Outubro",
+    11: "Novembro",
+    12: "Dezembro",
+}
 
 DEFAULT_TEMPLATES: dict[str, str] = {
     "calendar": (
@@ -177,10 +191,16 @@ def _channel_mention(channel_id: int | None) -> str:
     return f"<#{cid}>" if cid else "não configurado"
 
 
-def _member_display(member: discord.Member | None, user_id: int) -> str:
+def _member_display(member: discord.Member | None, user_id: int, fallback: str | None = None) -> str:
     if member is not None:
         return str(getattr(member, "display_name", None) or getattr(member, "name", None) or user_id)
+    if fallback:
+        return str(fallback)
     return f"Usuário {user_id}"
+
+
+def _display_sort_key(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
 
 
 def _birthday_date(day: int, month: int) -> str:
@@ -1244,6 +1264,7 @@ class BirthdayCog(commands.Cog):
                 ("send_messages_in_threads", "enviar mensagens em threads"),
                 ("read_message_history", "ler histórico de mensagens"),
                 ("add_reactions", "adicionar reações"),
+                ("manage_messages", "apagar mensagens inválidas"),
             ])
         missing = [label for attr, label in needed if not bool(getattr(perms, attr, False))]
         if not missing:
@@ -1303,17 +1324,22 @@ class BirthdayCog(commands.Cog):
             if not uid or not _valid_birthday(day, month, None):
                 continue
             member = guild.get_member(uid)
+            missing_confirmed = False
             if member is None and cleanup_missing:
                 try:
                     member = await guild.fetch_member(uid)
                 except discord.NotFound:
-                    stale.append(uid)
-                    continue
-                except discord.HTTPException:
+                    missing_confirmed = True
+                except discord.HTTPException as exc:
+                    # Falha de fetch não significa que o usuário saiu. Manter o
+                    # registro evita apagar aniversários válidos quando o cache de
+                    # membros não está completo ou a API falha temporariamente.
+                    log.debug("não consegui buscar membro do aniversário guild=%s user=%s: %r", guild.id, uid, exc)
                     member = None
-            if member is None and cleanup_missing:
+            if missing_confirmed:
                 stale.append(uid)
                 continue
+            fallback_name = str(doc.get("display_name") or doc.get("username") or "").strip() or None
             year_raw = doc.get("year")
             try:
                 year = int(year_raw) if year_raw else None
@@ -1325,31 +1351,42 @@ class BirthdayCog(commands.Cog):
                 day=day,
                 month=month,
                 year=year,
-                display_name=_member_display(member, uid),
+                display_name=_member_display(member, uid, fallback_name),
                 mention=f"<@{uid}>",
                 next_dt=next_dt,
             ))
         if stale and cleanup_missing:
             await db.coll.delete_many({"type": BIRTHDAY_DOC_ENTRY, "guild_id": int(guild.id), "user_id": {"$in": stale}})
-        result.sort(key=lambda e: (e.next_dt, e.display_name.casefold()))
+        result.sort(key=lambda e: (e.next_dt, _display_sort_key(e.display_name)))
         return result
 
     async def _render_calendar(self, guild: discord.Guild, *, limit: int | None = None, compact: bool = False) -> str:
-        cfg = await self._get_config(int(guild.id))
         entries = await self._calendar_entries(guild, cleanup_missing=True)
         if not entries:
             return ""
-        shown = entries if limit is None else entries[:max(0, int(limit))]
-        lines = []
+
+        ordered = sorted(entries, key=lambda e: (int(e.month), int(e.day), _display_sort_key(e.display_name)))
+        shown = ordered if limit is None else ordered[:max(0, int(limit))]
+        grouped: dict[int, list[CalendarEntry]] = {}
         for entry in shown:
-            if compact:
-                lines.append(f"{_birthday_date(entry.day, entry.month)} — {entry.display_name}")
-            else:
-                lines.append(f"• {_birthday_date(entry.day, entry.month)} — {entry.display_name}")
-        hidden = len(entries) - len(shown)
+            grouped.setdefault(int(entry.month), []).append(entry)
+
+        multiple_months = len(grouped) > 1
+        lines: list[str] = []
+        for idx, month in enumerate(sorted(grouped)):
+            if idx and multiple_months:
+                lines.extend(["", "────────────────", ""])
+            if multiple_months or not compact:
+                lines.append(f"📅 {PT_MONTHS.get(month, f'{month:02d}')}" )
+                lines.append("")
+            for entry in sorted(grouped[month], key=lambda e: (int(e.day), _display_sort_key(e.display_name))):
+                prefix = "" if compact else "• "
+                lines.append(f"{prefix}{_birthday_date(entry.day, entry.month)} — {entry.display_name}")
+
+        hidden = len(ordered) - len(shown)
         if hidden > 0:
-            lines.append(f"+ {hidden} aniversário(s) cadastrado(s)")
-        return "\n".join(lines)
+            lines.extend(["", f"+ {hidden} aniversário(s) cadastrado(s)"])
+        return "\n".join(line.rstrip() for line in lines).strip()
 
     def _base_values(self, guild: discord.Guild, cfg: dict[str, Any]) -> dict[str, Any]:
         now = _utcnow()
@@ -1518,7 +1555,7 @@ class BirthdayCog(commands.Cog):
         key_map = {"calendar": "calendar", "single": "announce_single", "group": "announce_group"}
         await self._send_template_preview(interaction, key_map.get(action, "calendar"))
 
-    async def _upsert_birthday(self, guild_id: int, user_id: int, *, day: int, month: int, year: int | None) -> bool:
+    async def _upsert_birthday(self, guild_id: int, user_id: int, *, day: int, month: int, year: int | None, member: discord.Member | discord.User | None = None) -> bool:
         db = self.db
         if db is None or not hasattr(db, "coll"):
             return False
@@ -1533,6 +1570,9 @@ class BirthdayCog(commands.Cog):
             "year": int(year) if year else None,
             "updated_at": now_iso,
         }
+        if member is not None:
+            update["display_name"] = str(getattr(member, "display_name", None) or getattr(member, "name", None) or user_id)
+            update["username"] = str(getattr(member, "name", "") or "")
         if not existing:
             update["created_at"] = now_iso
         await db.coll.update_one(
@@ -1550,30 +1590,44 @@ class BirthdayCog(commands.Cog):
         await db.coll.delete_many({"type": BIRTHDAY_DOC_SENT, "guild_id": int(guild_id), "user_id": int(user_id)})
         return bool(getattr(res, "deleted_count", 0))
 
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if message.author.bot or message.guild is None:
+    def _is_birthday_thread(self, thread: discord.Thread, cfg: dict[str, Any]) -> bool:
+        thread_id = int(cfg.get("birthday_thread_id") or 0)
+        channel_id = int(getattr(thread, "id", 0) or 0)
+        if thread_id and channel_id == thread_id:
+            return True
+
+        register_channel_id = int(cfg.get("register_channel_id") or 0)
+        if not register_channel_id:
+            return False
+        if str(getattr(thread, "name", "") or "") != BIRTHDAY_THREAD_NAME:
+            return False
+
+        parent_id = int(getattr(thread, "parent_id", 0) or 0)
+        if parent_id == register_channel_id:
+            return True
+
+        parent = getattr(thread, "parent", None)
+        try:
+            if int(getattr(parent, "id", 0) or 0) == register_channel_id:
+                return True
+        except Exception:
+            pass
+        return False
+
+    @commands.Cog.listener("on_message")
+    async def birthday_thread_message_listener(self, message: discord.Message):
+        if getattr(getattr(message, "author", None), "bot", False) or message.guild is None:
             return
         if not isinstance(message.channel, discord.Thread):
             return
+
         cfg = await self._get_config(int(message.guild.id))
-        thread_id = int(cfg.get("birthday_thread_id") or 0)
         channel_id = int(getattr(message.channel, "id", 0) or 0)
-        parent_id = int(getattr(message.channel, "parent_id", 0) or 0)
-        register_channel_id = int(cfg.get("register_channel_id") or 0)
-        is_expected_named_thread = (
-            str(getattr(message.channel, "name", "") or "") == BIRTHDAY_THREAD_NAME
-            and bool(register_channel_id)
-            and parent_id == register_channel_id
-        )
-        if thread_id and channel_id != thread_id:
-            if not is_expected_named_thread:
-                return
-            await self._update_config(int(message.guild.id), {"birthday_thread_id": channel_id})
-            cfg = await self._get_config(int(message.guild.id))
-        elif not thread_id:
-            if not is_expected_named_thread:
-                return
+        if not self._is_birthday_thread(message.channel, cfg):
+            return
+
+        saved_thread_id = int(cfg.get("birthday_thread_id") or 0)
+        if channel_id and saved_thread_id != channel_id:
             await self._update_config(int(message.guild.id), {"birthday_thread_id": channel_id})
             cfg = await self._get_config(int(message.guild.id))
 
@@ -1586,13 +1640,17 @@ class BirthdayCog(commands.Cog):
             return
 
         day, month, year = parsed
-        await self._upsert_birthday(message.guild.id, message.author.id, day=day, month=month, year=year)
+        try:
+            await self._upsert_birthday(message.guild.id, message.author.id, day=day, month=month, year=year, member=message.author)
+        except Exception as exc:
+            log.warning("falha ao salvar aniversário guild=%s user=%s: %r", message.guild.id, message.author.id, exc)
+            return
         opts = cfg["options"]
         reaction = str(opts.get("valid_reaction") or DEFAULT_REACTION).strip() or DEFAULT_REACTION
         try:
             await message.add_reaction(reaction)
-        except discord.HTTPException:
-            pass
+        except discord.HTTPException as exc:
+            log.debug("não consegui reagir à data válida guild=%s message=%s: %r", message.guild.id, message.id, exc)
         await self._sync_public_calendar(message.guild)
 
     @commands.Cog.listener()
