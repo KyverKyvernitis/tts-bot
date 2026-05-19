@@ -466,7 +466,7 @@ class BirthdayPreferencesModal(discord.ui.Modal):
         await self.panel.cog._sync_public_calendar(interaction.guild)
 
 
-class _AdminMainSelect(discord.ui.StringSelect):
+class _AdminMainSelect(discord.ui.Select):
     def __init__(self, panel: "BirthdayAdminView"):
         self.panel = panel
         super().__init__(
@@ -494,7 +494,7 @@ class _AdminMainSelect(discord.ui.StringSelect):
         await interaction.response.edit_message(view=self.panel)
 
 
-class _BackSelect(discord.ui.StringSelect):
+class _BackSelect(discord.ui.Select):
     def __init__(self, panel: "BirthdayAdminView"):
         self.panel = panel
         super().__init__(
@@ -564,7 +564,7 @@ class _AnnounceChannelSelect(discord.ui.ChannelSelect):
         await self.panel.cog._sync_public_calendar(interaction.guild)
 
 
-class _TemplateSelect(discord.ui.StringSelect):
+class _TemplateSelect(discord.ui.Select):
     def __init__(self, panel: "BirthdayAdminView"):
         self.panel = panel
         current = panel.selected_template
@@ -585,7 +585,7 @@ class _TemplateSelect(discord.ui.StringSelect):
         await interaction.response.edit_message(view=self.panel)
 
 
-class _TemplateActionSelect(discord.ui.StringSelect):
+class _TemplateActionSelect(discord.ui.Select):
     def __init__(self, panel: "BirthdayAdminView"):
         self.panel = panel
         super().__init__(
@@ -623,7 +623,7 @@ class _TemplateActionSelect(discord.ui.StringSelect):
             return
 
 
-class _RestoreConfirmSelect(discord.ui.StringSelect):
+class _RestoreConfirmSelect(discord.ui.Select):
     def __init__(self, panel: "BirthdayAdminView"):
         self.panel = panel
         super().__init__(
@@ -658,7 +658,7 @@ class _RestoreConfirmSelect(discord.ui.StringSelect):
         await self.panel.cog._sync_public_calendar(interaction.guild)
 
 
-class _UnknownTemplateConfirmSelect(discord.ui.StringSelect):
+class _UnknownTemplateConfirmSelect(discord.ui.Select):
     def __init__(self, panel: "BirthdayAdminView"):
         self.panel = panel
         super().__init__(
@@ -695,7 +695,7 @@ class _UnknownTemplateConfirmSelect(discord.ui.StringSelect):
         await self.panel.cog._sync_public_calendar(interaction.guild)
 
 
-class _VariableCategorySelect(discord.ui.StringSelect):
+class _VariableCategorySelect(discord.ui.Select):
     def __init__(self, panel: "BirthdayAdminView"):
         self.panel = panel
         labels = {
@@ -715,7 +715,7 @@ class _VariableCategorySelect(discord.ui.StringSelect):
         await interaction.response.edit_message(view=self.panel)
 
 
-class _PreferencesActionSelect(discord.ui.StringSelect):
+class _PreferencesActionSelect(discord.ui.Select):
     def __init__(self, panel: "BirthdayAdminView"):
         self.panel = panel
         super().__init__(
@@ -739,7 +739,7 @@ class _PreferencesActionSelect(discord.ui.StringSelect):
             await interaction.response.send_message(view=_make_notice_view("Indisponível", str(exc), ok=False), ephemeral=True)
 
 
-class _TestActionSelect(discord.ui.StringSelect):
+class _TestActionSelect(discord.ui.Select):
     def __init__(self, panel: "BirthdayAdminView"):
         self.panel = panel
         super().__init__(
@@ -760,7 +760,7 @@ class _TestActionSelect(discord.ui.StringSelect):
         await self.panel.cog._handle_test_action(interaction, str(self.values[0]))
 
 
-class _EntriesMonthSelect(discord.ui.StringSelect):
+class _EntriesMonthSelect(discord.ui.Select):
     def __init__(self, panel: "BirthdayAdminView"):
         self.panel = panel
         options = [discord.SelectOption(label="Todos os meses", value="0", default=(panel.entries_month == 0))]
@@ -776,7 +776,7 @@ class _EntriesMonthSelect(discord.ui.StringSelect):
         await interaction.response.edit_message(view=self.panel)
 
 
-class _EntriesActionSelect(discord.ui.StringSelect):
+class _EntriesActionSelect(discord.ui.Select):
     def __init__(self, panel: "BirthdayAdminView"):
         self.panel = panel
         super().__init__(
