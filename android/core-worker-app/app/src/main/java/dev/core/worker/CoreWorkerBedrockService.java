@@ -150,6 +150,9 @@ public class CoreWorkerBedrockService extends Service {
                 builder.redirectErrorStream(true);
                 builder.environment().put("LD_LIBRARY_PATH", ".");
                 builder.environment().put("HOME", preflight.bedrockDir.getAbsolutePath());
+                if (preflight.nativeExecutor != null) {
+                    builder.environment().put("CORE_WORKER_NATIVE_EXECUTOR", preflight.nativeExecutor.getAbsolutePath());
+                }
 
                 commandQueueOffset = commandQueueFile().length();
                 appendLog("[runner] iniciando: box64 ./bedrock_server");
@@ -281,9 +284,22 @@ public class CoreWorkerBedrockService extends Service {
         p.server = new File(p.bedrockDir, "bedrock_server");
         p.eula = new File(p.bedrockDir, "eula.txt");
         p.properties = new File(p.bedrockDir, "server.properties");
+        File nativeDir = new File(getApplicationInfo() == null || getApplicationInfo().nativeLibraryDir == null ? "" : getApplicationInfo().nativeLibraryDir);
+        p.nativeExecutor = firstExisting(
+                new File(nativeDir, "libcoreworker_executor.so"),
+                new File(nativeDir, "libcoreworker_proot.so"),
+                new File(nativeDir, "libcoreworker_busybox.so"),
+                new File(nativeDir, "libproot.so"),
+                new File(nativeDir, "libbusybox.so")
+        );
+        p.embeddedBox64 = firstExisting(
+                new File(nativeDir, "libcoreworker_box64.so"),
+                new File(nativeDir, "libbox64.so")
+        );
         File box64A = new File(p.coreLinuxDir, "bin/box64");
         File box64B = new File(p.coreLinuxDir, "box64/box64");
-        p.box64 = box64A.exists() ? box64A : box64B;
+        p.box64 = p.embeddedBox64 != null ? p.embeddedBox64 : (box64A.exists() ? box64A : box64B);
+        p.box64InWritableHome = p.box64 != null && isInside(p.box64, new File(getApplicationInfo() == null ? getFilesDir().getParent() : getApplicationInfo().dataDir));
         File rootfsMarker = new File(p.coreLinuxDir, "rootfs/.core-worker-rootfs-ready");
         p.rootfsReady = rootfsMarker.exists();
         p.eulaAccepted = eulaAccepted(p.eula);
@@ -293,8 +309,10 @@ public class CoreWorkerBedrockService extends Service {
         if (!p.properties.exists()) p.blockers.put("server.properties ausente");
         if (!p.eulaAccepted) p.blockers.put("EULA pendente");
         if (!p.server.exists()) p.blockers.put("bedrock_server não instalado");
+        if (p.nativeExecutor == null) p.blockers.put("executor interno pendente");
         if (!p.rootfsReady) p.blockers.put("rootfs pendente");
         if (p.box64 == null || !p.box64.exists()) p.blockers.put("Box64 pendente");
+        if (p.box64InWritableHome && Build.VERSION.SDK_INT >= 29) p.blockers.put("Box64 em diretório gravável bloqueado pelo Android");
         if (p.box64 != null && p.box64.exists() && !p.box64.canExecute()) p.box64.setExecutable(true, true);
         if (p.server.exists() && !p.server.canExecute()) p.server.setExecutable(true, true);
         p.ready = p.blockers.length() == 0;
@@ -366,6 +384,12 @@ public class CoreWorkerBedrockService extends Service {
             obj.put("appVersionCode", BuildConfig.VERSION_CODE);
             obj.put("commandQueue", commandQueueFile().getAbsolutePath());
             obj.put("consoleLog", logFile().getAbsolutePath());
+            try {
+                Preflight p = preflight();
+                obj.put("nativeExecutor", p.nativeExecutor == null ? "" : p.nativeExecutor.getAbsolutePath());
+                obj.put("embeddedBox64", p.embeddedBox64 == null ? "" : p.embeddedBox64.getAbsolutePath());
+            } catch (Throwable ignored) {
+            }
             if (blockers != null) obj.put("blockers", blockers);
             if (command != null) {
                 JSONArray arr = new JSONArray();
@@ -398,6 +422,28 @@ public class CoreWorkerBedrockService extends Service {
             builder.append(blockers.optString(i, "pendente"));
         }
         return builder.toString();
+    }
+
+    private File firstExisting(File... files) {
+        if (files == null) return null;
+        for (File file : files) {
+            try {
+                if (file != null && file.exists()) return file;
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private boolean isInside(File file, File parent) {
+        try {
+            if (file == null || parent == null) return false;
+            String f = file.getCanonicalPath();
+            String p = parent.getCanonicalPath();
+            return f.equals(p) || f.startsWith(p + File.separator);
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private void createChannel() {
@@ -560,6 +606,9 @@ public class CoreWorkerBedrockService extends Service {
         File eula;
         File properties;
         File box64;
+        File embeddedBox64;
+        File nativeExecutor;
+        boolean box64InWritableHome;
         boolean rootfsReady;
         boolean eulaAccepted;
         boolean ready;

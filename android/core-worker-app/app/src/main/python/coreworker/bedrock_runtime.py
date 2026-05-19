@@ -125,11 +125,13 @@ def _build_preflight(core_linux_dir, bedrock_dir, service_active, foreground_act
     server = bedrock_dir / "bedrock_server"
     internal_state = _read_json(core_linux_dir / "runtime" / "core-linux-internal-state.json")
     internal_preflight = internal_state.get("preflight") if isinstance(internal_state.get("preflight"), dict) else {}
-    internal_executor_ready = bool(internal_preflight.get("executorReady"))
+    native_executor_state = _read_json(core_linux_dir / "runtime" / "native-executor-state.json")
+    internal_executor_ready = bool(internal_preflight.get("executorReady") or native_executor_state.get("readyForRootfs") or native_executor_state.get("ok"))
     rootfs_ready = bool((core_linux_dir / "rootfs" / ".core-worker-rootfs-ready").exists() or internal_preflight.get("rootfsReady"))
     box64_candidates = [core_linux_dir / "bin" / "box64", core_linux_dir / "box64" / "box64"]
     box64 = next((p for p in box64_candidates if p.exists()), None)
-    box64_ready = bool(box64 is not None or internal_preflight.get("box64Ready"))
+    embedded_box64 = bool(native_executor_state.get("embeddedBox64Present") or internal_preflight.get("box64Ready"))
+    box64_ready = bool(box64 is not None or embedded_box64)
     eula_ok = _eula_accepted(eula)
     server_installed = server.exists()
     props_ready = properties.exists()
@@ -161,6 +163,7 @@ def _build_preflight(core_linux_dir, bedrock_dir, service_active, foreground_act
         "box64": box64,
         "box64Ready": box64_ready,
         "internalExecutorReady": internal_executor_ready,
+        "nativeExecutor": native_executor_state,
         "coreLinuxInternal": internal_state,
         "rootfsReady": rootfs_ready,
         "eulaAccepted": eula_ok,
@@ -264,6 +267,7 @@ def run(context_json=None):
             "rootfsReady": preflight["rootfsReady"],
             "box64Ready": bool(preflight.get("box64Ready")),
             "internalExecutorReady": bool(preflight.get("internalExecutorReady")),
+            "nativeExecutorState": (preflight.get("nativeExecutor") or {}).get("state") if isinstance(preflight.get("nativeExecutor"), dict) else "",
             "readyToStart": preflight["readyToStart"],
             "blockers": preflight["blockers"],
             "bedrockDir": safe_path(bedrock_dir),

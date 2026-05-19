@@ -2723,6 +2723,20 @@ public class MainActivity extends Activity {
     }
 
 
+    private JSONObject coreLinuxNativeExecutorSnapshot(String action) throws Exception {
+        JSONObject nativeExecutor = CoreWorkerNativeExecutor.snapshot(this, coreLinuxDir(), action == null ? "probe" : action);
+        try {
+            String summary = nativeExecutor.optString("summary", "executor nativo interno atualizado");
+            if (summary != null && !summary.trim().isEmpty()) {
+                coreLinuxSummary = summary;
+                coreLinuxState = nativeExecutor.optString("state", coreLinuxState);
+                coreLinuxLastCheckAt = System.currentTimeMillis();
+            }
+        } catch (Throwable ignored) {
+        }
+        return nativeExecutor;
+    }
+
     private JSONObject coreLinuxInternalSnapshot(String action) throws Exception {
         prepareCoreLinuxRuntimeStateWithoutRecursiveProbe();
         JSONObject extra = new JSONObject();
@@ -2734,6 +2748,7 @@ public class MainActivity extends Activity {
         extra.put("cacheDir", getCacheDir().getAbsolutePath());
         extra.put("nativeLibDir", getApplicationInfo() == null ? "" : getApplicationInfo().nativeLibraryDir);
         extra.put("dataDir", getApplicationInfo() == null ? "" : getApplicationInfo().dataDir);
+        extra.put("nativeExecutor", coreLinuxNativeExecutorSnapshot("probe"));
         extra.put("androidSdk", Build.VERSION.SDK_INT);
         extra.put("targetSdk", getApplicationInfo() == null ? 0 : getApplicationInfo().targetSdkVersion);
         extra.put("primaryAbi", Build.SUPPORTED_ABIS != null && Build.SUPPORTED_ABIS.length > 0 ? Build.SUPPORTED_ABIS[0] : "");
@@ -3578,6 +3593,10 @@ public class MainActivity extends Activity {
                 .put("apk_core_linux_rootfs_manifest")
                 .put("apk_core_linux_box64_manifest")
                 .put("apk_core_linux_bedrock_preflight")
+                .put("apk_core_linux_native_executor_probe")
+                .put("apk_core_linux_native_executor_test")
+                .put("apk_core_linux_native_runtime_status")
+                .put("apk_core_linux_internal_repair")
                 .put("apk_minecraft_bedrock_probe")
                 .put("apk_minecraft_bedrock_status")
                 .put("apk_minecraft_bedrock_requirements")
@@ -4115,6 +4134,31 @@ public class MainActivity extends Activity {
                 result.put("error", plan.optString("error", "plano assistido pendente"));
             }
             result.put("message", plan.optBoolean("ok", false) ? "plano assistido Linux/Bedrock gerado sem baixar nada" : "plano assistido Linux/Bedrock pendente");
+            return result;
+        }
+
+        if ("apk_core_linux_native_executor_probe".equals(type)
+                || "apk_core_linux_native_executor_test".equals(type)
+                || "apk_core_linux_native_runtime_status".equals(type)
+                || "apk_core_linux_internal_repair".equals(type)) {
+            String action = "probe";
+            if ("apk_core_linux_native_executor_test".equals(type)) action = "test";
+            if ("apk_core_linux_native_runtime_status".equals(type)) action = "status";
+            if ("apk_core_linux_internal_repair".equals(type)) action = "repair";
+            JSONObject nativeExecutor = coreLinuxNativeExecutorSnapshot(action);
+            safePutPayload(result, "nativeExecutor", nativeExecutor);
+            try {
+                JSONObject core = coreLinuxInternalSnapshot("repair".equals(action) ? "repair" : "executor");
+                safePutPayload(result, "coreLinuxInternal", core);
+            } catch (Throwable ignored) {
+            }
+            internalDiagnosticsSummary = nativeExecutor.optString("summary", "executor nativo interno atualizado");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!nativeExecutor.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", nativeExecutor.optString("summary", "executor nativo interno pendente"));
+            }
+            result.put("message", nativeExecutor.optString("summary", "executor nativo interno atualizado"));
             return result;
         }
 
@@ -5207,6 +5251,10 @@ public class MainActivity extends Activity {
         status.put("core_linux_summary", coreLinuxSummary == null ? "" : coreLinuxSummary);
         status.put("core_linux_state", coreLinuxState == null ? "" : coreLinuxState);
         status.put("core_linux_prepared", coreLinuxPrepared);
+        try {
+            safePutPayload(status, "core_linux_native_executor", coreLinuxNativeExecutorSnapshot("probe"));
+        } catch (Throwable ignored) {
+        }
         status.put("bedrock_summary", bedrockSummary == null ? "" : bedrockSummary);
         status.put("bedrock_state", bedrockState == null ? "" : bedrockState);
         status.put("bedrock_ready", bedrockReady);

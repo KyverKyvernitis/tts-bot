@@ -78,6 +78,11 @@ def _ensure_layout(core_linux_dir):
 def _embedded_candidates(native_lib_dir):
     native_lib_dir = Path(str(native_lib_dir or ""))
     candidates = {
+        "executor": [
+            native_lib_dir / "libcoreworker_executor.so",
+            native_lib_dir / "libcoreworker_proot.so",
+            native_lib_dir / "libcoreworker_busybox.so",
+        ],
         "proot": [
             native_lib_dir / "libcoreworker_proot.so",
             native_lib_dir / "libproot.so",
@@ -152,6 +157,7 @@ def _manifest_payload(ctx, layout, embedded, blockers, now):
             "note": "Android 10+ bloqueia execve direto de binários criados no diretório gravável do app; binários executáveis precisam ser embutidos/assinados de forma controlada no APK.",
         },
         "expectedEmbeddedBinaries": {
+            "executor": embedded.get("executor", {}),
             "proot": embedded.get("proot", {}),
             "box64": embedded.get("box64", {}),
             "busybox": embedded.get("busybox", {}),
@@ -192,18 +198,30 @@ def run(context_json=None):
         now = int(time.time() * 1000)
 
         embedded = _embedded_candidates(native_lib_dir)
+        native_executor = ctx.get("nativeExecutor") if isinstance(ctx.get("nativeExecutor"), dict) else {}
         rootfs = _rootfs_markers(layout["rootfs"])
         bedrock = _bedrock_markers(layout["bedrock"])
 
-        executor_embedded = bool(embedded["proot"]["present"] or embedded["busybox"]["present"])
-        box64_embedded = bool(embedded["box64"]["present"])
+        executor_embedded = bool(
+            embedded.get("executor", {}).get("present")
+            or embedded.get("proot", {}).get("present")
+            or embedded.get("busybox", {}).get("present")
+            or native_executor.get("embeddedExecutorPresent")
+        )
+        executor_test = native_executor.get("test") if isinstance(native_executor.get("test"), dict) else {}
+        executor_test_attempted = bool(executor_test.get("attempted"))
+        executor_test_ok = bool(executor_test.get("ok"))
+        executor_ready = bool(executor_embedded and (not executor_test_attempted or executor_test_ok))
+        box64_embedded = bool(embedded["box64"]["present"] or native_executor.get("embeddedBox64Present"))
         rootfs_ready = bool(rootfs["readyMarker"] and rootfs["binSh"])
         bedrock_ready = bool(bedrock["server"] and bedrock["serverProperties"] and bedrock["eulaAccepted"])
 
         blockers = []
         warnings = []
         if not executor_embedded:
-            blockers.append("executor interno embutido pendente")
+            blockers.append("executor nativo interno embutido pendente")
+        elif executor_test_attempted and not executor_test_ok:
+            blockers.append("executor nativo interno falhou no teste")
         if not rootfs_ready:
             blockers.append("rootfs interno pendente")
         if not box64_embedded:
@@ -220,12 +238,16 @@ def run(context_json=None):
 
         manifest = _manifest_payload(ctx, layout, embedded, blockers, now)
         executor_state = {
-            "ok": executor_embedded,
-            "state": "ready" if executor_embedded else "blocked",
+            "ok": executor_ready,
+            "state": "ready_for_rootfs" if executor_ready else ("test_failed" if executor_test_attempted else "blocked"),
             "mode": "embedded-native-executor",
             "embedded": embedded,
+            "nativeExecutor": native_executor,
             "nativeLibDir": safe_path(native_lib_dir),
-            "blockers": [] if executor_embedded else ["executor interno embutido pendente"],
+            "testAttempted": executor_test_attempted,
+            "testOk": executor_test_ok,
+            "readyForRootfs": executor_ready,
+            "blockers": [] if executor_ready else (["executor nativo interno falhou no teste"] if executor_test_attempted else ["executor nativo interno embutido pendente"]),
             "updatedAt": now,
             "safety": "não executa shell livre e não aceita comando arbitrário da VPS",
         }
@@ -247,7 +269,7 @@ def run(context_json=None):
         preflight = {
             "ok": not blockers,
             "state": "ready" if not blockers else "blocked",
-            "executorReady": executor_embedded,
+            "executorReady": executor_ready,
             "rootfsReady": rootfs_ready,
             "box64Ready": box64_embedded,
             "bedrockReady": bedrock_ready,
@@ -277,6 +299,7 @@ def run(context_json=None):
 
         _write_json(layout["runtime"] / "core-linux-internal-state.json", state)
         _write_json(layout["runtime"] / "executor-state.json", executor_state)
+        _write_json(layout["runtime"] / "native-runtime-state.json", native_executor if native_executor else executor_state)
         _write_json(layout["runtime"] / "rootfs-state.json", rootfs_state)
         _write_json(layout["runtime"] / "box64-state.json", box64_state)
         _write_json(layout["runtime"] / "bedrock-internal-preflight.json", preflight)
@@ -299,6 +322,7 @@ def run(context_json=None):
             prepared=True,
             coreLinuxInternal=state,
             executor=executor_state,
+            nativeExecutor=native_executor,
             rootfs=rootfs_state,
             box64=box64_state,
             preflight=preflight,
