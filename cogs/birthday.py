@@ -29,9 +29,8 @@ MAX_TEXT_DISPLAY = 3900
 DEFAULT_TEMPLATES: dict[str, str] = {
     "calendar": (
         "# 🎂 Aniversários\n"
-        "Mande seu aniversário na thread abaixo.\n\n"
-        "## 📅 Calendário\n"
-        "${birthdaycalendar}"
+        "Mande seu aniversário na thread abaixo.\n"
+        "${birthdaycalendarblock}"
     ),
     "saved": "Prontinho, ${usermention}. Seu aniversário foi salvo como **${birthdaydate}** 🎂",
     "updated": "Prontinho, ${usermention}. Atualizei seu aniversário para **${birthdaydate}** 🎂",
@@ -43,27 +42,19 @@ DEFAULT_TEMPLATES: dict[str, str] = {
 
 TEMPLATE_LABELS: dict[str, str] = {
     "calendar": "Mensagem do calendário",
-    "saved": "Resposta de data salva",
-    "updated": "Resposta de data atualizada",
-    "invalid": "Resposta de data inválida",
     "announce_single": "Aviso individual",
     "announce_group": "Aviso agrupado",
-    "empty_calendar": "Calendário vazio",
 }
 
 TEMPLATE_DESCRIPTIONS: dict[str, str] = {
     "calendar": "Mensagem pública acima da thread. É aplicada no canal assim que salvar.",
-    "saved": "Resposta temporária quando alguém cadastra a data pela primeira vez.",
-    "updated": "Resposta temporária quando alguém troca a própria data.",
-    "invalid": "Resposta temporária quando a mensagem da thread não é uma data válida.",
-    "announce_single": "Mensagem enviada no canal de avisos para uma pessoa.",
-    "announce_group": "Mensagem enviada quando há mais de um aniversariante no dia.",
-    "empty_calendar": "Texto usado quando ainda não há aniversários no calendário.",
+    "announce_single": "Mensagem normal enviada no canal de avisos para uma pessoa. Pode mencionar o aniversariante.",
+    "announce_group": "Mensagem normal enviada quando há mais de um aniversariante no dia. Pode mencionar os aniversariantes.",
 }
 
 VARIABLES_BY_TEMPLATE: dict[str, tuple[str, ...]] = {
     "calendar": (
-        "guildname", "guildid", "guildmembercount", "birthdaycount", "birthdaycalendar",
+        "guildname", "guildid", "guildmembercount", "birthdaycount", "birthdaycalendarblock", "birthdaycalendar",
         "birthdaycalendarcompact", "birthdaycalendarnext10", "birthdaycalendarnext20",
         "nextbirthdayname", "nextbirthdaydate", "nextbirthdaymention", "nowtimestamp",
         "nowdate", "nowtime", "announcechannel", "registerchannel",
@@ -109,6 +100,7 @@ VARIABLE_HELP: dict[str, str] = {
     "birthdayage": "idade, se o ano foi informado",
     "birthdaytimestamp": "timestamp Discord do aniversário deste ano",
     "birthdaycount": "quantidade de aniversários cadastrados/no dia",
+    "birthdaycalendarblock": "bloco do calendário, oculto quando não há aniversariantes",
     "birthdaycalendar": "calendário completo ordenado pelos próximos aniversários",
     "birthdaycalendarcompact": "calendário em linhas curtas",
     "birthdaycalendarnext10": "próximos 10 aniversários",
@@ -134,11 +126,32 @@ VARIABLE_HELP: dict[str, str] = {
 VARIABLE_CATEGORIES: dict[str, tuple[str, ...]] = {
     "member": ("usermention", "userid", "username", "userdisplayname", "usernickname"),
     "birthday": ("birthdayday", "birthdaymonth", "birthdayyear", "birthdaydate", "birthdaydatefull", "birthdayage", "birthdaytimestamp"),
-    "calendar": ("birthdaycount", "birthdaycalendar", "birthdaycalendarcompact", "birthdaycalendarnext10", "birthdaycalendarnext20", "nextbirthdayname", "nextbirthdaydate", "nextbirthdaymention"),
+    "calendar": ("birthdaycount", "birthdaycalendarblock", "birthdaycalendar", "birthdaycalendarcompact", "birthdaycalendarnext10", "birthdaycalendarnext20", "nextbirthdayname", "nextbirthdaydate", "nextbirthdaymention"),
     "server": ("guildname", "guildid", "guildmembercount", "announcechannel", "registerchannel"),
     "time": ("nowtimestamp", "nowdate", "nowtime"),
     "invalid": ("usermessage", "validexample"),
 }
+
+
+def _template_variable_hint(template_key: str) -> str:
+    variables = VARIABLES_BY_TEMPLATE.get(template_key, tuple())
+    if not variables:
+        return ""
+    rendered = ", ".join(f"${{{name}}}" for name in variables)
+    return "Variáveis compatíveis: " + rendered
+
+
+def _strip_empty_calendar_heading(text: str) -> str:
+    lines = str(text or "").splitlines()
+    kept: list[str] = []
+    for line in lines:
+        normalized = line.strip().casefold()
+        if "calend" in normalized and (normalized.startswith("#") or normalized.startswith("📅") or normalized.startswith("**📅")):
+            continue
+        kept.append(line.rstrip())
+    value = "\n".join(kept).strip()
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value
 
 
 def _utcnow() -> datetime:
@@ -298,10 +311,21 @@ class BirthdayMessageModal(discord.ui.Modal):
             label="Mensagem",
             style=discord.TextStyle.paragraph,
             default=str(current)[:4000],
+            placeholder=_template_variable_hint(template_key)[:100],
             required=True,
             max_length=4000,
         )
         self.add_item(self.body_input)
+        hint = _template_variable_hint(template_key)
+        if hint:
+            self.variables_input = discord.ui.TextInput(
+                label="Variáveis compatíveis",
+                style=discord.TextStyle.paragraph,
+                default=hint[:4000],
+                required=False,
+                max_length=4000,
+            )
+            self.add_item(self.variables_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         template = str(self.body_input.value or "").strip()
@@ -399,9 +423,8 @@ class BirthdayPreferencesModal(discord.ui.Modal):
         if not all(hasattr(discord.ui, attr) for attr in ("Label", "CheckboxGroup", "RadioGroup")):
             raise RuntimeError("discord.py 2.7+ é necessário para as preferências modernas.")
 
-        self.flags_group = discord.ui.CheckboxGroup(required=False, min_values=0, max_values=5)
+        self.flags_group = discord.ui.CheckboxGroup(required=False, min_values=0, max_values=3)
         for value, label, desc, default in (
-            ("temporary_reply", "Responder e apagar depois", "A resposta do bot some depois de alguns segundos.", bool(opts.get("temporary_reply", True))),
             ("show_age", "Mostrar idade nos avisos", "Só funciona quando a pessoa informou o ano.", bool(opts.get("show_age", True))),
             ("group_announcements", "Juntar aniversariantes do dia", "Uma mensagem para todos no mesmo dia.", bool(opts.get("group_announcements", True))),
             ("delete_on_leave", "Remover quando sair do servidor", "Limpa o calendário quando o membro sai.", bool(opts.get("delete_on_leave", True))),
@@ -420,14 +443,6 @@ class BirthdayPreferencesModal(discord.ui.Modal):
             required=True,
             max_length=20,
         )
-        self.delete_after_input = discord.ui.TextInput(
-            label="Apagar resposta do bot após segundos",
-            placeholder="10",
-            default=str(int(opts.get("delete_after_seconds") or DEFAULT_DELETE_AFTER)),
-            required=True,
-            max_length=3,
-        )
-
         self.add_item(discord.ui.Label(
             text="Comportamento",
             description="Marque o que deve ficar ativo.",
@@ -438,24 +453,16 @@ class BirthdayPreferencesModal(discord.ui.Modal):
             component=self.leap_group,
         ))
         self.add_item(self.reaction_input)
-        self.add_item(self.delete_after_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         selected = set(getattr(self.flags_group, "values", None) or [])
-        try:
-            delete_after = int(str(self.delete_after_input.value or "10").strip())
-        except Exception:
-            delete_after = DEFAULT_DELETE_AFTER
-        delete_after = max(1, min(delete_after, 120))
         reaction = str(self.reaction_input.value or DEFAULT_REACTION).strip() or DEFAULT_REACTION
         options = {
-            "temporary_reply": "temporary_reply" in selected,
             "show_age": "show_age" in selected,
             "group_announcements": "group_announcements" in selected,
             "delete_on_leave": "delete_on_leave" in selected,
             "leap_day_mode": str(getattr(self.leap_group, "value", None) or "feb28"),
             "valid_reaction": reaction,
-            "delete_after_seconds": delete_after,
         }
         await self.panel.cog._update_config(interaction.guild.id, {"options": options})
         self.panel.config = await self.panel.cog._get_config(int(interaction.guild.id))
@@ -477,7 +484,6 @@ class _AdminMainSelect(discord.ui.Select):
                 discord.SelectOption(label="Cadastro", value="register", emoji="📍", description="Canal onde fica o calendário."),
                 discord.SelectOption(label="Avisos", value="announce", emoji="📢", description="Canal e horário dos parabéns."),
                 discord.SelectOption(label="Mensagens", value="messages", emoji="💬", description="Textos configuráveis do fluxo."),
-                discord.SelectOption(label="Variáveis", value="variables", emoji="📌", description="Lista de variáveis disponíveis."),
                 discord.SelectOption(label="Preferências", value="preferences", emoji="⚙️", description="Reação, idade, 29/02 e agrupamento."),
                 discord.SelectOption(label="Testes", value="tests", emoji="🧪", description="Prévia sem esperar o dia."),
                 discord.SelectOption(label="Aniversariantes", value="entries", emoji="📋", description="Ver e gerenciar aniversariantes."),
@@ -604,7 +610,6 @@ class _TemplateActionSelect(discord.ui.Select):
             options=[
                 discord.SelectOption(label="Editar mensagem", value="edit", emoji="✏️"),
                 discord.SelectOption(label="Ver prévia", value="preview", emoji="👀"),
-                discord.SelectOption(label="Ver variáveis compatíveis", value="vars", emoji="📌"),
                 discord.SelectOption(label="Restaurar padrão", value="restore", emoji="↩️"),
             ],
         )
@@ -617,12 +622,6 @@ class _TemplateActionSelect(discord.ui.Select):
             return
         if action == "preview":
             await self.panel.cog._send_template_preview(interaction, key)
-            return
-        if action == "vars":
-            self.panel.go_to("template_vars")
-            self.panel.notice = ""
-            self.panel._rebuild()
-            await interaction.response.edit_message(view=self.panel)
             return
         if action == "restore":
             self.panel.go_to("confirm_restore")
@@ -677,7 +676,6 @@ class _UnknownTemplateConfirmSelect(discord.ui.Select):
             options=[
                 discord.SelectOption(label="Editar de novo", value="edit", emoji="✏️"),
                 discord.SelectOption(label="Salvar mesmo assim", value="save", emoji="✅"),
-                discord.SelectOption(label="Ver variáveis compatíveis", value="vars", emoji="📌"),
             ],
         )
 
@@ -686,12 +684,6 @@ class _UnknownTemplateConfirmSelect(discord.ui.Select):
         key = self.panel.pending_template_key or self.panel.selected_template
         if action == "edit":
             await interaction.response.send_modal(BirthdayMessageModal(self.panel, key))
-            return
-        if action == "vars":
-            self.panel.selected_template = key
-            self.panel.go_to("template_vars")
-            self.panel._rebuild()
-            await interaction.response.edit_message(view=self.panel)
             return
         await self.panel.cog._set_template(interaction.guild, key, self.panel.pending_template_value or "")
         self.panel.pending_template_key = ""
@@ -757,8 +749,6 @@ class _TestActionSelect(discord.ui.Select):
             max_values=1,
             options=[
                 discord.SelectOption(label="Prévia do calendário", value="calendar", emoji="📅"),
-                discord.SelectOption(label="Resposta de data salva", value="saved", emoji="✅"),
-                discord.SelectOption(label="Resposta de data inválida", value="invalid", emoji="⚠️"),
                 discord.SelectOption(label="Aviso individual", value="single", emoji="🎂"),
                 discord.SelectOption(label="Aviso agrupado", value="group", emoji="🎉"),
                 discord.SelectOption(label="Enviar teste no canal de avisos", value="send", emoji="📨"),
@@ -1049,7 +1039,6 @@ class BirthdayAdminView(discord.ui.LayoutView):
             f"**Horário dos avisos:** `{hour:02d}:{minute:02d}`",
             f"**Fuso:** `{cfg.get('timezone') or DEFAULT_TIMEZONE}`",
             f"**Reação em data válida:** {opts.get('valid_reaction') or DEFAULT_REACTION}",
-            f"**Resposta temporária:** {int(opts.get('delete_after_seconds') or DEFAULT_DELETE_AFTER)}s",
             f"**Idade nos avisos:** {'sim' if opts.get('show_age', True) else 'não'}",
             f"**Avisos agrupados:** {'sim' if opts.get('group_announcements', True) else 'não'}",
             f"**29/02:** {'01/03' if opts.get('leap_day_mode') == 'mar01' else '28/02'}",
@@ -1143,13 +1132,11 @@ class BirthdayCog(commands.Cog):
         cfg["templates"] = templates
         opts = {
             "allow_update": True,
-            "temporary_reply": True,
             "show_age": True,
             "group_announcements": True,
             "delete_on_leave": True,
             "leap_day_mode": "feb28",
             "valid_reaction": DEFAULT_REACTION,
-            "delete_after_seconds": DEFAULT_DELETE_AFTER,
         }
         opts.update(dict(cfg.get("options") or {}))
         cfg["options"] = opts
@@ -1351,7 +1338,7 @@ class BirthdayCog(commands.Cog):
         cfg = await self._get_config(int(guild.id))
         entries = await self._calendar_entries(guild, cleanup_missing=True)
         if not entries:
-            return _replace_vars(cfg["templates"].get("empty_calendar") or DEFAULT_TEMPLATES["empty_calendar"], self._base_values(guild, cfg))
+            return ""
         shown = entries if limit is None else entries[:max(0, int(limit))]
         lines = []
         for entry in shown:
@@ -1385,6 +1372,7 @@ class BirthdayCog(commands.Cog):
         values["birthdaycalendarcompact"] = await self._render_calendar(guild, compact=True)
         values["birthdaycalendarnext10"] = await self._render_calendar(guild, limit=10)
         values["birthdaycalendarnext20"] = await self._render_calendar(guild, limit=20)
+        values["birthdaycalendarblock"] = f"\n\n## 📅 Calendário\n{values['birthdaycalendar']}" if entries else ""
         if entries:
             first = entries[0]
             values.update({
@@ -1400,6 +1388,8 @@ class BirthdayCog(commands.Cog):
         cfg = self._normalize_config(cfg or await self._get_config(int(guild.id)))
         values = await self._calendar_values(guild, cfg)
         body = _replace_vars(cfg["templates"].get("calendar") or DEFAULT_TEMPLATES["calendar"], values)
+        if not int(values.get("birthdaycount") or 0):
+            body = _strip_empty_calendar_heading(body)
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(discord.ui.Container(
             discord.ui.TextDisplay(_trim(body)),
@@ -1525,7 +1515,7 @@ class BirthdayCog(commands.Cog):
             await channel.send(content=body, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
             await interaction.response.send_message(view=_make_notice_view("Teste enviado", f"Enviei a prévia em {channel.mention}.", ok=True), ephemeral=True)
             return
-        key_map = {"calendar": "calendar", "saved": "saved", "invalid": "invalid", "single": "announce_single", "group": "announce_group"}
+        key_map = {"calendar": "calendar", "single": "announce_single", "group": "announce_group"}
         await self._send_template_preview(interaction, key_map.get(action, "calendar"))
 
     async def _upsert_birthday(self, guild_id: int, user_id: int, *, day: int, month: int, year: int | None) -> bool:
@@ -1564,25 +1554,45 @@ class BirthdayCog(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.author.bot or message.guild is None:
             return
+        if not isinstance(message.channel, discord.Thread):
+            return
         cfg = await self._get_config(int(message.guild.id))
         thread_id = int(cfg.get("birthday_thread_id") or 0)
-        if not thread_id or int(getattr(message.channel, "id", 0) or 0) != thread_id:
-            return
+        channel_id = int(getattr(message.channel, "id", 0) or 0)
+        parent_id = int(getattr(message.channel, "parent_id", 0) or 0)
+        register_channel_id = int(cfg.get("register_channel_id") or 0)
+        is_expected_named_thread = (
+            str(getattr(message.channel, "name", "") or "") == BIRTHDAY_THREAD_NAME
+            and bool(register_channel_id)
+            and parent_id == register_channel_id
+        )
+        if thread_id and channel_id != thread_id:
+            if not is_expected_named_thread:
+                return
+            await self._update_config(int(message.guild.id), {"birthday_thread_id": channel_id})
+            cfg = await self._get_config(int(message.guild.id))
+        elif not thread_id:
+            if not is_expected_named_thread:
+                return
+            await self._update_config(int(message.guild.id), {"birthday_thread_id": channel_id})
+            cfg = await self._get_config(int(message.guild.id))
+
         parsed = _parse_date(message.content or "")
         if parsed is None:
-            values = self._member_values(message.author, day=23, month=9, year=None, cfg=cfg, user_message=message.content or "")
-            await self._send_temp_view(message, "invalid", values, ok=False)
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
             return
+
         day, month, year = parsed
-        updated = await self._upsert_birthday(message.guild.id, message.author.id, day=day, month=month, year=year)
+        await self._upsert_birthday(message.guild.id, message.author.id, day=day, month=month, year=year)
         opts = cfg["options"]
         reaction = str(opts.get("valid_reaction") or DEFAULT_REACTION).strip() or DEFAULT_REACTION
         try:
             await message.add_reaction(reaction)
         except discord.HTTPException:
             pass
-        values = self._member_values(message.author, day=day, month=month, year=year, cfg=cfg, user_message=message.content or "")
-        await self._send_temp_view(message, "updated" if updated else "saved", values, ok=True)
         await self._sync_public_calendar(message.guild)
 
     @commands.Cog.listener()
