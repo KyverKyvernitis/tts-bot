@@ -139,6 +139,8 @@ AUTO_WORKER_ID = "__auto_core_worker__"
 WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
     {"label": "Testar worker", "value": "ping", "job_type": "ping", "payload": {}, "summary": "teste manual pelo painel workers", "description": "Testa comunicação", "emoji": "🧪", "category": "quick"},
     {"label": "Saúde", "value": "worker_self_check", "job_type": "worker_self_check", "payload": {}, "summary": "saúde completa pelo painel workers", "description": "Bateria, rede e sistema", "emoji": "🩺", "category": "quick"},
+    {"label": "Atualizar agent", "value": "worker_update_quick", "job_type": "worker_update", "payload": {}, "summary": "atualizar arquivos do phone-worker", "description": "Corrige agent antigo", "emoji": "⬆️", "category": "quick"},
+    {"label": "Buildar APK", "value": "apk_build_debug_quick", "job_type": "apk_build_debug", "payload": {"source_zip_url": "auto", "publish": True}, "summary": "compilar APK Core Worker em worker builder", "description": "Retry manual do APK", "emoji": "🏗️", "category": "quick"},
     {"label": "Atualizar agent", "value": "worker_update", "job_type": "worker_update", "payload": {}, "summary": "atualizar arquivos do phone-worker", "description": "Atualiza e reinicia", "emoji": "⬆️", "requires_declared": True, "category": "maintenance"},
     {"label": "Reparar scripts", "value": "worker_repair_scripts", "job_type": "worker_update", "payload": {"scripts_only": True}, "summary": "reinstalar scripts auxiliares do worker", "description": "Reinstala scripts", "emoji": "🛠️", "requires_declared": True, "category": "maintenance"},
     {"label": "Buildar APK", "value": "apk_build_debug", "job_type": "apk_build_debug", "payload": {"source_zip_url": "auto", "publish": True}, "summary": "compilar APK Core Worker em worker builder", "description": "APK fora da VPS", "emoji": "🏗️", "requires_declared": True, "category": "maintenance"},
@@ -2452,10 +2454,16 @@ class WorkersPanelView(discord.ui.LayoutView):
         if self._selected_is_legacy():
             status = self.snapshot.status if isinstance(self.snapshot.status, dict) else {}
             supported = _task_set(status.get("supported_tasks"))
-            if supported:
-                return supported
-            # Worker legado antigo: liberar só ações que não dependem do /task novo.
-            return {"ping", "status", "worker_self_check", "diagnostic_basic"}
+            # O phone-worker direto continua sendo o builder/agent mesmo sem celular
+            # pareado pelo APK. Manter ações essenciais visíveis evita regressão
+            # quando o registry ainda mostra "nenhum celular pareado".
+            legacy_direct = {
+                "ping", "status", "worker_self_check", "diagnostic_basic",
+                "worker_logs", "worker_update", "apk_build_debug",
+                "boot_status", "boot_repair", "service_status", "service_start",
+                "service_stop", "service_restart", "network_probe", "tailscale_status",
+            }
+            return supported | legacy_direct
         worker = self._selected_worker()
         if not worker:
             return set()
@@ -2475,11 +2483,13 @@ class WorkersPanelView(discord.ui.LayoutView):
             {"label": "Testar troca automática", "value": "_failover_test", "description": "Precisa de 2+ workers", "emoji": "🧪", "panel_action": "failover", "category": "add"},
             {"label": "Limpar jobs", "value": "_cleanup_jobs", "description": "Remove travados/antigos", "emoji": "🧹", "panel_action": "cleanup", "category": "organize"},
         ]
+        if selected_worker is not None or self._selected_is_legacy() or self._selected_is_auto():
+            specs.append({"label": "Ver último resultado", "value": "_show_last_result", "description": "Detalhes do último job", "emoji": "📄", "panel_action": "last_result", "category": "quick"})
+
         if selected_worker is not None:
             specs.extend([
                 {"label": "Detalhes do celular", "value": "_worker_details", "description": "Resumo completo", "emoji": "📱", "panel_action": "details", "category": "quick"},
                 {"label": "Testar runtime APK", "value": "_apk_internal_test", "description": "Agenda jobs internos seguros", "emoji": "🧪", "panel_action": "apk_internal_test", "category": "quick"},
-                {"label": "Ver último resultado", "value": "_show_last_result", "description": "Detalhes do último job", "emoji": "📄", "panel_action": "last_result", "category": "quick"},
                 {"label": "Atualizar runtime", "value": "_apk_refresh_runtime", "description": "Heartbeat/status agora", "emoji": "🔄", "panel_action": "apk_refresh_runtime", "category": "apk", "apk_job_type": "apk_refresh_runtime"},
                 {"label": "Pacote de status", "value": "_apk_force_status_bundle", "description": "Bundle completo do APK", "emoji": "📦", "panel_action": "apk_force_status_bundle", "category": "apk", "apk_job_type": "apk_force_status_bundle"},
                 {"label": "Testar notificação", "value": "_apk_test_notification", "description": "Notificação local segura", "emoji": "🔔", "panel_action": "apk_test_notification", "category": "apk", "apk_job_type": "apk_test_notification"},
@@ -2623,7 +2633,10 @@ class WorkersPanelView(discord.ui.LayoutView):
         registered = int((summary or {}).get('registered') or 0)
         online = int((summary or {}).get('online') or 0)
         pairings = int((summary or {}).get('pairings_active') or 0)
-        workers_label = "nenhum celular pareado" if registered <= 0 else f"{online}/{registered} online"
+        if registered <= 0:
+            workers_label = "phone-worker direto online" if snapshot.online else "nenhum celular pareado"
+        else:
+            workers_label = f"{online}/{registered} online"
         if pairings:
             workers_label += f" · {pairings} código(s) ativo(s)"
         queue_label = "sem tarefas na fila"
@@ -2709,7 +2722,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             components.append(discord.ui.ActionRow(refresh))
         else:
             components.append(discord.ui.ActionRow(refresh, pairing, cleanup_jobs))
-        if not _has_online_registry_worker(snapshot):
+        if not _snapshot_has_online_worker(snapshot):
             components.append(discord.ui.ActionRow(wake))
         container = discord.ui.Container(*components, accent_color=snapshot.accent)
         self.add_item(container)
@@ -3528,11 +3541,16 @@ class WorkersCommandMixin:
             result.setdefault("summary", "status direto coletado")
             return result
         timeout = max(3.0, _env_float("WORKERS_PANEL_DIRECT_TASK_TIMEOUT_SECONDS", 18.0))
+        if kind == "apk_build_debug":
+            timeout = max(timeout, _env_float("WORKERS_PANEL_DIRECT_APK_BUILD_TIMEOUT_SECONDS", 7200.0))
+        elif kind == "worker_update":
+            timeout = max(timeout, _env_float("WORKERS_PANEL_DIRECT_UPDATE_TIMEOUT_SECONDS", 60.0))
         direct_tasks = {
             "network_probe",
             "tailscale_status",
             "worker_logs",
             "worker_update",
+            "apk_build_debug",
             "boot_status",
             "boot_repair",
             "service_status",

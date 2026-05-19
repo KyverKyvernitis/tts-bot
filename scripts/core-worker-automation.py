@@ -12,6 +12,8 @@ import sys
 import time
 import zipfile
 import contextlib
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -496,6 +498,82 @@ def _worker_supports(worker: dict[str, Any], task: str, required_capability: str
     return not tasks or task in tasks
 
 
+
+
+
+
+def _task_set(value: object) -> set[str]:
+    if isinstance(value, (list, tuple, set)):
+        raw_items = value
+    elif isinstance(value, str):
+        raw_items = value.replace(';', ',').split(',')
+    else:
+        raw_items = []
+    result: set[str] = set()
+    for item in raw_items:
+        clean = re.sub(r"[^a-z0-9_]+", "_", str(item or "").strip().lower().replace('-', '_')).strip('_')
+        if clean:
+            result.add(clean)
+    return result
+
+def _direct_phone_worker_config() -> dict[str, str]:
+    enabled = _env_bool("PHONE_WORKER_ENABLED", True)
+    host = str(os.getenv("PHONE_WORKER_HOST") or os.getenv("CORE_WORKER_PHONE_HOST") or "").strip()
+    port = str(os.getenv("PHONE_WORKER_PORT") or "8766").strip() or "8766"
+    scheme = str(os.getenv("PHONE_WORKER_SCHEME") or "http").strip() or "http"
+    token = str(os.getenv("PHONE_WORKER_TOKEN") or "").strip()
+    return {"enabled": "1" if enabled else "0", "host": host, "port": port, "scheme": scheme, "token": token}
+
+
+def _direct_phone_worker_request(path: str, *, payload: dict[str, Any] | None = None, timeout: float = 5.0) -> dict[str, Any]:
+    cfg = _direct_phone_worker_config()
+    if cfg["enabled"] != "1" or not cfg["host"]:
+        return {"ok": False, "skipped": True, "summary": "phone-worker direto não configurado"}
+    url = f"{cfg['scheme']}://{cfg['host']}:{cfg['port']}{path}"
+    headers = {"Accept": "application/json"}
+    data = None
+    method = "GET"
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        method = "POST"
+    if cfg["token"]:
+        headers["Authorization"] = f"Bearer {cfg['token']}"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=max(0.8, timeout)) as resp:
+            raw = resp.read()
+        parsed = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+        return parsed if isinstance(parsed, dict) else {"ok": False, "summary": "resposta direta não é JSON object"}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:400]
+        return {"ok": False, "status": exc.code, "summary": f"HTTP {exc.code}: {_short(body, 160)}"}
+    except Exception as exc:
+        return {"ok": False, "summary": f"{type(exc).__name__}: {_short(exc, 160)}"}
+
+
+def _direct_phone_worker_update_if_needed(payload: dict[str, Any], target_version: str, *, force: bool = False) -> dict[str, Any]:
+    status = _direct_phone_worker_request("/status", timeout=2.5)
+    if not bool(status.get("ok", True)):
+        return {"ok": False, "skipped": True, "summary": f"phone-worker direto indisponível: {_short(status.get('summary') or status.get('error'), 160)}"}
+    current_version = str(status.get("version") or "")
+    supported = _task_set(status.get("supported_tasks"))
+    if supported and "worker_update" not in supported:
+        return {"ok": False, "skipped": True, "current_version": current_version, "summary": "phone-worker direto não declara worker_update"}
+    if not force and current_version and _version_tuple(current_version) >= _version_tuple(target_version):
+        return {"ok": True, "skipped": True, "current_version": current_version, "target_version": target_version, "summary": f"phone-worker direto já está em {current_version}"}
+    body = dict(payload)
+    body["task"] = "worker_update"
+    body.setdefault("source", "vps-updater-direct")
+    result = _direct_phone_worker_request("/task", payload=body, timeout=45.0)
+    result.setdefault("current_version", current_version)
+    result.setdefault("target_version", target_version)
+    if result.get("ok") is False:
+        result.setdefault("summary", "update direto falhou")
+    else:
+        result.setdefault("summary", f"update direto enviado para {target_version}")
+    return result
+
 def _worker_needs_boot_repair(worker: dict[str, Any]) -> bool:
     if not worker.get("online"):
         return False
@@ -564,6 +642,9 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
     workers = [w for w in snapshot.get("workers") or [] if isinstance(w, dict)]
     payload = _build_worker_update_payload()
     target_version = str(payload.get("version") or "desconhecida")
+    direct_update = {}
+    if not only_worker_id:
+        direct_update = _direct_phone_worker_update_if_needed(payload, target_version, force=force)
 
     pending = _load_pending()
     pending["agent_update"] = {
@@ -621,8 +702,8 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
         pending = _load_pending()
         pending.pop("agent_update", None)
         _save_pending(pending)
-        return {"ok": True, "target_version": target_version, "queued": [], "skipped": skipped[:16], "errors": [], "pending": False, "message": "todos os agents ativos já estão atualizados"}
-    return {"ok": True, "target_version": target_version, "queued": queued, "skipped": skipped[:16], "errors": errors[:10], "pending": True}
+        return {"ok": True, "target_version": target_version, "queued": [], "skipped": skipped[:16], "errors": [], "pending": False, "direct_update": direct_update, "message": "todos os agents ativos já estão atualizados"}
+    return {"ok": True, "target_version": target_version, "queued": queued, "skipped": skipped[:16], "errors": errors[:10], "pending": True, "direct_update": direct_update}
 
 _APK_BUILD_PERMANENT_ERROR_RE = re.compile(
     r"(compiledebugjavawithjavac|javac|unclosed string literal|cannot find symbol|"

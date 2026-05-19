@@ -1,5 +1,9 @@
 # Phone Worker
 
+## Patch 84.3: hotfix de atualização do agent e painel
+
+A versão `1.8.5` reforça o fluxo de atualização do phone-worker e evita que o painel/automação continuem usando um agent antigo depois de patches do APK. O painel da VPS agora mantém ações essenciais visíveis para o phone-worker direto, esconde o botão de acordar quando já existe worker online e deixa o build manual disponível mesmo quando ainda não há celular pareado pelo APK.
+
 ## Patch 84.2: build APK com executor nativo prebuilt
 
 A versão `1.8.4` ajusta o builder Android para o Patch 84.2:
