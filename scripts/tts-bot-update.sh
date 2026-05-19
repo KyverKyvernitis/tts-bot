@@ -279,6 +279,12 @@ has_fatal_boot_logs() {
   local logs patterns
   logs="$(journal_since_epoch "$unit" "$since_epoch")"
   [[ -n "${logs//[[:space:]]/}" ]] || return 1
+  # O bot.py agora permite que cogs opcionais falhem sem derrubar o processo.
+  # Essas linhas podem mencionar AttributeError/ImportError/etc. de forma
+  # informativa; não devem acionar rollback se o próprio log diz que o bot
+  # continuou online. Erros críticos continuam passando pelo filtro.
+  logs="$(printf '%s\n' "$logs" | grep -Ev '\[cogs\].*(continuará online|boot continuou com aviso)' || true)"
+  [[ -n "${logs//[[:space:]]/}" ]] || return 1
   patterns="$(fatal_boot_log_patterns)"
   printf '%s\n' "$logs" | grep -Eiq "$patterns"
 }

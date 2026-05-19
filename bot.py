@@ -4,6 +4,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -93,6 +94,10 @@ from webserver import run_webserver, set_health_provider
 from music_system import AudioRouter
 
 
+BOOT_LOG = logging.getLogger("bot.boot")
+COG_LOG = logging.getLogger("bot.cogs")
+UPDATE_LOG = logging.getLogger("zip_update")
+
 print("BOT.PY INICIOU")
 
 
@@ -110,6 +115,50 @@ REMOVED_SLASH_COMMANDS = {
     # Core Workers agora é comando privado de prefixo: workers/worker/w.
     "workers",
 }
+
+TRUTHY_VALUES = {"1", "true", "yes", "y", "on", "sim", "s"}
+
+# Cogs que não devem ser carregadas automaticamente pelo varredor genérico.
+# `cogs.tts` é carregado por módulos explícitos mais abaixo; carregar o pacote
+# inteiro também criaria ambiguidade/duplicidade.
+SKIPPED_COG_FILES = {"voice_moderation"}
+SKIPPED_COG_PACKAGES = {"tts"}
+EXPLICIT_COG_EXTENSIONS = (
+    "cogs.tts.cog",
+    "cogs.tts.toggle",
+)
+
+
+def _env_truthy(name: str, *, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in TRUTHY_VALUES
+
+
+def _csv_values(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = re.split(r"[,;\s]+", value)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+    return [str(item).strip() for item in raw_items if str(item).strip()]
+
+
+def _normalize_extension_name(value: str) -> str:
+    value = str(value or "").strip().replace("/", ".").replace("\\", ".")
+    if value.endswith(".py"):
+        value = value[:-3]
+    value = value.strip(".")
+    if not value:
+        return ""
+    if value.startswith("cogs."):
+        return value
+    return f"cogs.{value}"
+
 
 def _cfg(*names: str, default=None):
     for name in names:
@@ -159,7 +208,150 @@ class BotLocal(commands.Bot):
         self.audio_router = AudioRouter(self)
         self._music_bitrate_reconciled = False
         self._music_voice_status_reconciled = False
+
+        self.loaded_extensions: list[str] = []
+        self.failed_extensions: dict[str, dict[str, object]] = {}
+        self.skipped_extensions: dict[str, str] = {}
+        self.critical_extensions: set[str] = self._read_critical_extensions()
+        self.cog_loading_finished = False
+
         set_health_provider(self.get_health_snapshot)
+
+    def _read_critical_extensions(self) -> set[str]:
+        """Lê a lista de cogs realmente críticas.
+
+        Por padrão, nenhuma feature cog derruba o bot inteiro. Se algum sistema
+        base virar indispensável, ele pode ser listado em `CRITICAL_COGS` no
+        config.py ou em `BOT_CRITICAL_COGS` no .env/ambiente.
+        """
+        values: list[str] = []
+        values.extend(_csv_values(getattr(config, "CRITICAL_COGS", None)))
+        values.extend(_csv_values(getattr(config, "BOT_CRITICAL_COGS", None)))
+        values.extend(_csv_values(os.getenv("BOT_CRITICAL_COGS")))
+        normalized = {_normalize_extension_name(item) for item in values}
+        normalized.discard("")
+        return normalized
+
+    def _is_critical_extension(self, extension: str) -> bool:
+        return _normalize_extension_name(extension) in self.critical_extensions
+
+    def _extension_error_summary(self, exc: BaseException) -> str:
+        root = getattr(exc, "original", None) or getattr(exc, "__cause__", None) or exc
+        root_type = type(root).__name__
+        root_message = str(root).strip()
+        if not root_message:
+            root_message = repr(root)
+        return f"{root_type}: {root_message}"
+
+    def _record_failed_extension(self, extension: str, exc: BaseException) -> None:
+        summary = self._extension_error_summary(exc)
+        root = getattr(exc, "original", None) or getattr(exc, "__cause__", None) or exc
+        self.failed_extensions[extension] = {
+            "summary": summary,
+            "exception_type": type(exc).__name__,
+            "root_type": type(root).__name__,
+            "critical": self._is_critical_extension(extension),
+        }
+
+    def _extension_has_setup_entrypoint(self, init_py: Path) -> bool:
+        try:
+            source = init_py.read_text(encoding="utf-8", errors="ignore")
+        except Exception as exc:
+            COG_LOG.warning("[cogs] não consegui ler %s: %r", init_py, exc)
+            return False
+        return bool(re.search(r"^\s*(async\s+def|def)\s+setup\s*\(", source, flags=re.MULTILINE))
+
+    def _discover_cog_extensions(self) -> list[str]:
+        cogs_dir = self._repo_root / "cogs"
+        discovered: list[str] = []
+        seen: set[str] = set()
+
+        def add_extension(extension: str) -> None:
+            extension = _normalize_extension_name(extension)
+            if not extension or extension in seen:
+                return
+            seen.add(extension)
+            discovered.append(extension)
+
+        if not cogs_dir.is_dir():
+            COG_LOG.warning("[cogs] pasta não encontrada: %s", cogs_dir)
+            return []
+
+        for entry in sorted(cogs_dir.iterdir(), key=lambda item: item.name.casefold()):
+            name = entry.name
+            if name.startswith("_"):
+                continue
+
+            if entry.is_file() and entry.suffix == ".py":
+                module_name = entry.stem
+                if module_name in SKIPPED_COG_FILES:
+                    self.skipped_extensions[f"cogs.{module_name}"] = "ignorada pelo loader"
+                    continue
+                add_extension(f"cogs.{module_name}")
+                continue
+
+            if entry.is_dir():
+                if name in SKIPPED_COG_PACKAGES:
+                    self.skipped_extensions[f"cogs.{name}"] = "carregada por módulos explícitos"
+                    continue
+                init_py = entry / "__init__.py"
+                if not init_py.is_file():
+                    continue
+                if self._extension_has_setup_entrypoint(init_py):
+                    add_extension(f"cogs.{name}")
+
+        for extension in EXPLICIT_COG_EXTENSIONS:
+            add_extension(extension)
+
+        return discovered
+
+    async def _load_extension_safely(self, extension: str) -> bool:
+        extension = _normalize_extension_name(extension)
+        try:
+            await self.load_extension(extension)
+        except commands.ExtensionAlreadyLoaded:
+            COG_LOG.info("[cogs] já estava carregada: %s", extension)
+            if extension not in self.loaded_extensions:
+                self.loaded_extensions.append(extension)
+            return True
+        except Exception as exc:
+            self._record_failed_extension(extension, exc)
+            summary = self._extension_error_summary(exc)
+            if self._is_critical_extension(extension):
+                COG_LOG.exception(
+                    "[cogs] cog crítica falhou ao carregar: %s | %s",
+                    extension,
+                    summary,
+                )
+                raise
+            COG_LOG.error(
+                "[cogs] %s falhou ao carregar, mas o bot continuará online. Erro: %s",
+                extension,
+                summary,
+            )
+            return False
+
+        self.loaded_extensions.append(extension)
+        COG_LOG.info("[cogs] carregada: %s", extension)
+        return True
+
+    async def _load_cogs_safely(self) -> None:
+        extensions = self._discover_cog_extensions()
+        COG_LOG.info("[cogs] preparando %s extensão(ões)", len(extensions))
+        for extension in extensions:
+            await self._load_extension_safely(extension)
+        self.cog_loading_finished = True
+
+        failed = len(self.failed_extensions)
+        loaded = len(self.loaded_extensions)
+        if failed:
+            COG_LOG.warning(
+                "[cogs] boot continuou com aviso: %s carregada(s), %s com falha",
+                loaded,
+                failed,
+            )
+        else:
+            COG_LOG.info("[cogs] todas carregadas: %s", loaded)
 
     async def _cleanup_removed_slash_commands(self, guild_ids: set[int]) -> None:
         """Remove comandos slash antigos sem tocar em comandos de outras cogs."""
@@ -213,51 +405,10 @@ class BotLocal(commands.Bot):
         await self.settings_db.init()
 
         print("Carregando cogs...")
+        await self._load_cogs_safely()
 
-        cogs_dir = os.path.join(os.path.dirname(__file__), "cogs")
-        extensions = []
-
-        for entry in sorted(os.listdir(cogs_dir)):
-            if entry.startswith("_"):
-                continue
-
-            full_path = os.path.join(cogs_dir, entry)
-
-            if entry.endswith(".py"):
-                module_name = entry[:-3]
-                if module_name == "voice_moderation":
-                    continue
-                ext = f"cogs.{module_name}"
-                extensions.append(ext)
-                continue
-
-            if os.path.isdir(full_path):
-                init_py = os.path.join(full_path, "__init__.py")
-                if entry == "tts" or not os.path.isfile(init_py):
-                    continue
-                try:
-                    init_source = Path(init_py).read_text(encoding="utf-8", errors="ignore")
-                except Exception:
-                    init_source = ""
-                if "def setup" not in init_source:
-                    continue
-                extensions.append(f"cogs.{entry}")
-
-        # TTS foi reorganizado para um pacote próprio em cogs/tts.
-        extensions.extend([
-            "cogs.tts.cog",
-            "cogs.tts.toggle",
-        ])
-
-        for ext in extensions:
-            try:
-                await self.load_extension(ext)
-            except Exception as e:
-                print(f"[bot] falha ao carregar {ext}: {e}")
-                raise
-
-        should_sync = str(os.getenv("SYNC_SLASH_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
-        allow_global_sync = str(os.getenv("SYNC_GLOBAL_SLASH_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
+        should_sync = _env_truthy("SYNC_SLASH_COMMANDS")
+        allow_global_sync = _env_truthy("SYNC_GLOBAL_SLASH_COMMANDS")
 
         health_guild_id = 927002914449424404
         guild_ids = {int(gid) for gid in (getattr(config, "GUILD_IDS", []) or []) if gid}
@@ -278,7 +429,7 @@ class BotLocal(commands.Bot):
         # o bot antes rodava com sync global e agora tá em modo guild-only —
         # sem isso, os comandos globais fantasmas continuam registrados e o
         # Discord mostra cada comando em duplicata (um global + um guild).
-        clear_globals_on_boot = str(os.getenv("CLEAR_GLOBAL_COMMANDS", "false")).strip().lower() in {"1", "true", "yes", "on"}
+        clear_globals_on_boot = _env_truthy("CLEAR_GLOBAL_COMMANDS")
         if should_sync:
             if allow_global_sync:
                 # Modo global: sincroniza global mas TAMBÉM faz sync de cada
@@ -371,13 +522,27 @@ class BotLocal(commands.Bot):
         ready = bool(snapshot.get("discord_ready"))
         closed = bool(snapshot.get("discord_closed"))
         mongo_ok = bool(snapshot.get("mongo_ok"))
+        failed_extensions = dict(getattr(self, "failed_extensions", {}) or {})
+        critical_failed = [
+            name for name, data in failed_extensions.items()
+            if isinstance(data, dict) and bool(data.get("critical"))
+        ]
 
         starting = (not ready) and uptime_seconds < 120
-        healthy = (ready and not closed and mongo_ok) or starting
+        healthy = (ready and not closed and mongo_ok and not critical_failed) or starting
+        warnings = []
+        if failed_extensions:
+            warnings.append(f"{len(failed_extensions)} cog(s) não carregaram")
 
         snapshot["starting"] = starting
         snapshot["healthy"] = healthy
         snapshot["status"] = "starting" if starting else ("ok" if healthy else "error")
+        snapshot["warnings"] = warnings
+        snapshot["loaded_cogs_count"] = len(getattr(self, "loaded_extensions", []) or [])
+        snapshot["failed_cogs_count"] = len(failed_extensions)
+        snapshot["failed_cogs"] = failed_extensions
+        snapshot["critical_failed_cogs"] = critical_failed
+        snapshot["cog_loading_finished"] = bool(getattr(self, "cog_loading_finished", False))
 
         tts_cog = self.get_cog("TTSVoice")
         if tts_cog is not None and hasattr(tts_cog, "get_tts_metrics_snapshot"):
@@ -934,8 +1099,15 @@ async def main():
     web_thread.start()
 
     bot = BotLocal()
-    await bot.start(config.TOKEN)
+    try:
+        await bot.start(config.TOKEN)
+    finally:
+        if not bot.is_closed():
+            await bot.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        BOOT_LOG.info("Encerrado manualmente")
