@@ -78,7 +78,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
-    private static final String APP_VERSION = "0.5.37";
+    private static final String APP_VERSION = BuildConfig.VERSION_NAME;
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
     private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
@@ -1508,16 +1508,10 @@ public class MainActivity extends Activity {
                 String version = emptyFallback(latestVersionName, "nova versão");
                 setUpdateActionState("Baixando Core Worker " + version + " direto da VPS...\nSe falhar, o erro aparecerá aqui.", "Baixando...", true, true);
                 reportUpdateNotification(serverUrl, "download_started", true, "download direto iniciado pelo APK");
-                File updateDir = primaryUpdateDir();
-                if (!updateDir.exists() && !updateDir.mkdirs()) {
-                    String detail = "Não consegui criar a pasta local de atualização.";
-                    show(detail);
-                    setUpdateActionState("Falha: não consegui criar pasta local para baixar o APK.", "Tentar novamente", true, false);
-                    reportUpdateNotification(serverUrl, "download_failed", false, "falha criando pasta local de atualização");
-                    return;
-                }
+                File updateDir = ensureWritableUpdateDir();
                 String apkName = safeLocalApkName();
                 cleanupUpdateArtifactsKeeping(apkName, "pre_download");
+                updateDir = ensureWritableUpdateDir();
                 File apkFile = new File(updateDir, apkName);
                 boolean reusedExisting = false;
                 if (apkFile.exists() && latestApkSha256 != null && latestApkSha256.trim().matches("(?i)[a-f0-9]{64}")) {
@@ -1530,7 +1524,9 @@ public class MainActivity extends Activity {
                     }
                 }
                 if (!reusedExisting) {
+                    updateDir = ensureWritableUpdateDir();
                     File partFile = new File(updateDir, apkName + ".download");
+                    ensureParentDirectory(partFile);
                     if (partFile.exists()) partFile.delete();
                     downloadFile(latestApkUrl, partFile, (done, total) -> {
                         String progress = total > 0
@@ -1585,9 +1581,40 @@ public class MainActivity extends Activity {
     private File primaryUpdateDir() {
         File filesBase = getExternalFilesDir(null);
         if (filesBase == null) {
-            filesBase = getCacheDir();
+            filesBase = getFilesDir();
         }
         return new File(filesBase, "updates");
+    }
+
+    private boolean ensureDirectory(File dir) {
+        if (dir == null) return false;
+        if (dir.exists()) return dir.isDirectory();
+        try {
+            return dir.mkdirs() || dir.exists();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private File ensureWritableUpdateDir() throws Exception {
+        File primary = primaryUpdateDir();
+        if (ensureDirectory(primary)) return primary;
+
+        File internal = new File(getFilesDir(), "updates");
+        if (ensureDirectory(internal)) return internal;
+
+        File cache = new File(getCacheDir(), "updates");
+        if (ensureDirectory(cache)) return cache;
+
+        throw new Exception("não consegui criar a pasta temporária de atualização");
+    }
+
+    private void ensureParentDirectory(File file) throws Exception {
+        if (file == null) throw new Exception("arquivo temporário de update inválido");
+        File parent = file.getParentFile();
+        if (!ensureDirectory(parent)) {
+            throw new Exception("não consegui recriar a pasta temporária de atualização");
+        }
     }
 
     private File[] updateArtifactDirs() {
@@ -1699,8 +1726,7 @@ public class MainActivity extends Activity {
             count.files += childCount.files;
         }
         try {
-            File[] remaining = dir.listFiles();
-            if (remaining != null && remaining.length == 0) dir.delete();
+            ensureDirectory(dir);
         } catch (Throwable ignored) {
         }
         return count;
@@ -4805,8 +4831,15 @@ public class MainActivity extends Activity {
         } catch (Throwable ignored) {
             total = -1;
         }
+        ensureParentDirectory(target);
         InputStream input = conn.getInputStream();
-        FileOutputStream output = new FileOutputStream(target);
+        FileOutputStream output;
+        try {
+            output = new FileOutputStream(target);
+        } catch (Throwable firstOpenError) {
+            ensureParentDirectory(target);
+            output = new FileOutputStream(target);
+        }
         byte[] buffer = new byte[32 * 1024];
         int read;
         long done = 0;
