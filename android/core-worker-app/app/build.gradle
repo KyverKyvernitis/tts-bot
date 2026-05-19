@@ -58,8 +58,8 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 56
-        versionName "0.5.41"
+        versionCode 57
+        versionName "0.5.42"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -88,6 +88,12 @@ android {
             if (coreWorkerSigningEnabled) {
                 signingConfig signingConfigs.coreWorkerCompat
             }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
         }
     }
 

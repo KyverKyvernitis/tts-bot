@@ -204,14 +204,14 @@ def run(context_json=None):
 
         executor_embedded = bool(
             embedded.get("executor", {}).get("present")
-            or embedded.get("proot", {}).get("present")
-            or embedded.get("busybox", {}).get("present")
             or native_executor.get("embeddedExecutorPresent")
         )
         executor_test = native_executor.get("test") if isinstance(native_executor.get("test"), dict) else {}
         executor_test_attempted = bool(executor_test.get("attempted"))
         executor_test_ok = bool(executor_test.get("ok"))
-        executor_ready = bool(executor_embedded and (not executor_test_attempted or executor_test_ok))
+        native_bridge = native_executor.get("nativeBridge") if isinstance(native_executor.get("nativeBridge"), dict) else {}
+        native_bridge_loaded = bool(native_bridge.get("loaded"))
+        executor_ready = bool(executor_embedded and native_bridge_loaded and executor_test_attempted and executor_test_ok and native_executor.get("readyForRootfs"))
         box64_embedded = bool(embedded["box64"]["present"] or native_executor.get("embeddedBox64Present"))
         rootfs_ready = bool(rootfs["readyMarker"] and rootfs["binSh"])
         bedrock_ready = bool(bedrock["server"] and bedrock["serverProperties"] and bedrock["eulaAccepted"])
@@ -220,7 +220,11 @@ def run(context_json=None):
         warnings = []
         if not executor_embedded:
             blockers.append("executor nativo interno embutido pendente")
-        elif executor_test_attempted and not executor_test_ok:
+        elif not native_bridge_loaded:
+            blockers.append("executor nativo interno detectado, mas JNI não carregou")
+        elif not executor_test_attempted:
+            blockers.append("teste do executor nativo pendente")
+        elif not executor_test_ok:
             blockers.append("executor nativo interno falhou no teste")
         if not rootfs_ready:
             blockers.append("rootfs interno pendente")
@@ -239,15 +243,16 @@ def run(context_json=None):
         manifest = _manifest_payload(ctx, layout, embedded, blockers, now)
         executor_state = {
             "ok": executor_ready,
-            "state": "ready_for_rootfs" if executor_ready else ("test_failed" if executor_test_attempted else "blocked"),
-            "mode": "embedded-native-executor",
+            "state": "ready_for_rootfs" if executor_ready else ("executor_test_failed" if executor_test_attempted and not executor_test_ok else "executor_detected" if executor_embedded else "executor_missing"),
+            "mode": "embedded-native-executor-jni",
             "embedded": embedded,
             "nativeExecutor": native_executor,
+            "nativeBridge": native_bridge,
             "nativeLibDir": safe_path(native_lib_dir),
             "testAttempted": executor_test_attempted,
             "testOk": executor_test_ok,
             "readyForRootfs": executor_ready,
-            "blockers": [] if executor_ready else (["executor nativo interno falhou no teste"] if executor_test_attempted else ["executor nativo interno embutido pendente"]),
+            "blockers": [] if executor_ready else (["executor nativo interno falhou no teste"] if executor_test_attempted and not executor_test_ok else ["teste do executor nativo pendente"] if executor_embedded and native_bridge_loaded else ["executor nativo interno embutido pendente"]),
             "updatedAt": now,
             "safety": "não executa shell livre e não aceita comando arbitrário da VPS",
         }

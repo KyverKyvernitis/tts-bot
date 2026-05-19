@@ -1,5 +1,9 @@
 # Phone Worker
 
+## v1.8.2 — build nativo APK/NDK
+
+A versão `1.8.2` adiciona diagnóstico explícito de NDK/CMake para o build do Core Worker quando o app passa a usar `externalNativeBuild`. O worker continua sendo o único ambiente que compila APK; a VPS apenas orquestra, publica e notifica.
+
 ## v1.8.1 — assinatura compatível do APK
 
 A versão `1.8.1` alinha o agent ao Patch 57. O phone worker continua compilando o APK, mas agora recebe uma keystore compatível pelo payload autenticado do job e assina o APK no workspace temporário. Isso evita o erro do Android de conflito com pacote existente ao atualizar por cima.

@@ -42,7 +42,7 @@ _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.8.1"
+PHONE_WORKER_VERSION = "1.8.2"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2950,6 +2950,65 @@ def _read_android_version(project_dir: Path) -> tuple[str, int]:
     return version_name, version_code
 
 
+def _inspect_android_native_build_environment(project_dir: Path, env: dict[str, str]) -> dict[str, Any]:
+    """Diagnóstico leve para builds Android com NDK/CMake no phone worker.
+
+    Não instala nada e não builda fora do worker. O objetivo é falhar com mensagem
+    clara quando o Patch 84 exigir toolchain nativa e o Termux/SDK ainda não tiver
+    NDK ou CMake preparados.
+    """
+    build_gradle = project_dir / "app" / "build.gradle"
+    cmake_lists = project_dir / "app" / "src" / "main" / "cpp" / "CMakeLists.txt"
+    text = build_gradle.read_text(encoding="utf-8", errors="ignore") if build_gradle.exists() else ""
+    required = bool(cmake_lists.exists() or "externalNativeBuild" in text or "CMakeLists.txt" in text)
+    info: dict[str, Any] = {"required": required, "ok": True, "missing": []}
+    if not required:
+        return info
+
+    android_home = Path(env.get("ANDROID_HOME") or env.get("ANDROID_SDK_ROOT") or (Path.home() / "android-sdk")).expanduser()
+    info["android_home"] = str(android_home)
+    info["cmake_lists"] = str(cmake_lists)
+    info["cmake_lists_ok"] = cmake_lists.is_file()
+    if not cmake_lists.is_file():
+        info["ok"] = False
+        info["missing"].append("app/src/main/cpp/CMakeLists.txt")
+
+    ndk_candidates: list[Path] = []
+    for key in ("ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "NDK_HOME"):
+        value = str(env.get(key) or os.getenv(key) or "").strip()
+        if value:
+            ndk_candidates.append(Path(value).expanduser())
+    ndk_dir = android_home / "ndk"
+    if ndk_dir.is_dir():
+        ndk_candidates.extend(sorted([p for p in ndk_dir.iterdir() if p.is_dir()], reverse=True))
+    ndk_bundle = android_home / "ndk-bundle"
+    if ndk_bundle.is_dir():
+        ndk_candidates.append(ndk_bundle)
+    ndk_found = next((p for p in ndk_candidates if (p / "source.properties").is_file()), None)
+    info["ndk"] = str(ndk_found or "")
+    info["ndk_ok"] = ndk_found is not None
+    if ndk_found is None:
+        info["ok"] = False
+        info["missing"].append("Android NDK")
+
+    cmake_candidates: list[Path] = []
+    cmake_root = android_home / "cmake"
+    if cmake_root.is_dir():
+        cmake_candidates.extend(sorted([p / "bin" / "cmake" for p in cmake_root.iterdir() if p.is_dir()], reverse=True))
+    which_cmake = shutil.which("cmake")
+    if which_cmake:
+        cmake_candidates.append(Path(which_cmake))
+    cmake_found = next((p for p in cmake_candidates if p.is_file()), None)
+    info["cmake"] = str(cmake_found or "")
+    info["cmake_ok"] = cmake_found is not None
+    if cmake_found is None:
+        info["ok"] = False
+        info["missing"].append("CMake")
+
+    info["summary"] = "toolchain nativa pronta" if info["ok"] else "toolchain nativa incompleta: " + ", ".join(info["missing"])
+    return info
+
+
 def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str, version_code: int, sha256: str, publish_url: str, changelog: list[str] | None = None, source_sha256: str = "", source_fingerprint: str = "", notification_id: str = "", apk_signing_mode: str = "", apk_signing_keystore_sha256: str = "") -> dict[str, Any]:
     base_url, token, worker_id = _core_worker_auth_parts()
     if not token or not worker_id:
@@ -3065,6 +3124,16 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             env["CORE_WORKER_VPS_URL"] = injected_vps_url
             env["CORE_WORKER_VPS_LABEL"] = injected_vps_label
         builder_environment = _prepare_termux_android_build(project_dir, env)
+        native_environment = _inspect_android_native_build_environment(project_dir, env)
+        builder_environment["native_build"] = native_environment
+        if native_environment.get("required") and not native_environment.get("ok"):
+            return {
+                "ok": False,
+                "summary": native_environment.get("summary") or "toolchain nativa Android incompleta",
+                "native_build": native_environment,
+                "hint": "instale/prepare Android NDK e CMake no phone worker builder; a VPS não deve buildar APK",
+                "work_dir": str(work_dir),
+            }
         builder_environment["google_services"] = {
             "ok": bool(google_services.get("ok")),
             "package": google_services.get("package"),

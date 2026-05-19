@@ -7,28 +7,41 @@ import android.os.Build;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Executor nativo controlado do Core Linux.
  *
- * Não é shell livre: apenas localiza e testa binários nativos embutidos no APK
- * dentro de nativeLibraryDir. Binários baixados/criados em diretórios graváveis
- * do app são reportados, mas não são executados em Android 10+.
+ * Esta classe não abre shell e não executa comandos enviados pela VPS. O APK carrega
+ * libcoreworker_executor.so via JNI e expõe apenas uma allowlist local mínima para
+ * validar a primeira peça nativa do Core Linux antes de rootfs/Box64/Bedrock reais.
  */
 public final class CoreWorkerNativeExecutor {
     private static final long TEST_TIMEOUT_MS = 3500L;
     private static final int OUTPUT_LIMIT = 12 * 1024;
+    private static final String LIBRARY_NAME = "coreworker_executor";
+    private static final Set<String> ALLOWED_COMMANDS = new HashSet<>(Arrays.asList(
+            "version", "echo", "env-info", "fs-probe", "native-ping"
+    ));
+
+    private static boolean nativeLoadAttempted = false;
+    private static boolean nativeLoaded = false;
+    private static String nativeLoadError = "";
 
     private CoreWorkerNativeExecutor() {}
+
+    private static native String nativeRun(String command, String argument, String workDir);
 
     public static JSONObject snapshot(Context context, File coreLinuxDir, String action) {
         try {
@@ -48,13 +61,10 @@ public final class CoreWorkerNativeExecutor {
             File dataDir = new File(info == null || info.dataDir == null ? context.getFilesDir().getParent() : info.dataDir);
             long now = System.currentTimeMillis();
 
+            boolean loaded = ensureNativeLoaded();
             JSONArray embeddedCandidates = new JSONArray();
             JSONObject executor = findEmbedded(nativeDir, "executor", new String[]{
-                    "libcoreworker_executor.so",
-                    "libcoreworker_proot.so",
-                    "libcoreworker_busybox.so",
-                    "libproot.so",
-                    "libbusybox.so"
+                    "libcoreworker_executor.so"
             }, embeddedCandidates);
             JSONObject proot = findEmbedded(nativeDir, "proot", new String[]{
                     "libcoreworker_proot.so",
@@ -76,37 +86,65 @@ public final class CoreWorkerNativeExecutor {
             addDownloaded(downloadedCandidates, new File(bin, "box64"), dataDir);
             addDownloaded(downloadedCandidates, new File(base, "box64/box64"), dataDir);
 
-            boolean embeddedExecutorPresent = executor.optBoolean("present") || proot.optBoolean("present") || busybox.optBoolean("present");
+            boolean embeddedExecutorPresent = loaded || executor.optBoolean("present");
             boolean embeddedBox64Present = box64.optBoolean("present");
             boolean downloadedExecutableBlocked = hasPresent(downloadedCandidates);
+
             JSONArray blockers = new JSONArray();
             JSONArray warnings = new JSONArray();
             if (!embeddedExecutorPresent) blockers.put("executor nativo embutido pendente");
+            if (embeddedExecutorPresent && !loaded) blockers.put("executor nativo detectado, mas JNI não carregou");
             if (!embeddedBox64Present) warnings.put("Box64 nativo embutido pendente para Bedrock");
             if (downloadedExecutableBlocked && Build.VERSION.SDK_INT >= 29) {
                 warnings.put("binários em diretório gravável detectados, mas não executados por restrição Android 10+");
             }
 
+            JSONObject previous = readJson(new File(runtime, "native-executor-state.json"));
             JSONObject test = new JSONObject();
             test.put("attempted", false);
             test.put("ok", false);
             test.put("summary", "teste não executado");
             test.put("exitCode", -1);
-            if ("test".equals(safeAction) || "native_test".equals(safeAction) || "executor_test".equals(safeAction)) {
-                test = runAllowedTest(executor, proot, busybox, box64, base);
+            if (previous != null && previous.optBoolean("readyForRootfs", false)) {
+                JSONObject previousTest = previous.optJSONObject("test");
+                if (previousTest != null && previousTest.optBoolean("ok", false)) {
+                    test = previousTest;
+                    test.put("reusedPreviousOk", true);
+                }
+            }
+
+            boolean shouldTest = "test".equals(safeAction)
+                    || "native_test".equals(safeAction)
+                    || "executor_test".equals(safeAction)
+                    || "repair".equals(safeAction);
+            if (shouldTest) {
+                test = runSelfTest(base);
                 writeText(new File(logs, "native-executor-test.log"), test.toString(2) + "\n");
                 if (!test.optBoolean("ok", false)) {
                     blockers.put("teste do executor nativo falhou");
                 }
             }
 
-            String state = embeddedExecutorPresent ? (test.optBoolean("ok", false) ? "executor_test_ok" : "executor_detected") : "executor_missing";
-            if (!embeddedExecutorPresent && downloadedExecutableBlocked && Build.VERSION.SDK_INT >= 29) state = "android_execution_blocked";
-            boolean readyForRootfs = embeddedExecutorPresent && (!test.optBoolean("attempted", false) || test.optBoolean("ok", false));
+            boolean testOk = test.optBoolean("ok", false);
+            boolean testAttempted = test.optBoolean("attempted", false);
+            String state;
+            if (!embeddedExecutorPresent) {
+                state = "executor_missing";
+            } else if (!loaded || (testAttempted && !testOk)) {
+                state = "executor_test_failed";
+            } else if (testOk && shouldTest) {
+                state = "executor_test_ok";
+            } else if (testOk) {
+                state = "ready_for_rootfs";
+            } else {
+                state = "executor_detected";
+            }
+            boolean readyForRootfs = embeddedExecutorPresent && loaded && testOk;
 
             JSONObject payload = new JSONObject();
-            payload.put("ok", embeddedExecutorPresent && (!test.optBoolean("attempted", false) || test.optBoolean("ok", false)));
+            payload.put("ok", embeddedExecutorPresent && loaded && (!testAttempted || testOk));
             payload.put("state", state);
+            payload.put("readinessState", readyForRootfs ? "ready_for_rootfs" : state);
             payload.put("action", safeAction);
             payload.put("readyForRootfs", readyForRootfs);
             payload.put("nativeLibraryDir", path(nativeDir));
@@ -127,12 +165,14 @@ public final class CoreWorkerNativeExecutor {
             payload.put("embeddedCandidates", embeddedCandidates);
             payload.put("downloadedCandidates", downloadedCandidates);
             payload.put("downloadedExecutableBlocked", downloadedExecutableBlocked && Build.VERSION.SDK_INT >= 29);
+            payload.put("nativeBridge", nativeBridgeSnapshot(loaded));
+            payload.put("allowlist", new JSONArray().put("version").put("echo").put("env-info").put("fs-probe").put("native-ping"));
             payload.put("test", test);
             payload.put("blockers", blockers);
             payload.put("warnings", warnings);
             payload.put("updatedAt", now);
-            payload.put("summary", summary(state, blockers, warnings));
-            payload.put("safety", "allowlist nativa; sem shell livre; não executa binários baixados do app home");
+            payload.put("summary", summary(state, readyForRootfs, blockers, warnings));
+            payload.put("safety", "JNI allowlist nativa; sem shell livre; sem ProcessBuilder para comando remoto; não executa binários baixados do app home");
 
             writeJson(new File(runtime, "native-executor-state.json"), payload);
             writeJson(new File(runtime, "native-runtime-state.json"), payload);
@@ -141,12 +181,130 @@ public final class CoreWorkerNativeExecutor {
             JSONObject err = new JSONObject();
             try {
                 err.put("ok", false);
-                err.put("state", "error");
+                err.put("state", "executor_test_failed");
                 err.put("summary", "falha no executor nativo: " + shortThrowable(exc));
                 err.put("error", shortThrowable(exc));
             } catch (Throwable ignored) {}
             return err;
         }
+    }
+
+    private static synchronized boolean ensureNativeLoaded() {
+        if (nativeLoadAttempted) return nativeLoaded;
+        nativeLoadAttempted = true;
+        try {
+            System.loadLibrary(LIBRARY_NAME);
+            nativeLoaded = true;
+            nativeLoadError = "";
+        } catch (Throwable exc) {
+            nativeLoaded = false;
+            nativeLoadError = shortThrowable(exc);
+        }
+        return nativeLoaded;
+    }
+
+    private static JSONObject nativeBridgeSnapshot(boolean loaded) throws Exception {
+        JSONObject bridge = new JSONObject();
+        bridge.put("libraryName", LIBRARY_NAME);
+        bridge.put("loaded", loaded);
+        bridge.put("loadAttempted", nativeLoadAttempted);
+        bridge.put("loadError", nativeLoadError == null ? "" : nativeLoadError);
+        bridge.put("mode", "jni-shared-library");
+        return bridge;
+    }
+
+    private static JSONObject runSelfTest(File workDir) throws Exception {
+        JSONArray steps = new JSONArray();
+        String[] commands = new String[]{"native-ping", "version", "env-info", "fs-probe", "echo"};
+        boolean ok = true;
+        int exitCode = 0;
+        StringBuilder stdout = new StringBuilder();
+        StringBuilder stderr = new StringBuilder();
+        long started = System.currentTimeMillis();
+        for (String command : commands) {
+            String arg = "echo".equals(command) ? "core-worker-native-executor" : "";
+            JSONObject step = runAllowedNative(command, arg, workDir, TEST_TIMEOUT_MS);
+            steps.put(step);
+            if (!step.optBoolean("ok", false)) {
+                ok = false;
+                if (exitCode == 0) exitCode = step.optInt("exitCode", 1);
+            }
+            String out = step.optString("stdout", "");
+            String err = step.optString("stderr", "");
+            if (!out.isEmpty()) stdout.append("[").append(command).append("] ").append(out).append('\n');
+            if (!err.isEmpty()) stderr.append("[").append(command).append("] ").append(err).append('\n');
+        }
+        JSONObject result = new JSONObject();
+        result.put("attempted", true);
+        result.put("ok", ok);
+        result.put("summary", ok ? "executor nativo respondeu à allowlist JNI" : "executor nativo falhou em pelo menos um teste allowlist");
+        result.put("exitCode", ok ? 0 : exitCode);
+        result.put("stdout", sanitize(stdout.toString(), OUTPUT_LIMIT));
+        result.put("stderr", sanitize(stderr.toString(), OUTPUT_LIMIT));
+        result.put("steps", steps);
+        result.put("durationMs", System.currentTimeMillis() - started);
+        return result;
+    }
+
+    private static JSONObject runAllowedNative(final String command, final String argument, final File workDir, long timeoutMs) throws Exception {
+        JSONObject out = new JSONObject();
+        long started = System.currentTimeMillis();
+        out.put("command", command);
+        out.put("attempted", true);
+        out.put("timeoutMs", timeoutMs);
+        if (!ALLOWED_COMMANDS.contains(command)) {
+            out.put("ok", false);
+            out.put("exitCode", 126);
+            out.put("summary", "comando bloqueado pela allowlist Java");
+            out.put("stdout", "");
+            out.put("stderr", "comando não permitido");
+            out.put("durationMs", System.currentTimeMillis() - started);
+            return out;
+        }
+        if (!ensureNativeLoaded()) {
+            out.put("ok", false);
+            out.put("exitCode", 127);
+            out.put("summary", "biblioteca JNI não carregada");
+            out.put("stdout", "");
+            out.put("stderr", nativeLoadError == null ? "" : nativeLoadError);
+            out.put("durationMs", System.currentTimeMillis() - started);
+            return out;
+        }
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        Future<String> future = executor.submit(new Callable<String>() {
+            @Override
+            public String call() {
+                return nativeRun(command, argument == null ? "" : argument, workDir == null ? "" : workDir.getAbsolutePath());
+            }
+        });
+        try {
+            String raw = future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            JSONObject nativeResult = new JSONObject(raw == null || raw.trim().isEmpty() ? "{}" : raw);
+            out.put("ok", nativeResult.optBoolean("ok", false));
+            out.put("exitCode", nativeResult.optInt("exitCode", nativeResult.optBoolean("ok", false) ? 0 : 1));
+            out.put("summary", nativeResult.optBoolean("ok", false) ? "comando allowlist JNI executado" : "comando allowlist JNI falhou");
+            out.put("stdout", sanitize(nativeResult.optString("stdout", ""), OUTPUT_LIMIT));
+            out.put("stderr", sanitize(nativeResult.optString("stderr", ""), OUTPUT_LIMIT));
+            out.put("native", nativeResult);
+        } catch (TimeoutException exc) {
+            future.cancel(true);
+            out.put("ok", false);
+            out.put("exitCode", -1);
+            out.put("summary", "timeout no comando allowlist JNI");
+            out.put("stdout", "");
+            out.put("stderr", "timeout após " + timeoutMs + "ms");
+        } catch (Throwable exc) {
+            out.put("ok", false);
+            out.put("exitCode", -1);
+            out.put("summary", "falha no comando allowlist JNI: " + shortThrowable(exc));
+            out.put("stdout", "");
+            out.put("stderr", shortThrowable(exc));
+        } finally {
+            executor.shutdownNow();
+        }
+        out.put("durationMs", System.currentTimeMillis() - started);
+        return out;
     }
 
     private static JSONObject findEmbedded(File nativeDir, String kind, String[] names, JSONArray all) throws Exception {
@@ -198,83 +356,14 @@ public final class CoreWorkerNativeExecutor {
         return false;
     }
 
-    private static JSONObject runAllowedTest(JSONObject executor, JSONObject proot, JSONObject busybox, JSONObject box64, File workDir) throws Exception {
-        JSONObject candidate = firstPresent(busybox, executor, proot, box64);
-        JSONObject out = new JSONObject();
-        out.put("attempted", true);
-        if (candidate == null || !candidate.optBoolean("present")) {
-            out.put("ok", false);
-            out.put("summary", "nenhum executor nativo embutido disponível para teste");
-            out.put("exitCode", -1);
-            return out;
-        }
-        String path = candidate.optString("path", "");
-        String name = candidate.optString("name", "");
-        List<String> cmd = new ArrayList<>();
-        cmd.add(path);
-        if (name.contains("box64")) {
-            cmd.add("--version");
-        } else if (name.contains("busybox")) {
-            cmd.add("--help");
-        } else {
-            cmd.add("--help");
-        }
-        out.put("command", new JSONArray(cmd));
-        long started = System.currentTimeMillis();
-        Process process = null;
+    private static JSONObject readJson(File file) {
         try {
-            ProcessBuilder builder = new ProcessBuilder(cmd);
-            builder.directory(workDir);
-            builder.redirectErrorStream(true);
-            process = builder.start();
-            boolean finished = process.waitFor(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-            String output = readLimit(process.getInputStream(), OUTPUT_LIMIT);
-            if (!finished) {
-                process.destroyForcibly();
-                out.put("ok", false);
-                out.put("summary", "teste do executor nativo excedeu timeout");
-                out.put("exitCode", -1);
-            } else {
-                int exit = process.exitValue();
-                out.put("ok", exit == 0 || exit == 1);
-                out.put("summary", "executor nativo respondeu ao teste");
-                out.put("exitCode", exit);
-            }
-            out.put("stdout", sanitize(output, OUTPUT_LIMIT));
-        } catch (Throwable exc) {
-            out.put("ok", false);
-            out.put("summary", "falha ao testar executor nativo: " + shortThrowable(exc));
-            out.put("error", shortThrowable(exc));
-            out.put("exitCode", -1);
-        } finally {
-            if (process != null) {
-                try { process.destroy(); } catch (Throwable ignored) {}
-            }
+            if (file == null || !file.exists()) return null;
+            byte[] raw = java.nio.file.Files.readAllBytes(file.toPath());
+            return new JSONObject(new String(raw, StandardCharsets.UTF_8));
+        } catch (Throwable ignored) {
+            return null;
         }
-        out.put("durationMs", System.currentTimeMillis() - started);
-        return out;
-    }
-
-    private static JSONObject firstPresent(JSONObject... objects) {
-        for (JSONObject obj : objects) {
-            if (obj != null && obj.optBoolean("present")) return obj;
-        }
-        return null;
-    }
-
-    private static String readLimit(InputStream input, int limit) throws Exception {
-        if (input == null) return "";
-        BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
-        StringBuilder builder = new StringBuilder();
-        char[] buf = new char[1024];
-        int n;
-        while ((n = reader.read(buf)) >= 0) {
-            if (builder.length() < limit) {
-                int allowed = Math.min(n, limit - builder.length());
-                builder.append(buf, 0, allowed);
-            }
-        }
-        return builder.toString();
     }
 
     private static void writeJson(File file, JSONObject obj) throws Exception {
@@ -289,10 +378,11 @@ public final class CoreWorkerNativeExecutor {
         out.close();
     }
 
-    private static String summary(String state, JSONArray blockers, JSONArray warnings) {
+    private static String summary(String state, boolean readyForRootfs, JSONArray blockers, JSONArray warnings) {
+        if (readyForRootfs) return "executor nativo interno pronto para rootfs";
         if ("executor_test_ok".equals(state)) return "executor nativo interno testado";
-        if ("executor_detected".equals(state)) return "executor nativo interno detectado";
-        if ("android_execution_blocked".equals(state)) return "executor baixado detectado, mas bloqueado pelo Android";
+        if ("executor_detected".equals(state)) return "executor nativo interno detectado; teste pendente";
+        if ("executor_test_failed".equals(state)) return "executor nativo interno falhou no teste";
         if (blockers != null && blockers.length() > 0) return "executor nativo interno pendente · " + blockers.optString(0);
         if (warnings != null && warnings.length() > 0) return "executor nativo interno parcial · " + warnings.optString(0);
         return "executor nativo interno atualizado";
@@ -321,7 +411,8 @@ public final class CoreWorkerNativeExecutor {
         String clean = (value == null ? "" : value)
                 .replaceAll("(?i)(token|authorization|bearer|secret|password|passwd|firebase|fcm)[=: ]+[^\\s]+", "$1=[redacted]")
                 .replaceAll("([0-9]{1,3}\\.){3}[0-9]{1,3}", "[ip-redacted]")
-                .replace('\r', ' ');
+                .replace('\r', ' ')
+                .replace((char) 0, ' ');
         if (clean.length() > limit) clean = clean.substring(0, limit) + "…";
         return clean;
     }
