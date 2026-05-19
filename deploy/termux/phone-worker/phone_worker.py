@@ -43,7 +43,7 @@ _APK_BUILD_THREAD_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.8.3"
+PHONE_WORKER_VERSION = "1.8.4"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2902,6 +2902,48 @@ def _cleanup_old_apk_build_logs(build_root: Path, *, keep_logs: int | None = Non
             shutil.rmtree(path)
 
 
+def _summarize_gradle_log(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {"summary": "erro de Gradle sem log persistente", "permanent": False, "detail": ""}
+    text = _tail_text_file(path, limit=70000)
+    lowered = text.lower()
+    patterns = [
+        r"execution failed for task '[^']+'",
+        r"c/c\+\+: .+",
+        r"cmake[^\n]+syntax error[^\n]+",
+        r"cmake error[^\n]*",
+        r"ninja:[^\n]+",
+        r"aapt2[^\n]+",
+        r"manifest merger failed[^\n]*",
+        r"outofmemoryerror[^\n]*",
+        r"no space left[^\n]*",
+    ]
+    hits: list[str] = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            value = _short_text(match.group(0), limit=220)
+            if value and value not in hits:
+                hits.append(value)
+            if len(hits) >= 4:
+                break
+        if len(hits) >= 4:
+            break
+    permanent = any(fragment in lowered for fragment in (
+        'syntax error: ")" unexpected',
+        "cmake",
+        "manifest merger failed",
+        "google-services.json",
+        "assinatura compatível",
+    ))
+    if 'syntax error: ")" unexpected' in lowered and "cmake" in lowered:
+        summary = "CMake do Android SDK incompatível com Termux/Android; use executor prebuilt via jniLibs"
+    elif hits:
+        summary = "build do APK falhou: " + hits[0]
+    else:
+        summary = "build do APK falhou; veja gradle_log_tail"
+    return {"summary": _short_text(summary, limit=180), "permanent": permanent, "detail": " | ".join(hits[:4])}
+
+
 def _apk_build_failure_result(
     *,
     summary: str,
@@ -3089,24 +3131,48 @@ def _read_android_version(project_dir: Path) -> tuple[str, int]:
 
 
 def _inspect_android_native_build_environment(project_dir: Path, env: dict[str, str]) -> dict[str, Any]:
-    """Diagnóstico leve para builds Android com NDK/CMake no phone worker.
+    """Diagnóstico leve para builds Android com código nativo.
 
-    Não instala nada e não builda fora do worker. O objetivo é falhar com mensagem
-    clara quando o Patch 84 exigir toolchain nativa e o Termux/SDK ainda não tiver
-    NDK ou CMake preparados.
+    Patch 84.2 separa dois modos:
+    - externalNativeBuild/CMake: exige toolchain nativa executável no host;
+    - jniLibs prebuilt: o Gradle apenas empacota .so já pronta e não deve exigir
+      CMake/NDK no Termux.
+
+    O CMakeLists em src/main/cpp pode existir como fonte de auditoria sem obrigar
+    o phone worker a executar CMake.
     """
     build_gradle = project_dir / "app" / "build.gradle"
     cmake_lists = project_dir / "app" / "src" / "main" / "cpp" / "CMakeLists.txt"
+    prebuilt_dir = project_dir / "app" / "src" / "main" / "jniLibs" / "arm64-v8a"
+    prebuilt_executor = prebuilt_dir / "libcoreworker_executor.so"
     text = build_gradle.read_text(encoding="utf-8", errors="ignore") if build_gradle.exists() else ""
-    required = bool(cmake_lists.exists() or "externalNativeBuild" in text or "CMakeLists.txt" in text)
-    info: dict[str, Any] = {"required": required, "ok": True, "missing": []}
+    # Ignore comentários: o CMakeLists pode existir como auditoria e o build.gradle
+    # pode explicar externalNativeBuild sem ativá-lo de fato. Só exigimos toolchain
+    # quando há bloco Gradle real.
+    gradle_no_line_comments = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+    external_required = bool(re.search(r"(?m)^\s*externalNativeBuild\s*\{", gradle_no_line_comments))
+    prebuilt_present = bool(prebuilt_executor.is_file() and prebuilt_executor.stat().st_size > 1024)
+    required = external_required
+    info: dict[str, Any] = {
+        "required": required,
+        "externalNativeBuild": external_required,
+        "jniLibsPrebuilt": prebuilt_present,
+        "prebuilt_executor": str(prebuilt_executor),
+        "prebuilt_executor_bytes": prebuilt_executor.stat().st_size if prebuilt_executor.is_file() else 0,
+        "cmake_lists": str(cmake_lists),
+        "cmake_lists_ok": cmake_lists.is_file(),
+        "ok": True,
+        "missing": [],
+    }
+    if prebuilt_present and not external_required:
+        info["summary"] = "executor nativo prebuilt será empacotado via jniLibs; CMake/NDK não exigidos no Termux"
+        return info
     if not required:
+        info["summary"] = "sem externalNativeBuild ativo"
         return info
 
     android_home = Path(env.get("ANDROID_HOME") or env.get("ANDROID_SDK_ROOT") or (Path.home() / "android-sdk")).expanduser()
     info["android_home"] = str(android_home)
-    info["cmake_lists"] = str(cmake_lists)
-    info["cmake_lists_ok"] = cmake_lists.is_file()
     if not cmake_lists.is_file():
         info["ok"] = False
         info["missing"].append("app/src/main/cpp/CMakeLists.txt")
@@ -3401,8 +3467,9 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
                 returncode = 124
         if returncode != 0:
             preserve_workdir = keep_failed_workdir
+            gradle_failure = _summarize_gradle_log(gradle_log)
             return _apk_build_failure_result(
-                summary="build do APK falhou; veja gradle_log_tail",
+                summary=str(gradle_failure.get("summary") or "build do APK falhou; veja gradle_log_tail"),
                 version_name=version_name,
                 version_code=version_code,
                 source_fingerprint=source_fingerprint,
@@ -3413,6 +3480,12 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
                 returncode=returncode,
                 builder_environment=builder_environment,
                 native_environment=native_environment,
+                extra={
+                    "retryable": False,
+                    "permanent_failure": bool(gradle_failure.get("permanent")),
+                    "gradle_error_summary": gradle_failure.get("summary"),
+                    "gradle_error_detail": gradle_failure.get("detail"),
+                },
             )
         apk_candidates = sorted((project_dir / "app" / "build" / "outputs" / "apk" / "debug").glob("*.apk"), key=lambda path: path.stat().st_mtime, reverse=True)
         if not apk_candidates:

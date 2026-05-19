@@ -91,11 +91,11 @@ android {
         }
     }
 
-    externalNativeBuild {
-        cmake {
-            path file("src/main/cpp/CMakeLists.txt")
-        }
-    }
+    // Patch 84.2: o phone worker builda no Termux/Android. O CMake do SDK Manager
+    // é pacote de host Linux e não executa corretamente ali; por isso o executor
+    // nativo mínimo é empacotado como prebuilt em src/main/jniLibs/arm64-v8a.
+    // Mantemos os fontes C++ em src/main/cpp apenas como referência/auditoria para
+    // futura toolchain externa, sem externalNativeBuild neste fluxo privado.
 
     buildFeatures {
         buildConfig true

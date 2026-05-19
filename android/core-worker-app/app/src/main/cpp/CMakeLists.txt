@@ -1,3 +1,10 @@
+# Patch 84.2 note:
+# Este CMakeLists fica como referência/auditoria do executor nativo.
+# O build privado feito pelo phone worker/Termux não usa externalNativeBuild,
+# porque o CMake instalado pelo Android SDK Manager não executa corretamente
+# dentro do Termux/Android ARM64. O APK empacota a biblioteca prebuilt em
+# app/src/main/jniLibs/arm64-v8a/libcoreworker_executor.so.
+
 cmake_minimum_required(VERSION 3.22.1)
 
 project(coreworker_executor LANGUAGES CXX)

@@ -13,7 +13,7 @@
 
 namespace {
 
-constexpr const char* kExecutorVersion = "coreworker-executor/0.1.0-patch84";
+constexpr const char* kExecutorVersion = "coreworker-executor/0.1.1-patch84.2-source";
 constexpr std::size_t kArgLimit = 4096;
 
 std::string from_jstring(JNIEnv* env, jstring value) {

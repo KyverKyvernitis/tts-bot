@@ -1,5 +1,16 @@
 # Phone Worker
 
+## Patch 84.2: build APK com executor nativo prebuilt
+
+A versão `1.8.4` ajusta o builder Android para o Patch 84.2:
+
+- o executor nativo mínimo do APK é empacotado por `app/src/main/jniLibs/arm64-v8a/libcoreworker_executor.so`;
+- o phone worker não tenta mais tratar a existência de `src/main/cpp/CMakeLists.txt` como obrigação de CMake/NDK quando `externalNativeBuild` não está ativo;
+- falhas de Gradle passam a resumir melhor a causa principal no resultado do job;
+- o enfileiramento automático do mesmo APK/source recebe cooldown para evitar loop de builds repetidos.
+
+Isso evita o erro do CMake do Android SDK dentro do Termux/Android ARM64 (`Syntax error: ")" unexpected`) sem voltar a buildar APK na VPS Oracle.
+
 ## v1.8.3 — hotfix build APK sem loop
 
 A versão `1.8.3` estabiliza o builder depois da entrada do NDK/CMake: agora o `apk_build_debug` usa lock local/cross-process para impedir dois Gradle ao mesmo tempo, grava o log persistente em `~/core-worker-apk-builds/logs/`, devolve `gradle_log_tail` no resultado do job e mantém metadados de versão/source mesmo quando o build falha. Isso evita retry automático cego e deixa o painel mostrar o erro real antes de tentar outro build.

@@ -702,7 +702,27 @@ def _recent_failed_apk_build(version_name: str, source_fingerprint: str, *, cool
     return {}
 
 
-def queue_apk_build() -> dict[str, Any]:
+def _pending_apk_build_recently_queued(pending: dict[str, Any], version_code: int, source_fingerprint: str, *, cooldown_seconds: int | None = None) -> dict[str, Any]:
+    item = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
+    if not item:
+        return {}
+    cooldown = max(60, int(cooldown_seconds or int(os.getenv("CORE_WORKER_APK_BUILD_QUEUE_COOLDOWN_SECONDS", "600"))))
+    last_fp = str(item.get("last_queued_source_fingerprint") or item.get("sourceFingerprint") or "")
+    last_code = int(item.get("last_queued_versionCode") or item.get("versionCode") or 0)
+    last_at = float(item.get("last_queued_at") or 0)
+    if not last_at or last_fp != str(source_fingerprint or "") or last_code != int(version_code or 0):
+        return {}
+    age = time.time() - last_at
+    if age < cooldown:
+        return {
+            "cooldown_seconds": cooldown,
+            "retry_after_seconds": max(0, int(cooldown - age)),
+            "last_queued_at": last_at,
+        }
+    return {}
+
+
+def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
     registry = get_core_workers_registry()
     version_name, version_code = _read_android_version()
     source = _prepare_apk_source_zip()
@@ -755,7 +775,8 @@ def queue_apk_build() -> dict[str, Any]:
         ],
     }
     pending = _load_pending()
-    pending["apk_build"] = {
+    previous_apk_pending = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
+    pending_item = {
         "type": "apk_build_debug",
         "versionName": version_name,
         "versionCode": version_code,
@@ -763,17 +784,36 @@ def queue_apk_build() -> dict[str, Any]:
         "firebase_config_delivery": "job_payload",
         "apk_signing_delivery": "job_payload",
         "source": source,
-        "created_at": float((pending.get("apk_build") or {}).get("created_at") or time.time()) if isinstance(pending.get("apk_build"), dict) else time.time(),
+        "created_at": float(previous_apk_pending.get("created_at") or time.time()) if isinstance(previous_apk_pending, dict) else time.time(),
         "updated_at": time.time(),
         "message": "build do APK pendente; será executado quando um worker apk-builder/turbo estiver online",
     }
+    if isinstance(previous_apk_pending, dict):
+        for key in ("last_queued_at", "last_queued_versionCode", "last_queued_source_fingerprint", "last_job_id"):
+            if key in previous_apk_pending:
+                pending_item[key] = previous_apk_pending[key]
+    pending["apk_build"] = pending_item
     _save_pending(pending)
 
     if not _apk_needs_build(version_code, source_fingerprint):
         pending.pop("apk_build", None)
         _save_pending(pending)
         return {"ok": True, "versionName": version_name, "versionCode": version_code, "already_published": True, "sourceSha256": source.get("sha256"), "sourceFingerprint": source_fingerprint, "message": "latest.json já está publicado nessa versão/source"}
-    failed_recent = _recent_failed_apk_build(version_name, source_fingerprint)
+    recent_queue = {} if manual else _pending_apk_build_recently_queued(pending, version_code, source_fingerprint)
+    if recent_queue:
+        item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
+        item.update({
+            "ok": True,
+            "pending": True,
+            "blocked_by_recent_queue": True,
+            "retry_after_seconds": recent_queue.get("retry_after_seconds"),
+            "updated_at": time.time(),
+            "message": "build do APK já foi enfileirado recentemente; aguardando resultado/cooldown para evitar loop",
+        })
+        pending["apk_build"] = item
+        _save_pending(pending)
+        return item
+    failed_recent = {} if manual else _recent_failed_apk_build(version_name, source_fingerprint)
     if failed_recent:
         item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
         item.update({
@@ -804,6 +844,19 @@ def queue_apk_build() -> dict[str, Any]:
             max_attempts=1,
             summary=f"build automático APK {version_name} {source_fingerprint[:12]}",
         )
+        pending = _load_pending()
+        item = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
+        item.update({
+            "ok": True,
+            "pending": True,
+            "last_queued_at": time.time(),
+            "last_queued_versionCode": version_code,
+            "last_queued_source_fingerprint": source_fingerprint,
+            "last_job_id": (result.get("job") or {}).get("job_id") if isinstance(result.get("job"), dict) else None,
+            "message": "build do APK enfileirado; aguardando resultado do worker builder",
+        })
+        pending["apk_build"] = item
+        _save_pending(pending)
         return {"ok": True, "versionName": version_name, "versionCode": version_code, "source": source, "job": result.get("job"), "pending": True}
     except Exception as exc:
         pending = _load_pending()
@@ -930,7 +983,7 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 1
     if args.command == "queue-apk-build":
-        result = queue_apk_build()
+        result = queue_apk_build(manual=True)
         write_status({"manual": True, "apk_build": result, "pending": _load_pending(), "finished_at": time.time()})
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 2
