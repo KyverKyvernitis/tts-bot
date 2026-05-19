@@ -43,7 +43,7 @@ _APK_BUILD_THREAD_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.8.5"
+PHONE_WORKER_VERSION = "1.8.6"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -3508,8 +3508,20 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
         filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(payload.get("filename") or f"CoreWorker-v{version_name}-debug.apk")).strip("-._")
         if not filename.lower().endswith(".apk"):
             filename += ".apk"
+        artifact_dir = build_root / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = artifact_dir / filename
+        if artifact_path.exists():
+            artifact_path = artifact_dir / f"{Path(filename).stem}-{notification_id[:16] or int(started)}.apk"
+        try:
+            shutil.copy2(apk_path, artifact_path)
+        except Exception:
+            artifact_path.write_bytes(raw)
         result: dict[str, Any] = {
             "ok": True,
+            "build_gradle_ok": True,
+            "artifact_found": True,
+            "artifact_path": str(artifact_path),
             "summary": f"APK {version_name} compilado pelo worker",
             "versionName": version_name,
             "versionCode": version_code,
@@ -3521,6 +3533,7 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
                 "filename": filename,
                 "bytes": len(raw),
                 "sha256": apk_sha,
+                "artifact_path": str(artifact_path),
                 "signed": True,
                 "signed_by": str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
                 "signing_keystore_sha256": str(apk_signing.get("keystore_sha256") or "")[:12],
@@ -3547,11 +3560,14 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
                 apk_signing_keystore_sha256=str(apk_signing.get("keystore_sha256") or ""),
             )
             result["publish"] = publish
+            result["publish_ok"] = bool(publish.get("ok", False))
             if not bool(publish.get("ok", False)):
                 result["ok"] = False
                 result["summary"] = "APK compilado, mas publicação na VPS falhou"
                 if publish.get("error"):
                     result["publish_error"] = str(publish.get("error"))[:240]
+        else:
+            result["publish_ok"] = False
         return result
     finally:
         with contextlib.suppress(Exception):

@@ -1,5 +1,11 @@
 # Phone Worker
 
+## Patch 84.4: publicação do APK e multi-worker direto
+
+A versão `1.8.6` fecha o ciclo pós-build do APK: o APK gerado é copiado para `~/core-worker-apk-builds/artifacts/` antes de qualquer limpeza do workspace, o resultado separa build/artefato/publicação, e a VPS pode registrar automaticamente um phone-worker direto confiável quando ele usa o token local configurado. Isso evita o erro repetido `worker não encontrado` para heartbeat/poll/result/publish do builder direto e prepara o fluxo para vários workers com identidades estáveis.
+
+O build Android também evita tentar stripar `.so` com o `llvm-strip` x86_64 do NDK dentro do Termux, mantendo as bibliotecas nativas prebuilt empacotadas sem ruído.
+
 ## Patch 84.3: hotfix de atualização do agent e painel
 
 A versão `1.8.5` reforça o fluxo de atualização do phone-worker e evita que o painel/automação continuem usando um agent antigo depois de patches do APK. O painel da VPS agora mantém ações essenciais visíveis para o phone-worker direto, esconde o botão de acordar quando já existe worker online e deixa o build manual disponível mesmo quando ainda não há celular pareado pelo APK.

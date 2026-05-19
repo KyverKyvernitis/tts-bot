@@ -91,6 +91,16 @@ android {
         }
     }
 
+    packaging {
+        jniLibs {
+            // O builder roda dentro do Termux/Android. O llvm-strip do NDK instalado
+            // pelo SDK Manager é binário de host Linux x86_64 e gera ruído/falhas de
+            // strip nesse ambiente. As libs são privadas/debug e podem ser empacotadas
+            // sem strip para manter o build confiável no phone worker.
+            keepDebugSymbols += ["**/*.so"]
+        }
+    }
+
     // Patch 84.2: o phone worker builda no Termux/Android. O CMake do SDK Manager
     // é pacote de host Linux e não executa corretamente ali; por isso o executor
     // nativo mínimo é empacotado como prebuilt em src/main/jniLibs/arm64-v8a.

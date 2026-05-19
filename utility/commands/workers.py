@@ -3246,14 +3246,21 @@ class WorkersPanelView(discord.ui.LayoutView):
 
             if self._selected_is_legacy():
                 result = await self.cog._run_legacy_worker_action(job_type=job_type, payload=payload or {})
-                note = _shorten((result or {}).get("summary") or "ação direta concluída", limit=120)
-                final_note = f"✅ `{task}` direto concluído: {note}"
+                result_ok = bool((result or {}).get("ok", True))
+                note = _shorten((result or {}).get("summary") or ("ação direta concluída" if result_ok else "ação direta falhou"), limit=160)
+                icon = "✅" if result_ok else "❌"
+                final_note = f"{icon} `{task}` direto {'concluído' if result_ok else 'falhou'}: {note}"
                 self.snapshot = await self.cog._collect_workers_snapshot(action_note=final_note)
-                await self._edit_flow_message(
-                    flow,
-                    f"## ✅ {_shorten(readable, limit=80)}\n"
-                    f"Status: concluído\nResumo: {note}",
-                )
+                pseudo_job = {
+                    "type": task,
+                    "status": "succeeded" if result_ok else "failed",
+                    "worker_id": str((result or {}).get("worker_id") or "phone-worker-direto"),
+                    "summary": note,
+                    "result": result or {},
+                    "error": "" if result_ok else note,
+                    "finished_at": time.time(),
+                }
+                await self._edit_flow_message(flow, _job_detail_text(pseudo_job) + "\n\n-# Resultado direto salvo no estado do phone-worker.")
             else:
                 result = await self.cog._queue_core_worker_job(
                     interaction.user,
@@ -3304,12 +3311,15 @@ class WorkersPanelView(discord.ui.LayoutView):
         await interaction.response.send_message(_worker_detail_text(worker), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     async def _show_last_result(self, interaction: discord.Interaction):
-        worker_id = self._job_target_worker_id()
-        if not worker_id:
-            await interaction.response.send_message("Selecione um worker registrado para ver resultados.", ephemeral=True)
-            return
         try:
-            job = await self.cog._latest_core_worker_job(worker_id)
+            if self._selected_is_legacy():
+                job = await self.cog._latest_legacy_worker_result()
+            else:
+                worker_id = self._job_target_worker_id()
+                # Modo automático/multi-worker: sem alvo fixo, mostrar o job mais recente
+                # do registry. Isso evita exigir um worker específico quando a VPS escolhe
+                # o melhor builder compatível.
+                job = await self.cog._latest_core_worker_job(worker_id)
             view = LastJobResultView(owner_id=self.owner_id, job=job)
             await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
@@ -3484,7 +3494,7 @@ class WorkersCommandMixin:
         if not isinstance(parsed, dict):
             raise RuntimeError("resposta não é JSON object")
         if parsed.get("ok") is False:
-            raise RuntimeError(_shorten(_redact(parsed.get("error") or "worker retornou erro"), limit=120))
+            parsed.setdefault("summary", _shorten(_redact(parsed.get("error") or "worker retornou erro"), limit=160))
         return parsed
 
     def _build_worker_update_payload_sync(self, *, scripts_only: bool = False) -> dict[str, Any]:
@@ -3878,6 +3888,34 @@ class WorkersCommandMixin:
         result = await asyncio.to_thread(registry.latest_job_for_worker, worker_id)
         job = result.get("job") if isinstance(result, dict) else None
         return job if isinstance(job, dict) else None
+
+    async def _latest_legacy_worker_result(self) -> dict[str, Any] | None:
+        status = await asyncio.to_thread(
+            self._request_worker_status_sync,
+            timeout=max(1.0, _env_float("WORKERS_PANEL_STATUS_TIMEOUT_SECONDS", 3.0)),
+        )
+        queue = status.get("core_worker_jobs") if isinstance(status.get("core_worker_jobs"), dict) else {}
+        job_id = str(queue.get("last_result_job_id") or "")
+        kind = str(queue.get("last_result_type") or "phone_worker_direct")
+        raw_status = str(queue.get("last_result_status") or "succeeded").lower()
+        summary = str(queue.get("last_result_summary") or status.get("summary") or "resultado direto do phone-worker")
+        if not job_id and not summary:
+            return None
+        return {
+            "job_id": job_id or "direct-last-result",
+            "type": kind,
+            "status": raw_status if raw_status in {"succeeded", "failed"} else "succeeded",
+            "worker_id": str(status.get("worker_id") or status.get("id") or "phone-worker-direto"),
+            "summary": summary,
+            "finished_at": queue.get("last_result_at") or time.time(),
+            "result": {
+                "ok": raw_status != "failed",
+                "summary": summary,
+                "sent_ok": bool(queue.get("last_result_sent")),
+                "pending_results": queue.get("pending_results"),
+                "source": "phone-worker-direct-status",
+            },
+        }
 
     async def _rename_core_worker(self, worker_id: str, name: str) -> dict[str, Any]:
         registry = get_core_workers_registry()

@@ -84,6 +84,15 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if raw in {"1", "true", "yes", "y", "on", "sim"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off", "nao", "não"}:
+        return False
+    return default
+
+
 def _hash_secret(value: str) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
 
@@ -518,6 +527,77 @@ class CoreWorkersRegistry:
             "worker": public,
             "message": "pareado; salve este token localmente no APK/agent, ele não será mostrado de novo",
         }
+
+    def ensure_direct_worker(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
+        """Registra/renova um phone-worker direto confiável.
+
+        Esse caminho cobre o modo legado/direto usado pelo painel da VPS. Ele não
+        substitui o pareamento normal do APK: só aceita tokens explicitamente
+        configurados na VPS e usa o worker_id estável enviado pelo agent.
+        """
+        if not _is_trusted_direct_worker_token(token):
+            raise CoreWorkerRegistryError("worker não encontrado", status=404)
+        worker_id = _safe_worker_id(payload.get("worker_id") or payload.get("id"))
+        if not worker_id:
+            raise CoreWorkerRegistryError("worker_id ausente", status=400)
+        ts = _now()
+        with self._lock:
+            data = self._load_unlocked()
+            workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+            existing = workers.get(worker_id)
+            if isinstance(existing, dict):
+                old_hash = str(existing.get("token_hash") or "")
+                if old_hash and old_hash != _hash_secret(token) and not bool(existing.get("direct", False)):
+                    raise CoreWorkerRegistryError("worker_id já pertence a outro worker", status=403)
+                record = dict(existing)
+            else:
+                max_workers = max(1, _env_int("CORE_WORKER_MAX_WORKERS", DEFAULT_MAX_WORKERS))
+                if len(workers) >= max_workers:
+                    raise CoreWorkerRegistryError("limite de workers atingido", status=409)
+                record = {
+                    "worker_id": worker_id,
+                    "registered_at": ts,
+                    "paired_by_id": 0,
+                    "paired_by_name": "VPS direct",
+                    "manual_roles": ["phone-worker", "apk-builder"],
+                    "manual_capabilities": ["phone-worker", "apk-builder"],
+                }
+            record.update({
+                "worker_id": worker_id,
+                "enabled": True,
+                "token_hash": _hash_secret(token),
+                "updated_at": ts,
+                "last_heartbeat_at": ts,
+                "remote_addr": _short_text(remote_addr, limit=64),
+                "direct": True,
+                "source": _short_text(payload.get("source") or "phone-worker-direct", limit=32),
+                "name": _short_text(payload.get("name") or record.get("name") or "Core Phone Worker", limit=64),
+            })
+            if payload.get("endpoint") or payload.get("base_url") or payload.get("url"):
+                record["endpoint"] = _short_text(payload.get("endpoint") or payload.get("base_url") or payload.get("url"), limit=160)
+            if payload.get("version"):
+                record["version"] = _short_text(payload.get("version"), limit=48)
+            roles = normalize_roles(payload.get("roles"), default=normalize_roles(record.get("roles"), default=["phone-worker", "diagnostics", "apk-builder"]), limit=16)
+            capabilities = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities"), default=roles), limit=24)
+            tasks = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=64)
+            record["roles"] = _merge_unique(roles, normalize_roles(record.get("manual_roles"), limit=16), limit=16)
+            record["capabilities"] = _merge_unique(capabilities, normalize_roles(record.get("manual_capabilities"), limit=24), limit=24)
+            if tasks:
+                record["supported_tasks"] = tasks
+            for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
+                if key not in payload:
+                    continue
+                if key == "status":
+                    _merge_worker_status(record, payload.get(key))
+                else:
+                    record[key] = _safe_dict(payload.get(key), max_items=max_items)
+            workers[worker_id] = record
+            data["workers"] = workers
+            self._reconcile_jobs_from_worker_status_unlocked(data, now=ts)
+            self._save_unlocked(data)
+            public = _compact_worker_public(record, now=ts)
+        return {"ok": True, "worker_id": worker_id, "worker": public, "auto_registered": True}
+
 
     def heartbeat(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
         worker_id = _safe_worker_id(payload.get("worker_id") or payload.get("id"))
@@ -1135,10 +1215,49 @@ def _bearer_token(headers: Mapping[str, Any]) -> str:
     return ""
 
 
+def _trusted_direct_worker_tokens() -> set[str]:
+    tokens: set[str] = set()
+    for key in ("PHONE_WORKER_TOKEN", "CORE_WORKER_DIRECT_TOKEN", "CORE_WORKER_DIRECT_WORKER_TOKEN"):
+        value = str(os.getenv(key) or "").strip()
+        if value:
+            tokens.add(value)
+    for raw in (os.getenv("CORE_WORKER_DIRECT_WORKER_TOKENS") or "").replace(";", ",").split(","):
+        value = raw.strip()
+        if value:
+            tokens.add(value)
+    return tokens
+
+
+def _is_trusted_direct_worker_token(token: str) -> bool:
+    if not _env_bool("CORE_WORKER_DIRECT_AUTO_REGISTER", True):
+        return False
+    token = str(token or "").strip()
+    return bool(token and token in _trusted_direct_worker_tokens())
+
+
+def _retry_after_direct_autoregister(func, headers: Mapping[str, Any], payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:
+    token = _bearer_token(headers)
+    try:
+        return 200, func(payload, token=token, remote_addr=remote_addr)
+    except CoreWorkerRegistryError as exc:
+        if exc.status != 404:
+            raise
+        registry = get_core_workers_registry()
+        registry.ensure_direct_worker(payload, token=token, remote_addr=remote_addr)
+        return 200, func(payload, token=token, remote_addr=remote_addr)
+
+
 def core_worker_authenticate_http(headers: Mapping[str, Any], payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:
     try:
         worker_id = payload.get("worker_id") or payload.get("id")
-        result = get_core_workers_registry().authenticate_worker(str(worker_id or ""), token=_bearer_token(headers))
+        token = _bearer_token(headers)
+        try:
+            result = get_core_workers_registry().authenticate_worker(str(worker_id or ""), token=token)
+        except CoreWorkerRegistryError as exc:
+            if exc.status != 404:
+                raise
+            get_core_workers_registry().ensure_direct_worker(payload, token=token, remote_addr=remote_addr)
+            result = get_core_workers_registry().authenticate_worker(str(worker_id or ""), token=token)
         return 200, result
     except CoreWorkerRegistryError as exc:
         return exc.status, {"ok": False, "error": str(exc)}
@@ -1158,8 +1277,8 @@ def redeem_core_worker_pairing_http(payload: Mapping[str, Any], *, remote_addr: 
 
 def core_worker_heartbeat_http(headers: Mapping[str, Any], payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:
     try:
-        result = get_core_workers_registry().heartbeat(payload, token=_bearer_token(headers), remote_addr=remote_addr)
-        return 200, result
+        status, result = _retry_after_direct_autoregister(get_core_workers_registry().heartbeat, headers, payload, remote_addr=remote_addr)
+        return status, result
     except CoreWorkerRegistryError as exc:
         return exc.status, {"ok": False, "error": str(exc)}
     except Exception as exc:
@@ -1168,8 +1287,8 @@ def core_worker_heartbeat_http(headers: Mapping[str, Any], payload: Mapping[str,
 
 def core_worker_poll_job_http(headers: Mapping[str, Any], payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:
     try:
-        result = get_core_workers_registry().poll_job(payload, token=_bearer_token(headers), remote_addr=remote_addr)
-        return 200, result
+        status, result = _retry_after_direct_autoregister(get_core_workers_registry().poll_job, headers, payload, remote_addr=remote_addr)
+        return status, result
     except CoreWorkerRegistryError as exc:
         return exc.status, {"ok": False, "error": str(exc)}
     except Exception as exc:
@@ -1178,8 +1297,8 @@ def core_worker_poll_job_http(headers: Mapping[str, Any], payload: Mapping[str, 
 
 def core_worker_job_result_http(headers: Mapping[str, Any], payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:
     try:
-        result = get_core_workers_registry().submit_job_result(payload, token=_bearer_token(headers), remote_addr=remote_addr)
-        return 200, result
+        status, result = _retry_after_direct_autoregister(get_core_workers_registry().submit_job_result, headers, payload, remote_addr=remote_addr)
+        return status, result
     except CoreWorkerRegistryError as exc:
         return exc.status, {"ok": False, "error": str(exc)}
     except Exception as exc:
