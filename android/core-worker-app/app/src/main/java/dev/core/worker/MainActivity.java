@@ -8,6 +8,8 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.res.ColorStateList;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
@@ -76,6 +78,7 @@ import java.security.MessageDigest;
 import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class MainActivity extends Activity {
     private static final String APP_VERSION = BuildConfig.VERSION_NAME;
@@ -172,6 +175,8 @@ public class MainActivity extends Activity {
     private boolean profileExpanded = false;
     private volatile boolean fullStartupDone = false;
     private volatile boolean startupFallbackVisible = false;
+    private final AtomicBoolean completingStartup = new AtomicBoolean(false);
+    private final AtomicBoolean backgroundStartupStarted = new AtomicBoolean(false);
 
     private volatile boolean localAgentOnline = false;
     private volatile String localAgentVersion = "";
@@ -265,6 +270,14 @@ public class MainActivity extends Activity {
     }
 
     private void completeStartupAfterFirstDraw() {
+        if (fullStartupDone) {
+            startupLog("completeStartup:already-ready");
+            return;
+        }
+        if (!completingStartup.compareAndSet(false, true)) {
+            startupLog("completeStartup:already-running");
+            return;
+        }
         startupLog("completeStartup:start");
         try {
             migrateFcmSafetyStateForPatch52();
@@ -273,35 +286,51 @@ public class MainActivity extends Activity {
             fullStartupDone = true;
             startupFallbackVisible = false;
             startupLog("completeStartup:ui-ready");
-            runActivityCreateStartupTasks();
+            refreshLocalStatus("Interface pronta. Runtime, rootfs e sincronizações vão carregar em segundo plano.");
+            scheduleActivityCreateStartupTasks();
         } catch (Throwable exc) {
             fullStartupDone = false;
             startupFallbackVisible = true;
+            backgroundStartupStarted.set(false);
             String detail = fallbackThrowable(exc);
             appStatusLastError = detail;
             startupLog("completeStartup:fallback " + detail);
             renderStartupFallbackUi("Core Worker abriu em modo seguro", detail, true);
+        } finally {
+            completingStartup.set(false);
         }
     }
 
-    private void runActivityCreateStartupTasks() {
-        safeStartupTask(() -> cleanupUpdateArtifacts(false, "app_start"));
-        safeStartupTask(this::prepareInternalRuntimePreview);
-        safeStartupTask(this::prepareNativeRuntimeState);
-        safeStartupTask(this::prepareCoreLinuxRuntimeState);
-        safeStartupTask(this::readForegroundRuntimeState);
-        safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "activity_create"));
-        safeStartupTask(() -> reportAppState("app_opened", "APK aberto; versão instalada " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")"));
-        safeStartupTask(() -> reportAppState("runtime_internal_ready", "runtime interno preparado em modo híbrido; heartbeat/status direto ativo"));
-        safeStartupTask(() -> sendInternalRuntimeHeartbeat(false, "app_opened"));
-        safeStartupTask(() -> sendNativeWorkerHeartbeat(false, "app_opened"));
-        safeStartupTask(() -> fetchAndRunLightJobs(false, "app_opened"));
-        safeStartupTask(this::updatePermissionGate);
-        refreshLocalStatus("Pronto. O app verifica automaticamente se este celular já está pareado.");
-        safeStartupTask(() -> checkLocalAgent(false));
-        safeStartupTask(this::autoVerifySavedPairing);
-        safeStartupTask(this::autoCheckForUpdate);
-        scheduleFcmTokenRegistration("activity_create");
+    private void scheduleActivityCreateStartupTasks() {
+        if (!backgroundStartupStarted.compareAndSet(false, true)) {
+            startupLog("startupTasks:already-started");
+            return;
+        }
+        Thread worker = new Thread(this::runActivityCreateStartupTasksInBackground, "core-worker-startup-bg");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void runActivityCreateStartupTasksInBackground() {
+        startupLog("startupTasks:background-start");
+        safeStartupTask("cleanupUpdateArtifacts", () -> cleanupUpdateArtifacts(false, "app_start"));
+        safeStartupTask("prepareInternalRuntimePreview", this::prepareInternalRuntimePreview);
+        safeStartupTask("prepareNativeRuntimeState", this::prepareNativeRuntimeState);
+        safeStartupTask("prepareCoreLinuxRuntimeState", this::prepareCoreLinuxRuntimeState);
+        safeStartupTask("readForegroundRuntimeState", this::readForegroundRuntimeState);
+        safeStartupTask("scheduleUpdateJob", () -> CoreWorkerUpdateJobService.schedule(this, "activity_create"));
+        safeStartupTask("reportAppOpened", () -> reportAppState("app_opened", "APK aberto; versão instalada " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")"));
+        safeStartupTask("reportRuntimeReady", () -> reportAppState("runtime_internal_ready", "runtime interno preparado em modo híbrido; heartbeat/status direto ativo"));
+        safeStartupTask("sendInternalRuntimeHeartbeat", () -> sendInternalRuntimeHeartbeat(false, "app_opened"));
+        safeStartupTask("sendNativeWorkerHeartbeat", () -> sendNativeWorkerHeartbeat(false, "app_opened"));
+        safeStartupTask("fetchAndRunLightJobs", () -> fetchAndRunLightJobs(false, "app_opened"));
+        safeStartupTask("updatePermissionGate", this::updatePermissionGate);
+        show("Pronto. O app verifica pareamento e atualizações sem travar a tela.");
+        safeStartupTask("checkLocalAgent", () -> checkLocalAgent(false));
+        safeStartupTask("autoVerifySavedPairing", this::autoVerifySavedPairing);
+        safeStartupTask("autoCheckForUpdate", this::autoCheckForUpdate);
+        safeStartupTask("scheduleFcmTokenRegistration", () -> scheduleFcmTokenRegistration("activity_create"));
+        startupLog("startupTasks:background-finished");
     }
 
     @Override
@@ -340,24 +369,98 @@ public class MainActivity extends Activity {
     }
 
     private void safeStartupTask(SafeStartupRunnable runnable) {
+        safeStartupTask("startup", runnable);
+    }
+
+    private void safeStartupTask(String label, SafeStartupRunnable runnable) {
+        String cleanLabel = label == null || label.trim().isEmpty() ? "startup" : label.trim();
         try {
+            startupLog("safeStartupTask:start " + cleanLabel);
             runnable.run();
+            startupLog("safeStartupTask:ok " + cleanLabel);
         } catch (Throwable exc) {
             appStatusLastError = fallbackThrowable(exc);
-            startupLog("safeStartupTask:" + appStatusLastError);
+            startupLog("safeStartupTask:fail " + cleanLabel + " " + appStatusLastError);
         }
     }
 
     private void startupLog(String message) {
         try {
-            File dir = new File(getFilesDir(), "core-linux/logs");
-            if (!dir.exists()) dir.mkdirs();
-            File file = new File(dir, "app-startup.log");
+            File file = startupLogFile();
+            File dir = file.getParentFile();
+            if (dir != null && !dir.exists()) dir.mkdirs();
             String line = System.currentTimeMillis() + " " + String.valueOf(message == null ? "" : message) + "\n";
             FileOutputStream out = new FileOutputStream(file, true);
             out.write(line.getBytes(StandardCharsets.UTF_8));
             out.close();
         } catch (Throwable ignored) {
+        }
+    }
+
+    private File startupLogFile() {
+        return new File(new File(getFilesDir(), "core-linux/logs"), "app-startup.log");
+    }
+
+    private String readStartupLogTail() {
+        File file = startupLogFile();
+        if (!file.exists()) {
+            return "Log de inicialização ainda não foi criado.";
+        }
+        StringBuilder builder = new StringBuilder();
+        try {
+            BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                builder.append(line).append('\n');
+                if (builder.length() > 12000) {
+                    builder.delete(0, Math.min(builder.length(), 4000));
+                }
+            }
+            reader.close();
+        } catch (Throwable exc) {
+            return "Não consegui ler o log interno: " + fallbackThrowable(exc);
+        }
+        String value = builder.toString().trim();
+        if (value.isEmpty()) {
+            return "Log de inicialização vazio.";
+        }
+        return value.length() > 9000 ? value.substring(value.length() - 9000) : value;
+    }
+
+    private void showStartupLogDialog() {
+        runOnUiThread(() -> {
+            String logText = readStartupLogTail();
+            TextView text = new TextView(this);
+            text.setText(logText);
+            text.setTextIsSelectable(true);
+            text.setTextColor(TEXT);
+            text.setTextSize(12);
+            text.setTypeface(Typeface.MONOSPACE);
+            text.setPadding(dp(12), dp(12), dp(12), dp(12));
+            text.setBackgroundColor(BG);
+            ScrollView scroll = new ScrollView(this);
+            scroll.addView(text, new ScrollView.LayoutParams(
+                    ScrollView.LayoutParams.MATCH_PARENT,
+                    ScrollView.LayoutParams.WRAP_CONTENT
+            ));
+            new AlertDialog.Builder(this)
+                    .setTitle("Log do Core Worker")
+                    .setView(scroll)
+                    .setPositiveButton("Copiar", (dialog, which) -> copyToClipboard("core-worker-startup.log", logText))
+                    .setNegativeButton("Fechar", null)
+                    .show();
+        });
+    }
+
+    private void copyToClipboard(String label, String value) {
+        try {
+            ClipboardManager manager = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (manager != null) {
+                manager.setPrimaryClip(ClipData.newPlainText(label == null ? "Core Worker" : label, value == null ? "" : value));
+                toast("Log copiado.");
+            }
+        } catch (Throwable exc) {
+            toast("Não consegui copiar o log: " + fallbackThrowable(exc));
         }
     }
 
@@ -425,6 +528,17 @@ public class MainActivity extends Activity {
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
             ));
+
+            Button logs = new Button(this);
+            logs.setText("Ver log de inicialização");
+            logs.setAllCaps(false);
+            logs.setOnClickListener(v -> showStartupLogDialog());
+            LinearLayout.LayoutParams logsParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+            );
+            logsParams.setMargins(0, dp(10), 0, 0);
+            root.addView(logs, logsParams);
 
             setContentView(root);
         } catch (Throwable ignored) {
@@ -698,6 +812,10 @@ public class MainActivity extends Activity {
         heartbeatButton = secondaryButton("Sincronizar painel workers");
         heartbeatButton.setOnClickListener(v -> sendHeartbeat());
         technicalDetailsContent.addView(heartbeatButton);
+
+        Button appLogsButton = secondaryButton("Ver logs do app");
+        appLogsButton.setOnClickListener(v -> showStartupLogDialog());
+        technicalDetailsContent.addView(appLogsButton);
 
         Button foregroundStartButton = secondaryButton("Ativar runtime persistente");
         foregroundStartButton.setOnClickListener(v -> startForegroundRuntimeFromUi());
@@ -5667,7 +5785,7 @@ public class MainActivity extends Activity {
             localAgentVpsConfigured = false;
             localAgentJobsConfigured = false;
             localAgentMessage = "offline";
-            updatePairingUi();
+            runOnUiThread(this::updatePairingUi);
             if (updateText) {
                 showLocalAgentText();
             }
@@ -5691,7 +5809,7 @@ public class MainActivity extends Activity {
             JSONObject body = new JSONObject(result.body);
             applyLocalAgentStatus(body);
             showLocalAgentText();
-            updatePairingUi();
+            runOnUiThread(this::updatePairingUi);
             updateSystemChecklistText();
             return true;
         } catch (Throwable exc) {
@@ -5699,7 +5817,7 @@ public class MainActivity extends Activity {
             localAgentVersion = "";
             localAgentProfile = "";
             localAgentMessage = "offline ao aplicar perfil";
-            updatePairingUi();
+            runOnUiThread(this::updatePairingUi);
             showLocalAgentText();
             updateSystemChecklistText();
             return false;
@@ -5715,9 +5833,12 @@ public class MainActivity extends Activity {
         }
         localAgentProfile = reportedProfile;
         if (!reportedProfile.isEmpty()) {
-            prefs.edit().putString("profile", reportedProfile).apply();
-            updateProfileRadioSelection(reportedProfile);
-            updateProfileHint(reportedProfile);
+            final String finalReportedProfile = reportedProfile;
+            prefs.edit().putString("profile", finalReportedProfile).apply();
+            runOnUiThread(() -> {
+                updateProfileRadioSelection(finalReportedProfile);
+                updateProfileHint(finalReportedProfile);
+            });
         }
         localAgentWorkerId = body.optString("worker_id", localAgentWorkerId);
         localAgentVpsConfigured = body.optBoolean("vps_configured", false);
@@ -5914,8 +6035,10 @@ public class MainActivity extends Activity {
     }
 
     private void runBusy(String message, WorkerRunnable runnable) {
-        refreshLocalStatus(message);
-        setButtonsEnabled(false);
+        runOnUiThread(() -> {
+            refreshLocalStatus(message);
+            setButtonsEnabled(false);
+        });
         new Thread(() -> {
             try {
                 runnable.run();
