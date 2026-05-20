@@ -57,9 +57,10 @@ def run(context_json=None):
             "executorState": (core_linux_dir / "runtime" / "executor-state.json").exists(),
         }
         internal_state = _read_json(core_linux_dir / "runtime" / "core-linux-internal-state.json")
+        rootfs_state = _read_json(core_linux_dir / "runtime" / "rootfs-state.json")
         internal_preflight = internal_state.get("preflight") if isinstance(internal_state.get("preflight"), dict) else {}
         missing_base = [k for k in ["coreLinuxDir", "runtimeMarker", "rootfsDir", "binDir", "scriptsDir", "logsDir", "downloadsDir", "bedrockDir"] if not markers[k]]
-        rootfs_ready = bool(markers["rootfsPrepared"] or internal_preflight.get("rootfsReady"))
+        rootfs_ready = bool(rootfs_state.get("rootfsReady") or markers["rootfsPrepared"] or internal_preflight.get("rootfsReady"))
         box64_ready = bool(markers["box64Binary"] or internal_preflight.get("box64Ready"))
         prepared = bool(markers["coreLinuxDir"] and markers["runtimeMarker"] and not missing_base)
         ok = prepared
@@ -96,9 +97,10 @@ def run(context_json=None):
             coreLinuxDir=safe_path(core_linux_dir),
             markers=markers,
             coreLinuxInternal=internal_state,
+            rootfsState=rootfs_state,
             missing=missing_base[:12],
             size=dir_size(core_linux_dir, max_files=260),
-            safety="diagnóstico somente leitura; não instala e não executa binário externo",
+            safety="diagnóstico somente leitura; rootfs validada por estado/manifest; não executa binário externo",
         )
     except Exception as exc:
         return error_response("linux_runtime_probe", exc)

@@ -110,13 +110,20 @@ def _embedded_candidates(native_lib_dir):
 
 def _rootfs_markers(rootfs):
     rootfs = Path(rootfs)
+    state = _read_json(rootfs.parent / "runtime" / "rootfs-state.json")
     return {
         "dir": rootfs.exists(),
         "nonEmpty": _nonempty_dir(rootfs),
         "readyMarker": (rootfs / ".core-worker-rootfs-ready").exists(),
+        "manifest": (rootfs / ".core-worker-rootfs-manifest.json").exists(),
         "etcOsRelease": (rootfs / "etc" / "os-release").exists(),
         "binSh": (rootfs / "bin" / "sh").exists(),
         "usrBinEnv": (rootfs / "usr" / "bin" / "env").exists(),
+        "state": state.get("state", ""),
+        "rootfsReady": bool(state.get("rootfsReady")),
+        "validationLevel": state.get("validationLevel", ""),
+        "distributionReady": bool(state.get("distributionReady")),
+        "readyForBox64Install": bool(state.get("readyForBox64Install")),
     }
 
 
@@ -213,7 +220,7 @@ def run(context_json=None):
         native_bridge_loaded = bool(native_bridge.get("loaded"))
         executor_ready = bool(executor_embedded and native_bridge_loaded and executor_test_attempted and executor_test_ok and native_executor.get("readyForRootfs"))
         box64_embedded = bool(embedded["box64"]["present"] or native_executor.get("embeddedBox64Present"))
-        rootfs_ready = bool(rootfs["readyMarker"] and rootfs["binSh"])
+        rootfs_ready = bool(rootfs.get("rootfsReady") or (rootfs["readyMarker"] and rootfs["binSh"]))
         bedrock_ready = bool(bedrock["server"] and bedrock["serverProperties"] and bedrock["eulaAccepted"])
 
         blockers = []
@@ -256,11 +263,16 @@ def run(context_json=None):
             "updatedAt": now,
             "safety": "não executa shell livre e não aceita comando arbitrário da VPS",
         }
+        persisted_rootfs_state = _read_json(layout["runtime"] / "rootfs-state.json")
         rootfs_state = {
             "ok": rootfs_ready,
-            "state": "ready" if rootfs_ready else "pending",
+            "state": persisted_rootfs_state.get("state") or ("rootfs_validated" if rootfs_ready else "pending"),
             "markers": rootfs,
             "path": safe_path(layout["rootfs"]),
+            "validationLevel": persisted_rootfs_state.get("validationLevel", rootfs.get("validationLevel", "")),
+            "distributionReady": bool(persisted_rootfs_state.get("distributionReady", rootfs.get("distributionReady", False))),
+            "readyForBox64Install": bool(persisted_rootfs_state.get("readyForBox64Install", rootfs_ready)),
+            "managerState": persisted_rootfs_state,
             "blockers": [] if rootfs_ready else ["rootfs interno pendente"],
             "updatedAt": now,
         }
@@ -305,7 +317,8 @@ def run(context_json=None):
         _write_json(layout["runtime"] / "core-linux-internal-state.json", state)
         _write_json(layout["runtime"] / "executor-state.json", executor_state)
         _write_json(layout["runtime"] / "native-runtime-state.json", native_executor if native_executor else executor_state)
-        _write_json(layout["runtime"] / "rootfs-state.json", rootfs_state)
+        if not _read_json(layout["runtime"] / "rootfs-state.json"):
+            _write_json(layout["runtime"] / "rootfs-state.json", rootfs_state)
         _write_json(layout["runtime"] / "box64-state.json", box64_state)
         _write_json(layout["runtime"] / "bedrock-internal-preflight.json", preflight)
         _write_json(layout["manifests"] / "core-linux-internal-manifest.json", manifest)
@@ -335,7 +348,7 @@ def run(context_json=None):
             warnings=warnings,
             manifestPath=safe_path(layout["manifests"] / "core-linux-internal-manifest.json"),
             size=dir_size(core_linux_dir, max_files=900),
-            safety="bootstrap interno sem Termux; não baixa, não executa binário externo e não abre shell livre",
+            safety="bootstrap interno sem Termux; rootfs validada por manifest/estado; não baixa, não executa binário externo e não abre shell livre",
         )
     except Exception as exc:
         return error_response("core_linux_internal", exc)

@@ -124,6 +124,7 @@ def _build_preflight(core_linux_dir, bedrock_dir, service_active, foreground_act
     eula = bedrock_dir / "eula.txt"
     server = bedrock_dir / "bedrock_server"
     internal_state = _read_json(core_linux_dir / "runtime" / "core-linux-internal-state.json")
+    rootfs_state = _read_json(core_linux_dir / "runtime" / "rootfs-state.json")
     internal_preflight = internal_state.get("preflight") if isinstance(internal_state.get("preflight"), dict) else {}
     native_executor_state = _read_json(core_linux_dir / "runtime" / "native-executor-state.json")
     native_executor_test = native_executor_state.get("test") if isinstance(native_executor_state.get("test"), dict) else {}
@@ -131,7 +132,7 @@ def _build_preflight(core_linux_dir, bedrock_dir, service_active, foreground_act
         internal_preflight.get("executorReady")
         or (native_executor_state.get("readyForRootfs") and native_executor_test.get("attempted") and native_executor_test.get("ok"))
     )
-    rootfs_ready = bool((core_linux_dir / "rootfs" / ".core-worker-rootfs-ready").exists() or internal_preflight.get("rootfsReady"))
+    rootfs_ready = bool(rootfs_state.get("rootfsReady") or (core_linux_dir / "rootfs" / ".core-worker-rootfs-ready").exists() or internal_preflight.get("rootfsReady"))
     box64_candidates = [core_linux_dir / "bin" / "box64", core_linux_dir / "box64" / "box64"]
     box64 = next((p for p in box64_candidates if p.exists()), None)
     embedded_box64 = bool(native_executor_state.get("embeddedBox64Present") or internal_preflight.get("box64Ready"))
@@ -170,6 +171,7 @@ def _build_preflight(core_linux_dir, bedrock_dir, service_active, foreground_act
         "nativeExecutor": native_executor_state,
         "coreLinuxInternal": internal_state,
         "rootfsReady": rootfs_ready,
+        "rootfsState": rootfs_state,
         "eulaAccepted": eula_ok,
         "serverInstalled": server_installed,
         "serverProperties": props_ready,

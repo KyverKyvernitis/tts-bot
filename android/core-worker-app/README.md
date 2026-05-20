@@ -1,3 +1,15 @@
+# Patch 85 — rootfs interno assistido
+
+A versão `0.5.43` adiciona o primeiro Rootfs Manager interno do APK. O app cria e valida um scaffold controlado em `files/core-linux/rootfs/`, com estado persistente em `runtime/rootfs-state.json`, manifesto local, staging separado e logs próprios.
+
+Escopo seguro desta etapa:
+
+- prepara/valida rootfs interno dentro do armazenamento app-specific do Android;
+- não baixa rootfs externo, Box64 ou Bedrock;
+- não abre shell livre e não aceita comando arbitrário da VPS;
+- mantém Termux somente como fallback legado;
+- deixa Bedrock bloqueado por Box64/bedrock_server/EULA, mas não mais por falta da estrutura rootfs quando o scaffold for validado.
+
 # Core Worker APK privado
 
 # Patch 59 — status interno completo do APK

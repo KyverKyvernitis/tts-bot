@@ -301,7 +301,8 @@ public class CoreWorkerBedrockService extends Service {
         p.box64 = p.embeddedBox64 != null ? p.embeddedBox64 : (box64A.exists() ? box64A : box64B);
         p.box64InWritableHome = p.box64 != null && isInside(p.box64, new File(getApplicationInfo() == null ? getFilesDir().getParent() : getApplicationInfo().dataDir));
         File rootfsMarker = new File(p.coreLinuxDir, "rootfs/.core-worker-rootfs-ready");
-        p.rootfsReady = rootfsMarker.exists();
+        JSONObject rootfsState = readJsonFile(new File(p.coreLinuxDir, "runtime/rootfs-state.json"));
+        p.rootfsReady = rootfsMarker.exists() || rootfsState.optBoolean("rootfsReady", false);
         p.eulaAccepted = eulaAccepted(p.eula);
         p.bedrockDir.mkdirs();
         p.runtimeDir.mkdirs();
@@ -317,6 +318,22 @@ public class CoreWorkerBedrockService extends Service {
         if (p.server.exists() && !p.server.canExecute()) p.server.setExecutable(true, true);
         p.ready = p.blockers.length() == 0;
         return p;
+    }
+
+    private JSONObject readJsonFile(File file) {
+        try {
+            if (file == null || !file.exists()) return new JSONObject();
+            BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8));
+            StringBuilder builder = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null && builder.length() < 65536) {
+                builder.append(line).append('\n');
+            }
+            reader.close();
+            return new JSONObject(builder.toString());
+        } catch (Throwable ignored) {
+            return new JSONObject();
+        }
     }
 
     private boolean eulaAccepted(File eula) {

@@ -2647,16 +2647,16 @@ public class MainActivity extends Activity {
         JSONObject rootfsPlan = new JSONObject();
         rootfsPlan.put("ok", true);
         rootfsPlan.put("kind", "rootfs-plan");
-        rootfsPlan.put("target", "Ubuntu 22.04 LTS+ rootfs");
-        rootfsPlan.put("status", "planned");
+        rootfsPlan.put("target", "Core Worker rootfs scaffold validável; Ubuntu real fica para etapa assistida futura");
+        rootfsPlan.put("status", "rootfs-scaffold-planned");
         rootfsPlan.put("autoDownload", false);
         rootfsPlan.put("destructive", false);
         rootfsPlan.put("requiresExplicitUserAction", true);
         rootfsPlan.put("steps", new JSONArray()
                 .put("validar arm64-v8a e armazenamento livre")
-                .put("baixar rootfs somente após confirmação explícita")
-                .put("verificar checksum antes de extrair")
-                .put("extrair no sandbox core-linux/rootfs")
+                .put("criar scaffold controlado em core-linux/rootfs")
+                .put("gravar manifesto e rootfs-state.json")
+                .put("validar layout antes da etapa Box64")
                 .put("nunca aceitar comandos arbitrários da VPS"));
         writeTextFile(new File(provision, "rootfs-plan.json"), rootfsPlan.toString());
 
@@ -2769,6 +2769,38 @@ public class MainActivity extends Activity {
         coreLinuxState = py.optString("state", py.optBoolean("ok", false) ? "core-linux-internal ok" : "core-linux-internal bloqueado");
         coreLinuxSummary = py.optString("summary", coreLinuxSummary);
         coreLinuxLastCheckAt = System.currentTimeMillis();
+        updateSystemChecklistText();
+        return py;
+    }
+
+    private JSONObject coreLinuxRootfsSnapshot(String action) throws Exception {
+        prepareCoreLinuxRuntimeStateWithoutRecursiveProbe();
+        JSONObject extra = new JSONObject();
+        String safeAction = action == null ? "status" : action;
+        extra.put("action", safeAction);
+        extra.put("focus", safeAction);
+        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
+        extra.put("filesDir", getFilesDir().getAbsolutePath());
+        extra.put("cacheDir", getCacheDir().getAbsolutePath());
+        extra.put("androidSdk", Build.VERSION.SDK_INT);
+        extra.put("targetSdk", getApplicationInfo() == null ? 0 : getApplicationInfo().targetSdkVersion);
+        extra.put("foregroundRuntimeActive", foregroundRuntimeActive);
+        extra.put("termuxInstalled", isPackageInstalled("com.termux"));
+        extra.put("termuxApiInstalled", isPackageInstalled("com.termux.api"));
+        extra.put("termuxBootInstalled", isPackageInstalled("com.termux.boot"));
+        try {
+            extra.put("nativeExecutor", coreLinuxNativeExecutorSnapshot("status"));
+        } catch (Throwable ignored) {
+        }
+        JSONObject py = runEmbeddedPythonJob("core_linux_rootfs", extra);
+        coreLinuxPrepared = py.optBoolean("rootfsReady", coreLinuxPrepared);
+        coreLinuxState = py.optString("state", coreLinuxState);
+        coreLinuxSummary = py.optString("summary", coreLinuxSummary);
+        coreLinuxLastCheckAt = System.currentTimeMillis();
+        try {
+            coreLinuxInternalSnapshot("rootfs");
+        } catch (Throwable ignored) {
+        }
         updateSystemChecklistText();
         return py;
     }
@@ -2902,8 +2934,8 @@ public class MainActivity extends Activity {
             payload.put("source", "core-worker-apk-native");
             payload.put("endpoint", "apk://" + installId());
             putProfilePayload(payload, profile);
-            payload.put("roles", new JSONArray().put("apk-native").put("diagnostics").put("internal-jobs").put("linux-runtime").put("bedrock-manager"));
-            payload.put("capabilities", new JSONArray().put("apk-native").put("android-status").put("native-boot").put("safe-shell-probe").put("python-embedded").put("core-linux-runtime").put("minecraft-bedrock-manager"));
+            payload.put("roles", new JSONArray().put("apk-native").put("diagnostics").put("internal-jobs").put("linux-runtime").put("rootfs-manager").put("bedrock-manager"));
+            payload.put("capabilities", new JSONArray().put("apk-native").put("android-status").put("native-boot").put("safe-shell-probe").put("python-embedded").put("core-linux-runtime").put("core-linux-rootfs-manager").put("minecraft-bedrock-manager"));
             payload.put("supported_tasks", new JSONArray());
             payload.put("app_jobs", supportedLightJobsArray());
             JSONObject status = payload.optJSONObject("status");
@@ -2911,7 +2943,7 @@ public class MainActivity extends Activity {
             status.put("apk_native_worker", true);
             status.put("termux_required_now", false);
             status.put("termux_role", "fallback-legado");
-            status.put("migration_stage", "apk-native-runtime-python-linux-bedrock-installer");
+            status.put("migration_stage", "apk-native-runtime-python-linux-rootfs-bedrock-installer");
             status.put("native_shell", "allowlist-probe");
             status.put("python_runtime", nativePythonAvailable ? "embedded-ok" : "embedded-pending");
             safePutPayload(payload, "status", status);
@@ -2963,8 +2995,8 @@ public class MainActivity extends Activity {
             payload.put("name", prefs.getString("device_name", defaultDeviceName()));
             payload.put("version", APP_VERSION);
             payload.put("source", "core-worker-apk-native");
-            payload.put("roles", new JSONArray().put("apk-native").put("diagnostics").put("internal-jobs").put("linux-runtime").put("bedrock-manager"));
-            payload.put("capabilities", new JSONArray().put("apk-native").put("android-status").put("native-boot").put("safe-shell-probe").put("python-embedded").put("core-linux-runtime").put("minecraft-bedrock-manager"));
+            payload.put("roles", new JSONArray().put("apk-native").put("diagnostics").put("internal-jobs").put("linux-runtime").put("rootfs-manager").put("bedrock-manager"));
+            payload.put("capabilities", new JSONArray().put("apk-native").put("android-status").put("native-boot").put("safe-shell-probe").put("python-embedded").put("core-linux-runtime").put("core-linux-rootfs-manager").put("minecraft-bedrock-manager"));
             payload.put("supported_tasks", new JSONArray());
             payload.put("app_jobs", supportedLightJobsArray());
             safePutPayload(payload, "battery", batterySnapshot());
@@ -3232,6 +3264,8 @@ public class MainActivity extends Activity {
                 || "network_diagnostic".equals(script)
                 || "runtime_files_check".equals(script)
                 || "linux_runtime_probe".equals(script)
+                || "core_linux_internal".equals(script)
+                || "core_linux_rootfs".equals(script)
                 || "linux_provision_plan".equals(script)
                 || "bedrock_requirements".equals(script)
                 || "bedrock_probe".equals(script)
@@ -3583,6 +3617,12 @@ public class MainActivity extends Activity {
                 .put("apk_python_runtime_files_check")
                 .put("apk_linux_runtime_probe")
                 .put("apk_linux_rootfs_probe")
+                .put("apk_core_linux_rootfs_status")
+                .put("apk_core_linux_rootfs_preflight")
+                .put("apk_core_linux_rootfs_prepare")
+                .put("apk_core_linux_rootfs_validate")
+                .put("apk_core_linux_rootfs_repair")
+                .put("apk_core_linux_rootfs_clean_staging")
                 .put("apk_linux_box64_probe")
                 .put("apk_linux_provisioner_probe")
                 .put("apk_linux_prepare_directories")
@@ -4134,6 +4174,30 @@ public class MainActivity extends Activity {
                 result.put("error", plan.optString("error", "plano assistido pendente"));
             }
             result.put("message", plan.optBoolean("ok", false) ? "plano assistido Linux/Bedrock gerado sem baixar nada" : "plano assistido Linux/Bedrock pendente");
+            return result;
+        }
+
+        if ("apk_core_linux_rootfs_status".equals(type)
+                || "apk_core_linux_rootfs_preflight".equals(type)
+                || "apk_core_linux_rootfs_prepare".equals(type)
+                || "apk_core_linux_rootfs_validate".equals(type)
+                || "apk_core_linux_rootfs_repair".equals(type)
+                || "apk_core_linux_rootfs_clean_staging".equals(type)) {
+            String action = "status";
+            if ("apk_core_linux_rootfs_preflight".equals(type)) action = "preflight";
+            if ("apk_core_linux_rootfs_prepare".equals(type)) action = "prepare";
+            if ("apk_core_linux_rootfs_validate".equals(type)) action = "validate";
+            if ("apk_core_linux_rootfs_repair".equals(type)) action = "repair";
+            if ("apk_core_linux_rootfs_clean_staging".equals(type)) action = "clean_staging";
+            JSONObject rootfs = coreLinuxRootfsSnapshot(action);
+            safePutPayload(result, "rootfs", rootfs);
+            internalDiagnosticsSummary = rootfs.optString("summary", "rootfs interno atualizado");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!rootfs.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", rootfs.optString("error", rootfs.optString("summary", "rootfs interno pendente")));
+            }
+            result.put("message", rootfs.optString("summary", "rootfs interno atualizado sem baixar/iniciar servidor"));
             return result;
         }
 
@@ -5253,6 +5317,10 @@ public class MainActivity extends Activity {
         status.put("core_linux_prepared", coreLinuxPrepared);
         try {
             safePutPayload(status, "core_linux_native_executor", coreLinuxNativeExecutorSnapshot("probe"));
+        } catch (Throwable ignored) {
+        }
+        try {
+            safePutPayload(status, "core_linux_rootfs", coreLinuxRootfsSnapshot("status"));
         } catch (Throwable ignored) {
         }
         status.put("bedrock_summary", bedrockSummary == null ? "" : bedrockSummary);
