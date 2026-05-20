@@ -112,6 +112,9 @@ public class MainActivity extends Activity {
 
     private SharedPreferences prefs;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Object embeddedPythonLock = new Object();
+    private final AtomicBoolean bedrockProbeRunning = new AtomicBoolean(false);
+    private static final long BEDROCK_STEP_TIMEOUT_MS = 4500L;
     private LinearLayout connectCard;
     private TextView connectTitleText;
     private TextView connectHintText;
@@ -149,6 +152,12 @@ public class MainActivity extends Activity {
     private TextView bedrockReadinessText;
     private TextView bedrockTerminalText;
     private EditText bedrockCommandInput;
+    private Button bedrockTestAllButton;
+    private Button bedrockPrepareServerButton;
+    private Button bedrockFilesButton;
+    private Button bedrockLogsButton;
+    private Button bedrockEulaButton;
+    private Button bedrockSendCommandButton;
     private boolean suppressBedrockSwitchEvents = false;
     private TextView permissionStatusText;
     private Button notificationPermissionButton;
@@ -877,27 +886,27 @@ public class MainActivity extends Activity {
         bedrockReadinessText.setPadding(dp(12), dp(10), dp(12), dp(10));
         readinessCard.addView(bedrockReadinessText);
 
-        Button bedrockTestAllButton = primaryButton("Testar servidor");
+        bedrockTestAllButton = primaryButton("Testar servidor");
         bedrockTestAllButton.setOnClickListener(v -> testBedrockServerFromUi());
         readinessCard.addView(bedrockTestAllButton);
 
-        Button bedrockPrepareServerButton = secondaryButton("Preparar servidor");
+        bedrockPrepareServerButton = secondaryButton("Preparar servidor");
         bedrockPrepareServerButton.setOnClickListener(v -> prepareBedrockServerFromUi());
         readinessCard.addView(bedrockPrepareServerButton);
 
         LinearLayout bedrockActionRow = new LinearLayout(this);
         bedrockActionRow.setOrientation(LinearLayout.HORIZONTAL);
         readinessCard.addView(bedrockActionRow);
-        Button bedrockFilesButton = compactButton("Arquivos");
+        bedrockFilesButton = compactButton("Arquivos");
         bedrockFilesButton.setOnClickListener(v -> showBedrockFilesFromUi());
-        Button bedrockLogsButton = compactButton("Logs");
+        bedrockLogsButton = compactButton("Logs");
         bedrockLogsButton.setOnClickListener(v -> refreshBedrockRuntimeLogsFromUi());
         bedrockActionRow.addView(bedrockFilesButton, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         LinearLayout.LayoutParams logsParams = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
         logsParams.setMargins(dp(8), 0, 0, 0);
         bedrockActionRow.addView(bedrockLogsButton, logsParams);
 
-        Button bedrockEulaButton = dangerButton("Confirmar EULA Bedrock");
+        bedrockEulaButton = dangerButton("Confirmar EULA Bedrock");
         bedrockEulaButton.setOnClickListener(v -> confirmBedrockEulaFromUi());
         readinessCard.addView(bedrockEulaButton);
 
@@ -918,16 +927,17 @@ public class MainActivity extends Activity {
         bedrockCommandInput.setSingleLine(true);
         bedrockCommandInput.setTypeface(Typeface.MONOSPACE);
         commandRow.addView(bedrockCommandInput, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        Button sendCommandButton = compactButton("Enviar");
-        sendCommandButton.setOnClickListener(v -> sendBedrockConsoleCommandFromUi());
+        bedrockSendCommandButton = compactButton("Enviar");
+        bedrockSendCommandButton.setOnClickListener(v -> sendBedrockConsoleCommandFromUi());
         LinearLayout.LayoutParams sendParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
         sendParams.setMargins(dp(8), dp(7), 0, 0);
-        commandRow.addView(sendCommandButton, sendParams);
+        commandRow.addView(bedrockSendCommandButton, sendParams);
 
         setContentView(root);
+        updatePermissionGate();
     }
 
     private ScrollView pageScroll() {
@@ -1068,6 +1078,9 @@ public class MainActivity extends Activity {
     private void buildPermissionGate(LinearLayout root) {
         permissionGateCard = card();
         permissionGateCard.setBackground(cardBackground(CARD_SOFT));
+        // Não mostrar alerta falso na primeira renderização: as permissões são verificadas
+        // imediatamente depois da UI nascer e no onResume. O card só aparece se faltar algo real.
+        permissionGateCard.setVisibility(View.GONE);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -1076,7 +1089,7 @@ public class MainActivity extends Activity {
         root.addView(permissionGateCard, params);
 
         permissionGateCard.addView(sectionTitle("Permissões necessárias"));
-        TextView intro = smallText("Permita notificações, instalação de APK e uso em segundo plano.");
+        TextView intro = smallText("Só aparece quando faltar alguma permissão real para avisos, atualização ou segundo plano.");
         intro.setTextColor(TEXT);
         permissionGateCard.addView(intro);
 
@@ -1134,21 +1147,6 @@ public class MainActivity extends Activity {
             boolean batteryOk = hasBatteryPermission();
             boolean allOk = notificationOk && installOk && batteryOk;
 
-            if (permissionStatusText != null) {
-                StringBuilder builder = new StringBuilder();
-                builder.append(permissionLine("Notificações", notificationOk, "avisar APK novo publicado pela VPS")).append('\n');
-                builder.append(permissionLine("Instalar atualizações", installOk, "abrir o APK baixado da VPS")).append('\n');
-                builder.append(permissionLine("Segundo plano/bateria", batteryOk, "manter checagens locais mais confiáveis"));
-                permissionStatusText.setText(builder.toString());
-            }
-
-            if (permissionGateCard != null) {
-                permissionGateCard.setVisibility(allOk ? View.GONE : View.VISIBLE);
-            }
-            LinearLayout visibleHost = pageHost != null ? pageHost : mainContent;
-            if (visibleHost != null) {
-                visibleHost.setVisibility(allOk ? View.VISIBLE : View.GONE);
-            }
             if (notificationPermissionButton != null) {
                 notificationPermissionButton.setVisibility(notificationOk ? View.GONE : View.VISIBLE);
             }
@@ -1157,6 +1155,38 @@ public class MainActivity extends Activity {
             }
             if (batteryPermissionButton != null) {
                 batteryPermissionButton.setVisibility(batteryOk ? View.GONE : View.VISIBLE);
+            }
+            if (refreshPermissionsButton != null) {
+                refreshPermissionsButton.setVisibility(allOk ? View.GONE : View.VISIBLE);
+            }
+
+            if (permissionStatusText != null) {
+                if (allOk) {
+                    permissionStatusText.setText("");
+                    permissionStatusText.setVisibility(View.GONE);
+                } else {
+                    StringBuilder builder = new StringBuilder();
+                    if (!notificationOk) {
+                        builder.append(permissionLine("Notificações", false, "avisar APK novo publicado pela VPS")).append('\n');
+                    }
+                    if (!installOk) {
+                        builder.append(permissionLine("Instalar atualizações", false, "abrir o APK baixado da VPS")).append('\n');
+                    }
+                    if (!batteryOk) {
+                        builder.append(permissionLine("Segundo plano/bateria", false, "manter checagens locais mais confiáveis"));
+                    }
+                    permissionStatusText.setText(builder.toString().trim());
+                    permissionStatusText.setVisibility(View.VISIBLE);
+                }
+            }
+
+            if (permissionGateCard != null) {
+                permissionGateCard.setVisibility(allOk ? View.GONE : View.VISIBLE);
+            }
+            // Permissão pendente não deve esconder a interface principal nem gerar aparência de app quebrado.
+            LinearLayout visibleHost = pageHost != null ? pageHost : mainContent;
+            if (visibleHost != null) {
+                visibleHost.setVisibility(View.VISIBLE);
             }
         });
     }
@@ -2515,15 +2545,149 @@ public class MainActivity extends Activity {
     }
 
     private void testBedrockServerFromUi() {
+        if (!bedrockProbeRunning.compareAndSet(false, true)) {
+            refreshLocalStatus("Teste Bedrock já está em andamento. Aguarde o resultado atual.");
+            return;
+        }
         runBusy("Testando servidor Bedrock...", () -> {
-            JSONObject manager = bedrockManagerSnapshot("status", false);
-            JSONObject installer = bedrockInstallerWizardSnapshot("final_preflight");
-            JSONObject runtime = bedrockRuntimeSnapshot("status");
-            String summary = runtime.optString("summary", installer.optString("summary", manager.optString("summary", "Teste Bedrock concluído")));
-            reportAppState("bedrock_test_all", summary);
-            show(summary);
-            appendBedrockTerminal("test", summary);
+            try {
+                JSONObject result = bedrockServerSafeTestSnapshot();
+                String summary = result.optString("summary", "Teste Bedrock concluído");
+                reportAppState("bedrock_test_all", summary);
+                show(summary);
+                appendBedrockTerminal("test", summary);
+            } finally {
+                bedrockProbeRunning.set(false);
+            }
         });
+    }
+
+    private interface BedrockProbeStep {
+        JSONObject run() throws Exception;
+    }
+
+    private JSONObject bedrockServerSafeTestSnapshot() throws Exception {
+        JSONObject manager = runBedrockStepWithTimeout("manager", () -> bedrockManagerSnapshot("status", false), BEDROCK_STEP_TIMEOUT_MS);
+        JSONObject installer = new JSONObject();
+        JSONObject runtime = new JSONObject();
+
+        if (!manager.optBoolean("timeout", false)) {
+            installer = runBedrockStepWithTimeout("installer", () -> bedrockInstallerWizardSnapshot("final_preflight"), BEDROCK_STEP_TIMEOUT_MS);
+        } else {
+            installer = bedrockStepError("installer", "ignorado porque o diagnóstico inicial demorou demais", null);
+        }
+        if (!manager.optBoolean("timeout", false) && !installer.optBoolean("timeout", false)) {
+            runtime = runBedrockStepWithTimeout("runtime", () -> bedrockRuntimeSnapshot("status"), BEDROCK_STEP_TIMEOUT_MS);
+        } else {
+            runtime = bedrockStepError("runtime", "ignorado para proteger a interface", null);
+        }
+
+        String summary = firstNonEmpty(
+                runtime.optString("summary", ""),
+                installer.optString("summary", ""),
+                manager.optString("summary", ""),
+                "Teste Bedrock concluído"
+        );
+        boolean ok = manager.optBoolean("ok", false) || installer.optBoolean("ok", false) || runtime.optBoolean("ok", false);
+        JSONArray warnings = new JSONArray();
+        collectBedrockStepWarning(warnings, "manager", manager);
+        collectBedrockStepWarning(warnings, "installer", installer);
+        collectBedrockStepWarning(warnings, "runtime", runtime);
+        if (warnings.length() > 0) {
+            summary = summary + " · diagnóstico parcial";
+        }
+
+        JSONObject out = new JSONObject();
+        out.put("ok", ok);
+        out.put("summary", summary);
+        out.put("manager", manager);
+        out.put("installer", installer);
+        out.put("runtime", runtime);
+        out.put("warnings", warnings);
+        out.put("timeoutMsPerStep", BEDROCK_STEP_TIMEOUT_MS);
+        out.put("uiSafe", true);
+        return out;
+    }
+
+    private void collectBedrockStepWarning(JSONArray warnings, String label, JSONObject step) {
+        if (warnings == null || step == null) return;
+        if (!step.optBoolean("ok", false) || step.optBoolean("timeout", false)) {
+            JSONObject warning = new JSONObject();
+            try {
+                warning.put("step", label);
+                warning.put("summary", step.optString("summary", step.optString("error", "pendente")));
+                warnings.put(warning);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private JSONObject runBedrockStepWithTimeout(String label, BedrockProbeStep step, long timeoutMs) {
+        final JSONObject[] result = new JSONObject[1];
+        final Throwable[] error = new Throwable[1];
+        Thread thread = new Thread(() -> {
+            try {
+                result[0] = step.run();
+            } catch (Throwable exc) {
+                error[0] = exc;
+            }
+        }, "core-worker-bedrock-probe-" + sanitizeThreadName(label));
+        thread.setDaemon(true);
+        thread.start();
+        try {
+            thread.join(Math.max(1000L, timeoutMs));
+        } catch (InterruptedException exc) {
+            Thread.currentThread().interrupt();
+            return bedrockStepError(label, "interrompido", exc);
+        }
+        if (thread.isAlive()) {
+            return bedrockStepTimeout(label, timeoutMs);
+        }
+        if (error[0] != null) {
+            return bedrockStepError(label, "falha", error[0]);
+        }
+        return result[0] == null ? bedrockStepError(label, "resultado vazio", null) : result[0];
+    }
+
+    private JSONObject bedrockStepTimeout(String label, long timeoutMs) {
+        JSONObject out = new JSONObject();
+        try {
+            out.put("ok", false);
+            out.put("step", label == null ? "unknown" : label);
+            out.put("timeout", true);
+            out.put("timeoutMs", timeoutMs);
+            out.put("summary", "diagnóstico Bedrock demorou demais em " + (label == null ? "etapa" : label));
+            out.put("error", "timeout");
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    private JSONObject bedrockStepError(String label, String summary, Throwable exc) {
+        JSONObject out = new JSONObject();
+        try {
+            out.put("ok", false);
+            out.put("step", label == null ? "unknown" : label);
+            out.put("summary", summary == null ? "falha Bedrock" : summary);
+            out.put("error", exc == null ? "erro desconhecido" : shortThrowable(exc));
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    private String firstNonEmpty(String... values) {
+        if (values == null) return "";
+        for (String value : values) {
+            if (value != null && !value.trim().isEmpty()) {
+                return value.trim();
+            }
+        }
+        return "";
+    }
+
+    private String sanitizeThreadName(String value) {
+        String text = value == null ? "step" : value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_-]", "-");
+        return text.isEmpty() ? "step" : text;
     }
 
     private void prepareBedrockServerFromUi() {
@@ -3447,38 +3611,40 @@ public class MainActivity extends Activity {
             return out;
         }
         try {
-            if (!Python.isStarted()) {
-                Python.start(new AndroidPlatform(this));
+            synchronized (embeddedPythonLock) {
+                if (!Python.isStarted()) {
+                    Python.start(new AndroidPlatform(getApplicationContext()));
+                }
+                Python py = Python.getInstance();
+                PyObject sys = py.getModule("sys");
+                nativePythonVersion = sys.get("version").toString();
+                PyObject module = py.getModule("coreworker." + cleanScript);
+                JSONObject context = buildPythonJobContext(extra);
+                PyObject response = module.callAttr("run", context.toString());
+                String raw = sanitizeCommandOutput(response == null ? "" : response.toString(), 8000);
+                try {
+                    out = new JSONObject(raw);
+                } catch (Throwable parseError) {
+                    out = new JSONObject();
+                    out.put("ok", false);
+                    out.put("raw", raw);
+                    out.put("error", "Python retornou JSON inválido: " + shortThrowable(parseError));
+                }
+                out.put("embedded", true);
+                out.put("script", cleanScript);
+                out.put("module", "coreworker." + cleanScript);
+                out.put("pythonVersion", nativePythonVersion);
+                out.put("arbitraryCode", false);
+                out.put("durationMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+                nativePythonAvailable = out.optBoolean("ok", true);
+                nativePythonLastRunAt = System.currentTimeMillis();
+                nativePythonLastScript = cleanScript;
+                nativePythonLastError = out.optBoolean("ok", false) ? "" : out.optString("error", "erro Python");
+                nativePythonSummary = out.optBoolean("ok", false)
+                        ? "Python Chaquopy ok · " + cleanScript
+                        : "Python Chaquopy falhou · " + out.optString("error", "erro");
+                return out;
             }
-            Python py = Python.getInstance();
-            PyObject sys = py.getModule("sys");
-            nativePythonVersion = sys.get("version").toString();
-            PyObject module = py.getModule("coreworker." + cleanScript);
-            JSONObject context = buildPythonJobContext(extra);
-            PyObject response = module.callAttr("run", context.toString());
-            String raw = sanitizeCommandOutput(response == null ? "" : response.toString(), 8000);
-            try {
-                out = new JSONObject(raw);
-            } catch (Throwable parseError) {
-                out = new JSONObject();
-                out.put("ok", false);
-                out.put("raw", raw);
-                out.put("error", "Python retornou JSON inválido: " + shortThrowable(parseError));
-            }
-            out.put("embedded", true);
-            out.put("script", cleanScript);
-            out.put("module", "coreworker." + cleanScript);
-            out.put("pythonVersion", nativePythonVersion);
-            out.put("arbitraryCode", false);
-            out.put("durationMs", Math.max(0L, System.currentTimeMillis() - startedAt));
-            nativePythonAvailable = out.optBoolean("ok", true);
-            nativePythonLastRunAt = System.currentTimeMillis();
-            nativePythonLastScript = cleanScript;
-            nativePythonLastError = out.optBoolean("ok", false) ? "" : out.optString("error", "erro Python");
-            nativePythonSummary = out.optBoolean("ok", false)
-                    ? "Python Chaquopy ok · " + cleanScript
-                    : "Python Chaquopy falhou · " + out.optString("error", "erro");
-            return out;
         } catch (Throwable exc) {
             nativePythonAvailable = false;
             nativePythonLastRunAt = System.currentTimeMillis();
@@ -6072,6 +6238,12 @@ public class MainActivity extends Activity {
         if (updateCleanupButton != null) updateCleanupButton.setEnabled(enabled && !updateDownloadBusy);
         if (updateInstallButton != null) applyUpdateButtonState(latestUpdateAvailable, updateDownloadBusy ? "Baixando..." : "Atualizar agora", updateDownloadBusy);
         if (clearButton != null) clearButton.setEnabled(enabled);
+        if (bedrockTestAllButton != null) bedrockTestAllButton.setEnabled(enabled && !bedrockProbeRunning.get());
+        if (bedrockPrepareServerButton != null) bedrockPrepareServerButton.setEnabled(enabled);
+        if (bedrockFilesButton != null) bedrockFilesButton.setEnabled(enabled);
+        if (bedrockLogsButton != null) bedrockLogsButton.setEnabled(enabled);
+        if (bedrockEulaButton != null) bedrockEulaButton.setEnabled(enabled);
+        if (bedrockSendCommandButton != null) bedrockSendCommandButton.setEnabled(enabled);
     }
 
     private void refreshLocalStatus(String extra) {

@@ -1,3 +1,9 @@
+## Patch 85.3: permissões reais e teste Bedrock protegido
+
+A versão `0.5.46` corrige dois pontos da etapa Rootfs/Bedrock: o card **Permissões necessárias** não nasce mais visível por padrão e só aparece depois da verificação real quando falta notificação, instalação de APK ou liberação de bateria; a tela principal continua acessível mesmo se alguma permissão estiver pendente. Também remove o retângulo vazio do card quando tudo está ok.
+
+O botão **Testar servidor** agora executa o diagnóstico Bedrock em fluxo protegido: impede toque duplicado, usa timeouts por etapa, serializa o Python embutido para evitar corrida com outros jobs, captura erro parcial e sempre devolve resumo seguro em vez de travar/crashar a interface.
+
 ## Patch 85.1: abertura segura da MainActivity
 
 A versão `0.5.44` adiciona um guard de inicialização para impedir tela branca depois da entrada do Rootfs Manager. A MainActivity agora desenha uma tela segura imediatamente, adia rootfs/Python/probes para depois da primeira renderização, registra falhas em `files/core-linux/logs/app-startup.log` e mostra modo seguro com detalhe caso a UI principal falhe. O rootfs continua assistido e validável; Box64/Bedrock real ainda ficam para patches futuros.
