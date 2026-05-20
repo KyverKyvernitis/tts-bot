@@ -1743,7 +1743,7 @@ def core_worker_app_publish():
         "source": "apk-publish",
         "roles": ["phone-worker", "apk-builder"],
         "capabilities": ["phone-worker", "apk-builder"],
-        "supported_tasks": ["apk_build_debug", "worker_update", "worker_logs", "diagnostic_basic", "network_probe"],
+        "supported_tasks": ["apk_build_debug", "apk_publish_last", "worker_update", "worker_logs", "diagnostic_basic", "network_probe"],
     }
     status, auth_body = core_worker_authenticate_http(request.headers, auth_payload, remote_addr=request.remote_addr or "")
     if status != 200:

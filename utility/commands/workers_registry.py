@@ -41,6 +41,7 @@ CORE_WORKER_JOB_TYPES = {
     "maintenance_plan",
     "worker_update",
     "apk_build_debug",
+    "apk_publish_last",
     "vps_assist_probe",
     "hash_batch",
     "endpoint_probe",
@@ -956,7 +957,43 @@ class CoreWorkersRegistry:
             jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
             job = jobs.get(job_id)
             if not isinstance(job, dict):
-                raise CoreWorkerRegistryError("job não encontrado", status=404)
+                # Resultado antigo/local de um job que a VPS já limpou. O worker
+                # precisa receber 200 para remover o pending-results local e parar
+                # o loop, mas ainda registramos o resumo no status do worker.
+                result_summary = _short_text(payload.get("summary") or payload.get("error") or "resultado antigo descartado", limit=160)
+                status_dict = _worker_status_dict(worker)
+                queue_status = status_dict.get("core_worker_jobs") if isinstance(status_dict.get("core_worker_jobs"), dict) else {}
+                queue_status.update({
+                    "last_stale_result_at": ts,
+                    "last_stale_result_job_id": job_id,
+                    "last_stale_result_status": status,
+                    "last_stale_result_summary": result_summary,
+                    "last_result_at": ts,
+                    "last_result_job_id": job_id,
+                    "last_result_type": _normalize_job_type((payload.get("result") or {}).get("type") if isinstance(payload.get("result"), Mapping) else ""),
+                    "last_result_status": status,
+                    "last_result_summary": result_summary,
+                    "last_result_stale": True,
+                })
+                status_dict["core_worker_jobs"] = queue_status
+                worker["updated_at"] = ts
+                worker["last_heartbeat_at"] = ts
+                worker["remote_addr"] = _short_text(remote_addr, limit=64)
+                data["workers"][worker_id] = worker
+                self._save_unlocked(data)
+                return {
+                    "ok": True,
+                    "accepted": True,
+                    "stale": True,
+                    "job_missing": True,
+                    "summary": "resultado antigo aceito e descartado; job não existe mais no registry",
+                    "job": {
+                        "job_id": job_id,
+                        "status": status,
+                        "worker_id": worker_id,
+                        "summary": result_summary,
+                    },
+                }
             assigned = str(job.get("worker_id") or "")
             if assigned and assigned != worker_id:
                 raise CoreWorkerRegistryError("job pertence a outro worker", status=403)

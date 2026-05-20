@@ -1,3 +1,7 @@
+## Patch 84.6: resultados antigos, republicação e allowlist multi-worker
+
+A versão `1.8.8` fecha a limpeza de resultados pendentes antigos: quando a VPS responde que um job já não existe, o agent arquiva localmente o resultado e para de reenviar em loop. O registry também passa a aceitar `apk_publish_last` como tipo de job válido, permitindo republicar o último APK salvo em `~/core-worker-apk-builds/artifacts/` sem recompilar. Esse ajuste mantém o fluxo multi-worker: resultados ficam ligados ao worker/job quando possível, e resultados órfãos são registrados como descartados em vez de travarem heartbeat/poll.
+
 # Phone Worker
 
 ## Patch 84.5: bootstrap direto e republicação sem rebuild

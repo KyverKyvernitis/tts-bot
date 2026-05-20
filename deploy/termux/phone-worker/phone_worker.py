@@ -43,7 +43,7 @@ _APK_BUILD_THREAD_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.8.7"
+PHONE_WORKER_VERSION = "1.8.8"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -1005,12 +1005,18 @@ def _store_pending_core_job_result(payload: dict[str, Any]) -> None:
     _persist_pending_core_job_results()
 
 
-def _post_core_worker_job_result_payload(payload: dict[str, Any], *, timeout: float = 8.0) -> bool:
+def _post_core_worker_job_result_payload_status(payload: dict[str, Any], *, timeout: float = 8.0) -> tuple[bool, int, dict[str, Any]]:
     code, data = _post_core_worker_json("/core-worker/jobs/result", payload, timeout=timeout)
-    if 200 <= code < 300 and data.get("ok", True):
-        return True
+    ok = bool(200 <= code < 300 and data.get("ok", True))
+    if ok:
+        return True, int(code), data
     print(f"[core-worker-jobs] falha ao enviar resultado HTTP {code}: {_short_text(data.get('error') or data, limit=180)}", flush=True)
-    return False
+    return False, int(code), data
+
+
+def _post_core_worker_job_result_payload(payload: dict[str, Any], *, timeout: float = 8.0) -> bool:
+    ok, _code, _data = _post_core_worker_job_result_payload_status(payload, timeout=timeout)
+    return ok
 
 
 def _flush_pending_core_worker_job_results(*, timeout: float = 8.0) -> int:
@@ -1020,13 +1026,21 @@ def _flush_pending_core_worker_job_results(*, timeout: float = 8.0) -> int:
     sent = 0
     changed = False
     for job_id, payload in pending:
-        if _post_core_worker_job_result_payload(payload, timeout=timeout):
+        ok, code, data = _post_core_worker_job_result_payload_status(payload, timeout=timeout)
+        if ok:
             with _CORE_JOB_LOCK:
                 _PENDING_CORE_JOB_RESULTS.pop(job_id, None)
                 if _CORE_JOB_LAST_RESULT.get("job_id") == job_id:
                     _CORE_JOB_LAST_RESULT["sent_ok"] = True
             changed = True
             sent += 1
+            continue
+        if _job_result_rejection_is_permanent(code, data):
+            _archive_pending_core_job_result(job_id, payload, reason=f"VPS recusou resultado antigo HTTP {code}", response=data)
+            with _CORE_JOB_LOCK:
+                _PENDING_CORE_JOB_RESULTS.pop(job_id, None)
+            changed = True
+            print(f"[core-worker-jobs] resultado pendente antigo arquivado e removido: {job_id}", flush=True)
     if changed:
         _persist_pending_core_job_results()
     return sent
@@ -2081,6 +2095,10 @@ def _phone_worker_pending_results_file() -> Path:
     return Path(os.getenv("PHONE_WORKER_PENDING_RESULTS_FILE") or (_phone_worker_dir() / "phone-worker-pending-results.json")).expanduser()
 
 
+def _phone_worker_pending_results_archive_file() -> Path:
+    return Path(os.getenv("PHONE_WORKER_PENDING_RESULTS_ARCHIVE_FILE") or (_phone_worker_dir() / "phone-worker-pending-results.archive.json")).expanduser()
+
+
 def _phone_worker_update_status_file() -> Path:
     return Path(os.getenv("PHONE_WORKER_UPDATE_STATUS_FILE") or (_phone_worker_dir() / "phone-worker-update.status.json")).expanduser()
 
@@ -2123,6 +2141,43 @@ def _persist_pending_core_job_results() -> None:
         _write_json_file_atomic(path, {"updated_at": time.time(), "results": items})
     except Exception as exc:
         print(f"[core-worker-jobs] não consegui persistir resultado pendente: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
+
+
+def _archive_pending_core_job_result(job_id: str, payload: dict[str, Any], *, reason: str, response: dict[str, Any] | None = None) -> None:
+    """Move um resultado pendente impossível de reenviar para histórico local curto.
+
+    Isso evita loops eternos quando a VPS já limpou o job antigo, mas preserva
+    informação suficiente para diagnóstico.
+    """
+    safe_job_id = _short_text(job_id, limit=80)
+    if not safe_job_id:
+        return
+    path = _phone_worker_pending_results_archive_file()
+    archive = _read_json_file(path)
+    items = archive.get("items") if isinstance(archive.get("items"), list) else []
+    entry = {
+        "job_id": safe_job_id,
+        "archived_at": time.time(),
+        "reason": _short_text(reason, limit=180),
+        "summary": _short_text(payload.get("summary") or payload.get("error") or "", limit=180),
+        "status": _short_text(payload.get("status") or "", limit=40),
+        "type": _short_text((payload.get("result") or {}).get("type") if isinstance(payload.get("result"), dict) else payload.get("type"), limit=60),
+        "stored_at": payload.get("stored_at"),
+        "response": _short_text(json.dumps(response or {}, ensure_ascii=False, separators=(",", ":")), limit=600),
+    }
+    items.append(entry)
+    items = items[-40:]
+    try:
+        _write_json_file_atomic(path, {"updated_at": time.time(), "items": items})
+    except Exception as exc:
+        print(f"[core-worker-jobs] não consegui arquivar resultado pendente antigo: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
+
+
+def _job_result_rejection_is_permanent(code: int, data: dict[str, Any]) -> bool:
+    text = json.dumps(data, ensure_ascii=False).lower() if isinstance(data, dict) else str(data).lower()
+    if int(code or 0) == 404 and ("job não encontrado" in text or "job nao encontrado" in text or "job not found" in text):
+        return True
+    return False
 
 
 def _read_pid_file(path: Path) -> int | None:
@@ -4087,9 +4142,12 @@ def _send_core_worker_job_result(*, job_id: str, status: str, result: dict[str, 
         "error": _short_text(error, limit=240),
         "summary": _short_text(safe_result.get("summary") or error or status, limit=160),
     }
-    ok = _post_core_worker_job_result_payload(payload, timeout=timeout)
+    ok, code, data = _post_core_worker_job_result_payload_status(payload, timeout=timeout)
     if not ok:
-        _store_pending_core_job_result(payload)
+        if _job_result_rejection_is_permanent(code, data):
+            _archive_pending_core_job_result(job_id, payload, reason=f"VPS não reconhece mais este job HTTP {code}", response=data)
+        else:
+            _store_pending_core_job_result(payload)
     return ok
 
 
