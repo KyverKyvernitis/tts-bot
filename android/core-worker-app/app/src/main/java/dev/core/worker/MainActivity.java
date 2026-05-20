@@ -115,6 +115,8 @@ public class MainActivity extends Activity {
     private final Object embeddedPythonLock = new Object();
     private final AtomicBoolean bedrockProbeRunning = new AtomicBoolean(false);
     private static final long BEDROCK_STEP_TIMEOUT_MS = 4500L;
+    private static final long PERMISSION_GATE_STABILIZE_MS = 1200L;
+    private static final long BEDROCK_SAFE_TEST_LOG_LIMIT_BYTES = 256L * 1024L;
     private LinearLayout connectCard;
     private TextView connectTitleText;
     private TextView connectHintText;
@@ -159,6 +161,9 @@ public class MainActivity extends Activity {
     private Button bedrockEulaButton;
     private Button bedrockSendCommandButton;
     private boolean suppressBedrockSwitchEvents = false;
+    private volatile int permissionGateMissingStreak = 0;
+    private volatile long permissionGateFirstMissingAt = 0L;
+    private final AtomicBoolean permissionGateDelayedRecheckScheduled = new AtomicBoolean(false);
     private TextView permissionStatusText;
     private Button notificationPermissionButton;
     private Button installPermissionButton;
@@ -325,7 +330,7 @@ public class MainActivity extends Activity {
         safeStartupTask("cleanupUpdateArtifacts", () -> cleanupUpdateArtifacts(false, "app_start"));
         safeStartupTask("prepareInternalRuntimePreview", this::prepareInternalRuntimePreview);
         safeStartupTask("prepareNativeRuntimeState", this::prepareNativeRuntimeState);
-        safeStartupTask("prepareCoreLinuxRuntimeState", this::prepareCoreLinuxRuntimeState);
+        safeStartupTask("prepareCoreLinuxRuntimeSkeleton", this::prepareCoreLinuxRuntimeStateWithoutRecursiveProbe);
         safeStartupTask("readForegroundRuntimeState", this::readForegroundRuntimeState);
         safeStartupTask("scheduleUpdateJob", () -> CoreWorkerUpdateJobService.schedule(this, "activity_create"));
         safeStartupTask("reportAppOpened", () -> reportAppState("app_opened", "APK aberto; versão instalada " + APP_VERSION + " (" + BuildConfig.VERSION_CODE + ")"));
@@ -1146,22 +1151,46 @@ public class MainActivity extends Activity {
             boolean installOk = hasInstallPermission();
             boolean batteryOk = hasBatteryPermission();
             boolean allOk = notificationOk && installOk && batteryOk;
+            long now = System.currentTimeMillis();
+
+            if (allOk) {
+                permissionGateMissingStreak = 0;
+                permissionGateFirstMissingAt = 0L;
+                permissionGateDelayedRecheckScheduled.set(false);
+            } else {
+                if (permissionGateFirstMissingAt <= 0L) {
+                    permissionGateFirstMissingAt = now;
+                    permissionGateMissingStreak = 1;
+                } else {
+                    permissionGateMissingStreak = Math.min(1000, permissionGateMissingStreak + 1);
+                }
+            }
+            boolean stableMissing = !allOk
+                    && permissionGateMissingStreak >= 2
+                    && (now - permissionGateFirstMissingAt) >= PERMISSION_GATE_STABILIZE_MS;
+
+            if (!allOk && !stableMissing && permissionGateDelayedRecheckScheduled.compareAndSet(false, true)) {
+                mainHandler.postDelayed(() -> {
+                    permissionGateDelayedRecheckScheduled.set(false);
+                    updatePermissionGate();
+                }, PERMISSION_GATE_STABILIZE_MS);
+            }
 
             if (notificationPermissionButton != null) {
-                notificationPermissionButton.setVisibility(notificationOk ? View.GONE : View.VISIBLE);
+                notificationPermissionButton.setVisibility((stableMissing && !notificationOk) ? View.VISIBLE : View.GONE);
             }
             if (installPermissionButton != null) {
-                installPermissionButton.setVisibility(installOk ? View.GONE : View.VISIBLE);
+                installPermissionButton.setVisibility((stableMissing && !installOk) ? View.VISIBLE : View.GONE);
             }
             if (batteryPermissionButton != null) {
-                batteryPermissionButton.setVisibility(batteryOk ? View.GONE : View.VISIBLE);
+                batteryPermissionButton.setVisibility((stableMissing && !batteryOk) ? View.VISIBLE : View.GONE);
             }
             if (refreshPermissionsButton != null) {
-                refreshPermissionsButton.setVisibility(allOk ? View.GONE : View.VISIBLE);
+                refreshPermissionsButton.setVisibility(stableMissing ? View.VISIBLE : View.GONE);
             }
 
             if (permissionStatusText != null) {
-                if (allOk) {
+                if (allOk || !stableMissing) {
                     permissionStatusText.setText("");
                     permissionStatusText.setVisibility(View.GONE);
                 } else {
@@ -1175,13 +1204,14 @@ public class MainActivity extends Activity {
                     if (!batteryOk) {
                         builder.append(permissionLine("Segundo plano/bateria", false, "manter checagens locais mais confiáveis"));
                     }
-                    permissionStatusText.setText(builder.toString().trim());
-                    permissionStatusText.setVisibility(View.VISIBLE);
+                    String status = builder.toString().trim();
+                    permissionStatusText.setText(status);
+                    permissionStatusText.setVisibility(status.isEmpty() ? View.GONE : View.VISIBLE);
                 }
             }
 
             if (permissionGateCard != null) {
-                permissionGateCard.setVisibility(allOk ? View.GONE : View.VISIBLE);
+                permissionGateCard.setVisibility(stableMissing ? View.VISIBLE : View.GONE);
             }
             // Permissão pendente não deve esconder a interface principal nem gerar aparência de app quebrado.
             LinearLayout visibleHost = pageHost != null ? pageHost : mainContent;
@@ -2551,8 +2581,8 @@ public class MainActivity extends Activity {
         }
         runBusy("Testando servidor Bedrock...", () -> {
             try {
-                JSONObject result = bedrockServerSafeTestSnapshot();
-                String summary = result.optString("summary", "Teste Bedrock concluído");
+                JSONObject result = bedrockServerLightweightTestSnapshot();
+                String summary = result.optString("summary", "Diagnóstico Bedrock concluído");
                 reportAppState("bedrock_test_all", summary);
                 show(summary);
                 appendBedrockTerminal("test", summary);
@@ -2607,6 +2637,196 @@ public class MainActivity extends Activity {
         out.put("timeoutMsPerStep", BEDROCK_STEP_TIMEOUT_MS);
         out.put("uiSafe", true);
         return out;
+    }
+
+    private JSONObject bedrockServerLightweightTestSnapshot() throws Exception {
+        long startedAt = System.currentTimeMillis();
+        prepareCoreLinuxRuntimeStateWithoutRecursiveProbe();
+
+        File core = coreLinuxDir();
+        File rootfs = new File(core, "rootfs");
+        File runtime = new File(core, "runtime");
+        File bedrock = new File(core, "bedrock");
+        File provision = new File(core, "provision");
+        File logs = new File(core, "logs");
+        File serverProperties = new File(bedrock, "server.properties");
+        File serverPropertiesTemplate = new File(bedrock, "server.properties.template");
+        File eula = new File(bedrock, "eula.txt");
+        File server = new File(bedrock, "bedrock_server");
+        File box64A = new File(core, "bin/box64");
+        File box64B = new File(core, "box64/box64");
+        File rootfsReadyMarker = new File(rootfs, ".core-worker-rootfs-ready");
+        File rootfsState = new File(runtime, "rootfs-state.json");
+        File nativeExecutorState = new File(runtime, "native-executor-state.json");
+        File appNativeExecutor = new File(getApplicationInfo() == null || getApplicationInfo().nativeLibraryDir == null ? "" : getApplicationInfo().nativeLibraryDir, "libcoreworker_executor.so");
+
+        boolean rootfsDir = safeDirectoryExists(rootfs);
+        boolean rootfsReady = safeFileExists(rootfsReadyMarker) || safeTextContains(rootfsState, "\"rootfsReady\"", "true");
+        boolean executorBundled = safeFileExists(appNativeExecutor);
+        boolean executorStateOk = safeTextContains(nativeExecutorState, "\"ok\"", "true") || safeTextContains(nativeExecutorState, "readyForRootfs", "true");
+        boolean serverPropertiesReady = safeFileExists(serverProperties) || safeFileExists(serverPropertiesTemplate);
+        boolean eulaAccepted = safeTextContains(eula, "eula=true");
+        boolean serverInstalled = safeFileExists(server);
+        boolean box64Ready = safeFileExists(box64A) || safeFileExists(box64B);
+
+        JSONArray blockers = new JSONArray();
+        if (!rootfsDir) blockers.put("rootfs ausente");
+        if (!rootfsReady) blockers.put("rootfs ainda não validado");
+        if (!executorBundled && !executorStateOk) blockers.put("executor interno ainda não confirmado");
+        if (!serverPropertiesReady) blockers.put("server.properties ainda não preparado");
+        if (!serverInstalled) blockers.put("bedrock_server não instalado");
+        if (!eulaAccepted) blockers.put("EULA pendente");
+        if (!box64Ready) blockers.put("Box64 pendente");
+
+        boolean ready = blockers.length() == 0;
+        String rootfsStateLabel = !rootfsDir ? "rootfs_missing" : (rootfsReady ? "rootfs_ready" : "rootfs_detected");
+        String bedrockStateLabel = ready ? "bedrock_ready" : "bedrock_test_blocked";
+        String nextAction = ready ? "ativar runtime Bedrock" : bedrockNextAction(rootfsReady, executorBundled || executorStateOk, serverPropertiesReady, serverInstalled, eulaAccepted, box64Ready);
+        String summary = ready
+                ? "Bedrock pronto para preflight do runner."
+                : "Diagnóstico parcial concluído. Runtime Bedrock ainda não está pronto.";
+
+        JSONObject rootfsJson = new JSONObject();
+        rootfsJson.put("state", rootfsStateLabel);
+        rootfsJson.put("dir", rootfs.getAbsolutePath());
+        rootfsJson.put("exists", rootfsDir);
+        rootfsJson.put("ready", rootfsReady);
+        rootfsJson.put("stateFile", safeFileStatus(rootfsState));
+        rootfsJson.put("readyMarker", safeFileStatus(rootfsReadyMarker));
+
+        JSONObject executorJson = new JSONObject();
+        executorJson.put("state", executorBundled || executorStateOk ? "executor_detected" : "executor_missing");
+        executorJson.put("bundledLibrary", safeFileStatus(appNativeExecutor));
+        executorJson.put("stateFile", safeFileStatus(nativeExecutorState));
+        executorJson.put("validated", executorStateOk);
+        executorJson.put("note", "Teste Bedrock não chama JNI/Python para proteger a interface.");
+
+        JSONObject bedrockJson = new JSONObject();
+        bedrockJson.put("state", bedrockStateLabel);
+        bedrockJson.put("dir", bedrock.getAbsolutePath());
+        bedrockJson.put("properties", safeFileStatus(serverProperties));
+        bedrockJson.put("propertiesTemplate", safeFileStatus(serverPropertiesTemplate));
+        bedrockJson.put("eula", safeFileStatus(eula));
+        bedrockJson.put("server", safeFileStatus(server));
+        bedrockJson.put("box64", safeFileExists(box64A) ? safeFileStatus(box64A) : safeFileStatus(box64B));
+        bedrockJson.put("ready", ready);
+
+        JSONObject out = new JSONObject();
+        out.put("ok", true);
+        out.put("ready", ready);
+        out.put("state", bedrockStateLabel);
+        out.put("summary", summary);
+        out.put("nextAction", nextAction);
+        out.put("rootfs", rootfsJson);
+        out.put("executor", executorJson);
+        out.put("bedrock", bedrockJson);
+        out.put("provision", safeFileStatus(provision));
+        out.put("blockers", blockers);
+        out.put("durationMs", Math.max(0L, System.currentTimeMillis() - startedAt));
+        out.put("uiSafe", true);
+        out.put("pythonTouched", false);
+        out.put("nativeTouched", false);
+
+        bedrockReady = ready;
+        bedrockState = bedrockStateLabel;
+        bedrockSummary = summary;
+        bedrockInstallerSummary = ready ? "preflight local pronto" : "pendências locais encontradas pelo diagnóstico seguro";
+        bedrockInstallerState = ready ? "ready" : "blocked";
+        bedrockInstallerNextAction = nextAction;
+        bedrockRuntimeSummary = ready ? emptyFallback(bedrockRuntimeSummary, "runtime Bedrock aguardando start") : "runtime Bedrock bloqueado até concluir pendências";
+        bedrockLastCheckAt = System.currentTimeMillis();
+        internalDiagnosticsSummary = summary;
+        internalDiagnosticsLastAt = System.currentTimeMillis();
+
+        appendBoundedTextFile(new File(logs, "bedrock-test.log"), out.toString() + "\n", BEDROCK_SAFE_TEST_LOG_LIMIT_BYTES);
+        appendBoundedTextFile(new File(logs, "rootfs-check.log"), rootfsJson.toString() + "\n", BEDROCK_SAFE_TEST_LOG_LIMIT_BYTES);
+        updateSystemChecklistText();
+        return out;
+    }
+
+    private String bedrockNextAction(boolean rootfsReady, boolean executorReady, boolean propertiesReady, boolean serverInstalled, boolean eulaAccepted, boolean box64Ready) {
+        if (!executorReady) return "validar executor interno";
+        if (!rootfsReady) return "preparar rootfs interno assistido";
+        if (!propertiesReady) return "preparar server.properties";
+        if (!serverInstalled) return "instalar Bedrock oficial com confirmação";
+        if (!eulaAccepted) return "confirmar EULA Bedrock";
+        if (!box64Ready) return "preparar Box64";
+        return "ativar runtime Bedrock";
+    }
+
+    private JSONObject safeFileStatus(File file) {
+        JSONObject out = new JSONObject();
+        try {
+            out.put("path", file == null ? "" : file.getAbsolutePath());
+            boolean exists = file != null && file.exists();
+            out.put("exists", exists);
+            out.put("directory", exists && file.isDirectory());
+            out.put("file", exists && file.isFile());
+            out.put("bytes", exists && file.isFile() ? Math.max(0L, file.length()) : 0L);
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    private boolean safeFileExists(File file) {
+        try {
+            return file != null && file.exists() && file.isFile();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private boolean safeDirectoryExists(File file) {
+        try {
+            return file != null && file.exists() && file.isDirectory();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private boolean safeTextContains(File file, String... needles) {
+        try {
+            if (file == null || !file.exists() || !file.isFile()) return false;
+            BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8));
+            StringBuilder builder = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null && builder.length() < 12000) {
+                builder.append(line).append('\n');
+            }
+            reader.close();
+            String text = builder.toString().toLowerCase(Locale.ROOT).replace(" ", "");
+            if (needles == null || needles.length == 0) return !text.isEmpty();
+            for (String needle : needles) {
+                String clean = String.valueOf(needle == null ? "" : needle).toLowerCase(Locale.ROOT).replace(" ", "");
+                if (!clean.isEmpty() && !text.contains(clean)) return false;
+            }
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private void appendBoundedTextFile(File file, String value, long maxBytes) {
+        try {
+            File parent = file == null ? null : file.getParentFile();
+            if (parent != null && !parent.exists()) parent.mkdirs();
+            if (file != null && file.exists() && file.length() > Math.max(1024L, maxBytes)) {
+                File old = new File(file.getParentFile(), file.getName() + ".old");
+                try { if (old.exists()) old.delete(); } catch (Throwable ignored) {}
+                try {
+                    if (!file.renameTo(old)) {
+                        writeTextFile(file, "");
+                    }
+                } catch (Throwable ignored) {
+                    writeTextFile(file, "");
+                }
+            }
+            FileOutputStream out = new FileOutputStream(file, true);
+            out.write(String.valueOf(value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            out.close();
+        } catch (Throwable ignored) {
+        }
     }
 
     private void collectBedrockStepWarning(JSONArray warnings, String label, JSONObject step) {
@@ -3015,10 +3235,8 @@ public class MainActivity extends Activity {
             writeTextFile(new File(base, "runtime-marker.json"), marker.toString());
             writeTextFile(new File(scripts, "README.txt"), "Scripts internos do Core Worker. Não cole tokens, IP privado ou segredos aqui.\n");
             writeCoreLinuxProvisionerFiles(base);
-            try {
-                coreLinuxInternalSnapshot("bootstrap");
-            } catch (Throwable ignored) {
-            }
+            // Não chamar Python/rootfs profundo aqui. Este método pode rodar na abertura do app,
+            // então só cria o esqueleto leve; diagnósticos profundos ficam sob ação explícita.
             coreLinuxPrepared = true;
             coreLinuxState = "core-linux-internal preparado";
             coreLinuxSummary = "Core Linux interno preparado · executor/rootfs/Box64 pendentes";
@@ -6209,6 +6427,8 @@ public class MainActivity extends Activity {
             try {
                 runnable.run();
             } catch (Throwable exc) {
+                appStatusLastError = shortThrowable(exc);
+                startupLog("runBusy:fail " + appStatusLastError);
                 show("Erro: " + exc.getClass().getSimpleName() + " · " + String.valueOf(exc.getMessage()));
             } finally {
                 runOnUiThread(() -> setButtonsEnabled(true));

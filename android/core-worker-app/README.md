@@ -1,3 +1,9 @@
+## Patch 85.4: Bedrock/rootfs sem travar a interface
+
+A versão `0.5.47` deixa o botão **Testar servidor** totalmente leve e local: ele não chama Python/Chaquopy, não toca JNI, não inicia serviço, não baixa nada e não tenta executar Bedrock. O teste agora apenas valida arquivos/estados locais de rootfs, executor, Box64, EULA e Bedrock, grava `files/core-linux/logs/bedrock-test.log` e `files/core-linux/logs/rootfs-check.log`, e retorna uma mensagem natural quando o runtime ainda não está pronto.
+
+Também evita alerta falso de **Permissões necessárias** na abertura: o card só aparece depois de uma pendência estável em verificações consecutivas, e some imediatamente quando todas as permissões estão ok. A preparação do Core Linux na abertura foi reduzida ao esqueleto leve; probes profundos de rootfs/Python ficam para ação explícita ou jobs permitidos.
+
 ## Patch 85.3: permissões reais e teste Bedrock protegido
 
 A versão `0.5.46` corrige dois pontos da etapa Rootfs/Bedrock: o card **Permissões necessárias** não nasce mais visível por padrão e só aparece depois da verificação real quando falta notificação, instalação de APK ou liberação de bateria; a tela principal continua acessível mesmo se alguma permissão estiver pendente. Também remove o retângulo vazio do card quando tudo está ok.
