@@ -42,8 +42,7 @@ PT_MONTHS = {
 
 DEFAULT_TEMPLATES: dict[str, str] = {
     "calendar": (
-        "# 🎂 Aniversários\n"
-        "Mande seu aniversário na thread abaixo.\n"
+        "# 🎂 Aniversários"
         "${birthdaycalendarblock}"
     ),
     "saved": "Prontinho, ${usermention}. Seu aniversário foi salvo como **${birthdaydate}** 🎂",
@@ -155,17 +154,24 @@ def _template_variable_hint(template_key: str) -> str:
     return "Variáveis compatíveis: " + rendered
 
 
-def _strip_empty_calendar_heading(text: str) -> str:
+def _clean_public_calendar_body(text: str) -> str:
     lines = str(text or "").splitlines()
     kept: list[str] = []
     for line in lines:
-        normalized = line.strip().casefold()
-        if "calend" in normalized and (normalized.startswith("#") or normalized.startswith("📅") or normalized.startswith("**📅")):
+        stripped = line.strip()
+        normalized = stripped.casefold()
+        if normalized == "mande seu aniversário na thread abaixo.":
+            continue
+        if "calend" in normalized and (
+            normalized.startswith("#")
+            or normalized.startswith("📅")
+            or normalized.startswith("**📅")
+        ):
             continue
         kept.append(line.rstrip())
     value = "\n".join(kept).strip()
     value = re.sub(r"\n{3,}", "\n\n", value)
-    return value
+    return value or "# 🎂 Aniversários"
 
 
 def _utcnow() -> datetime:
@@ -1377,7 +1383,7 @@ class BirthdayCog(commands.Cog):
             if idx and multiple_months:
                 lines.extend(["", "────────────────", ""])
             if multiple_months or not compact:
-                lines.append(f"📅 {PT_MONTHS.get(month, f'{month:02d}')}" )
+                lines.append(f"🗓️ {PT_MONTHS.get(month, f'{month:02d}')}" )
                 lines.append("")
             for entry in sorted(grouped[month], key=lambda e: (int(e.day), _display_sort_key(e.display_name))):
                 prefix = "" if compact else "• "
@@ -1409,7 +1415,7 @@ class BirthdayCog(commands.Cog):
         values["birthdaycalendarcompact"] = await self._render_calendar(guild, compact=True)
         values["birthdaycalendarnext10"] = await self._render_calendar(guild, limit=10)
         values["birthdaycalendarnext20"] = await self._render_calendar(guild, limit=20)
-        values["birthdaycalendarblock"] = f"\n\n## 📅 Calendário\n{values['birthdaycalendar']}" if entries else ""
+        values["birthdaycalendarblock"] = f"\n\n{values['birthdaycalendar']}" if entries else ""
         if entries:
             first = entries[0]
             values.update({
@@ -1425,8 +1431,7 @@ class BirthdayCog(commands.Cog):
         cfg = self._normalize_config(cfg or await self._get_config(int(guild.id)))
         values = await self._calendar_values(guild, cfg)
         body = _replace_vars(cfg["templates"].get("calendar") or DEFAULT_TEMPLATES["calendar"], values)
-        if not int(values.get("birthdaycount") or 0):
-            body = _strip_empty_calendar_heading(body)
+        body = _clean_public_calendar_body(body)
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(discord.ui.Container(
             discord.ui.TextDisplay(_trim(body)),
