@@ -1,3 +1,7 @@
+## Patch 85.1: abertura segura da MainActivity
+
+A versão `0.5.44` adiciona um guard de inicialização para impedir tela branca depois da entrada do Rootfs Manager. A MainActivity agora desenha uma tela segura imediatamente, adia rootfs/Python/probes para depois da primeira renderização, registra falhas em `files/core-linux/logs/app-startup.log` e mostra modo seguro com detalhe caso a UI principal falhe. O rootfs continua assistido e validável; Box64/Bedrock real ainda ficam para patches futuros.
+
 # Patch 85 — rootfs interno assistido
 
 A versão `0.5.43` adiciona o primeiro Rootfs Manager interno do APK. O app cria e valida um scaffold controlado em `files/core-linux/rootfs/`, com estado persistente em `runtime/rootfs-state.json`, manifesto local, staging separado e logs próprios.

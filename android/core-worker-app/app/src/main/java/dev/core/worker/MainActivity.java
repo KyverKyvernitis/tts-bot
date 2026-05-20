@@ -170,6 +170,8 @@ public class MainActivity extends Activity {
     private LinearLayout profileDetailsContent;
     private Button profileToggleButton;
     private boolean profileExpanded = false;
+    private volatile boolean fullStartupDone = false;
+    private volatile boolean startupFallbackVisible = false;
 
     private volatile boolean localAgentOnline = false;
     private volatile String localAgentVersion = "";
@@ -247,10 +249,42 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        migrateFcmSafetyStateForPatch52();
-        buildUi();
-        loadInputs();
+        startupLog("onCreate:start v" + APP_VERSION + " code=" + BuildConfig.VERSION_CODE);
+        try {
+            prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+            renderStartupFallbackUi(
+                    "Core Worker iniciando",
+                    "Abrindo tela segura antes de carregar runtime, rootfs, Python ou Bedrock.",
+                    false
+            );
+            mainHandler.postDelayed(this::completeStartupAfterFirstDraw, 80L);
+        } catch (Throwable exc) {
+            startupLog("onCreate:fatal-before-safe-ui " + fallbackThrowable(exc));
+            renderStartupFallbackUi("Core Worker abriu em modo seguro", fallbackThrowable(exc), true);
+        }
+    }
+
+    private void completeStartupAfterFirstDraw() {
+        startupLog("completeStartup:start");
+        try {
+            migrateFcmSafetyStateForPatch52();
+            buildUi();
+            loadInputs();
+            fullStartupDone = true;
+            startupFallbackVisible = false;
+            startupLog("completeStartup:ui-ready");
+            runActivityCreateStartupTasks();
+        } catch (Throwable exc) {
+            fullStartupDone = false;
+            startupFallbackVisible = true;
+            String detail = fallbackThrowable(exc);
+            appStatusLastError = detail;
+            startupLog("completeStartup:fallback " + detail);
+            renderStartupFallbackUi("Core Worker abriu em modo seguro", detail, true);
+        }
+    }
+
+    private void runActivityCreateStartupTasks() {
         safeStartupTask(() -> cleanupUpdateArtifacts(false, "app_start"));
         safeStartupTask(this::prepareInternalRuntimePreview);
         safeStartupTask(this::prepareNativeRuntimeState);
@@ -273,6 +307,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (!fullStartupDone) {
+            startupLog("onResume:waiting-full-startup fallback=" + startupFallbackVisible);
+            return;
+        }
         safeStartupTask(this::updatePermissionGate);
         safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "activity_resume"));
         safeStartupTask(this::autoVerifySavedPairing);
@@ -304,6 +342,91 @@ public class MainActivity extends Activity {
     private void safeStartupTask(SafeStartupRunnable runnable) {
         try {
             runnable.run();
+        } catch (Throwable exc) {
+            appStatusLastError = fallbackThrowable(exc);
+            startupLog("safeStartupTask:" + appStatusLastError);
+        }
+    }
+
+    private void startupLog(String message) {
+        try {
+            File dir = new File(getFilesDir(), "core-linux/logs");
+            if (!dir.exists()) dir.mkdirs();
+            File file = new File(dir, "app-startup.log");
+            String line = System.currentTimeMillis() + " " + String.valueOf(message == null ? "" : message) + "\n";
+            FileOutputStream out = new FileOutputStream(file, true);
+            out.write(line.getBytes(StandardCharsets.UTF_8));
+            out.close();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private String fallbackThrowable(Throwable err) {
+        if (err == null) return "erro desconhecido";
+        String msg = String.valueOf(err.getMessage() == null ? "" : err.getMessage()).trim();
+        String text = err.getClass().getSimpleName() + (msg.isEmpty() ? "" : ": " + msg);
+        return text.length() > 220 ? text.substring(0, 220) : text;
+    }
+
+    private void renderStartupFallbackUi(String titleText, String details, boolean error) {
+        try {
+            startupFallbackVisible = true;
+            LinearLayout root = new LinearLayout(this);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.setGravity(Gravity.CENTER_HORIZONTAL);
+            root.setPadding(dp(18), dp(24), dp(18), dp(18));
+            root.setBackgroundColor(BG);
+
+            TextView title = new TextView(this);
+            title.setText(titleText == null || titleText.trim().isEmpty() ? "Core Worker" : titleText);
+            title.setTextColor(TEXT);
+            title.setTextSize(26);
+            title.setTypeface(null, Typeface.BOLD);
+            title.setGravity(Gravity.CENTER);
+            root.addView(title, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+            ));
+
+            TextView body = new TextView(this);
+            StringBuilder text = new StringBuilder();
+            text.append(error ? "Modo seguro ativo. A tela principal foi protegida para não ficar branca.\n\n" : "Carregando tela principal com segurança.\n\n");
+            text.append("Versão: ").append(APP_VERSION).append(" (").append(BuildConfig.VERSION_CODE).append(")\n");
+            text.append("Runtime/rootfs: carregamento adiado até a interface estar pronta.\n");
+            if (details != null && !details.trim().isEmpty()) {
+                text.append("\nDetalhe: ").append(details.trim());
+            }
+            body.setText(text.toString());
+            body.setTextColor(error ? WARN : MUTED);
+            body.setTextSize(14);
+            body.setGravity(Gravity.CENTER);
+            body.setPadding(0, dp(12), 0, dp(18));
+            root.addView(body, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+            ));
+
+            Button retry = new Button(this);
+            retry.setText(error ? "Tentar abrir novamente" : "Abrir agora");
+            retry.setAllCaps(false);
+            retry.setOnClickListener(v -> completeStartupAfterFirstDraw());
+            root.addView(retry, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+            ));
+
+            TextView hint = new TextView(this);
+            hint.setText("Log local: files/core-linux/logs/app-startup.log");
+            hint.setTextColor(MUTED);
+            hint.setTextSize(12);
+            hint.setGravity(Gravity.CENTER);
+            hint.setPadding(0, dp(14), 0, 0);
+            root.addView(hint, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+            ));
+
+            setContentView(root);
         } catch (Throwable ignored) {
         }
     }
