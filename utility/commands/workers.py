@@ -59,6 +59,7 @@ CORE_WORKER_IMPORTANT_WAKE_TASKS = {
     "zip_validate",
     "maintenance_plan",
     "apk_build_debug",
+    "apk_publish_last",
     "vps_assist_probe",
     "endpoint_probe",
     "service_status",
@@ -120,7 +121,7 @@ WORKER_EDITABLE_FEATURES: tuple[dict[str, Any], ...] = (
     {"value": "log-summary", "label": "Logs", "description": "Resumo e leitura de logs", "emoji": "🧾", "roles": ("log-summary",), "capabilities": ("log-summary", "worker-logs"), "tasks": ("log_summary", "log_digest", "worker_logs", "text_stats")},
     {"value": "maintenance-plan", "label": "Manutenção", "description": "Plano seguro de limpeza/cache", "emoji": "🧹", "roles": ("maintenance-plan",), "capabilities": ("maintenance-plan", "cache-worker"), "tasks": ("maintenance_plan",)},
     {"value": "zip-validate", "label": "ZIP / patch", "description": "Validar e auditar ZIP", "emoji": "🧪", "roles": ("zip-validate",), "capabilities": ("zip-validate",), "tasks": ("zip_validate", "zip_audit")},
-    {"value": "apk-builder", "label": "APK builder", "description": "Compilar APK fora da VPS", "emoji": "🏗️", "roles": ("apk-builder",), "capabilities": ("apk-builder",), "tasks": ("apk_build_debug",)},
+    {"value": "apk-builder", "label": "APK builder", "description": "Compilar/publicar APK fora da VPS", "emoji": "🏗️", "roles": ("apk-builder",), "capabilities": ("apk-builder",), "tasks": ("apk_build_debug", "apk_publish_last")},
     {"value": "vps-assist", "label": "Ajudar VPS", "description": "Offload seguro quando disponível", "emoji": "🧠", "roles": ("vps-assist",), "capabilities": ("vps-assist", "hash-worker", "endpoint-probe"), "tasks": ("vps_assist_probe", "hash_batch", "endpoint_probe")},
     {"value": "ffmpeg", "label": "FFmpeg", "description": "Conversão de áudio curta", "emoji": "🎚️", "roles": ("ffmpeg",), "capabilities": ("ffmpeg", "audio-convert"), "tasks": ("ffmpeg_check", "audio_convert")},
     {"value": "ffprobe", "label": "FFprobe", "description": "Analisar mídia", "emoji": "🔎", "roles": ("ffprobe",), "capabilities": ("ffprobe", "media-probe"), "tasks": ("ffprobe_check", "media_probe")},
@@ -141,9 +142,11 @@ WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
     {"label": "Saúde", "value": "worker_self_check", "job_type": "worker_self_check", "payload": {}, "summary": "saúde completa pelo painel workers", "description": "Bateria, rede e sistema", "emoji": "🩺", "category": "quick"},
     {"label": "Atualizar agent", "value": "worker_update_quick", "job_type": "worker_update", "payload": {}, "summary": "atualizar arquivos do phone-worker", "description": "Corrige agent antigo", "emoji": "⬆️", "category": "quick"},
     {"label": "Buildar APK", "value": "apk_build_debug_quick", "job_type": "apk_build_debug", "payload": {"source_zip_url": "auto", "publish": True}, "summary": "compilar APK Core Worker em worker builder", "description": "Retry manual do APK", "emoji": "🏗️", "category": "quick"},
+    {"label": "Republicar APK", "value": "apk_publish_last_quick", "job_type": "apk_publish_last", "payload": {}, "summary": "republicar último APK Core Worker", "description": "Sem rebuild", "emoji": "📤", "category": "quick"},
     {"label": "Atualizar agent", "value": "worker_update", "job_type": "worker_update", "payload": {}, "summary": "atualizar arquivos do phone-worker", "description": "Atualiza e reinicia", "emoji": "⬆️", "requires_declared": True, "category": "maintenance"},
     {"label": "Reparar scripts", "value": "worker_repair_scripts", "job_type": "worker_update", "payload": {"scripts_only": True}, "summary": "reinstalar scripts auxiliares do worker", "description": "Reinstala scripts", "emoji": "🛠️", "requires_declared": True, "category": "maintenance"},
     {"label": "Buildar APK", "value": "apk_build_debug", "job_type": "apk_build_debug", "payload": {"source_zip_url": "auto", "publish": True}, "summary": "compilar APK Core Worker em worker builder", "description": "APK fora da VPS", "emoji": "🏗️", "requires_declared": True, "category": "maintenance"},
+    {"label": "Republicar APK", "value": "apk_publish_last", "job_type": "apk_publish_last", "payload": {}, "summary": "republicar último APK gerado", "description": "Só publicação", "emoji": "📤", "requires_declared": True, "category": "maintenance"},
     {"label": "Teste auxiliar", "value": "vps_assist_probe", "job_type": "vps_assist_probe", "payload": {}, "summary": "medir se este worker pode ajudar a VPS", "description": "Pronto para ajudar", "emoji": "🧠", "requires_declared": True, "category": "assist"},
     {"label": "Resumir logs VPS", "value": "vps_log_digest", "job_type": "log_digest", "payload": {"source": "vps_logs_auto"}, "summary": "resumir logs recentes da VPS em worker", "description": "Logs fora da VPS", "emoji": "🧾", "requires_declared": True, "category": "assist"},
     {"label": "Auditar patch ZIP", "value": "vps_zip_audit", "job_type": "zip_audit", "payload": {"source": "latest_update_zip"}, "summary": "auditar ZIP recente usando worker", "description": "Valida ZIP", "emoji": "🧪", "requires_declared": True, "category": "assist"},
@@ -2459,7 +2462,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             # quando o registry ainda mostra "nenhum celular pareado".
             legacy_direct = {
                 "ping", "status", "worker_self_check", "diagnostic_basic",
-                "worker_logs", "worker_update", "apk_build_debug",
+                "worker_logs", "worker_update", "apk_build_debug", "apk_publish_last",
                 "boot_status", "boot_repair", "service_status", "service_start",
                 "service_stop", "service_restart", "network_probe", "tailscale_status",
             }
@@ -3234,6 +3237,8 @@ class WorkersPanelView(discord.ui.LayoutView):
                 payload = await self.cog._build_worker_update_payload(scripts_only=bool((payload or {}).get("scripts_only")))
             elif task == "apk_build_debug":
                 payload = await self.cog._build_apk_builder_payload(payload or {})
+            elif task == "apk_publish_last":
+                payload = await self._build_assist_payload(job_type, payload or {})
             else:
                 payload = await self._build_assist_payload(job_type, payload or {})
 
@@ -3561,6 +3566,7 @@ class WorkersCommandMixin:
             "worker_logs",
             "worker_update",
             "apk_build_debug",
+            "apk_publish_last",
             "boot_status",
             "boot_repair",
             "service_status",
@@ -3837,7 +3843,7 @@ class WorkersCommandMixin:
     ) -> dict[str, Any]:
         registry = get_core_workers_registry()
         task = _task_name(job_type)
-        is_apk_build = task == "apk_build_debug"
+        is_apk_build = task in {"apk_build_debug", "apk_publish_last"}
         assist_tasks = {"vps_assist_probe", "hash_batch", "endpoint_probe", "media_probe", "audio_convert", "log_digest", "zip_audit", "maintenance_plan"}
         # Não use uma capacidade genérica como trava para todos os assist jobs.
         # O registry já valida supported_tasks/target. Isso evita oferecer uma ação

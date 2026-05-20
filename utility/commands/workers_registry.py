@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import threading
 import time
 from pathlib import Path
@@ -535,7 +536,7 @@ class CoreWorkersRegistry:
         substitui o pareamento normal do APK: só aceita tokens explicitamente
         configurados na VPS e usa o worker_id estável enviado pelo agent.
         """
-        if not _is_trusted_direct_worker_token(token):
+        if not _is_trusted_direct_worker_token(token, remote_addr=remote_addr):
             raise CoreWorkerRegistryError("worker não encontrado", status=404)
         worker_id = _safe_worker_id(payload.get("worker_id") or payload.get("id"))
         if not worker_id:
@@ -1217,7 +1218,12 @@ def _bearer_token(headers: Mapping[str, Any]) -> str:
 
 def _trusted_direct_worker_tokens() -> set[str]:
     tokens: set[str] = set()
-    for key in ("PHONE_WORKER_TOKEN", "CORE_WORKER_DIRECT_TOKEN", "CORE_WORKER_DIRECT_WORKER_TOKEN"):
+    for key in (
+        "PHONE_WORKER_TOKEN",
+        "CORE_WORKER_TOKEN",
+        "CORE_WORKER_DIRECT_TOKEN",
+        "CORE_WORKER_DIRECT_WORKER_TOKEN",
+    ):
         value = str(os.getenv(key) or "").strip()
         if value:
             tokens.add(value)
@@ -1228,11 +1234,60 @@ def _trusted_direct_worker_tokens() -> set[str]:
     return tokens
 
 
-def _is_trusted_direct_worker_token(token: str) -> bool:
+def _normalize_remote_addr(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if text.startswith("::ffff:"):
+        text = text.removeprefix("::ffff:")
+    if text.startswith("[") and "]" in text:
+        text = text[1:text.index("]")]
+    # Evita cortar IPv6 puro. Só remove porta de IPv4/host:porta.
+    if text.count(":") == 1 and text.rsplit(":", 1)[1].isdigit():
+        text = text.rsplit(":", 1)[0]
+    return text.strip()
+
+
+def _trusted_direct_worker_hosts() -> set[str]:
+    hosts: set[str] = set()
+    raw_values = [
+        os.getenv("PHONE_WORKER_HOST"),
+        os.getenv("CORE_WORKER_PHONE_HOST"),
+        os.getenv("PHONE_WORKER_DIRECT_HOST"),
+    ]
+    raw_values.extend((os.getenv("CORE_WORKER_DIRECT_WORKER_HOSTS") or "").replace(";", ",").split(","))
+    for raw in raw_values:
+        host = _normalize_remote_addr(raw)
+        if not host:
+            continue
+        hosts.add(host)
+        # Quando o usuário configurar hostname, tenta resolver uma vez. Falha de
+        # DNS não deve impedir a comparação pelo texto original.
+        if not re.match(r"^[0-9a-f:.]+$", host):
+            try:
+                hosts.add(_normalize_remote_addr(socket.gethostbyname(host)))
+            except Exception:
+                pass
+    return hosts
+
+
+def _is_trusted_direct_worker_token(token: str, *, remote_addr: str = "") -> bool:
     if not _env_bool("CORE_WORKER_DIRECT_AUTO_REGISTER", True):
         return False
     token = str(token or "").strip()
-    return bool(token and token in _trusted_direct_worker_tokens())
+    if not token:
+        return False
+    if token in _trusted_direct_worker_tokens():
+        return True
+    # Ponte de bootstrap: em instalações legadas o phone-worker direto pode ter
+    # CORE_WORKER_TOKEN antigo salvo localmente, enquanto a VPS só tem o host do
+    # worker direto em PHONE_WORKER_HOST. Permitir auto-registro por host evita
+    # que heartbeat/poll/result/publish fiquem presos em 404 e deixa a VPS enviar
+    # o próximo worker_update que normaliza o token. Desativável por env.
+    if not _env_bool("CORE_WORKER_DIRECT_AUTO_REGISTER_BY_HOST", True):
+        return False
+    remote = _normalize_remote_addr(remote_addr)
+    return bool(remote and remote in _trusted_direct_worker_hosts())
 
 
 def _retry_after_direct_autoregister(func, headers: Mapping[str, Any], payload: Mapping[str, Any], *, remote_addr: str = "") -> tuple[int, dict[str, Any]]:

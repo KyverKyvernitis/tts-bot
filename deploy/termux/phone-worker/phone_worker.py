@@ -43,7 +43,7 @@ _APK_BUILD_THREAD_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.8.6"
+PHONE_WORKER_VERSION = "1.8.7"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -74,6 +74,7 @@ SUPPORTED_DIRECT_TASKS = (
     "worker_self_check",
     "worker_update",
     "apk_build_debug",
+    "apk_publish_last",
     "vps_assist_probe",
     "hash_batch",
     "endpoint_probe",
@@ -106,6 +107,7 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "worker_self_check",
     "worker_update",
     "apk_build_debug",
+    "apk_publish_last",
     "vps_assist_probe",
     "hash_batch",
     "endpoint_probe",
@@ -3230,6 +3232,7 @@ def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str,
     apk_bytes = apk_path.read_bytes()
     parts = [
         field("worker_id", worker_id),
+        field("workerName", _default_worker_name()),
         field("filename", filename),
         field("versionName", version_name),
         field("versionCode", int(version_code or 0)),
@@ -3258,6 +3261,9 @@ def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str,
         data=body,
         headers={
             "Authorization": f"Bearer {token}",
+            "X-Core-Worker-ID": worker_id,
+            "X-Core-Worker-Version": PHONE_WORKER_VERSION,
+            "X-Phone-Worker-Token": token,
             "Content-Type": f"multipart/form-data; boundary={boundary}",
             "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}",
         },
@@ -3276,6 +3282,112 @@ def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str,
     except Exception as exc:
         _remember_core_worker_network_error(exc)
         raise
+
+
+def _latest_apk_artifact_metadata(build_root: Path) -> dict[str, Any]:
+    artifact_dir = build_root / "artifacts"
+    candidates: list[Path] = []
+    latest_meta = artifact_dir / "latest-artifact.json"
+    if latest_meta.is_file():
+        candidates.append(latest_meta)
+    if artifact_dir.is_dir():
+        candidates.extend(sorted(artifact_dir.glob("*.apk.json"), key=lambda path: path.stat().st_mtime, reverse=True))
+    for meta_path in candidates:
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8", errors="replace") or "{}")
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        apk_path = Path(str(data.get("artifact_path") or "")).expanduser()
+        if apk_path.is_file():
+            data["metadata_path"] = str(meta_path)
+            return data
+    if artifact_dir.is_dir():
+        for apk_path in sorted(artifact_dir.glob("*.apk"), key=lambda path: path.stat().st_mtime, reverse=True):
+            try:
+                raw = apk_path.read_bytes()
+            except Exception:
+                continue
+            name = apk_path.name
+            version = "0.0.0"
+            match = re.search(r"CoreWorker-v([0-9A-Za-z_.-]+)-", name)
+            if match:
+                version = match.group(1)
+            return {
+                "filename": name,
+                "versionName": version,
+                "versionCode": 0,
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "bytes": len(raw),
+                "artifact_path": str(apk_path),
+                "notificationId": f"apk-republish-{int(apk_path.stat().st_mtime)}",
+            }
+    return {}
+
+
+def _apply_apk_publish_last(payload: dict[str, Any]) -> dict[str, Any]:
+    roles, capabilities = _current_core_worker_roles_and_capabilities()
+    if "apk-builder" not in set(roles + capabilities):
+        raise PermissionError("este worker não tem função apk-builder")
+    build_root = Path(os.getenv("PHONE_WORKER_APK_BUILD_DIR") or (Path.home() / "core-worker-apk-builds")).expanduser()
+    requested = str(payload.get("artifact_path") or payload.get("apk_path") or "").strip()
+    meta: dict[str, Any] = {}
+    if requested:
+        apk_path = Path(requested).expanduser()
+        if apk_path.is_file():
+            raw = apk_path.read_bytes()
+            meta = {
+                "filename": apk_path.name,
+                "versionName": str(payload.get("versionName") or payload.get("version_name") or "0.0.0"),
+                "versionCode": int(payload.get("versionCode") or payload.get("version_code") or 0),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "bytes": len(raw),
+                "artifact_path": str(apk_path),
+                "sourceFingerprint": str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or ""),
+                "sourceSha256": str(payload.get("sourceSha256") or payload.get("source_sha256") or ""),
+                "notificationId": str(payload.get("notificationId") or payload.get("notification_id") or f"apk-republish-{int(time.time())}"),
+            }
+    if not meta:
+        meta = _latest_apk_artifact_metadata(build_root)
+    if not meta:
+        return {"ok": False, "summary": "nenhum APK persistente encontrado para republicar", "artifact_dir": str(build_root / "artifacts")}
+    apk_path = Path(str(meta.get("artifact_path") or "")).expanduser()
+    if not apk_path.is_file():
+        return {"ok": False, "summary": "artifact APK não existe mais", "artifact_path": str(apk_path)}
+    version_name = str(payload.get("versionName") or payload.get("version_name") or meta.get("versionName") or "0.0.0")
+    try:
+        version_code = int(payload.get("versionCode") or payload.get("version_code") or meta.get("versionCode") or 0)
+    except Exception:
+        version_code = 0
+    filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(payload.get("filename") or meta.get("filename") or apk_path.name)).strip("-._")
+    publish_url = str(payload.get("publish_url") or "").strip()
+    base_url, _token, _worker_id = _core_worker_auth_parts()
+    publish = _upload_core_worker_apk(
+        apk_path,
+        filename=filename,
+        version_name=version_name,
+        version_code=version_code,
+        sha256=str(meta.get("sha256") or hashlib.sha256(apk_path.read_bytes()).hexdigest()),
+        publish_url=publish_url or f"{base_url}/core-worker/app/publish",
+        changelog=list(payload.get("changelog") or ["APK republicado por worker builder"]),
+        source_sha256=str(payload.get("sourceSha256") or payload.get("source_sha256") or meta.get("sourceSha256") or ""),
+        source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or meta.get("sourceFingerprint") or ""),
+        notification_id=str(payload.get("notificationId") or payload.get("notification_id") or meta.get("notificationId") or f"apk-republish-{int(time.time())}"),
+        apk_signing_mode=str(payload.get("apkSigningMode") or meta.get("apkSigningMode") or "compat-vps-debug-keystore"),
+        apk_signing_keystore_sha256=str(payload.get("apkSigningKeystoreSha256") or meta.get("apkSigningKeystoreSha256") or ""),
+    )
+    return {
+        "ok": bool(publish.get("ok")),
+        "summary": "APK republicado na VPS" if publish.get("ok") else "APK persistente encontrado, mas publicação falhou",
+        "publish_ok": bool(publish.get("ok")),
+        "publish": publish,
+        "artifact_found": True,
+        "artifact_path": str(apk_path),
+        "versionName": version_name,
+        "versionCode": version_code,
+        "apk": {"filename": filename, "bytes": apk_path.stat().st_size, "sha256": str(meta.get("sha256") or ""), "artifact_path": str(apk_path)},
+    }
 
 
 def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
@@ -3517,6 +3629,23 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             shutil.copy2(apk_path, artifact_path)
         except Exception:
             artifact_path.write_bytes(raw)
+        artifact_meta = {
+            "filename": filename,
+            "versionName": version_name,
+            "versionCode": version_code,
+            "sha256": apk_sha,
+            "bytes": len(raw),
+            "artifact_path": str(artifact_path),
+            "sourceFingerprint": source_fingerprint,
+            "sourceSha256": str(download.get("sha256") or expected_source_sha or ""),
+            "notificationId": notification_id,
+            "apkSigningMode": str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
+            "apkSigningKeystoreSha256": str(apk_signing.get("keystore_sha256") or ""),
+            "created_at": time.time(),
+        }
+        with contextlib.suppress(Exception):
+            _write_json_file_atomic(artifact_path.with_suffix(artifact_path.suffix + ".json"), artifact_meta)
+            _write_json_file_atomic(artifact_dir / "latest-artifact.json", artifact_meta)
         result: dict[str, Any] = {
             "ok": True,
             "build_gradle_ok": True,
@@ -3882,6 +4011,9 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
         elif kind == "apk_build_debug":
             result = _apply_apk_build_debug(payload)
             result.setdefault("summary", "APK compilado/publicado pelo worker")
+        elif kind == "apk_publish_last":
+            result = _apply_apk_publish_last(payload)
+            result.setdefault("summary", "último APK republicado pelo worker")
         elif kind == "boot_status":
             result = _termux_boot_status_snapshot()
             result["shell_autostart"] = _termux_shell_autostart_status_snapshot()

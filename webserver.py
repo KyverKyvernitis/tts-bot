@@ -1736,7 +1736,16 @@ def core_worker_app_publish():
     from utility.commands.workers_registry import core_worker_authenticate_http
 
     form = request.form.to_dict(flat=True)
-    status, auth_body = core_worker_authenticate_http(request.headers, {"worker_id": form.get("worker_id") or request.headers.get("X-Core-Worker-ID") or ""}, remote_addr=request.remote_addr or "")
+    auth_payload = {
+        "worker_id": form.get("worker_id") or request.headers.get("X-Core-Worker-ID") or "",
+        "name": form.get("workerName") or form.get("worker_name") or "Core Phone Worker",
+        "version": form.get("requiredAgentVersion") or request.headers.get("X-Core-Worker-Version") or "",
+        "source": "apk-publish",
+        "roles": ["phone-worker", "apk-builder"],
+        "capabilities": ["phone-worker", "apk-builder"],
+        "supported_tasks": ["apk_build_debug", "worker_update", "worker_logs", "diagnostic_basic", "network_probe"],
+    }
+    status, auth_body = core_worker_authenticate_http(request.headers, auth_payload, remote_addr=request.remote_addr or "")
     if status != 200:
         return jsonify(auth_body), status
     worker = auth_body.get("worker") if isinstance(auth_body.get("worker"), dict) else {}

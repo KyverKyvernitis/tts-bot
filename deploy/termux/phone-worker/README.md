@@ -1,5 +1,9 @@
 # Phone Worker
 
+## Patch 84.5: bootstrap direto e republicação sem rebuild
+
+A versão `1.8.7` reforça o fluxo multi-worker direto: a VPS pode recuperar um phone-worker direto confiável por host configurado quando o token antigo ainda está salvo no Termux, evitando o ciclo de `worker não encontrado` em heartbeat/poll/result/publish. O builder também passa a registrar metadados do APK persistente e expõe `apk_publish_last`, permitindo republicar o último APK gerado sem recompilar quando só a publicação falhou.
+
 ## Patch 84.4: publicação do APK e multi-worker direto
 
 A versão `1.8.6` fecha o ciclo pós-build do APK: o APK gerado é copiado para `~/core-worker-apk-builds/artifacts/` antes de qualquer limpeza do workspace, o resultado separa build/artefato/publicação, e a VPS pode registrar automaticamente um phone-worker direto confiável quando ele usa o token local configurado. Isso evita o erro repetido `worker não encontrado` para heartbeat/poll/result/publish do builder direto e prepara o fluxo para vários workers com identidades estáveis.
