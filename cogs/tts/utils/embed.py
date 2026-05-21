@@ -5,6 +5,158 @@ def make_embed(title: str, description: str, *, ok: bool = True) -> discord.Embe
     return discord.Embed(title=title, description=description, color=discord.Color.green() if ok else discord.Color.red())
 
 
+def _clean_display_value(value: object, *, fallback: str = "Não definido") -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"none", "null"}:
+        return fallback
+    if text.startswith("`") and text.endswith("`"):
+        text = text[1:-1].strip()
+    return text or fallback
+
+
+def human_voice_name(value: object) -> str:
+    text = _clean_display_value(value)
+    if text == "Não definido":
+        return text
+    # pt-BR-FranciscaNeural -> Francisca
+    parts = [part for part in str(text).replace("_", "-").split("-") if part]
+    if len(parts) >= 3:
+        name = parts[-1]
+    else:
+        name = str(text)
+    for suffix in ("Neural", "Standard", "Wavenet"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+    return name or str(text)
+
+
+def human_language_name(value: object) -> str:
+    text = _clean_display_value(value)
+    aliases = {
+        "pt-br": "Português do Brasil",
+        "pt-BR": "Português do Brasil",
+        "pt": "Português",
+        "en": "Inglês",
+        "en-US": "Inglês",
+        "es": "Espanhol",
+        "fr": "Francês",
+        "ja": "Japonês",
+    }
+    return aliases.get(text, text)
+
+
+def human_rate(value: object) -> str:
+    text = _clean_display_value(value, fallback="normal")
+    lowered = text.lower()
+    if lowered in {"+0%", "0%", "0", "1", "1.0", "normal"}:
+        return "normal"
+    try:
+        numeric = float(str(text).replace("%", ""))
+        if abs(numeric) < 0.001 or abs(numeric - 1.0) < 0.001:
+            return "normal"
+        if "%" in str(text):
+            return "mais rápida" if numeric > 0 else "mais lenta"
+        return "mais rápida" if numeric > 1.0 else "mais lenta"
+    except Exception:
+        return text
+
+
+def human_pitch(value: object) -> str:
+    text = _clean_display_value(value, fallback="normal")
+    lowered = text.lower()
+    if lowered in {"+0hz", "0hz", "0", "0.0", "normal"}:
+        return "normal"
+    try:
+        numeric = float(str(text).lower().replace("hz", ""))
+        if abs(numeric) < 0.001:
+            return "normal"
+        return "mais agudo" if numeric > 0 else "mais grave"
+    except Exception:
+        return text
+
+
+def human_bool(value: object) -> str:
+    text = str(value or "").strip().lower().replace("`", "")
+    if text in {"ativado", "ativo", "true", "1", "sim", "on"}:
+        return "ligado"
+    if text in {"desativado", "inativo", "false", "0", "não", "nao", "off"}:
+        return "desligado"
+    return _clean_display_value(value, fallback="desligado")
+
+
+def _field_value(embed: discord.Embed, *names: str, default: str = "Não definido") -> str:
+    wanted = {name.lower() for name in names}
+    for field in getattr(embed, "fields", []) or []:
+        if str(getattr(field, "name", "") or "").lower() in wanted:
+            return _clean_display_value(getattr(field, "value", ""), fallback=default)
+    return default
+
+
+def _history_value(embed: discord.Embed) -> str:
+    value = _field_value(embed, "Últimas alterações", "🕘 Últimas alterações", default="")
+    return "" if value == "Não definido" else value
+
+
+def build_settings_panel_text_from_embed(embed: discord.Embed, *, server: bool) -> str:
+    """Renderiza o conteúdo principal do painel em texto para Components V2.
+
+    O embed ainda existe como fallback interno, mas o painel principal usa este texto
+    dentro de um Container/TextDisplay para ficar mais limpo no Discord.
+    """
+    title = _clean_display_value(getattr(embed, "title", ""), fallback="TTS do servidor" if server else "TTS")
+    description = _clean_display_value(getattr(embed, "description", ""), fallback="")
+    edge_voice = human_voice_name(_field_value(embed, "Voz do Edge"))
+    edge_rate = human_rate(_field_value(embed, "Velocidade do Edge", default="+0%"))
+    edge_pitch = human_pitch(_field_value(embed, "Tom do Edge", default="+0Hz"))
+    reading = edge_rate if edge_pitch == "normal" else f"{edge_rate} · tom {edge_pitch}"
+
+    lines: list[str] = [f"### {title}"]
+    if description:
+        lines.append(description)
+    lines.append("")
+
+    if server:
+        bot_prefix = _field_value(embed, "Prefixo do bot", default="_")
+        gtts_prefix = _field_value(embed, "Prefixo do modo gTTS", default=".")
+        edge_prefix = _field_value(embed, "Prefixo do modo Edge", default=",")
+        gcloud_prefix = _field_value(embed, "Prefixo do Google", default="'")
+        author = human_bool(_field_value(embed, "Autor antes da frase", default="Desativado"))
+        ignored_role = _field_value(embed, "Cargo ignorado", default="nenhum")
+        if ignored_role == "Não definido":
+            ignored_role = "nenhum"
+        lines.extend([
+            "**Voz padrão**",
+            edge_voice,
+            "",
+            "**Leitura padrão**",
+            reading,
+            "",
+            "**Prefixos**",
+            f"Bot {bot_prefix} · gTTS {gtts_prefix} · Edge {edge_prefix} · Google {gcloud_prefix}",
+            "",
+            "**Regras**",
+            f"Autor antes da frase: {author}\nCargo ignorado: {ignored_role}",
+        ])
+    else:
+        spoken_name = _field_value(embed, "Apelido falado", default="padrão")
+        lines.extend([
+            "**Voz**",
+            edge_voice,
+            "",
+            "**Leitura**",
+            reading,
+            "",
+            "**Apelido falado**",
+            spoken_name,
+        ])
+
+    history = _history_value(embed)
+    if history:
+        lines.extend(["", "**Últimas alterações**", history])
+
+    return "\n".join(lines).strip()
+
+
 def build_expired_panel_embed(*, slash_mention: str, prefix_hint: str) -> discord.Embed:
     return make_embed("Esse painel expirou", f"Use o comando de barra {slash_mention} ou prefixo {prefix_hint} para abrir outro painel.", ok=False)
 
@@ -105,7 +257,9 @@ def build_settings_embed(*, title: str, description: str, resolved: dict, guild_
         google_prefix = guild_defaults.get('gcloud_prefix', google_prefix_default)
         embed.add_field(name="Prefixo do Google", value=f"`{google_prefix}`", inline=True)
         embed.add_field(name="Autor antes da frase", value="`Ativado`" if bool(guild_defaults.get('announce_author', False)) else "`Desativado`", inline=True)
+        embed.add_field(name="Cargo ignorado", value=ignored_tts_role_text or "`Nenhum`", inline=True)
     if history_text:
         embed.add_field(name="Últimas alterações", value=history_text, inline=False)
-    embed.set_footer(text="Os ajustes de gTTS, Edge e Google Cloud ficam salvos no banco." if server or panel_kind == "toggle" else "As alterações desse painel ficam salvas para o usuário correspondente.")
+    embed.set_footer(text="Detalhes técnicos preservados para o painel avançado." if server else "Ajustes salvos para este usuário neste servidor.")
     return embed
+

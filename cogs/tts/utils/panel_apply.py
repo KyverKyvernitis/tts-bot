@@ -76,10 +76,11 @@ async def _apply_server_prefix_from_modal(
     edited = False
     try:
         if getattr(interaction, "message", None) is not None and getattr(interaction.message, "id", None) == getattr(panel_message, "id", None):
-            await interaction.response.edit_message(embed=embed, view=view)
+            content, edit_embed, edit_view = cog._prepare_panel_payload(embed=embed, view=view)
+            await interaction.response.edit_message(content=content, embed=edit_embed, view=edit_view)
             edited = True
         else:
-            await panel_message.edit(embed=embed, view=view)
+            await cog._edit_panel_message_payload(panel_message, embed=embed, view=view)
             edited = True
     except discord.NotFound:
         print("[tts_panel] painel antigo não existe mais; seguindo sem editar")

@@ -45,6 +45,9 @@ from .utils.embed import (
     build_toggle_embed,
     build_status_embed,
     build_settings_embed,
+    human_voice_name,
+    human_rate,
+    human_pitch,
     status_voice_channel_text,
     spoken_name_status_text,
 )
@@ -1036,18 +1039,62 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _quote_value(self, value: str) -> str:
         return f'"{value}"'
 
+    def _compact_history_text(self, rendered: str) -> str:
+        text = str(rendered or "").strip().replace("`", "")
+        if not text:
+            return ""
+
+        lowered = text.lower()
+        value = ""
+        if " para " in text:
+            value = text.rsplit(" para ", 1)[-1].strip().strip('"')
+
+        if "voz" in lowered:
+            return f"Voz: {human_voice_name(value)}" if value else "Voz atualizada"
+        if "tom" in lowered:
+            return f"Tom: {human_pitch(value)}" if value else "Tom atualizado"
+        if "velocidade" in lowered:
+            return f"Velocidade: {human_rate(value)}" if value else "Velocidade atualizada"
+        if "apelido" in lowered or "nome falado" in lowered:
+            return "Apelido atualizado" if value else "Apelido limpo"
+        if "prefixo" in lowered:
+            if "edge" in lowered:
+                label = "Prefixo Edge"
+            elif "google" in lowered or "gcloud" in lowered:
+                label = "Prefixo Google"
+            elif "gtts" in lowered:
+                label = "Prefixo gTTS"
+            elif "comandos" in lowered or "bot" in lowered:
+                label = "Prefixo do bot"
+            else:
+                label = "Prefixos"
+            return f"{label}: {value}" if value else f"{label} atualizado"
+        if "autor" in lowered:
+            return "Autor antes da frase: ligado" if any(x in lowered for x in ("ativ", "lig", "on", "true")) else "Autor antes da frase: desligado"
+        if "cargo ignorado" in lowered:
+            return f"Cargo ignorado: {value}" if value else "Cargo ignorado atualizado"
+        if "modo" in lowered:
+            return f"Modo: {value}" if value else "Modo atualizado"
+        if "google cloud" in lowered and "idioma" in lowered:
+            return f"Idioma Google: {value}" if value else "Idioma Google atualizado"
+        if "gtts" in lowered and "idioma" in lowered:
+            return f"Idioma gTTS: {value}" if value else "Idioma gTTS atualizado"
+
+        # Limpa as frases antigas, sem inventar informação.
+        text = re.sub(r"^Você(?: \([^)]*\))?\s+alterou\s+", "", text, flags=re.I)
+        text = re.sub(r"^.+?\s+alterou\s+", "", text, flags=re.I)
+        return text[:90]
+
     def _format_history_entries(self, entries: list[str], *, viewer_user_id: int | None = None, message_id: int | None = None) -> str:
         entries = [str(x) for x in (entries or []) if str(x or "").strip()]
         if not entries:
             return ""
         lines = []
-        for idx, entry in enumerate(entries):
+        for entry in entries[-3:]:
             rendered = self._render_history_entry(entry, viewer_user_id=viewer_user_id, message_id=message_id)
-            safe = rendered.replace("`", "'")
-            line = f"`{safe}`"
-            if idx == len(entries) - 1:
-                line = f"**{line}**"
-            lines.append(line)
+            safe = self._compact_history_text(rendered)
+            if safe:
+                lines.append(f"• {safe}")
         return "\n".join(lines)
 
     def _format_status_history_entries(self, entries: list[str], *, viewer_user_id: int | None = None) -> str:
@@ -1184,7 +1231,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         await self._delete_prefix_panel(message.guild.id, message.author.id, panel_kind)
 
-        sent = await message.channel.send(embed=embed, view=view)
+        content, send_embed, send_view = self._prepare_panel_payload(embed=embed, view=view)
+        sent = await message.channel.send(content=content, embed=send_embed, view=send_view)
         view.message = sent
         db = self._get_db()
         initial_history: list[str] = []
@@ -1336,6 +1384,45 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _make_embed(self, title: str, description: str, *, ok: bool = True) -> discord.Embed:
         return make_embed(title, description, ok=ok)
 
+    def _is_components_v2_panel_view(self, view: discord.ui.View | None) -> bool:
+        checker = getattr(view, "is_components_v2_panel", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+
+    def _prepare_panel_payload(
+        self,
+        *,
+        content: str | None = None,
+        embed: discord.Embed | None = None,
+        view: discord.ui.View | None = None,
+    ) -> tuple[str | None, discord.Embed | None, discord.ui.View | None]:
+        if self._is_components_v2_panel_view(view):
+            setter = getattr(view, "set_panel_embed", None)
+            if callable(setter):
+                try:
+                    setter(embed)
+                except Exception as e:
+                    print(f"[tts_panel] falha ao preparar payload v2: {e!r}")
+                    return content, embed, view
+            # Components V2 não deve ser enviado junto de embed/content tradicional.
+            return None, None, view
+        return content, embed, view
+
+    async def _edit_panel_message_payload(
+        self,
+        message: discord.Message,
+        *,
+        embed: discord.Embed | None = None,
+        view: discord.ui.View | None = None,
+        content: str | None = None,
+    ):
+        content, embed, view = self._prepare_panel_payload(content=content, embed=embed, view=view)
+        return await message.edit(content=content, embed=embed, view=view)
+
     async def _respond(
         self,
         interaction: discord.Interaction,
@@ -1345,6 +1432,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         view: discord.ui.View | None = None,
         ephemeral: bool = True,
     ):
+        content, embed, view = self._prepare_panel_payload(content=content, embed=embed, view=view)
         if interaction.response.is_done():
             response_type = getattr(interaction.response, "type", None)
             if response_type == discord.InteractionResponseType.deferred_channel_message:
@@ -2881,14 +2969,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         last_changes = self._resolve_last_changes(stored_changes=last_changes, message_id=message_id)
 
         if server:
-            title = "Painel de TTS do servidor"
-            description = "Use os botões abaixo para ajustar os padrões do servidor. gTTS, Edge e Google Cloud têm controles separados por prefixo."
+            title = "TTS do servidor"
+            description = "Padrões usados por quem ainda não configurou o próprio TTS."
         elif target_user_name and int(user_id or 0) != int(viewer_user_id or user_id or 0):
-            title = f"Painel de TTS de {target_user_name}"
-            description = f"Use os botões abaixo para alterar as configurações de {target_user_name}. gTTS, Edge e Google Cloud têm controles separados por prefixo."
+            title = f"TTS de {target_user_name}"
+            description = "Ajustes salvos para esse usuário."
         else:
-            title = "Painel de TTS"
-            description = "Use os botões abaixo para alterar as suas configurações. gTTS, Edge e Google Cloud têm controles separados por prefixo."
+            title = "TTS"
+            description = "Ajustes salvos só para você."
         member = self.bot.get_guild(guild_id).get_member(user_id) if (not server and self.bot.get_guild(guild_id)) else None
         spoken_name_text = None
         if not server:
@@ -2961,7 +3049,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             view = self._build_panel_view(0 if getattr(panel_message, "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id, server=True)
             view.message = panel_message
             try:
-                await panel_message.edit(embed=embed, view=view)
+                await self._edit_panel_message_payload(panel_message, embed=embed, view=view)
             except discord.NotFound:
                 pass
             except Exception as e:
@@ -3031,7 +3119,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             view = self._build_panel_view(0 if getattr(panel_message, "id", None) in self._public_panel_states else interaction.user.id, interaction.guild.id, server=True)
             view.message = panel_message
             try:
-                await panel_message.edit(embed=embed, view=view)
+                await self._edit_panel_message_payload(panel_message, embed=embed, view=view)
             except discord.NotFound:
                 pass
             except Exception as e:
@@ -3077,7 +3165,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 and getattr(current_interaction_message, "id", None) == getattr(message_to_edit, "id", None)
                 and not interaction.response.is_done()
             ):
-                await interaction.response.edit_message(embed=embed, view=view)
+                content, edit_embed, edit_view = self._prepare_panel_payload(embed=embed, view=view)
+                await interaction.response.edit_message(content=content, embed=edit_embed, view=edit_view)
                 edited = True
         except discord.NotFound as e:
             print(f"[tts_panel] falha ao editar via interaction.response.edit_message: {e!r}")
@@ -3088,7 +3177,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             try:
                 if not interaction.response.is_done():
                     await interaction.response.defer(ephemeral=True, thinking=False)
-                await message_to_edit.edit(embed=embed, view=view)
+                await self._edit_panel_message_payload(message_to_edit, embed=embed, view=view)
                 edited = True
             except discord.NotFound as e:
                 print(f"[tts_panel] painel alvo não existe mais via message.edit: {e!r}")
@@ -3097,7 +3186,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         if not edited and message_to_edit is not None:
             try:
-                await interaction.followup.edit_message(message_id=message_to_edit.id, embed=embed, view=view)
+                content, edit_embed, edit_view = self._prepare_panel_payload(embed=embed, view=view)
+                await interaction.followup.edit_message(message_id=message_to_edit.id, content=content, embed=edit_embed, view=edit_view)
                 edited = True
             except discord.NotFound as e:
                 print(f"[tts_panel] painel alvo não existe mais via followup.edit_message: {e!r}")
@@ -3109,9 +3199,11 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 if hasattr(view, "message"):
                     view.message = current_interaction_message
                 if not interaction.response.is_done():
-                    await interaction.response.edit_message(embed=embed, view=view)
+                    content, edit_embed, edit_view = self._prepare_panel_payload(embed=embed, view=view)
+                    await interaction.response.edit_message(content=content, embed=edit_embed, view=edit_view)
                 else:
-                    await interaction.followup.edit_message(message_id=current_interaction_message.id, embed=embed, view=view)
+                    content, edit_embed, edit_view = self._prepare_panel_payload(embed=embed, view=view)
+                    await interaction.followup.edit_message(message_id=current_interaction_message.id, content=content, embed=edit_embed, view=edit_view)
                 edited = True
             except discord.NotFound as e:
                 print(f"[tts_panel] falha ao editar a mensagem atual: {e!r}")
@@ -3121,15 +3213,19 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if not edited:
             try:
                 if not interaction.response.is_done():
+                    content, send_embed, send_view = self._prepare_panel_payload(embed=embed, view=view)
                     await interaction.response.send_message(
-                        embed=embed,
-                        view=view,
+                        content=content,
+                        embed=send_embed,
+                        view=send_view,
                         ephemeral=True,
                     )
                 else:
+                    content, send_embed, send_view = self._prepare_panel_payload(embed=embed, view=view)
                     await interaction.followup.send(
-                        embed=embed,
-                        view=view,
+                        content=content,
+                        embed=send_embed,
+                        view=send_view,
                         ephemeral=True,
                     )
             except Exception as e:
@@ -3369,7 +3465,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
         await self._delete_prefix_panel(message.guild.id, message.author.id, panel_kind)
 
-        sent = await message.channel.send(embed=embed, view=view)
+        content, send_embed, send_view = self._prepare_panel_payload(embed=embed, view=view)
+        sent = await message.channel.send(content=content, embed=send_embed, view=send_view)
         view.message = sent
         self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "history": [], "owner_id": message.author.id}
         self._active_prefix_panels[self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)] = sent
