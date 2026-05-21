@@ -1000,7 +1000,45 @@ def _make_modal_checkbox_group(custom_id: str, *, options: list[tuple[str, str, 
         return None
 
 
-def _top_edge_voice_options(cog: "TTSVoice", current: str = "") -> list[discord.SelectOption]:
+def _edge_language_from_voice(voice: str, default: str = "pt-BR") -> str:
+    voice = str(voice or "").strip()
+    parts = voice.split("-")
+    if len(parts) >= 2 and parts[0] and parts[1]:
+        return f"{parts[0]}-{parts[1]}"
+    return str(default or "pt-BR")
+
+
+def _edge_voice_matches_language(voice: str, language: str) -> bool:
+    voice = str(voice or "").strip()
+    language = str(language or "").strip()
+    return bool(voice and language and voice.startswith(language + "-"))
+
+
+def _edge_language_options(cog: "TTSVoice", current: str = "") -> list[discord.SelectOption]:
+    current = str(current or "pt-BR").strip() or "pt-BR"
+    preferred = [current, "pt-BR", "pt-PT", "en-US", "en-GB", "es-ES", "es-MX", "fr-FR", "de-DE", "it-IT", "ja-JP", "ko-KR", "zh-CN"]
+    discovered = sorted({
+        _edge_language_from_voice(v)
+        for v in list(getattr(cog, "edge_voice_cache", []) or []) + sorted(getattr(cog, "edge_voice_names", set()) or set())
+        if str(v or "").strip()
+    })
+    seen: set[str] = set()
+    options: list[discord.SelectOption] = []
+    for code in preferred + discovered:
+        code = str(code or "").strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        options.append(discord.SelectOption(label=_shorten(code, 100), description="Idioma Edge", value=code, default=(code == current)))
+        if len(options) >= 25:
+            break
+    return options or [discord.SelectOption(label="pt-BR", description="Idioma Edge", value="pt-BR", default=True)]
+
+
+def _edge_voice_options_for_language(cog: "TTSVoice", *, language: str, current: str = "") -> list[discord.SelectOption]:
+    language = str(language or _edge_language_from_voice(current)).strip() or "pt-BR"
+    current = str(current or "").strip()
+    voices_source = list(getattr(cog, "edge_voice_cache", []) or []) + sorted(getattr(cog, "edge_voice_names", set()) or set())
     preferred = [
         "pt-BR-FranciscaNeural",
         "pt-BR-AntonioNeural",
@@ -1018,22 +1056,49 @@ def _top_edge_voice_options(cog: "TTSVoice", current: str = "") -> list[discord.
         "pt-BR-ValerioNeural",
         "pt-BR-YaraNeural",
     ]
-    voices = []
-    seen = set()
-    if current:
-        preferred.insert(0, current)
-    for voice in preferred + list(cog.edge_voice_cache or []) + sorted(cog.edge_voice_names or []):
+    candidates: list[str] = []
+    if current and _edge_voice_matches_language(current, language):
+        candidates.append(current)
+    candidates.extend([v for v in preferred if _edge_voice_matches_language(v, language)])
+    candidates.extend([v for v in voices_source if _edge_voice_matches_language(str(v), language)])
+    seen: set[str] = set()
+    voices: list[str] = []
+    for voice in candidates:
         voice = str(voice or "").strip()
         if not voice or voice in seen:
             continue
-        if voice.startswith("pt-BR") or not voices:
-            seen.add(voice)
-            voices.append(voice)
+        seen.add(voice)
+        voices.append(voice)
         if len(voices) >= 25:
             break
+    if not voices and current:
+        voices = [current]
     if not voices:
-        voices = [current or "pt-BR-FranciscaNeural"]
-    return [discord.SelectOption(label=_shorten(v, 100), description="Voz Edge", value=v) for v in voices[:25]]
+        voices = ["pt-BR-FranciscaNeural"]
+    has_current = current and any(v == current for v in voices)
+    options: list[discord.SelectOption] = []
+    for idx, voice in enumerate(voices[:25]):
+        options.append(
+            discord.SelectOption(
+                label=_shorten(voice, 100),
+                description="Voz Edge",
+                value=voice,
+                default=(voice == current if has_current else idx == 0),
+            )
+        )
+    return options
+
+
+def _pick_first_edge_voice_for_language(cog: "TTSVoice", language: str, current: str = "") -> str:
+    options = _edge_voice_options_for_language(cog, language=language, current=current)
+    if not options:
+        return str(current or "pt-BR-FranciscaNeural")
+    return str(getattr(options[0], "value", None) or getattr(options[0], "label", None) or current or "pt-BR-FranciscaNeural")
+
+
+def _top_edge_voice_options(cog: "TTSVoice", current: str = "") -> list[discord.SelectOption]:
+    language = _edge_language_from_voice(current)
+    return _edge_voice_options_for_language(cog, language=language, current=current)
 
 
 def _top_gtts_language_options(cog: "TTSVoice", current: str = "") -> list[discord.SelectOption]:
@@ -1099,7 +1164,28 @@ def _gcloud_voice_options_for_language(cog: "TTSVoice", *, language: str, curren
             if len(options) >= 25:
                 break
 
-    return options[:25] or [discord.SelectOption(label=f"{language}-Standard-A", description="Voz Google", value=f"{language}-Standard-A")]
+    if not options:
+        options = [discord.SelectOption(label=f"{language}-Standard-A", description="Voz Google", value=f"{language}-Standard-A")]
+
+    current_matches = current and cog._gcloud_voice_matches_language(current, language)
+    seen_values = {str(getattr(opt, "value", "") or "") for opt in options}
+    if current_matches and current not in seen_values:
+        options.insert(0, discord.SelectOption(label=_shorten(current, 100), description="Voz Google", value=current))
+
+    has_default = False
+    for index, option in enumerate(options[:25]):
+        value = str(getattr(option, "value", "") or "")
+        try:
+            option.default = (value == current) if current_matches else (index == 0)
+            has_default = has_default or bool(option.default)
+        except Exception:
+            pass
+    if not has_default and options:
+        try:
+            options[0].default = True
+        except Exception:
+            pass
+    return options[:25]
 
 
 def _top_gcloud_voice_options(cog: "TTSVoice", current: str = "", language: str = "pt-BR") -> list[discord.SelectOption]:
@@ -1255,6 +1341,7 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
         user_id = int(target_user_id or 0)
         guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
         self.current_voice = _current_tts_value(cog, guild_id, user_id, "voice", str(getattr(config, "EDGE_TTS_VOICE", "pt-BR-FranciscaNeural") or "pt-BR-FranciscaNeural"), server=server)
+        self.current_language = _edge_language_from_voice(self.current_voice)
         self.current_rate = _current_tts_value(cog, guild_id, user_id, "rate", "+0%", server=server)
         self.current_pitch = _current_tts_value(cog, guild_id, user_id, "pitch", "+0Hz", server=server)
         if self.force_text_fallback or not self._build_guided_modal():
@@ -1264,12 +1351,24 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
         if not _modal_label_available():
             return False
         try:
+            language_select = _make_modal_select(
+                "edge_language",
+                placeholder="Idioma Edge",
+                options=_edge_language_options(self.cog, self.current_language),
+            )
             voice_select = _make_modal_select(
                 "edge_voice",
                 placeholder="Escolha a voz Edge",
-                options=_with_default_option(_top_edge_voice_options(self.cog, self.current_voice), self.current_voice),
+                options=_edge_voice_options_for_language(self.cog, language=self.current_language, current=self.current_voice),
             )
             ok = _add_modal_label_item(
+                self,
+                "language",
+                text="Idioma Edge",
+                description="",
+                component=language_select,
+            )
+            ok = ok and _add_modal_label_item(
                 self,
                 "voice",
                 text="Voz Edge",
@@ -1316,6 +1415,14 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
     def _build_text_fallback(self) -> None:
         _add_modal_text_input(
             self,
+            "language",
+            label="Idioma Edge",
+            placeholder="Ex.: pt-BR, en-US, es-ES",
+            current=self.current_language,
+            max_length=16,
+        )
+        _add_modal_text_input(
+            self,
             "voice",
             label="Voz Edge",
             placeholder="Voz usada com ,texto. Ex.: pt-BR-FranciscaNeural",
@@ -1344,14 +1451,33 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
         details: list[str] = []
         history_bits: list[str] = []
 
+        language = _single_component_value(getattr(self, "language", None), self.current_language)
+        selected_language = str(language or self.current_language or "pt-BR").strip() or "pt-BR"
         voice = _single_component_value(getattr(self, "voice", None), self.current_voice)
-        if voice and str(voice) != str(self.current_voice):
-            if voice not in self.cog.edge_voice_names and voice not in self.cog.edge_voice_cache:
+        selected_voice = str(voice or self.current_voice or "").strip()
+        adjusted_voice = ""
+        if selected_language and selected_voice and not _edge_voice_matches_language(selected_voice, selected_language):
+            adjusted_voice = _pick_first_edge_voice_for_language(self.cog, selected_language, self.current_voice)
+            selected_voice = adjusted_voice
+        if selected_voice and str(selected_voice) != str(self.current_voice):
+            if selected_voice not in self.cog.edge_voice_names and selected_voice not in self.cog.edge_voice_cache:
                 await interaction.response.send_message(embed=self.cog._make_embed("Voz inválida", "Essa voz Edge não foi encontrada.", ok=False), ephemeral=True)
                 return
-            updates["voice"] = voice
-            details.append(f"• Voz: {human_voice_name(voice)}")
-            history_bits.append(f"voz {human_voice_name(voice)}")
+            updates["voice"] = selected_voice
+            if selected_language != self.current_language and adjusted_voice:
+                details.append(f"• Idioma: {selected_language}")
+                details.append(f"• Voz ajustada: {human_voice_name(selected_voice)}")
+                history_bits.append("idioma e voz atualizados")
+            else:
+                details.append(f"• Voz: {human_voice_name(selected_voice)}")
+                history_bits.append(f"voz {human_voice_name(selected_voice)}")
+        elif selected_language != self.current_language:
+            picked_voice = _pick_first_edge_voice_for_language(self.cog, selected_language, self.current_voice)
+            if picked_voice and picked_voice != self.current_voice:
+                updates["voice"] = picked_voice
+                details.append(f"• Idioma: {selected_language}")
+                details.append(f"• Voz ajustada: {human_voice_name(picked_voice)}")
+                history_bits.append("idioma e voz atualizados")
 
         rate = _single_component_value(getattr(self, "rate", None), self.current_rate)
         if rate:
@@ -1377,14 +1503,17 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
                 details.append(f"• Tom: {human_pitch(normalized)}")
                 history_bits.append(f"tom {human_pitch(normalized)}")
 
-        if len(history_bits) == 1:
+        if len(history_bits) == 1 and history_bits[0] != "idioma e voz atualizados":
             key = history_bits[0].split(' ', 1)[0]
             article = {"voz": "a", "velocidade": "a", "tom": "o"}.get(key, "o")
             history_label = f"{article} {'própria ' if not self.server else ''}{key} do Edge"
             history_value = history_bits[0].split(' ', 1)[1] if ' ' in history_bits[0] else "atualizado"
         else:
             history_label = "o Edge" if self.server else "o próprio Edge"
-            history_value = "leitura atualizada" if updates and all(k in updates for k in ("rate", "pitch")) and "voice" not in updates else "configurações atualizadas"
+            if "idioma e voz atualizados" in history_bits:
+                history_value = "idioma e voz atualizados"
+            else:
+                history_value = "leitura atualizada" if updates and all(k in updates for k in ("rate", "pitch")) and "voice" not in updates else "configurações atualizadas"
 
         await _save_tts_modal_updates(
             self.cog,
@@ -1439,13 +1568,8 @@ class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
                 max_length=10,
                 required=False,
             )
-            ok = ok and _add_modal_label_item(
-                self,
-                "manual_language",
-                text="Outro idioma",
-                description="",
-                component=manual_input,
-            )
+            self.add_item(manual_input)
+            self.manual_language = manual_input
             return bool(ok)
         except Exception as e:
             print(f"[tts_modal] gTTS guiado falhou: {e!r}")
@@ -1921,7 +2045,7 @@ async def _send_settings_modal_with_fallback(interaction: discord.Interaction, g
 class TTSPublicLauncherSelect(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="Edge", description="Voz, velocidade e tom do Edge", value="edge", emoji="🔊"),
+            discord.SelectOption(label="Edge", description="Idioma, voz, velocidade e tom do Edge", value="edge", emoji="🔊"),
             discord.SelectOption(label="gTTS", description="Idioma do gTTS", value="gtts", emoji="🔤"),
             discord.SelectOption(label="Google", description="Idioma, voz e leitura Google", value="gcloud", emoji="☁️"),
             discord.SelectOption(label="Apelido", description="Nome que o bot fala por você", value="spoken_name", emoji="🪪"),
@@ -2603,7 +2727,7 @@ class TTSMainPanelSelect(discord.ui.Select):
         if self.server:
             options = [
                 discord.SelectOption(label="Prefixos", description="Símbolos do bot, Edge, gTTS e Google", value="prefixes", emoji="⌨️"),
-                discord.SelectOption(label="Edge", description="Voz e leitura Edge padrão do servidor", value="edge", emoji="🔊"),
+                discord.SelectOption(label="Edge", description="Idioma, voz e leitura Edge padrão do servidor", value="edge", emoji="🔊"),
                 discord.SelectOption(label="gTTS", description="Idioma gTTS padrão do servidor", value="gtts", emoji="🔤"),
                 discord.SelectOption(label="Google", description="Idioma, voz e leitura Google padrão", value="gcloud", emoji="☁️"),
                 discord.SelectOption(label="Regras", description="Autor antes da frase e cargo ignorado", value="rules", emoji="☑️"),
@@ -2611,7 +2735,7 @@ class TTSMainPanelSelect(discord.ui.Select):
             placeholder = "Escolha o ajuste do servidor"
         else:
             options = [
-                discord.SelectOption(label="Edge", description="Voz natural: voz, velocidade e tom", value="edge", emoji="🔊"),
+                discord.SelectOption(label="Edge", description="Voz natural: idioma, voz, velocidade e tom", value="edge", emoji="🔊"),
                 discord.SelectOption(label="gTTS", description="Voz simples: idioma usado no gTTS", value="gtts", emoji="🔤"),
                 discord.SelectOption(label="Google", description="Google Cloud: idioma, voz e leitura", value="gcloud", emoji="☁️"),
                 discord.SelectOption(label="Apelido", description="Nome que o bot fala por você", value="spoken_name", emoji="🪪"),
