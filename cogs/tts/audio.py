@@ -1322,6 +1322,31 @@ class TTSAudioMixin:
                     if response.status < 200 or response.status >= 300:
                         raise RuntimeError(f"HTTP {response.status}: {response_text[:260]}")
                     data = json.loads(response_text or "{}")
+            if isinstance(data, dict) and data.get("ok") is False:
+                total_ms = (time.monotonic() - started) * 1000.0
+                logs = data.get("logs") if isinstance(data.get("logs"), list) else []
+                clean_logs = [self._short_tts_benchmark_text(line, limit=160) for line in logs[:5]]
+                clean_logs.append(f"VPS recebeu resposta sem áudio; total real {total_ms:.1f} ms")
+                return {
+                    "ok": False,
+                    "engine": engine,
+                    "total_ms": round(total_ms, 2),
+                    "worker_total_ms": data.get("worker_total_ms"),
+                    "worker_synth_ms": data.get("worker_synth_ms"),
+                    "size": int(data.get("size") or 0),
+                    "error": self._short_tts_benchmark_text(str(data.get("error") or "worker retornou ok=false"), limit=260),
+                    "worker_profile": data.get("worker_profile"),
+                    "worker_version": data.get("worker_version"),
+                    "audio_format": data.get("audio_format"),
+                    "cache_hit": bool(data.get("cache_hit")),
+                    "cache_exists_before": bool(data.get("cache_exists_before")),
+                    "cache_mode": data.get("cache_mode"),
+                    "cache_key": data.get("cache_key"),
+                    "cache_file": data.get("cache_file"),
+                    "cache_read_ms": data.get("cache_read_ms"),
+                    "cache_stored": bool(data.get("cache_stored")),
+                    "logs": clean_logs,
+                }
             out_b64 = str(data.get("data_b64") or "")
             if not out_b64:
                 raise RuntimeError("worker não retornou data_b64")
@@ -1365,7 +1390,10 @@ class TTSAudioMixin:
                 "worker_version": data.get("worker_version"),
                 "audio_format": data.get("audio_format"),
                 "cache_hit": bool(data.get("cache_hit")),
+                "cache_exists_before": bool(data.get("cache_exists_before")),
+                "cache_mode": data.get("cache_mode"),
                 "cache_key": data.get("cache_key"),
+                "cache_file": data.get("cache_file"),
                 "cache_read_ms": data.get("cache_read_ms"),
                 "cache_stored": bool(data.get("cache_stored")),
                 "logs": clean_logs,
@@ -1386,24 +1414,28 @@ class TTSAudioMixin:
             return await self._tts_benchmark_worker_engine_once(item)
 
         miss = await self._tts_benchmark_worker_engine_once(item, cache_mode="refresh")
-        hit = await self._tts_benchmark_worker_engine_once(item, cache_mode="prefer")
+        hit = await self._tts_benchmark_worker_engine_once(item, cache_mode="cache_only")
         if not miss.get("ok"):
             return miss
-        if not hit.get("ok"):
+        hit_is_real = bool(hit.get("ok")) and bool(hit.get("cache_hit"))
+        if not hit_is_real:
             combined = dict(miss)
             combined["piper_cache_miss"] = miss
             combined["piper_cache_hit"] = hit
-            combined["logs"] = list(miss.get("logs") or [])[:3] + ["cache hit falhou: " + str(hit.get("error") or "erro sem detalhe")]
+            combined["piper_cache_hit_real"] = False
+            reason = hit.get("error") or "segunda chamada não retornou cache_hit=true"
+            combined["logs"] = list(miss.get("logs") or [])[:4] + ["cache hit inválido: " + str(reason)] + list(hit.get("logs") or [])[:3]
             return combined
         combined = dict(hit)
         combined["piper_cache_miss"] = miss
         combined["piper_cache_hit"] = hit
+        combined["piper_cache_hit_real"] = True
         combined["worker_synth_ms"] = miss.get("worker_synth_ms")
         combined["total_ms"] = hit.get("total_ms")
         logs = []
-        logs.extend(list(miss.get("logs") or [])[:2])
-        logs.extend(list(hit.get("logs") or [])[:3])
-        combined["logs"] = logs[:6]
+        logs.extend(list(miss.get("logs") or [])[:3])
+        logs.extend(list(hit.get("logs") or [])[:4])
+        combined["logs"] = logs[:7]
         return combined
 
     def _format_tts_benchmark_engine_block(self, engine: str, local: dict[str, Any], worker: dict[str, Any]) -> list[str]:
@@ -1415,8 +1447,11 @@ class TTSAudioMixin:
         if engine == "piper":
             miss = worker.get("piper_cache_miss") if isinstance(worker.get("piper_cache_miss"), dict) else None
             hit = worker.get("piper_cache_hit") if isinstance(worker.get("piper_cache_hit"), dict) else None
-            if worker_ok and hit and hit.get("ok"):
-                title = "Piper funcional · cache hit é o caminho rápido"
+            hit_real = bool(worker.get("piper_cache_hit_real")) or (bool(hit and hit.get("ok")) and bool(hit and hit.get("cache_hit")))
+            if hit_real:
+                title = "Piper funcional · cache hit real"
+            elif worker_ok and hit is not None:
+                title = "Piper funcional, mas cache hit falhou"
             elif worker_ok:
                 title = "Piper funcional, mas cache hit não foi medido"
             else:
@@ -1424,32 +1459,40 @@ class TTSAudioMixin:
             lines = [f"**piper** — {title}"]
             lines.append("VPS: indisponível · Piper experimental roda apenas no phone-worker turbo")
             if worker_ok:
+                miss_total = miss.get("total_ms") if miss else worker.get("total_ms")
+                miss_synth = miss.get("worker_synth_ms") if miss else worker.get("worker_synth_ms")
+                miss_size = int((miss or worker).get("size") or 0)
                 lines.append(
-                    f"Worker: ok · cache hit {self._format_tts_benchmark_ms(worker_total_ms)}"
-                    + (f" · geração/miss {self._format_tts_benchmark_ms(worker_synth_ms)}" if worker_synth_ms is not None else "")
-                    + f" · {int(worker.get('size') or 0)} B"
+                    f"Worker geração/miss: ok · total {self._format_tts_benchmark_ms(miss_total)}"
+                    + (f" · synth {self._format_tts_benchmark_ms(miss_synth)}" if miss_synth is not None else "")
+                    + f" · {miss_size} B"
                 )
-                if miss or hit:
-                    miss_total = miss.get("total_ms") if miss else None
-                    miss_synth = miss.get("worker_synth_ms") if miss else None
-                    hit_total = hit.get("total_ms") if hit else None
-                    hit_read = hit.get("cache_read_ms") if hit else None
-                    lines.append(
-                        "Cache: "
-                        f"miss/geração {self._format_tts_benchmark_ms(miss_total)}"
-                        + (f" (synth {self._format_tts_benchmark_ms(miss_synth)})" if miss_synth is not None else "")
-                        + f" · hit {self._format_tts_benchmark_ms(hit_total)}"
-                        + (f" (read {self._format_tts_benchmark_ms(hit_read)})" if hit_read is not None else "")
-                    )
+                if hit is not None:
+                    hit_total = hit.get("total_ms")
+                    hit_read = hit.get("cache_read_ms")
+                    hit_size = int(hit.get("size") or 0)
+                    if hit_real:
+                        lines.append(
+                            f"Worker cache hit: ok · total {self._format_tts_benchmark_ms(hit_total)}"
+                            + (f" · read {self._format_tts_benchmark_ms(hit_read)}" if hit_read is not None else "")
+                            + f" · {hit_size} B"
+                            + (f" · key `{hit.get('cache_key')}`" if hit.get("cache_key") else "")
+                        )
+                    else:
+                        lines.append(
+                            f"Worker cache hit: falhou/ inválido · total {self._format_tts_benchmark_ms(hit_total)}"
+                            + f" · {hit.get('error') or 'cache_hit não confirmado'}"
+                            + (f" · key `{hit.get('cache_key')}`" if hit.get("cache_key") else "")
+                        )
             else:
                 lines.append(f"Worker: falhou · total {self._format_tts_benchmark_ms(worker_total_ms)} · {worker.get('error') or 'erro sem detalhe'}")
             logs: list[str] = []
             for source, data in (("Worker", worker),):
                 raw_logs = data.get("logs") if isinstance(data.get("logs"), list) else []
-                for entry in raw_logs[:4]:
+                for entry in raw_logs[:6]:
                     logs.append(f"{source}: {self._short_tts_benchmark_text(entry, limit=120)}")
             if logs:
-                lines.append("Logs curtas: " + " | ".join(logs[:4]))
+                lines.append("Logs curtas: " + " | ".join(logs[:6]))
             return lines
 
         if local_ok and worker_ok:
@@ -1512,12 +1555,17 @@ class TTSAudioMixin:
                     local_wins += 1
         piper_hit_ms = None
         piper_miss_ms = None
+        piper_hit_real = False
+        piper_cache_error = ""
         for engine, _, worker in results:
-            if engine == "piper" and worker.get("ok"):
+            if engine == "piper" and (worker.get("ok") or worker.get("piper_cache_miss") or worker.get("piper_cache_hit")):
                 hit = worker.get("piper_cache_hit") if isinstance(worker.get("piper_cache_hit"), dict) else None
                 miss = worker.get("piper_cache_miss") if isinstance(worker.get("piper_cache_miss"), dict) else None
-                piper_hit_ms = hit.get("total_ms") if hit else worker.get("total_ms")
+                piper_hit_real = bool(worker.get("piper_cache_hit_real")) or (bool(hit and hit.get("ok")) and bool(hit and hit.get("cache_hit")))
+                piper_hit_ms = hit.get("total_ms") if hit else None
                 piper_miss_ms = miss.get("total_ms") if miss else worker.get("worker_synth_ms")
+                if hit and not piper_hit_real:
+                    piper_cache_error = str(hit.get("error") or "cache_hit não confirmado")
                 break
 
         if good_comparisons <= 0:
@@ -1528,8 +1576,12 @@ class TTSAudioMixin:
             verdict = "worker turbo ganhou só em uma engine; ainda não dá para usar em TTS real."
         else:
             verdict = "VPS foi igual ou melhor em edge/gtts; worker deve continuar opcional."
-        if piper_hit_ms is not None:
-            verdict += f" Piper: miss {self._format_tts_benchmark_ms(piper_miss_ms)}; cache hit {self._format_tts_benchmark_ms(piper_hit_ms)} — recomendado apenas quando cacheado."
+        if piper_miss_ms is not None:
+            if piper_hit_real and piper_hit_ms is not None:
+                verdict += f" Piper: miss {self._format_tts_benchmark_ms(piper_miss_ms)}; cache hit real {self._format_tts_benchmark_ms(piper_hit_ms)} — recomendado quando cacheado."
+            else:
+                detail = f" ({self._short_tts_benchmark_text(piper_cache_error, limit=90)})" if piper_cache_error else ""
+                verdict += f" Piper: miss {self._format_tts_benchmark_ms(piper_miss_ms)}; cache hit ainda não validado{detail}."
 
         header = [
             "🧪 **Benchmark TTS Worker Turbo**",
