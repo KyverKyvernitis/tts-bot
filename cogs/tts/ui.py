@@ -872,9 +872,10 @@ class _BaseTTSLayoutView(_TTS_LAYOUT_VIEW_CLS):
 
 
 class TTSPublicLauncherView(_BaseTTSLayoutView):
-    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, timeout: float = 300):
+    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, timeout: float = 300, history_text: str = ""):
         super().__init__(cog, owner_id, guild_id, timeout=timeout)
         self.panel_kind = "launcher"
+        self.history_text = str(history_text or "").strip()
         self._rebuild_items()
 
     def is_components_v2_panel(self) -> bool:
@@ -887,18 +888,25 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
         )
 
     def _launcher_text(self) -> str:
-        return (
-            "### TTS\n"
-            "Painel público. Cada pessoa abre os próprios ajustes.\n\n"
-            "**Como funciona**\n"
-            "Cada prefixo usa um modo de TTS diferente.\n\n"
-            "**Edge**\n"
-            "Voz natural. Exemplo: `,texto`\n\n"
-            "**gTTS**\n"
-            "Voz simples. Exemplo: `.texto`\n\n"
-            "**Google**\n"
-            "Google Cloud. Exemplo: `'texto`"
-        )
+        lines = [
+            "### TTS",
+            "Abra seus ajustes abaixo. O painel é público, mas cada pessoa altera só o próprio TTS.",
+            "",
+            "**Como funciona**",
+            "Cada prefixo escolhe um modo de voz.",
+            "",
+            "**Edge**",
+            "Voz natural. Use: `,texto`",
+            "",
+            "**gTTS**",
+            "Voz simples. Use: `.texto`",
+            "",
+            "**Google**",
+            "Google Cloud. Use: `'texto`",
+        ]
+        if self.history_text:
+            lines.extend(["", "**Últimas alterações**", self.history_text])
+        return "\n".join(lines).strip()
 
     def _make_button(self, label: str, callback: Callable[[discord.Interaction], object], *, emoji: str | None = None, style: discord.ButtonStyle = discord.ButtonStyle.secondary) -> discord.ui.Button:
         button = discord.ui.Button(label=label, emoji=emoji, style=style)
@@ -932,8 +940,6 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
             pass
 
         my_tts = self._make_button("Meu TTS", self._open_my_tts, emoji="🗣️", style=discord.ButtonStyle.primary)
-        server = self._make_button("TTS do servidor", self._open_server_tts, emoji="🛠️")
-        help_button = self._make_button("Ajuda", self._open_help, emoji="❔")
 
         if self.is_components_v2_panel():
             container = discord.ui.Container(discord.ui.TextDisplay(self._launcher_text()), accent_color=discord.Color.blurple())
@@ -941,12 +947,11 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
                 container.add_item(discord.ui.Separator(visible=True))
             except TypeError:
                 container.add_item(discord.ui.Separator())
-            self._add_control_row(container, my_tts, server, help_button)
+            self._add_control_row(container, my_tts)
             self.add_item(container)
             return
 
-        for button in (my_tts, server, help_button):
-            self.add_item(button)
+        self.add_item(my_tts)
 
     async def _open_my_tts(self, interaction: discord.Interaction):
         if interaction.guild is None:
@@ -1087,15 +1092,7 @@ class TTSModeActionsView(_BaseTTSView):
             self.clear_items()
         except Exception:
             pass
-        if self.mode == "edge":
-            self.add_item(self._make_button("Voz Edge", self._open_edge_voice, emoji="🎙️", row=0))
-            self.add_item(self._make_button("Leitura Edge", self._open_edge_reading, emoji="🎚️", row=0))
-        elif self.mode == "gtts":
-            self.add_item(self._make_button("Idioma gTTS", self._open_gtts_language, emoji="🌐", row=0))
-        else:
-            self.add_item(self._make_button("Idioma Google", self._open_google_language, emoji="☁️", row=0))
-            self.add_item(self._make_button("Voz Google", self._open_google_voice, emoji="🎙️", row=0))
-            self.add_item(self._make_button("Leitura Google", self._open_google_reading, emoji="🎚️", row=0))
+        self.add_item(TTSModeActionSelect(self.mode))
         self.add_item(self._make_button("Voltar", self._back_to_main_panel, emoji="⬅️", row=1))
 
     def _prefix_for_mode(self) -> str:
@@ -1112,10 +1109,10 @@ class TTSModeActionsView(_BaseTTSView):
         prefix = self._prefix_for_mode()
         target = "do servidor" if self.server else "seus"
         if self.mode == "edge":
-            return "Edge", f"Usado quando a mensagem começa com `{prefix}texto`. Altere a voz Edge e a leitura Edge {target}."
+            return "Edge", f"Usado quando a mensagem começa com `{prefix}texto`. Escolha no menu o que quer mudar."
         if self.mode == "gtts":
-            return "gTTS", f"Usado quando a mensagem começa com `{prefix}texto`. Altere o idioma gTTS {target}."
-        return "Google", f"Usado quando a mensagem começa com `{prefix}texto`. Altere idioma, voz e leitura Google {target}."
+            return "gTTS", f"Usado quando a mensagem começa com `{prefix}texto`. Escolha no menu o que quer mudar."
+        return "Google", f"Usado quando a mensagem começa com `{prefix}texto`. Escolha no menu o que quer mudar."
 
     async def send(self, interaction: discord.Interaction):
         title, description = self._mode_title_description()
@@ -1414,6 +1411,97 @@ class TTSAdvancedActionsView(_BaseTTSView):
         )
 
 
+class TTSMainPanelSelect(discord.ui.Select):
+    def __init__(self, *, server: bool):
+        self.server = bool(server)
+        if self.server:
+            options = [
+                discord.SelectOption(label="Prefixos", description="Símbolos do bot, Edge, gTTS e Google", value="prefixes", emoji="⌨️"),
+                discord.SelectOption(label="Edge", description="Voz e leitura Edge padrão do servidor", value="edge", emoji="🔊"),
+                discord.SelectOption(label="gTTS", description="Idioma gTTS padrão do servidor", value="gtts", emoji="🔤"),
+                discord.SelectOption(label="Google", description="Idioma, voz e leitura Google padrão", value="gcloud", emoji="☁️"),
+                discord.SelectOption(label="Regras", description="Autor antes da frase e cargo ignorado", value="rules", emoji="☑️"),
+                discord.SelectOption(label="Mais opções", description="Modo de TTS e ajustes menos usados", value="advanced", emoji="⚙️"),
+            ]
+            placeholder = "Escolha o ajuste do servidor"
+        else:
+            options = [
+                discord.SelectOption(label="Edge", description="Voz natural: voz, velocidade e tom", value="edge", emoji="🔊"),
+                discord.SelectOption(label="gTTS", description="Voz simples: idioma usado no gTTS", value="gtts", emoji="🔤"),
+                discord.SelectOption(label="Google", description="Google Cloud: idioma, voz e leitura", value="gcloud", emoji="☁️"),
+                discord.SelectOption(label="Apelido", description="Nome que o bot fala por você", value="spoken_name", emoji="🪪"),
+                discord.SelectOption(label="Mais opções", description="Modo de TTS e ajustes menos usados", value="advanced", emoji="⚙️"),
+            ]
+            placeholder = "Escolha o que editar"
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = getattr(self, "view", None)
+        if panel is None:
+            await interaction.response.send_message("Esse painel não está disponível agora.", ephemeral=True)
+            return
+        value = self.values[0]
+        if value == "edge":
+            await panel._open_edge_panel(interaction)
+        elif value == "gtts":
+            await panel._open_gtts_panel(interaction)
+        elif value == "gcloud":
+            await panel._open_google_panel(interaction)
+        elif value == "spoken_name":
+            await panel._open_spoken_name_modal(interaction)
+        elif value == "prefixes":
+            await panel._open_prefixes_panel(interaction)
+        elif value == "rules":
+            await panel._open_rules_panel(interaction)
+        else:
+            await panel._open_advanced_panel(interaction)
+
+
+class TTSModeActionSelect(discord.ui.Select):
+    def __init__(self, mode: str):
+        self.mode = str(mode or "edge")
+        if self.mode == "edge":
+            options = [
+                discord.SelectOption(label="Voz Edge", description="Escolhe a voz usada no prefixo Edge", value="edge_voice", emoji="🎙️"),
+                discord.SelectOption(label="Leitura Edge", description="Velocidade e tom do Edge", value="edge_reading", emoji="🎚️"),
+            ]
+            placeholder = "Editar Edge"
+        elif self.mode == "gtts":
+            options = [
+                discord.SelectOption(label="Idioma gTTS", description="Idioma usado no prefixo gTTS", value="gtts_language", emoji="🌐"),
+            ]
+            placeholder = "Editar gTTS"
+        else:
+            options = [
+                discord.SelectOption(label="Idioma Google", description="Idioma da voz Google", value="google_language", emoji="☁️"),
+                discord.SelectOption(label="Voz Google", description="Voz do Google Cloud", value="google_voice", emoji="🎙️"),
+                discord.SelectOption(label="Leitura Google", description="Velocidade e tom do Google", value="google_reading", emoji="🎚️"),
+            ]
+            placeholder = "Editar Google"
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        panel = getattr(self, "view", None)
+        if panel is None:
+            await interaction.response.send_message("Esse painel não está disponível agora.", ephemeral=True)
+            return
+        value = self.values[0]
+        if value == "edge_voice":
+            await panel._open_edge_voice(interaction)
+        elif value == "edge_reading":
+            await panel._open_edge_reading(interaction)
+        elif value == "gtts_language":
+            await panel._open_gtts_language(interaction)
+        elif value == "google_language":
+            await panel._open_google_language(interaction)
+        elif value == "google_voice":
+            await panel._open_google_voice(interaction)
+        elif value == "google_reading":
+            await panel._open_google_reading(interaction)
+        else:
+            await interaction.response.send_message("Opção indisponível.", ephemeral=True)
+
+
 class TTSMainPanelView(_BaseTTSLayoutView):
     def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180, target_user_id: int | None = None, target_user_name: str | None = None):
         super().__init__(cog, owner_id, guild_id, timeout=timeout, target_user_id=target_user_id, target_user_name=target_user_name)
@@ -1489,44 +1577,14 @@ class TTSMainPanelView(_BaseTTSLayoutView):
             except TypeError:
                 container.add_item(discord.ui.Separator())
 
-            self._add_control_row(
-                container,
-                self._make_button("Edge", self._open_edge_panel, emoji="🔊"),
-                self._make_button("gTTS", self._open_gtts_panel, emoji="🔤"),
-                self._make_button("Google", self._open_google_panel, emoji="☁️"),
-            )
-            if self.server:
-                self._add_control_row(
-                    container,
-                    self._make_button("Prefixos", self._open_prefixes_panel, emoji="⌨️"),
-                    self._make_button("Regras", self._open_rules_panel, emoji="☑️"),
-                    self._make_button("Mais opções", self._open_advanced_panel, emoji="⚙️"),
-                )
-            else:
-                self._add_control_row(
-                    container,
-                    self._make_button("Apelido", self._open_spoken_name_modal, emoji="🪪"),
-                    self._make_button("Mais opções", self._open_advanced_panel, emoji="⚙️"),
-                )
+            row = discord.ui.ActionRow()
+            row.add_item(TTSMainPanelSelect(server=self.server))
+            container.add_item(row)
             self.add_item(container)
             return
 
         # Fallback se a lib em produção ainda não tiver LayoutView/Components V2.
-        base_buttons = (
-            self._make_button("Edge", self._open_edge_panel, emoji="🔊"),
-            self._make_button("gTTS", self._open_gtts_panel, emoji="🔤"),
-            self._make_button("Google", self._open_google_panel, emoji="☁️"),
-        )
-        extra_buttons = (
-            self._make_button("Prefixos", self._open_prefixes_panel, emoji="⌨️"),
-            self._make_button("Regras", self._open_rules_panel, emoji="☑️"),
-            self._make_button("Mais opções", self._open_advanced_panel, emoji="⚙️"),
-        ) if self.server else (
-            self._make_button("Apelido", self._open_spoken_name_modal, emoji="🪪"),
-            self._make_button("Mais opções", self._open_advanced_panel, emoji="⚙️"),
-        )
-        for button in (*base_buttons, *extra_buttons):
-            self.add_item(button)
+        self.add_item(TTSMainPanelSelect(server=self.server))
 
     async def _open_mode_panel(self, interaction: discord.Interaction, mode: str):
         print(f"[tts_panel] mode_button | mode={mode} user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")

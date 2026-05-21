@@ -2489,8 +2489,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _build_panel_view(self, owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180, target_user_id: int | None = None, target_user_name: str | None = None) -> discord.ui.View:
         return TTSMainPanelView(self, owner_id, guild_id, server=server, timeout=timeout, target_user_id=target_user_id, target_user_name=target_user_name)
 
-    def _build_public_tts_launcher_view(self, guild_id: int, *, timeout: float = 300) -> discord.ui.View:
-        return TTSPublicLauncherView(self, 0, guild_id, timeout=timeout)
+    def _build_public_tts_launcher_view(self, guild_id: int, *, timeout: float = 300, history_text: str = "") -> discord.ui.View:
+        return TTSPublicLauncherView(self, 0, guild_id, timeout=timeout, history_text=history_text)
 
     def _member_panel_name(self, member: discord.abc.User | None) -> str:
         if member is None:
@@ -3457,6 +3457,19 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         panel_kind = "user"
+        initial_history: list[str] = []
+        db = self._get_db()
+        if db and hasattr(db, "get_panel_history"):
+            panel_history = await self._maybe_await(db.get_panel_history(message.guild.id, message.author.id))
+            if panel_type == "server":
+                initial_history = list((panel_history or {}).get("server_last_changes", []) or [])
+            elif panel_type == "toggle":
+                initial_history = list((panel_history or {}).get("toggle_last_changes", []) or [])
+            else:
+                # O painel normal é público. Aqui entram só alterações globais do servidor,
+                # nunca histórico pessoal do autor do comando.
+                initial_history = list((panel_history or {}).get("server_last_changes", []) or [])
+
         if panel_type == "server":
             panel_kind = "server"
             if not message.author.guild_permissions.kick_members:
@@ -3472,6 +3485,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 message.author.id,
                 server=True,
                 panel_kind="server",
+                last_changes=initial_history,
             )
             view = self._build_panel_view(0, message.guild.id, server=True, timeout=300)
         elif panel_type == "toggle":
@@ -3492,12 +3506,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             view = self._build_toggle_view(0, message.guild.id, timeout=300)
         else:
             panel_kind = "launcher"
+            history_text = self._format_history_entries(initial_history, viewer_user_id=None, message_id=None)
             embed = self._make_embed(
                 "TTS",
-                "Painel público. Cada pessoa abre os próprios ajustes pelos botões.",
+                "Abra seus ajustes. O painel é público, mas cada pessoa altera só o próprio TTS.",
                 ok=True,
             )
-            view = self._build_public_tts_launcher_view(message.guild.id, timeout=300)
+            view = self._build_public_tts_launcher_view(message.guild.id, timeout=300, history_text=history_text)
 
         if await self._check_prefix_panel_cooldown(message, panel_kind):
             return
@@ -3507,7 +3522,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         content, send_embed, send_view = self._prepare_panel_payload(embed=embed, view=view)
         sent = await message.channel.send(content=content, embed=send_embed, view=send_view)
         view.message = sent
-        self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "history": [], "owner_id": message.author.id}
+        self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "history": self._merge_history_entries(initial_history), "owner_id": message.author.id}
         self._active_prefix_panels[self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)] = sent
 
     async def _leave_from_panel(self, interaction: discord.Interaction):
