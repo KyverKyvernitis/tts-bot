@@ -43,6 +43,9 @@ public class CoreWorkerBedrockService extends Service {
     private static final int NOTIFICATION_ID = 4108;
     private static final long TICK_MS = 15L * 1000L;
     private static final long LOG_LIMIT_BYTES = 512L * 1024L;
+    // Patch 85.6: o runner Bedrock real fica desligado até o rootfs interno ser estável.
+    private static final boolean BEDROCK_RUNTIME_ISOLATED = true;
+    private static final String BEDROCK_ISOLATION_SUMMARY = "Runtime Bedrock isolado para proteger o app; serviço não iniciado.";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private volatile boolean active = false;
@@ -81,6 +84,26 @@ public class CoreWorkerBedrockService extends Service {
                     .putLong("bedrock_runtime_service_last_tick_at", System.currentTimeMillis())
                     .apply();
             stopForeground(true);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        if (BEDROCK_RUNTIME_ISOLATED) {
+            active = false;
+            runnerActive = false;
+            stopRunnerGracefully("isolated_runtime");
+            prefs().edit()
+                    .putBoolean("bedrock_runtime_service_active", false)
+                    .putString("bedrock_runtime_service_state", BEDROCK_ISOLATION_SUMMARY)
+                    .putLong("bedrock_runtime_service_last_tick_at", System.currentTimeMillis())
+                    .apply();
+            writeRunnerState("isolated", false, false, BEDROCK_ISOLATION_SUMMARY, new JSONArray().put("runtime Bedrock isolado nesta versão"), null);
+            appendLog("[service] " + BEDROCK_ISOLATION_SUMMARY);
+            try {
+                startForeground(NOTIFICATION_ID, buildNotification(BEDROCK_ISOLATION_SUMMARY));
+                stopForeground(true);
+            } catch (Throwable ignored) {
+            }
             stopSelf();
             return START_NOT_STICKY;
         }

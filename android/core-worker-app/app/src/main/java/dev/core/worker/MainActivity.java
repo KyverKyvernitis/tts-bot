@@ -118,6 +118,10 @@ public class MainActivity extends Activity {
     private static final long PERMISSION_GATE_STABILIZE_MS = 1200L;
     private static final long BEDROCK_SAFE_TEST_LOG_LIMIT_BYTES = 256L * 1024L;
     private static final long BEDROCK_TEST_MIN_INTERVAL_MS = 2500L;
+    // Patch 85.6: Bedrock/rootfs ficam isolados do fluxo visual até o runtime interno ser validado.
+    // Nenhum botão da aba Bedrock deve iniciar Python pesado, rootfs real, Termux, Box64 ou serviço Bedrock.
+    private static final boolean BEDROCK_RUNTIME_ISOLATED = true;
+    private static final String BEDROCK_ISOLATION_SUMMARY = "Runtime Bedrock isolado para proteger o app; diagnóstico leve apenas.";
     private LinearLayout connectCard;
     private TextView connectTitleText;
     private TextView connectHintText;
@@ -192,6 +196,7 @@ public class MainActivity extends Activity {
     private volatile boolean startupFallbackVisible = false;
     private final AtomicBoolean completingStartup = new AtomicBoolean(false);
     private final AtomicBoolean backgroundStartupStarted = new AtomicBoolean(false);
+    private volatile boolean activityDestroyed = false;
 
     private volatile boolean localAgentOnline = false;
     private volatile String localAgentVersion = "";
@@ -270,6 +275,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        activityDestroyed = false;
         startupLog("onCreate:start v" + APP_VERSION + " code=" + BuildConfig.VERSION_CODE);
         try {
             prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
@@ -366,6 +372,14 @@ public class MainActivity extends Activity {
         safeStartupTask(this::readBedrockServiceState);
         safeStartupTask(() -> fetchAndRunLightJobs(false, "activity_resume"));
         scheduleFcmTokenRegistration("activity_resume");
+    }
+
+    @Override
+    protected void onDestroy() {
+        activityDestroyed = true;
+        bedrockProbeRunning.set(false);
+        permissionGateDelayedRecheckScheduled.set(false);
+        super.onDestroy();
     }
 
     @Override
@@ -1144,7 +1158,9 @@ public class MainActivity extends Activity {
     }
 
     private boolean hasRequiredAppPermissions() {
-        return hasNotificationPermission() && hasInstallPermission() && hasBatteryPermission();
+        // Bateria/segundo plano varia muito por fabricante e pode voltar falso até depois do usuário permitir.
+        // Para não poluir a tela inicial, o gate obrigatório só considera permissões objetivas do Android.
+        return hasNotificationPermission() && hasInstallPermission();
     }
 
     private void updatePermissionGate() {
@@ -1152,7 +1168,7 @@ public class MainActivity extends Activity {
             boolean notificationOk = hasNotificationPermission();
             boolean installOk = hasInstallPermission();
             boolean batteryOk = hasBatteryPermission();
-            boolean allOk = notificationOk && installOk && batteryOk;
+            boolean allOk = notificationOk && installOk;
             long now = System.currentTimeMillis();
 
             if (allOk) {
@@ -1185,7 +1201,9 @@ public class MainActivity extends Activity {
                 installPermissionButton.setVisibility((stableMissing && !installOk) ? View.VISIBLE : View.GONE);
             }
             if (batteryPermissionButton != null) {
-                batteryPermissionButton.setVisibility((stableMissing && !batteryOk) ? View.VISIBLE : View.GONE);
+                // Não mostrar sozinho no início: em MIUI/Android alguns aparelhos reportam bateria como pendente
+                // mesmo depois do usuário liberar, e isso fazia o cartão aparecer sem necessidade.
+                batteryPermissionButton.setVisibility((stableMissing && !batteryOk && (!notificationOk || !installOk)) ? View.VISIBLE : View.GONE);
             }
             if (refreshPermissionsButton != null) {
                 refreshPermissionsButton.setVisibility(stableMissing ? View.VISIBLE : View.GONE);
@@ -1203,8 +1221,8 @@ public class MainActivity extends Activity {
                     if (!installOk) {
                         builder.append(permissionLine("Instalar atualizações", false, "abrir o APK baixado da VPS")).append('\n');
                     }
-                    if (!batteryOk) {
-                        builder.append(permissionLine("Segundo plano/bateria", false, "manter checagens locais mais confiáveis"));
+                    if (!batteryOk && (!notificationOk || !installOk)) {
+                        builder.append(permissionLine("Segundo plano/bateria", false, "opcional para manter checagens locais mais confiáveis"));
                     }
                     String status = builder.toString().trim();
                     permissionStatusText.setText(status);
@@ -2587,32 +2605,34 @@ public class MainActivity extends Activity {
             refreshLocalStatus("Teste Bedrock já está em andamento. Aguarde o resultado atual.");
             return;
         }
-        startupLog("bedrock:test:start ui-lightweight");
-        runOnUiThread(() -> {
-            refreshLocalStatus("Testando servidor Bedrock sem carregar rootfs/Python pesado...");
-            if (bedrockTestAllButton != null) bedrockTestAllButton.setEnabled(false);
-        });
+        startupLog("bedrock:test:start isolated-static");
+        refreshLocalStatus("Testando Bedrock em modo seguro: sem rootfs, Python, Termux, Box64 ou serviço.");
+        if (bedrockTestAllButton != null) bedrockTestAllButton.setEnabled(false);
         Thread worker = new Thread(() -> {
+            String summary = "Diagnóstico Bedrock leve concluído.";
             try {
                 JSONObject result = bedrockServerLightweightTestSnapshot();
-                String summary = result.optString("summary", "Diagnóstico Bedrock concluído");
+                summary = result.optString("summary", summary);
                 startupLog("bedrock:test:ok " + summary);
-                reportAppState("bedrock_test_all", summary);
-                show(summary);
                 appendBedrockTerminal("test", summary);
+                exportBedrockDebugSnapshot("manual-test", result);
             } catch (Throwable exc) {
-                String summary = "Diagnóstico Bedrock protegido falhou: " + shortThrowable(exc);
+                summary = "Diagnóstico Bedrock protegido falhou: " + shortThrowable(exc);
                 appStatusLastError = summary;
                 startupLog("bedrock:test:fail " + summary);
-                show(summary);
                 appendBedrockTerminal("test", summary);
+                exportBedrockDebugSnapshot("manual-test-failed", null);
             } finally {
+                final String finalSummary = summary;
                 bedrockProbeRunning.set(false);
                 runOnUiThread(() -> {
+                    if (activityDestroyed) return;
                     if (bedrockTestAllButton != null) bedrockTestAllButton.setEnabled(true);
+                    refreshLocalStatus(finalSummary);
+                    refreshBedrockVisualState();
                 });
             }
-        }, "core-worker-bedrock-ui-light-test");
+        }, "core-worker-bedrock-static-test");
         worker.setDaemon(true);
         worker.start();
     }
@@ -2622,47 +2642,12 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject bedrockServerSafeTestSnapshot() throws Exception {
-        JSONObject manager = runBedrockStepWithTimeout("manager", () -> bedrockManagerSnapshot("status", false), BEDROCK_STEP_TIMEOUT_MS);
-        JSONObject installer = new JSONObject();
-        JSONObject runtime = new JSONObject();
-
-        if (!manager.optBoolean("timeout", false)) {
-            installer = runBedrockStepWithTimeout("installer", () -> bedrockInstallerWizardSnapshot("final_preflight"), BEDROCK_STEP_TIMEOUT_MS);
-        } else {
-            installer = bedrockStepError("installer", "ignorado porque o diagnóstico inicial demorou demais", null);
-        }
-        if (!manager.optBoolean("timeout", false) && !installer.optBoolean("timeout", false)) {
-            runtime = runBedrockStepWithTimeout("runtime", () -> bedrockRuntimeSnapshot("status"), BEDROCK_STEP_TIMEOUT_MS);
-        } else {
-            runtime = bedrockStepError("runtime", "ignorado para proteger a interface", null);
-        }
-
-        String summary = firstNonEmpty(
-                runtime.optString("summary", ""),
-                installer.optString("summary", ""),
-                manager.optString("summary", ""),
-                "Teste Bedrock concluído"
-        );
-        boolean ok = manager.optBoolean("ok", false) || installer.optBoolean("ok", false) || runtime.optBoolean("ok", false);
-        JSONArray warnings = new JSONArray();
-        collectBedrockStepWarning(warnings, "manager", manager);
-        collectBedrockStepWarning(warnings, "installer", installer);
-        collectBedrockStepWarning(warnings, "runtime", runtime);
-        if (warnings.length() > 0) {
-            summary = summary + " · diagnóstico parcial";
-        }
-
-        JSONObject out = new JSONObject();
-        out.put("ok", ok);
-        out.put("summary", summary);
-        out.put("manager", manager);
-        out.put("installer", installer);
-        out.put("runtime", runtime);
-        out.put("warnings", warnings);
-        out.put("timeoutMsPerStep", BEDROCK_STEP_TIMEOUT_MS);
-        out.put("uiSafe", true);
+        JSONObject out = bedrockServerLightweightTestSnapshot();
+        out.put("safeSnapshot", true);
+        out.put("heavyStepsSkipped", true);
         return out;
     }
+
 
     private JSONObject bedrockServerLightweightTestSnapshot() throws Exception {
         long startedAt = System.currentTimeMillis();
@@ -2702,14 +2687,18 @@ public class MainActivity extends Activity {
         if (!serverInstalled) blockers.put("bedrock_server não instalado");
         if (!eulaAccepted) blockers.put("EULA pendente");
         if (!box64Ready) blockers.put("Box64 pendente");
+        if (BEDROCK_RUNTIME_ISOLATED) blockers.put("runtime Bedrock isolado nesta versão para evitar crash/ANR");
 
-        boolean ready = blockers.length() == 0;
+        boolean filesReady = blockers.length() == (BEDROCK_RUNTIME_ISOLATED ? 1 : 0);
+        boolean ready = !BEDROCK_RUNTIME_ISOLATED && filesReady;
         String rootfsStateLabel = !rootfsDir ? "rootfs_missing" : (rootfsReady ? "rootfs_ready" : "rootfs_detected");
-        String bedrockStateLabel = ready ? "bedrock_ready" : "bedrock_test_blocked";
-        String nextAction = ready ? "ativar runtime Bedrock" : bedrockNextAction(rootfsReady, executorBundled || executorStateOk, serverPropertiesReady, serverInstalled, eulaAccepted, box64Ready);
-        String summary = ready
-                ? "Bedrock pronto para preflight do runner."
-                : "Diagnóstico parcial concluído. Runtime Bedrock ainda não está pronto.";
+        String bedrockStateLabel = ready ? "bedrock_ready" : "bedrock_runtime_isolated";
+        String nextAction = BEDROCK_RUNTIME_ISOLATED
+                ? "corrigir estabilidade antes de reativar runtime Bedrock"
+                : (ready ? "ativar runtime Bedrock" : bedrockNextAction(rootfsReady, executorBundled || executorStateOk, serverPropertiesReady, serverInstalled, eulaAccepted, box64Ready));
+        String summary = BEDROCK_RUNTIME_ISOLATED
+                ? "Diagnóstico parcial concluído. Runtime Bedrock ainda não está pronto."
+                : (ready ? "Bedrock pronto para preflight do runner." : "Diagnóstico parcial concluído. Runtime Bedrock ainda não está pronto.");
 
         JSONObject rootfsJson = new JSONObject();
         rootfsJson.put("state", rootfsStateLabel);
@@ -2718,13 +2707,15 @@ public class MainActivity extends Activity {
         rootfsJson.put("ready", rootfsReady);
         rootfsJson.put("stateFile", safeFileStatus(rootfsState));
         rootfsJson.put("readyMarker", safeFileStatus(rootfsReadyMarker));
+        rootfsJson.put("pythonTouched", false);
+        rootfsJson.put("prootStarted", false);
 
         JSONObject executorJson = new JSONObject();
         executorJson.put("state", executorBundled || executorStateOk ? "executor_detected" : "executor_missing");
         executorJson.put("bundledLibrary", safeFileStatus(appNativeExecutor));
         executorJson.put("stateFile", safeFileStatus(nativeExecutorState));
         executorJson.put("validated", executorStateOk);
-        executorJson.put("note", "Teste Bedrock não chama JNI/Python para proteger a interface.");
+        executorJson.put("note", "Teste Bedrock não chama JNI/Python/Termux para proteger a interface.");
 
         JSONObject bedrockJson = new JSONObject();
         bedrockJson.put("state", bedrockStateLabel);
@@ -2735,10 +2726,12 @@ public class MainActivity extends Activity {
         bedrockJson.put("server", safeFileStatus(server));
         bedrockJson.put("box64", safeFileExists(box64A) ? safeFileStatus(box64A) : safeFileStatus(box64B));
         bedrockJson.put("ready", ready);
+        bedrockJson.put("isolationMode", BEDROCK_RUNTIME_ISOLATED);
 
         JSONObject out = new JSONObject();
         out.put("ok", true);
         out.put("ready", ready);
+        out.put("filesReady", filesReady);
         out.put("state", bedrockStateLabel);
         out.put("summary", summary);
         out.put("nextAction", nextAction);
@@ -2749,8 +2742,11 @@ public class MainActivity extends Activity {
         out.put("blockers", blockers);
         out.put("durationMs", Math.max(0L, System.currentTimeMillis() - startedAt));
         out.put("uiSafe", true);
+        out.put("isolationMode", BEDROCK_RUNTIME_ISOLATED);
         out.put("pythonTouched", false);
         out.put("nativeTouched", false);
+        out.put("termuxTouched", false);
+        out.put("serviceStarted", false);
 
         bedrockReady = ready;
         bedrockState = bedrockStateLabel;
@@ -2758,7 +2754,9 @@ public class MainActivity extends Activity {
         bedrockInstallerSummary = ready ? "preflight local pronto" : "pendências locais encontradas pelo diagnóstico seguro";
         bedrockInstallerState = ready ? "ready" : "blocked";
         bedrockInstallerNextAction = nextAction;
-        bedrockRuntimeSummary = ready ? emptyFallback(bedrockRuntimeSummary, "runtime Bedrock aguardando start") : "runtime Bedrock bloqueado até concluir pendências";
+        bedrockRuntimeSummary = BEDROCK_RUNTIME_ISOLATED ? BEDROCK_ISOLATION_SUMMARY : (ready ? emptyFallback(bedrockRuntimeSummary, "runtime Bedrock aguardando start") : "runtime Bedrock bloqueado até concluir pendências");
+        bedrockRuntimeState = BEDROCK_RUNTIME_ISOLATED ? "isolated" : bedrockRuntimeState;
+        bedrockRuntimeServiceActive = false;
         bedrockLastCheckAt = System.currentTimeMillis();
         internalDiagnosticsSummary = summary;
         internalDiagnosticsLastAt = System.currentTimeMillis();
@@ -2767,6 +2765,68 @@ public class MainActivity extends Activity {
         appendBoundedTextFile(new File(logs, "rootfs-check.log"), rootfsJson.toString() + "\n", BEDROCK_SAFE_TEST_LOG_LIMIT_BYTES);
         updateSystemChecklistText();
         return out;
+    }
+
+    private void exportBedrockDebugSnapshot(String reason, JSONObject snapshot) {
+        try {
+            File dir = exportDiagnosticsDir();
+            if (dir == null) return;
+            JSONObject out = new JSONObject();
+            out.put("reason", reason == null ? "manual" : reason);
+            out.put("createdAt", System.currentTimeMillis());
+            out.put("appVersion", APP_VERSION);
+            out.put("appVersionCode", BuildConfig.VERSION_CODE);
+            out.put("bedrockState", bedrockState == null ? "" : bedrockState);
+            out.put("bedrockSummary", bedrockSummary == null ? "" : bedrockSummary);
+            out.put("bedrockRuntimeState", bedrockRuntimeState == null ? "" : bedrockRuntimeState);
+            out.put("bedrockRuntimeSummary", bedrockRuntimeSummary == null ? "" : bedrockRuntimeSummary);
+            out.put("isolationMode", BEDROCK_RUNTIME_ISOLATED);
+            out.put("lastError", appStatusLastError == null ? "" : appStatusLastError);
+            if (snapshot != null) out.put("snapshot", snapshot);
+            File file = new File(dir, "bedrock-safe-state.json");
+            writeTextFile(file, out.toString(2));
+            appendBoundedTextFile(new File(dir, "bedrock-safe-events.log"), out.toString() + "\n", BEDROCK_SAFE_TEST_LOG_LIMIT_BYTES);
+        } catch (Throwable exc) {
+            startupLog("bedrock:export-failed " + shortThrowable(exc));
+        }
+    }
+
+    private File exportDiagnosticsDir() {
+        File[] candidates = new File[] {
+                new File("/sdcard/Download/CoreWorker"),
+                getExternalFilesDir("CoreWorkerDiagnostics"),
+                new File(getFilesDir(), "core-linux/logs/export")
+        };
+        for (File dir : candidates) {
+            try {
+                if (dir == null) continue;
+                if (!dir.exists()) dir.mkdirs();
+                if (dir.exists() && dir.isDirectory() && dir.canWrite()) return dir;
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private String readTextFileTail(File file, int limit) {
+        try {
+            if (file == null || !file.exists() || !file.isFile()) return "";
+            BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8));
+            StringBuilder builder = new StringBuilder();
+            String line;
+            int max = Math.max(256, limit);
+            while ((line = reader.readLine()) != null) {
+                builder.append(line).append('\n');
+                if (builder.length() > max * 2) {
+                    builder.delete(0, builder.length() - max);
+                }
+            }
+            reader.close();
+            String text = builder.toString().trim();
+            return text.length() > max ? text.substring(text.length() - max) : text;
+        } catch (Throwable ignored) {
+            return "";
+        }
     }
 
     private String bedrockNextAction(boolean rootfsReady, boolean executorReady, boolean propertiesReady, boolean serverInstalled, boolean eulaAccepted, boolean box64Ready) {
@@ -2936,14 +2996,17 @@ public class MainActivity extends Activity {
     }
 
     private void prepareBedrockServerFromUi() {
-        runBusy("Preparando servidor Bedrock...", () -> {
-            JSONObject prepared = bedrockManagerSnapshot("prepare_properties", false);
-            JSONObject installer = bedrockInstallerWizardSnapshot("prepare_environment");
-            reportAppState("bedrock_prepare_server", installer.optString("summary", prepared.optString("summary", "Preparação Bedrock atualizada")));
-            show(installer.optString("summary", prepared.optString("summary", "Preparação Bedrock atualizada.")));
-            appendBedrockTerminal("prepare", installer.optString("summary", prepared.optString("summary", "Preparação atualizada")));
+        runBusy("Preparando servidor Bedrock em modo seguro...", () -> {
+            prepareCoreLinuxRuntimeStateWithoutRecursiveProbe();
+            writeCoreLinuxProvisionerFiles(coreLinuxDir());
+            JSONObject snapshot = bedrockServerLightweightTestSnapshot();
+            String summary = "Arquivos base preparados. " + snapshot.optString("summary", BEDROCK_ISOLATION_SUMMARY);
+            appendBedrockTerminal("prepare", summary);
+            refreshLocalStatus(summary);
+            exportBedrockDebugSnapshot("prepare-safe", snapshot);
         });
     }
+
 
     private void showBedrockFilesFromUi() {
         File bedrockDir = new File(coreLinuxDir(), "bedrock");
@@ -2967,14 +3030,12 @@ public class MainActivity extends Activity {
         if (bedrockCommandInput != null) {
             bedrockCommandInput.setText("");
         }
-        runBusy("Enviando comando ao console Bedrock...", () -> {
-            JSONObject out = bedrockRuntimeSnapshot("console_command", command);
-            String summary = out.optString("summary", "comando registrado no console Bedrock");
-            appendBedrockTerminal(command, summary);
-            reportAppState("bedrock_console_command", "Comando Bedrock: " + sanitizeCommandOutput(command, 120));
-            refreshLocalStatus(summary);
-        });
+        String summary = "ignorado para proteger a interface · runtime Bedrock ainda isolado";
+        appendBedrockTerminal(command, summary);
+        refreshLocalStatus(summary);
+        exportBedrockDebugSnapshot("console-command-blocked", null);
     }
+
 
     private void appendBedrockTerminal(String command, String response) {
         runOnUiThread(() -> {
@@ -2990,86 +3051,75 @@ public class MainActivity extends Activity {
     }
 
     private void prepareBedrockManagerFromUi() {
-        runBusy("Preparando arquivos do Bedrock Manager...", () -> {
-            JSONObject out = bedrockManagerSnapshot("prepare_properties", false);
-            reportAppState("bedrock_manager_prepare", out.optString("summary", "Bedrock Manager preparado"));
-            show(out.optString("summary", "Bedrock Manager preparado."));
-        });
+        prepareBedrockServerFromUi();
     }
 
+
     private void refreshBedrockManagerFromUi() {
-        runBusy("Atualizando status do Bedrock Manager...", () -> {
-            JSONObject out = bedrockManagerSnapshot("status", false);
-            reportAppState("bedrock_manager_status", out.optString("summary", "Status Bedrock atualizado"));
-            show(out.optString("summary", "Status Bedrock atualizado."));
-        });
+        testBedrockServerFromUi();
     }
+
 
     private void confirmBedrockEulaFromUi() {
         new AlertDialog.Builder(this)
                 .setTitle("Confirmar EULA do Bedrock?")
-                .setMessage("Isso grava eula=true apenas no ambiente local do Core Worker. Confirme somente se você leu e aceita os termos do Minecraft/Microsoft para o Bedrock Dedicated Server. O APK ainda não baixa nem inicia o servidor automaticamente.")
+                .setMessage("Isso grava eula=true apenas no ambiente local do Core Worker. O runtime Bedrock continua isolado e não será iniciado automaticamente.")
                 .setPositiveButton("Aceito e gravar", (dialog, which) -> runBusy("Gravando confirmação local da EULA...", () -> {
-                    JSONObject out = bedrockManagerSnapshot("accept_eula", true);
-                    reportAppState("bedrock_eula_confirmed", out.optString("summary", "EULA Bedrock confirmada localmente"));
-                    show(out.optString("summary", "EULA Bedrock confirmada localmente."));
+                    File bedrockDir = new File(coreLinuxDir(), "bedrock");
+                    if (!bedrockDir.exists()) bedrockDir.mkdirs();
+                    writeTextFile(new File(bedrockDir, "eula.txt"), "# Aceito manualmente pelo usuário no Core Worker\neula=true\n");
+                    JSONObject snapshot = bedrockServerLightweightTestSnapshot();
+                    String summary = "EULA Bedrock confirmada localmente. Runtime continua isolado por segurança.";
+                    appendBedrockTerminal("eula", summary);
+                    refreshLocalStatus(summary);
+                    exportBedrockDebugSnapshot("eula-safe", snapshot);
                 }))
                 .setNegativeButton("Cancelar", null)
                 .show();
     }
 
+
     private void bedrockWizardFromUi(String focus, String fallbackMessage) {
-        runBusy("Atualizando instalador assistido Bedrock...", () -> {
-            JSONObject out = bedrockInstallerWizardSnapshot(focus == null ? "status" : focus);
-            reportAppState("bedrock_installer_" + (focus == null ? "status" : focus), out.optString("summary", fallbackMessage == null ? "Instalador Bedrock atualizado" : fallbackMessage));
-            show(out.optString("summary", fallbackMessage == null ? "Instalador Bedrock atualizado." : fallbackMessage));
+        runBusy("Atualizando Bedrock em modo seguro...", () -> {
+            JSONObject out = bedrockServerLightweightTestSnapshot();
+            out.put("focus", focus == null ? "status" : focus);
+            String summary = out.optString("summary", fallbackMessage == null ? BEDROCK_ISOLATION_SUMMARY : fallbackMessage);
+            appendBedrockTerminal("wizard", summary);
+            refreshLocalStatus(summary);
+            exportBedrockDebugSnapshot("wizard-safe", out);
         });
     }
 
+
     private JSONObject bedrockInstallerWizardSnapshot(String focus) throws Exception {
-        prepareCoreLinuxRuntimeState();
-        JSONObject extra = new JSONObject();
-        extra.put("focus", focus == null ? "status" : focus);
-        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
-        extra.put("bedrockDir", new File(coreLinuxDir(), "bedrock").getAbsolutePath());
-        extra.put("foregroundRuntimeActive", foregroundRuntimeActive);
-        extra.put("officialLinux", "Ubuntu Linux 22.04 LTS ou superior");
-        extra.put("officialRamGb", 4);
-        JSONObject py = runEmbeddedPythonJob("bedrock_installer_wizard", extra);
-        bedrockInstallerSummary = py.optString("summary", bedrockInstallerSummary);
-        bedrockInstallerState = py.optString("state", bedrockInstallerState);
-        bedrockInstallerNextAction = py.optString("nextAction", bedrockInstallerNextAction);
-        JSONObject bedrock = py.optJSONObject("bedrock");
-        if (bedrock != null) {
-            if (bedrock.optBoolean("serverInstalled", false)) {
-                bedrockSummary = "Bedrock instalado · aguardando runner";
-            } else if (bedrock.optBoolean("eulaAccepted", false)) {
-                bedrockSummary = "Bedrock EULA aceita · servidor não instalado";
-            }
-        }
-        bedrockLastCheckAt = System.currentTimeMillis();
-        updateSystemChecklistText();
-        return py;
+        JSONObject out = bedrockServerLightweightTestSnapshot();
+        out.put("focus", focus == null ? "status" : focus);
+        out.put("mode", "installer-static-no-python");
+        bedrockInstallerSummary = out.optString("summary", bedrockInstallerSummary);
+        bedrockInstallerState = "blocked";
+        bedrockInstallerNextAction = out.optString("nextAction", bedrockInstallerNextAction);
+        return out;
     }
 
+
     private JSONObject bedrockManagerSnapshot(String focus, boolean acceptEula) throws Exception {
-        prepareCoreLinuxRuntimeState();
-        JSONObject extra = new JSONObject();
-        extra.put("focus", focus == null ? "status" : focus);
-        extra.put("acceptEula", acceptEula);
-        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
-        extra.put("bedrockDir", new File(coreLinuxDir(), "bedrock").getAbsolutePath());
-        extra.put("foregroundRuntimeActive", foregroundRuntimeActive);
-        extra.put("officialLinux", "Ubuntu Linux 22.04 LTS ou superior");
-        extra.put("officialRamGb", 4);
-        JSONObject py = runEmbeddedPythonJob("bedrock_manager", extra);
-        bedrockSummary = py.optString("summary", bedrockSummary);
-        bedrockState = py.optString("state", bedrockState);
-        bedrockReady = py.optBoolean("ready", bedrockReady);
+        if (acceptEula) {
+            File bedrockDir = new File(coreLinuxDir(), "bedrock");
+            if (!bedrockDir.exists()) bedrockDir.mkdirs();
+            writeTextFile(new File(bedrockDir, "eula.txt"), "# Aceito manualmente pelo usuário no Core Worker\neula=true\n");
+        }
+        JSONObject out = bedrockServerLightweightTestSnapshot();
+        out.put("focus", focus == null ? "status" : focus);
+        out.put("mode", "manager-static-no-python");
+        out.put("acceptEula", acceptEula);
+        bedrockSummary = out.optString("summary", bedrockSummary);
+        bedrockState = out.optString("state", bedrockState);
+        bedrockReady = out.optBoolean("ready", false);
         bedrockLastCheckAt = System.currentTimeMillis();
         updateSystemChecklistText();
-        return py;
+        return out;
     }
+
 
     private void confirmStartBedrockRuntimeFromUi() {
         new AlertDialog.Builder(this)
@@ -3081,32 +3131,58 @@ public class MainActivity extends Activity {
     }
 
     private void startBedrockRuntimeFromUi() {
-        runBusy("Ativando runtime Bedrock assistido...", () -> {
-            startBedrockService("manual");
-            JSONObject out = bedrockRuntimeSnapshot("start");
-            reportAppState("bedrock_runtime_start", out.optString("summary", "Runtime Bedrock atualizado"));
-            show(out.optString("summary", "Runtime Bedrock atualizado."));
-        });
+        bedrockRuntimeServiceActive = false;
+        bedrockRuntimeState = "isolated";
+        bedrockRuntimeSummary = BEDROCK_ISOLATION_SUMMARY;
+        if (prefs != null) {
+            prefs.edit()
+                    .putBoolean("bedrock_runtime_service_active", false)
+                    .putString("bedrock_runtime_service_state", BEDROCK_ISOLATION_SUMMARY)
+                    .putLong("bedrock_runtime_service_last_tick_at", System.currentTimeMillis())
+                    .apply();
+        }
+        appendBedrockTerminal("start", "bloqueado: runtime Bedrock isolado até a estabilidade do rootfs ser validada");
+        refreshLocalStatus("Start Bedrock bloqueado com segurança. Primeiro vamos estabilizar rootfs/runtime interno.");
+        refreshBedrockVisualState();
+        exportBedrockDebugSnapshot("start-blocked", null);
     }
+
 
     private void stopBedrockRuntimeFromUi() {
-        runBusy("Parando runtime Bedrock...", () -> {
-            stopBedrockService("manual");
-            JSONObject out = bedrockRuntimeSnapshot("stop");
-            reportAppState("bedrock_runtime_stop", out.optString("summary", "Runtime Bedrock parado"));
-            show(out.optString("summary", "Runtime Bedrock parado."));
-        });
+        try {
+            stopBedrockService("manual-stop-safe");
+        } catch (Throwable exc) {
+            startupLog("bedrock:stop-service-ignored " + shortThrowable(exc));
+        }
+        bedrockRuntimeServiceActive = false;
+        bedrockRuntimeState = "stopped";
+        bedrockRuntimeSummary = "runtime Bedrock parado";
+        appendBedrockTerminal("stop", "runtime Bedrock parado/bloqueado com segurança");
+        refreshLocalStatus("Runtime Bedrock parado.");
+        refreshBedrockVisualState();
     }
+
 
     private void refreshBedrockRuntimeLogsFromUi() {
-        runBusy("Coletando logs do Bedrock...", () -> {
-            JSONObject out = bedrockRuntimeSnapshot("console_tail");
-            reportAppState("bedrock_runtime_logs", out.optString("summary", "Logs Bedrock atualizados"));
-            show(out.optString("summary", "Logs Bedrock atualizados."));
+        runBusy("Coletando logs locais do Bedrock...", () -> {
+            JSONObject out = bedrockRuntimeStaticSnapshot("console_tail");
+            String tail = readTextFileTail(new File(new File(coreLinuxDir(), "bedrock/logs"), "bedrock-console.log"), 1800);
+            String summary = tail.trim().isEmpty() ? "Nenhum log Bedrock interno encontrado." : tail;
+            appendBedrockTerminal("logs", summary);
+            refreshLocalStatus("Logs Bedrock locais verificados sem iniciar runtime.");
+            exportBedrockDebugSnapshot("logs-safe", out);
         });
     }
 
+
     private void startBedrockService(String reason) {
+        if (BEDROCK_RUNTIME_ISOLATED) {
+            bedrockRuntimeServiceActive = false;
+            bedrockRuntimeState = "isolated";
+            bedrockRuntimeSummary = BEDROCK_ISOLATION_SUMMARY;
+            startupLog("bedrock:service-start-blocked " + (reason == null ? "" : reason));
+            return;
+        }
         Intent intent = new Intent(this, CoreWorkerBedrockService.class);
         intent.setAction(CoreWorkerBedrockService.ACTION_START);
         intent.putExtra("reason", reason == null ? "manual" : reason);
@@ -3138,6 +3214,20 @@ public class MainActivity extends Activity {
 
     private void readBedrockServiceState() {
         try {
+            if (BEDROCK_RUNTIME_ISOLATED) {
+                bedrockRuntimeServiceActive = false;
+                bedrockRuntimeState = "isolated";
+                bedrockRuntimeSummary = BEDROCK_ISOLATION_SUMMARY;
+                if (prefs != null && prefs.getBoolean("bedrock_runtime_service_active", false)) {
+                    prefs.edit()
+                            .putBoolean("bedrock_runtime_service_active", false)
+                            .putString("bedrock_runtime_service_state", BEDROCK_ISOLATION_SUMMARY)
+                            .putLong("bedrock_runtime_service_last_tick_at", System.currentTimeMillis())
+                            .apply();
+                }
+                updateSystemChecklistText();
+                return;
+            }
             bedrockRuntimeServiceActive = prefs.getBoolean("bedrock_runtime_service_active", false);
             bedrockRuntimeState = prefs.getString("bedrock_runtime_service_state", bedrockRuntimeServiceActive ? "serviço Bedrock ativo" : "stopped");
             bedrockRuntimeSummary = bedrockRuntimeServiceActive ? bedrockRuntimeState : "runtime Bedrock parado";
@@ -3153,38 +3243,19 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject bedrockRuntimeSnapshot(String action, String consoleCommand) throws Exception {
-        prepareCoreLinuxRuntimeState();
-        readBedrockServiceState();
-        JSONObject extra = new JSONObject();
-        extra.put("action", action == null ? "status" : action);
-        if (consoleCommand != null) extra.put("consoleCommand", consoleCommand);
-        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
-        extra.put("bedrockDir", new File(coreLinuxDir(), "bedrock").getAbsolutePath());
-        extra.put("foregroundRuntimeActive", foregroundRuntimeActive);
-        extra.put("bedrockServiceActive", bedrockRuntimeServiceActive);
-        extra.put("officialLinux", "Ubuntu Linux 22.04 LTS ou superior");
-        extra.put("officialRamGb", 4);
-        JSONObject py = runEmbeddedPythonJob("bedrock_runtime", extra);
-        bedrockRuntimeSummary = py.optString("summary", bedrockRuntimeSummary);
-        bedrockRuntimeState = py.optString("state", bedrockRuntimeState);
-        JSONObject rt = py.optJSONObject("bedrockRuntime");
-        if (rt != null) {
-            bedrockRuntimeServiceActive = rt.optBoolean("serviceActive", bedrockRuntimeServiceActive);
-        }
-        if (py.optBoolean("readyToStart", false)) {
-            bedrockSummary = "Bedrock pronto para start real";
-            bedrockReady = true;
-        } else if (py.optJSONArray("blockers") != null) {
-            bedrockSummary = py.optString("summary", bedrockSummary);
-        }
-        String logTail = py.optString("logTail", "");
-        if (logTail != null && !logTail.trim().isEmpty() && bedrockTerminalText != null) {
-            runOnUiThread(() -> bedrockTerminalText.setText("Core Bedrock Console\n" + sanitizeCommandOutput(logTail, 1800)));
-        }
+        JSONObject out = bedrockRuntimeStaticSnapshot(action == null ? "status" : action);
+        out.put("consoleCommandBlocked", consoleCommand != null && !consoleCommand.trim().isEmpty());
+        out.put("mode", "runtime-static-no-python");
+        out.put("isolationMode", BEDROCK_RUNTIME_ISOLATED);
+        bedrockRuntimeSummary = out.optString("summary", bedrockRuntimeSummary);
+        bedrockRuntimeState = out.optString("state", bedrockRuntimeState);
+        bedrockRuntimeServiceActive = false;
         bedrockLastCheckAt = System.currentTimeMillis();
         updateSystemChecklistText();
-        return py;
+        return out;
     }
+
+
 
     private void prepareNativeRuntimeState() {
         try {
@@ -3356,18 +3427,12 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject coreLinuxRuntimeProbeSnapshot(String focus) throws Exception {
-        JSONObject extra = new JSONObject();
-        extra.put("focus", focus == null ? "runtime" : focus);
-        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
-        extra.put("termuxInstalled", isPackageInstalled("com.termux"));
-        extra.put("termuxApiInstalled", isPackageInstalled("com.termux.api"));
-        extra.put("termuxBootInstalled", isPackageInstalled("com.termux.boot"));
-        JSONObject py = runEmbeddedPythonJob("linux_runtime_probe", extra);
-        coreLinuxPrepared = py.optBoolean("prepared", coreLinuxPrepared);
-        coreLinuxState = py.optString("state", py.optBoolean("ok", false) ? "diagnóstico ok" : "atenção");
-        coreLinuxSummary = py.optString("summary", coreLinuxSummary);
+        JSONObject out = coreLinuxStaticSnapshot(focus == null ? "runtime" : focus);
+        out.put("mode", "runtime-static-no-python");
+        coreLinuxState = out.optString("state", coreLinuxState);
+        coreLinuxSummary = out.optString("summary", coreLinuxSummary);
         coreLinuxLastCheckAt = System.currentTimeMillis();
-        return py;
+        return out;
     }
 
 
@@ -3386,72 +3451,27 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject coreLinuxInternalSnapshot(String action) throws Exception {
-        prepareCoreLinuxRuntimeStateWithoutRecursiveProbe();
-        JSONObject extra = new JSONObject();
-        extra.put("action", action == null ? "probe" : action);
-        extra.put("focus", action == null ? "probe" : action);
-        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
-        extra.put("bedrockDir", new File(coreLinuxDir(), "bedrock").getAbsolutePath());
-        extra.put("filesDir", getFilesDir().getAbsolutePath());
-        extra.put("cacheDir", getCacheDir().getAbsolutePath());
-        extra.put("nativeLibDir", getApplicationInfo() == null ? "" : getApplicationInfo().nativeLibraryDir);
-        extra.put("dataDir", getApplicationInfo() == null ? "" : getApplicationInfo().dataDir);
-        extra.put("nativeExecutor", coreLinuxNativeExecutorSnapshot("probe"));
-        extra.put("androidSdk", Build.VERSION.SDK_INT);
-        extra.put("targetSdk", getApplicationInfo() == null ? 0 : getApplicationInfo().targetSdkVersion);
-        extra.put("primaryAbi", Build.SUPPORTED_ABIS != null && Build.SUPPORTED_ABIS.length > 0 ? Build.SUPPORTED_ABIS[0] : "");
-        JSONArray abis = new JSONArray();
-        if (Build.SUPPORTED_ABIS != null) {
-            for (String abi : Build.SUPPORTED_ABIS) {
-                abis.put(abi);
-            }
-        }
-        extra.put("supportedAbis", abis);
-        extra.put("termuxInstalled", isPackageInstalled("com.termux"));
-        extra.put("termuxApiInstalled", isPackageInstalled("com.termux.api"));
-        extra.put("termuxBootInstalled", isPackageInstalled("com.termux.boot"));
-        extra.put("officialLinux", "Ubuntu Linux 22.04 LTS ou superior");
-        extra.put("officialRamGb", 4);
-        JSONObject py = runEmbeddedPythonJob("core_linux_internal", extra);
-        coreLinuxPrepared = py.optBoolean("prepared", coreLinuxPrepared);
-        coreLinuxState = py.optString("state", py.optBoolean("ok", false) ? "core-linux-internal ok" : "core-linux-internal bloqueado");
-        coreLinuxSummary = py.optString("summary", coreLinuxSummary);
+        JSONObject out = coreLinuxStaticSnapshot(action == null ? "probe" : action);
+        out.put("mode", "internal-static-no-python");
+        coreLinuxPrepared = true;
+        coreLinuxState = out.optString("state", "static_safe_check");
+        coreLinuxSummary = out.optString("summary", coreLinuxSummary);
         coreLinuxLastCheckAt = System.currentTimeMillis();
         updateSystemChecklistText();
-        return py;
+        return out;
     }
 
+
     private JSONObject coreLinuxRootfsSnapshot(String action) throws Exception {
-        prepareCoreLinuxRuntimeStateWithoutRecursiveProbe();
-        JSONObject extra = new JSONObject();
-        String safeAction = action == null ? "status" : action;
-        extra.put("action", safeAction);
-        extra.put("focus", safeAction);
-        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
-        extra.put("filesDir", getFilesDir().getAbsolutePath());
-        extra.put("cacheDir", getCacheDir().getAbsolutePath());
-        extra.put("androidSdk", Build.VERSION.SDK_INT);
-        extra.put("targetSdk", getApplicationInfo() == null ? 0 : getApplicationInfo().targetSdkVersion);
-        extra.put("foregroundRuntimeActive", foregroundRuntimeActive);
-        extra.put("termuxInstalled", isPackageInstalled("com.termux"));
-        extra.put("termuxApiInstalled", isPackageInstalled("com.termux.api"));
-        extra.put("termuxBootInstalled", isPackageInstalled("com.termux.boot"));
-        try {
-            extra.put("nativeExecutor", coreLinuxNativeExecutorSnapshot("status"));
-        } catch (Throwable ignored) {
-        }
-        JSONObject py = runEmbeddedPythonJob("core_linux_rootfs", extra);
-        coreLinuxPrepared = py.optBoolean("rootfsReady", coreLinuxPrepared);
-        coreLinuxState = py.optString("state", coreLinuxState);
-        coreLinuxSummary = py.optString("summary", coreLinuxSummary);
+        JSONObject out = coreLinuxRootfsStaticSnapshot(action == null ? "status" : action);
+        coreLinuxPrepared = out.optBoolean("rootfsReady", coreLinuxPrepared);
+        coreLinuxState = out.optString("state", coreLinuxState);
+        coreLinuxSummary = out.optString("summary", coreLinuxSummary);
         coreLinuxLastCheckAt = System.currentTimeMillis();
-        try {
-            coreLinuxInternalSnapshot("rootfs");
-        } catch (Throwable ignored) {
-        }
         updateSystemChecklistText();
-        return py;
+        return out;
     }
+
 
     private void prepareCoreLinuxRuntimeStateWithoutRecursiveProbe() {
         try {
@@ -3472,86 +3492,65 @@ public class MainActivity extends Activity {
 
 
     private JSONObject bedrockRequirementsSnapshot() throws Exception {
-        JSONObject extra = new JSONObject();
-        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
-        extra.put("termuxInstalled", isPackageInstalled("com.termux"));
-        extra.put("officialLinux", "Ubuntu Linux 22.04 LTS+ recomendado pelo download oficial atual");
-        extra.put("officialRamGb", 4);
-        JSONObject py = runEmbeddedPythonJob("bedrock_requirements", extra);
-        bedrockSummary = py.optString("summary", bedrockSummary);
-        bedrockState = py.optString("state", py.optBoolean("ok", false) ? "requisitos avaliados" : "requisitos pendentes");
-        bedrockReady = py.optBoolean("ready", false);
+        JSONObject out = bedrockServerLightweightTestSnapshot();
+        out.put("mode", "requirements-static-no-python");
+        bedrockSummary = out.optString("summary", bedrockSummary);
+        bedrockState = out.optString("state", bedrockState);
+        bedrockReady = out.optBoolean("ready", false);
         bedrockLastCheckAt = System.currentTimeMillis();
-        return py;
+        return out;
     }
+
 
     private JSONObject bedrockProbeSnapshot(String focus) throws Exception {
-        JSONObject extra = new JSONObject();
-        extra.put("focus", focus == null ? "probe" : focus);
-        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
-        extra.put("bedrockDir", new File(coreLinuxDir(), "bedrock").getAbsolutePath());
-        extra.put("termuxInstalled", isPackageInstalled("com.termux"));
-        extra.put("officialServerBundled", false);
-        JSONObject py = runEmbeddedPythonJob("bedrock_probe", extra);
-        bedrockSummary = py.optString("summary", bedrockSummary);
-        bedrockState = py.optString("state", py.optBoolean("ok", false) ? "diagnóstico ok" : "não configurado");
-        bedrockReady = py.optBoolean("ready", false);
+        JSONObject out = bedrockServerLightweightTestSnapshot();
+        out.put("focus", focus == null ? "probe" : focus);
+        out.put("mode", "probe-static-no-python");
+        bedrockSummary = out.optString("summary", bedrockSummary);
+        bedrockState = out.optString("state", bedrockState);
+        bedrockReady = out.optBoolean("ready", false);
         bedrockLastCheckAt = System.currentTimeMillis();
-        return py;
+        return out;
     }
 
+
     private JSONObject coreLinuxProvisionPlanSnapshot(String focus) throws Exception {
-        prepareCoreLinuxRuntimeState();
-        JSONObject extra = new JSONObject();
-        extra.put("focus", focus == null ? "plan" : focus);
-        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
-        extra.put("termuxInstalled", isPackageInstalled("com.termux"));
-        extra.put("termuxApiInstalled", isPackageInstalled("com.termux.api"));
-        extra.put("termuxBootInstalled", isPackageInstalled("com.termux.boot"));
-        JSONObject py = runEmbeddedPythonJob("linux_provision_plan", extra);
-        coreLinuxPrepared = py.optBoolean("prepared", coreLinuxPrepared);
-        coreLinuxState = py.optString("state", "provisioner preparado");
-        coreLinuxSummary = py.optString("summary", coreLinuxSummary);
+        prepareCoreLinuxRuntimeStateWithoutRecursiveProbe();
+        JSONObject out = coreLinuxStaticSnapshot(focus == null ? "plan" : focus);
+        out.put("mode", "provision-plan-static-no-python");
+        out.put("summary", "plano Core Linux disponível em modo seguro; execução pesada pausada");
+        coreLinuxPrepared = true;
+        coreLinuxState = "provisioner_static_safe";
+        coreLinuxSummary = out.optString("summary", coreLinuxSummary);
         coreLinuxLastCheckAt = System.currentTimeMillis();
-        return py;
+        return out;
     }
 
 
     private JSONObject linuxAssistedInstallSnapshot(String focus) throws Exception {
-        prepareCoreLinuxRuntimeState();
-        JSONObject extra = new JSONObject();
-        extra.put("focus", focus == null ? "strategy" : focus);
-        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
-        extra.put("bedrockDir", new File(coreLinuxDir(), "bedrock").getAbsolutePath());
-        extra.put("termuxInstalled", isPackageInstalled("com.termux"));
-        extra.put("termuxApiInstalled", isPackageInstalled("com.termux.api"));
-        extra.put("termuxBootInstalled", isPackageInstalled("com.termux.boot"));
-        extra.put("foregroundRuntimeActive", foregroundRuntimeActive);
-        extra.put("officialLinux", "Ubuntu 22.04 LTS+");
-        extra.put("officialRamGb", 4);
-        JSONObject py = runEmbeddedPythonJob("linux_assisted_install", extra);
-        linuxInstallStrategySummary = py.optString("summary", linuxInstallStrategySummary);
+        prepareCoreLinuxRuntimeStateWithoutRecursiveProbe();
+        JSONObject out = coreLinuxStaticSnapshot(focus == null ? "strategy" : focus);
+        out.put("mode", "assisted-install-static-no-python");
+        out.put("summary", "instalação assistida Linux pausada em modo seguro; nenhum download/rootfs iniciado");
+        linuxInstallStrategySummary = out.optString("summary", linuxInstallStrategySummary);
         internalDiagnosticsSummary = linuxInstallStrategySummary;
         internalDiagnosticsLastAt = System.currentTimeMillis();
-        return py;
+        return out;
     }
 
+
     private JSONObject bedrockInstallPlanSnapshot(String focus) throws Exception {
-        prepareCoreLinuxRuntimeState();
-        JSONObject extra = new JSONObject();
-        extra.put("focus", focus == null ? "install_plan" : focus);
-        extra.put("coreLinuxDir", coreLinuxDir().getAbsolutePath());
-        extra.put("bedrockDir", new File(coreLinuxDir(), "bedrock").getAbsolutePath());
-        extra.put("termuxInstalled", isPackageInstalled("com.termux"));
-        extra.put("officialLinux", "Ubuntu Linux 22.04 LTS+ recomendado pelo download oficial atual");
-        extra.put("officialRamGb", 4);
-        JSONObject py = runEmbeddedPythonJob("bedrock_install_plan", extra);
-        bedrockSummary = py.optString("summary", bedrockSummary);
-        bedrockState = py.optString("state", "install-plan-ready");
-        bedrockReady = py.optBoolean("ready", bedrockReady);
+        JSONObject out = bedrockServerLightweightTestSnapshot();
+        out.put("focus", focus == null ? "install_plan" : focus);
+        out.put("mode", "install-plan-static-no-python");
+        out.put("summary", "plano Bedrock disponível em modo seguro; nenhum download/runner iniciado");
+        bedrockSummary = out.optString("summary", bedrockSummary);
+        bedrockState = out.optString("state", "install-plan-static-safe");
+        bedrockReady = false;
         bedrockLastCheckAt = System.currentTimeMillis();
-        return py;
+        return out;
     }
+
 
     private String nativeWorkerId() {
         String saved = prefs == null ? "" : prefs.getString("native_worker_id", "");
@@ -4809,15 +4808,11 @@ public class MainActivity extends Activity {
             if ("apk_core_linux_rootfs_validate".equals(type)) action = "validate";
             if ("apk_core_linux_rootfs_repair".equals(type)) action = "repair";
             if ("apk_core_linux_rootfs_clean_staging".equals(type)) action = "clean_staging";
-            JSONObject rootfs = coreLinuxRootfsSnapshot(action);
+            JSONObject rootfs = coreLinuxRootfsStaticSnapshot(action);
             safePutPayload(result, "rootfs", rootfs);
-            internalDiagnosticsSummary = rootfs.optString("summary", "rootfs interno atualizado");
+            internalDiagnosticsSummary = rootfs.optString("summary", "rootfs interno em modo seguro");
             internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!rootfs.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", rootfs.optString("error", rootfs.optString("summary", "rootfs interno pendente")));
-            }
-            result.put("message", rootfs.optString("summary", "rootfs interno atualizado sem baixar/iniciar servidor"));
+            result.put("message", rootfs.optString("summary", "rootfs interno verificado sem Python/Termux"));
             return result;
         }
 
@@ -4858,36 +4853,23 @@ public class MainActivity extends Activity {
             if ("apk_core_linux_rootfs_manifest".equals(type)) action = "rootfs";
             if ("apk_core_linux_box64_manifest".equals(type)) action = "box64";
             if ("apk_core_linux_bedrock_preflight".equals(type)) action = "bedrock_preflight";
-            JSONObject core = coreLinuxInternalSnapshot(action);
+            JSONObject core = coreLinuxStaticSnapshot(action);
             safePutPayload(result, "coreLinuxInternal", core);
-            internalDiagnosticsSummary = core.optString("summary", "Core Linux interno atualizado");
+            internalDiagnosticsSummary = core.optString("summary", "Core Linux interno em modo seguro");
             internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!core.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", core.optString("error", core.optString("summary", "Core Linux interno bloqueado")));
-            }
-            result.put("message", core.optString("summary", "Core Linux interno atualizado sem Termux"));
+            result.put("message", core.optString("summary", "Core Linux interno verificado sem Python/Termux"));
             return result;
         }
 
         if ("apk_linux_runtime_probe".equals(type) || "apk_linux_rootfs_probe".equals(type) || "apk_linux_box64_probe".equals(type)) {
-            prepareCoreLinuxRuntimeState();
-            try {
-                coreLinuxInternalSnapshot("probe");
-            } catch (Throwable ignored) {
-            }
             String focus = "runtime";
             if ("apk_linux_rootfs_probe".equals(type)) focus = "rootfs";
             if ("apk_linux_box64_probe".equals(type)) focus = "box64";
-            JSONObject linux = coreLinuxRuntimeProbeSnapshot(focus);
+            JSONObject linux = coreLinuxStaticSnapshot(focus);
             safePutPayload(result, "linuxRuntime", linux);
-            internalDiagnosticsSummary = linux.optString("summary", "runtime Linux verificado");
+            internalDiagnosticsSummary = linux.optString("summary", "runtime Linux verificado em modo seguro");
             internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!linux.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", linux.optString("error", "runtime Linux pendente"));
-            }
-            result.put("message", linux.optBoolean("ok", false) ? "Core Linux Runtime diagnosticado pelo APK" : "Core Linux Runtime ainda pendente");
+            result.put("message", linux.optString("summary", "Core Linux Runtime verificado sem Python/Termux"));
             return result;
         }
         if ("apk_linux_prepare_directories".equals(type)) {
@@ -4924,7 +4906,7 @@ public class MainActivity extends Activity {
             return result;
         }
         if ("apk_minecraft_bedrock_requirements".equals(type)) {
-            JSONObject requirements = bedrockRequirementsSnapshot();
+            JSONObject requirements = bedrockServerLightweightTestSnapshot();
             safePutPayload(result, "bedrock", requirements);
             internalDiagnosticsSummary = requirements.optString("summary", "requisitos Bedrock avaliados");
             internalDiagnosticsLastAt = System.currentTimeMillis();
@@ -4936,7 +4918,7 @@ public class MainActivity extends Activity {
             return result;
         }
         if ("apk_minecraft_bedrock_probe".equals(type) || "apk_minecraft_bedrock_status".equals(type)) {
-            JSONObject bedrock = bedrockProbeSnapshot("apk_minecraft_bedrock_status".equals(type) ? "status" : "probe");
+            JSONObject bedrock = bedrockServerLightweightTestSnapshot();
             safePutPayload(result, "bedrock", bedrock);
             internalDiagnosticsSummary = bedrock.optString("summary", "Bedrock diagnosticado");
             internalDiagnosticsLastAt = System.currentTimeMillis();
@@ -4958,15 +4940,12 @@ public class MainActivity extends Activity {
             if ("apk_minecraft_bedrock_start_plan".equals(type)) focus = "start_plan";
             if ("apk_minecraft_bedrock_stop_plan".equals(type)) focus = "stop_plan";
             if ("apk_minecraft_bedrock_logs_status".equals(type)) focus = "logs_status";
-            JSONObject manager = bedrockManagerSnapshot(focus, false);
+            JSONObject manager = bedrockServerLightweightTestSnapshot();
+            manager.put("focus", focus);
             safePutPayload(result, "bedrockManager", manager);
-            internalDiagnosticsSummary = manager.optString("summary", "Bedrock Manager atualizado");
+            internalDiagnosticsSummary = manager.optString("summary", "Bedrock Manager em modo seguro");
             internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!manager.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", manager.optString("error", "Bedrock Manager pendente"));
-            }
-            result.put("message", manager.optString("summary", "Bedrock Manager atualizado sem baixar/iniciar servidor"));
+            result.put("message", manager.optString("summary", "Bedrock Manager verificado sem Python/Termux"));
             return result;
         }
         if ("apk_minecraft_bedrock_installer_status".equals(type)
@@ -4981,15 +4960,13 @@ public class MainActivity extends Activity {
             if ("apk_minecraft_bedrock_prepare_environment_plan".equals(type)) focus = "prepare_environment";
             if ("apk_minecraft_bedrock_download_manifest".equals(type)) focus = "download_manifest";
             if ("apk_minecraft_bedrock_final_preflight".equals(type)) focus = "final_preflight";
-            JSONObject wizard = bedrockInstallerWizardSnapshot(focus);
+            JSONObject wizard = bedrockServerLightweightTestSnapshot();
+            wizard.put("focus", focus);
+            wizard.put("installerIsolated", true);
             safePutPayload(result, "bedrockInstaller", wizard);
-            internalDiagnosticsSummary = wizard.optString("summary", "instalador Bedrock atualizado");
+            internalDiagnosticsSummary = wizard.optString("summary", "instalador Bedrock em modo seguro");
             internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!wizard.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", wizard.optString("error", wizard.optString("summary", "instalador Bedrock bloqueado")));
-            }
-            result.put("message", wizard.optString("summary", "instalador Bedrock atualizado sem baixar/iniciar servidor"));
+            result.put("message", wizard.optString("summary", "instalador Bedrock verificado sem Python/Termux"));
             return result;
         }
         if ("apk_minecraft_bedrock_runtime_status".equals(type)
@@ -5010,20 +4987,16 @@ public class MainActivity extends Activity {
             if ("apk_minecraft_bedrock_runner_preflight".equals(type)) action = "preflight";
             if ("apk_minecraft_bedrock_console_command".equals(type)) action = "console_command_remote_blocked";
             if ("apk_minecraft_bedrock_runtime_repair".equals(type)) action = "repair";
-            if ("start".equals(action)) {
-                startBedrockService("job");
-            } else if ("stop".equals(action)) {
-                stopBedrockService("job");
+            if ("stop".equals(action)) {
+                try { stopBedrockService("job-stop-safe"); } catch (Throwable ignored) {}
             }
-            JSONObject runtime = bedrockRuntimeSnapshot(action);
+            JSONObject runtime = bedrockRuntimeStaticSnapshot(action);
+            runtime.put("startBlocked", "start".equals(action));
+            runtime.put("isolationMode", BEDROCK_RUNTIME_ISOLATED);
             safePutPayload(result, "bedrockRuntime", runtime);
-            internalDiagnosticsSummary = runtime.optString("summary", "runtime Bedrock atualizado");
+            internalDiagnosticsSummary = runtime.optString("summary", "runtime Bedrock em modo seguro");
             internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!runtime.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", runtime.optString("error", "runtime Bedrock pendente"));
-            }
-            result.put("message", runtime.optString("summary", "runtime Bedrock atualizado pelo APK"));
+            result.put("message", "start".equals(action) ? "runtime Bedrock bloqueado com segurança pelo APK" : runtime.optString("summary", "runtime Bedrock verificado sem Python/Termux"));
             return result;
         }
         if ("apk_download_small".equals(type)) {
@@ -5216,6 +5189,22 @@ public class MainActivity extends Activity {
         out.put("bedrockDir", safeFileStatus(bedrock));
         out.put("pythonTouched", false);
         out.put("nativeStarted", false);
+        return out;
+    }
+
+    private JSONObject coreLinuxRootfsStaticSnapshot(String action) throws Exception {
+        JSONObject core = coreLinuxStaticSnapshot(action == null ? "rootfs" : action);
+        JSONObject out = new JSONObject();
+        out.put("ok", true);
+        out.put("action", action == null ? "status" : action);
+        out.put("mode", "static-no-python");
+        out.put("summary", "rootfs interno verificado em modo seguro; operação pesada pausada");
+        out.put("state", "rootfs_static_safe_check");
+        out.put("rootfsReady", core.optBoolean("rootfsReady", false));
+        safePutPayload(out, "coreLinux", core);
+        out.put("pythonTouched", false);
+        out.put("termuxTouched", false);
+        out.put("serviceStarted", false);
         return out;
     }
 
@@ -5985,13 +5974,11 @@ public class MainActivity extends Activity {
         status.put("core_linux_state", coreLinuxState == null ? "" : coreLinuxState);
         status.put("core_linux_prepared", coreLinuxPrepared);
         try {
-            safePutPayload(status, "core_linux_native_executor", coreLinuxNativeExecutorSnapshot("probe"));
+            safePutPayload(status, "core_linux_static", coreLinuxStaticSnapshot("status"));
         } catch (Throwable ignored) {
         }
-        try {
-            safePutPayload(status, "core_linux_rootfs", coreLinuxRootfsSnapshot("status"));
-        } catch (Throwable ignored) {
-        }
+        status.put("core_linux_heavy_probe_paused", true);
+        status.put("bedrock_runtime_isolated", BEDROCK_RUNTIME_ISOLATED);
         status.put("bedrock_summary", bedrockSummary == null ? "" : bedrockSummary);
         status.put("bedrock_state", bedrockState == null ? "" : bedrockState);
         status.put("bedrock_ready", bedrockReady);
@@ -6481,11 +6468,15 @@ public class MainActivity extends Activity {
     }
 
     private void show(String message) {
-        runOnUiThread(() -> refreshLocalStatus(message));
+        runOnUiThread(() -> {
+            if (!activityDestroyed) refreshLocalStatus(message);
+        });
     }
 
     private void toast(String message) {
-        runOnUiThread(() -> Toast.makeText(this, message, Toast.LENGTH_SHORT).show());
+        runOnUiThread(() -> {
+            if (!activityDestroyed) Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+        });
     }
 
     private void setButtonsEnabled(boolean enabled) {
