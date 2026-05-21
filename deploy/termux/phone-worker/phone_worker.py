@@ -1724,6 +1724,129 @@ class WorkerHandler(BaseHTTPRequestHandler):
             config = str(config_path)
         return str(model_path), config
 
+    def _piper_cache_enabled(self, body: dict[str, Any]) -> bool:
+        raw = body.get("cache_enabled", os.getenv("PHONE_WORKER_PIPER_CACHE_ENABLED", "true"))
+        return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+    def _piper_cache_dir(self) -> Path:
+        configured = str(os.getenv("PHONE_WORKER_PIPER_CACHE_DIR", "") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        return Path.home() / "phone-worker" / "cache" / "piper"
+
+    def _piper_cache_limits(self) -> tuple[int, int]:
+        def _as_int(name: str, default: int, minimum: int, maximum: int) -> int:
+            try:
+                value = int(float(os.getenv(name, str(default)) or default))
+            except Exception:
+                value = default
+            return max(minimum, min(maximum, value))
+        max_mb = _as_int("PHONE_WORKER_PIPER_CACHE_MAX_MB", 2048, 32, 16384)
+        max_files = _as_int("PHONE_WORKER_PIPER_CACHE_MAX_FILES", 4096, 32, 50000)
+        return max_mb * 1024 * 1024, max_files
+
+    def _normalize_piper_cache_text(self, text: str) -> str:
+        return " ".join(str(text or "").strip().split()).lower()
+
+    def _piper_cache_key(self, *, text: str, model_path: str, config_path: str, model_name: str, audio_format_hint: str) -> str:
+        model = Path(model_path)
+        try:
+            stat = model.stat()
+            model_sig = f"{model.resolve()}:{stat.st_size}:{int(stat.st_mtime)}"
+        except Exception:
+            model_sig = str(model_path)
+        bitrate = str(os.getenv("PHONE_WORKER_PIPER_MP3_BITRATE", "96k") or "96k")
+        payload = "|".join([
+            "piper-worker-cache-v2",
+            PHONE_WORKER_VERSION,
+            str(model_name or "turbo-default"),
+            model_sig,
+            str(config_path or ""),
+            str(audio_format_hint or "auto"),
+            bitrate,
+            self._normalize_piper_cache_text(text),
+        ])
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _find_piper_cache_file(self, key: str) -> tuple[Path | None, str]:
+        cache_dir = self._piper_cache_dir()
+        for fmt, suffix in (("mp3", ".mp3"), ("wav", ".wav")):
+            path = cache_dir / f"{key}{suffix}"
+            if path.exists() and path.stat().st_size > 0:
+                return path, fmt
+        return None, ""
+
+    def _touch_piper_cache_file(self, path: Path) -> None:
+        now = time.time()
+        with contextlib.suppress(Exception):
+            os.utime(path, (now, now))
+
+    def _prune_piper_cache(self, *, protected: Path | None = None) -> None:
+        cache_dir = self._piper_cache_dir()
+        max_bytes, max_files = self._piper_cache_limits()
+        try:
+            entries = [p for p in cache_dir.iterdir() if p.is_file() and p.suffix.lower() in {".mp3", ".wav"}]
+        except FileNotFoundError:
+            return
+        total_bytes = 0
+        stats: list[tuple[float, int, Path]] = []
+        for path in entries:
+            try:
+                st = path.stat()
+            except FileNotFoundError:
+                continue
+            total_bytes += int(st.st_size)
+            stats.append((float(st.st_mtime), int(st.st_size), path))
+        if len(stats) <= max_files and total_bytes <= max_bytes:
+            return
+        protected_path = protected.resolve() if protected else None
+        for _, size, path in sorted(stats, key=lambda item: item[0]):
+            if protected_path is not None:
+                with contextlib.suppress(Exception):
+                    if path.resolve() == protected_path:
+                        continue
+            if len(stats) <= max_files and total_bytes <= max_bytes:
+                break
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                continue
+            total_bytes = max(0, total_bytes - size)
+            stats = [item for item in stats if item[2] != path]
+
+    def _piper_cache_hit_result(self, *, path: Path, audio_format: str, key: str, roles: list[str], capabilities: list[str], logs: list[str], max_audio_bytes: int, started: float) -> dict[str, Any]:
+        read_started = time.monotonic()
+        data = path.read_bytes()
+        read_ms = (time.monotonic() - read_started) * 1000.0
+        if not data:
+            raise RuntimeError("cache Piper vazio")
+        if len(data) > max_audio_bytes:
+            raise RuntimeError(f"cache Piper grande demais: {len(data)} bytes")
+        self._touch_piper_cache_file(path)
+        digest = hashlib.sha256(data).hexdigest()
+        total_ms = (time.monotonic() - started) * 1000.0
+        logs.append(f"cache hit Piper {len(data)} B em {read_ms:.1f} ms")
+        return {
+            "ok": True,
+            "engine": "piper",
+            "audio_format": audio_format,
+            "cache_hit": True,
+            "cache_key": key[:16],
+            "cache_read_ms": round(read_ms, 2),
+            "worker_profile": _current_core_worker_profile(),
+            "worker_version": PHONE_WORKER_VERSION,
+            "roles": roles[:16],
+            "capabilities": capabilities[:24],
+            "worker_synth_ms": 0.0,
+            "size": len(data),
+            "sha256": digest,
+            "logs": logs[:10],
+            "data_b64": _b64encode(data, max_bytes=max_audio_bytes),
+            "worker_total_ms": round(total_ms, 2),
+        }
+
     def _synthesize_piper_bytes(self, body: dict[str, Any], *, benchmark: bool) -> dict[str, Any]:
         roles, capabilities = self._ensure_tts_piper_turbo_allowed()
         text = str(body.get("text") or "").strip()
@@ -1736,11 +1859,31 @@ class WorkerHandler(BaseHTTPRequestHandler):
         piper_cmd = self._resolve_piper_command()
         model_path, config_path = self._resolve_piper_model(body)
         model_name = str(body.get("model_name") or os.getenv("PHONE_WORKER_PIPER_MODEL_NAME", "turbo-default") or "turbo-default").strip() or "turbo-default"
+        cache_mode = str(body.get("cache_mode") or "prefer").strip().lower()
+        cache_enabled = self._piper_cache_enabled(body)
         logs: list[str] = [
             f"perfil={_current_core_worker_profile()} versão={PHONE_WORKER_VERSION}",
             f"engine=piper chars={len(text)} timeout={timeout}s modelo={model_name}",
         ]
         started = time.monotonic()
+        cache_key = self._piper_cache_key(text=text, model_path=model_path, config_path=config_path, model_name=model_name, audio_format_hint="auto")
+        if cache_enabled and cache_mode not in {"refresh", "bypass", "miss"}:
+            cached_path, cached_format = self._find_piper_cache_file(cache_key)
+            if cached_path is not None:
+                return self._piper_cache_hit_result(
+                    path=cached_path,
+                    audio_format=cached_format,
+                    key=cache_key,
+                    roles=roles,
+                    capabilities=capabilities,
+                    logs=logs,
+                    max_audio_bytes=max_audio_bytes,
+                    started=started,
+                )
+            logs.append("cache miss Piper")
+        elif cache_enabled:
+            logs.append(f"cache Piper ignorado por modo={cache_mode}")
+
         with tempfile.TemporaryDirectory(prefix="phone-worker-piper-") as tmp:
             tmp_dir = Path(tmp)
             wav_path = tmp_dir / "speech.wav"
@@ -1809,11 +1952,29 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 raise RuntimeError(f"áudio grande demais: {len(data)} bytes")
         synth_ms = (time.monotonic() - started) * 1000.0
         digest = hashlib.sha256(data).hexdigest()
+        cache_stored = False
+        if cache_enabled and cache_mode not in {"bypass"}:
+            try:
+                cache_dir = self._piper_cache_dir()
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                cache_path = cache_dir / f"{cache_key}.{audio_format}"
+                tmp_cache_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+                tmp_cache_path.write_bytes(data)
+                os.replace(tmp_cache_path, cache_path)
+                self._touch_piper_cache_file(cache_path)
+                self._prune_piper_cache(protected=cache_path)
+                cache_stored = True
+                logs.append(f"cache store Piper {cache_path.name} {len(data)} B")
+            except Exception as exc:
+                logs.append(f"cache store Piper falhou: {_short_text(exc, limit=120)}")
         logs.append(f"worker Piper gerou {len(data)} bytes em {synth_ms:.1f} ms")
         return {
             "ok": True,
             "engine": "piper",
             "audio_format": audio_format,
+            "cache_hit": False,
+            "cache_key": cache_key[:16],
+            "cache_stored": cache_stored,
             "worker_profile": _current_core_worker_profile(),
             "worker_version": PHONE_WORKER_VERSION,
             "roles": roles[:16],

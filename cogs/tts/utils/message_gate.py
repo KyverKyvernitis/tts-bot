@@ -64,8 +64,8 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
             reason="prefix_command",
         )
 
-    # Piper experimental: prefixo fixo por enquanto, sem painel.
-    # É restrito por guild por padrão para evitar roubar mensagens comuns com / em outros servidores.
+    # Piper experimental: prefixo experimental % por enquanto, sem painel.
+    # É restrito por guild por padrão para evitar roubar mensagens comuns em outros servidores.
     piper_enabled = bool(getattr(config, "TTS_PIPER_EXPERIMENT_ENABLED", False))
     piper_prefix = str(getattr(config, "TTS_PIPER_EXPERIMENT_PREFIX", "/") or "/")
     piper_guild_id = int(getattr(config, "TTS_PIPER_EXPERIMENT_GUILD_ID", 0) or 0)

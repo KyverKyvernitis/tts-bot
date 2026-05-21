@@ -69,11 +69,14 @@ TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS = max(1.5, float(getattr(config, "TTS_TURBO_
 TTS_TURBO_BENCHMARK_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_TURBO_BENCHMARK_MAX_AUDIO_MB", 4) or 4))
 TTS_PIPER_EXPERIMENT_ENABLED = bool(getattr(config, "TTS_PIPER_EXPERIMENT_ENABLED", True))
 TTS_PIPER_EXPERIMENT_GUILD_ID = int(getattr(config, "TTS_PIPER_EXPERIMENT_GUILD_ID", TTS_TURBO_BENCHMARK_GUILD_ID) or TTS_TURBO_BENCHMARK_GUILD_ID)
-TTS_PIPER_EXPERIMENT_PREFIX = str(getattr(config, "TTS_PIPER_EXPERIMENT_PREFIX", "/") or "/").strip() or "/"
+TTS_PIPER_EXPERIMENT_PREFIX = str(getattr(config, "TTS_PIPER_EXPERIMENT_PREFIX", "%") or "%").strip() or "%"
 TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_PIPER_WORKER_TIMEOUT_SECONDS", 6.0) or 6.0))
 TTS_PIPER_MAX_TEXT_LENGTH = max(16, int(getattr(config, "TTS_PIPER_MAX_TEXT_LENGTH", 600) or 600))
 TTS_PIPER_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_PIPER_MAX_AUDIO_MB", 8) or 8))
 TTS_PIPER_MODEL_NAME = str(getattr(config, "TTS_PIPER_MODEL_NAME", "turbo-default") or "turbo-default").strip() or "turbo-default"
+TTS_PIPER_VPS_CACHE_SIZE = max(32, int(getattr(config, "TTS_PIPER_VPS_CACHE_SIZE", 2048) or 2048))
+TTS_PIPER_VPS_CACHE_MAX_MB = max(64, int(getattr(config, "TTS_PIPER_VPS_CACHE_MAX_MB", 2048) or 2048))
+TTS_PIPER_VPS_CACHE_MAX_BYTES = TTS_PIPER_VPS_CACHE_MAX_MB * 1024 * 1024
 PHONE_WORKER_ENABLED = bool(getattr(config, "PHONE_WORKER_ENABLED", False))
 PHONE_WORKER_HOST = str(getattr(config, "PHONE_WORKER_HOST", "") or "").strip()
 PHONE_WORKER_PORT = int(getattr(config, "PHONE_WORKER_PORT", 8766) or 8766)
@@ -703,7 +706,10 @@ class TTSAudioMixin:
         total_files = len(files)
         total_bytes = sum(size for _, _, size, _ in files)
 
-        if total_files <= TTS_TEMP_MAX_FILES and total_bytes <= TTS_TEMP_MAX_BYTES:
+        effective_max_files = TTS_TEMP_MAX_FILES + TTS_PIPER_VPS_CACHE_SIZE
+        effective_max_bytes = TTS_TEMP_MAX_BYTES + TTS_PIPER_VPS_CACHE_MAX_BYTES
+
+        if total_files <= effective_max_files and total_bytes <= effective_max_bytes:
             return
 
         cache_order = self._get_global_cache_order()
@@ -712,7 +718,7 @@ class TTSAudioMixin:
             abs_path = os.path.abspath(path)
             if abs_path in protected:
                 continue
-            if total_files <= TTS_TEMP_MAX_FILES and total_bytes <= TTS_TEMP_MAX_BYTES:
+            if total_files <= effective_max_files and total_bytes <= effective_max_bytes:
                 break
             try:
                 os.remove(abs_path)
@@ -736,6 +742,17 @@ class TTSAudioMixin:
         cache_order.move_to_end(key)
         cache_frequency[key] = int(cache_frequency.get(key, 0) or 0) + 1
 
+    def _is_piper_cache_key(self, key: str) -> bool:
+        return str(key or "").startswith("piper_")
+
+    def _cache_quota_overflow(self, cache_order: OrderedDict[str, float]) -> tuple[bool, bool, bool]:
+        piper_count = sum(1 for key in cache_order if self._is_piper_cache_key(key))
+        normal_count = max(0, len(cache_order) - piper_count)
+        piper_over = piper_count > TTS_PIPER_VPS_CACHE_SIZE
+        normal_over = normal_count > TTS_AUDIO_CACHE_SIZE
+        total_over = len(cache_order) > (TTS_AUDIO_CACHE_SIZE + TTS_PIPER_VPS_CACHE_SIZE)
+        return normal_over, piper_over, total_over
+
     def _purge_cache(self, state: GuildTTSState, *, protected_paths: Optional[set[str]] = None, force_tmp_prune: bool = False) -> None:
         cache_order = self._get_global_cache_order()
         cache_frequency = self._get_cache_frequency_map()
@@ -751,11 +768,20 @@ class TTSAudioMixin:
             cache_frequency.pop(key, None)
 
         protected = {os.path.abspath(p) for p in (protected_paths or set()) if p}
-        while len(cache_order) > TTS_AUDIO_CACHE_SIZE:
+        while True:
+            normal_over, piper_over, total_over = self._cache_quota_overflow(cache_order)
+            if not (normal_over or piper_over or total_over):
+                break
+
             candidate_key = None
             candidate_score = None
 
             for key, last_used_ts in cache_order.items():
+                is_piper = self._is_piper_cache_key(key)
+                if piper_over and not is_piper:
+                    continue
+                if normal_over and not piper_over and is_piper:
+                    continue
                 path = self._cache_path(key)
                 abs_path = os.path.abspath(path)
                 if abs_path in protected:
@@ -825,7 +851,8 @@ class TTSAudioMixin:
             if language == 'pt-br':
                 language = 'pt'
             payload = f"gtts|{language}|{text}"
-        cached_key = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        cached_key = f"piper_{digest}" if engine == "piper" else digest
         item._cache_key_value = cached_key
         return cached_key
 
@@ -1258,7 +1285,7 @@ class TTSAudioMixin:
                 with contextlib.suppress(Exception):
                     os.remove(path)
 
-    async def _tts_benchmark_worker_engine(self, item: QueueItem) -> dict[str, Any]:
+    async def _tts_benchmark_worker_engine_once(self, item: QueueItem, *, cache_mode: str | None = None) -> dict[str, Any]:
         engine = str(item.engine or "gtts").strip().lower()
         base = self._phone_worker_tts_benchmark_base_url()
         if not base:
@@ -1280,6 +1307,8 @@ class TTSAudioMixin:
             "timeout_seconds": int(max(2.0, TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS - 1.0)),
             "max_audio_bytes": TTS_TURBO_BENCHMARK_MAX_AUDIO_MB * 1024 * 1024,
         }
+        if cache_mode:
+            payload["cache_mode"] = cache_mode
         headers = {
             "Authorization": f"Bearer {PHONE_WORKER_TOKEN}",
             "Content-Type": "application/json",
@@ -1308,7 +1337,8 @@ class TTSAudioMixin:
                 raise RuntimeError("sha256 do áudio retornado não confere")
 
             def _write_and_stat(content: bytes) -> int:
-                path = self._make_runtime_temp_file(suffix=".mp3")
+                suffix = ".wav" if data.get("audio_format") == "wav" else ".mp3"
+                path = self._make_runtime_temp_file(suffix=suffix)
                 try:
                     with open(path, "wb") as handle:
                         handle.write(content)
@@ -1333,6 +1363,11 @@ class TTSAudioMixin:
                 "sha256": actual_hash,
                 "worker_profile": data.get("worker_profile"),
                 "worker_version": data.get("worker_version"),
+                "audio_format": data.get("audio_format"),
+                "cache_hit": bool(data.get("cache_hit")),
+                "cache_key": data.get("cache_key"),
+                "cache_read_ms": data.get("cache_read_ms"),
+                "cache_stored": bool(data.get("cache_stored")),
                 "logs": clean_logs,
             }
         except Exception as exc:
@@ -1345,12 +1380,78 @@ class TTSAudioMixin:
                 "logs": [f"worker falhou após {total_ms:.1f} ms"],
             }
 
+    async def _tts_benchmark_worker_engine(self, item: QueueItem) -> dict[str, Any]:
+        engine = str(item.engine or "gtts").strip().lower()
+        if engine != "piper":
+            return await self._tts_benchmark_worker_engine_once(item)
+
+        miss = await self._tts_benchmark_worker_engine_once(item, cache_mode="refresh")
+        hit = await self._tts_benchmark_worker_engine_once(item, cache_mode="prefer")
+        if not miss.get("ok"):
+            return miss
+        if not hit.get("ok"):
+            combined = dict(miss)
+            combined["piper_cache_miss"] = miss
+            combined["piper_cache_hit"] = hit
+            combined["logs"] = list(miss.get("logs") or [])[:3] + ["cache hit falhou: " + str(hit.get("error") or "erro sem detalhe")]
+            return combined
+        combined = dict(hit)
+        combined["piper_cache_miss"] = miss
+        combined["piper_cache_hit"] = hit
+        combined["worker_synth_ms"] = miss.get("worker_synth_ms")
+        combined["total_ms"] = hit.get("total_ms")
+        logs = []
+        logs.extend(list(miss.get("logs") or [])[:2])
+        logs.extend(list(hit.get("logs") or [])[:3])
+        combined["logs"] = logs[:6]
+        return combined
+
     def _format_tts_benchmark_engine_block(self, engine: str, local: dict[str, Any], worker: dict[str, Any]) -> list[str]:
         local_ok = bool(local.get("ok"))
         worker_ok = bool(worker.get("ok"))
         local_ms = local.get("elapsed_ms")
         worker_total_ms = worker.get("total_ms")
         worker_synth_ms = worker.get("worker_synth_ms")
+        if engine == "piper":
+            miss = worker.get("piper_cache_miss") if isinstance(worker.get("piper_cache_miss"), dict) else None
+            hit = worker.get("piper_cache_hit") if isinstance(worker.get("piper_cache_hit"), dict) else None
+            if worker_ok and hit and hit.get("ok"):
+                title = "Piper funcional · cache hit é o caminho rápido"
+            elif worker_ok:
+                title = "Piper funcional, mas cache hit não foi medido"
+            else:
+                title = "Piper falhou no worker"
+            lines = [f"**piper** — {title}"]
+            lines.append("VPS: indisponível · Piper experimental roda apenas no phone-worker turbo")
+            if worker_ok:
+                lines.append(
+                    f"Worker: ok · cache hit {self._format_tts_benchmark_ms(worker_total_ms)}"
+                    + (f" · geração/miss {self._format_tts_benchmark_ms(worker_synth_ms)}" if worker_synth_ms is not None else "")
+                    + f" · {int(worker.get('size') or 0)} B"
+                )
+                if miss or hit:
+                    miss_total = miss.get("total_ms") if miss else None
+                    miss_synth = miss.get("worker_synth_ms") if miss else None
+                    hit_total = hit.get("total_ms") if hit else None
+                    hit_read = hit.get("cache_read_ms") if hit else None
+                    lines.append(
+                        "Cache: "
+                        f"miss/geração {self._format_tts_benchmark_ms(miss_total)}"
+                        + (f" (synth {self._format_tts_benchmark_ms(miss_synth)})" if miss_synth is not None else "")
+                        + f" · hit {self._format_tts_benchmark_ms(hit_total)}"
+                        + (f" (read {self._format_tts_benchmark_ms(hit_read)})" if hit_read is not None else "")
+                    )
+            else:
+                lines.append(f"Worker: falhou · total {self._format_tts_benchmark_ms(worker_total_ms)} · {worker.get('error') or 'erro sem detalhe'}")
+            logs: list[str] = []
+            for source, data in (("Worker", worker),):
+                raw_logs = data.get("logs") if isinstance(data.get("logs"), list) else []
+                for entry in raw_logs[:4]:
+                    logs.append(f"{source}: {self._short_tts_benchmark_text(entry, limit=120)}")
+            if logs:
+                lines.append("Logs curtas: " + " | ".join(logs[:4]))
+            return lines
+
         if local_ok and worker_ok:
             winner = self._format_tts_benchmark_delta(local_ms, worker_total_ms)
         elif local_ok:
@@ -1409,6 +1510,16 @@ class TTSAudioMixin:
                     best_saving_ms = max(best_saving_ms, delta)
                 elif delta < 0:
                     local_wins += 1
+        piper_hit_ms = None
+        piper_miss_ms = None
+        for engine, _, worker in results:
+            if engine == "piper" and worker.get("ok"):
+                hit = worker.get("piper_cache_hit") if isinstance(worker.get("piper_cache_hit"), dict) else None
+                miss = worker.get("piper_cache_miss") if isinstance(worker.get("piper_cache_miss"), dict) else None
+                piper_hit_ms = hit.get("total_ms") if hit else worker.get("total_ms")
+                piper_miss_ms = miss.get("total_ms") if miss else worker.get("worker_synth_ms")
+                break
+
         if good_comparisons <= 0:
             verdict = "não deu para comparar com segurança: nenhuma engine teve os dois lados ok."
         elif worker_wins >= 2:
@@ -1416,7 +1527,9 @@ class TTSAudioMixin:
         elif worker_wins == 1:
             verdict = "worker turbo ganhou só em uma engine; ainda não dá para usar em TTS real."
         else:
-            verdict = "VPS foi igual ou melhor; por enquanto worker deve ficar só como teste/cache/conversão."
+            verdict = "VPS foi igual ou melhor em edge/gtts; worker deve continuar opcional."
+        if piper_hit_ms is not None:
+            verdict += f" Piper: miss {self._format_tts_benchmark_ms(piper_miss_ms)}; cache hit {self._format_tts_benchmark_ms(piper_hit_ms)} — recomendado apenas quando cacheado."
 
         header = [
             "🧪 **Benchmark TTS Worker Turbo**",

@@ -379,11 +379,13 @@ TTS_TURBO_BENCHMARK_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_TURBO_BENCHM
 # Prefixo fixo por enquanto; sem painel/configuração pública. Guild 0 libera em todas.
 TTS_PIPER_EXPERIMENT_ENABLED = _parse_bool(os.getenv("TTS_PIPER_EXPERIMENT_ENABLED", "true"), True)
 TTS_PIPER_EXPERIMENT_GUILD_ID = _parse_int(os.getenv("TTS_PIPER_EXPERIMENT_GUILD_ID", str(TTS_TURBO_BENCHMARK_GUILD_ID)), TTS_TURBO_BENCHMARK_GUILD_ID)
-TTS_PIPER_EXPERIMENT_PREFIX = (os.getenv("TTS_PIPER_EXPERIMENT_PREFIX", "/") or "/").strip() or "/"
+TTS_PIPER_EXPERIMENT_PREFIX = (os.getenv("TTS_PIPER_EXPERIMENT_PREFIX", "%") or "%").strip() or "%"
 TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_PIPER_WORKER_TIMEOUT_SECONDS", "6.0"), 6.0))
 TTS_PIPER_MAX_TEXT_LENGTH = max(16, _parse_int(os.getenv("TTS_PIPER_MAX_TEXT_LENGTH", "600"), 600))
 TTS_PIPER_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_PIPER_MAX_AUDIO_MB", "8"), 8))
 TTS_PIPER_MODEL_NAME = (os.getenv("TTS_PIPER_MODEL_NAME", "turbo-default") or "turbo-default").strip() or "turbo-default"
+TTS_PIPER_VPS_CACHE_SIZE = max(32, _parse_int(os.getenv("TTS_PIPER_VPS_CACHE_SIZE", "2048"), 2048))
+TTS_PIPER_VPS_CACHE_MAX_MB = max(64, _parse_int(os.getenv("TTS_PIPER_VPS_CACHE_MAX_MB", "2048"), 2048))
 
 # Uso do phone-worker fora do /vps: preparação de áudio TTS para Lavalink.
 # A VPS sempre mantém fallback local.

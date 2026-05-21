@@ -209,12 +209,12 @@ class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_piper_experimental_prefix_enqueues_in_authorized_guild(self):
         cog = FakeCog(db=FakeDB(guild_defaults={"tts_prefix": "."}, resolved={"engine": "gtts", "language": "pt-br"}))
-        message = make_message("/olá piper", guild_id=927002914449424404)
+        message = make_message("%olá piper", guild_id=927002914449424404)
 
         decision = await analyze_message_for_tts(cog, message)
         self.assertTrue(decision.should_process_tts)
         self.assertEqual(decision.forced_engine, "piper")
-        self.assertEqual(decision.active_prefix, "/")
+        self.assertEqual(decision.active_prefix, "%")
 
         result = await dispatch_message_tts(
             cog,
