@@ -1,3 +1,9 @@
+## Patch 85.7: terminal interno e logs ao vivo
+
+A versão `0.5.50` transforma o terminal da aba Bedrock em um console técnico do Core Worker: ele agora guarda histórico em `files/core-linux/logs/bedrock-terminal.log`, acompanha eventos/status em tempo real, permite copiar logs direto pelo app e abre uma tela de terminal expandida com botão **Mínimo** para voltar.
+
+O terminal continua seguro: não é shell livre do Android. Ele aceita comandos controlados como `help`, `status`, `logs`, `test`, `prepare`, `clear` e `copy`, enquanto comandos reais do Bedrock seguem bloqueados até rootfs/runtime serem validados sem crash.
+
 ## Patch 85.5: modo seguro real para Bedrock/rootfs
 
 A versão `0.5.48` corta a origem mais provável do crash pós-**Testar servidor**: o APK não anuncia nem executa jobs automáticos de rootfs, Bedrock ou Python pesado enquanto essa etapa ainda não estiver validável. Se a VPS ainda tiver algum job antigo desses na fila, o app responde como **pausado por segurança**, em vez de tocar Chaquopy/rootfs/Bedrock em segundo plano.

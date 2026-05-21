@@ -3,6 +3,7 @@ package dev.core.worker;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -35,6 +36,7 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -165,6 +167,22 @@ public class MainActivity extends Activity {
     private Button bedrockLogsButton;
     private Button bedrockEulaButton;
     private Button bedrockSendCommandButton;
+    private Button bedrockExpandTerminalButton;
+    private Button bedrockCopyTerminalButton;
+    private Dialog bedrockFullTerminalDialog;
+    private TextView bedrockFullTerminalText;
+    private final Runnable bedrockFullTerminalRefreshRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (activityDestroyed || bedrockFullTerminalDialog == null || !bedrockFullTerminalDialog.isShowing()) {
+                return;
+            }
+            refreshBedrockTerminalViews();
+            mainHandler.postDelayed(this, 1000L);
+        }
+    };
+    private volatile String lastTerminalStatusLine = "";
+    private volatile long lastTerminalStatusAt = 0L;
     private boolean suppressBedrockSwitchEvents = false;
     private volatile int permissionGateMissingStreak = 0;
     private volatile long permissionGateFirstMissingAt = 0L;
@@ -379,6 +397,15 @@ public class MainActivity extends Activity {
         activityDestroyed = true;
         bedrockProbeRunning.set(false);
         permissionGateDelayedRecheckScheduled.set(false);
+        mainHandler.removeCallbacks(bedrockFullTerminalRefreshRunnable);
+        try {
+            if (bedrockFullTerminalDialog != null && bedrockFullTerminalDialog.isShowing()) {
+                bedrockFullTerminalDialog.dismiss();
+            }
+        } catch (Throwable ignored) {
+        }
+        bedrockFullTerminalDialog = null;
+        bedrockFullTerminalText = null;
         super.onDestroy();
     }
 
@@ -932,8 +959,21 @@ public class MainActivity extends Activity {
         readinessCard.addView(bedrockEulaButton);
 
         LinearLayout terminalCard = cardWithTopMargin(bedrockContent);
-        terminalCard.addView(sectionTitle("Terminal do servidor"));
-        terminalCard.addView(smallText("Console do Bedrock. Não é shell livre do Android."));
+        LinearLayout terminalHeader = new LinearLayout(this);
+        terminalHeader.setOrientation(LinearLayout.HORIZONTAL);
+        terminalHeader.setGravity(Gravity.CENTER_VERTICAL);
+        TextView terminalTitle = sectionTitle("Terminal do servidor");
+        terminalHeader.addView(terminalTitle, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        bedrockCopyTerminalButton = compactButton("Copiar");
+        bedrockCopyTerminalButton.setOnClickListener(v -> copyBedrockTerminalLogsFromUi());
+        bedrockExpandTerminalButton = compactButton("▣");
+        bedrockExpandTerminalButton.setOnClickListener(v -> showBedrockTerminalFullScreen());
+        terminalHeader.addView(bedrockCopyTerminalButton, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams expandTerminalParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        expandTerminalParams.setMargins(dp(8), 0, 0, 0);
+        terminalHeader.addView(bedrockExpandTerminalButton, expandTerminalParams);
+        terminalCard.addView(terminalHeader);
+        terminalCard.addView(smallText("Console e logs em tempo real do Core Worker. Não é shell livre do Android."));
         bedrockTerminalText = terminalText();
         terminalCard.addView(bedrockTerminalText);
 
@@ -1013,7 +1053,8 @@ public class MainActivity extends Activity {
         text.setTypeface(Typeface.MONOSPACE);
         text.setLineSpacing(dp(1), 1.0f);
         text.setMinLines(5);
-        text.setText("Core Bedrock Console\n$ servidor desligado · prepare/inicie para enviar comandos");
+        text.setMaxLines(12);
+        text.setText(readBedrockTerminalTail());
         text.setPadding(dp(12), dp(10), dp(12), dp(10));
         text.setBackground(cardBackground(Color.rgb(4, 9, 16)));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
@@ -3030,6 +3071,54 @@ public class MainActivity extends Activity {
         if (bedrockCommandInput != null) {
             bedrockCommandInput.setText("");
         }
+        handleBedrockConsoleCommand(command);
+    }
+
+
+    private void handleBedrockConsoleCommand(String rawCommand) {
+        String command = rawCommand == null ? "" : rawCommand.trim();
+        if (command.isEmpty()) {
+            refreshLocalStatus("Digite um comando do console Bedrock.");
+            return;
+        }
+        String normalized = command.toLowerCase(Locale.ROOT);
+        if ("clear".equals(normalized) || "limpar".equals(normalized)) {
+            clearBedrockTerminalLogs();
+            refreshLocalStatus("Terminal limpo.");
+            return;
+        }
+        if ("copy".equals(normalized) || "copiar".equals(normalized)) {
+            copyBedrockTerminalLogsFromUi();
+            appendBedrockTerminal(command, "logs copiados para a área de transferência");
+            return;
+        }
+        if ("help".equals(normalized) || "ajuda".equals(normalized)) {
+            appendBedrockTerminal(command, "comandos seguros: help, status, logs, test, prepare, clear, copy. Comandos reais do Bedrock ficam bloqueados até o runtime estar validado.");
+            refreshLocalStatus("Ajuda do terminal exibida.");
+            return;
+        }
+        if ("status".equals(normalized) || "info".equals(normalized)) {
+            String summary = "Bedrock: " + emptyFallback(bedrockSummary, "aguardando diagnóstico")
+                    + " · runtime: " + emptyFallback(bedrockRuntimeSummary, "parado")
+                    + " · próxima ação: " + emptyFallback(bedrockInstallerNextAction, "validar requisitos");
+            appendBedrockTerminal(command, summary);
+            refreshLocalStatus(summary);
+            return;
+        }
+        if ("logs".equals(normalized) || "log".equals(normalized)) {
+            refreshBedrockRuntimeLogsFromUi();
+            return;
+        }
+        if ("test".equals(normalized) || "teste".equals(normalized)) {
+            appendBedrockTerminal(command, "iniciando diagnóstico seguro pelo botão interno");
+            testBedrockServerFromUi();
+            return;
+        }
+        if ("prepare".equals(normalized) || "preparar".equals(normalized)) {
+            appendBedrockTerminal(command, "preparando arquivos base em modo seguro");
+            prepareBedrockServerFromUi();
+            return;
+        }
         String summary = "ignorado para proteger a interface · runtime Bedrock ainda isolado";
         appendBedrockTerminal(command, summary);
         refreshLocalStatus(summary);
@@ -3038,15 +3127,166 @@ public class MainActivity extends Activity {
 
 
     private void appendBedrockTerminal(String command, String response) {
+        String safeCommand = sanitizeCommandOutput(command == null ? "" : command, 120);
+        String safeResponse = sanitizeCommandOutput(response == null ? "" : response, 420);
+        String line = System.currentTimeMillis() + " > " + safeCommand + "\n"
+                + System.currentTimeMillis() + " $ " + safeResponse + "\n";
+        appendBoundedTextFile(terminalLogFile(), line, BEDROCK_SAFE_TEST_LOG_LIMIT_BYTES);
+        refreshBedrockTerminalViews();
+    }
+
+
+    private void appendCoreTerminalEvent(String label, String message) {
+        String cleanMessage = message == null ? "" : message.trim();
+        if (cleanMessage.isEmpty()) return;
+        long now = System.currentTimeMillis();
+        String key = (label == null ? "status" : label.trim()) + ":" + cleanMessage;
+        if (key.equals(lastTerminalStatusLine) && now - lastTerminalStatusAt < 1800L) {
+            return;
+        }
+        lastTerminalStatusLine = key;
+        lastTerminalStatusAt = now;
+        appendBedrockTerminal(label == null ? "status" : label, cleanMessage);
+    }
+
+
+    private File terminalLogFile() {
+        return new File(new File(getFilesDir(), "core-linux/logs"), "bedrock-terminal.log");
+    }
+
+
+    private String terminalDefaultText() {
+        return "Core Bedrock Console\n$ servidor desligado · prepare/inicie para enviar comandos";
+    }
+
+
+    private String readBedrockTerminalTail() {
+        File file = terminalLogFile();
+        if (!file.exists()) {
+            return terminalDefaultText();
+        }
+        String value = readTextFileTail(file, 7000).trim();
+        if (value.isEmpty()) {
+            return terminalDefaultText();
+        }
+        return "Core Bedrock Console\n" + value;
+    }
+
+
+    private void refreshBedrockTerminalViews() {
         runOnUiThread(() -> {
-            if (bedrockTerminalText == null) return;
-            String current = bedrockTerminalText.getText() == null ? "Core Bedrock Console" : bedrockTerminalText.getText().toString();
-            String line = "\n> " + sanitizeCommandOutput(command == null ? "" : command, 120) + "\n$ " + sanitizeCommandOutput(response == null ? "" : response, 260);
-            String next = current + line;
-            if (next.length() > 1800) {
-                next = "Core Bedrock Console\n... histórico anterior resumido ..." + next.substring(Math.max(0, next.length() - 1400));
+            if (activityDestroyed) return;
+            String text = readBedrockTerminalTail();
+            if (bedrockTerminalText != null) {
+                bedrockTerminalText.setText(text);
             }
-            bedrockTerminalText.setText(next);
+            if (bedrockFullTerminalText != null) {
+                bedrockFullTerminalText.setText(text);
+            }
+        });
+    }
+
+
+    private void clearBedrockTerminalLogs() {
+        try {
+            writeTextFile(terminalLogFile(), "");
+        } catch (Throwable exc) {
+            startupLog("terminal:clear-failed " + shortThrowable(exc));
+        }
+        refreshBedrockTerminalViews();
+    }
+
+
+    private void copyBedrockTerminalLogsFromUi() {
+        copyToClipboard("core-worker-bedrock-terminal.log", readBedrockTerminalTail());
+    }
+
+
+    private void showBedrockTerminalFullScreen() {
+        runOnUiThread(() -> {
+            if (activityDestroyed) return;
+            if (bedrockFullTerminalDialog != null && bedrockFullTerminalDialog.isShowing()) {
+                refreshBedrockTerminalViews();
+                return;
+            }
+            Dialog dialog = new Dialog(this);
+            dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+            bedrockFullTerminalDialog = dialog;
+
+            LinearLayout root = new LinearLayout(this);
+            root.setOrientation(LinearLayout.VERTICAL);
+            root.setPadding(dp(14), dp(14), dp(14), dp(14));
+            root.setBackgroundColor(BG);
+
+            LinearLayout header = new LinearLayout(this);
+            header.setOrientation(LinearLayout.HORIZONTAL);
+            header.setGravity(Gravity.CENTER_VERTICAL);
+            TextView title = sectionTitle("▣ Terminal do Core Worker");
+            header.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+            Button copy = compactButton("Copiar");
+            copy.setOnClickListener(v -> copyBedrockTerminalLogsFromUi());
+            header.addView(copy, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+            Button minimize = compactButton("Mínimo");
+            minimize.setOnClickListener(v -> dialog.dismiss());
+            LinearLayout.LayoutParams minimizeParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            minimizeParams.setMargins(dp(8), 0, 0, 0);
+            header.addView(minimize, minimizeParams);
+            root.addView(header);
+
+            TextView hint = smallText("Logs ao vivo e comandos seguros. Shell Android livre continua bloqueado.");
+            root.addView(hint);
+
+            ScrollView scroll = new ScrollView(this);
+            scroll.setFillViewport(true);
+            bedrockFullTerminalText = terminalText();
+            bedrockFullTerminalText.setMaxLines(Integer.MAX_VALUE);
+            bedrockFullTerminalText.setText(readBedrockTerminalTail());
+            scroll.addView(bedrockFullTerminalText, new ScrollView.LayoutParams(
+                    ScrollView.LayoutParams.MATCH_PARENT,
+                    ScrollView.LayoutParams.WRAP_CONTENT
+            ));
+            LinearLayout.LayoutParams scrollParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    0,
+                    1f
+            );
+            scrollParams.setMargins(0, dp(8), 0, dp(8));
+            root.addView(scroll, scrollParams);
+
+            LinearLayout commandRow = new LinearLayout(this);
+            commandRow.setOrientation(LinearLayout.HORIZONTAL);
+            commandRow.setGravity(Gravity.CENTER_VERTICAL);
+            EditText commandInput = input("help, status, logs, test...", "");
+            commandInput.setSingleLine(true);
+            commandInput.setTypeface(Typeface.MONOSPACE);
+            commandRow.addView(commandInput, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+            Button send = compactButton("Enviar");
+            send.setOnClickListener(v -> {
+                String cmd = commandInput.getText() == null ? "" : commandInput.getText().toString().trim();
+                commandInput.setText("");
+                handleBedrockConsoleCommand(cmd);
+            });
+            LinearLayout.LayoutParams sendParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            sendParams.setMargins(dp(8), 0, 0, 0);
+            commandRow.addView(send, sendParams);
+            root.addView(commandRow);
+
+            dialog.setContentView(root);
+            dialog.setOnDismissListener(d -> {
+                mainHandler.removeCallbacks(bedrockFullTerminalRefreshRunnable);
+                bedrockFullTerminalText = null;
+                bedrockFullTerminalDialog = null;
+            });
+            dialog.show();
+            Window window = dialog.getWindow();
+            if (window != null) {
+                window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+                window.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(BG));
+            }
+            mainHandler.removeCallbacks(bedrockFullTerminalRefreshRunnable);
+            mainHandler.post(bedrockFullTerminalRefreshRunnable);
         });
     }
 
@@ -6499,6 +6739,8 @@ public class MainActivity extends Activity {
         if (bedrockLogsButton != null) bedrockLogsButton.setEnabled(enabled);
         if (bedrockEulaButton != null) bedrockEulaButton.setEnabled(enabled);
         if (bedrockSendCommandButton != null) bedrockSendCommandButton.setEnabled(enabled);
+        if (bedrockExpandTerminalButton != null) bedrockExpandTerminalButton.setEnabled(enabled);
+        if (bedrockCopyTerminalButton != null) bedrockCopyTerminalButton.setEnabled(enabled);
     }
 
     private void refreshLocalStatus(String extra) {
@@ -6522,6 +6764,9 @@ public class MainActivity extends Activity {
         } else {
             statusText.setText("");
             statusText.setVisibility(View.GONE);
+        }
+        if (hasExtra) {
+            appendCoreTerminalEvent("status", extra.trim());
         }
         if (localAgentText != null) {
             localAgentText.setText(localAgentLine());
