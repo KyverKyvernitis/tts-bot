@@ -1,3 +1,9 @@
+## Patch 85.5: modo seguro real para Bedrock/rootfs
+
+A versão `0.5.48` corta a origem mais provável do crash pós-**Testar servidor**: o APK não anuncia nem executa jobs automáticos de rootfs, Bedrock ou Python pesado enquanto essa etapa ainda não estiver validável. Se a VPS ainda tiver algum job antigo desses na fila, o app responde como **pausado por segurança**, em vez de tocar Chaquopy/rootfs/Bedrock em segundo plano.
+
+O botão **Testar servidor** agora roda em uma thread dedicada, com cooldown curto, logs explícitos em `files/core-linux/logs/app-startup.log`, sem usar o fluxo genérico de busy global e sem disparar probes profundos. Diagnósticos de bundle/relatório também foram rebaixados para snapshots leves, usando apenas arquivos locais e estado salvo. O switch do Bedrock fica bloqueado enquanto o runtime não estiver realmente pronto, evitando start acidental do serviço antes da validação.
+
 ## Patch 85.4: Bedrock/rootfs sem travar a interface
 
 A versão `0.5.47` deixa o botão **Testar servidor** totalmente leve e local: ele não chama Python/Chaquopy, não toca JNI, não inicia serviço, não baixa nada e não tenta executar Bedrock. O teste agora apenas valida arquivos/estados locais de rootfs, executor, Box64, EULA e Bedrock, grava `files/core-linux/logs/bedrock-test.log` e `files/core-linux/logs/rootfs-check.log`, e retorna uma mensagem natural quando o runtime ainda não está pronto.
