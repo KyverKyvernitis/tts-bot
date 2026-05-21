@@ -976,15 +976,54 @@ def _make_modal_select(custom_id: str, *, placeholder: str, options: list[discor
         return discord.ui.Select(**kwargs)
 
 
-def _make_modal_role_select(custom_id: str, *, placeholder: str, required: bool = False):
+def _role_select_default_values(default_role: discord.Role | None) -> list[object]:
+    if default_role is None:
+        return []
+    default_value_cls = getattr(discord, "SelectDefaultValue", None)
+    if default_value_cls is None:
+        return []
+    from_role = getattr(default_value_cls, "from_role", None)
+    if callable(from_role):
+        try:
+            return [from_role(default_role)]
+        except Exception as e:
+            print(f"[tts_modal] SelectDefaultValue.from_role falhou: {e!r}")
+    try:
+        value_type = getattr(getattr(discord, "SelectDefaultValueType", None), "role", None)
+        if value_type is not None:
+            return [default_value_cls(id=int(getattr(default_role, "id", 0) or 0), type=value_type)]
+    except Exception as e:
+        print(f"[tts_modal] SelectDefaultValue manual falhou: {e!r}")
+    return []
+
+
+def _make_modal_role_select(custom_id: str, *, placeholder: str, required: bool = False, default_role: discord.Role | None = None):
     role_select_cls = getattr(discord.ui, "RoleSelect", None)
     if role_select_cls is None:
         return None
-    kwargs = dict(custom_id=custom_id, placeholder=str(placeholder or "")[:150], min_values=1 if required else 0, max_values=1)
+    default_values = _role_select_default_values(default_role)
+    kwargs = dict(
+        custom_id=custom_id,
+        placeholder=str(placeholder or "")[:150],
+        min_values=1 if required else 0,
+        max_values=1,
+    )
+    if default_values:
+        kwargs["default_values"] = default_values
     try:
         return role_select_cls(required=required, **kwargs)
     except TypeError:
-        return role_select_cls(**kwargs)
+        kwargs.pop("default_values", None)
+        try:
+            select = role_select_cls(required=required, **kwargs)
+        except TypeError:
+            select = role_select_cls(**kwargs)
+        if default_values:
+            try:
+                select.default_values = default_values
+            except Exception as e:
+                print(f"[tts_modal] RoleSelect default_values indisponível: {e!r}")
+        return select
 
 
 def _radio_value_matches(left: object, right: object) -> bool:
@@ -1963,12 +2002,15 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
             self.current_ignored_role_enabled = bool(role_id)
         self.current_ignored_role = str(role_id) if role_id else ""
         self.current_ignored_role_name = ""
+        self.current_ignored_role_obj = None
         try:
             guild = getattr(panel_message, "guild", None)
             role = guild.get_role(role_id) if guild is not None and role_id else None
+            self.current_ignored_role_obj = role
             self.current_ignored_role_name = str(getattr(role, "name", "") or "")
         except Exception:
             self.current_ignored_role_name = ""
+            self.current_ignored_role_obj = None
         if self.force_text_fallback or not self._build_guided_modal():
             self._build_text_fallback()
 
@@ -2007,8 +2049,9 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
 
             role_select = _make_modal_role_select(
                 "ignored_role",
-                placeholder=(f"Cargo atual: {self.current_ignored_role_name}" if self.current_ignored_role_name else "Selecione o cargo ignorado"),
+                placeholder="Escolha o cargo ignorado",
                 required=False,
+                default_role=self.current_ignored_role_obj,
             )
             if role_select is not None:
                 ok = ok and _add_modal_label_item(
@@ -2115,17 +2158,25 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
                     updates["ignored_tts_role_enabled"] = ignored_enabled
                     parts.append("cargo ignorado ligado" if ignored_enabled else "cargo ignorado desligado")
 
+        def _mark_ignored_role_changed(role: discord.Role) -> None:
+            role_id = int(getattr(role, "id", 0) or 0)
+            if not role_id:
+                return
+            role_text = getattr(role, "mention", None) or getattr(role, "name", None) or "cargo"
+            if role_id != self.current_ignored_role_id:
+                updates["ignored_tts_role_id"] = role_id
+                parts.append(f"cargo ignorado {role_text}")
+                # Trocar/definir cargo liga a regra automaticamente. Isso não
+                # deve acontecer apenas por causa do cargo salvo vindo como
+                # default_values no RoleSelect.
+                updates["ignored_tts_role_enabled"] = True
+                parts[:] = [part for part in parts if part != "cargo ignorado desligado"]
+                if "cargo ignorado ligado" not in parts:
+                    parts.append("cargo ignorado ligado")
+
         selected_role = _first_selected_role(getattr(self, "ignored_role", None))
         if selected_role is not None:
-            role_id = int(getattr(selected_role, "id", 0) or 0)
-            if role_id:
-                if role_id != self.current_ignored_role_id:
-                    updates["ignored_tts_role_id"] = role_id
-                    parts.append(f"cargo ignorado {getattr(selected_role, 'mention', getattr(selected_role, 'name', 'cargo'))}")
-                if not self.current_ignored_role_enabled or updates.get("ignored_tts_role_enabled") is False:
-                    updates["ignored_tts_role_enabled"] = True
-                    if "cargo ignorado ligado" not in parts:
-                        parts.append("cargo ignorado ligado")
+            _mark_ignored_role_changed(selected_role)
         else:
             raw_role = _item_value(getattr(self, "ignored_role", None))
             if raw_role:
@@ -2143,14 +2194,7 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
                             allowed_mentions=discord.AllowedMentions.none(),
                         )
                         return
-                    role_id = int(getattr(role, "id", 0) or 0)
-                    if role_id and role_id != self.current_ignored_role_id:
-                        updates["ignored_tts_role_id"] = role_id
-                        parts.append(f"cargo ignorado {getattr(role, 'mention', getattr(role, 'name', 'cargo'))}")
-                    if not self.current_ignored_role_enabled or updates.get("ignored_tts_role_enabled") is False:
-                        updates["ignored_tts_role_enabled"] = True
-                        if "cargo ignorado ligado" not in parts:
-                            parts.append("cargo ignorado ligado")
+                    _mark_ignored_role_changed(role)
 
         if updates.get("ignored_tts_role_enabled") is True and not int(updates.get("ignored_tts_role_id") or self.current_ignored_role_id or 0):
             await interaction.response.send_message(
