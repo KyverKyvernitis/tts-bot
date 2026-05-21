@@ -1091,6 +1091,16 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return f"Google: velocidade {human_rate(value)}" if value else "Google: velocidade atualizada"
         if "google" in lowered and "tom" in lowered:
             return f"Google: tom {human_pitch(value)}" if value else "Google: tom atualizado"
+        if "google" in lowered:
+            return f"Google: {value}" if value else "Google atualizado"
+        if "edge" in lowered and "voz" in lowered:
+            return f"Edge: voz {human_voice_name(value)}" if value else "Edge: voz atualizada"
+        if "edge" in lowered and "tom" in lowered:
+            return f"Edge: tom {human_pitch(value)}" if value else "Edge: tom atualizado"
+        if "edge" in lowered and "velocidade" in lowered:
+            return f"Edge: velocidade {human_rate(value)}" if value else "Edge: velocidade atualizada"
+        if "edge" in lowered:
+            return f"Edge: {value}" if value else "Edge atualizado"
         if "voz" in lowered:
             return f"Edge: voz {human_voice_name(value)}" if value else "Edge: voz atualizada"
         if "tom" in lowered:
@@ -3193,6 +3203,36 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         edited = False
         message_to_edit = target_message or getattr(interaction, "message", None)
         current_interaction_message = getattr(interaction, "message", None)
+
+        target_id = getattr(message_to_edit, "id", None)
+        state = self._public_panel_states.get(target_id or 0, {}) if target_id else {}
+        if message_to_edit is not None and state.get("panel_kind") == "launcher":
+            try:
+                history_text = self._format_history_entries(
+                    self._get_public_panel_history(target_id),
+                    viewer_user_id=None,
+                    message_id=target_id,
+                ) or "• Nada recente."
+                launcher_view = self._build_public_tts_launcher_view(
+                    getattr(getattr(message_to_edit, "guild", None), "id", getattr(interaction.guild, "id", 0)),
+                    timeout=300,
+                    history_text=history_text,
+                )
+                launcher_view.message = message_to_edit
+                if not interaction.response.is_done():
+                    await interaction.response.defer(ephemeral=True, thinking=False)
+                await self._edit_panel_message_payload(
+                    message_to_edit,
+                    embed=self._make_embed("TTS", "Cada prefixo escolhe um modo de voz.", ok=True),
+                    view=launcher_view,
+                )
+                await interaction.followup.send(
+                    embed=self._make_embed(title, description or "Salvo.", ok=True),
+                    ephemeral=True,
+                )
+                return
+            except Exception as e:
+                print(f"[tts_panel] falha ao atualizar launcher público: {e!r}")
 
         if message_to_edit is not None and hasattr(view, "message"):
             view.message = message_to_edit

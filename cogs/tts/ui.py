@@ -14,7 +14,7 @@ from discord.ext import commands
 
 import config
 from .common import _shorten, validate_mode
-from .utils.embed import build_settings_panel_text_from_embed
+from .utils.embed import build_settings_panel_text_from_embed, human_voice_name, human_language_name, human_rate, human_pitch
 
 TTS_PANEL_EXPIRE_AFTER_SECONDS = 180.0
 TTS_PANEL_DISPATCH_TIMEOUT_SECONDS = 86400.0
@@ -945,19 +945,34 @@ def _make_modal_select(custom_id: str, *, placeholder: str, options: list[discor
         return discord.ui.Select(**kwargs)
 
 
+def _radio_value_matches(left: object, right: object) -> bool:
+    a = str(left or "").strip().replace("+", "")
+    b = str(right or "").strip().replace("+", "")
+    if a == b:
+        return True
+    try:
+        na = float(a.lower().replace("hz", "").replace("%", ""))
+        nb = float(b.lower().replace("hz", "").replace("%", ""))
+        return abs(na - nb) < 0.001
+    except Exception:
+        return False
+
+
 def _make_modal_radio(custom_id: str, *, options: list[tuple[str, str, str]], default_value: str):
     group_cls = getattr(discord.ui, "RadioGroup", None)
     if group_cls is None:
         return None
     try:
         group = group_cls(custom_id=custom_id, required=True, options=[])
-        seen_default = False
+        default_seen = any(_radio_value_matches(value, default_value) for _, value, _ in options)
         for label, value, description in options:
-            is_default = str(value) == str(default_value)
-            seen_default = seen_default or is_default
-            group.add_option(label=label[:100], value=str(value)[:100], description=(description or None), default=is_default)
-        if default_value and not seen_default:
-            group.add_option(label=_shorten(f"Atual ({default_value})", 100), value=str(default_value)[:100], description="Mantém o valor atual", default=True)
+            is_default = _radio_value_matches(value, default_value) if default_seen else label.casefold() == "normal"
+            group.add_option(
+                label=label[:100],
+                value=str(value)[:100],
+                description=(description or None),
+                default=is_default,
+            )
         return group
     except Exception as e:
         print(f"[tts_modal] RadioGroup desativado/falhou: {e!r}")
@@ -1053,28 +1068,42 @@ def _top_gcloud_language_options(current: str = "") -> list[discord.SelectOption
     return options
 
 
+def _gcloud_voice_options_for_language(cog: "TTSVoice", *, language: str, current: str = "") -> list[discord.SelectOption]:
+    language = str(language or "pt-BR").strip() or "pt-BR"
+    current = str(current or "").strip()
+    catalog = list(getattr(cog, "_gcloud_voices_cache", []) or [])
+    options: list[discord.SelectOption] = []
+    try:
+        if catalog:
+            safe_current = current if cog._gcloud_voice_matches_language(current, language) else ""
+            options = cog._build_gcloud_voice_options_from_catalog(catalog, language, current_value=safe_current)
+    except Exception as e:
+        print(f"[tts_modal] falha ao filtrar vozes Google por idioma: {e!r}")
+        options = []
+
+    if not options:
+        families = ["Standard", "Wavenet", "Neural2"]
+        letters = ["A", "B", "C", "D", "E"]
+        names: list[str] = []
+        if current and current.startswith(language + "-"):
+            names.append(current)
+        for family in families:
+            for letter in letters:
+                names.append(f"{language}-{family}-{letter}")
+        seen: set[str] = set()
+        for name in names:
+            if not name or name in seen or not name.startswith(language + "-"):
+                continue
+            seen.add(name)
+            options.append(discord.SelectOption(label=_shorten(name, 100), description="Voz Google", value=name))
+            if len(options) >= 25:
+                break
+
+    return options[:25] or [discord.SelectOption(label=f"{language}-Standard-A", description="Voz Google", value=f"{language}-Standard-A")]
+
+
 def _top_gcloud_voice_options(cog: "TTSVoice", current: str = "", language: str = "pt-BR") -> list[discord.SelectOption]:
-    preferred = [
-        current or "",
-        "pt-BR-Standard-A",
-        "pt-BR-Standard-B",
-        "pt-BR-Standard-C",
-        "pt-BR-Wavenet-A",
-        "pt-BR-Wavenet-B",
-        "pt-BR-Wavenet-C",
-        "pt-BR-Neural2-A",
-        "pt-BR-Neural2-B",
-        "pt-BR-Neural2-C",
-    ]
-    seen = set()
-    options = []
-    for voice in preferred:
-        voice = str(voice or "").strip()
-        if not voice or voice in seen:
-            continue
-        seen.add(voice)
-        options.append(discord.SelectOption(label=_shorten(voice, 100), description="Voz Google Cloud", value=voice))
-    return options or [discord.SelectOption(label="pt-BR-Standard-A", description="Voz Google Cloud", value="pt-BR-Standard-A")]
+    return _gcloud_voice_options_for_language(cog, language=language, current=current)
 
 
 async def _save_tts_modal_updates(
@@ -1114,7 +1143,7 @@ async def _save_tts_modal_updates(
     clean_updates = {k: v for k, v in (updates or {}).items() if v is not None}
     if not clean_updates:
         await interaction.response.send_message(
-            embed=cog._make_embed("Nada para salvar", "Nenhum ajuste foi alterado.", ok=True),
+            embed=cog._make_embed("Nada mudou", "Nenhum ajuste foi alterado.", ok=True),
             ephemeral=True,
         )
         return
@@ -1145,11 +1174,32 @@ async def _save_tts_modal_updates(
             target_user_name=effective_user_name,
         )
         await cog._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, history_entry=history_entry, **clean_updates)
+        cog._append_public_panel_history(message_id, history_entry)
         history_user_id = effective_user_id
         panel_kind = "user"
 
     state = cog._public_panel_states.get(message_id or 0, {}) if message_id else {}
-    should_edit_panel = bool(panel_message is not None and state.get("panel_kind") != "launcher")
+    if panel_message is not None and state.get("panel_kind") == "launcher":
+        history_text = cog._format_history_entries(
+            cog._get_public_panel_history(message_id),
+            viewer_user_id=None,
+            message_id=message_id,
+        ) or "• Nada recente."
+        view = cog._build_public_tts_launcher_view(interaction.guild.id, timeout=300, history_text=history_text)
+        view.message = panel_message
+        await cog._panel_update_after_change(
+            interaction,
+            embed=cog._make_embed("TTS", "Cada prefixo escolhe um modo de voz.", ok=True),
+            view=view,
+            title=success_title,
+            description=success_description,
+            target_message=panel_message,
+        )
+        if server:
+            await cog._announce_panel_change(interaction, title=success_title, description=success_description, target_message=panel_message)
+        return
+
+    should_edit_panel = bool(panel_message is not None)
     if should_edit_panel:
         panel_history = await cog._maybe_await(db.get_panel_history(interaction.guild.id, history_user_id)) if hasattr(db, "get_panel_history") else {}
         key = "server_last_changes" if server else "user_last_changes"
@@ -1223,35 +1273,35 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
                 self,
                 "voice",
                 text="Voz Edge",
-                description="Quem fala quando você usa o prefixo Edge. Ex.: ,texto",
+                description="",
                 component=voice_select,
             )
             ok = ok and _add_modal_radio(
                 self,
                 "rate",
                 text="Velocidade Edge",
-                description="Mais lenta ou mais rápida. Normal é +0%.",
+                description="",
                 current=self.current_rate,
                 options=[
-                    ("Bem mais lenta", "-50%", "Fala bem devagar"),
-                    ("Mais lenta", "-25%", "Fala um pouco devagar"),
-                    ("Normal", "+0%", "Velocidade padrão"),
-                    ("Mais rápida", "+25%", "Fala um pouco rápido"),
-                    ("Bem mais rápida", "+50%", "Fala bem rápido"),
+                    ("Bem mais lenta", "-50%", ""),
+                    ("Mais lenta", "-25%", ""),
+                    ("Normal", "+0%", ""),
+                    ("Mais rápida", "+25%", ""),
+                    ("Bem mais rápida", "+50%", ""),
                 ],
             )
             ok = ok and _add_modal_radio(
                 self,
                 "pitch",
                 text="Tom Edge",
-                description="Mais grave ou mais agudo. Normal é +0Hz.",
+                description="",
                 current=self.current_pitch,
                 options=[
-                    ("Bem mais grave", "-50Hz", "Voz mais baixa"),
-                    ("Mais grave", "-25Hz", "Voz um pouco baixa"),
-                    ("Normal", "+0Hz", "Tom padrão"),
-                    ("Mais agudo", "+25Hz", "Voz um pouco alta"),
-                    ("Bem mais agudo", "+50Hz", "Voz mais alta"),
+                    ("Bem mais grave", "-50Hz", ""),
+                    ("Mais grave", "-25Hz", ""),
+                    ("Normal", "+0Hz", ""),
+                    ("Mais agudo", "+25Hz", ""),
+                    ("Bem mais agudo", "+50Hz", ""),
                 ],
             )
             return bool(ok)
@@ -1291,40 +1341,61 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
 
     async def on_submit(self, interaction: discord.Interaction):
         updates: dict[str, object] = {}
-        parts: list[str] = []
+        details: list[str] = []
+        history_bits: list[str] = []
+
         voice = _single_component_value(getattr(self, "voice", None), self.current_voice)
-        if voice:
+        if voice and str(voice) != str(self.current_voice):
             if voice not in self.cog.edge_voice_names and voice not in self.cog.edge_voice_cache:
                 await interaction.response.send_message(embed=self.cog._make_embed("Voz inválida", "Essa voz Edge não foi encontrada.", ok=False), ephemeral=True)
                 return
             updates["voice"] = voice
-            parts.append(f"voz {voice}")
+            details.append(f"• Voz: {human_voice_name(voice)}")
+            history_bits.append(f"voz {human_voice_name(voice)}")
+
         rate = _single_component_value(getattr(self, "rate", None), self.current_rate)
         if rate:
             normalized = self.cog._normalize_rate_value(rate)
             if normalized is None:
                 await interaction.response.send_message(embed=self.cog._make_embed("Velocidade inválida", "Use opções como `+0%`, `-25%` ou `+25%`.", ok=False), ephemeral=True)
                 return
-            updates["rate"] = normalized
-            parts.append(f"velocidade {normalized}")
+            current_rate = self.cog._normalize_rate_value(self.current_rate) or self.current_rate
+            if str(normalized) != str(current_rate):
+                updates["rate"] = normalized
+                details.append(f"• Velocidade: {human_rate(normalized)}")
+                history_bits.append(f"velocidade {human_rate(normalized)}")
+
         pitch = _single_component_value(getattr(self, "pitch", None), self.current_pitch)
         if pitch:
             normalized = self.cog._normalize_pitch_value(pitch)
             if normalized is None:
                 await interaction.response.send_message(embed=self.cog._make_embed("Tom inválido", "Use opções como `+0Hz`, `-25Hz` ou `+25Hz`.", ok=False), ephemeral=True)
                 return
-            updates["pitch"] = normalized
-            parts.append(f"tom {normalized}")
+            current_pitch = self.cog._normalize_pitch_value(self.current_pitch) or self.current_pitch
+            if str(normalized) != str(current_pitch):
+                updates["pitch"] = normalized
+                details.append(f"• Tom: {human_pitch(normalized)}")
+                history_bits.append(f"tom {human_pitch(normalized)}")
+
+        if len(history_bits) == 1:
+            key = history_bits[0].split(' ', 1)[0]
+            article = {"voz": "a", "velocidade": "a", "tom": "o"}.get(key, "o")
+            history_label = f"{article} {'própria ' if not self.server else ''}{key} do Edge"
+            history_value = history_bits[0].split(' ', 1)[1] if ' ' in history_bits[0] else "atualizado"
+        else:
+            history_label = "o Edge" if self.server else "o próprio Edge"
+            history_value = "leitura atualizada" if updates and all(k in updates for k in ("rate", "pitch")) and "voice" not in updates else "configurações atualizadas"
+
         await _save_tts_modal_updates(
             self.cog,
             interaction,
             source_panel_message=self.panel_message,
             server=self.server,
             updates=updates,
-            history_label="o Edge" if self.server else "o próprio Edge",
-            history_value=", ".join(parts) if parts else "sem alterações",
+            history_label=history_label,
+            history_value=history_value,
             success_title="Edge atualizado",
-            success_description="Salvo: " + (", ".join(parts) if parts else "sem alterações") + ".",
+            success_description="\n".join(details) if details else "Nada mudou.",
             target_user_id=self.target_user_id,
             target_user_name=self.target_user_name,
         )
@@ -1351,16 +1422,31 @@ class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
         try:
             language_select = _make_modal_select(
                 "gtts_language",
-                placeholder="Escolha o idioma gTTS",
+                placeholder="Idioma gTTS",
                 options=_with_default_option(_top_gtts_language_options(self.cog, self.current_language), self.current_language),
             )
-            return _add_modal_label_item(
+            ok = _add_modal_label_item(
                 self,
                 "language",
                 text="Idioma gTTS",
-                description="Idioma da voz simples usada com o prefixo gTTS. Ex.: .texto",
+                description="",
                 component=language_select,
             )
+            manual_input = _make_modal_text_input(
+                label="Outro idioma",
+                placeholder="Opcional: pt-br, en, es, ja",
+                current="",
+                max_length=10,
+                required=False,
+            )
+            ok = ok and _add_modal_label_item(
+                self,
+                "manual_language",
+                text="Outro idioma",
+                description="",
+                component=manual_input,
+            )
+            return bool(ok)
         except Exception as e:
             print(f"[tts_modal] gTTS guiado falhou: {e!r}")
             try:
@@ -1374,20 +1460,23 @@ class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
             self,
             "language",
             label="Idioma gTTS",
-            placeholder="Idioma da voz simples. Ex.: pt-br, en, es, fr, ja",
+            placeholder="Ex.: pt-br, en, es, fr, ja",
             current=self.current_language,
             max_length=10,
         )
 
     async def on_submit(self, interaction: discord.Interaction):
-        value = _single_component_value(getattr(self, "language", None), self.current_language)
-        if not value:
-            updates = {}
-        else:
-            if value not in self.cog.gtts_languages:
-                await interaction.response.send_message(embed=self.cog._make_embed("Idioma inválido", "Esse código não está na lista do gTTS. Exemplos: `pt-br`, `en`, `es`.", ok=False), ephemeral=True)
-                return
-            updates = {"language": value}
+        selected = _single_component_value(getattr(self, "language", None), self.current_language)
+        manual = _item_value(getattr(self, "manual_language", None))
+        raw_value = manual or selected
+        code, _language_name = self.cog._resolve_gtts_language_input(raw_value)
+        if code is None:
+            await interaction.response.send_message(
+                embed=self.cog._make_embed("Idioma inválido", "Use algo como `pt-br`, `en`, `es` ou `ja`.", ok=False),
+                ephemeral=True,
+            )
+            return
+        updates = {"language": code} if str(code) != str(self.current_language) else {}
         await _save_tts_modal_updates(
             self.cog,
             interaction,
@@ -1395,9 +1484,9 @@ class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
             server=self.server,
             updates=updates,
             history_label="o idioma do modo gTTS" if self.server else "o próprio idioma do gTTS",
-            history_value=value or "sem alterações",
+            history_value=code,
             success_title="gTTS atualizado",
-            success_description=f"Salvo: idioma `{value}`." if value else "Nenhum idioma foi alterado.",
+            success_description=f"• Idioma: {human_language_name(code)}" if updates else "Nada mudou.",
             target_user_id=self.target_user_id,
             target_user_name=self.target_user_name,
         )
@@ -1427,52 +1516,52 @@ class GoogleSettingsModal(discord.ui.Modal, title="Editar Google"):
         try:
             language_select = _make_modal_select(
                 "gcloud_language",
-                placeholder="Escolha o idioma Google",
+                placeholder="Idioma Google",
                 options=_with_default_option(_top_gcloud_language_options(self.current_language), self.current_language),
             )
             voice_select = _make_modal_select(
                 "gcloud_voice",
-                placeholder="Escolha a voz Google",
-                options=_with_default_option(_top_gcloud_voice_options(self.cog, self.current_voice, self.current_language), self.current_voice),
+                placeholder="Voz Google",
+                options=_gcloud_voice_options_for_language(self.cog, language=self.current_language, current=self.current_voice),
             )
             ok = _add_modal_label_item(
                 self,
                 "language",
                 text="Idioma Google",
-                description="Idioma usado pela voz Google Cloud. Ex.: 'texto",
+                description="",
                 component=language_select,
             )
             ok = ok and _add_modal_label_item(
                 self,
                 "voice",
                 text="Voz Google",
-                description="Quem fala quando você usa o prefixo Google.",
+                description="",
                 component=voice_select,
             )
             ok = ok and _add_modal_radio(
                 self,
                 "rate",
                 text="Velocidade Google",
-                description="Mais lenta ou mais rápida. Normal é 1.0.",
+                description="",
                 current=self.current_rate,
                 options=[
-                    ("Mais lenta", "0.75", "Fala um pouco devagar"),
-                    ("Normal", "1.0", "Velocidade padrão"),
-                    ("Mais rápida", "1.25", "Fala um pouco rápido"),
-                    ("Bem mais rápida", "1.5", "Fala bem rápido"),
+                    ("Mais lenta", "0.75", ""),
+                    ("Normal", "1.0", ""),
+                    ("Mais rápida", "1.25", ""),
+                    ("Bem mais rápida", "1.5", ""),
                 ],
             )
             ok = ok and _add_modal_radio(
                 self,
                 "pitch",
                 text="Tom Google",
-                description="Mais grave ou mais agudo. Normal é 0.0.",
+                description="",
                 current=self.current_pitch,
                 options=[
-                    ("Mais grave", "-5", "Voz um pouco baixa"),
-                    ("Normal", "0", "Tom padrão"),
-                    ("Mais agudo", "5", "Voz um pouco alta"),
-                    ("Bem mais agudo", "10", "Voz bem alta"),
+                    ("Mais grave", "-5", ""),
+                    ("Normal", "0", ""),
+                    ("Mais agudo", "5", ""),
+                    ("Bem mais agudo", "10", ""),
                 ],
             )
             return bool(ok)
@@ -1520,43 +1609,91 @@ class GoogleSettingsModal(discord.ui.Modal, title="Editar Google"):
 
     async def on_submit(self, interaction: discord.Interaction):
         updates: dict[str, object] = {}
-        parts: list[str] = []
+        details: list[str] = []
+        history_bits: list[str] = []
+
         language = _single_component_value(getattr(self, "language", None), self.current_language)
+        selected_language = self.current_language
         if language:
             value, error = self.cog._validate_gcloud_language_input(language)
             if error or value is None:
                 await interaction.response.send_message(embed=self.cog._make_embed("Idioma inválido", error or "Idioma inválido.", ok=False), ephemeral=True)
                 return
-            updates["gcloud_language"] = value
-            parts.append(f"idioma {value}")
+            selected_language = value
+            if str(value) != str(self.current_language):
+                updates["gcloud_language"] = value
+                details.append(f"• Idioma: {value}")
+                history_bits.append(f"idioma {value}")
+
         voice = _single_component_value(getattr(self, "voice", None), self.current_voice)
-        if voice:
-            value, error = self.cog._validate_gcloud_voice_input(voice)
+        selected_voice = str(voice or self.current_voice or "").strip()
+        if selected_voice:
+            value, error = self.cog._validate_gcloud_voice_input(selected_voice)
             if error or value is None:
                 await interaction.response.send_message(embed=self.cog._make_embed("Voz inválida", error or "Voz inválida.", ok=False), ephemeral=True)
                 return
-            updates["gcloud_voice"] = value
-            parts.append(f"voz {value}")
+            selected_voice = value
+
+        adjusted_voice = ""
+        if selected_language and selected_voice and not self.cog._gcloud_voice_matches_language(selected_voice, selected_language):
+            catalog = await self.cog._load_gcloud_voices()
+            adjusted_voice = self.cog._pick_first_gcloud_voice_for_language(catalog, selected_language) if catalog else f"{selected_language}-Standard-A"
+            selected_voice = adjusted_voice
+
+        if selected_voice and str(selected_voice) != str(self.current_voice):
+            updates["gcloud_voice"] = selected_voice
+            label = "Voz ajustada" if adjusted_voice else "Voz"
+            details.append(f"• {label}: {selected_voice}")
+            history_bits.append("voz ajustada" if adjusted_voice else f"voz {human_voice_name(selected_voice)}")
+
         rate = _single_component_value(getattr(self, "rate", None), self.current_rate)
         if rate:
             value = self.cog._normalize_gcloud_rate_value(rate)
-            updates["gcloud_rate"] = value
-            parts.append(f"velocidade {value}")
+            current_rate = self.cog._normalize_gcloud_rate_value(self.current_rate)
+            if str(value) != str(current_rate):
+                updates["gcloud_rate"] = value
+                details.append(f"• Velocidade: {human_rate(value)}")
+                history_bits.append(f"velocidade {human_rate(value)}")
+
         pitch = _single_component_value(getattr(self, "pitch", None), self.current_pitch)
         if pitch:
             value = self.cog._normalize_gcloud_pitch_value(pitch)
-            updates["gcloud_pitch"] = value
-            parts.append(f"tom {value}")
+            current_pitch = self.cog._normalize_gcloud_pitch_value(self.current_pitch)
+            if str(value) != str(current_pitch):
+                updates["gcloud_pitch"] = value
+                details.append(f"• Tom: {human_pitch(value)}")
+                history_bits.append(f"tom {human_pitch(value)}")
+
+        if len(history_bits) == 1:
+            bit = history_bits[0]
+            if bit == "voz ajustada":
+                history_label = "o Google" if self.server else "o próprio Google"
+                history_value = "voz ajustada"
+            else:
+                key, _, value = bit.partition(" ")
+                article = {"voz": "a", "velocidade": "a", "tom": "o", "idioma": "o"}.get(key, "o")
+                poss = {"voz": "própria", "velocidade": "própria", "tom": "próprio", "idioma": "próprio"}.get(key, "próprio")
+                history_label = f"{article} {poss + ' ' if not self.server else ''}{key} do Google"
+                history_value = value or "atualizado"
+        else:
+            history_label = "o Google" if self.server else "o próprio Google"
+            if "gcloud_language" in updates and "gcloud_voice" in updates:
+                history_value = "idioma e voz atualizados"
+            elif updates:
+                history_value = "leitura atualizada" if set(updates) <= {"gcloud_rate", "gcloud_pitch"} else "configurações atualizadas"
+            else:
+                history_value = "sem alterações"
+
         await _save_tts_modal_updates(
             self.cog,
             interaction,
             source_panel_message=self.panel_message,
             server=self.server,
             updates=updates,
-            history_label="o Google Cloud" if self.server else "o próprio Google Cloud",
-            history_value=", ".join(parts) if parts else "sem alterações",
+            history_label=history_label,
+            history_value=history_value,
             success_title="Google atualizado",
-            success_description="Salvo: " + (", ".join(parts) if parts else "sem alterações") + ".",
+            success_description="\n".join(details) if details else "Nada mudou.",
             target_user_id=self.target_user_id,
             target_user_name=self.target_user_name,
         )

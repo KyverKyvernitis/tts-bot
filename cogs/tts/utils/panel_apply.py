@@ -628,6 +628,14 @@ async def _apply_spoken_name_from_modal(
         )
         return
 
+    current_name = cog._get_saved_spoken_name(interaction.guild.id, effective_user_id)
+    if str(validated_name or "") == str(current_name or ""):
+        await interaction.response.send_message(
+            embed=cog._make_embed("Nada mudou", "Nenhum ajuste foi alterado.", ok=True),
+            ephemeral=True,
+        )
+        return
+
     if validated_name:
         history_entry = cog._user_history_text(
             interaction,
@@ -643,7 +651,7 @@ async def _apply_spoken_name_from_modal(
             speaker_name=validated_name,
             history_entry=history_entry,
         )
-        desc = f"O apelido falado de {effective_user_name} agora é `{validated_name}`." if effective_user_id != interaction.user.id else f"O seu apelido falado agora é `{validated_name}`."
+        desc = "• Apelido atualizado"
     else:
         if effective_user_id == interaction.user.id:
             history_entry = cog._encode_public_owner_history(
@@ -651,10 +659,10 @@ async def _apply_spoken_name_from_modal(
                 cog._panel_actor_name(interaction),
                 "removeu o próprio apelido falado personalizado",
             )
-            desc = "O seu apelido falado voltou para o modo automático."
+            desc = "• Apelido limpo"
         else:
             history_entry = f"{cog._panel_actor_name(interaction)} removeu o apelido falado personalizado de {effective_user_name}"
-            desc = f"O apelido falado de {effective_user_name} voltou para o modo automático."
+            desc = "• Apelido limpo"
         await cog._set_user_tts_and_refresh(
             interaction.guild.id,
             effective_user_id,
