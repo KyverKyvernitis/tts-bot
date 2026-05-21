@@ -873,6 +873,118 @@ def _make_optional_select(*, placeholder: str, options: list[discord.SelectOptio
         return discord.ui.Select(**kwargs)
 
 
+def _single_component_value(item, default: str = "") -> str:
+    values = _select_values(item)
+    if values:
+        return str(values[0] or "").strip()
+    return _item_value(item, default)
+
+
+def _with_default_option(options: list[discord.SelectOption], current: str) -> list[discord.SelectOption]:
+    current = str(current or "").strip()
+    seen = set()
+    fixed: list[discord.SelectOption] = []
+    if current:
+        fixed.append(discord.SelectOption(label=_shorten(current, 100), description="Valor atual", value=current, default=True))
+        seen.add(current)
+    for option in options or []:
+        value = str(getattr(option, "value", "") or "").strip()
+        if not value or value in seen:
+            continue
+        try:
+            option.default = (value == current)
+        except Exception:
+            pass
+        fixed.append(option)
+        seen.add(value)
+        if len(fixed) >= 25:
+            break
+    return fixed[:25]
+
+
+def _modal_label_available() -> bool:
+    return bool(hasattr(discord.ui, "Label"))
+
+
+def _make_modal_text_input(*, label: str, placeholder: str, current: str = "", max_length: int = 80, required: bool = False):
+    item = discord.ui.TextInput(label=label, placeholder=placeholder, required=required, max_length=max_length)
+    try:
+        item.default = str(current or "")[:max_length]
+    except Exception:
+        try:
+            item.value = str(current or "")[:max_length]
+        except Exception:
+            pass
+    return item
+
+
+def _add_modal_text_input(modal, attr_name: str, *, label: str, placeholder: str, current: str = "", max_length: int = 80, required: bool = False) -> None:
+    item = _make_modal_text_input(label=label, placeholder=placeholder, current=current, max_length=max_length, required=required)
+    modal.add_item(item)
+    setattr(modal, attr_name, item)
+
+
+def _add_modal_label_item(modal, attr_name: str, *, text: str, description: str, component) -> bool:
+    label_cls = getattr(discord.ui, "Label", None)
+    if label_cls is None:
+        return False
+    try:
+        modal.add_item(label_cls(text=text[:45], description=(description or None), component=component))
+        setattr(modal, attr_name, component)
+        return True
+    except Exception as e:
+        print(f"[tts_modal] Label desativado/falhou: {e!r}")
+        return False
+
+
+def _make_modal_select(custom_id: str, *, placeholder: str, options: list[discord.SelectOption], required: bool = True):
+    kwargs = dict(custom_id=custom_id, placeholder=placeholder[:150], min_values=1 if required else 0, max_values=1, options=options[:25])
+    try:
+        return discord.ui.Select(required=required, **kwargs)
+    except TypeError:
+        return discord.ui.Select(**kwargs)
+
+
+def _make_modal_radio(custom_id: str, *, options: list[tuple[str, str, str]], default_value: str):
+    group_cls = getattr(discord.ui, "RadioGroup", None)
+    if group_cls is None:
+        return None
+    try:
+        group = group_cls(custom_id=custom_id, required=True, options=[])
+        seen_default = False
+        for label, value, description in options:
+            is_default = str(value) == str(default_value)
+            seen_default = seen_default or is_default
+            group.add_option(label=label[:100], value=str(value)[:100], description=(description or None), default=is_default)
+        if default_value and not seen_default:
+            group.add_option(label=_shorten(f"Atual ({default_value})", 100), value=str(default_value)[:100], description="Mantém o valor atual", default=True)
+        return group
+    except Exception as e:
+        print(f"[tts_modal] RadioGroup desativado/falhou: {e!r}")
+        return None
+
+
+def _add_modal_radio(modal, attr_name: str, *, text: str, description: str, options: list[tuple[str, str, str]], current: str) -> bool:
+    group = _make_modal_radio(attr_name, options=options, default_value=str(current or ""))
+    if group is None:
+        return False
+    return _add_modal_label_item(modal, attr_name, text=text, description=description, component=group)
+
+
+def _make_modal_checkbox_group(custom_id: str, *, options: list[tuple[str, str, str, bool]], min_values: int = 0, max_values: int | None = None):
+    group_cls = getattr(discord.ui, "CheckboxGroup", None)
+    if group_cls is None:
+        return None
+    try:
+        group = group_cls(custom_id=custom_id, required=False, min_values=min_values, max_values=max_values or len(options), options=[])
+        for label, value, description, default in options:
+            group.add_option(label=label[:100], value=str(value)[:100], description=(description or None), default=bool(default))
+        return group
+    except Exception as e:
+        print(f"[tts_modal] CheckboxGroup desativado/falhou: {e!r}")
+        return None
+
+
 def _top_edge_voice_options(cog: "TTSVoice", current: str = "") -> list[discord.SelectOption]:
     preferred = [
         "pt-BR-FranciscaNeural",
@@ -1082,64 +1194,124 @@ async def _save_tts_modal_updates(
 
 
 class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
-    voice = discord.ui.TextInput(
-        label="Voz Edge",
-        placeholder="Ex.: pt-BR-FranciscaNeural",
-        required=False,
-        max_length=80,
-    )
-    rate = discord.ui.TextInput(
-        label="Velocidade Edge",
-        placeholder="Ex.: +0%, -25%, +25%",
-        required=False,
-        max_length=8,
-    )
-    pitch = discord.ui.TextInput(
-        label="Tom Edge",
-        placeholder="Ex.: +0Hz, -25Hz, +25Hz",
-        required=False,
-        max_length=8,
-    )
-
-    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None):
+    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None, force_text_fallback: bool = False):
         super().__init__()
         self.cog = cog
         self.panel_message = panel_message
         self.server = bool(server)
         self.target_user_id = target_user_id
         self.target_user_name = target_user_name
+        self.force_text_fallback = bool(force_text_fallback)
         user_id = int(target_user_id or 0)
         guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
-        current_voice = _current_tts_value(cog, guild_id, user_id, "voice", str(getattr(config, "EDGE_TTS_VOICE", "pt-BR-FranciscaNeural") or "pt-BR-FranciscaNeural"), server=server)
-        current_rate = _current_tts_value(cog, guild_id, user_id, "rate", "+0%", server=server)
-        current_pitch = _current_tts_value(cog, guild_id, user_id, "pitch", "+0Hz", server=server)
-        self.voice.default = str(current_voice or "")[:80]
-        self.rate.default = str(current_rate or "+0%")[:8]
-        self.pitch.default = str(current_pitch or "+0Hz")[:8]
+        self.current_voice = _current_tts_value(cog, guild_id, user_id, "voice", str(getattr(config, "EDGE_TTS_VOICE", "pt-BR-FranciscaNeural") or "pt-BR-FranciscaNeural"), server=server)
+        self.current_rate = _current_tts_value(cog, guild_id, user_id, "rate", "+0%", server=server)
+        self.current_pitch = _current_tts_value(cog, guild_id, user_id, "pitch", "+0Hz", server=server)
+        if self.force_text_fallback or not self._build_guided_modal():
+            self._build_text_fallback()
+
+    def _build_guided_modal(self) -> bool:
+        if not _modal_label_available():
+            return False
+        try:
+            voice_select = _make_modal_select(
+                "edge_voice",
+                placeholder="Escolha a voz Edge",
+                options=_with_default_option(_top_edge_voice_options(self.cog, self.current_voice), self.current_voice),
+            )
+            ok = _add_modal_label_item(
+                self,
+                "voice",
+                text="Voz Edge",
+                description="Quem fala quando você usa o prefixo Edge. Ex.: ,texto",
+                component=voice_select,
+            )
+            ok = ok and _add_modal_radio(
+                self,
+                "rate",
+                text="Velocidade Edge",
+                description="Mais lenta ou mais rápida. Normal é +0%.",
+                current=self.current_rate,
+                options=[
+                    ("Bem mais lenta", "-50%", "Fala bem devagar"),
+                    ("Mais lenta", "-25%", "Fala um pouco devagar"),
+                    ("Normal", "+0%", "Velocidade padrão"),
+                    ("Mais rápida", "+25%", "Fala um pouco rápido"),
+                    ("Bem mais rápida", "+50%", "Fala bem rápido"),
+                ],
+            )
+            ok = ok and _add_modal_radio(
+                self,
+                "pitch",
+                text="Tom Edge",
+                description="Mais grave ou mais agudo. Normal é +0Hz.",
+                current=self.current_pitch,
+                options=[
+                    ("Bem mais grave", "-50Hz", "Voz mais baixa"),
+                    ("Mais grave", "-25Hz", "Voz um pouco baixa"),
+                    ("Normal", "+0Hz", "Tom padrão"),
+                    ("Mais agudo", "+25Hz", "Voz um pouco alta"),
+                    ("Bem mais agudo", "+50Hz", "Voz mais alta"),
+                ],
+            )
+            return bool(ok)
+        except Exception as e:
+            print(f"[tts_modal] Edge guiado falhou: {e!r}")
+            try:
+                self.clear_items()
+            except Exception:
+                pass
+            return False
+
+    def _build_text_fallback(self) -> None:
+        _add_modal_text_input(
+            self,
+            "voice",
+            label="Voz Edge",
+            placeholder="Voz usada com ,texto. Ex.: pt-BR-FranciscaNeural",
+            current=self.current_voice,
+            max_length=80,
+        )
+        _add_modal_text_input(
+            self,
+            "rate",
+            label="Velocidade Edge",
+            placeholder="Use +0% normal, -25% lenta ou +25% rápida",
+            current=self.current_rate,
+            max_length=8,
+        )
+        _add_modal_text_input(
+            self,
+            "pitch",
+            label="Tom Edge",
+            placeholder="Use +0Hz normal, -25Hz grave ou +25Hz agudo",
+            current=self.current_pitch,
+            max_length=8,
+        )
 
     async def on_submit(self, interaction: discord.Interaction):
         updates: dict[str, object] = {}
         parts: list[str] = []
-        voice = _item_value(self.voice)
+        voice = _single_component_value(getattr(self, "voice", None), self.current_voice)
         if voice:
             if voice not in self.cog.edge_voice_names and voice not in self.cog.edge_voice_cache:
                 await interaction.response.send_message(embed=self.cog._make_embed("Voz inválida", "Essa voz Edge não foi encontrada.", ok=False), ephemeral=True)
                 return
             updates["voice"] = voice
             parts.append(f"voz {voice}")
-        rate = _item_value(self.rate)
+        rate = _single_component_value(getattr(self, "rate", None), self.current_rate)
         if rate:
             normalized = self.cog._normalize_rate_value(rate)
             if normalized is None:
-                await interaction.response.send_message(embed=self.cog._make_embed("Velocidade inválida", "Use valores como `+0%`, `-25%` ou `+25%`.", ok=False), ephemeral=True)
+                await interaction.response.send_message(embed=self.cog._make_embed("Velocidade inválida", "Use opções como `+0%`, `-25%` ou `+25%`.", ok=False), ephemeral=True)
                 return
             updates["rate"] = normalized
             parts.append(f"velocidade {normalized}")
-        pitch = _item_value(self.pitch)
+        pitch = _single_component_value(getattr(self, "pitch", None), self.current_pitch)
         if pitch:
             normalized = self.cog._normalize_pitch_value(pitch)
             if normalized is None:
-                await interaction.response.send_message(embed=self.cog._make_embed("Tom inválido", "Use valores como `+0Hz`, `-25Hz` ou `+25Hz`.", ok=False), ephemeral=True)
+                await interaction.response.send_message(embed=self.cog._make_embed("Tom inválido", "Use opções como `+0Hz`, `-25Hz` ou `+25Hz`.", ok=False), ephemeral=True)
                 return
             updates["pitch"] = normalized
             parts.append(f"tom {normalized}")
@@ -1159,27 +1331,56 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
 
 
 class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
-    language = discord.ui.TextInput(
-        label="Idioma gTTS",
-        placeholder="Ex.: pt-br, en, es, fr, ja",
-        required=False,
-        max_length=10,
-    )
-
-    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None):
+    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None, force_text_fallback: bool = False):
         super().__init__()
         self.cog = cog
         self.panel_message = panel_message
         self.server = bool(server)
         self.target_user_id = target_user_id
         self.target_user_name = target_user_name
+        self.force_text_fallback = bool(force_text_fallback)
         user_id = int(target_user_id or 0)
         guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
-        current = _current_tts_value(cog, guild_id, user_id, "language", "pt-br", server=server)
-        self.language.default = str(current or "pt-br")[:10]
+        self.current_language = _current_tts_value(cog, guild_id, user_id, "language", "pt-br", server=server)
+        if self.force_text_fallback or not self._build_guided_modal():
+            self._build_text_fallback()
+
+    def _build_guided_modal(self) -> bool:
+        if not _modal_label_available():
+            return False
+        try:
+            language_select = _make_modal_select(
+                "gtts_language",
+                placeholder="Escolha o idioma gTTS",
+                options=_with_default_option(_top_gtts_language_options(self.cog, self.current_language), self.current_language),
+            )
+            return _add_modal_label_item(
+                self,
+                "language",
+                text="Idioma gTTS",
+                description="Idioma da voz simples usada com o prefixo gTTS. Ex.: .texto",
+                component=language_select,
+            )
+        except Exception as e:
+            print(f"[tts_modal] gTTS guiado falhou: {e!r}")
+            try:
+                self.clear_items()
+            except Exception:
+                pass
+            return False
+
+    def _build_text_fallback(self) -> None:
+        _add_modal_text_input(
+            self,
+            "language",
+            label="Idioma gTTS",
+            placeholder="Idioma da voz simples. Ex.: pt-br, en, es, fr, ja",
+            current=self.current_language,
+            max_length=10,
+        )
 
     async def on_submit(self, interaction: discord.Interaction):
-        value = _item_value(self.language)
+        value = _single_component_value(getattr(self, "language", None), self.current_language)
         if not value:
             updates = {}
         else:
@@ -1203,53 +1404,124 @@ class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
 
 
 class GoogleSettingsModal(discord.ui.Modal, title="Editar Google"):
-    language = discord.ui.TextInput(
-        label="Idioma Google",
-        placeholder="Ex.: pt-BR, en-US, es-ES",
-        required=False,
-        max_length=16,
-    )
-    voice = discord.ui.TextInput(
-        label="Voz Google",
-        placeholder="Ex.: pt-BR-Standard-A",
-        required=False,
-        max_length=80,
-    )
-    rate = discord.ui.TextInput(
-        label="Velocidade Google",
-        placeholder="Ex.: 1.0, 0.85, 1.15",
-        required=False,
-        max_length=8,
-    )
-    pitch = discord.ui.TextInput(
-        label="Tom Google",
-        placeholder="Ex.: 0.0, -2.0, 2.0",
-        required=False,
-        max_length=8,
-    )
-
-    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None):
+    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None, force_text_fallback: bool = False):
         super().__init__()
         self.cog = cog
         self.panel_message = panel_message
         self.server = bool(server)
         self.target_user_id = target_user_id
         self.target_user_name = target_user_name
+        self.force_text_fallback = bool(force_text_fallback)
         user_id = int(target_user_id or 0)
         guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
-        current_language = cog._get_current_gcloud_language(guild_id, user_id, server=server) if guild_id else str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR")
-        current_voice = cog._get_current_gcloud_voice(guild_id, user_id, server=server) if guild_id else str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A")
-        current_rate = _current_tts_value(cog, guild_id, user_id, "gcloud_rate", "1.0", server=server)
-        current_pitch = _current_tts_value(cog, guild_id, user_id, "gcloud_pitch", "0.0", server=server)
-        self.language.default = str(current_language or "pt-BR")[:16]
-        self.voice.default = str(current_voice or "pt-BR-Standard-A")[:80]
-        self.rate.default = str(current_rate or "1.0")[:8]
-        self.pitch.default = str(current_pitch or "0.0")[:8]
+        self.current_language = cog._get_current_gcloud_language(guild_id, user_id, server=server) if guild_id else str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR")
+        self.current_voice = cog._get_current_gcloud_voice(guild_id, user_id, server=server) if guild_id else str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A")
+        self.current_rate = _current_tts_value(cog, guild_id, user_id, "gcloud_rate", "1.0", server=server)
+        self.current_pitch = _current_tts_value(cog, guild_id, user_id, "gcloud_pitch", "0.0", server=server)
+        if self.force_text_fallback or not self._build_guided_modal():
+            self._build_text_fallback()
+
+    def _build_guided_modal(self) -> bool:
+        if not _modal_label_available():
+            return False
+        try:
+            language_select = _make_modal_select(
+                "gcloud_language",
+                placeholder="Escolha o idioma Google",
+                options=_with_default_option(_top_gcloud_language_options(self.current_language), self.current_language),
+            )
+            voice_select = _make_modal_select(
+                "gcloud_voice",
+                placeholder="Escolha a voz Google",
+                options=_with_default_option(_top_gcloud_voice_options(self.cog, self.current_voice, self.current_language), self.current_voice),
+            )
+            ok = _add_modal_label_item(
+                self,
+                "language",
+                text="Idioma Google",
+                description="Idioma usado pela voz Google Cloud. Ex.: 'texto",
+                component=language_select,
+            )
+            ok = ok and _add_modal_label_item(
+                self,
+                "voice",
+                text="Voz Google",
+                description="Quem fala quando você usa o prefixo Google.",
+                component=voice_select,
+            )
+            ok = ok and _add_modal_radio(
+                self,
+                "rate",
+                text="Velocidade Google",
+                description="Mais lenta ou mais rápida. Normal é 1.0.",
+                current=self.current_rate,
+                options=[
+                    ("Mais lenta", "0.75", "Fala um pouco devagar"),
+                    ("Normal", "1.0", "Velocidade padrão"),
+                    ("Mais rápida", "1.25", "Fala um pouco rápido"),
+                    ("Bem mais rápida", "1.5", "Fala bem rápido"),
+                ],
+            )
+            ok = ok and _add_modal_radio(
+                self,
+                "pitch",
+                text="Tom Google",
+                description="Mais grave ou mais agudo. Normal é 0.0.",
+                current=self.current_pitch,
+                options=[
+                    ("Mais grave", "-5", "Voz um pouco baixa"),
+                    ("Normal", "0", "Tom padrão"),
+                    ("Mais agudo", "5", "Voz um pouco alta"),
+                    ("Bem mais agudo", "10", "Voz bem alta"),
+                ],
+            )
+            return bool(ok)
+        except Exception as e:
+            print(f"[tts_modal] Google guiado falhou: {e!r}")
+            try:
+                self.clear_items()
+            except Exception:
+                pass
+            return False
+
+    def _build_text_fallback(self) -> None:
+        _add_modal_text_input(
+            self,
+            "language",
+            label="Idioma Google",
+            placeholder="Idioma da voz Google. Ex.: pt-BR, en-US, es-ES",
+            current=self.current_language,
+            max_length=16,
+        )
+        _add_modal_text_input(
+            self,
+            "voice",
+            label="Voz Google",
+            placeholder="Voz usada com 'texto. Ex.: pt-BR-Standard-A",
+            current=self.current_voice,
+            max_length=80,
+        )
+        _add_modal_text_input(
+            self,
+            "rate",
+            label="Velocidade Google",
+            placeholder="Use 1.0 normal, 0.75 lenta ou 1.25 rápida",
+            current=self.current_rate,
+            max_length=8,
+        )
+        _add_modal_text_input(
+            self,
+            "pitch",
+            label="Tom Google",
+            placeholder="Use 0 normal, -5 grave ou 5 agudo",
+            current=self.current_pitch,
+            max_length=8,
+        )
 
     async def on_submit(self, interaction: discord.Interaction):
         updates: dict[str, object] = {}
         parts: list[str] = []
-        language = _item_value(self.language)
+        language = _single_component_value(getattr(self, "language", None), self.current_language)
         if language:
             value, error = self.cog._validate_gcloud_language_input(language)
             if error or value is None:
@@ -1257,7 +1529,7 @@ class GoogleSettingsModal(discord.ui.Modal, title="Editar Google"):
                 return
             updates["gcloud_language"] = value
             parts.append(f"idioma {value}")
-        voice = _item_value(self.voice)
+        voice = _single_component_value(getattr(self, "voice", None), self.current_voice)
         if voice:
             value, error = self.cog._validate_gcloud_voice_input(voice)
             if error or value is None:
@@ -1265,12 +1537,12 @@ class GoogleSettingsModal(discord.ui.Modal, title="Editar Google"):
                 return
             updates["gcloud_voice"] = value
             parts.append(f"voz {value}")
-        rate = _item_value(self.rate)
+        rate = _single_component_value(getattr(self, "rate", None), self.current_rate)
         if rate:
             value = self.cog._normalize_gcloud_rate_value(rate)
             updates["gcloud_rate"] = value
             parts.append(f"velocidade {value}")
-        pitch = _item_value(self.pitch)
+        pitch = _single_component_value(getattr(self, "pitch", None), self.current_pitch)
         if pitch:
             value = self.cog._normalize_gcloud_pitch_value(pitch)
             updates["gcloud_pitch"] = value
@@ -1285,50 +1557,6 @@ class GoogleSettingsModal(discord.ui.Modal, title="Editar Google"):
             history_value=", ".join(parts) if parts else "sem alterações",
             success_title="Google atualizado",
             success_description="Salvo: " + (", ".join(parts) if parts else "sem alterações") + ".",
-            target_user_id=self.target_user_id,
-            target_user_name=self.target_user_name,
-        )
-
-
-class MoreTTSOptionsModal(discord.ui.Modal, title="Mais opções"):
-    mode = discord.ui.TextInput(
-        label="Modo de TTS",
-        placeholder="edge, gtts ou gcloud",
-        required=False,
-        max_length=12,
-    )
-
-    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None):
-        super().__init__()
-        self.cog = cog
-        self.panel_message = panel_message
-        self.server = bool(server)
-        self.target_user_id = target_user_id
-        self.target_user_name = target_user_name
-        current = "edge"
-        guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
-        if guild_id:
-            current = _current_tts_value(cog, guild_id, int(target_user_id or 0), "engine", "edge", server=server)
-        self.mode.default = str(current or "edge")[:12]
-
-    async def on_submit(self, interaction: discord.Interaction):
-        mode = _item_value(self.mode)
-        if not mode:
-            updates = {}
-            value = ""
-        else:
-            value = validate_mode(mode)
-            updates = {"engine": value}
-        await _save_tts_modal_updates(
-            self.cog,
-            interaction,
-            source_panel_message=self.panel_message,
-            server=self.server,
-            updates=updates,
-            history_label="o modo padrão do servidor" if self.server else "o próprio modo",
-            history_value=value or "sem alterações",
-            success_title="Modo de TTS atualizado",
-            success_description=f"Salvo: modo `{value}`." if value else "Nenhum modo foi alterado.",
             target_user_id=self.target_user_id,
             target_user_name=self.target_user_name,
         )
@@ -1383,19 +1611,6 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
 
 
 class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
-    announce_author = discord.ui.TextInput(
-        label="Autor antes da frase",
-        placeholder="sim ou não",
-        required=False,
-        max_length=8,
-    )
-    ignored_role = discord.ui.TextInput(
-        label="Cargo ignorado",
-        placeholder="Opcional: mencione, ID, nome ou 0 para remover",
-        required=False,
-        max_length=80,
-    )
-
     def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None):
         super().__init__()
         self.cog = cog
@@ -1406,10 +1621,78 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
             defaults = db.get_guild_tts_defaults(guild_id) if db is not None and guild_id else {}
         except Exception:
             defaults = {}
-        announce = bool((defaults or {}).get("announce_author"))
-        self.announce_author.default = "sim" if announce else "não"
+        self.current_announce_author = bool((defaults or {}).get("announce_author"))
         role_id = int((defaults or {}).get("ignored_tts_role_id") or 0)
-        self.ignored_role.default = str(role_id) if role_id else ""
+        self.current_ignored_role = str(role_id) if role_id else ""
+        if not self._build_guided_modal():
+            self._build_text_fallback()
+
+    def _build_guided_modal(self) -> bool:
+        if not _modal_label_available():
+            return False
+        try:
+            rules = _make_modal_checkbox_group(
+                "tts_rules",
+                options=[
+                    (
+                        "Autor antes da frase",
+                        "announce_author",
+                        "O bot fala quem mandou antes do texto.",
+                        self.current_announce_author,
+                    ),
+                ],
+                min_values=0,
+                max_values=1,
+            )
+            if rules is None:
+                return False
+            ok = _add_modal_label_item(
+                self,
+                "rules",
+                text="Opções do TTS",
+                description="Marque apenas o que deve ficar ligado no servidor.",
+                component=rules,
+            )
+            role_input = _make_modal_text_input(
+                label="Cargo ignorado",
+                placeholder="Mencione, cole o ID/nome ou use 0 para remover",
+                current=self.current_ignored_role,
+                max_length=80,
+                required=False,
+            )
+            ok = ok and _add_modal_label_item(
+                self,
+                "ignored_role",
+                text="Cargo ignorado",
+                description="Usuários com esse cargo não ativam TTS. Deixe vazio para manter.",
+                component=role_input,
+            )
+            return bool(ok)
+        except Exception as e:
+            print(f"[tts_modal] regras guiadas falharam: {e!r}")
+            try:
+                self.clear_items()
+            except Exception:
+                pass
+            return False
+
+    def _build_text_fallback(self) -> None:
+        _add_modal_text_input(
+            self,
+            "announce_author",
+            label="Autor antes da frase",
+            placeholder="sim para falar o autor antes; não para desligar",
+            current="sim" if self.current_announce_author else "não",
+            max_length=8,
+        )
+        _add_modal_text_input(
+            self,
+            "ignored_role",
+            label="Cargo ignorado",
+            placeholder="Mencione, cole o ID/nome ou use 0 para remover",
+            current=self.current_ignored_role,
+            max_length=80,
+        )
 
     def _find_role(self, guild: discord.Guild | None, raw: str) -> discord.Role | None:
         if guild is None:
@@ -1430,12 +1713,18 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
     async def on_submit(self, interaction: discord.Interaction):
         updates: dict[str, object] = {}
         parts = []
-        text = _item_value(self.announce_author).lower()
-        if text:
-            enabled = text in {"sim", "s", "yes", "y", "true", "1", "on", "ativo", "ativado", "ligado"}
+        if hasattr(self, "rules"):
+            values = set(_select_values(getattr(self, "rules", None)))
+            enabled = "announce_author" in values
             updates["announce_author"] = enabled
             parts.append("autor antes da frase ligado" if enabled else "autor antes da frase desligado")
-        raw_role = _item_value(self.ignored_role)
+        else:
+            text = _item_value(getattr(self, "announce_author", None)).lower()
+            if text:
+                enabled = text in {"sim", "s", "yes", "y", "true", "1", "on", "ativo", "ativado", "ligado"}
+                updates["announce_author"] = enabled
+                parts.append("autor antes da frase ligado" if enabled else "autor antes da frase desligado")
+        raw_role = _item_value(getattr(self, "ignored_role", None))
         if raw_role:
             if raw_role.strip().lower() in {"0", "nenhum", "remover", "remove", "off", "desativar"}:
                 updates["ignored_tts_role_id"] = 0
@@ -1460,6 +1749,38 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
         )
 
 
+async def _send_settings_modal_with_fallback(interaction: discord.Interaction, guided_factory, fallback_factory, *, context: str) -> None:
+    try:
+        await interaction.response.send_modal(guided_factory())
+        return
+    except Exception as e:
+        print(f"[tts_modal] modal guiado falhou em {context}: {e!r}")
+        if interaction.response.is_done():
+            try:
+                await interaction.followup.send(
+                    embed=guided_factory().cog._make_embed(
+                        "Erro no formulário",
+                        "Não consegui abrir esse formulário agora. Tente abrir o painel novamente.",
+                        ok=False,
+                    ),
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+            return
+    try:
+        await interaction.response.send_modal(fallback_factory())
+    except Exception as e:
+        print(f"[tts_modal] fallback também falhou em {context}: {e!r}")
+        try:
+            await interaction.response.send_message("Não consegui abrir esse formulário agora.", ephemeral=True)
+        except Exception:
+            try:
+                await interaction.followup.send("Não consegui abrir esse formulário agora.", ephemeral=True)
+            except Exception:
+                pass
+
+
 class TTSPublicLauncherSelect(discord.ui.Select):
     def __init__(self):
         options = [
@@ -1467,7 +1788,6 @@ class TTSPublicLauncherSelect(discord.ui.Select):
             discord.SelectOption(label="gTTS", description="Idioma do gTTS", value="gtts", emoji="🔤"),
             discord.SelectOption(label="Google", description="Idioma, voz e leitura Google", value="gcloud", emoji="☁️"),
             discord.SelectOption(label="Apelido", description="Nome que o bot fala por você", value="spoken_name", emoji="🪪"),
-            discord.SelectOption(label="Mais opções", description="Modo de TTS e ajustes extras", value="advanced", emoji="⚙️"),
         ]
         super().__init__(placeholder="Abrir ajuste", min_values=1, max_values=1, options=options)
 
@@ -1479,16 +1799,31 @@ class TTSPublicLauncherSelect(discord.ui.Select):
         value = self.values[0]
         target_name = panel.cog._member_panel_name(interaction.user)
         if value == "edge":
-            await interaction.response.send_modal(EdgeSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name))
+            await _send_settings_modal_with_fallback(
+                interaction,
+                lambda: EdgeSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name),
+                lambda: EdgeSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name, force_text_fallback=True),
+                context="public-edge",
+            )
         elif value == "gtts":
-            await interaction.response.send_modal(GTTSSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name))
+            await _send_settings_modal_with_fallback(
+                interaction,
+                lambda: GTTSSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name),
+                lambda: GTTSSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name, force_text_fallback=True),
+                context="public-gtts",
+            )
         elif value == "gcloud":
-            await interaction.response.send_modal(GoogleSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name))
+            await _send_settings_modal_with_fallback(
+                interaction,
+                lambda: GoogleSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name),
+                lambda: GoogleSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name, force_text_fallback=True),
+                context="public-google",
+            )
         elif value == "spoken_name":
             current_value = panel.cog._get_saved_spoken_name(interaction.guild.id, interaction.user.id)
             await interaction.response.send_modal(SpokenNameModal(panel.cog, getattr(interaction, "message", None), target_user_id=interaction.user.id, target_user_name=target_name, current_value=current_value))
         else:
-            await interaction.response.send_modal(MoreTTSOptionsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name))
+            await interaction.response.send_message("Opção indisponível.", ephemeral=True)
 
 
 
@@ -2135,7 +2470,6 @@ class TTSMainPanelSelect(discord.ui.Select):
                 discord.SelectOption(label="gTTS", description="Idioma gTTS padrão do servidor", value="gtts", emoji="🔤"),
                 discord.SelectOption(label="Google", description="Idioma, voz e leitura Google padrão", value="gcloud", emoji="☁️"),
                 discord.SelectOption(label="Regras", description="Autor antes da frase e cargo ignorado", value="rules", emoji="☑️"),
-                discord.SelectOption(label="Mais opções", description="Modo de TTS e ajustes menos usados", value="advanced", emoji="⚙️"),
             ]
             placeholder = "Escolha o ajuste do servidor"
         else:
@@ -2144,7 +2478,6 @@ class TTSMainPanelSelect(discord.ui.Select):
                 discord.SelectOption(label="gTTS", description="Voz simples: idioma usado no gTTS", value="gtts", emoji="🔤"),
                 discord.SelectOption(label="Google", description="Google Cloud: idioma, voz e leitura", value="gcloud", emoji="☁️"),
                 discord.SelectOption(label="Apelido", description="Nome que o bot fala por você", value="spoken_name", emoji="🪪"),
-                discord.SelectOption(label="Mais opções", description="Modo de TTS e ajustes menos usados", value="advanced", emoji="⚙️"),
             ]
             placeholder = "Escolha o que editar"
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
@@ -2168,7 +2501,7 @@ class TTSMainPanelSelect(discord.ui.Select):
         elif value == "rules":
             await panel._open_rules_panel(interaction)
         else:
-            await panel._open_advanced_panel(interaction)
+            await interaction.response.send_message("Opção indisponível.", ephemeral=True)
 
 
 class TTSModeActionSelect(discord.ui.Select):
@@ -2303,36 +2636,34 @@ class TTSMainPanelView(_BaseTTSLayoutView):
     async def _open_mode_panel(self, interaction: discord.Interaction, mode: str):
         print(f"[tts_panel] mode_select | mode={mode} user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
         panel_message = getattr(interaction, "message", None)
+        target_user_id = self.target_user_id
+        target_user_name = self.target_user_name
+        if not self.server and target_user_id is None:
+            target_user_id = interaction.user.id
+            target_user_name = self.cog._member_panel_name(interaction.user)
+
         if mode == "edge":
-            await interaction.response.send_modal(
-                EdgeSettingsModal(
-                    self.cog,
-                    panel_message,
-                    server=self.server,
-                    target_user_id=self.target_user_id,
-                    target_user_name=self.target_user_name,
-                )
+            await _send_settings_modal_with_fallback(
+                interaction,
+                lambda: EdgeSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name),
+                lambda: EdgeSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name, force_text_fallback=True),
+                context="panel-edge",
             )
         elif mode == "gtts":
-            await interaction.response.send_modal(
-                GTTSSettingsModal(
-                    self.cog,
-                    panel_message,
-                    server=self.server,
-                    target_user_id=self.target_user_id,
-                    target_user_name=self.target_user_name,
-                )
+            await _send_settings_modal_with_fallback(
+                interaction,
+                lambda: GTTSSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name),
+                lambda: GTTSSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name, force_text_fallback=True),
+                context="panel-gtts",
             )
         else:
-            await interaction.response.send_modal(
-                GoogleSettingsModal(
-                    self.cog,
-                    panel_message,
-                    server=self.server,
-                    target_user_id=self.target_user_id,
-                    target_user_name=self.target_user_name,
-                )
+            await _send_settings_modal_with_fallback(
+                interaction,
+                lambda: GoogleSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name),
+                lambda: GoogleSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name, force_text_fallback=True),
+                context="panel-google",
             )
+
 
     async def _open_edge_panel(self, interaction: discord.Interaction):
         await self._open_mode_panel(interaction, "edge")
@@ -2399,15 +2730,13 @@ class TTSMainPanelView(_BaseTTSLayoutView):
         await interaction.response.send_modal(TTSServerRulesModal(self.cog, getattr(interaction, "message", None)))
 
     async def _open_advanced_panel(self, interaction: discord.Interaction):
-        print(f"[tts_panel] advanced_select | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
-        await interaction.response.send_modal(
-            MoreTTSOptionsModal(
-                self.cog,
-                getattr(interaction, "message", None),
-                server=self.server,
-                target_user_id=self.target_user_id,
-                target_user_name=self.target_user_name,
-            )
+        await interaction.response.send_message(
+            embed=self.cog._make_embed(
+                "Opção removida",
+                "Esse painel foi simplificado. Use Edge, gTTS, Google, Apelido ou o comando separado do TTS do servidor.",
+                ok=True,
+            ),
+            ephemeral=True,
         )
 
 
