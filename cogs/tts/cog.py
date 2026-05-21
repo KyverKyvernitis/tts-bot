@@ -3509,7 +3509,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             history_text = self._format_history_entries(initial_history, viewer_user_id=None, message_id=None)
             embed = self._make_embed(
                 "TTS",
-                "Abra seus ajustes. O painel é público, mas cada pessoa altera só o próprio TTS.",
+                "Cada prefixo escolhe um modo de voz. Use o menu para abrir seus ajustes.",
                 ok=True,
             )
             view = self._build_public_tts_launcher_view(message.guild.id, timeout=300, history_text=history_text)

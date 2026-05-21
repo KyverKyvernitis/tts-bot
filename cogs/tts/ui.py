@@ -811,7 +811,17 @@ def _item_value(item, default: str = "") -> str:
         return str(default or "")
 
 
+def _experimental_modal_components_enabled() -> bool:
+    # Selects/radio/checkbox dentro de modal ainda variam bastante entre
+    # versões da lib/cliente. Mantemos desligado por padrão para não quebrar
+    # a interação do painel; o painel continua usando selects na mensagem e
+    # modais seguros com TextInput.
+    return bool(getattr(config, "TTS_EXPERIMENTAL_MODAL_COMPONENTS", False))
+
+
 def _maybe_add_radio_group(modal, attr_name: str, *, label: str, options: list[tuple[str, str, str]], default_value: str) -> bool:
+    if not _experimental_modal_components_enabled():
+        return False
     group_cls = getattr(discord.ui, "RadioGroup", None)
     if group_cls is None:
         return False
@@ -827,11 +837,14 @@ def _maybe_add_radio_group(modal, attr_name: str, *, label: str, options: list[t
         modal.add_item(group)
         setattr(modal, attr_name, group)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[tts_modal] RadioGroup desativado/falhou: {e!r}")
         return False
 
 
 def _maybe_add_checkbox_group(modal, attr_name: str, *, options: list[tuple[str, str, str, bool]], min_values: int = 0, max_values: int | None = None) -> bool:
+    if not _experimental_modal_components_enabled():
+        return False
     group_cls = getattr(discord.ui, "CheckboxGroup", None)
     if group_cls is None:
         return False
@@ -847,7 +860,8 @@ def _maybe_add_checkbox_group(modal, attr_name: str, *, options: list[tuple[str,
         modal.add_item(group)
         setattr(modal, attr_name, group)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[tts_modal] CheckboxGroup desativado/falhou: {e!r}")
         return False
 
 
@@ -1068,6 +1082,25 @@ async def _save_tts_modal_updates(
 
 
 class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
+    voice = discord.ui.TextInput(
+        label="Voz Edge",
+        placeholder="Ex.: pt-BR-FranciscaNeural",
+        required=False,
+        max_length=80,
+    )
+    rate = discord.ui.TextInput(
+        label="Velocidade Edge",
+        placeholder="Ex.: +0%, -25%, +25%",
+        required=False,
+        max_length=8,
+    )
+    pitch = discord.ui.TextInput(
+        label="Tom Edge",
+        placeholder="Ex.: +0Hz, -25Hz, +25Hz",
+        required=False,
+        max_length=8,
+    )
+
     def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None):
         super().__init__()
         self.cog = cog
@@ -1080,48 +1113,21 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
         current_voice = _current_tts_value(cog, guild_id, user_id, "voice", str(getattr(config, "EDGE_TTS_VOICE", "pt-BR-FranciscaNeural") or "pt-BR-FranciscaNeural"), server=server)
         current_rate = _current_tts_value(cog, guild_id, user_id, "rate", "+0%", server=server)
         current_pitch = _current_tts_value(cog, guild_id, user_id, "pitch", "+0Hz", server=server)
-        self.voice_select = _make_optional_select(placeholder="Voz Edge", options=_top_edge_voice_options(cog, current_voice))
-        self.add_item(self.voice_select)
-        if not _maybe_add_radio_group(
-            self,
-            "rate_group",
-            label="Velocidade Edge",
-            default_value=current_rate,
-            options=[
-                ("Mais lenta", "-25%", "Reduz a velocidade"),
-                ("Normal", "+0%", "Velocidade padrão"),
-                ("Mais rápida", "+25%", "Aumenta a velocidade"),
-            ],
-        ):
-            self.rate_input = discord.ui.TextInput(label="Velocidade Edge", placeholder="Ex.: +0%, -25%, +25%", required=False, max_length=8, default=str(current_rate or "+0%"))
-            self.add_item(self.rate_input)
-        if not _maybe_add_radio_group(
-            self,
-            "pitch_group",
-            label="Tom Edge",
-            default_value=current_pitch,
-            options=[
-                ("Mais grave", "-25Hz", "Voz mais grave"),
-                ("Normal", "+0Hz", "Tom padrão"),
-                ("Mais agudo", "+25Hz", "Voz mais aguda"),
-            ],
-        ):
-            self.pitch_input = discord.ui.TextInput(label="Tom Edge", placeholder="Ex.: +0Hz, -25Hz, +25Hz", required=False, max_length=8, default=str(current_pitch or "+0Hz"))
-            self.add_item(self.pitch_input)
+        self.voice.default = str(current_voice or "")[:80]
+        self.rate.default = str(current_rate or "+0%")[:8]
+        self.pitch.default = str(current_pitch or "+0Hz")[:8]
 
     async def on_submit(self, interaction: discord.Interaction):
-        voice_values = _select_values(self.voice_select)
         updates: dict[str, object] = {}
         parts: list[str] = []
-        if voice_values:
-            voice = voice_values[0]
+        voice = _item_value(self.voice)
+        if voice:
             if voice not in self.cog.edge_voice_names and voice not in self.cog.edge_voice_cache:
                 await interaction.response.send_message(embed=self.cog._make_embed("Voz inválida", "Essa voz Edge não foi encontrada.", ok=False), ephemeral=True)
                 return
             updates["voice"] = voice
             parts.append(f"voz {voice}")
-        rate = _item_value(getattr(self, "rate_group", None), "") or _item_value(getattr(self, "rate_input", None), "")
-        pitch = _item_value(getattr(self, "pitch_group", None), "") or _item_value(getattr(self, "pitch_input", None), "")
+        rate = _item_value(self.rate)
         if rate:
             normalized = self.cog._normalize_rate_value(rate)
             if normalized is None:
@@ -1129,6 +1135,7 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
                 return
             updates["rate"] = normalized
             parts.append(f"velocidade {normalized}")
+        pitch = _item_value(self.pitch)
         if pitch:
             normalized = self.cog._normalize_pitch_value(pitch)
             if normalized is None:
@@ -1152,6 +1159,13 @@ class EdgeSettingsModal(discord.ui.Modal, title="Editar Edge"):
 
 
 class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
+    language = discord.ui.TextInput(
+        label="Idioma gTTS",
+        placeholder="Ex.: pt-br, en, es, fr, ja",
+        required=False,
+        max_length=10,
+    )
+
     def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None):
         super().__init__()
         self.cog = cog
@@ -1162,14 +1176,10 @@ class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
         user_id = int(target_user_id or 0)
         guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
         current = _current_tts_value(cog, guild_id, user_id, "language", "pt-br", server=server)
-        self.language_select = _make_optional_select(placeholder="Idioma gTTS", options=_top_gtts_language_options(cog, current))
-        self.add_item(self.language_select)
-        self.custom_language = discord.ui.TextInput(label="Outro idioma gTTS", placeholder="Opcional. Ex.: pt-br, en, es, fr, ja", required=False, max_length=10, default="")
-        self.add_item(self.custom_language)
+        self.language.default = str(current or "pt-br")[:10]
 
     async def on_submit(self, interaction: discord.Interaction):
-        selected = _select_values(self.language_select)
-        value = str(self.custom_language or "").strip() or (selected[0] if selected else "")
+        value = _item_value(self.language)
         if not value:
             updates = {}
         else:
@@ -1184,7 +1194,7 @@ class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
             server=self.server,
             updates=updates,
             history_label="o idioma do modo gTTS" if self.server else "o próprio idioma do gTTS",
-            history_value=value,
+            history_value=value or "sem alterações",
             success_title="gTTS atualizado",
             success_description=f"Salvo: idioma `{value}`." if value else "Nenhum idioma foi alterado.",
             target_user_id=self.target_user_id,
@@ -1193,6 +1203,31 @@ class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
 
 
 class GoogleSettingsModal(discord.ui.Modal, title="Editar Google"):
+    language = discord.ui.TextInput(
+        label="Idioma Google",
+        placeholder="Ex.: pt-BR, en-US, es-ES",
+        required=False,
+        max_length=16,
+    )
+    voice = discord.ui.TextInput(
+        label="Voz Google",
+        placeholder="Ex.: pt-BR-Standard-A",
+        required=False,
+        max_length=80,
+    )
+    rate = discord.ui.TextInput(
+        label="Velocidade Google",
+        placeholder="Ex.: 1.0, 0.85, 1.15",
+        required=False,
+        max_length=8,
+    )
+    pitch = discord.ui.TextInput(
+        label="Tom Google",
+        placeholder="Ex.: 0.0, -2.0, 2.0",
+        required=False,
+        max_length=8,
+    )
+
     def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None):
         super().__init__()
         self.cog = cog
@@ -1206,62 +1241,36 @@ class GoogleSettingsModal(discord.ui.Modal, title="Editar Google"):
         current_voice = cog._get_current_gcloud_voice(guild_id, user_id, server=server) if guild_id else str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A")
         current_rate = _current_tts_value(cog, guild_id, user_id, "gcloud_rate", "1.0", server=server)
         current_pitch = _current_tts_value(cog, guild_id, user_id, "gcloud_pitch", "0.0", server=server)
-        self.language_select = _make_optional_select(placeholder="Idioma Google", options=_top_gcloud_language_options(current_language))
-        self.add_item(self.language_select)
-        self.voice_select = _make_optional_select(placeholder="Voz Google", options=_top_gcloud_voice_options(cog, current_voice, current_language))
-        self.add_item(self.voice_select)
-        if not _maybe_add_radio_group(
-            self,
-            "rate_group",
-            label="Velocidade Google",
-            default_value=str(current_rate),
-            options=[
-                ("Mais lenta", "0.85", "Reduz a velocidade"),
-                ("Normal", "1.0", "Velocidade padrão"),
-                ("Mais rápida", "1.15", "Aumenta a velocidade"),
-            ],
-        ):
-            self.rate_input = discord.ui.TextInput(label="Velocidade Google", placeholder="Ex.: 1.0, 0.85, 1.15", required=False, max_length=8, default=str(current_rate or "1.0"))
-            self.add_item(self.rate_input)
-        if not _maybe_add_radio_group(
-            self,
-            "pitch_group",
-            label="Tom Google",
-            default_value=str(current_pitch),
-            options=[
-                ("Mais grave", "-2.0", "Voz mais grave"),
-                ("Normal", "0.0", "Tom padrão"),
-                ("Mais agudo", "2.0", "Voz mais aguda"),
-            ],
-        ):
-            self.pitch_input = discord.ui.TextInput(label="Tom Google", placeholder="Ex.: 0.0, -2.0, 2.0", required=False, max_length=8, default=str(current_pitch or "0.0"))
-            self.add_item(self.pitch_input)
+        self.language.default = str(current_language or "pt-BR")[:16]
+        self.voice.default = str(current_voice or "pt-BR-Standard-A")[:80]
+        self.rate.default = str(current_rate or "1.0")[:8]
+        self.pitch.default = str(current_pitch or "0.0")[:8]
 
     async def on_submit(self, interaction: discord.Interaction):
         updates: dict[str, object] = {}
         parts: list[str] = []
-        lang_values = _select_values(self.language_select)
-        voice_values = _select_values(self.voice_select)
-        if lang_values:
-            value, error = self.cog._validate_gcloud_language_input(lang_values[0])
+        language = _item_value(self.language)
+        if language:
+            value, error = self.cog._validate_gcloud_language_input(language)
             if error or value is None:
                 await interaction.response.send_message(embed=self.cog._make_embed("Idioma inválido", error or "Idioma inválido.", ok=False), ephemeral=True)
                 return
             updates["gcloud_language"] = value
             parts.append(f"idioma {value}")
-        if voice_values:
-            value, error = self.cog._validate_gcloud_voice_input(voice_values[0])
+        voice = _item_value(self.voice)
+        if voice:
+            value, error = self.cog._validate_gcloud_voice_input(voice)
             if error or value is None:
                 await interaction.response.send_message(embed=self.cog._make_embed("Voz inválida", error or "Voz inválida.", ok=False), ephemeral=True)
                 return
             updates["gcloud_voice"] = value
             parts.append(f"voz {value}")
-        rate = _item_value(getattr(self, "rate_group", None), "") or _item_value(getattr(self, "rate_input", None), "")
-        pitch = _item_value(getattr(self, "pitch_group", None), "") or _item_value(getattr(self, "pitch_input", None), "")
+        rate = _item_value(self.rate)
         if rate:
             value = self.cog._normalize_gcloud_rate_value(rate)
             updates["gcloud_rate"] = value
             parts.append(f"velocidade {value}")
+        pitch = _item_value(self.pitch)
         if pitch:
             value = self.cog._normalize_gcloud_pitch_value(pitch)
             updates["gcloud_pitch"] = value
@@ -1282,6 +1291,13 @@ class GoogleSettingsModal(discord.ui.Modal, title="Editar Google"):
 
 
 class MoreTTSOptionsModal(discord.ui.Modal, title="Mais opções"):
+    mode = discord.ui.TextInput(
+        label="Modo de TTS",
+        placeholder="edge, gtts ou gcloud",
+        required=False,
+        max_length=12,
+    )
+
     def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None):
         super().__init__()
         self.cog = cog
@@ -1293,22 +1309,10 @@ class MoreTTSOptionsModal(discord.ui.Modal, title="Mais opções"):
         guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
         if guild_id:
             current = _current_tts_value(cog, guild_id, int(target_user_id or 0), "engine", "edge", server=server)
-        if not _maybe_add_radio_group(
-            self,
-            "mode_group",
-            label="Modo de TTS",
-            default_value=current,
-            options=[
-                ("Edge", "edge", "Modo natural"),
-                ("gTTS", "gtts", "Modo simples"),
-                ("Google", "gcloud", "Google Cloud"),
-            ],
-        ):
-            self.mode_input = discord.ui.TextInput(label="Modo de TTS", placeholder="edge, gtts ou gcloud", required=False, max_length=12, default=str(current or "edge"))
-            self.add_item(self.mode_input)
+        self.mode.default = str(current or "edge")[:12]
 
     async def on_submit(self, interaction: discord.Interaction):
-        mode = _item_value(getattr(self, "mode_group", None), "") or _item_value(getattr(self, "mode_input", None), "")
+        mode = _item_value(self.mode)
         if not mode:
             updates = {}
             value = ""
@@ -1322,7 +1326,7 @@ class MoreTTSOptionsModal(discord.ui.Modal, title="Mais opções"):
             server=self.server,
             updates=updates,
             history_label="o modo padrão do servidor" if self.server else "o próprio modo",
-            history_value=value,
+            history_value=value or "sem alterações",
             success_title="Modo de TTS atualizado",
             success_description=f"Salvo: modo `{value}`." if value else "Nenhum modo foi alterado.",
             target_user_id=self.target_user_id,
@@ -1360,7 +1364,7 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
             ("edge_prefix", "Edge", ("edge_prefix",)),
             ("google_prefix", "Google", ("gcloud_prefix",)),
         ]:
-            value = str(getattr(self, field_name) or "").strip()
+            value = _item_value(getattr(self, field_name, None))
             if value:
                 for key in keys:
                     updates[key] = value[:8]
@@ -1372,13 +1376,26 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
             server=True,
             updates=updates,
             history_label="os prefixos do servidor",
-            history_value=", ".join(parts),
+            history_value=", ".join(parts) if parts else "sem alterações",
             success_title="Prefixos atualizados",
             success_description="Salvo: " + (", ".join(parts) if parts else "sem alterações") + ".",
         )
 
 
 class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
+    announce_author = discord.ui.TextInput(
+        label="Autor antes da frase",
+        placeholder="sim ou não",
+        required=False,
+        max_length=8,
+    )
+    ignored_role = discord.ui.TextInput(
+        label="Cargo ignorado",
+        placeholder="Opcional: mencione, ID, nome ou 0 para remover",
+        required=False,
+        max_length=80,
+    )
+
     def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None):
         super().__init__()
         self.cog = cog
@@ -1390,46 +1407,46 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
         except Exception:
             defaults = {}
         announce = bool((defaults or {}).get("announce_author"))
-        if not _maybe_add_checkbox_group(
-            self,
-            "rules_group",
-            options=[("Autor antes da frase", "announce_author", "Fala quem enviou a mensagem", announce)],
-            min_values=0,
-            max_values=1,
-        ):
-            self.announce_author = discord.ui.TextInput(label="Autor antes da frase", placeholder="sim ou não", required=False, max_length=8, default="sim" if announce else "não")
-            self.add_item(self.announce_author)
-        role_select_cls = getattr(discord.ui, "RoleSelect", None)
-        if role_select_cls is not None:
-            try:
-                self.role_select = role_select_cls(placeholder="Cargo ignorado", min_values=0, max_values=1, required=False)
-                self.add_item(self.role_select)
-            except Exception:
-                self.role_select = None
-        else:
-            self.role_select = None
+        self.announce_author.default = "sim" if announce else "não"
+        role_id = int((defaults or {}).get("ignored_tts_role_id") or 0)
+        self.ignored_role.default = str(role_id) if role_id else ""
+
+    def _find_role(self, guild: discord.Guild | None, raw: str) -> discord.Role | None:
+        if guild is None:
+            return None
+        value = str(raw or "").strip()
+        if not value:
+            return None
+        match = re.fullmatch(r"<@&(\d+)>", value)
+        role_id = int(match.group(1)) if match else int(value) if value.isdigit() else 0
+        if role_id:
+            return guild.get_role(role_id)
+        lowered = value.casefold()
+        for role in getattr(guild, "roles", []) or []:
+            if str(getattr(role, "name", "")).casefold() == lowered:
+                return role
+        return None
 
     async def on_submit(self, interaction: discord.Interaction):
         updates: dict[str, object] = {}
-        selected_rules = set(_select_values(getattr(self, "rules_group", None)))
-        if hasattr(self, "rules_group"):
-            updates["announce_author"] = "announce_author" in selected_rules
-        else:
-            text = str(getattr(self, "announce_author", "") or "").strip().lower()
-            if text:
-                updates["announce_author"] = text in {"sim", "s", "yes", "y", "true", "1", "on", "ativo", "ativado"}
-        role_values = getattr(getattr(self, "role_select", None), "values", None) or []
-        if role_values:
-            role = role_values[0]
-            updates["ignored_tts_role_id"] = int(getattr(role, "id", 0) or 0)
-            role_text = getattr(role, "mention", None) or getattr(role, "name", "cargo")
-        else:
-            role_text = ""
         parts = []
-        if "announce_author" in updates:
-            parts.append("autor antes da frase ligado" if updates["announce_author"] else "autor antes da frase desligado")
-        if role_text:
-            parts.append(f"cargo ignorado {role_text}")
+        text = _item_value(self.announce_author).lower()
+        if text:
+            enabled = text in {"sim", "s", "yes", "y", "true", "1", "on", "ativo", "ativado", "ligado"}
+            updates["announce_author"] = enabled
+            parts.append("autor antes da frase ligado" if enabled else "autor antes da frase desligado")
+        raw_role = _item_value(self.ignored_role)
+        if raw_role:
+            if raw_role.strip().lower() in {"0", "nenhum", "remover", "remove", "off", "desativar"}:
+                updates["ignored_tts_role_id"] = 0
+                parts.append("cargo ignorado removido")
+            else:
+                role = self._find_role(getattr(interaction, "guild", None), raw_role)
+                if role is None:
+                    await interaction.response.send_message(embed=self.cog._make_embed("Cargo não encontrado", "Use menção, ID ou nome exato do cargo.", ok=False), ephemeral=True)
+                    return
+                updates["ignored_tts_role_id"] = int(getattr(role, "id", 0) or 0)
+                parts.append(f"cargo ignorado {getattr(role, 'mention', None) or getattr(role, 'name', 'cargo')}")
         await _save_tts_modal_updates(
             self.cog,
             interaction,
@@ -1437,7 +1454,7 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
             server=True,
             updates=updates,
             history_label="as regras do TTS",
-            history_value=", ".join(parts),
+            history_value=", ".join(parts) if parts else "sem alterações",
             success_title="Regras atualizadas",
             success_description="Salvo: " + (", ".join(parts) if parts else "sem alterações") + ".",
         )
@@ -1583,10 +1600,9 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
         )
 
     def _launcher_text(self) -> str:
+        history = self.history_text or "• Nada recente."
         lines = [
             "### TTS",
-            "Abra seus ajustes abaixo. O painel é público, mas cada pessoa altera só o próprio TTS.",
-            "",
             "**Como funciona**",
             "Cada prefixo escolhe um modo de voz.",
             "",
@@ -1598,9 +1614,10 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
             "",
             "**Google**",
             "Google Cloud. Use: `'texto`",
+            "",
+            "**Últimas alterações**",
+            history,
         ]
-        if self.history_text:
-            lines.extend(["", "**Últimas alterações**", self.history_text])
         return "\n".join(lines).strip()
 
     def _make_button(self, label: str, callback: Callable[[discord.Interaction], object], *, emoji: str | None = None, style: discord.ButtonStyle = discord.ButtonStyle.secondary) -> discord.ui.Button:
