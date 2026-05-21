@@ -5,6 +5,7 @@ import time
 import re
 import weakref
 import unicodedata
+import traceback
 from urllib.parse import urlparse
 from typing import Optional, Callable
 
@@ -796,9 +797,34 @@ def _current_tts_value(cog: "TTSVoice", guild_id: int, user_id: int, key: str, d
 
 def _select_values(item) -> list[str]:
     try:
-        return [str(v) for v in (getattr(item, "values", None) or []) if str(v or "").strip()]
+        values = []
+        for value in (getattr(item, "values", None) or []):
+            if value is None:
+                continue
+            if hasattr(value, "id") and not isinstance(value, str):
+                value = str(getattr(value, "id", "") or "")
+            value = str(value or "").strip()
+            if value:
+                values.append(value)
+        return values
     except Exception:
         return []
+
+
+def _selected_roles(item) -> list[discord.Role]:
+    roles: list[discord.Role] = []
+    try:
+        for value in (getattr(item, "values", None) or []):
+            if isinstance(value, discord.Role):
+                roles.append(value)
+    except Exception:
+        pass
+    return roles
+
+
+def _first_selected_role(item) -> discord.Role | None:
+    roles = _selected_roles(item)
+    return roles[0] if roles else None
 
 
 def _item_value(item, default: str = "") -> str:
@@ -882,23 +908,27 @@ def _single_component_value(item, default: str = "") -> str:
 
 def _with_default_option(options: list[discord.SelectOption], current: str) -> list[discord.SelectOption]:
     current = str(current or "").strip()
-    seen = set()
+    seen: set[str] = set()
     fixed: list[discord.SelectOption] = []
-    if current:
-        fixed.append(discord.SelectOption(label=_shorten(current, 100), description="Valor atual", value=current, default=True))
-        seen.add(current)
+    matched_current = False
+
     for option in options or []:
         value = str(getattr(option, "value", "") or "").strip()
         if not value or value in seen:
             continue
         try:
-            option.default = (value == current)
+            option.default = bool(current and value == current)
+            matched_current = matched_current or bool(option.default)
         except Exception:
             pass
         fixed.append(option)
         seen.add(value)
         if len(fixed) >= 25:
             break
+
+    if current and not matched_current:
+        fixed.insert(0, discord.SelectOption(label=_shorten(current, 100), description="Valor atual", value=current, default=True))
+
     return fixed[:25]
 
 
@@ -924,25 +954,37 @@ def _add_modal_text_input(modal, attr_name: str, *, label: str, placeholder: str
     setattr(modal, attr_name, item)
 
 
-def _add_modal_label_item(modal, attr_name: str, *, text: str, description: str, component) -> bool:
+def _add_modal_label_item(modal, attr_name: str, *, text: str, description: str = "", component=None) -> bool:
     label_cls = getattr(discord.ui, "Label", None)
-    if label_cls is None:
+    if label_cls is None or component is None:
         return False
     try:
-        modal.add_item(label_cls(text=text[:45], description=(description or None), component=component))
+        modal.add_item(label_cls(text=str(text or "")[:45], description=(str(description or "")[:100] or None), component=component))
         setattr(modal, attr_name, component)
         return True
     except Exception as e:
         print(f"[tts_modal] Label desativado/falhou: {e!r}")
+        traceback.print_exception(type(e), e, e.__traceback__)
         return False
 
 
 def _make_modal_select(custom_id: str, *, placeholder: str, options: list[discord.SelectOption], required: bool = True):
-    kwargs = dict(custom_id=custom_id, placeholder=placeholder[:150], min_values=1 if required else 0, max_values=1, options=options[:25])
+    kwargs = dict(custom_id=custom_id, placeholder=str(placeholder or "")[:150], min_values=1 if required else 0, max_values=1, options=(options or [])[:25])
     try:
         return discord.ui.Select(required=required, **kwargs)
     except TypeError:
         return discord.ui.Select(**kwargs)
+
+
+def _make_modal_role_select(custom_id: str, *, placeholder: str, required: bool = False):
+    role_select_cls = getattr(discord.ui, "RoleSelect", None)
+    if role_select_cls is None:
+        return None
+    kwargs = dict(custom_id=custom_id, placeholder=str(placeholder or "")[:150], min_values=1 if required else 0, max_values=1)
+    try:
+        return role_select_cls(required=required, **kwargs)
+    except TypeError:
+        return role_select_cls(**kwargs)
 
 
 def _radio_value_matches(left: object, right: object) -> bool:
@@ -997,6 +1039,7 @@ def _make_modal_checkbox_group(custom_id: str, *, options: list[tuple[str, str, 
         return group
     except Exception as e:
         print(f"[tts_modal] CheckboxGroup desativado/falhou: {e!r}")
+        traceback.print_exception(type(e), e, e.__traceback__)
         return None
 
 
@@ -1102,22 +1145,24 @@ def _top_edge_voice_options(cog: "TTSVoice", current: str = "") -> list[discord.
 
 
 def _top_gtts_language_options(cog: "TTSVoice", current: str = "") -> list[discord.SelectOption]:
-    preferred = ["pt-br", "pt", "en", "es", "fr", "ja", "it", "de"]
-    items = []
-    seen = set()
-    if current:
-        preferred.insert(0, current)
+    preferred = [
+        "pt-br", "pt", "en", "es", "fr", "de", "it", "ja", "ko", "zh-cn",
+        "ru", "ar", "hi", "id", "tr", "pl", "nl", "sv", "no", "da",
+    ]
+    items: list[discord.SelectOption] = []
+    seen: set[str] = set()
     langs = dict(cog.gtts_languages or {})
-    for code in preferred + sorted(langs):
-        code = str(code or "").strip()
+    for code in ([current] if current else []) + preferred + sorted(langs):
+        code = str(code or "").strip().lower()
         if not code or code in seen:
             continue
         seen.add(code)
         name = langs.get(code) or code
-        items.append(discord.SelectOption(label=_shorten(f"{code} — {name}", 100), description="Idioma gTTS", value=code))
+        label = _shorten(f"{name} ({code})", 100) if name != code else _shorten(code, 100)
+        items.append(discord.SelectOption(label=label, description="Idioma gTTS", value=code, default=(code == str(current or "").strip().lower())))
         if len(items) >= 25:
             break
-    return items or [discord.SelectOption(label="pt-br", description="Português Brasil", value="pt-br")]
+    return items or [discord.SelectOption(label="Português Brasil (pt-br)", description="Idioma gTTS", value="pt-br", default=True)]
 
 
 def _top_gcloud_language_options(current: str = "") -> list[discord.SelectOption]:
@@ -1133,31 +1178,50 @@ def _top_gcloud_language_options(current: str = "") -> list[discord.SelectOption
     return options
 
 
+def _coerce_gcloud_voice_for_language(cog: "TTSVoice", voice: str, language: str) -> str:
+    language = str(language or "pt-BR").strip() or "pt-BR"
+    voice = str(voice or "").strip()
+    if not voice:
+        return ""
+    if cog._gcloud_voice_matches_language(voice, language):
+        return voice
+    simple = voice.strip()
+    if re.fullmatch(r"[A-Z]", simple, flags=re.I):
+        return f"{language}-Standard-{simple.upper()}"
+    if re.fullmatch(r"(?:Standard|Wavenet|Neural2|Studio|Chirp3(?:-HD)?)-[A-Z0-9]+", simple, flags=re.I):
+        return f"{language}-{simple}"
+    return ""
+
+
 def _gcloud_voice_options_for_language(cog: "TTSVoice", *, language: str, current: str = "") -> list[discord.SelectOption]:
     language = str(language or "pt-BR").strip() or "pt-BR"
-    current = str(current or "").strip()
+    current = _coerce_gcloud_voice_for_language(cog, current, language)
     catalog = list(getattr(cog, "_gcloud_voices_cache", []) or [])
     options: list[discord.SelectOption] = []
     try:
         if catalog:
-            safe_current = current if cog._gcloud_voice_matches_language(current, language) else ""
-            options = cog._build_gcloud_voice_options_from_catalog(catalog, language, current_value=safe_current)
+            raw_options = cog._build_gcloud_voice_options_from_catalog(catalog, language, current_value=current or None)
+            for option in raw_options:
+                value = str(getattr(option, "value", "") or "").strip()
+                if value and cog._gcloud_voice_matches_language(value, language):
+                    options.append(option)
     except Exception as e:
         print(f"[tts_modal] falha ao filtrar vozes Google por idioma: {e!r}")
+        traceback.print_exception(type(e), e, e.__traceback__)
         options = []
 
     if not options:
         families = ["Standard", "Wavenet", "Neural2"]
         letters = ["A", "B", "C", "D", "E"]
         names: list[str] = []
-        if current and current.startswith(language + "-"):
+        if current:
             names.append(current)
         for family in families:
             for letter in letters:
                 names.append(f"{language}-{family}-{letter}")
         seen: set[str] = set()
         for name in names:
-            if not name or name in seen or not name.startswith(language + "-"):
+            if not name or name in seen or not cog._gcloud_voice_matches_language(name, language):
                 continue
             seen.add(name)
             options.append(discord.SelectOption(label=_shorten(name, 100), description="Voz Google", value=name))
@@ -1167,16 +1231,15 @@ def _gcloud_voice_options_for_language(cog: "TTSVoice", *, language: str, curren
     if not options:
         options = [discord.SelectOption(label=f"{language}-Standard-A", description="Voz Google", value=f"{language}-Standard-A")]
 
-    current_matches = current and cog._gcloud_voice_matches_language(current, language)
-    seen_values = {str(getattr(opt, "value", "") or "") for opt in options}
-    if current_matches and current not in seen_values:
+    current_values = {str(getattr(opt, "value", "") or "") for opt in options}
+    if current and current not in current_values:
         options.insert(0, discord.SelectOption(label=_shorten(current, 100), description="Voz Google", value=current))
 
     has_default = False
     for index, option in enumerate(options[:25]):
         value = str(getattr(option, "value", "") or "")
         try:
-            option.default = (value == current) if current_matches else (index == 0)
+            option.default = bool(current and value == current)
             has_default = has_default or bool(option.default)
         except Exception:
             pass
@@ -1568,8 +1631,13 @@ class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
                 max_length=10,
                 required=False,
             )
-            self.add_item(manual_input)
-            self.manual_language = manual_input
+            ok = ok and _add_modal_label_item(
+                self,
+                "manual_language",
+                text="Outro idioma",
+                description="Opcional. Substitui a seleção acima.",
+                component=manual_input,
+            )
             return bool(ok)
         except Exception as e:
             print(f"[tts_modal] gTTS guiado falhou: {e!r}")
@@ -1872,10 +1940,11 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
 
 
 class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
-    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None):
+    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, force_text_fallback: bool = False):
         super().__init__()
         self.cog = cog
         self.panel_message = panel_message
+        self.force_text_fallback = bool(force_text_fallback)
         guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
         try:
             db = cog._get_db()
@@ -1884,8 +1953,9 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
             defaults = {}
         self.current_announce_author = bool((defaults or {}).get("announce_author"))
         role_id = int((defaults or {}).get("ignored_tts_role_id") or 0)
+        self.current_ignored_role_id = role_id
         self.current_ignored_role = str(role_id) if role_id else ""
-        if not self._build_guided_modal():
+        if self.force_text_fallback or not self._build_guided_modal():
             self._build_text_fallback()
 
     def _build_guided_modal(self) -> bool:
@@ -1898,39 +1968,61 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
                     (
                         "Autor antes da frase",
                         "announce_author",
-                        "O bot fala quem mandou antes do texto.",
+                        "Fala o nome de quem mandou.",
                         self.current_announce_author,
+                    ),
+                    (
+                        "Remover cargo ignorado",
+                        "clear_ignored_role",
+                        "Limpa o cargo ignorado atual.",
+                        False,
                     ),
                 ],
                 min_values=0,
-                max_values=1,
+                max_values=2,
             )
             if rules is None:
                 return False
             ok = _add_modal_label_item(
                 self,
                 "rules",
-                text="Opções do TTS",
-                description="Marque apenas o que deve ficar ligado no servidor.",
+                text="Regras",
+                description="Marque o que deve ficar ligado.",
                 component=rules,
             )
-            role_input = _make_modal_text_input(
-                label="Cargo ignorado",
-                placeholder="Mencione, cole o ID/nome ou use 0 para remover",
-                current=self.current_ignored_role,
-                max_length=80,
+
+            role_select = _make_modal_role_select(
+                "ignored_role",
+                placeholder="Cargo ignorado. Deixe vazio para manter.",
                 required=False,
             )
-            ok = ok and _add_modal_label_item(
-                self,
-                "ignored_role",
-                text="Cargo ignorado",
-                description="Usuários com esse cargo não ativam TTS. Deixe vazio para manter.",
-                component=role_input,
-            )
+            if role_select is not None:
+                ok = ok and _add_modal_label_item(
+                    self,
+                    "ignored_role",
+                    text="Cargo ignorado",
+                    description="Opcional. Escolha um cargo para ignorar no TTS.",
+                    component=role_select,
+                )
+            else:
+                role_input = _make_modal_text_input(
+                    label="Cargo ignorado",
+                    placeholder="ID/nome ou 0 para remover. Vazio mantém.",
+                    current=self.current_ignored_role,
+                    max_length=80,
+                    required=False,
+                )
+                ok = ok and _add_modal_label_item(
+                    self,
+                    "ignored_role",
+                    text="Cargo ignorado",
+                    description="Opcional. Use ID, nome exato ou 0 para remover.",
+                    component=role_input,
+                )
             return bool(ok)
         except Exception as e:
             print(f"[tts_modal] regras guiadas falharam: {e!r}")
+            traceback.print_exception(type(e), e, e.__traceback__)
             try:
                 self.clear_items()
             except Exception:
@@ -1942,7 +2034,7 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
             self,
             "announce_author",
             label="Autor antes da frase",
-            placeholder="sim para falar o autor antes; não para desligar",
+            placeholder="sim para ligar; não para desligar",
             current="sim" if self.current_announce_author else "não",
             max_length=8,
         )
@@ -1950,9 +2042,10 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
             self,
             "ignored_role",
             label="Cargo ignorado",
-            placeholder="Mencione, cole o ID/nome ou use 0 para remover",
+            placeholder="ID/nome ou 0 para remover. Vazio mantém.",
             current=self.current_ignored_role,
             max_length=80,
+            required=False,
         )
 
     def _find_role(self, guild: discord.Guild | None, raw: str) -> discord.Role | None:
@@ -1973,30 +2066,51 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
 
     async def on_submit(self, interaction: discord.Interaction):
         updates: dict[str, object] = {}
-        parts = []
+        parts: list[str] = []
+
         if hasattr(self, "rules"):
             values = set(_select_values(getattr(self, "rules", None)))
             enabled = "announce_author" in values
-            updates["announce_author"] = enabled
-            parts.append("autor antes da frase ligado" if enabled else "autor antes da frase desligado")
+            clear_role = "clear_ignored_role" in values
+            if enabled != self.current_announce_author:
+                updates["announce_author"] = enabled
+                parts.append("autor antes da frase ligado" if enabled else "autor antes da frase desligado")
         else:
             text = _item_value(getattr(self, "announce_author", None)).lower()
             if text:
                 enabled = text in {"sim", "s", "yes", "y", "true", "1", "on", "ativo", "ativado", "ligado"}
-                updates["announce_author"] = enabled
-                parts.append("autor antes da frase ligado" if enabled else "autor antes da frase desligado")
-        raw_role = _item_value(getattr(self, "ignored_role", None))
-        if raw_role:
-            if raw_role.strip().lower() in {"0", "nenhum", "remover", "remove", "off", "desativar"}:
+                if enabled != self.current_announce_author:
+                    updates["announce_author"] = enabled
+                    parts.append("autor antes da frase ligado" if enabled else "autor antes da frase desligado")
+            clear_role = False
+
+        selected_role = _first_selected_role(getattr(self, "ignored_role", None))
+        if selected_role is not None:
+            role_id = int(getattr(selected_role, "id", 0) or 0)
+            if role_id and role_id != self.current_ignored_role_id:
+                updates["ignored_tts_role_id"] = role_id
+                parts.append(f"cargo ignorado {getattr(selected_role, 'name', 'cargo')}")
+        elif clear_role:
+            if self.current_ignored_role_id:
                 updates["ignored_tts_role_id"] = 0
                 parts.append("cargo ignorado removido")
-            else:
-                role = self._find_role(getattr(interaction, "guild", None), raw_role)
-                if role is None:
-                    await interaction.response.send_message(embed=self.cog._make_embed("Cargo não encontrado", "Use menção, ID ou nome exato do cargo.", ok=False), ephemeral=True)
-                    return
-                updates["ignored_tts_role_id"] = int(getattr(role, "id", 0) or 0)
-                parts.append(f"cargo ignorado {getattr(role, 'mention', None) or getattr(role, 'name', 'cargo')}")
+        else:
+            raw_role = _item_value(getattr(self, "ignored_role", None))
+            if raw_role:
+                if raw_role.strip().lower() in {"0", "nenhum", "remover", "remove", "off", "desativar"}:
+                    if self.current_ignored_role_id:
+                        updates["ignored_tts_role_id"] = 0
+                        parts.append("cargo ignorado removido")
+                else:
+                    role = self._find_role(getattr(interaction, "guild", None), raw_role)
+                    if role is None:
+                        await interaction.response.send_message(embed=self.cog._make_embed("Cargo não encontrado", "Use menção, ID ou nome exato do cargo.", ok=False), ephemeral=True)
+                        return
+                    role_id = int(getattr(role, "id", 0) or 0)
+                    if role_id and role_id != self.current_ignored_role_id:
+                        updates["ignored_tts_role_id"] = role_id
+                        parts.append(f"cargo ignorado {getattr(role, 'name', 'cargo')}")
+
         await _save_tts_modal_updates(
             self.cog,
             interaction,
@@ -2006,7 +2120,7 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
             history_label="as regras do TTS",
             history_value=", ".join(parts) if parts else "sem alterações",
             success_title="Regras atualizadas",
-            success_description="Salvo: " + (", ".join(parts) if parts else "sem alterações") + ".",
+            success_description="\n".join(f"• {part}" for part in parts) if parts else "Nada mudou.",
         )
 
 
@@ -2016,16 +2130,10 @@ async def _send_settings_modal_with_fallback(interaction: discord.Interaction, g
         return
     except Exception as e:
         print(f"[tts_modal] modal guiado falhou em {context}: {e!r}")
+        traceback.print_exception(type(e), e, e.__traceback__)
         if interaction.response.is_done():
             try:
-                await interaction.followup.send(
-                    embed=guided_factory().cog._make_embed(
-                        "Erro no formulário",
-                        "Não consegui abrir esse formulário agora. Tente abrir o painel novamente.",
-                        ok=False,
-                    ),
-                    ephemeral=True,
-                )
+                await interaction.followup.send("Não consegui abrir esse formulário agora.", ephemeral=True)
             except Exception:
                 pass
             return
@@ -2033,6 +2141,7 @@ async def _send_settings_modal_with_fallback(interaction: discord.Interaction, g
         await interaction.response.send_modal(fallback_factory())
     except Exception as e:
         print(f"[tts_modal] fallback também falhou em {context}: {e!r}")
+        traceback.print_exception(type(e), e, e.__traceback__)
         try:
             await interaction.response.send_message("Não consegui abrir esse formulário agora.", ephemeral=True)
         except Exception:
@@ -2988,7 +3097,12 @@ class TTSMainPanelView(_BaseTTSLayoutView):
     async def _open_rules_panel(self, interaction: discord.Interaction):
         if not self.server:
             return await self._open_advanced_panel(interaction)
-        await interaction.response.send_modal(TTSServerRulesModal(self.cog, getattr(interaction, "message", None)))
+        await _send_settings_modal_with_fallback(
+            interaction,
+            lambda: TTSServerRulesModal(self.cog, getattr(interaction, "message", None)),
+            lambda: TTSServerRulesModal(self.cog, getattr(interaction, "message", None), force_text_fallback=True),
+            context="server-rules",
+        )
 
     async def _open_advanced_panel(self, interaction: discord.Interaction):
         await interaction.response.send_message(
