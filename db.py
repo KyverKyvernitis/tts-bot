@@ -593,6 +593,10 @@ class SettingsDB:
             "announce_author": bool(g.get("announce_author_enabled", False)),
             "auto_leave": bool(g.get("auto_leave_enabled", True)),
             "ignored_tts_role_id": int(g.get("ignored_tts_role_id", 0) or 0),
+            # Migração suave: servidores antigos tinham apenas o ID.
+            # Se já havia cargo salvo e não existe flag explícita, mantemos ativo
+            # para preservar o comportamento anterior.
+            "ignored_tts_role_enabled": bool(g.get("ignored_tts_role_enabled", bool(int(g.get("ignored_tts_role_id", 0) or 0)))),
         }
 
     async def set_guild_tts_defaults(
@@ -617,6 +621,7 @@ class SettingsDB:
         announce_author: Optional[bool] = None,
         auto_leave: Optional[bool] = None,
         ignored_tts_role_id: Optional[int] = None,
+        ignored_tts_role_enabled: Optional[bool] = None,
     ):
         doc = self._get_guild_doc(guild_id)
         tts = doc.get("tts_defaults", {}) or {}
@@ -663,6 +668,8 @@ class SettingsDB:
                 doc["ignored_tts_role_id"] = max(0, int(ignored_tts_role_id or 0))
             except Exception:
                 doc["ignored_tts_role_id"] = 0
+        if ignored_tts_role_enabled is not None:
+            doc["ignored_tts_role_enabled"] = bool(ignored_tts_role_enabled)
 
         doc["tts_defaults"] = tts
         self._invalidate_resolved_tts_cache(guild_id=guild_id)
@@ -675,12 +682,26 @@ class SettingsDB:
         except Exception:
             return 0
 
+    def get_ignored_tts_role_enabled(self, guild_id: int) -> bool:
+        g = self.guild_cache.get(guild_id, {})
+        # Migração suave: se a flag ainda não existe, um cargo salvo antigo fica ativo.
+        if "ignored_tts_role_enabled" not in g:
+            return bool(self.get_ignored_tts_role_id(guild_id))
+        return bool(g.get("ignored_tts_role_enabled", False))
+
     async def set_ignored_tts_role_id(self, guild_id: int, role_id: int | None):
         doc = self._get_guild_doc(guild_id)
         try:
             doc["ignored_tts_role_id"] = max(0, int(role_id or 0))
         except Exception:
             doc["ignored_tts_role_id"] = 0
+        if doc["ignored_tts_role_id"] > 0:
+            doc["ignored_tts_role_enabled"] = True
+        await self._save_guild_doc(guild_id, doc)
+
+    async def set_ignored_tts_role_enabled(self, guild_id: int, enabled: bool):
+        doc = self._get_guild_doc(guild_id)
+        doc["ignored_tts_role_enabled"] = bool(enabled)
         await self._save_guild_doc(guild_id, doc)
 
 

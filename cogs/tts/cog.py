@@ -926,6 +926,29 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 pass
         return 0
 
+    def _ignored_tts_role_enabled(self, guild_id: int, *, guild_defaults: dict | None = None) -> bool:
+        if guild_defaults is not None:
+            # Migração suave: se não existir flag explícita, cargo antigo salvo continua ativo.
+            if "ignored_tts_role_enabled" in (guild_defaults or {}):
+                return bool((guild_defaults or {}).get("ignored_tts_role_enabled", False))
+            return bool(self._get_ignored_tts_role_id(guild_id, guild_defaults=guild_defaults))
+
+        db = self._get_db()
+        if db is not None and hasattr(db, "get_ignored_tts_role_enabled"):
+            try:
+                return bool(db.get_ignored_tts_role_enabled(guild_id))
+            except Exception:
+                pass
+        if db is not None and hasattr(db, "get_guild_tts_defaults"):
+            try:
+                defaults = db.get_guild_tts_defaults(guild_id) or {}
+                if "ignored_tts_role_enabled" in defaults:
+                    return bool(defaults.get("ignored_tts_role_enabled", False))
+                return bool(self._get_ignored_tts_role_id(guild_id, guild_defaults=defaults))
+            except Exception:
+                pass
+        return bool(self._get_ignored_tts_role_id(guild_id))
+
     def _get_ignored_tts_role(self, guild: discord.Guild | None, *, guild_defaults: dict | None = None) -> discord.Role | None:
         if guild is None:
             return None
@@ -936,16 +959,20 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
     def _ignored_tts_role_text(self, guild_id: int, *, guild_defaults: dict | None = None) -> str:
         role_id = self._get_ignored_tts_role_id(guild_id, guild_defaults=guild_defaults)
+        enabled = self._ignored_tts_role_enabled(guild_id, guild_defaults=guild_defaults)
         if role_id <= 0:
-            return "`Nenhum`"
+            return "desligado"
         guild = self.bot.get_guild(guild_id)
         role = guild.get_role(role_id) if guild is not None else None
-        if role is not None:
-            return role.mention
-        return f"`{role_id}` (cargo não encontrado)"
+        mention = role.mention if role is not None else f"<@&{role_id}>"
+        if enabled:
+            return f"{mention} · ligado"
+        return f"desligado · {mention} salvo"
 
     def _member_has_ignored_tts_role(self, member: discord.Member | None, *, guild_defaults: dict | None = None) -> bool:
         if member is None or member.guild is None:
+            return False
+        if not self._ignored_tts_role_enabled(member.guild.id, guild_defaults=guild_defaults):
             return False
         ignored_role_id = self._get_ignored_tts_role_id(member.guild.id, guild_defaults=guild_defaults)
         if ignored_role_id <= 0:
@@ -1112,7 +1139,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if "autor" in lowered:
             return "Autor antes da frase: ligado" if any(x in lowered for x in ("ativ", "lig", "on", "true")) else "Autor antes da frase: desligado"
         if "cargo ignorado" in lowered:
-            return f"Cargo ignorado: {value}" if value else "Cargo ignorado atualizado"
+            clean_value = re.sub(r"^cargo ignorado\s+", "", value, flags=re.I).strip() if value else ""
+            return f"Cargo ignorado: {clean_value}" if clean_value else "Cargo ignorado atualizado"
+        if "regras" in lowered:
+            return "Regras atualizadas"
         if "modo" in lowered:
             return f"Modo de TTS: {value}" if value else "Modo de TTS atualizado"
 
@@ -1273,7 +1303,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         await self._delete_prefix_panel(message.guild.id, message.author.id, panel_kind)
 
         content, send_embed, send_view = self._prepare_panel_payload(embed=embed, view=view)
-        sent = await message.channel.send(content=content, embed=send_embed, view=send_view)
+        sent = await message.channel.send(
+            content=content,
+            embed=send_embed,
+            view=send_view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         view.message = sent
         db = self._get_db()
         initial_history: list[str] = []
@@ -1462,7 +1497,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         content: str | None = None,
     ):
         content, embed, view = self._prepare_panel_payload(content=content, embed=embed, view=view)
-        return await message.edit(content=content, embed=embed, view=view)
+        return await message.edit(
+            content=content,
+            embed=embed,
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     async def _respond(
         self,
@@ -1481,6 +1521,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     content=content,
                     embed=embed,
                     view=view,
+                    allowed_mentions=discord.AllowedMentions.none(),
                 )
                 try:
                     return await interaction.original_response()
@@ -1493,12 +1534,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 view=view,
                 ephemeral=ephemeral,
                 wait=True,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
         await interaction.response.send_message(
             content=content,
             embed=embed,
             view=view,
             ephemeral=ephemeral,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
         try:
             return await interaction.original_response()
@@ -2679,7 +2722,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     icon_url=interaction.user.display_avatar.url,
                 )
             embed.set_footer(text="Alteração feita pelo painel de TTS")
-            await channel.send(embed=embed)
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except Exception as e:
             print(f"[tts_voice] Falha ao anunciar alteração do painel: {e}")
 
@@ -3077,8 +3120,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             )
             return
 
-        await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, ignored_tts_role_id=int(role.id)))
-        history_entry = self._server_history_text(interaction, "o cargo ignorado do TTS", role.mention)
+        await self._maybe_await(
+            db.set_guild_tts_defaults(
+                interaction.guild.id,
+                ignored_tts_role_id=int(role.id),
+                ignored_tts_role_enabled=True,
+            )
+        )
+        history_entry = self._server_history_text(interaction, "o cargo ignorado", role.mention)
         await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
         if source_panel_message is not None:
             self._append_public_panel_history(getattr(source_panel_message, "id", None), history_entry)
@@ -3105,8 +3154,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 print(f"[tts_panel] falha ao editar painel: {e!r}")
 
         title = "Cargo ignorado atualizado"
-        description = f"Agora o bot ignora mensagens de TTS dos usuários que estiverem em {role.mention}."
-        await interaction.response.send_message(embed=self._make_embed(title, description, ok=True), ephemeral=True)
+        description = f"Cargo ignorado: {role.mention} · ligado."
+        await interaction.response.send_message(
+            embed=self._make_embed(title, description, ok=True),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         if panel_message is not None:
             await self._announce_panel_change(interaction, title=title, description=description, target_message=panel_message)
 
@@ -3146,9 +3199,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return
 
         current_role = interaction.guild.get_role(current_role_id)
-        current_role_text = current_role.mention if current_role is not None else f"`{current_role_id}`"
-        await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, ignored_tts_role_id=0))
-        history_entry = self._server_history_text(interaction, "removeu o cargo ignorado do TTS", current_role_text)
+        current_role_text = current_role.mention if current_role is not None else f"<@&{current_role_id}>"
+        await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, ignored_tts_role_enabled=False))
+        history_entry = self._server_history_text(interaction, "o cargo ignorado", "desligado")
         await self._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
         if source_panel_message is not None:
             self._append_public_panel_history(getattr(source_panel_message, "id", None), history_entry)
@@ -3174,9 +3227,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             except Exception as e:
                 print(f"[tts_panel] falha ao editar painel: {e!r}")
 
-        title = "Cargo ignorado removido"
-        description = "O bot voltou a considerar mensagens de TTS de todos os cargos deste servidor."
-        await interaction.response.send_message(embed=self._make_embed(title, description, ok=True), ephemeral=True)
+        title = "Cargo ignorado desativado"
+        description = f"Cargo ignorado: desligado. O cargo {current_role_text} continua salvo."
+        await interaction.response.send_message(
+            embed=self._make_embed(title, description, ok=True),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         if panel_message is not None:
             await self._announce_panel_change(interaction, title=title, description=description, target_message=panel_message)
 
@@ -3229,6 +3286,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 await interaction.followup.send(
                     embed=self._make_embed(title, description or "Salvo.", ok=True),
                     ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
                 )
                 return
             except Exception as e:
@@ -3266,7 +3324,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if not edited and message_to_edit is not None:
             try:
                 content, edit_embed, edit_view = self._prepare_panel_payload(embed=embed, view=view)
-                await interaction.followup.edit_message(message_id=message_to_edit.id, content=content, embed=edit_embed, view=edit_view)
+                await interaction.followup.edit_message(
+                    message_id=message_to_edit.id,
+                    content=content,
+                    embed=edit_embed,
+                    view=edit_view,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
                 edited = True
             except discord.NotFound as e:
                 print(f"[tts_panel] painel alvo não existe mais via followup.edit_message: {e!r}")
@@ -3279,10 +3343,21 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     view.message = current_interaction_message
                 if not interaction.response.is_done():
                     content, edit_embed, edit_view = self._prepare_panel_payload(embed=embed, view=view)
-                    await interaction.response.edit_message(content=content, embed=edit_embed, view=edit_view)
+                    await interaction.response.edit_message(
+                        content=content,
+                        embed=edit_embed,
+                        view=edit_view,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
                 else:
                     content, edit_embed, edit_view = self._prepare_panel_payload(embed=embed, view=view)
-                    await interaction.followup.edit_message(message_id=current_interaction_message.id, content=content, embed=edit_embed, view=edit_view)
+                    await interaction.followup.edit_message(
+                        message_id=current_interaction_message.id,
+                        content=content,
+                        embed=edit_embed,
+                        view=edit_view,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
                 edited = True
             except discord.NotFound as e:
                 print(f"[tts_panel] falha ao editar a mensagem atual: {e!r}")
@@ -3298,6 +3373,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         embed=send_embed,
                         view=send_view,
                         ephemeral=True,
+                        allowed_mentions=discord.AllowedMentions.none(),
                     )
                 else:
                     content, send_embed, send_view = self._prepare_panel_payload(embed=embed, view=view)
@@ -3306,6 +3382,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                         embed=send_embed,
                         view=send_view,
                         ephemeral=True,
+                        allowed_mentions=discord.AllowedMentions.none(),
                     )
             except Exception as e:
                 print(f"[tts_panel] falha ao responder followup: {e!r}")
@@ -3563,7 +3640,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         await self._delete_prefix_panel(message.guild.id, message.author.id, panel_kind)
 
         content, send_embed, send_view = self._prepare_panel_payload(embed=embed, view=view)
-        sent = await message.channel.send(content=content, embed=send_embed, view=send_view)
+        sent = await message.channel.send(
+            content=content,
+            embed=send_embed,
+            view=send_view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         view.message = sent
         self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "history": self._merge_history_entries(initial_history), "owner_id": message.author.id}
         self._active_prefix_panels[self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)] = sent

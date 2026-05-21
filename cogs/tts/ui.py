@@ -724,7 +724,7 @@ class IgnoreRoleConfigView(_BaseTTSView):
             self.source_panel_message = getattr(interaction, "message", None)
         embed = self.cog._make_embed(
             "Cargo ignorado no TTS",
-            "Selecione um cargo para ignorar mensagens de TTS dos usuários que estiverem nele, ou remova o cargo configurado.",
+            "Selecione um cargo para ativar a regra. Desativar mantém o cargo salvo.",
             ok=True,
         )
         if interaction.response.is_done():
@@ -737,7 +737,7 @@ class IgnoreRoleConfigView(_BaseTTSView):
                 msg = None
         self.message = msg
 
-    @discord.ui.button(label="Remover cargo", style=discord.ButtonStyle.danger, emoji="🗑️", row=1)
+    @discord.ui.button(label="Desativar", style=discord.ButtonStyle.danger, emoji="⛔", row=1)
     async def remove_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog._remove_ignored_tts_role_from_panel(
             interaction,
@@ -1294,6 +1294,7 @@ async def _save_tts_modal_updates(
         await interaction.response.send_message(
             embed=cog._make_embed("Nada mudou", "Nenhum ajuste foi alterado.", ok=True),
             ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
         return
 
@@ -1386,6 +1387,7 @@ async def _save_tts_modal_updates(
         await interaction.response.send_message(
             embed=cog._make_embed(success_title, success_description, ok=True),
             ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     if server:
@@ -1954,7 +1956,19 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
         self.current_announce_author = bool((defaults or {}).get("announce_author"))
         role_id = int((defaults or {}).get("ignored_tts_role_id") or 0)
         self.current_ignored_role_id = role_id
+        if "ignored_tts_role_enabled" in (defaults or {}):
+            self.current_ignored_role_enabled = bool((defaults or {}).get("ignored_tts_role_enabled", False))
+        else:
+            # Migração suave: se já havia cargo salvo antes da flag, ele começa ativo.
+            self.current_ignored_role_enabled = bool(role_id)
         self.current_ignored_role = str(role_id) if role_id else ""
+        self.current_ignored_role_name = ""
+        try:
+            guild = getattr(panel_message, "guild", None)
+            role = guild.get_role(role_id) if guild is not None and role_id else None
+            self.current_ignored_role_name = str(getattr(role, "name", "") or "")
+        except Exception:
+            self.current_ignored_role_name = ""
         if self.force_text_fallback or not self._build_guided_modal():
             self._build_text_fallback()
 
@@ -1972,10 +1986,10 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
                         self.current_announce_author,
                     ),
                     (
-                        "Remover cargo ignorado",
-                        "clear_ignored_role",
-                        "Limpa o cargo ignorado atual.",
-                        False,
+                        "Cargo ignorado",
+                        "ignored_role_enabled",
+                        "Liga/desliga sem apagar o cargo salvo.",
+                        self.current_ignored_role_enabled,
                     ),
                 ],
                 min_values=0,
@@ -1987,13 +2001,13 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
                 self,
                 "rules",
                 text="Regras",
-                description="Marque o que deve ficar ligado.",
+                description="Marque o que fica ligado.",
                 component=rules,
             )
 
             role_select = _make_modal_role_select(
                 "ignored_role",
-                placeholder="Cargo ignorado. Deixe vazio para manter.",
+                placeholder=(f"Cargo atual: {self.current_ignored_role_name}" if self.current_ignored_role_name else "Selecione o cargo ignorado"),
                 required=False,
             )
             if role_select is not None:
@@ -2001,13 +2015,13 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
                     self,
                     "ignored_role",
                     text="Cargo ignorado",
-                    description="Opcional. Escolha um cargo para ignorar no TTS.",
+                    description="Selecionar um cargo liga essa regra automaticamente.",
                     component=role_select,
                 )
             else:
                 role_input = _make_modal_text_input(
                     label="Cargo ignorado",
-                    placeholder="ID/nome ou 0 para remover. Vazio mantém.",
+                    placeholder="ID/nome. Vazio mantém; off desliga sem apagar.",
                     current=self.current_ignored_role,
                     max_length=80,
                     required=False,
@@ -2016,7 +2030,7 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
                     self,
                     "ignored_role",
                     text="Cargo ignorado",
-                    description="Opcional. Use ID, nome exato ou 0 para remover.",
+                    description="Usar ID/nome ativa; off desliga sem apagar.",
                     component=role_input,
                 )
             return bool(ok)
@@ -2040,9 +2054,18 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
         )
         _add_modal_text_input(
             self,
+            "ignored_role_enabled",
+            label="Cargo ignorado ativo",
+            placeholder="sim para ligar; não para desligar",
+            current="sim" if self.current_ignored_role_enabled else "não",
+            max_length=8,
+            required=False,
+        )
+        _add_modal_text_input(
+            self,
             "ignored_role",
             label="Cargo ignorado",
-            placeholder="ID/nome ou 0 para remover. Vazio mantém.",
+            placeholder="ID/nome. Vazio mantém; off desliga sem apagar.",
             current=self.current_ignored_role,
             max_length=80,
             required=False,
@@ -2071,10 +2094,13 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
         if hasattr(self, "rules"):
             values = set(_select_values(getattr(self, "rules", None)))
             enabled = "announce_author" in values
-            clear_role = "clear_ignored_role" in values
+            ignored_enabled = "ignored_role_enabled" in values
             if enabled != self.current_announce_author:
                 updates["announce_author"] = enabled
                 parts.append("autor antes da frase ligado" if enabled else "autor antes da frase desligado")
+            if ignored_enabled != self.current_ignored_role_enabled:
+                updates["ignored_tts_role_enabled"] = ignored_enabled
+                parts.append("cargo ignorado ligado" if ignored_enabled else "cargo ignorado desligado")
         else:
             text = _item_value(getattr(self, "announce_author", None)).lower()
             if text:
@@ -2082,34 +2108,68 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
                 if enabled != self.current_announce_author:
                     updates["announce_author"] = enabled
                     parts.append("autor antes da frase ligado" if enabled else "autor antes da frase desligado")
-            clear_role = False
+            role_enabled_text = _item_value(getattr(self, "ignored_role_enabled", None)).lower()
+            if role_enabled_text:
+                ignored_enabled = role_enabled_text in {"sim", "s", "yes", "y", "true", "1", "on", "ativo", "ativado", "ligado"}
+                if ignored_enabled != self.current_ignored_role_enabled:
+                    updates["ignored_tts_role_enabled"] = ignored_enabled
+                    parts.append("cargo ignorado ligado" if ignored_enabled else "cargo ignorado desligado")
 
         selected_role = _first_selected_role(getattr(self, "ignored_role", None))
         if selected_role is not None:
             role_id = int(getattr(selected_role, "id", 0) or 0)
-            if role_id and role_id != self.current_ignored_role_id:
-                updates["ignored_tts_role_id"] = role_id
-                parts.append(f"cargo ignorado {getattr(selected_role, 'name', 'cargo')}")
-        elif clear_role:
-            if self.current_ignored_role_id:
-                updates["ignored_tts_role_id"] = 0
-                parts.append("cargo ignorado removido")
+            if role_id:
+                if role_id != self.current_ignored_role_id:
+                    updates["ignored_tts_role_id"] = role_id
+                    parts.append(f"cargo ignorado {getattr(selected_role, 'mention', getattr(selected_role, 'name', 'cargo'))}")
+                if not self.current_ignored_role_enabled or updates.get("ignored_tts_role_enabled") is False:
+                    updates["ignored_tts_role_enabled"] = True
+                    if "cargo ignorado ligado" not in parts:
+                        parts.append("cargo ignorado ligado")
         else:
             raw_role = _item_value(getattr(self, "ignored_role", None))
             if raw_role:
-                if raw_role.strip().lower() in {"0", "nenhum", "remover", "remove", "off", "desativar"}:
-                    if self.current_ignored_role_id:
-                        updates["ignored_tts_role_id"] = 0
-                        parts.append("cargo ignorado removido")
+                raw_lower = raw_role.strip().lower()
+                if raw_lower in {"0", "nenhum", "remover", "remove", "off", "desativar", "desligar", "não", "nao"}:
+                    if self.current_ignored_role_enabled:
+                        updates["ignored_tts_role_enabled"] = False
+                        parts.append("cargo ignorado desligado")
                 else:
                     role = self._find_role(getattr(interaction, "guild", None), raw_role)
                     if role is None:
-                        await interaction.response.send_message(embed=self.cog._make_embed("Cargo não encontrado", "Use menção, ID ou nome exato do cargo.", ok=False), ephemeral=True)
+                        await interaction.response.send_message(
+                            embed=self.cog._make_embed("Cargo não encontrado", "Use menção, ID ou nome exato do cargo.", ok=False),
+                            ephemeral=True,
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
                         return
                     role_id = int(getattr(role, "id", 0) or 0)
                     if role_id and role_id != self.current_ignored_role_id:
                         updates["ignored_tts_role_id"] = role_id
-                        parts.append(f"cargo ignorado {getattr(role, 'name', 'cargo')}")
+                        parts.append(f"cargo ignorado {getattr(role, 'mention', getattr(role, 'name', 'cargo'))}")
+                    if not self.current_ignored_role_enabled or updates.get("ignored_tts_role_enabled") is False:
+                        updates["ignored_tts_role_enabled"] = True
+                        if "cargo ignorado ligado" not in parts:
+                            parts.append("cargo ignorado ligado")
+
+        if updates.get("ignored_tts_role_enabled") is True and not int(updates.get("ignored_tts_role_id") or self.current_ignored_role_id or 0):
+            await interaction.response.send_message(
+                embed=self.cog._make_embed("Cargo obrigatório", "Escolha um cargo antes de ligar o cargo ignorado.", ok=False),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        history_label = "as regras do TTS"
+        history_value = "regras atualizadas" if parts else "sem alterações"
+        if len(parts) == 1:
+            only = str(parts[0])
+            if only.startswith("autor antes da frase"):
+                history_label = "o autor antes da frase"
+                history_value = "desligado" if "desligado" in only else "ligado"
+            elif only.startswith("cargo ignorado"):
+                history_label = "o cargo ignorado"
+                history_value = only.replace("cargo ignorado", "", 1).strip() or "atualizado"
 
         await _save_tts_modal_updates(
             self.cog,
@@ -2117,8 +2177,8 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
             source_panel_message=self.panel_message,
             server=True,
             updates=updates,
-            history_label="as regras do TTS",
-            history_value=", ".join(parts) if parts else "sem alterações",
+            history_label=history_label,
+            history_value=history_value,
             success_title="Regras atualizadas",
             success_description="\n".join(f"• {part}" for part in parts) if parts else "Nada mudou.",
         )
