@@ -185,6 +185,25 @@ if [[ ! -f "$WORKER_DIR/phone_worker.py" ]]; then
   exit 1
 fi
 
+ensure_tts_benchmark_deps_if_needed() {
+  local profile="${CORE_WORKER_PROFILE:-${PHONE_WORKER_PROFILE:-}}"
+  profile="$(printf '%s' "$profile" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
+  [[ "$profile" == "turbo" ]] || return 0
+  local mode="${PHONE_WORKER_TTS_DEPS_INSTALL:-auto}"
+  mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
+  [[ "$mode" == "0" || "$mode" == "false" || "$mode" == "off" || "$mode" == "no" ]] && return 0
+  "$PYTHON_BIN" - <<'PYTTSDEPS' >/dev/null 2>&1 && return 0
+import edge_tts  # noqa: F401
+import gtts  # noqa: F401
+from google.cloud import texttospeech_v1  # noqa: F401
+PYTTSDEPS
+  log "perfil turbo: instalando dependências opcionais do benchmark TTS"
+  "$PYTHON_BIN" -m pip install --upgrade edge-tts gTTS google-cloud-texttospeech >/dev/null 2>&1 || \
+    log "não consegui instalar dependências TTS automaticamente; o benchmark vai mostrar o erro curto"
+}
+
+ensure_tts_benchmark_deps_if_needed
+
 count="$(worker_pid_count)"
 if health_ok && [[ "$count" -le 1 ]]; then
   running_ver="$(running_version)"

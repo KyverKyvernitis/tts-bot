@@ -1,6 +1,7 @@
 import inspect
 import contextlib
 import asyncio
+import logging
 import time
 import os
 import re
@@ -18,6 +19,8 @@ except Exception:  # pragma: no cover - dependência opcional em tempo de import
     google_texttospeech = None
 
 import config
+
+logger = logging.getLogger(__name__)
 from .audio import GuildTTSState, QueueItem, TTSAudioMixin, TTS_BOOT_WARMUP_ENABLED
 from .common import (
     _guild_scoped,
@@ -2250,6 +2253,17 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         payload = dispatch_result.payload
         if payload is None:
             return
+
+        if dispatch_result.enqueued:
+            try:
+                self._schedule_tts_turbo_benchmark_if_needed(
+                    message,
+                    active_prefix,
+                    payload.queue_item,
+                    payload.resolved,
+                )
+            except Exception:
+                logger.exception("[tts_benchmark] falha ao agendar benchmark turbo")
 
         self._ensure_worker(message.guild.id)
 

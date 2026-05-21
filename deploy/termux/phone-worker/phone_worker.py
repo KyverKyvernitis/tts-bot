@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import contextlib
 import hashlib
@@ -43,7 +44,7 @@ _APK_BUILD_THREAD_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.8.8"
+PHONE_WORKER_VERSION = "1.8.9"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -70,6 +71,7 @@ SUPPORTED_DIRECT_TASKS = (
     "status",
     "tailscale_status",
     "text_stats",
+    "tts_synthesize_benchmark",
     "worker_logs",
     "worker_self_check",
     "worker_update",
@@ -103,6 +105,7 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "status",
     "tailscale_status",
     "text_stats",
+    "tts_synthesize_benchmark",
     "worker_logs",
     "worker_self_check",
     "worker_update",
@@ -143,8 +146,8 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     },
     "turbo": {
         "label": "Turbo",
-        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "apk-builder", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "apk-builder", "vps-assist", "cache-worker"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "apk-builder", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -1580,6 +1583,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_maintenance_plan(body)
             elif task == "text_stats":
                 payload = self._task_text_stats(body)
+            elif task == "tts_synthesize_benchmark":
+                payload = self._task_tts_synthesize_benchmark(body)
             elif task == "log_extract":
                 payload = self._task_log_extract(body)
             elif task == "log_summary":
@@ -1596,6 +1601,179 @@ class WorkerHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             JOBS_FAILED += 1
             _error(self, HTTPStatus.BAD_REQUEST, f"{type(exc).__name__}: {exc}")
+
+    def _normalize_tts_edge_rate(self, raw: Any) -> str:
+        value = str(raw or "").strip().replace("％", "%").replace("−", "-").replace("–", "-").replace("—", "-").replace(" ", "")
+        if value.endswith("%"):
+            value = value[:-1]
+        if not value:
+            return "+0%"
+        if value[0] not in "+-":
+            value = f"+{value}"
+        sign, number = value[0], value[1:]
+        if not number.isdigit():
+            return "+0%"
+        return f"{sign}{number}%"
+
+    def _normalize_tts_edge_pitch(self, raw: Any) -> str:
+        value = str(raw or "").strip().replace("−", "-").replace("–", "-").replace("—", "-").replace(" ", "")
+        if value.lower().endswith("hz"):
+            value = value[:-2]
+        if not value:
+            return "+0Hz"
+        if value[0] not in "+-":
+            value = f"+{value}"
+        sign, number = value[0], value[1:]
+        if not number.isdigit():
+            return "+0Hz"
+        return f"{sign}{number}Hz"
+
+    def _normalize_tts_gtts_language(self, raw: Any) -> str:
+        language = str(raw or "pt").strip().lower().replace("_", "-") or "pt"
+        if language == "pt-br":
+            language = "pt"
+        return language
+
+    def _normalize_tts_gcloud_language(self, raw: Any) -> str:
+        return str(raw or "pt-BR").strip().replace("_", "-") or "pt-BR"
+
+    def _normalize_tts_gcloud_rate(self, raw: Any) -> float:
+        try:
+            value = float(str(raw).strip().replace(",", "."))
+        except Exception:
+            value = 1.0
+        return max(0.25, min(2.0, value))
+
+    def _normalize_tts_gcloud_pitch(self, raw: Any) -> float:
+        try:
+            value = float(str(raw).strip().replace(",", "."))
+        except Exception:
+            value = 0.0
+        return max(-20.0, min(20.0, value))
+
+    def _ensure_tts_benchmark_turbo_allowed(self) -> tuple[list[str], list[str]]:
+        profile = _current_core_worker_profile()
+        roles, capabilities = _current_core_worker_roles_and_capabilities()
+        caps = set(roles) | set(capabilities)
+        if profile != "turbo" or "tts-synth" not in caps or "tts-benchmark" not in caps:
+            raise RuntimeError("tts_synthesize_benchmark é restrito ao perfil turbo com tts-synth/tts-benchmark")
+        return roles, capabilities
+
+    def _ensure_worker_google_credentials_file(self, tmp_dir: Path) -> None:
+        if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+            return
+        raw_json = (os.getenv("GOOGLE_CREDENTIALS_JSON", "") or "").strip()
+        if not raw_json:
+            raise RuntimeError("gcloud sem GOOGLE_APPLICATION_CREDENTIALS/GOOGLE_CREDENTIALS_JSON no worker")
+        try:
+            parsed = json.loads(raw_json)
+            if isinstance(parsed, str):
+                parsed = json.loads(parsed)
+            if not isinstance(parsed, dict):
+                raise ValueError("JSON não é objeto")
+        except Exception as exc:
+            raise RuntimeError(f"GOOGLE_CREDENTIALS_JSON inválido no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
+        path = tmp_dir / "google-credentials.json"
+        path.write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(path)
+
+    def _task_tts_synthesize_benchmark(self, body: dict[str, Any]) -> dict[str, Any]:
+        roles, capabilities = self._ensure_tts_benchmark_turbo_allowed()
+        engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_")
+        if engine not in {"edge", "gtts", "gcloud"}:
+            raise ValueError("engine inválida para benchmark TTS")
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise ValueError("texto vazio")
+        if len(text) > 1200:
+            raise ValueError("texto grande demais para benchmark")
+        timeout = max(2, min(self.job_timeout, int(float(body.get("timeout_seconds") or self.job_timeout))))
+        max_audio_bytes = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
+        logs: list[str] = [
+            f"perfil={_current_core_worker_profile()} versão={PHONE_WORKER_VERSION}",
+            f"engine={engine} chars={len(text)} timeout={timeout}s",
+        ]
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="phone-worker-tts-bench-") as tmp:
+            tmp_dir = Path(tmp)
+            out_path = tmp_dir / "speech.mp3"
+            try:
+                if engine == "edge":
+                    try:
+                        import edge_tts  # type: ignore
+                    except Exception as exc:
+                        raise RuntimeError(f"edge-tts não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
+                    voice = str(body.get("voice") or "pt-BR-FranciscaNeural").strip() or "pt-BR-FranciscaNeural"
+                    rate = self._normalize_tts_edge_rate(body.get("rate"))
+                    pitch = self._normalize_tts_edge_pitch(body.get("pitch"))
+
+                    async def _save_edge() -> None:
+                        communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
+                        await communicate.save(str(out_path))
+
+                    asyncio.run(asyncio.wait_for(_save_edge(), timeout=timeout))
+                    logs.append(f"edge voice={voice} rate={rate} pitch={pitch}")
+                elif engine == "gcloud":
+                    try:
+                        from google.cloud import texttospeech_v1 as google_texttospeech  # type: ignore
+                    except Exception as exc:
+                        raise RuntimeError(f"google-cloud-texttospeech não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
+                    self._ensure_worker_google_credentials_file(tmp_dir)
+                    language = self._normalize_tts_gcloud_language(body.get("language"))
+                    voice_name = str(body.get("voice") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
+                    rate = self._normalize_tts_gcloud_rate(body.get("rate"))
+                    pitch = self._normalize_tts_gcloud_pitch(body.get("pitch"))
+                    if voice_name and not voice_name.lower().startswith(language.lower() + "-"):
+                        voice_name = ""
+                    client = google_texttospeech.TextToSpeechClient()
+                    voice_kwargs = {"language_code": language}
+                    if voice_name:
+                        voice_kwargs["name"] = voice_name
+                    request = google_texttospeech.SynthesizeSpeechRequest(
+                        input=google_texttospeech.SynthesisInput(text=text),
+                        voice=google_texttospeech.VoiceSelectionParams(**voice_kwargs),
+                        audio_config=google_texttospeech.AudioConfig(
+                            audio_encoding=google_texttospeech.AudioEncoding.MP3,
+                            speaking_rate=rate,
+                            pitch=pitch,
+                        ),
+                    )
+                    response = client.synthesize_speech(request=request)
+                    out_path.write_bytes(response.audio_content)
+                    logs.append(f"gcloud language={language} voice={voice_name or 'auto'} rate={rate} pitch={pitch}")
+                else:
+                    try:
+                        from gtts import gTTS  # type: ignore
+                    except Exception as exc:
+                        raise RuntimeError(f"gTTS não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
+                    language = self._normalize_tts_gtts_language(body.get("language"))
+                    tts = gTTS(text=text, lang=language)
+                    with open(out_path, "wb") as handle:
+                        tts.write_to_fp(handle)
+                    logs.append(f"gtts language={language}")
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError(f"{engine} timeout após {timeout}s no worker") from exc
+            synth_ms = (time.monotonic() - started) * 1000.0
+            if not out_path.exists() or out_path.stat().st_size <= 0:
+                raise RuntimeError("engine não gerou arquivo de áudio")
+            data = out_path.read_bytes()
+            if len(data) > max_audio_bytes:
+                raise RuntimeError(f"áudio grande demais: {len(data)} bytes")
+        digest = hashlib.sha256(data).hexdigest()
+        logs.append(f"worker gerou {len(data)} bytes em {synth_ms:.1f} ms")
+        return {
+            "ok": True,
+            "engine": engine,
+            "worker_profile": _current_core_worker_profile(),
+            "worker_version": PHONE_WORKER_VERSION,
+            "roles": roles[:16],
+            "capabilities": capabilities[:24],
+            "worker_synth_ms": round(synth_ms, 2),
+            "size": len(data),
+            "sha256": digest,
+            "logs": logs[:8],
+            "data_b64": _b64encode(data, max_bytes=max_audio_bytes),
+        }
 
     def _task_sha256(self, body: dict[str, Any]) -> dict[str, Any]:
         data = _b64decode(str(body.get("data_b64") or ""), max_bytes=self.max_body_bytes)

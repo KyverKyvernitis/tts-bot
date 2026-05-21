@@ -367,6 +367,14 @@ PHONE_WORKER_UPDATE_LOG_SUMMARY_ENABLED = _parse_bool(os.getenv("PHONE_WORKER_UP
 PHONE_WORKER_UPDATE_LOG_SUMMARY_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("PHONE_WORKER_UPDATE_LOG_SUMMARY_TIMEOUT_SECONDS", "4.0"), 4.0))
 PHONE_WORKER_MAINTENANCE_PLAN_ENABLED = _parse_bool(os.getenv("PHONE_WORKER_MAINTENANCE_PLAN_ENABLED", "true"), True)
 
+# Benchmark restrito de TTS: usado só para provar se o worker turbo realmente
+# sintetiza mais rápido que a VPS. Não altera o fluxo normal de TTS.
+TTS_TURBO_BENCHMARK_ENABLED = _parse_bool(os.getenv("TTS_TURBO_BENCHMARK_ENABLED", "true"), True)
+TTS_TURBO_BENCHMARK_GUILD_ID = _parse_int(os.getenv("TTS_TURBO_BENCHMARK_GUILD_ID", "927002914449424404"), 927002914449424404)
+TTS_TURBO_BENCHMARK_TRIGGER_TEXT = (os.getenv("TTS_TURBO_BENCHMARK_TRIGGER_TEXT", "teste") or "teste").strip().lower()
+TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS = max(1.5, _parse_float(os.getenv("TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS", "12.0"), 12.0))
+TTS_TURBO_BENCHMARK_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_TURBO_BENCHMARK_MAX_AUDIO_MB", "4"), 4))
+
 # Uso do phone-worker fora do /vps: preparação de áudio TTS para Lavalink.
 # A VPS sempre mantém fallback local.
 MUSIC_TTS_PHONE_WORKER_CONVERT_ENABLED = _parse_bool(os.getenv("MUSIC_TTS_PHONE_WORKER_CONVERT_ENABLED", "true"), True)

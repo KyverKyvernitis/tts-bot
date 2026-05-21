@@ -1,5 +1,6 @@
 import contextlib
 import asyncio
+import base64
 import hashlib
 import json
 import inspect
@@ -10,9 +11,10 @@ import time
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import discord
+import aiohttp
 import edge_tts
 from gtts import gTTS
 from gtts.tts import gTTSError
@@ -60,6 +62,16 @@ TTS_TEMP_DIR = os.path.abspath(str(getattr(config, "TTS_TEMP_DIR", os.path.join(
 TTS_TEMP_MAX_MB = max(64, int(getattr(config, "TTS_TEMP_MAX_MB", 256)))
 TTS_TEMP_MAX_FILES = max(32, int(getattr(config, "TTS_TEMP_MAX_FILES", 256)))
 TTS_TEMP_MAX_BYTES = TTS_TEMP_MAX_MB * 1024 * 1024
+TTS_TURBO_BENCHMARK_ENABLED = bool(getattr(config, "TTS_TURBO_BENCHMARK_ENABLED", True))
+TTS_TURBO_BENCHMARK_GUILD_ID = int(getattr(config, "TTS_TURBO_BENCHMARK_GUILD_ID", 927002914449424404) or 927002914449424404)
+TTS_TURBO_BENCHMARK_TRIGGER_TEXT = str(getattr(config, "TTS_TURBO_BENCHMARK_TRIGGER_TEXT", "teste") or "teste").strip().lower() or "teste"
+TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS = max(1.5, float(getattr(config, "TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS", 12.0) or 12.0))
+TTS_TURBO_BENCHMARK_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_TURBO_BENCHMARK_MAX_AUDIO_MB", 4) or 4))
+PHONE_WORKER_ENABLED = bool(getattr(config, "PHONE_WORKER_ENABLED", False))
+PHONE_WORKER_HOST = str(getattr(config, "PHONE_WORKER_HOST", "") or "").strip()
+PHONE_WORKER_PORT = int(getattr(config, "PHONE_WORKER_PORT", 8766) or 8766)
+PHONE_WORKER_SCHEME = str(getattr(config, "PHONE_WORKER_SCHEME", "http") or "http").strip().lower() or "http"
+PHONE_WORKER_TOKEN = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
 
 _RUNTIME_DIR = os.path.join(TTS_TEMP_DIR, "runtime")
 _CACHE_DIR = os.path.join(TTS_TEMP_DIR, "cache")
@@ -995,6 +1007,316 @@ class TTSAudioMixin:
             except Exception:
                 pass
             raise
+
+    def _phone_worker_tts_benchmark_base_url(self) -> str:
+        if not PHONE_WORKER_ENABLED or not PHONE_WORKER_HOST or not PHONE_WORKER_TOKEN:
+            return ""
+        scheme = PHONE_WORKER_SCHEME if PHONE_WORKER_SCHEME in {"http", "https"} else "http"
+        return f"{scheme}://{PHONE_WORKER_HOST}:{PHONE_WORKER_PORT}"
+
+    def _short_tts_benchmark_text(self, value: Any, *, limit: int = 180) -> str:
+        text = str(value or "").replace("`", "'").replace("\r", " ").replace("\n", " ").strip()
+        text = " ".join(text.split())
+        if len(text) > limit:
+            return text[: max(0, limit - 1)] + "…"
+        return text
+
+    def _format_tts_benchmark_ms(self, value: Any) -> str:
+        try:
+            numeric = float(value)
+        except Exception:
+            return "—"
+        return f"{numeric:.0f} ms" if numeric >= 10 else f"{numeric:.1f} ms"
+
+    def _format_tts_benchmark_delta(self, local_ms: Any, worker_ms: Any) -> str:
+        try:
+            local = float(local_ms)
+            worker = float(worker_ms)
+        except Exception:
+            return "sem cálculo"
+        delta = local - worker
+        pct = (delta / local * 100.0) if local > 0 else 0.0
+        if delta > 0:
+            return f"worker ganhou por {delta:.0f} ms ({pct:.1f}%)"
+        if delta < 0:
+            return f"VPS ganhou por {abs(delta):.0f} ms ({abs(pct):.1f}%)"
+        return "empate técnico"
+
+    def _should_run_tts_turbo_benchmark(self, message: discord.Message, active_prefix: str) -> bool:
+        if not TTS_TURBO_BENCHMARK_ENABLED:
+            return False
+        guild = getattr(message, "guild", None)
+        if guild is None or int(getattr(guild, "id", 0) or 0) != TTS_TURBO_BENCHMARK_GUILD_ID:
+            return False
+        content = str(getattr(message, "content", "") or "")
+        prefix = str(active_prefix or "")
+        if not prefix or not content.startswith(prefix):
+            return False
+        spoken = content[len(prefix):].strip().lower()
+        return spoken == TTS_TURBO_BENCHMARK_TRIGGER_TEXT
+
+    def _build_tts_benchmark_item(self, base_item: QueueItem, engine: str, resolved: dict[str, Any] | None, *, text: str) -> QueueItem:
+        resolved = dict(resolved or {})
+        engine = str(engine or "gtts").strip().lower()
+        if engine == "edge":
+            voice = str(resolved.get("voice") or base_item.voice or "pt-BR-FranciscaNeural")
+            language = str(resolved.get("language") or base_item.language or GTTS_DEFAULT_LANGUAGE)
+            rate = str(resolved.get("rate") or base_item.rate or "+0%")
+            pitch = str(resolved.get("pitch") or base_item.pitch or "+0Hz")
+        elif engine == "gcloud":
+            voice = str(resolved.get("gcloud_voice") or GOOGLE_CLOUD_TTS_VOICE_NAME)
+            language = str(resolved.get("gcloud_language") or GOOGLE_CLOUD_TTS_LANGUAGE_CODE)
+            rate = str(resolved.get("gcloud_rate") or GOOGLE_CLOUD_TTS_SPEAKING_RATE)
+            pitch = str(resolved.get("gcloud_pitch") or GOOGLE_CLOUD_TTS_PITCH)
+        else:
+            engine = "gtts"
+            voice = ""
+            language = str(resolved.get("language") or base_item.language or GTTS_DEFAULT_LANGUAGE)
+            rate = "+0%"
+            pitch = "+0Hz"
+        return QueueItem(
+            guild_id=base_item.guild_id,
+            channel_id=base_item.channel_id,
+            author_id=base_item.author_id,
+            text=text,
+            engine=engine,
+            voice=voice,
+            language=language,
+            rate=rate,
+            pitch=pitch,
+        )
+
+    async def _tts_benchmark_local_engine(self, item: QueueItem) -> dict[str, Any]:
+        engine = str(item.engine or "gtts").strip().lower()
+        started = time.monotonic()
+        path = ""
+        try:
+            if engine == "edge":
+                path = await self._generate_edge_file(item.text, item.voice, item.rate, item.pitch)
+            elif engine == "gcloud":
+                path = await self._generate_google_cloud_file(item.text, item.language, item.voice, item.rate, item.pitch)
+            else:
+                engine = "gtts"
+                path = await self._generate_gtts_file(item.text, item.language)
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            size = os.path.getsize(path) if path and os.path.exists(path) else 0
+            sha256 = ""
+            if path and os.path.exists(path):
+                def _hash_file(target: str) -> str:
+                    digest = hashlib.sha256()
+                    with open(target, "rb") as handle:
+                        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    return digest.hexdigest()
+                sha256 = await asyncio.to_thread(_hash_file, path)
+            return {
+                "ok": True,
+                "engine": engine,
+                "elapsed_ms": round(elapsed_ms, 2),
+                "size": int(size),
+                "sha256": sha256,
+                "logs": [f"VPS gerou {size} bytes em {elapsed_ms:.1f} ms"],
+            }
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            return {
+                "ok": False,
+                "engine": engine,
+                "elapsed_ms": round(elapsed_ms, 2),
+                "error": self._short_tts_benchmark_text(f"{type(exc).__name__}: {exc}", limit=220),
+                "logs": [f"VPS falhou após {elapsed_ms:.1f} ms"],
+            }
+        finally:
+            if path:
+                with contextlib.suppress(Exception):
+                    os.remove(path)
+
+    async def _tts_benchmark_worker_engine(self, item: QueueItem) -> dict[str, Any]:
+        engine = str(item.engine or "gtts").strip().lower()
+        base = self._phone_worker_tts_benchmark_base_url()
+        if not base:
+            return {
+                "ok": False,
+                "engine": engine,
+                "error": "PHONE_WORKER_ENABLED/HOST/TOKEN não configurado",
+                "logs": ["worker indisponível na config da VPS"],
+            }
+        payload = {
+            "task": "tts_synthesize_benchmark",
+            "engine": engine,
+            "text": item.text,
+            "voice": item.voice,
+            "language": item.language,
+            "rate": item.rate,
+            "pitch": item.pitch,
+            "timeout_seconds": int(max(2.0, TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS - 1.0)),
+            "max_audio_bytes": TTS_TURBO_BENCHMARK_MAX_AUDIO_MB * 1024 * 1024,
+        }
+        headers = {
+            "Authorization": f"Bearer {PHONE_WORKER_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        started = time.monotonic()
+        try:
+            timeout = aiohttp.ClientTimeout(total=TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(f"{base}/task", headers=headers, json=payload) as response:
+                    response_text = await response.text()
+                    if response.status < 200 or response.status >= 300:
+                        raise RuntimeError(f"HTTP {response.status}: {response_text[:260]}")
+                    data = json.loads(response_text or "{}")
+            out_b64 = str(data.get("data_b64") or "")
+            if not out_b64:
+                raise RuntimeError("worker não retornou data_b64")
+            raw = base64.b64decode(out_b64.encode("ascii"), validate=True)
+            if not raw:
+                raise RuntimeError("worker retornou áudio vazio")
+            max_audio_bytes = TTS_TURBO_BENCHMARK_MAX_AUDIO_MB * 1024 * 1024
+            if len(raw) > max_audio_bytes:
+                raise RuntimeError(f"worker retornou áudio grande demais: {len(raw)} bytes")
+            expected_hash = str(data.get("sha256") or "")
+            actual_hash = hashlib.sha256(raw).hexdigest()
+            if expected_hash and expected_hash != actual_hash:
+                raise RuntimeError("sha256 do áudio retornado não confere")
+
+            def _write_and_stat(content: bytes) -> int:
+                path = self._make_runtime_temp_file(suffix=".mp3")
+                try:
+                    with open(path, "wb") as handle:
+                        handle.write(content)
+                    return os.path.getsize(path)
+                finally:
+                    with contextlib.suppress(Exception):
+                        os.remove(path)
+
+            saved_size = await asyncio.to_thread(_write_and_stat, raw)
+            total_ms = (time.monotonic() - started) * 1000.0
+            logs = data.get("logs") if isinstance(data.get("logs"), list) else []
+            clean_logs = [self._short_tts_benchmark_text(line, limit=160) for line in logs[:4]]
+            clean_logs.append(f"VPS validou/salvou temp {saved_size} bytes; total real {total_ms:.1f} ms")
+            return {
+                "ok": True,
+                "engine": engine,
+                "total_ms": round(total_ms, 2),
+                "worker_synth_ms": data.get("worker_synth_ms"),
+                "size": int(saved_size),
+                "sha256": actual_hash,
+                "worker_profile": data.get("worker_profile"),
+                "worker_version": data.get("worker_version"),
+                "logs": clean_logs,
+            }
+        except Exception as exc:
+            total_ms = (time.monotonic() - started) * 1000.0
+            return {
+                "ok": False,
+                "engine": engine,
+                "total_ms": round(total_ms, 2),
+                "error": self._short_tts_benchmark_text(f"{type(exc).__name__}: {exc}", limit=260),
+                "logs": [f"worker falhou após {total_ms:.1f} ms"],
+            }
+
+    def _format_tts_benchmark_engine_block(self, engine: str, local: dict[str, Any], worker: dict[str, Any]) -> list[str]:
+        local_ok = bool(local.get("ok"))
+        worker_ok = bool(worker.get("ok"))
+        local_ms = local.get("elapsed_ms")
+        worker_total_ms = worker.get("total_ms")
+        worker_synth_ms = worker.get("worker_synth_ms")
+        if local_ok and worker_ok:
+            winner = self._format_tts_benchmark_delta(local_ms, worker_total_ms)
+        elif local_ok:
+            winner = "só VPS funcionou"
+        elif worker_ok:
+            winner = "só worker funcionou"
+        else:
+            winner = "ambos falharam"
+        lines = [f"**{engine}** — {winner}"]
+        lines.append(
+            f"VPS: {'ok' if local_ok else 'falhou'} · {self._format_tts_benchmark_ms(local_ms)}"
+            + (f" · {int(local.get('size') or 0)} B" if local_ok else f" · {local.get('error') or 'erro sem detalhe'}")
+        )
+        lines.append(
+            f"Worker: {'ok' if worker_ok else 'falhou'} · total {self._format_tts_benchmark_ms(worker_total_ms)}"
+            + (f" · synth {self._format_tts_benchmark_ms(worker_synth_ms)} · {int(worker.get('size') or 0)} B" if worker_ok else f" · {worker.get('error') or 'erro sem detalhe'}")
+        )
+        logs: list[str] = []
+        for source, data in (("VPS", local), ("Worker", worker)):
+            raw_logs = data.get("logs") if isinstance(data.get("logs"), list) else []
+            for entry in raw_logs[:2]:
+                logs.append(f"{source}: {self._short_tts_benchmark_text(entry, limit=120)}")
+        if logs:
+            lines.append("Logs curtas: " + " | ".join(logs[:4]))
+        return lines
+
+    async def _send_tts_turbo_benchmark_report(self, channel: Any, base_item: QueueItem, resolved: dict[str, Any] | None) -> None:
+        benchmark_text = TTS_TURBO_BENCHMARK_TRIGGER_TEXT
+        engines = ("edge", "gtts", "gcloud")
+        started = time.monotonic()
+        results: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+        worker_meta: dict[str, Any] = {}
+        for engine in engines:
+            item = self._build_tts_benchmark_item(base_item, engine, resolved, text=benchmark_text)
+            local_task = asyncio.create_task(self._tts_benchmark_local_engine(item))
+            worker_task = asyncio.create_task(self._tts_benchmark_worker_engine(item))
+            local, worker = await asyncio.gather(local_task, worker_task)
+            if worker.get("worker_profile") or worker.get("worker_version"):
+                worker_meta = worker
+            results.append((engine, local, worker))
+
+        total_ms = (time.monotonic() - started) * 1000.0
+        good_comparisons = 0
+        worker_wins = 0
+        local_wins = 0
+        best_saving_ms = 0.0
+        for _, local, worker in results:
+            if local.get("ok") and worker.get("ok"):
+                good_comparisons += 1
+                try:
+                    delta = float(local.get("elapsed_ms") or 0.0) - float(worker.get("total_ms") or 0.0)
+                except Exception:
+                    delta = 0.0
+                if delta > 0:
+                    worker_wins += 1
+                    best_saving_ms = max(best_saving_ms, delta)
+                elif delta < 0:
+                    local_wins += 1
+        if good_comparisons <= 0:
+            verdict = "não deu para comparar com segurança: nenhuma engine teve os dois lados ok."
+        elif worker_wins >= 2:
+            verdict = f"worker turbo parece promissor ({worker_wins}/{good_comparisons} vitórias; melhor ganho {best_saving_ms:.0f} ms)."
+        elif worker_wins == 1:
+            verdict = "worker turbo ganhou só em uma engine; ainda não dá para usar em TTS real."
+        else:
+            verdict = "VPS foi igual ou melhor; por enquanto worker deve ficar só como teste/cache/conversão."
+
+        header = [
+            "🧪 **Benchmark TTS Worker Turbo**",
+            f"Servidor autorizado: `{TTS_TURBO_BENCHMARK_GUILD_ID}` · texto: `{benchmark_text}` · total: {self._format_tts_benchmark_ms(total_ms)}",
+        ]
+        if worker_meta:
+            header.append(
+                f"Worker: perfil `{worker_meta.get('worker_profile') or '?'}` · versão `{worker_meta.get('worker_version') or '?'}`"
+            )
+        blocks: list[str] = []
+        for engine, local, worker in results:
+            blocks.append("\n".join(self._format_tts_benchmark_engine_block(engine, local, worker)))
+        footer = f"**Resumo:** {verdict}"
+        content = "\n".join(header + ["", *blocks, "", footer])
+        if len(content) > 1900:
+            content = content[:1880] + "\n… relatório cortado para caber na mensagem."
+        try:
+            await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            logger.exception("[tts_benchmark] falha ao enviar relatório no canal")
+
+    def _schedule_tts_turbo_benchmark_if_needed(self, message: discord.Message, active_prefix: str, item: QueueItem, resolved: dict[str, Any] | None) -> bool:
+        if not self._should_run_tts_turbo_benchmark(message, active_prefix):
+            return False
+        channel = getattr(message, "channel", None)
+        if channel is None:
+            return False
+        task = asyncio.create_task(self._send_tts_turbo_benchmark_report(channel, item, resolved))
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        return True
 
     async def _resolve_or_generate_singleflight_audio(self, state: GuildTTSState, item: QueueItem, *, read_cache: bool, store_in_cache: bool) -> tuple[str, bool]:
         key = self._cache_key(item)

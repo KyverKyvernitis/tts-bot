@@ -1,3 +1,7 @@
+## Patch 84.7: benchmark TTS turbo
+
+A versão `1.8.9` adiciona a task direta `tts_synthesize_benchmark`, restrita ao perfil `turbo` com as capacidades `tts-synth` e `tts-benchmark`. Ela sintetiza áudio curto por `edge`, `gtts` ou `gcloud` e devolve o MP3 para a VPS medir o tempo total real do worker, incluindo ida, síntese, retorno e validação. O worker não vira dependência do TTS: se estiver offline, lento, sem dependência ou sem credencial Google local, a VPS continua sintetizando sozinha e o relatório informa a falha curta.
+
 ## Patch 84.6: resultados antigos, republicação e allowlist multi-worker
 
 A versão `1.8.8` fecha a limpeza de resultados pendentes antigos: quando a VPS responde que um job já não existe, o agent arquiva localmente o resultado e para de reenviar em loop. O registry também passa a aceitar `apk_publish_last` como tipo de job válido, permitindo republicar o último APK salvo em `~/core-worker-apk-builds/artifacts/` sem recompilar. Esse ajuste mantém o fluxo multi-worker: resultados ficam ligados ao worker/job quando possível, e resultados órfãos são registrados como descartados em vez de travarem heartbeat/poll.
