@@ -871,6 +871,148 @@ class _BaseTTSLayoutView(_TTS_LAYOUT_VIEW_CLS):
         pass
 
 
+class TTSPublicLauncherView(_BaseTTSLayoutView):
+    def __init__(self, cog: "TTSVoice", owner_id: int, guild_id: int, *, timeout: float = 300):
+        super().__init__(cog, owner_id, guild_id, timeout=timeout)
+        self.panel_kind = "launcher"
+        self._rebuild_items()
+
+    def is_components_v2_panel(self) -> bool:
+        return bool(
+            hasattr(discord.ui, "LayoutView")
+            and isinstance(self, getattr(discord.ui, "LayoutView"))
+            and hasattr(discord.ui, "Container")
+            and hasattr(discord.ui, "TextDisplay")
+            and hasattr(discord.ui, "ActionRow")
+        )
+
+    def _launcher_text(self) -> str:
+        return (
+            "### TTS\n"
+            "Painel público. Cada pessoa abre os próprios ajustes.\n\n"
+            "**Como funciona**\n"
+            "Cada prefixo usa um modo de TTS diferente.\n\n"
+            "**Edge**\n"
+            "Voz natural. Exemplo: `,texto`\n\n"
+            "**gTTS**\n"
+            "Voz simples. Exemplo: `.texto`\n\n"
+            "**Google**\n"
+            "Google Cloud. Exemplo: `'texto`"
+        )
+
+    def _make_button(self, label: str, callback: Callable[[discord.Interaction], object], *, emoji: str | None = None, style: discord.ButtonStyle = discord.ButtonStyle.secondary) -> discord.ui.Button:
+        button = discord.ui.Button(label=label, emoji=emoji, style=style)
+        async def wrapped(interaction: discord.Interaction):
+            result = callback(interaction)
+            if inspect.isawaitable(result):
+                await result
+        button.callback = wrapped
+        return button
+
+    def _make_action_row(self, *buttons: discord.ui.Button):
+        if self.is_components_v2_panel():
+            row = discord.ui.ActionRow()
+            for button in buttons:
+                row.add_item(button)
+            return row
+        return list(buttons)
+
+    def _add_control_row(self, container, *buttons: discord.ui.Button) -> None:
+        row = self._make_action_row(*buttons)
+        if self.is_components_v2_panel():
+            container.add_item(row)
+        else:
+            for button in row:
+                self.add_item(button)
+
+    def _rebuild_items(self) -> None:
+        try:
+            self.clear_items()
+        except Exception:
+            pass
+
+        my_tts = self._make_button("Meu TTS", self._open_my_tts, emoji="🗣️", style=discord.ButtonStyle.primary)
+        server = self._make_button("TTS do servidor", self._open_server_tts, emoji="🛠️")
+        help_button = self._make_button("Ajuda", self._open_help, emoji="❔")
+
+        if self.is_components_v2_panel():
+            container = discord.ui.Container(discord.ui.TextDisplay(self._launcher_text()), accent_color=discord.Color.blurple())
+            try:
+                container.add_item(discord.ui.Separator(visible=True))
+            except TypeError:
+                container.add_item(discord.ui.Separator())
+            self._add_control_row(container, my_tts, server, help_button)
+            self.add_item(container)
+            return
+
+        for button in (my_tts, server, help_button):
+            self.add_item(button)
+
+    async def _open_my_tts(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=self.cog._make_embed("Comando indisponível", "Esse painel só pode ser usado dentro de um servidor.", ok=False),
+                ephemeral=True,
+            )
+            return
+        target_name = self.cog._member_panel_name(interaction.user)
+        embed = await self.cog._build_settings_embed(
+            interaction.guild.id,
+            interaction.user.id,
+            server=False,
+            panel_kind="user",
+            target_user_name=target_name,
+            viewer_user_id=interaction.user.id,
+        )
+        view = self.cog._build_panel_view(
+            interaction.user.id,
+            interaction.guild.id,
+            server=False,
+            target_user_id=interaction.user.id,
+            target_user_name=target_name,
+        )
+        msg = await self.cog._respond(interaction, embed=embed, view=view, ephemeral=True)
+        view.message = msg
+
+    async def _open_server_tts(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=self.cog._make_embed("Comando indisponível", "Esse painel só pode ser usado dentro de um servidor.", ok=False),
+                ephemeral=True,
+            )
+            return
+        if not getattr(getattr(interaction.user, "guild_permissions", None), "kick_members", False):
+            await interaction.response.send_message(
+                embed=self.cog._make_embed("Sem permissão", "Você precisa da permissão `Expulsar Membros` para abrir o painel do servidor.", ok=False),
+                ephemeral=True,
+            )
+            return
+        embed = await self.cog._build_settings_embed(
+            interaction.guild.id,
+            interaction.user.id,
+            server=True,
+            panel_kind="server",
+            viewer_user_id=interaction.user.id,
+        )
+        view = self.cog._build_panel_view(interaction.user.id, interaction.guild.id, server=True)
+        msg = await self.cog._respond(interaction, embed=embed, view=view, ephemeral=True)
+        view.message = msg
+
+    async def _open_help(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            embed=self.cog._make_embed(
+                "Ajuda do TTS",
+                "Edge, gTTS e Google são modos de voz. O prefixo é só o símbolo digitado antes da frase.\n\n"
+                "Exemplos:\n"
+                "• `,bom dia` usa Edge.\n"
+                "• `.bom dia` usa gTTS.\n"
+                "• `'bom dia` usa Google.",
+                ok=True,
+            ),
+            ephemeral=True,
+        )
+
+
 class TTSReadingQuickView(_BaseTTSView):
     def __init__(
         self,
@@ -899,7 +1041,7 @@ class TTSReadingQuickView(_BaseTTSView):
     async def send(self, interaction: discord.Interaction):
         embed = self.cog._make_embed(
             "Leitura",
-            "Escolha velocidade e tom. O painel principal será atualizado depois de salvar.",
+            "Muda velocidade e tom do modo Edge. O painel principal será atualizado depois de salvar.",
             ok=True,
         )
         if interaction.response.is_done():
@@ -908,18 +1050,214 @@ class TTSReadingQuickView(_BaseTTSView):
             await interaction.response.send_message(embed=embed, view=self, ephemeral=True)
 
 
+class TTSModeActionsView(_BaseTTSView):
+    def __init__(
+        self,
+        cog: "TTSVoice",
+        owner_id: int,
+        guild_id: int,
+        *,
+        mode: str,
+        server: bool,
+        source_panel_message: discord.Message | None,
+        target_user_id: int | None = None,
+        target_user_name: str | None = None,
+    ):
+        super().__init__(cog, owner_id, guild_id, timeout=180, target_user_id=target_user_id, target_user_name=target_user_name)
+        self.mode = str(mode or "edge")
+        self.server = server
+        self.source_panel_message = source_panel_message
+        self.panel_kind = "server" if server else "user"
+        self._build_buttons()
+
+    def _target_owner(self, interaction: discord.Interaction) -> int:
+        return interaction.user.id if self.owner_id == 0 else self.owner_id
+
+    def _make_button(self, label: str, callback: Callable[[discord.Interaction], object], *, emoji: str | None = None, style: discord.ButtonStyle = discord.ButtonStyle.secondary, row: int | None = None) -> discord.ui.Button:
+        button = discord.ui.Button(label=label, emoji=emoji, style=style, row=row)
+        async def wrapped(interaction: discord.Interaction):
+            result = callback(interaction)
+            if inspect.isawaitable(result):
+                await result
+        button.callback = wrapped
+        return button
+
+    def _build_buttons(self) -> None:
+        try:
+            self.clear_items()
+        except Exception:
+            pass
+        if self.mode == "edge":
+            self.add_item(self._make_button("Voz Edge", self._open_edge_voice, emoji="🎙️", row=0))
+            self.add_item(self._make_button("Leitura Edge", self._open_edge_reading, emoji="🎚️", row=0))
+        elif self.mode == "gtts":
+            self.add_item(self._make_button("Idioma gTTS", self._open_gtts_language, emoji="🌐", row=0))
+        else:
+            self.add_item(self._make_button("Idioma Google", self._open_google_language, emoji="☁️", row=0))
+            self.add_item(self._make_button("Voz Google", self._open_google_voice, emoji="🎙️", row=0))
+            self.add_item(self._make_button("Leitura Google", self._open_google_reading, emoji="🎚️", row=0))
+        self.add_item(self._make_button("Voltar", self._back_to_main_panel, emoji="⬅️", row=1))
+
+    def _prefix_for_mode(self) -> str:
+        # Texto curto de orientação. O painel principal mostra os prefixos reais
+        # vindos do banco; aqui usamos os padrões para evitar consulta assíncrona
+        # dentro de uma função de renderização simples.
+        if self.mode == "edge":
+            return ","
+        if self.mode == "gcloud":
+            return str(getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'") or "'")
+        return "."
+
+    def _mode_title_description(self) -> tuple[str, str]:
+        prefix = self._prefix_for_mode()
+        target = "do servidor" if self.server else "seus"
+        if self.mode == "edge":
+            return "Edge", f"Usado quando a mensagem começa com `{prefix}texto`. Altere a voz Edge e a leitura Edge {target}."
+        if self.mode == "gtts":
+            return "gTTS", f"Usado quando a mensagem começa com `{prefix}texto`. Altere o idioma gTTS {target}."
+        return "Google", f"Usado quando a mensagem começa com `{prefix}texto`. Altere idioma, voz e leitura Google {target}."
+
+    async def send(self, interaction: discord.Interaction):
+        title, description = self._mode_title_description()
+        embed = self.cog._make_embed(title, description, ok=True)
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, view=self, ephemeral=True, wait=True)
+        else:
+            await interaction.response.send_message(embed=embed, view=self, ephemeral=True)
+
+    async def _open_edge_voice(self, interaction: discord.Interaction):
+        view = _SimpleSelectView(
+            self.cog,
+            self._target_owner(interaction),
+            self.guild_id,
+            "Voz Edge",
+            "Muda a voz usada pelo modo Edge.",
+            VoiceRegionSelect(self.cog, server=self.server),
+            source_panel_message=self.source_panel_message,
+            target_user_id=self.target_user_id,
+            target_user_name=self.target_user_name,
+        )
+        await view.send(interaction)
+
+    async def _open_edge_reading(self, interaction: discord.Interaction):
+        await TTSReadingQuickView(
+            self.cog,
+            self._target_owner(interaction),
+            self.guild_id,
+            server=self.server,
+            source_panel_message=self.source_panel_message,
+            target_user_id=self.target_user_id,
+            target_user_name=self.target_user_name,
+        ).send(interaction)
+
+    async def _open_gtts_language(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="Idioma gTTS",
+            description="Muda o idioma usado pelo modo gTTS. Exemplos: `pt-br`, `en`, `es`, `fr`, `ja`.",
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=LanguageHelpView(
+                self.cog,
+                self._target_owner(interaction),
+                self.guild_id,
+                server=self.server,
+                source_panel_message=self.source_panel_message,
+                target_user_id=self.target_user_id,
+                target_user_name=self.target_user_name,
+            ),
+            ephemeral=True,
+        )
+
+    async def _open_google_language(self, interaction: discord.Interaction):
+        current_target_user_id = int(self.target_user_id or interaction.user.id)
+        current_value = self.cog._get_current_gcloud_language(self.guild_id, current_target_user_id, server=self.server)
+        await self.cog._open_gcloud_language_picker(
+            interaction,
+            owner_id=self._target_owner(interaction),
+            guild_id=self.guild_id,
+            current_value=current_value,
+            server=self.server,
+            source_panel_message=self.source_panel_message,
+            target_user_id=None if self.owner_id == 0 and self.target_user_id is None else self.target_user_id,
+            target_user_name=self.target_user_name,
+        )
+
+    async def _open_google_voice(self, interaction: discord.Interaction):
+        current_target_user_id = int(self.target_user_id or interaction.user.id)
+        current_language = self.cog._get_current_gcloud_language(self.guild_id, current_target_user_id, server=self.server)
+        current_value = self.cog._get_current_gcloud_voice(self.guild_id, current_target_user_id, server=self.server)
+        await self.cog._open_gcloud_voice_picker(
+            interaction,
+            owner_id=self._target_owner(interaction),
+            guild_id=self.guild_id,
+            language_code=current_language,
+            current_value=current_value,
+            server=self.server,
+            source_panel_message=self.source_panel_message,
+            target_user_id=None if self.owner_id == 0 and self.target_user_id is None else self.target_user_id,
+            target_user_name=self.target_user_name,
+        )
+
+    async def _open_google_reading(self, interaction: discord.Interaction):
+        view = _SimpleSelectView(
+            self.cog,
+            self._target_owner(interaction),
+            self.guild_id,
+            "Leitura Google",
+            "Muda velocidade e tom usados pelo modo Google.",
+            GCloudSpeedSelect(self.cog, server=self.server),
+            source_panel_message=self.source_panel_message,
+            target_user_id=self.target_user_id,
+            target_user_name=self.target_user_name,
+        )
+        pitch_select = GCloudPitchSelect(self.cog, server=self.server)
+        pitch_select.source_panel_message = self.source_panel_message
+        pitch_select.target_user_id = self.target_user_id
+        pitch_select.target_user_name = self.target_user_name
+        view.add_item(pitch_select)
+        await view.send(interaction)
+
+    async def _back_to_main_panel(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            return
+        target_id = int(self.target_user_id or interaction.user.id)
+        target_name = str(self.target_user_name or self.cog._member_panel_name(interaction.user))
+        embed = await self.cog._build_settings_embed(
+            interaction.guild.id,
+            target_id if not self.server else interaction.user.id,
+            server=self.server,
+            panel_kind="server" if self.server else "user",
+            target_user_name=target_name if not self.server else None,
+            viewer_user_id=interaction.user.id,
+        )
+        view = self.cog._build_panel_view(
+            self._target_owner(interaction),
+            interaction.guild.id,
+            server=self.server,
+            target_user_id=None if self.server else target_id,
+            target_user_name=None if self.server else target_name,
+        )
+        content, edit_embed, edit_view = self.cog._prepare_panel_payload(embed=embed, view=view)
+        await interaction.response.edit_message(content=content, embed=edit_embed, view=edit_view)
+        view.message = getattr(interaction, "message", None)
+
+
+
+
 
 
 class PrefixTargetSelect(discord.ui.Select):
     def __init__(self, cog: "TTSVoice"):
         self.cog = cog
         options = [
-            discord.SelectOption(label="Bot", description="Prefixo dos comandos de TTS", value="bot", emoji="🤖"),
-            discord.SelectOption(label="gTTS", description="Prefixo das mensagens do modo gTTS", value="gtts", emoji="🔤"),
-            discord.SelectOption(label="Edge", description="Prefixo das mensagens do modo Edge", value="edge", emoji="🔊"),
-            discord.SelectOption(label="Google", description="Prefixo das mensagens do Google Cloud", value="gcloud", emoji="☁️"),
+            discord.SelectOption(label="Bot", description="Símbolo usado nos comandos do bot. Exemplo: _panel", value="bot", emoji="🤖"),
+            discord.SelectOption(label="gTTS", description="Símbolo antes da frase para usar gTTS. Exemplo: .bom dia", value="gtts", emoji="🔤"),
+            discord.SelectOption(label="Edge", description="Símbolo antes da frase para usar Edge. Exemplo: ,bom dia", value="edge", emoji="🔊"),
+            discord.SelectOption(label="Google", description="Símbolo antes da frase para usar Google. Exemplo: 'bom dia", value="gcloud", emoji="☁️"),
         ]
-        super().__init__(placeholder="Escolha o prefixo", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="Escolha qual prefixo alterar", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None) or getattr(interaction, "message", None)
@@ -954,6 +1292,8 @@ class TTSAdvancedActionsView(_BaseTTSView):
         self.panel_kind = "server" if server else "user"
         if not server:
             self.remove_item(self.ignored_role_button)
+            # O apelido já fica no painel principal; aqui deixam só ajustes técnicos.
+            self.remove_item(self.spoken_name_button)
         else:
             self.remove_item(self.spoken_name_button)
 
@@ -964,7 +1304,7 @@ class TTSAdvancedActionsView(_BaseTTSView):
     async def gtts_language_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
             title="Idioma gTTS",
-            description="Digite o código do idioma ou escolha pela lista. Exemplos: `pt-br`, `en`, `es`, `fr`, `ja`.",
+            description="Muda o idioma usado pelo modo gTTS. Exemplos: `pt-br`, `en`, `es`, `fr`, `ja`.",
             color=discord.Color.blurple(),
         )
         await interaction.response.send_message(
@@ -1020,7 +1360,7 @@ class TTSAdvancedActionsView(_BaseTTSView):
             self._target_owner(interaction),
             self.guild_id,
             "Leitura Google",
-            "Escolha velocidade ou tom do Google Cloud.",
+            "Muda velocidade e tom usados pelo modo Google.",
             GCloudSpeedSelect(self.cog, server=self.server),
             source_panel_message=self.source_panel_message,
             target_user_id=self.target_user_id,
@@ -1044,14 +1384,14 @@ class TTSAdvancedActionsView(_BaseTTSView):
         await view.send(interaction)
 
 
-    @discord.ui.button(label="Modo", style=discord.ButtonStyle.secondary, emoji="🎛️", row=2)
+    @discord.ui.button(label="Modo de TTS", style=discord.ButtonStyle.secondary, emoji="🎛️", row=2)
     async def mode_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = _SimpleSelectView(
             self.cog,
             self._target_owner(interaction),
             self.guild_id,
-            "Modo",
-            "Ajuste de compatibilidade para comandos antigos. Os prefixos continuam escolhendo o motor por mensagem.",
+            "Modo de TTS",
+            "Escolhe o motor padrão usado por comandos antigos. Os prefixos Edge, gTTS e Google continuam escolhendo o motor por mensagem.",
             ModeSelect(self.cog, server=self.server),
             source_panel_message=self.source_panel_message,
             target_user_id=self.target_user_id,
@@ -1149,44 +1489,66 @@ class TTSMainPanelView(_BaseTTSLayoutView):
             except TypeError:
                 container.add_item(discord.ui.Separator())
 
+            self._add_control_row(
+                container,
+                self._make_button("Edge", self._open_edge_panel, emoji="🔊"),
+                self._make_button("gTTS", self._open_gtts_panel, emoji="🔤"),
+                self._make_button("Google", self._open_google_panel, emoji="☁️"),
+            )
             if self.server:
                 self._add_control_row(
                     container,
-                    self._make_button("Voz padrão", self._open_voice_panel, emoji="🎙️"),
-                    self._make_button("Leitura", self._open_reading_panel, emoji="🎚️"),
                     self._make_button("Prefixos", self._open_prefixes_panel, emoji="⌨️"),
                     self._make_button("Regras", self._open_rules_panel, emoji="☑️"),
-                    self._make_button("Avançado", self._open_advanced_panel, emoji="⚙️"),
+                    self._make_button("Mais opções", self._open_advanced_panel, emoji="⚙️"),
                 )
             else:
                 self._add_control_row(
                     container,
-                    self._make_button("Voz", self._open_voice_panel, emoji="🎙️"),
-                    self._make_button("Leitura", self._open_reading_panel, emoji="🎚️"),
                     self._make_button("Apelido", self._open_spoken_name_modal, emoji="🪪"),
-                    self._make_button("Avançado", self._open_advanced_panel, emoji="⚙️"),
+                    self._make_button("Mais opções", self._open_advanced_panel, emoji="⚙️"),
                 )
             self.add_item(container)
             return
 
         # Fallback se a lib em produção ainda não tiver LayoutView/Components V2.
-        if self.server:
-            for button in (
-                self._make_button("Voz padrão", self._open_voice_panel, emoji="🎙️"),
-                self._make_button("Leitura", self._open_reading_panel, emoji="🎚️"),
-                self._make_button("Prefixos", self._open_prefixes_panel, emoji="⌨️"),
-                self._make_button("Regras", self._open_rules_panel, emoji="☑️"),
-                self._make_button("Avançado", self._open_advanced_panel, emoji="⚙️"),
-            ):
-                self.add_item(button)
-        else:
-            for button in (
-                self._make_button("Voz", self._open_voice_panel, emoji="🎙️"),
-                self._make_button("Leitura", self._open_reading_panel, emoji="🎚️"),
-                self._make_button("Apelido", self._open_spoken_name_modal, emoji="🪪"),
-                self._make_button("Avançado", self._open_advanced_panel, emoji="⚙️"),
-            ):
-                self.add_item(button)
+        base_buttons = (
+            self._make_button("Edge", self._open_edge_panel, emoji="🔊"),
+            self._make_button("gTTS", self._open_gtts_panel, emoji="🔤"),
+            self._make_button("Google", self._open_google_panel, emoji="☁️"),
+        )
+        extra_buttons = (
+            self._make_button("Prefixos", self._open_prefixes_panel, emoji="⌨️"),
+            self._make_button("Regras", self._open_rules_panel, emoji="☑️"),
+            self._make_button("Mais opções", self._open_advanced_panel, emoji="⚙️"),
+        ) if self.server else (
+            self._make_button("Apelido", self._open_spoken_name_modal, emoji="🪪"),
+            self._make_button("Mais opções", self._open_advanced_panel, emoji="⚙️"),
+        )
+        for button in (*base_buttons, *extra_buttons):
+            self.add_item(button)
+
+    async def _open_mode_panel(self, interaction: discord.Interaction, mode: str):
+        print(f"[tts_panel] mode_button | mode={mode} user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
+        await TTSModeActionsView(
+            self.cog,
+            self._target_owner(interaction),
+            self.guild_id,
+            mode=mode,
+            server=self.server,
+            source_panel_message=interaction.message,
+            target_user_id=self.target_user_id,
+            target_user_name=self.target_user_name,
+        ).send(interaction)
+
+    async def _open_edge_panel(self, interaction: discord.Interaction):
+        await self._open_mode_panel(interaction, "edge")
+
+    async def _open_gtts_panel(self, interaction: discord.Interaction):
+        await self._open_mode_panel(interaction, "gtts")
+
+    async def _open_google_panel(self, interaction: discord.Interaction):
+        await self._open_mode_panel(interaction, "gcloud")
 
     async def _open_voice_panel(self, interaction: discord.Interaction):
         print(f"[tts_panel] voice_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
@@ -1237,13 +1599,13 @@ class TTSMainPanelView(_BaseTTSLayoutView):
             )
             return
         await interaction.response.send_message(
-            embed=self.cog._make_embed("Prefixos", "Escolha qual prefixo quer trocar.", ok=True),
+            embed=self.cog._make_embed("Prefixos", "Cada prefixo é o símbolo antes da frase. Exemplo: `,bom dia`, `.bom dia`, `'bom dia`.", ok=True),
             view=_SimpleSelectView(
                 self.cog,
                 self._target_owner(interaction),
                 self.guild_id,
                 "Prefixos",
-                "Escolha qual prefixo quer alterar.",
+                "Escolha o símbolo que ativa cada modo de TTS.",
                 PrefixTargetSelect(self.cog),
                 source_panel_message=interaction.message,
             ),
@@ -1269,8 +1631,8 @@ class TTSMainPanelView(_BaseTTSLayoutView):
     async def _open_advanced_panel(self, interaction: discord.Interaction):
         print(f"[tts_panel] advanced_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
         embed = self.cog._make_embed(
-            "Avançado",
-            "Configurações técnicas: gTTS, Google Cloud, listas completas e ajustes separados.",
+            "Mais opções",
+            "Modo de TTS e ajustes menos usados. Os prefixos Edge, gTTS e Google continuam separados.",
             ok=True,
         )
         view = TTSAdvancedActionsView(

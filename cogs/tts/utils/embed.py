@@ -97,6 +97,19 @@ def _history_value(embed: discord.Embed) -> str:
     return "" if value == "Não definido" else value
 
 
+def _prefix_example(prefix: object) -> str:
+    value = _clean_display_value(prefix, fallback=".")
+    return f"`{value}texto`"
+
+
+def _human_reading(rate: object, pitch: object) -> str:
+    rate_text = human_rate(rate)
+    pitch_text = human_pitch(pitch)
+    if pitch_text == "normal":
+        return rate_text
+    return f"{rate_text} · tom {pitch_text}"
+
+
 def build_settings_panel_text_from_embed(embed: discord.Embed, *, server: bool) -> str:
     """Renderiza o conteúdo principal do painel em texto para Components V2.
 
@@ -105,46 +118,63 @@ def build_settings_panel_text_from_embed(embed: discord.Embed, *, server: bool) 
     """
     title = _clean_display_value(getattr(embed, "title", ""), fallback="TTS do servidor" if server else "TTS")
     description = _clean_display_value(getattr(embed, "description", ""), fallback="")
+
+    edge_prefix = _field_value(embed, "Prefixo do modo Edge", default=",")
+    gtts_prefix = _field_value(embed, "Prefixo do modo gTTS", default=".")
+    gcloud_prefix = _field_value(embed, "Prefixo do Google", default="'")
+
     edge_voice = human_voice_name(_field_value(embed, "Voz do Edge"))
-    edge_rate = human_rate(_field_value(embed, "Velocidade do Edge", default="+0%"))
-    edge_pitch = human_pitch(_field_value(embed, "Tom do Edge", default="+0Hz"))
-    reading = edge_rate if edge_pitch == "normal" else f"{edge_rate} · tom {edge_pitch}"
+    edge_reading = _human_reading(
+        _field_value(embed, "Velocidade do Edge", default="+0%"),
+        _field_value(embed, "Tom do Edge", default="+0Hz"),
+    )
+    gtts_language = _field_value(embed, "Idioma do gTTS", default="pt-br")
+    gcloud_language = _field_value(embed, "Idioma do Google", default="pt-BR")
+    gcloud_voice = human_voice_name(_field_value(embed, "Voz do Google", default="pt-BR-Standard-A"))
+    gcloud_reading = _human_reading(
+        _field_value(embed, "Velocidade do Google", default="1.0"),
+        _field_value(embed, "Tom do Google", default="0.0"),
+    )
 
     lines: list[str] = [f"### {title}"]
     if description:
         lines.append(description)
     lines.append("")
+    lines.append("Cada prefixo usa seus próprios ajustes.")
+    lines.append("")
+    lines.extend([
+        "**Edge**",
+        f"Prefixo: {_prefix_example(edge_prefix)}",
+        f"Voz Edge: {edge_voice}",
+        f"Leitura Edge: {edge_reading}",
+        "",
+        "**gTTS**",
+        f"Prefixo: {_prefix_example(gtts_prefix)}",
+        f"Idioma gTTS: {gtts_language}",
+        "",
+        "**Google**",
+        f"Prefixo: {_prefix_example(gcloud_prefix)}",
+        f"Idioma Google: {gcloud_language}",
+        f"Voz Google: {gcloud_voice}",
+        f"Leitura Google: {gcloud_reading}",
+    ])
 
     if server:
         bot_prefix = _field_value(embed, "Prefixo do bot", default="_")
-        gtts_prefix = _field_value(embed, "Prefixo do modo gTTS", default=".")
-        edge_prefix = _field_value(embed, "Prefixo do modo Edge", default=",")
-        gcloud_prefix = _field_value(embed, "Prefixo do Google", default="'")
         author = human_bool(_field_value(embed, "Autor antes da frase", default="Desativado"))
         ignored_role = _field_value(embed, "Cargo ignorado", default="nenhum")
         if ignored_role == "Não definido":
             ignored_role = "nenhum"
         lines.extend([
-            "**Voz padrão**",
-            edge_voice,
             "",
-            "**Leitura padrão**",
-            reading,
-            "",
-            "**Prefixos**",
-            f"Bot {bot_prefix} · gTTS {gtts_prefix} · Edge {edge_prefix} · Google {gcloud_prefix}",
-            "",
-            "**Regras**",
-            f"Autor antes da frase: {author}\nCargo ignorado: {ignored_role}",
+            "**Servidor**",
+            f"Prefixo do bot: `{bot_prefix}`",
+            f"Autor antes da frase: {author}",
+            f"Cargo ignorado: {ignored_role}",
         ])
     else:
         spoken_name = _field_value(embed, "Apelido falado", default="padrão")
         lines.extend([
-            "**Voz**",
-            edge_voice,
-            "",
-            "**Leitura**",
-            reading,
             "",
             "**Apelido falado**",
             spoken_name,
@@ -248,14 +278,14 @@ def build_settings_embed(*, title: str, description: str, resolved: dict, guild_
     embed.add_field(name="Voz do Google", value=f"`{resolved.get('gcloud_voice', google_voice_default)}`", inline=True)
     embed.add_field(name="Velocidade do Google", value=f"`{resolved.get('gcloud_rate', google_rate_default)}`", inline=True)
     embed.add_field(name="Tom do Google", value=f"`{resolved.get('gcloud_pitch', google_pitch_default)}`", inline=True)
+    google_prefix = guild_defaults.get('gcloud_prefix', google_prefix_default)
+    embed.add_field(name="Prefixo do modo gTTS", value=f"`{guild_defaults.get('gtts_prefix', guild_defaults.get('tts_prefix', '.'))}`", inline=True)
+    embed.add_field(name="Prefixo do modo Edge", value=f"`{guild_defaults.get('edge_prefix', ',')}`", inline=True)
+    embed.add_field(name="Prefixo do Google", value=f"`{google_prefix}`", inline=True)
     if not server and spoken_name_text is not None:
         embed.add_field(name="Apelido falado", value=spoken_name_text, inline=True)
     if server:
         embed.add_field(name="Prefixo do bot", value=f"`{guild_defaults.get('bot_prefix', '_')}`", inline=True)
-        embed.add_field(name="Prefixo do modo gTTS", value=f"`{guild_defaults.get('gtts_prefix', guild_defaults.get('tts_prefix', '.'))}`", inline=True)
-        embed.add_field(name="Prefixo do modo Edge", value=f"`{guild_defaults.get('edge_prefix', ',')}`", inline=True)
-        google_prefix = guild_defaults.get('gcloud_prefix', google_prefix_default)
-        embed.add_field(name="Prefixo do Google", value=f"`{google_prefix}`", inline=True)
         embed.add_field(name="Autor antes da frase", value="`Ativado`" if bool(guild_defaults.get('announce_author', False)) else "`Desativado`", inline=True)
         embed.add_field(name="Cargo ignorado", value=ignored_tts_role_text or "`Nenhum`", inline=True)
     if history_text:

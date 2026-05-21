@@ -97,6 +97,7 @@ from .ui import (
     GCloudVoiceModal,
     SpokenNameModal,
     IgnoreRoleConfigView,
+    TTSPublicLauncherView,
     TTSMainPanelView,
     TTSStatusView,
     TTSTogglePanelView,
@@ -996,7 +997,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if member is None:
             return "@usuário"
 
-        name = getattr(member, "name", None) or getattr(member, "display_name", None) or "usuário"
+        name = (
+            getattr(member, "display_name", None)
+            or getattr(member, "global_name", None)
+            or getattr(member, "name", None)
+            or "usuário"
+        )
         if not str(name).startswith("@"):
             return f"@{name}"
         return str(name)
@@ -1039,6 +1045,20 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _quote_value(self, value: str) -> str:
         return f'"{value}"'
 
+    def _history_actor_label(self, entry: str, rendered: str) -> str:
+        decoded = self._decode_public_owner_history(entry)
+        if decoded:
+            return decoded[1]
+
+        text = str(rendered or entry or "").strip().replace("`", "")
+        match = re.match(r"^(@.+?)\s+(?:alterou|ativou|desativou|removeu|resetou)\b", text, flags=re.I)
+        if match:
+            return match.group(1).strip()
+        match = re.match(r"^Você\s+\((@[^)]+)\)", text, flags=re.I)
+        if match:
+            return match.group(1).strip()
+        return ""
+
     def _compact_history_text(self, rendered: str) -> str:
         text = str(rendered or "").strip().replace("`", "")
         if not text:
@@ -1049,14 +1069,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if " para " in text:
             value = text.rsplit(" para ", 1)[-1].strip().strip('"')
 
-        if "voz" in lowered:
-            return f"Voz: {human_voice_name(value)}" if value else "Voz atualizada"
-        if "tom" in lowered:
-            return f"Tom: {human_pitch(value)}" if value else "Tom atualizado"
-        if "velocidade" in lowered:
-            return f"Velocidade: {human_rate(value)}" if value else "Velocidade atualizada"
-        if "apelido" in lowered or "nome falado" in lowered:
-            return "Apelido atualizado" if value else "Apelido limpo"
         if "prefixo" in lowered:
             if "edge" in lowered:
                 label = "Prefixo Edge"
@@ -1069,16 +1081,30 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             else:
                 label = "Prefixos"
             return f"{label}: {value}" if value else f"{label} atualizado"
+        if "google" in lowered and "idioma" in lowered:
+            return f"Google: idioma {value}" if value else "Google: idioma atualizado"
+        if "gtts" in lowered and "idioma" in lowered:
+            return f"gTTS: idioma {value}" if value else "gTTS: idioma atualizado"
+        if "google" in lowered and "voz" in lowered:
+            return f"Google: voz {human_voice_name(value)}" if value else "Google: voz atualizada"
+        if "google" in lowered and "velocidade" in lowered:
+            return f"Google: velocidade {human_rate(value)}" if value else "Google: velocidade atualizada"
+        if "google" in lowered and "tom" in lowered:
+            return f"Google: tom {human_pitch(value)}" if value else "Google: tom atualizado"
+        if "voz" in lowered:
+            return f"Edge: voz {human_voice_name(value)}" if value else "Edge: voz atualizada"
+        if "tom" in lowered:
+            return f"Edge: tom {human_pitch(value)}" if value else "Edge: tom atualizado"
+        if "velocidade" in lowered:
+            return f"Edge: velocidade {human_rate(value)}" if value else "Edge: velocidade atualizada"
+        if "apelido" in lowered or "nome falado" in lowered:
+            return "Apelido atualizado" if value else "Apelido limpo"
         if "autor" in lowered:
             return "Autor antes da frase: ligado" if any(x in lowered for x in ("ativ", "lig", "on", "true")) else "Autor antes da frase: desligado"
         if "cargo ignorado" in lowered:
             return f"Cargo ignorado: {value}" if value else "Cargo ignorado atualizado"
         if "modo" in lowered:
-            return f"Modo: {value}" if value else "Modo atualizado"
-        if "google cloud" in lowered and "idioma" in lowered:
-            return f"Idioma Google: {value}" if value else "Idioma Google atualizado"
-        if "gtts" in lowered and "idioma" in lowered:
-            return f"Idioma gTTS: {value}" if value else "Idioma gTTS atualizado"
+            return f"Modo de TTS: {value}" if value else "Modo de TTS atualizado"
 
         # Limpa as frases antigas, sem inventar informação.
         text = re.sub(r"^Você(?: \([^)]*\))?\s+alterou\s+", "", text, flags=re.I)
@@ -1093,7 +1119,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         for entry in entries[-3:]:
             rendered = self._render_history_entry(entry, viewer_user_id=viewer_user_id, message_id=message_id)
             safe = self._compact_history_text(rendered)
+            actor = self._history_actor_label(entry, rendered)
             if safe:
+                if actor:
+                    if not actor.startswith("@"):
+                        actor = f"@{actor}"
+                    safe = f"{safe} ({actor})"
                 lines.append(f"• {safe}")
         return "\n".join(lines)
 
@@ -2458,10 +2489,18 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     def _build_panel_view(self, owner_id: int, guild_id: int, *, server: bool = False, timeout: float = 180, target_user_id: int | None = None, target_user_name: str | None = None) -> discord.ui.View:
         return TTSMainPanelView(self, owner_id, guild_id, server=server, timeout=timeout, target_user_id=target_user_id, target_user_name=target_user_name)
 
+    def _build_public_tts_launcher_view(self, guild_id: int, *, timeout: float = 300) -> discord.ui.View:
+        return TTSPublicLauncherView(self, 0, guild_id, timeout=timeout)
+
     def _member_panel_name(self, member: discord.abc.User | None) -> str:
         if member is None:
             return "@usuário"
-        name = getattr(member, "name", None) or getattr(member, "display_name", None) or str(member)
+        name = (
+            getattr(member, "display_name", None)
+            or getattr(member, "global_name", None)
+            or getattr(member, "name", None)
+            or str(member)
+        )
         return name if str(name).startswith("@") else f"@{name}"
 
     async def _resolve_member_from_text(self, guild: discord.Guild, raw: str) -> discord.Member | None:
@@ -3452,13 +3491,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             embed = await self._build_toggle_embed(message.guild.id, message.author.id)
             view = self._build_toggle_view(0, message.guild.id, timeout=300)
         else:
-            embed = await self._build_settings_embed(
-                message.guild.id,
-                message.author.id,
-                server=False,
-                panel_kind="user",
+            panel_kind = "launcher"
+            embed = self._make_embed(
+                "TTS",
+                "Painel público. Cada pessoa abre os próprios ajustes pelos botões.",
+                ok=True,
             )
-            view = self._build_panel_view(0, message.guild.id, server=False, timeout=300)
+            view = self._build_public_tts_launcher_view(message.guild.id, timeout=300)
 
         if await self._check_prefix_panel_cooldown(message, panel_kind):
             return
