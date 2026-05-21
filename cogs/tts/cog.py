@@ -3569,25 +3569,66 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         embed = self._make_embed("Entrei na call com sucesso", f"Entrei na call `{author_voice.channel.name}`", ok=True)
         await message.channel.send(embed=embed)
 
-    async def _send_prefix_panel(self, message: discord.Message, *, panel_type: str):
+    async def _send_prefix_panel(
+        self,
+        message: discord.Message,
+        *,
+        panel_type: str,
+        target_query: str = "",
+        invoked_alias: str = "",
+    ) -> bool:
         if not message.guild:
-            return
+            return False
 
         panel_kind = "user"
         initial_history: list[str] = []
         db = self._get_db()
+        target_member: discord.Member | None = None
+        target_query = str(target_query or "").strip()
+        invoked_alias_text = str(invoked_alias or "").strip().lower()
+        short_panel_alias = bool(invoked_alias_text) and invoked_alias_text.endswith("p") and not invoked_alias_text.endswith("panel") and not invoked_alias_text.endswith("painel")
+
+        if panel_type == "user" and target_query:
+            # `_p` também pode ser alias do player de música. Só consumimos
+            # `_p <algo>` quando o autor é staff e o alvo resolve claramente.
+            if not getattr(message.author.guild_permissions, "kick_members", False):
+                if short_panel_alias:
+                    return False
+                await message.channel.send(
+                    embed=self._make_embed(
+                        "Sem permissão",
+                        "Você precisa da permissão `Expulsar Membros` para editar o TTS de outro usuário.",
+                        ok=False,
+                    ),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return True
+
+            target_member = await self._resolve_member_from_text(message.guild, target_query)
+            if target_member is None:
+                if short_panel_alias:
+                    return False
+                await message.channel.send(
+                    embed=self._make_embed(
+                        "Usuário não encontrado",
+                        "Use menção, ID ou nome exato do usuário.",
+                        ok=False,
+                    ),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return True
+
+        history_user_id = int(getattr(target_member, "id", message.author.id) or message.author.id)
         if db and hasattr(db, "get_panel_history"):
-            panel_history = await self._maybe_await(db.get_panel_history(message.guild.id, message.author.id))
+            panel_history = await self._maybe_await(db.get_panel_history(message.guild.id, history_user_id))
             if panel_type == "server":
                 initial_history = list((panel_history or {}).get("server_last_changes", []) or [])
             elif panel_type == "toggle":
                 initial_history = list((panel_history or {}).get("toggle_last_changes", []) or [])
             else:
-                # O painel normal é público, mas quando alguém abre um painel novo
-                # ele começa com o histórico pessoal daquele usuário naquele servidor.
-                # Se outras pessoas usarem essa mesma mensagem depois, as ações delas
-                # entram no histórico temporário desse painel/mensagem, sem contaminar
-                # o histórico pessoal do autor.
+                # Painel novo começa com o histórico pessoal do usuário editado.
+                # Se outro usuário interagir com a mesma mensagem depois, a ação
+                # também entra no histórico temporário daquele painel.
                 initial_history = list((panel_history or {}).get("user_last_changes", []) or [])
 
         if panel_type == "server":
@@ -3598,8 +3639,8 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                     "Você precisa da permissão `Expulsar Membros` para abrir o painel do servidor",
                     ok=False,
                 )
-                await message.channel.send(embed=embed)
-                return
+                await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                return True
             embed = await self._build_settings_embed(
                 message.guild.id,
                 message.author.id,
@@ -3610,20 +3651,39 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             view = self._build_panel_view(0, message.guild.id, server=True, timeout=300)
         elif panel_type == "toggle":
             panel_kind = "toggle"
-            fake_interaction = None
             if not message.author.guild_permissions.kick_members:
                 embed = self._make_embed(
                     "Sem permissão",
                     "Você precisa da permissão `Expulsar Membros` para abrir o painel de toggles",
                     ok=False,
                 )
-                await message.channel.send(embed=embed)
-                return
+                await message.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                return True
             guild_ids = getattr(config, "GUILD_IDS", []) or []
             if guild_ids and message.guild.id not in guild_ids:
-                return
+                return True
             embed = await self._build_toggle_embed(message.guild.id, message.author.id)
             view = self._build_toggle_view(0, message.guild.id, timeout=300)
+        elif target_member is not None:
+            panel_kind = "user_target"
+            target_name = self._member_panel_name(target_member)
+            embed = await self._build_settings_embed(
+                message.guild.id,
+                target_member.id,
+                server=False,
+                panel_kind="user",
+                last_changes=initial_history,
+                target_user_name=target_name,
+                viewer_user_id=message.author.id,
+            )
+            view = self._build_panel_view(
+                message.author.id,
+                message.guild.id,
+                server=False,
+                timeout=300,
+                target_user_id=target_member.id,
+                target_user_name=target_name,
+            )
         else:
             panel_kind = "launcher"
             history_text = self._format_history_entries(initial_history, viewer_user_id=None, message_id=None)
@@ -3635,7 +3695,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             view = self._build_public_tts_launcher_view(message.guild.id, timeout=300, history_text=history_text)
 
         if await self._check_prefix_panel_cooldown(message, panel_kind):
-            return
+            return True
 
         await self._delete_prefix_panel(message.guild.id, message.author.id, panel_kind)
 
@@ -3647,8 +3707,14 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             allowed_mentions=discord.AllowedMentions.none(),
         )
         view.message = sent
-        self._public_panel_states[sent.id] = {"panel_kind": panel_kind, "history": self._merge_history_entries(initial_history), "owner_id": message.author.id}
+        self._public_panel_states[sent.id] = {
+            "panel_kind": "user" if panel_kind == "user_target" else panel_kind,
+            "history": self._merge_history_entries(initial_history),
+            "owner_id": message.author.id,
+            "target_user_id": int(getattr(target_member, "id", 0) or 0) if target_member is not None else None,
+        }
         self._active_prefix_panels[self._prefix_panel_key(message.guild.id, message.author.id, panel_kind)] = sent
+        return True
 
     async def _leave_from_panel(self, interaction: discord.Interaction):
         vc = self._get_voice_client_for_guild(interaction.guild)
@@ -3784,10 +3850,9 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         else:
             view.message = msg
 
-    @app_commands.command(name="usuario", description="Abre o painel, reseta ou altera o apelido falado de um usuário")
-    @app_commands.describe(usuario="Usuário que terá as configurações alteradas", acao="Escolha se quer abrir o painel, alterar o apelido falado ou resetar")
-    @app_commands.choices(acao=USER_CONFIG_ACTION_CHOICES)
-    async def usuario(self, interaction: discord.Interaction, usuario: discord.Member, acao: app_commands.Choice[str]):
+    # O antigo /tts usuario foi removido. Staff deve usar o comando prefixado
+    # `_panel <usuário>`/`_p <usuário>` para abrir o painel de outro membro.
+    async def _legacy_usuario_slash_removed(self, interaction: discord.Interaction, usuario: discord.Member, acao: app_commands.Choice[str]):
         if not await self._require_guild(interaction):
             return
         if not await self._require_kick_members(interaction):

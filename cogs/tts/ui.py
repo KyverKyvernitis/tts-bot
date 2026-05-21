@@ -2030,7 +2030,7 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
                     (
                         "Cargo ignorado",
                         "ignored_role_enabled",
-                        "Liga/desliga sem apagar o cargo salvo.",
+                        "",
                         self.current_ignored_role_enabled,
                     ),
                 ],
@@ -2043,7 +2043,6 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
                 self,
                 "rules",
                 text="Regras",
-                description="Marque o que fica ligado.",
                 component=rules,
             )
 
@@ -2058,7 +2057,6 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
                     self,
                     "ignored_role",
                     text="Cargo ignorado",
-                    description="Selecionar um cargo liga essa regra automaticamente.",
                     component=role_select,
                 )
             else:
@@ -2073,7 +2071,6 @@ class TTSServerRulesModal(discord.ui.Modal, title="Regras do TTS"):
                     self,
                     "ignored_role",
                     text="Cargo ignorado",
-                    description="Usar ID/nome ativa; off desliga sem apagar.",
                     component=role_input,
                 )
             return bool(ok)

@@ -19,6 +19,7 @@ from .aliases import extract_prefixed_argument, get_prefixed_aliases, matches_pr
 class PrefixControlCommand:
     kind: str
     argument: str = ""
+    alias: str = ""
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,25 @@ def build_prefix_routing_config(guild_defaults: dict[str, Any] | None, *, bot_pr
     )
 
 
+
+def _match_prefixed_command_with_argument(content: str, bot_prefix: str, *, kind: str) -> tuple[str, str] | None:
+    """Retorna o alias usado e o argumento restante.
+
+    Usado pelo painel de usuário porque `_p` pode ser compartilhado com o
+    player de música. O dispatcher decide se consome ou deixa passar.
+    """
+    raw = str(content or "").strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    for alias in get_prefixed_aliases(bot_prefix, kind, display=False):
+        alias_lower = alias.lower()
+        if lowered == alias_lower:
+            return alias, ""
+        if lowered.startswith(alias_lower + " "):
+            return alias, raw[len(alias):].strip()
+    return None
+
 def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControlCommand | None:
     # Casa o conteúdo contra cada comando de controle conhecido. Os com
     # argumento (`reset`, `set_lang`) extraem o resto da string como argumento.
@@ -60,8 +80,10 @@ def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControl
         return PrefixControlCommand("reset", extract_prefixed_argument(raw, bot_prefix, kind="reset"))
     if matches_prefixed_command(raw, bot_prefix, kind="set_lang"):
         return PrefixControlCommand("set_lang", extract_prefixed_argument(raw, bot_prefix, kind="set_lang"))
-    if matches_prefixed_command(raw, bot_prefix, kind="panel_user"):
-        return PrefixControlCommand("panel_user")
+    panel_user = _match_prefixed_command_with_argument(raw, bot_prefix, kind="panel_user")
+    if panel_user is not None:
+        alias, argument = panel_user
+        return PrefixControlCommand("panel_user", argument, alias)
     if matches_prefixed_command(raw, bot_prefix, kind="panel_server"):
         return PrefixControlCommand("panel_server")
     if matches_prefixed_command(raw, bot_prefix, kind="panel_toggle"):
@@ -106,8 +128,12 @@ async def dispatch_prefix_control_command(cog: Any, message: Any, command: Prefi
         await cog._prefix_set_lang(message, command.argument)
         return True
     if kind == "panel_user":
-        await cog._send_prefix_panel(message, panel_type="user")
-        return True
+        return bool(await cog._send_prefix_panel(
+            message,
+            panel_type="user",
+            target_query=command.argument,
+            invoked_alias=command.alias,
+        ))
     if kind == "panel_server":
         await cog._send_prefix_panel(message, panel_type="server")
         return True
