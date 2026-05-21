@@ -2151,6 +2151,42 @@ async def _send_settings_modal_with_fallback(interaction: discord.Interaction, g
                 pass
 
 
+
+async def _reset_public_launcher_select(interaction: discord.Interaction, panel) -> None:
+    """Re-renderiza o launcher público para limpar a opção marcada no select.
+
+    No mobile do Discord, depois de escolher uma opção, o select pode ficar preso
+    visualmente no último valor. Como abrir modal consome a resposta da interação,
+    esse reset precisa ser feito com message.edit normal, sem usar interaction.response.
+    """
+    message = getattr(interaction, "message", None)
+    guild = getattr(interaction, "guild", None)
+    cog = getattr(panel, "cog", None)
+    if message is None or guild is None or cog is None:
+        return
+    message_id = int(getattr(message, "id", 0) or 0)
+    state = getattr(cog, "_public_panel_states", {}).get(message_id, {}) if message_id else {}
+    if state.get("panel_kind") != "launcher":
+        return
+
+    try:
+        history_text = cog._format_history_entries(
+            cog._get_public_panel_history(message_id),
+            viewer_user_id=None,
+            message_id=message_id,
+        ) or getattr(panel, "history_text", "") or "• Nada recente."
+        view = cog._build_public_tts_launcher_view(guild.id, timeout=300, history_text=history_text)
+        view.message = message
+        await cog._edit_panel_message_payload(
+            message,
+            embed=cog._make_embed("TTS", "Cada prefixo escolhe um modo de voz.", ok=True),
+            view=view,
+        )
+    except Exception as e:
+        print(f"[tts_panel] falha ao limpar select do launcher: {e!r}")
+        traceback.print_exception(type(e), e, e.__traceback__)
+
+
 class TTSPublicLauncherSelect(discord.ui.Select):
     def __init__(self):
         options = [
@@ -2159,7 +2195,13 @@ class TTSPublicLauncherSelect(discord.ui.Select):
             discord.SelectOption(label="Google", description="Idioma, voz e leitura Google", value="gcloud", emoji="☁️"),
             discord.SelectOption(label="Apelido", description="Nome que o bot fala por você", value="spoken_name", emoji="🪪"),
         ]
-        super().__init__(placeholder="Abrir ajuste", min_values=1, max_values=1, options=options)
+        super().__init__(
+            placeholder="Abrir ajuste",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id=f"tts_public_launcher:{time.monotonic_ns()}",
+        )
 
     async def callback(self, interaction: discord.Interaction):
         panel = getattr(self, "view", None)
@@ -2168,6 +2210,9 @@ class TTSPublicLauncherSelect(discord.ui.Select):
             return
         value = self.values[0]
         target_name = panel.cog._member_panel_name(interaction.user)
+        # Limpa a opção marcada sem consumir a resposta da interação;
+        # a resposta principal continua sendo o modal.
+        asyncio.create_task(_reset_public_launcher_select(interaction, panel))
         if value == "edge":
             await _send_settings_modal_with_fallback(
                 interaction,

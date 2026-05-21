@@ -3506,9 +3506,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             elif panel_type == "toggle":
                 initial_history = list((panel_history or {}).get("toggle_last_changes", []) or [])
             else:
-                # O painel normal é público. Aqui entram só alterações globais do servidor,
-                # nunca histórico pessoal do autor do comando.
-                initial_history = list((panel_history or {}).get("server_last_changes", []) or [])
+                # O painel normal é público, mas quando alguém abre um painel novo
+                # ele começa com o histórico pessoal daquele usuário naquele servidor.
+                # Se outras pessoas usarem essa mesma mensagem depois, as ações delas
+                # entram no histórico temporário desse painel/mensagem, sem contaminar
+                # o histórico pessoal do autor.
+                initial_history = list((panel_history or {}).get("user_last_changes", []) or [])
 
         if panel_type == "server":
             panel_kind = "server"
