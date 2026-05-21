@@ -230,6 +230,16 @@ class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue_item.engine, "piper")
         self.assertEqual(queue_item.piper_fallback_engine, "gtts")
 
+    async def test_piper_experimental_prefix_is_available_in_any_guild_by_default(self):
+        cog = FakeCog(db=FakeDB(guild_defaults={"tts_prefix": "."}, resolved={"engine": "gtts", "language": "pt-br"}))
+        message = make_message("%teste global", guild_id=123456789)
+
+        decision = await analyze_message_for_tts(cog, message)
+
+        self.assertTrue(decision.should_process_tts)
+        self.assertEqual(decision.forced_engine, "piper")
+        self.assertEqual(decision.active_prefix, "%")
+
     async def test_message_without_tts_prefix_stops_in_gate(self):
         cog = FakeCog(db=FakeDB(guild_defaults={"tts_prefix": "."}))
         message = make_message("olá sem prefixo")

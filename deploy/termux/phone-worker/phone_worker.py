@@ -44,7 +44,7 @@ _APK_BUILD_THREAD_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.9.1"
+PHONE_WORKER_VERSION = "1.9.2"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -71,6 +71,8 @@ SUPPORTED_DIRECT_TASKS = (
     "status",
     "tailscale_status",
     "text_stats",
+    "tts_cache_lookup",
+    "tts_cache_store",
     "tts_synthesize_benchmark",
     "tts_synthesize_piper",
     "worker_logs",
@@ -106,6 +108,8 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "status",
     "tailscale_status",
     "text_stats",
+    "tts_cache_lookup",
+    "tts_cache_store",
     "tts_synthesize_benchmark",
     "tts_synthesize_piper",
     "worker_logs",
@@ -1280,6 +1284,45 @@ def _safe_name(name: Any, fallback: str = "file.bin") -> str:
     return "/".join(parts) or fallback
 
 
+def _turbo_dependency_snapshot() -> dict[str, Any]:
+    profile = _current_core_worker_profile()
+    deps: dict[str, Any] = {
+        "profile": profile,
+        "turbo": profile == "turbo",
+        "ffmpeg": bool(shutil.which("ffmpeg")),
+        "ffprobe": bool(shutil.which("ffprobe")),
+        "curl": bool(shutil.which("curl")),
+        "wget": bool(shutil.which("wget")),
+        "piper_cli": bool(shutil.which("piper")),
+        "piper_command": bool(str(os.getenv("PHONE_WORKER_PIPER_COMMAND", "") or "").strip()),
+        "piper_model": False,
+        "piper_config": False,
+        "edge_tts": False,
+        "gtts": False,
+    }
+    model = str(os.getenv("PHONE_WORKER_PIPER_MODEL", "") or "").strip()
+    config = str(os.getenv("PHONE_WORKER_PIPER_CONFIG", "") or "").strip()
+    if model:
+        with contextlib.suppress(Exception):
+            deps["piper_model"] = Path(model).expanduser().exists() and Path(model).expanduser().stat().st_size > 0
+    if config:
+        with contextlib.suppress(Exception):
+            deps["piper_config"] = Path(config).expanduser().exists() and Path(config).expanduser().stat().st_size > 0
+    try:
+        import edge_tts  # type: ignore  # noqa: F401
+        deps["edge_tts"] = True
+    except Exception as exc:
+        deps["edge_tts_error"] = _short_text(exc, limit=80)
+    try:
+        import gtts  # type: ignore  # noqa: F401
+        deps["gtts"] = True
+    except Exception as exc:
+        deps["gtts_error"] = _short_text(exc, limit=80)
+    missing = [key for key in ("ffmpeg", "ffprobe", "edge_tts", "gtts", "piper_cli", "piper_model", "piper_config") if not deps.get(key)]
+    deps["ok"] = not missing
+    deps["missing"] = missing
+    return deps
+
 def _system_status() -> dict[str, Any]:
     auto_boot_repair = _auto_repair_local_boot_if_needed()
     disk = shutil.disk_usage(Path.home())
@@ -1329,6 +1372,7 @@ def _system_status() -> dict[str, Any]:
         },
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ffprobe": bool(shutil.which("ffprobe")),
+        "turbo_dependencies": _turbo_dependency_snapshot(),
     }
 
 
@@ -1585,6 +1629,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_maintenance_plan(body)
             elif task == "text_stats":
                 payload = self._task_text_stats(body)
+            elif task == "tts_cache_lookup":
+                payload = self._task_tts_cache_lookup(body)
+            elif task == "tts_cache_store":
+                payload = self._task_tts_cache_store(body)
             elif task == "tts_synthesize_benchmark":
                 payload = self._task_tts_synthesize_benchmark(body)
             elif task == "tts_synthesize_piper":
@@ -1654,6 +1702,189 @@ class WorkerHandler(BaseHTTPRequestHandler):
         except Exception:
             value = 0.0
         return max(-20.0, min(20.0, value))
+
+    def _ensure_tts_cache_allowed(self) -> tuple[list[str], list[str]]:
+        profile = _current_core_worker_profile()
+        roles, capabilities = _current_core_worker_roles_and_capabilities()
+        caps = set(roles) | set(capabilities)
+        if profile != "turbo" or "cache-worker" not in caps:
+            raise RuntimeError("tts_cache é restrito ao perfil turbo com cache-worker")
+        return roles, capabilities
+
+    def _tts_cache_root(self) -> Path:
+        configured = str(os.getenv("PHONE_WORKER_TTS_CACHE_DIR", "") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        return Path.home() / "phone-worker" / "cache" / "tts"
+
+    def _tts_cache_limits(self) -> tuple[int, int]:
+        def _as_int(name: str, default: int, minimum: int, maximum: int) -> int:
+            try:
+                value = int(float(os.getenv(name, str(default)) or default))
+            except Exception:
+                value = default
+            return max(minimum, min(maximum, value))
+        max_mb = _as_int("PHONE_WORKER_TTS_CACHE_MAX_MB", 4096, 64, 32768)
+        max_files = _as_int("PHONE_WORKER_TTS_CACHE_MAX_FILES", 20000, 64, 100000)
+        return max_mb * 1024 * 1024, max_files
+
+    def _sanitize_tts_cache_key(self, raw: Any) -> str:
+        key = str(raw or "").strip().lower()
+        key = re.sub(r"[^a-z0-9_\-]", "", key)
+        if len(key) < 16:
+            raise RuntimeError("cache_key inválida/curta")
+        return key[:96]
+
+    def _normalize_tts_cache_format(self, raw: Any) -> str:
+        fmt = str(raw or "mp3").strip().lower().replace(".", "")
+        if fmt in {"wav", "wave"}:
+            return "wav"
+        if fmt in {"ogg", "opus"}:
+            return "ogg"
+        return "mp3"
+
+    def _tts_cache_path(self, key: str, audio_format: str) -> Path:
+        return self._tts_cache_root() / f"{key}.{self._normalize_tts_cache_format(audio_format)}"
+
+    def _find_tts_cache_file(self, key: str) -> tuple[Path | None, str]:
+        root = self._tts_cache_root()
+        for fmt in ("mp3", "wav", "ogg"):
+            path = root / f"{key}.{fmt}"
+            if path.exists() and path.stat().st_size > 0:
+                return path, fmt
+        return None, ""
+
+    def _touch_tts_cache_file(self, path: Path) -> None:
+        now = time.time()
+        with contextlib.suppress(Exception):
+            os.utime(path, (now, now))
+
+    def _prune_tts_cache(self, *, protected: Path | None = None) -> None:
+        root = self._tts_cache_root()
+        max_bytes, max_files = self._tts_cache_limits()
+        try:
+            entries = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() in {".mp3", ".wav", ".ogg"}]
+        except FileNotFoundError:
+            return
+        stats: list[tuple[float, int, Path]] = []
+        total_bytes = 0
+        for path in entries:
+            try:
+                st = path.stat()
+            except FileNotFoundError:
+                continue
+            size = int(st.st_size or 0)
+            total_bytes += size
+            stats.append((float(st.st_mtime), size, path))
+        if len(stats) <= max_files and total_bytes <= max_bytes:
+            return
+        protected_path = None
+        if protected is not None:
+            with contextlib.suppress(Exception):
+                protected_path = protected.resolve()
+        for _, size, path in sorted(stats, key=lambda item: item[0]):
+            if len(stats) <= max_files and total_bytes <= max_bytes:
+                break
+            if protected_path is not None:
+                with contextlib.suppress(Exception):
+                    if path.resolve() == protected_path:
+                        continue
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                continue
+            total_bytes = max(0, total_bytes - size)
+            stats = [item for item in stats if item[2] != path]
+
+    def _task_tts_cache_lookup(self, body: dict[str, Any]) -> dict[str, Any]:
+        roles, capabilities = self._ensure_tts_cache_allowed()
+        started = time.monotonic()
+        key = self._sanitize_tts_cache_key(body.get("cache_key"))
+        max_audio_bytes = max(1, int(body.get("max_audio_bytes") or self.max_output_bytes))
+        path, audio_format = self._find_tts_cache_file(key)
+        if path is None:
+            return {
+                "ok": False,
+                "engine": str(body.get("engine") or "tts-cache")[:40],
+                "cache_hit": False,
+                "cache_key": key[:16],
+                "error": "worker turbo cache miss",
+                "worker_profile": _current_core_worker_profile(),
+                "worker_version": PHONE_WORKER_VERSION,
+                "roles": roles[:16],
+                "capabilities": capabilities[:24],
+                "logs": [f"tts cache miss key={key[:16]}"],
+            }
+        read_started = time.monotonic()
+        data = path.read_bytes()
+        read_ms = (time.monotonic() - read_started) * 1000.0
+        if not data:
+            raise RuntimeError("cache TTS vazio")
+        if len(data) > max_audio_bytes:
+            raise RuntimeError(f"cache TTS grande demais: {len(data)} bytes")
+        self._touch_tts_cache_file(path)
+        digest = hashlib.sha256(data).hexdigest()
+        total_ms = (time.monotonic() - started) * 1000.0
+        return {
+            "ok": True,
+            "engine": str(body.get("engine") or "tts-cache")[:40],
+            "audio_format": audio_format,
+            "cache_hit": True,
+            "cache_key": key[:16],
+            "cache_file": path.name,
+            "cache_read_ms": round(read_ms, 2),
+            "worker_profile": _current_core_worker_profile(),
+            "worker_version": PHONE_WORKER_VERSION,
+            "roles": roles[:16],
+            "capabilities": capabilities[:24],
+            "worker_synth_ms": 0.0,
+            "worker_total_ms": round(total_ms, 2),
+            "size": len(data),
+            "sha256": digest,
+            "logs": [f"tts cache hit {path.name} {len(data)} B em {read_ms:.1f} ms"],
+            "data_b64": _b64encode(data, max_bytes=max_audio_bytes),
+        }
+
+    def _task_tts_cache_store(self, body: dict[str, Any]) -> dict[str, Any]:
+        roles, capabilities = self._ensure_tts_cache_allowed()
+        started = time.monotonic()
+        key = self._sanitize_tts_cache_key(body.get("cache_key"))
+        audio_format = self._normalize_tts_cache_format(body.get("audio_format"))
+        data = _b64decode(str(body.get("data_b64") or ""), max_bytes=self.max_body_bytes)
+        if not data:
+            raise RuntimeError("data_b64 vazio para cache TTS")
+        expected_hash = str(body.get("sha256") or "").strip().lower()
+        actual_hash = hashlib.sha256(data).hexdigest()
+        if expected_hash and expected_hash != actual_hash:
+            raise RuntimeError("sha256 do cache TTS não confere")
+        root = self._tts_cache_root()
+        root.mkdir(parents=True, exist_ok=True)
+        path = self._tts_cache_path(key, audio_format)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_bytes(data)
+        os.replace(tmp_path, path)
+        self._touch_tts_cache_file(path)
+        self._prune_tts_cache(protected=path)
+        total_ms = (time.monotonic() - started) * 1000.0
+        return {
+            "ok": True,
+            "engine": str(body.get("engine") or "tts-cache")[:40],
+            "audio_format": audio_format,
+            "cache_hit": False,
+            "cache_stored": True,
+            "cache_key": key[:16],
+            "cache_file": path.name,
+            "worker_profile": _current_core_worker_profile(),
+            "worker_version": PHONE_WORKER_VERSION,
+            "roles": roles[:16],
+            "capabilities": capabilities[:24],
+            "worker_total_ms": round(total_ms, 2),
+            "size": len(data),
+            "sha256": actual_hash,
+            "logs": [f"tts cache store {path.name} {len(data)} B"],
+        }
 
     def _ensure_tts_benchmark_turbo_allowed(self) -> tuple[list[str], list[str]]:
         profile = _current_core_worker_profile()

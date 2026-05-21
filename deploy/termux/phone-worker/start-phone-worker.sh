@@ -185,23 +185,181 @@ if [[ ! -f "$WORKER_DIR/phone_worker.py" ]]; then
   exit 1
 fi
 
-ensure_tts_benchmark_deps_if_needed() {
+upsert_env_value() {
+  local key="$1"
+  local value="$2"
+  mkdir -p "$(dirname "$ENV_FILE")"
+  if [[ -f "$ENV_FILE" ]] && grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
+    local tmp="${ENV_FILE}.tmp.$$"
+    awk -v k="$key" -v v="$value" 'BEGIN{done=0} $0 ~ "^" k "=" {print k "=" v; done=1; next} {print} END{if(!done) print k "=" v}' "$ENV_FILE" > "$tmp" && mv -f "$tmp" "$ENV_FILE"
+  else
+    printf '\n%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+  fi
+  export "$key=$value"
+}
+
+is_turbo_profile() {
   local profile="${CORE_WORKER_PROFILE:-${PHONE_WORKER_PROFILE:-}}"
   profile="$(printf '%s' "$profile" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
-  [[ "$profile" == "turbo" ]] || return 0
-  local mode="${PHONE_WORKER_TTS_DEPS_INSTALL:-auto}"
+  [[ "$profile" == "turbo" ]]
+}
+
+deps_install_enabled() {
+  local mode="${PHONE_WORKER_TURBO_DEPS_INSTALL:-${PHONE_WORKER_TTS_DEPS_INSTALL:-auto}}"
   mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
-  [[ "$mode" == "0" || "$mode" == "false" || "$mode" == "off" || "$mode" == "no" ]] && return 0
+  [[ "$mode" == "0" || "$mode" == "false" || "$mode" == "off" || "$mode" == "no" ]] && return 1
+  return 0
+}
+
+ensure_turbo_termux_packages_if_needed() {
+  is_turbo_profile || return 0
+  deps_install_enabled || return 0
+  command -v pkg >/dev/null 2>&1 || return 0
+  local missing=()
+  command -v curl >/dev/null 2>&1 || missing+=(curl)
+  command -v wget >/dev/null 2>&1 || missing+=(wget)
+  command -v ffmpeg >/dev/null 2>&1 || missing+=(ffmpeg)
+  command -v ffprobe >/dev/null 2>&1 || missing+=(ffmpeg)
+  command -v sox >/dev/null 2>&1 || missing+=(sox)
+  command -v espeak >/dev/null 2>&1 || missing+=(espeak)
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    log "perfil turbo: instalando pacote(s) Termux ausentes: ${missing[*]}"
+    pkg install -y "${missing[@]}" >/dev/null 2>&1 || \
+      log "não consegui instalar todos os pacotes turbo; capabilities dependentes podem falhar"
+  fi
+}
+
+ensure_turbo_python_tts_deps_if_needed() {
+  is_turbo_profile || return 0
+  deps_install_enabled || return 0
   "$PYTHON_BIN" - <<'PYTTSDEPS' >/dev/null 2>&1 && return 0
 import edge_tts  # noqa: F401
 import gtts  # noqa: F401
 PYTTSDEPS
-  log "perfil turbo: instalando dependências leves do benchmark TTS (edge/gTTS)"
+  log "perfil turbo: instalando dependências leves do TTS (edge/gTTS)"
   "$PYTHON_BIN" -m pip install --upgrade edge-tts gTTS >/dev/null 2>&1 || \
-    log "não consegui instalar edge/gTTS automaticamente; o benchmark vai mostrar o erro curto"
+    log "não consegui instalar edge/gTTS automaticamente; o benchmark vai mostrar erro curto"
 }
 
-ensure_tts_benchmark_deps_if_needed
+ensure_turbo_piper_cli_if_needed() {
+  is_turbo_profile || return 0
+  deps_install_enabled || return 0
+  if command -v piper >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ -n "${PHONE_WORKER_PIPER_COMMAND:-}" && -x "${PHONE_WORKER_PIPER_COMMAND:-}" ]] && command -v piper >/dev/null 2>&1; then
+    return 0
+  fi
+  command -v apt >/dev/null 2>&1 || return 0
+  command -v wget >/dev/null 2>&1 || return 0
+  log "perfil turbo: piper CLI ausente; tentando instalar pacote .deb do Piper para Termux"
+  local tmpdir="${TMPDIR:-/tmp}/piper-termux-install"
+  mkdir -p "$tmpdir"
+  local deb_url="${PHONE_WORKER_PIPER_DEB_URL:-}"
+  if [[ -z "$deb_url" ]]; then
+    deb_url="$($PYTHON_BIN - <<'PYPIPERDEB' 2>/dev/null || true
+import json, urllib.request
+url='https://api.github.com/repos/gyroing/piper-tts-for-termux/releases/latest'
+data=json.load(urllib.request.urlopen(url, timeout=20))
+for a in data.get('assets') or []:
+    u=str(a.get('browser_download_url') or '')
+    if u.endswith('.deb'):
+        print(u)
+        break
+PYPIPERDEB
+)"
+  fi
+  if [[ -z "$deb_url" ]]; then
+    log "não encontrei URL .deb do Piper; configure PHONE_WORKER_PIPER_DEB_URL se quiser auto-instalar"
+    return 0
+  fi
+  wget -q -O "$tmpdir/piper-termux.deb" "$deb_url" && \
+    apt install -y "$tmpdir/piper-termux.deb" >/dev/null 2>&1 || \
+    log "não consegui instalar Piper .deb automaticamente"
+}
+
+ensure_turbo_piper_model_if_needed() {
+  is_turbo_profile || return 0
+  deps_install_enabled || return 0
+  local auto_model="${PHONE_WORKER_PIPER_MODEL_AUTO_DOWNLOAD:-true}"
+  auto_model="$(printf '%s' "$auto_model" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
+  [[ "$auto_model" == "0" || "$auto_model" == "false" || "$auto_model" == "off" || "$auto_model" == "no" ]] && return 0
+  local model="${PHONE_WORKER_PIPER_MODEL:-$HOME/piper-models/pt_BR/edresson-low/pt_BR-edresson-low.onnx}"
+  local config="${PHONE_WORKER_PIPER_CONFIG:-${model}.json}"
+  local model_url="${PHONE_WORKER_PIPER_MODEL_URL:-https://huggingface.co/rhasspy/piper-voices/resolve/main/pt/pt_BR/edresson/low/pt_BR-edresson-low.onnx?download=true}"
+  local config_url="${PHONE_WORKER_PIPER_CONFIG_URL:-https://huggingface.co/rhasspy/piper-voices/resolve/main/pt/pt_BR/edresson/low/pt_BR-edresson-low.onnx.json?download=true}"
+  command -v wget >/dev/null 2>&1 || return 0
+  mkdir -p "$(dirname "$model")"
+  if [[ ! -s "$model" ]]; then
+    log "perfil turbo: baixando modelo Piper padrão"
+    wget -q -c -O "$model" "$model_url" || log "não consegui baixar modelo Piper padrão"
+  fi
+  if [[ ! -s "$config" ]]; then
+    log "perfil turbo: baixando config do modelo Piper padrão"
+    wget -q -c -O "$config" "$config_url" || log "não consegui baixar config Piper padrão"
+  fi
+  [[ -s "$model" ]] && upsert_env_value PHONE_WORKER_PIPER_MODEL "$model"
+  [[ -s "$config" ]] && upsert_env_value PHONE_WORKER_PIPER_CONFIG "$config"
+  if [[ -z "${PHONE_WORKER_PIPER_MODEL_NAME:-}" ]]; then
+    upsert_env_value PHONE_WORKER_PIPER_MODEL_NAME "pt_BR-edresson-low"
+  fi
+}
+
+ensure_turbo_piper_wrapper_if_needed() {
+  is_turbo_profile || return 0
+  deps_install_enabled || return 0
+  local wrapper="$WORKER_DIR/bin/piper-worker"
+  if [[ -x "$wrapper" ]]; then
+    if [[ -z "${PHONE_WORKER_PIPER_COMMAND:-}" ]]; then
+      upsert_env_value PHONE_WORKER_PIPER_COMMAND "$wrapper"
+    fi
+    return 0
+  fi
+  command -v piper >/dev/null 2>&1 || return 0
+  command -v ffmpeg >/dev/null 2>&1 || return 0
+  mkdir -p "$WORKER_DIR/bin"
+  cat > "$wrapper" <<'PIPERWRAP'
+#!/data/data/com.termux/files/usr/bin/bash
+set -euo pipefail
+MODEL=""
+CONFIG=""
+OUTPUT=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --model) MODEL="${2:-}"; shift 2 ;;
+    --config) CONFIG="${2:-}"; shift 2 ;;
+    --output_file|--output-file) OUTPUT="${2:-}"; shift 2 ;;
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
+if [ -z "$MODEL" ] || [ ! -s "$MODEL" ]; then echo "modelo Piper inválido: $MODEL" >&2; exit 2; fi
+if [ -z "$OUTPUT" ]; then echo "output_file não informado" >&2; exit 2; fi
+VOICE_DIR="$(dirname "$MODEL")"
+VOICE_NAME="$(basename "$MODEL")"
+VOICE_NAME="${VOICE_NAME%.onnx}"
+TEXT="$(cat)"
+if [ -z "${TEXT// }" ]; then echo "texto vazio" >&2; exit 2; fi
+RAW="$(mktemp "$TMPDIR/piper-raw-XXXXXX.raw")"
+trap 'rm -f "$RAW"' EXIT
+export PIPER_VOICE_PATH="$VOICE_DIR"
+piper -m "$VOICE_NAME" -f "$RAW" -- "$TEXT"
+ffmpeg -y -hide_banner -loglevel error -f f32le -ar 22050 -ac 1 -i "$RAW" "$OUTPUT"
+PIPERWRAP
+  chmod +x "$wrapper"
+  upsert_env_value PHONE_WORKER_PIPER_COMMAND "$wrapper"
+  log "perfil turbo: wrapper Piper criado em $wrapper"
+}
+
+ensure_turbo_deps_if_needed() {
+  ensure_turbo_termux_packages_if_needed
+  ensure_turbo_python_tts_deps_if_needed
+  ensure_turbo_piper_cli_if_needed
+  ensure_turbo_piper_model_if_needed
+  ensure_turbo_piper_wrapper_if_needed
+}
+
+ensure_turbo_deps_if_needed
 
 count="$(worker_pid_count)"
 if health_ok && [[ "$count" -le 1 ]]; then

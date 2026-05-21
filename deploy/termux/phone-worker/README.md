@@ -6,7 +6,7 @@ A versão `1.9.0` mantém a task direta `tts_synthesize_piper`, restrita ao perf
 
 O benchmark `.teste` agora mede Piper em duas fases: cache miss/geração e cache hit. O resumo deve diferenciar “Piper funcional, mas lento ao gerar” de “Piper cacheado é rápido”.
 
-Piper/modelos continuam locais no celular: configure `PHONE_WORKER_PIPER_COMMAND`, `PHONE_WORKER_PIPER_MODEL` e, se necessário, `PHONE_WORKER_PIPER_CONFIG` no `~/.phone-worker.env`. Não coloque `.onnx`, `.json` de modelo, service account ou segredos no repositório. Para cache local grande, ajuste `PHONE_WORKER_PIPER_CACHE_MAX_MB` e `PHONE_WORKER_PIPER_CACHE_MAX_FILES`.
+Piper/modelos continuam locais no celular: configure `PHONE_WORKER_PIPER_COMMAND`, `PHONE_WORKER_PIPER_MODEL` e, se necessário, `PHONE_WORKER_PIPER_CONFIG` no `~/.phone-worker.env`. Não coloque `.onnx`, `.json` de modelo, service account ou segredos no repositório. No perfil `turbo`, o `start-phone-worker.sh` pode instalar dependências faltantes de forma segura (`PHONE_WORKER_TURBO_DEPS_INSTALL=auto`) e baixar o modelo padrão se `PHONE_WORKER_PIPER_MODEL_AUTO_DOWNLOAD=true`. Para cache local grande, ajuste `PHONE_WORKER_PIPER_CACHE_MAX_MB`, `PHONE_WORKER_PIPER_CACHE_MAX_FILES`, `PHONE_WORKER_TTS_CACHE_MAX_MB` e `PHONE_WORKER_TTS_CACHE_MAX_FILES`. A VPS pode consultar esse cache TTS genérico do worker como segunda camada, sem depender dele para funcionar.
 
 ## Patch 84.7: benchmark TTS turbo
 

@@ -68,7 +68,7 @@ TTS_TURBO_BENCHMARK_TRIGGER_TEXT = str(getattr(config, "TTS_TURBO_BENCHMARK_TRIG
 TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS = max(1.5, float(getattr(config, "TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS", 12.0) or 12.0))
 TTS_TURBO_BENCHMARK_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_TURBO_BENCHMARK_MAX_AUDIO_MB", 4) or 4))
 TTS_PIPER_EXPERIMENT_ENABLED = bool(getattr(config, "TTS_PIPER_EXPERIMENT_ENABLED", True))
-TTS_PIPER_EXPERIMENT_GUILD_ID = int(getattr(config, "TTS_PIPER_EXPERIMENT_GUILD_ID", TTS_TURBO_BENCHMARK_GUILD_ID) or TTS_TURBO_BENCHMARK_GUILD_ID)
+TTS_PIPER_EXPERIMENT_GUILD_ID = int(getattr(config, "TTS_PIPER_EXPERIMENT_GUILD_ID", 0) or 0)
 TTS_PIPER_EXPERIMENT_PREFIX = str(getattr(config, "TTS_PIPER_EXPERIMENT_PREFIX", "%") or "%").strip() or "%"
 TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_PIPER_WORKER_TIMEOUT_SECONDS", 6.0) or 6.0))
 TTS_PIPER_MAX_TEXT_LENGTH = max(16, int(getattr(config, "TTS_PIPER_MAX_TEXT_LENGTH", 600) or 600))
@@ -77,6 +77,11 @@ TTS_PIPER_MODEL_NAME = str(getattr(config, "TTS_PIPER_MODEL_NAME", "turbo-defaul
 TTS_PIPER_VPS_CACHE_SIZE = max(32, int(getattr(config, "TTS_PIPER_VPS_CACHE_SIZE", 2048) or 2048))
 TTS_PIPER_VPS_CACHE_MAX_MB = max(64, int(getattr(config, "TTS_PIPER_VPS_CACHE_MAX_MB", 2048) or 2048))
 TTS_PIPER_VPS_CACHE_MAX_BYTES = TTS_PIPER_VPS_CACHE_MAX_MB * 1024 * 1024
+TTS_TURBO_WORKER_CACHE_ENABLED = bool(getattr(config, "TTS_TURBO_WORKER_CACHE_ENABLED", True))
+TTS_TURBO_WORKER_CACHE_LOOKUP_TIMEOUT_SECONDS = max(0.15, float(getattr(config, "TTS_TURBO_WORKER_CACHE_LOOKUP_TIMEOUT_SECONDS", 0.65) or 0.65))
+TTS_TURBO_WORKER_CACHE_STORE_TIMEOUT_SECONDS = max(0.5, float(getattr(config, "TTS_TURBO_WORKER_CACHE_STORE_TIMEOUT_SECONDS", 2.5) or 2.5))
+TTS_TURBO_WORKER_CACHE_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_TURBO_WORKER_CACHE_MAX_AUDIO_MB", 8) or 8))
+TTS_TURBO_WORKER_CACHE_STORE_BACKGROUND = bool(getattr(config, "TTS_TURBO_WORKER_CACHE_STORE_BACKGROUND", True))
 PHONE_WORKER_ENABLED = bool(getattr(config, "PHONE_WORKER_ENABLED", False))
 PHONE_WORKER_HOST = str(getattr(config, "PHONE_WORKER_HOST", "") or "").strip()
 PHONE_WORKER_PORT = int(getattr(config, "PHONE_WORKER_PORT", 8766) or 8766)
@@ -1106,6 +1111,120 @@ class TTSAudioMixin:
         data["audio_format"] = self._normalize_worker_audio_format(data.get("audio_format"))
         return data
 
+    def _worker_tts_cache_payload_base(self, item: QueueItem, key: str) -> dict[str, Any]:
+        engine = str(item.engine or "gtts").strip().lower() or "gtts"
+        payload: dict[str, Any] = {
+            "cache_key": key,
+            "engine": engine,
+            "text_length": len(str(item.text or "")),
+            "max_audio_bytes": TTS_TURBO_WORKER_CACHE_MAX_AUDIO_MB * 1024 * 1024,
+        }
+        if engine == "piper":
+            payload["model_name"] = str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME)
+        return payload
+
+    def _path_audio_format(self, path: str) -> str:
+        suffix = os.path.splitext(str(path or ""))[1].lower().replace(".", "")
+        if suffix in {"wav", "wave"}:
+            return "wav"
+        if suffix in {"ogg", "opus"}:
+            return "ogg"
+        return "mp3"
+
+    async def _try_get_worker_turbo_cache_path(self, item: QueueItem) -> str | None:
+        if not TTS_TURBO_WORKER_CACHE_ENABLED:
+            return None
+        if not PHONE_WORKER_ENABLED or not PHONE_WORKER_HOST or not PHONE_WORKER_TOKEN:
+            return None
+        key = self._cache_key(item)
+        payload = self._worker_tts_cache_payload_base(item, key)
+        try:
+            data = await self._request_phone_worker_tts_audio(
+                task="tts_cache_lookup",
+                payload=payload,
+                timeout_seconds=TTS_TURBO_WORKER_CACHE_LOOKUP_TIMEOUT_SECONDS,
+                max_audio_mb=TTS_TURBO_WORKER_CACHE_MAX_AUDIO_MB,
+            )
+            if not bool(data.get("cache_hit")):
+                return None
+            suffix = ".wav" if data.get("audio_format") == "wav" else (".ogg" if data.get("audio_format") == "ogg" else ".mp3")
+            path = self._make_runtime_temp_file(suffix=suffix)
+            try:
+                with open(path, "wb") as handle:
+                    handle.write(data["raw_audio"])
+                if os.path.getsize(path) <= 0:
+                    raise RuntimeError("worker cache retornou áudio vazio")
+                self._record_cache_hit(item.engine)
+                self._log_debug(
+                    f"[tts_worker_cache] hit | guild={item.guild_id} engine={item.engine} key={key[:10]} total={data.get('total_ms')}ms read={data.get('cache_read_ms')}ms"
+                )
+                return path
+            except Exception:
+                with contextlib.suppress(Exception):
+                    os.remove(path)
+                raise
+        except Exception as exc:
+            self._log_debug(f"[tts_worker_cache] miss/indisponível | guild={item.guild_id} engine={item.engine} erro={exc}")
+            return None
+
+    async def _store_worker_turbo_cache(self, item: QueueItem, path: str) -> None:
+        if not TTS_TURBO_WORKER_CACHE_ENABLED:
+            return
+        if not PHONE_WORKER_ENABLED or not PHONE_WORKER_HOST or not PHONE_WORKER_TOKEN:
+            return
+        if not path or not os.path.exists(path):
+            return
+        try:
+            size = os.path.getsize(path)
+        except Exception:
+            return
+        max_bytes = TTS_TURBO_WORKER_CACHE_MAX_AUDIO_MB * 1024 * 1024
+        if size <= 0 or size > max_bytes:
+            return
+        key = self._cache_key(item)
+        try:
+            def _read_file(target: str) -> bytes:
+                with open(target, "rb") as handle:
+                    return handle.read()
+            raw = await asyncio.to_thread(_read_file, path)
+            if not raw or len(raw) > max_bytes:
+                return
+            digest = hashlib.sha256(raw).hexdigest()
+            payload = self._worker_tts_cache_payload_base(item, key)
+            payload.update({
+                "audio_format": self._path_audio_format(path),
+                "sha256": digest,
+                "data_b64": base64.b64encode(raw).decode("ascii"),
+            })
+            base = self._phone_worker_tts_base_url()
+            if not base:
+                return
+            headers = {
+                "Authorization": f"Bearer {PHONE_WORKER_TOKEN}",
+                "Content-Type": "application/json",
+            }
+            request_payload = dict(payload)
+            request_payload["task"] = "tts_cache_store"
+            timeout = aiohttp.ClientTimeout(total=TTS_TURBO_WORKER_CACHE_STORE_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(f"{base}/task", headers=headers, json=request_payload) as response:
+                    text = await response.text()
+                    if response.status < 200 or response.status >= 300:
+                        raise RuntimeError(f"HTTP {response.status}: {text[:160]}")
+            self._log_debug(f"[tts_worker_cache] store ok | guild={item.guild_id} engine={item.engine} key={key[:10]} size={size}")
+        except Exception as exc:
+            self._log_debug(f"[tts_worker_cache] store falhou | guild={item.guild_id} engine={item.engine} erro={exc}")
+
+    def _schedule_worker_turbo_cache_store(self, item: QueueItem, path: str) -> None:
+        if not TTS_TURBO_WORKER_CACHE_STORE_BACKGROUND:
+            return
+        if not TTS_TURBO_WORKER_CACHE_ENABLED:
+            return
+        if not PHONE_WORKER_ENABLED or not PHONE_WORKER_HOST or not PHONE_WORKER_TOKEN:
+            return
+        task = asyncio.create_task(self._store_worker_turbo_cache(item, path))
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
     async def _generate_piper_worker_file(self, item: QueueItem) -> str:
         text = str(item.text or "").strip()
         if not text:
@@ -1627,9 +1746,18 @@ class TTSAudioMixin:
                 if cached:
                     return cached, False
 
+                worker_cached = await self._try_get_worker_turbo_cache_path(item)
+                if worker_cached:
+                    if store_in_cache:
+                        cached_path = await self._store_in_cache(state, item, worker_cached)
+                        self._schedule_worker_turbo_cache_store(item, cached_path)
+                        return cached_path, False
+                    return worker_cached, False
+
             generated = await self._generate_audio_file(item)
             if store_in_cache:
                 cached_path = await self._store_in_cache(state, item, generated)
+                self._schedule_worker_turbo_cache_store(item, cached_path)
                 if cached_path != generated:
                     return cached_path, False
             return generated, False
