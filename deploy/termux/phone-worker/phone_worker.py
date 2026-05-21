@@ -44,7 +44,7 @@ _APK_BUILD_THREAD_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.8.9"
+PHONE_WORKER_VERSION = "1.9.0"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -72,6 +72,7 @@ SUPPORTED_DIRECT_TASKS = (
     "tailscale_status",
     "text_stats",
     "tts_synthesize_benchmark",
+    "tts_synthesize_piper",
     "worker_logs",
     "worker_self_check",
     "worker_update",
@@ -106,6 +107,7 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "tailscale_status",
     "text_stats",
     "tts_synthesize_benchmark",
+    "tts_synthesize_piper",
     "worker_logs",
     "worker_self_check",
     "worker_update",
@@ -146,8 +148,8 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     },
     "turbo": {
         "label": "Turbo",
-        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "apk-builder", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "apk-builder", "vps-assist", "cache-worker"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "apk-builder", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -1585,6 +1587,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_text_stats(body)
             elif task == "tts_synthesize_benchmark":
                 payload = self._task_tts_synthesize_benchmark(body)
+            elif task == "tts_synthesize_piper":
+                payload = self._task_tts_synthesize_piper(body)
             elif task == "log_extract":
                 payload = self._task_log_extract(body)
             elif task == "log_summary":
@@ -1659,6 +1663,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raise RuntimeError("tts_synthesize_benchmark é restrito ao perfil turbo com tts-synth/tts-benchmark")
         return roles, capabilities
 
+    def _ensure_tts_piper_turbo_allowed(self) -> tuple[list[str], list[str]]:
+        profile = _current_core_worker_profile()
+        roles, capabilities = _current_core_worker_roles_and_capabilities()
+        caps = set(roles) | set(capabilities)
+        if profile != "turbo" or "tts-synth" not in caps:
+            raise RuntimeError("tts_synthesize_piper é restrito ao perfil turbo com tts-synth")
+        return roles, capabilities
+
     def _ensure_worker_google_credentials_file(self, tmp_dir: Path) -> None:
         if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
             return
@@ -1677,10 +1689,149 @@ class WorkerHandler(BaseHTTPRequestHandler):
         path.write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(path)
 
+    def _resolve_piper_command(self) -> str:
+        configured = str(os.getenv("PHONE_WORKER_PIPER_COMMAND", "") or "").strip()
+        if configured:
+            return configured
+        found = shutil.which("piper")
+        if found:
+            return found
+        raise RuntimeError("piper não encontrado; configure PHONE_WORKER_PIPER_COMMAND ou instale o binário no worker turbo")
+
+    def _resolve_piper_model(self, body: dict[str, Any]) -> tuple[str, str]:
+        model = str(body.get("model") or body.get("model_path") or os.getenv("PHONE_WORKER_PIPER_MODEL", "") or "").strip()
+        config = str(body.get("config") or body.get("config_path") or os.getenv("PHONE_WORKER_PIPER_CONFIG", "") or "").strip()
+        model_name = str(body.get("model_name") or os.getenv("PHONE_WORKER_PIPER_MODEL_NAME", "turbo-default") or "turbo-default").strip() or "turbo-default"
+        if not model:
+            # Atalho opcional para manter vários modelos por nome sem mexer no bot.
+            env_key = re.sub(r"[^A-Z0-9]+", "_", model_name.upper()).strip("_")
+            if env_key:
+                model = str(os.getenv(f"PHONE_WORKER_PIPER_MODEL_{env_key}", "") or "").strip()
+                config = config or str(os.getenv(f"PHONE_WORKER_PIPER_CONFIG_{env_key}", "") or "").strip()
+        if not model:
+            raise RuntimeError("Piper sem modelo; configure PHONE_WORKER_PIPER_MODEL=/caminho/voz.onnx no worker turbo")
+        model_path = Path(model).expanduser()
+        if not model_path.exists() or model_path.stat().st_size <= 0:
+            raise RuntimeError(f"modelo Piper não encontrado ou vazio: {model_path}")
+        if not config:
+            candidate = Path(str(model_path) + ".json")
+            if candidate.exists():
+                config = str(candidate)
+        if config:
+            config_path = Path(config).expanduser()
+            if not config_path.exists() or config_path.stat().st_size <= 0:
+                raise RuntimeError(f"config Piper não encontrado ou vazio: {config_path}")
+            config = str(config_path)
+        return str(model_path), config
+
+    def _synthesize_piper_bytes(self, body: dict[str, Any], *, benchmark: bool) -> dict[str, Any]:
+        roles, capabilities = self._ensure_tts_piper_turbo_allowed()
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise ValueError("texto vazio")
+        if len(text) > 1600:
+            raise ValueError("texto grande demais para Piper experimental")
+        timeout = max(2, min(self.job_timeout, int(float(body.get("timeout_seconds") or self.job_timeout))))
+        max_audio_bytes = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
+        piper_cmd = self._resolve_piper_command()
+        model_path, config_path = self._resolve_piper_model(body)
+        model_name = str(body.get("model_name") or os.getenv("PHONE_WORKER_PIPER_MODEL_NAME", "turbo-default") or "turbo-default").strip() or "turbo-default"
+        logs: list[str] = [
+            f"perfil={_current_core_worker_profile()} versão={PHONE_WORKER_VERSION}",
+            f"engine=piper chars={len(text)} timeout={timeout}s modelo={model_name}",
+        ]
+        started = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="phone-worker-piper-") as tmp:
+            tmp_dir = Path(tmp)
+            wav_path = tmp_dir / "speech.wav"
+            mp3_path = tmp_dir / "speech.mp3"
+            cmd = [piper_cmd, "--model", model_path, "--output_file", str(wav_path)]
+            if config_path:
+                cmd.extend(["--config", config_path])
+            extra_args = shlex.split(str(os.getenv("PHONE_WORKER_PIPER_EXTRA_ARGS", "") or ""))
+            if extra_args:
+                cmd.extend(extra_args)
+            piper_started = time.monotonic()
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    input=(text + "\n").encode("utf-8"),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"Piper timeout após {timeout}s") from exc
+            piper_ms = (time.monotonic() - piper_started) * 1000.0
+            stderr = _short_text((proc.stderr or b"").decode("utf-8", errors="ignore"), limit=220)
+            if proc.returncode != 0:
+                raise RuntimeError(f"Piper saiu com código {proc.returncode}: {stderr or 'sem stderr'}")
+            if not wav_path.exists() or wav_path.stat().st_size <= 0:
+                raise RuntimeError(f"Piper não gerou WAV válido: {stderr or 'sem stderr'}")
+            logs.append(f"piper wav {wav_path.stat().st_size} B em {piper_ms:.1f} ms")
+
+            output_path = wav_path
+            audio_format = "wav"
+            ffmpeg = shutil.which("ffmpeg")
+            if ffmpeg:
+                conv_started = time.monotonic()
+                conv_cmd = [
+                    ffmpeg,
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(wav_path),
+                    "-codec:a",
+                    "libmp3lame",
+                    "-b:a",
+                    str(os.getenv("PHONE_WORKER_PIPER_MP3_BITRATE", "96k") or "96k"),
+                    str(mp3_path),
+                ]
+                conv = subprocess.run(conv_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=max(2, min(timeout, 8)), check=False)
+                conv_ms = (time.monotonic() - conv_started) * 1000.0
+                if conv.returncode == 0 and mp3_path.exists() and mp3_path.stat().st_size > 0:
+                    output_path = mp3_path
+                    audio_format = "mp3"
+                    logs.append(f"ffmpeg mp3 {mp3_path.stat().st_size} B em {conv_ms:.1f} ms")
+                else:
+                    conv_err = _short_text((conv.stderr or b"").decode("utf-8", errors="ignore"), limit=160)
+                    logs.append(f"ffmpeg mp3 indisponível; usando wav: {conv_err or 'sem stderr'}")
+            else:
+                logs.append("ffmpeg não encontrado; retornando wav")
+
+            data = output_path.read_bytes()
+            if not data:
+                raise RuntimeError("Piper retornou áudio vazio")
+            if len(data) > max_audio_bytes:
+                raise RuntimeError(f"áudio grande demais: {len(data)} bytes")
+        synth_ms = (time.monotonic() - started) * 1000.0
+        digest = hashlib.sha256(data).hexdigest()
+        logs.append(f"worker Piper gerou {len(data)} bytes em {synth_ms:.1f} ms")
+        return {
+            "ok": True,
+            "engine": "piper",
+            "audio_format": audio_format,
+            "worker_profile": _current_core_worker_profile(),
+            "worker_version": PHONE_WORKER_VERSION,
+            "roles": roles[:16],
+            "capabilities": capabilities[:24],
+            "worker_synth_ms": round(synth_ms, 2),
+            "size": len(data),
+            "sha256": digest,
+            "logs": logs[:10],
+            "data_b64": _b64encode(data, max_bytes=max_audio_bytes),
+        }
+
+    def _task_tts_synthesize_piper(self, body: dict[str, Any]) -> dict[str, Any]:
+        return self._synthesize_piper_bytes(body, benchmark=False)
+
     def _task_tts_synthesize_benchmark(self, body: dict[str, Any]) -> dict[str, Any]:
         roles, capabilities = self._ensure_tts_benchmark_turbo_allowed()
         engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_")
-        if engine not in {"edge", "gtts", "gcloud"}:
+        if engine not in {"edge", "gtts", "gcloud", "piper"}:
             raise ValueError("engine inválida para benchmark TTS")
         text = str(body.get("text") or "").strip()
         if not text:
@@ -1713,6 +1864,11 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
                     asyncio.run(asyncio.wait_for(_save_edge(), timeout=timeout))
                     logs.append(f"edge voice={voice} rate={rate} pitch={pitch}")
+                elif engine == "piper":
+                    result = self._synthesize_piper_bytes(body, benchmark=True)
+                    result["engine"] = "piper"
+                    result["logs"] = (logs + list(result.get("logs") or []))[:10]
+                    return result
                 elif engine == "gcloud":
                     try:
                         from google.cloud import texttospeech_v1 as google_texttospeech  # type: ignore

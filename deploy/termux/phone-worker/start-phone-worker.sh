@@ -195,11 +195,10 @@ ensure_tts_benchmark_deps_if_needed() {
   "$PYTHON_BIN" - <<'PYTTSDEPS' >/dev/null 2>&1 && return 0
 import edge_tts  # noqa: F401
 import gtts  # noqa: F401
-from google.cloud import texttospeech_v1  # noqa: F401
 PYTTSDEPS
-  log "perfil turbo: instalando dependências opcionais do benchmark TTS"
-  "$PYTHON_BIN" -m pip install --upgrade edge-tts gTTS google-cloud-texttospeech >/dev/null 2>&1 || \
-    log "não consegui instalar dependências TTS automaticamente; o benchmark vai mostrar o erro curto"
+  log "perfil turbo: instalando dependências leves do benchmark TTS (edge/gTTS)"
+  "$PYTHON_BIN" -m pip install --upgrade edge-tts gTTS >/dev/null 2>&1 || \
+    log "não consegui instalar edge/gTTS automaticamente; o benchmark vai mostrar o erro curto"
 }
 
 ensure_tts_benchmark_deps_if_needed

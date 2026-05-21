@@ -64,6 +64,24 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
             reason="prefix_command",
         )
 
+    # Piper experimental: prefixo fixo por enquanto, sem painel.
+    # É restrito por guild por padrão para evitar roubar mensagens comuns com / em outros servidores.
+    piper_enabled = bool(getattr(config, "TTS_PIPER_EXPERIMENT_ENABLED", False))
+    piper_prefix = str(getattr(config, "TTS_PIPER_EXPERIMENT_PREFIX", "/") or "/")
+    piper_guild_id = int(getattr(config, "TTS_PIPER_EXPERIMENT_GUILD_ID", 0) or 0)
+    if piper_enabled and piper_prefix and message.content.startswith(piper_prefix):
+        guild_ok = piper_guild_id <= 0 or int(getattr(message.guild, "id", 0) or 0) == piper_guild_id
+        spoken = message.content[len(piper_prefix):].strip()
+        if guild_ok and spoken:
+            return MessageGateDecision(
+                should_process_tts=True,
+                should_dispatch_prefix_command=False,
+                guild_defaults=guild_defaults,
+                forced_engine="piper",
+                active_prefix=piper_prefix,
+                reason="piper_experimental_prefix_matched",
+            )
+
     # Casa um dos três prefixos de fala (gTTS / Edge / gcloud). Se nenhum casar,
     # a mensagem é texto comum e o gate ignora.
     forced_engine, active_prefix = match_engine_prefix(

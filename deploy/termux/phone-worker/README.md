@@ -1,3 +1,11 @@
+# Phone Worker Termux
+
+## Patch 85: Piper experimental no perfil turbo
+
+A versão `1.9.0` adiciona a task direta `tts_synthesize_piper`, restrita ao perfil `turbo` com `tts-synth`. O bot pode usar o prefixo experimental `/texto` no servidor autorizado para tentar sintetizar pelo Piper local no celular; se o worker estiver offline, sem binário/modelo ou lento, a VPS cai automaticamente para a engine normal de fallback. O benchmark `.teste` agora também mostra Piper, trata áudio `0 B` como falha e o script de start deixa de tentar instalar `google-cloud-texttospeech` no Termux.
+
+Piper/modelos continuam locais no celular: configure `PHONE_WORKER_PIPER_COMMAND`, `PHONE_WORKER_PIPER_MODEL` e, se necessário, `PHONE_WORKER_PIPER_CONFIG` no `~/.phone-worker.env`. Não coloque `.onnx`, `.json` de modelo, service account ou segredos no repositório.
+
 ## Patch 84.7: benchmark TTS turbo
 
 A versão `1.8.9` adiciona a task direta `tts_synthesize_benchmark`, restrita ao perfil `turbo` com as capacidades `tts-synth` e `tts-benchmark`. Ela sintetiza áudio curto por `edge`, `gtts` ou `gcloud` e devolve o MP3 para a VPS medir o tempo total real do worker, incluindo ida, síntese, retorno e validação. O worker não vira dependência do TTS: se estiver offline, lento, sem dependência ou sem credencial Google local, a VPS continua sintetizando sozinha e o relatório informa a falha curta.

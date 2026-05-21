@@ -67,6 +67,13 @@ TTS_TURBO_BENCHMARK_GUILD_ID = int(getattr(config, "TTS_TURBO_BENCHMARK_GUILD_ID
 TTS_TURBO_BENCHMARK_TRIGGER_TEXT = str(getattr(config, "TTS_TURBO_BENCHMARK_TRIGGER_TEXT", "teste") or "teste").strip().lower() or "teste"
 TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS = max(1.5, float(getattr(config, "TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS", 12.0) or 12.0))
 TTS_TURBO_BENCHMARK_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_TURBO_BENCHMARK_MAX_AUDIO_MB", 4) or 4))
+TTS_PIPER_EXPERIMENT_ENABLED = bool(getattr(config, "TTS_PIPER_EXPERIMENT_ENABLED", True))
+TTS_PIPER_EXPERIMENT_GUILD_ID = int(getattr(config, "TTS_PIPER_EXPERIMENT_GUILD_ID", TTS_TURBO_BENCHMARK_GUILD_ID) or TTS_TURBO_BENCHMARK_GUILD_ID)
+TTS_PIPER_EXPERIMENT_PREFIX = str(getattr(config, "TTS_PIPER_EXPERIMENT_PREFIX", "/") or "/").strip() or "/"
+TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_PIPER_WORKER_TIMEOUT_SECONDS", 6.0) or 6.0))
+TTS_PIPER_MAX_TEXT_LENGTH = max(16, int(getattr(config, "TTS_PIPER_MAX_TEXT_LENGTH", 600) or 600))
+TTS_PIPER_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_PIPER_MAX_AUDIO_MB", 8) or 8))
+TTS_PIPER_MODEL_NAME = str(getattr(config, "TTS_PIPER_MODEL_NAME", "turbo-default") or "turbo-default").strip() or "turbo-default"
 PHONE_WORKER_ENABLED = bool(getattr(config, "PHONE_WORKER_ENABLED", False))
 PHONE_WORKER_HOST = str(getattr(config, "PHONE_WORKER_HOST", "") or "").strip()
 PHONE_WORKER_PORT = int(getattr(config, "PHONE_WORKER_PORT", 8766) or 8766)
@@ -98,6 +105,12 @@ class QueueItem:
     _normalized_cache_text: Optional[str] = field(default=None, repr=False, compare=False)
     _cache_key_value: Optional[str] = field(default=None, repr=False, compare=False)
     _dedup_signature: Optional[str] = field(default=None, repr=False, compare=False)
+    piper_fallback_engine: str = field(default="gtts", repr=False, compare=False)
+    piper_fallback_voice: str = field(default="", repr=False, compare=False)
+    piper_fallback_language: str = field(default="", repr=False, compare=False)
+    piper_fallback_rate: str = field(default="+0%", repr=False, compare=False)
+    piper_fallback_pitch: str = field(default="+0Hz", repr=False, compare=False)
+    piper_model: str = field(default="", repr=False, compare=False)
 
 
 @dataclass
@@ -804,6 +817,9 @@ class TTSAudioMixin:
             rate = self._normalize_gcloud_rate(item.rate)
             pitch = self._normalize_gcloud_pitch(item.pitch)
             payload = f"gcloud|{language}|{voice}|{rate}|{pitch}|{text}"
+        elif engine == "piper":
+            model = str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME).strip() or TTS_PIPER_MODEL_NAME
+            payload = f"piper|worker|{model}|{text}"
         else:
             language = (item.language or GTTS_DEFAULT_LANGUAGE).strip().lower().replace('_', '-')
             if language == 'pt-br':
@@ -1014,6 +1030,107 @@ class TTSAudioMixin:
         scheme = PHONE_WORKER_SCHEME if PHONE_WORKER_SCHEME in {"http", "https"} else "http"
         return f"{scheme}://{PHONE_WORKER_HOST}:{PHONE_WORKER_PORT}"
 
+    def _phone_worker_tts_base_url(self) -> str:
+        return self._phone_worker_tts_benchmark_base_url()
+
+    def _normalize_worker_audio_format(self, value: Any) -> str:
+        fmt = str(value or "mp3").strip().lower().replace(".", "")
+        if fmt in {"wav", "wave"}:
+            return "wav"
+        if fmt in {"ogg", "opus"}:
+            return "ogg"
+        return "mp3"
+
+    async def _request_phone_worker_tts_audio(self, *, task: str, payload: dict[str, Any], timeout_seconds: float, max_audio_mb: int) -> dict[str, Any]:
+        base = self._phone_worker_tts_base_url()
+        if not base:
+            raise RuntimeError("PHONE_WORKER_ENABLED/HOST/TOKEN não configurado")
+        headers = {
+            "Authorization": f"Bearer {PHONE_WORKER_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        request_payload = dict(payload)
+        request_payload["task"] = task
+        max_audio_bytes = max(1, int(max_audio_mb)) * 1024 * 1024
+        request_payload.setdefault("max_audio_bytes", max_audio_bytes)
+        started = time.monotonic()
+        timeout = aiohttp.ClientTimeout(total=max(1.0, float(timeout_seconds)))
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(f"{base}/task", headers=headers, json=request_payload) as response:
+                response_text = await response.text()
+                if response.status < 200 or response.status >= 300:
+                    raise RuntimeError(f"HTTP {response.status}: {response_text[:260]}")
+                data = json.loads(response_text or "{}")
+        out_b64 = str(data.get("data_b64") or "")
+        if not out_b64:
+            raise RuntimeError("worker não retornou data_b64")
+        raw = base64.b64decode(out_b64.encode("ascii"), validate=True)
+        if not raw:
+            raise RuntimeError("worker retornou áudio vazio")
+        if len(raw) > max_audio_bytes:
+            raise RuntimeError(f"worker retornou áudio grande demais: {len(raw)} bytes")
+        expected_hash = str(data.get("sha256") or "")
+        actual_hash = hashlib.sha256(raw).hexdigest()
+        if expected_hash and expected_hash != actual_hash:
+            raise RuntimeError("sha256 do áudio retornado não confere")
+        data["raw_audio"] = raw
+        data["sha256"] = actual_hash
+        data["total_ms"] = round((time.monotonic() - started) * 1000.0, 2)
+        data["audio_format"] = self._normalize_worker_audio_format(data.get("audio_format"))
+        return data
+
+    async def _generate_piper_worker_file(self, item: QueueItem) -> str:
+        text = str(item.text or "").strip()
+        if not text:
+            raise RuntimeError("texto vazio para Piper")
+        if len(text) > TTS_PIPER_MAX_TEXT_LENGTH:
+            raise RuntimeError(f"texto grande demais para Piper experimental ({len(text)}/{TTS_PIPER_MAX_TEXT_LENGTH})")
+        payload = {
+            "text": text,
+            "model_name": str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME),
+            "timeout_seconds": max(1.0, TTS_PIPER_WORKER_TIMEOUT_SECONDS - 0.5),
+        }
+        data = await self._request_phone_worker_tts_audio(
+            task="tts_synthesize_piper",
+            payload=payload,
+            timeout_seconds=TTS_PIPER_WORKER_TIMEOUT_SECONDS,
+            max_audio_mb=TTS_PIPER_MAX_AUDIO_MB,
+        )
+        suffix = ".wav" if data.get("audio_format") == "wav" else ".mp3"
+        path = self._make_runtime_temp_file(suffix=suffix)
+        try:
+            with open(path, "wb") as handle:
+                handle.write(data["raw_audio"])
+            if os.path.getsize(path) <= 0:
+                raise RuntimeError("Piper retornou áudio vazio")
+            logs = data.get("logs") if isinstance(data.get("logs"), list) else []
+            if logs:
+                self._log_debug("[tts_piper] " + " | ".join(self._short_tts_benchmark_text(x, limit=120) for x in logs[:3]))
+            return path
+        except Exception:
+            with contextlib.suppress(Exception):
+                os.remove(path)
+            raise
+
+    async def _generate_piper_fallback_file(self, item: QueueItem) -> str:
+        fallback_engine = str(getattr(item, "piper_fallback_engine", "gtts") or "gtts").strip().lower()
+        if fallback_engine == "edge":
+            voice = str(getattr(item, "piper_fallback_voice", "") or item.voice or "pt-BR-FranciscaNeural")
+            rate = str(getattr(item, "piper_fallback_rate", "") or item.rate or "+0%")
+            pitch = str(getattr(item, "piper_fallback_pitch", "") or item.pitch or "+0Hz")
+            return await self._run_timed_generation("edge", lambda: self._generate_edge_file(item.text, voice, rate, pitch), guild_id=item.guild_id)
+        if fallback_engine == "gcloud":
+            language = str(getattr(item, "piper_fallback_language", "") or GOOGLE_CLOUD_TTS_LANGUAGE_CODE)
+            voice = str(getattr(item, "piper_fallback_voice", "") or GOOGLE_CLOUD_TTS_VOICE_NAME)
+            rate = str(getattr(item, "piper_fallback_rate", "") or GOOGLE_CLOUD_TTS_SPEAKING_RATE)
+            pitch = str(getattr(item, "piper_fallback_pitch", "") or GOOGLE_CLOUD_TTS_PITCH)
+            try:
+                return await self._run_timed_generation("gcloud", lambda: self._generate_google_cloud_file(item.text, language, voice, rate, pitch), guild_id=item.guild_id)
+            except Exception as exc:
+                logger.warning("[tts_piper] fallback gcloud falhou, usando gTTS | guild=%s erro=%s", item.guild_id, exc)
+        language = str(getattr(item, "piper_fallback_language", "") or item.language or GTTS_DEFAULT_LANGUAGE)
+        return await self._run_timed_generation("gtts", lambda: self._generate_gtts_file(item.text, language), guild_id=item.guild_id)
+
     def _short_tts_benchmark_text(self, value: Any, *, limit: int = 180) -> str:
         text = str(value or "").replace("`", "'").replace("\r", " ").replace("\n", " ").strip()
         text = " ".join(text.split())
@@ -1068,6 +1185,11 @@ class TTSAudioMixin:
             language = str(resolved.get("gcloud_language") or GOOGLE_CLOUD_TTS_LANGUAGE_CODE)
             rate = str(resolved.get("gcloud_rate") or GOOGLE_CLOUD_TTS_SPEAKING_RATE)
             pitch = str(resolved.get("gcloud_pitch") or GOOGLE_CLOUD_TTS_PITCH)
+        elif engine == "piper":
+            voice = ""
+            language = str(resolved.get("language") or base_item.language or GTTS_DEFAULT_LANGUAGE)
+            rate = "+0%"
+            pitch = "+0Hz"
         else:
             engine = "gtts"
             voice = ""
@@ -1084,6 +1206,7 @@ class TTSAudioMixin:
             language=language,
             rate=rate,
             pitch=pitch,
+            piper_model=str(resolved.get("piper_model") or getattr(base_item, "piper_model", "") or TTS_PIPER_MODEL_NAME),
         )
 
     async def _tts_benchmark_local_engine(self, item: QueueItem) -> dict[str, Any]:
@@ -1091,6 +1214,8 @@ class TTSAudioMixin:
         started = time.monotonic()
         path = ""
         try:
+            if engine == "piper":
+                raise RuntimeError("Piper experimental roda apenas no phone-worker turbo")
             if engine == "edge":
                 path = await self._generate_edge_file(item.text, item.voice, item.rate, item.pitch)
             elif engine == "gcloud":
@@ -1100,6 +1225,8 @@ class TTSAudioMixin:
                 path = await self._generate_gtts_file(item.text, item.language)
             elapsed_ms = (time.monotonic() - started) * 1000.0
             size = os.path.getsize(path) if path and os.path.exists(path) else 0
+            if size <= 0:
+                raise RuntimeError("engine gerou áudio vazio (0 B)")
             sha256 = ""
             if path and os.path.exists(path):
                 def _hash_file(target: str) -> str:
@@ -1149,6 +1276,7 @@ class TTSAudioMixin:
             "language": item.language,
             "rate": item.rate,
             "pitch": item.pitch,
+            "model_name": str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME),
             "timeout_seconds": int(max(2.0, TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS - 1.0)),
             "max_audio_bytes": TTS_TURBO_BENCHMARK_MAX_AUDIO_MB * 1024 * 1024,
         }
@@ -1190,6 +1318,8 @@ class TTSAudioMixin:
                         os.remove(path)
 
             saved_size = await asyncio.to_thread(_write_and_stat, raw)
+            if saved_size <= 0:
+                raise RuntimeError("worker retornou áudio vazio após salvar temp")
             total_ms = (time.monotonic() - started) * 1000.0
             logs = data.get("logs") if isinstance(data.get("logs"), list) else []
             clean_logs = [self._short_tts_benchmark_text(line, limit=160) for line in logs[:4]]
@@ -1249,7 +1379,7 @@ class TTSAudioMixin:
 
     async def _send_tts_turbo_benchmark_report(self, channel: Any, base_item: QueueItem, resolved: dict[str, Any] | None) -> None:
         benchmark_text = TTS_TURBO_BENCHMARK_TRIGGER_TEXT
-        engines = ("edge", "gtts", "gcloud")
+        engines = ("edge", "gtts", "gcloud", "piper")
         started = time.monotonic()
         results: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
         worker_meta: dict[str, Any] = {}
@@ -1361,6 +1491,17 @@ class TTSAudioMixin:
         return result
 
     async def _generate_audio_file(self, item: QueueItem) -> str:
+        if item.engine == "piper":
+            try:
+                return await self._run_timed_generation(
+                    "piper",
+                    lambda: self._generate_piper_worker_file(item),
+                    guild_id=item.guild_id,
+                )
+            except Exception as e:
+                logger.warning("[tts_piper] Piper experimental falhou, usando fallback local | guild=%s erro=%s", item.guild_id, e)
+                return await self._generate_piper_fallback_file(item)
+
         if item.engine == "edge":
             try:
                 return await self._run_timed_generation(

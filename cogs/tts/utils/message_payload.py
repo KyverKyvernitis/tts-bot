@@ -45,6 +45,11 @@ async def build_message_tts_payload(
 
     resolved = dict(resolved or {})
     forced_gtts = False
+    fallback_engine = str(resolved.get("engine") or "gtts").strip().lower() or "gtts"
+    fallback_voice = str(resolved.get("voice") or "")
+    fallback_language = str(resolved.get("language") or getattr(config, "GTTS_DEFAULT_LANGUAGE", "pt-br"))
+    fallback_rate = str(resolved.get("rate") or "+0%")
+    fallback_pitch = str(resolved.get("pitch") or "+0Hz")
 
     # Override pelo prefixo: se o user usou o prefixo de Edge, ele quer Edge
     # nessa fala mesmo que o engine padrão dele seja gTTS (e idem pros outros).
@@ -62,6 +67,11 @@ async def build_message_tts_payload(
         resolved["voice"] = resolved.get("gcloud_voice") or str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A")
         resolved["rate"] = resolved.get("gcloud_rate") or str(getattr(config, "GOOGLE_CLOUD_TTS_SPEAKING_RATE", 1.0) or 1.0)
         resolved["pitch"] = resolved.get("gcloud_pitch") or str(getattr(config, "GOOGLE_CLOUD_TTS_PITCH", 0.0) or 0.0)
+    elif forced_engine == "piper":
+        # Piper é experimental e roda no phone-worker turbo. Guardamos a engine
+        # efetiva antiga para fallback local se o celular estiver offline/lento.
+        resolved["engine"] = "piper"
+        resolved["piper_model"] = str(getattr(config, "TTS_PIPER_MODEL_NAME", "turbo-default") or "turbo-default")
 
     # Texto final: tira o prefixo de fala, limpa marcadores e prepende o
     # nome falado do autor quando o servidor tem essa opção ligada.
@@ -92,5 +102,11 @@ async def build_message_tts_payload(
         language=str(resolved.get("language") or ""),
         rate=str(resolved.get("rate") or "+0%"),
         pitch=str(resolved.get("pitch") or "+0Hz"),
+        piper_fallback_engine=fallback_engine,
+        piper_fallback_voice=fallback_voice,
+        piper_fallback_language=fallback_language,
+        piper_fallback_rate=fallback_rate,
+        piper_fallback_pitch=fallback_pitch,
+        piper_model=str(resolved.get("piper_model") or getattr(config, "TTS_PIPER_MODEL_NAME", "turbo-default") or "turbo-default"),
     )
     return MessageTTSPayload(text=text, resolved=resolved, queue_item=queue_item, forced_gtts=forced_gtts)

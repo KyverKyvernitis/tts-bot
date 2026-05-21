@@ -206,6 +206,30 @@ class MessageFlowSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cog.enqueue_calls, [])
         self.assertIsNone(cog._state.last_text_channel_id)
 
+
+    async def test_piper_experimental_prefix_enqueues_in_authorized_guild(self):
+        cog = FakeCog(db=FakeDB(guild_defaults={"tts_prefix": "."}, resolved={"engine": "gtts", "language": "pt-br"}))
+        message = make_message("/olá piper", guild_id=927002914449424404)
+
+        decision = await analyze_message_for_tts(cog, message)
+        self.assertTrue(decision.should_process_tts)
+        self.assertEqual(decision.forced_engine, "piper")
+        self.assertEqual(decision.active_prefix, "/")
+
+        result = await dispatch_message_tts(
+            cog,
+            message,
+            guild_defaults=decision.guild_defaults,
+            active_prefix=decision.active_prefix,
+            forced_engine=decision.forced_engine,
+        )
+
+        self.assertTrue(result.enqueued)
+        _, queue_item = cog.enqueue_calls[0]
+        self.assertEqual(queue_item.text, "olá piper")
+        self.assertEqual(queue_item.engine, "piper")
+        self.assertEqual(queue_item.piper_fallback_engine, "gtts")
+
     async def test_message_without_tts_prefix_stops_in_gate(self):
         cog = FakeCog(db=FakeDB(guild_defaults={"tts_prefix": "."}))
         message = make_message("olá sem prefixo")
