@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from typing import Optional
@@ -15,7 +16,7 @@ from music_system.models import ExtractedBatch, MusicTrack
 from music_system.providers import describe_url
 from music_system.ui import SearchResultView, QueueView, VoiceStatusSettingsView, build_queue_embed, build_now_playing_embeds
 from music_system.musicnode_ui import MusicNodePanelView
-from music_system.worker_node import music_agent_command, resolve_music_tracks_on_worker
+from music_system.worker_node import music_agent_command, music_agent_status, resolve_music_tracks_on_worker
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,60 @@ class Music(commands.Cog):
 
     def _music_agent_default_enabled(self) -> bool:
         return bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)()
+
+
+    def _music_agent_guild_state(self, payload: dict, guild_id: int) -> dict:
+        guilds = payload.get("guilds") if isinstance(payload, dict) else {}
+        if not isinstance(guilds, dict):
+            return {}
+        state = guilds.get(str(guild_id)) or guilds.get(guild_id)
+        return state if isinstance(state, dict) else {}
+
+    def _music_agent_play_message(self, track: MusicTrack, result: dict | None = None) -> str:
+        result = result or {}
+        queued = bool(result.get("queued"))
+        state = result.get("state") if isinstance(result.get("state"), dict) else {}
+        status = str(state.get("status") or "").lower()
+        transport = str(state.get("transport") or "").strip().lower()
+        transport_label = "direto no worker" if transport == "direct" else "Lavalink do worker" if transport == "lavalink" else "Music Agent"
+        if queued:
+            return f"`🎶` **Adicionada ao Music Agent:** {track.short_title} • `{track.duration_label}`"
+        if status == "playing":
+            return f"`🎧` **Tocando pelo Music Agent:** {track.short_title} • `{track.duration_label}` • {transport_label}"
+        if status in {"failed", "error"}:
+            error = str(state.get("last_error") or "fonte de áudio falhou no worker").strip()[:180]
+            return f"`⚠️` Não consegui iniciar **{track.short_title}** no Music Agent: `{error}`"
+        return f"`🎧` **Music Agent preparando:** {track.short_title} • `{track.duration_label}`"
+
+    async def _watch_music_agent_message(self, message, guild_id: int, track: MusicTrack, *, seconds: float | None = None) -> None:
+        limit = float(seconds or getattr(config, "MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", 30.0) or 30.0)
+        deadline = asyncio.get_running_loop().time() + max(5.0, limit)
+        last_status = ""
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(1.5)
+            try:
+                payload = await music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 3.5))
+                state = self._music_agent_guild_state(payload, guild_id)
+                status = str(state.get("status") or "").lower()
+                if not status or status == last_status:
+                    continue
+                last_status = status
+                if status == "playing":
+                    transport = str(state.get("transport") or "").strip().lower()
+                    transport_label = "direto no worker" if transport == "direct" else "Lavalink do worker" if transport == "lavalink" else "Music Agent"
+                    await message.edit(content=f"`🎧` **Tocando pelo Music Agent:** {track.short_title} • `{track.duration_label}` • {transport_label}")
+                    return
+                if status in {"failed", "error"}:
+                    error = str(state.get("last_error") or "fonte de áudio falhou no worker").strip()[:220]
+                    await message.edit(content=f"`⚠️` Não consegui iniciar **{track.short_title}** no Music Agent: `{error}`")
+                    return
+                if status in {"idle", "stopped"} and not state.get("current"):
+                    await message.edit(content=f"`⚠️` Music Agent ficou sem faixa ativa para **{track.short_title}**. Tente novamente.")
+                    return
+            except Exception:
+                logger.debug("[music/agent] falha ao acompanhar estado remoto", exc_info=True)
+        with contextlib.suppress(Exception):
+            await message.edit(content=f"`⚠️` Music Agent demorou para confirmar o início de **{track.short_title}**. Tente novamente se não tocar.")
 
     async def _send_music_agent_control(self, ctx: commands.Context, action: str, success_message: str) -> bool:
         if not self._music_agent_default_enabled():
@@ -459,13 +514,11 @@ class Music(commands.Cog):
                 logger.warning("[music/agent] falha ao enviar play direto | guild=%s erro=%s", ctx.guild.id, exc)
                 await self._reply(ctx, self._music_error_message(exc))
                 return
-            queued = bool(result.get("queued"))
-            await self._reply(
-                ctx,
-                f"`🎶` **Adicionada ao Music Agent:** {track.short_title} • `{track.duration_label}`"
-                if queued
-                else f"`🎧` **Music Agent preparando:** {track.short_title} • `{track.duration_label}`",
-            )
+            msg = await self._reply(ctx, self._music_agent_play_message(track, result))
+            state = result.get("state") if isinstance(result.get("state"), dict) else {}
+            status = str(state.get("status") or "").lower()
+            if msg is not None and not result.get("queued") and status not in {"playing", "failed", "error"}:
+                asyncio.create_task(self._watch_music_agent_message(msg, ctx.guild.id, track))
             return
 
         state_before = self.router.get_state(ctx.guild.id)

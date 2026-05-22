@@ -359,6 +359,7 @@ AUX_LAVALINK_COOLDOWN_SECONDS = max(10.0, _parse_float(os.getenv("AUX_LAVALINK_C
 MUSIC_AGENT_ENABLED = _parse_bool(os.getenv("MUSIC_AGENT_ENABLED", "true"), True)
 MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", "18.0"), 18.0))
 MUSIC_AGENT_STATUS_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", "3.5"), 3.5))
+MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS = max(5.0, _parse_float(os.getenv("MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", "30.0"), 30.0))
 MUSIC_AGENT_MISSING_TOKEN_MESSAGE = (
     os.getenv("MUSIC_AGENT_MISSING_TOKEN_MESSAGE", "Sistema de música indisponível no momento: Music Agent sem token configurado no worker")
     or "Sistema de música indisponível no momento: Music Agent sem token configurado no worker"

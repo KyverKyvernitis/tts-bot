@@ -317,12 +317,15 @@ PYMUSICAGENTDEPS
   log "perfil turbo: dependências do Music Agent ausentes; instalando somente o necessário"
   local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl 'wavelink>=3.4,<3.6' 'yt-dlp[default]')
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-180}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
+    timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-600}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
       log "não consegui instalar dependências do Music Agent automaticamente dentro do timeout"
   else
     "${pip_cmd[@]}" >/dev/null 2>&1 || \
       log "não consegui instalar dependências do Music Agent automaticamente"
   fi
+  "$PYTHON_BIN" - <<'PYMUSICAGENTCHECK' >/dev/null 2>&1 && log "perfil turbo: dependências do Music Agent prontas" || true
+import aiohttp, discord, nacl, wavelink, yt_dlp  # noqa: F401
+PYMUSICAGENTCHECK
 }
 
 ensure_turbo_piper_cli_if_needed() {

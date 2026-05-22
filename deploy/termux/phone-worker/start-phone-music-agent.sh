@@ -76,7 +76,7 @@ PYDEPS
   log "dependências do Music Agent ausentes; instalando aiohttp, discord.py, PyNaCl, wavelink e yt-dlp"
   local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl 'wavelink>=3.4,<3.6' 'yt-dlp[default]')
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-180}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
+    timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-600}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
       log "não consegui instalar todas as dependências automaticamente dentro do timeout"
   else
     "${pip_cmd[@]}" >/dev/null 2>&1 || \
