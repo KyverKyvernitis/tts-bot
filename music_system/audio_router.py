@@ -2451,14 +2451,14 @@ class AudioRouter:
                 except MusicWorkerEngineUnavailable as exc:
                     playback_failed = True
                     playback_failed_before_start = True
-                    playback_failure_label = self._exc_label(exc)
+                    playback_failure_label = MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE
                     if not state.skip_requested and not state.stop_requested:
                         logger.warning("[music/worker] engine musical indisponível | guild=%s track=%r erro=%s", guild_id, track.title, self._exc_label(exc))
                         await self._send_text(guild, state, MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE)
                 except Exception as exc:
                     playback_failed = True
                     playback_failed_before_start = not bool(float(getattr(state, "current_started_at_monotonic", 0.0) or 0.0))
-                    playback_failure_label = self._exc_label(exc)
+                    playback_failure_label = self._public_playback_failure_label(exc)
                     if not state.skip_requested and not state.stop_requested:
                         logger.warning("[music] Falha ao tocar | guild=%s track=%r erro=%s", guild_id, track.title, self._exc_label(exc))
                         await self._send_text(guild, state, f"⚠️ Não consegui iniciar **{track.short_title}**. Se houver outra música no queue, vou tentar a próxima.")
@@ -2894,6 +2894,36 @@ class AudioRouter:
                 raise MusicPlaybackError(f"Lavalink terminou/falhou cedo demais: {premature_reason}")
             return True
 
+    def _lavalink_failure_is_track_source_error(self, exc: BaseException | None) -> bool:
+        text = self._exc_label(exc).lower()
+        source_markers = (
+            "trackexception",
+            "invalid status code",
+            "stream: 404",
+            "http 404",
+            "404",
+            "perdeu o track",
+            "nenhuma fonte candidata",
+            "não conseguiu tocar nenhuma fonte candidata",
+            "failed to load tracks",
+            "loadexception",
+            "no tracks",
+        )
+        if any(marker in text for marker in source_markers):
+            return True
+        return False
+
+    def _public_playback_failure_label(self, exc: BaseException | None) -> str:
+        text = self._exc_label(exc)
+        lower = text.lower()
+        if self._lavalink_failure_is_track_source_error(exc):
+            if "soundcloud" in lower or "scsearch" in lower:
+                return "A fonte encontrada pelo worker não entregou um stream tocável."
+            return "A fonte de áudio falhou no worker."
+        if "cannot connect" in lower or "connection refused" in lower or "cooldown" in lower or "no nodes" in lower:
+            return MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE if self.music_worker_only_enabled() else "Node musical indisponível."
+        return text[:160]
+
     async def _play_track(self, guild: discord.Guild, state: MusicGuildState, track: MusicTrack) -> bool:
         if not state.last_voice_channel_id:
             raise RuntimeError("Canal de voz não definido.")
@@ -2968,6 +2998,8 @@ class AudioRouter:
                     self._mark_internal_voice_disconnect(guild.id, seconds=10.0)
                     self._set_current_status(state, "queued" if self._has_pending_track(state) else "idle")
                     if self.music_worker_only_enabled():
+                        if self._lavalink_failure_is_track_source_error(exc):
+                            raise MusicPlaybackError(self._public_playback_failure_label(exc)) from exc
                         raise MusicWorkerEngineUnavailable(MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE) from exc
                     await self._send_text(
                         guild,

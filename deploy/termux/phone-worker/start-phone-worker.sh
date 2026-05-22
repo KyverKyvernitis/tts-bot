@@ -25,6 +25,8 @@ MAX_LOG_BYTES="${PHONE_WORKER_LOG_MAX_BYTES:-1048576}"
 KILL_DUPLICATES="${PHONE_WORKER_START_KILL_DUPLICATES:-true}"
 SSHD_AUTO_START="${PHONE_WORKER_SSHD_AUTO_START:-true}"
 SSHD_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
+MUSIC_LAVALINK_AUTO_START="${PHONE_WORKER_START_LAVALINK:-${PHONE_LAVALINK_AUTO_START:-true}}"
+PHONE_LAVALINK_START_COMMAND="${PHONE_LAVALINK_START_COMMAND:-$HOME/start-phone-lavalink.sh}"
 
 log() {
   printf '[phone-worker-start] %s\n' "$*"
@@ -351,6 +353,18 @@ PIPERWRAP
   log "perfil turbo: wrapper Piper criado em $wrapper"
 }
 
+ensure_lavalink_for_turbo_if_needed() {
+  is_turbo_profile || return 0
+  truthy "$MUSIC_LAVALINK_AUTO_START" || return 0
+  if [[ ! -x "$PHONE_LAVALINK_START_COMMAND" ]]; then
+    log "perfil turbo: start do Lavalink não encontrado em $PHONE_LAVALINK_START_COMMAND"
+    return 0
+  fi
+  log "perfil turbo: garantindo Lavalink do worker"
+  "$PHONE_LAVALINK_START_COMMAND" >/dev/null 2>&1 || \
+    log "não consegui iniciar Lavalink automaticamente; música pode ficar indisponível"
+}
+
 ensure_turbo_deps_if_needed() {
   ensure_turbo_termux_packages_if_needed
   ensure_turbo_python_tts_deps_if_needed
@@ -360,6 +374,7 @@ ensure_turbo_deps_if_needed() {
 }
 
 ensure_turbo_deps_if_needed
+ensure_lavalink_for_turbo_if_needed
 
 count="$(worker_pid_count)"
 if health_ok && [[ "$count" -le 1 ]]; then

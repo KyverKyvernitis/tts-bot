@@ -44,7 +44,7 @@ _APK_BUILD_THREAD_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.9.3"
+PHONE_WORKER_VERSION = "1.9.4"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -61,6 +61,7 @@ SUPPORTED_DIRECT_TASKS = (
     "log_extract",
     "log_summary",
     "maintenance_plan",
+    "music_ytdlp_resolve",
     "network_probe",
     "ping",
     "service_restart",
@@ -99,6 +100,7 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "ffprobe_check",
     "log_summary",
     "maintenance_plan",
+    "music_ytdlp_resolve",
     "network_probe",
     "ping",
     "service_restart",
@@ -1392,13 +1394,123 @@ def _phone_lavalink_env_value(name: str, default: str = "") -> str:
     return default
 
 
-def _music_node_snapshot() -> dict[str, Any]:
+
+_LAVALINK_AUTOSTART_LOCK = threading.Lock()
+_LAVALINK_AUTOSTART_LAST_AT = 0.0
+
+
+def _truthy_env(name: str, default: bool = False) -> bool:
+    return _env_bool(name, default)
+
+
+def _phone_lavalink_port() -> int:
     port_raw = _phone_lavalink_env_value("PHONE_LAVALINK_PORT", _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PORT", "2333")) or "2333"
     try:
-        port = max(1, min(65535, int(str(port_raw).strip())))
+        return max(1, min(65535, int(str(port_raw).strip())))
     except Exception:
-        port = 2333
-    password = _phone_lavalink_env_value("PHONE_LAVALINK_PASSWORD", _phone_lavalink_env_value("AUX_LAVALINK_PASSWORD", _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PASSWORD", "")))
+        return 2333
+
+
+def _phone_lavalink_password() -> str:
+    return _phone_lavalink_env_value("PHONE_LAVALINK_PASSWORD", _phone_lavalink_env_value("AUX_LAVALINK_PASSWORD", _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PASSWORD", "")))
+
+
+def _probe_local_lavalink_http(*, timeout: float = 2.5) -> tuple[bool, int, str]:
+    port = _phone_lavalink_port()
+    password = _phone_lavalink_password()
+    headers = {"Accept": "text/plain"}
+    if password:
+        headers["Authorization"] = password
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/version", headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=max(0.5, float(timeout))) as response:
+            body = response.read(512).decode("utf-8", errors="replace").strip()
+            status = int(getattr(response, "status", 0) or 0)
+        return (200 <= status < 300), status, body
+    except urllib.error.HTTPError as exc:
+        # 401 prova que existe Lavalink respondendo, mas a senha do probe não bateu
+        # ou não foi enviada. Para autostart isso é suficiente para não duplicar
+        # processos; para health completo, _music_node_snapshot usa a senha e marca
+        # saudável apenas quando der 2xx.
+        return (int(exc.code) == 401 and not password), int(exc.code), _short_text(exc.reason, limit=80)
+    except Exception as exc:
+        return False, 0, _short_text(f"{type(exc).__name__}: {exc}", limit=120)
+
+
+def _spawn_builtin_lavalink_proot_start() -> tuple[bool, str]:
+    if not shutil.which("tmux"):
+        return False, "tmux não encontrado"
+    if not shutil.which("proot-distro"):
+        return False, "proot-distro não encontrado"
+    host_dir = Path(_phone_lavalink_env_value("PHONE_LAVALINK_HOST_DIR", str(Path.home() / "lavalink"))).expanduser()
+    jar = host_dir / "Lavalink.jar"
+    if not jar.exists():
+        return False, f"Lavalink.jar não encontrado em {host_dir}"
+    session = _phone_lavalink_env_value("PHONE_LAVALINK_TMUX_SESSION", "lavalink-debian") or "lavalink-debian"
+    distro = _phone_lavalink_env_value("PHONE_LAVALINK_PROOT_DISTRO", "debian") or "debian"
+    proot_dir = _phone_lavalink_env_value("PHONE_LAVALINK_PROOT_DIR", "/root/lavalink") or "/root/lavalink"
+    java_xmx = _phone_lavalink_env_value("PHONE_LAVALINK_JAVA_XMX", "768m") or "768m"
+    log_name = _phone_lavalink_env_value("PHONE_LAVALINK_LOG_NAME", "lavalink-proot.log") or "lavalink-proot.log"
+    subprocess.run(["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+    with contextlib.suppress(Exception):
+        subprocess.run(["pkill", "-f", "java.*Lavalink.jar"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+    command = (
+        "cd " + shlex.quote(proot_dir) +
+        " && mkdir -p /tmp/lavalink" +
+        " && exec /usr/bin/java -Djava.io.tmpdir=/tmp/lavalink -Xmx" + shlex.quote(java_xmx) +
+        " -jar Lavalink.jar >> " + shlex.quote(log_name) + " 2>&1"
+    )
+    tmux_cmd = [
+        "tmux", "new-session", "-d", "-s", session,
+        "proot-distro", "login", distro,
+        "--bind", f"{host_dir}:{proot_dir}",
+        "--", "bash", "-lc", command,
+    ]
+    subprocess.Popen(tmux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True, f"sessão {session} iniciada"
+
+
+def _ensure_phone_lavalink_started(reason: str = "health") -> dict[str, Any]:
+    global _LAVALINK_AUTOSTART_LAST_AT
+    if not _truthy_env("PHONE_LAVALINK_AUTO_START", True):
+        return {"attempted": False, "reason": "auto_start_disabled"}
+    roles, capabilities = _current_core_worker_roles_and_capabilities()
+    caps = {str(x).strip().lower() for x in (roles + capabilities)}
+    if not ({"music", "music-node", "music-lavalink"} & caps):
+        return {"attempted": False, "reason": "worker_sem_capacidade_music"}
+    alive, status, body = _probe_local_lavalink_http(timeout=1.5)
+    if alive or status == 401:
+        return {"attempted": False, "reason": "already_online", "http_status": status}
+    now = time.time()
+    cooldown = max(5.0, _env_float("PHONE_LAVALINK_AUTO_START_COOLDOWN_SECONDS", 30.0))
+    if now - _LAVALINK_AUTOSTART_LAST_AT < cooldown:
+        return {"attempted": False, "reason": "cooldown", "last_error": body}
+    with _LAVALINK_AUTOSTART_LOCK:
+        now = time.time()
+        if now - _LAVALINK_AUTOSTART_LAST_AT < cooldown:
+            return {"attempted": False, "reason": "cooldown", "last_error": body}
+        _LAVALINK_AUTOSTART_LAST_AT = now
+        script = Path(_phone_lavalink_env_value("PHONE_LAVALINK_START_COMMAND", str(Path.home() / "start-phone-lavalink.sh"))).expanduser()
+        try:
+            if script.exists() and os.access(script, os.X_OK):
+                subprocess.Popen([str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print(f"[phone-worker] lavalink auto-start solicitado via {script} ({reason})", flush=True)
+                return {"attempted": True, "method": "script", "script": str(script)}
+            ok, detail = _spawn_builtin_lavalink_proot_start()
+            if ok:
+                print(f"[phone-worker] lavalink auto-start solicitado via proot/tmux ({reason})", flush=True)
+            else:
+                print(f"[phone-worker] lavalink auto-start falhou: {detail}", flush=True)
+            return {"attempted": bool(ok), "method": "builtin-proot", "detail": detail}
+        except Exception as exc:
+            detail = _short_text(f"{type(exc).__name__}: {exc}", limit=160)
+            print(f"[phone-worker] lavalink auto-start erro: {detail}", flush=True)
+            return {"attempted": False, "error": detail}
+
+def _music_node_snapshot() -> dict[str, Any]:
+    autostart = _ensure_phone_lavalink_started(reason="music_node_snapshot")
+    port = _phone_lavalink_port()
+    password = _phone_lavalink_password()
     bind_host = _phone_lavalink_env_value("PHONE_LAVALINK_BIND_HOST", "127.0.0.1") or "127.0.0.1"
     public_host = (
         _phone_lavalink_env_value("PHONE_LAVALINK_PUBLIC_HOST", "")
@@ -1426,6 +1538,7 @@ def _music_node_snapshot() -> dict[str, Any]:
         "ok": False,
         "online": False,
         "state": "offline",
+        "autostart": autostart,
     }
     start = time.time()
     try:
@@ -1776,6 +1889,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_zip_validate(body)
             elif task == "maintenance_plan":
                 payload = self._task_maintenance_plan(body)
+            elif task == "music_ytdlp_resolve":
+                payload = self._task_music_ytdlp_resolve(body)
             elif task == "text_stats":
                 payload = self._task_text_stats(body)
             elif task == "tts_cache_lookup":
@@ -2873,6 +2988,113 @@ class WorkerHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 results.append({"url": _short_text(url, limit=160), "ok": False, "latency_ms": round((time.perf_counter() - started) * 1000, 1), "error": f"{type(exc).__name__}: {_short_text(exc, limit=120)}"})
         return {"ok": any(item.get("ok") for item in results), "summary": "endpoints testados pelo worker", "results": results}
+
+    def _task_music_ytdlp_resolve(self, body: dict[str, Any]) -> dict[str, Any]:
+        query = str(body.get("query") or body.get("url") or body.get("q") or "").strip()
+        if not query:
+            raise ValueError("query vazia")
+        limit = max(1, min(10, int(float(body.get("limit") or body.get("max_results") or 5))))
+        timeout = max(5, min(self.job_timeout, int(float(body.get("timeout_seconds") or min(self.job_timeout, 30)))))
+        fmt = str(body.get("format") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or "bestaudio/best").strip() or "bestaudio/best"
+        is_url = bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", query) or query.lower().startswith("www."))
+        target = query if is_url or query.lower().startswith(("ytsearch:", "ytsearch", "ytmsearch:")) else f"ytsearch{limit}:{query}"
+        try:
+            import yt_dlp  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("yt-dlp não está instalado no phone worker") from exc
+
+        def select_stream(entry: dict[str, Any]) -> str:
+            for item in entry.get("requested_downloads") or []:
+                if isinstance(item, dict):
+                    url = str(item.get("url") or "").strip()
+                    if url.startswith(("http://", "https://")):
+                        return url
+            url = str(entry.get("url") or "").strip()
+            if url.startswith(("http://", "https://")) and "youtube.com/watch" not in url and "youtu.be/" not in url:
+                return url
+            best_url = ""
+            best_score = -1.0
+            for fmt_item in entry.get("formats") or []:
+                if not isinstance(fmt_item, dict):
+                    continue
+                candidate = str(fmt_item.get("url") or "").strip()
+                if not candidate.startswith(("http://", "https://")):
+                    continue
+                acodec = str(fmt_item.get("acodec") or "").lower()
+                vcodec = str(fmt_item.get("vcodec") or "").lower()
+                if acodec in {"", "none"}:
+                    continue
+                score = float(fmt_item.get("abr") or fmt_item.get("tbr") or 0)
+                if vcodec in {"", "none"}:
+                    score += 10000
+                if score > best_score:
+                    best_score = score
+                    best_url = candidate
+            return best_url
+
+        cookies = str(os.getenv("PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE") or os.getenv("MUSIC_YTDLP_COOKIES_FILE") or os.getenv("YTDLP_COOKIES_FILE") or "").strip()
+        ydl_opts: dict[str, Any] = {
+            "format": fmt,
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": not bool(body.get("allow_playlist")),
+            "ignoreerrors": True,
+            "socket_timeout": max(3, min(20, timeout - 1)),
+            "retries": max(0, int(float(os.getenv("PHONE_WORKER_MUSIC_YTDLP_RETRIES", "1") or 1))),
+            "fragment_retries": max(0, int(float(os.getenv("PHONE_WORKER_MUSIC_YTDLP_FRAGMENT_RETRIES", "1") or 1))),
+            "cachedir": str(Path(os.getenv("PHONE_WORKER_MUSIC_YTDLP_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / "yt-dlp")).expanduser()),
+        }
+        if cookies and Path(cookies).expanduser().exists():
+            ydl_opts["cookiefile"] = str(Path(cookies).expanduser())
+        started = time.time()
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(target, download=False)
+        entries: list[Any]
+        if isinstance(info, dict) and isinstance(info.get("entries"), list):
+            entries = list(info.get("entries") or [])
+            playlist_title = str(info.get("title") or "")
+            is_playlist = True
+        else:
+            entries = [info]
+            playlist_title = ""
+            is_playlist = False
+        tracks: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            stream_url = select_stream(entry)
+            if not stream_url:
+                continue
+            webpage_url = str(entry.get("webpage_url") or entry.get("original_url") or entry.get("url") or query).strip()
+            tracks.append({
+                "title": _short_text(entry.get("title") or entry.get("fulltitle") or "Música", limit=160, default="Música"),
+                "uploader": _short_text(entry.get("uploader") or entry.get("channel") or entry.get("creator") or "", limit=120),
+                "duration": entry.get("duration"),
+                "thumbnail": _short_text(entry.get("thumbnail") or "", limit=500),
+                "webpage_url": webpage_url,
+                "original_query": query,
+                "stream_url": stream_url,
+                "source": _short_text(entry.get("extractor_key") or entry.get("extractor") or "worker-ytdlp", limit=80, default="worker-ytdlp"),
+                "extractor": "worker-ytdlp",
+                "is_live": bool(entry.get("is_live")),
+                "ext": _short_text(entry.get("ext") or "", limit=20),
+                "format_id": _short_text(entry.get("format_id") or "", limit=80),
+            })
+            if len(tracks) >= limit:
+                break
+        return {
+            "ok": True,
+            "summary": "música resolvida pelo yt-dlp no worker",
+            "query": query,
+            "target": target,
+            "tracks": tracks,
+            "tracks_found": len(tracks),
+            "is_playlist": is_playlist,
+            "playlist_title": playlist_title,
+            "truncated": bool(len(entries) > len(tracks)),
+            "elapsed_ms": round((time.time() - started) * 1000.0, 1),
+        }
 
     def _task_ffprobe_media(self, body: dict[str, Any]) -> dict[str, Any]:
         ffprobe = shutil.which("ffprobe")
@@ -5013,6 +5235,10 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
         elif kind == "ffprobe_check":
             result = _command_version("ffprobe")
             result.setdefault("summary", "ffprobe verificado")
+        elif kind == "music_ytdlp_resolve":
+            runner = _task_runner(max_body_bytes, max_output_bytes, job_timeout)
+            result = runner._task_music_ytdlp_resolve(payload)
+            result.setdefault("summary", "música resolvida pelo worker")
         elif kind in {"media_probe", "ffprobe_media"}:
             runner = _task_runner(max_body_bytes, max_output_bytes, job_timeout)
             result = runner._task_ffprobe_media(payload)

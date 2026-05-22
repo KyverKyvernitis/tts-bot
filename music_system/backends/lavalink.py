@@ -1242,7 +1242,11 @@ class LavalinkBackend:
         candidates: list[str] = []
         original_url = str(getattr(track, "original_url", "") or "").strip()
         webpage_url = str(getattr(track, "webpage_url", "") or "").strip()
+        stream_url = str(getattr(track, "stream_url", "") or "").strip()
+        lavalink_query = str(getattr(track, "lavalink_query", "") or "").strip()
         source = str(getattr(track, "source", "") or getattr(track, "extractor", "") or "").strip().lower()
+        extractor = str(getattr(track, "extractor", "") or "").strip().lower()
+        is_worker_ytdlp_track = source in {"worker-ytdlp", "worker", "yt-dlp", "ytdlp"} or extractor in {"worker-ytdlp", "worker", "yt-dlp", "ytdlp"}
         is_youtube_track = (
             source in {"youtube", "yt", "ytsearch", "ytmsearch"}
             or self._is_youtube_value(original_url)
@@ -1262,8 +1266,11 @@ class LavalinkBackend:
             or "soundcloud.com" in str(fallback_query or "").lower()
         )
 
-        raw_values = [fallback_query, original_url, webpage_url]
-        url_values = [value for value in (original_url, webpage_url, fallback_query) if self._is_url_like_value(value)]
+        raw_values = [fallback_query, original_url, webpage_url, stream_url, lavalink_query]
+        # Faixas resolvidas pelo phone worker já chegam com URL direta de áudio.
+        # Essa URL deve ir ao Lavalink como fonte HTTP antes de qualquer espelho
+        # por título/SoundCloud; a página original fica só para exibição.
+        url_values = [value for value in (stream_url, lavalink_query, original_url, webpage_url, fallback_query) if self._is_url_like_value(value)]
         non_url_queries = [value for value in (fallback_query, original_url, webpage_url) if value and not self._is_url_like_value(value)]
         explicit_prefixed = []
         for value in raw_values:
@@ -1276,10 +1283,18 @@ class LavalinkBackend:
         lavalink_playable = getattr(track, "lavalink_playable", None)
         lavalink_resolved = bool(getattr(track, "lavalink_resolved", False) or lavalink_playable is not None)
 
+        if is_worker_ytdlp_track:
+            for value in (stream_url, lavalink_query):
+                if self._is_url_like_value(value):
+                    self._append_unique_candidate(candidates, value)
+            if candidates:
+                return candidates
+
         if is_youtube_track:
-            # YouTube nunca entra cru no Lavalink. Link direto e resultado de
-            # pesquisa tentam primeiro um mirror LavaSrc sem YouTube; se não bater
-            # ou o node perder o stream, o AudioRouter cai para yt-dlp local.
+            # YouTube nunca entra cru no Lavalink. Em modo antigo, link direto e
+            # resultado de pesquisa tentam mirrors; em worker-only a resolução
+            # pesada deve ter ocorrido antes no phone worker e entrado pelo bloco
+            # worker-ytdlp acima.
             for value in mirror_fallbacks:
                 self._append_unique_candidate(candidates, value)
             return candidates

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+import aiohttp
+
 import config
+from music_system.errors import MusicExtractionError
+from music_system.models import ExtractedBatch, MusicTrack
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +210,146 @@ def select_music_worker() -> MusicWorkerSelection:
 
     reason = "; ".join(rejected[:3]) if rejected else "nenhum worker compatível"
     return MusicWorkerSelection(False, reason=reason)
+
+
+
+
+def _phone_worker_base_url() -> str:
+    if not _as_bool(getattr(config, "PHONE_WORKER_ENABLED", False), False):
+        return ""
+    host = str(getattr(config, "PHONE_WORKER_HOST", "") or "").strip()
+    token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
+    if not host or not token:
+        return ""
+    scheme = str(getattr(config, "PHONE_WORKER_SCHEME", "http") or "http").strip().lower()
+    if scheme not in {"http", "https"}:
+        scheme = "http"
+    try:
+        port = int(getattr(config, "PHONE_WORKER_PORT", 8766) or 8766)
+    except Exception:
+        port = 8766
+    return f"{scheme}://{host}:{port}"
+
+
+def _direct_stream_url(data: Mapping[str, Any]) -> str:
+    for key in ("stream_url", "url", "direct_url"):
+        value = str(data.get(key) or "").strip()
+        if value.startswith(("http://", "https://")):
+            return value
+    return ""
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        number = float(value)
+        if number <= 0:
+            return None
+        return number
+    except Exception:
+        return None
+
+
+async def resolve_music_tracks_on_worker(
+    query: str,
+    *,
+    requester_id: int = 0,
+    requester_name: str = "",
+    limit: int = 5,
+    timeout_seconds: float | None = None,
+) -> ExtractedBatch:
+    """Resolve pesquisa/link no phone worker turbo usando yt-dlp do celular.
+
+    Em modo worker-only a VPS não deve chamar yt-dlp local nem depender de
+    scsearch/SoundCloud como substituto. O worker retorna URLs diretas de áudio
+    que o Lavalink do próprio worker toca pela fonte HTTP.
+    """
+    selection = require_music_worker_available()
+    base = _phone_worker_base_url()
+    token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
+    if not base or not token:
+        raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+    clean_query = str(query or "").strip()
+    if not clean_query:
+        return ExtractedBatch(tracks=[], query="", is_playlist=False)
+    try:
+        max_limit = max(1, min(10, int(limit or 5)))
+    except Exception:
+        max_limit = 5
+    total_timeout = max(5.0, float(timeout_seconds if timeout_seconds is not None else getattr(config, "MUSIC_WORKER_YTDLP_TIMEOUT_SECONDS", 28.0) or 28.0))
+    payload = {
+        "task": "music_ytdlp_resolve",
+        "query": clean_query,
+        "limit": max_limit,
+        "timeout_seconds": total_timeout,
+    }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    started = time.monotonic()
+    timeout = aiohttp.ClientTimeout(total=total_timeout + 2.0)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(f"{base}/task", headers=headers, json=payload) as response:
+                text = await response.text()
+                if response.status < 200 or response.status >= 300:
+                    raise RuntimeError(f"HTTP {response.status}: {text[:240]}")
+                data = json.loads(text or "{}")
+    except MusicWorkerUnavailable:
+        raise
+    except Exception as exc:
+        logger.warning("[music/worker] yt-dlp remoto falhou | worker=%s query=%r erro=%s", selection.worker_id, clean_query, exc)
+        raise MusicExtractionError("`⚠️` Não consegui resolver essa música no worker agora. Tente novamente em alguns segundos.", detail=str(exc)) from exc
+
+    if data.get("ok") is False:
+        message = str(data.get("message") or data.get("error") or "worker retornou erro ao resolver música")
+        raise MusicExtractionError(f"`⚠️` {message[:220]}", detail=message)
+
+    raw_tracks = data.get("tracks") if isinstance(data.get("tracks"), list) else []
+    tracks: list[MusicTrack] = []
+    for item in raw_tracks[:max_limit]:
+        if not isinstance(item, Mapping):
+            continue
+        stream_url = _direct_stream_url(item)
+        if not stream_url:
+            continue
+        title = str(item.get("title") or item.get("fulltitle") or "Música").strip() or "Música"
+        webpage_url = str(item.get("webpage_url") or item.get("original_url") or clean_query).strip()
+        source = str(item.get("source") or item.get("extractor") or "worker-ytdlp").strip() or "worker-ytdlp"
+        track = MusicTrack(
+            title=title,
+            webpage_url=webpage_url,
+            original_url=str(item.get("original_query") or clean_query),
+            stream_url=stream_url,
+            requester_id=int(requester_id or 0),
+            requester_name=requester_name or "",
+            duration=_float_or_none(item.get("duration")),
+            uploader=str(item.get("uploader") or item.get("channel") or "").strip(),
+            thumbnail=str(item.get("thumbnail") or "").strip(),
+            source=source,
+            extractor="worker-ytdlp",
+            is_live=_as_bool(item.get("is_live"), False),
+            lavalink_query=stream_url,
+            lavalink_resolved=True,
+        )
+        tracks.append(track)
+    elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+    logger.info(
+        "[music/worker] yt-dlp remoto ok | worker=%s query=%r tracks=%s elapsed_ms=%.1f",
+        selection.worker_id or selection.name,
+        clean_query,
+        len(tracks),
+        elapsed_ms,
+    )
+    return ExtractedBatch(
+        tracks=tracks,
+        query=clean_query,
+        is_playlist=bool(data.get("is_playlist")),
+        playlist_title=str(data.get("playlist_title") or ""),
+        truncated=bool(data.get("truncated")),
+    )
 
 
 async def ensure_music_worker_available() -> MusicWorkerSelection:

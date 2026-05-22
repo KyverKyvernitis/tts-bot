@@ -15,6 +15,7 @@ from music_system.models import ExtractedBatch, MusicTrack
 from music_system.providers import describe_url
 from music_system.ui import SearchResultView, QueueView, VoiceStatusSettingsView, build_queue_embed, build_now_playing_embeds
 from music_system.musicnode_ui import MusicNodePanelView
+from music_system.worker_node import resolve_music_tracks_on_worker
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,10 @@ class Music(commands.Cog):
             return "`⚠️` O YouTube recusou o stream de áudio. Atualize `yt-dlp[default]` e confirme se o Deno está instalado."
         if "drm" in lower:
             return "`⚠️` Essa fonte usa DRM. Tente outro link ou pesquise pelo nome da música."
+        if ("trackexception" in lower or "invalid status code" in lower or "stream: 404" in lower or "perdeu o track" in lower or "nenhuma fonte candidata" in lower):
+            if "soundcloud" in lower or "scsearch" in lower or "404" in lower:
+                return "`⚠️` A fonte encontrada não entregou um stream tocável. Tente novamente ou use um link direto."
+            return "`⚠️` O worker encontrou a música, mas a fonte de áudio falhou ao iniciar. Tente outra busca ou link."
         if "failed to load tracks" in lower or "lavalinkloadexception" in lower or "something went wrong while looking up" in lower:
             if "spotify" in lower or "spsearch" in lower or "response code from channel info is 403" in lower:
                 return "`⚠️` Não consegui resolver esse link do Spotify no node. Vou evitar erro cru: confira a API do Spotify no `.env` e use modo `auto` para cair no player local quando o LavaSrc falhar."
@@ -260,7 +265,23 @@ class Music(commands.Cog):
 
         requester_name = getattr(ctx.author, "display_name", str(ctx.author))
 
-        if self._should_use_lavalink_for_input(query, ctx.guild.id):
+        if getattr(self.router, "music_worker_only_enabled", lambda: False)():
+            try:
+                batch = await resolve_music_tracks_on_worker(
+                    query,
+                    requester_id=ctx.author.id,
+                    requester_name=requester_name,
+                    limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
+                )
+            except MusicExtractionError as exc:
+                await self._reply(ctx, self._music_error_message(exc))
+                return
+            except Exception as exc:
+                logger.exception("[music/worker] erro ao resolver música no worker")
+                await self._reply(ctx, self._music_error_message(exc))
+                return
+
+        elif self._should_use_lavalink_for_input(query, ctx.guild.id):
             # LavaSrc/Lavalink fica responsável por SoundCloud/scsearch e por
             # links que o node resolve com segurança. Spotify cru passa antes
             # pela API do bot para não cair em erro bruto do SpotifySourceManager.
