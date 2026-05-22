@@ -1422,16 +1422,34 @@ class MusicPlayerView(discord.ui.View):
         ok = await self.router.previous(self.guild_id)
         await self._ack(interaction, "`⏮️` Voltando para a música anterior." if ok else "Não há música anterior no histórico.")
 
+    def _music_agent_default_enabled(self) -> bool:
+        return bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)()
+
+    async def _send_agent_control(self, interaction: discord.Interaction, action: str, message: str) -> bool:
+        if not self._music_agent_default_enabled():
+            return False
+        try:
+            await music_agent_command(action, guild_id=self.guild_id, requester_id=getattr(interaction.user, "id", 0), requester_name=getattr(interaction.user, "display_name", str(interaction.user)))
+        except Exception as exc:
+            await self._ack(interaction, f"`⚠️` Music Agent não respondeu: `{str(exc)[:180]}`")
+            return True
+        await self._ack(interaction, message)
+        return True
+
     @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary, row=0, custom_id="music:pause_resume")
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = self.router.get_state(self.guild_id)
         if state.paused:
+            if await self._send_agent_control(interaction, "resume", "`▶️` Música retomada no Music Agent."):
+                return
             ok = await self.router.resume(self.guild_id)
             if ok:
                 await self._defer_control(interaction)
             else:
                 await self._ack(interaction, "Não havia música pausada.")
         else:
+            if await self._send_agent_control(interaction, "pause", "`⏸️` Música pausada no Music Agent."):
+                return
             ok = await self.router.pause(self.guild_id)
             if ok:
                 await self._defer_control(interaction)
@@ -1440,11 +1458,15 @@ class MusicPlayerView(discord.ui.View):
 
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._send_agent_control(interaction, "skip", "`⏭️` Pulando música no Music Agent."):
+            return
         _ok, message = await self.router.request_skip(self.guild_id, interaction.user)
         await self._ack(interaction, message)
 
     @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0, custom_id="music:stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self._send_agent_control(interaction, "stop", "`⏹️` Music Agent encerrado e desconectado."):
+            return
         _ok, message = await self.router.request_stop(self.guild_id, interaction.user, disconnect=True)
         await self._ack(interaction, message)
 

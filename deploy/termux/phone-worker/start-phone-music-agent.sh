@@ -11,6 +11,13 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
+MUSIC_AGENT_ENV_FILE="${MUSIC_AGENT_ENV:-$WORKER_DIR/secrets/music-agent.env}"
+if [[ -f "$MUSIC_AGENT_ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$MUSIC_AGENT_ENV_FILE"
+  set +a
+fi
 PYTHON_BIN="${PHONE_WORKER_PYTHON:-python}"
 HOST="${MUSIC_AGENT_HOST:-127.0.0.1}"
 PORT="${MUSIC_AGENT_PORT:-8786}"

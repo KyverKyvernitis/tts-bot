@@ -354,11 +354,15 @@ AUX_LAVALINK_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("AUX_LAVALINK_TIM
 AUX_LAVALINK_COOLDOWN_SECONDS = max(10.0, _parse_float(os.getenv("AUX_LAVALINK_COOLDOWN_SECONDS", "300"), 300.0))
 
 
-# Music Agent experimental — phone worker controls Discord voice with the same bot token.
-# Disabled by default so the VPS keeps the current music path until the worker agent is configured.
-MUSIC_AGENT_ENABLED = _parse_bool(os.getenv("MUSIC_AGENT_ENABLED", "false"), False)
-MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", "12.0"), 12.0))
-MUSIC_AGENT_STATUS_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", "2.5"), 2.5))
+# Music Agent no phone worker — padrão da música. A VPS fica como plano de UI/status
+# e o worker assume voz/player/Lavalink/yt-dlp quando disponível.
+MUSIC_AGENT_ENABLED = _parse_bool(os.getenv("MUSIC_AGENT_ENABLED", "true"), True)
+MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", "18.0"), 18.0))
+MUSIC_AGENT_STATUS_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", "3.5"), 3.5))
+MUSIC_AGENT_MISSING_TOKEN_MESSAGE = (
+    os.getenv("MUSIC_AGENT_MISSING_TOKEN_MESSAGE", "Sistema de música indisponível no momento: Music Agent sem token configurado no worker")
+    or "Sistema de música indisponível no momento: Music Agent sem token configurado no worker"
+).strip()
 
 # Phone-worker auxiliar — celular via Tailscale.
 # Para música, o modo atual é worker-only: a VPS não deve usar yt-dlp/FFmpeg local

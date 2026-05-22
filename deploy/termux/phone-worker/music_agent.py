@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Core Music Agent for the phone worker.
 
-Experimental same-bot music plane: the VPS remains the UI/control plane while
+Same-bot music plane: the VPS remains the UI/status plane while
 this process owns Discord voice/Lavalink/yt-dlp on the phone worker.
 
 The agent intentionally does not register Discord commands and does not handle
@@ -39,7 +39,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.1.0"
+AGENT_VERSION = "0.2.0"
 STARTED_AT = time.time()
 
 

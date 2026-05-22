@@ -66,6 +66,20 @@ class Music(commands.Cog):
             return False
         return True
 
+    def _music_agent_default_enabled(self) -> bool:
+        return bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)()
+
+    async def _send_music_agent_control(self, ctx: commands.Context, action: str, success_message: str) -> bool:
+        if not self._music_agent_default_enabled():
+            return False
+        try:
+            await music_agent_command(action, guild_id=ctx.guild.id, requester_id=ctx.author.id, requester_name=getattr(ctx.author, "display_name", str(ctx.author)))
+        except Exception as exc:
+            await self._reply(ctx, self._music_error_message(exc))
+            return True
+        await self._reply(ctx, success_message)
+        return True
+
     async def _reply(self, ctx: commands.Context, content: str | None = None, **kwargs):
         # Todas as mensagens novas da música são silenciosas por padrão para não notificar o servidor.
         kwargs.setdefault("silent", True)
@@ -501,6 +515,8 @@ class Music(commands.Cog):
     async def pause(self, ctx: commands.Context):
         if not await self._ensure_music_action_voice(ctx):
             return
+        if await self._send_music_agent_control(ctx, "pause", "`⏸️` Música pausada no Music Agent."):
+            return
         ok = await self.router.pause(ctx.guild.id)
         if not ok:
             await self._reply(ctx, "Não há música tocando para pausar.")
@@ -510,6 +526,8 @@ class Music(commands.Cog):
     async def resume(self, ctx: commands.Context):
         if not await self._ensure_music_action_voice(ctx):
             return
+        if await self._send_music_agent_control(ctx, "resume", "`▶️` Música retomada no Music Agent."):
+            return
         ok = await self.router.resume(ctx.guild.id)
         if not ok:
             await self._reply(ctx, "Não há música pausada.")
@@ -518,6 +536,8 @@ class Music(commands.Cog):
     @commands.guild_only()
     async def skip(self, ctx: commands.Context):
         if not await self._ensure_music_action_voice(ctx):
+            return
+        if await self._send_music_agent_control(ctx, "skip", "`⏭️` Pulando música no Music Agent."):
             return
         _ok, message = await self.router.request_skip(ctx.guild.id, ctx.author)
         await self._reply(ctx, message)
@@ -534,6 +554,8 @@ class Music(commands.Cog):
     @commands.guild_only()
     async def stop(self, ctx: commands.Context):
         if not await self._ensure_music_action_voice(ctx):
+            return
+        if await self._send_music_agent_control(ctx, "stop", "`⏹️` Music Agent encerrado e desconectado."):
             return
         _ok, message = await self.router.request_stop(ctx.guild.id, ctx.author, disconnect=True)
         await self._reply(ctx, message)

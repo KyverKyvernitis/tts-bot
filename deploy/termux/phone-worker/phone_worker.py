@@ -51,7 +51,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.1"
+PHONE_WORKER_VERSION = "1.10.2"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -3386,6 +3386,73 @@ class WorkerHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 results.append({"url": _short_text(url, limit=160), "ok": False, "latency_ms": round((time.perf_counter() - started) * 1000, 1), "error": f"{type(exc).__name__}: {_short_text(exc, limit=120)}"})
         return {"ok": any(item.get("ok") for item in results), "summary": "endpoints testados pelo worker", "results": results}
+
+    def _task_music_agent_proxy(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Proxy authenticated /task requests to the local same-bot Music Agent."""
+        host = str(os.getenv("MUSIC_AGENT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+        try:
+            port = int(float(os.getenv("MUSIC_AGENT_PORT") or 8786))
+        except Exception:
+            port = 8786
+        token = str(os.getenv("MUSIC_AGENT_TOKEN") or os.getenv("PHONE_WORKER_TOKEN") or "").strip()
+        action = str(body.get("action") or body.get("command") or "status").strip().lower().replace("-", "_") or "status"
+        try:
+            timeout_seconds = float(body.get("timeout_seconds") or os.getenv("MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS") or 18.0)
+        except Exception:
+            timeout_seconds = 18.0
+        timeout_seconds = max(1.0, min(90.0, timeout_seconds))
+        base = f"http://{host}:{port}"
+
+        if action not in {"status", "get_state"} and not str(os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or "").strip():
+            return {
+                "ok": False,
+                "available": False,
+                "error": "Music Agent sem token do bot no worker",
+                "message": "configure MUSIC_AGENT_BOT_TOKEN em ~/phone-worker/secrets/music-agent.env",
+                "agent": {"host": host, "port": port, "configured": False},
+            }
+
+        headers = {"Accept": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        try:
+            if action in {"status", "get_state"}:
+                req = urllib.request.Request(f"{base}/health", headers=headers, method="GET")
+                with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+                    raw = resp.read(min(self.max_output_bytes, 1024 * 1024)).decode("utf-8", "replace")
+                data = json.loads(raw or "{}")
+            else:
+                payload = {k: v for k, v in body.items() if k not in {"task", "timeout_seconds"}}
+                payload.setdefault("action", action)
+                encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                headers["Content-Type"] = "application/json"
+                req = urllib.request.Request(f"{base}/command", data=encoded, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+                    raw = resp.read(min(self.max_output_bytes, 1024 * 1024)).decode("utf-8", "replace")
+                data = json.loads(raw or "{}")
+        except urllib.error.HTTPError as exc:
+            raw = ""
+            with contextlib.suppress(Exception):
+                raw = exc.read(2048).decode("utf-8", "replace")
+            return {
+                "ok": False,
+                "available": False,
+                "error": f"Music Agent HTTP {exc.code}: {_short_text(raw or exc.reason, 260)}",
+                "agent": {"host": host, "port": port, "configured": True},
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "available": False,
+                "error": f"{type(exc).__name__}: {_short_text(exc, 260)}",
+                "agent": {"host": host, "port": port, "configured": True},
+            }
+        if isinstance(data, dict):
+            data.setdefault("ok", True)
+            data.setdefault("available", bool(data.get("discord_ready") or data.get("ok")))
+            data.setdefault("agent", {"host": host, "port": port, "configured": True})
+            return data
+        return {"ok": False, "available": False, "error": "resposta inválida do Music Agent", "agent": {"host": host, "port": port, "configured": True}}
 
     def _task_music_ytdlp_resolve(self, body: dict[str, Any]) -> dict[str, Any]:
         query = str(body.get("query") or body.get("url") or body.get("q") or "").strip()
