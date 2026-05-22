@@ -368,6 +368,14 @@ MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE = (
 MUSIC_WORKER_REQUIRE_TURBO = _parse_bool(os.getenv("MUSIC_WORKER_REQUIRE_TURBO", "true"), True)
 MUSIC_WORKER_REQUIRED_ROLES = (os.getenv("MUSIC_WORKER_REQUIRED_ROLES", "phone-worker") or "phone-worker").strip()
 MUSIC_WORKER_REQUIRED_CAPABILITIES = (os.getenv("MUSIC_WORKER_REQUIRED_CAPABILITIES", "ffmpeg,ffprobe") or "ffmpeg,ffprobe").strip()
+# Segredos/cookies do yt-dlp em modo worker-only ficam no phone worker, não na VPS.
+# Use um caminho local do celular, por exemplo:
+# ~/phone-worker/secrets/youtube-cookies.txt
+MUSIC_WORKER_YTDLP_COOKIES_FILE = (
+    os.getenv("MUSIC_WORKER_YTDLP_COOKIES_FILE", os.getenv("PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE", ""))
+    or ""
+).strip()
+MUSIC_WORKER_YTDLP_TIMEOUT_SECONDS = max(5.0, _parse_float(os.getenv("MUSIC_WORKER_YTDLP_TIMEOUT_SECONDS", "32.0"), 32.0))
 MUSIC_WORKER_LAVALINK_HOST = (os.getenv("MUSIC_WORKER_LAVALINK_HOST", "") or "").strip()
 MUSIC_WORKER_LAVALINK_PORT = _parse_int(os.getenv("MUSIC_WORKER_LAVALINK_PORT", "2333"), 2333)
 MUSIC_WORKER_LAVALINK_PASSWORD = (os.getenv("MUSIC_WORKER_LAVALINK_PASSWORD", "") or "").strip()

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -165,16 +166,100 @@ def _worker_is_turbo(worker: Mapping[str, Any], roles_caps: set[str]) -> bool:
 
 
 def _music_node_status_ok(worker: Mapping[str, Any]) -> bool:
+    # Em worker-only, o registry pode ficar alguns heartbeats atrasado em relação
+    # ao phone worker real. Quando MUSIC_WORKER_REQUIRE_MUSIC_NODE_STATUS=false,
+    # o gate não deve bloquear por status stale/offline; o backend Lavalink e o
+    # job remoto ainda fazem o healthcheck real antes de tocar.
+    require_status = _as_bool(getattr(config, "MUSIC_WORKER_REQUIRE_MUSIC_NODE_STATUS", False), False)
     node = _worker_music_node(worker)
     if isinstance(node, Mapping):
         summary = worker_music_summary(worker)
         if summary.get("available"):
             return True
         if any(key in node for key in ("ok", "online", "state")):
-            return False
+            return not require_status
     # Compatibilidade: bases antigas do worker ainda não reportam music_node.
     # Nesse caso, a configuração/healthcheck do próprio engine decide no backend.
-    return not _as_bool(getattr(config, "MUSIC_WORKER_REQUIRE_MUSIC_NODE_STATUS", False), False)
+    return not require_status
+
+
+def _configured_phone_worker_selection(reason: str = "phone_worker_configurado") -> MusicWorkerSelection | None:
+    if not _as_bool(getattr(config, "PHONE_WORKER_ENABLED", False), False):
+        return None
+    host = str(getattr(config, "PHONE_WORKER_HOST", "") or "").strip()
+    token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
+    if not host or not token:
+        return None
+    scheme = str(getattr(config, "PHONE_WORKER_SCHEME", "http") or "http").strip().lower()
+    if scheme not in {"http", "https"}:
+        scheme = "http"
+    try:
+        port = int(getattr(config, "PHONE_WORKER_PORT", 8766) or 8766)
+    except Exception:
+        port = 8766
+
+    lavalink_host = str(
+        getattr(config, "MUSIC_WORKER_LAVALINK_HOST", "")
+        or getattr(config, "AUX_LAVALINK_HOST", "")
+        or os.getenv("PHONE_LAVALINK_HOST", "")
+        or host
+    ).strip()
+    try:
+        lavalink_port = int(
+            getattr(config, "MUSIC_WORKER_LAVALINK_PORT", None)
+            or getattr(config, "AUX_LAVALINK_PORT", None)
+            or os.getenv("PHONE_LAVALINK_PORT", "")
+            or 2333
+        )
+    except Exception:
+        lavalink_port = 2333
+
+    required_roles = _csv(getattr(config, "MUSIC_WORKER_REQUIRED_ROLES", "phone-worker"))
+    required_caps = _csv(getattr(config, "MUSIC_WORKER_REQUIRED_CAPABILITIES", "ffmpeg,ffprobe"))
+    roles = sorted(required_roles | {"phone-worker", "music", "music-node", "music-lavalink", "music-ytdlp"})
+    capabilities = sorted(
+        required_caps
+        | {
+            "phone-worker",
+            "ffmpeg",
+            "ffprobe",
+            "music",
+            "music-node",
+            "music-lavalink",
+            "music-ytdlp",
+            "music-ytdlp-resolve",
+            "service-control",
+        }
+    )
+    worker_id = str(os.getenv("CORE_WORKER_ID") or getattr(config, "PHONE_WORKER_ID", "") or "phone-worker-configured").strip()
+    worker = {
+        "worker_id": worker_id,
+        "name": str(os.getenv("CORE_WORKER_NAME") or "Phone Worker Turbo"),
+        "online": True,
+        "enabled": True,
+        "profile": "turbo",
+        "roles": roles,
+        "capabilities": capabilities,
+        "endpoint": f"{scheme}://{host}:{port}",
+        "remote_addr": host,
+        "status": {
+            "profile": "turbo",
+            "music_node": {
+                "kind": "lavalink",
+                "mode": "lavalink",
+                "ok": True,
+                "online": True,
+                "state": "configured",
+                "host": "127.0.0.1",
+                "public_host": lavalink_host,
+                "connect_host": lavalink_host,
+                "port": lavalink_port,
+                "public_port": lavalink_port,
+                "connect_port": lavalink_port,
+            },
+        },
+    }
+    return MusicWorkerSelection(True, worker_id=worker_id, name=str(worker["name"]), worker=worker, reason=reason)
 
 
 def select_music_worker() -> MusicWorkerSelection:
@@ -188,6 +273,10 @@ def select_music_worker() -> MusicWorkerSelection:
     workers = _load_public_workers()
     online = [w for w in workers if bool(w.get("enabled", True)) and bool(w.get("online"))]
     if not online:
+        configured = _configured_phone_worker_selection(reason="phone_worker_configurado_sem_registry_online")
+        if configured is not None:
+            logger.info("[music/worker] usando phone worker configurado direto; registry sem worker online")
+            return configured
         return MusicWorkerSelection(False, reason="nenhum worker online")
 
     rejected: list[str] = []
@@ -209,6 +298,10 @@ def select_music_worker() -> MusicWorkerSelection:
         return MusicWorkerSelection(True, worker_id=worker_id, name=name, worker=worker, reason="ok")
 
     reason = "; ".join(rejected[:3]) if rejected else "nenhum worker compatível"
+    configured = _configured_phone_worker_selection(reason=f"phone_worker_configurado_fallback:{reason}")
+    if configured is not None:
+        logger.info("[music/worker] usando phone worker configurado direto; recusas_registry=%s", reason)
+        return configured
     return MusicWorkerSelection(False, reason=reason)
 
 
@@ -360,6 +453,7 @@ async def ensure_music_worker_available() -> MusicWorkerSelection:
 def require_music_worker_available() -> MusicWorkerSelection:
     selection = select_music_worker()
     if not selection.available:
+        logger.info("[music/worker] indisponível: %s", selection.reason or "sem motivo")
         raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
     return selection
 

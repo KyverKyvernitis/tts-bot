@@ -44,7 +44,7 @@ _APK_BUILD_THREAD_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.9.4"
+PHONE_WORKER_VERSION = "1.9.5"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -155,7 +155,7 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "turbo": {
         "label": "Turbo",
         "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -1071,8 +1071,12 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         capabilities.append("ffmpeg")
     if status.get("ffprobe") and "ffprobe" not in capabilities:
         capabilities.append("ffprobe")
-    if bool(music_node.get("ok") or music_node.get("online")):
-        for capability in ("music", "music-node", "music-lavalink"):
+    music_ready = bool(music_node.get("ok") or music_node.get("online") or profile == "turbo")
+    if music_ready:
+        for role in ("music", "music-node", "music-lavalink", "music-ytdlp"):
+            if role not in roles:
+                roles.append(role)
+        for capability in ("music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve"):
             if capability not in capabilities:
                 capabilities.append(capability)
     return {
@@ -1411,8 +1415,36 @@ def _phone_lavalink_port() -> int:
         return 2333
 
 
+def _read_lavalink_application_password() -> str:
+    app_path = Path(_phone_lavalink_env_value("PHONE_LAVALINK_APPLICATION_YML", str(Path.home() / "lavalink" / "application.yml"))).expanduser()
+    try:
+        if not app_path.exists():
+            return ""
+        text = app_path.read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith("#") or ":" not in raw:
+                continue
+            key, value = raw.split(":", 1)
+            if key.strip().lower() != "password":
+                continue
+            value = value.strip().strip('"').strip("'")
+            if value.startswith("${") and value.endswith("}"):
+                env_key = value[2:-1].split(":", 1)[0].strip()
+                return str(os.getenv(env_key) or "").strip()
+            return value
+    except Exception:
+        return ""
+    return ""
+
+
 def _phone_lavalink_password() -> str:
-    return _phone_lavalink_env_value("PHONE_LAVALINK_PASSWORD", _phone_lavalink_env_value("AUX_LAVALINK_PASSWORD", _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PASSWORD", "")))
+    return (
+        _phone_lavalink_env_value("PHONE_LAVALINK_PASSWORD", "")
+        or _phone_lavalink_env_value("AUX_LAVALINK_PASSWORD", "")
+        or _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PASSWORD", "")
+        or _read_lavalink_application_password()
+    )
 
 
 def _probe_local_lavalink_http(*, timeout: float = 2.5) -> tuple[bool, int, str]:
@@ -1476,7 +1508,7 @@ def _ensure_phone_lavalink_started(reason: str = "health") -> dict[str, Any]:
         return {"attempted": False, "reason": "auto_start_disabled"}
     roles, capabilities = _current_core_worker_roles_and_capabilities()
     caps = {str(x).strip().lower() for x in (roles + capabilities)}
-    if not ({"music", "music-node", "music-lavalink"} & caps):
+    if not ({"music", "music-node", "music-lavalink"} & caps) and _current_core_worker_profile() != "turbo":
         return {"attempted": False, "reason": "worker_sem_capacidade_music"}
     alive, status, body = _probe_local_lavalink_http(timeout=1.5)
     if alive or status == 401:
@@ -1556,6 +1588,21 @@ def _music_node_snapshot() -> dict[str, Any]:
             "latency_ms": round((time.time() - start) * 1000.0, 1),
             "music_available": healthy,
             "playback_modes": ["lavalink"] if healthy else [],
+        })
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code or 0)
+        # 401 ainda prova que o Lavalink está vivo; a VPS/bot pode ter a senha
+        # correta mesmo quando o worker não conseguiu ler application.yml/env.
+        alive = status == 401
+        result.update({
+            "ok": alive,
+            "online": alive,
+            "state": "auth_required" if alive else f"http_{status}",
+            "http_status": status,
+            "error": "authorization_required" if alive else _short_text(exc.reason, limit=100),
+            "latency_ms": round((time.time() - start) * 1000.0, 1),
+            "music_available": alive,
+            "playback_modes": ["lavalink"] if alive else [],
         })
     except Exception as exc:
         result.update({
@@ -3032,7 +3079,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     best_url = candidate
             return best_url
 
-        cookies = str(os.getenv("PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE") or os.getenv("MUSIC_YTDLP_COOKIES_FILE") or os.getenv("YTDLP_COOKIES_FILE") or "").strip()
+        cookies = str(
+            os.getenv("PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE")
+            or os.getenv("MUSIC_WORKER_YTDLP_COOKIES_FILE")
+            or os.getenv("MUSIC_YTDLP_COOKIES_FILE")
+            or os.getenv("YTDLP_COOKIES_FILE")
+            or ""
+        ).strip()
         ydl_opts: dict[str, Any] = {
             "format": fmt,
             "quiet": True,

@@ -82,12 +82,23 @@ class Music(commands.Cog):
         if clean and clean in {worker_unavailable, worker_engine_unavailable}:
             return clean
         lower = raw.lower()
+        if any(
+            needle in lower
+            for needle in (
+                "invalid status code for soundcloud stream",
+                "failed to load tracks",
+                "trackexception",
+                "something broke when playing the track",
+                "não conseguiu tocar nenhuma fonte candidata",
+            )
+        ):
+            return "`⚠️` Não consegui tocar essa fonte agora. Tente outro link ou outra pesquisa."
         if getattr(self.router, "music_worker_only_enabled", lambda: False)() and (
             "lavalink indisponível" in lower
             or "lavalink em cooldown" in lower
             or "cannot connect to" in lower
             or "node musical" in lower
-            or "wavelink" in lower
+            or ("wavelink" in lower and "trackexception" not in lower)
         ):
             return worker_engine_unavailable or "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta"
         if "sign in to confirm" in lower or "not a bot" in lower:

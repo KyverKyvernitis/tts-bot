@@ -200,6 +200,44 @@ upsert_env_value() {
   export "$key=$value"
 }
 
+append_csv_env_value() {
+  local key="$1"
+  local item="$2"
+  local current="${!key:-}"
+  local normalized
+  normalized="$(printf '%s' "$current" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -Fx "$item" || true)"
+  if [[ -n "$normalized" ]]; then
+    return 0
+  fi
+  if [[ -n "$current" ]]; then
+    upsert_env_value "$key" "${current},${item}"
+  else
+    upsert_env_value "$key" "$item"
+  fi
+}
+
+ensure_music_worker_env_if_needed() {
+  is_turbo_profile || return 0
+  for role in music music-node music-lavalink music-ytdlp; do
+    append_csv_env_value CORE_WORKER_ROLES "$role"
+  done
+  for capability in music music-node music-lavalink music-ytdlp music-ytdlp-resolve; do
+    append_csv_env_value CORE_WORKER_CAPABILITIES "$capability"
+  done
+  local cookies="${PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE:-${MUSIC_WORKER_YTDLP_COOKIES_FILE:-}}"
+  if [[ -z "$cookies" ]]; then
+    cookies="$WORKER_DIR/secrets/youtube-cookies.txt"
+  fi
+  if [[ -s "$cookies" ]]; then
+    upsert_env_value PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE "$cookies"
+    upsert_env_value MUSIC_WORKER_YTDLP_COOKIES_FILE "$cookies"
+    log "perfil turbo: cookies yt-dlp do worker configurados"
+  else
+    mkdir -p "$(dirname "$cookies")" 2>/dev/null || true
+    log "perfil turbo: cookies yt-dlp do worker não encontrados em $cookies; worker tentará sem cookies"
+  fi
+}
+
 is_turbo_profile() {
   local profile="${CORE_WORKER_PROFILE:-${PHONE_WORKER_PROFILE:-}}"
   profile="$(printf '%s' "$profile" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
@@ -373,6 +411,7 @@ ensure_turbo_deps_if_needed() {
   ensure_turbo_piper_wrapper_if_needed
 }
 
+ensure_music_worker_env_if_needed
 ensure_turbo_deps_if_needed
 ensure_lavalink_for_turbo_if_needed
 
