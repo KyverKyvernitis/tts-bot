@@ -361,7 +361,10 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
     ])
     backend = str(getattr(state, "current_backend", "local") or "local").lower()
     if backend == "lavalink":
-        backend_label = "Reprodução via Lavalink"
+        if str(getattr(track, "extractor", "") or "").lower() == "worker-ytdlp":
+            backend_label = "Lavalink do worker"
+        else:
+            backend_label = "Reprodução via Lavalink"
     else:
         # Fallback é detalhe de diagnóstico. No painel público, mostrar
         # "fallback LavaSrc" dá a impressão de fonte errada/invertida quando a

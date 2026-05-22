@@ -438,7 +438,11 @@ async def resolve_music_tracks_on_worker(
             continue
         direct_stream_url = _direct_stream_url(item)
         worker_stream_url = _worker_stream_url(base, item)
-        stream_url = worker_stream_url or direct_stream_url
+        # O phone worker pode expor um endpoint PCM/cacheado, mas esse caminho
+        # ainda faz a VPS virar relé de áudio e engasga em rede móvel/Tailscale.
+        # Para música worker-only, a VPS deve passar a URL direta resolvida pelo
+        # yt-dlp para o Lavalink do próprio worker transportar até o Discord.
+        stream_url = direct_stream_url or worker_stream_url
         item_metadata_only = _as_bool(item.get("metadata_only") or item.get("search_only"), False)
         webpage_url = str(item.get("webpage_url") or item.get("original_url") or clean_query).strip()
         if not stream_url and not item_metadata_only:
@@ -471,9 +475,16 @@ async def resolve_music_tracks_on_worker(
             track.lavalink_query = ""
             track.lavalink_resolved = False
             track.display_source = "YouTube"
-        if worker_stream_url:
-            # Stream PCM preparado pelo phone worker. A VPS lê esse endpoint com
-            # AudioSource próprio; não passa por yt-dlp/FFmpeg local nem por Lavalink.
+        if direct_stream_url:
+            # Metadados vêm do worker/yt-dlp, mas o transporte de áudio é feito
+            # pelo Lavalink do worker. Não marque como Worker local/PCM.
+            track.display_source = "YouTube"
+            track.lavalink_query = direct_stream_url
+            track.lavalink_resolved = True
+        elif worker_stream_url:
+            # Compatibilidade com workers antigos: só use esse endpoint se o
+            # worker não devolveu URL direta. O roteador atual evitará esse
+            # caminho para pesquisa comum sempre que houver direct_stream_url.
             track.display_source = "Worker local"
         
         tracks.append(track)
