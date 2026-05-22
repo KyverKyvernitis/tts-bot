@@ -12,6 +12,7 @@ import config
 from .errors import MusicExtractionError
 from .models import ExtractedBatch, MusicTrack
 from .providers import describe_url
+from .worker_node import resolve_music_tracks_on_worker
 
 PLAYER_BAR_URL = "https://cdn.discordapp.com/attachments/554468640942981147/1127294696025227367/rainbow_bar3.gif"
 QUEUE_PAGE_SIZE = 8
@@ -73,6 +74,21 @@ def _is_youtube_text_search(query: str) -> bool:
     return not describe_url(raw).is_url
 
 
+def _worker_only_should_use_lavalink(query: str) -> bool:
+    raw = (query or "").strip()
+    if not raw:
+        return False
+    lower = raw.lower()
+    profile = describe_url(raw)
+    if lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:")):
+        return True
+    if profile.is_youtube and profile.resource_type == "playlist":
+        return True
+    if profile.platform in {"spotify", "soundcloud", "apple", "deezer"}:
+        return True
+    return False
+
+
 async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, requester_id: int, requester_name: str) -> tuple[ExtractedBatch, bool]:
     """Resolve o input do modal respeitando o backend ativo.
 
@@ -85,23 +101,32 @@ async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, req
         selection = await router.ensure_music_worker_available()
         if not getattr(selection, "available", False):
             raise RuntimeError(getattr(router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
-        if _is_lavalink_search_request(query):
-            batch = await backends.search_lavalink_tracks(
+        if _worker_only_should_use_lavalink(query):
+            if _is_lavalink_search_request(query):
+                batch = await backends.search_lavalink_tracks(
+                    query,
+                    requester_id=requester_id,
+                    requester_name=requester_name,
+                    guild_id=guild_id,
+                    limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
+                )
+                return batch, True
+            batch = await backends.resolve_lavalink_direct_tracks(
                 query,
                 requester_id=requester_id,
                 requester_name=requester_name,
                 guild_id=guild_id,
-                limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
+                limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
             )
-            return batch, True
-        batch = await backends.resolve_lavalink_direct_tracks(
+            return batch, False
+        batch = await resolve_music_tracks_on_worker(
             query,
             requester_id=requester_id,
             requester_name=requester_name,
-            guild_id=guild_id,
-            limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
+            limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
+            metadata_only=_is_youtube_text_search(query),
         )
-        return batch, False
+        return batch, bool(_is_youtube_text_search(query) and len(batch.tracks) > 1)
 
     should_use_lavalink = getattr(backends, "should_use_lavalink_real", None)
     lavalink_active = bool(callable(should_use_lavalink) and should_use_lavalink(guild_id))
@@ -341,7 +366,10 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
         # Fallback é detalhe de diagnóstico. No painel público, mostrar
         # "fallback LavaSrc" dá a impressão de fonte errada/invertida quando a
         # música já caiu corretamente para o player local.
-        backend_label = "Reprodução local"
+        if str(getattr(track, "extractor", "") or "").lower() == "worker-ytdlp":
+            backend_label = "Reprodução local worker"
+        else:
+            backend_label = "Reprodução local"
     lines.append(f"> -# 🎧 **⠂** `{backend_label}`")
     if backend != "lavalink":
         format_label = _local_audio_format_label(track)

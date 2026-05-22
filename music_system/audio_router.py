@@ -764,6 +764,19 @@ class AudioRouter:
         stream_url = str(getattr(track, "stream_url", "") or "").strip().lower()
         return bool(extractor == "worker-ytdlp" and "/music/stream/" in stream_url)
 
+    def _track_is_worker_ytdlp_candidate(self, track: MusicTrack | None) -> bool:
+        """Faixa de busca/link comum que deve tocar pelo engine local do worker.
+
+        A busca leve do worker retorna apenas metadados, sem ``stream_url``. Mesmo
+        assim ela não pode ser reclassificada como Lavalink antes de resolver o
+        stream real, senão texto normal vira ``scsearch:...`` e cai na rota errada.
+        """
+        if track is None:
+            return False
+        extractor = str(getattr(track, "extractor", "") or "").strip().lower()
+        source = str(getattr(track, "source", "") or "").strip().lower()
+        return bool(extractor == "worker-ytdlp" or source.startswith("worker-ytdlp"))
+
     def _make_worker_local_source(self, track: MusicTrack) -> WorkerPCMHttpAudioSource:
         return WorkerPCMHttpAudioSource(
             str(getattr(track, "stream_url", "") or ""),
@@ -3201,6 +3214,7 @@ class AudioRouter:
 
         direct_youtube_request = False if self.music_worker_only_enabled() else self._track_is_direct_youtube_request(track)
         worker_local_stream = self._track_uses_worker_local_stream(track)
+        worker_local_candidate = bool(worker_local_stream or (self.music_worker_only_enabled() and self._track_is_worker_ytdlp_candidate(track)))
         # Link direto do YouTube prioriza áudio. Não bloqueie a resolução do
         # stream local aguardando painel/metadata bonitos; o painel é criado
         # depois, quando o stream já estiver pronto/iniciando.
@@ -3209,8 +3223,8 @@ class AudioRouter:
             # mesma música continuam editando esse painel.
             await self.update_panel(guild.id, create=True, repost=True)
 
-        use_lavalink_real = bool(self.backends.should_use_music_lavalink(guild.id) if self.music_worker_only_enabled() else self.backends.should_use_lavalink_real(guild.id)) and not direct_youtube_request and not worker_local_stream
-        if self.music_worker_only_enabled() and not use_lavalink_real and not worker_local_stream:
+        use_lavalink_real = bool(self.backends.should_use_music_lavalink(guild.id) if self.music_worker_only_enabled() else self.backends.should_use_lavalink_real(guild.id)) and not direct_youtube_request and not worker_local_candidate
+        if self.music_worker_only_enabled() and not use_lavalink_real and not worker_local_candidate:
             # Worker-only não pode cair para yt-dlp/FFmpeg local na VPS. Se o
             # worker está online mas o engine musical dele não está pronto, falhe
             # com mensagem natural e sem expor Wavelink/Lavalink/cooldown no painel.
@@ -3323,6 +3337,8 @@ class AudioRouter:
             raise MusicPlaybackError("Playback cancelado.")
         if not track.stream_url:
             raise MusicExtractionError("A música não retornou URL de stream.")
+        worker_local_stream = self._track_uses_worker_local_stream(track)
+        worker_local_candidate = bool(worker_local_stream or (self.music_worker_only_enabled() and self._track_is_worker_ytdlp_candidate(track)))
 
         # Só entra/move para a call depois que existe stream válido. Antes disso
         # ficaríamos conectando/desconectando enquanto o yt-dlp falha por anti-bot,
