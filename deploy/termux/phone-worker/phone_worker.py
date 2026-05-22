@@ -153,7 +153,7 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "turbo": {
         "label": "Turbo",
         "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "apk-builder", "vps-assist", "cache-worker", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -1056,6 +1056,7 @@ def _flush_pending_core_worker_job_results(*, timeout: float = 8.0) -> int:
 
 def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     status = _safe_telemetry("system", _system_status, {"ok": False})
+    music_node = _safe_telemetry("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"})
     worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
     name = _default_worker_name()
     endpoint = str(os.getenv("CORE_WORKER_ENDPOINT") or os.getenv("PHONE_WORKER_ENDPOINT") or "").strip()
@@ -1068,6 +1069,10 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         capabilities.append("ffmpeg")
     if status.get("ffprobe") and "ffprobe" not in capabilities:
         capabilities.append("ffprobe")
+    if bool(music_node.get("ok") or music_node.get("online")):
+        for capability in ("music", "music-node", "music-lavalink"):
+            if capability not in capabilities:
+                capabilities.append(capability)
     return {
         "worker_id": worker_id,
         "name": _short_text(name, limit=64, default="Core Phone Worker"),
@@ -1100,7 +1105,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         "status": {
             "core_worker_jobs": _core_job_runtime_snapshot(),
             "core_worker_network": _core_worker_network_runtime_snapshot(),
-            "music_node": _safe_telemetry("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"}),
+            "music_node": music_node,
             "runtime_mode": CORE_WORKER_RUNTIME_MODE,
             "runtime": {
                 "mode": CORE_WORKER_RUNTIME_MODE,
@@ -1388,20 +1393,36 @@ def _phone_lavalink_env_value(name: str, default: str = "") -> str:
 
 
 def _music_node_snapshot() -> dict[str, Any]:
-    port_raw = _phone_lavalink_env_value("PHONE_LAVALINK_PORT", "2333") or "2333"
+    port_raw = _phone_lavalink_env_value("PHONE_LAVALINK_PORT", _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PORT", "2333")) or "2333"
     try:
         port = max(1, min(65535, int(str(port_raw).strip())))
     except Exception:
         port = 2333
-    password = _phone_lavalink_env_value("PHONE_LAVALINK_PASSWORD", _phone_lavalink_env_value("AUX_LAVALINK_PASSWORD", ""))
+    password = _phone_lavalink_env_value("PHONE_LAVALINK_PASSWORD", _phone_lavalink_env_value("AUX_LAVALINK_PASSWORD", _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PASSWORD", "")))
+    bind_host = _phone_lavalink_env_value("PHONE_LAVALINK_BIND_HOST", "127.0.0.1") or "127.0.0.1"
+    public_host = (
+        _phone_lavalink_env_value("PHONE_LAVALINK_PUBLIC_HOST", "")
+        or _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_HOST", "")
+        or _phone_lavalink_env_value("PHONE_LAVALINK_HOST", "")
+    )
+    public_port_raw = _phone_lavalink_env_value("PHONE_LAVALINK_PUBLIC_PORT", _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PORT", ""))
+    try:
+        public_port = max(1, min(65535, int(str(public_port_raw).strip()))) if str(public_port_raw or "").strip() else port
+    except Exception:
+        public_port = port
     url = f"http://127.0.0.1:{port}/version"
     headers = {"Accept": "text/plain"}
     if password:
         headers["Authorization"] = password
     result: dict[str, Any] = {
         "kind": "lavalink",
-        "host": "127.0.0.1",
+        "mode": "lavalink",
+        "host": bind_host,
         "port": port,
+        "public_host": public_host,
+        "public_port": public_port,
+        "connect_host": public_host,
+        "connect_port": public_port,
         "ok": False,
         "online": False,
         "state": "offline",
@@ -1412,18 +1433,23 @@ def _music_node_snapshot() -> dict[str, Any]:
         with urllib.request.urlopen(req, timeout=2.5) as response:
             body = response.read(512).decode("utf-8", errors="replace").strip()
             status = int(getattr(response, "status", 0) or 0)
+        healthy = 200 <= status < 300
         result.update({
-            "ok": 200 <= status < 300,
-            "online": 200 <= status < 300,
-            "state": "healthy" if 200 <= status < 300 else f"http_{status}",
+            "ok": healthy,
+            "online": healthy,
+            "state": "healthy" if healthy else f"http_{status}",
             "http_status": status,
             "version": _short_text(body, limit=80),
             "latency_ms": round((time.time() - start) * 1000.0, 1),
+            "music_available": healthy,
+            "playback_modes": ["lavalink"] if healthy else [],
         })
     except Exception as exc:
         result.update({
             "error": _short_text(f"{type(exc).__name__}: {exc}", limit=120),
             "latency_ms": round((time.time() - start) * 1000.0, 1),
+            "music_available": False,
+            "playback_modes": [],
         })
     return result
 

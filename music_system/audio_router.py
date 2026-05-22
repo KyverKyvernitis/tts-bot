@@ -28,7 +28,9 @@ from .models import LoopMode, MusicTrack
 from .providers import describe_url
 from .backends import MusicBackendManager
 from .worker_node import (
+    MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE,
     MUSIC_WORKER_UNAVAILABLE_MESSAGE,
+    MusicWorkerEngineUnavailable,
     MusicWorkerUnavailable,
     ensure_music_worker_available as _ensure_music_worker_available,
     music_worker_only_enabled as _music_worker_only_enabled,
@@ -2446,6 +2448,13 @@ class AudioRouter:
                     if not state.skip_requested and not state.stop_requested:
                         logger.warning("[music/worker] worker indisponível durante playback | guild=%s track=%r erro=%s", guild_id, track.title, self._exc_label(exc))
                         await self._send_text(guild, state, MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+                except MusicWorkerEngineUnavailable as exc:
+                    playback_failed = True
+                    playback_failed_before_start = True
+                    playback_failure_label = self._exc_label(exc)
+                    if not state.skip_requested and not state.stop_requested:
+                        logger.warning("[music/worker] engine musical indisponível | guild=%s track=%r erro=%s", guild_id, track.title, self._exc_label(exc))
+                        await self._send_text(guild, state, MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE)
                 except Exception as exc:
                     playback_failed = True
                     playback_failed_before_start = not bool(float(getattr(state, "current_started_at_monotonic", 0.0) or 0.0))
@@ -2914,6 +2923,15 @@ class AudioRouter:
             await self.update_panel(guild.id, create=True, repost=True)
 
         use_lavalink_real = bool(self.backends.should_use_music_lavalink(guild.id) if self.music_worker_only_enabled() else self.backends.should_use_lavalink_real(guild.id)) and not direct_youtube_request
+        if self.music_worker_only_enabled() and not use_lavalink_real:
+            # Worker-only não pode cair para yt-dlp/FFmpeg local na VPS. Se o
+            # worker está online mas o engine musical dele não está pronto, falhe
+            # com mensagem natural e sem expor Wavelink/Lavalink/cooldown no painel.
+            worker_error_getter = getattr(self.backends, "music_worker_engine_error_message", None)
+            message = worker_error_getter(guild.id) if callable(worker_error_getter) else MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE
+            if message == MUSIC_WORKER_UNAVAILABLE_MESSAGE:
+                raise MusicWorkerUnavailable(message)
+            raise MusicWorkerEngineUnavailable(message)
         if direct_youtube_request:
             logger.info(
                 "[music] YouTube direto usando reprodução local/yt-dlp sem mirror LavaSrc | guild=%s track=%r",
@@ -2949,10 +2967,12 @@ class AudioRouter:
                     self._mark_lavalink_transition(state, seconds=10.0)
                     self._mark_internal_voice_disconnect(guild.id, seconds=10.0)
                     self._set_current_status(state, "queued" if self._has_pending_track(state) else "idle")
+                    if self.music_worker_only_enabled():
+                        raise MusicWorkerEngineUnavailable(MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE) from exc
                     await self._send_text(
                         guild,
                         state,
-                        MUSIC_WORKER_UNAVAILABLE_MESSAGE if self.music_worker_only_enabled() else "⚠️ Lavalink não conseguiu iniciar essa música agora. O node pode estar reconectando/sobrecarregado; tente novamente ou troque o node em `_musicnode`.",
+                        "⚠️ Lavalink não conseguiu iniciar essa música agora. O node pode estar reconectando/sobrecarregado; tente novamente ou troque o node em `_musicnode`.",
                     )
                     raise MusicPlaybackError(f"Lavalink indisponível em modo lavalink-only: {exc}") from exc
 

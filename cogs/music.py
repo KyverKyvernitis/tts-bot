@@ -75,9 +75,20 @@ class Music(commands.Cog):
 
     def _music_error_message(self, exc: Exception) -> str:
         raw = str(exc or "")
-        if raw.strip() == getattr(self.router, "music_worker_unavailable_message", ""):
-            return raw.strip()
+        clean = raw.strip()
+        worker_unavailable = getattr(self.router, "music_worker_unavailable_message", "")
+        worker_engine_unavailable = getattr(getattr(self.router, "backends", None), "music_worker_engine_error_message", lambda _guild_id=None: "")(None)
+        if clean and clean in {worker_unavailable, worker_engine_unavailable}:
+            return clean
         lower = raw.lower()
+        if getattr(self.router, "music_worker_only_enabled", lambda: False)() and (
+            "lavalink indisponível" in lower
+            or "lavalink em cooldown" in lower
+            or "cannot connect to" in lower
+            or "node musical" in lower
+            or "wavelink" in lower
+        ):
+            return worker_engine_unavailable or "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta"
         if "sign in to confirm" in lower or "not a bot" in lower:
             return "`⚠️` O YouTube bloqueou a extração pedindo login/cookies. Confira `cookies.txt`, Deno e `yt-dlp[default]`."
         if "signature" in lower or "n challenge" in lower or "only images are available" in lower:
@@ -265,6 +276,10 @@ class Music(commands.Cog):
                     except Exception as lavalink_exc:
                         raw_lower = query.lower().strip()
                         explicit_lavalink = raw_lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:"))
+                        if getattr(self.router, "music_worker_only_enabled", lambda: False)():
+                            # Worker-only é uma fronteira dura: busca textual também
+                            # fica no engine musical do worker. Nada de yt-dlp local na VPS.
+                            raise lavalink_exc
                         if not self._is_youtube_text_search(query) or explicit_lavalink:
                             raise
                         logger.warning(
@@ -281,7 +296,9 @@ class Music(commands.Cog):
                     if not batch.tracks and self._is_youtube_text_search(query):
                         raw_lower = query.lower().strip()
                         explicit_lavalink = raw_lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:"))
-                        if not explicit_lavalink:
+                        if getattr(self.router, "music_worker_only_enabled", lambda: False)():
+                            batch = ExtractedBatch(tracks=[], query=query, is_playlist=False)
+                        elif not explicit_lavalink:
                             logger.info(
                                 "[music/lavalink] busca textual no node vazia; fallback local yt-dlp | guild=%s query=%r",
                                 ctx.guild.id,

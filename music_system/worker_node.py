@@ -13,6 +13,10 @@ MUSIC_WORKER_UNAVAILABLE_MESSAGE = str(
     getattr(config, "MUSIC_WORKER_UNAVAILABLE_MESSAGE", "Sistema de música indisponível no momento: Nenhum worker online")
     or "Sistema de música indisponível no momento: Nenhum worker online"
 ).strip()
+MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE = str(
+    getattr(config, "MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE", "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta")
+    or "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta"
+).strip()
 
 
 def _as_bool(value: object, default: bool = False) -> bool:
@@ -46,6 +50,10 @@ class MusicWorkerUnavailable(RuntimeError):
     pass
 
 
+class MusicWorkerEngineUnavailable(RuntimeError):
+    pass
+
+
 @dataclass(slots=True)
 class MusicWorkerSelection:
     available: bool
@@ -56,7 +64,7 @@ class MusicWorkerSelection:
 
     @property
     def message(self) -> str:
-        return MUSIC_WORKER_UNAVAILABLE_MESSAGE
+        return MUSIC_WORKER_UNAVAILABLE_MESSAGE if not self.available else ""
 
 
 def _load_public_workers() -> list[Mapping[str, Any]]:
@@ -93,6 +101,38 @@ def _nested(mapping: Mapping[str, Any] | None, *keys: str) -> Any:
     return current
 
 
+def _worker_music_node(worker: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    if not isinstance(worker, Mapping):
+        return None
+    status = worker.get("status") if isinstance(worker.get("status"), Mapping) else {}
+    candidates = [
+        status.get("music_node") if isinstance(status, Mapping) else None,
+        status.get("lavalink") if isinstance(status, Mapping) else None,
+        _nested(status, "services", "lavalink") if isinstance(status, Mapping) else None,
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, Mapping):
+            return candidate
+    return None
+
+
+def worker_music_summary(worker: Mapping[str, Any] | None) -> dict[str, Any]:
+    node = _worker_music_node(worker)
+    if not isinstance(node, Mapping):
+        return {"available": False, "mode": "", "state": "unknown"}
+    state = str(node.get("state") or "").strip().lower()
+    online = _as_bool(node.get("ok"), False) or _as_bool(node.get("online"), False) or state in {"ok", "online", "healthy"}
+    mode = str(node.get("mode") or node.get("kind") or "lavalink").strip().lower()
+    return {
+        "available": bool(online),
+        "mode": mode,
+        "state": state or ("healthy" if online else "offline"),
+        "host": str(node.get("host") or ""),
+        "port": node.get("port"),
+        "error": str(node.get("error") or ""),
+    }
+
+
 def _worker_profile(worker: Mapping[str, Any]) -> str:
     for value in (
         worker.get("profile"),
@@ -118,20 +158,15 @@ def _worker_is_turbo(worker: Mapping[str, Any], roles_caps: set[str]) -> bool:
 
 
 def _music_node_status_ok(worker: Mapping[str, Any]) -> bool:
-    status = worker.get("status") if isinstance(worker.get("status"), Mapping) else {}
-    candidates = [
-        status.get("music_node") if isinstance(status, Mapping) else None,
-        status.get("lavalink") if isinstance(status, Mapping) else None,
-        _nested(status, "services", "lavalink") if isinstance(status, Mapping) else None,
-    ]
-    for candidate in candidates:
-        if isinstance(candidate, Mapping):
-            if _as_bool(candidate.get("ok"), False) or _as_bool(candidate.get("online"), False) or str(candidate.get("state") or "").lower() in {"ok", "online", "healthy"}:
-                return True
-            if any(key in candidate for key in ("ok", "online", "state")):
-                return False
+    node = _worker_music_node(worker)
+    if isinstance(node, Mapping):
+        summary = worker_music_summary(worker)
+        if summary.get("available"):
+            return True
+        if any(key in node for key in ("ok", "online", "state")):
+            return False
     # Compatibilidade: bases antigas do worker ainda não reportam music_node.
-    # Nesse caso, a checagem do próprio Lavalink continua decidindo no backend.
+    # Nesse caso, a configuração/healthcheck do próprio engine decide no backend.
     return not _as_bool(getattr(config, "MUSIC_WORKER_REQUIRE_MUSIC_NODE_STATUS", False), False)
 
 

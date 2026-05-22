@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from typing import Any
+import os
+import re
+from typing import Any, Mapping
+from urllib.parse import urlparse
 
 import config
 
@@ -12,7 +15,13 @@ from .base import BackendHealth, BackendSearchResult, LocalPlaybackBackend
 from ..models import ExtractedBatch
 from .lavalink import LavalinkBackend, LavalinkConfig, _normalize_provider
 from .lavalink_config import LavalinkConfigStore
-from ..worker_node import select_music_worker, music_worker_only_enabled
+from ..worker_node import (
+    MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE,
+    MUSIC_WORKER_UNAVAILABLE_MESSAGE,
+    select_music_worker,
+    music_worker_only_enabled,
+    worker_music_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +84,113 @@ class MusicBackendManager:
             timeout_seconds=max(1.0, float(getattr(config, "AUX_LAVALINK_TIMEOUT_SECONDS", 3.0) or 3.0)),
             provider="lavalink",
         )
+
+    def _safe_worker_node_name(self, worker_id: object, fallback: str = "worker") -> str:
+        raw = str(worker_id or fallback or "worker").strip().lower()
+        raw = re.sub(r"[^a-z0-9_.:-]+", "-", raw).strip("-._:")
+        return f"worker-{raw or 'music'}"[:64]
+
+    def _mapping_get_first(self, mapping: Mapping[str, Any] | None, *keys: str) -> Any:
+        if not isinstance(mapping, Mapping):
+            return None
+        for key in keys:
+            value = mapping.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    def _worker_endpoint_host(self, worker: Mapping[str, Any] | None) -> str:
+        if not isinstance(worker, Mapping):
+            return ""
+        for key in ("endpoint", "public_endpoint", "base_url", "url"):
+            raw = str(worker.get(key) or "").strip()
+            if not raw:
+                continue
+            candidate = raw if "://" in raw else f"http://{raw}"
+            with contextlib.suppress(Exception):
+                parsed = urlparse(candidate)
+                if parsed.hostname:
+                    return parsed.hostname.strip("[]")
+        remote = str(worker.get("remote_addr") or "").strip()
+        if remote and remote not in {"127.0.0.1", "::1", "localhost"}:
+            return remote.strip("[]")
+        return ""
+
+    def _worker_lavalink_host(self, worker: Mapping[str, Any] | None, music_node: Mapping[str, Any] | None) -> str:
+        explicit = str(
+            getattr(config, "MUSIC_WORKER_LAVALINK_HOST", "")
+            or os.getenv("PHONE_LAVALINK_HOST", "")
+            or ""
+        ).strip()
+        if explicit:
+            return explicit
+        node_host = str(
+            self._mapping_get_first(
+                music_node,
+                "public_host",
+                "external_host",
+                "advertise_host",
+                "connect_host",
+                "vps_host",
+                "host",
+            )
+            or ""
+        ).strip()
+        if node_host and node_host.lower() not in {"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"}:
+            return node_host.strip("[]")
+        return self._worker_endpoint_host(worker)
+
+    def _worker_lavalink_port(self, music_node: Mapping[str, Any] | None) -> int:
+        explicit_port = os.getenv("MUSIC_WORKER_LAVALINK_PORT")
+        for value in (
+            explicit_port if explicit_port not in (None, "") else None,
+            self._mapping_get_first(music_node, "public_port", "external_port", "connect_port", "vps_port", "port"),
+            getattr(config, "AUX_LAVALINK_PORT", None),
+            getattr(config, "LAVALINK_PORT", None),
+            2333,
+        ):
+            try:
+                port = int(str(value).strip())
+                if 1 <= port <= 65535:
+                    return port
+            except Exception:
+                continue
+        return 2333
+
+    def _worker_lavalink_password(self) -> str:
+        return str(
+            getattr(config, "MUSIC_WORKER_LAVALINK_PASSWORD", "")
+            or os.getenv("PHONE_LAVALINK_PASSWORD", "")
+            or getattr(config, "AUX_LAVALINK_PASSWORD", "")
+            or getattr(config, "LAVALINK_PASSWORD", "")
+            or ""
+        ).strip()
+
+    def _worker_lavalink_secure(self, music_node: Mapping[str, Any] | None) -> bool:
+        explicit = os.getenv("MUSIC_WORKER_LAVALINK_SECURE")
+        if explicit not in (None, ""):
+            return str(explicit).strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
+        raw = self._mapping_get_first(music_node, "secure", "ssl", "https")
+        if raw is not None:
+            return str(raw).strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
+        return bool(getattr(config, "AUX_LAVALINK_SECURE", False) or getattr(config, "LAVALINK_SECURE", False))
+
+    def _selected_worker_music_status(self) -> tuple[Any, Mapping[str, Any] | None, dict[str, Any]]:
+        selection = select_music_worker()
+        worker = selection.worker if getattr(selection, "available", False) else None
+        status = worker.get("status") if isinstance(worker, Mapping) and isinstance(worker.get("status"), Mapping) else {}
+        music_node = None
+        if isinstance(status, Mapping):
+            for candidate in (
+                status.get("music_node"),
+                status.get("lavalink"),
+                (status.get("services") or {}).get("lavalink") if isinstance(status.get("services"), Mapping) else None,
+            ):
+                if isinstance(candidate, Mapping):
+                    music_node = candidate
+                    break
+        summary = worker_music_summary(worker)
+        return selection, music_node, summary
 
     def _looks_like_youtube_input(self, value: object) -> bool:
         text = str(value or "").strip().lower()
@@ -178,19 +294,59 @@ class MusicBackendManager:
             return "lavalink"
 
     def _worker_only_music_node_config_for_guild(self, guild_id: int | None = None) -> LavalinkConfig:
-        """Node usado somente pela música em modo worker-only.
+        """Node musical pertencente ao worker selecionado.
 
-        Se AUX_LAVALINK_* estiver configurado, ele representa o phone worker
-        turbo/phone-lavalink e vira o único node musical. Sem AUX, LAVALINK_*
-        pode ser usado como node remoto do worker. Nunca volta para player local.
+        A VPS escolhe primeiro o worker turbo online. Depois deriva o Lavalink do
+        próprio worker: host público explícito do node, ou o host do endpoint do
+        worker quando o heartbeat informa 127.0.0.1. AUX_LAVALINK_* permanece como
+        fallback/compatibilidade para senha/porta, mas não transforma a VPS em
+        fallback de música.
         """
-        try:
-            aux = self._aux_node_config_for_guild(guild_id)
-            if bool(getattr(config, "MUSIC_WORKER_LAVALINK_USE_AUX", True)) and aux.enabled and aux.configured:
-                return aux
-        except Exception:
-            logger.debug("[music/worker] falha ao ler AUX_LAVALINK como node do worker", exc_info=True)
-        return self._node_config_for_guild(guild_id)
+        selection, music_node, summary = self._selected_worker_music_status()
+        if not getattr(selection, "available", False):
+            return LavalinkConfig(
+                enabled=False,
+                mode="off",
+                host="",
+                port=max(1, int(getattr(config, "MUSIC_WORKER_LAVALINK_PORT", 2333) or 2333)),
+                password="",
+                secure=False,
+                node_name="worker-music",
+                timeout_seconds=max(1.0, float(getattr(config, "MUSIC_WORKER_LAVALINK_TIMEOUT_SECONDS", 3.0) or 3.0)),
+                provider="lavalink",
+            )
+
+        worker = selection.worker if isinstance(selection.worker, Mapping) else {}
+        mode = str(summary.get("mode") or "lavalink").strip().lower()
+        if mode not in {"lavalink", "node", "music-node"}:
+            # O worker está online, mas o bot ainda só sabe controlar o engine
+            # musical por Lavalink. Sem fallback local na VPS.
+            return LavalinkConfig(
+                enabled=False,
+                mode="off",
+                host="",
+                port=self._worker_lavalink_port(music_node),
+                password="",
+                secure=False,
+                node_name=self._safe_worker_node_name(getattr(selection, "worker_id", "") or worker.get("worker_id") or "music"),
+                timeout_seconds=max(1.0, float(getattr(config, "MUSIC_WORKER_LAVALINK_TIMEOUT_SECONDS", 3.0) or 3.0)),
+                provider="lavalink",
+            )
+
+        host = self._worker_lavalink_host(worker, music_node)
+        password = self._worker_lavalink_password()
+        enabled = bool(host and password)
+        return LavalinkConfig(
+            enabled=enabled,
+            mode="lavalink" if enabled else "off",
+            host=host,
+            port=self._worker_lavalink_port(music_node),
+            password=password,
+            secure=self._worker_lavalink_secure(music_node),
+            node_name=self._safe_worker_node_name(getattr(selection, "worker_id", "") or worker.get("worker_id") or "music"),
+            timeout_seconds=max(1.0, float(getattr(config, "MUSIC_WORKER_LAVALINK_TIMEOUT_SECONDS", 3.0) or 3.0)),
+            provider="lavalink",
+        )
 
     def should_use_music_lavalink(self, guild_id: int | None = None) -> bool:
         if not music_worker_only_enabled():
@@ -201,7 +357,7 @@ class MusicBackendManager:
         try:
             cfg = self._worker_only_music_node_config_for_guild(guild_id)
         except Exception:
-            logger.debug("[music/worker] falha ao ler config do node musical", exc_info=True)
+            logger.debug("[music/worker] falha ao ler config do node musical do worker", exc_info=True)
             return False
         if not (cfg.enabled and cfg.configured and cfg.mode in {"lavalink", "auto"}):
             return False
@@ -257,7 +413,10 @@ class MusicBackendManager:
 
     def playback_backend_for_guild(self, guild_id: int | None = None) -> str:
         if music_worker_only_enabled():
-            return "lavalink" if self.should_use_music_lavalink(guild_id) else "worker_offline"
+            worker = select_music_worker()
+            if not worker.available:
+                return "worker_offline"
+            return "worker_lavalink" if self.should_use_music_lavalink(guild_id) else "worker_engine_unavailable"
         return "lavalink" if self.should_use_lavalink_real(guild_id) else "local"
 
     def lavalink_mode_for_guild(self, guild_id: int | None = None) -> str:
@@ -412,6 +571,22 @@ class MusicBackendManager:
         finally:
             await lavalink_backend.close()
 
+    def music_worker_engine_error_message(self, guild_id: int | None = None) -> str:
+        if not music_worker_only_enabled():
+            return "Node musical indisponível."
+        worker = select_music_worker()
+        if not worker.available:
+            return MUSIC_WORKER_UNAVAILABLE_MESSAGE
+        return MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE
+
+    def require_music_lavalink_engine(self, guild_id: int | None = None) -> None:
+        if self.should_use_music_lavalink(guild_id):
+            return
+        worker = select_music_worker()
+        if not worker.available:
+            raise RuntimeError(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+        raise RuntimeError(MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE)
+
     async def search_lavalink_tracks(
         self,
         query: str,
@@ -421,8 +596,7 @@ class MusicBackendManager:
         guild_id: int | None = None,
         limit: int = 5,
     ) -> ExtractedBatch:
-        if not self.should_use_music_lavalink(guild_id):
-            raise RuntimeError("Sistema de música indisponível no momento: Nenhum worker online")
+        self.require_music_lavalink_engine(guild_id)
         last_error: Exception | None = None
         for label, cfg in self._lavalink_configs_for_operation(guild_id, purpose="music", query=query):
             lavalink_backend = LavalinkBackend.from_config(cfg)
@@ -475,8 +649,7 @@ class MusicBackendManager:
         guild_id: int | None = None,
         limit: int = 25,
     ) -> ExtractedBatch:
-        if not self.should_use_music_lavalink(guild_id):
-            raise RuntimeError("Sistema de música indisponível no momento: Nenhum worker online")
+        self.require_music_lavalink_engine(guild_id)
         last_error: Exception | None = None
         for label, cfg in self._lavalink_configs_for_operation(guild_id, purpose="music", query=query):
             lavalink_backend = LavalinkBackend.from_config(cfg)
@@ -522,8 +695,7 @@ class MusicBackendManager:
 
     async def play_lavalink_track(self, guild, voice_channel, track, *, volume: float = 1.0):
         guild_id = getattr(guild, "id", None)
-        if not self.should_use_music_lavalink(guild_id):
-            raise RuntimeError("Sistema de música indisponível no momento: Nenhum worker online")
+        self.require_music_lavalink_engine(guild_id)
         last_error: Exception | None = None
         for label, cfg in self._lavalink_configs_for_operation(guild_id, purpose="music", track=track):
             lavalink_backend = LavalinkBackend.from_config(cfg)
