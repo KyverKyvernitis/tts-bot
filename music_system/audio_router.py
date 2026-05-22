@@ -122,7 +122,13 @@ PHONE_WORKER_TOKEN = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip(
 
 PCM_FRAME_BYTES = 3840  # 20ms, 48kHz, stereo, signed 16-bit little endian
 PCM_FRAME_MS = 20.0
+PCM_FRAMES_PER_SECOND = int(1000 / PCM_FRAME_MS)
+PCM_SILENCE_FRAME = b"\x00" * PCM_FRAME_BYTES
 PCM_LIMITER_THRESHOLD = 30000
+MUSIC_WORKER_STREAM_PREBUFFER_SECONDS = max(0.1, float(getattr(config, "MUSIC_WORKER_STREAM_PREBUFFER_SECONDS", 2.0) or 2.0))
+MUSIC_WORKER_STREAM_READY_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "MUSIC_WORKER_STREAM_READY_TIMEOUT_SECONDS", 18.0) or 18.0))
+MUSIC_WORKER_STREAM_MAX_BUFFER_SECONDS = max(1.0, float(getattr(config, "MUSIC_WORKER_STREAM_MAX_BUFFER_SECONDS", 8.0) or 8.0))
+MUSIC_WORKER_STREAM_UNDERRUN_LOG_EVERY = max(1, int(getattr(config, "MUSIC_WORKER_STREAM_UNDERRUN_LOG_EVERY", 25) or 25))
 
 
 def _ffmpeg_options_with_base_volume(options: str, volume: float) -> tuple[str, float]:
@@ -412,67 +418,191 @@ class MixedAudioSource(discord.AudioSource):
 
 
 class WorkerPCMHttpAudioSource(discord.AudioSource):
-    """PCM 48k stereo produzido pelo phone worker.
+    """PCM 48k stereo produzido pelo phone worker com jitter buffer.
 
-    A VPS não executa yt-dlp/FFmpeg para esse caminho: ela só lê frames PCM já
-    decodificados do endpoint do worker e entrega para o voice client do Discord.
+    O Discord chama read() em uma thread de áudio a cada ~20ms. Por isso,
+    read() não pode bloquear em rede/Tailscale. Um leitor em background puxa o
+    HTTP do worker, acumula frames PCM e read() só consome frames prontos.
     """
 
-    def __init__(self, url: str, *, token: str = "", timeout: float = 20.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        token: str = "",
+        timeout: float = 20.0,
+        prebuffer_seconds: float = MUSIC_WORKER_STREAM_PREBUFFER_SECONDS,
+        max_buffer_seconds: float = MUSIC_WORKER_STREAM_MAX_BUFFER_SECONDS,
+    ) -> None:
         self.url = str(url or "").strip()
         self.token = str(token or "").strip()
         self.timeout = max(3.0, float(timeout or 20.0))
+        self.prebuffer_seconds = max(0.1, float(prebuffer_seconds or MUSIC_WORKER_STREAM_PREBUFFER_SECONDS))
+        self.max_buffer_seconds = max(self.prebuffer_seconds + 0.5, float(max_buffer_seconds or MUSIC_WORKER_STREAM_MAX_BUFFER_SECONDS))
+        self._prebuffer_frames = max(1, int(self.prebuffer_seconds * PCM_FRAMES_PER_SECOND))
+        self._max_buffer_frames = max(self._prebuffer_frames + 1, int(self.max_buffer_seconds * PCM_FRAMES_PER_SECOND))
         self._response: Any = None
         self._closed = False
-        self._lock = threading.RLock()
+        self._reader_started = False
+        self._reader_done = False
+        self._last_error: Exception | None = None
+        self._frames: deque[bytes] = deque()
         self._buffer = b""
+        self._underruns = 0
+        self._frames_read = 0
+        self._frames_buffered = 0
+        self._started_at = time.monotonic()
+        self._ready_event = threading.Event()
+        self._condition = threading.Condition(threading.RLock())
+        self._reader_thread: threading.Thread | None = None
 
     def is_opus(self) -> bool:
         return False
 
-    def _ensure_open(self) -> None:
-        if self._response is not None:
-            return
-        headers = {"User-Agent": "CoreMusicWorkerPCM/1.0"}
+    @property
+    def last_error(self) -> Exception | None:
+        return self._last_error
+
+    def _open_response(self) -> Any:
+        headers = {"User-Agent": "CoreMusicWorkerPCM/1.1"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         request = urllib.request.Request(self.url, headers=headers, method="GET")
-        self._response = urllib.request.urlopen(request, timeout=self.timeout)  # noqa: S310 - URL do phone worker configurado
+        return urllib.request.urlopen(request, timeout=self.timeout)  # noqa: S310 - URL do phone worker configurado
 
-    def read(self) -> bytes:
-        with self._lock:
-            if self._closed:
-                return b""
-            try:
-                self._ensure_open()
-                while len(self._buffer) < PCM_FRAME_BYTES:
-                    chunk = self._response.read(PCM_FRAME_BYTES - len(self._buffer))
-                    if not chunk:
-                        break
-                    self._buffer += chunk
-                if not self._buffer:
-                    return b""
-                frame = self._buffer[:PCM_FRAME_BYTES]
-                self._buffer = self._buffer[PCM_FRAME_BYTES:]
-                if len(frame) < PCM_FRAME_BYTES:
-                    frame += b"\x00" * (PCM_FRAME_BYTES - len(frame))
-                return frame
-            except Exception as exc:
-                logger.warning("[music/worker-local] falha lendo PCM do worker: %s", exc)
-                self.cleanup()
-                return b""
-
-    def cleanup(self) -> None:
-        with self._lock:
-            if self._closed:
+    def _ensure_reader_started(self) -> None:
+        with self._condition:
+            if self._reader_started or self._closed:
                 return
-            self._closed = True
+            self._reader_started = True
+            self._reader_thread = threading.Thread(
+                target=self._reader_loop,
+                name="music-worker-pcm-reader",
+                daemon=True,
+            )
+            self._reader_thread.start()
+
+    def _append_frame_locked(self, frame: bytes) -> None:
+        if len(frame) < PCM_FRAME_BYTES:
+            frame = frame + (b"\x00" * (PCM_FRAME_BYTES - len(frame)))
+        elif len(frame) > PCM_FRAME_BYTES:
+            frame = frame[:PCM_FRAME_BYTES]
+        while not self._closed and len(self._frames) >= self._max_buffer_frames:
+            self._condition.wait(timeout=0.05)
+        if self._closed:
+            return
+        self._frames.append(frame)
+        self._frames_buffered += 1
+        if len(self._frames) >= self._prebuffer_frames:
+            self._ready_event.set()
+        self._condition.notify_all()
+
+    def _reader_loop(self) -> None:
+        chunk_buffer = b""
+        try:
+            self._response = self._open_response()
+            while True:
+                with self._condition:
+                    if self._closed:
+                        break
+                chunk = self._response.read(PCM_FRAME_BYTES * 8)
+                if not chunk:
+                    break
+                chunk_buffer += chunk
+                while len(chunk_buffer) >= PCM_FRAME_BYTES:
+                    frame = chunk_buffer[:PCM_FRAME_BYTES]
+                    chunk_buffer = chunk_buffer[PCM_FRAME_BYTES:]
+                    with self._condition:
+                        self._append_frame_locked(frame)
+            if chunk_buffer:
+                with self._condition:
+                    self._append_frame_locked(chunk_buffer)
+        except Exception as exc:
+            self._last_error = exc
+            logger.warning("[music/worker-local] leitor PCM falhou: %s", exc)
+        finally:
+            with self._condition:
+                self._reader_done = True
+                self._ready_event.set()
+                self._condition.notify_all()
+            elapsed = max(0.001, time.monotonic() - self._started_at)
+            logger.info(
+                "[music/worker-local] leitor PCM encerrado | frames=%s read=%s underruns=%s buffer=%s elapsed=%.1fs error=%s",
+                self._frames_buffered,
+                self._frames_read,
+                self._underruns,
+                len(self._frames),
+                elapsed,
+                type(self._last_error).__name__ if self._last_error else "",
+            )
             response = self._response
             self._response = None
             with contextlib.suppress(Exception):
                 if response is not None:
                     response.close()
+
+    def wait_until_ready(self, timeout: float | None = None) -> bool:
+        """Abre o HTTP em background e espera pré-buffer antes do vc.play()."""
+        self._ensure_reader_started()
+        wait_timeout = max(0.5, float(timeout if timeout is not None else MUSIC_WORKER_STREAM_READY_TIMEOUT_SECONDS))
+        ok = self._ready_event.wait(timeout=wait_timeout)
+        with self._condition:
+            ready = bool(self._frames)
+            done = bool(self._reader_done)
+            error = self._last_error
+        if ready:
+            logger.info(
+                "[music/worker-local] pré-buffer pronto | frames=%s alvo=%s timeout=%.1fs",
+                len(self._frames),
+                self._prebuffer_frames,
+                wait_timeout,
+            )
+            return True
+        if error:
+            logger.warning("[music/worker-local] pré-buffer falhou: %s", error)
+        elif done:
+            logger.warning("[music/worker-local] worker encerrou antes do pré-buffer")
+        elif not ok:
+            logger.warning("[music/worker-local] pré-buffer timeout | frames=%s alvo=%s", len(self._frames), self._prebuffer_frames)
+        return False
+
+    def read(self) -> bytes:
+        self._ensure_reader_started()
+        with self._condition:
+            if self._closed:
+                return b""
+            if self._frames:
+                frame = self._frames.popleft()
+                self._frames_read += 1
+                self._condition.notify_all()
+                return frame
+            if self._reader_done:
+                return b""
+            self._underruns += 1
+            if self._underruns == 1 or self._underruns % MUSIC_WORKER_STREAM_UNDERRUN_LOG_EVERY == 0:
+                logger.warning(
+                    "[music/worker-local] underrun de buffer | count=%s read=%s buffered=%s",
+                    self._underruns,
+                    self._frames_read,
+                    self._frames_buffered,
+                )
+            return PCM_SILENCE_FRAME
+
+    def cleanup(self) -> None:
+        response = None
+        with self._condition:
+            if self._closed:
+                return
+            self._closed = True
+            response = self._response
+            self._response = None
+            self._frames.clear()
             self._buffer = b""
+            self._ready_event.set()
+            self._condition.notify_all()
+        with contextlib.suppress(Exception):
+            if response is not None:
+                response.close()
 
 
 @dataclass
@@ -639,6 +769,8 @@ class AudioRouter:
             str(getattr(track, "stream_url", "") or ""),
             token=PHONE_WORKER_TOKEN,
             timeout=max(5.0, float(getattr(config, "MUSIC_WORKER_STREAM_CONNECT_TIMEOUT_SECONDS", 20.0) or 20.0)),
+            prebuffer_seconds=MUSIC_WORKER_STREAM_PREBUFFER_SECONDS,
+            max_buffer_seconds=MUSIC_WORKER_STREAM_MAX_BUFFER_SECONDS,
         )
 
     def _reset_stale_resolving_state(self, guild_id: int, state: MusicGuildState, *, reason: str = "stale") -> bool:
@@ -3249,6 +3381,19 @@ class AudioRouter:
             if worker_local_stream:
                 ffmpeg_source = self._make_worker_local_source(track)
                 source_base_volume = 1.0
+                state.current_status_detail = "Preenchendo buffer do worker..."
+                self._schedule_panel_update(guild.id, create=True)
+                ready = await asyncio.to_thread(
+                    ffmpeg_source.wait_until_ready,
+                    MUSIC_WORKER_STREAM_READY_TIMEOUT_SECONDS,
+                )
+                if not ready:
+                    err = ffmpeg_source.last_error
+                    with contextlib.suppress(Exception):
+                        ffmpeg_source.cleanup()
+                    raise MusicPlaybackError(
+                        f"Stream local do worker não preparou áudio a tempo: {type(err).__name__ if err else 'prebuffer_timeout'}"
+                    )
             else:
                 ffmpeg_source = discord.FFmpegPCMAudio(
                     track.stream_url,
