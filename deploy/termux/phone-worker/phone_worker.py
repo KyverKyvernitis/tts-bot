@@ -44,7 +44,7 @@ _APK_BUILD_THREAD_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.9.5"
+PHONE_WORKER_VERSION = "1.9.6"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -3044,11 +3044,52 @@ class WorkerHandler(BaseHTTPRequestHandler):
         timeout = max(5, min(self.job_timeout, int(float(body.get("timeout_seconds") or min(self.job_timeout, 30)))))
         fmt = str(body.get("format") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or "bestaudio/best").strip() or "bestaudio/best"
         is_url = bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", query) or query.lower().startswith("www."))
-        target = query if is_url or query.lower().startswith(("ytsearch:", "ytsearch", "ytmsearch:")) else f"ytsearch{limit}:{query}"
+
+        def _default_search_prefix() -> str:
+            raw = str(
+                body.get("default_search")
+                or os.getenv("PHONE_WORKER_MUSIC_YTDLP_DEFAULT_SEARCH")
+                or os.getenv("MUSIC_WORKER_YTDLP_DEFAULT_SEARCH")
+                or "ytsearch1"
+            ).strip().lower()
+            raw = raw.rstrip(":")
+            if raw in {"ytsearch", "ytsearchdate", "ytsearchall", "ytmsearch"}:
+                raw = f"{raw}1"
+            if not raw:
+                raw = "ytsearch1"
+            return raw
+
+        default_search = _default_search_prefix()
+        if is_url or query.lower().startswith(("ytsearch:", "ytsearch", "ytmsearch:")):
+            target = query
+        else:
+            # A pesquisa textual precisa ser explícita. Sem isso, o YouTube pode
+            # interpretar "megalovania" como ID/URL e retornar "Video unavailable".
+            target = f"{default_search}:{query}"
+
         try:
             import yt_dlp  # type: ignore
         except Exception as exc:
             raise RuntimeError("yt-dlp não está instalado no phone worker") from exc
+
+        def _split_csv(value: Any) -> list[str]:
+            items: list[str] = []
+            for part in re.split(r"[,;\s]+", str(value or "")):
+                clean = part.strip()
+                if clean:
+                    items.append(clean)
+            return items
+
+        def _safe_url_for_log(value: str) -> str:
+            if not value:
+                return ""
+            try:
+                parsed = urllib.parse.urlsplit(value)
+                if parsed.scheme and parsed.netloc:
+                    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path[:80], "", ""))
+            except Exception:
+                pass
+            return _short_text(value, limit=160)
 
         def select_stream(entry: dict[str, Any]) -> str:
             for item in entry.get("requested_downloads") or []:
@@ -3079,13 +3120,32 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     best_url = candidate
             return best_url
 
-        cookies = str(
+        configured_cookies = str(
             os.getenv("PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE")
             or os.getenv("MUSIC_WORKER_YTDLP_COOKIES_FILE")
             or os.getenv("MUSIC_YTDLP_COOKIES_FILE")
             or os.getenv("YTDLP_COOKIES_FILE")
             or ""
         ).strip()
+        default_cookies = Path.home() / "phone-worker" / "secrets" / "youtube-cookies.txt"
+        cookies_path = Path(configured_cookies).expanduser() if configured_cookies else default_cookies
+        cookies_ok = bool(cookies_path.exists() and cookies_path.is_file() and cookies_path.stat().st_size > 0)
+
+        js_runtime_raw = str(
+            body.get("js_runtimes")
+            or body.get("js_runtime")
+            or os.getenv("PHONE_WORKER_MUSIC_YTDLP_JS_RUNTIMES")
+            or os.getenv("MUSIC_WORKER_YTDLP_JS_RUNTIMES")
+            or "node"
+        ).strip()
+        js_runtimes = _split_csv(js_runtime_raw)
+        remote_components = str(
+            body.get("remote_components")
+            or os.getenv("PHONE_WORKER_MUSIC_YTDLP_REMOTE_COMPONENTS")
+            or os.getenv("MUSIC_WORKER_YTDLP_REMOTE_COMPONENTS")
+            or ""
+        ).strip()
+
         ydl_opts: dict[str, Any] = {
             "format": fmt,
             "quiet": True,
@@ -3098,20 +3158,37 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "fragment_retries": max(0, int(float(os.getenv("PHONE_WORKER_MUSIC_YTDLP_FRAGMENT_RETRIES", "1") or 1))),
             "cachedir": str(Path(os.getenv("PHONE_WORKER_MUSIC_YTDLP_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / "yt-dlp")).expanduser()),
         }
-        if cookies and Path(cookies).expanduser().exists():
-            ydl_opts["cookiefile"] = str(Path(cookies).expanduser())
+        if cookies_ok:
+            ydl_opts["cookiefile"] = str(cookies_path)
+
+        # O suporte Python para js_runtimes pode variar por versão do yt-dlp.
+        # A chamada via API continua rápida quando funcionar; se retornar vazio
+        # por challenge/EJS, o fallback CLI abaixo usa exatamente os flags que
+        # funcionaram no Termux: --js-runtimes node + ytsearch1:<query>.
         started = time.time()
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(target, download=False)
+        info: Any = None
+        api_error = ""
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(target, download=False)
+        except Exception as exc:
+            api_error = f"{type(exc).__name__}: {_short_text(exc, limit=220)}"
+            info = None
+
         entries: list[Any]
         if isinstance(info, dict) and isinstance(info.get("entries"), list):
             entries = list(info.get("entries") or [])
             playlist_title = str(info.get("title") or "")
             is_playlist = True
-        else:
+        elif info is not None:
             entries = [info]
             playlist_title = ""
             is_playlist = False
+        else:
+            entries = []
+            playlist_title = ""
+            is_playlist = False
+
         tracks: list[dict[str, Any]] = []
         for entry in entries:
             if not isinstance(entry, dict):
@@ -3136,9 +3213,77 @@ class WorkerHandler(BaseHTTPRequestHandler):
             })
             if len(tracks) >= limit:
                 break
+
+        cli_stderr = ""
+        cli_rc: int | None = None
+        if not tracks:
+            cmd = [shutil.which("python") or "python", "-m", "yt_dlp"]
+            if cookies_ok:
+                cmd += ["--cookies", str(cookies_path)]
+            for runtime in js_runtimes:
+                # yt-dlp aceita lista separada por vírgula em uma única opção.
+                # Mantemos uma opção para todos os runtimes para preservar sintaxe CLI.
+                pass
+            if js_runtimes:
+                cmd += ["--js-runtimes", ",".join(js_runtimes)]
+            if remote_components:
+                cmd += ["--remote-components", remote_components]
+            cmd += [
+                "--no-playlist",
+                "--no-warnings",
+                "--socket-timeout",
+                str(max(3, min(20, timeout - 1))),
+                "-f",
+                fmt,
+                "-g",
+                target,
+            ]
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=str(Path.home() / "phone-worker"),
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout,
+                )
+                cli_rc = int(proc.returncode)
+                cli_stderr = _short_text(proc.stderr or "", limit=800)
+                urls = [
+                    line.strip()
+                    for line in (proc.stdout or "").splitlines()
+                    if line.strip().startswith(("http://", "https://"))
+                ]
+                for idx, stream_url in enumerate(urls[:limit], start=1):
+                    tracks.append({
+                        "title": _short_text(query if not is_url else "Música", limit=160, default="Música"),
+                        "uploader": "",
+                        "duration": None,
+                        "thumbnail": "",
+                        "webpage_url": query,
+                        "original_query": query,
+                        "stream_url": stream_url,
+                        "source": "worker-ytdlp-cli",
+                        "extractor": "worker-ytdlp",
+                        "is_live": False,
+                        "ext": "",
+                        "format_id": "",
+                    })
+            except Exception as exc:
+                cli_stderr = f"{type(exc).__name__}: {_short_text(exc, limit=500)}"
+
+        if not tracks:
+            reason = cli_stderr or api_error or "yt-dlp não retornou URL de áudio"
+            print(
+                "[music-ytdlp] tracks=0 "
+                f"target={_short_text(target, limit=120)!r} cookies={'on' if cookies_ok else 'off'} "
+                f"js={','.join(js_runtimes) or 'off'} rc={cli_rc} erro={_short_text(reason, limit=240)}",
+                flush=True,
+            )
+
         return {
             "ok": True,
-            "summary": "música resolvida pelo yt-dlp no worker",
+            "summary": "música resolvida pelo yt-dlp no worker" if tracks else "yt-dlp não encontrou áudio tocável no worker",
             "query": query,
             "target": target,
             "tracks": tracks,
@@ -3147,6 +3292,12 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "playlist_title": playlist_title,
             "truncated": bool(len(entries) > len(tracks)),
             "elapsed_ms": round((time.time() - started) * 1000.0, 1),
+            "cookies": "on" if cookies_ok else "off",
+            "js_runtime": ",".join(js_runtimes) if js_runtimes else "",
+            "default_search": default_search,
+            "api_error": _short_text(api_error, limit=240),
+            "cli_rc": cli_rc,
+            "cli_error": _short_text(cli_stderr, limit=240),
         }
 
     def _task_ffprobe_media(self, body: dict[str, Any]) -> dict[str, Any]:

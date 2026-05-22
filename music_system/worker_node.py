@@ -376,6 +376,8 @@ async def resolve_music_tracks_on_worker(
         "query": clean_query,
         "limit": max_limit,
         "timeout_seconds": total_timeout,
+        "js_runtimes": str(getattr(config, "MUSIC_WORKER_YTDLP_JS_RUNTIMES", "node") or "node"),
+        "default_search": str(getattr(config, "MUSIC_WORKER_YTDLP_DEFAULT_SEARCH", "ytsearch1") or "ytsearch1"),
     }
     headers = {
         "Authorization": f"Bearer {token}",
@@ -430,11 +432,15 @@ async def resolve_music_tracks_on_worker(
         tracks.append(track)
     elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
     logger.info(
-        "[music/worker] yt-dlp remoto ok | worker=%s query=%r tracks=%s elapsed_ms=%.1f",
+        "[music/worker] yt-dlp remoto ok | worker=%s query=%r tracks=%s elapsed_ms=%.1f js=%s search=%s cli_rc=%s cli_error=%r",
         selection.worker_id or selection.name,
         clean_query,
         len(tracks),
         elapsed_ms,
+        data.get("js_runtime") or "",
+        data.get("default_search") or "",
+        data.get("cli_rc"),
+        str(data.get("cli_error") or data.get("api_error") or "")[:220],
     )
     return ExtractedBatch(
         tracks=tracks,

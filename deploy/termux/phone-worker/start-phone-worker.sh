@@ -236,6 +236,10 @@ ensure_music_worker_env_if_needed() {
     mkdir -p "$(dirname "$cookies")" 2>/dev/null || true
     log "perfil turbo: cookies yt-dlp do worker não encontrados em $cookies; worker tentará sem cookies"
   fi
+  upsert_env_value PHONE_WORKER_MUSIC_YTDLP_JS_RUNTIMES "${PHONE_WORKER_MUSIC_YTDLP_JS_RUNTIMES:-node}"
+  upsert_env_value MUSIC_WORKER_YTDLP_JS_RUNTIMES "${MUSIC_WORKER_YTDLP_JS_RUNTIMES:-node}"
+  upsert_env_value PHONE_WORKER_MUSIC_YTDLP_DEFAULT_SEARCH "${PHONE_WORKER_MUSIC_YTDLP_DEFAULT_SEARCH:-ytsearch1}"
+  upsert_env_value MUSIC_WORKER_YTDLP_DEFAULT_SEARCH "${MUSIC_WORKER_YTDLP_DEFAULT_SEARCH:-ytsearch1}"
 }
 
 is_turbo_profile() {
@@ -260,6 +264,7 @@ ensure_turbo_termux_packages_if_needed() {
   command -v wget >/dev/null 2>&1 || missing+=(wget)
   command -v ffmpeg >/dev/null 2>&1 || missing+=(ffmpeg)
   command -v ffprobe >/dev/null 2>&1 || missing+=(ffmpeg)
+  command -v node >/dev/null 2>&1 || missing+=(nodejs)
   command -v sox >/dev/null 2>&1 || missing+=(sox)
   command -v espeak >/dev/null 2>&1 || missing+=(espeak)
   if [[ "${#missing[@]}" -gt 0 ]]; then
@@ -279,6 +284,18 @@ PYTTSDEPS
   log "perfil turbo: instalando dependências leves do TTS (edge/gTTS)"
   "$PYTHON_BIN" -m pip install --upgrade edge-tts gTTS >/dev/null 2>&1 || \
     log "não consegui instalar edge/gTTS automaticamente; o benchmark vai mostrar erro curto"
+}
+
+ensure_music_ytdlp_deps_if_needed() {
+  is_turbo_profile || return 0
+  deps_install_enabled || return 0
+  "$PYTHON_BIN" - <<'PYYTDLPDEPS' >/dev/null 2>&1 && return 0
+import yt_dlp  # noqa: F401
+import yt_dlp_ejs  # noqa: F401
+PYYTDLPDEPS
+  log "perfil turbo: instalando suporte yt-dlp/EJS para música"
+  "$PYTHON_BIN" -m pip install --upgrade "yt-dlp[default]" >/dev/null 2>&1 || \
+    log "não consegui instalar yt-dlp[default] automaticamente; música YouTube pode falhar no challenge"
 }
 
 ensure_turbo_piper_cli_if_needed() {
@@ -406,6 +423,7 @@ ensure_lavalink_for_turbo_if_needed() {
 ensure_turbo_deps_if_needed() {
   ensure_turbo_termux_packages_if_needed
   ensure_turbo_python_tts_deps_if_needed
+  ensure_music_ytdlp_deps_if_needed
   ensure_turbo_piper_cli_if_needed
   ensure_turbo_piper_model_if_needed
   ensure_turbo_piper_wrapper_if_needed
