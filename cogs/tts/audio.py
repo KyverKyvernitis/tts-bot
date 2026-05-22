@@ -82,6 +82,9 @@ TTS_TURBO_WORKER_CACHE_LOOKUP_TIMEOUT_SECONDS = max(0.15, float(getattr(config, 
 TTS_TURBO_WORKER_CACHE_STORE_TIMEOUT_SECONDS = max(0.5, float(getattr(config, "TTS_TURBO_WORKER_CACHE_STORE_TIMEOUT_SECONDS", 2.5) or 2.5))
 TTS_TURBO_WORKER_CACHE_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_TURBO_WORKER_CACHE_MAX_AUDIO_MB", 8) or 8))
 TTS_TURBO_WORKER_CACHE_STORE_BACKGROUND = bool(getattr(config, "TTS_TURBO_WORKER_CACHE_STORE_BACKGROUND", True))
+TTS_TURBO_WORKER_CACHE_MISS_COOLDOWN_SECONDS = max(1.0, float(getattr(config, "TTS_TURBO_WORKER_CACHE_MISS_COOLDOWN_SECONDS", 45.0) or 45.0))
+TTS_TURBO_WORKER_CACHE_ERROR_COOLDOWN_SECONDS = max(1.0, float(getattr(config, "TTS_TURBO_WORKER_CACHE_ERROR_COOLDOWN_SECONDS", 10.0) or 10.0))
+TTS_TURBO_WORKER_CACHE_INDEX_MAX_ENTRIES = max(128, int(getattr(config, "TTS_TURBO_WORKER_CACHE_INDEX_MAX_ENTRIES", 4096) or 4096))
 PHONE_WORKER_ENABLED = bool(getattr(config, "PHONE_WORKER_ENABLED", False))
 PHONE_WORKER_HOST = str(getattr(config, "PHONE_WORKER_HOST", "") or "").strip()
 PHONE_WORKER_PORT = int(getattr(config, "PHONE_WORKER_PORT", 8766) or 8766)
@@ -362,6 +365,14 @@ class TTSAudioMixin:
                 "queue_depth_samples": 0,
                 "queue_depth_max": 0,
                 "prefetch_started": 0,
+                "worker_cache_lookup_hits": 0,
+                "worker_cache_lookup_misses": 0,
+                "worker_cache_lookup_skipped": 0,
+                "worker_cache_lookup_errors": 0,
+                "worker_cache_store_ok": 0,
+                "worker_cache_store_failed": 0,
+                "worker_cache_hit_total_ms": 0.0,
+                "worker_cache_hit_samples": 0,
                 "boot_warmups": 0,
                 "last_warmup_started_at": None,
                 "last_warmup_completed_at": None,
@@ -448,6 +459,76 @@ class TTSAudioMixin:
     def _record_cache_store(self) -> None:
         metrics = self._get_metrics_store()
         metrics["cache_stores"] = int(metrics.get("cache_stores", 0) or 0) + 1
+
+    def _record_worker_cache_lookup(self, status: str, *, total_ms: float | None = None) -> None:
+        metrics = self._get_metrics_store()
+        key_map = {
+            "hit": "worker_cache_lookup_hits",
+            "miss": "worker_cache_lookup_misses",
+            "skip": "worker_cache_lookup_skipped",
+            "error": "worker_cache_lookup_errors",
+        }
+        metric_key = key_map.get(str(status or "").strip().lower())
+        if metric_key:
+            metrics[metric_key] = int(metrics.get(metric_key, 0) or 0) + 1
+        if status == "hit" and total_ms is not None:
+            self._record_average_metric("worker_cache_hit_total_ms", "worker_cache_hit_samples", float(total_ms))
+
+    def _record_worker_cache_store(self, ok: bool) -> None:
+        metrics = self._get_metrics_store()
+        key = "worker_cache_store_ok" if ok else "worker_cache_store_failed"
+        metrics[key] = int(metrics.get(key, 0) or 0) + 1
+
+    def _get_worker_cache_index(self) -> OrderedDict[str, dict[str, Any]]:
+        index = getattr(self, "_tts_worker_cache_index", None)
+        if index is None:
+            index = OrderedDict()
+            setattr(self, "_tts_worker_cache_index", index)
+        return index
+
+    def _prune_worker_cache_index(self) -> None:
+        index = self._get_worker_cache_index()
+        now = time.monotonic()
+        for key in list(index.keys()):
+            entry = index.get(key) or {}
+            expires_at = float(entry.get("expires_at", 0.0) or 0.0)
+            if expires_at and expires_at <= now:
+                index.pop(key, None)
+        while len(index) > TTS_TURBO_WORKER_CACHE_INDEX_MAX_ENTRIES:
+            index.popitem(last=False)
+
+    def _mark_worker_cache_index(self, key: str, status: str, *, ttl: float | None = None, meta: dict[str, Any] | None = None) -> None:
+        clean_key = str(key or "").strip()
+        if not clean_key:
+            return
+        status = str(status or "").strip().lower() or "unknown"
+        if ttl is None:
+            if status == "miss":
+                ttl = TTS_TURBO_WORKER_CACHE_MISS_COOLDOWN_SECONDS
+            elif status == "error":
+                ttl = TTS_TURBO_WORKER_CACHE_ERROR_COOLDOWN_SECONDS
+            else:
+                ttl = max(float(TTS_AUDIO_CACHE_TTL_SECONDS), 3600.0)
+        index = self._get_worker_cache_index()
+        index[clean_key] = {
+            "status": status,
+            "updated_at": time.monotonic(),
+            "expires_at": time.monotonic() + max(1.0, float(ttl)),
+            **(meta or {}),
+        }
+        index.move_to_end(clean_key)
+        self._prune_worker_cache_index()
+
+    def _worker_cache_recent_negative_status(self, key: str) -> str:
+        clean_key = str(key or "").strip()
+        if not clean_key:
+            return ""
+        self._prune_worker_cache_index()
+        entry = self._get_worker_cache_index().get(clean_key) or {}
+        status = str(entry.get("status") or "").strip().lower()
+        if status in {"miss", "error"}:
+            return status
+        return ""
 
     def _get_engine_alert_state(self) -> dict[str, float]:
         state = getattr(self, "_tts_engine_alert_last_sent", None)
@@ -604,6 +685,7 @@ class TTSAudioMixin:
         self._get_global_cache_order()
         self._get_cache_frequency_map()
         self._get_inflight_cache_tasks()
+        self._get_worker_cache_index()
         self._get_metrics_store()
         self._hydrate_cache_index()
 
@@ -643,6 +725,14 @@ class TTSAudioMixin:
             "avg_queue_depth_at_enqueue": round((float(metrics.get("queue_depth_total", 0.0) or 0.0) / int(metrics.get("queue_depth_samples", 0) or 1)), 2) if int(metrics.get("queue_depth_samples", 0) or 0) else 0.0,
             "max_queue_depth_seen": int(metrics.get("queue_depth_max", 0) or 0),
             "prefetch_started": int(metrics.get("prefetch_started", 0) or 0),
+            "worker_cache_lookup_hits": int(metrics.get("worker_cache_lookup_hits", 0) or 0),
+            "worker_cache_lookup_misses": int(metrics.get("worker_cache_lookup_misses", 0) or 0),
+            "worker_cache_lookup_skipped": int(metrics.get("worker_cache_lookup_skipped", 0) or 0),
+            "worker_cache_lookup_errors": int(metrics.get("worker_cache_lookup_errors", 0) or 0),
+            "worker_cache_store_ok": int(metrics.get("worker_cache_store_ok", 0) or 0),
+            "worker_cache_store_failed": int(metrics.get("worker_cache_store_failed", 0) or 0),
+            "avg_worker_cache_hit_ms": round((float(metrics.get("worker_cache_hit_total_ms", 0.0) or 0.0) / int(metrics.get("worker_cache_hit_samples", 0) or 1)), 2) if int(metrics.get("worker_cache_hit_samples", 0) or 0) else 0.0,
+            "worker_cache_index_entries": int(len(self._get_worker_cache_index())),
             "boot_warmups": int(metrics.get("boot_warmups", 0) or 0),
             "last_warmup_duration_ms": metrics.get("last_warmup_duration_ms"),
             "queued_items_current": int(sum(state.queue.qsize() for state in self.guild_states.values())),
@@ -1073,7 +1163,7 @@ class TTSAudioMixin:
             return "ogg"
         return "mp3"
 
-    async def _request_phone_worker_tts_audio(self, *, task: str, payload: dict[str, Any], timeout_seconds: float, max_audio_mb: int) -> dict[str, Any]:
+    async def _request_phone_worker_json(self, *, task: str, payload: dict[str, Any], timeout_seconds: float, max_audio_mb: int, raise_on_worker_error: bool = True) -> dict[str, Any]:
         base = self._phone_worker_tts_base_url()
         if not base:
             raise RuntimeError("PHONE_WORKER_ENABLED/HOST/TOKEN não configurado")
@@ -1093,6 +1183,14 @@ class TTSAudioMixin:
                 if response.status < 200 or response.status >= 300:
                     raise RuntimeError(f"HTTP {response.status}: {response_text[:260]}")
                 data = json.loads(response_text or "{}")
+        data["total_ms"] = round((time.monotonic() - started) * 1000.0, 2)
+        data["audio_format"] = self._normalize_worker_audio_format(data.get("audio_format"))
+        if raise_on_worker_error and data.get("ok") is False:
+            raise RuntimeError(str(data.get("error") or "worker retornou ok=false"))
+        return data
+
+    def _decode_worker_audio_payload(self, data: dict[str, Any], *, max_audio_mb: int) -> dict[str, Any]:
+        max_audio_bytes = max(1, int(max_audio_mb)) * 1024 * 1024
         out_b64 = str(data.get("data_b64") or "")
         if not out_b64:
             raise RuntimeError("worker não retornou data_b64")
@@ -1107,9 +1205,18 @@ class TTSAudioMixin:
             raise RuntimeError("sha256 do áudio retornado não confere")
         data["raw_audio"] = raw
         data["sha256"] = actual_hash
-        data["total_ms"] = round((time.monotonic() - started) * 1000.0, 2)
         data["audio_format"] = self._normalize_worker_audio_format(data.get("audio_format"))
         return data
+
+    async def _request_phone_worker_tts_audio(self, *, task: str, payload: dict[str, Any], timeout_seconds: float, max_audio_mb: int) -> dict[str, Any]:
+        data = await self._request_phone_worker_json(
+            task=task,
+            payload=payload,
+            timeout_seconds=timeout_seconds,
+            max_audio_mb=max_audio_mb,
+            raise_on_worker_error=True,
+        )
+        return self._decode_worker_audio_payload(data, max_audio_mb=max_audio_mb)
 
     def _worker_tts_cache_payload_base(self, item: QueueItem, key: str) -> dict[str, Any]:
         engine = str(item.engine or "gtts").strip().lower() or "gtts"
@@ -1137,16 +1244,30 @@ class TTSAudioMixin:
         if not PHONE_WORKER_ENABLED or not PHONE_WORKER_HOST or not PHONE_WORKER_TOKEN:
             return None
         key = self._cache_key(item)
+        recent_negative = self._worker_cache_recent_negative_status(key)
+        if recent_negative:
+            self._record_worker_cache_lookup("skip")
+            self._log_debug(
+                f"[tts_worker_cache] consulta pulada por índice negativo | guild={item.guild_id} engine={item.engine} key={key[:10]} status={recent_negative}"
+            )
+            return None
         payload = self._worker_tts_cache_payload_base(item, key)
         try:
-            data = await self._request_phone_worker_tts_audio(
+            data = await self._request_phone_worker_json(
                 task="tts_cache_lookup",
                 payload=payload,
                 timeout_seconds=TTS_TURBO_WORKER_CACHE_LOOKUP_TIMEOUT_SECONDS,
                 max_audio_mb=TTS_TURBO_WORKER_CACHE_MAX_AUDIO_MB,
+                raise_on_worker_error=False,
             )
             if not bool(data.get("cache_hit")):
+                self._mark_worker_cache_index(key, "miss", meta={"engine": item.engine})
+                self._record_worker_cache_lookup("miss")
+                self._log_debug(
+                    f"[tts_worker_cache] miss | guild={item.guild_id} engine={item.engine} key={key[:10]} total={data.get('total_ms')}ms erro={data.get('error')}"
+                )
                 return None
+            data = self._decode_worker_audio_payload(data, max_audio_mb=TTS_TURBO_WORKER_CACHE_MAX_AUDIO_MB)
             suffix = ".wav" if data.get("audio_format") == "wav" else (".ogg" if data.get("audio_format") == "ogg" else ".mp3")
             path = self._make_runtime_temp_file(suffix=suffix)
             try:
@@ -1155,6 +1276,12 @@ class TTSAudioMixin:
                 if os.path.getsize(path) <= 0:
                     raise RuntimeError("worker cache retornou áudio vazio")
                 self._record_cache_hit(item.engine)
+                self._record_worker_cache_lookup("hit", total_ms=float(data.get("total_ms", 0.0) or 0.0))
+                self._mark_worker_cache_index(key, "hit", meta={
+                    "engine": item.engine,
+                    "audio_format": data.get("audio_format"),
+                    "size": len(data.get("raw_audio") or b""),
+                })
                 self._log_debug(
                     f"[tts_worker_cache] hit | guild={item.guild_id} engine={item.engine} key={key[:10]} total={data.get('total_ms')}ms read={data.get('cache_read_ms')}ms"
                 )
@@ -1164,6 +1291,8 @@ class TTSAudioMixin:
                     os.remove(path)
                 raise
         except Exception as exc:
+            self._mark_worker_cache_index(key, "error", ttl=TTS_TURBO_WORKER_CACHE_ERROR_COOLDOWN_SECONDS, meta={"engine": item.engine, "error": str(exc)[:160]})
+            self._record_worker_cache_lookup("error")
             self._log_debug(f"[tts_worker_cache] miss/indisponível | guild={item.guild_id} engine={item.engine} erro={exc}")
             return None
 
@@ -1211,8 +1340,11 @@ class TTSAudioMixin:
                     text = await response.text()
                     if response.status < 200 or response.status >= 300:
                         raise RuntimeError(f"HTTP {response.status}: {text[:160]}")
+            self._mark_worker_cache_index(key, "hit", meta={"engine": item.engine, "size": size, "source": "store"})
+            self._record_worker_cache_store(True)
             self._log_debug(f"[tts_worker_cache] store ok | guild={item.guild_id} engine={item.engine} key={key[:10]} size={size}")
         except Exception as exc:
+            self._record_worker_cache_store(False)
             self._log_debug(f"[tts_worker_cache] store falhou | guild={item.guild_id} engine={item.engine} erro={exc}")
 
     def _schedule_worker_turbo_cache_store(self, item: QueueItem, path: str) -> None:

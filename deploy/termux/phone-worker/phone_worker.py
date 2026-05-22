@@ -44,7 +44,7 @@ _APK_BUILD_THREAD_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.9.2"
+PHONE_WORKER_VERSION = "1.9.3"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -1323,6 +1323,64 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
     deps["missing"] = missing
     return deps
 
+
+def _cache_dir_snapshot(path: Path, *, max_scan_files: int = 20000) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "path": str(path),
+        "exists": path.exists(),
+        "files": 0,
+        "bytes": 0,
+        "scanned_files": 0,
+    }
+    try:
+        if not path.exists():
+            return result
+        entries = []
+        for item in path.iterdir():
+            if not item.is_file():
+                continue
+            if item.suffix.lower() not in {".mp3", ".wav", ".ogg"}:
+                continue
+            entries.append(item)
+            if len(entries) >= max_scan_files:
+                break
+        total = 0
+        newest = 0.0
+        oldest = 0.0
+        for item in entries:
+            with contextlib.suppress(Exception):
+                st = item.stat()
+                total += int(st.st_size or 0)
+                newest = max(newest, float(st.st_mtime or 0.0))
+                oldest = float(st.st_mtime or 0.0) if not oldest else min(oldest, float(st.st_mtime or 0.0))
+        result.update({
+            "files": len(entries),
+            "bytes": total,
+            "scanned_files": len(entries),
+            "oldest_mtime": oldest or None,
+            "newest_mtime": newest or None,
+        })
+    except Exception as exc:
+        result["error"] = _short_text(exc, limit=100)
+    return result
+
+
+def _worker_turbo_cache_snapshot() -> dict[str, Any]:
+    tts_dir = Path(os.getenv("PHONE_WORKER_TTS_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / "tts")).expanduser()
+    piper_dir = Path(os.getenv("PHONE_WORKER_PIPER_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / "piper")).expanduser()
+    return {
+        "tts": _cache_dir_snapshot(tts_dir),
+        "piper": _cache_dir_snapshot(piper_dir),
+        "tts_limits": {
+            "max_mb": int(float(os.getenv("PHONE_WORKER_TTS_CACHE_MAX_MB", "4096") or 4096)),
+            "max_files": int(float(os.getenv("PHONE_WORKER_TTS_CACHE_MAX_FILES", "20000") or 20000)),
+        },
+        "piper_limits": {
+            "max_mb": int(float(os.getenv("PHONE_WORKER_PIPER_CACHE_MAX_MB", "2048") or 2048)),
+            "max_files": int(float(os.getenv("PHONE_WORKER_PIPER_CACHE_MAX_FILES", "4096") or 4096)),
+        },
+    }
+
 def _system_status() -> dict[str, Any]:
     auto_boot_repair = _auto_repair_local_boot_if_needed()
     disk = shutil.disk_usage(Path.home())
@@ -1373,6 +1431,7 @@ def _system_status() -> dict[str, Any]:
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ffprobe": bool(shutil.which("ffprobe")),
         "turbo_dependencies": _turbo_dependency_snapshot(),
+        "turbo_cache": _worker_turbo_cache_snapshot(),
     }
 
 
@@ -1805,16 +1864,21 @@ class WorkerHandler(BaseHTTPRequestHandler):
         max_audio_bytes = max(1, int(body.get("max_audio_bytes") or self.max_output_bytes))
         path, audio_format = self._find_tts_cache_file(key)
         if path is None:
+            total_ms = (time.monotonic() - started) * 1000.0
             return {
                 "ok": False,
                 "engine": str(body.get("engine") or "tts-cache")[:40],
                 "cache_hit": False,
+                "cache_exists_before": False,
                 "cache_key": key[:16],
                 "error": "worker turbo cache miss",
                 "worker_profile": _current_core_worker_profile(),
                 "worker_version": PHONE_WORKER_VERSION,
                 "roles": roles[:16],
                 "capabilities": capabilities[:24],
+                "worker_synth_ms": 0.0,
+                "worker_total_ms": round(total_ms, 2),
+                "total_ms": round(total_ms, 2),
                 "logs": [f"tts cache miss key={key[:16]}"],
             }
         read_started = time.monotonic()
