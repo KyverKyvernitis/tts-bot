@@ -328,9 +328,10 @@ MUSIC_REJECT_WEAK_LINK_MATCHES = _parse_bool(os.getenv("MUSIC_REJECT_WEAK_LINK_M
 # Spotify direto/spsearch fica fora do padrão porque o LavaSrc 4.8.x pode falhar com 403.
 MUSIC_LAVASRC_MIRROR_PREFIXES = (os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "scsearch") or "scsearch").strip()
 
-# Lavalink — suporte invisível/diagnóstico para migração futura do player.
-# Patch atual NÃO troca o player real: MUSIC_BACKEND permanece local por padrão.
-MUSIC_BACKEND = (os.getenv("MUSIC_BACKEND", "local") or "local").strip().lower()
+# Lavalink/phone worker — música agora deve rodar fora da VPS.
+# MUSIC_BACKEND fica aceitando valor antigo por compatibilidade, mas o fluxo
+# musical usa MUSIC_WORKER_ONLY_ENABLED para bloquear fallback local pesado.
+MUSIC_BACKEND = (os.getenv("MUSIC_BACKEND", "worker") or "worker").strip().lower()
 LAVALINK_ENABLED = _parse_bool(os.getenv("LAVALINK_ENABLED", "false"), False)
 LAVALINK_MODE = (os.getenv("LAVALINK_MODE", "off") or "off").strip().lower()
 LAVALINK_HOST = (os.getenv("LAVALINK_HOST", "") or "").strip()
@@ -340,10 +341,9 @@ LAVALINK_SECURE = _parse_bool(os.getenv("LAVALINK_SECURE", "false"), False)
 LAVALINK_NODE_NAME = (os.getenv("LAVALINK_NODE_NAME", "main") or "main").strip() or "main"
 LAVALINK_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("LAVALINK_TIMEOUT_SECONDS", "8.0"), 8.0))
 
-# Lavalink auxiliar opcional — pensado para um node externo/celular via Tailscale.
-# Ele nunca é obrigatório: se ficar offline, lento ou falhar, o bot volta para o
-# Lavalink principal/VPS. TTS via Lavalink continua no node principal porque os
-# arquivos temporários normalmente usam URL interna/local da VPS.
+# Lavalink auxiliar — pensado para o phone worker/celular via Tailscale.
+# Em MUSIC_WORKER_ONLY_ENABLED=true, este node vira o node musical preferencial
+# e não há fallback para execução pesada local na VPS.
 AUX_LAVALINK_ENABLED = _parse_bool(os.getenv("AUX_LAVALINK_ENABLED", "false"), False)
 AUX_LAVALINK_HOST = (os.getenv("AUX_LAVALINK_HOST", "") or "").strip()
 AUX_LAVALINK_PORT = _parse_int(os.getenv("AUX_LAVALINK_PORT", "2333"), 2333)
@@ -353,8 +353,24 @@ AUX_LAVALINK_NODE_NAME = (os.getenv("AUX_LAVALINK_NODE_NAME", "phone") or "phone
 AUX_LAVALINK_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("AUX_LAVALINK_TIMEOUT_SECONDS", "3.0"), 3.0))
 AUX_LAVALINK_COOLDOWN_SECONDS = max(10.0, _parse_float(os.getenv("AUX_LAVALINK_COOLDOWN_SECONDS", "300"), 300.0))
 
-# Phone-worker auxiliar — celular via Tailscale. Nunca é obrigatório: qualquer
-# falha cai para processamento local na VPS.
+# Phone-worker auxiliar — celular via Tailscale.
+# Para música, o modo atual é worker-only: a VPS não deve usar yt-dlp/FFmpeg local
+# nem fallback pesado. O worker turbo/phone-lavalink precisa estar online.
+MUSIC_WORKER_ONLY_ENABLED = _parse_bool(os.getenv("MUSIC_WORKER_ONLY_ENABLED", "true"), True)
+MUSIC_WORKER_UNAVAILABLE_MESSAGE = (
+    os.getenv("MUSIC_WORKER_UNAVAILABLE_MESSAGE", "Sistema de música indisponível no momento: Nenhum worker online")
+    or "Sistema de música indisponível no momento: Nenhum worker online"
+).strip()
+MUSIC_WORKER_REQUIRE_TURBO = _parse_bool(os.getenv("MUSIC_WORKER_REQUIRE_TURBO", "true"), True)
+MUSIC_WORKER_REQUIRED_ROLES = (os.getenv("MUSIC_WORKER_REQUIRED_ROLES", "phone-worker") or "phone-worker").strip()
+MUSIC_WORKER_REQUIRED_CAPABILITIES = (os.getenv("MUSIC_WORKER_REQUIRED_CAPABILITIES", "ffmpeg,ffprobe") or "ffmpeg,ffprobe").strip()
+# Quando true, exige que o heartbeat do worker já informe status.music_node/lavalink saudável.
+# Fica false por compatibilidade com agents antigos; o backend Lavalink ainda valida o node.
+MUSIC_WORKER_REQUIRE_MUSIC_NODE_STATUS = _parse_bool(os.getenv("MUSIC_WORKER_REQUIRE_MUSIC_NODE_STATUS", "false"), False)
+# Em worker-only, o node auxiliar do celular vira o node preferencial/único da música
+# quando AUX_LAVALINK_* estiver configurado. Sem AUX, usa LAVALINK_* como node do worker.
+MUSIC_WORKER_LAVALINK_USE_AUX = _parse_bool(os.getenv("MUSIC_WORKER_LAVALINK_USE_AUX", "true"), True)
+
 PHONE_WORKER_ENABLED = _parse_bool(os.getenv("PHONE_WORKER_ENABLED", "false"), False)
 PHONE_WORKER_HOST = (os.getenv("PHONE_WORKER_HOST", "") or "").strip()
 PHONE_WORKER_PORT = _parse_int(os.getenv("PHONE_WORKER_PORT", "8766"), 8766)

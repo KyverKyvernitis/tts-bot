@@ -27,6 +27,13 @@ from .errors import MusicExtractionError, MusicPlaybackError
 from .models import LoopMode, MusicTrack
 from .providers import describe_url
 from .backends import MusicBackendManager
+from .worker_node import (
+    MUSIC_WORKER_UNAVAILABLE_MESSAGE,
+    MusicWorkerUnavailable,
+    ensure_music_worker_available as _ensure_music_worker_available,
+    music_worker_only_enabled as _music_worker_only_enabled,
+    require_music_worker_available as _require_music_worker_available,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -537,6 +544,19 @@ class AudioRouter:
             state.current_status_changed_at = time.monotonic()
         else:
             state.current_status = status
+
+    def music_worker_only_enabled(self) -> bool:
+        return bool(_music_worker_only_enabled())
+
+    @property
+    def music_worker_unavailable_message(self) -> str:
+        return MUSIC_WORKER_UNAVAILABLE_MESSAGE
+
+    async def ensure_music_worker_available(self):
+        return await _ensure_music_worker_available()
+
+    def require_music_worker_available(self):
+        return _require_music_worker_available()
 
     def _reset_stale_resolving_state(self, guild_id: int, state: MusicGuildState, *, reason: str = "stale") -> bool:
         """Limpa estado local preso em resolving sem task/source ativa.
@@ -2271,6 +2291,8 @@ class AudioRouter:
         return max(delay, remaining - MUSIC_PREFETCH_BEFORE_END_SECONDS)
 
     def _start_prefetch_next(self, guild_id: int, state: MusicGuildState) -> None:
+        if self.music_worker_only_enabled():
+            return
         with contextlib.suppress(Exception):
             if self.backends.should_use_lavalink_real(guild_id):
                 # Em modo node de áudio real, a próxima faixa deve ser resolvida
@@ -2417,6 +2439,13 @@ class AudioRouter:
                 state.control_vote_cleanup_tasks.clear()
                 try:
                     played_ok = await self._play_track(guild, state, track)
+                except MusicWorkerUnavailable as exc:
+                    playback_failed = True
+                    playback_failed_before_start = True
+                    playback_failure_label = self._exc_label(exc)
+                    if not state.skip_requested and not state.stop_requested:
+                        logger.warning("[music/worker] worker indisponível durante playback | guild=%s track=%r erro=%s", guild_id, track.title, self._exc_label(exc))
+                        await self._send_text(guild, state, MUSIC_WORKER_UNAVAILABLE_MESSAGE)
                 except Exception as exc:
                     playback_failed = True
                     playback_failed_before_start = not bool(float(getattr(state, "current_started_at_monotonic", 0.0) or 0.0))
@@ -2862,6 +2891,8 @@ class AudioRouter:
         channel = guild.get_channel(state.last_voice_channel_id) or self.bot.get_channel(state.last_voice_channel_id)
         if channel is None or not hasattr(channel, "connect"):
             raise RuntimeError("Canal de voz não encontrado.")
+        if self.music_worker_only_enabled():
+            self.require_music_worker_available()
 
         state.current = track
         state.music_session_active = True
@@ -2873,7 +2904,7 @@ class AudioRouter:
         state.current_lavalink_player = None
         state.current_lavalink_playable = None
 
-        direct_youtube_request = self._track_is_direct_youtube_request(track)
+        direct_youtube_request = False if self.music_worker_only_enabled() else self._track_is_direct_youtube_request(track)
         # Link direto do YouTube prioriza áudio. Não bloqueie a resolução do
         # stream local aguardando painel/metadata bonitos; o painel é criado
         # depois, quando o stream já estiver pronto/iniciando.
@@ -2882,7 +2913,7 @@ class AudioRouter:
             # mesma música continuam editando esse painel.
             await self.update_panel(guild.id, create=True, repost=True)
 
-        use_lavalink_real = bool(self.backends.should_use_lavalink_real(guild.id)) and not direct_youtube_request
+        use_lavalink_real = bool(self.backends.should_use_music_lavalink(guild.id) if self.music_worker_only_enabled() else self.backends.should_use_lavalink_real(guild.id)) and not direct_youtube_request
         if direct_youtube_request:
             logger.info(
                 "[music] YouTube direto usando reprodução local/yt-dlp sem mirror LavaSrc | guild=%s track=%r",
@@ -2899,9 +2930,9 @@ class AudioRouter:
             try:
                 return await self._play_track_lavalink(guild, state, track, channel)
             except Exception as exc:
-                allow_local_fallback = bool(self._track_is_youtube_selection(track))
+                allow_local_fallback = False if self.music_worker_only_enabled() else bool(self._track_is_youtube_selection(track))
                 fallback_getter = getattr(self.backends, "should_lavalink_fallback_to_local", None)
-                if callable(fallback_getter):
+                if callable(fallback_getter) and not self.music_worker_only_enabled():
                     with contextlib.suppress(Exception):
                         allow_local_fallback = bool(allow_local_fallback or fallback_getter(guild.id))
                 state.last_lavalink_error = f"{exc.__class__.__name__}: {exc}"
@@ -2921,7 +2952,7 @@ class AudioRouter:
                     await self._send_text(
                         guild,
                         state,
-                        "⚠️ Lavalink não conseguiu iniciar essa música agora. O node pode estar reconectando/sobrecarregado; tente novamente ou troque o node em `_musicnode`.",
+                        MUSIC_WORKER_UNAVAILABLE_MESSAGE if self.music_worker_only_enabled() else "⚠️ Lavalink não conseguiu iniciar essa música agora. O node pode estar reconectando/sobrecarregado; tente novamente ou troque o node em `_musicnode`.",
                     )
                     raise MusicPlaybackError(f"Lavalink indisponível em modo lavalink-only: {exc}") from exc
 

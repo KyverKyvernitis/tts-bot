@@ -12,6 +12,7 @@ from .base import BackendHealth, BackendSearchResult, LocalPlaybackBackend
 from ..models import ExtractedBatch
 from .lavalink import LavalinkBackend, LavalinkConfig, _normalize_provider
 from .lavalink_config import LavalinkConfigStore
+from ..worker_node import select_music_worker, music_worker_only_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +62,11 @@ class MusicBackendManager:
         servidor não está em Lavalink/Auto, o auxiliar também não entra.
         """
         primary = self._node_config_for_guild(guild_id)
+        aux_enabled = bool(getattr(config, "AUX_LAVALINK_ENABLED", False))
+        aux_mode = "lavalink" if bool(music_worker_only_enabled() and aux_enabled) else (primary.mode if primary.mode in {"lavalink", "auto"} else "off")
         return LavalinkConfig(
-            enabled=bool(getattr(config, "AUX_LAVALINK_ENABLED", False)),
-            mode=primary.mode if primary.mode in {"lavalink", "auto"} else "off",
+            enabled=aux_enabled,
+            mode=aux_mode,
             host=str(getattr(config, "AUX_LAVALINK_HOST", "") or "").strip(),
             port=max(1, int(getattr(config, "AUX_LAVALINK_PORT", 2333) or 2333)),
             password=str(getattr(config, "AUX_LAVALINK_PASSWORD", "") or "").strip(),
@@ -131,6 +134,8 @@ class MusicBackendManager:
         query: object = "",
         track: Any | None = None,
     ) -> list[tuple[str, LavalinkConfig]]:
+        if music_worker_only_enabled() and str(purpose or "music").lower() == "music":
+            return [("worker", self._worker_only_music_node_config_for_guild(guild_id))]
         primary = self._node_config_for_guild(guild_id)
         configs: list[tuple[str, LavalinkConfig]] = []
         if self._aux_lavalink_allowed(guild_id, purpose=purpose, query=query, track=track):
@@ -171,6 +176,36 @@ class MusicBackendManager:
             return self._node_config_for_guild(guild_id).provider
         except Exception:
             return "lavalink"
+
+    def _worker_only_music_node_config_for_guild(self, guild_id: int | None = None) -> LavalinkConfig:
+        """Node usado somente pela música em modo worker-only.
+
+        Se AUX_LAVALINK_* estiver configurado, ele representa o phone worker
+        turbo/phone-lavalink e vira o único node musical. Sem AUX, LAVALINK_*
+        pode ser usado como node remoto do worker. Nunca volta para player local.
+        """
+        try:
+            aux = self._aux_node_config_for_guild(guild_id)
+            if bool(getattr(config, "MUSIC_WORKER_LAVALINK_USE_AUX", True)) and aux.enabled and aux.configured:
+                return aux
+        except Exception:
+            logger.debug("[music/worker] falha ao ler AUX_LAVALINK como node do worker", exc_info=True)
+        return self._node_config_for_guild(guild_id)
+
+    def should_use_music_lavalink(self, guild_id: int | None = None) -> bool:
+        if not music_worker_only_enabled():
+            return self.should_use_lavalink_real(guild_id)
+        worker = select_music_worker()
+        if not worker.available:
+            return False
+        try:
+            cfg = self._worker_only_music_node_config_for_guild(guild_id)
+        except Exception:
+            logger.debug("[music/worker] falha ao ler config do node musical", exc_info=True)
+            return False
+        if not (cfg.enabled and cfg.configured and cfg.mode in {"lavalink", "auto"}):
+            return False
+        return bool(self.lavalink._wavelink_installed())
 
     def _real_lavalink_guild_ids(self) -> set[int]:
         """Lista opcional de restrição herdada dos testes antigos.
@@ -221,6 +256,8 @@ class MusicBackendManager:
         return bool(self.lavalink._wavelink_installed())
 
     def playback_backend_for_guild(self, guild_id: int | None = None) -> str:
+        if music_worker_only_enabled():
+            return "lavalink" if self.should_use_music_lavalink(guild_id) else "worker_offline"
         return "lavalink" if self.should_use_lavalink_real(guild_id) else "local"
 
     def lavalink_mode_for_guild(self, guild_id: int | None = None) -> str:
@@ -232,6 +269,9 @@ class MusicBackendManager:
             return "off"
 
     def should_lavalink_fallback_to_local(self, guild_id: int | None = None) -> bool:
+        # Modo worker-only nunca cai para player local da VPS.
+        if music_worker_only_enabled():
+            return False
         # Modo lavalink é lavalink-only: se o node falhar, não mistura com voice client local.
         # Modo auto pode cair para o backend local antes de iniciar áudio real.
         return self.lavalink_mode_for_guild(guild_id) == "auto"
@@ -381,8 +421,8 @@ class MusicBackendManager:
         guild_id: int | None = None,
         limit: int = 5,
     ) -> ExtractedBatch:
-        if not self.should_use_lavalink_real(guild_id):
-            raise RuntimeError("Playback real via node de áudio não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
+        if not self.should_use_music_lavalink(guild_id):
+            raise RuntimeError("Sistema de música indisponível no momento: Nenhum worker online")
         last_error: Exception | None = None
         for label, cfg in self._lavalink_configs_for_operation(guild_id, purpose="music", query=query):
             lavalink_backend = LavalinkBackend.from_config(cfg)
@@ -394,7 +434,7 @@ class MusicBackendManager:
                     requester_name=requester_name,
                     limit=limit,
                 )
-                if batch.tracks or label == "principal":
+                if batch.tracks or label in {"principal", "worker"}:
                     if label == "auxiliar":
                         logger.info(
                             "[music/lavalink-aux] busca atendida pelo node auxiliar | guild=%s query=%r tracks=%s",
@@ -435,8 +475,8 @@ class MusicBackendManager:
         guild_id: int | None = None,
         limit: int = 25,
     ) -> ExtractedBatch:
-        if not self.should_use_lavalink_real(guild_id):
-            raise RuntimeError("Playback real via node de áudio não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
+        if not self.should_use_music_lavalink(guild_id):
+            raise RuntimeError("Sistema de música indisponível no momento: Nenhum worker online")
         last_error: Exception | None = None
         for label, cfg in self._lavalink_configs_for_operation(guild_id, purpose="music", query=query):
             lavalink_backend = LavalinkBackend.from_config(cfg)
@@ -448,7 +488,7 @@ class MusicBackendManager:
                     requester_name=requester_name,
                     limit=limit,
                 )
-                if batch.tracks or label == "principal":
+                if batch.tracks or label in {"principal", "worker"}:
                     if label == "auxiliar":
                         logger.info(
                             "[music/lavalink-aux] link resolvido pelo node auxiliar | guild=%s query=%r tracks=%s",
@@ -482,8 +522,8 @@ class MusicBackendManager:
 
     async def play_lavalink_track(self, guild, voice_channel, track, *, volume: float = 1.0):
         guild_id = getattr(guild, "id", None)
-        if not self.should_use_lavalink_real(guild_id):
-            raise RuntimeError("Playback real via node de áudio não está ativo para este servidor. Use `_musicnode` no modo Lavalink ou Auto.")
+        if not self.should_use_music_lavalink(guild_id):
+            raise RuntimeError("Sistema de música indisponível no momento: Nenhum worker online")
         last_error: Exception | None = None
         for label, cfg in self._lavalink_configs_for_operation(guild_id, purpose="music", track=track):
             lavalink_backend = LavalinkBackend.from_config(cfg)
@@ -613,4 +653,6 @@ class MusicBackendManager:
             "aux_lavalink_host": aux_cfg.safe_host_label,
             "aux_lavalink_cooldown_seconds": round(aux_probe.failure_cooldown_remaining(), 1),
             "music_node_provider_env": str(getattr(config, "MUSIC_NODE_PROVIDER", "lavalink") or "lavalink"),
+            "music_worker_only": bool(music_worker_only_enabled()),
+            "music_worker_lavalink_active": bool(self.should_use_music_lavalink(guild_id)),
         }

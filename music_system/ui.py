@@ -76,11 +76,33 @@ def _is_youtube_text_search(query: str) -> bool:
 async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, requester_id: int, requester_name: str) -> tuple[ExtractedBatch, bool]:
     """Resolve o input do modal respeitando o backend ativo.
 
-    SoundCloud direto fica no Lavalink/LavaSrc. Spotify/Deezer/Apple são
-    metadata-only: o bot lê título/artista pela API e só depois tenta mirror
-    Deezer/SoundCloud no playback. YouTube direto vai para yt-dlp local.
+    Em modo worker-only, todo input vai para o nó remoto do worker e não
+    executa resolução/yt-dlp local na VPS. No modo legado, mantém o fluxo
+    anterior de metadados e fallback local.
     """
     backends = getattr(router, "backends", None)
+    if getattr(router, "music_worker_only_enabled", lambda: False)():
+        selection = await router.ensure_music_worker_available()
+        if not getattr(selection, "available", False):
+            raise RuntimeError(getattr(router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
+        if _is_lavalink_search_request(query):
+            batch = await backends.search_lavalink_tracks(
+                query,
+                requester_id=requester_id,
+                requester_name=requester_name,
+                guild_id=guild_id,
+                limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
+            )
+            return batch, True
+        batch = await backends.resolve_lavalink_direct_tracks(
+            query,
+            requester_id=requester_id,
+            requester_name=requester_name,
+            guild_id=guild_id,
+            limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
+        )
+        return batch, False
+
     should_use_lavalink = getattr(backends, "should_use_lavalink_real", None)
     lavalink_active = bool(callable(should_use_lavalink) and should_use_lavalink(guild_id))
 
@@ -178,6 +200,12 @@ async def _require_music_voice_interaction(interaction: discord.Interaction, rou
         bot_channel = _interaction_bot_voice_channel(interaction, state)
         if bot_channel is not None and getattr(bot_channel, "id", None) != getattr(user_channel, "id", None):
             await _send_interaction_notice(interaction, "Entre no mesmo canal de voz do bot para usar isso.")
+            return False
+    if getattr(router, "music_worker_only_enabled", lambda: False)():
+        selection = await router.ensure_music_worker_available()
+        if not getattr(selection, "available", False):
+            message = getattr(router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online")
+            await _send_interaction_notice(interaction, message)
             return False
     return True
 
@@ -719,7 +747,11 @@ class AddSongModal(discord.ui.Modal):
             await interaction.followup.send(f"`⚠️` {exc}", ephemeral=True)
             return
         except Exception as exc:
-            await interaction.followup.send(f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
+            message = str(exc or "").strip()
+            if message == getattr(self.router, "music_worker_unavailable_message", ""):
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.followup.send(f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
             return
 
         if not batch.tracks:

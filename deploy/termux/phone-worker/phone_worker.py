@@ -1100,6 +1100,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         "status": {
             "core_worker_jobs": _core_job_runtime_snapshot(),
             "core_worker_network": _core_worker_network_runtime_snapshot(),
+            "music_node": _safe_telemetry("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"}),
             "runtime_mode": CORE_WORKER_RUNTIME_MODE,
             "runtime": {
                 "mode": CORE_WORKER_RUNTIME_MODE,
@@ -1365,6 +1366,68 @@ def _cache_dir_snapshot(path: Path, *, max_scan_files: int = 20000) -> dict[str,
     return result
 
 
+def _phone_lavalink_env_value(name: str, default: str = "") -> str:
+    value = str(os.getenv(name) or "").strip()
+    if value:
+        return value
+    env_file = Path(os.getenv("PHONE_LAVALINK_ENV") or str(Path.home() / ".phone-lavalink.env")).expanduser()
+    try:
+        if not env_file.exists():
+            return default
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith("#") or "=" not in raw:
+                continue
+            key, raw_value = raw.split("=", 1)
+            if key.strip() != name:
+                continue
+            return raw_value.strip().strip('"').strip("'")
+    except Exception:
+        return default
+    return default
+
+
+def _music_node_snapshot() -> dict[str, Any]:
+    port_raw = _phone_lavalink_env_value("PHONE_LAVALINK_PORT", "2333") or "2333"
+    try:
+        port = max(1, min(65535, int(str(port_raw).strip())))
+    except Exception:
+        port = 2333
+    password = _phone_lavalink_env_value("PHONE_LAVALINK_PASSWORD", _phone_lavalink_env_value("AUX_LAVALINK_PASSWORD", ""))
+    url = f"http://127.0.0.1:{port}/version"
+    headers = {"Accept": "text/plain"}
+    if password:
+        headers["Authorization"] = password
+    result: dict[str, Any] = {
+        "kind": "lavalink",
+        "host": "127.0.0.1",
+        "port": port,
+        "ok": False,
+        "online": False,
+        "state": "offline",
+    }
+    start = time.time()
+    try:
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=2.5) as response:
+            body = response.read(512).decode("utf-8", errors="replace").strip()
+            status = int(getattr(response, "status", 0) or 0)
+        result.update({
+            "ok": 200 <= status < 300,
+            "online": 200 <= status < 300,
+            "state": "healthy" if 200 <= status < 300 else f"http_{status}",
+            "http_status": status,
+            "version": _short_text(body, limit=80),
+            "latency_ms": round((time.time() - start) * 1000.0, 1),
+        })
+    except Exception as exc:
+        result.update({
+            "error": _short_text(f"{type(exc).__name__}: {exc}", limit=120),
+            "latency_ms": round((time.time() - start) * 1000.0, 1),
+        })
+    return result
+
+
 def _worker_turbo_cache_snapshot() -> dict[str, Any]:
     tts_dir = Path(os.getenv("PHONE_WORKER_TTS_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / "tts")).expanduser()
     piper_dir = Path(os.getenv("PHONE_WORKER_PIPER_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / "piper")).expanduser()
@@ -1407,6 +1470,7 @@ def _system_status() -> dict[str, Any]:
         "core_worker_heartbeat": _heartbeat_configured(),
         "core_worker_jobs": {"configured": _core_worker_jobs_configured(), **_core_job_runtime_snapshot()},
         "core_worker_network": _core_worker_network_runtime_snapshot(),
+        "music_node": _safe_telemetry("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"}),
         "scripts": _script_inventory(),
         "boot": _safe_telemetry("boot", _termux_boot_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "shell_autostart": _safe_telemetry("shell autostart", _termux_shell_autostart_status_snapshot, {"ok": False, "source": "telemetry_failed"}),

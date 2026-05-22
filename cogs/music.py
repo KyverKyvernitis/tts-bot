@@ -48,6 +48,12 @@ class Music(commands.Cog):
         if user_channel is None:
             await self._reply(ctx, "Entre em um canal de voz primeiro.")
             return False
+        if getattr(self.router, "music_worker_only_enabled", lambda: False)():
+            selection = await self.router.ensure_music_worker_available()
+            if not getattr(selection, "available", False):
+                logger.info("[music/worker] ação bloqueada: %s", getattr(selection, "reason", "worker indisponível"))
+                await self._reply(ctx, getattr(self.router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
+                return False
         state = self.router.get_state(ctx.guild.id)
         vc = getattr(ctx.guild, "voice_client", None)
         bot_channel = getattr(vc, "channel", None) if vc is not None else None
@@ -69,6 +75,8 @@ class Music(commands.Cog):
 
     def _music_error_message(self, exc: Exception) -> str:
         raw = str(exc or "")
+        if raw.strip() == getattr(self.router, "music_worker_unavailable_message", ""):
+            return raw.strip()
         lower = raw.lower()
         if "sign in to confirm" in lower or "not a bot" in lower:
             return "`⚠️` O YouTube bloqueou a extração pedindo login/cookies. Confira `cookies.txt`, Deno e `yt-dlp[default]`."
@@ -115,6 +123,8 @@ class Music(commands.Cog):
         return not profile.is_url
 
     def _should_use_lavalink_for_input(self, query: str, guild_id: int | None) -> bool:
+        if getattr(self.router, "music_worker_only_enabled", lambda: False)():
+            return True
         if not self._is_lavalink_real_enabled(guild_id):
             return False
         profile = self._query_profile(query)
@@ -216,12 +226,19 @@ class Music(commands.Cog):
             await self._reply(ctx, "Entre em um canal de voz primeiro.")
             return
 
+        if getattr(self.router, "music_worker_only_enabled", lambda: False)():
+            selection = await self.router.ensure_music_worker_available()
+            if not getattr(selection, "available", False):
+                logger.info("[music/worker] play bloqueado: %s", getattr(selection, "reason", "worker indisponível"))
+                await self._reply(ctx, getattr(self.router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
+                return
+
         input_profile = self._query_profile(query)
 
         # Shadow mode Lavalink: consulta o node em paralelo, mas mantém o áudio real
         # no player local atual. YouTube direto fica totalmente fora do LavaSrc/node
         # para não criar atraso nem mirror desnecessário.
-        if not input_profile.is_youtube:
+        if not getattr(self.router, "music_worker_only_enabled", lambda: False)() and not input_profile.is_youtube:
             self.router.schedule_lavalink_shadow_search(
                 ctx.guild.id,
                 query,
