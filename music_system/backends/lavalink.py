@@ -1103,7 +1103,44 @@ class LavalinkBackend:
         fallback_query = str(fallback_query or "").strip()
         return bool(self._is_youtube_value(original_url) or self._is_youtube_value(fallback_query))
 
+    def _is_worker_ytdlp_track(self, track: Any) -> bool:
+        source = str(getattr(track, "source", "") or "").strip().lower()
+        extractor = str(getattr(track, "extractor", "") or "").strip().lower()
+        values = {source, extractor}
+        return bool(
+            any(value in {"worker-ytdlp", "worker", "yt-dlp", "ytdlp"} for value in values)
+            or source.startswith("worker-ytdlp")
+            or extractor.startswith("worker-ytdlp")
+        )
+
+    def _is_direct_worker_stream_candidate(self, track: Any, *, candidate: str = "") -> bool:
+        if not self._is_worker_ytdlp_track(track):
+            return False
+        stream_url = str(getattr(track, "stream_url", "") or "").strip()
+        lavalink_query = str(getattr(track, "lavalink_query", "") or "").strip()
+        candidate = str(candidate or "").strip()
+        if not candidate:
+            return bool(stream_url or lavalink_query)
+        direct_values = {value for value in (stream_url, lavalink_query) if value}
+        if candidate in direct_values:
+            return True
+        lowered = candidate.lower()
+        return bool(
+            self._is_url_like_value(candidate)
+            and (
+                "googlevideo.com/" in lowered
+                or "videoplayback" in lowered
+                or "mime=audio" in lowered
+            )
+        )
+
     def _requires_strict_mirror_match(self, track: Any, *, candidate: str = "") -> bool:
+        # Stream direto vindo do phone worker já foi escolhido pelo yt-dlp com
+        # cookies/EJS no celular. O Lavalink enxerga essa URL como fonte HTTP e
+        # costuma retornar metadados genéricos (Unknown title/artist). Nesse caso
+        # a validação wanted/got de mirror LavaSrc não se aplica.
+        if self._is_direct_worker_stream_candidate(track, candidate=candidate):
+            return False
         source = str(getattr(track, "source", "") or getattr(track, "extractor", "") or "").strip().lower()
         original_url = str(getattr(track, "original_url", "") or "")
         webpage_url = str(getattr(track, "webpage_url", "") or "")
@@ -1133,7 +1170,13 @@ class LavalinkBackend:
         Para pesquisa do YouTube, o resultado selecionado serve como metadata. O
         LavaSrc/SoundCloud/Spotify só é aceito se título/artista e duração forem
         compatíveis. Se não bater, o router cai para o yt-dlp local.
+
+        Exceção importante: stream direto ``worker-ytdlp`` não é mirror; é a URL
+        final resolvida no phone worker. O Lavalink pode carregar essa URL como
+        HTTP e devolver ``Unknown title`` sem isso significar música errada.
         """
+        if self._is_direct_worker_stream_candidate(track, candidate=candidate):
+            return True
         if not self._requires_strict_mirror_match(track, candidate=candidate):
             return True
 
@@ -1891,14 +1934,7 @@ class LavalinkBackend:
                 self._playable_debug_shape(search),
             )
             return None, None, search
-        meta = {
-            "query": candidate,
-            "title": str(getattr(playable, "title", "") or getattr(track, "title", "") or ""),
-            "author": str(getattr(playable, "author", "") or getattr(track, "uploader", "") or ""),
-            "source": str(getattr(playable, "source", "") or getattr(track, "source", "") or ""),
-            "duration": getattr(playable, "length", None) or getattr(playable, "duration", None) or getattr(track, "duration", None),
-            "artwork": str(getattr(playable, "artwork", "") or getattr(track, "thumbnail", "") or ""),
-        }
+        meta = self._meta_from_playable(playable, track, query=candidate)
         return playable, meta, search
 
     def _duration_ms_from_meta(self, playable: Any, meta: dict[str, Any] | None = None) -> int:
@@ -2009,13 +2045,39 @@ class LavalinkBackend:
                     await result
 
     def _meta_from_playable(self, playable: Any, track: Any, *, query: str = "") -> dict[str, Any]:
+        query_value = str(query or getattr(track, "lavalink_query", "") or getattr(track, "original_url", "") or getattr(track, "webpage_url", "") or "")
+        playable_title = str(getattr(playable, "title", "") or "").strip()
+        playable_author = str(getattr(playable, "author", "") or "").strip()
+        playable_source = str(getattr(playable, "source", "") or getattr(playable, "source_name", "") or "").strip()
+        playable_duration = getattr(playable, "length", None) or getattr(playable, "duration", None)
+        playable_artwork = str(getattr(playable, "artwork", "") or "").strip()
+
+        if self._is_direct_worker_stream_candidate(track, candidate=query_value):
+            # Para stream HTTP direto do phone worker, preserve os metadados do
+            # yt-dlp/worker. O Lavalink só sabe que a fonte é HTTP e geralmente
+            # responde Unknown title/artist, mas isso não deve poluir painel nem
+            # causar rejeição de compatibilidade.
+            return {
+                "query": query_value,
+                "title": str(getattr(track, "title", "") or playable_title or "Música").strip(),
+                "author": str(getattr(track, "uploader", "") or playable_author or "").strip(),
+                "source": str(getattr(track, "source", "") or "worker-ytdlp").strip(),
+                "duration": getattr(track, "duration", None) or playable_duration,
+                "artwork": str(getattr(track, "thumbnail", "") or playable_artwork or "").strip(),
+                "direct_stream": True,
+                "worker_direct_stream": True,
+                "lavalink_title": playable_title,
+                "lavalink_author": playable_author,
+                "lavalink_source": playable_source,
+            }
+
         return {
-            "query": str(query or getattr(track, "lavalink_query", "") or getattr(track, "original_url", "") or getattr(track, "webpage_url", "") or ""),
-            "title": str(getattr(playable, "title", "") or getattr(track, "title", "") or ""),
-            "author": str(getattr(playable, "author", "") or getattr(track, "uploader", "") or ""),
-            "source": str(getattr(playable, "source", "") or getattr(track, "source", "") or ""),
-            "duration": getattr(playable, "length", None) or getattr(playable, "duration", None) or getattr(track, "duration", None),
-            "artwork": str(getattr(playable, "artwork", "") or getattr(track, "thumbnail", "") or ""),
+            "query": query_value,
+            "title": str(playable_title or getattr(track, "title", "") or ""),
+            "author": str(playable_author or getattr(track, "uploader", "") or ""),
+            "source": str(playable_source or getattr(track, "source", "") or ""),
+            "duration": playable_duration or getattr(track, "duration", None),
+            "artwork": str(playable_artwork or getattr(track, "thumbnail", "") or ""),
         }
 
     async def _play_pre_resolved_playable(
@@ -2116,11 +2178,13 @@ class LavalinkBackend:
 
                 if not self._mirror_meta_matches_track(track, meta, candidate=candidate):
                     logger.info(
-                        "[music/lavalink] mirror rejeitado por baixa compatibilidade | guild=%s query=%r wanted=%r got=%r",
+                        "[music/lavalink] mirror rejeitado por baixa compatibilidade | guild=%s query=%r wanted=%r got=%r direct_stream=%s source=%r",
                         getattr(guild, "id", None),
                         candidate,
                         getattr(track, "title", ""),
                         meta.get("title"),
+                        bool(meta.get("direct_stream") or meta.get("worker_direct_stream")),
+                        meta.get("source"),
                     )
                     last_error = RuntimeError("Espelho LavaSrc não bateu bem com a música escolhida.")
                     continue
