@@ -40,11 +40,13 @@ _CORE_JOB_ACTIVE: dict[str, Any] = {}
 _CORE_JOB_LAST_RESULT: dict[str, Any] = {}
 _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 _APK_BUILD_THREAD_LOCK = threading.Lock()
+_MUSIC_STREAM_LOCK = threading.RLock()
+_MUSIC_STREAMS: dict[str, dict[str, Any]] = {}
 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.9.7"
+PHONE_WORKER_VERSION = "1.9.8"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -387,6 +389,147 @@ def _short_text(value: Any, *, limit: int = 120, default: str = "") -> str:
     if len(text) > limit:
         return text[: max(1, limit - 1)].rstrip() + "…"
     return text
+
+
+
+def _music_stream_ttl_seconds() -> float:
+    return max(300.0, min(21600.0, _env_float("PHONE_WORKER_MUSIC_STREAM_TTL_SECONDS", 7200.0)))
+
+
+def _cleanup_music_streams_unlocked(now: float | None = None) -> None:
+    current = time.time() if now is None else float(now)
+    expired = [key for key, item in _MUSIC_STREAMS.items() if float(item.get("expires_at") or 0.0) <= current]
+    for key in expired:
+        _MUSIC_STREAMS.pop(key, None)
+
+
+def _register_music_stream(item: dict[str, Any]) -> str:
+    stream_url = str(item.get("stream_url") or item.get("direct_url") or "").strip()
+    if not stream_url:
+        return ""
+    seed = f"{time.time()}|{os.urandom(16).hex()}|{stream_url[:96]}".encode("utf-8", errors="ignore")
+    stream_id = hashlib.sha256(seed).hexdigest()[:32]
+    ttl = _music_stream_ttl_seconds()
+    stored = dict(item)
+    stored["id"] = stream_id
+    stored["created_at"] = time.time()
+    stored["expires_at"] = time.time() + ttl
+    with _MUSIC_STREAM_LOCK:
+        _cleanup_music_streams_unlocked()
+        _MUSIC_STREAMS[stream_id] = stored
+    return stream_id
+
+
+def _music_stream_lookup(stream_id: str) -> dict[str, Any] | None:
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return None
+    with _MUSIC_STREAM_LOCK:
+        _cleanup_music_streams_unlocked()
+        item = _MUSIC_STREAMS.get(stream_id)
+        return dict(item) if isinstance(item, dict) else None
+
+
+def _safe_ffmpeg_header_lines(headers: Any) -> str:
+    if not isinstance(headers, dict):
+        return ""
+    allowed = {"user-agent", "accept", "accept-language", "referer", "origin", "cookie", "range"}
+    lines: list[str] = []
+    for key, value in headers.items():
+        name = str(key or "").strip()
+        if not name or name.lower() not in allowed:
+            continue
+        text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+        if not text:
+            continue
+        lines.append(f"{name}: {text}\r\n")
+    return "".join(lines)
+
+
+def _stream_music_pcm(handler: BaseHTTPRequestHandler, stream_id: str) -> None:
+    item = _music_stream_lookup(stream_id)
+    if not item:
+        _error(handler, HTTPStatus.NOT_FOUND, "stream não encontrado ou expirado")
+        return
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        _error(handler, HTTPStatus.INTERNAL_SERVER_ERROR, "ffmpeg não encontrado no worker")
+        return
+    stream_url = str(item.get("stream_url") or item.get("direct_url") or "").strip()
+    if not stream_url.startswith(("http://", "https://")):
+        _error(handler, HTTPStatus.BAD_REQUEST, "stream inválido")
+        return
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_at_eof",
+        "1",
+        "-reconnect_on_network_error",
+        "1",
+        "-reconnect_on_http_error",
+        "403,404,408,429,5xx",
+        "-reconnect_delay_max",
+        "5",
+        "-rw_timeout",
+        "10000000",
+    ]
+    ff_headers = _safe_ffmpeg_header_lines(item.get("http_headers"))
+    if ff_headers:
+        cmd += ["-headers", ff_headers]
+    cmd += [
+        "-i",
+        stream_url,
+        "-vn",
+        "-sn",
+        "-dn",
+        "-f",
+        "s16le",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "pipe:1",
+    ]
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(Path.home() / "phone-worker"))
+        handler.send_response(HTTPStatus.OK)
+        handler.send_header("Content-Type", "application/octet-stream")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("X-Core-Worker-Stream-Id", stream_id)
+        handler.end_headers()
+        assert proc.stdout is not None
+        while True:
+            chunk = proc.stdout.read(8192)
+            if not chunk:
+                break
+            try:
+                handler.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                break
+        with contextlib.suppress(Exception):
+            handler.wfile.flush()
+    except Exception as exc:
+        # Se headers ainda não foram enviados, tenta JSON; caso contrário só loga.
+        try:
+            if not getattr(handler, "_headers_buffer", None):
+                _error(handler, HTTPStatus.INTERNAL_SERVER_ERROR, f"stream falhou: {type(exc).__name__}")
+        except Exception:
+            pass
+        print(f"[music-stream] falhou id={stream_id} erro={type(exc).__name__}: {_short_text(exc, limit=160)}", flush=True)
+    finally:
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=2)
 
 
 def _format_bytes(value: Any) -> str:
@@ -1824,6 +1967,12 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urllib.parse.urlparse(self.path).path
+        if path.startswith("/music/stream/"):
+            if not self._require_auth():
+                return
+            stream_id = path.rsplit("/", 1)[-1]
+            _stream_music_pcm(self, stream_id)
+            return
         if path == "/local/status":
             if not self._require_local_client():
                 return
@@ -3050,13 +3199,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 body.get("default_search")
                 or os.getenv("PHONE_WORKER_MUSIC_YTDLP_DEFAULT_SEARCH")
                 or os.getenv("MUSIC_WORKER_YTDLP_DEFAULT_SEARCH")
-                or "ytsearch1"
+                or "ytsearch"
             ).strip().lower()
             raw = raw.rstrip(":")
             if raw in {"ytsearch", "ytsearchdate", "ytsearchall", "ytmsearch"}:
-                raw = f"{raw}1"
+                raw = f"{raw}{limit}"
             if not raw:
-                raw = "ytsearch1"
+                raw = f"ytsearch{limit}"
             return raw
 
         default_search = _default_search_prefix()
@@ -3204,7 +3353,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             title = _short_text(title_value, limit=160, default=(query if not is_url else "Música"))
             uploader = _short_text(entry.get("uploader") or entry.get("channel") or entry.get("creator") or entry.get("artist") or "", limit=120)
             source_value = source_label or entry.get("extractor_key") or entry.get("extractor") or "worker-ytdlp"
-            tracks.append({
+            track_payload = {
                 "title": title,
                 "uploader": uploader,
                 "duration": entry.get("duration"),
@@ -3221,7 +3370,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 "format_id": _short_text(entry.get("format_id") or "", limit=80),
                 "http_headers": entry.get("http_headers") if isinstance(entry.get("http_headers"), dict) else {},
                 "is_direct_stream": True,
-            })
+            }
+            stream_id = _register_music_stream(track_payload)
+            if stream_id:
+                track_payload["worker_stream_id"] = stream_id
+                track_payload["worker_stream_path"] = f"/music/stream/{stream_id}"
+                track_payload["worker_stream_transport"] = "pcm_s16le_48k_stereo"
+            tracks.append(track_payload)
             return True
 
         for entry in entries:
@@ -3317,7 +3472,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     if line.strip().startswith(("http://", "https://"))
                 ]
                 for idx, stream_url in enumerate(urls[:limit], start=1):
-                    tracks.append({
+                    track_payload = {
                         "title": _short_text(query if not is_url else "Música", limit=160, default="Música"),
                         "uploader": "",
                         "duration": None,
@@ -3334,7 +3489,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         "format_id": "",
                         "http_headers": {},
                         "is_direct_stream": True,
-                    })
+                    }
+                    stream_id = _register_music_stream(track_payload)
+                    if stream_id:
+                        track_payload["worker_stream_id"] = stream_id
+                        track_payload["worker_stream_path"] = f"/music/stream/{stream_id}"
+                        track_payload["worker_stream_transport"] = "pcm_s16le_48k_stereo"
+                    tracks.append(track_payload)
             except Exception as exc:
                 cli_stderr = f"{type(exc).__name__}: {_short_text(exc, limit=500)}"
 

@@ -16,6 +16,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Any
 from urllib.parse import quote, urlsplit, urlunsplit
+import urllib.request
+import urllib.error
 
 import discord
 import aiohttp
@@ -408,6 +410,70 @@ class MixedAudioSource(discord.AudioSource):
             self._finish_overlay(overlay)
 
 
+class WorkerPCMHttpAudioSource(discord.AudioSource):
+    """PCM 48k stereo produzido pelo phone worker.
+
+    A VPS não executa yt-dlp/FFmpeg para esse caminho: ela só lê frames PCM já
+    decodificados do endpoint do worker e entrega para o voice client do Discord.
+    """
+
+    def __init__(self, url: str, *, token: str = "", timeout: float = 20.0) -> None:
+        self.url = str(url or "").strip()
+        self.token = str(token or "").strip()
+        self.timeout = max(3.0, float(timeout or 20.0))
+        self._response: Any = None
+        self._closed = False
+        self._lock = threading.RLock()
+        self._buffer = b""
+
+    def is_opus(self) -> bool:
+        return False
+
+    def _ensure_open(self) -> None:
+        if self._response is not None:
+            return
+        headers = {"User-Agent": "CoreMusicWorkerPCM/1.0"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        request = urllib.request.Request(self.url, headers=headers, method="GET")
+        self._response = urllib.request.urlopen(request, timeout=self.timeout)  # noqa: S310 - URL do phone worker configurado
+
+    def read(self) -> bytes:
+        with self._lock:
+            if self._closed:
+                return b""
+            try:
+                self._ensure_open()
+                while len(self._buffer) < PCM_FRAME_BYTES:
+                    chunk = self._response.read(PCM_FRAME_BYTES - len(self._buffer))
+                    if not chunk:
+                        break
+                    self._buffer += chunk
+                if not self._buffer:
+                    return b""
+                frame = self._buffer[:PCM_FRAME_BYTES]
+                self._buffer = self._buffer[PCM_FRAME_BYTES:]
+                if len(frame) < PCM_FRAME_BYTES:
+                    frame += b"\x00" * (PCM_FRAME_BYTES - len(frame))
+                return frame
+            except Exception as exc:
+                logger.warning("[music/worker-local] falha lendo PCM do worker: %s", exc)
+                self.cleanup()
+                return b""
+
+    def cleanup(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            response = self._response
+            self._response = None
+            with contextlib.suppress(Exception):
+                if response is not None:
+                    response.close()
+            self._buffer = b""
+
+
 @dataclass
 class MusicGuildState:
     queue: asyncio.Queue[MusicTrack] = field(default_factory=lambda: asyncio.Queue(maxsize=MUSIC_QUEUE_MAXSIZE))
@@ -559,6 +625,20 @@ class AudioRouter:
 
     def require_music_worker_available(self):
         return _require_music_worker_available()
+
+    def _track_uses_worker_local_stream(self, track: MusicTrack | None) -> bool:
+        if track is None:
+            return False
+        extractor = str(getattr(track, "extractor", "") or "").strip().lower()
+        stream_url = str(getattr(track, "stream_url", "") or "").strip().lower()
+        return bool(extractor == "worker-ytdlp" and "/music/stream/" in stream_url)
+
+    def _make_worker_local_source(self, track: MusicTrack) -> WorkerPCMHttpAudioSource:
+        return WorkerPCMHttpAudioSource(
+            str(getattr(track, "stream_url", "") or ""),
+            token=PHONE_WORKER_TOKEN,
+            timeout=max(5.0, float(getattr(config, "MUSIC_WORKER_STREAM_CONNECT_TIMEOUT_SECONDS", 20.0) or 20.0)),
+        )
 
     def _reset_stale_resolving_state(self, guild_id: int, state: MusicGuildState, *, reason: str = "stale") -> bool:
         """Limpa estado local preso em resolving sem task/source ativa.
@@ -2355,6 +2435,10 @@ class AudioRouter:
         state.next_resolve_task.add_done_callback(_consume_expected_music_exception)
 
     async def _resolve_current_track(self, state: MusicGuildState, track: MusicTrack) -> None:
+        if self._track_uses_worker_local_stream(track):
+            # O stream já é um endpoint PCM do phone worker. Não chame o extractor
+            # local da VPS, que acionaria yt-dlp/FFmpeg local e quebraria worker-only.
+            return
         target_abr = self._audio_max_abr_for_load()
         key = self._track_resolve_key(track, target_abr)
         task = state.next_resolve_task if state.next_resolve_key == key else None
@@ -2944,6 +3028,7 @@ class AudioRouter:
         state.current_lavalink_playable = None
 
         direct_youtube_request = False if self.music_worker_only_enabled() else self._track_is_direct_youtube_request(track)
+        worker_local_stream = self._track_uses_worker_local_stream(track)
         # Link direto do YouTube prioriza áudio. Não bloqueie a resolução do
         # stream local aguardando painel/metadata bonitos; o painel é criado
         # depois, quando o stream já estiver pronto/iniciando.
@@ -2952,8 +3037,8 @@ class AudioRouter:
             # mesma música continuam editando esse painel.
             await self.update_panel(guild.id, create=True, repost=True)
 
-        use_lavalink_real = bool(self.backends.should_use_music_lavalink(guild.id) if self.music_worker_only_enabled() else self.backends.should_use_lavalink_real(guild.id)) and not direct_youtube_request
-        if self.music_worker_only_enabled() and not use_lavalink_real:
+        use_lavalink_real = bool(self.backends.should_use_music_lavalink(guild.id) if self.music_worker_only_enabled() else self.backends.should_use_lavalink_real(guild.id)) and not direct_youtube_request and not worker_local_stream
+        if self.music_worker_only_enabled() and not use_lavalink_real and not worker_local_stream:
             # Worker-only não pode cair para yt-dlp/FFmpeg local na VPS. Se o
             # worker está online mas o engine musical dele não está pronto, falhe
             # com mensagem natural e sem expor Wavelink/Lavalink/cooldown no painel.
@@ -3099,6 +3184,8 @@ class AudioRouter:
             if attempt > 0:
                 if state.skip_requested or state.stop_requested:
                     raise MusicPlaybackError("Playback cancelado.")
+                if worker_local_stream:
+                    raise last_start_error or MusicPlaybackError("Stream local do worker não iniciou.")
                 # URL de stream pode expirar/403 antes do FFmpeg produzir áudio.
                 # Força uma nova resolução uma única vez, sem loop infinito.
                 track.stream_url = ""
@@ -3119,11 +3206,15 @@ class AudioRouter:
             ffmpeg_before_options = MUSIC_RECONNECT_BEFORE_OPTIONS
             if playback_start_offset > 0:
                 ffmpeg_before_options = f"{ffmpeg_before_options} -ss {playback_start_offset:.3f}".strip()
-            ffmpeg_source = discord.FFmpegPCMAudio(
-                track.stream_url,
-                before_options=ffmpeg_before_options,
-                options=ffmpeg_options,
-            )
+            if worker_local_stream:
+                ffmpeg_source = self._make_worker_local_source(track)
+                source_base_volume = 1.0
+            else:
+                ffmpeg_source = discord.FFmpegPCMAudio(
+                    track.stream_url,
+                    before_options=ffmpeg_before_options,
+                    options=ffmpeg_options,
+                )
             mixed_source = MixedAudioSource(
                 loop=loop,
                 music_source=ffmpeg_source,

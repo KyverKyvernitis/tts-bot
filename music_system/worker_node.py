@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+from urllib.parse import urljoin
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -332,6 +333,21 @@ def _direct_stream_url(data: Mapping[str, Any]) -> str:
     return ""
 
 
+
+
+def _looks_like_url(value: str) -> bool:
+    raw = str(value or "").strip().lower()
+    return raw.startswith(("http://", "https://", "www."))
+
+
+def _worker_stream_url(base: str, item: Mapping[str, Any]) -> str:
+    explicit = str(item.get("worker_stream_url") or item.get("worker_audio_url") or "").strip()
+    if explicit.startswith(("http://", "https://")):
+        return explicit
+    path = str(item.get("worker_stream_path") or item.get("worker_audio_path") or "").strip()
+    if path.startswith("/") and base:
+        return urljoin(base.rstrip("/") + "/", path.lstrip("/"))
+    return ""
 def _float_or_none(value: Any) -> float | None:
     try:
         if value is None or value == "":
@@ -377,7 +393,11 @@ async def resolve_music_tracks_on_worker(
         "limit": max_limit,
         "timeout_seconds": total_timeout,
         "js_runtimes": str(getattr(config, "MUSIC_WORKER_YTDLP_JS_RUNTIMES", "node") or "node"),
-        "default_search": str(getattr(config, "MUSIC_WORKER_YTDLP_DEFAULT_SEARCH", "ytsearch1") or "ytsearch1"),
+        "default_search": (
+            f"ytsearch{max_limit}"
+            if not _looks_like_url(clean_query)
+            else str(getattr(config, "MUSIC_WORKER_YTDLP_DEFAULT_SEARCH", "ytsearch") or "ytsearch")
+        ),
     }
     headers = {
         "Authorization": f"Bearer {token}",
@@ -407,7 +427,9 @@ async def resolve_music_tracks_on_worker(
     for item in raw_tracks[:max_limit]:
         if not isinstance(item, Mapping):
             continue
-        stream_url = _direct_stream_url(item)
+        direct_stream_url = _direct_stream_url(item)
+        worker_stream_url = _worker_stream_url(base, item)
+        stream_url = worker_stream_url or direct_stream_url
         if not stream_url:
             continue
         title = str(item.get("title") or item.get("fulltitle") or "Música").strip() or "Música"
@@ -430,9 +452,14 @@ async def resolve_music_tracks_on_worker(
             source=source,
             extractor="worker-ytdlp",
             is_live=_as_bool(item.get("is_live"), False),
-            lavalink_query=stream_url,
-            lavalink_resolved=True,
+            lavalink_query=direct_stream_url or stream_url,
+            lavalink_resolved=bool(direct_stream_url),
         )
+        if worker_stream_url:
+            # Stream PCM preparado pelo phone worker. A VPS lê esse endpoint com
+            # AudioSource próprio; não passa por yt-dlp/FFmpeg local nem por Lavalink.
+            track.display_source = "Worker local"
+        
         tracks.append(track)
     elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
     logger.info(

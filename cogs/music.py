@@ -151,7 +151,16 @@ class Music(commands.Cog):
 
     def _should_use_lavalink_for_input(self, query: str, guild_id: int | None) -> bool:
         if getattr(self.router, "music_worker_only_enabled", lambda: False)():
-            return True
+            raw = (query or "").strip()
+            lower = raw.lower()
+            profile = self._query_profile(raw)
+            if lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:")):
+                return True
+            if profile.is_youtube and profile.resource_type == "playlist":
+                return True
+            if profile.platform in {"spotify", "soundcloud", "apple", "deezer"}:
+                return True
+            return False
         if not self._is_lavalink_real_enabled(guild_id):
             return False
         profile = self._query_profile(query)
@@ -278,12 +287,21 @@ class Music(commands.Cog):
 
         if getattr(self.router, "music_worker_only_enabled", lambda: False)():
             try:
-                batch = await resolve_music_tracks_on_worker(
-                    query,
-                    requester_id=ctx.author.id,
-                    requester_name=requester_name,
-                    limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
-                )
+                if self._should_use_lavalink_for_input(query, ctx.guild.id):
+                    batch = await self.router.backends.resolve_lavalink_direct_tracks(
+                        query,
+                        requester_id=ctx.author.id,
+                        requester_name=requester_name,
+                        guild_id=getattr(ctx.guild, "id", None),
+                        limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
+                    )
+                else:
+                    batch = await resolve_music_tracks_on_worker(
+                        query,
+                        requester_id=ctx.author.id,
+                        requester_name=requester_name,
+                        limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
+                    )
             except MusicExtractionError as exc:
                 await self._reply(ctx, self._music_error_message(exc))
                 return

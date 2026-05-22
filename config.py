@@ -381,8 +381,8 @@ MUSIC_WORKER_YTDLP_JS_RUNTIMES = (
     or "node"
 ).strip()
 MUSIC_WORKER_YTDLP_DEFAULT_SEARCH = (
-    os.getenv("MUSIC_WORKER_YTDLP_DEFAULT_SEARCH", os.getenv("PHONE_WORKER_MUSIC_YTDLP_DEFAULT_SEARCH", "ytsearch1"))
-    or "ytsearch1"
+    os.getenv("MUSIC_WORKER_YTDLP_DEFAULT_SEARCH", os.getenv("PHONE_WORKER_MUSIC_YTDLP_DEFAULT_SEARCH", "ytsearch"))
+    or "ytsearch"
 ).strip()
 MUSIC_WORKER_LAVALINK_HOST = (os.getenv("MUSIC_WORKER_LAVALINK_HOST", "") or "").strip()
 MUSIC_WORKER_LAVALINK_PORT = _parse_int(os.getenv("MUSIC_WORKER_LAVALINK_PORT", "2333"), 2333)
