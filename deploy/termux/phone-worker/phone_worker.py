@@ -42,11 +42,16 @@ _PENDING_CORE_JOB_RESULTS: dict[str, dict[str, Any]] = {}
 _APK_BUILD_THREAD_LOCK = threading.Lock()
 _MUSIC_STREAM_LOCK = threading.RLock()
 _MUSIC_STREAMS: dict[str, dict[str, Any]] = {}
+PCM_SAMPLE_RATE = 48000
+PCM_CHANNELS = 2
+PCM_SAMPLE_WIDTH_BYTES = 2
+PCM_FRAME_MS = 20
+PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * (PCM_FRAME_MS / 1000.0))
 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.9.9"
+PHONE_WORKER_VERSION = "1.10.0"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -400,7 +405,9 @@ def _cleanup_music_streams_unlocked(now: float | None = None) -> None:
     current = time.time() if now is None else float(now)
     expired = [key for key, item in _MUSIC_STREAMS.items() if float(item.get("expires_at") or 0.0) <= current]
     for key in expired:
-        _MUSIC_STREAMS.pop(key, None)
+        item = _MUSIC_STREAMS.pop(key, None)
+        if isinstance(item, dict):
+            _cleanup_music_prepared_file(item)
 
 
 def _register_music_stream(item: dict[str, Any]) -> str:
@@ -446,19 +453,86 @@ def _safe_ffmpeg_header_lines(headers: Any) -> str:
     return "".join(lines)
 
 
-def _stream_music_pcm(handler: BaseHTTPRequestHandler, stream_id: str) -> None:
-    item = _music_stream_lookup(stream_id)
-    if not item:
-        _error(handler, HTTPStatus.NOT_FOUND, "stream não encontrado ou expirado")
+
+def _music_pcm_cache_dir() -> Path:
+    raw = str(os.getenv("PHONE_WORKER_MUSIC_PCM_CACHE_DIR") or "").strip()
+    path = Path(raw).expanduser() if raw else (Path.home() / "phone-worker" / "cache" / "music-pcm")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _music_prepared_mode_enabled() -> bool:
+    raw = str(os.getenv("PHONE_WORKER_MUSIC_STREAM_MODE") or os.getenv("PHONE_WORKER_MUSIC_PREPARE_MODE") or "prepared").strip().lower()
+    return raw not in {"live", "passthrough", "stream", "realtime", "0", "false", "off", "no", "não", "nao"}
+
+
+def _music_prepare_timeout_seconds(item: dict[str, Any]) -> float:
+    configured = _env_float("PHONE_WORKER_MUSIC_PREPARE_TIMEOUT_SECONDS", 0.0)
+    if configured > 0:
+        return max(20.0, min(1800.0, configured))
+    duration = float(item.get("duration") or 0.0)
+    if duration > 0:
+        return max(45.0, min(1800.0, duration * 2.5 + 45.0))
+    return 240.0
+
+
+def _music_prepare_max_duration_seconds() -> float:
+    return max(0.0, _env_float("PHONE_WORKER_MUSIC_PREPARE_MAX_DURATION_SECONDS", 1800.0))
+
+
+def _music_pcm_cache_max_bytes() -> int:
+    mb = max(64.0, min(16384.0, _env_float("PHONE_WORKER_MUSIC_PCM_CACHE_MAX_MB", 2048.0)))
+    return int(mb * 1024 * 1024)
+
+
+def _cleanup_music_prepared_file(item: dict[str, Any]) -> None:
+    path = str(item.get("prepared_pcm_path") or "").strip()
+    if not path:
         return
+    with contextlib.suppress(Exception):
+        p = Path(path)
+        cache_dir = _music_pcm_cache_dir().resolve()
+        resolved = p.resolve()
+        if cache_dir in resolved.parents or resolved == cache_dir:
+            p.unlink(missing_ok=True)
+
+
+def _cleanup_music_pcm_cache() -> None:
+    try:
+        cache_dir = _music_pcm_cache_dir()
+        files = [p for p in cache_dir.glob("*.pcm") if p.is_file()]
+    except Exception:
+        return
+    now = time.time()
+    max_age = _music_stream_ttl_seconds() + 600.0
+    for p in files:
+        with contextlib.suppress(Exception):
+            if now - p.stat().st_mtime > max_age:
+                p.unlink(missing_ok=True)
+    try:
+        files = [p for p in cache_dir.glob("*.pcm") if p.is_file()]
+        total = sum(p.stat().st_size for p in files)
+    except Exception:
+        return
+    max_bytes = _music_pcm_cache_max_bytes()
+    if total <= max_bytes:
+        return
+    for p in sorted(files, key=lambda item: item.stat().st_mtime):
+        with contextlib.suppress(Exception):
+            size = p.stat().st_size
+            p.unlink(missing_ok=True)
+            total -= size
+        if total <= max_bytes:
+            break
+
+
+def _music_stream_build_ffmpeg_input_cmd(item: dict[str, Any], *, output: str) -> list[str]:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
-        _error(handler, HTTPStatus.INTERNAL_SERVER_ERROR, "ffmpeg não encontrado no worker")
-        return
+        raise RuntimeError("ffmpeg não encontrado no worker")
     stream_url = str(item.get("stream_url") or item.get("direct_url") or "").strip()
     if not stream_url.startswith(("http://", "https://")):
-        _error(handler, HTTPStatus.BAD_REQUEST, "stream inválido")
-        return
+        raise ValueError("stream inválido")
     cmd = [
         ffmpeg,
         "-hide_banner",
@@ -495,19 +569,143 @@ def _stream_music_pcm(handler: BaseHTTPRequestHandler, stream_id: str) -> None:
         "48000",
         "-ac",
         "2",
-        "pipe:1",
+        output,
     ]
+    return cmd
+
+
+def _prepare_music_pcm_file(stream_id: str, item: dict[str, Any]) -> dict[str, Any]:
+    """Transcodifica a faixa inteira no worker antes de servir para a VPS.
+
+    Isso evita streaming PCM estritamente em tempo real via Tailscale. O worker usa
+    CPU/IO local para preparar o áudio mais rápido que tempo real; a VPS só lê um
+    arquivo PCM estável com buffer alto.
+    """
+    prepared_path = str(item.get("prepared_pcm_path") or "").strip()
+    if prepared_path:
+        p = Path(prepared_path)
+        if p.exists() and p.is_file() and p.stat().st_size > 0:
+            return item
+
+    duration = float(item.get("duration") or 0.0)
+    max_duration = _music_prepare_max_duration_seconds()
+    if max_duration > 0 and duration > max_duration:
+        raise TimeoutError(f"faixa muito longa para cache completo no worker ({duration:.0f}s > {max_duration:.0f}s)")
+
+    _cleanup_music_pcm_cache()
+    cache_dir = _music_pcm_cache_dir()
+    out_path = cache_dir / f"{stream_id}.pcm"
+    tmp_path = cache_dir / f"{stream_id}.tmp.pcm"
+    with contextlib.suppress(Exception):
+        tmp_path.unlink(missing_ok=True)
+
+    timeout = _music_prepare_timeout_seconds(item)
+    cmd = _music_stream_build_ffmpeg_input_cmd(item, output=str(tmp_path))
+    started = time.time()
+    print(
+        f"[music-stream] cache_started id={stream_id} title={_short_text(item.get('title'), limit=80)!r} duration={duration:.1f}s timeout={timeout:.1f}s",
+        flush=True,
+    )
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        cwd=str(Path.home() / "phone-worker"),
+        timeout=timeout,
+    )
+    elapsed = time.time() - started
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, (bytes, bytearray)) else str(proc.stderr or "")
+        with contextlib.suppress(Exception):
+            tmp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg cache falhou rc={proc.returncode}: {_short_text(stderr, limit=220)}")
+    if not tmp_path.exists() or tmp_path.stat().st_size <= 0:
+        with contextlib.suppress(Exception):
+            tmp_path.unlink(missing_ok=True)
+        raise RuntimeError("ffmpeg não gerou PCM no worker")
+    tmp_path.replace(out_path)
+    size = out_path.stat().st_size
+    prepared_seconds = size / 192000.0
+    updated = dict(item)
+    updated["prepared_pcm_path"] = str(out_path)
+    updated["prepared_pcm_bytes"] = size
+    updated["prepared_pcm_seconds"] = prepared_seconds
+    updated["prepared_at"] = time.time()
+    updated["stream_mode"] = "prepared_pcm"
+    with _MUSIC_STREAM_LOCK:
+        current = _MUSIC_STREAMS.get(stream_id)
+        if isinstance(current, dict):
+            current.update(updated)
+    print(
+        f"[music-stream] cache_ready id={stream_id} bytes={size} seconds={prepared_seconds:.1f} elapsed={elapsed:.1f}s",
+        flush=True,
+    )
+    _cleanup_music_pcm_cache()
+    return updated
+
+
+def _serve_prepared_music_pcm(handler: BaseHTTPRequestHandler, stream_id: str, item: dict[str, Any]) -> None:
+    path = Path(str(item.get("prepared_pcm_path") or ""))
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError("PCM preparado não encontrado")
+    size = path.stat().st_size
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "application/octet-stream")
+    handler.send_header("Content-Length", str(size))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Core-Worker-Stream-Id", stream_id)
+    handler.send_header("X-Core-Worker-Stream-Mode", "prepared-pcm")
+    handler.send_header("X-Core-Worker-Prepared-Seconds", f"{float(item.get('prepared_pcm_seconds') or 0.0):.3f}")
+    handler.end_headers()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(PCM_FRAME_BYTES * 64)
+            if not chunk:
+                break
+            try:
+                handler.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                break
+    with contextlib.suppress(Exception):
+        handler.wfile.flush()
+
+def _stream_music_pcm(handler: BaseHTTPRequestHandler, stream_id: str) -> None:
+    item = _music_stream_lookup(stream_id)
+    if not item:
+        _error(handler, HTTPStatus.NOT_FOUND, "stream não encontrado ou expirado")
+        return
+    stream_url = str(item.get("stream_url") or item.get("direct_url") or "").strip()
+    if not stream_url.startswith(("http://", "https://")):
+        _error(handler, HTTPStatus.BAD_REQUEST, "stream inválido")
+        return
+
+    if _music_prepared_mode_enabled():
+        try:
+            prepared = _prepare_music_pcm_file(stream_id, item)
+            _serve_prepared_music_pcm(handler, stream_id, prepared)
+            return
+        except Exception as exc:
+            fallback_live = str(os.getenv("PHONE_WORKER_MUSIC_PREPARE_LIVE_FALLBACK") or "false").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
+            print(f"[music-stream] cache_failed id={stream_id} erro={type(exc).__name__}: {_short_text(exc, limit=180)}", flush=True)
+            if not fallback_live:
+                _error(handler, HTTPStatus.INTERNAL_SERVER_ERROR, f"preparo de áudio no worker falhou: {type(exc).__name__}")
+                return
+
+    # Fallback legado: PCM ao vivo. Mantido apenas para emergência; por padrão o
+    # modo prepared acima é usado para evitar travadas por jitter/rede.
     proc: subprocess.Popen[bytes] | None = None
     try:
+        cmd = _music_stream_build_ffmpeg_input_cmd(item, output="pipe:1")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(Path.home() / "phone-worker"))
         handler.send_response(HTTPStatus.OK)
         handler.send_header("Content-Type", "application/octet-stream")
         handler.send_header("Cache-Control", "no-store")
         handler.send_header("X-Core-Worker-Stream-Id", stream_id)
+        handler.send_header("X-Core-Worker-Stream-Mode", "live-pcm")
         handler.end_headers()
         assert proc.stdout is not None
         while True:
-            chunk = proc.stdout.read(8192)
+            chunk = proc.stdout.read(PCM_FRAME_BYTES * 16)
             if not chunk:
                 break
             try:
@@ -517,7 +715,6 @@ def _stream_music_pcm(handler: BaseHTTPRequestHandler, stream_id: str) -> None:
         with contextlib.suppress(Exception):
             handler.wfile.flush()
     except Exception as exc:
-        # Se headers ainda não foram enviados, tenta JSON; caso contrário só loga.
         try:
             if not getattr(handler, "_headers_buffer", None):
                 _error(handler, HTTPStatus.INTERNAL_SERVER_ERROR, f"stream falhou: {type(exc).__name__}")
@@ -530,7 +727,6 @@ def _stream_music_pcm(handler: BaseHTTPRequestHandler, stream_id: str) -> None:
                 proc.kill()
             with contextlib.suppress(Exception):
                 proc.wait(timeout=2)
-
 
 def _format_bytes(value: Any) -> str:
     try:

@@ -125,9 +125,9 @@ PCM_FRAME_MS = 20.0
 PCM_FRAMES_PER_SECOND = int(1000 / PCM_FRAME_MS)
 PCM_SILENCE_FRAME = b"\x00" * PCM_FRAME_BYTES
 PCM_LIMITER_THRESHOLD = 30000
-MUSIC_WORKER_STREAM_PREBUFFER_SECONDS = max(0.1, float(getattr(config, "MUSIC_WORKER_STREAM_PREBUFFER_SECONDS", 2.0) or 2.0))
-MUSIC_WORKER_STREAM_READY_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "MUSIC_WORKER_STREAM_READY_TIMEOUT_SECONDS", 18.0) or 18.0))
-MUSIC_WORKER_STREAM_MAX_BUFFER_SECONDS = max(1.0, float(getattr(config, "MUSIC_WORKER_STREAM_MAX_BUFFER_SECONDS", 8.0) or 8.0))
+MUSIC_WORKER_STREAM_PREBUFFER_SECONDS = max(6.0, float(getattr(config, "MUSIC_WORKER_STREAM_PREBUFFER_SECONDS", 8.0) or 8.0))
+MUSIC_WORKER_STREAM_READY_TIMEOUT_SECONDS = max(30.0, float(getattr(config, "MUSIC_WORKER_STREAM_READY_TIMEOUT_SECONDS", 90.0) or 90.0))
+MUSIC_WORKER_STREAM_MAX_BUFFER_SECONDS = max(20.0, float(getattr(config, "MUSIC_WORKER_STREAM_MAX_BUFFER_SECONDS", 30.0) or 30.0))
 MUSIC_WORKER_STREAM_UNDERRUN_LOG_EVERY = max(1, int(getattr(config, "MUSIC_WORKER_STREAM_UNDERRUN_LOG_EVERY", 25) or 25))
 
 
@@ -436,9 +436,9 @@ class WorkerPCMHttpAudioSource(discord.AudioSource):
     ) -> None:
         self.url = str(url or "").strip()
         self.token = str(token or "").strip()
-        self.timeout = max(3.0, float(timeout or 20.0))
-        self.prebuffer_seconds = max(0.1, float(prebuffer_seconds or MUSIC_WORKER_STREAM_PREBUFFER_SECONDS))
-        self.max_buffer_seconds = max(self.prebuffer_seconds + 0.5, float(max_buffer_seconds or MUSIC_WORKER_STREAM_MAX_BUFFER_SECONDS))
+        self.timeout = max(30.0, float(timeout or 90.0))
+        self.prebuffer_seconds = max(6.0, float(prebuffer_seconds or MUSIC_WORKER_STREAM_PREBUFFER_SECONDS))
+        self.max_buffer_seconds = max(self.prebuffer_seconds + 3.0, 20.0, float(max_buffer_seconds or MUSIC_WORKER_STREAM_MAX_BUFFER_SECONDS))
         self._prebuffer_frames = max(1, int(self.prebuffer_seconds * PCM_FRAMES_PER_SECOND))
         self._max_buffer_frames = max(self._prebuffer_frames + 1, int(self.max_buffer_seconds * PCM_FRAMES_PER_SECOND))
         self._response: Any = None
@@ -781,7 +781,7 @@ class AudioRouter:
         return WorkerPCMHttpAudioSource(
             str(getattr(track, "stream_url", "") or ""),
             token=PHONE_WORKER_TOKEN,
-            timeout=max(5.0, float(getattr(config, "MUSIC_WORKER_STREAM_CONNECT_TIMEOUT_SECONDS", 20.0) or 20.0)),
+            timeout=max(30.0, float(getattr(config, "MUSIC_WORKER_STREAM_CONNECT_TIMEOUT_SECONDS", 90.0) or 90.0)),
             prebuffer_seconds=MUSIC_WORKER_STREAM_PREBUFFER_SECONDS,
             max_buffer_seconds=MUSIC_WORKER_STREAM_MAX_BUFFER_SECONDS,
         )
