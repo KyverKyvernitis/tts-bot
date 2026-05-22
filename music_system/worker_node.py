@@ -412,7 +412,11 @@ async def resolve_music_tracks_on_worker(
             continue
         title = str(item.get("title") or item.get("fulltitle") or "Música").strip() or "Música"
         webpage_url = str(item.get("webpage_url") or item.get("original_url") or clean_query).strip()
-        source = str(item.get("source") or item.get("extractor") or "worker-ytdlp").strip() or "worker-ytdlp"
+        raw_source = str(item.get("source") or item.get("extractor") or "worker-ytdlp").strip() or "worker-ytdlp"
+        lower_source = raw_source.lower()
+        # O extractor interno continua worker-ytdlp para roteamento/playback, mas
+        # o painel público deve mostrar a origem de conteúdo, não o nome técnico do job.
+        source = "YouTube" if "ytdlp" in lower_source or "yt-dlp" in lower_source or "youtube" in lower_source else raw_source
         track = MusicTrack(
             title=title,
             webpage_url=webpage_url,

@@ -1941,6 +1941,7 @@ class LavalinkBackend:
         meta: dict[str, Any] | None,
         *,
         timeout: float = 2.2,
+        allow_slow_start: bool = False,
     ) -> None:
         """Garante que o track não caiu imediatamente após o start.
 
@@ -1973,7 +1974,11 @@ class LavalinkBackend:
                 elapsed = asyncio.get_running_loop().time() - started_at
                 # Para faixas de música normais, sumir nos primeiros segundos é
                 # quase sempre TrackException/stream quebrado, não fim natural.
-                if saw_track or duration_ms >= 8000 or elapsed >= 0.8:
+                # URL HTTP direta gerada pelo phone worker pode demorar um pouco
+                # mais para aparecer como current/playing no REST do Lavalink.
+                if allow_slow_start and not saw_track and elapsed < max(1.0, float(timeout or 2.2)):
+                    pass
+                elif saw_track or duration_ms >= 8000 or elapsed >= 0.8:
                     state = (last_payload or {}).get("state") if isinstance(last_payload, dict) else None
                     last_error = RuntimeError(
                         "Lavalink iniciou a faixa, mas o player perdeu o track logo em seguida "
@@ -1982,6 +1987,12 @@ class LavalinkBackend:
                     break
 
             if asyncio.get_running_loop().time() >= deadline:
+                if allow_slow_start and not saw_track:
+                    state = (last_payload or {}).get("state") if isinstance(last_payload, dict) else None
+                    raise RuntimeError(
+                        "Lavalink não confirmou início do stream HTTP do worker "
+                        f"dentro de {float(timeout or 2.2):.1f}s (state={state!r})."
+                    )
                 return
             await asyncio.sleep(0.25)
 
@@ -2029,7 +2040,15 @@ class LavalinkBackend:
                 channel,
                 timeout=max(12.0, min(90.0, float(self.cfg.timeout_seconds or 12.0))),
             )
-            await self._wait_for_playback_stable(player, guild, playable, meta, timeout=2.2)
+            worker_http_stream = str(getattr(track, "extractor", "") or "").strip().lower() == "worker-ytdlp" or str(getattr(track, "source", "") or "").strip().lower().startswith("worker-ytdlp")
+            await self._wait_for_playback_stable(
+                player,
+                guild,
+                playable,
+                meta,
+                timeout=6.0 if worker_http_stream else 2.2,
+                allow_slow_start=worker_http_stream,
+            )
         except Exception:
             await self._stop_player_quietly(player)
             raise
@@ -2133,7 +2152,15 @@ class LavalinkBackend:
                     )
                     # Confirma também que o stream não caiu logo após abrir. Isso pega
                     # SoundCloud 404/TrackException e libera tentativa no próximo candidato.
-                    await self._wait_for_playback_stable(player, guild, playable, meta, timeout=2.2)
+                    worker_http_stream = str(getattr(track, "extractor", "") or "").strip().lower() == "worker-ytdlp" or str(getattr(track, "source", "") or "").strip().lower().startswith("worker-ytdlp")
+                    await self._wait_for_playback_stable(
+                        player,
+                        guild,
+                        playable,
+                        meta,
+                        timeout=6.0 if worker_http_stream else 2.2,
+                        allow_slow_start=worker_http_stream,
+                    )
                 except Exception:
                     await self._stop_player_quietly(player)
                     raise

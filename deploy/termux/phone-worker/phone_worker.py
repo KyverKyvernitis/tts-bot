@@ -44,7 +44,7 @@ _APK_BUILD_THREAD_LOCK = threading.Lock()
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.9.6"
+PHONE_WORKER_VERSION = "1.9.7"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -3190,32 +3190,94 @@ class WorkerHandler(BaseHTTPRequestHandler):
             is_playlist = False
 
         tracks: list[dict[str, Any]] = []
-        for entry in entries:
+
+        def append_entry_track(entry: dict[str, Any], *, source_label: str | None = None) -> bool:
             if not isinstance(entry, dict):
-                continue
+                return False
             stream_url = select_stream(entry)
             if not stream_url:
-                continue
-            webpage_url = str(entry.get("webpage_url") or entry.get("original_url") or entry.get("url") or query).strip()
+                return False
+            webpage_url = str(entry.get("webpage_url") or entry.get("original_url") or "").strip()
+            if not webpage_url or webpage_url == stream_url:
+                webpage_url = str(entry.get("webpage_url_basename") or entry.get("display_id") or query).strip() or query
+            title_value = entry.get("title") or entry.get("fulltitle") or entry.get("alt_title") or ""
+            title = _short_text(title_value, limit=160, default=(query if not is_url else "Música"))
+            uploader = _short_text(entry.get("uploader") or entry.get("channel") or entry.get("creator") or entry.get("artist") or "", limit=120)
+            source_value = source_label or entry.get("extractor_key") or entry.get("extractor") or "worker-ytdlp"
             tracks.append({
-                "title": _short_text(entry.get("title") or entry.get("fulltitle") or "Música", limit=160, default="Música"),
-                "uploader": _short_text(entry.get("uploader") or entry.get("channel") or entry.get("creator") or "", limit=120),
+                "title": title,
+                "uploader": uploader,
                 "duration": entry.get("duration"),
                 "thumbnail": _short_text(entry.get("thumbnail") or "", limit=500),
                 "webpage_url": webpage_url,
+                "original_url": webpage_url,
                 "original_query": query,
                 "stream_url": stream_url,
-                "source": _short_text(entry.get("extractor_key") or entry.get("extractor") or "worker-ytdlp", limit=80, default="worker-ytdlp"),
+                "direct_url": stream_url,
+                "source": _short_text(source_value, limit=80, default="worker-ytdlp"),
                 "extractor": "worker-ytdlp",
                 "is_live": bool(entry.get("is_live")),
                 "ext": _short_text(entry.get("ext") or "", limit=20),
                 "format_id": _short_text(entry.get("format_id") or "", limit=80),
+                "http_headers": entry.get("http_headers") if isinstance(entry.get("http_headers"), dict) else {},
+                "is_direct_stream": True,
             })
+            return True
+
+        for entry in entries:
+            append_entry_track(entry)
             if len(tracks) >= limit:
                 break
 
         cli_stderr = ""
         cli_rc: int | None = None
+        if not tracks:
+            cmd_json = [shutil.which("python") or "python", "-m", "yt_dlp"]
+            if cookies_ok:
+                cmd_json += ["--cookies", str(cookies_path)]
+            if js_runtimes:
+                cmd_json += ["--js-runtimes", ",".join(js_runtimes)]
+            if remote_components:
+                cmd_json += ["--remote-components", remote_components]
+            cmd_json += [
+                "--no-playlist",
+                "--no-warnings",
+                "--socket-timeout",
+                str(max(3, min(20, timeout - 1))),
+                "-f",
+                fmt,
+                "-J",
+                target,
+            ]
+            try:
+                proc_json = subprocess.run(
+                    cmd_json,
+                    cwd=str(Path.home() / "phone-worker"),
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout,
+                )
+                cli_rc = int(proc_json.returncode)
+                cli_stderr = _short_text(proc_json.stderr or "", limit=800)
+                parsed: Any = json.loads(proc_json.stdout or "{}") if proc_json.stdout else {}
+                json_entries: list[Any]
+                if isinstance(parsed, dict) and isinstance(parsed.get("entries"), list):
+                    json_entries = list(parsed.get("entries") or [])
+                    playlist_title = playlist_title or str(parsed.get("title") or "")
+                    is_playlist = True
+                elif isinstance(parsed, dict) and parsed:
+                    json_entries = [parsed]
+                else:
+                    json_entries = []
+                for entry in json_entries:
+                    if isinstance(entry, dict):
+                        append_entry_track(entry, source_label="worker-ytdlp-cli-json")
+                    if len(tracks) >= limit:
+                        break
+            except Exception as exc:
+                cli_stderr = f"{type(exc).__name__}: {_short_text(exc, limit=500)}"
+
         if not tracks:
             cmd = [shutil.which("python") or "python", "-m", "yt_dlp"]
             if cookies_ok:
@@ -3261,13 +3323,17 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         "duration": None,
                         "thumbnail": "",
                         "webpage_url": query,
+                        "original_url": query,
                         "original_query": query,
                         "stream_url": stream_url,
+                        "direct_url": stream_url,
                         "source": "worker-ytdlp-cli",
                         "extractor": "worker-ytdlp",
                         "is_live": False,
                         "ext": "",
                         "format_id": "",
+                        "http_headers": {},
+                        "is_direct_stream": True,
                     })
             except Exception as exc:
                 cli_stderr = f"{type(exc).__name__}: {_short_text(exc, limit=500)}"
