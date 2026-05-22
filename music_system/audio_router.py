@@ -37,6 +37,7 @@ from .worker_node import (
     ensure_music_worker_available as _ensure_music_worker_available,
     music_worker_only_enabled as _music_worker_only_enabled,
     require_music_worker_available as _require_music_worker_available,
+    resolve_music_tracks_on_worker as _resolve_music_tracks_on_worker,
 )
 
 logger = logging.getLogger(__name__)
@@ -2438,6 +2439,45 @@ class AudioRouter:
         if self._track_uses_worker_local_stream(track):
             # O stream já é um endpoint PCM do phone worker. Não chame o extractor
             # local da VPS, que acionaria yt-dlp/FFmpeg local e quebraria worker-only.
+            return
+        if self.music_worker_only_enabled() and str(getattr(track, "extractor", "") or "").lower() == "worker-ytdlp" and not str(getattr(track, "stream_url", "") or "").strip():
+            # A busca textual em worker-only agora é leve: ela traz apenas
+            # metadados para montar 5 opções rapidamente. Só ao tocar a faixa
+            # escolhida resolvemos stream real, endpoint PCM e FFmpeg no celular.
+            source = str(getattr(track, "webpage_url", "") or getattr(track, "original_url", "") or getattr(track, "title", "") or "").strip()
+            if not source:
+                raise MusicExtractionError("A música não tem origem para resolver no worker.")
+            batch = await _resolve_music_tracks_on_worker(
+                source,
+                requester_id=int(getattr(track, "requester_id", 0) or 0),
+                requester_name=str(getattr(track, "requester_name", "") or ""),
+                limit=1,
+                metadata_only=False,
+            )
+            if not batch.tracks:
+                raise MusicExtractionError("O worker não retornou stream para a música escolhida.")
+            resolved = batch.tracks[0]
+            for attr in (
+                "stream_url",
+                "lavalink_query",
+                "lavalink_resolved",
+                "source",
+                "extractor",
+                "duration",
+                "uploader",
+                "thumbnail",
+                "display_source",
+                "is_live",
+            ):
+                value = getattr(resolved, attr, None)
+                if value not in (None, ""):
+                    setattr(track, attr, value)
+            if getattr(resolved, "webpage_url", ""):
+                track.webpage_url = resolved.webpage_url
+            if getattr(resolved, "original_url", ""):
+                track.original_url = resolved.original_url
+            if not track.stream_url:
+                raise MusicExtractionError("O worker não retornou URL de áudio local.")
             return
         target_abr = self._audio_max_abr_for_load()
         key = self._track_resolve_key(track, target_abr)

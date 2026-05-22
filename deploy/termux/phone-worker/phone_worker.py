@@ -46,7 +46,7 @@ _MUSIC_STREAMS: dict[str, dict[str, Any]] = {}
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.9.8"
+PHONE_WORKER_VERSION = "1.9.9"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -3193,6 +3193,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
         timeout = max(5, min(self.job_timeout, int(float(body.get("timeout_seconds") or min(self.job_timeout, 30)))))
         fmt = str(body.get("format") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or "bestaudio/best").strip() or "bestaudio/best"
         is_url = bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", query) or query.lower().startswith("www."))
+        metadata_only = str(body.get("metadata_only") if body.get("metadata_only") is not None else body.get("search_only") or "").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
+        if metadata_only and is_url:
+            # Link direto precisa de uma fonte tocável; pesquisa leve só vale para texto.
+            metadata_only = False
 
         def _default_search_prefix() -> str:
             raw = str(
@@ -3309,6 +3313,12 @@ class WorkerHandler(BaseHTTPRequestHandler):
         }
         if cookies_ok:
             ydl_opts["cookiefile"] = str(cookies_path)
+        if metadata_only:
+            # Busca textual leve: retorna 5 candidatos sem resolver stream_url, sem
+            # ffmpeg e sem abrir endpoint de áudio. A resolução pesada acontece
+            # apenas depois que o usuário escolhe uma faixa.
+            ydl_opts["extract_flat"] = "in_playlist"
+            ydl_opts.pop("format", None)
 
         # O suporte Python para js_runtimes pode variar por versão do yt-dlp.
         # A chamada via API continua rápida quando funcionar; se retornar vazio
@@ -3340,15 +3350,52 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
         tracks: list[dict[str, Any]] = []
 
+        def entry_webpage_url(entry: dict[str, Any], *, stream_url: str = "") -> str:
+            webpage_url = str(entry.get("webpage_url") or entry.get("original_url") or entry.get("url") or "").strip()
+            if webpage_url and webpage_url != stream_url and webpage_url.startswith(("http://", "https://")):
+                return webpage_url
+            entry_id = str(entry.get("id") or entry.get("display_id") or "").strip()
+            source_key = str(entry.get("extractor_key") or entry.get("extractor") or "").lower()
+            if entry_id and ("youtube" in source_key or target.lower().startswith(("ytsearch", "ytmsearch"))):
+                return f"https://www.youtube.com/watch?v={entry_id}"
+            return str(entry.get("webpage_url_basename") or entry.get("display_id") or query).strip() or query
+
+        def append_metadata_track(entry: dict[str, Any], *, source_label: str | None = None) -> bool:
+            if not isinstance(entry, dict):
+                return False
+            webpage_url = entry_webpage_url(entry)
+            if not webpage_url:
+                return False
+            title_value = entry.get("title") or entry.get("fulltitle") or entry.get("alt_title") or ""
+            title = _short_text(title_value, limit=160, default=query)
+            uploader = _short_text(entry.get("uploader") or entry.get("channel") or entry.get("creator") or entry.get("artist") or "", limit=120)
+            source_value = source_label or entry.get("extractor_key") or entry.get("extractor") or "worker-ytdlp-search"
+            tracks.append({
+                "title": title,
+                "uploader": uploader,
+                "duration": entry.get("duration"),
+                "thumbnail": _short_text(entry.get("thumbnail") or "", limit=500),
+                "webpage_url": webpage_url,
+                "original_url": webpage_url,
+                "original_query": query,
+                "source": _short_text(source_value, limit=80, default="worker-ytdlp-search"),
+                "extractor": "worker-ytdlp",
+                "is_live": bool(entry.get("is_live")),
+                "metadata_only": True,
+                "search_only": True,
+                "is_direct_stream": False,
+            })
+            return True
+
         def append_entry_track(entry: dict[str, Any], *, source_label: str | None = None) -> bool:
             if not isinstance(entry, dict):
                 return False
+            if metadata_only:
+                return append_metadata_track(entry, source_label=source_label)
             stream_url = select_stream(entry)
             if not stream_url:
                 return False
-            webpage_url = str(entry.get("webpage_url") or entry.get("original_url") or "").strip()
-            if not webpage_url or webpage_url == stream_url:
-                webpage_url = str(entry.get("webpage_url_basename") or entry.get("display_id") or query).strip() or query
+            webpage_url = entry_webpage_url(entry, stream_url=stream_url)
             title_value = entry.get("title") or entry.get("fulltitle") or entry.get("alt_title") or ""
             title = _short_text(title_value, limit=160, default=(query if not is_url else "Música"))
             uploader = _short_text(entry.get("uploader") or entry.get("channel") or entry.get("creator") or entry.get("artist") or "", limit=120)
@@ -3394,16 +3441,17 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 cmd_json += ["--js-runtimes", ",".join(js_runtimes)]
             if remote_components:
                 cmd_json += ["--remote-components", remote_components]
+            if metadata_only:
+                cmd_json += ["--flat-playlist"]
             cmd_json += [
                 "--no-playlist",
                 "--no-warnings",
                 "--socket-timeout",
                 str(max(3, min(20, timeout - 1))),
-                "-f",
-                fmt,
-                "-J",
-                target,
             ]
+            if not metadata_only:
+                cmd_json += ["-f", fmt]
+            cmd_json += ["-J", target]
             try:
                 proc_json = subprocess.run(
                     cmd_json,
@@ -3433,7 +3481,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 cli_stderr = f"{type(exc).__name__}: {_short_text(exc, limit=500)}"
 
-        if not tracks:
+        if not tracks and not metadata_only:
             cmd = [shutil.which("python") or "python", "-m", "yt_dlp"]
             if cookies_ok:
                 cmd += ["--cookies", str(cookies_path)]
@@ -3510,7 +3558,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
         return {
             "ok": True,
-            "summary": "música resolvida pelo yt-dlp no worker" if tracks else "yt-dlp não encontrou áudio tocável no worker",
+            "summary": ("busca leve resolvida pelo yt-dlp no worker" if metadata_only and tracks else "música resolvida pelo yt-dlp no worker" if tracks else "yt-dlp não encontrou áudio tocável no worker"),
             "query": query,
             "target": target,
             "tracks": tracks,
@@ -3518,6 +3566,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "is_playlist": is_playlist,
             "playlist_title": playlist_title,
             "truncated": bool(len(entries) > len(tracks)),
+            "metadata_only": bool(metadata_only),
             "elapsed_ms": round((time.time() - started) * 1000.0, 1),
             "cookies": "on" if cookies_ok else "off",
             "js_runtime": ",".join(js_runtimes) if js_runtimes else "",

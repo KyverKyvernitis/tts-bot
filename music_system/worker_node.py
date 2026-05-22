@@ -367,6 +367,7 @@ async def resolve_music_tracks_on_worker(
     requester_name: str = "",
     limit: int = 5,
     timeout_seconds: float | None = None,
+    metadata_only: bool | None = None,
 ) -> ExtractedBatch:
     """Resolve pesquisa/link no phone worker turbo usando yt-dlp do celular.
 
@@ -386,16 +387,24 @@ async def resolve_music_tracks_on_worker(
         max_limit = max(1, min(10, int(limit or 5)))
     except Exception:
         max_limit = 5
-    total_timeout = max(5.0, float(timeout_seconds if timeout_seconds is not None else getattr(config, "MUSIC_WORKER_YTDLP_TIMEOUT_SECONDS", 28.0) or 28.0))
+    is_text_search = not _looks_like_url(clean_query)
+    if metadata_only is None:
+        metadata_only = bool(is_text_search)
+    if metadata_only:
+        default_timeout = float(getattr(config, "MUSIC_WORKER_YTDLP_SEARCH_TIMEOUT_SECONDS", 12.0) or 12.0)
+    else:
+        default_timeout = float(getattr(config, "MUSIC_WORKER_YTDLP_TIMEOUT_SECONDS", 28.0) or 28.0)
+    total_timeout = max(5.0, float(timeout_seconds if timeout_seconds is not None else default_timeout))
     payload = {
         "task": "music_ytdlp_resolve",
         "query": clean_query,
         "limit": max_limit,
         "timeout_seconds": total_timeout,
+        "metadata_only": bool(metadata_only),
         "js_runtimes": str(getattr(config, "MUSIC_WORKER_YTDLP_JS_RUNTIMES", "node") or "node"),
         "default_search": (
             f"ytsearch{max_limit}"
-            if not _looks_like_url(clean_query)
+            if is_text_search
             else str(getattr(config, "MUSIC_WORKER_YTDLP_DEFAULT_SEARCH", "ytsearch") or "ytsearch")
         ),
     }
@@ -430,10 +439,13 @@ async def resolve_music_tracks_on_worker(
         direct_stream_url = _direct_stream_url(item)
         worker_stream_url = _worker_stream_url(base, item)
         stream_url = worker_stream_url or direct_stream_url
-        if not stream_url:
+        item_metadata_only = _as_bool(item.get("metadata_only") or item.get("search_only"), False)
+        webpage_url = str(item.get("webpage_url") or item.get("original_url") or clean_query).strip()
+        if not stream_url and not item_metadata_only:
+            continue
+        if item_metadata_only and not webpage_url:
             continue
         title = str(item.get("title") or item.get("fulltitle") or "Música").strip() or "Música"
-        webpage_url = str(item.get("webpage_url") or item.get("original_url") or clean_query).strip()
         raw_source = str(item.get("source") or item.get("extractor") or "worker-ytdlp").strip() or "worker-ytdlp"
         lower_source = raw_source.lower()
         # O extractor interno continua worker-ytdlp para roteamento/playback, mas
@@ -455,6 +467,10 @@ async def resolve_music_tracks_on_worker(
             lavalink_query=direct_stream_url or stream_url,
             lavalink_resolved=bool(direct_stream_url),
         )
+        if item_metadata_only:
+            track.lavalink_query = ""
+            track.lavalink_resolved = False
+            track.display_source = "YouTube"
         if worker_stream_url:
             # Stream PCM preparado pelo phone worker. A VPS lê esse endpoint com
             # AudioSource próprio; não passa por yt-dlp/FFmpeg local nem por Lavalink.
@@ -463,10 +479,11 @@ async def resolve_music_tracks_on_worker(
         tracks.append(track)
     elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
     logger.info(
-        "[music/worker] yt-dlp remoto ok | worker=%s query=%r tracks=%s elapsed_ms=%.1f js=%s search=%s cli_rc=%s cli_error=%r",
+        "[music/worker] yt-dlp remoto ok | worker=%s query=%r tracks=%s metadata_only=%s elapsed_ms=%.1f js=%s search=%s cli_rc=%s cli_error=%r",
         selection.worker_id or selection.name,
         clean_query,
         len(tracks),
+        bool(data.get("metadata_only") or metadata_only),
         elapsed_ms,
         data.get("js_runtime") or "",
         data.get("default_search") or "",

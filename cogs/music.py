@@ -301,6 +301,7 @@ class Music(commands.Cog):
                         requester_id=ctx.author.id,
                         requester_name=requester_name,
                         limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
+                        metadata_only=self._is_youtube_text_search(query),
                     )
             except MusicExtractionError as exc:
                 await self._reply(ctx, self._music_error_message(exc))
