@@ -27,6 +27,8 @@ SSHD_AUTO_START="${PHONE_WORKER_SSHD_AUTO_START:-true}"
 SSHD_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
 MUSIC_LAVALINK_AUTO_START="${PHONE_WORKER_START_LAVALINK:-${PHONE_LAVALINK_AUTO_START:-true}}"
 PHONE_LAVALINK_START_COMMAND="${PHONE_LAVALINK_START_COMMAND:-$HOME/start-phone-lavalink.sh}"
+MUSIC_AGENT_AUTO_START="${PHONE_WORKER_START_MUSIC_AGENT:-${MUSIC_AGENT_ENABLED:-false}}"
+MUSIC_AGENT_START_COMMAND="${MUSIC_AGENT_START_COMMAND:-$WORKER_DIR/start-phone-music-agent.sh}"
 
 log() {
   printf '[phone-worker-start] %s\n' "$*"
@@ -218,10 +220,10 @@ append_csv_env_value() {
 
 ensure_music_worker_env_if_needed() {
   is_turbo_profile || return 0
-  for role in music music-node music-lavalink music-ytdlp; do
+  for role in music music-node music-lavalink music-ytdlp music-agent; do
     append_csv_env_value CORE_WORKER_ROLES "$role"
   done
-  for capability in music music-node music-lavalink music-ytdlp music-ytdlp-resolve; do
+  for capability in music music-node music-lavalink music-ytdlp music-ytdlp-resolve music-agent music-agent-control; do
     append_csv_env_value CORE_WORKER_CAPABILITIES "$capability"
   done
   local cookies="${PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE:-${MUSIC_WORKER_YTDLP_COOKIES_FILE:-}}"
@@ -296,6 +298,18 @@ PYYTDLPDEPS
   log "perfil turbo: instalando suporte yt-dlp/EJS para música"
   "$PYTHON_BIN" -m pip install --upgrade "yt-dlp[default]" >/dev/null 2>&1 || \
     log "não consegui instalar yt-dlp[default] automaticamente; música YouTube pode falhar no challenge"
+}
+
+ensure_music_agent_deps_if_needed() {
+  is_turbo_profile || return 0
+  deps_install_enabled || return 0
+  truthy "$MUSIC_AGENT_AUTO_START" || return 0
+  "$PYTHON_BIN" - <<'PYMUSICAGENTDEPS' >/dev/null 2>&1 && return 0
+import aiohttp, discord, wavelink, yt_dlp  # noqa: F401
+PYMUSICAGENTDEPS
+  log "perfil turbo: instalando dependências do Music Agent"
+  "$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py[voice]>=2.7.1,<2.8' 'wavelink>=3.4,<3.6' 'yt-dlp[default]' >/dev/null 2>&1 || \
+    log "não consegui instalar dependências do Music Agent automaticamente"
 }
 
 ensure_turbo_piper_cli_if_needed() {
@@ -420,10 +434,31 @@ ensure_lavalink_for_turbo_if_needed() {
     log "não consegui iniciar Lavalink automaticamente; música pode ficar indisponível"
 }
 
+
+ensure_music_agent_for_turbo_if_needed() {
+  is_turbo_profile || return 0
+  truthy "$MUSIC_AGENT_AUTO_START" || return 0
+  if [[ ! -x "$MUSIC_AGENT_START_COMMAND" ]]; then
+    log "perfil turbo: start do Music Agent não encontrado em $MUSIC_AGENT_START_COMMAND"
+    return 0
+  fi
+  if [[ -z "${MUSIC_AGENT_BOT_TOKEN:-${DISCORD_TOKEN:-${BOT_TOKEN:-}}}" ]]; then
+    log "perfil turbo: Music Agent habilitado, mas token do bot não está configurado no worker"
+    return 0
+  fi
+  if [[ -z "${MUSIC_AGENT_TOKEN:-}" && -n "${PHONE_WORKER_TOKEN:-}" ]]; then
+    upsert_env_value MUSIC_AGENT_TOKEN "$PHONE_WORKER_TOKEN"
+  fi
+  log "perfil turbo: garantindo Music Agent do worker"
+  "$MUSIC_AGENT_START_COMMAND" >/dev/null 2>&1 || \
+    log "não consegui iniciar Music Agent automaticamente; música direta no worker pode ficar indisponível"
+}
+
 ensure_turbo_deps_if_needed() {
   ensure_turbo_termux_packages_if_needed
   ensure_turbo_python_tts_deps_if_needed
   ensure_music_ytdlp_deps_if_needed
+  ensure_music_agent_deps_if_needed
   ensure_turbo_piper_cli_if_needed
   ensure_turbo_piper_model_if_needed
   ensure_turbo_piper_wrapper_if_needed
@@ -432,6 +467,7 @@ ensure_turbo_deps_if_needed() {
 ensure_music_worker_env_if_needed
 ensure_turbo_deps_if_needed
 ensure_lavalink_for_turbo_if_needed
+ensure_music_agent_for_turbo_if_needed
 
 count="$(worker_pid_count)"
 if health_ok && [[ "$count" -le 1 ]]; then

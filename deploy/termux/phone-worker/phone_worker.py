@@ -51,7 +51,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.0"
+PHONE_WORKER_VERSION = "1.10.1"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -69,6 +69,8 @@ SUPPORTED_DIRECT_TASKS = (
     "log_summary",
     "maintenance_plan",
     "music_ytdlp_resolve",
+    "music_agent_command",
+    "music_agent_status",
     "network_probe",
     "ping",
     "service_restart",
@@ -108,6 +110,8 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "log_summary",
     "maintenance_plan",
     "music_ytdlp_resolve",
+    "music_agent_command",
+    "music_agent_status",
     "network_probe",
     "ping",
     "service_restart",
@@ -2281,6 +2285,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_zip_validate(body)
             elif task == "maintenance_plan":
                 payload = self._task_maintenance_plan(body)
+            elif task in {"music_agent_status", "music_agent_command"}:
+                payload = self._task_music_agent_proxy(body)
             elif task == "music_ytdlp_resolve":
                 payload = self._task_music_ytdlp_resolve(body)
             elif task == "text_stats":
@@ -5911,6 +5917,10 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
         elif kind == "ffprobe_check":
             result = _command_version("ffprobe")
             result.setdefault("summary", "ffprobe verificado")
+        elif kind in {"music_agent_status", "music_agent_command"}:
+            runner = _task_runner(max_body_bytes, max_output_bytes, job_timeout)
+            result = runner._task_music_agent_proxy(payload)
+            result.setdefault("summary", "Music Agent consultado pelo worker")
         elif kind == "music_ytdlp_resolve":
             runner = _task_runner(max_body_bytes, max_output_bytes, job_timeout)
             result = runner._task_music_ytdlp_resolve(payload)

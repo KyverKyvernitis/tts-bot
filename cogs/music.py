@@ -15,7 +15,7 @@ from music_system.models import ExtractedBatch, MusicTrack
 from music_system.providers import describe_url
 from music_system.ui import SearchResultView, QueueView, VoiceStatusSettingsView, build_queue_embed, build_now_playing_embeds
 from music_system.musicnode_ui import MusicNodePanelView
-from music_system.worker_node import resolve_music_tracks_on_worker
+from music_system.worker_node import music_agent_command, resolve_music_tracks_on_worker
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +425,32 @@ class Music(commands.Cog):
                 ctx,
                 embed=embed,
                 view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:10], ctx.author.id),
+            )
+            return
+
+        if bool(getattr(config, "MUSIC_AGENT_ENABLED", False)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
+            track = batch.tracks[0]
+            try:
+                result = await music_agent_command(
+                    "play",
+                    guild_id=ctx.guild.id,
+                    voice_channel_id=voice_channel.id,
+                    text_channel_id=ctx.channel.id,
+                    query=track.webpage_url or track.original_url or query,
+                    track=track,
+                    requester_id=ctx.author.id,
+                    requester_name=requester_name,
+                )
+            except Exception as exc:
+                logger.warning("[music/agent] falha ao enviar play direto | guild=%s erro=%s", ctx.guild.id, exc)
+                await self._reply(ctx, self._music_error_message(exc))
+                return
+            queued = bool(result.get("queued"))
+            await self._reply(
+                ctx,
+                f"`🎶` **Adicionada ao Music Agent:** {track.short_title} • `{track.duration_label}`"
+                if queued
+                else f"`🎧` **Music Agent preparando:** {track.short_title} • `{track.duration_label}`",
             )
             return
 

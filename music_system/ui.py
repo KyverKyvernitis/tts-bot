@@ -12,7 +12,7 @@ import config
 from .errors import MusicExtractionError
 from .models import ExtractedBatch, MusicTrack
 from .providers import describe_url
-from .worker_node import resolve_music_tracks_on_worker
+from .worker_node import music_agent_command, resolve_music_tracks_on_worker
 
 PLAYER_BAR_URL = "https://cdn.discordapp.com/attachments/554468640942981147/1127294696025227367/rainbow_bar3.gif"
 QUEUE_PAGE_SIZE = 8
@@ -700,6 +700,25 @@ class SearchSelect(discord.ui.Select):
         if voice_channel is None or text_channel is None:
             await interaction.response.send_message("Canal não encontrado.", ephemeral=True)
             return
+        if bool(getattr(config, "MUSIC_AGENT_ENABLED", False)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
+            try:
+                result = await music_agent_command(
+                    "play",
+                    guild_id=self.guild_id,
+                    voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
+                    text_channel_id=getattr(text_channel, "id", self.text_channel_id),
+                    query=track.webpage_url or track.original_url or track.title,
+                    track=track,
+                    requester_id=getattr(interaction.user, "id", 0),
+                    requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
+                )
+            except Exception as exc:
+                await interaction.response.edit_message(content=f"`⚠️` Não consegui enviar essa música ao Music Agent: `{exc}`", embed=None, view=None)
+                return
+            queued = bool(result.get("queued"))
+            msg = f"`🎶` **Adicionada ao Music Agent:** {track.short_title} • `{track.duration_label}`" if queued else f"`🎧` **Music Agent preparando:** {track.short_title} • `{track.duration_label}`"
+            await interaction.response.edit_message(content=msg, embed=None, view=None)
+            return
         state_before = self.router.get_state(self.guild_id)
         was_session_active = bool(
             state_before.current
@@ -806,6 +825,27 @@ class AddSongModal(discord.ui.Modal):
                 view=SearchResultView(self.router, guild.id, getattr(voice_channel, "id", 0), getattr(text_channel, "id", 0), batch.tracks[:10], interaction.user.id),
                 ephemeral=True,
             )
+            return
+
+        if bool(getattr(config, "MUSIC_AGENT_ENABLED", False)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
+            track = batch.tracks[0]
+            try:
+                result = await music_agent_command(
+                    "play",
+                    guild_id=guild.id,
+                    voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
+                    text_channel_id=getattr(text_channel, "id", self.text_channel_id),
+                    query=track.webpage_url or track.original_url or query,
+                    track=track,
+                    requester_id=interaction.user.id,
+                    requester_name=requester_name,
+                )
+            except Exception as exc:
+                await interaction.followup.send(f"`⚠️` Não consegui enviar essa música ao Music Agent: `{exc}`", ephemeral=True)
+                return
+            queued = bool(result.get("queued"))
+            msg = f"`🎶` **Adicionada ao Music Agent:** {track.short_title} • `{track.duration_label}`" if queued else f"`🎧` **Music Agent preparando:** {track.short_title} • `{track.duration_label}`"
+            await interaction.followup.send(msg, ephemeral=True)
             return
 
         state_before = self.router.get_state(self.guild_id)

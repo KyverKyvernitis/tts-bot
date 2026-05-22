@@ -510,6 +510,106 @@ async def resolve_music_tracks_on_worker(
     )
 
 
+
+async def music_agent_command(
+    action: str,
+    *,
+    guild_id: int = 0,
+    voice_channel_id: int = 0,
+    text_channel_id: int = 0,
+    query: str = "",
+    track: MusicTrack | Mapping[str, Any] | None = None,
+    requester_id: int = 0,
+    requester_name: str = "",
+    timeout_seconds: float | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Send a command to the phone-worker Music Agent through /task.
+
+    This is the control-plane bridge for the future architecture where the VPS
+    edits UI/status while the same-bot agent on the phone owns voice/playback.
+    """
+    selection = require_music_worker_available()
+    base = _phone_worker_base_url()
+    token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
+    if not base or not token:
+        raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+    payload: dict[str, Any] = {
+        "task": "music_agent_command",
+        "action": action,
+        "guild_id": int(guild_id or 0),
+        "voice_channel_id": int(voice_channel_id or 0),
+        "text_channel_id": int(text_channel_id or 0),
+        "query": str(query or ""),
+        "requester_id": int(requester_id or 0),
+        "requester_name": requester_name or "",
+        "timeout_seconds": float(timeout_seconds or getattr(config, "MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", 12.0) or 12.0),
+    }
+    if track is not None:
+        if isinstance(track, MusicTrack):
+            payload["track"] = {
+                "title": track.title,
+                "webpage_url": track.webpage_url,
+                "original_url": track.original_url,
+                "stream_url": track.stream_url,
+                "duration": track.duration,
+                "uploader": track.uploader,
+                "thumbnail": track.thumbnail,
+                "source": track.source,
+                "extractor": track.extractor,
+                "requester_id": track.requester_id,
+                "requester_name": track.requester_name,
+            }
+            if not payload["query"]:
+                payload["query"] = track.webpage_url or track.original_url or track.stream_url or track.title
+        elif isinstance(track, Mapping):
+            payload["track"] = dict(track)
+    payload.update({k: v for k, v in extra.items() if v is not None})
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    total_timeout = max(2.0, float(payload["timeout_seconds"]) + 2.0)
+    timeout = aiohttp.ClientTimeout(total=total_timeout)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(f"{base}/task", headers=headers, json=payload) as response:
+                text = await response.text()
+                if response.status < 200 or response.status >= 300:
+                    raise RuntimeError(f"HTTP {response.status}: {text[:260]}")
+                data = json.loads(text or "{}")
+    except Exception as exc:
+        logger.warning("[music/agent] comando remoto falhou | worker=%s action=%s erro=%s", selection.worker_id, action, exc)
+        raise MusicWorkerEngineUnavailable(MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE) from exc
+    if data.get("ok") is False:
+        raise MusicWorkerEngineUnavailable(str(data.get("error") or data.get("message") or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE))
+    return data
+
+
+async def music_agent_status(*, timeout_seconds: float | None = None) -> dict[str, Any]:
+    selection = require_music_worker_available()
+    base = _phone_worker_base_url()
+    token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
+    if not base or not token:
+        raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+    payload = {
+        "task": "music_agent_status",
+        "action": "status",
+        "timeout_seconds": float(timeout_seconds or getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 2.5) or 2.5),
+    }
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    timeout = aiohttp.ClientTimeout(total=max(1.0, float(payload["timeout_seconds"]) + 1.0))
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(f"{base}/task", headers=headers, json=payload) as response:
+                text = await response.text()
+                if response.status < 200 or response.status >= 300:
+                    raise RuntimeError(f"HTTP {response.status}: {text[:220]}")
+                data = json.loads(text or "{}")
+    except Exception as exc:
+        logger.info("[music/agent] status remoto indisponível | worker=%s erro=%s", selection.worker_id, exc)
+        return {"ok": False, "available": False, "error": str(exc)}
+    data.setdefault("ok", True)
+    data.setdefault("available", bool(data.get("discord_ready")))
+    return data
+
 async def ensure_music_worker_available() -> MusicWorkerSelection:
     # Mantido async para uso uniforme em comandos/interações.
     return select_music_worker()
