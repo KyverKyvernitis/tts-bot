@@ -20,7 +20,7 @@ if [[ -f "$MUSIC_AGENT_ENV_FILE" ]]; then
 fi
 PYTHON_BIN="${PHONE_WORKER_PYTHON:-python}"
 HOST="${MUSIC_AGENT_HOST:-127.0.0.1}"
-PORT="${MUSIC_AGENT_PORT:-8786}"
+PORT="${MUSIC_AGENT_PORT:-8780}"
 TOKEN="${MUSIC_AGENT_TOKEN:-${PHONE_WORKER_TOKEN:-}}"
 LOG_FILE="${MUSIC_AGENT_LOG_FILE:-$WORKER_DIR/music_agent.log}"
 PID_FILE="${MUSIC_AGENT_PID_FILE:-$WORKER_DIR/music_agent.pid}"
@@ -71,11 +71,17 @@ kill_agent() {
 
 ensure_deps() {
   "$PYTHON_BIN" - <<'PYDEPS' >/dev/null 2>&1 && return 0
-import aiohttp, discord, wavelink, yt_dlp  # noqa: F401
+import aiohttp, discord, nacl, wavelink, yt_dlp  # noqa: F401
 PYDEPS
-  log "instalando dependências do Music Agent: aiohttp discord.py[voice] wavelink yt-dlp[default]"
-  "$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py[voice]>=2.7.1,<2.8' 'wavelink>=3.4,<3.6' 'yt-dlp[default]' >/dev/null 2>&1 || \
-    log "não consegui instalar todas as dependências automaticamente"
+  log "dependências do Music Agent ausentes; instalando aiohttp, discord.py, PyNaCl, wavelink e yt-dlp"
+  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl 'wavelink>=3.4,<3.6' 'yt-dlp[default]')
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-180}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
+      log "não consegui instalar todas as dependências automaticamente dentro do timeout"
+  else
+    "${pip_cmd[@]}" >/dev/null 2>&1 || \
+      log "não consegui instalar todas as dependências automaticamente"
+  fi
 }
 
 ensure_deps

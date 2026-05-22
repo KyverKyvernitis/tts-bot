@@ -39,7 +39,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.2.0"
+AGENT_VERSION = "0.2.1"
 STARTED_AT = time.time()
 
 
@@ -150,7 +150,7 @@ class GuildMusicState:
 class MusicAgent:
     def __init__(self) -> None:
         self.host = os.getenv("MUSIC_AGENT_HOST", "127.0.0.1")
-        self.port = env_int("MUSIC_AGENT_PORT", 8786)
+        self.port = env_int("MUSIC_AGENT_PORT", 8780)
         self.token = os.getenv("MUSIC_AGENT_TOKEN") or os.getenv("PHONE_WORKER_TOKEN") or ""
         self.discord_token = os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or ""
         self.lavalink_uri = os.getenv("MUSIC_AGENT_LAVALINK_URI") or os.getenv("LAVALINK_URI") or "http://127.0.0.1:2333"
@@ -255,6 +255,9 @@ class MusicAgent:
             await wavelink.Pool.connect(nodes=[node], client=self.client, cache_capacity=100)
         except TypeError:
             await wavelink.Pool.connect(nodes=[node], client=self.client)
+        except Exception:
+            self._pool_connected = False
+            raise
         self._pool_connected = True
 
     async def dispatch(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -296,7 +299,10 @@ class MusicAgent:
             st.updated_at = time.time()
             return {"ok": True, "queued": True, "state": st.public()}
         st.queue.append(track)
+        print(f"[music-agent] play_received guild={guild_id} voice={voice_channel_id} title={track.title!r}", flush=True)
         await self._play_next(guild_id)
+        if st.status == "error":
+            return {"ok": False, "queued": False, "error": st.last_error or "falha ao iniciar playback", "state": st.public()}
         return {"ok": True, "queued": False, "state": st.public()}
 
     async def cmd_pause(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -379,6 +385,7 @@ class MusicAgent:
             player_cls = getattr(wavelink, "Player", None)
             if player_cls is None:
                 raise RuntimeError("Wavelink não expõe Player")
+            print(f"[music-agent] voice_connecting guild={guild_id} channel={st.voice_channel_id}", flush=True)
             player = guild.voice_client
             if player is None or not isinstance(player, player_cls) or not getattr(player, "connected", False):
                 player = await channel.connect(cls=player_cls, self_deaf=True)
@@ -389,7 +396,7 @@ class MusicAgent:
             await player.play(playable)
             st.status = "playing"
             st.updated_at = time.time()
-            print(f"[music-agent] playing guild={guild_id} title={st.current.title!r}", flush=True)
+            print(f"[music-agent] play_started guild={guild_id} title={st.current.title!r}", flush=True)
         except Exception as exc:
             st.status = "error"
             st.last_error = f"{type(exc).__name__}: {short_text(exc, 260)}"

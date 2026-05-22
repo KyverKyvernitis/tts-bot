@@ -51,7 +51,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.2"
+PHONE_WORKER_VERSION = "1.10.3"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -1402,6 +1402,7 @@ def _flush_pending_core_worker_job_results(*, timeout: float = 8.0) -> int:
 def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     status = _safe_telemetry("system", _system_status, {"ok": False})
     music_node = _safe_telemetry("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"})
+    music_agent = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
     worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
     name = _default_worker_name()
     endpoint = str(os.getenv("CORE_WORKER_ENDPOINT") or os.getenv("PHONE_WORKER_ENDPOINT") or "").strip()
@@ -1414,12 +1415,12 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         capabilities.append("ffmpeg")
     if status.get("ffprobe") and "ffprobe" not in capabilities:
         capabilities.append("ffprobe")
-    music_ready = bool(music_node.get("ok") or music_node.get("online") or profile == "turbo")
+    music_ready = bool(music_agent.get("available") or music_node.get("ok") or music_node.get("online") or profile == "turbo")
     if music_ready:
-        for role in ("music", "music-node", "music-lavalink", "music-ytdlp"):
+        for role in ("music", "music-agent", "music-node", "music-lavalink", "music-ytdlp"):
             if role not in roles:
                 roles.append(role)
-        for capability in ("music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve"):
+        for capability in ("music", "music-agent", "music-voice", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve"):
             if capability not in capabilities:
                 capabilities.append(capability)
     return {
@@ -1455,6 +1456,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
             "core_worker_jobs": _core_job_runtime_snapshot(),
             "core_worker_network": _core_worker_network_runtime_snapshot(),
             "music_node": music_node,
+            "music_agent": music_agent,
             "runtime_mode": CORE_WORKER_RUNTIME_MODE,
             "runtime": {
                 "mode": CORE_WORKER_RUNTIME_MODE,
@@ -1973,6 +1975,68 @@ def _worker_turbo_cache_snapshot() -> dict[str, Any]:
         },
     }
 
+
+def _music_agent_snapshot() -> dict[str, Any]:
+    """Small local health probe for the same-bot Music Agent.
+
+    This is intentionally best-effort and never exposes tokens. The VPS uses it
+    to know whether the worker can own voice/playback before falling back to any
+    legacy music route.
+    """
+    host = str(os.getenv("MUSIC_AGENT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+    try:
+        port = int(float(os.getenv("MUSIC_AGENT_PORT") or 8780))
+    except Exception:
+        port = 8780
+    token = str(os.getenv("MUSIC_AGENT_TOKEN") or os.getenv("PHONE_WORKER_TOKEN") or "").strip()
+    configured = bool(str(os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or "").strip())
+    url = f"http://{host}:{port}/health"
+    headers = {"Accept": "application/json", "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    started = time.perf_counter()
+    try:
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=max(0.5, min(5.0, _env_float("MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 2.5)))) as resp:
+            raw = resp.read(512 * 1024).decode("utf-8", "replace")
+            status = int(getattr(resp, "status", 200) or 200)
+        data = json.loads(raw or "{}") if raw.strip() else {}
+        if not isinstance(data, dict):
+            data = {}
+        ok = bool(data.get("ok")) and bool(data.get("discord_ready")) and bool(data.get("pool_connected"))
+        data.update({
+            "ok": ok,
+            "available": ok,
+            "configured": configured,
+            "host": host,
+            "port": port,
+            "http_status": status,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+        })
+        return data
+    except urllib.error.HTTPError as exc:
+        raw = ""
+        with contextlib.suppress(Exception):
+            raw = exc.read(1024).decode("utf-8", "replace")
+        return {
+            "ok": False,
+            "available": False,
+            "configured": configured,
+            "host": host,
+            "port": port,
+            "http_status": int(exc.code),
+            "error": _short_text(raw or exc.reason, limit=180),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "available": False,
+            "configured": configured,
+            "host": host,
+            "port": port,
+            "error": f"{type(exc).__name__}: {_short_text(exc, limit=160)}",
+        }
+
 def _system_status() -> dict[str, Any]:
     auto_boot_repair = _auto_repair_local_boot_if_needed()
     disk = shutil.disk_usage(Path.home())
@@ -2000,6 +2064,7 @@ def _system_status() -> dict[str, Any]:
         "core_worker_jobs": {"configured": _core_worker_jobs_configured(), **_core_job_runtime_snapshot()},
         "core_worker_network": _core_worker_network_runtime_snapshot(),
         "music_node": _safe_telemetry("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"}),
+        "music_agent": _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False}),
         "scripts": _script_inventory(),
         "boot": _safe_telemetry("boot", _termux_boot_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "shell_autostart": _safe_telemetry("shell autostart", _termux_shell_autostart_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
@@ -3391,9 +3456,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
         """Proxy authenticated /task requests to the local same-bot Music Agent."""
         host = str(os.getenv("MUSIC_AGENT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
         try:
-            port = int(float(os.getenv("MUSIC_AGENT_PORT") or 8786))
+            port = int(float(os.getenv("MUSIC_AGENT_PORT") or 8780))
         except Exception:
-            port = 8786
+            port = 8780
         token = str(os.getenv("MUSIC_AGENT_TOKEN") or os.getenv("PHONE_WORKER_TOKEN") or "").strip()
         action = str(body.get("action") or body.get("command") or "status").strip().lower().replace("-", "_") or "status"
         try:
@@ -3437,14 +3502,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
             return {
                 "ok": False,
                 "available": False,
-                "error": f"Music Agent HTTP {exc.code}: {_short_text(raw or exc.reason, 260)}",
+                "error": f"Music Agent HTTP {exc.code}: {_short_text(raw or exc.reason, limit=260)}",
                 "agent": {"host": host, "port": port, "configured": True},
             }
         except Exception as exc:
             return {
                 "ok": False,
                 "available": False,
-                "error": f"{type(exc).__name__}: {_short_text(exc, 260)}",
+                "error": f"{type(exc).__name__}: {_short_text(exc, limit=260)}",
                 "agent": {"host": host, "port": port, "configured": True},
             }
         if isinstance(data, dict):

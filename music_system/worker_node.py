@@ -573,13 +573,24 @@ async def music_agent_command(
             async with session.post(f"{base}/task", headers=headers, json=payload) as response:
                 text = await response.text()
                 if response.status < 200 or response.status >= 300:
-                    raise RuntimeError(f"HTTP {response.status}: {text[:260]}")
+                    detail = text[:400]
+                    with contextlib.suppress(Exception):
+                        parsed = json.loads(text or "{}")
+                        if isinstance(parsed, Mapping):
+                            detail = str(parsed.get("error") or parsed.get("message") or detail)[:400]
+                    raise RuntimeError(f"Music Agent HTTP {response.status}: {detail}")
                 data = json.loads(text or "{}")
     except Exception as exc:
-        logger.warning("[music/agent] comando remoto falhou | worker=%s action=%s erro=%s", selection.worker_id, action, exc)
-        raise MusicWorkerEngineUnavailable(MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE) from exc
+        message = str(exc or "").strip() or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE
+        logger.warning("[music/agent] comando remoto falhou | worker=%s action=%s erro=%s", selection.worker_id, action, message)
+        lower = message.lower()
+        if "connection" in lower or "connect" in lower or "refused" in lower or "timeout" in lower:
+            message = "Sistema de música indisponível no momento: Music Agent não está online no worker"
+        raise MusicWorkerEngineUnavailable(message[:260]) from exc
     if data.get("ok") is False:
-        raise MusicWorkerEngineUnavailable(str(data.get("error") or data.get("message") or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE))
+        message = str(data.get("error") or data.get("message") or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE).strip()
+        raise MusicWorkerEngineUnavailable(message[:260])
+    logger.info("[music/agent] comando remoto enviado | worker=%s action=%s guild=%s", selection.worker_id or selection.name, action, guild_id)
     return data
 
 
