@@ -1175,40 +1175,65 @@ class CoreWorkersRegistry:
             self._save_unlocked(data)
         return {"ok": True, "removed_worker_id": safe_worker_id}
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, *, lock_timeout_seconds: float | None = None) -> dict[str, Any]:
         ts = _now()
-        with self._lock:
+        stale = False
+        error = ""
+        acquired = False
+
+        if lock_timeout_seconds is None:
+            self._lock.acquire()
+            acquired = True
+        else:
+            try:
+                acquired = self._lock.acquire(timeout=max(0.0, float(lock_timeout_seconds)))
+            except TypeError:
+                acquired = self._lock.acquire(False)
+
+        if acquired:
+            try:
+                data = self._load_unlocked()
+                expired = self._cleanup_pairings_unlocked(data, now=ts)
+                job_cleanup = self._cleanup_jobs_unlocked(data, now=ts)
+                if expired or any(int(v or 0) for v in job_cleanup.values()):
+                    self._save_unlocked(data)
+            finally:
+                self._lock.release()
+        else:
+            # Painéis e consultas de status não podem travar o event loop esperando
+            # heartbeat/jobs. A leitura do JSON é segura sem lock porque salvamos
+            # via arquivo temporário + replace atômico; se houver corrida, _load_unlocked
+            # já cai para estado vazio em vez de propagar exceção.
             data = self._load_unlocked()
-            expired = self._cleanup_pairings_unlocked(data, now=ts)
-            job_cleanup = self._cleanup_jobs_unlocked(data, now=ts)
-            if expired or any(int(v or 0) for v in job_cleanup.values()):
-                self._save_unlocked(data)
-            pairings_raw = data.get("pairings") if isinstance(data.get("pairings"), dict) else {}
-            jobs_raw = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
-            workers_raw = data.get("workers") if isinstance(data.get("workers"), dict) else {}
-            pairings = []
-            for record in pairings_raw.values():
-                if not isinstance(record, Mapping):
-                    continue
-                expires_at = float(record.get("expires_at") or 0.0)
-                pairings.append({
-                    "pairing_id": str(record.get("pairing_id") or ""),
-                    "created_at": record.get("created_at"),
-                    "expires_at": expires_at,
-                    "ttl_left_seconds": max(0, round(expires_at - ts, 3)),
-                    "created_by_id": int(record.get("created_by_id") or 0),
-                    "created_by_name": _short_text(record.get("created_by_name"), limit=80),
-                })
-            workers = [
-                _compact_worker_public(record, now=ts)
-                for record in workers_raw.values()
-                if isinstance(record, Mapping)
-            ]
-            jobs = [
-                _compact_job_public(record, include_result=False, now=ts)
-                for record in jobs_raw.values()
-                if isinstance(record, Mapping)
-            ]
+            stale = True
+            error = "registry_lock_timeout"
+
+        pairings_raw = data.get("pairings") if isinstance(data.get("pairings"), dict) else {}
+        jobs_raw = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+        workers_raw = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+        pairings = []
+        for record in pairings_raw.values():
+            if not isinstance(record, Mapping):
+                continue
+            expires_at = float(record.get("expires_at") or 0.0)
+            pairings.append({
+                "pairing_id": str(record.get("pairing_id") or ""),
+                "created_at": record.get("created_at"),
+                "expires_at": expires_at,
+                "ttl_left_seconds": max(0, round(expires_at - ts, 3)),
+                "created_by_id": int(record.get("created_by_id") or 0),
+                "created_by_name": _short_text(record.get("created_by_name"), limit=80),
+            })
+        workers = [
+            _compact_worker_public(record, now=ts)
+            for record in workers_raw.values()
+            if isinstance(record, Mapping)
+        ]
+        jobs = [
+            _compact_job_public(record, include_result=False, now=ts)
+            for record in jobs_raw.values()
+            if isinstance(record, Mapping)
+        ]
         workers.sort(key=_public_worker_sort_key)
         jobs.sort(key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0.0), reverse=True)
         queued = sum(1 for item in jobs if item.get("status") == "queued")
@@ -1216,7 +1241,9 @@ class CoreWorkersRegistry:
         failed = sum(1 for item in jobs if item.get("status") == "failed")
         succeeded = sum(1 for item in jobs if item.get("status") == "succeeded")
         return {
-            "ok": True,
+            "ok": not stale,
+            "error": error,
+            "stale": stale,
             "path": str(self.path),
             "workers": workers,
             "pairings": sorted(pairings, key=lambda item: float(item.get("expires_at") or 0.0)),

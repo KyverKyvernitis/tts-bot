@@ -1587,8 +1587,14 @@ def _core_worker_push_status_text(worker_id: str = "") -> str:
     return f"Push: ativo ({active}){suffix}"
 
 
-def _automation_status_text() -> str:
-    """Resumo curto e humano do pipeline agent/APK para o painel."""
+def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None) -> str:
+    """Resumo curto e humano do pipeline agent/APK para o painel.
+
+    Importante: esta função roda durante a renderização do painel. Ela não pode
+    chamar o registry nem esperar locks, porque isso bloqueia o event loop do
+    Discord quando o registry está ocupado com heartbeat/jobs. Use sempre o
+    snapshot já coletado fora do layout.
+    """
     root = _repo_root()
     pending_path = root / "data" / "core_worker_automation_pending.json"
     status_path = root / "data" / "core_worker_automation_status.json"
@@ -1597,12 +1603,7 @@ def _automation_status_text() -> str:
         pending = json.loads(pending_path.read_text(encoding="utf-8")) if pending_path.exists() else {}
     except Exception:
         pending = {}
-    snapshot_workers: list[dict[str, Any]] = []
-    try:
-        snap = get_core_workers_registry().snapshot()
-        snapshot_workers = [w for w in (snap.get("workers") or []) if isinstance(w, dict)] if isinstance(snap, dict) else []
-    except Exception:
-        snapshot_workers = []
+    snapshot_workers = [w for w in (snapshot_workers or []) if isinstance(w, dict)]
     if isinstance(pending, dict):
         agent = pending.get("agent_update") if isinstance(pending.get("agent_update"), dict) else {}
         apk = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
@@ -2683,7 +2684,12 @@ class WorkersPanelView(discord.ui.LayoutView):
             queue_label = f"{queued} pendente(s) · {running} rodando"
             if queued and not online and not self._has_legacy_worker():
                 queue_label += " · sem celular online"
-        automation_label = _shorten(_automation_status_text(), limit=140)
+        registry_workers = []
+        if isinstance(snapshot.registry_snapshot, dict):
+            registry_workers = [w for w in (snapshot.registry_snapshot.get("workers") or []) if isinstance(w, dict)]
+        automation_label = _shorten(_automation_status_text(registry_workers), limit=140)
+        if snapshot.registry_error:
+            automation_label = _shorten(f"{automation_label} · registry: {snapshot.registry_error}", limit=140)
         header = discord.ui.TextDisplay(
             "# 📱 Core Workers\n"
             f"**Estado:** {snapshot.state_label}\n"
@@ -3641,8 +3647,16 @@ class WorkersCommandMixin:
     async def _collect_registry_snapshot(self) -> tuple[dict[str, Any], str]:
         try:
             registry = get_core_workers_registry()
-            snapshot = await asyncio.to_thread(registry.snapshot)
-            return snapshot, ""
+            lock_timeout = max(0.05, _env_float("WORKERS_REGISTRY_SNAPSHOT_LOCK_TIMEOUT_SECONDS", 0.35))
+            total_timeout = max(0.2, _env_float("WORKERS_REGISTRY_SNAPSHOT_TOTAL_TIMEOUT_SECONDS", 1.2))
+            snapshot = await asyncio.wait_for(
+                asyncio.to_thread(registry.snapshot, lock_timeout_seconds=lock_timeout),
+                timeout=total_timeout,
+            )
+            error = str(snapshot.get("error") or "") if isinstance(snapshot, dict) else ""
+            return snapshot if isinstance(snapshot, dict) else {}, error
+        except asyncio.TimeoutError:
+            return {}, "registry_snapshot_timeout"
         except Exception as exc:
             return {}, f"{type(exc).__name__}: {exc}"
 
