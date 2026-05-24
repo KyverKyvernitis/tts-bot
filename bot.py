@@ -10,6 +10,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 import traceback
 import zipfile
 import urllib.error
@@ -92,11 +93,13 @@ import config
 from db import SettingsDB
 from webserver import run_webserver, set_health_provider
 from music_system import AudioRouter
+from utility.interaction_safety import is_unknown_interaction, safe_send_interaction_message
 
 
 BOOT_LOG = logging.getLogger("bot.boot")
 COG_LOG = logging.getLogger("bot.cogs")
 UPDATE_LOG = logging.getLogger("zip_update")
+ASYNCIO_LOG = logging.getLogger("bot.asyncio")
 
 print("BOT.PY INICIOU")
 
@@ -202,6 +205,11 @@ class BotLocal(commands.Bot):
             "last_update": None,
         }
         self._health_task: asyncio.Task | None = None
+        self._event_loop_watchdog_task: asyncio.Task | None = None
+        self._event_loop_last_lag_ms: float = 0.0
+        self._event_loop_max_lag_ms: float = 0.0
+        self._event_loop_lag_warnings: int = 0
+        self._event_loop_last_warning_at: float = 0.0
         self._zip_update_lock = asyncio.Lock()
         self._repo_root = Path(__file__).resolve().parent
         self._update_temp_root = Path("/tmp/discord-auto-update")
@@ -543,6 +551,9 @@ class BotLocal(commands.Bot):
         snapshot["failed_cogs"] = failed_extensions
         snapshot["critical_failed_cogs"] = critical_failed
         snapshot["cog_loading_finished"] = bool(getattr(self, "cog_loading_finished", False))
+        snapshot["event_loop_last_lag_ms"] = round(float(getattr(self, "_event_loop_last_lag_ms", 0.0) or 0.0), 1)
+        snapshot["event_loop_max_lag_ms"] = round(float(getattr(self, "_event_loop_max_lag_ms", 0.0) or 0.0), 1)
+        snapshot["event_loop_lag_warnings"] = int(getattr(self, "_event_loop_lag_warnings", 0) or 0)
 
         tts_cog = self.get_cog("TTSVoice")
         if tts_cog is not None and hasattr(tts_cog, "get_tts_metrics_snapshot"):
@@ -581,6 +592,32 @@ class BotLocal(commands.Bot):
                 "last_update": datetime.now(timezone.utc).isoformat(),
             })
             await asyncio.sleep(15)
+
+    async def _event_loop_watchdog_loop(self):
+        interval = max(0.5, float(getattr(config, "BOT_EVENT_LOOP_WATCHDOG_INTERVAL_SECONDS", 1.0) or 1.0))
+        warn_after = max(0.25, float(getattr(config, "BOT_EVENT_LOOP_LAG_WARNING_SECONDS", 1.5) or 1.5))
+        loop = asyncio.get_running_loop()
+        expected = loop.time() + interval
+        while not self.is_closed():
+            await asyncio.sleep(interval)
+            now = loop.time()
+            lag = max(0.0, now - expected)
+            expected = now + interval
+            lag_ms = lag * 1000.0
+            self._event_loop_last_lag_ms = lag_ms
+            if lag_ms > self._event_loop_max_lag_ms:
+                self._event_loop_max_lag_ms = lag_ms
+            if lag >= warn_after:
+                self._event_loop_lag_warnings += 1
+                # Evita logar a cada segundo durante uma trava longa; o contador no
+                # health snapshot continua registrando todos os atrasos detectados.
+                last = float(getattr(self, "_event_loop_last_warning_at", 0.0) or 0.0)
+                if time.monotonic() - last >= 10.0:
+                    self._event_loop_last_warning_at = time.monotonic()
+                    ASYNCIO_LOG.warning(
+                        "event loop atrasado %.0f ms; possível I/O síncrono ou CPU em callback async",
+                        lag_ms,
+                    )
 
     def _make_zip_update_embed(self, title: str, description: str, color: discord.Color) -> discord.Embed:
         embed = discord.Embed(title=title, description=description, color=color)
@@ -1005,6 +1042,10 @@ class BotLocal(commands.Bot):
                 shutil.rmtree(work_dir, ignore_errors=True)
 
     async def close(self):
+        if self._event_loop_watchdog_task is not None:
+            self._event_loop_watchdog_task.cancel()
+        if self._health_task is not None:
+            self._health_task.cancel()
         router = getattr(self, "audio_router", None)
         if router is not None:
             try:
@@ -1043,6 +1084,8 @@ class BotLocal(commands.Bot):
                     logging.getLogger("music").debug("reconciliação de status de canal falhou: %r", e, exc_info=True)
         if self._health_task is None or self._health_task.done():
             self._health_task = asyncio.create_task(self._health_monitor_loop())
+        if self._event_loop_watchdog_task is None or self._event_loop_watchdog_task.done():
+            self._event_loop_watchdog_task = asyncio.create_task(self._event_loop_watchdog_loop())
 
     async def on_message(self, message: discord.Message):
         if getattr(message.author, "bot", False):
@@ -1076,20 +1119,24 @@ class BotLocal(commands.Bot):
         interaction: discord.Interaction,
         error: discord.app_commands.AppCommandError,
     ):
+        root = getattr(error, "original", None) or getattr(error, "__cause__", None) or error
+        if is_unknown_interaction(root):
+            logging.getLogger("discord.app_commands.tree").warning(
+                "Comando %s expirou antes da primeira resposta: %s",
+                getattr(getattr(interaction, "command", None), "name", "?"),
+                root,
+            )
+            return
         print(f"[APP_COMMAND_ERROR] {error!r}")
-        try:
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    f"Erro ao executar o comando: {error}",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.response.send_message(
-                    f"Erro ao executar o comando: {error}",
-                    ephemeral=True,
-                )
-        except Exception as e:
-            print(f"[APP_COMMAND_ERROR] Falha ao responder ao usuário: {e!r}")
+        ok = await safe_send_interaction_message(
+            interaction,
+            f"Erro ao executar o comando: {error}",
+            ephemeral=True,
+            log=logging.getLogger("discord.app_commands.tree"),
+            label="bot.app_command_error",
+        )
+        if not ok:
+            print("[APP_COMMAND_ERROR] Falha ao responder ao usuário: token/interaction indisponível")
 
 
 async def main():

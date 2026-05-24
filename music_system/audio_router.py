@@ -37,6 +37,7 @@ from .worker_node import (
     ensure_music_worker_available as _ensure_music_worker_available,
     music_worker_only_enabled as _music_worker_only_enabled,
     require_music_worker_available as _require_music_worker_available,
+    require_music_worker_available_async as _require_music_worker_available_async,
     resolve_music_tracks_on_worker as _resolve_music_tracks_on_worker,
 )
 
@@ -756,6 +757,9 @@ class AudioRouter:
 
     def require_music_worker_available(self):
         return _require_music_worker_available()
+
+    async def require_music_worker_available_async(self):
+        return await _require_music_worker_available_async()
 
     def _track_uses_worker_local_stream(self, track: MusicTrack | None) -> bool:
         if track is None:
@@ -3200,7 +3204,7 @@ class AudioRouter:
         if channel is None or not hasattr(channel, "connect"):
             raise RuntimeError("Canal de voz não encontrado.")
         if self.music_worker_only_enabled():
-            self.require_music_worker_available()
+            await self.require_music_worker_available_async()
 
         state.current = track
         state.music_session_active = True

@@ -19,6 +19,7 @@ from music_system.errors import MusicExtractionError
 from music_system.models import ExtractedBatch, MusicTrack
 
 logger = logging.getLogger(__name__)
+_SELECTION_CACHE: dict[str, Any] = {"at": 0.0, "selection": None}
 
 MUSIC_WORKER_UNAVAILABLE_MESSAGE = str(
     getattr(config, "MUSIC_WORKER_UNAVAILABLE_MESSAGE", "Sistema de música indisponível no momento: Nenhum worker online")
@@ -402,7 +403,26 @@ def _configured_phone_worker_selection(reason: str = "phone_worker_configurado")
     return MusicWorkerSelection(True, worker_id=worker_id, name=str(worker["name"]), worker=worker, reason=reason)
 
 
+def _selection_cache_seconds() -> float:
+    try:
+        return max(0.0, min(3.0, float(getattr(config, "MUSIC_WORKER_SELECTION_CACHE_SECONDS", 0.8) or 0.0)))
+    except Exception:
+        return 0.8
+
+
 def select_music_worker() -> MusicWorkerSelection:
+    ttl = _selection_cache_seconds()
+    now = time.monotonic()
+    cached = _SELECTION_CACHE.get("selection")
+    if ttl > 0 and isinstance(cached, MusicWorkerSelection) and now - float(_SELECTION_CACHE.get("at") or 0.0) <= ttl:
+        return cached
+    selection = _select_music_worker_uncached()
+    _SELECTION_CACHE["selection"] = selection
+    _SELECTION_CACHE["at"] = now
+    return selection
+
+
+def _select_music_worker_uncached() -> MusicWorkerSelection:
     if not music_worker_only_enabled():
         return MusicWorkerSelection(True, reason="worker-only desativado")
 
@@ -523,7 +543,7 @@ async def resolve_music_tracks_on_worker(
     scsearch/SoundCloud como substituto. O worker retorna URLs diretas de áudio
     que o Lavalink do próprio worker toca pela fonte HTTP.
     """
-    selection = require_music_worker_available()
+    selection = await require_music_worker_available_async()
     base = _phone_worker_base_url()
     token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
     if not base or not token:
@@ -682,7 +702,7 @@ async def music_agent_command(
     This is the control-plane bridge for the future architecture where the VPS
     edits UI/status while the same-bot agent on the phone owns voice/playback.
     """
-    selection = require_music_worker_available()
+    selection = await require_music_worker_available_async()
     base = _phone_worker_base_url()
     token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
     if not base or not token:
@@ -758,7 +778,7 @@ async def music_agent_command(
 
 
 async def music_agent_status(*, timeout_seconds: float | None = None) -> dict[str, Any]:
-    selection = require_music_worker_available()
+    selection = await require_music_worker_available_async()
     base = _phone_worker_base_url()
     token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
     if not base or not token:
@@ -784,18 +804,36 @@ async def music_agent_status(*, timeout_seconds: float | None = None) -> dict[st
     data.setdefault("available", bool(data.get("discord_ready")))
     return data
 
+def _raise_unavailable(selection: MusicWorkerSelection) -> None:
+    logger.info("[music/worker] indisponível: %s", selection.reason or "sem motivo")
+    raise MusicWorkerUnavailable(selection.message or MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+
+
+async def select_music_worker_async() -> MusicWorkerSelection:
+    """Seleciona worker fora do event loop.
+
+    A seleção pode ler o registry em disco e, em fallback, consultar /health do
+    phone worker configurado. Chamá-la diretamente em callback async congela o bot
+    por até alguns segundos e causa interações 10062/Unknown interaction.
+    """
+    return await asyncio.to_thread(select_music_worker)
+
+
 async def ensure_music_worker_available() -> MusicWorkerSelection:
-    # Mantido async para uso uniforme em comandos/interações.
-    return select_music_worker()
+    # Mantido async para uso uniforme em comandos/interações, agora sem bloquear o
+    # event loop durante registry/healthcheck.
+    return await select_music_worker_async()
 
 
 def require_music_worker_available() -> MusicWorkerSelection:
     selection = select_music_worker()
     if not selection.available:
-        logger.info("[music/worker] indisponível: %s", selection.reason or "sem motivo")
-        raise MusicWorkerUnavailable(selection.message or MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+        _raise_unavailable(selection)
     return selection
 
 
 async def require_music_worker_available_async() -> MusicWorkerSelection:
-    return require_music_worker_available()
+    selection = await select_music_worker_async()
+    if not selection.available:
+        _raise_unavailable(selection)
+    return selection
