@@ -21,7 +21,27 @@ fi
 PYTHON_BIN="${PHONE_WORKER_PYTHON:-python}"
 HOST="${MUSIC_AGENT_HOST:-127.0.0.1}"
 PORT="${MUSIC_AGENT_PORT:-8780}"
-TOKEN="${MUSIC_AGENT_TOKEN:-${PHONE_WORKER_TOKEN:-}}"
+TOKEN="${MUSIC_AGENT_TOKEN:-}"
+if [[ -z "$TOKEN" ]]; then
+  mkdir -p "$(dirname "$MUSIC_AGENT_ENV_FILE")"
+  if command -v python >/dev/null 2>&1; then
+    TOKEN="$(python - <<'PYTOKEN'
+import secrets
+print(secrets.token_urlsafe(32))
+PYTOKEN
+)"
+  else
+    TOKEN="$(date +%s%N)-$RANDOM-$RANDOM"
+  fi
+  if grep -qE '^MUSIC_AGENT_TOKEN=' "$MUSIC_AGENT_ENV_FILE" 2>/dev/null; then
+    tmp_file="${MUSIC_AGENT_ENV_FILE}.tmp"
+    sed -E "s|^MUSIC_AGENT_TOKEN=.*|MUSIC_AGENT_TOKEN=$TOKEN|" "$MUSIC_AGENT_ENV_FILE" > "$tmp_file" && mv "$tmp_file" "$MUSIC_AGENT_ENV_FILE"
+  else
+    printf '\nMUSIC_AGENT_TOKEN=%s\n' "$TOKEN" >> "$MUSIC_AGENT_ENV_FILE"
+  fi
+  chmod 600 "$MUSIC_AGENT_ENV_FILE" 2>/dev/null || true
+  export MUSIC_AGENT_TOKEN="$TOKEN"
+fi
 LOG_FILE="${MUSIC_AGENT_LOG_FILE:-$WORKER_DIR/music_agent.log}"
 PID_FILE="${MUSIC_AGENT_PID_FILE:-$WORKER_DIR/music_agent.pid}"
 START_WAIT="${MUSIC_AGENT_START_WAIT_SECONDS:-5}"
@@ -106,14 +126,30 @@ kill_agent() {
   done
 }
 
+ensure_termux_packages() {
+  truthy "${MUSIC_AGENT_AUTO_INSTALL_TERMUX_PACKAGES:-true}" || return 0
+  command -v pkg >/dev/null 2>&1 || return 0
+  local missing=()
+  for bin in ffmpeg pkg-config clang make rustc; do
+    command -v "$bin" >/dev/null 2>&1 || missing+=("$bin")
+  done
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    return 0
+  fi
+  log "pacotes Termux de voz ausentes (${missing[*]}); instalando dependências essenciais"
+  pkg install -y python clang make pkg-config libffi libsodium openssl rust ffmpeg >/dev/null 2>&1 || \
+    log "não consegui instalar todos os pacotes Termux automaticamente"
+}
+
 ensure_deps() {
+  ensure_termux_packages
   "$PYTHON_BIN" - <<'PYDEPS' >/dev/null 2>&1 && return 0
-import aiohttp, discord, nacl, wavelink, yt_dlp  # noqa: F401
+import aiohttp, discord, nacl, davey, wavelink, yt_dlp  # noqa: F401
 PYDEPS
-  log "dependências do Music Agent ausentes; instalando aiohttp, discord.py, PyNaCl, wavelink e yt-dlp"
-  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl 'wavelink>=3.4,<3.6' 'yt-dlp[default]')
+  log "dependências do Music Agent ausentes; instalando aiohttp, discord.py, PyNaCl, davey, wavelink e yt-dlp"
+  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl davey 'wavelink>=3.4,<3.6' 'yt-dlp[default]')
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-600}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
+    timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-900}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
       log "não consegui instalar todas as dependências automaticamente dentro do timeout"
   else
     "${pip_cmd[@]}" >/dev/null 2>&1 || \

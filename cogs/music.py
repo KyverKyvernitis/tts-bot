@@ -100,7 +100,7 @@ class Music(commands.Cog):
         if status in {"failed", "error"}:
             error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:180]
             lower_error = error.lower()
-            if "music agent" in lower_error or "configure music_agent" in lower_error or "sem token" in lower_error:
+            if any(token in lower_error for token in ("music agent", "configure music_agent", "sem token", "pynacl", "davey", "dependency", "unauthorized")):
                 error = "backend musical ainda não está pronto"
             return f"`⚠️` Não consegui iniciar **{track.short_title}**: `{error}`"
         return f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`"
@@ -138,6 +138,9 @@ class Music(commands.Cog):
                     return
                 if status in {"failed", "error"}:
                     error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:220]
+                    lower_error = error.lower()
+                    if any(token in lower_error for token in ("music agent", "configure music_agent", "sem token", "pynacl", "davey", "dependency", "unauthorized")):
+                        error = "backend musical ainda não está pronto"
                     await message.edit(content=f"`⚠️` Não consegui iniciar **{track.short_title}**: `{error}`")
                     return
                 if status in {"idle", "stopped"} and not state.get("current"):

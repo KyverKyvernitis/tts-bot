@@ -101,6 +101,8 @@ class MusicWorkerSelection:
         reason = str(self.reason or "").lower()
         if "music_agent_full" in reason or "sem_capacidade" in reason or "capacity" in reason:
             return MUSIC_WORKER_NO_CAPACITY_MESSAGE
+        if "music_agent" in reason or "agent_" in reason or "dependency" in reason or "engine" in reason:
+            return MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE
         return MUSIC_WORKER_UNAVAILABLE_MESSAGE
 
 
@@ -184,7 +186,7 @@ def _music_agent_active_sessions(agent: Mapping[str, Any] | None) -> int:
 
 def worker_music_agent_summary(worker: Mapping[str, Any] | None) -> dict[str, Any]:
     agent = _worker_music_agent(worker)
-    min_version = str(getattr(config, "MUSIC_AGENT_MIN_VERSION", "0.3.3") or "0.3.3")
+    min_version = str(getattr(config, "MUSIC_AGENT_MIN_VERSION", "0.3.4") or "0.3.4")
     max_sessions = max(1, int(getattr(config, "MUSIC_AGENT_MAX_SESSIONS_PER_WORKER", 2) or 2))
     if not isinstance(agent, Mapping):
         return {"available": False, "reason": "music_agent_missing", "version": "", "active_sessions": 0, "max_sessions": max_sessions}
@@ -195,8 +197,18 @@ def worker_music_agent_summary(worker: Mapping[str, Any] | None) -> dict[str, An
     # Lavalink. O pool só é obrigatório para fontes que realmente usam
     # Lavalink/LavaSrc; não pode bloquear a seleção do worker turbo online.
     ready = ok and _as_bool(agent.get("discord_ready"), False)
+    deps = agent.get("voice_dependencies") if isinstance(agent.get("voice_dependencies"), Mapping) else {}
+    missing_deps_raw = agent.get("dependency_missing") or (deps.get("missing") if isinstance(deps, Mapping) else [])
+    if isinstance(missing_deps_raw, str):
+        missing_deps = [missing_deps_raw]
+    elif isinstance(missing_deps_raw, (list, tuple, set)):
+        missing_deps = list(missing_deps_raw)
+    else:
+        missing_deps = []
     if version and not _version_at_least(version, min_version):
         return {"available": False, "reason": f"music_agent_old:{version}<{min_version}", "version": version, "active_sessions": active_sessions, "max_sessions": max_sessions}
+    if missing_deps:
+        return {"available": False, "reason": "dependency_missing:" + ",".join(str(x) for x in list(missing_deps)[:4]), "version": version, "active_sessions": active_sessions, "max_sessions": max_sessions}
     if not ready:
         return {"available": False, "reason": "music_agent_not_ready", "version": version, "active_sessions": active_sessions, "max_sessions": max_sessions}
     if active_sessions >= max_sessions:
@@ -290,9 +302,9 @@ def _probe_configured_phone_worker_health(base_url: str, token: str) -> Mapping[
     if not enabled:
         return {"ok": True, "profile": "turbo"}
     try:
-        timeout = max(0.3, min(3.0, float(getattr(config, "MUSIC_WORKER_CONFIGURED_HEALTH_TIMEOUT_SECONDS", 1.2) or 1.2)))
+        timeout = max(0.3, min(8.0, float(getattr(config, "MUSIC_WORKER_CONFIGURED_HEALTH_TIMEOUT_SECONDS", 3.5) or 3.5)))
     except Exception:
-        timeout = 1.2
+        timeout = 3.5
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     try:
         req = urllib.request.Request(f"{base_url.rstrip('/')}/health", headers=headers, method="GET")
@@ -459,6 +471,12 @@ def _select_music_worker_uncached() -> MusicWorkerSelection:
             agent_summary = worker_music_agent_summary(worker)
             if not agent_summary.get("available"):
                 reason = str(agent_summary.get('reason') or 'music_agent_indisponivel')
+                live = _configured_phone_worker_selection(reason=f"live_status_registry_stale:{reason}")
+                if live is not None:
+                    live_summary = worker_music_agent_summary(live.worker)
+                    if live_summary.get("available"):
+                        logger.info("[music/worker] registry stale; usando status live do phone worker | worker=%s reason=%s", live.worker_id or live.name, reason)
+                        return live
                 if not _music_agent_bootstrap_allowed(reason):
                     rejected.append(f"{worker_id or name}:{reason}")
                     continue
@@ -764,6 +782,10 @@ async def music_agent_command(
             or "connect" in lower
             or "refused" in lower
             or "timeout" in lower
+            or "pynacl" in lower
+            or "davey" in lower
+            or "dependency" in lower
+            or "unauthorized" in lower
         ):
             message = "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta"
         raise MusicWorkerEngineUnavailable(message[:260]) from exc

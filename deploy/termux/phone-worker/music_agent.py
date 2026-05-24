@@ -18,6 +18,7 @@ import re
 import shutil
 import signal
 import subprocess
+import secrets
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,8 +40,57 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.3"
+AGENT_VERSION = "0.3.4"
 STARTED_AT = time.time()
+
+
+def load_env_file(path: Path, *, override: bool = False) -> None:
+    try:
+        lines = path.expanduser().read_text("utf-8", errors="replace").splitlines()
+    except Exception:
+        return
+    for line in lines:
+        raw = line.strip()
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            continue
+        if override or key not in os.environ:
+            os.environ[key] = value.strip().strip('"').strip("'")
+
+
+def bootstrap_env() -> None:
+    worker_dir = Path(os.getenv("PHONE_WORKER_DIR") or Path.home() / "phone-worker").expanduser()
+    load_env_file(Path(os.getenv("PHONE_WORKER_ENV") or Path.home() / ".phone-worker.env"), override=False)
+    env_file = Path(os.getenv("MUSIC_AGENT_ENV") or worker_dir / "secrets" / "music-agent.env").expanduser()
+    load_env_file(env_file, override=False)
+    if not str(os.getenv("MUSIC_AGENT_TOKEN") or "").strip():
+        token = secrets.token_urlsafe(32)
+        os.environ["MUSIC_AGENT_TOKEN"] = token
+        try:
+            env_file.parent.mkdir(parents=True, exist_ok=True)
+            old = env_file.read_text("utf-8", errors="replace") if env_file.exists() else ""
+            lines: list[str] = []
+            replaced = False
+            for line in old.splitlines():
+                if re.match(r"^\s*MUSIC_AGENT_TOKEN\s*=", line):
+                    if not replaced:
+                        lines.append("MUSIC_AGENT_TOKEN=" + token)
+                        replaced = True
+                    continue
+                lines.append(line)
+            if not replaced:
+                lines.append("MUSIC_AGENT_TOKEN=" + token)
+            env_file.write_text("\n".join(lines).rstrip() + "\n", "utf-8")
+            with contextlib.suppress(Exception):
+                os.chmod(env_file, 0o600)
+        except Exception:
+            pass
+
+
+bootstrap_env()
 
 
 _LOCAL_SEARCH_PREFIXES = ("ytsearch", "ytmsearch")
@@ -255,7 +305,7 @@ class MusicAgent:
         self.ytdlp_timeout = env_int("MUSIC_AGENT_YTDLP_TIMEOUT_SECONDS", 35)
         self.cookies_file = os.getenv("MUSIC_AGENT_YTDLP_COOKIES_FILE") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE") or str(Path.home() / "phone-worker" / "secrets" / "youtube-cookies.txt")
         self.js_runtimes = os.getenv("MUSIC_AGENT_YTDLP_JS_RUNTIMES") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_JS_RUNTIMES") or "node"
-        self.default_search = os.getenv("MUSIC_AGENT_YTDLP_DEFAULT_SEARCH") or "ytsearch1"
+        self.default_search = os.getenv("MUSIC_AGENT_YTDLP_DEFAULT_SEARCH") or "ytsearch5"
         self.direct_audio_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_AUDIO_ENABLED"), True)
         self.direct_youtube_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_YOUTUBE_ENABLED"), True)
         self.lavalink_for_direct_streams = truthy(os.getenv("MUSIC_AGENT_LAVALINK_FOR_DIRECT_STREAMS"), False)
@@ -373,6 +423,28 @@ class MusicAgent:
             self.log("command_error", action=body.get("action"), error=f"{type(exc).__name__}: {exc}")
             return web.json_response({"ok": False, "error": f"{type(exc).__name__}: {short_text(exc, 300)}", "status": self.status_payload()}, status=400)
 
+    def voice_dependencies_payload(self) -> dict[str, Any]:
+        checks: dict[str, dict[str, Any]] = {}
+        modules = {
+            "discord.py": "discord",
+            "PyNaCl": "nacl",
+            "davey": "davey",
+            "yt-dlp": "yt_dlp",
+            "wavelink": "wavelink",
+            "aiohttp": "aiohttp",
+        }
+        for label, module in modules.items():
+            try:
+                __import__(module)
+                checks[label] = {"ok": True}
+            except Exception as exc:
+                checks[label] = {"ok": False, "error": f"{type(exc).__name__}: {short_text(exc, 120)}"}
+        for binary in ("ffmpeg", "ffprobe"):
+            path = shutil.which(binary)
+            checks[binary] = {"ok": bool(path), "path": path or ""}
+        missing = [name for name, info in checks.items() if not bool(info.get("ok"))]
+        return {"ok": not missing, "missing": missing, "checks": checks}
+
     def status_payload(self) -> dict[str, Any]:
         return {
             "ok": True,
@@ -385,6 +457,7 @@ class MusicAgent:
             "lavalink_node": self.lavalink_node_name,
             "pool_connected": self._pool_connected,
             "direct_audio_enabled": self.direct_audio_enabled,
+            "voice_dependencies": self.voice_dependencies_payload(),
             "guilds": {str(gid): state.public() for gid, state in self.states.items()},
         }
 

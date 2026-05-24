@@ -15,6 +15,7 @@ import shutil
 import socket
 import shlex
 import stat
+import secrets
 from collections import Counter
 import subprocess
 import tempfile
@@ -51,12 +52,92 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.5"
+PHONE_WORKER_VERSION = "1.10.6"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_JOB_POLL_INTERVAL_SECONDS = 10
 DEFAULT_CORE_JOB_RESULT_MAX_BYTES = 256 * 1024
+
+
+def _early_env_truthy(value: object, default: bool = False) -> bool:
+    if value is None:
+        return default
+    text = str(value).strip().lower().strip('"\'')
+    if not text:
+        return default
+    if text in {"0", "false", "no", "n", "off", "nao", "não"}:
+        return False
+    if text in {"1", "true", "yes", "y", "on", "sim"}:
+        return True
+    return default
+
+
+def _load_env_file_once(path: Path, *, override: bool = False) -> dict[str, str]:
+    loaded: dict[str, str] = {}
+    try:
+        lines = path.expanduser().read_text("utf-8", errors="replace").splitlines()
+    except Exception:
+        return loaded
+    for line in lines:
+        raw = line.strip()
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            continue
+        value = value.strip().strip('"').strip("'")
+        loaded[key] = value
+        if override or key not in os.environ:
+            os.environ[key] = value
+    return loaded
+
+
+def _music_agent_env_file_early() -> Path:
+    worker_dir = Path(os.getenv("PHONE_WORKER_DIR") or Path.home() / "phone-worker").expanduser()
+    return Path(os.getenv("MUSIC_AGENT_ENV") or worker_dir / "secrets" / "music-agent.env").expanduser()
+
+
+def _ensure_music_agent_token_env(*, persist: bool = True) -> str:
+    env_file = _music_agent_env_file_early()
+    _load_env_file_once(env_file, override=False)
+    token = str(os.getenv("MUSIC_AGENT_TOKEN") or "").strip()
+    if token:
+        return token
+    token = secrets.token_urlsafe(32)
+    os.environ["MUSIC_AGENT_TOKEN"] = token
+    if persist:
+        try:
+            env_file.parent.mkdir(parents=True, exist_ok=True)
+            old = env_file.read_text("utf-8", errors="replace") if env_file.exists() else ""
+            lines: list[str] = []
+            replaced = False
+            for line in old.splitlines():
+                if re.match(r"^\s*MUSIC_AGENT_TOKEN\s*=", line):
+                    if not replaced:
+                        lines.append("MUSIC_AGENT_TOKEN=" + token)
+                        replaced = True
+                    continue
+                lines.append(line)
+            if not replaced:
+                lines.append("MUSIC_AGENT_TOKEN=" + token)
+            env_file.write_text("\n".join(lines).rstrip() + "\n", "utf-8")
+            with contextlib.suppress(Exception):
+                os.chmod(env_file, 0o600)
+        except Exception:
+            pass
+    return token
+
+
+def _load_phone_worker_runtime_env() -> None:
+    _load_env_file_once(Path(os.getenv("PHONE_WORKER_ENV") or Path.home() / ".phone-worker.env"), override=False)
+    _load_env_file_once(_music_agent_env_file_early(), override=False)
+    if _early_env_truthy(os.getenv("MUSIC_AGENT_AUTO_TOKEN"), True):
+        _ensure_music_agent_token_env(persist=True)
+
+
+_load_phone_worker_runtime_env()
 
 SUPPORTED_DIRECT_TASKS = (
     "diagnostic_basic",
@@ -1569,16 +1650,19 @@ def _send_core_worker_heartbeat_once(*, host: str, port: int, timeout: float = 6
     _base_url, _token, worker_id = _core_worker_auth_parts()
     if not _base_url or not _token or not worker_id:
         return False
+    started = time.perf_counter()
     try:
         payload = _core_worker_payload(host=host, port=port)
         status, data = _post_core_worker_json("/core-worker/heartbeat", payload, timeout=timeout)
+        elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
         if 200 <= status < 300 and data.get("ok", True):
             with contextlib.suppress(Exception):
                 _flush_pending_core_worker_job_results(timeout=min(5.0, max(1.0, timeout)))
             return True
-        print(f"[core-worker-heartbeat] HTTP {status}: {_short_text(data.get('error') or data, limit=180)}", flush=True)
+        print(f"[core-worker-heartbeat] HTTP {status} em {elapsed_ms}ms: {_short_text(data.get('error') or data, limit=180)}", flush=True)
     except Exception as exc:
-        print(f"[core-worker-heartbeat] falhou: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
+        elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
+        print(f"[core-worker-heartbeat] falhou endpoint=/core-worker/heartbeat elapsed_ms={elapsed_ms}: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
     return False
 
 
@@ -1590,7 +1674,7 @@ def _start_core_worker_heartbeat(*, host: str, port: int) -> None:
 
     def loop() -> None:
         while True:
-            _send_core_worker_heartbeat_once(host=host, port=port, timeout=6.0)
+            _send_core_worker_heartbeat_once(host=host, port=port, timeout=max(6.0, min(20.0, _env_float("CORE_WORKER_HEARTBEAT_TIMEOUT_SECONDS", 12.0))))
             time.sleep(interval)
 
     thread = threading.Thread(target=loop, name="core-worker-heartbeat", daemon=True)
@@ -2018,6 +2102,29 @@ def _music_agent_log_file() -> Path:
     return Path(os.getenv("MUSIC_AGENT_LOG_FILE") or (_phone_worker_dir() / "music_agent.log")).expanduser()
 
 
+def _music_voice_dependencies_snapshot() -> dict[str, Any]:
+    checks: dict[str, dict[str, Any]] = {}
+    module_map = {
+        "discord.py": "discord",
+        "PyNaCl": "nacl",
+        "davey": "davey",
+        "yt-dlp": "yt_dlp",
+        "wavelink": "wavelink",
+        "aiohttp": "aiohttp",
+    }
+    for label, module in module_map.items():
+        try:
+            __import__(module)
+            checks[label] = {"ok": True}
+        except Exception as exc:
+            checks[label] = {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=120)}"}
+    for binary in ("ffmpeg", "ffprobe"):
+        path = shutil.which(binary)
+        checks[binary] = {"ok": bool(path), "path": path or ""}
+    missing = [name for name, info in checks.items() if not bool(info.get("ok"))]
+    return {"ok": not missing, "missing": missing, "checks": checks}
+
+
 def _music_agent_snapshot() -> dict[str, Any]:
     """Small local health probe for the same-bot Music Agent.
 
@@ -2025,13 +2132,15 @@ def _music_agent_snapshot() -> dict[str, Any]:
     to know whether the worker can own voice/playback before falling back to any
     legacy music route.
     """
+    _load_phone_worker_runtime_env()
+    token = str(os.getenv("MUSIC_AGENT_TOKEN") or "").strip() or _ensure_music_agent_token_env(persist=True)
     host = str(os.getenv("MUSIC_AGENT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
     try:
         port = int(float(os.getenv("MUSIC_AGENT_PORT") or 8780))
     except Exception:
         port = 8780
-    token = str(os.getenv("MUSIC_AGENT_TOKEN") or os.getenv("PHONE_WORKER_TOKEN") or "").strip()
     configured = bool(str(os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or "").strip())
+    deps = _music_voice_dependencies_snapshot()
     file_version = _read_music_agent_version_from_path()
     url = f"http://{host}:{port}/health"
     headers = {"Accept": "application/json", "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}"}
@@ -2054,8 +2163,8 @@ def _music_agent_snapshot() -> dict[str, Any]:
         available = bool(data.get("available") or discord_ready)
         needs_restart = bool(runtime_version and file_version and _version_lt_loose(runtime_version, file_version))
         data.update({
-            "ok": available,
-            "available": available,
+            "ok": available and bool(deps.get("ok", True)),
+            "available": available and bool(deps.get("ok", True)),
             "configured": configured,
             "file_version": file_version,
             "runtime_version": runtime_version,
@@ -2064,6 +2173,8 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "port": port,
             "http_status": status,
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "voice_dependencies": deps,
+            "dependency_missing": list(deps.get("missing") or []),
         })
         return data
     except urllib.error.HTTPError as exc:
@@ -2079,6 +2190,8 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "port": port,
             "http_status": int(exc.code),
             "error": _short_text(raw or exc.reason, limit=180),
+            "voice_dependencies": deps,
+            "dependency_missing": list(deps.get("missing") or []),
         }
     except Exception as exc:
         return {
@@ -2089,6 +2202,8 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "host": host,
             "port": port,
             "error": f"{type(exc).__name__}: {_short_text(exc, limit=160)}",
+            "voice_dependencies": deps,
+            "dependency_missing": list(deps.get("missing") or []),
         }
 
 def _system_status() -> dict[str, Any]:
@@ -2119,6 +2234,7 @@ def _system_status() -> dict[str, Any]:
         "core_worker_network": _core_worker_network_runtime_snapshot(),
         "music_node": _safe_telemetry("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"}),
         "music_agent": _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False}),
+        "music_voice_dependencies": _safe_telemetry("music voice dependencies", _music_voice_dependencies_snapshot, {"ok": False, "missing": ["unknown"]}),
         "scripts": _script_inventory(),
         "boot": _safe_telemetry("boot", _termux_boot_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
         "shell_autostart": _safe_telemetry("shell autostart", _termux_shell_autostart_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
@@ -2333,7 +2449,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 if not pair_result.get("ok"):
                     _json_response(self, HTTPStatus.BAD_REQUEST, pair_result)
                     return
-                heartbeat_ok = _send_core_worker_heartbeat_once(host=host, port=port, timeout=6.0)
+                heartbeat_ok = _send_core_worker_heartbeat_once(host=host, port=port, timeout=max(6.0, min(20.0, _env_float("CORE_WORKER_HEARTBEAT_TIMEOUT_SECONDS", 12.0))))
                 result = _local_agent_status_payload(host=host, port=port)
                 result.update(pair_result)
                 result["profile"] = profile_result.get("profile")
@@ -2355,7 +2471,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             try:
                 host, port = self._bind_host_port()
                 result = _local_agent_status_payload(host=host, port=port)
-                result["synced_to_vps"] = _send_core_worker_heartbeat_once(host=host, port=port, timeout=6.0) if _heartbeat_configured() else False
+                result["synced_to_vps"] = _send_core_worker_heartbeat_once(host=host, port=port, timeout=max(6.0, min(20.0, _env_float("CORE_WORKER_HEARTBEAT_TIMEOUT_SECONDS", 12.0)))) if _heartbeat_configured() else False
                 result["message"] = "heartbeat solicitado ao worker local"
                 _json_response(self, HTTPStatus.OK, result)
             except Exception as exc:
@@ -3508,12 +3624,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
     def _task_music_agent_proxy(self, body: dict[str, Any]) -> dict[str, Any]:
         """Proxy authenticated /task requests to the local same-bot Music Agent."""
+        _load_phone_worker_runtime_env()
+        token = str(os.getenv("MUSIC_AGENT_TOKEN") or "").strip() or _ensure_music_agent_token_env(persist=True)
         host = str(os.getenv("MUSIC_AGENT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
         try:
             port = int(float(os.getenv("MUSIC_AGENT_PORT") or 8780))
         except Exception:
             port = 8780
-        token = str(os.getenv("MUSIC_AGENT_TOKEN") or os.getenv("PHONE_WORKER_TOKEN") or "").strip()
         action = str(body.get("action") or body.get("command") or "status").strip().lower().replace("-", "_") or "status"
         try:
             timeout_seconds = float(body.get("timeout_seconds") or os.getenv("MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS") or 18.0)
@@ -5962,6 +6079,14 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
 
     target_version = _short_text(payload.get("version"), limit=48, default="desconhecida")
     applied_version = _read_phone_worker_version_from_path(_phone_worker_dir() / "phone_worker.py") or target_version
+    updated_names = {str(item.get("target") or "") for item in updated}
+    applied_music_agent_version = _read_music_agent_version_from_path(_phone_worker_dir() / "music_agent.py")
+    music_agent_restart: dict[str, Any] | None = None
+    if {"music_agent.py", "start-phone-music-agent.sh"} & updated_names:
+        try:
+            music_agent_restart = _run_service_action("music-agent", "restart")
+        except Exception as exc:
+            errors.append(f"music-agent restart: {type(exc).__name__}: {_short_text(exc, limit=100)}")
     boot_status = _repair_termux_boot_script() if any(item.get("target") in {"start-phone-worker.sh", "start-phone-music-agent.sh", "watch-phone-worker.sh", "bootstrap-phone-worker.sh", "install.sh"} for item in updated) else _termux_boot_status_snapshot()
     shell_status = _repair_termux_shell_autostart()
     update_status = {
@@ -5969,6 +6094,7 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
         "updated_at": time.time(),
         "previous_runtime_version": PHONE_WORKER_VERSION,
         "applied_file_version": applied_version,
+        "applied_music_agent_version": applied_music_agent_version,
         "target_version": target_version,
         "restart_requested": bool(payload.get("restart", True)),
         "files": [item.get("target") for item in updated],
@@ -5985,7 +6111,9 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
         "total_bytes": total,
         "current_version": PHONE_WORKER_VERSION,
         "applied_file_version": applied_version,
+        "applied_music_agent_version": applied_music_agent_version,
         "target_version": target_version,
+        "music_agent_restart": music_agent_restart,
         "boot": {"ok": bool(boot_status.get("ok")), "mode": boot_status.get("mode"), "summary": boot_status.get("summary")},
         "shell_autostart": {"ok": bool(shell_status.get("ok")), "summary": shell_status.get("summary"), "changed": bool(shell_status.get("changed"))},
         "update_status_file": str(_phone_worker_update_status_file()),
