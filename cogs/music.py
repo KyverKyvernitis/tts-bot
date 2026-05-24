@@ -93,18 +93,37 @@ class Music(commands.Cog):
         result = result or {}
         queued = bool(result.get("queued"))
         state = result.get("state") if isinstance(result.get("state"), dict) else {}
+        current = state.get("current") if isinstance(state.get("current"), dict) else {}
+
+        def useful(value: object) -> str:
+            text = str(value or "").strip()
+            return "" if text.lower() in {"youtube", "link", "música", "musica", "desconhecida", "unknown"} else text
+
+        title = useful(current.get("title")) or track.short_title
+        if len(title) > 90:
+            title = title[:87].rstrip() + "..."
+        duration_label = track.duration_label
+        try:
+            duration = current.get("duration")
+            if duration is not None and str(duration) != "":
+                total = max(0, int(float(duration)))
+                minutes, seconds = divmod(total, 60)
+                hours, minutes = divmod(minutes, 60)
+                duration_label = f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+        except Exception:
+            pass
         status = str(state.get("status") or "").lower()
         if queued:
-            return f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}`"
+            return f"`🎶` **Adicionada ao queue:** {title} • `{duration_label}`"
         if self._music_agent_confirmed_playing(state):
-            return f"`🎧` **Tocando:** {track.short_title} • `{track.duration_label}`"
+            return f"`🎧` **Tocando:** {title} • `{duration_label}`"
         if status in {"failed", "error"}:
             error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:180]
             lower_error = error.lower()
             if any(token in lower_error for token in ("music agent", "configure music_agent", "sem token", "pynacl", "davey", "dependency", "unauthorized")):
                 error = "backend musical ainda não está pronto"
-            return f"`⚠️` Não consegui iniciar **{track.short_title}**: `{error}`"
-        return f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`"
+            return f"`⚠️` Não consegui iniciar **{title}**: `{error}`"
+        return f"`🎧` **Preparando para tocar:** {title} • `{duration_label}`"
 
     async def _sync_music_agent_panel(self, guild_id: int, track: MusicTrack, result: dict | None, *, voice_channel_id: int = 0, text_channel_id: int = 0, queued: bool = False) -> None:
         state = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}

@@ -40,6 +40,7 @@ from .worker_node import (
     require_music_worker_available_async as _require_music_worker_available_async,
     resolve_music_tracks_on_worker as _resolve_music_tracks_on_worker,
     music_agent_command as _music_agent_command,
+    music_agent_status as _music_agent_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -694,6 +695,9 @@ class MusicGuildState:
     voice_status_last_restore_at: float = 0.0
     voice_status_force_task: Optional[asyncio.Task] = None
     voice_status_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    agent_monitor_task: Optional[asyncio.Task] = None
+    agent_started_track_key: str = ""
+    agent_side_effect_task: Optional[asyncio.Task] = None
 
     def queue_size(self) -> int:
         return self.queue.qsize() + len(self.forward_queue)
@@ -3890,10 +3894,24 @@ class AudioRouter:
     def _track_from_agent_payload(self, payload: dict, fallback: MusicTrack | None = None) -> MusicTrack | None:
         if not isinstance(payload, dict):
             return fallback
-        title = str(payload.get("title") or (getattr(fallback, "title", "") if fallback is not None else "") or "Música").strip() or "Música"
+
+        def useful(value: object, *, generic: set[str] | None = None) -> str:
+            text = str(value or "").strip()
+            if not text:
+                return ""
+            if text.lower() in (generic or {"youtube", "link", "música", "musica", "desconhecida", "unknown", "worker-agent", "music-agent-ytdlp"}):
+                return ""
+            return text
+
+        payload_title = useful(payload.get("title"))
+        fallback_title = useful(getattr(fallback, "title", "") if fallback is not None else "")
+        title = payload_title or fallback_title or "Música"
         webpage_url = str(payload.get("webpage_url") or (getattr(fallback, "webpage_url", "") if fallback is not None else "") or payload.get("query") or "").strip()
         requester_id = int(payload.get("requester_id") or (getattr(fallback, "requester_id", 0) if fallback is not None else 0) or 0)
         requester_name = str(payload.get("requester_name") or (getattr(fallback, "requester_name", "") if fallback is not None else "") or "").strip()
+        payload_uploader = useful(payload.get("uploader"), generic={"youtube", "desconhecida", "unknown"})
+        fallback_uploader = useful(getattr(fallback, "uploader", "") if fallback is not None else "", generic={"youtube", "desconhecida", "unknown"})
+        source = str(payload.get("source") or (getattr(fallback, "source", "") if fallback is not None else "") or "YouTube")
         track = MusicTrack(
             title=title,
             webpage_url=webpage_url,
@@ -3902,14 +3920,136 @@ class AudioRouter:
             requester_id=requester_id,
             requester_name=requester_name,
             duration=(payload.get("duration") if payload.get("duration") is not None else (getattr(fallback, "duration", None) if fallback is not None else None)),
-            uploader=str(payload.get("uploader") or (getattr(fallback, "uploader", "") if fallback is not None else "") or ""),
+            uploader=payload_uploader or fallback_uploader,
             thumbnail=str(payload.get("thumbnail") or (getattr(fallback, "thumbnail", "") if fallback is not None else "") or ""),
-            source=str(payload.get("source") or (getattr(fallback, "source", "") if fallback is not None else "") or "YouTube"),
+            source=source,
             extractor="worker-ytdlp",
             is_live=bool(getattr(fallback, "is_live", False)) if fallback is not None else False,
         )
         track.display_source = "YouTube" if "youtube" in track.source.lower() or "ytdlp" in track.source.lower() else track.source
         return track
+
+    def _music_agent_state_from_payload(self, payload: dict, guild_id: int) -> dict:
+        guilds = payload.get("guilds") if isinstance(payload, dict) else {}
+        if not isinstance(guilds, dict):
+            return {}
+        state = guilds.get(str(guild_id)) or guilds.get(guild_id)
+        return state if isinstance(state, dict) else {}
+
+    def start_music_agent_monitor(self, guild_id: int, *, voice_channel_id: int | None = None, text_channel_id: int | None = None) -> None:
+        state = self.get_state(int(guild_id))
+        task = getattr(state, "agent_monitor_task", None)
+        if task is not None and not task.done():
+            return
+
+        async def _runner() -> None:
+            idle_seen = 0
+            try:
+                while True:
+                    await asyncio.sleep(max(1.0, min(4.0, float(getattr(config, "MUSIC_AGENT_PANEL_POLL_SECONDS", 2.0) or 2.0))))
+                    try:
+                        payload = await _music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0))
+                    except Exception:
+                        logger.debug("[music/agent] monitor não conseguiu consultar status | guild=%s", guild_id, exc_info=True)
+                        continue
+                    remote = self._music_agent_state_from_payload(payload, int(guild_id))
+                    if not remote:
+                        idle_seen += 1
+                        if idle_seen >= 4:
+                            return
+                        continue
+                    await self.sync_music_agent_state(
+                        int(guild_id),
+                        None,
+                        remote,
+                        voice_channel_id=voice_channel_id,
+                        text_channel_id=text_channel_id,
+                        queued=False,
+                        create_panel=True,
+                    )
+                    status = str(remote.get("status") or "").lower()
+                    has_current = isinstance(remote.get("current"), dict) and bool(remote.get("current"))
+                    if status in {"idle", "stopped", "failed", "error"} and not has_current:
+                        idle_seen += 1
+                    else:
+                        idle_seen = 0
+                    if idle_seen >= 3:
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("[music/agent] monitor encerrado por falha", exc_info=True)
+            finally:
+                st = self.get_state(int(guild_id))
+                if getattr(st, "agent_monitor_task", None) is asyncio.current_task():
+                    st.agent_monitor_task = None
+
+        try:
+            task = asyncio.create_task(_runner())
+            task.add_done_callback(_consume_expected_music_exception)
+            state.agent_monitor_task = task
+        except RuntimeError:
+            state.agent_monitor_task = None
+
+    def _schedule_agent_playback_started_effects(self, guild_id: int, track_key: str) -> None:
+        state = self.get_state(int(guild_id))
+        old = getattr(state, "agent_side_effect_task", None)
+        if old is not None and not old.done():
+            old.cancel()
+
+        async def _runner() -> None:
+            try:
+                guild = self.bot.get_guild(int(guild_id))
+                if guild is None:
+                    return
+                st = self.get_state(int(guild_id))
+                track = st.current
+                if track is None or self._panel_key_for_track(track) != track_key:
+                    return
+                channel = None
+                if st.last_voice_channel_id:
+                    channel = guild.get_channel(int(st.last_voice_channel_id)) or self.bot.get_channel(int(st.last_voice_channel_id))
+                if channel is None:
+                    return
+                await self._boost_auto_bitrate_for_music(guild, channel, st)
+                await self._apply_voice_status_for_music(guild, channel, st, track, force=True)
+                self._schedule_voice_status_track_sync(int(guild_id), repeat_after=2.0, reason="agent_playback_started")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("[music/agent] efeitos de início da faixa falharam | guild=%s", guild_id, exc_info=True)
+            finally:
+                st = self.get_state(int(guild_id))
+                if getattr(st, "agent_side_effect_task", None) is asyncio.current_task():
+                    st.agent_side_effect_task = None
+
+        try:
+            task = asyncio.create_task(_runner())
+            task.add_done_callback(_consume_expected_music_exception)
+            state.agent_side_effect_task = task
+        except RuntimeError:
+            state.agent_side_effect_task = None
+
+    def _schedule_agent_session_finished_effects(self, guild_id: int, reason: str) -> None:
+        async def _runner() -> None:
+            try:
+                guild = self.bot.get_guild(int(guild_id))
+                if guild is None:
+                    return
+                st = self.get_state(int(guild_id))
+                channel = None
+                if st.last_voice_channel_id:
+                    channel = guild.get_channel(int(st.last_voice_channel_id)) or self.bot.get_channel(int(st.last_voice_channel_id))
+                await self._restore_auto_bitrate_for_state(guild, st, reason=reason, channel_hint=channel)
+                await self._restore_voice_status_for_state(guild, st, reason=reason, channel_hint=channel)
+            except Exception:
+                logger.debug("[music/agent] efeitos de fim da sessão falharam | guild=%s", guild_id, exc_info=True)
+
+        try:
+            task = asyncio.create_task(_runner())
+            task.add_done_callback(_consume_expected_music_exception)
+        except RuntimeError:
+            pass
 
     async def sync_music_agent_state(
         self,
@@ -3953,6 +4093,10 @@ class AudioRouter:
         if current_payload:
             track = self._track_from_agent_payload(current_payload, track)
         last_error = str(remote.get("last_error") or "").strip()
+        had_active_agent_session = bool(
+            str(getattr(state, "current_backend", "") or "").lower() == "agent"
+            and (state.current is not None or previous_status in {"resolving", "starting", "playing", "paused", "queued"})
+        )
         confirmed_playing = bool(remote.get("confirmed_playing"))
         if raw_status == "playing" and not confirmed_playing:
             if "voice_connected" in remote or "player_present" in remote:
@@ -3974,15 +4118,23 @@ class AudioRouter:
                 state.current_status_detail = last_error[:300]
                 self._set_current_status(state, "error")
             elif raw_status in {"idle", "stopped"} and not current_payload and not last_error:
-                # O worker pode responder antes do primeiro evento de áudio. Não
-                # apague o painel imediatamente; mostre preparação e deixe o watch
-                # confirmar playing/failed/idle depois.
-                if track is not None:
-                    state.current = track
-                    self._set_current_status(state, "starting")
-                else:
+                if had_active_agent_session:
                     state.current = None
+                    state.paused = False
+                    state.music_session_active = False
+                    state.agent_started_track_key = ""
                     self._set_current_status(state, "idle")
+                    self._schedule_agent_session_finished_effects(int(guild_id), "agent_idle")
+                else:
+                    # O worker pode responder antes do primeiro evento de áudio. Não
+                    # apague o painel imediatamente; mostre preparação e deixe o watch
+                    # confirmar playing/failed/idle depois.
+                    if track is not None:
+                        state.current = track
+                        self._set_current_status(state, "starting")
+                    else:
+                        state.current = None
+                        self._set_current_status(state, "idle")
             else:
                 if track is not None:
                     state.current = track
@@ -4004,17 +4156,25 @@ class AudioRouter:
             state.current_status_detail = raw_status
         active_statuses = {"resolving", "starting", "playing", "paused", "queued"}
         new_panel_key = self._panel_key_for_track(state.current)
+        active_confirmed = bool(raw_status == "playing" and confirmed_playing and state.current is not None)
         if state.current is not None or self._has_pending_track(state) or state.current_status in active_statuses:
             self._reactivate_panel_controls_now(int(guild_id))
+        if active_confirmed and new_panel_key and getattr(state, "agent_started_track_key", "") != new_panel_key:
+            state.agent_started_track_key = new_panel_key
+            state.current_started_at_monotonic = time.monotonic()
+            state.current_start_offset_seconds = 0.0
+            self._schedule_agent_playback_started_effects(int(guild_id), new_panel_key)
         should_repost_panel = bool(
             create_panel
             and state.now_message is not None
             and new_panel_key
-            and (previous_panel_key != new_panel_key or previous_status not in active_statuses)
+            and (previous_panel_key != new_panel_key or previous_status not in active_statuses or active_confirmed)
             and bool(getattr(config, "MUSIC_PANEL_REPOST_ON_TRACK_CHANGE", True))
         )
         if create_panel:
             await self.update_panel(int(guild_id), create=True, repost=should_repost_panel)
+        if state.current_backend == "agent" and state.current_status in active_statuses:
+            self.start_music_agent_monitor(int(guild_id), voice_channel_id=voice_channel_id, text_channel_id=text_channel_id)
         return state
 
     async def update_panel(self, guild_id: int, *, create: bool = True, repost: bool = False) -> None:
@@ -4054,12 +4214,19 @@ class AudioRouter:
                 if should_repost and state.now_message is not None:
                     old_message = state.now_message
                     state.now_message = None
-                    with contextlib.suppress(Exception):
+                    deleted = False
+                    try:
                         await old_message.delete()
+                        deleted = True
+                    except Exception:
+                        deleted = False
                     # Se não deu para apagar, pelo menos tenta matar os componentes
-                    # antigos para evitar dois painéis controlando o player.
-                    with contextlib.suppress(Exception):
-                        await old_message.edit(view=None)
+                    # antigos para evitar dois painéis controlando o player. O painel
+                    # novo ainda será enviado abaixo com uma View fresca.
+                    if not deleted:
+                        with contextlib.suppress(Exception):
+                            await old_message.edit(view=None)
+                    logger.info("[music] repostando painel do player | guild=%s track_key=%s", guild_id, current_panel_key)
 
                 if state.now_message is not None and not should_repost:
                     try:

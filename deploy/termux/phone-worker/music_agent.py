@@ -44,7 +44,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.6"
+AGENT_VERSION = "0.3.7"
 STARTED_AT = time.time()
 
 
@@ -163,6 +163,31 @@ def _looks_like_url(value: str) -> bool:
 def _float_or_none(value: Any) -> float | None:
     try:
         return float(value) if value is not None and str(value) != "" else None
+    except Exception:
+        return None
+
+
+def _metadata_text(value: Any, *, limit: int = 180) -> str:
+    text = short_text(value, limit)
+    if text.lower() in {"youtube", "link", "música", "musica", "worker-agent", "music-agent-ytdlp", "desconhecida", "unknown"}:
+        return ""
+    return text
+
+
+def _duration_from_ytdlp(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text or text.upper() in {"NA", "N/A", "NONE", "NULL"}:
+        return None
+    try:
+        return float(text)
+    except Exception:
+        pass
+    parts = text.split(":")
+    try:
+        total = 0
+        for part in parts:
+            total = total * 60 + int(float(part))
+        return float(total)
     except Exception:
         return None
 
@@ -1110,35 +1135,40 @@ class MusicAgent:
 
     async def resolve_track(self, query: str, *, track_meta: dict[str, Any], body: dict[str, Any]) -> AgentTrack:
         direct = str(track_meta.get("stream_url") or body.get("stream_url") or "").strip()
-        title = short_text(track_meta.get("title") or body.get("title") or query, 160) or "Música"
+        title_hint = _metadata_text(track_meta.get("title") or body.get("title"), limit=160)
         requester_id = safe_id(body.get("requester_id") or track_meta.get("requester_id"))
         requester_name = short_text(body.get("requester_name") or track_meta.get("requester_name"), 80)
         source = short_text(track_meta.get("source") or body.get("source") or "worker-agent", 80)
         webpage_url = str(track_meta.get("webpage_url") or track_meta.get("original_url") or query).strip()
         if direct.startswith(("http://", "https://")):
             return AgentTrack(
-                title=title,
+                title=title_hint or short_text(query, 160) or "Música",
                 requester_id=requester_id,
                 requester_name=requester_name,
                 query=query,
                 webpage_url=webpage_url,
                 stream_url=direct,
                 duration=_float_or_none(track_meta.get("duration")),
-                uploader=short_text(track_meta.get("uploader"), 120),
+                uploader=_metadata_text(track_meta.get("uploader"), limit=120),
                 thumbnail=short_text(track_meta.get("thumbnail"), 500),
                 source=source or "worker-ytdlp",
                 transport_hint="direct",
             )
         resolved = await asyncio.to_thread(self._resolve_with_ytdlp, query)
+        resolved_title = _metadata_text(resolved.get("title"), limit=160)
+        resolved_uploader = _metadata_text(resolved.get("uploader"), limit=120)
+        meta_uploader = _metadata_text(track_meta.get("uploader"), limit=120)
+        meta_duration = _float_or_none(track_meta.get("duration"))
+        resolved_duration = _float_or_none(resolved.get("duration"))
         return AgentTrack(
-            title=short_text(track_meta.get("title") or resolved.get("title") or query, 160),
+            title=title_hint or resolved_title or short_text(query, 160) or "Música",
             requester_id=requester_id,
             requester_name=requester_name,
             query=query,
             webpage_url=str(resolved.get("webpage_url") or webpage_url or query),
             stream_url=str(resolved.get("stream_url") or ""),
-            duration=_float_or_none(track_meta.get("duration") if track_meta.get("duration") is not None else resolved.get("duration")),
-            uploader=short_text(track_meta.get("uploader") or resolved.get("uploader"), 120),
+            duration=meta_duration if meta_duration is not None else resolved_duration,
+            uploader=meta_uploader or resolved_uploader,
             thumbnail=short_text(track_meta.get("thumbnail") or resolved.get("thumbnail"), 500),
             source="music-agent-ytdlp",
             transport_hint="direct",
@@ -1158,20 +1188,41 @@ class MusicAgent:
         base_cmd += ["--no-playlist", "--no-warnings", "--socket-timeout", "12"]
         self.log("yt_dlp_resolve", query=query, target=target, js=self.js_runtimes)
         if _looks_like_url(query):
-            fast_cmd = base_cmd + ["-f", self.ytdlp_format, "--print", "__title__:%(title)s", "-g", target]
+            fast_cmd = base_cmd + [
+                "-f", self.ytdlp_format,
+                "--print", "__title__:%(title)s",
+                "--print", "__uploader__:%(uploader,channel,creator)s",
+                "--print", "__duration__:%(duration)s",
+                "--print", "__thumbnail__:%(thumbnail)s",
+                "--print", "__webpage_url__:%(webpage_url,original_url)s",
+                "-g", target,
+            ]
             fast_started = time.time()
             fast = subprocess.run(fast_cmd, cwd=str(Path.home() / "phone-worker"), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=max(5, min(self.ytdlp_timeout, 18)))
             lines = [line.strip() for line in (fast.stdout or "").splitlines() if line.strip()]
-            urls = [line for line in lines if line.startswith(("http://", "https://"))]
-            title_hint = next((line.split(":", 1)[1].strip() for line in lines if line.startswith("__title__:")), "")
+            urls = [line for line in lines if line.startswith(("http://", "https://")) and not line.startswith(("https://i.ytimg.com", "http://i.ytimg.com"))]
+            def marker(name: str) -> str:
+                prefix = f"__{name}__:"
+                return next((line.split(":", 1)[1].strip() for line in lines if line.startswith(prefix)), "")
+            title_hint = marker("title")
+            uploader_hint = marker("uploader")
+            duration_hint = marker("duration")
+            thumbnail_hint = marker("thumbnail")
+            webpage_hint = marker("webpage_url")
             if fast.returncode == 0 and urls:
-                self.log("yt_dlp_fast_url_ok", elapsed_ms=round((time.time() - fast_started) * 1000.0, 1), titled=bool(title_hint))
+                self.log(
+                    "yt_dlp_fast_url_ok",
+                    elapsed_ms=round((time.time() - fast_started) * 1000.0, 1),
+                    titled=bool(title_hint),
+                    uploader=bool(uploader_hint),
+                    duration=bool(duration_hint),
+                )
                 return {
                     "title": title_hint or query,
-                    "uploader": "",
-                    "duration": None,
-                    "thumbnail": "",
-                    "webpage_url": query,
+                    "uploader": uploader_hint,
+                    "duration": _duration_from_ytdlp(duration_hint),
+                    "thumbnail": thumbnail_hint,
+                    "webpage_url": webpage_hint or query,
                     "stream_url": urls[0],
                 }
             self.log("yt_dlp_fast_url_fallback", rc=fast.returncode, error=short_text(fast.stderr, 160))

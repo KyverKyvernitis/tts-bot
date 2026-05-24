@@ -40,15 +40,34 @@ def _agent_confirmed_playing(state: dict) -> bool:
 def _agent_play_message(track: MusicTrack, result: dict | None = None) -> str:
     result = result or {}
     state = result.get("state") if isinstance(result.get("state"), dict) else {}
+    current = state.get("current") if isinstance(state.get("current"), dict) else {}
+
+    def useful(value: object) -> str:
+        text = str(value or "").strip()
+        return "" if text.lower() in {"youtube", "link", "música", "musica", "desconhecida", "unknown"} else text
+
+    title = useful(current.get("title")) or track.short_title
+    if len(title) > 90:
+        title = title[:87].rstrip() + "..."
+    duration_label = track.duration_label
+    try:
+        duration = current.get("duration")
+        if duration is not None and str(duration) != "":
+            total = max(0, int(float(duration)))
+            minutes, seconds = divmod(total, 60)
+            hours, minutes = divmod(minutes, 60)
+            duration_label = f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+    except Exception:
+        pass
     status = str(state.get("status") or "").lower()
     if result.get("queued"):
-        return f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}`"
+        return f"`🎶` **Adicionada ao queue:** {title} • `{duration_label}`"
     if _agent_confirmed_playing(state):
-        return f"`🎧` **Tocando:** {track.short_title} • `{track.duration_label}`"
+        return f"`🎧` **Tocando:** {title} • `{duration_label}`"
     if status in {"failed", "error"}:
         error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:180]
-        return f"`⚠️` Não consegui iniciar **{track.short_title}**: `{error}`"
-    return f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`"
+        return f"`⚠️` Não consegui iniciar **{title}**: `{error}`"
+    return f"`🎧` **Preparando para tocar:** {title} • `{duration_label}`"
 
 
 async def _sync_agent_panel(router, guild_id: int, voice_channel_id: int, text_channel_id: int, track: MusicTrack, result: dict | None, *, queued: bool = False) -> None:
