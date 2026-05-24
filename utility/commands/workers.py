@@ -3524,7 +3524,9 @@ class WorkersCommandMixin:
         files: list[dict[str, Any]] = []
         all_targets = (
             ("phone_worker.py", 0o755),
+            ("music_agent.py", 0o755),
             ("start-phone-worker.sh", 0o755),
+            ("start-phone-music-agent.sh", 0o755),
             ("watch-phone-worker.sh", 0o755),
             ("pair-phone-worker.sh", 0o755),
             ("bootstrap-phone-worker.sh", 0o755),
@@ -3534,6 +3536,7 @@ class WorkersCommandMixin:
         )
         script_targets = (
             ("start-phone-worker.sh", 0o755),
+            ("start-phone-music-agent.sh", 0o755),
             ("watch-phone-worker.sh", 0o755),
             ("pair-phone-worker.sh", 0o755),
             ("bootstrap-phone-worker.sh", 0o755),

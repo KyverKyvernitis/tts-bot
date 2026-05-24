@@ -1976,6 +1976,16 @@ def _worker_turbo_cache_snapshot() -> dict[str, Any]:
     }
 
 
+def _read_music_agent_version_from_path(path: Path | None = None) -> str:
+    path = path or (_phone_worker_dir() / "music_agent.py")
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    match = re.search(r'^AGENT_VERSION\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+    return match.group(1) if match else ""
+
+
 def _music_agent_snapshot() -> dict[str, Any]:
     """Small local health probe for the same-bot Music Agent.
 
@@ -1990,6 +2000,7 @@ def _music_agent_snapshot() -> dict[str, Any]:
         port = 8780
     token = str(os.getenv("MUSIC_AGENT_TOKEN") or os.getenv("PHONE_WORKER_TOKEN") or "").strip()
     configured = bool(str(os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or "").strip())
+    file_version = _read_music_agent_version_from_path()
     url = f"http://{host}:{port}/health"
     headers = {"Accept": "application/json", "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}"}
     if token:
@@ -2008,6 +2019,7 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "ok": ok,
             "available": ok,
             "configured": configured,
+            "file_version": file_version,
             "host": host,
             "port": port,
             "http_status": status,
@@ -2022,9 +2034,11 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "ok": False,
             "available": False,
             "configured": configured,
+            "file_version": file_version,
             "host": host,
             "port": port,
             "http_status": int(exc.code),
+            "file_version": file_version,
             "error": _short_text(raw or exc.reason, limit=180),
         }
     except Exception as exc:
@@ -2032,8 +2046,10 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "ok": False,
             "available": False,
             "configured": configured,
+            "file_version": file_version,
             "host": host,
             "port": port,
+            "file_version": file_version,
             "error": f"{type(exc).__name__}: {_short_text(exc, limit=160)}",
         }
 
@@ -5723,7 +5739,9 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
 
 _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker.py": ("worker", "phone_worker.py", 0o755),
+    "music_agent.py": ("worker", "music_agent.py", 0o755),
     "start-phone-worker.sh": ("worker", "start-phone-worker.sh", 0o755),
+    "start-phone-music-agent.sh": ("worker", "start-phone-music-agent.sh", 0o755),
     "watch-phone-worker.sh": ("worker", "watch-phone-worker.sh", 0o755),
     "pair-phone-worker.sh": ("worker", "pair-phone-worker.sh", 0o755),
     "bootstrap-phone-worker.sh": ("worker", "bootstrap-phone-worker.sh", 0o755),
@@ -5758,7 +5776,7 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
     files = payload.get("files")
     if not isinstance(files, list) or not files:
         raise ValueError("payload de update sem arquivos")
-    if len(files) > 8:
+    if len(files) > 12:
         raise ValueError("arquivos demais no update")
 
     updated: list[dict[str, Any]] = []
@@ -5792,7 +5810,7 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
             os.chmod(tmp, int(item.get("mode") or mode))
             tmp.replace(path)
             applied_paths = [path]
-            if path.name in {"start-phone-worker.sh", "watch-phone-worker.sh", "pair-phone-worker.sh", "bootstrap-phone-worker.sh"}:
+            if path.name in {"start-phone-worker.sh", "start-phone-music-agent.sh", "watch-phone-worker.sh", "pair-phone-worker.sh", "bootstrap-phone-worker.sh"}:
                 # Espelhar scripts em ~/ também para instalações antigas e atalhos existentes.
                 home_copy = _home_script(path.name)
                 try:
@@ -5811,7 +5829,7 @@ def _apply_worker_update(payload: dict[str, Any]) -> dict[str, Any]:
 
     target_version = _short_text(payload.get("version"), limit=48, default="desconhecida")
     applied_version = _read_phone_worker_version_from_path(_phone_worker_dir() / "phone_worker.py") or target_version
-    boot_status = _repair_termux_boot_script() if any(item.get("target") in {"start-phone-worker.sh", "watch-phone-worker.sh", "bootstrap-phone-worker.sh", "install.sh"} for item in updated) else _termux_boot_status_snapshot()
+    boot_status = _repair_termux_boot_script() if any(item.get("target") in {"start-phone-worker.sh", "start-phone-music-agent.sh", "watch-phone-worker.sh", "bootstrap-phone-worker.sh", "install.sh"} for item in updated) else _termux_boot_status_snapshot()
     shell_status = _repair_termux_shell_autostart()
     update_status = {
         "ok": True,

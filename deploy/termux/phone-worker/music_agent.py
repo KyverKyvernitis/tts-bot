@@ -39,7 +39,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.1"
+AGENT_VERSION = "0.3.2"
 STARTED_AT = time.time()
 
 
@@ -193,6 +193,8 @@ class GuildMusicState:
     def public(self) -> dict[str, Any]:
         player = self.player
         voice_connected = False
+        playing = False
+        position_ms = 0
         if player is not None:
             with contextlib.suppress(Exception):
                 connected_attr = getattr(player, "connected", None)
@@ -201,6 +203,15 @@ class GuildMusicState:
                 checker = getattr(player, "is_connected", None)
                 if callable(checker):
                     voice_connected = bool(checker())
+            with contextlib.suppress(Exception):
+                checker = getattr(player, "is_playing", None)
+                if callable(checker):
+                    playing = bool(checker())
+            with contextlib.suppress(Exception):
+                playing = bool(playing or getattr(player, "playing", False))
+            with contextlib.suppress(Exception):
+                position_ms = int(float(getattr(player, "position", 0) or 0))
+        status_age = max(0.0, time.time() - float(self.updated_at or time.time()))
         return {
             "guild_id": self.guild_id,
             "voice_channel_id": self.voice_channel_id,
@@ -213,8 +224,12 @@ class GuildMusicState:
             "transport": self.transport,
             "preparing_since": self.preparing_since,
             "playing_since": self.playing_since,
+            "status_age_seconds": round(status_age, 2),
             "voice_connected": voice_connected,
             "player_present": player is not None,
+            "player_playing": playing,
+            "position_ms": position_ms,
+            "confirmed_playing": bool(self.status == "playing" and player is not None and voice_connected),
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,
             "queue_size": len(self.queue),
@@ -648,8 +663,10 @@ class MusicAgent:
         self._set_status(st, "starting", event="lavalink_player_play_called")
         await player.play(playable)
         await asyncio.sleep(0.25)
-        self._set_status(st, "playing", event="lavalink_play_dispatched")
-        self.log("play_started", guild_id=guild_id, transport="lavalink", title=track.title)
+        # Não marque como tocando só porque o comando foi despachado.
+        # O estado definitivo vem do evento TrackStart do Wavelink/Lavalink.
+        self._set_status(st, "starting", event="lavalink_play_dispatched")
+        self.log("play_dispatched", guild_id=guild_id, transport="lavalink", title=track.title)
 
     async def _finish_current(self, guild_id: int, *, error: str | None, event: str) -> None:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))

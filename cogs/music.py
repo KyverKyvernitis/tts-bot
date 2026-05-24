@@ -78,6 +78,16 @@ class Music(commands.Cog):
         state = guilds.get(str(guild_id)) or guilds.get(guild_id)
         return state if isinstance(state, dict) else {}
 
+    @staticmethod
+    def _music_agent_confirmed_playing(state: dict) -> bool:
+        if str(state.get("status") or "").lower() != "playing":
+            return False
+        if "confirmed_playing" in state:
+            return bool(state.get("confirmed_playing"))
+        if "voice_connected" in state or "player_present" in state:
+            return bool(state.get("voice_connected")) and bool(state.get("player_present"))
+        return False
+
     def _music_agent_play_message(self, track: MusicTrack, result: dict | None = None) -> str:
         result = result or {}
         queued = bool(result.get("queued"))
@@ -85,7 +95,7 @@ class Music(commands.Cog):
         status = str(state.get("status") or "").lower()
         if queued:
             return f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}`"
-        if status == "playing":
+        if self._music_agent_confirmed_playing(state):
             return f"`🎧` **Tocando:** {track.short_title} • `{track.duration_label}`"
         if status in {"failed", "error"}:
             error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:180]
@@ -120,7 +130,7 @@ class Music(commands.Cog):
                 if not status or status == last_status:
                     continue
                 last_status = status
-                if status == "playing":
+                if self._music_agent_confirmed_playing(state):
                     await message.edit(content=f"`🎧` **Tocando:** {track.short_title} • `{track.duration_label}`")
                     return
                 if status in {"failed", "error"}:

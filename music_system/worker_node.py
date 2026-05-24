@@ -53,6 +53,22 @@ def _csv(value: object) -> set[str]:
     return items
 
 
+def _version_tuple(value: object) -> tuple[int, ...]:
+    import re
+
+    parts = [int(part) for part in re.findall(r"\d+", str(value or ""))[:4]]
+    return tuple(parts or [0])
+
+
+def _version_at_least(value: object, minimum: object) -> bool:
+    current = _version_tuple(value)
+    wanted = _version_tuple(minimum)
+    size = max(len(current), len(wanted))
+    current = current + (0,) * (size - len(current))
+    wanted = wanted + (0,) * (size - len(wanted))
+    return current >= wanted
+
+
 def music_worker_only_enabled() -> bool:
     return _as_bool(getattr(config, "MUSIC_WORKER_ONLY_ENABLED", True), True)
 
@@ -125,6 +141,54 @@ def _worker_music_node(worker: Mapping[str, Any] | None) -> Mapping[str, Any] | 
         if isinstance(candidate, Mapping):
             return candidate
     return None
+
+
+def _worker_music_agent(worker: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    if not isinstance(worker, Mapping):
+        return None
+    status = worker.get("status") if isinstance(worker.get("status"), Mapping) else {}
+    candidates = [
+        status.get("music_agent") if isinstance(status, Mapping) else None,
+        _nested(status, "services", "music_agent") if isinstance(status, Mapping) else None,
+        worker.get("music_agent"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, Mapping):
+            return candidate
+    return None
+
+
+def _music_agent_active_sessions(agent: Mapping[str, Any] | None) -> int:
+    if not isinstance(agent, Mapping):
+        return 0
+    guilds = agent.get("guilds") if isinstance(agent.get("guilds"), Mapping) else {}
+    active = 0
+    for state in guilds.values():
+        if not isinstance(state, Mapping):
+            continue
+        status = str(state.get("status") or "").strip().lower()
+        if status in {"preparing", "starting", "playing", "paused", "queued"}:
+            active += 1
+    return active
+
+
+def worker_music_agent_summary(worker: Mapping[str, Any] | None) -> dict[str, Any]:
+    agent = _worker_music_agent(worker)
+    min_version = str(getattr(config, "MUSIC_AGENT_MIN_VERSION", "0.3.2") or "0.3.2")
+    max_sessions = max(1, int(getattr(config, "MUSIC_AGENT_MAX_SESSIONS_PER_WORKER", 2) or 2))
+    if not isinstance(agent, Mapping):
+        return {"available": False, "reason": "music_agent_missing", "version": "", "active_sessions": 0, "max_sessions": max_sessions}
+    version = str(agent.get("version") or agent.get("file_version") or "").strip()
+    active_sessions = _music_agent_active_sessions(agent)
+    ok = _as_bool(agent.get("ok"), False) or _as_bool(agent.get("available"), False)
+    ready = ok and _as_bool(agent.get("discord_ready"), False) and _as_bool(agent.get("pool_connected"), False)
+    if version and not _version_at_least(version, min_version):
+        return {"available": False, "reason": f"music_agent_old:{version}<{min_version}", "version": version, "active_sessions": active_sessions, "max_sessions": max_sessions}
+    if not ready:
+        return {"available": False, "reason": "music_agent_not_ready", "version": version, "active_sessions": active_sessions, "max_sessions": max_sessions}
+    if active_sessions >= max_sessions:
+        return {"available": False, "reason": "music_agent_full", "version": version, "active_sessions": active_sessions, "max_sessions": max_sessions}
+    return {"available": True, "reason": "ok", "version": version, "active_sessions": active_sessions, "max_sessions": max_sessions}
 
 
 def worker_music_summary(worker: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -235,6 +299,12 @@ def _configured_phone_worker_selection(reason: str = "phone_worker_configurado")
     if health is None:
         return None
 
+    if _as_bool(getattr(config, "MUSIC_AGENT_ENABLED", True), True):
+        agent_summary = worker_music_agent_summary({"status": {"music_agent": health.get("music_agent") if isinstance(health, Mapping) else None}})
+        if not agent_summary.get("available"):
+            logger.info("[music/worker] phone worker configurado sem Music Agent elegível: %s", agent_summary.get("reason"))
+            return None
+
     lavalink_host = str(
         getattr(config, "MUSIC_WORKER_LAVALINK_HOST", "")
         or getattr(config, "AUX_LAVALINK_HOST", "")
@@ -294,6 +364,7 @@ def _configured_phone_worker_selection(reason: str = "phone_worker_configurado")
                 "public_port": lavalink_port,
                 "connect_port": lavalink_port,
             },
+            "music_agent": health.get("music_agent") if isinstance(health, Mapping) else {},
         },
     }
     return MusicWorkerSelection(True, worker_id=worker_id, name=str(worker["name"]), worker=worker, reason=reason)
@@ -332,6 +403,11 @@ def select_music_worker() -> MusicWorkerSelection:
         if not _music_node_status_ok(worker):
             rejected.append(f"{worker_id or name}:music_node_offline")
             continue
+        if _as_bool(getattr(config, "MUSIC_AGENT_ENABLED", True), True):
+            agent_summary = worker_music_agent_summary(worker)
+            if not agent_summary.get("available"):
+                rejected.append(f"{worker_id or name}:{agent_summary.get('reason') or 'music_agent_indisponivel'}")
+                continue
         return MusicWorkerSelection(True, worker_id=worker_id, name=name, worker=worker, reason="ok")
 
     reason = "; ".join(rejected[:3]) if rejected else "nenhum worker compatível"

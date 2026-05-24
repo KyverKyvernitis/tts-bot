@@ -3901,6 +3901,12 @@ class AudioRouter:
         raw_status = str(remote.get("status") or "").strip().lower()
         current_payload = remote.get("current") if isinstance(remote.get("current"), dict) else {}
         last_error = str(remote.get("last_error") or "").strip()
+        confirmed_playing = bool(remote.get("confirmed_playing"))
+        if raw_status == "playing" and not confirmed_playing:
+            if "voice_connected" in remote or "player_present" in remote:
+                confirmed_playing = bool(remote.get("voice_connected")) and bool(remote.get("player_present"))
+        if raw_status == "playing" and not confirmed_playing:
+            raw_status = "starting"
         if queued:
             # Música foi aceita para fila remota; mantenha a faixa atual do painel.
             if state.current is None and track is not None:

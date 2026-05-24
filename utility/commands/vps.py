@@ -159,8 +159,13 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
                 ))
                 self._ui_mode = "select"
                 return
-            except Exception:
-                logger.exception("[utility/vps] falha ao montar modal com select multi-escolha; usando fallback")
+            except Exception as exc:
+                logger.exception("[utility/vps] falha ao montar modal com select multi-escolha")
+                if not force_text_fallback:
+                    raise RuntimeError("modal avançado da VPS indisponível") from exc
+
+        if not force_text_fallback:
+            raise RuntimeError("discord.py sem suporte a Label/StringSelect em modal para /vps")
 
         self.items_input = discord.ui.TextInput(
             label="O que enviar?",
@@ -857,25 +862,21 @@ class VpsCommandMixin:
                 await interaction.followup.send(fallback[:1900] or "`⚠️` Nenhum resultado gerado.", files=files[:10])
 
     async def _send_vps_modal(self, interaction: discord.Interaction) -> None:
-        """Abre o modal do /vps sem defer prévio.
+        """Abre o modal avançado do /vps sem fazer await pesado antes.
 
-        Discord não permite ``send_modal`` depois de ``defer``. Além disso, em
-        alguns runtimes/mobile os componentes novos de Modal (RadioGroup/Checkbox
-        dentro de Label) podem falhar antes de abrir. Nesse caso, o comando cai
-        imediatamente para um modal clássico de TextInput em vez de deixar
-        “O aplicativo não respondeu”.
+        Discord invalida a interação se a primeira resposta não acontecer em
+        poucos segundos; por isso este método só monta e envia o modal. O select
+        dentro do modal é o fluxo principal. O TextInput simples não deve virar
+        fallback silencioso, porque isso esconde regressão de Components V2.
         """
-        # O modal avançado com componentes novos pode falhar em alguns clientes e
-        # gastar a janela de resposta da interação. O TextInput é menos bonito, mas
-        # abre de forma confiável e evita "O aplicativo não respondeu".
         try:
-            await interaction.response.send_modal(VpsModal(self, force_text_fallback=True))
+            await interaction.response.send_modal(VpsModal(self, force_text_fallback=False))
             return
         except Exception:
-            logger.exception("[utility/vps] falha ao abrir modal TextInput")
+            logger.exception("[utility/vps] falha ao abrir modal avançado")
             if not interaction.response.is_done():
                 await interaction.response.send_message(
-                    "`⚠️` Não consegui abrir o painel da VPS. Tente novamente em alguns segundos.",
+                    "`⚠️` Não consegui abrir o painel avançado da VPS. Tente novamente em alguns segundos.",
                     ephemeral=True,
                 )
 
