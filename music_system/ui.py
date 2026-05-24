@@ -199,14 +199,15 @@ async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, req
                 limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
             )
             return batch, False
+        youtube_text_search = _is_youtube_text_search(query)
         batch = await resolve_music_tracks_on_worker(
             query,
             requester_id=requester_id,
             requester_name=requester_name,
-            limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
-            metadata_only=_is_youtube_text_search(query),
+            limit=(max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))) if youtube_text_search else 1),
+            metadata_only=youtube_text_search,
         )
-        return batch, bool(_is_youtube_text_search(query) and len(batch.tracks) > 1)
+        return batch, bool(youtube_text_search and len(batch.tracks) > 1)
 
     should_use_lavalink = getattr(backends, "should_use_lavalink_real", None)
     lavalink_active = bool(callable(should_use_lavalink) and should_use_lavalink(guild_id))
@@ -770,7 +771,7 @@ class SearchSelect(discord.ui.Select):
         if voice_channel is None or text_channel is None:
             await interaction.response.send_message("Canal não encontrado.", ephemeral=True)
             return
-        if bool(getattr(config, "MUSIC_AGENT_ENABLED", False)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
+        if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
             try:
                 result = await music_agent_command(
                     "play",
@@ -911,7 +912,7 @@ class AddSongModal(discord.ui.Modal):
             )
             return
 
-        if bool(getattr(config, "MUSIC_AGENT_ENABLED", False)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
+        if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
             track = batch.tracks[0]
             try:
                 result = await music_agent_command(

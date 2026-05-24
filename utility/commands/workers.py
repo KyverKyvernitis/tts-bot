@@ -5,6 +5,7 @@ import base64
 import hashlib
 import contextlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -20,7 +21,13 @@ import discord
 from discord.ext import commands
 
 from utility.commands.workers_registry import get_core_workers_registry
+from utility.interaction_safety import (
+    safe_defer_interaction,
+    safe_edit_original_or_message,
+)
 
+
+logger = logging.getLogger(__name__)
 
 WORKERS_COMMAND_GUILD_ID = 927002914449424404
 WORKERS_COMMAND_GUILD = discord.Object(id=WORKERS_COMMAND_GUILD_ID)
@@ -2252,7 +2259,7 @@ class WorkerRolesEditorView(discord.ui.LayoutView):
         await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
 
     async def _apply(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(thinking=False)
+        await safe_defer_interaction(interaction, thinking=False, log=logger, label="workers.roles_editor")
         roles, caps, tasks = _roles_caps_tasks_for_features(self.selected_features, profile=(self.profile if self.profile != "manter" else ""))
         try:
             await self.cog._update_core_worker_roles(self.worker_id, ", ".join(roles), ", ".join(caps), ", ".join(tasks))
@@ -2263,11 +2270,23 @@ class WorkerRolesEditorView(discord.ui.LayoutView):
                 await self.parent.message.edit(view=self.parent, allowed_mentions=discord.AllowedMentions.none())
             text = "✅ Funções atualizadas.\n\n" + _role_text(roles, limit=16) + "\n\nJobs: " + ", ".join(f"`{task}`" for task in tasks[:20])
             self._rebuild(done=text[:1900])
-            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+            await safe_edit_original_or_message(
+                interaction,
+                view=self,
+                allowed_mentions=discord.AllowedMentions.none(),
+                log=logger,
+                label="workers.roles_editor",
+            )
         except Exception as exc:
             text = f"Não consegui atualizar as funções: {_compact_failure(exc)}"
             self._rebuild(done=text)
-            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+            await safe_edit_original_or_message(
+                interaction,
+                view=self,
+                allowed_mentions=discord.AllowedMentions.none(),
+                log=logger,
+                label="workers.roles_editor",
+            )
 
     async def _cancel(self, interaction: discord.Interaction) -> None:
         self._rebuild(done="Edição fechada. Nada foi alterado.")
@@ -2909,7 +2928,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         )
 
     async def _queue_apk_internal_runtime_test(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(thinking=False)
+        await safe_defer_interaction(interaction, thinking=False, log=logger, label="workers.apk_job")
         worker = self._selected_worker()
         worker_id = str((worker or {}).get("worker_id") or "").strip()
         result = await asyncio.to_thread(_queue_core_worker_app_internal_runtime_test, worker_id)
@@ -2921,11 +2940,11 @@ class WorkersPanelView(discord.ui.LayoutView):
         self.snapshot = await self.cog._collect_workers_snapshot(action_note=note)
         self._ensure_selected_worker()
         self._rebuild_layout()
-        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._edit_panel_after_response(interaction)
         await self._send_ephemeral(interaction, note)
 
     async def _queue_apk_manual_job(self, interaction: discord.Interaction, job_type: str, *, label: str = "job APK") -> None:
-        await interaction.response.defer(thinking=False)
+        await safe_defer_interaction(interaction, thinking=False, log=logger, label="workers.apk_job")
         worker = self._selected_worker()
         worker_id = str((worker or {}).get("worker_id") or "").strip()
         payload: dict[str, Any] = {}
@@ -2944,18 +2963,18 @@ class WorkersPanelView(discord.ui.LayoutView):
         self.snapshot = await self.cog._collect_workers_snapshot(action_note=note)
         self._ensure_selected_worker()
         self._rebuild_layout()
-        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._edit_panel_after_response(interaction)
         await self._send_ephemeral(interaction, note)
 
     async def _edit_panel_after_response(self, interaction: discord.Interaction) -> None:
-        try:
-            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
-            return
-        except Exception:
-            pass
-        if self.message is not None:
-            with contextlib.suppress(Exception):
-                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await safe_edit_original_or_message(
+            interaction,
+            message=self.message,
+            view=self,
+            allowed_mentions=discord.AllowedMentions.none(),
+            log=logger,
+            label="workers.panel_edit",
+        )
 
     async def _send_ephemeral(self, interaction: discord.Interaction, message: str) -> None:
         with contextlib.suppress(Exception):
@@ -2979,16 +2998,35 @@ class WorkersPanelView(discord.ui.LayoutView):
             await flow_message.edit(content=message[:1900], allowed_mentions=discord.AllowedMentions.none())
 
     async def _refresh_panel(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=False)
+        # Botão de refresh precisa reconhecer a interação imediatamente. Se a VPS
+        # estiver engasgada e Discord já tiver invalidado o token, ainda tentamos
+        # atualizar a mensagem salva sem transformar isso em traceback na view.
+        acked = await safe_defer_interaction(
+            interaction,
+            thinking=False,
+            log=logger,
+            label="workers.refresh",
+        )
         previous_note = self.snapshot.action_note
         self.snapshot = await self.cog._collect_workers_snapshot(action_note=previous_note)
         self._ensure_selected_worker()
         self._rebuild_layout()
-        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        if acked:
+            await safe_edit_original_or_message(
+                interaction,
+                message=self.message,
+                view=self,
+                allowed_mentions=discord.AllowedMentions.none(),
+                log=logger,
+                label="workers.refresh",
+            )
+        elif self.message is not None:
+            with contextlib.suppress(Exception):
+                await self.message.edit(view=self, allowed_mentions=discord.AllowedMentions.none())
 
     async def _wake_worker(self, interaction: discord.Interaction):
         # Responde imediatamente para o Discord não mostrar "Esta interação falhou".
-        await interaction.response.defer(thinking=False)
+        await safe_defer_interaction(interaction, thinking=False, log=logger, label="workers.wake")
         flow = await self._open_flow_message(
             interaction,
             "## 📡 Acordando phone-worker\n"
@@ -3008,12 +3046,12 @@ class WorkersPanelView(discord.ui.LayoutView):
         )
 
     async def _sync_worker(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=False)
+        await safe_defer_interaction(interaction, thinking=False, log=logger, label="workers.sync")
         snapshot = await self.cog._sync_phone_worker()
         self.snapshot = snapshot
         self._ensure_selected_worker()
         self._rebuild_layout()
-        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._edit_panel_after_response(interaction)
         await self._send_ephemeral(interaction, f"🔁 Sync phone-worker: {_shorten(snapshot.action_note or snapshot.error or 'verifique o painel', limit=120)}")
 
     async def _open_pairing_modal(self, interaction: discord.Interaction):
@@ -3047,7 +3085,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         await interaction.response.send_modal(PairWorkerModal())
 
     async def _create_pairing(self, interaction: discord.Interaction, *, worker_name: str = "Core Worker 2", profile: str = "midia"):
-        await interaction.response.defer(thinking=False)
+        await safe_defer_interaction(interaction, thinking=False, log=logger, label="workers.pairing")
         try:
             pairing = await self.cog._create_core_worker_pairing(interaction.user)
             code = str(pairing.get("code") or "")
@@ -3101,13 +3139,13 @@ class WorkersPanelView(discord.ui.LayoutView):
         await interaction.response.send_message(msg[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     async def _run_failover_test(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=False)
+        await safe_defer_interaction(interaction, thinking=False, log=logger, label="workers.failover")
         online_workers = self._online_registry_workers()
         if len(online_workers) < 2:
             self.snapshot = await self.cog._collect_workers_snapshot(action_note="teste failover precisa de 2 workers online")
             self._ensure_selected_worker()
             self._rebuild_layout()
-            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+            await self._edit_panel_after_response(interaction)
             await interaction.followup.send("O teste de failover real precisa de pelo menos 2 workers online. Com 1 worker, use `Testar worker`.", ephemeral=True)
             return
         try:
@@ -3123,7 +3161,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             self.snapshot = await self.cog._collect_workers_snapshot(action_note="⏳ teste failover enviado; aguardando melhor worker")
             self._ensure_selected_worker()
             self._rebuild_layout()
-            await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+            await self._edit_panel_after_response(interaction)
             final_job = await self.cog._wait_core_worker_job(job_id, timeout=_env_float("WORKERS_PANEL_ACTION_WAIT_SECONDS", 12.0)) if job_id else None
             worker_id = str((final_job or {}).get("worker_id") or "")
             worker_name = self._worker_name_by_id(worker_id) if worker_id else "worker desconhecido"
@@ -3136,7 +3174,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha no teste failover: {_compact_failure(exc)}")
         self._ensure_selected_worker()
         self._rebuild_layout()
-        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._edit_panel_after_response(interaction)
 
     def _worker_name_by_id(self, worker_id: str) -> str:
         for worker in self._registry_workers():
@@ -3236,7 +3274,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         payload: dict[str, Any] | None = None,
         summary: str = "",
     ):
-        await interaction.response.defer(thinking=False)
+        await safe_defer_interaction(interaction, thinking=False, log=logger, label="workers.queue_job")
         target_worker_id = self._job_target_worker_id()
         task = _task_name(job_type)
         readable = summary or task
@@ -3296,7 +3334,7 @@ class WorkersPanelView(discord.ui.LayoutView):
                 self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"⏳ `{task}` enviado para {target_label}; aguardando resultado")
                 self._ensure_selected_worker()
                 self._rebuild_layout()
-                await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+                await self._edit_panel_after_response(interaction)
                 await self._edit_flow_message(
                     flow,
                     f"## ⚙️ {_shorten(readable, limit=80)}\n"
@@ -3322,7 +3360,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             )
         self._ensure_selected_worker()
         self._rebuild_layout()
-        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._edit_panel_after_response(interaction)
 
 
     async def _show_worker_details(self, interaction: discord.Interaction):
@@ -3367,7 +3405,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             )
 
             async def on_submit(self, modal_interaction: discord.Interaction) -> None:
-                await modal_interaction.response.defer(thinking=False)
+                await safe_defer_interaction(modal_interaction, thinking=False, log=logger, label="workers.rename_modal")
                 try:
                     await view.cog._rename_core_worker(worker_id, str(self.new_name.value or ""))
                     view.snapshot = await view.cog._collect_workers_snapshot(action_note=f"worker renomeado para {_shorten(self.new_name.value, limit=40)}")
@@ -3398,7 +3436,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         if not worker:
             await interaction.response.send_message("Selecione um worker registrado.", ephemeral=True)
             return
-        await interaction.response.defer(thinking=False)
+        await safe_defer_interaction(interaction, thinking=False, log=logger, label="workers.set_enabled")
         worker_id = str(worker.get("worker_id") or "")
         try:
             await self.cog._set_core_worker_enabled(worker_id, enabled=enabled)
@@ -3408,7 +3446,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha alterando worker: {_compact_failure(exc)}")
         self._ensure_selected_worker()
         self._rebuild_layout()
-        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._edit_panel_after_response(interaction)
         await self._send_ephemeral(interaction, self.snapshot.action_note or "Estado do worker atualizado.")
 
     async def _delete_selected_worker(self, interaction: discord.Interaction):
@@ -3416,7 +3454,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         if not worker:
             await interaction.response.send_message("Selecione um worker offline para remover.", ephemeral=True)
             return
-        await interaction.response.defer(thinking=False)
+        await safe_defer_interaction(interaction, thinking=False, log=logger, label="workers.delete")
         worker_id = str(worker.get("worker_id") or "")
         try:
             await self.cog._delete_core_worker(worker_id)
@@ -3426,11 +3464,11 @@ class WorkersPanelView(discord.ui.LayoutView):
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha removendo worker: {_compact_failure(exc)}")
         self._ensure_selected_worker()
         self._rebuild_layout()
-        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._edit_panel_after_response(interaction)
         await self._send_ephemeral(interaction, self.snapshot.action_note or "Worker removido/atualizado.")
 
     async def _cleanup_jobs(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=False)
+        await safe_defer_interaction(interaction, thinking=False, log=logger, label="workers.cleanup")
         try:
             result = await self.cog._cleanup_core_worker_jobs()
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"limpeza de jobs: {result}")
@@ -3438,7 +3476,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"falha limpando jobs: {_compact_failure(exc)}")
         self._ensure_selected_worker()
         self._rebuild_layout()
-        await interaction.edit_original_response(view=self, allowed_mentions=discord.AllowedMentions.none())
+        await self._edit_panel_after_response(interaction)
         await self._send_ephemeral(interaction, self.snapshot.action_note or "Jobs limpos/atualizados.")
 
 

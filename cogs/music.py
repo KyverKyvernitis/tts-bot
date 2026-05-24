@@ -386,12 +386,13 @@ class Music(commands.Cog):
                         limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
                     )
                 else:
+                    youtube_text_search = self._is_youtube_text_search(query)
                     batch = await resolve_music_tracks_on_worker(
                         query,
                         requester_id=ctx.author.id,
                         requester_name=requester_name,
-                        limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
-                        metadata_only=self._is_youtube_text_search(query),
+                        limit=(max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))) if youtube_text_search else 1),
+                        metadata_only=youtube_text_search,
                     )
             except MusicExtractionError as exc:
                 await self._reply(ctx, self._music_error_message(exc))
@@ -518,7 +519,7 @@ class Music(commands.Cog):
             )
             return
 
-        if bool(getattr(config, "MUSIC_AGENT_ENABLED", False)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
+        if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
             track = batch.tracks[0]
             try:
                 result = await music_agent_command(

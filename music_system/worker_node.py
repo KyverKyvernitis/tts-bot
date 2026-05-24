@@ -500,6 +500,11 @@ async def resolve_music_tracks_on_worker(
     except Exception:
         max_limit = 5
     is_text_search = not _looks_like_url(clean_query)
+    if not is_text_search:
+        # Link direto deve resolver uma faixa/playlist pelo URL informado; não usar
+        # ytsearchN como fallback padrão, porque isso faz o worker pesquisar em vez
+        # de respeitar exatamente o link enviado.
+        max_limit = 1
     if metadata_only is None:
         metadata_only = bool(is_text_search)
     if metadata_only:
@@ -517,7 +522,7 @@ async def resolve_music_tracks_on_worker(
         "default_search": (
             f"ytsearch{max_limit}"
             if is_text_search
-            else str(getattr(config, "MUSIC_WORKER_YTDLP_DEFAULT_SEARCH", "ytsearch") or "ytsearch")
+            else "auto"
         ),
     }
     headers = {

@@ -12,6 +12,11 @@ from discord import app_commands
 from discord.ext import commands
 
 from music_system import AudioRouter
+from utility.interaction_safety import (
+    is_unknown_interaction,
+    safe_defer_interaction,
+    safe_send_interaction_message,
+)
 from music_system.diagnostics import (
     DiagnosticsOptions,
     build_full_vps_diagnostics_report,
@@ -267,12 +272,12 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
         except Exception as exc:
             logger.exception("[utility/vps] erro fatal no submit do modal")
             message = f"`⚠️` O painel da VPS falhou antes de concluir: {type(exc).__name__}: {str(exc)[:300]}"
-            with contextlib.suppress(Exception):
-                if not interaction.response.is_done():
-                    await interaction.response.send_message(message)
-                    return
-            with contextlib.suppress(Exception):
-                await interaction.followup.send(message)
+            await safe_send_interaction_message(
+                interaction,
+                message,
+                log=logger,
+                label="utility/vps.on_submit",
+            )
 
 
 
@@ -354,15 +359,13 @@ class VpsCommandMixin:
         )
 
     async def _defer_vps_interaction(self, interaction: discord.Interaction) -> bool:
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(thinking=True, ephemeral=False)
-            return True
-        except discord.InteractionResponded:
-            return True
-        except Exception:
-            logger.exception("[utility/vps] não consegui deferir interação /vps")
-            return False
+        return await safe_defer_interaction(
+            interaction,
+            thinking=True,
+            ephemeral=False,
+            log=logger,
+            label="utility/vps",
+        )
 
     async def _with_vps_timeout(self, label: str, coro, *, timeout: float):
         try:
@@ -667,7 +670,13 @@ class VpsCommandMixin:
 
     async def _run_vps_action(self, interaction: discord.Interaction, *, selected_items: list[VpsItem]) -> None:
         if interaction.guild is None or int(getattr(interaction.guild, "id", 0) or 0) != VPS_COMMAND_GUILD_ID:
-            await interaction.response.send_message("Esse painel só funciona na guilda de teste configurada.")
+            await safe_send_interaction_message(
+                interaction,
+                "Esse painel só funciona na guilda de teste configurada.",
+                ephemeral=True,
+                log=logger,
+                label="utility/vps.guild_guard",
+            )
             return
 
         # Modal submit precisa ser reconhecido em até poucos segundos.
@@ -872,19 +881,30 @@ class VpsCommandMixin:
         try:
             await interaction.response.send_modal(VpsModal(self, force_text_fallback=False))
             return
-        except Exception:
+        except Exception as exc:
+            if is_unknown_interaction(exc):
+                logger.warning("[utility/vps] interação /vps expirou antes do modal abrir: %s", exc)
+                return
             logger.exception("[utility/vps] falha ao abrir modal avançado")
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    "`⚠️` Não consegui abrir o painel avançado da VPS. Tente novamente em alguns segundos.",
-                    ephemeral=True,
-                )
+            await safe_send_interaction_message(
+                interaction,
+                "`⚠️` Não consegui abrir o painel avançado da VPS. Tente novamente em alguns segundos.",
+                ephemeral=True,
+                log=logger,
+                label="utility/vps.modal_fallback",
+            )
 
     @app_commands.command(name="vps", description="Abre o painel de diagnóstico/anexos da VPS")
     @app_commands.guilds(VPS_COMMAND_GUILD)
     async def vps(self, interaction: discord.Interaction):
         if interaction.guild is None or int(getattr(interaction.guild, "id", 0) or 0) != VPS_COMMAND_GUILD_ID:
-            await interaction.response.send_message("Esse painel só funciona na guilda de teste configurada.", ephemeral=True)
+            await safe_send_interaction_message(
+                interaction,
+                "Esse painel só funciona na guilda de teste configurada.",
+                ephemeral=True,
+                log=logger,
+                label="utility/vps.command_guard",
+            )
             return
         # Não faça await pesado antes de send_modal: se o owner check/rede travar,
         # o Discord mostra “O aplicativo não respondeu” e o modal nem abre.
