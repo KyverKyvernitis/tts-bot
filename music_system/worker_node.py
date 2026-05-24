@@ -7,6 +7,8 @@ import logging
 import os
 import time
 from urllib.parse import urljoin
+import urllib.request
+import urllib.error
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -184,6 +186,35 @@ def _music_node_status_ok(worker: Mapping[str, Any]) -> bool:
     return not require_status
 
 
+def _probe_configured_phone_worker_health(base_url: str, token: str) -> Mapping[str, Any] | None:
+    """Healthcheck curto para não tratar worker configurado/offline como online.
+
+    O registry pode estar atrasado, então ainda aceitamos o worker configurado;
+    mas ele precisa responder rapidamente. Assim `_play` falha na hora quando o
+    celular/turbo worker não está realmente disponível.
+    """
+    if not base_url or not token:
+        return None
+    enabled = _as_bool(getattr(config, "MUSIC_WORKER_CONFIGURED_HEALTHCHECK_ENABLED", True), True)
+    if not enabled:
+        return {"ok": True, "profile": "turbo"}
+    try:
+        timeout = max(0.3, min(3.0, float(getattr(config, "MUSIC_WORKER_CONFIGURED_HEALTH_TIMEOUT_SECONDS", 1.2) or 1.2)))
+    except Exception:
+        timeout = 1.2
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    try:
+        req = urllib.request.Request(f"{base_url.rstrip('/')}/health", headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(384 * 1024).decode("utf-8", "replace")
+        data = json.loads(raw or "{}")
+        if isinstance(data, Mapping) and bool(data.get("ok")):
+            return data
+    except Exception as exc:
+        logger.info("[music/worker] phone worker configurado não respondeu rápido: %s", exc)
+    return None
+
+
 def _configured_phone_worker_selection(reason: str = "phone_worker_configurado") -> MusicWorkerSelection | None:
     if not _as_bool(getattr(config, "PHONE_WORKER_ENABLED", False), False):
         return None
@@ -198,6 +229,11 @@ def _configured_phone_worker_selection(reason: str = "phone_worker_configurado")
         port = int(getattr(config, "PHONE_WORKER_PORT", 8766) or 8766)
     except Exception:
         port = 8766
+
+    endpoint = f"{scheme}://{host}:{port}"
+    health = _probe_configured_phone_worker_health(endpoint, token)
+    if health is None:
+        return None
 
     lavalink_host = str(
         getattr(config, "MUSIC_WORKER_LAVALINK_HOST", "")
@@ -241,10 +277,10 @@ def _configured_phone_worker_selection(reason: str = "phone_worker_configurado")
         "profile": "turbo",
         "roles": roles,
         "capabilities": capabilities,
-        "endpoint": f"{scheme}://{host}:{port}",
+        "endpoint": endpoint,
         "remote_addr": host,
         "status": {
-            "profile": "turbo",
+            "profile": str(health.get("profile") or "turbo"),
             "music_node": {
                 "kind": "lavalink",
                 "mode": "lavalink",
@@ -578,14 +614,14 @@ async def music_agent_command(
                         parsed = json.loads(text or "{}")
                         if isinstance(parsed, Mapping):
                             detail = str(parsed.get("error") or parsed.get("message") or detail)[:400]
-                    raise RuntimeError(f"Music Agent HTTP {response.status}: {detail}")
+                    raise RuntimeError(f"Player remoto HTTP {response.status}: {detail}")
                 data = json.loads(text or "{}")
     except Exception as exc:
         message = str(exc or "").strip() or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE
         logger.warning("[music/agent] comando remoto falhou | worker=%s action=%s erro=%s", selection.worker_id, action, message)
         lower = message.lower()
         if "connection" in lower or "connect" in lower or "refused" in lower or "timeout" in lower:
-            message = "Sistema de música indisponível no momento: Music Agent não está online no worker"
+            message = "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta"
         raise MusicWorkerEngineUnavailable(message[:260]) from exc
     if data.get("ok") is False:
         message = str(data.get("error") or data.get("message") or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE).strip()

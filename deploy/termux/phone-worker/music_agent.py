@@ -39,7 +39,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.0"
+AGENT_VERSION = "0.3.1"
 STARTED_AT = time.time()
 
 
@@ -186,10 +186,21 @@ class GuildMusicState:
     transport: str = ""
     preparing_since: float = 0.0
     playing_since: float = 0.0
+    started_monotonic: float = 0.0
     updated_at: float = field(default_factory=time.time)
     player: Any = None
 
     def public(self) -> dict[str, Any]:
+        player = self.player
+        voice_connected = False
+        if player is not None:
+            with contextlib.suppress(Exception):
+                connected_attr = getattr(player, "connected", None)
+                voice_connected = bool(connected_attr) if connected_attr is not None else voice_connected
+            with contextlib.suppress(Exception):
+                checker = getattr(player, "is_connected", None)
+                if callable(checker):
+                    voice_connected = bool(checker())
         return {
             "guild_id": self.guild_id,
             "voice_channel_id": self.voice_channel_id,
@@ -202,6 +213,8 @@ class GuildMusicState:
             "transport": self.transport,
             "preparing_since": self.preparing_since,
             "playing_since": self.playing_since,
+            "voice_connected": voice_connected,
+            "player_present": player is not None,
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,
             "queue_size": len(self.queue),
@@ -312,11 +325,14 @@ class MusicAgent:
         elif status == "playing":
             if not st.playing_since:
                 st.playing_since = now
+            if not st.started_monotonic:
+                st.started_monotonic = time.monotonic()
             st.preparing_since = 0.0
         elif status in {"idle", "failed", "error"}:
             st.preparing_since = 0.0
             if status != "playing":
                 st.playing_since = 0.0
+                st.started_monotonic = 0.0
 
     async def handle_health(self, request: web.Request) -> web.Response:
         if not self._auth_ok(request):
@@ -498,7 +514,7 @@ class MusicAgent:
         st.paused = False
         st.transport = ""
         self._set_status(st, "preparing", event="play_preparing")
-        self.log("track_loading", guild_id=guild_id, title=st.current.title, source=st.current.source)
+        self.log("track_loading", guild_id=guild_id, title=getattr(st.current, "title", ""), source=getattr(st.current, "source", ""))
         try:
             use_direct = self._should_use_direct_voice(st.current)
             if use_direct:
@@ -523,7 +539,7 @@ class MusicAgent:
     async def _resolve_guild_and_channel(self, guild_id: int, voice_channel_id: int) -> tuple[Any, Any]:
         guild = self.client.get_guild(guild_id)
         if guild is None:
-            raise RuntimeError(f"guild {guild_id} não encontrada no Music Agent")
+            raise RuntimeError(f"guild {guild_id} não encontrada no player remoto")
         channel = guild.get_channel(voice_channel_id) or self.client.get_channel(voice_channel_id)
         if channel is None:
             raise RuntimeError(f"canal de voz {voice_channel_id} não encontrado")
@@ -551,7 +567,7 @@ class MusicAgent:
         source = self._build_ffmpeg_source(track.stream_url)
         st.player = voice_client
         st.transport = "direct"
-        self._set_status(st, "playing", event="direct_player_play_called")
+        self._set_status(st, "starting", event="direct_player_starting")
         self.log("player_play_called", guild_id=guild_id, transport="direct", title=track.title)
 
         def after(error: Exception | None) -> None:
@@ -561,6 +577,10 @@ class MusicAgent:
             asyncio.run_coroutine_threadsafe(self._direct_after(guild_id, error), loop)
 
         voice_client.play(source, after=after)
+        await asyncio.sleep(0.25)
+        if not getattr(voice_client, "is_playing", lambda: False)() and not getattr(voice_client, "is_paused", lambda: False)():
+            raise RuntimeError("ffmpeg iniciou, mas o áudio não ficou tocando")
+        self._set_status(st, "playing", event="direct_track_start")
         self.log("play_started", guild_id=guild_id, transport="direct", title=track.title)
 
     def _build_ffmpeg_source(self, stream_url: str) -> discord.AudioSource:
@@ -584,9 +604,17 @@ class MusicAgent:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         if st.current is None and not st.queue:
             return
+        played_for = time.monotonic() - float(st.started_monotonic or 0.0) if st.started_monotonic else 0.0
+        min_ok = max(0.5, env_float("MUSIC_AGENT_EARLY_END_SECONDS", 2.5))
         if error:
             self._set_status(st, "failed", event="direct_after_error", error=f"{type(error).__name__}: {short_text(error, 260)}")
             self.log("play_failed", guild_id=guild_id, transport="direct", error=st.last_error)
+            if st.queue:
+                await self._play_next(guild_id)
+            return
+        if played_for < min_ok and st.current is not None:
+            self._set_status(st, "failed", event="direct_after_early_end", error=f"áudio encerrou cedo demais ({played_for:.1f}s)")
+            self.log("play_failed", guild_id=guild_id, transport="direct", error=st.last_error, title=getattr(st.current, "title", ""))
             if st.queue:
                 await self._play_next(guild_id)
             return
@@ -617,8 +645,10 @@ class MusicAgent:
         st.transport = "lavalink"
         playable = await self._playable_for_track(track)
         self.log("player_play_called", guild_id=guild_id, transport="lavalink", title=track.title)
+        self._set_status(st, "starting", event="lavalink_player_play_called")
         await player.play(playable)
-        self._set_status(st, "playing", event="lavalink_player_play_called")
+        await asyncio.sleep(0.25)
+        self._set_status(st, "playing", event="lavalink_play_dispatched")
         self.log("play_started", guild_id=guild_id, transport="lavalink", title=track.title)
 
     async def _finish_current(self, guild_id: int, *, error: str | None, event: str) -> None:

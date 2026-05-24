@@ -27,30 +27,36 @@ def _agent_guild_state(payload: dict, guild_id: int) -> dict:
     return state if isinstance(state, dict) else {}
 
 
-def _agent_transport_label(state: dict) -> str:
-    transport = str((state or {}).get("transport") or "").strip().lower()
-    if transport == "direct":
-        return "direto no worker"
-    if transport == "lavalink":
-        return "Lavalink do worker"
-    return "Music Agent"
-
-
 def _agent_play_message(track: MusicTrack, result: dict | None = None) -> str:
     result = result or {}
     state = result.get("state") if isinstance(result.get("state"), dict) else {}
     status = str(state.get("status") or "").lower()
     if result.get("queued"):
-        return f"`🎶` **Adicionada ao Music Agent:** {track.short_title} • `{track.duration_label}`"
+        return f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}`"
     if status == "playing":
-        return f"`🎧` **Tocando pelo Music Agent:** {track.short_title} • `{track.duration_label}` • {_agent_transport_label(state)}"
+        return f"`🎧` **Tocando:** {track.short_title} • `{track.duration_label}`"
     if status in {"failed", "error"}:
-        error = str(state.get("last_error") or "fonte de áudio falhou no worker").strip()[:180]
-        return f"`⚠️` Não consegui iniciar **{track.short_title}** no Music Agent: `{error}`"
-    return f"`🎧` **Music Agent preparando:** {track.short_title} • `{track.duration_label}`"
+        error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:180]
+        return f"`⚠️` Não consegui iniciar **{track.short_title}**: `{error}`"
+    return f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`"
 
 
-async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, seconds: float | None = None) -> None:
+async def _sync_agent_panel(router, guild_id: int, voice_channel_id: int, text_channel_id: int, track: MusicTrack, result: dict | None, *, queued: bool = False) -> None:
+    state = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
+    syncer = getattr(router, "sync_music_agent_state", None)
+    if callable(syncer):
+        await syncer(
+            guild_id,
+            track,
+            state,
+            voice_channel_id=voice_channel_id,
+            text_channel_id=text_channel_id,
+            queued=queued,
+            create_panel=True,
+        )
+
+
+async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, router=None, voice_channel_id: int = 0, text_channel_id: int = 0, seconds: float | None = None) -> None:
     limit = float(seconds or getattr(config, "MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", 30.0) or 30.0)
     deadline = asyncio.get_running_loop().time() + max(5.0, limit)
     last_status = ""
@@ -60,24 +66,26 @@ async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, sec
             payload = await music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 3.5))
             state = _agent_guild_state(payload, guild_id)
             status = str(state.get("status") or "").lower()
+            if router is not None:
+                await _sync_agent_panel(router, guild_id, voice_channel_id, text_channel_id, track, {"state": state})
             if not status or status == last_status:
                 continue
             last_status = status
             if status == "playing":
-                await message.edit(content=f"`🎧` **Tocando pelo Music Agent:** {track.short_title} • `{track.duration_label}` • {_agent_transport_label(state)}", embed=None, view=None)
+                await message.edit(content=f"`🎧` **Tocando:** {track.short_title} • `{track.duration_label}`", embed=None, view=None)
                 return
             if status in {"failed", "error"}:
-                error = str(state.get("last_error") or "fonte de áudio falhou no worker").strip()[:220]
-                await message.edit(content=f"`⚠️` Não consegui iniciar **{track.short_title}** no Music Agent: `{error}`", embed=None, view=None)
+                error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:220]
+                await message.edit(content=f"`⚠️` Não consegui iniciar **{track.short_title}**: `{error}`", embed=None, view=None)
                 return
             if status in {"idle", "stopped"} and not state.get("current"):
-                await message.edit(content=f"`⚠️` Music Agent ficou sem faixa ativa para **{track.short_title}**. Tente novamente.", embed=None, view=None)
+                await message.edit(content=f"`⚠️` A música não ficou ativa para **{track.short_title}**. Tente novamente.", embed=None, view=None)
                 return
         except Exception:
             # Não quebra o fluxo do usuário se o acompanhamento não conseguir consultar o worker.
             continue
     with contextlib.suppress(Exception):
-        await message.edit(content=f"`⚠️` Music Agent demorou para confirmar o início de **{track.short_title}**. Tente novamente se não tocar.", embed=None, view=None)
+        await message.edit(content=f"`⚠️` Demorei para confirmar o início de **{track.short_title}**. Tente novamente se não tocar.", embed=None, view=None)
 
 
 _LAVALINK_SEARCH_PREFIXES = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
@@ -422,21 +430,11 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
         f"> -# ✋ **⠂** {requester}",
     ])
     backend = str(getattr(state, "current_backend", "local") or "local").lower()
-    if backend == "lavalink":
-        if str(getattr(track, "extractor", "") or "").lower() == "worker-ytdlp":
-            backend_label = "Lavalink do worker"
-        else:
-            backend_label = "Reprodução via Lavalink"
-    else:
-        # Fallback é detalhe de diagnóstico. No painel público, mostrar
-        # "fallback LavaSrc" dá a impressão de fonte errada/invertida quando a
-        # música já caiu corretamente para o player local.
-        if str(getattr(track, "extractor", "") or "").lower() == "worker-ytdlp":
-            backend_label = "Reprodução local worker"
-        else:
-            backend_label = "Reprodução local"
+    # Backend é detalhe interno. O painel público deve falar de player/música,
+    # não de Music Agent, Lavalink, worker ou fallback.
+    backend_label = "Player de música"
     lines.append(f"> -# 🎧 **⠂** `{backend_label}`")
-    if backend != "lavalink":
+    if backend not in {"lavalink", "agent"}:
         format_label = _local_audio_format_label(track)
         if format_label:
             lines.append(f"> -# 🎚️ **⠂** `Formato: {format_label}`")
@@ -775,8 +773,17 @@ class SearchSelect(discord.ui.Select):
                     requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
                 )
             except Exception as exc:
-                await interaction.response.edit_message(content=f"`⚠️` Não consegui enviar essa música ao Music Agent: `{exc}`", embed=None, view=None)
+                await interaction.response.edit_message(content=f"`⚠️` Não consegui preparar essa música: `{exc}`", embed=None, view=None)
                 return
+            await _sync_agent_panel(
+                self.router,
+                self.guild_id,
+                getattr(voice_channel, "id", self.voice_channel_id),
+                getattr(text_channel, "id", self.text_channel_id),
+                track,
+                result,
+                queued=bool(result.get("queued")),
+            )
             msg = _agent_play_message(track, result)
             await interaction.response.edit_message(content=msg, embed=None, view=None)
             state = result.get("state") if isinstance(result.get("state"), dict) else {}
@@ -784,7 +791,7 @@ class SearchSelect(discord.ui.Select):
             if not result.get("queued") and status not in {"playing", "failed", "error"}:
                 with contextlib.suppress(Exception):
                     message = await interaction.original_response()
-                    asyncio.create_task(_watch_agent_message(message, self.guild_id, track))
+                    asyncio.create_task(_watch_agent_message(message, self.guild_id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id)))
             return
         state_before = self.router.get_state(self.guild_id)
         was_session_active = bool(
@@ -908,14 +915,23 @@ class AddSongModal(discord.ui.Modal):
                     requester_name=requester_name,
                 )
             except Exception as exc:
-                await interaction.followup.send(f"`⚠️` Não consegui enviar essa música ao Music Agent: `{exc}`", ephemeral=True)
+                await interaction.followup.send(f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
                 return
+            await _sync_agent_panel(
+                self.router,
+                guild.id,
+                getattr(voice_channel, "id", self.voice_channel_id),
+                getattr(text_channel, "id", self.text_channel_id),
+                track,
+                result,
+                queued=bool(result.get("queued")),
+            )
             msg = _agent_play_message(track, result)
             sent = await interaction.followup.send(msg, ephemeral=True, wait=True)
             state = result.get("state") if isinstance(result.get("state"), dict) else {}
             status = str(state.get("status") or "").lower()
             if sent is not None and not result.get("queued") and status not in {"playing", "failed", "error"}:
-                asyncio.create_task(_watch_agent_message(sent, guild.id, track))
+                asyncio.create_task(_watch_agent_message(sent, guild.id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id)))
             return
 
         state_before = self.router.get_state(self.guild_id)
@@ -1501,7 +1517,7 @@ class MusicPlayerView(discord.ui.View):
         try:
             await music_agent_command(action, guild_id=self.guild_id, requester_id=getattr(interaction.user, "id", 0), requester_name=getattr(interaction.user, "display_name", str(interaction.user)))
         except Exception as exc:
-            await self._ack(interaction, f"`⚠️` Music Agent não respondeu: `{str(exc)[:180]}`")
+            await self._ack(interaction, f"`⚠️` O player não respondeu: `{str(exc)[:180]}`")
             return True
         await self._ack(interaction, message)
         return True
@@ -1510,7 +1526,7 @@ class MusicPlayerView(discord.ui.View):
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = self.router.get_state(self.guild_id)
         if state.paused:
-            if await self._send_agent_control(interaction, "resume", "`▶️` Música retomada no Music Agent."):
+            if await self._send_agent_control(interaction, "resume", "`▶️` Música retomada."):
                 return
             ok = await self.router.resume(self.guild_id)
             if ok:
@@ -1518,7 +1534,7 @@ class MusicPlayerView(discord.ui.View):
             else:
                 await self._ack(interaction, "Não havia música pausada.")
         else:
-            if await self._send_agent_control(interaction, "pause", "`⏸️` Música pausada no Music Agent."):
+            if await self._send_agent_control(interaction, "pause", "`⏸️` Música pausada."):
                 return
             ok = await self.router.pause(self.guild_id)
             if ok:
@@ -1528,14 +1544,14 @@ class MusicPlayerView(discord.ui.View):
 
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self._send_agent_control(interaction, "skip", "`⏭️` Pulando música no Music Agent."):
+        if await self._send_agent_control(interaction, "skip", "`⏭️` Pulando música."):
             return
         _ok, message = await self.router.request_skip(self.guild_id, interaction.user)
         await self._ack(interaction, message)
 
     @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0, custom_id="music:stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self._send_agent_control(interaction, "stop", "`⏹️` Music Agent encerrado e desconectado."):
+        if await self._send_agent_control(interaction, "stop", "`⏹️` Player encerrado e desconectado."):
             return
         _ok, message = await self.router.request_stop(self.guild_id, interaction.user, disconnect=True)
         await self._ack(interaction, message)

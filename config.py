@@ -361,8 +361,8 @@ MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_AGE
 MUSIC_AGENT_STATUS_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", "3.5"), 3.5))
 MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS = max(5.0, _parse_float(os.getenv("MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", "30.0"), 30.0))
 MUSIC_AGENT_MISSING_TOKEN_MESSAGE = (
-    os.getenv("MUSIC_AGENT_MISSING_TOKEN_MESSAGE", "Sistema de música indisponível no momento: Music Agent sem token configurado no worker")
-    or "Sistema de música indisponível no momento: Music Agent sem token configurado no worker"
+    os.getenv("MUSIC_AGENT_MISSING_TOKEN_MESSAGE", "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta")
+    or "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta"
 ).strip()
 
 # Phone-worker auxiliar — celular via Tailscale.
@@ -410,6 +410,8 @@ MUSIC_WORKER_LAVALINK_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("MUSIC_W
 # Quando true, exige que o heartbeat do worker já informe status.music_node/lavalink saudável.
 # Fica false por compatibilidade com agents antigos; o backend Lavalink ainda valida o node.
 MUSIC_WORKER_REQUIRE_MUSIC_NODE_STATUS = _parse_bool(os.getenv("MUSIC_WORKER_REQUIRE_MUSIC_NODE_STATUS", "false"), False)
+MUSIC_WORKER_CONFIGURED_HEALTHCHECK_ENABLED = _parse_bool(os.getenv("MUSIC_WORKER_CONFIGURED_HEALTHCHECK_ENABLED", "true"), True)
+MUSIC_WORKER_CONFIGURED_HEALTH_TIMEOUT_SECONDS = max(0.3, _parse_float(os.getenv("MUSIC_WORKER_CONFIGURED_HEALTH_TIMEOUT_SECONDS", "1.2"), 1.2))
 # Em worker-only, o node auxiliar do celular vira o node preferencial/único da música
 # quando AUX_LAVALINK_* estiver configurado. Sem AUX, usa LAVALINK_* como node do worker.
 MUSIC_WORKER_LAVALINK_USE_AUX = _parse_bool(os.getenv("MUSIC_WORKER_LAVALINK_USE_AUX", "true"), True)

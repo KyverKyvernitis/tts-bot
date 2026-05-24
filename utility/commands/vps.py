@@ -865,18 +865,14 @@ class VpsCommandMixin:
         imediatamente para um modal clássico de TextInput em vez de deixar
         “O aplicativo não respondeu”.
         """
-        try:
-            await interaction.response.send_modal(VpsModal(self))
-            return
-        except Exception:
-            logger.exception("[utility/vps] falha ao abrir modal avançado; tentando fallback TextInput")
-
-        if interaction.response.is_done():
-            return
+        # O modal avançado com componentes novos pode falhar em alguns clientes e
+        # gastar a janela de resposta da interação. O TextInput é menos bonito, mas
+        # abre de forma confiável e evita "O aplicativo não respondeu".
         try:
             await interaction.response.send_modal(VpsModal(self, force_text_fallback=True))
+            return
         except Exception:
-            logger.exception("[utility/vps] fallback TextInput também falhou")
+            logger.exception("[utility/vps] falha ao abrir modal TextInput")
             if not interaction.response.is_done():
                 await interaction.response.send_message(
                     "`⚠️` Não consegui abrir o painel da VPS. Tente novamente em alguns segundos.",

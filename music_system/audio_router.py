@@ -3862,6 +3862,92 @@ class AudioRouter:
         except RuntimeError:
             pass
 
+
+    async def sync_music_agent_state(
+        self,
+        guild_id: int,
+        track: MusicTrack | None = None,
+        agent_state: dict | None = None,
+        *,
+        voice_channel_id: int | None = None,
+        text_channel_id: int | None = None,
+        queued: bool = False,
+        create_panel: bool = True,
+    ) -> MusicGuildState:
+        """Espelha o estado do backend de música do worker no painel da VPS.
+
+        O backend remoto toca a música; a VPS continua dona da UI. Este método
+        nunca conecta a VPS em voz e nunca expõe nomes internos de backend ao
+        usuário. Ele só mantém ``MusicGuildState`` renderizável para o painel.
+        """
+        state = self.get_state(int(guild_id))
+        remote = agent_state if isinstance(agent_state, dict) else {}
+
+        try:
+            if text_channel_id:
+                state.last_text_channel_id = int(text_channel_id)
+            elif remote.get("text_channel_id"):
+                state.last_text_channel_id = int(remote.get("text_channel_id"))
+        except Exception:
+            pass
+        try:
+            if voice_channel_id:
+                state.last_voice_channel_id = int(voice_channel_id)
+            elif remote.get("voice_channel_id"):
+                state.last_voice_channel_id = int(remote.get("voice_channel_id"))
+        except Exception:
+            pass
+
+        raw_status = str(remote.get("status") or "").strip().lower()
+        current_payload = remote.get("current") if isinstance(remote.get("current"), dict) else {}
+        last_error = str(remote.get("last_error") or "").strip()
+        if queued:
+            # Música foi aceita para fila remota; mantenha a faixa atual do painel.
+            if state.current is None and track is not None:
+                state.current = track
+                self._set_current_status(state, "queued")
+        else:
+            if last_error and raw_status in {"", "idle", "stopped"}:
+                raw_status = "failed"
+            if raw_status in {"failed", "error"}:
+                if track is not None:
+                    state.current = track
+                state.idle_reason = "track_failed"
+                state.current_status_detail = last_error[:300]
+                self._set_current_status(state, "error")
+            elif raw_status in {"idle", "stopped"} and not current_payload and not last_error:
+                # O worker pode responder antes do primeiro evento de áudio. Não
+                # apague o painel imediatamente; mostre preparação e deixe o watch
+                # confirmar playing/failed/idle depois.
+                if track is not None:
+                    state.current = track
+                    self._set_current_status(state, "starting")
+                else:
+                    state.current = None
+                    self._set_current_status(state, "idle")
+            else:
+                if track is not None:
+                    state.current = track
+                mapped = {
+                    "preparing": "resolving",
+                    "starting": "starting",
+                    "playing": "playing",
+                    "paused": "paused",
+                    "queued": "queued",
+                }.get(raw_status or "starting", "starting")
+                self._set_current_status(state, mapped)
+
+        state.current_backend = "agent"
+        state.current_lavalink_player = None
+        state.current_source = None
+        state.paused = raw_status == "paused"
+        state.music_session_active = bool(state.current or raw_status in {"preparing", "starting", "playing", "paused", "queued"})
+        if raw_status and raw_status not in {"failed", "error"}:
+            state.current_status_detail = raw_status
+        if create_panel:
+            await self.update_panel(int(guild_id), create=True)
+        return state
+
     async def update_panel(self, guild_id: int, *, create: bool = True, repost: bool = False) -> None:
         state = self.get_state(guild_id)
         if not state.last_text_channel_id:
