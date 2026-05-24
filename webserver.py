@@ -25,6 +25,10 @@ _core_worker_fcm_tokens_lock = threading.RLock()
 _core_worker_app_heartbeat_lock = threading.RLock()
 _core_worker_app_jobs_lock = threading.RLock()
 _tts_audio_files: dict[str, tuple[str, float]] = {}
+_core_worker_pending_automation_lock = threading.RLock()
+_core_worker_pending_automation_processes = {}
+_core_worker_pending_automation_last_started = {}
+_core_worker_pending_automation_last_log = {}
 
 
 def _core_worker_apk_dir() -> str:
@@ -2045,28 +2049,111 @@ def core_worker_app_file(filename: str):
 
 
 
+def _env_bool_web(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if raw in {"1", "true", "yes", "y", "on", "sim"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off", "nao", "não"}:
+        return False
+    return default
+
+
+def _env_float_web(name: str, default: float, *, minimum: float | None = None, maximum: float | None = None) -> float:
+    try:
+        value = float(os.getenv(name, "") or default)
+    except Exception:
+        value = float(default)
+    if minimum is not None:
+        value = max(float(minimum), value)
+    if maximum is not None:
+        value = min(float(maximum), value)
+    return value
+
+
+def _automation_worker_key(worker_id: str) -> str:
+    worker_id = str(worker_id or "").strip()
+    if not worker_id:
+        return "__all__"
+    return re.sub(r"[^A-Za-z0-9_.:-]+", "_", worker_id)[:120] or "__unknown__"
+
+
+def _is_process_running(process: subprocess.Popen | None) -> bool:
+    if process is None:
+        return False
+    try:
+        return process.poll() is None
+    except Exception:
+        return False
+
+
+def _log_pending_automation_skip(key: str, message: str) -> None:
+    now = time.time()
+    last = float(_core_worker_pending_automation_last_log.get(key) or 0.0)
+    if now - last < 30.0:
+        return
+    _core_worker_pending_automation_last_log[key] = now
+    with contextlib.suppress(Exception):
+        app.logger.info("core-worker automation skipped | worker=%s reason=%s", key, message)
+
+
 def _kick_core_worker_pending_automation(worker_id: str = "") -> None:
     """Agenda processamento leve das pendências de agent/APK após heartbeat.
 
-    Não bloqueia o /heartbeat: se um worker antigo voltar online depois do update
-    da VPS, o script tenta entregar worker_update/apk_build pendentes em segundo
-    plano. A VPS continua sendo a fonte de decisão; o worker só executa jobs
-    whitelist.
+    O endpoint de heartbeat/poll/result pode ser chamado várias vezes por minuto.
+    Sem proteção, cada chamada abre um process-pending novo e a VPS pequena fica
+    presa em subprocessos concorrentes. Esta função é fire-and-forget, mas agora
+    tem lock/cooldown por worker e mata execuções claramente antigas antes de
+    abrir outra. O script também possui lock próprio como segunda linha de defesa.
     """
+    if not _env_bool_web("CORE_WORKER_PENDING_AUTOMATION_ENABLED", True):
+        return
     worker_id = str(worker_id or "").strip()
+    key = _automation_worker_key(worker_id)
+    now = time.time()
+    cooldown = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_COOLDOWN_SECONDS", 60.0, minimum=5.0, maximum=900.0)
+    max_runtime = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_MAX_RUNTIME_SECONDS", 180.0, minimum=30.0, maximum=1800.0)
+
     script = os.path.join(os.getcwd(), "scripts", "core-worker-automation.py")
     if not os.path.isfile(script):
         return
-    py = os.path.join(os.getcwd(), ".venv", "bin", "python")
-    if not os.path.isfile(py):
-        py = shutil.which("python3") or "python3"
-    cmd = [py, script, "process-pending"]
-    if worker_id:
-        cmd.extend(["--worker-id", worker_id])
-    try:
-        subprocess.Popen(cmd, cwd=os.getcwd(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    except Exception:
-        pass
+
+    with _core_worker_pending_automation_lock:
+        process = _core_worker_pending_automation_processes.get(key)
+        last_started = float(_core_worker_pending_automation_last_started.get(key) or 0.0)
+        if _is_process_running(process):
+            age = now - last_started
+            if age < max_runtime:
+                _log_pending_automation_skip(key, f"already_running age={age:.1f}s")
+                return
+            _log_pending_automation_skip(key, f"stale_process_kill age={age:.1f}s")
+            with contextlib.suppress(Exception):
+                process.terminate()
+            time.sleep(0.05)
+            if _is_process_running(process):
+                with contextlib.suppress(Exception):
+                    process.kill()
+            _core_worker_pending_automation_processes.pop(key, None)
+
+        if now - last_started < cooldown:
+            _log_pending_automation_skip(key, f"cooldown {now - last_started:.1f}s<{cooldown:.1f}s")
+            return
+
+        py = os.path.join(os.getcwd(), ".venv", "bin", "python")
+        if not os.path.isfile(py):
+            py = shutil.which("python3") or "python3"
+        cmd = [py, script, "process-pending"]
+        if worker_id:
+            cmd.extend(["--worker-id", worker_id])
+        try:
+            process = subprocess.Popen(cmd, cwd=os.getcwd(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                app.logger.warning("core-worker automation spawn failed | worker=%s error=%s", key, exc)
+            return
+        _core_worker_pending_automation_processes[key] = process
+        _core_worker_pending_automation_last_started[key] = now
+        with contextlib.suppress(Exception):
+            app.logger.info("core-worker automation started | worker=%s pid=%s", key, getattr(process, "pid", ""))
 
 
 @app.post("/core-worker/pair")
