@@ -28,6 +28,10 @@ MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE = str(
     getattr(config, "MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE", "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta")
     or "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta"
 ).strip()
+MUSIC_WORKER_NO_CAPACITY_MESSAGE = str(
+    getattr(config, "MUSIC_WORKER_NO_CAPACITY_MESSAGE", "Sistema de música indisponível no momento: Nenhum worker disponível")
+    or "Sistema de música indisponível no momento: Nenhum worker disponível"
+).strip()
 
 
 def _as_bool(value: object, default: bool = False) -> bool:
@@ -91,7 +95,12 @@ class MusicWorkerSelection:
 
     @property
     def message(self) -> str:
-        return MUSIC_WORKER_UNAVAILABLE_MESSAGE if not self.available else ""
+        if self.available:
+            return ""
+        reason = str(self.reason or "").lower()
+        if "music_agent_full" in reason or "sem_capacidade" in reason or "capacity" in reason:
+            return MUSIC_WORKER_NO_CAPACITY_MESSAGE
+        return MUSIC_WORKER_UNAVAILABLE_MESSAGE
 
 
 def _load_public_workers() -> list[Mapping[str, Any]]:
@@ -174,14 +183,17 @@ def _music_agent_active_sessions(agent: Mapping[str, Any] | None) -> int:
 
 def worker_music_agent_summary(worker: Mapping[str, Any] | None) -> dict[str, Any]:
     agent = _worker_music_agent(worker)
-    min_version = str(getattr(config, "MUSIC_AGENT_MIN_VERSION", "0.3.2") or "0.3.2")
+    min_version = str(getattr(config, "MUSIC_AGENT_MIN_VERSION", "0.3.3") or "0.3.3")
     max_sessions = max(1, int(getattr(config, "MUSIC_AGENT_MAX_SESSIONS_PER_WORKER", 2) or 2))
     if not isinstance(agent, Mapping):
         return {"available": False, "reason": "music_agent_missing", "version": "", "active_sessions": 0, "max_sessions": max_sessions}
     version = str(agent.get("version") or agent.get("file_version") or "").strip()
     active_sessions = _music_agent_active_sessions(agent)
     ok = _as_bool(agent.get("ok"), False) or _as_bool(agent.get("available"), False)
-    ready = ok and _as_bool(agent.get("discord_ready"), False) and _as_bool(agent.get("pool_connected"), False)
+    # YouTube direto usa o Music Agent com voz/ffmpeg e não depende do pool
+    # Lavalink. O pool só é obrigatório para fontes que realmente usam
+    # Lavalink/LavaSrc; não pode bloquear a seleção do worker turbo online.
+    ready = ok and _as_bool(agent.get("discord_ready"), False)
     if version and not _version_at_least(version, min_version):
         return {"available": False, "reason": f"music_agent_old:{version}<{min_version}", "version": version, "active_sessions": active_sessions, "max_sessions": max_sessions}
     if not ready:
@@ -189,6 +201,20 @@ def worker_music_agent_summary(worker: Mapping[str, Any] | None) -> dict[str, An
     if active_sessions >= max_sessions:
         return {"available": False, "reason": "music_agent_full", "version": version, "active_sessions": active_sessions, "max_sessions": max_sessions}
     return {"available": True, "reason": "ok", "version": version, "active_sessions": active_sessions, "max_sessions": max_sessions}
+
+
+def _music_agent_bootstrap_allowed(reason: object = "") -> bool:
+    """True when an online turbo worker may be selected to start/fix its agent.
+
+    A stopped/outdated agent is not the same thing as an offline worker. Selecting
+    the worker lets phone_worker.py start/restart the Music Agent on the real play
+    command and avoids the wrong behavior where `_play` says there is no worker.
+    Capacity remains a hard block.
+    """
+    if not _as_bool(getattr(config, "MUSIC_AGENT_BOOTSTRAP_ON_PLAY", True), True):
+        return False
+    text = str(reason or "").lower()
+    return "music_agent_full" not in text
 
 
 def worker_music_summary(worker: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -302,8 +328,14 @@ def _configured_phone_worker_selection(reason: str = "phone_worker_configurado")
     if _as_bool(getattr(config, "MUSIC_AGENT_ENABLED", True), True):
         agent_summary = worker_music_agent_summary({"status": {"music_agent": health.get("music_agent") if isinstance(health, Mapping) else None}})
         if not agent_summary.get("available"):
-            logger.info("[music/worker] phone worker configurado sem Music Agent elegível: %s", agent_summary.get("reason"))
-            return None
+            if _music_agent_bootstrap_allowed(agent_summary.get("reason")):
+                logger.info(
+                    "[music/worker] phone worker configurado será usado para preparar Music Agent: %s",
+                    agent_summary.get("reason"),
+                )
+            else:
+                logger.info("[music/worker] phone worker configurado sem Music Agent elegível: %s", agent_summary.get("reason"))
+                return None
 
     lavalink_host = str(
         getattr(config, "MUSIC_WORKER_LAVALINK_HOST", "")
@@ -406,8 +438,12 @@ def select_music_worker() -> MusicWorkerSelection:
         if _as_bool(getattr(config, "MUSIC_AGENT_ENABLED", True), True):
             agent_summary = worker_music_agent_summary(worker)
             if not agent_summary.get("available"):
-                rejected.append(f"{worker_id or name}:{agent_summary.get('reason') or 'music_agent_indisponivel'}")
-                continue
+                reason = str(agent_summary.get('reason') or 'music_agent_indisponivel')
+                if not _music_agent_bootstrap_allowed(reason):
+                    rejected.append(f"{worker_id or name}:{reason}")
+                    continue
+                logger.info("[music/worker] selecionando worker turbo para preparar Music Agent | worker=%s reason=%s", worker_id or name, reason)
+                return MusicWorkerSelection(True, worker_id=worker_id, name=name, worker=worker, reason=f"bootstrap:{reason}")
         return MusicWorkerSelection(True, worker_id=worker_id, name=name, worker=worker, reason="ok")
 
     reason = "; ".join(rejected[:3]) if rejected else "nenhum worker compatível"
@@ -701,11 +737,21 @@ async def music_agent_command(
         message = str(exc or "").strip() or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE
         logger.warning("[music/agent] comando remoto falhou | worker=%s action=%s erro=%s", selection.worker_id, action, message)
         lower = message.lower()
-        if "connection" in lower or "connect" in lower or "refused" in lower or "timeout" in lower:
+        if (
+            "music agent" in lower
+            or "configure music_agent" in lower
+            or "connection" in lower
+            or "connect" in lower
+            or "refused" in lower
+            or "timeout" in lower
+        ):
             message = "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta"
         raise MusicWorkerEngineUnavailable(message[:260]) from exc
     if data.get("ok") is False:
         message = str(data.get("error") or data.get("message") or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE).strip()
+        lower = message.lower()
+        if "music agent" in lower or "configure music_agent" in lower or "sem token" in lower:
+            message = str(getattr(config, "MUSIC_AGENT_MISSING_TOKEN_MESSAGE", MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE) or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE)
         raise MusicWorkerEngineUnavailable(message[:260])
     logger.info("[music/agent] comando remoto enviado | worker=%s action=%s guild=%s", selection.worker_id or selection.name, action, guild_id)
     return data
@@ -747,7 +793,7 @@ def require_music_worker_available() -> MusicWorkerSelection:
     selection = select_music_worker()
     if not selection.available:
         logger.info("[music/worker] indisponível: %s", selection.reason or "sem motivo")
-        raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+        raise MusicWorkerUnavailable(selection.message or MUSIC_WORKER_UNAVAILABLE_MESSAGE)
     return selection
 
 

@@ -39,7 +39,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.2"
+AGENT_VERSION = "0.3.3"
 STARTED_AT = time.time()
 
 
@@ -229,7 +229,12 @@ class GuildMusicState:
             "player_present": player is not None,
             "player_playing": playing,
             "position_ms": position_ms,
-            "confirmed_playing": bool(self.status == "playing" and player is not None and voice_connected),
+            "confirmed_playing": bool(
+                self.status == "playing"
+                and player is not None
+                and voice_connected
+                and (playing or position_ms > 0)
+            ),
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,
             "queue_size": len(self.queue),
@@ -592,11 +597,14 @@ class MusicAgent:
             asyncio.run_coroutine_threadsafe(self._direct_after(guild_id, error), loop)
 
         voice_client.play(source, after=after)
-        await asyncio.sleep(0.25)
+        confirm_delay = max(0.4, min(2.0, env_float("MUSIC_AGENT_DIRECT_CONFIRM_SECONDS", 0.9)))
+        await asyncio.sleep(confirm_delay)
+        if not getattr(voice_client, "is_connected", lambda: False)():
+            raise RuntimeError("conectei no canal, mas a voz caiu antes do áudio")
         if not getattr(voice_client, "is_playing", lambda: False)() and not getattr(voice_client, "is_paused", lambda: False)():
             raise RuntimeError("ffmpeg iniciou, mas o áudio não ficou tocando")
-        self._set_status(st, "playing", event="direct_track_start")
-        self.log("play_started", guild_id=guild_id, transport="direct", title=track.title)
+        self._set_status(st, "playing", event="direct_track_start_confirmed")
+        self.log("play_started", guild_id=guild_id, transport="direct", title=track.title, confirm_delay=confirm_delay)
 
     def _build_ffmpeg_source(self, stream_url: str) -> discord.AudioSource:
         opus_cls = getattr(discord, "FFmpegOpusAudio", None)

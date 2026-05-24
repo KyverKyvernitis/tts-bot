@@ -51,7 +51,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.4"
+PHONE_WORKER_VERSION = "1.10.5"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -1986,6 +1986,38 @@ def _read_music_agent_version_from_path(path: Path | None = None) -> str:
     return match.group(1) if match else ""
 
 
+def _version_tuple_loose(value: Any) -> tuple[int, ...]:
+    try:
+        parts = [int(part) for part in re.findall(r"\d+", str(value or ""))[:4]]
+    except Exception:
+        parts = []
+    return tuple(parts or [0])
+
+
+def _version_lt_loose(current: Any, target: Any) -> bool:
+    left = _version_tuple_loose(current)
+    right = _version_tuple_loose(target)
+    size = max(len(left), len(right))
+    left = left + (0,) * (size - len(left))
+    right = right + (0,) * (size - len(right))
+    return left < right
+
+
+def _music_agent_start_script() -> Path:
+    explicit = str(os.getenv("MUSIC_AGENT_START_COMMAND") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return _best_script("start-phone-music-agent.sh")
+
+
+def _music_agent_pid_file() -> Path:
+    return Path(os.getenv("MUSIC_AGENT_PID_FILE") or (_phone_worker_dir() / "music_agent.pid")).expanduser()
+
+
+def _music_agent_log_file() -> Path:
+    return Path(os.getenv("MUSIC_AGENT_LOG_FILE") or (_phone_worker_dir() / "music_agent.log")).expanduser()
+
+
 def _music_agent_snapshot() -> dict[str, Any]:
     """Small local health probe for the same-bot Music Agent.
 
@@ -2014,12 +2046,20 @@ def _music_agent_snapshot() -> dict[str, Any]:
         data = json.loads(raw or "{}") if raw.strip() else {}
         if not isinstance(data, dict):
             data = {}
-        ok = bool(data.get("ok")) and bool(data.get("discord_ready")) and bool(data.get("pool_connected"))
+        runtime_version = str(data.get("version") or "").strip()
+        discord_ready = bool(data.get("discord_ready"))
+        # YouTube direto usa voz/ffmpeg do Music Agent e não precisa que o pool
+        # Lavalink esteja conectado. Pool conectado é detalhe técnico para
+        # playlists/Spotify/SoundCloud, não condição para o worker existir.
+        available = bool(data.get("available") or discord_ready)
+        needs_restart = bool(runtime_version and file_version and _version_lt_loose(runtime_version, file_version))
         data.update({
-            "ok": ok,
-            "available": ok,
+            "ok": available,
+            "available": available,
             "configured": configured,
             "file_version": file_version,
+            "runtime_version": runtime_version,
+            "needs_restart": needs_restart,
             "host": host,
             "port": port,
             "http_status": status,
@@ -2038,7 +2078,6 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "host": host,
             "port": port,
             "http_status": int(exc.code),
-            "file_version": file_version,
             "error": _short_text(raw or exc.reason, limit=180),
         }
     except Exception as exc:
@@ -2049,7 +2088,6 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "file_version": file_version,
             "host": host,
             "port": port,
-            "file_version": file_version,
             "error": f"{type(exc).__name__}: {_short_text(exc, limit=160)}",
         }
 
@@ -3483,8 +3521,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
             timeout_seconds = 18.0
         timeout_seconds = max(1.0, min(90.0, timeout_seconds))
         base = f"http://{host}:{port}"
+        agent_configured = bool(str(os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or "").strip())
 
-        if action not in {"status", "get_state"} and not str(os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or "").strip():
+        if action not in {"status", "get_state"} and not agent_configured:
             return {
                 "ok": False,
                 "available": False,
@@ -3496,21 +3535,37 @@ class WorkerHandler(BaseHTTPRequestHandler):
         headers = {"Accept": "application/json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        try:
+
+        def _request_agent() -> dict[str, Any]:
+            local_headers = dict(headers)
             if action in {"status", "get_state"}:
-                req = urllib.request.Request(f"{base}/health", headers=headers, method="GET")
+                req = urllib.request.Request(f"{base}/health", headers=local_headers, method="GET")
                 with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
                     raw = resp.read(min(self.max_output_bytes, 1024 * 1024)).decode("utf-8", "replace")
-                data = json.loads(raw or "{}")
+                parsed = json.loads(raw or "{}")
             else:
                 payload = {k: v for k, v in body.items() if k not in {"task", "timeout_seconds"}}
                 payload.setdefault("action", action)
                 encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-                headers["Content-Type"] = "application/json"
-                req = urllib.request.Request(f"{base}/command", data=encoded, headers=headers, method="POST")
+                local_headers["Content-Type"] = "application/json"
+                req = urllib.request.Request(f"{base}/command", data=encoded, headers=local_headers, method="POST")
                 with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
                     raw = resp.read(min(self.max_output_bytes, 1024 * 1024)).decode("utf-8", "replace")
-                data = json.loads(raw or "{}")
+                parsed = json.loads(raw or "{}")
+            return parsed if isinstance(parsed, dict) else {}
+
+        attempted_prepare: dict[str, Any] | None = None
+        try:
+            if action not in {"status", "get_state"}:
+                snapshot = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": agent_configured})
+                runtime_version = str(snapshot.get("version") or snapshot.get("runtime_version") or "").strip()
+                file_version = str(snapshot.get("file_version") or "").strip()
+                needs_restart = bool(snapshot.get("needs_restart") or (runtime_version and file_version and _version_lt_loose(runtime_version, file_version)))
+                if needs_restart:
+                    attempted_prepare = _run_service_action("music-agent", "restart")
+                elif not bool(snapshot.get("available")):
+                    attempted_prepare = _run_service_action("music-agent", "start")
+            data = _request_agent()
         except urllib.error.HTTPError as exc:
             raw = ""
             with contextlib.suppress(Exception):
@@ -3519,21 +3574,41 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 "ok": False,
                 "available": False,
                 "error": f"Music Agent HTTP {exc.code}: {_short_text(raw or exc.reason, limit=260)}",
-                "agent": {"host": host, "port": port, "configured": True},
+                "agent": {"host": host, "port": port, "configured": agent_configured},
+                "prepare": attempted_prepare,
             }
         except Exception as exc:
-            return {
-                "ok": False,
-                "available": False,
-                "error": f"{type(exc).__name__}: {_short_text(exc, limit=260)}",
-                "agent": {"host": host, "port": port, "configured": True},
-            }
+            # Uma queda de conexão no primeiro comando normalmente significa
+            # agent parado/desatualizado. Tenta um start uma vez antes de falhar.
+            if action not in {"status", "get_state"} and attempted_prepare is None and agent_configured:
+                try:
+                    attempted_prepare = _run_service_action("music-agent", "start")
+                    data = _request_agent()
+                except Exception as retry_exc:
+                    return {
+                        "ok": False,
+                        "available": False,
+                        "error": f"{type(retry_exc).__name__}: {_short_text(retry_exc, limit=260)}",
+                        "first_error": f"{type(exc).__name__}: {_short_text(exc, limit=180)}",
+                        "agent": {"host": host, "port": port, "configured": agent_configured},
+                        "prepare": attempted_prepare,
+                    }
+            else:
+                return {
+                    "ok": False,
+                    "available": False,
+                    "error": f"{type(exc).__name__}: {_short_text(exc, limit=260)}",
+                    "agent": {"host": host, "port": port, "configured": agent_configured},
+                    "prepare": attempted_prepare,
+                }
         if isinstance(data, dict):
             data.setdefault("ok", True)
-            data.setdefault("available", bool(data.get("discord_ready") or data.get("ok")))
-            data.setdefault("agent", {"host": host, "port": port, "configured": True})
+            data.setdefault("available", bool(data.get("discord_ready") or data.get("available") or data.get("ok")))
+            data.setdefault("agent", {"host": host, "port": port, "configured": agent_configured})
+            if attempted_prepare is not None:
+                data.setdefault("prepare", attempted_prepare)
             return data
-        return {"ok": False, "available": False, "error": "resposta inválida do Music Agent", "agent": {"host": host, "port": port, "configured": True}}
+        return {"ok": False, "available": False, "error": "resposta inválida do Music Agent", "agent": {"host": host, "port": port, "configured": agent_configured}, "prepare": attempted_prepare}
 
     def _task_music_ytdlp_resolve(self, body: dict[str, Any]) -> dict[str, Any]:
         query = str(body.get("query") or body.get("url") or body.get("q") or "").strip()
@@ -4636,9 +4711,13 @@ def _allowed_service_name(value: Any) -> str:
         "phone": "phone-worker",
         "watch": "phone-worker-watch",
         "watchdog": "phone-worker-watch",
+        "music": "music-agent",
+        "music-agent": "music-agent",
+        "musicagent": "music-agent",
+        "agent-music": "music-agent",
     }
     service = aliases.get(service, service)
-    if service not in {"phone-worker", "phone-worker-watch", "tailscale"}:
+    if service not in {"phone-worker", "phone-worker-watch", "music-agent", "tailscale"}:
         raise ValueError("serviço não permitido")
     return service
 
@@ -4684,6 +4763,28 @@ def _service_status(service: str) -> dict[str, Any]:
             "script": str(_best_script("watch-phone-worker.sh")),
             "scripts": _script_inventory(),
         }
+    if service == "music-agent":
+        pid = _read_pid_file(_music_agent_pid_file())
+        snapshot = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
+        running = bool(snapshot.get("available") or _pid_alive(pid) or _pgrep_count("music_agent.py") > 0)
+        return {
+            "ok": True,
+            "service": service,
+            "manageable": True,
+            "running": running,
+            "available": bool(snapshot.get("available")),
+            "configured": bool(snapshot.get("configured")),
+            "version": snapshot.get("version") or snapshot.get("runtime_version") or "",
+            "file_version": snapshot.get("file_version") or "",
+            "needs_restart": bool(snapshot.get("needs_restart")),
+            "pid_file": str(_music_agent_pid_file()),
+            "pid_file_pid": pid,
+            "pid_file_alive": _pid_alive(pid),
+            "processes": _pgrep_count("music_agent.py"),
+            "script": str(_music_agent_start_script()),
+            "log_file": str(_music_agent_log_file()),
+            "health": snapshot,
+        }
     tailscale = _tailscale_snapshot(probe_vps=True)
     return {
         "ok": True,
@@ -4727,6 +4828,38 @@ def _run_service_action(service: str, action: str) -> dict[str, Any]:
             subprocess.Popen(["bash", str(watch_script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             time.sleep(1)
         return _service_status(service) | {"action": action}
+
+    if service == "music-agent":
+        start_script = _music_agent_start_script()
+        if action in {"stop", "restart"}:
+            pid = _read_pid_file(_music_agent_pid_file())
+            if pid:
+                with contextlib.suppress(Exception):
+                    os.kill(int(pid), 15)
+            with contextlib.suppress(Exception):
+                _music_agent_pid_file().unlink()
+            for _ in range(4):
+                if _pgrep_count("music_agent.py") <= 0:
+                    break
+                time.sleep(0.25)
+            if _pgrep_count("music_agent.py") > 0:
+                with contextlib.suppress(Exception):
+                    _run_text_command(["pkill", "-f", "music_agent.py"], timeout=2.0, max_bytes=4096)
+                time.sleep(0.5)
+        result_extra: dict[str, Any] = {}
+        if action in {"start", "restart"}:
+            if not start_script.exists():
+                raise FileNotFoundError(str(start_script))
+            proc = subprocess.run(["bash", str(start_script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90.0)
+            result_extra.update({
+                "returncode": int(proc.returncode),
+                "stdout": _sanitize_log_text(proc.stdout.decode("utf-8", errors="replace"), limit=3000),
+                "stderr": _sanitize_log_text(proc.stderr.decode("utf-8", errors="replace"), limit=3000),
+            })
+        status = _service_status(service) | {"action": action, **result_extra}
+        if result_extra.get("returncode") not in (None, 0) and not bool(status.get("available")):
+            status["ok"] = False
+        return status
 
     # phone-worker é o próprio processo atual. Parar/reiniciar precisa ser deferido
     # para o resultado do job conseguir voltar para a VPS antes do tmux/pkill.

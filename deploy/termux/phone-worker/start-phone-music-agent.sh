@@ -51,6 +51,43 @@ health_ok() {
   fi
 }
 
+health_json() {
+  if [[ -n "$TOKEN" ]]; then
+    curl --max-time 4 -fsS -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/health" 2>/dev/null || true
+  else
+    curl --max-time 4 -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null || true
+  fi
+}
+
+running_version() {
+  health_json | "$PYTHON_BIN" -c 'import json,sys;
+try:
+ data=json.load(sys.stdin); print(str(data.get("version") or ""))
+except Exception: pass' 2>/dev/null || true
+}
+
+file_version() {
+  "$PYTHON_BIN" - "$WORKER_DIR/music_agent.py" <<'PYVER' 2>/dev/null || true
+import re, sys
+try:
+    text=open(sys.argv[1], encoding="utf-8", errors="ignore").read()
+except Exception:
+    text=""
+m=re.search(r'^AGENT_VERSION\s*=\s*["\']([^"\']+)["\']', text, re.M)
+print(m.group(1) if m else "")
+PYVER
+}
+
+version_lt() {
+  "$PYTHON_BIN" - "$1" "$2" <<'PYVERCMP' 2>/dev/null
+import re, sys
+def parts(v):
+    xs=[int(x) for x in re.findall(r"\d+", v or "")[:4]]
+    return tuple(xs or [0])
+sys.exit(0 if parts(sys.argv[1]) < parts(sys.argv[2]) else 1)
+PYVERCMP
+}
+
 list_pids() {
   pgrep -f 'music_agent.py' 2>/dev/null || true
 }
@@ -88,8 +125,15 @@ ensure_deps
 mkdir -p "$(dirname "$LOG_FILE")"
 
 if health_ok; then
-  log "Music Agent já está online em $HOST:$PORT"
-  exit 0
+  running_ver="$(running_version)"
+  file_ver="$(file_version)"
+  if [[ -n "$running_ver" && -n "$file_ver" ]] && version_lt "$running_ver" "$file_ver"; then
+    log "Music Agent online está desatualizado; runtime=$running_ver arquivo=$file_ver; reiniciando"
+    kill_agent
+  else
+    log "Music Agent já está online em $HOST:$PORT versão=${running_ver:-?}"
+    exit 0
+  fi
 fi
 
 if truthy "$KILL_DUPLICATES"; then

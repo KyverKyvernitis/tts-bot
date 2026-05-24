@@ -54,7 +54,7 @@ class Music(commands.Cog):
             selection = await self.router.ensure_music_worker_available()
             if not getattr(selection, "available", False):
                 logger.info("[music/worker] ação bloqueada: %s", getattr(selection, "reason", "worker indisponível"))
-                await self._reply(ctx, getattr(self.router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
+                await self._reply(ctx, getattr(selection, "message", "") or getattr(self.router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
                 return False
         state = self.router.get_state(ctx.guild.id)
         vc = getattr(ctx.guild, "voice_client", None)
@@ -99,6 +99,9 @@ class Music(commands.Cog):
             return f"`🎧` **Tocando:** {track.short_title} • `{track.duration_label}`"
         if status in {"failed", "error"}:
             error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:180]
+            lower_error = error.lower()
+            if "music agent" in lower_error or "configure music_agent" in lower_error or "sem token" in lower_error:
+                error = "backend musical ainda não está pronto"
             return f"`⚠️` Não consegui iniciar **{track.short_title}**: `{error}`"
         return f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`"
 
@@ -169,7 +172,7 @@ class Music(commands.Cog):
         clean = raw.strip()
         worker_unavailable = getattr(self.router, "music_worker_unavailable_message", "")
         worker_engine_unavailable = getattr(getattr(self.router, "backends", None), "music_worker_engine_error_message", lambda _guild_id=None: "")(None)
-        if clean and clean in {worker_unavailable, worker_engine_unavailable}:
+        if clean and (clean in {worker_unavailable, worker_engine_unavailable} or clean.startswith("Sistema de música indisponível no momento:")):
             return clean
         lower = raw.lower()
         if any(
@@ -356,7 +359,7 @@ class Music(commands.Cog):
             selection = await self.router.ensure_music_worker_available()
             if not getattr(selection, "available", False):
                 logger.info("[music/worker] play bloqueado: %s", getattr(selection, "reason", "worker indisponível"))
-                await self._reply(ctx, getattr(self.router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
+                await self._reply(ctx, getattr(selection, "message", "") or getattr(self.router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
                 return
 
         input_profile = self._query_profile(query)

@@ -180,7 +180,7 @@ async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, req
     if getattr(router, "music_worker_only_enabled", lambda: False)():
         selection = await router.ensure_music_worker_available()
         if not getattr(selection, "available", False):
-            raise RuntimeError(getattr(router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
+            raise RuntimeError(getattr(selection, "message", "") or getattr(router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
         if _worker_only_should_use_lavalink(query):
             if _is_lavalink_search_request(query):
                 batch = await backends.search_lavalink_tracks(
@@ -310,7 +310,7 @@ async def _require_music_voice_interaction(interaction: discord.Interaction, rou
     if getattr(router, "music_worker_only_enabled", lambda: False)():
         selection = await router.ensure_music_worker_available()
         if not getattr(selection, "available", False):
-            message = getattr(router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online")
+            message = getattr(selection, "message", "") or getattr(router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online")
             await _send_interaction_notice(interaction, message)
             return False
     return True
@@ -883,7 +883,7 @@ class AddSongModal(discord.ui.Modal):
             return
         except Exception as exc:
             message = str(exc or "").strip()
-            if message == getattr(self.router, "music_worker_unavailable_message", ""):
+            if message == getattr(self.router, "music_worker_unavailable_message", "") or message.startswith("Sistema de música indisponível no momento:"):
                 await interaction.followup.send(message, ephemeral=True)
             else:
                 await interaction.followup.send(f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
