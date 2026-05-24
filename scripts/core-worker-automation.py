@@ -12,6 +12,7 @@ import sys
 import time
 import zipfile
 import contextlib
+import fcntl
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -39,6 +40,37 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
 PENDING_PATH = ROOT / "data" / "core_worker_automation_pending.json"
 STATUS_PATH = ROOT / "data" / "core_worker_automation_status.json"
 STATE_PATH = ROOT / "data" / "core_worker_automation_state.json"
+LOCK_DIR = ROOT / "data" / "locks"
+
+
+def _lock_key(value: str) -> str:
+    value = str(value or "").strip() or "all"
+    return re.sub(r"[^A-Za-z0-9_.:-]+", "_", value)[:120] or "all"
+
+
+@contextlib.contextmanager
+def _process_pending_lock(worker_id: str):
+    LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = LOCK_DIR / f"core-worker-automation-process-pending-{_lock_key(worker_id)}.lock"
+    fh = lock_path.open("a+", encoding="utf-8")
+    acquired = False
+    try:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+            fh.seek(0)
+            fh.truncate()
+            fh.write(json.dumps({"pid": os.getpid(), "worker_id": str(worker_id or ""), "started_at": time.time()}, ensure_ascii=False))
+            fh.flush()
+        except BlockingIOError:
+            acquired = False
+        yield acquired
+    finally:
+        if acquired:
+            with contextlib.suppress(Exception):
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        with contextlib.suppress(Exception):
+            fh.close()
 
 
 def _load_repo_env() -> None:
@@ -1076,8 +1108,15 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 2
     if args.command == "process-pending":
-        result = process_pending(worker_id=str(getattr(args, "worker_id", "") or ""))
-        return 0 if result.get("ok") else 2
+        worker_id = str(getattr(args, "worker_id", "") or "")
+        with _process_pending_lock(worker_id) as acquired:
+            if not acquired:
+                result = {"ok": True, "skipped": "already_running", "worker_id": worker_id, "processed_at": time.time()}
+                write_status({"process_pending": result, "finished_at": time.time()})
+                print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+                return 0
+            result = process_pending(worker_id=worker_id)
+            return 0 if result.get("ok") else 2
     return 1
 
 
