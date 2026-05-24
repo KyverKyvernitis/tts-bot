@@ -39,6 +39,7 @@ from .worker_node import (
     require_music_worker_available as _require_music_worker_available,
     require_music_worker_available_async as _require_music_worker_available_async,
     resolve_music_tracks_on_worker as _resolve_music_tracks_on_worker,
+    music_agent_command as _music_agent_command,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ logger = logging.getLogger(__name__)
 MUSIC_DEFAULT_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_DEFAULT_VOLUME", 0.55))))
 TTS_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_TTS_VOLUME", 1.0))))
 MUSIC_TTS_LOCAL_DUCK_FACTOR = max(0.0, min(1.0, float(getattr(config, "MUSIC_TTS_LOCAL_DUCK_PERCENT", 5.0)) / 100.0))
+MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT = max(0, min(100, int(getattr(config, "MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT", 8))))
 MUSIC_LAVALINK_TTS_PAUSE_ENABLED = bool(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_ENABLED", True))
 MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS = max(0.2, float(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS", 0.35)))
 MUSIC_TTS_OVERLAY_TIMEOUT_IS_NON_FATAL = bool(getattr(config, "MUSIC_TTS_OVERLAY_TIMEOUT_IS_NON_FATAL", True))
@@ -3867,6 +3869,30 @@ class AudioRouter:
             pass
 
 
+    def _track_from_agent_payload(self, payload: dict, fallback: MusicTrack | None = None) -> MusicTrack | None:
+        if not isinstance(payload, dict):
+            return fallback
+        title = str(payload.get("title") or (getattr(fallback, "title", "") if fallback is not None else "") or "Música").strip() or "Música"
+        webpage_url = str(payload.get("webpage_url") or (getattr(fallback, "webpage_url", "") if fallback is not None else "") or payload.get("query") or "").strip()
+        requester_id = int(payload.get("requester_id") or (getattr(fallback, "requester_id", 0) if fallback is not None else 0) or 0)
+        requester_name = str(payload.get("requester_name") or (getattr(fallback, "requester_name", "") if fallback is not None else "") or "").strip()
+        track = MusicTrack(
+            title=title,
+            webpage_url=webpage_url,
+            original_url=str(payload.get("query") or (getattr(fallback, "original_url", "") if fallback is not None else "") or webpage_url),
+            stream_url=str(getattr(fallback, "stream_url", "") if fallback is not None else ""),
+            requester_id=requester_id,
+            requester_name=requester_name,
+            duration=(payload.get("duration") if payload.get("duration") is not None else (getattr(fallback, "duration", None) if fallback is not None else None)),
+            uploader=str(payload.get("uploader") or (getattr(fallback, "uploader", "") if fallback is not None else "") or ""),
+            thumbnail=str(payload.get("thumbnail") or (getattr(fallback, "thumbnail", "") if fallback is not None else "") or ""),
+            source=str(payload.get("source") or (getattr(fallback, "source", "") if fallback is not None else "") or "YouTube"),
+            extractor="worker-ytdlp",
+            is_live=bool(getattr(fallback, "is_live", False)) if fallback is not None else False,
+        )
+        track.display_source = "YouTube" if "youtube" in track.source.lower() or "ytdlp" in track.source.lower() else track.source
+        return track
+
     async def sync_music_agent_state(
         self,
         guild_id: int,
@@ -3904,6 +3930,8 @@ class AudioRouter:
 
         raw_status = str(remote.get("status") or "").strip().lower()
         current_payload = remote.get("current") if isinstance(remote.get("current"), dict) else {}
+        if current_payload:
+            track = self._track_from_agent_payload(current_payload, track)
         last_error = str(remote.get("last_error") or "").strip()
         confirmed_playing = bool(remote.get("confirmed_playing"))
         if raw_status == "playing" and not confirmed_playing:
@@ -3982,7 +4010,15 @@ class AudioRouter:
             current_panel_key = self._panel_key_for_track(state.current)
 
             async with state.panel_lock:
-                should_repost = bool(repost and has_player_content)
+                track_changed = bool(
+                    has_player_content
+                    and state.now_message is not None
+                    and current_panel_key
+                    and state.panel_track_key
+                    and current_panel_key != state.panel_track_key
+                    and bool(getattr(config, "MUSIC_PANEL_REPOST_ON_TRACK_CHANGE", True))
+                )
+                should_repost = bool(has_player_content and (repost or (create and track_changed)))
                 if should_repost and state.now_message is not None:
                     old_message = state.now_message
                     state.now_message = None
@@ -4527,6 +4563,28 @@ class AudioRouter:
             return None
         return local_vc
 
+    async def _set_music_agent_ducking(self, guild_id: int, enabled: bool, state: MusicGuildState | None = None) -> bool:
+        if not guild_id:
+            return False
+        try:
+            action = "duck" if enabled else "unduck"
+            kwargs: dict[str, Any] = {"guild_id": int(guild_id), "timeout_seconds": 2.0}
+            if enabled:
+                kwargs["volume_percent"] = MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT
+            elif state is not None:
+                kwargs["volume_percent"] = max(0, min(150, int(round(float(getattr(state, "volume", MUSIC_DEFAULT_VOLUME) or MUSIC_DEFAULT_VOLUME) * 100))))
+            await _music_agent_command(action, **kwargs)
+            logger.info(
+                "[music/agent] tts_duck_%s | guild=%s volume=%s",
+                "start" if enabled else "restore",
+                guild_id,
+                kwargs.get("volume_percent", "normal"),
+            )
+            return True
+        except Exception as exc:
+            logger.debug("[music/agent] falha ao ajustar ducking remoto | guild=%s enabled=%s erro=%s", guild_id, enabled, exc)
+            return False
+
     async def play_tts(
         self,
         *,
@@ -4683,6 +4741,10 @@ class AudioRouter:
                 "tts_local_duck_percent": MUSIC_TTS_LOCAL_DUCK_FACTOR * 100.0,
             }
 
+        agent_ducked = False
+        if state is not None and guild_id is not None and str(getattr(state, "current_backend", "") or "").lower() == "agent" and state.current is not None:
+            agent_ducked = await self._set_music_agent_ducking(int(guild_id), True, state)
+
         finished = loop.create_future()
 
         def _after(error: Exception | None) -> None:
@@ -4699,18 +4761,24 @@ class AudioRouter:
 
             loop.call_soon_threadsafe(_finish_once)
 
-        play_call_started_at = time.monotonic()
-        vc.play(source, after=_after)
-        play_call_ms = max(0.0, (time.monotonic() - play_call_started_at) * 1000.0)
-        playback_started_at = time.monotonic()
-        await asyncio.wait_for(finished, timeout=max(1.0, float(timeout)))
-        playback_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
-        return {
-            "source_setup_ms": source_setup_ms,
-            "play_call_ms": play_call_ms,
-            "playback_ms": playback_ms,
-            "playback_started_at": playback_started_at,
-        }
+        try:
+            play_call_started_at = time.monotonic()
+            vc.play(source, after=_after)
+            play_call_ms = max(0.0, (time.monotonic() - play_call_started_at) * 1000.0)
+            playback_started_at = time.monotonic()
+            await asyncio.wait_for(finished, timeout=max(1.0, float(timeout)))
+            playback_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
+            return {
+                "source_setup_ms": source_setup_ms,
+                "play_call_ms": play_call_ms,
+                "playback_ms": playback_ms,
+                "playback_started_at": playback_started_at,
+                "tts_agent_ducked": bool(agent_ducked),
+                "tts_agent_duck_percent": MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT if agent_ducked else 0,
+            }
+        finally:
+            if agent_ducked and state is not None and guild_id is not None:
+                await self._set_music_agent_ducking(int(guild_id), False, state)
 
     async def pause(self, guild_id: int) -> bool:
         guild = self.bot.get_guild(int(guild_id))

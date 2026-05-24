@@ -762,6 +762,27 @@ class SearchSelect(discord.ui.Select):
         if guild is None:
             await interaction.response.send_message("Guild não encontrada.", ephemeral=True)
             return
+
+        # ACK imediato: escolher um resultado pode resolver stream, consultar worker
+        # e iniciar voz. Se isso acontecer antes do defer, o Discord mostra
+        # "Esta interação falhou" mesmo quando o painel acaba atualizando.
+        try:
+            await interaction.response.defer(thinking=False)
+        except discord.NotFound:
+            return
+        except Exception:
+            # Se já foi respondida por algum caminho defensivo, continua usando edit/followup.
+            pass
+
+        async def edit_original(content: str) -> None:
+            try:
+                await interaction.edit_original_response(content=content, embed=None, view=None)
+            except discord.NotFound:
+                return
+            except Exception:
+                with contextlib.suppress(Exception):
+                    await interaction.followup.send(content, ephemeral=True)
+
         if not await _require_music_voice_interaction(interaction, self.router, self.guild_id):
             return
         idx = int(self.values[0])
@@ -769,7 +790,7 @@ class SearchSelect(discord.ui.Select):
         voice_channel = _interaction_user_voice_channel(interaction)
         text_channel = guild.get_channel(self.text_channel_id) or interaction.channel
         if voice_channel is None or text_channel is None:
-            await interaction.response.send_message("Canal não encontrado.", ephemeral=True)
+            await edit_original("Canal não encontrado.")
             return
         if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
             try:
@@ -784,7 +805,7 @@ class SearchSelect(discord.ui.Select):
                     requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
                 )
             except Exception as exc:
-                await interaction.response.edit_message(content=f"`⚠️` Não consegui preparar essa música: `{exc}`", embed=None, view=None)
+                await edit_original(f"`⚠️` Não consegui preparar essa música: `{exc}`")
                 return
             await _sync_agent_panel(
                 self.router,
@@ -796,7 +817,7 @@ class SearchSelect(discord.ui.Select):
                 queued=bool(result.get("queued")),
             )
             msg = _agent_play_message(track, result)
-            await interaction.response.edit_message(content=msg, embed=None, view=None)
+            await edit_original(msg)
             state = result.get("state") if isinstance(result.get("state"), dict) else {}
             status = str(state.get("status") or "").lower()
             if not result.get("queued") and status not in {"playing", "failed", "error"}:
@@ -812,11 +833,7 @@ class SearchSelect(discord.ui.Select):
         )
         added, dropped = await self.router.enqueue(guild, voice_channel, text_channel, [track])
         if added <= 0:
-            await interaction.response.edit_message(
-                content="`⚠️` Não adicionei nada: essa música já está no queue/tocando ou o queue está cheio.",
-                embed=None,
-                view=None,
-            )
+            await edit_original("`⚠️` Não adicionei nada: essa música já está no queue/tocando ou o queue está cheio.")
             return
         state = self.router.get_state(self.guild_id)
         position = state.queue_size() + (1 if state.current else 0)
@@ -826,7 +843,7 @@ class SearchSelect(discord.ui.Select):
             msg = f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`"
         if dropped:
             msg += "\n`⚠️` Alguns itens extras não entraram porque já estavam no queue/tocando ou porque o queue está cheio."
-        await interaction.response.edit_message(content=msg, embed=None, view=None)
+        await edit_original(msg)
 
 
 class SearchResultView(discord.ui.View):

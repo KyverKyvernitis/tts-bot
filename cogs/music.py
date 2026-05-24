@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from typing import Optional
 
 import config
@@ -317,6 +318,20 @@ class Music(commands.Cog):
         )
         return ExtractedBatch(tracks=[track], query=identifier, is_playlist=False)
 
+    def _worker_direct_url_batch(self, query: str, *, requester_id: int, requester_name: str) -> ExtractedBatch:
+        profile = self._query_profile(query)
+        title = "YouTube" if profile.is_youtube else "Link"
+        track = MusicTrack(
+            title=title,
+            webpage_url=profile.canonical or query,
+            original_url=query,
+            requester_id=requester_id,
+            requester_name=requester_name or "",
+            source="YouTube" if profile.is_youtube else (profile.platform or "link"),
+            extractor="worker-ytdlp",
+        )
+        return ExtractedBatch(tracks=[track], query=query, is_playlist=False)
+
     def _is_lavalink_search_request(self, query: str) -> bool:
         raw = (query or "").strip()
         if not raw:
@@ -393,13 +408,25 @@ class Music(commands.Cog):
                     )
                 else:
                     youtube_text_search = self._is_youtube_text_search(query)
-                    batch = await resolve_music_tracks_on_worker(
-                        query,
-                        requester_id=ctx.author.id,
-                        requester_name=requester_name,
-                        limit=(max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))) if youtube_text_search else 1),
-                        metadata_only=youtube_text_search,
-                    )
+                    if input_profile.is_url and not youtube_text_search:
+                        # Link direto: não faça yt-dlp duas vezes antes de responder.
+                        # O Music Agent resolve o stream no phone worker no momento do play
+                        # usando o caminho rápido de URL direta.
+                        batch = self._worker_direct_url_batch(
+                            query,
+                            requester_id=ctx.author.id,
+                            requester_name=requester_name,
+                        )
+                    else:
+                        resolve_started = time.monotonic()
+                        batch = await resolve_music_tracks_on_worker(
+                            query,
+                            requester_id=ctx.author.id,
+                            requester_name=requester_name,
+                            limit=(max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))) if youtube_text_search else 1),
+                            metadata_only=youtube_text_search,
+                        )
+                        logger.info("[music/worker] resolve etapa concluída | guild=%s metadata_only=%s elapsed_ms=%.1f", ctx.guild.id, youtube_text_search, (time.monotonic() - resolve_started) * 1000.0)
             except MusicExtractionError as exc:
                 await self._reply(ctx, self._music_error_message(exc))
                 return
@@ -528,6 +555,7 @@ class Music(commands.Cog):
         if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
             track = batch.tracks[0]
             try:
+                agent_started = time.monotonic()
                 result = await music_agent_command(
                     "play",
                     guild_id=ctx.guild.id,
@@ -538,6 +566,7 @@ class Music(commands.Cog):
                     requester_id=ctx.author.id,
                     requester_name=requester_name,
                 )
+                logger.info("[music/agent] play etapa concluída | guild=%s elapsed_ms=%.1f queued=%s", ctx.guild.id, (time.monotonic() - agent_started) * 1000.0, bool(result.get("queued")))
             except Exception as exc:
                 logger.warning("[music/agent] falha ao enviar play direto | guild=%s erro=%s", ctx.guild.id, exc)
                 await self._reply(ctx, self._music_error_message(exc))

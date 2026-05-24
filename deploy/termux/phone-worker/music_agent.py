@@ -40,7 +40,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.4"
+AGENT_VERSION = "0.3.5"
 STARTED_AT = time.time()
 
 
@@ -239,6 +239,9 @@ class GuildMusicState:
     started_monotonic: float = 0.0
     updated_at: float = field(default_factory=time.time)
     player: Any = None
+    volume_percent: int = 55
+    normal_volume_percent: int = 55
+    ducked: bool = False
 
     def public(self) -> dict[str, Any]:
         player = self.player
@@ -288,6 +291,9 @@ class GuildMusicState:
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,
             "queue_size": len(self.queue),
+            "volume_percent": self.volume_percent,
+            "normal_volume_percent": self.normal_volume_percent,
+            "ducked": self.ducked,
             "queue": [item.public() for item in self.queue[:10]],
         }
 
@@ -316,6 +322,10 @@ class MusicAgent:
         )
         self.ffmpeg_options = os.getenv("MUSIC_AGENT_FFMPEG_OPTIONS", "-vn -sn -dn -loglevel warning")
         self.ffmpeg_bitrate = env_int("MUSIC_AGENT_FFMPEG_OPUS_BITRATE_KBPS", 128)
+        self.default_volume_percent = max(0, min(150, env_int("MUSIC_AGENT_DEFAULT_VOLUME_PERCENT", 55)))
+        self.duck_volume_percent = max(0, min(100, env_int("MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT", 8)))
+        # PCMVolumeTransformer lets the worker-owned direct voice path duck TTS and restore volume.
+        self.direct_pcm_volume_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_PCM_VOLUME_ENABLED"), True)
         self.prepare_timeout = env_float("MUSIC_AGENT_PREPARING_TIMEOUT_SECONDS", 30.0)
         intents = discord.Intents.none()
         intents.guilds = True
@@ -494,6 +504,10 @@ class MusicAgent:
             return await self.cmd_skip(body)
         if action == "volume":
             return await self.cmd_volume(body)
+        if action in {"duck", "duck_volume", "tts_duck"}:
+            return await self.cmd_duck(body)
+        if action in {"unduck", "restore_volume", "tts_restore"}:
+            return await self.cmd_unduck(body)
         raise ValueError("ação do Music Agent não suportada")
 
     async def cmd_play(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -511,6 +525,10 @@ class MusicAgent:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         st.voice_channel_id = voice_channel_id
         st.text_channel_id = text_channel_id
+        if not st.normal_volume_percent:
+            st.normal_volume_percent = self.default_volume_percent
+        if not st.volume_percent:
+            st.volume_percent = st.normal_volume_percent
         st.last_action = "play"
         self.log("play_received", guild_id=guild_id, voice=voice_channel_id, query=query)
         track = await self.resolve_track(query, track_meta=track_meta, body=body)
@@ -583,17 +601,62 @@ class MusicAgent:
         await self._play_next(guild_id)
         return {"ok": True, "state": st.public()}
 
+    async def _apply_player_volume(self, st: GuildMusicState, volume: int) -> bool:
+        volume = max(0, min(1000, int(volume)))
+        player = st.player
+        if player is None:
+            st.volume_percent = volume
+            return False
+        applied = False
+        setter = getattr(player, "set_volume", None)
+        if callable(setter):
+            maybe = setter(volume)
+            if asyncio.iscoroutine(maybe):
+                await maybe
+            applied = True
+        # discord.VoiceClient exposes the active source; when it is a
+        # PCMVolumeTransformer, changing source.volume is immediate.
+        source = getattr(player, "source", None)
+        if source is not None and hasattr(source, "volume"):
+            with contextlib.suppress(Exception):
+                source.volume = max(0.0, min(10.0, volume / 100.0))
+                applied = True
+        st.volume_percent = volume
+        st.updated_at = time.time()
+        return applied
+
     async def cmd_volume(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
-        volume = max(0, min(1000, int(float(body.get("volume") or body.get("volume_percent") or 55))))
+        volume = max(0, min(1000, int(float(body.get("volume") or body.get("volume_percent") or self.default_volume_percent))))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
-        if st.player:
-            setter = getattr(st.player, "set_volume", None)
-            if callable(setter):
-                maybe = setter(volume)
-                if asyncio.iscoroutine(maybe):
-                    await maybe
-        return {"ok": True, "volume": volume, "state": st.public()}
+        st.normal_volume_percent = volume
+        if not st.ducked:
+            await self._apply_player_volume(st, volume)
+        return {"ok": True, "volume": st.volume_percent, "normal_volume": st.normal_volume_percent, "ducked": st.ducked, "state": st.public()}
+
+    async def cmd_duck(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id = safe_id(body.get("guild_id"))
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        requested = body.get("volume") if body.get("volume") is not None else body.get("volume_percent")
+        if requested is None:
+            requested = self.duck_volume_percent
+        duck_volume = max(0, min(100, int(float(requested))))
+        if not st.normal_volume_percent:
+            st.normal_volume_percent = max(0, min(150, int(st.volume_percent or self.default_volume_percent)))
+        st.ducked = True
+        await self._apply_player_volume(st, duck_volume)
+        self.log("tts_duck", guild_id=guild_id, volume=duck_volume, normal=st.normal_volume_percent)
+        return {"ok": True, "ducked": True, "volume": st.volume_percent, "normal_volume": st.normal_volume_percent, "state": st.public()}
+
+    async def cmd_unduck(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id = safe_id(body.get("guild_id"))
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        restore = max(0, min(150, int(float(body.get("volume") or body.get("volume_percent") or st.normal_volume_percent or self.default_volume_percent))))
+        st.ducked = False
+        st.normal_volume_percent = restore
+        await self._apply_player_volume(st, restore)
+        self.log("tts_restore", guild_id=guild_id, volume=restore)
+        return {"ok": True, "ducked": False, "volume": st.volume_percent, "normal_volume": st.normal_volume_percent, "state": st.public()}
 
     async def _play_next(self, guild_id: int) -> None:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
@@ -606,6 +669,9 @@ class MusicAgent:
         st.current = st.queue.pop(0)
         st.paused = False
         st.transport = ""
+        st.ducked = False
+        st.normal_volume_percent = max(0, min(150, int(st.normal_volume_percent or self.default_volume_percent)))
+        st.volume_percent = st.normal_volume_percent
         self._set_status(st, "preparing", event="play_preparing")
         self.log("track_loading", guild_id=guild_id, title=getattr(st.current, "title", ""), source=getattr(st.current, "source", ""))
         try:
@@ -657,7 +723,7 @@ class MusicAgent:
                 await voice_client.move_to(channel)
         if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
             voice_client.stop()
-        source = self._build_ffmpeg_source(track.stream_url)
+        source = self._build_ffmpeg_source(track.stream_url, volume_percent=st.volume_percent)
         st.player = voice_client
         st.transport = "direct"
         self._set_status(st, "starting", event="direct_player_starting")
@@ -679,7 +745,16 @@ class MusicAgent:
         self._set_status(st, "playing", event="direct_track_start_confirmed")
         self.log("play_started", guild_id=guild_id, transport="direct", title=track.title, confirm_delay=confirm_delay)
 
-    def _build_ffmpeg_source(self, stream_url: str) -> discord.AudioSource:
+    def _build_ffmpeg_source(self, stream_url: str, *, volume_percent: int | None = None) -> discord.AudioSource:
+        volume = max(0.0, min(10.0, float(volume_percent if volume_percent is not None else self.default_volume_percent) / 100.0))
+        if self.direct_pcm_volume_enabled:
+            pcm = discord.FFmpegPCMAudio(
+                stream_url,
+                executable=self.ffmpeg_executable,
+                before_options=self.ffmpeg_before_options,
+                options=self.ffmpeg_options,
+            )
+            return discord.PCMVolumeTransformer(pcm, volume=volume)
         opus_cls = getattr(discord, "FFmpegOpusAudio", None)
         if opus_cls is not None:
             return opus_cls(
@@ -689,12 +764,13 @@ class MusicAgent:
                 options=self.ffmpeg_options,
                 bitrate=self.ffmpeg_bitrate,
             )
-        return discord.FFmpegPCMAudio(
+        pcm = discord.FFmpegPCMAudio(
             stream_url,
             executable=self.ffmpeg_executable,
             before_options=self.ffmpeg_before_options,
             options=self.ffmpeg_options,
         )
+        return discord.PCMVolumeTransformer(pcm, volume=volume)
 
     async def _direct_after(self, guild_id: int, error: Exception | None) -> None:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
@@ -739,6 +815,10 @@ class MusicAgent:
             await player.move_to(channel)
         st.player = player
         st.transport = "lavalink"
+        with contextlib.suppress(Exception):
+            maybe = player.set_volume(max(0, min(150, int(st.volume_percent or self.default_volume_percent))))
+            if asyncio.iscoroutine(maybe):
+                await maybe
         playable = await self._playable_for_track(track)
         self.log("player_play_called", guild_id=guild_id, transport="lavalink", title=track.title)
         self._set_status(st, "starting", event="lavalink_player_play_called")
@@ -826,14 +906,33 @@ class MusicAgent:
         lowered = query.lower().strip()
         if not _looks_like_url(query) and not lowered.startswith(_LOCAL_SEARCH_PREFIXES):
             target = f"{self.default_search.rstrip(':')}:{query}"
-        cmd = [shutil.which("python") or "python", "-m", "yt_dlp"]
+        base_cmd = [shutil.which("python") or "python", "-m", "yt_dlp"]
         cookies = Path(self.cookies_file).expanduser()
         if cookies.exists() and cookies.stat().st_size > 0:
-            cmd += ["--cookies", str(cookies)]
+            base_cmd += ["--cookies", str(cookies)]
         if self.js_runtimes:
-            cmd += ["--js-runtimes", self.js_runtimes]
-        cmd += ["--no-playlist", "--no-warnings", "--socket-timeout", "20", "-f", self.ytdlp_format, "-J", target]
+            base_cmd += ["--js-runtimes", self.js_runtimes]
+        base_cmd += ["--no-playlist", "--no-warnings", "--socket-timeout", "12"]
         self.log("yt_dlp_resolve", query=query, target=target, js=self.js_runtimes)
+        if _looks_like_url(query):
+            fast_cmd = base_cmd + ["-f", self.ytdlp_format, "--print", "__title__:%(title)s", "-g", target]
+            fast_started = time.time()
+            fast = subprocess.run(fast_cmd, cwd=str(Path.home() / "phone-worker"), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=max(5, min(self.ytdlp_timeout, 18)))
+            lines = [line.strip() for line in (fast.stdout or "").splitlines() if line.strip()]
+            urls = [line for line in lines if line.startswith(("http://", "https://"))]
+            title_hint = next((line.split(":", 1)[1].strip() for line in lines if line.startswith("__title__:")), "")
+            if fast.returncode == 0 and urls:
+                self.log("yt_dlp_fast_url_ok", elapsed_ms=round((time.time() - fast_started) * 1000.0, 1), titled=bool(title_hint))
+                return {
+                    "title": title_hint or query,
+                    "uploader": "",
+                    "duration": None,
+                    "thumbnail": "",
+                    "webpage_url": query,
+                    "stream_url": urls[0],
+                }
+            self.log("yt_dlp_fast_url_fallback", rc=fast.returncode, error=short_text(fast.stderr, 160))
+        cmd = base_cmd + ["-f", self.ytdlp_format, "-J", target]
         proc = subprocess.run(cmd, cwd=str(Path.home() / "phone-worker"), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=self.ytdlp_timeout)
         if proc.returncode != 0 and not proc.stdout.strip():
             raise RuntimeError(short_text(proc.stderr or f"yt-dlp rc={proc.returncode}", 300))
