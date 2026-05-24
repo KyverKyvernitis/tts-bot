@@ -416,7 +416,11 @@ def _prepare_apk_source_zip() -> dict[str, Any]:
 
 def _load_registry_snapshot() -> dict[str, Any]:
     try:
-        return get_core_workers_registry().snapshot()
+        timeout = float(os.getenv("CORE_WORKER_AUTOMATION_REGISTRY_LOCK_TIMEOUT_SECONDS", "0.25") or 0.25)
+    except Exception:
+        timeout = 0.25
+    try:
+        return get_core_workers_registry().snapshot(lock_timeout_seconds=max(0.0, min(3.0, timeout)))
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "workers": [], "jobs": []}
 
@@ -987,7 +991,19 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
         return item
 
 
+def _automation_time_budget_seconds() -> float:
+    try:
+        return max(5.0, min(180.0, float(os.getenv("CORE_WORKER_AUTOMATION_TIME_BUDGET_SECONDS", "45") or 45)))
+    except Exception:
+        return 45.0
+
+
+def _budget_exceeded(started: float) -> bool:
+    return (time.monotonic() - started) >= _automation_time_budget_seconds()
+
+
 def process_pending(*, worker_id: str = "") -> dict[str, Any]:
+    started = time.monotonic()
     pending = _load_pending()
     result: dict[str, Any] = {"ok": True, "worker_id": worker_id, "processed_at": time.time()}
     snapshot = _load_registry_snapshot()
@@ -996,27 +1012,28 @@ def process_pending(*, worker_id: str = "") -> dict[str, Any]:
     apk_version_code = int(current.get("apk_versionCode") or 0)
     apk_source_hash = str(current.get("apk_source_hash") or "")
 
-    # Mesmo sem pendência explícita, heartbeat/poll de worker online deve reparar
-    # boot incompleto automaticamente. Isso evita depender do botão manual.
-    result["boot_repair"] = queue_boot_repairs(only_worker_id=worker_id)
+    if _env_bool("CORE_WORKER_AUTO_BOOT_REPAIR_ON_PENDING", False) and not _budget_exceeded(started):
+        result["boot_repair"] = queue_boot_repairs(only_worker_id=worker_id)
+    else:
+        result["boot_repair"] = {"ok": True, "skipped": "disabled_by_default"}
 
-    # Patch 45: mismatch de versão não pode ficar apenas visual. Se a VPS espera
-    # uma versão mais nova e o worker voltou online, criamos o worker_update mesmo
-    # quando o arquivo de pendência foi apagado/ficou obsoleto.
-    agent_needed = _workers_need_agent_version(snapshot, target_agent)
-    if pending.get("agent_update") or agent_needed:
+    agent_needed = False if _budget_exceeded(started) else _workers_need_agent_version(snapshot, target_agent)
+    if not _budget_exceeded(started) and (pending.get("agent_update") or agent_needed):
         result["agent_update"] = queue_agent_updates(force=False, only_worker_id=worker_id)
         if agent_needed:
             result["agent_update_detected"] = {"target_version": target_agent, "reason": "worker abaixo da versão esperada"}
+    elif pending.get("agent_update") or agent_needed:
+        result["agent_update"] = {"ok": True, "skipped": "time_budget_exceeded"}
 
-    # Mesma regra para o APK: latest.json antigo ou source divergente precisa
-    # reagendar build automaticamente, sem depender de botão manual.
-    apk_needed = _apk_needs_build(apk_version_code, apk_source_hash)
-    if pending.get("apk_build") or apk_needed:
+    apk_needed = False if _budget_exceeded(started) else _apk_needs_build(apk_version_code, apk_source_hash)
+    if not _budget_exceeded(started) and (pending.get("apk_build") or apk_needed):
         result["apk_build"] = queue_apk_build()
         if apk_needed:
             result["apk_build_detected"] = {"versionCode": apk_version_code, "reason": "latest.json ausente/antigo ou source divergente"}
+    elif pending.get("apk_build") or apk_needed:
+        result["apk_build"] = {"ok": True, "skipped": "time_budget_exceeded"}
 
+    result["elapsed_ms"] = round((time.monotonic() - started) * 1000.0, 1)
     write_status({"process_pending": result, "pending": _load_pending(), "finished_at": time.time()})
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return result

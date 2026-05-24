@@ -548,6 +548,11 @@ env_truthy() {
 }
 
 wait_for_lavalink_ready() {
+  # Arquitetura atual: Lavalink da VPS não é usado. Quando música usa phone worker,
+  # esperar lavalink.service local só cria travamento/restart-loop.
+  if ! env_truthy VPS_LAVALINK_ENABLED; then
+    return 0
+  fi
   if [[ -x "$REPO_DIR/scripts/wait-audio-node-ready.py" ]]; then
     sudo -u ubuntu -H "$REPO_DIR/scripts/wait-audio-node-ready.py" --timeout "${AUDIO_NODE_STARTUP_WAIT_SECONDS:-20}"
     return $?
@@ -695,9 +700,52 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 }
 
 
+sanitize_vps_lavalink_units() {
+  # Remove dependências locais do Lavalink. O node de áudio válido fica no phone worker/Music Agent.
+  local file changed_any=0
+  for file in /etc/systemd/system/tts-bot.service /etc/systemd/system/tts-bot.service.d/*.conf; do
+    [[ -f "$file" ]] || continue
+    if grep -q 'lavalink.service' "$file" 2>/dev/null; then
+      cp -a "$file" "$file.backup.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+      python3 - "$file" <<'PY_SANITIZE_LAVALINK'
+import sys
+from pathlib import Path
+p=Path(sys.argv[1])
+text=p.read_text(encoding='utf-8', errors='replace')
+out=[]
+for line in text.splitlines():
+    stripped=line.strip()
+    if stripped.startswith(('Wants=', 'Requires=', 'After=', 'Before=')) and 'lavalink.service' in stripped:
+        key, value = line.split('=', 1)
+        parts=[part for part in value.split() if part != 'lavalink.service']
+        if parts:
+            out.append(key + '=' + ' '.join(parts))
+        else:
+            out.append('# ' + key + '=lavalink.service removido: Lavalink roda no phone worker/Music Agent')
+        continue
+    if stripped.startswith('ExecStartPre=') and 'wait-audio-node-ready.py' in stripped:
+        out.append('# ExecStartPre wait-audio-node-ready.py removido: Lavalink local da VPS não é usado')
+        continue
+    out.append(line)
+p.write_text('\n'.join(out).rstrip() + '\n', encoding='utf-8')
+PY_SANITIZE_LAVALINK
+      changed_any=1
+    fi
+  done
+  if ! env_truthy VPS_LAVALINK_ENABLED; then
+    systemctl stop lavalink.service >/dev/null 2>&1 || true
+    systemctl disable lavalink.service >/dev/null 2>&1 || true
+    systemctl reset-failed lavalink.service >/dev/null 2>&1 || true
+  fi
+  if (( changed_any == 1 )); then
+    systemctl daemon-reload || true
+  fi
+}
+
 deploy_audio_services() {
+  sanitize_vps_lavalink_units
   if (( AUDIO_SYSTEMD_CHANGED == 0 )); then
-    AUDIO_SERVICES_STATUS="não alterado"
+    AUDIO_SERVICES_STATUS="não alterado; Lavalink VPS sanitizado"
     return 0
   fi
 
@@ -724,7 +772,7 @@ deploy_audio_services() {
   fi
 
   if (( lavalink_unit_changed == 1 )); then
-    if env_truthy LAVALINK_ENABLED; then
+    if env_truthy VPS_LAVALINK_ENABLED; then
       systemctl enable "$LAVALINK_SERVICE" >/dev/null 2>&1 || true
       systemctl restart "$LAVALINK_SERVICE" || true
       if systemctl is-active --quiet "$LAVALINK_SERVICE"; then
@@ -733,7 +781,7 @@ deploy_audio_services() {
         AUDIO_SERVICES_STATUS="Lavalink configurado, mas não ficou ativo"
       fi
     else
-      AUDIO_SERVICES_STATUS="Lavalink não iniciado porque LAVALINK_ENABLED=false"
+      AUDIO_SERVICES_STATUS="Lavalink VPS não iniciado; node de áudio roda no phone worker/Music Agent"
     fi
   else
     AUDIO_SERVICES_STATUS="units atualizadas; Lavalink não alterado"
@@ -837,6 +885,9 @@ deploy_phone_worker_watch() {
   STAGE="configuração do watcher do phone worker"
   local installed=0
 
+  if [[ -f "$REPO_DIR/scripts/phone-worker-watch.sh" ]]; then
+    chmod +x "$REPO_DIR/scripts/phone-worker-watch.sh" 2>/dev/null || true
+  fi
   if [[ -f "$REPO_DIR/deploy/systemd/phone-worker-watch.service" ]]; then
     cp "$REPO_DIR/deploy/systemd/phone-worker-watch.service" /etc/systemd/system/phone-worker-watch.service
     installed=1

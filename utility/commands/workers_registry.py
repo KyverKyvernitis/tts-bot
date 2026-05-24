@@ -18,7 +18,7 @@ DEFAULT_OFFLINE_AFTER_SECONDS = 90
 DEFAULT_MAX_WORKERS = 24
 DEFAULT_JOB_TTL_SECONDS = 900
 DEFAULT_JOB_LEASE_SECONDS = 120
-DEFAULT_JOB_HISTORY_LIMIT = 80
+DEFAULT_JOB_HISTORY_LIMIT = 25
 DEFAULT_JOB_PAYLOAD_MAX_STRING = 2 * 1024 * 1024
 
 CORE_WORKER_JOB_TYPES = {
@@ -380,6 +380,38 @@ def _public_worker_sort_key(worker: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _sanitize_finished_job_for_storage(job: dict[str, Any]) -> None:
+    """Remove payloads grandes de jobs finalizados antes de salvar o registry.
+
+    Jobs de APK/update podem carregar keystore/config/source metadata no payload.
+    Manter isso em dezenas de jobs finalizados fez o registry crescer para dezenas
+    de MB e travar health/painéis em VPS pequena. O worker já recebeu o payload;
+    para histórico basta summary/error/result compacto.
+    """
+    status = str(job.get("status") or "queued").strip().lower()
+    if status in {"queued", "running"}:
+        return
+    if job.get("payload"):
+        job["payload_dropped_after_finish"] = True
+        job["payload"] = {}
+    if isinstance(job.get("result"), Mapping):
+        job["result"] = _safe_dict(job.get("result"), max_items=24, max_string=2048)
+
+
+def _sanitize_registry_for_storage(data: dict[str, Any]) -> None:
+    workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+    for worker in workers.values():
+        if not isinstance(worker, dict):
+            continue
+        for key, max_items in (("battery", 12), ("network", 12), ("health", 16), ("status", 18)):
+            if isinstance(worker.get(key), Mapping):
+                worker[key] = _safe_dict(worker.get(key), max_items=max_items, max_string=4096)
+    jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+    for job in jobs.values():
+        if isinstance(job, dict):
+            _sanitize_finished_job_for_storage(job)
+
+
 class CoreWorkersRegistry:
     """Registro leve dos Core Workers.
 
@@ -413,6 +445,7 @@ class CoreWorkersRegistry:
         return data
 
     def _save_unlocked(self, data: dict[str, Any]) -> None:
+        _sanitize_registry_for_storage(data)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
@@ -723,6 +756,9 @@ class CoreWorkersRegistry:
         active_status = {"queued", "running"}
         active = [(jid, job) for jid, job in ordered if str(job.get("status") or "queued") in active_status]
         done = [(jid, job) for jid, job in ordered if str(job.get("status") or "queued") not in active_status]
+        for _jid, done_job in done:
+            if isinstance(done_job, dict):
+                _sanitize_finished_job_for_storage(done_job)
         trimmed = 0
         for jid, _job in done[keep:]:
             jobs.pop(jid, None)
@@ -1002,7 +1038,9 @@ class CoreWorkersRegistry:
             job["finished_at"] = ts
             job["lease_until"] = 0
             job["worker_id"] = worker_id
-            job["result"] = _safe_dict(payload.get("result"), max_items=48)
+            job["result"] = _safe_dict(payload.get("result"), max_items=32, max_string=4096)
+            job["payload_dropped_after_finish"] = True
+            job["payload"] = {}
             job["error"] = _short_text(payload.get("error"), limit=240)
             submitted_summary = _short_text(payload.get("summary"), limit=160)
             if submitted_summary:

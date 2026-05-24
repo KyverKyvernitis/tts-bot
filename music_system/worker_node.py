@@ -186,7 +186,7 @@ def _music_agent_active_sessions(agent: Mapping[str, Any] | None) -> int:
 
 def worker_music_agent_summary(worker: Mapping[str, Any] | None) -> dict[str, Any]:
     agent = _worker_music_agent(worker)
-    min_version = str(getattr(config, "MUSIC_AGENT_MIN_VERSION", "0.3.4") or "0.3.4")
+    min_version = str(getattr(config, "MUSIC_AGENT_MIN_VERSION", "0.3.8") or "0.3.8")
     max_sessions = max(1, int(getattr(config, "MUSIC_AGENT_MAX_SESSIONS_PER_WORKER", 2) or 2))
     if not isinstance(agent, Mapping):
         return {"available": False, "reason": "music_agent_missing", "version": "", "active_sessions": 0, "max_sessions": max_sessions}

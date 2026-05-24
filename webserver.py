@@ -2086,6 +2086,33 @@ def _is_process_running(process: subprocess.Popen | None) -> bool:
         return False
 
 
+def _reap_pending_automation_process(key: str, process: subprocess.Popen, *, max_runtime: float) -> None:
+    """Waits for a spawned process in a daemon thread so it cannot remain defunct.
+
+    Popen objects only release their child process after wait()/poll(). On the 1 GB
+    VPS, a few defunct automation children plus repeated health/heartbeat requests
+    were enough to make the bot appear frozen. This watcher is intentionally tiny
+    and never touches Discord state.
+    """
+    try:
+        try:
+            process.wait(timeout=max(5.0, float(max_runtime)))
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(Exception):
+                process.terminate()
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(Exception):
+                    process.kill()
+                with contextlib.suppress(Exception):
+                    process.wait(timeout=5.0)
+    finally:
+        with _core_worker_pending_automation_lock:
+            if _core_worker_pending_automation_processes.get(key) is process:
+                _core_worker_pending_automation_processes.pop(key, None)
+
+
 def _log_pending_automation_skip(key: str, message: str) -> None:
     now = time.time()
     last = float(_core_worker_pending_automation_last_log.get(key) or 0.0)
@@ -2110,8 +2137,8 @@ def _kick_core_worker_pending_automation(worker_id: str = "") -> None:
     worker_id = str(worker_id or "").strip()
     key = _automation_worker_key(worker_id)
     now = time.time()
-    cooldown = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_COOLDOWN_SECONDS", 60.0, minimum=5.0, maximum=900.0)
-    max_runtime = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_MAX_RUNTIME_SECONDS", 180.0, minimum=30.0, maximum=1800.0)
+    cooldown = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_COOLDOWN_SECONDS", 240.0, minimum=30.0, maximum=1800.0)
+    max_runtime = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_MAX_RUNTIME_SECONDS", 75.0, minimum=20.0, maximum=900.0)
 
     script = os.path.join(os.getcwd(), "scripts", "core-worker-automation.py")
     if not os.path.isfile(script):
@@ -2152,6 +2179,17 @@ def _kick_core_worker_pending_automation(worker_id: str = "") -> None:
             return
         _core_worker_pending_automation_processes[key] = process
         _core_worker_pending_automation_last_started[key] = now
+        try:
+            threading.Thread(
+                target=_reap_pending_automation_process,
+                args=(key, process),
+                kwargs={"max_runtime": max_runtime},
+                name=f"core-worker-auto-reap-{key[:24]}",
+                daemon=True,
+            ).start()
+        except Exception:
+            # Próxima chamada ainda fará poll/cleanup; não vale quebrar request HTTP.
+            pass
         with contextlib.suppress(Exception):
             app.logger.info("core-worker automation started | worker=%s pid=%s", key, getattr(process, "pid", ""))
 

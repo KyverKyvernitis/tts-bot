@@ -4088,7 +4088,8 @@ class AudioRouter:
         except Exception:
             pass
 
-        raw_status = str(remote.get("status") or "").strip().lower()
+        remote_status_original = str(remote.get("status") or "").strip().lower()
+        raw_status = remote_status_original
         current_payload = remote.get("current") if isinstance(remote.get("current"), dict) else {}
         if current_payload:
             track = self._track_from_agent_payload(current_payload, track)
@@ -4156,10 +4157,11 @@ class AudioRouter:
             state.current_status_detail = raw_status
         active_statuses = {"resolving", "starting", "playing", "paused", "queued"}
         new_panel_key = self._panel_key_for_track(state.current)
+        active_started_signal = bool(remote_status_original == "playing" and state.current is not None)
         active_confirmed = bool(raw_status == "playing" and confirmed_playing and state.current is not None)
         if state.current is not None or self._has_pending_track(state) or state.current_status in active_statuses:
             self._reactivate_panel_controls_now(int(guild_id))
-        if active_confirmed and new_panel_key and getattr(state, "agent_started_track_key", "") != new_panel_key:
+        if (active_confirmed or active_started_signal) and new_panel_key and getattr(state, "agent_started_track_key", "") != new_panel_key:
             state.agent_started_track_key = new_panel_key
             state.current_started_at_monotonic = time.monotonic()
             state.current_start_offset_seconds = 0.0
@@ -4168,7 +4170,7 @@ class AudioRouter:
             create_panel
             and state.now_message is not None
             and new_panel_key
-            and (previous_panel_key != new_panel_key or previous_status not in active_statuses or active_confirmed)
+            and (previous_panel_key != new_panel_key or previous_status not in active_statuses or active_confirmed or active_started_signal)
             and bool(getattr(config, "MUSIC_PANEL_REPOST_ON_TRACK_CHANGE", True))
         )
         if create_panel:
@@ -4973,6 +4975,68 @@ class AudioRouter:
                     "tts_lavalink_error": str(exc),
                     "tts_lavalink_local_fallback_available": MUSIC_TTS_LAVALINK_FAILURE_LOCAL_FALLBACK,
                 }
+
+        if (
+            MUSIC_AGENT_TTS_ROUTE_ENABLED
+            and state is not None
+            and guild is not None
+            and guild_id is not None
+            and str(getattr(state, "current_backend", "") or "").lower() == "agent"
+            and state.current is not None
+        ):
+            source_paths = await self._lavalink_tts_source_paths_for_playback(path)
+            raw_candidates: list[str] = []
+            for source_path in source_paths:
+                raw_candidates.extend(self._lavalink_tts_candidates_for_path(source_path, timeout=timeout))
+            candidates = await self._filter_lavalink_tts_candidates(raw_candidates)
+            source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
+            if not candidates:
+                logger.warning(
+                    "[music/agent] TTS roteado para worker sem URL acessível; evitando assumir a voz local e interromper o player | guild=%s source_paths=%s raw_candidates=%s",
+                    guild_id,
+                    source_paths,
+                    raw_candidates,
+                )
+                return {
+                    "source_setup_ms": source_setup_ms,
+                    "play_call_ms": 0.0,
+                    "playback_ms": max(0.0, (time.monotonic() - playback_started_at) * 1000.0),
+                    "playback_started_at": playback_started_at,
+                    "tts_agent_route": True,
+                    "tts_agent_failed": True,
+                    "tts_agent_missing_source": True,
+                }
+            started_agent = time.monotonic()
+            result = await _music_agent_command(
+                "tts",
+                guild_id=int(guild_id),
+                voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or getattr(getattr(vc, "channel", None), "id", 0) or 0),
+                audio_url=str(candidates[0]),
+                engine="prebuilt-url",
+                timeout_seconds=max(3.0, float(timeout or MUSIC_AGENT_TTS_TIMEOUT_SECONDS)),
+            )
+            elapsed_ms = max(0.0, (time.monotonic() - started_agent) * 1000.0)
+            state_payload = result.get("state") if isinstance(result, dict) else None
+            if isinstance(state_payload, dict):
+                await self.sync_music_agent_state(
+                    int(guild_id),
+                    state.current,
+                    state_payload,
+                    voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or getattr(getattr(vc, "channel", None), "id", 0) or 0),
+                    text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0),
+                    create_panel=True,
+                )
+            return {
+                "ok": bool(isinstance(result, dict) and result.get("ok", True)),
+                "tts_agent_route": True,
+                "tts_agent_prebuilt": True,
+                "source_setup_ms": source_setup_ms,
+                "play_call_ms": 0.0,
+                "playback_ms": float((result or {}).get("playback_ms") or elapsed_ms) if isinstance(result, dict) else elapsed_ms,
+                "playback_started_at": playback_started_at,
+                "agent_elapsed_ms": elapsed_ms,
+                "worker_result": result,
+            }
 
         source = discord.FFmpegPCMAudio(path, before_options=before_options, options=options)
         source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)

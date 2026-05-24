@@ -44,7 +44,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.7"
+AGENT_VERSION = "0.3.8"
 STARTED_AT = time.time()
 
 
@@ -911,12 +911,31 @@ class MusicAgent:
         try:
             with tempfile.TemporaryDirectory(prefix="music-agent-tts-") as tmp:
                 path = Path(tmp) / "tts.mp3"
-                engine = await asyncio.wait_for(self._synthesize_tts_file(body, path), timeout=max(3.0, timeout * 0.75))
-                if not path.exists() or path.stat().st_size <= 0:
-                    raise RuntimeError("TTS não gerou áudio")
-                tts_source = discord.FFmpegPCMAudio(str(path), executable=self.ffmpeg_executable, before_options="-nostdin", options="-vn -sn -dn -loglevel warning")
+                audio_url = str(body.get("audio_url") or body.get("url") or "").strip()
+                audio_b64 = str(body.get("audio_b64") or body.get("audioBase64") or "").strip()
+                tts_input = ""
+                if audio_url.startswith(("http://", "https://", "file://")):
+                    tts_input = audio_url
+                    engine = str(body.get("engine") or "prebuilt-url").strip() or "prebuilt-url"
+                elif audio_b64:
+                    try:
+                        raw = base64.b64decode(audio_b64.encode("ascii"), validate=True)
+                    except Exception as exc:
+                        raise ValueError(f"audio_b64 inválido: {type(exc).__name__}") from exc
+                    max_bytes = max(1024, int(env_float("MUSIC_AGENT_TTS_MAX_B64_BYTES", 8 * 1024 * 1024)))
+                    if len(raw) > max_bytes:
+                        raise ValueError("áudio TTS grande demais para o Music Agent")
+                    path.write_bytes(raw)
+                    tts_input = str(path)
+                    engine = str(body.get("engine") or "prebuilt-b64").strip() or "prebuilt-b64"
+                else:
+                    engine = await asyncio.wait_for(self._synthesize_tts_file(body, path), timeout=max(3.0, timeout * 0.75))
+                    if not path.exists() or path.stat().st_size <= 0:
+                        raise RuntimeError("TTS não gerou áudio")
+                    tts_input = str(path)
+                tts_source = discord.FFmpegPCMAudio(tts_input, executable=self.ffmpeg_executable, before_options="-nostdin", options="-vn -sn -dn -loglevel warning")
                 future = source.add_tts(tts_source, volume=max(0.0, min(2.0, env_float("MUSIC_AGENT_TTS_VOLUME", 1.0))))
-                self.log("tts_overlay_start", guild_id=guild_id, engine=engine, chars=len(str(body.get("text") or "")))
+                self.log("tts_overlay_start", guild_id=guild_id, engine=engine, chars=len(str(body.get("text") or "")), prebuilt=bool(audio_url or audio_b64))
                 await asyncio.wait_for(future, timeout=timeout)
         finally:
             st.ducked = False

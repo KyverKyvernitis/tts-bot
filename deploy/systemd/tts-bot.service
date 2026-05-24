@@ -1,6 +1,6 @@
 [Unit]
 Description=Discord TTS Bot
-After=network-online.target lavalink.service
+After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
 StartLimitBurst=5
@@ -12,7 +12,6 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/bot
 EnvironmentFile=/home/ubuntu/bot/.env
-ExecStartPre=/home/ubuntu/bot/scripts/wait-audio-node-ready.py --timeout 90
 ExecStart=/home/ubuntu/bot/start.sh
 
 Restart=always
