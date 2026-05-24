@@ -13,13 +13,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import base64
 import os
 import re
 import shutil
 import signal
 import subprocess
 import secrets
+import tempfile
+import threading
 import time
+from array import array
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -40,7 +44,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.5"
+AGENT_VERSION = "0.3.6"
 STARTED_AT = time.time()
 
 
@@ -161,6 +165,136 @@ def _float_or_none(value: Any) -> float | None:
         return float(value) if value is not None and str(value) != "" else None
     except Exception:
         return None
+
+
+PCM_FRAME_BYTES = 3840
+
+
+class AgentMixedAudioSource(discord.AudioSource):
+    """PCM mixer used by the worker-owned voice session.
+
+    It keeps music and TTS inside the same Discord voice connection, so TTS does
+    not make the VPS bot steal/disconnect the Music Agent session.
+    """
+
+    def __init__(self, *, loop: asyncio.AbstractEventLoop, music_source: discord.AudioSource, music_volume: float, duck_factor: float = 0.08) -> None:
+        self.loop = loop
+        self.music_source = music_source
+        self.normal_music_volume = max(0.0, min(2.0, float(music_volume)))
+        self.duck_factor = max(0.0, min(1.0, float(duck_factor)))
+        self._overlays: list[dict[str, Any]] = []
+        self._lock = threading.RLock()
+        self._closed = False
+        self._music_ended = False
+
+    def is_opus(self) -> bool:
+        return False
+
+    def set_music_volume(self, volume: float) -> None:
+        self.normal_music_volume = max(0.0, min(2.0, float(volume)))
+
+    def set_duck_factor(self, factor: float) -> None:
+        self.duck_factor = max(0.0, min(1.0, float(factor)))
+
+    def add_tts(self, source: discord.AudioSource, *, volume: float = 1.0) -> asyncio.Future:
+        future = self.loop.create_future()
+        with self._lock:
+            self._overlays.append({"source": source, "volume": max(0.0, min(2.0, float(volume))), "future": future, "ended": False})
+        return future
+
+    def _future_result(self, future: asyncio.Future, value: object = None) -> None:
+        def _set() -> None:
+            if not future.done():
+                future.set_result(value)
+        self.loop.call_soon_threadsafe(_set)
+
+    def _future_exception(self, future: asyncio.Future, error: Exception) -> None:
+        def _set() -> None:
+            if not future.done():
+                future.set_exception(error)
+        self.loop.call_soon_threadsafe(_set)
+
+    def _limit(self, value: int) -> int:
+        return max(-32768, min(32767, int(value)))
+
+    def _samples(self, frame: bytes, volume: float) -> array:
+        samples = array("h")
+        samples.frombytes(frame)
+        if abs(volume - 1.0) > 0.001:
+            for i, sample in enumerate(samples):
+                samples[i] = self._limit(int(sample * volume))
+        return samples
+
+    def _mix_into(self, base: array, frame: bytes, volume: float) -> None:
+        if not frame:
+            return
+        other = self._samples(frame, volume)
+        if len(other) < len(base):
+            other.extend([0] * (len(base) - len(other)))
+        elif len(other) > len(base):
+            del other[len(base):]
+        for i, sample in enumerate(other):
+            base[i] = self._limit(int(base[i]) + int(sample))
+
+    def read(self) -> bytes:
+        if self._closed:
+            return b""
+        with self._lock:
+            overlays = list(self._overlays)
+        music_frame = b""
+        if not self._music_ended:
+            music_frame = self.music_source.read()
+            if not music_frame:
+                self._music_ended = True
+                with contextlib.suppress(Exception):
+                    self.music_source.cleanup()
+        if not music_frame and not overlays:
+            self.cleanup()
+            return b""
+        music_volume = self.normal_music_volume * (self.duck_factor if overlays else 1.0)
+        if music_frame:
+            base = self._samples(music_frame, music_volume)
+        else:
+            base = array("h", [0] * (PCM_FRAME_BYTES // 2))
+        ended: list[dict[str, Any]] = []
+        for overlay in overlays:
+            source = overlay.get("source")
+            future = overlay.get("future")
+            try:
+                frame = source.read() if source is not None else b""
+            except Exception as exc:
+                if isinstance(future, asyncio.Future):
+                    self._future_exception(future, exc)
+                ended.append(overlay)
+                continue
+            if frame:
+                self._mix_into(base, frame, float(overlay.get("volume") or 1.0))
+            else:
+                with contextlib.suppress(Exception):
+                    source.cleanup()
+                if isinstance(future, asyncio.Future):
+                    self._future_result(future, None)
+                ended.append(overlay)
+        if ended:
+            with self._lock:
+                self._overlays = [ov for ov in self._overlays if ov not in ended]
+        return base.tobytes()
+
+    def cleanup(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with contextlib.suppress(Exception):
+            self.music_source.cleanup()
+        with self._lock:
+            overlays = list(self._overlays)
+            self._overlays.clear()
+        for overlay in overlays:
+            with contextlib.suppress(Exception):
+                overlay.get("source").cleanup()
+            future = overlay.get("future")
+            if isinstance(future, asyncio.Future):
+                self._future_result(future, None)
 
 
 def _select_stream_url(entry: dict[str, Any]) -> str:
@@ -442,6 +576,8 @@ class MusicAgent:
             "yt-dlp": "yt_dlp",
             "wavelink": "wavelink",
             "aiohttp": "aiohttp",
+            "gTTS": "gtts",
+            "edge-tts": "edge_tts",
         }
         for label, module in modules.items():
             try:
@@ -508,6 +644,8 @@ class MusicAgent:
             return await self.cmd_duck(body)
         if action in {"unduck", "restore_volume", "tts_restore"}:
             return await self.cmd_unduck(body)
+        if action in {"tts", "tts_play", "speak"}:
+            return await self.cmd_tts(body)
         raise ValueError("ação do Music Agent não suportada")
 
     async def cmd_play(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -617,7 +755,11 @@ class MusicAgent:
         # discord.VoiceClient exposes the active source; when it is a
         # PCMVolumeTransformer, changing source.volume is immediate.
         source = getattr(player, "source", None)
-        if source is not None and hasattr(source, "volume"):
+        if source is not None and hasattr(source, "set_music_volume"):
+            with contextlib.suppress(Exception):
+                source.set_music_volume(max(0.0, min(10.0, volume / 100.0)))
+                applied = True
+        elif source is not None and hasattr(source, "volume"):
             with contextlib.suppress(Exception):
                 source.volume = max(0.0, min(10.0, volume / 100.0))
                 applied = True
@@ -657,6 +799,106 @@ class MusicAgent:
         await self._apply_player_volume(st, restore)
         self.log("tts_restore", guild_id=guild_id, volume=restore)
         return {"ok": True, "ducked": False, "volume": st.volume_percent, "normal_volume": st.normal_volume_percent, "state": st.public()}
+
+    def _normalize_tts_language(self, value: Any) -> str:
+        raw = str(value or "pt-br").strip().lower().replace("_", "-")
+        if raw in {"pt", "ptbr", "pt-br", "br"}:
+            return "pt-br"
+        if raw in {"en", "en-us", "us"}:
+            return "en"
+        return raw or "pt-br"
+
+    def _normalize_edge_rate(self, value: Any) -> str:
+        raw = str(value or "+0%").strip() or "+0%"
+        if re.match(r"^[+-]?\d+%$", raw):
+            return raw if raw.startswith(("+", "-")) else "+" + raw
+        return "+0%"
+
+    def _normalize_edge_pitch(self, value: Any) -> str:
+        raw = str(value or "+0Hz").strip() or "+0Hz"
+        if re.match(r"^[+-]?\d+Hz$", raw, re.I):
+            return raw if raw.startswith(("+", "-")) else "+" + raw
+        return "+0Hz"
+
+    async def _synthesize_tts_file(self, body: dict[str, Any], target: Path) -> str:
+        text = short_text(body.get("text") or body.get("content") or "", 1600)
+        if not text:
+            raise ValueError("texto TTS vazio")
+        engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_")
+        if engine in {"google", "google_tts"}:
+            engine = "gtts"
+        if engine == "edge":
+            try:
+                import edge_tts  # type: ignore
+            except Exception as exc:
+                raise RuntimeError(f"edge-tts ausente no worker: {type(exc).__name__}") from exc
+            voice = str(body.get("voice") or "pt-BR-FranciscaNeural").strip() or "pt-BR-FranciscaNeural"
+            rate = self._normalize_edge_rate(body.get("rate"))
+            pitch = self._normalize_edge_pitch(body.get("pitch"))
+            communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
+            await communicate.save(str(target))
+            return "edge"
+        if engine == "gcloud":
+            try:
+                from google.cloud import texttospeech_v1 as google_texttospeech  # type: ignore
+                language = self._normalize_tts_language(body.get("language")).replace("pt-br", "pt-BR")
+                voice_name = str(body.get("voice") or "").strip()
+                client = google_texttospeech.TextToSpeechClient()
+                voice_kwargs = {"language_code": language}
+                if voice_name:
+                    voice_kwargs["name"] = voice_name
+                response = client.synthesize_speech(
+                    request=google_texttospeech.SynthesizeSpeechRequest(
+                        input=google_texttospeech.SynthesisInput(text=text),
+                        voice=google_texttospeech.VoiceSelectionParams(**voice_kwargs),
+                        audio_config=google_texttospeech.AudioConfig(audio_encoding=google_texttospeech.AudioEncoding.MP3),
+                    )
+                )
+                target.write_bytes(response.audio_content)
+                return "gcloud"
+            except Exception as exc:
+                self.log("tts_gcloud_fallback_gtts", error=f"{type(exc).__name__}: {short_text(exc, 120)}")
+                engine = "gtts"
+        try:
+            from gtts import gTTS  # type: ignore
+        except Exception as exc:
+            raise RuntimeError(f"gTTS ausente no worker: {type(exc).__name__}") from exc
+        language = self._normalize_tts_language(body.get("language"))
+        tts = gTTS(text=text, lang=language)
+        with open(target, "wb") as handle:
+            await asyncio.to_thread(tts.write_to_fp, handle)
+        return "gtts"
+
+    async def cmd_tts(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id = safe_id(body.get("guild_id"))
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        player = st.player
+        if not guild_id or player is None or st.current is None:
+            return {"ok": False, "error": "sem sessão musical ativa no worker", "state": st.public()}
+        source = getattr(player, "source", None)
+        if not isinstance(source, AgentMixedAudioSource):
+            return {"ok": False, "error": "sessão atual não suporta TTS no worker sem interromper música", "state": st.public()}
+        timeout = max(1.0, min(90.0, float(body.get("timeout_seconds") or 30.0)))
+        started = time.monotonic()
+        engine = "worker"
+        st.ducked = True
+        st.updated_at = time.time()
+        try:
+            with tempfile.TemporaryDirectory(prefix="music-agent-tts-") as tmp:
+                path = Path(tmp) / "tts.mp3"
+                engine = await asyncio.wait_for(self._synthesize_tts_file(body, path), timeout=max(3.0, timeout * 0.75))
+                if not path.exists() or path.stat().st_size <= 0:
+                    raise RuntimeError("TTS não gerou áudio")
+                tts_source = discord.FFmpegPCMAudio(str(path), executable=self.ffmpeg_executable, before_options="-nostdin", options="-vn -sn -dn -loglevel warning")
+                future = source.add_tts(tts_source, volume=max(0.0, min(2.0, env_float("MUSIC_AGENT_TTS_VOLUME", 1.0))))
+                self.log("tts_overlay_start", guild_id=guild_id, engine=engine, chars=len(str(body.get("text") or "")))
+                await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            st.ducked = False
+            st.updated_at = time.time()
+        elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
+        self.log("tts_overlay_done", guild_id=guild_id, elapsed_ms=round(elapsed_ms, 1))
+        return {"ok": True, "engine": engine, "playback_ms": round(elapsed_ms, 1), "state": st.public()}
 
     async def _play_next(self, guild_id: int) -> None:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
@@ -754,7 +996,8 @@ class MusicAgent:
                 before_options=self.ffmpeg_before_options,
                 options=self.ffmpeg_options,
             )
-            return discord.PCMVolumeTransformer(pcm, volume=volume)
+            loop = self._loop or asyncio.get_running_loop()
+            return AgentMixedAudioSource(loop=loop, music_source=pcm, music_volume=volume, duck_factor=max(0.0, min(1.0, self.duck_volume_percent / 100.0)))
         opus_cls = getattr(discord, "FFmpegOpusAudio", None)
         if opus_cls is not None:
             return opus_cls(

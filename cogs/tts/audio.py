@@ -2271,6 +2271,15 @@ class TTSAudioMixin:
         if target_channel is None:
             return None
 
+        router = getattr(getattr(self, "bot", None), "audio_router", None)
+        should_route_agent = getattr(router, "should_route_tts_to_music_agent", None)
+        if callable(should_route_agent):
+            with contextlib.suppress(Exception):
+                if should_route_agent(guild.id, item.channel_id):
+                    state.last_channel_id = item.channel_id
+                    logger.debug("[tts_voice] conexão local ignorada; TTS será roteado pelo worker musical | guild=%s channel=%s", guild.id, item.channel_id)
+                    return None
+
         vc = self._get_voice_client_for_guild(guild)
         if getattr(self, "_is_lavalink_voice_client", lambda _vc: False)(vc):
             if not getattr(self, "_lavalink_music_should_own_voice", lambda _guild: False)(guild):
@@ -2418,6 +2427,55 @@ class TTSAudioMixin:
                                 if hasattr(self, "_disconnect_if_blocked"):
                                     await self._maybe_await(self._disconnect_if_blocked(guild))
                                 continue
+
+                    router = getattr(getattr(self, "bot", None), "audio_router", None)
+                    should_route_agent = getattr(router, "should_route_tts_to_music_agent", None) if router is not None else None
+                    play_agent_tts = getattr(router, "play_tts_via_music_agent", None) if router is not None else None
+                    if callable(should_route_agent) and callable(play_agent_tts) and should_route_agent(guild.id, item.channel_id):
+                        if audio_task is not None and not audio_task.done():
+                            audio_task.cancel()
+                            with contextlib.suppress(BaseException):
+                                await audio_task
+                        dequeue_started_at = float(getattr(item, "_dequeued_at_monotonic", time.monotonic()))
+                        try:
+                            playback_result = await play_agent_tts(
+                                guild_id=guild.id,
+                                channel_id=item.channel_id,
+                                text=item.text,
+                                engine=item.engine,
+                                voice=item.voice,
+                                language=item.language,
+                                rate=item.rate,
+                                pitch=item.pitch,
+                                timeout=self._estimate_playback_timeout(item),
+                            )
+                            playback_started_at = float(playback_result.get("playback_started_at", time.monotonic()) or time.monotonic()) if isinstance(playback_result, dict) else time.monotonic()
+                            queue_wait_ms = max(0.0, (dequeue_started_at - float(getattr(item, "enqueued_at_monotonic", dequeue_started_at))) * 1000.0)
+                            dispatch_ms = max(0.0, (playback_started_at - dequeue_started_at) * 1000.0)
+                            playback_ms = max(0.0, float((playback_result or {}).get("playback_ms", 0.0) or 0.0)) if isinstance(playback_result, dict) else 0.0
+                            self._record_queue_timing(
+                                queue_wait_ms=queue_wait_ms,
+                                dispatch_ms=dispatch_ms,
+                                source_setup_ms=0.0,
+                                play_call_ms=0.0,
+                                playback_ms=playback_ms,
+                                total_to_playback_ms=max(0.0, (playback_started_at - float(getattr(item, "enqueued_at_monotonic", playback_started_at))) * 1000.0),
+                            )
+                            logger.info(
+                                "[tts_voice] TTS roteado pelo worker musical | guild=%s channel=%s engine=%s ok=%s",
+                                guild_id,
+                                item.channel_id,
+                                item.engine,
+                                bool(isinstance(playback_result, dict) and playback_result.get("ok", True)),
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "[tts_voice] TTS do worker musical falhou; descartando para não interromper a música | guild=%s channel=%s erro=%s",
+                                guild_id,
+                                item.channel_id,
+                                exc,
+                            )
+                        continue
 
                     connect_task = asyncio.create_task(self._ensure_connected_fast(guild, item))
                     own_audio_task = None

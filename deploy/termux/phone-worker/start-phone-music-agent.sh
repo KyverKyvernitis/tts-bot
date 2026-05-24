@@ -144,10 +144,10 @@ ensure_termux_packages() {
 ensure_deps() {
   ensure_termux_packages
   "$PYTHON_BIN" - <<'PYDEPS' >/dev/null 2>&1 && return 0
-import aiohttp, discord, nacl, davey, wavelink, yt_dlp  # noqa: F401
+import aiohttp, discord, nacl, davey, wavelink, yt_dlp, gtts, edge_tts  # noqa: F401
 PYDEPS
-  log "dependências do Music Agent ausentes; instalando aiohttp, discord.py, PyNaCl, davey, wavelink e yt-dlp"
-  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl davey 'wavelink>=3.4,<3.6' 'yt-dlp[default]')
+  log "dependências do Music Agent/TTS ausentes; instalando aiohttp, discord.py, PyNaCl, davey, wavelink, yt-dlp, gTTS e edge-tts"
+  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl davey 'wavelink>=3.4,<3.6' 'yt-dlp[default]' gTTS edge-tts)
   if command -v timeout >/dev/null 2>&1; then
     timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-900}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
       log "não consegui instalar todas as dependências automaticamente dentro do timeout"

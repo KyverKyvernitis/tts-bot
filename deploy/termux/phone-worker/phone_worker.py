@@ -52,7 +52,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.7"
+PHONE_WORKER_VERSION = "1.10.8"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2111,6 +2111,8 @@ def _music_voice_dependencies_snapshot() -> dict[str, Any]:
         "yt-dlp": "yt_dlp",
         "wavelink": "wavelink",
         "aiohttp": "aiohttp",
+        "gTTS": "gtts",
+        "edge-tts": "edge_tts",
     }
     for label, module in module_map.items():
         try:

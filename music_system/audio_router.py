@@ -48,6 +48,8 @@ MUSIC_DEFAULT_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_DEFAULT_VO
 TTS_VOLUME = max(0.0, min(2.0, float(getattr(config, "MUSIC_TTS_VOLUME", 1.0))))
 MUSIC_TTS_LOCAL_DUCK_FACTOR = max(0.0, min(1.0, float(getattr(config, "MUSIC_TTS_LOCAL_DUCK_PERCENT", 5.0)) / 100.0))
 MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT = max(0, min(100, int(getattr(config, "MUSIC_AGENT_TTS_DUCK_VOLUME_PERCENT", 8))))
+MUSIC_AGENT_TTS_ROUTE_ENABLED = bool(getattr(config, "MUSIC_AGENT_TTS_ROUTE_ENABLED", True))
+MUSIC_AGENT_TTS_TIMEOUT_SECONDS = max(3.0, float(getattr(config, "MUSIC_AGENT_TTS_TIMEOUT_SECONDS", 30.0)))
 MUSIC_LAVALINK_TTS_PAUSE_ENABLED = bool(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_ENABLED", True))
 MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS = max(0.2, float(getattr(config, "MUSIC_LAVALINK_TTS_PAUSE_GRACE_SECONDS", 0.35)))
 MUSIC_TTS_OVERLAY_TIMEOUT_IS_NON_FATAL = bool(getattr(config, "MUSIC_TTS_OVERLAY_TIMEOUT_IS_NON_FATAL", True))
@@ -1941,6 +1943,20 @@ class AudioRouter:
             task.cancel()
         state.panel_controls_invalidation_task = None
 
+    def _reactivate_panel_controls_now(self, guild_id: int) -> None:
+        """Reativa controles quando uma nova sessão/faixa começa.
+
+        O painel antigo pode ter sido renderizado como encerrado com componentes
+        invalidados. Ao iniciar uma nova faixa, principalmente pelo Music Agent,
+        os botões precisam voltar com uma View fresca.
+        """
+        state = self.get_state(guild_id)
+        state.panel_controls_invalid_at = 0.0
+        task = getattr(state, "panel_controls_invalidation_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        state.panel_controls_invalidation_task = None
+
     def _set_idle_reason(
         self,
         state: MusicGuildState,
@@ -2019,6 +2035,8 @@ class AudioRouter:
             if self._lavalink_tts_active(state) or self._lavalink_resume_grace_active(state):
                 return True
             return False
+        if state.current_backend == "agent" and self.should_route_tts_to_music_agent(guild_id, getattr(state, "last_voice_channel_id", 0)):
+            return True
         if self._lavalink_tts_active(state) or self._lavalink_resume_grace_active(state):
             return True
         return bool(state.current_backend == "lavalink" and (state.current_lavalink_player is not None or state.current is not None))
@@ -3912,6 +3930,8 @@ class AudioRouter:
         """
         state = self.get_state(int(guild_id))
         remote = agent_state if isinstance(agent_state, dict) else {}
+        previous_panel_key = getattr(state, "panel_track_key", None)
+        previous_status = str(getattr(state, "current_status", "") or "")
 
         try:
             if text_channel_id:
@@ -3982,8 +4002,19 @@ class AudioRouter:
         state.music_session_active = bool(state.current or raw_status in {"preparing", "starting", "playing", "paused", "queued"})
         if raw_status and raw_status not in {"failed", "error"}:
             state.current_status_detail = raw_status
+        active_statuses = {"resolving", "starting", "playing", "paused", "queued"}
+        new_panel_key = self._panel_key_for_track(state.current)
+        if state.current is not None or self._has_pending_track(state) or state.current_status in active_statuses:
+            self._reactivate_panel_controls_now(int(guild_id))
+        should_repost_panel = bool(
+            create_panel
+            and state.now_message is not None
+            and new_panel_key
+            and (previous_panel_key != new_panel_key or previous_status not in active_statuses)
+            and bool(getattr(config, "MUSIC_PANEL_REPOST_ON_TRACK_CHANGE", True))
+        )
         if create_panel:
-            await self.update_panel(int(guild_id), create=True)
+            await self.update_panel(int(guild_id), create=True, repost=should_repost_panel)
         return state
 
     async def update_panel(self, guild_id: int, *, create: bool = True, repost: bool = False) -> None:
@@ -4001,6 +4032,8 @@ class AudioRouter:
             from .ui import build_player_embeds, MusicPlayerView
 
             has_player_content = bool(state.current or self._has_pending_track(state))
+            if has_player_content:
+                self._reactivate_panel_controls_now(int(guild_id))
             state.panel_vote_summary = self.pending_vote_summary(guild_id)
             embeds = build_player_embeds(state)
             # O painel mantém a mesma estrutura de controles mesmo quando a música acaba,
@@ -4014,8 +4047,7 @@ class AudioRouter:
                     has_player_content
                     and state.now_message is not None
                     and current_panel_key
-                    and state.panel_track_key
-                    and current_panel_key != state.panel_track_key
+                    and (not state.panel_track_key or current_panel_key != state.panel_track_key)
                     and bool(getattr(config, "MUSIC_PANEL_REPOST_ON_TRACK_CHANGE", True))
                 )
                 should_repost = bool(has_player_content and (repost or (create and track_changed)))
@@ -4062,6 +4094,85 @@ class AudioRouter:
             return urlunsplit((base.scheme, base.netloc, source.path, source.query, ""))
         except Exception:
             return ""
+
+    def should_route_tts_to_music_agent(self, guild_id: int | None, channel_id: int | None = None) -> bool:
+        """Retorna se o TTS deve seguir pelo worker dono da sessão musical.
+
+        Quando o Music Agent está tocando, a VPS não deve entrar na call pelo
+        caminho normal de TTS, porque isso interrompe o player remoto.
+        """
+        if not MUSIC_AGENT_TTS_ROUTE_ENABLED:
+            return False
+        try:
+            state = self.get_state(int(guild_id or 0))
+        except Exception:
+            return False
+        if str(getattr(state, "current_backend", "") or "").lower() != "agent":
+            return False
+        active = bool(
+            getattr(state, "music_session_active", False)
+            or getattr(state, "current", None) is not None
+            or str(getattr(state, "current_status", "") or "") in {"resolving", "starting", "playing", "paused", "queued"}
+        )
+        if not active:
+            return False
+        try:
+            if channel_id and getattr(state, "last_voice_channel_id", 0):
+                return int(channel_id) == int(getattr(state, "last_voice_channel_id", 0) or 0)
+        except Exception:
+            return active
+        return active
+
+    async def play_tts_via_music_agent(
+        self,
+        *,
+        guild_id: int,
+        channel_id: int,
+        text: str,
+        engine: str = "gtts",
+        voice: str = "",
+        language: str = "pt-br",
+        rate: str = "+0%",
+        pitch: str = "+0Hz",
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        if not self.should_route_tts_to_music_agent(guild_id, channel_id):
+            return {"ok": False, "tts_agent_route": False, "reason": "agent_not_owner"}
+        started = time.monotonic()
+        result = await _music_agent_command(
+            "tts",
+            guild_id=int(guild_id),
+            voice_channel_id=int(channel_id or 0),
+            text=str(text or ""),
+            engine=str(engine or "gtts"),
+            voice=str(voice or ""),
+            language=str(language or "pt-br"),
+            rate=str(rate or "+0%"),
+            pitch=str(pitch or "+0Hz"),
+            timeout_seconds=max(3.0, float(timeout or MUSIC_AGENT_TTS_TIMEOUT_SECONDS)),
+        )
+        elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
+        state_payload = result.get("state") if isinstance(result, dict) else None
+        if isinstance(state_payload, dict):
+            state = self.get_state(int(guild_id))
+            await self.sync_music_agent_state(
+                int(guild_id),
+                state.current,
+                state_payload,
+                voice_channel_id=int(channel_id or getattr(state, "last_voice_channel_id", 0) or 0),
+                text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0),
+                create_panel=True,
+            )
+        return {
+            "ok": bool(isinstance(result, dict) and result.get("ok", True)),
+            "tts_agent_route": True,
+            "source_setup_ms": 0.0,
+            "play_call_ms": 0.0,
+            "playback_ms": float((result or {}).get("playback_ms") or 0.0) if isinstance(result, dict) else 0.0,
+            "playback_started_at": time.monotonic(),
+            "agent_elapsed_ms": elapsed_ms,
+            "worker_result": result,
+        }
 
     def _tts_format_suffix(self, fmt: str) -> str:
         fmt = str(fmt or "").strip().lower()
