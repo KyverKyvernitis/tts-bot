@@ -312,10 +312,10 @@ ensure_music_agent_deps_if_needed() {
   deps_install_enabled || return 0
   truthy "$MUSIC_AGENT_AUTO_START" || return 0
   "$PYTHON_BIN" - <<'PYMUSICAGENTDEPS' >/dev/null 2>&1 && return 0
-import aiohttp, discord, nacl, wavelink, yt_dlp  # noqa: F401
+import aiohttp, discord, nacl, wavelink, yt_dlp, davey, edge_tts, gtts  # noqa: F401
 PYMUSICAGENTDEPS
   log "perfil turbo: dependências do Music Agent ausentes; instalando somente o necessário"
-  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl 'wavelink>=3.4,<3.6' 'yt-dlp[default]')
+  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl davey 'wavelink>=3.4,<3.6' 'yt-dlp[default]' edge-tts gTTS)
   if command -v timeout >/dev/null 2>&1; then
     timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-600}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
       log "não consegui instalar dependências do Music Agent automaticamente dentro do timeout"
@@ -324,7 +324,7 @@ PYMUSICAGENTDEPS
       log "não consegui instalar dependências do Music Agent automaticamente"
   fi
   "$PYTHON_BIN" - <<'PYMUSICAGENTCHECK' >/dev/null 2>&1 && log "perfil turbo: dependências do Music Agent prontas" || true
-import aiohttp, discord, nacl, wavelink, yt_dlp  # noqa: F401
+import aiohttp, discord, nacl, wavelink, yt_dlp, davey, edge_tts, gtts  # noqa: F401
 PYMUSICAGENTCHECK
 }
 

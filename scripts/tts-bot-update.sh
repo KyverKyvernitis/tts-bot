@@ -736,6 +736,14 @@ PY_SANITIZE_LAVALINK
     systemctl stop lavalink.service >/dev/null 2>&1 || true
     systemctl disable lavalink.service >/dev/null 2>&1 || true
     systemctl reset-failed lavalink.service >/dev/null 2>&1 || true
+    # systemctl mask falha quando /etc/systemd/system/lavalink.service é um arquivo
+    # real. Fazemos a máscara idempotente manualmente para impedir restart-loop local.
+    if [[ -e /etc/systemd/system/lavalink.service && ! -L /etc/systemd/system/lavalink.service ]]; then
+      cp -a /etc/systemd/system/lavalink.service "/etc/systemd/system/lavalink.service.backup.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+      mv /etc/systemd/system/lavalink.service "/etc/systemd/system/lavalink.service.disabled.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    fi
+    ln -sfn /dev/null /etc/systemd/system/lavalink.service 2>/dev/null || true
+    changed_any=1
   fi
   if (( changed_any == 1 )); then
     systemctl daemon-reload || true
@@ -754,7 +762,7 @@ deploy_audio_services() {
 
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^deploy/systemd/lavalink\.service$'; then
     lavalink_unit_changed=1
-    if [[ -f "$REPO_DIR/deploy/systemd/lavalink.service" ]]; then
+    if env_truthy VPS_LAVALINK_ENABLED && [[ -f "$REPO_DIR/deploy/systemd/lavalink.service" ]]; then
       cp "$REPO_DIR/deploy/systemd/lavalink.service" /etc/systemd/system/lavalink.service
       installed=1
     fi

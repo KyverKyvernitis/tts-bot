@@ -3899,7 +3899,10 @@ class AudioRouter:
             text = str(value or "").strip()
             if not text:
                 return ""
-            if text.lower() in (generic or {"youtube", "link", "música", "musica", "desconhecida", "unknown", "worker-agent", "music-agent-ytdlp"}):
+            lower = text.lower()
+            if lower in (generic or {"youtube", "link", "música", "musica", "desconhecida", "unknown", "worker-agent", "music-agent-ytdlp", "worker-ytdlp"}):
+                return ""
+            if "desconhecida" in lower and ("youtube" in lower or "worker" in lower):
                 return ""
             return text
 
@@ -4216,18 +4219,11 @@ class AudioRouter:
                 if should_repost and state.now_message is not None:
                     old_message = state.now_message
                     state.now_message = None
-                    deleted = False
-                    try:
-                        await old_message.delete()
-                        deleted = True
-                    except Exception:
-                        deleted = False
-                    # Se não deu para apagar, pelo menos tenta matar os componentes
-                    # antigos para evitar dois painéis controlando o player. O painel
-                    # novo ainda será enviado abaixo com uma View fresca.
-                    if not deleted:
-                        with contextlib.suppress(Exception):
-                            await old_message.edit(view=None)
+                    # Mantém histórico visual, mas remove componentes do painel antigo.
+                    # O painel novo é enviado como mensagem mais recente com View fresca,
+                    # corrigindo botões expirados após fim de música/Music Agent.
+                    with contextlib.suppress(Exception):
+                        await old_message.edit(view=None)
                     logger.info("[music] repostando painel do player | guild=%s track_key=%s", guild_id, current_panel_key)
 
                 if state.now_message is not None and not should_repost:

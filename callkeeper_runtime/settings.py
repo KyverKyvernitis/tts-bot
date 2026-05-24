@@ -26,7 +26,7 @@ class CallKeeperSettings:
     guild_id: int
     default_channel_id: int
     bot_tokens: tuple[str, ...]
-    watchdog_interval: float = 1.0
+    watchdog_interval: float = 5.0
     event_debounce: float = 0.20
     disconnect_cooldown: float = 3.0
 
@@ -41,7 +41,7 @@ def load_settings() -> CallKeeperSettings:
         guild_id=_safe_int(getattr(config, "CALLKEEPER_GUILD_ID", 0), 0),
         default_channel_id=_safe_int(getattr(config, "CALLKEEPER_CHANNEL_ID", 0), 0),
         bot_tokens=tokens,
-        watchdog_interval=max(0.25, _safe_float(getattr(config, "CALLKEEPER_WATCHDOG_INTERVAL_SECONDS", 1.0), 1.0)),
+        watchdog_interval=max(2.0, _safe_float(getattr(config, "CALLKEEPER_WATCHDOG_INTERVAL_SECONDS", 5.0), 5.0)),
         event_debounce=max(0.05, _safe_float(getattr(config, "CALLKEEPER_EVENT_DEBOUNCE_SECONDS", 0.20), 0.20)),
         disconnect_cooldown=max(0.0, _safe_float(getattr(config, "CALLKEEPER_DISCONNECTED_BOT_COOLDOWN_SECONDS", 3.0), 3.0)),
     )

@@ -44,7 +44,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.8"
+AGENT_VERSION = "0.3.9"
 STARTED_AT = time.time()
 
 
@@ -169,7 +169,10 @@ def _float_or_none(value: Any) -> float | None:
 
 def _metadata_text(value: Any, *, limit: int = 180) -> str:
     text = short_text(value, limit)
-    if text.lower() in {"youtube", "link", "música", "musica", "worker-agent", "music-agent-ytdlp", "desconhecida", "unknown"}:
+    lower = text.lower()
+    if lower in {"youtube", "link", "música", "musica", "worker-agent", "music-agent-ytdlp", "worker-ytdlp", "desconhecida", "unknown"}:
+        return ""
+    if "desconhecida" in lower and ("youtube" in lower or "worker" in lower):
         return ""
     return text
 

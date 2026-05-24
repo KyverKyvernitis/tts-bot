@@ -2137,8 +2137,8 @@ def _kick_core_worker_pending_automation(worker_id: str = "") -> None:
     worker_id = str(worker_id or "").strip()
     key = _automation_worker_key(worker_id)
     now = time.time()
-    cooldown = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_COOLDOWN_SECONDS", 240.0, minimum=30.0, maximum=1800.0)
-    max_runtime = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_MAX_RUNTIME_SECONDS", 75.0, minimum=20.0, maximum=900.0)
+    cooldown = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_COOLDOWN_SECONDS", 900.0, minimum=300.0, maximum=3600.0)
+    max_runtime = _env_float_web("CORE_WORKER_PENDING_AUTOMATION_MAX_RUNTIME_SECONDS", 45.0, minimum=10.0, maximum=180.0)
 
     script = os.path.join(os.getcwd(), "scripts", "core-worker-automation.py")
     if not os.path.isfile(script):

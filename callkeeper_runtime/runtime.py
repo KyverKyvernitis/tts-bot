@@ -261,6 +261,8 @@ class CallKeeperRuntime:
         self._stopping = asyncio.Event()
         self._last_seen_target_channel_id = 0
         self._last_logged_state_key: tuple[bool, int, int] | None = None
+        self._last_reconcile_log_key: tuple[str, int, int, int] | None = None
+        self._last_reconcile_log_at: float = 0.0
 
     async def start(self) -> None:
         if self.settings.guild_id <= 0:
@@ -589,13 +591,19 @@ class CallKeeperRuntime:
 
             member_count = await self._member_count_without_callkeeper_bots()
             required = min(3, self._required_bots_for_member_count(member_count))
-            log.info(
-                "[callkeeper] reconcile %s | membros_nao_callkeeper=%s required=%s target=%s",
-                reason,
-                member_count,
-                required,
-                channel_id,
-            )
+            now_log = time.monotonic()
+            log_key = (reason, member_count, required, channel_id)
+            important_reason = reason not in {"watchdog", "aux_seen_voice_update", "aux_voice_state"}
+            if important_reason or log_key != self._last_reconcile_log_key or (now_log - self._last_reconcile_log_at) >= 60.0:
+                log.info(
+                    "[callkeeper] reconcile %s | membros_nao_callkeeper=%s required=%s target=%s",
+                    reason,
+                    member_count,
+                    required,
+                    channel_id,
+                )
+                self._last_reconcile_log_key = log_key
+                self._last_reconcile_log_at = now_log
 
             target_connected: list[AuxSlot] = []
             connected_elsewhere: list[AuxSlot] = []

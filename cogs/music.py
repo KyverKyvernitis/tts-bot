@@ -97,7 +97,14 @@ class Music(commands.Cog):
 
         def useful(value: object) -> str:
             text = str(value or "").strip()
-            return "" if text.lower() in {"youtube", "link", "música", "musica", "desconhecida", "unknown"} else text
+            lower = text.lower()
+            if lower in {"youtube", "link", "música", "musica", "desconhecida", "unknown"}:
+                return ""
+            if "desconhecida" in lower and ("youtube" in lower or "worker" in lower):
+                return ""
+            if lower.startswith("youtube •") or lower.startswith("youtube -"):
+                return ""
+            return text
 
         title = useful(current.get("title")) or track.short_title
         if len(title) > 90:

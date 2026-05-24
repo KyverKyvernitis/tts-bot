@@ -18,8 +18,8 @@ DEFAULT_OFFLINE_AFTER_SECONDS = 90
 DEFAULT_MAX_WORKERS = 24
 DEFAULT_JOB_TTL_SECONDS = 900
 DEFAULT_JOB_LEASE_SECONDS = 120
-DEFAULT_JOB_HISTORY_LIMIT = 25
-DEFAULT_JOB_PAYLOAD_MAX_STRING = 2 * 1024 * 1024
+DEFAULT_JOB_HISTORY_LIMIT = 8
+DEFAULT_JOB_PAYLOAD_MAX_STRING = 256 * 1024
 
 CORE_WORKER_JOB_TYPES = {
     "ping",
@@ -214,19 +214,24 @@ def _worker_status_dict(worker: dict[str, Any]) -> dict[str, Any]:
 
 
 def _merge_worker_status(worker: dict[str, Any], incoming: object) -> None:
-    """Atualiza status sem apagar subestado local mantido pelo registry."""
+    """Atualiza status sem apagar subestado local mantido pelo registry.
+
+    O heartbeat do worker pode carregar subárvores grandes. O registry precisa
+    guardar só o suficiente para seleção/diagnóstico; payload bruto grande deve
+    ficar nos logs/arquivos do worker, não em data/core_workers_registry.json.
+    """
     if not isinstance(incoming, Mapping):
         return
     current = worker.get("status") if isinstance(worker.get("status"), dict) else {}
     merged = dict(current)
-    for key, value in _safe_dict(incoming, max_items=24).items():
+    for key, value in _safe_dict(incoming, max_items=18, max_string=1024).items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             nested = dict(merged.get(key) or {})
             nested.update(value)
-            merged[key] = nested
+            merged[key] = _safe_dict(nested, max_items=18, max_string=1024)
         else:
             merged[key] = value
-    worker["status"] = merged
+    worker["status"] = _safe_dict(merged, max_items=18, max_string=1024)
 
 
 def _safe_dict(value: object, *, max_items: int = 32, max_string: int = 8192) -> dict[str, Any]:
@@ -321,10 +326,10 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "runtime_mode": runtime_mode,
         "runtime": _safe_dict(runtime, max_items=16),
         "endpoint": _short_text(record.get("endpoint"), limit=160),
-        "battery": _safe_dict(record.get("battery"), max_items=16),
-        "network": _safe_dict(record.get("network"), max_items=16),
-        "health": _safe_dict(record.get("health"), max_items=24),
-        "status": _safe_dict(record.get("status"), max_items=24),
+        "battery": _safe_dict(record.get("battery"), max_items=12, max_string=512),
+        "network": _safe_dict(record.get("network"), max_items=12, max_string=512),
+        "health": _safe_dict(record.get("health"), max_items=16, max_string=1024),
+        "status": _safe_dict(record.get("status"), max_items=18, max_string=1024),
         "remote_addr": _short_text(record.get("remote_addr"), limit=64),
     }
     return public
@@ -405,7 +410,7 @@ def _sanitize_registry_for_storage(data: dict[str, Any]) -> None:
             continue
         for key, max_items in (("battery", 12), ("network", 12), ("health", 16), ("status", 18)):
             if isinstance(worker.get(key), Mapping):
-                worker[key] = _safe_dict(worker.get(key), max_items=max_items, max_string=4096)
+                worker[key] = _safe_dict(worker.get(key), max_items=max_items, max_string=1024)
     jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
     for job in jobs.values():
         if isinstance(job, dict):
@@ -715,7 +720,7 @@ class CoreWorkersRegistry:
 
     def _cleanup_jobs_unlocked(self, data: dict[str, Any], *, now: float | None = None, keep_history: int | None = None) -> dict[str, int]:
         ts = _now() if now is None else float(now)
-        keep = max(10, int(keep_history or _env_int("CORE_WORKER_JOB_HISTORY_LIMIT", DEFAULT_JOB_HISTORY_LIMIT)))
+        keep = max(5, min(50, int(keep_history or _env_int("CORE_WORKER_JOB_HISTORY_LIMIT", DEFAULT_JOB_HISTORY_LIMIT))))
         jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
         reconciled = self._reconcile_jobs_from_worker_status_unlocked(data, now=ts)
         jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
@@ -789,7 +794,7 @@ class CoreWorkersRegistry:
         record = {
             "job_id": job_id,
             "type": kind,
-            "payload": _safe_dict(payload or {}, max_items=96, max_string=_env_int("CORE_WORKER_JOB_PAYLOAD_MAX_STRING", DEFAULT_JOB_PAYLOAD_MAX_STRING)),
+            "payload": _safe_dict(payload or {}, max_items=64, max_string=_env_int("CORE_WORKER_JOB_PAYLOAD_MAX_STRING", DEFAULT_JOB_PAYLOAD_MAX_STRING)),
             "status": "queued",
             "created_at": ts,
             "updated_at": ts,
@@ -972,7 +977,7 @@ class CoreWorkersRegistry:
             "job": {
                 "job_id": str(selected.get("job_id") or ""),
                 "type": str(selected.get("type") or ""),
-                "payload": _safe_dict(selected.get("payload"), max_items=96, max_string=_env_int("CORE_WORKER_JOB_PAYLOAD_MAX_STRING", DEFAULT_JOB_PAYLOAD_MAX_STRING)),
+                "payload": _safe_dict(selected.get("payload"), max_items=64, max_string=_env_int("CORE_WORKER_JOB_PAYLOAD_MAX_STRING", DEFAULT_JOB_PAYLOAD_MAX_STRING)),
                 "lease_until": selected.get("lease_until"),
                 "attempts": int(selected.get("attempts") or 0),
             },
