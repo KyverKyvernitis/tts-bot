@@ -103,17 +103,17 @@ pkg install termux-api -y || true
 
 log "copiando/reparando scripts em $WORKER_DIR"
 mkdir -p "$WORKER_DIR"
-for f in phone_worker.py start-phone-worker.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
+for f in phone_worker.py music_agent.py start-phone-worker.sh watch-phone-worker.sh start-phone-music-agent.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
   if [[ -f "$SCRIPT_DIR/$f" ]]; then
     cp "$SCRIPT_DIR/$f" "$WORKER_DIR/$f"
   fi
 done
-for f in start-phone-worker.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh; do
+for f in start-phone-worker.sh watch-phone-worker.sh start-phone-music-agent.sh pair-phone-worker.sh bootstrap-phone-worker.sh; do
   if [[ -f "$WORKER_DIR/$f" ]]; then
     write_compat_wrapper "$f"
   fi
 done
-chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/install.sh" 2>/dev/null || true
+chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/music_agent.py" "$WORKER_DIR/start-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh" "$WORKER_DIR/start-phone-music-agent.sh" "$WORKER_DIR/install.sh" 2>/dev/null || true
 
 log "criando/reparando inicialização automática do Termux:Boot"
 install_core_worker_boot || true

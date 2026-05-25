@@ -245,7 +245,7 @@ fi
 tcp_probe "$PHONE_HOST" "$SSH_PORT" "$SSH_CONNECT_TIMEOUT" "ssh" | while IFS= read -r line; do log "$line"; done
 
 if [[ "$START_COMMAND" == "__AUTO_WATCHDOG__" ]]; then
-  START_COMMAND='sh -c "cd; termux-wake-lock >/dev/null 2>&1 || true; if [ -x phone-worker/watch-phone-worker.sh ]; then nohup bash phone-worker/watch-phone-worker.sh >/dev/null 2>&1 & elif [ -x watch-phone-worker.sh ]; then nohup bash watch-phone-worker.sh >/dev/null 2>&1 & elif [ -x phone-worker/start-phone-worker.sh ]; then nohup bash phone-worker/start-phone-worker.sh >/dev/null 2>&1 & elif [ -x start-phone-worker.sh ]; then nohup bash start-phone-worker.sh >/dev/null 2>&1 & else exit 42; fi"'
+  START_COMMAND='sh -c "cd; termux-wake-lock >/dev/null 2>&1 || true; if [ -x phone-worker/watch-phone-worker.sh ]; then nohup bash phone-worker/watch-phone-worker.sh >/dev/null 2>&1 & elif [ -x phone-worker/start-phone-worker.sh ]; then nohup bash phone-worker/start-phone-worker.sh >/dev/null 2>&1 & elif [ -x watch-phone-worker.sh ] && grep -q Core\ Worker watch-phone-worker.sh 2>/dev/null; then nohup bash watch-phone-worker.sh >/dev/null 2>&1 & elif [ -x start-phone-worker.sh ] && grep -q Core\ Worker start-phone-worker.sh 2>/dev/null; then nohup bash start-phone-worker.sh >/dev/null 2>&1 & else exit 42; fi"'
 fi
 
 log "acionando Termux via SSH em ${SSH_USER}@$(mask_host "$PHONE_HOST"):${SSH_PORT}"

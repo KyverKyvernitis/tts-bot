@@ -44,9 +44,6 @@ falsey() {
 safe_mode_enabled() {
   truthy "${PHONE_WORKER_SAFE_MODE:-${PHONE_WORKER_BASIC_ONLY:-${PHONE_WORKER_LIGHT_MODE:-false}}}" && return 0
   truthy "${PHONE_WORKER_DISABLE_HEAVY_SERVICES:-false}" && return 0
-  if falsey "${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-}" || falsey "${PHONE_WORKER_DEPS_INSTALL_MODE:-}"; then
-    truthy "${PHONE_WORKER_ALLOW_HEAVY_SERVICES_WITH_DEPS_OFF:-false}" || return 0
-  fi
   return 1
 }
 

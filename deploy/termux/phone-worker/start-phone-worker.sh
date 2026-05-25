@@ -32,17 +32,19 @@ MAX_LOG_BYTES="${PHONE_WORKER_LOG_MAX_BYTES:-1048576}"
 KILL_DUPLICATES="${PHONE_WORKER_START_KILL_DUPLICATES:-true}"
 SSHD_AUTO_START="${PHONE_WORKER_SSHD_AUTO_START:-true}"
 SSHD_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
-# Serviços pesados do perfil turbo ficam em modo seguro por padrão quando o operador
-# desativou auto-install. Isso evita Java/Lavalink/pip/clang rodando em loop e
-# aquecendo o celular. Para música completa, defina explicitamente
-# PHONE_WORKER_START_LAVALINK=true e PHONE_WORKER_START_MUSIC_AGENT=true.
+# Serviços pesados do perfil turbo respeitam modo seguro explícito. Auto-install
+# agora é seguro/condicional: só tenta pacote ausente, com cooldown/timeout.
+# Para bloquear serviços, use PHONE_WORKER_SAFE_MODE=true ou START_* = off.
 MUSIC_LAVALINK_AUTO_START="${PHONE_WORKER_START_LAVALINK:-${PHONE_LAVALINK_AUTO_START:-auto}}"
-PHONE_LAVALINK_START_COMMAND="${PHONE_LAVALINK_START_COMMAND:-$WORKER_DIR/../start-phone-lavalink.sh}"
+PHONE_LAVALINK_START_COMMAND="${PHONE_LAVALINK_START_COMMAND:-$HOME/start-phone-lavalink.sh}"
 if [[ ! -x "$PHONE_LAVALINK_START_COMMAND" && -x "$HOME/start-phone-lavalink.sh" ]]; then
   PHONE_LAVALINK_START_COMMAND="$HOME/start-phone-lavalink.sh"
 fi
 MUSIC_AGENT_AUTO_START="${PHONE_WORKER_START_MUSIC_AGENT:-${MUSIC_AGENT_ENABLED:-auto}}"
 MUSIC_AGENT_START_COMMAND="${MUSIC_AGENT_START_COMMAND:-$WORKER_DIR/start-phone-music-agent.sh}"
+MAINT_LOCK_DIR="${PHONE_WORKER_MAINT_LOCK_DIR:-$WORKER_DIR/.phone-worker-maintenance.lock}"
+MAINT_LOG_FILE="${PHONE_WORKER_MAINT_LOG_FILE:-$WORKER_DIR/phone-worker-maintenance.log}"
+DEPS_STATE_DIR="${PHONE_WORKER_DEPS_STATE_DIR:-$WORKER_DIR/.dependency-install}"
 
 log() {
   printf '[phone-worker-start] %s\n' "$*"
@@ -72,9 +74,6 @@ normalize_boolish() {
 safe_mode_enabled() {
   truthy "${PHONE_WORKER_SAFE_MODE:-${PHONE_WORKER_BASIC_ONLY:-${PHONE_WORKER_LIGHT_MODE:-false}}}" && return 0
   truthy "${PHONE_WORKER_DISABLE_HEAVY_SERVICES:-false}" && return 0
-  if falsey "${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-}" || falsey "${PHONE_WORKER_DEPS_INSTALL_MODE:-}"; then
-    truthy "${PHONE_WORKER_ALLOW_HEAVY_SERVICES_WITH_DEPS_OFF:-false}" || return 0
-  fi
   return 1
 }
 
@@ -302,10 +301,12 @@ is_turbo_profile() {
 
 deps_install_enabled() {
   safe_mode_enabled && return 1
-  # Novos nomes *_MODE são os preferidos. Mantém compatibilidade com os antigos.
-  local mode="${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-${PHONE_WORKER_DEPS_INSTALL_MODE:-${PHONE_WORKER_TURBO_DEPS_INSTALL:-${PHONE_WORKER_TTS_DEPS_INSTALL:-off}}}}"
+  # *_MODE=off foi usado como freio de emergência contra loops pesados. A partir
+  # deste patch, off/manual continuam permitindo instalações leves e idempotentes
+  # somente quando o pacote está ausente. Para bloquear tudo use disabled/never.
+  local mode="${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-${PHONE_WORKER_DEPS_INSTALL_MODE:-${PHONE_WORKER_TURBO_DEPS_INSTALL:-${PHONE_WORKER_TTS_DEPS_INSTALL:-safe}}}}"
   mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
-  [[ "$mode" == "0" || "$mode" == "false" || "$mode" == "off" || "$mode" == "no" ]] && return 1
+  [[ "$mode" == "disabled" || "$mode" == "disable" || "$mode" == "never" || "$mode" == "none" || "$mode" == "bloqueado" ]] && return 1
   return 0
 }
 
@@ -313,6 +314,85 @@ heavy_python_deps_enabled() {
   local mode="${PHONE_WORKER_HEAVY_PYTHON_DEPS_INSTALL:-manual}"
   mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
   [[ "$mode" == "1" || "$mode" == "true" || "$mode" == "on" || "$mode" == "yes" || "$mode" == "sim" ]]
+}
+
+pip_source_builds_enabled() {
+  truthy "${PHONE_WORKER_ALLOW_PIP_SOURCE_BUILDS:-false}"
+}
+
+install_attempt_allowed() {
+  local key="$1"
+  local cooldown="${2:-900}"
+  mkdir -p "$DEPS_STATE_DIR" 2>/dev/null || true
+  local safe_key
+  safe_key="$(printf '%s' "$key" | tr -c 'A-Za-z0-9_.-' '_')"
+  local file="$DEPS_STATE_DIR/$safe_key.last"
+  local now last
+  now="$(date +%s 2>/dev/null || echo 0)"
+  last="0"
+  [[ -f "$file" ]] && last="$(cat "$file" 2>/dev/null || echo 0)"
+  if [[ "$last" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ && $((now - last)) -lt "$cooldown" ]]; then
+    log "auto-install em cooldown: $key"
+    return 1
+  fi
+  printf '%s' "$now" > "$file" 2>/dev/null || true
+  return 0
+}
+
+python_module_ok() {
+  local module="$1"
+  "$PYTHON_BIN" - "$module" <<'PYMODCHECK' >/dev/null 2>&1
+import importlib, sys
+importlib.import_module(sys.argv[1])
+PYMODCHECK
+}
+
+safe_pip_install_module() {
+  local label="$1"
+  local module="$2"
+  local package="$3"
+  local kind="${4:-light}"
+  python_module_ok "$module" && return 0
+  deps_install_enabled || { log "dependência ausente: $label; auto-install seguro desativado"; return 1; }
+  if [[ "$kind" == "heavy" ]] && ! heavy_python_deps_enabled; then
+    log "dependência pesada opcional ausente: $label; não instalando sem opt-in explícito"
+    return 1
+  fi
+  local cooldown timeout
+  cooldown="${PHONE_WORKER_DEPS_INSTALL_COOLDOWN_SECONDS:-900}"
+  timeout="${PHONE_WORKER_DEPS_INSTALL_TIMEOUT_SECONDS:-240}"
+  [[ "$kind" == "heavy" ]] && timeout="${PHONE_WORKER_HEAVY_DEPS_INSTALL_TIMEOUT_SECONDS:-240}"
+  install_attempt_allowed "pip-$label" "$cooldown" || return 1
+  cleanup_stale_heavy_dependency_builds
+  log "auto-install seguro: $label ausente; instalando $package"
+  local pip_args=(--disable-pip-version-check --no-input install --upgrade --prefer-binary)
+  if [[ "$kind" == "heavy" ]] || ! pip_source_builds_enabled; then
+    pip_args+=(--only-binary=:all:)
+  fi
+  local cmd=("$PYTHON_BIN" -m pip "${pip_args[@]}" "$package")
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$timeout" "${cmd[@]}" >/dev/null 2>&1 || log "auto-install falhou/expirou para $label"
+  else
+    "${cmd[@]}" >/dev/null 2>&1 || log "auto-install falhou para $label"
+  fi
+  python_module_ok "$module"
+}
+
+safe_pkg_install_missing() {
+  local label="$1"; shift
+  deps_install_enabled || { log "pacote Termux ausente: $label; auto-install seguro desativado"; return 1; }
+  command -v pkg >/dev/null 2>&1 || return 1
+  [[ "$#" -gt 0 ]] || return 0
+  local cooldown timeout
+  cooldown="${PHONE_WORKER_DEPS_INSTALL_COOLDOWN_SECONDS:-900}"
+  timeout="${PHONE_WORKER_TERMUX_DEPS_INSTALL_TIMEOUT_SECONDS:-180}"
+  install_attempt_allowed "pkg-$label" "$cooldown" || return 1
+  log "auto-install seguro: pacote(s) Termux ausentes para $label: $*"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$timeout" pkg install -y "$@" >/dev/null 2>&1 || log "não consegui instalar pacote(s) Termux para $label dentro do timeout"
+  else
+    pkg install -y "$@" >/dev/null 2>&1 || log "não consegui instalar pacote(s) Termux para $label"
+  fi
 }
 
 cleanup_stale_heavy_dependency_builds() {
@@ -348,7 +428,6 @@ cleanup_heavy_services_for_safe_mode() {
 
 ensure_turbo_termux_packages_if_needed() {
   is_turbo_profile || return 0
-  deps_install_enabled || return 0
   command -v pkg >/dev/null 2>&1 || return 0
   local missing=()
   command -v curl >/dev/null 2>&1 || missing+=(curl)
@@ -359,71 +438,39 @@ ensure_turbo_termux_packages_if_needed() {
   command -v sox >/dev/null 2>&1 || missing+=(sox)
   command -v espeak >/dev/null 2>&1 || missing+=(espeak)
   if [[ "${#missing[@]}" -gt 0 ]]; then
-    log "perfil turbo: instalando pacote(s) Termux ausentes: ${missing[*]}"
-    pkg install -y "${missing[@]}" >/dev/null 2>&1 || \
-      log "não consegui instalar todos os pacotes turbo; capabilities dependentes podem falhar"
+    mapfile -t missing < <(printf '%s\n' "${missing[@]}" | awk 'NF && !seen[$0]++')
+    safe_pkg_install_missing "turbo-base" "${missing[@]}" || true
   fi
 }
 
 ensure_turbo_python_tts_deps_if_needed() {
   is_turbo_profile || return 0
-  deps_install_enabled || return 0
-  "$PYTHON_BIN" - <<'PYTTSDEPS' >/dev/null 2>&1 && return 0
-import edge_tts  # noqa: F401
-import gtts  # noqa: F401
-PYTTSDEPS
-  log "perfil turbo: instalando dependências leves do TTS (edge/gTTS)"
-  "$PYTHON_BIN" -m pip install --upgrade edge-tts gTTS >/dev/null 2>&1 || \
-    log "não consegui instalar edge/gTTS automaticamente; o benchmark vai mostrar erro curto"
-
-  # google-cloud-texttospeech puxa grpcio e pode compilar nativamente no Termux,
-  # travando/esquentando o celular. Só instala em modo explícito.
-  if heavy_python_deps_enabled; then
-    "$PYTHON_BIN" - <<'PYGCLOUDDEP' >/dev/null 2>&1 || {
-import google.cloud.texttospeech_v1  # noqa: F401
-PYGCLOUDDEP
-      log "dependência pesada Google Cloud TTS ausente; instalando porque PHONE_WORKER_HEAVY_PYTHON_DEPS_INSTALL=true"
-      "$PYTHON_BIN" -m pip install --upgrade google-cloud-texttospeech >/dev/null 2>&1 || \
-        log "não consegui instalar Google Cloud TTS automaticamente; recurso opcional ficará indisponível"
-    }
-  fi
+  safe_pip_install_module "edge-tts" "edge_tts" "edge-tts" light || true
+  safe_pip_install_module "gTTS" "gtts" "gTTS" light || true
+  # google-cloud-texttospeech puxa grpcio e pode tentar build nativo. Mesmo com
+  # opt-in, usa --only-binary por padrão para falhar rápido em vez de compilar.
+  safe_pip_install_module "google-cloud-texttospeech" "google.cloud.texttospeech_v1" "google-cloud-texttospeech" heavy || true
 }
 
 ensure_music_ytdlp_deps_if_needed() {
   is_turbo_profile || return 0
-  deps_install_enabled || return 0
-  "$PYTHON_BIN" - <<'PYYTDLPDEPS' >/dev/null 2>&1 && return 0
-import yt_dlp  # noqa: F401
-import yt_dlp_ejs  # noqa: F401
-PYYTDLPDEPS
-  log "perfil turbo: instalando suporte yt-dlp/EJS para música"
-  "$PYTHON_BIN" -m pip install --upgrade "yt-dlp[default]" >/dev/null 2>&1 || \
-    log "não consegui instalar yt-dlp[default] automaticamente; música YouTube pode falhar no challenge"
+  safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp[default]" light || true
+  safe_pip_install_module "yt-dlp-ejs" "yt_dlp_ejs" "yt-dlp-ejs" light || true
 }
 
 ensure_music_agent_deps_if_needed() {
   is_turbo_profile || return 0
-  deps_install_enabled || return 0
   autostart_enabled "$MUSIC_AGENT_AUTO_START" || { log "perfil turbo: Music Agent não será iniciado automaticamente (modo seguro/auto-start off)"; return 0; }
-  "$PYTHON_BIN" - <<'PYMUSICAGENTDEPS' >/dev/null 2>&1 && return 0
-import aiohttp, discord, nacl, wavelink, yt_dlp, davey, edge_tts, gtts  # noqa: F401
-PYMUSICAGENTDEPS
-  log "perfil turbo: dependências do Music Agent ausentes; instalando somente o necessário"
-  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl davey 'wavelink>=3.4,<3.6' 'yt-dlp[default]' edge-tts gTTS)
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-600}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
-      log "não consegui instalar dependências do Music Agent automaticamente dentro do timeout"
-  else
-    "${pip_cmd[@]}" >/dev/null 2>&1 || \
-      log "não consegui instalar dependências do Music Agent automaticamente"
-  fi
-  if heavy_python_deps_enabled; then
-    "$PYTHON_BIN" - <<'PYGCLOUDCHECK' >/dev/null 2>&1 || \
-      "$PYTHON_BIN" -m pip install --upgrade google-cloud-texttospeech >/dev/null 2>&1 || true
-import google.cloud.texttospeech_v1  # noqa: F401
-PYGCLOUDCHECK
-  fi
-  "$PYTHON_BIN" - <<'PYMUSICAGENTCHECK' >/dev/null 2>&1 && log "perfil turbo: dependências do Music Agent prontas" || true
+  safe_pip_install_module "aiohttp" "aiohttp" "aiohttp" light || true
+  safe_pip_install_module "discord.py" "discord" "discord.py>=2.7.1,<2.8" light || true
+  safe_pip_install_module "PyNaCl" "nacl" "PyNaCl" light || true
+  safe_pip_install_module "davey" "davey" "davey" light || true
+  safe_pip_install_module "wavelink" "wavelink" "wavelink>=3.4,<3.6" light || true
+  safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp[default]" light || true
+  safe_pip_install_module "edge-tts" "edge_tts" "edge-tts" light || true
+  safe_pip_install_module "gTTS" "gtts" "gTTS" light || true
+  safe_pip_install_module "google-cloud-texttospeech" "google.cloud.texttospeech_v1" "google-cloud-texttospeech" heavy || true
+  "$PYTHON_BIN" - <<'PYMUSICAGENTCHECK' >/dev/null 2>&1 && log "perfil turbo: dependências do Music Agent prontas" || log "perfil turbo: Music Agent ainda possui dependências ausentes; será reportado no health"
 import aiohttp, discord, nacl, wavelink, yt_dlp, davey, edge_tts, gtts  # noqa: F401
 PYMUSICAGENTCHECK
 }
@@ -580,6 +627,25 @@ ensure_turbo_deps_if_needed() {
   ensure_turbo_piper_wrapper_if_needed
 }
 
+run_post_start_maintenance_async() {
+  is_turbo_profile || return 0
+  mkdir -p "$(dirname "$MAINT_LOG_FILE")" 2>/dev/null || true
+  (
+    if ! mkdir "$MAINT_LOCK_DIR" 2>/dev/null; then
+      log "manutenção pós-start já em andamento"
+      exit 0
+    fi
+    trap 'rm -rf "$MAINT_LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+    log "manutenção pós-start iniciada"
+    cleanup_stale_heavy_dependency_builds
+    cleanup_heavy_services_for_safe_mode
+    ensure_turbo_deps_if_needed
+    ensure_lavalink_for_turbo_if_needed
+    ensure_music_agent_for_turbo_if_needed
+    log "manutenção pós-start finalizada"
+  ) >> "$MAINT_LOG_FILE" 2>&1 &
+}
+
 ensure_music_worker_env_if_needed
 cleanup_stale_heavy_dependency_builds
 cleanup_heavy_services_for_safe_mode
@@ -593,20 +659,17 @@ if health_ok && [[ "$count" -le 1 ]]; then
     write_status "restart_for_update runtime=$running_ver file=$file_ver $(now_iso)"
     kill_worker_processes
   else
-    # Worker saudável não deve rodar auto-install a cada ciclo do watchdog.
-    # Mantém apenas serviços auxiliares de música, que são checagens rápidas.
-    ensure_lavalink_for_turbo_if_needed
-    ensure_music_agent_for_turbo_if_needed
+    # Worker saudável fica online; manutenção/deps/serviços auxiliares rodam em
+    # segundo plano com lock/cooldown para não travar o watchdog nem o celular.
+    run_post_start_maintenance_async
     log "worker já está online; pid(s)=$count"
     write_status "ok already_online $(now_iso)"
     exit 0
   fi
 fi
 
-# Dependências só são verificadas quando o worker não está online ou precisou reiniciar.
-ensure_turbo_deps_if_needed
-ensure_lavalink_for_turbo_if_needed
-ensure_music_agent_for_turbo_if_needed
+# O worker principal deve subir leve primeiro. Dependências turbo e serviços de
+# música são preparados depois, em background, para evitar aquecimento/travamento.
 
 if [[ "$KILL_DUPLICATES" != "false" ]]; then
   log "limpando processos antigos/duplicados do phone-worker"
@@ -630,6 +693,7 @@ sleep "$START_WAIT"
 if health_ok; then
   log "worker iniciado com sucesso; pid=$child_pid"
   write_status "ok pid=$child_pid $(now_iso)"
+  run_post_start_maintenance_async
   exit 0
 fi
 

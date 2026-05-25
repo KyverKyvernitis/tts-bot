@@ -46,6 +46,7 @@ LOG_FILE="${MUSIC_AGENT_LOG_FILE:-$WORKER_DIR/music_agent.log}"
 PID_FILE="${MUSIC_AGENT_PID_FILE:-$WORKER_DIR/music_agent.pid}"
 START_WAIT="${MUSIC_AGENT_START_WAIT_SECONDS:-5}"
 KILL_DUPLICATES="${MUSIC_AGENT_KILL_DUPLICATES:-true}"
+DEPS_STATE_DIR="${MUSIC_AGENT_DEPS_STATE_DIR:-$WORKER_DIR/.dependency-install}"
 
 log() { printf '[music-agent-start] %s\n' "$*"; }
 truthy() {
@@ -63,17 +64,76 @@ falsey() {
 agent_safe_mode_enabled() {
   truthy "${MUSIC_AGENT_SAFE_MODE:-${PHONE_WORKER_SAFE_MODE:-${PHONE_WORKER_BASIC_ONLY:-${PHONE_WORKER_LIGHT_MODE:-false}}}}" && return 0
   truthy "${PHONE_WORKER_DISABLE_HEAVY_SERVICES:-false}" && return 0
-  if falsey "${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-}" || falsey "${PHONE_WORKER_DEPS_INSTALL_MODE:-}"; then
-    truthy "${PHONE_WORKER_ALLOW_HEAVY_SERVICES_WITH_DEPS_OFF:-false}" || return 0
-  fi
   return 1
 }
 
 agent_deps_install_enabled() {
   agent_safe_mode_enabled && return 1
-  local mode="${MUSIC_AGENT_DEPS_INSTALL_MODE:-${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-${PHONE_WORKER_DEPS_INSTALL_MODE:-off}}}"
-  falsey "$mode" && return 1
+  local mode="${MUSIC_AGENT_DEPS_INSTALL_MODE:-${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-${PHONE_WORKER_DEPS_INSTALL_MODE:-safe}}}"
+  mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
+  [[ "$mode" == "disabled" || "$mode" == "disable" || "$mode" == "never" || "$mode" == "none" || "$mode" == "bloqueado" ]] && return 1
   return 0
+}
+
+pip_source_builds_enabled() {
+  truthy "${MUSIC_AGENT_ALLOW_PIP_SOURCE_BUILDS:-${PHONE_WORKER_ALLOW_PIP_SOURCE_BUILDS:-false}}"
+}
+
+install_attempt_allowed() {
+  local key="$1"
+  local cooldown="${2:-900}"
+  mkdir -p "$DEPS_STATE_DIR" 2>/dev/null || true
+  local safe_key file now last
+  safe_key="$(printf '%s' "$key" | tr -c 'A-Za-z0-9_.-' '_')"
+  file="$DEPS_STATE_DIR/$safe_key.last"
+  now="$(date +%s 2>/dev/null || echo 0)"
+  last="0"
+  [[ -f "$file" ]] && last="$(cat "$file" 2>/dev/null || echo 0)"
+  if [[ "$last" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ && $((now - last)) -lt "$cooldown" ]]; then
+    log "auto-install em cooldown: $key"
+    return 1
+  fi
+  printf '%s' "$now" > "$file" 2>/dev/null || true
+  return 0
+}
+
+python_module_ok() {
+  local module="$1"
+  "$PYTHON_BIN" - "$module" <<'PYMODCHECK' >/dev/null 2>&1
+import importlib, sys
+importlib.import_module(sys.argv[1])
+PYMODCHECK
+}
+
+safe_pip_install_module() {
+  local label="$1"
+  local module="$2"
+  local package="$3"
+  local kind="${4:-light}"
+  python_module_ok "$module" && return 0
+  agent_deps_install_enabled || { log "dependência ausente: $label; auto-install seguro desativado"; return 1; }
+  if [[ "$kind" == "heavy" ]] && ! heavy_python_deps_enabled; then
+    log "dependência pesada opcional ausente: $label; não instalando sem opt-in explícito"
+    return 1
+  fi
+  local timeout cooldown
+  timeout="${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-240}"
+  [[ "$kind" == "heavy" ]] && timeout="${MUSIC_AGENT_HEAVY_DEPS_INSTALL_TIMEOUT_SECONDS:-240}"
+  cooldown="${MUSIC_AGENT_DEPS_INSTALL_COOLDOWN_SECONDS:-900}"
+  install_attempt_allowed "music-agent-pip-$label" "$cooldown" || return 1
+  cleanup_stale_heavy_dependency_builds
+  log "auto-install seguro: $label ausente; instalando $package"
+  local pip_args=(--disable-pip-version-check --no-input install --upgrade --prefer-binary)
+  if [[ "$kind" == "heavy" ]] || ! pip_source_builds_enabled; then
+    pip_args+=(--only-binary=:all:)
+  fi
+  local cmd=("$PYTHON_BIN" -m pip "${pip_args[@]}" "$package")
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$timeout" "${cmd[@]}" >/dev/null 2>&1 || log "auto-install falhou/expirou para $label"
+  else
+    "${cmd[@]}" >/dev/null 2>&1 || log "auto-install falhou para $label"
+  fi
+  python_module_ok "$module"
 }
 
 heavy_python_deps_enabled() {
@@ -179,52 +239,44 @@ kill_agent() {
 
 ensure_termux_packages() {
   truthy "${MUSIC_AGENT_AUTO_INSTALL_TERMUX_PACKAGES:-true}" || return 0
+  agent_deps_install_enabled || return 0
   command -v pkg >/dev/null 2>&1 || return 0
   local missing=()
-  for bin in ffmpeg pkg-config clang make rustc; do
-    command -v "$bin" >/dev/null 2>&1 || missing+=("$bin")
-  done
+  command -v ffmpeg >/dev/null 2>&1 || missing+=(ffmpeg)
+  command -v pkg-config >/dev/null 2>&1 || missing+=(pkg-config)
   if [[ ${#missing[@]} -eq 0 ]]; then
     return 0
   fi
-  log "pacotes Termux de voz ausentes (${missing[*]}); instalando dependências essenciais"
-  pkg install -y python clang make pkg-config libffi libsodium openssl rust ffmpeg >/dev/null 2>&1 || \
-    log "não consegui instalar todos os pacotes Termux automaticamente"
+  mapfile -t missing < <(printf '%s\n' "${missing[@]}" | awk 'NF && !seen[$0]++')
+  install_attempt_allowed "music-agent-pkg-base" "${MUSIC_AGENT_DEPS_INSTALL_COOLDOWN_SECONDS:-900}" || return 0
+  log "pacotes Termux ausentes (${missing[*]}); instalando apenas o necessário"
+  local timeout="${MUSIC_AGENT_TERMUX_DEPS_INSTALL_TIMEOUT_SECONDS:-180}"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$timeout" pkg install -y "${missing[@]}" >/dev/null 2>&1 || log "não consegui instalar todos os pacotes Termux dentro do timeout"
+  else
+    pkg install -y "${missing[@]}" >/dev/null 2>&1 || log "não consegui instalar todos os pacotes Termux automaticamente"
+  fi
 }
 
 ensure_deps() {
-  agent_deps_install_enabled || {
-    log "auto-install de dependências do Music Agent desativado por env"
-    return 0
-  }
   ensure_termux_packages
-  "$PYTHON_BIN" - <<'PYDEPS' >/dev/null 2>&1 && return 0
-import aiohttp, discord, nacl, davey, wavelink, yt_dlp, gtts, edge_tts  # noqa: F401
+  local missing=0
+  safe_pip_install_module "aiohttp" "aiohttp" "aiohttp" light || missing=1
+  safe_pip_install_module "discord.py" "discord" "discord.py>=2.7.1,<2.8" light || missing=1
+  safe_pip_install_module "PyNaCl" "nacl" "PyNaCl" light || missing=1
+  safe_pip_install_module "davey" "davey" "davey" light || missing=1
+  safe_pip_install_module "wavelink" "wavelink" "wavelink>=3.4,<3.6" light || missing=1
+  safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp[default]" light || missing=1
+  safe_pip_install_module "gTTS" "gtts" "gTTS" light || true
+  safe_pip_install_module "edge-tts" "edge_tts" "edge-tts" light || true
+  safe_pip_install_module "google-cloud-texttospeech" "google.cloud.texttospeech_v1" "google-cloud-texttospeech" heavy || true
+  if "$PYTHON_BIN" - <<'PYDEPS' >/dev/null 2>&1; then
+import aiohttp, discord, nacl, davey, wavelink, yt_dlp  # noqa: F401
 PYDEPS
-  log "dependências leves do Music Agent/TTS ausentes; instalando sem Google Cloud TTS/grpcio"
-  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl davey 'wavelink>=3.4,<3.6' 'yt-dlp[default]' gTTS edge-tts)
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-600}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
-      log "não consegui instalar todas as dependências leves automaticamente dentro do timeout"
-  else
-    "${pip_cmd[@]}" >/dev/null 2>&1 || \
-      log "não consegui instalar todas as dependências leves automaticamente"
+    return 0
   fi
-  if heavy_python_deps_enabled; then
-    "$PYTHON_BIN" - <<'PYGCLOUD' >/dev/null 2>&1 || {
-import google.cloud.texttospeech_v1  # noqa: F401
-PYGCLOUD
-      log "Google Cloud TTS/grpcio ausente; instalando porque heavy deps foram ativadas explicitamente"
-      local heavy_cmd=("$PYTHON_BIN" -m pip install --upgrade google-cloud-texttospeech)
-      if command -v timeout >/dev/null 2>&1; then
-        timeout "${MUSIC_AGENT_HEAVY_DEPS_INSTALL_TIMEOUT_SECONDS:-600}" "${heavy_cmd[@]}" >/dev/null 2>&1 || \
-          log "não consegui instalar Google Cloud TTS automaticamente dentro do timeout"
-      else
-        "${heavy_cmd[@]}" >/dev/null 2>&1 || \
-          log "não consegui instalar Google Cloud TTS automaticamente"
-      fi
-    }
-  fi
+  log "dependências críticas do Music Agent ainda ausentes; não iniciando para evitar loop de crash"
+  return 1
 }
 
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -249,8 +301,10 @@ if health_ok; then
 fi
 
 # Só verifica/instala dependências quando o Music Agent não está online ou será reiniciado.
-# Isso evita que cada watchdog/start tente pip install e trave o celular mesmo com o agente saudável.
-ensure_deps
+# Se faltar algo crítico, sai sem iniciar para evitar loop de crash e aquecimento.
+if ! ensure_deps; then
+  exit 0
+fi
 
 if truthy "$KILL_DUPLICATES"; then
   kill_agent

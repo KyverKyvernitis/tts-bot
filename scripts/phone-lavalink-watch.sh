@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Mantém o Lavalink auxiliar do celular acordado sem virar dependência do bot.
 # Este script roda na VPS via systemd timer. Se o celular estiver offline, ele
-# falha rápido e deixa o bot continuar usando o Lavalink principal da VPS.
+# falha rápido e deixa o bot seguir sem religar Lavalink local na VPS.
 set -u
 
 REPO_DIR="${REPO_DIR:-/home/ubuntu/bot}"
@@ -69,7 +69,7 @@ SSH_USER="$(env_value PHONE_LAVALINK_SSH_USER "")"
 SSH_PORT="$(env_value PHONE_LAVALINK_SSH_PORT 8022)"
 SSH_CONNECT_TIMEOUT="$(env_value PHONE_LAVALINK_SSH_CONNECT_TIMEOUT_SECONDS 5)"
 START_COMMAND="$(env_value PHONE_LAVALINK_START_COMMAND '~/start-phone-lavalink.sh')"
-COOLDOWN_SECONDS="$(env_value PHONE_LAVALINK_KICK_COOLDOWN_SECONDS 60)"
+COOLDOWN_SECONDS="$(env_value PHONE_LAVALINK_KICK_COOLDOWN_SECONDS 900)"
 STATE_DIR="${STATE_DIR:-$REPO_DIR/data/runtime}"
 COOLDOWN_FILE="$STATE_DIR/phone-lavalink-last-kick"
 
@@ -98,7 +98,7 @@ if [[ -f "$COOLDOWN_FILE" ]]; then
   last_kick="$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0)"
 fi
 if [[ "$last_kick" =~ ^[0-9]+$ ]] && (( now_epoch - last_kick < COOLDOWN_SECONDS )); then
-  log "cooldown ativo; VPS segue usando fallback local"
+  log "cooldown ativo; não tentando religar Lavalink do celular agora"
   exit 0
 fi
 printf '%s' "$now_epoch" > "$COOLDOWN_FILE" 2>/dev/null || true

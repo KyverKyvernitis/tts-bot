@@ -3,9 +3,10 @@ Description=Periodic phone Lavalink helper check
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
-AccuracySec=10s
+OnUnitActiveSec=10min
+AccuracySec=1min
 Persistent=true
+RandomizedDelaySec=45s
 
 [Install]
 WantedBy=timers.target

@@ -4206,24 +4206,20 @@ class AudioRouter:
 
         # O Music Agent envia confirmações repetidas de "playing" enquanto a faixa
         # continua ativa. Repostar o painel em cada confirmação cria spam de
-        # painéis idênticos. Repost só em transição real de faixa/sessão; refresh
-        # de estado apenas edita o painel atual.
+        # painéis idênticos. Repost só no primeiro start confirmado de uma faixa;
+        # refresh de metadata/status apenas edita o painel atual.
         track_changed_for_panel = bool(new_panel_key and previous_panel_key != new_panel_key)
-        resumed_from_inactive = bool(new_panel_key and previous_status not in active_statuses and just_started_agent_track)
-        repost_signal = bool(track_changed_for_panel or resumed_from_inactive)
-        repost_key = f"{guild_id}:{new_panel_key}:{int(float(getattr(state, 'current_started_at_monotonic', 0.0) or 0.0) * 1000)}" if new_panel_key else ""
+        repost_key = f"{guild_id}:{new_panel_key}" if new_panel_key else ""
         already_reposted = bool(repost_key and repost_key == str(getattr(state, "panel_last_repost_key", "") or ""))
         should_repost_panel = bool(
             create_panel
             and state.now_message is not None
             and new_panel_key
-            and repost_signal
+            and just_started_agent_track
+            and track_changed_for_panel
             and not already_reposted
             and bool(getattr(config, "MUSIC_PANEL_REPOST_ON_TRACK_CHANGE", True))
         )
-        if should_repost_panel and repost_key:
-            state.panel_last_repost_key = repost_key
-            state.panel_last_repost_at = time.monotonic()
         if create_panel:
             await self.update_panel(int(guild_id), create=True, repost=should_repost_panel)
         if state.current_backend == "agent" and state.current_status in active_statuses:
@@ -4267,7 +4263,8 @@ class AudioRouter:
                 already_reposted_key = bool(repost_key and repost_key == str(getattr(state, "panel_last_repost_key", "") or ""))
                 if repost and already_reposted_key:
                     repost = False
-                implicit_repost = bool(create and track_changed and not already_reposted_key)
+                allow_implicit_repost = str(getattr(state, "current_backend", "") or "").lower() != "agent"
+                implicit_repost = bool(create and track_changed and not already_reposted_key and allow_implicit_repost)
                 should_repost = bool(has_player_content and (repost or implicit_repost))
                 if should_repost and repost_key:
                     state.panel_last_repost_key = repost_key

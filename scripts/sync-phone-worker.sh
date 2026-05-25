@@ -70,6 +70,7 @@ chmod +x '$REMOTE_DIR/phone_worker.py' '$REMOTE_DIR/music_agent.py' '$REMOTE_DIR
 for f in start-phone-worker.sh start-phone-music-agent.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh; do
   cat > '$REMOTE_HOME/'\$f <<EOF_WRAPPER
 #!/data/data/com.termux/files/usr/bin/bash
+# Wrapper de compatibilidade gerenciado pelo Core Worker.
 exec /data/data/com.termux/files/usr/bin/bash '$REMOTE_DIR/'\$f "\\\$@"
 EOF_WRAPPER
   chmod +x '$REMOTE_HOME/'\$f 2>/dev/null || true

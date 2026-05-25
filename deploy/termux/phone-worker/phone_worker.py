@@ -54,7 +54,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.11"
+PHONE_WORKER_VERSION = "1.10.12"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2138,13 +2138,19 @@ def _module_import_ok(module_name: str) -> tuple[bool, str]:
 
 
 def _phone_worker_deps_mode_enabled() -> bool:
+    """Whether safe, missing-only dependency auto-install may run.
+
+    Older emergency configs used *_MODE=off to stop heavy grpcio/google-cloud
+    compile loops. Keep that value as safe-only instead of globally disabling
+    idempotent installs. Use disabled/never/none to block all auto-install.
+    """
     for key in ("PHONE_WORKER_TURBO_DEPS_INSTALL_MODE", "PHONE_WORKER_DEPS_INSTALL_MODE", "PHONE_WORKER_TURBO_DEPS_INSTALL", "PHONE_WORKER_TTS_DEPS_INSTALL"):
         raw = str(os.getenv(key) or "").strip().lower().strip('"\'')
-        if raw in {"0", "false", "off", "no", "nao", "não"}:
+        if raw in {"disabled", "disable", "never", "none", "bloqueado"}:
             return False
-        if raw in {"1", "true", "on", "yes", "sim", "auto"}:
+        if raw:
             return True
-    return False
+    return True
 
 
 def _phone_worker_heavy_python_deps_enabled() -> bool:
@@ -2152,16 +2158,42 @@ def _phone_worker_heavy_python_deps_enabled() -> bool:
     return raw in {"1", "true", "on", "yes", "sim"}
 
 
+def _phone_worker_allow_pip_source_builds() -> bool:
+    raw = str(os.getenv("PHONE_WORKER_ALLOW_PIP_SOURCE_BUILDS") or "").strip().lower().strip('"\'')
+    return raw in {"1", "true", "on", "yes", "sim"}
+
+
+def _dependency_install_state_dir() -> Path:
+    return Path(os.getenv("PHONE_WORKER_DEPS_STATE_DIR") or (_phone_worker_dir() / ".dependency-install")).expanduser()
+
+
+def _dependency_attempt_allowed(key: str, cooldown_seconds: float) -> tuple[bool, str, float]:
+    safe_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", key)[:120] or "dependency"
+    state_dir = _dependency_install_state_dir()
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    marker = state_dir / f"{safe_key}.last"
+    now = time.time()
+    last = 0.0
+    try:
+        last = float(marker.read_text(encoding="utf-8", errors="ignore").strip() or "0")
+    except Exception:
+        last = 0.0
+    if last and now - last < cooldown_seconds:
+        return False, "cooldown", max(0.0, cooldown_seconds - (now - last))
+    try:
+        marker.write_text(str(int(now)), encoding="utf-8")
+    except Exception:
+        pass
+    return True, "allowed", 0.0
+
+
 def _phone_worker_safe_mode_enabled() -> bool:
     for key in ("PHONE_WORKER_SAFE_MODE", "PHONE_WORKER_BASIC_ONLY", "PHONE_WORKER_LIGHT_MODE", "PHONE_WORKER_DISABLE_HEAVY_SERVICES"):
         if _env_bool(key, False):
             return True
-    # Quando o operador desligou auto-install após aquecimento/travamento, health
-    # não deve religar Java/Lavalink/Music Agent por efeito colateral.
-    for key in ("PHONE_WORKER_TURBO_DEPS_INSTALL_MODE", "PHONE_WORKER_DEPS_INSTALL_MODE"):
-        raw = str(os.getenv(key) or "").strip().lower().strip('"\'')
-        if raw in {"0", "false", "off", "no", "nao", "não"}:
-            return not _env_bool("PHONE_WORKER_ALLOW_HEAVY_SERVICES_WITH_DEPS_OFF", False)
     return False
 
 
@@ -2181,43 +2213,87 @@ def _start_tts_dependency_autoinstall(missing: list[str], checks: dict[str, dict
     enabled = _env_bool("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS", True) and _phone_worker_deps_mode_enabled()
     if not enabled:
         return {"enabled": False, "started": False, "reason": "disabled"}
+    if _phone_worker_safe_mode_enabled():
+        return {"enabled": False, "started": False, "reason": "safe_mode"}
     specs = _music_voice_dependency_specs()
     heavy_enabled = _phone_worker_heavy_python_deps_enabled()
-    # Optional heavy packages such as google-cloud-texttospeech pull grpcio on
-    # Termux/Python 3.13 and can compile native code for minutes. Never install
-    # them automatically unless explicitly requested.
-    pip_packages = [
-        str(specs[name].get("pip"))
-        for name in missing
-        if name in specs
-        and specs[name].get("pip")
-        and (not bool(specs[name].get("optional")) or heavy_enabled)
-    ]
-    skipped_optional = [name for name in missing if bool(specs.get(name, {}).get("optional")) and not heavy_enabled]
+    install_items: list[dict[str, Any]] = []
+    skipped_optional: list[str] = []
+    for name in missing:
+        spec = specs.get(name)
+        if not spec or not spec.get("pip"):
+            continue
+        optional = bool(spec.get("optional"))
+        if optional and not heavy_enabled:
+            skipped_optional.append(name)
+            continue
+        install_items.append({"name": name, "package": str(spec.get("pip")), "optional": optional})
     system_packages: list[str] = []
     if ("ffmpeg" in missing or "ffprobe" in missing) and shutil.which("pkg"):
         system_packages.append("ffmpeg")
-    pip_packages = [p for p in dict.fromkeys(pip_packages) if p]
+    install_items = list({str(item["name"]): item for item in install_items}.values())
     system_packages = [p for p in dict.fromkeys(system_packages) if p]
-    if not pip_packages and not system_packages:
+    if not install_items and not system_packages:
         reason = "optional_only" if skipped_optional else "nothing_installable"
         return {"enabled": True, "started": False, "reason": reason, "skipped_optional": skipped_optional}
     cooldown = max(60.0, float(_env_int("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS_COOLDOWN_SECONDS", 900)))
     now = time.time()
     with _TTS_DEP_AUTOINSTALL_LOCK:
         if _TTS_DEP_AUTOINSTALL_RUNNING:
-            return {"enabled": True, "started": False, "reason": "already_running", "pip": pip_packages, "system": system_packages, "skipped_optional": skipped_optional}
+            return {
+                "enabled": True,
+                "started": False,
+                "reason": "already_running",
+                "pip": [item["package"] for item in install_items],
+                "system": system_packages,
+                "skipped_optional": skipped_optional,
+            }
         if _TTS_DEP_AUTOINSTALL_LAST_AT and now - _TTS_DEP_AUTOINSTALL_LAST_AT < cooldown:
-            return {"enabled": True, "started": False, "reason": "cooldown", "remaining_seconds": round(cooldown - (now - _TTS_DEP_AUTOINSTALL_LAST_AT), 1), "pip": pip_packages, "system": system_packages, "skipped_optional": skipped_optional}
+            return {
+                "enabled": True,
+                "started": False,
+                "reason": "cooldown",
+                "remaining_seconds": round(cooldown - (now - _TTS_DEP_AUTOINSTALL_LAST_AT), 1),
+                "pip": [item["package"] for item in install_items],
+                "system": system_packages,
+                "skipped_optional": skipped_optional,
+            }
+        allowed, reason, remaining = _dependency_attempt_allowed("tts-autoinstall", cooldown)
+        if not allowed:
+            return {
+                "enabled": True,
+                "started": False,
+                "reason": reason,
+                "remaining_seconds": round(remaining, 1),
+                "pip": [item["package"] for item in install_items],
+                "system": system_packages,
+                "skipped_optional": skipped_optional,
+            }
         _TTS_DEP_AUTOINSTALL_RUNNING = True
         _TTS_DEP_AUTOINSTALL_LAST_AT = now
 
     def _runner() -> None:
         global _TTS_DEP_AUTOINSTALL_RUNNING
         try:
-            timeout = max(60, _env_int("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS_TIMEOUT_SECONDS", 420))
-            if pip_packages:
-                subprocess.run([sys.executable, "-m", "pip", "install", "--user", "-U", *pip_packages], timeout=timeout, check=False)
+            timeout = max(45, _env_int("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS_TIMEOUT_SECONDS", 240))
+            allow_source = _phone_worker_allow_pip_source_builds()
+            for item in install_items:
+                name = str(item.get("name") or "")
+                package = str(item.get("package") or "")
+                if not package:
+                    continue
+                # Recheck inside the worker thread so a race does not reinstall an
+                # already-present package.
+                module = str(specs.get(name, {}).get("module") or "")
+                if module:
+                    ok, _ = _module_import_ok(module)
+                    if ok:
+                        continue
+                pip_cmd = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--upgrade", "--prefer-binary"]
+                if bool(item.get("optional")) or not allow_source:
+                    pip_cmd.append("--only-binary=:all:")
+                pip_cmd.append(package)
+                subprocess.run(pip_cmd, timeout=timeout, check=False)
             if system_packages and shutil.which("pkg"):
                 env = dict(os.environ)
                 env.setdefault("DEBIAN_FRONTEND", "noninteractive")
@@ -2229,7 +2305,14 @@ def _start_tts_dependency_autoinstall(missing: list[str], checks: dict[str, dict
                 _TTS_DEP_AUTOINSTALL_RUNNING = False
 
     threading.Thread(target=_runner, name="tts-dependency-autoinstall", daemon=True).start()
-    return {"enabled": True, "started": True, "pip": pip_packages, "system": system_packages, "skipped_optional": skipped_optional}
+    return {
+        "enabled": True,
+        "started": True,
+        "pip": [item["package"] for item in install_items],
+        "system": system_packages,
+        "skipped_optional": skipped_optional,
+        "safe_only_binary": not _phone_worker_allow_pip_source_builds(),
+    }
 
 
 def _music_voice_dependencies_snapshot() -> dict[str, Any]:
