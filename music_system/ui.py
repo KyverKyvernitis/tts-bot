@@ -522,6 +522,15 @@ def _queue_items(state) -> list[MusicTrack]:
     return items
 
 
+def _queue_total_count(state, items: list[MusicTrack]) -> int:
+    total = len(items)
+    with contextlib.suppress(Exception):
+        total = max(total, int(state.queue_size()))
+    with contextlib.suppress(Exception):
+        total = max(total, int(getattr(state, "agent_remote_queue_size", 0) or 0))
+    return max(0, total)
+
+
 def _queue_duration_label(items: list[MusicTrack]) -> str:
     total = 0
     unknown = False
@@ -549,6 +558,7 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
     errored = status == "error"
     color = discord.Color.gold() if paused or loading else discord.Color.red() if errored else discord.Color.blurple()
     queue = _queue_items(state)
+    queue_total = _queue_total_count(state, queue)
     embed = discord.Embed(color=color)
     if skipping:
         author_name = "Pulando música:"
@@ -576,7 +586,7 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
         "",
     ]
     if skipping:
-        if queue:
+        if queue_total:
             lines.append("> -# ⏭️ **⠂** `Pulando... preparando a próxima música do queue.`")
         else:
             lines.append("> -# ⏭️ **⠂** `Pulando... encerrando a música atual.`")
@@ -621,8 +631,8 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
     if getattr(state, "shuffle", False):
         lines.append("> -# 🔀 **⠂** `Queue misturado`")
 
-    if queue:
-        lines.append(f"> -# 🎶 **⠂** `{len(queue)} música{'s' if len(queue) != 1 else ''} no queue`")
+    if queue_total:
+        lines.append(f"> -# 🎶 **⠂** `{queue_total} música{'s' if queue_total != 1 else ''} no queue`")
     else:
         lines.append("> -# 🎶 **⠂** `Queue vazio`")
 
@@ -1151,7 +1161,25 @@ class AddSongModal(discord.ui.Modal):
             if is_multi:
                 added = int(result.get("added") or len(batch.tracks))
                 label = f" de **{discord.utils.escape_markdown((batch.playlist_title or '')[:80])}**" if batch.playlist_title else ""
-                sent = await interaction.followup.send(f"`📑` **Playlist adicionada ao queue:** `{added}` música(s){label}.", ephemeral=True, wait=True)
+                count_label = "música" if added == 1 else "músicas"
+                state_payload = result.get("state") if isinstance(result.get("state"), dict) else {}
+                try:
+                    queue_total = int(state_payload.get("queue_size") or 0)
+                except Exception:
+                    queue_total = 0
+                if bool(result.get("queued")):
+                    total_line = f"\n`🎶` Queue agora: `{queue_total}` música(s)." if queue_total else ""
+                    sent = await interaction.followup.send(
+                        f"`📑` **Playlist adicionada ao final do queue:** `{added}` {count_label}{label}.{total_line}",
+                        ephemeral=True,
+                        wait=True,
+                    )
+                else:
+                    sent = await interaction.followup.send(
+                        f"`📑` **Playlist adicionada ao queue:** `{added}` {count_label}{label}.\n`🎧` Preparando a primeira faixa...",
+                        ephemeral=True,
+                        wait=True,
+                    )
             else:
                 msg = _agent_play_message(track, result)
                 sent = await interaction.followup.send(msg, ephemeral=True, wait=True)

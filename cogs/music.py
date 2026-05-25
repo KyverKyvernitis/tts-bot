@@ -782,7 +782,23 @@ class Music(commands.Cog):
                     added = int(result.get("added") or len(batch.tracks))
                     title = (batch.playlist_title or "playlist").strip()
                     label = f" de **{discord.utils.escape_markdown(title[:80])}**" if title else ""
-                    msg = await self._reply(ctx, f"`📑` **Playlist adicionada ao queue:** `{added}` música(s){label}.\n`🎧` Preparando a primeira faixa...")
+                    count_label = "música" if added == 1 else "músicas"
+                    state_payload = result.get("state") if isinstance(result.get("state"), dict) else {}
+                    try:
+                        queue_total = int(state_payload.get("queue_size") or 0)
+                    except Exception:
+                        queue_total = 0
+                    if bool(result.get("queued")):
+                        total_line = f"\n`🎶` Queue agora: `{queue_total}` música(s)." if queue_total else ""
+                        msg = await self._reply(
+                            ctx,
+                            f"`📑` **Playlist adicionada ao final do queue:** `{added}` {count_label}{label}.{total_line}",
+                        )
+                    else:
+                        msg = await self._reply(
+                            ctx,
+                            f"`📑` **Playlist adicionada ao queue:** `{added}` {count_label}{label}.\n`🎧` Preparando a primeira faixa...",
+                        )
                 else:
                     msg = await self._reply(ctx, self._music_agent_play_message(track, result))
                 state = result.get("state") if isinstance(result.get("state"), dict) else {}

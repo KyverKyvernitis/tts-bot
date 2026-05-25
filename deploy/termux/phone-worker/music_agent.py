@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.16"
+AGENT_VERSION = "0.3.17"
 STARTED_AT = time.time()
 
 
@@ -524,11 +524,20 @@ class MusicAgent:
         # PCMVolumeTransformer lets the worker-owned direct voice path duck TTS and restore volume.
         self.direct_pcm_volume_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_PCM_VOLUME_ENABLED"), True)
         self.prepare_timeout = env_float("MUSIC_AGENT_PREPARING_TIMEOUT_SECONDS", 30.0)
-        self.idle_disconnect_seconds = max(15.0, env_float("MUSIC_AGENT_IDLE_DISCONNECT_SECONDS", env_float("MUSIC_IDLE_DISCONNECT_SECONDS", 120.0)))
-        self.resolve_cache_ttl = max(0.0, env_float("MUSIC_AGENT_RESOLVE_CACHE_TTL_SECONDS", 300.0))
+        normal_idle = env_float("MUSIC_IDLE_DISCONNECT_SECONDS", 120.0)
+        min_idle = max(15.0, env_float("MUSIC_AGENT_MIN_IDLE_DISCONNECT_SECONDS", normal_idle))
+        self.idle_disconnect_seconds = max(min_idle, env_float("MUSIC_AGENT_IDLE_DISCONNECT_SECONDS", normal_idle))
+        # Cache separado: metadata pode viver muito mais que URL tocável. URLs
+        # diretas do YouTube/googlevideo expiram, então o cache de stream é curto
+        # e é invalidado em erro de playback.
+        legacy_cache_ttl = env_float("MUSIC_AGENT_RESOLVE_CACHE_TTL_SECONDS", 300.0)
+        self.metadata_cache_ttl = max(0.0, env_float("MUSIC_AGENT_METADATA_CACHE_TTL_SECONDS", 21600.0))
+        self.stream_cache_ttl = max(0.0, env_float("MUSIC_AGENT_STREAM_CACHE_TTL_SECONDS", min(max(legacy_cache_ttl, 1.0), 300.0)))
+        self.resolve_cache_ttl = self.stream_cache_ttl
         self.prefetch_enabled = truthy(os.getenv("MUSIC_AGENT_PREFETCH_ENABLED"), True)
         self.prefetch_timeout = max(3.0, env_float("MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS", 18.0))
         self._idle_disconnect_tasks: dict[int, asyncio.Task] = {}
+        self._metadata_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._resolve_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._resolve_locks: dict[str, asyncio.Lock] = {}
         self._prefetch_tasks: dict[str, asyncio.Task] = {}
@@ -594,25 +603,68 @@ class MusicAgent:
         raw = re.sub(r"[?&](utm_[^=&]+|feature|si)=[^&]+", "", raw)
         return raw or str(query or "").strip().lower()
 
+    def _cache_prune_one(self, cache: dict[str, tuple[float, dict[str, Any]]]) -> None:
+        if not cache:
+            return
+        oldest = min(cache.items(), key=lambda item: item[1][0])[0]
+        cache.pop(oldest, None)
+
+    def _metadata_cache_get(self, key: str) -> dict[str, Any] | None:
+        if self.metadata_cache_ttl <= 0 or not key:
+            return None
+        item = self._metadata_cache.get(key)
+        if not item:
+            return None
+        created, data = item
+        if time.monotonic() - created > self.metadata_cache_ttl:
+            self._metadata_cache.pop(key, None)
+            return None
+        return dict(data)
+
+    def _metadata_cache_put(self, key: str, data: dict[str, Any]) -> None:
+        if self.metadata_cache_ttl <= 0 or not key or not data:
+            return
+        stable = dict(data)
+        for volatile_key in ("stream_url", "url", "direct_url", "http_headers"):
+            stable.pop(volatile_key, None)
+        if len(self._metadata_cache) >= 512:
+            self._cache_prune_one(self._metadata_cache)
+        self._metadata_cache[key] = (time.monotonic(), stable)
+
     def _resolve_cache_get(self, key: str) -> dict[str, Any] | None:
-        if self.resolve_cache_ttl <= 0 or not key:
+        if self.stream_cache_ttl <= 0 or not key:
             return None
         item = self._resolve_cache.get(key)
         if not item:
             return None
         created, data = item
-        if time.monotonic() - created > self.resolve_cache_ttl:
+        if time.monotonic() - created > self.stream_cache_ttl:
+            # Preserve metadata even when the playable URL expired.
+            self._metadata_cache_put(key, data)
             self._resolve_cache.pop(key, None)
             return None
         return dict(data)
 
     def _resolve_cache_put(self, key: str, data: dict[str, Any]) -> None:
-        if self.resolve_cache_ttl <= 0 or not key or not data.get("stream_url"):
+        if not key or not data:
             return
-        if len(self._resolve_cache) >= 96:
-            oldest = min(self._resolve_cache.items(), key=lambda item: item[1][0])[0]
-            self._resolve_cache.pop(oldest, None)
+        self._metadata_cache_put(key, data)
+        if self.stream_cache_ttl <= 0 or not data.get("stream_url"):
+            return
+        if len(self._resolve_cache) >= 128:
+            self._cache_prune_one(self._resolve_cache)
         self._resolve_cache[key] = (time.monotonic(), dict(data))
+
+    def _invalidate_stream_cache(self, key: str) -> None:
+        if key:
+            self._resolve_cache.pop(key, None)
+
+    def _invalidate_track_stream_cache(self, track: AgentTrack | None) -> None:
+        if track is None:
+            return
+        meta = track.public()
+        key = self._resolve_cache_key(track.query or track.webpage_url or track.title, meta)
+        self._invalidate_stream_cache(key)
 
     def _agent_track_from_resolved(self, resolved: dict[str, Any], *, query: str, track_meta: dict[str, Any], body: dict[str, Any], cached: bool = False) -> AgentTrack:
         title_hint = _metadata_text(track_meta.get("title") or body.get("title"), limit=160)
@@ -848,6 +900,13 @@ class MusicAgent:
             "lavalink_node": self.lavalink_node_name,
             "pool_connected": self._pool_connected,
             "direct_audio_enabled": self.direct_audio_enabled,
+            "idle_disconnect_seconds": self.idle_disconnect_seconds,
+            "cache": {
+                "metadata_entries": len(self._metadata_cache),
+                "stream_entries": len(self._resolve_cache),
+                "metadata_ttl_seconds": self.metadata_cache_ttl,
+                "stream_ttl_seconds": self.stream_cache_ttl,
+            },
             "voice_dependencies": self.voice_dependencies_payload(),
             "guilds": {str(gid): state.public() for gid, state in self.states.items()},
         }
@@ -928,7 +987,7 @@ class MusicAgent:
             task = asyncio.create_task(self._prefetch_track(child, dict(meta), query, cache_key))
             self._prefetch_tasks[cache_key] = task
             accepted += 1
-        return {"ok": True, "accepted": accepted, "cache_size": len(self._resolve_cache)}
+        return {"ok": True, "accepted": accepted, "cache_size": len(self._resolve_cache), "metadata_cache_size": len(self._metadata_cache)}
 
     async def cmd_play(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
@@ -1330,6 +1389,7 @@ class MusicAgent:
             else:
                 await asyncio.wait_for(self._play_lavalink(guild_id, st.current), timeout=max(5.0, self.prepare_timeout))
         except Exception as exc:
+            self._invalidate_track_stream_cache(st.current)
             self._set_status(st, "failed", event="play_failed", error=f"{type(exc).__name__}: {short_text(exc, 260)}")
             self.log("play_failed", guild_id=guild_id, transport=st.transport or "unknown", error=st.last_error)
 
@@ -1448,12 +1508,14 @@ class MusicAgent:
         played_for = time.monotonic() - float(st.started_monotonic or 0.0) if st.started_monotonic else 0.0
         min_ok = max(0.5, env_float("MUSIC_AGENT_EARLY_END_SECONDS", 2.5))
         if error:
+            self._invalidate_track_stream_cache(st.current)
             self._set_status(st, "failed", event="direct_after_error", error=f"{type(error).__name__}: {short_text(error, 260)}")
             self.log("play_failed", guild_id=guild_id, transport="direct", error=st.last_error)
             if st.queue:
                 await self._play_next(guild_id)
             return
         if played_for < min_ok and st.current is not None:
+            self._invalidate_track_stream_cache(st.current)
             self._set_status(st, "failed", event="direct_after_early_end", error=f"áudio encerrou cedo demais ({played_for:.1f}s)")
             self.log("play_failed", guild_id=guild_id, transport="direct", error=st.last_error, title=getattr(st.current, "title", ""))
             if st.queue:
@@ -1561,13 +1623,21 @@ class MusicAgent:
         cache_key = self._resolve_cache_key(query, track_meta)
         cached = self._resolve_cache_get(cache_key)
         if cached:
-            self.log("resolve_cache_hit", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
+            self.log("resolve_stream_cache_hit", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
             return self._agent_track_from_resolved(cached, query=query, track_meta=track_meta, body=body, cached=True)
+        cached_meta = self._metadata_cache_get(cache_key)
+        if cached_meta:
+            # Metadata stable can fill missing title/artist/duration while yt-dlp
+            # refreshes the short-lived playable URL.
+            merged_meta = dict(cached_meta)
+            merged_meta.update({k: v for k, v in track_meta.items() if v not in (None, "", [], {})})
+            track_meta = merged_meta
+            self.log("resolve_metadata_cache_hit", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
         lock = self._resolve_locks.setdefault(cache_key, asyncio.Lock())
         async with lock:
             cached = self._resolve_cache_get(cache_key)
             if cached:
-                self.log("resolve_cache_hit_after_wait", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
+                self.log("resolve_stream_cache_hit_after_wait", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
                 return self._agent_track_from_resolved(cached, query=query, track_meta=track_meta, body=body, cached=True)
             started = time.time()
             resolved = await asyncio.to_thread(self._resolve_with_ytdlp, query)

@@ -692,6 +692,7 @@ class MusicGuildState:
     panel_last_repost_key: str = ""
     panel_last_repost_at: float = 0.0
     agent_last_idle_event: str = ""
+    agent_remote_queue_size: int = 0
     voice_status_last_applied_key: str = ""
     voice_status_last_sync_request_key: str = ""
     voice_status_last_sync_request_at: float = 0.0
@@ -706,7 +707,14 @@ class MusicGuildState:
     panel_last_repost_at: float = 0.0
 
     def queue_size(self) -> int:
-        return self.queue.qsize() + len(self.forward_queue)
+        local_count = self.queue.qsize() + len(self.forward_queue)
+        try:
+            remote_count = int(getattr(self, "agent_remote_queue_size", 0) or 0)
+        except Exception:
+            remote_count = 0
+        if str(getattr(self, "current_backend", "") or "").lower() == "agent":
+            return max(local_count, remote_count)
+        return local_count
 
 
 class AudioRouter:
@@ -3865,6 +3873,7 @@ class AudioRouter:
                 state.queue.get_nowait()
                 state.queue.task_done()
         state.forward_queue.clear()
+        state.agent_remote_queue_size = 0
         state.current = None
         state.current_started_at_monotonic = 0.0
         state.current_start_offset_seconds = 0.0
@@ -4192,10 +4201,18 @@ class AudioRouter:
         if not isinstance(remote, dict):
             return
         remote_queue = remote.get("queue")
+        try:
+            state.agent_remote_queue_size = max(0, int(remote.get("queue_size") or 0))
+        except Exception:
+            state.agent_remote_queue_size = 0
         if remote_queue is None and remote.get("queue_size") in (0, "0"):
             remote_queue = []
         if not isinstance(remote_queue, list):
             return
+        if not state.agent_remote_queue_size:
+            state.agent_remote_queue_size = len(remote_queue)
+        else:
+            state.agent_remote_queue_size = max(state.agent_remote_queue_size, len(remote_queue))
         mirrored: deque[MusicTrack] = deque(maxlen=MUSIC_HISTORY_MAXSIZE)
         for item in remote_queue[:MUSIC_QUEUE_MAXSIZE]:
             if isinstance(item, dict):
