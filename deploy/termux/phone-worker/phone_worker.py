@@ -7,6 +7,7 @@ import base64
 import contextlib
 import hashlib
 import io
+import importlib
 import json
 import os
 import platform
@@ -19,6 +20,7 @@ import secrets
 from collections import Counter
 import subprocess
 import tempfile
+import sys
 import threading
 import time
 import urllib.error
@@ -52,7 +54,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.9"
+PHONE_WORKER_VERSION = "1.10.10"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -247,7 +249,7 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "turbo": {
         "label": "Turbo",
         "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -2102,29 +2104,101 @@ def _music_agent_log_file() -> Path:
     return Path(os.getenv("MUSIC_AGENT_LOG_FILE") or (_phone_worker_dir() / "music_agent.log")).expanduser()
 
 
+_TTS_DEP_AUTOINSTALL_LOCK = threading.Lock()
+_TTS_DEP_AUTOINSTALL_LAST_AT = 0.0
+_TTS_DEP_AUTOINSTALL_RUNNING = False
+
+
+def _music_voice_dependency_specs() -> dict[str, dict[str, Any]]:
+    return {
+        "discord.py": {"module": "discord", "pip": "discord.py"},
+        "PyNaCl": {"module": "nacl", "pip": "PyNaCl"},
+        "davey": {"module": "davey", "pip": "davey"},
+        "yt-dlp": {"module": "yt_dlp", "pip": "yt-dlp"},
+        "wavelink": {"module": "wavelink", "pip": "wavelink"},
+        "aiohttp": {"module": "aiohttp", "pip": "aiohttp"},
+        "gTTS": {"module": "gtts", "pip": "gTTS"},
+        "edge-tts": {"module": "edge_tts", "pip": "edge-tts"},
+        "google-cloud-texttospeech": {"module": "google.cloud.texttospeech_v1", "pip": "google-cloud-texttospeech", "optional": True},
+    }
+
+
+def _module_import_ok(module_name: str) -> tuple[bool, str]:
+    try:
+        importlib.import_module(module_name)
+        return True, ""
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {_short_text(exc, limit=120)}"
+
+
+def _start_tts_dependency_autoinstall(missing: list[str], checks: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    global _TTS_DEP_AUTOINSTALL_LAST_AT, _TTS_DEP_AUTOINSTALL_RUNNING
+    enabled = _env_bool("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS", True)
+    if not enabled:
+        return {"enabled": False, "started": False, "reason": "disabled"}
+    specs = _music_voice_dependency_specs()
+    pip_packages = [str(specs[name].get("pip")) for name in missing if name in specs and specs[name].get("pip")]
+    system_packages: list[str] = []
+    if ("ffmpeg" in missing or "ffprobe" in missing) and shutil.which("pkg"):
+        system_packages.append("ffmpeg")
+    pip_packages = [p for p in dict.fromkeys(pip_packages) if p]
+    system_packages = [p for p in dict.fromkeys(system_packages) if p]
+    if not pip_packages and not system_packages:
+        return {"enabled": True, "started": False, "reason": "nothing_installable"}
+    cooldown = max(60.0, float(_env_int("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS_COOLDOWN_SECONDS", 900)))
+    now = time.time()
+    with _TTS_DEP_AUTOINSTALL_LOCK:
+        if _TTS_DEP_AUTOINSTALL_RUNNING:
+            return {"enabled": True, "started": False, "reason": "already_running", "pip": pip_packages, "system": system_packages}
+        if _TTS_DEP_AUTOINSTALL_LAST_AT and now - _TTS_DEP_AUTOINSTALL_LAST_AT < cooldown:
+            return {"enabled": True, "started": False, "reason": "cooldown", "remaining_seconds": round(cooldown - (now - _TTS_DEP_AUTOINSTALL_LAST_AT), 1), "pip": pip_packages, "system": system_packages}
+        _TTS_DEP_AUTOINSTALL_RUNNING = True
+        _TTS_DEP_AUTOINSTALL_LAST_AT = now
+
+    def _runner() -> None:
+        global _TTS_DEP_AUTOINSTALL_RUNNING
+        try:
+            timeout = max(60, _env_int("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS_TIMEOUT_SECONDS", 420))
+            if pip_packages:
+                subprocess.run([sys.executable, "-m", "pip", "install", "--user", "-U", *pip_packages], timeout=timeout, check=False)
+            if system_packages and shutil.which("pkg"):
+                env = dict(os.environ)
+                env.setdefault("DEBIAN_FRONTEND", "noninteractive")
+                subprocess.run(["pkg", "install", "-y", *system_packages], timeout=timeout, check=False, env=env)
+        except Exception:
+            pass
+        finally:
+            with _TTS_DEP_AUTOINSTALL_LOCK:
+                _TTS_DEP_AUTOINSTALL_RUNNING = False
+
+    threading.Thread(target=_runner, name="tts-dependency-autoinstall", daemon=True).start()
+    return {"enabled": True, "started": True, "pip": pip_packages, "system": system_packages}
+
+
 def _music_voice_dependencies_snapshot() -> dict[str, Any]:
     checks: dict[str, dict[str, Any]] = {}
-    module_map = {
-        "discord.py": "discord",
-        "PyNaCl": "nacl",
-        "davey": "davey",
-        "yt-dlp": "yt_dlp",
-        "wavelink": "wavelink",
-        "aiohttp": "aiohttp",
-        "gTTS": "gtts",
-        "edge-tts": "edge_tts",
-    }
-    for label, module in module_map.items():
-        try:
-            __import__(module)
-            checks[label] = {"ok": True}
-        except Exception as exc:
-            checks[label] = {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=120)}"}
+    specs = _music_voice_dependency_specs()
+    for label, spec in specs.items():
+        ok, error = _module_import_ok(str(spec.get("module") or ""))
+        checks[label] = {"ok": ok, "optional": bool(spec.get("optional"))}
+        if error:
+            checks[label]["error"] = error
     for binary in ("ffmpeg", "ffprobe"):
         path = shutil.which(binary)
         checks[binary] = {"ok": bool(path), "path": path or ""}
     missing = [name for name, info in checks.items() if not bool(info.get("ok"))]
-    return {"ok": not missing, "missing": missing, "checks": checks}
+    missing_critical = [name for name in missing if not bool(checks.get(name, {}).get("optional"))]
+    optional_missing = [name for name in missing if bool(checks.get(name, {}).get("optional"))]
+    # Tenta preparar o worker automaticamente sem bloquear o heartbeat/status.
+    auto_install = _start_tts_dependency_autoinstall(missing, checks) if missing else {"enabled": _env_bool("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS", True), "started": False, "reason": "ok"}
+    return {
+        "ok": not missing_critical,
+        "missing": missing_critical,
+        "optional_missing": optional_missing,
+        "all_missing": missing,
+        "checks": checks,
+        "auto_install": auto_install,
+    }
 
 
 def _music_agent_snapshot() -> dict[str, Any]:
@@ -2177,6 +2251,7 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
             "voice_dependencies": deps,
             "dependency_missing": list(deps.get("missing") or []),
+            "optional_dependency_missing": list(deps.get("optional_missing") or []),
         })
         return data
     except urllib.error.HTTPError as exc:
@@ -2194,6 +2269,7 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "error": _short_text(raw or exc.reason, limit=180),
             "voice_dependencies": deps,
             "dependency_missing": list(deps.get("missing") or []),
+            "optional_dependency_missing": list(deps.get("optional_missing") or []),
         }
     except Exception as exc:
         return {
@@ -2206,6 +2282,7 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "error": f"{type(exc).__name__}: {_short_text(exc, limit=160)}",
             "voice_dependencies": deps,
             "dependency_missing": list(deps.get("missing") or []),
+            "optional_dependency_missing": list(deps.get("optional_missing") or []),
         }
 
 def _system_status() -> dict[str, Any]:

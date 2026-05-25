@@ -687,7 +687,7 @@ Update: ${COMMIT_SUBJECT:-sem mensagem}
 Etapa: verificação de alterações locais
 Código: 1
 Rollback: não foi necessário
-Commit sujo: não
+Commit sujo: sim
 Diagnóstico: existem mudanças locais que seriam sobrescritas pelo merge.
 Arquivos locais:
 ${files_text:-nenhum arquivo listado}
@@ -1493,6 +1493,16 @@ on_error() {
     rollback_after_failure "$exit_code" "$failed_command"
   fi
 
+  local dirty_status dirty_files
+  dirty_status="não"
+  dirty_files=""
+  if [[ "$FAILED_STAGE" == "verificação de alterações locais" || "$STAGE" == "git pull" ]]; then
+    dirty_files="$(collect_local_tracked_changes || true)"
+    if [[ -n "${dirty_files//[[:space:]]/}" ]]; then
+      dirty_status="sim"
+    fi
+  fi
+
   local body
   body="Resumo: O updater falhou antes de concluir a troca de commit.
 Host: $HOSTNAME
@@ -1507,7 +1517,9 @@ Etapa: $STAGE
 Comando: $failed_command
 Código: $exit_code
 Rollback: $ROLLBACK_STATUS
-Commit sujo: não
+Commit sujo: $dirty_status
+Arquivos sujos:
+${dirty_files:-nenhum arquivo rastreado sujo detectado}
 Stderr:
 ${LAST_ERROR_STDERR:-nenhuma saída adicional capturada}
 Últimas linhas:

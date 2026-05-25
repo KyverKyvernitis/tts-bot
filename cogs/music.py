@@ -106,7 +106,7 @@ class Music(commands.Cog):
                 return ""
             return text
 
-        title = useful(current.get("title")) or track.short_title
+        title = useful(current.get("display_title")) or useful(current.get("title")) or useful(current.get("name")) or track.short_title
         if len(title) > 90:
             title = title[:87].rstrip() + "..."
         duration_label = track.duration_label
@@ -161,7 +161,7 @@ class Music(commands.Cog):
                     continue
                 last_status = status
                 if self._music_agent_confirmed_playing(state):
-                    await message.edit(content=f"`🎧` **Tocando:** {track.short_title} • `{track.duration_label}`")
+                    await message.edit(content=self._music_agent_play_message(track, {"state": state}))
                     return
                 if status in {"failed", "error"}:
                     error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:220]

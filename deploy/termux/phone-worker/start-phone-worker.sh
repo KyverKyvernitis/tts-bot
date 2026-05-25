@@ -289,10 +289,11 @@ ensure_turbo_python_tts_deps_if_needed() {
   "$PYTHON_BIN" - <<'PYTTSDEPS' >/dev/null 2>&1 && return 0
 import edge_tts  # noqa: F401
 import gtts  # noqa: F401
+import google.cloud.texttospeech_v1  # noqa: F401
 PYTTSDEPS
-  log "perfil turbo: instalando dependências leves do TTS (edge/gTTS)"
-  "$PYTHON_BIN" -m pip install --upgrade edge-tts gTTS >/dev/null 2>&1 || \
-    log "não consegui instalar edge/gTTS automaticamente; o benchmark vai mostrar erro curto"
+  log "perfil turbo: instalando dependências leves do TTS (edge/gTTS/Google Cloud TTS)"
+  "$PYTHON_BIN" -m pip install --upgrade edge-tts gTTS google-cloud-texttospeech >/dev/null 2>&1 || \
+    log "não consegui instalar edge/gTTS/Google Cloud TTS automaticamente; o benchmark vai mostrar erro curto"
 }
 
 ensure_music_ytdlp_deps_if_needed() {
@@ -313,9 +314,10 @@ ensure_music_agent_deps_if_needed() {
   truthy "$MUSIC_AGENT_AUTO_START" || return 0
   "$PYTHON_BIN" - <<'PYMUSICAGENTDEPS' >/dev/null 2>&1 && return 0
 import aiohttp, discord, nacl, wavelink, yt_dlp, davey, edge_tts, gtts  # noqa: F401
+import google.cloud.texttospeech_v1  # noqa: F401
 PYMUSICAGENTDEPS
   log "perfil turbo: dependências do Music Agent ausentes; instalando somente o necessário"
-  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl davey 'wavelink>=3.4,<3.6' 'yt-dlp[default]' edge-tts gTTS)
+  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl davey 'wavelink>=3.4,<3.6' 'yt-dlp[default]' edge-tts gTTS google-cloud-texttospeech)
   if command -v timeout >/dev/null 2>&1; then
     timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-600}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
       log "não consegui instalar dependências do Music Agent automaticamente dentro do timeout"
@@ -325,6 +327,7 @@ PYMUSICAGENTDEPS
   fi
   "$PYTHON_BIN" - <<'PYMUSICAGENTCHECK' >/dev/null 2>&1 && log "perfil turbo: dependências do Music Agent prontas" || true
 import aiohttp, discord, nacl, wavelink, yt_dlp, davey, edge_tts, gtts  # noqa: F401
+import google.cloud.texttospeech_v1  # noqa: F401
 PYMUSICAGENTCHECK
 }
 

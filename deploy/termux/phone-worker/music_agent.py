@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import importlib
 import base64
 import os
 import re
@@ -44,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.9"
+AGENT_VERSION = "0.3.10"
 STARTED_AT = time.time()
 
 
@@ -606,18 +607,22 @@ class MusicAgent:
             "aiohttp": "aiohttp",
             "gTTS": "gtts",
             "edge-tts": "edge_tts",
+            "google-cloud-texttospeech": "google.cloud.texttospeech_v1",
         }
+        optional_modules = {"google-cloud-texttospeech"}
         for label, module in modules.items():
             try:
-                __import__(module)
-                checks[label] = {"ok": True}
+                importlib.import_module(module)
+                checks[label] = {"ok": True, "optional": label in optional_modules}
             except Exception as exc:
-                checks[label] = {"ok": False, "error": f"{type(exc).__name__}: {short_text(exc, 120)}"}
+                checks[label] = {"ok": False, "optional": label in optional_modules, "error": f"{type(exc).__name__}: {short_text(exc, 120)}"}
         for binary in ("ffmpeg", "ffprobe"):
             path = shutil.which(binary)
             checks[binary] = {"ok": bool(path), "path": path or ""}
         missing = [name for name, info in checks.items() if not bool(info.get("ok"))]
-        return {"ok": not missing, "missing": missing, "checks": checks}
+        missing_critical = [name for name in missing if not bool(checks.get(name, {}).get("optional"))]
+        optional_missing = [name for name in missing if bool(checks.get(name, {}).get("optional"))]
+        return {"ok": not missing_critical, "missing": missing_critical, "optional_missing": optional_missing, "checks": checks}
 
     def status_payload(self) -> dict[str, Any]:
         return {
@@ -853,8 +858,8 @@ class MusicAgent:
         if not text:
             raise ValueError("texto TTS vazio")
         engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_")
-        if engine in {"google", "google_tts"}:
-            engine = "gtts"
+        if engine in {"google", "google_tts", "googlecloud", "google_cloud"}:
+            engine = "gcloud"
         if engine == "edge":
             try:
                 import edge_tts  # type: ignore

@@ -698,6 +698,8 @@ class MusicGuildState:
     agent_monitor_task: Optional[asyncio.Task] = None
     agent_started_track_key: str = ""
     agent_side_effect_task: Optional[asyncio.Task] = None
+    panel_last_repost_key: str = ""
+    panel_last_repost_at: float = 0.0
 
     def queue_size(self) -> int:
         return self.queue.qsize() + len(self.forward_queue)
@@ -1703,7 +1705,7 @@ class AudioRouter:
         # o usuário alterna rápido A → B → A. O cooldown antigo podia bloquear
         # a segunda atualização legítima e deixar o status preso na música
         # anterior até o refresh tardio.
-        high_priority_reason = reason in {"playback_started", "lavalink_track_started", "skip", "previous", "seek"}
+        high_priority_reason = reason in {"playback_started", "lavalink_track_started", "agent_playback_started", "music_agent_playback_started", "skip", "previous", "seek"}
         if (
             not high_priority_reason
             and sync_key
@@ -3895,41 +3897,71 @@ class AudioRouter:
         if not isinstance(payload, dict):
             return fallback
 
-        def useful(value: object, *, generic: set[str] | None = None) -> str:
-            text = str(value or "").strip()
-            if not text:
-                return ""
-            lower = text.lower()
-            if lower in (generic or {"youtube", "link", "música", "musica", "desconhecida", "unknown", "worker-agent", "music-agent-ytdlp", "worker-ytdlp"}):
-                return ""
-            if "desconhecida" in lower and ("youtube" in lower or "worker" in lower):
-                return ""
-            return text
+        def first_useful(*values: object, generic: set[str] | None = None) -> str:
+            blocked = generic or {
+                "youtube", "link", "música", "musica", "desconhecida", "unknown",
+                "worker-agent", "music-agent", "music-agent-ytdlp", "worker-ytdlp",
+            }
+            for value in values:
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                lower = text.lower()
+                if lower in blocked:
+                    continue
+                if "desconhecida" in lower and ("youtube" in lower or "worker" in lower):
+                    continue
+                return text
+            return ""
 
-        payload_title = useful(payload.get("title"))
-        fallback_title = useful(getattr(fallback, "title", "") if fallback is not None else "")
-        title = payload_title or fallback_title or "Música"
-        webpage_url = str(payload.get("webpage_url") or (getattr(fallback, "webpage_url", "") if fallback is not None else "") or payload.get("query") or "").strip()
+        fallback_title = getattr(fallback, "title", "") if fallback is not None else ""
+        fallback_uploader = getattr(fallback, "uploader", "") if fallback is not None else ""
+        title = first_useful(
+            payload.get("display_title"), payload.get("title"), payload.get("fulltitle"),
+            payload.get("name"), payload.get("track_title"), fallback_title,
+        ) or "Música"
+        uploader = first_useful(
+            payload.get("display_uploader"), payload.get("uploader"), payload.get("author"),
+            payload.get("channel"), payload.get("creator"), payload.get("artist"), fallback_uploader,
+            generic={"youtube", "desconhecida", "unknown", "worker-agent", "music-agent", "worker-ytdlp"},
+        )
+        webpage_url = str(
+            payload.get("webpage_url")
+            or payload.get("url")
+            or payload.get("display_url")
+            or (getattr(fallback, "webpage_url", "") if fallback is not None else "")
+            or payload.get("query")
+            or ""
+        ).strip()
         requester_id = int(payload.get("requester_id") or (getattr(fallback, "requester_id", 0) if fallback is not None else 0) or 0)
         requester_name = str(payload.get("requester_name") or (getattr(fallback, "requester_name", "") if fallback is not None else "") or "").strip()
-        payload_uploader = useful(payload.get("uploader"), generic={"youtube", "desconhecida", "unknown"})
-        fallback_uploader = useful(getattr(fallback, "uploader", "") if fallback is not None else "", generic={"youtube", "desconhecida", "unknown"})
-        source = str(payload.get("source") or (getattr(fallback, "source", "") if fallback is not None else "") or "YouTube")
+        source = str(payload.get("display_source") or payload.get("source") or (getattr(fallback, "source", "") if fallback is not None else "") or "YouTube")
+        thumbnail = str(
+            payload.get("display_thumbnail")
+            or payload.get("thumbnail")
+            or payload.get("thumb")
+            or (getattr(fallback, "thumbnail", "") if fallback is not None else "")
+            or ""
+        )
+        stream_url = str(payload.get("stream_url") or (getattr(fallback, "stream_url", "") if fallback is not None else "") or "")
         track = MusicTrack(
             title=title,
             webpage_url=webpage_url,
-            original_url=str(payload.get("query") or (getattr(fallback, "original_url", "") if fallback is not None else "") or webpage_url),
-            stream_url=str(getattr(fallback, "stream_url", "") if fallback is not None else ""),
+            original_url=str(payload.get("original_url") or payload.get("query") or (getattr(fallback, "original_url", "") if fallback is not None else "") or webpage_url),
+            stream_url=stream_url,
             requester_id=requester_id,
             requester_name=requester_name,
             duration=(payload.get("duration") if payload.get("duration") is not None else (getattr(fallback, "duration", None) if fallback is not None else None)),
-            uploader=payload_uploader or fallback_uploader,
-            thumbnail=str(payload.get("thumbnail") or (getattr(fallback, "thumbnail", "") if fallback is not None else "") or ""),
+            uploader=uploader,
+            thumbnail=thumbnail,
             source=source,
-            extractor="worker-ytdlp",
-            is_live=bool(getattr(fallback, "is_live", False)) if fallback is not None else False,
+            extractor=str(payload.get("extractor") or "worker-ytdlp"),
+            is_live=bool(payload.get("is_live") or (getattr(fallback, "is_live", False) if fallback is not None else False)),
         )
         track.display_source = "YouTube" if "youtube" in track.source.lower() or "ytdlp" in track.source.lower() else track.source
+        track.display_title = title
+        track.display_uploader = uploader
+        track.display_thumbnail = thumbnail
         return track
 
     def _music_agent_state_from_payload(self, payload: dict, guild_id: int) -> dict:
@@ -4164,18 +4196,34 @@ class AudioRouter:
         active_confirmed = bool(raw_status == "playing" and confirmed_playing and state.current is not None)
         if state.current is not None or self._has_pending_track(state) or state.current_status in active_statuses:
             self._reactivate_panel_controls_now(int(guild_id))
-        if (active_confirmed or active_started_signal) and new_panel_key and getattr(state, "agent_started_track_key", "") != new_panel_key:
+        previous_started_key = str(getattr(state, "agent_started_track_key", "") or "")
+        just_started_agent_track = bool((active_confirmed or active_started_signal) and new_panel_key and previous_started_key != new_panel_key)
+        if just_started_agent_track:
             state.agent_started_track_key = new_panel_key
             state.current_started_at_monotonic = time.monotonic()
             state.current_start_offset_seconds = 0.0
             self._schedule_agent_playback_started_effects(int(guild_id), new_panel_key)
+
+        # O Music Agent envia confirmações repetidas de "playing" enquanto a faixa
+        # continua ativa. Repostar o painel em cada confirmação cria spam de
+        # painéis idênticos. Repost só em transição real de faixa/sessão; refresh
+        # de estado apenas edita o painel atual.
+        track_changed_for_panel = bool(new_panel_key and previous_panel_key != new_panel_key)
+        resumed_from_inactive = bool(new_panel_key and previous_status not in active_statuses and just_started_agent_track)
+        repost_signal = bool(track_changed_for_panel or resumed_from_inactive)
+        repost_key = f"{guild_id}:{new_panel_key}:{int(float(getattr(state, 'current_started_at_monotonic', 0.0) or 0.0) * 1000)}" if new_panel_key else ""
+        already_reposted = bool(repost_key and repost_key == str(getattr(state, "panel_last_repost_key", "") or ""))
         should_repost_panel = bool(
             create_panel
             and state.now_message is not None
             and new_panel_key
-            and (previous_panel_key != new_panel_key or previous_status not in active_statuses or active_confirmed or active_started_signal)
+            and repost_signal
+            and not already_reposted
             and bool(getattr(config, "MUSIC_PANEL_REPOST_ON_TRACK_CHANGE", True))
         )
+        if should_repost_panel and repost_key:
+            state.panel_last_repost_key = repost_key
+            state.panel_last_repost_at = time.monotonic()
         if create_panel:
             await self.update_panel(int(guild_id), create=True, repost=should_repost_panel)
         if state.current_backend == "agent" and state.current_status in active_statuses:
