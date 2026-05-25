@@ -688,6 +688,10 @@ class MusicGuildState:
     voice_status_update_task: Optional[asyncio.Task] = None
     voice_status_last_update_at: float = 0.0
     voice_status_last_track_key: str = ""
+    agent_started_track_key: str = ""
+    panel_last_repost_key: str = ""
+    panel_last_repost_at: float = 0.0
+    agent_last_idle_event: str = ""
     voice_status_last_applied_key: str = ""
     voice_status_last_sync_request_key: str = ""
     voice_status_last_sync_request_at: float = 0.0
@@ -2809,7 +2813,8 @@ class AudioRouter:
                                 state.idle_channel_name = playback_failure_label[:160]
                             else:
                                 self._set_idle_reason(state, "queue_finished")
-                            self._set_panel_controls_invalidation(guild_id, delay=60.0)
+                            if not state.history:
+                                self._set_panel_controls_invalidation(guild_id, delay=60.0)
                             await self.schedule_music_idle_disconnect(guild_id)
                         self._schedule_panel_update(guild_id, create=bool(state.now_message))
         finally:
@@ -2818,7 +2823,8 @@ class AudioRouter:
                 if not state.stop_requested and not self._has_pending_track(state):
                     if str(getattr(state, "idle_reason", "") or "") != "track_failed":
                         self._set_idle_reason(state, "queue_finished")
-                    self._set_panel_controls_invalidation(guild_id, delay=60.0)
+                    if not state.history:
+                        self._set_panel_controls_invalidation(guild_id, delay=60.0)
                 state.current = None
                 state.current_started_at_monotonic = 0.0
                 state.current_start_offset_seconds = 0.0
@@ -3759,6 +3765,34 @@ class AudioRouter:
             )
             return
 
+        if str(getattr(state, "current_backend", "") or "").lower() == "agent":
+            status = str(getattr(state, "current_status", "") or "").lower()
+            reason = str(getattr(state, "idle_reason", "") or "").lower()
+            last_event = str(getattr(state, "agent_last_idle_event", "") or "").lower()
+            internal_idle_events = {
+                "queue_empty",
+                "direct_track_end",
+                "lavalink_track_end",
+                "agent_idle",
+                "stop",
+                "skip",
+                "idle",
+                "stopped",
+            }
+            if (
+                status == "idle"
+                and state.current is None
+                and not self._has_pending_track(state)
+                and (reason in {"queue_finished", "manual_stop"} or last_event in internal_idle_events)
+            ):
+                logger.info(
+                    "[music/agent] voice_state disconnect tratado como encerramento interno | guild=%s reason=%s event=%s",
+                    guild.id,
+                    reason or "-",
+                    last_event or "-",
+                )
+                return
+
         actor = await self._find_recent_voice_audit_actor(
             guild,
             disconnected=True,
@@ -4107,6 +4141,8 @@ class AudioRouter:
         remote = agent_state if isinstance(agent_state, dict) else {}
         previous_panel_key = getattr(state, "panel_track_key", None)
         previous_status = str(getattr(state, "current_status", "") or "")
+        previous_current = getattr(state, "current", None)
+        previous_current_key = self._panel_key_for_track(previous_current) if previous_current is not None else ""
 
         try:
             if text_channel_id:
@@ -4128,6 +4164,15 @@ class AudioRouter:
         current_payload = remote.get("current") if isinstance(remote.get("current"), dict) else {}
         if current_payload:
             track = self._track_from_agent_payload(current_payload, track)
+            incoming_key = self._panel_key_for_track(track) if track is not None else ""
+            if (
+                previous_current is not None
+                and incoming_key
+                and previous_current_key
+                and incoming_key != previous_current_key
+                and previous_status in {"resolving", "starting", "playing", "paused", "queued"}
+            ):
+                self._push_history(state, previous_current)
         last_error = str(remote.get("last_error") or "").strip()
         had_active_agent_session = bool(
             str(getattr(state, "current_backend", "") or "").lower() == "agent"
@@ -4155,11 +4200,30 @@ class AudioRouter:
                 self._set_current_status(state, "error")
             elif raw_status in {"idle", "stopped"} and not current_payload and not last_error:
                 if had_active_agent_session:
+                    last_action = str(remote.get("last_action") or "").strip().lower()
+                    last_event = str(remote.get("last_event") or "").strip().lower()
+                    if state.current is not None:
+                        self._push_history(state, state.current)
                     state.current = None
                     state.paused = False
                     state.music_session_active = False
                     state.agent_started_track_key = ""
+                    state.agent_last_idle_event = last_event or raw_status
+                    if last_action == "stop" or last_event == "stop":
+                        self._set_idle_reason(state, "manual_stop")
+                        self._invalidate_panel_controls_now(int(guild_id))
+                    elif last_event in {"external_disconnect", "voice_disconnected", "kicked"}:
+                        self._set_idle_reason(state, "external_disconnect")
+                        self._invalidate_panel_controls_now(int(guild_id))
+                    else:
+                        # Skip da última faixa, fim natural e fila remota vazia não
+                        # são desconexão externa. O painel deve mostrar fila vazia
+                        # e manter o botão anterior se houver histórico.
+                        self._set_idle_reason(state, "queue_finished")
+                        if not state.history:
+                            self._set_panel_controls_invalidation(int(guild_id), delay=60.0)
                     self._set_current_status(state, "idle")
+                    self._mark_internal_voice_disconnect(int(guild_id), seconds=8.0)
                     self._schedule_agent_session_finished_effects(int(guild_id), "agent_idle")
                 else:
                     # O worker pode responder antes do primeiro evento de áudio. Não
@@ -5033,6 +5097,45 @@ class AudioRouter:
             and str(getattr(state, "current_backend", "") or "").lower() == "agent"
             and state.current is not None
         ):
+            # Preferir síntese no phone worker quando o worker é dono da voz.
+            # O fallback por audio_url só fica para chamadas antigas que já chegam
+            # aqui com arquivo pronto e sem o QueueItem original.
+            if item is not None and str(getattr(item, "text", "") or "").strip():
+                started_agent = time.monotonic()
+                result = await _music_agent_command(
+                    "tts",
+                    guild_id=int(guild_id),
+                    voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or getattr(getattr(vc, "channel", None), "id", 0) or 0),
+                    text=str(getattr(item, "text", "") or ""),
+                    engine=str(getattr(item, "engine", "gtts") or "gtts"),
+                    voice=str(getattr(item, "voice", "") or ""),
+                    language=str(getattr(item, "language", "pt-br") or "pt-br"),
+                    rate=str(getattr(item, "rate", "+0%") or "+0%"),
+                    pitch=str(getattr(item, "pitch", "+0Hz") or "+0Hz"),
+                    timeout_seconds=max(3.0, float(timeout or MUSIC_AGENT_TTS_TIMEOUT_SECONDS)),
+                )
+                elapsed_ms = max(0.0, (time.monotonic() - started_agent) * 1000.0)
+                state_payload = result.get("state") if isinstance(result, dict) else None
+                if isinstance(state_payload, dict):
+                    await self.sync_music_agent_state(
+                        int(guild_id),
+                        state.current,
+                        state_payload,
+                        voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or getattr(getattr(vc, "channel", None), "id", 0) or 0),
+                        text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0),
+                        create_panel=True,
+                    )
+                return {
+                    "ok": bool(isinstance(result, dict) and result.get("ok", True)),
+                    "tts_agent_route": True,
+                    "tts_agent_synthesized_on_worker": True,
+                    "source_setup_ms": max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0),
+                    "play_call_ms": 0.0,
+                    "playback_ms": float((result or {}).get("playback_ms") or elapsed_ms) if isinstance(result, dict) else elapsed_ms,
+                    "playback_started_at": playback_started_at,
+                    "agent_elapsed_ms": elapsed_ms,
+                    "worker_result": result,
+                }
             source_paths = await self._lavalink_tts_source_paths_for_playback(path)
             raw_candidates: list[str] = []
             for source_path in source_paths:
@@ -5529,6 +5632,42 @@ class AudioRouter:
             previous_track = state.history.pop()
         except IndexError:
             return False
+
+        if str(getattr(state, "current_backend", "") or "").lower() == "agent" and self.music_worker_only_enabled():
+            if not int(getattr(state, "last_voice_channel_id", 0) or 0):
+                # Sem canal remoto conhecido, devolve ao histórico e falha limpo.
+                state.history.append(previous_track)
+                return False
+            try:
+                result = await _music_agent_command(
+                    "play",
+                    guild_id=int(guild_id),
+                    voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0),
+                    text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0),
+                    query=previous_track.webpage_url or previous_track.original_url or previous_track.stream_url or previous_track.title,
+                    track=previous_track,
+                    timeout_seconds=getattr(config, "MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", 12.0),
+                )
+            except Exception:
+                state.history.append(previous_track)
+                logger.warning("[music/agent] falha ao voltar histórico pelo worker | guild=%s", guild_id, exc_info=True)
+                return False
+            state.stop_requested = False
+            state.skip_requested = False
+            state.skip_transition_active = True
+            self._clear_idle_reason(state)
+            self._cancel_music_idle_disconnect(state)
+            remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
+            await self.sync_music_agent_state(
+                int(guild_id),
+                previous_track,
+                remote,
+                voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0),
+                text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0),
+                queued=bool(isinstance(result, dict) and result.get("queued")),
+                create_panel=True,
+            )
+            return True
 
         current = state.current
         # ``forward_queue`` tem prioridade sobre o queue normal. Por isso a

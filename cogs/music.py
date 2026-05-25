@@ -106,12 +106,21 @@ class Music(commands.Cog):
                 return ""
             return text
 
-        title = useful(current.get("display_title")) or useful(current.get("title")) or useful(current.get("name")) or track.short_title
+        # Quando o Music Agent responde queued=True, ``state.current`` continua
+        # sendo a música que já estava tocando. A confirmação de "adicionada ao
+        # queue" precisa usar a faixa selecionada/adicionada, não now-playing.
+        source_payload = {} if queued else current
+        title = (
+            useful(source_payload.get("display_title"))
+            or useful(source_payload.get("title"))
+            or useful(source_payload.get("name"))
+            or track.short_title
+        )
         if len(title) > 90:
             title = title[:87].rstrip() + "..."
         duration_label = track.duration_label
         try:
-            duration = current.get("duration")
+            duration = None if queued else current.get("duration")
             if duration is not None and str(duration) != "":
                 total = max(0, int(float(duration)))
                 minutes, seconds = divmod(total, 60)
@@ -182,10 +191,21 @@ class Music(commands.Cog):
         if not self._music_agent_default_enabled():
             return False
         try:
-            await music_agent_command(action, guild_id=ctx.guild.id, requester_id=ctx.author.id, requester_name=getattr(ctx.author, "display_name", str(ctx.author)))
+            result = await music_agent_command(action, guild_id=ctx.guild.id, requester_id=ctx.author.id, requester_name=getattr(ctx.author, "display_name", str(ctx.author)))
         except Exception as exc:
             await self._reply(ctx, self._music_error_message(exc))
             return True
+        state = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
+        if state:
+            with contextlib.suppress(Exception):
+                await self.router.sync_music_agent_state(
+                    ctx.guild.id,
+                    None,
+                    state,
+                    voice_channel_id=state.get("voice_channel_id") or getattr(getattr(ctx.author, "voice", None), "channel", None) and getattr(getattr(ctx.author, "voice", None).channel, "id", 0),
+                    text_channel_id=getattr(ctx.channel, "id", 0),
+                    create_panel=True,
+                )
         await self._reply(ctx, success_message)
         return True
 

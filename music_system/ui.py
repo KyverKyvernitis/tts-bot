@@ -53,12 +53,16 @@ def _agent_play_message(track: MusicTrack, result: dict | None = None) -> str:
             return ""
         return text
 
-    title = useful(current.get("display_title")) or useful(current.get("title")) or useful(current.get("name")) or track.short_title
+    queued = bool(result.get("queued"))
+    # Em queued=True o estado remoto ainda descreve a música atual. A confirmação
+    # precisa renderizar o candidato que acabou de entrar na fila.
+    source_payload = {} if queued else current
+    title = useful(source_payload.get("display_title")) or useful(source_payload.get("title")) or useful(source_payload.get("name")) or track.short_title
     if len(title) > 90:
         title = title[:87].rstrip() + "..."
     duration_label = track.duration_label
     try:
-        duration = current.get("duration")
+        duration = None if queued else current.get("duration")
         if duration is not None and str(duration) != "":
             total = max(0, int(float(duration)))
             minutes, seconds = divmod(total, 60)
@@ -67,7 +71,7 @@ def _agent_play_message(track: MusicTrack, result: dict | None = None) -> str:
     except Exception:
         pass
     status = str(state.get("status") or "").lower()
-    if result.get("queued"):
+    if queued:
         return f"`🎶` **Adicionada ao queue:** {title} • `{duration_label}`"
     if _agent_confirmed_playing(state):
         return f"`🎧` **Tocando:** {title} • `{duration_label}`"
@@ -1521,12 +1525,14 @@ class MusicPlayerView(discord.ui.View):
                 continue
             if not isinstance(item, discord.ui.Button):
                 continue
-            if controls_invalid:
-                item.disabled = True
-                continue
             item.label = None
             emoji_name = self._emoji_name(item)
             custom_id = str(getattr(item, "custom_id", "") or "")
+            if controls_invalid:
+                # Painel encerrado expira controles destrutivos, mas o botão de
+                # voltar continua útil quando há histórico tocável após fila vazia.
+                item.disabled = not (emoji_name == "⏮️" and has_history)
+                continue
             if custom_id.endswith(":pause_resume") or emoji_name in {"⏸️", "▶️"}:
                 item.emoji = "▶️" if paused else "⏸️"
                 item.style = discord.ButtonStyle.primary if paused else discord.ButtonStyle.secondary
@@ -1543,8 +1549,11 @@ class MusicPlayerView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         state = self.router.get_state(self.guild_id)
         if _panel_controls_invalid(state):
-            await _send_interaction_notice(interaction, "`⌛` Esse painel expirou. Use `_play <link ou pesquisa>` para começar de novo.")
-            return False
+            custom_id = str((getattr(interaction, "data", {}) or {}).get("custom_id") or "")
+            has_history = bool(list(getattr(state, "history", []) or []))
+            if not (custom_id.endswith(":back") or custom_id == "") or not has_history:
+                await _send_interaction_notice(interaction, "`⌛` Esse painel expirou. Use `_play <link ou pesquisa>` para começar de novo.")
+                return False
         return await _require_music_voice_interaction(interaction, self.router, self.guild_id)
 
     async def _ack(self, interaction: discord.Interaction, message: str) -> None:
@@ -1557,7 +1566,7 @@ class MusicPlayerView(discord.ui.View):
         if not interaction.response.is_done():
             await interaction.response.defer()
 
-    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="music:back")
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         ok = await self.router.previous(self.guild_id)
         await self._ack(interaction, "`⏮️` Voltando para a música anterior." if ok else "Não há música anterior no histórico.")
@@ -1569,10 +1578,21 @@ class MusicPlayerView(discord.ui.View):
         if not self._music_agent_default_enabled():
             return False
         try:
-            await music_agent_command(action, guild_id=self.guild_id, requester_id=getattr(interaction.user, "id", 0), requester_name=getattr(interaction.user, "display_name", str(interaction.user)))
+            result = await music_agent_command(action, guild_id=self.guild_id, requester_id=getattr(interaction.user, "id", 0), requester_name=getattr(interaction.user, "display_name", str(interaction.user)))
         except Exception as exc:
             await self._ack(interaction, f"`⚠️` O player não respondeu: `{str(exc)[:180]}`")
             return True
+        state = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
+        if state:
+            with contextlib.suppress(Exception):
+                await self.router.sync_music_agent_state(
+                    self.guild_id,
+                    None,
+                    state,
+                    voice_channel_id=state.get("voice_channel_id"),
+                    text_channel_id=state.get("text_channel_id"),
+                    create_panel=True,
+                )
         await self._ack(interaction, message)
         return True
 

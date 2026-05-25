@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.10"
+AGENT_VERSION = "0.3.11"
 STARTED_AT = time.time()
 
 
@@ -741,6 +741,7 @@ class MusicAgent:
     async def cmd_stop(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        st.last_action = "stop"
         st.queue.clear()
         st.current = None
         self._set_status(st, "idle", event="stop")
@@ -761,6 +762,7 @@ class MusicAgent:
     async def cmd_skip(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        st.last_action = "skip"
         player = st.player
         st.current = None
         if player:
