@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Watcher permanece opt-in: o updater só ativa com PHONE_WORKER_WATCH_ENABLED=true.
 # Mantém o phone-worker do celular acordado sem virar dependência do bot.
 # Roda na VPS via systemd timer. Se o celular estiver offline, falha rápido.
 set -u

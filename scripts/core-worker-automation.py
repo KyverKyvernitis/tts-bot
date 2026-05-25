@@ -1007,10 +1007,19 @@ def process_pending(*, worker_id: str = "") -> dict[str, Any]:
     pending = _load_pending()
     result: dict[str, Any] = {"ok": True, "worker_id": worker_id, "processed_at": time.time()}
     snapshot = _load_registry_snapshot()
-    current = _current_fingerprints()
+    # process-pending roda a partir de heartbeat/poll/result e precisa ser barato.
+    # Não calcule hash_tree do Android a cada heartbeat: em VPS de 1 GB isso gerou
+    # CPU alta, /health caro e subprocessos zumbis. O after-update continua fazendo
+    # fingerprint completo quando há commit novo; aqui só lidamos com pendências já
+    # gravadas, salvo opt-in explícito para autodetectar APK.
+    current: dict[str, Any] = {
+        "phone_worker_version": _read_phone_worker_version(),
+    }
     target_agent = str(current.get("phone_worker_version") or "")
-    apk_version_code = int(current.get("apk_versionCode") or 0)
-    apk_source_hash = str(current.get("apk_source_hash") or "")
+    version_name, apk_version_code = _read_android_version()
+    current["apk_versionName"] = version_name
+    current["apk_versionCode"] = apk_version_code
+    apk_source_hash = ""
 
     if _env_bool("CORE_WORKER_AUTO_BOOT_REPAIR_ON_PENDING", False) and not _budget_exceeded(started):
         result["boot_repair"] = queue_boot_repairs(only_worker_id=worker_id)
@@ -1025,7 +1034,12 @@ def process_pending(*, worker_id: str = "") -> dict[str, Any]:
     elif pending.get("agent_update") or agent_needed:
         result["agent_update"] = {"ok": True, "skipped": "time_budget_exceeded"}
 
-    apk_needed = False if _budget_exceeded(started) else _apk_needs_build(apk_version_code, apk_source_hash)
+    apk_needed = False
+    auto_detect_apk = _env_bool("CORE_WORKER_AUTOMATION_AUTO_DETECT_APK_CHANGES_ON_POLL", False)
+    if not _budget_exceeded(started) and auto_detect_apk:
+        apk_source_hash = _hash_tree(ROOT / "android" / "core-worker-app", exclude_dirs={"build", ".gradle", "releases"})
+        current["apk_source_hash"] = apk_source_hash
+        apk_needed = _apk_needs_build(apk_version_code, apk_source_hash)
     if not _budget_exceeded(started) and (pending.get("apk_build") or apk_needed):
         result["apk_build"] = queue_apk_build()
         if apk_needed:

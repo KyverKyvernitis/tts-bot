@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import re
 import time
 from copy import deepcopy
@@ -10,6 +11,8 @@ from typing import Any, Awaitable, Callable
 import discord
 from discord.ext import commands
 
+from utility.interaction_safety import safe_defer_interaction, safe_send_interaction_message
+
 try:
     from PIL import Image, ImageDraw, ImageFont
 except Exception:  # pragma: no cover - runtime guard only
@@ -17,6 +20,8 @@ except Exception:  # pragma: no cover - runtime guard only
     ImageDraw = None
     ImageFont = None
 
+
+logger = logging.getLogger(__name__)
 
 COLOR_PANEL_TIMEOUT = 600.0
 COLOR_COMMAND_COOLDOWN = 20.0
@@ -1398,13 +1403,35 @@ class ColorRolesCog(commands.Cog):
     async def _handle_public_pick(self, interaction: discord.Interaction, slot_number: int):
         guild = interaction.guild
         member = interaction.user if isinstance(interaction.user, discord.Member) else None
+
+        async def reply(text: str) -> None:
+            await safe_send_interaction_message(
+                interaction,
+                text,
+                ephemeral=True,
+                log=logger,
+                label="color_roles.public_pick",
+            )
+
+        # Responde/defer imediatamente. Em dias de lag na VPS, aplicar/remover cargos
+        # antes da primeira resposta deixa a interação expirar e o Discord registra
+        # 10062 Unknown interaction mesmo que a ação tenha sido aplicada.
+        if not await safe_defer_interaction(
+            interaction,
+            thinking=False,
+            ephemeral=True,
+            log=logger,
+            label="color_roles.public_pick",
+        ):
+            return
+
         if guild is None or member is None:
-            await interaction.response.send_message("Esse painel só funciona dentro de um servidor.", ephemeral=True)
+            await reply("Esse painel só funciona dentro de um servidor.")
             return
         cfg = self._get_config(guild.id)
         message_ids = [int(mid) for mid in (cfg.get("message_ids") or []) if mid]
         if int(getattr(interaction.message, "id", 0) or 0) not in message_ids:
-            await interaction.response.send_message(str((cfg.get("templates") or {}).get("missing_panel") or "Esse painel não é mais o oficial."), ephemeral=True)
+            await reply(str((cfg.get("templates") or {}).get("missing_panel") or "Esse painel não é mais o oficial."))
             return
         slot = self._get_slot_config(guild.id, slot_number)
         role_id = int(slot.get("role_id") or 0)
@@ -1413,12 +1440,12 @@ class ColorRolesCog(commands.Cog):
             target_role = await self._ensure_slot_role(guild, slot_number)
             role_id = int(target_role.id) if target_role else 0
         if role_id <= 0 or target_role is None:
-            await interaction.response.send_message(str((cfg.get("templates") or {}).get("no_role") or "Essa cor ainda não está configurada."), ephemeral=True)
+            await reply(str((cfg.get("templates") or {}).get("no_role") or "Essa cor ainda não está configurada."))
             return
         me = guild.me or (guild.get_member(self.bot.user.id) if self.bot.user else None)
         if me is None or target_role >= me.top_role:
             text = self._render_template(str((cfg.get("templates") or {}).get("hierarchy") or ""), member=member, slot=slot)
-            await interaction.response.send_message(text or "não consegui aplicar essa cor por causa da hierarquia de cargos.", ephemeral=True)
+            await reply(text or "não consegui aplicar essa cor por causa da hierarquia de cargos.")
             return
         current_slot_number, current_slot = self._member_current_color_slot(guild, member)
         roles_to_remove = self._member_color_roles(guild, member)
@@ -1426,7 +1453,7 @@ class ColorRolesCog(commands.Cog):
         unmanageable_roles = [role for role in roles_to_remove if me is None or role >= me.top_role]
         if unmanageable_roles:
             text = self._render_template(str((cfg.get("templates") or {}).get("hierarchy") or ""), member=member, slot=slot)
-            await interaction.response.send_message(text or "não consegui aplicar essa cor por causa da hierarquia de cargos.", ephemeral=True)
+            await reply(text or "não consegui aplicar essa cor por causa da hierarquia de cargos.")
             return
         try:
             if has_target_role or current_slot_number == int(slot_number):
@@ -1435,14 +1462,18 @@ class ColorRolesCog(commands.Cog):
                 template = str((cfg.get("templates") or {}).get("remove") or "")
                 text = self._render_template(template, member=member, slot=slot, removed_name=str(slot.get("name") or ""))
                 removed_name = _normalize_color_name(str(slot.get("name") or ""))
-                await interaction.response.send_message(text or f"cor {removed_name} removida.", ephemeral=True)
+                await reply(text or f"cor {removed_name} removida.")
                 return
             if roles_to_remove:
                 await member.remove_roles(*roles_to_remove, reason="Troca de cor pelo painel")
             await member.add_roles(target_role, reason="Cor escolhida pelo painel")
         except discord.Forbidden:
             text = self._render_template(str((cfg.get("templates") or {}).get("hierarchy") or ""), member=member, slot=slot)
-            await interaction.response.send_message(text or "não consegui aplicar essa cor por causa da hierarquia de cargos.", ephemeral=True)
+            await reply(text or "não consegui aplicar essa cor por causa da hierarquia de cargos.")
+            return
+        except Exception as exc:
+            logger.exception("[color_roles] falha ao aplicar cor pública")
+            await reply(f"não consegui aplicar essa cor agora ({type(exc).__name__}).")
             return
         if current_slot:
             template = str((cfg.get("templates") or {}).get("switch") or "")
@@ -1451,7 +1482,7 @@ class ColorRolesCog(commands.Cog):
             template = str((cfg.get("templates") or {}).get("apply") or "")
             text = self._render_template(template, member=member, slot=slot, added_name=str(slot.get("name") or ""))
         applied_name = _normalize_color_name(str(slot.get("name") or ""))
-        await interaction.response.send_message(text or f"cor {applied_name} aplicada.", ephemeral=True)
+        await reply(text or f"cor {applied_name} aplicada.")
 
     async def _delete_existing_panel_messages(self, guild_id: int):
         cfg = self._get_config(guild_id)

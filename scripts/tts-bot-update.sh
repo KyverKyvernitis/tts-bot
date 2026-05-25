@@ -750,6 +750,108 @@ PY_SANITIZE_LAVALINK
   fi
 }
 
+
+normalize_healthcheck_crontab() {
+  # Corrige linhas temporárias quebradas criadas durante diagnóstico manual.
+  # Não reativa healthcheck/resource-check automaticamente: eles continuam
+  # pausados até a correção passar pelo patch e pelo operador.
+  STAGE="normalização do crontab de emergência"
+  local tmp current changed
+  tmp="${TMPDIR:-/tmp}/tts-bot-cron.$$"
+  current="${TMPDIR:-/tmp}/tts-bot-cron-current.$$"
+  if ! sudo -u ubuntu -H crontab -l > "$current" 2>/dev/null; then
+    CRONTAB_HEALTH_STATUS="sem crontab do usuário ubuntu"
+    rm -f "$tmp" "$current" 2>/dev/null || true
+    return 0
+  fi
+  python3 - "$current" "$tmp" <<'PY_CRON'
+import sys
+from pathlib import Path
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+text = src.read_text(encoding='utf-8', errors='replace')
+health_line = '# TEMP_DISABLED_HEALTHCHECK_UNTIL_PATCH_20260524 * * * * * /home/ubuntu/bot/healthcheck.sh >/dev/null 2>&1'
+resource_line = '# TEMP_DISABLED_EMERGENCY_20260524 */5 * * * * /home/ubuntu/bot/resource-check.sh >/dev/null 2>&1'
+out=[]
+has_health=False
+has_resource=False
+changed=False
+for line in text.splitlines():
+    s=line.strip()
+    if s == '>/dev/null 2>&1':
+        changed=True
+        continue
+    if 'healthcheck.sh' in line:
+        if 'TEMP_DISABLED_HEALTHCHECK_UNTIL_PATCH_20260524' in line or line.lstrip().startswith('#'):
+            if not has_health:
+                out.append(health_line)
+                has_health=True
+            changed = changed or (line != health_line)
+            continue
+    if 'resource-check.sh' in line:
+        if 'TEMP_DISABLED_EMERGENCY_20260524' in line or line.lstrip().startswith('#'):
+            if not has_resource:
+                out.append(resource_line)
+                has_resource=True
+            changed = changed or (line != resource_line)
+            continue
+    out.append(line)
+dst.write_text('\n'.join(out).rstrip() + '\n', encoding='utf-8')
+print('changed=1' if changed else 'changed=0')
+PY_CRON
+  changed="$(tail -n 1 "$tmp" 2>/dev/null | grep -E '^changed=' | cut -d= -f2 || true)"
+  # O Python acima escreveu o crontab completo no mesmo arquivo que imprimiu status?
+  # Regera sem o status para manter o arquivo limpo.
+  python3 - "$current" "$tmp" <<'PY_CRON2'
+import sys
+from pathlib import Path
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+text = src.read_text(encoding='utf-8', errors='replace')
+health_line = '# TEMP_DISABLED_HEALTHCHECK_UNTIL_PATCH_20260524 * * * * * /home/ubuntu/bot/healthcheck.sh >/dev/null 2>&1'
+resource_line = '# TEMP_DISABLED_EMERGENCY_20260524 */5 * * * * /home/ubuntu/bot/resource-check.sh >/dev/null 2>&1'
+out=[]
+has_health=False
+has_resource=False
+for line in text.splitlines():
+    s=line.strip()
+    if s == '>/dev/null 2>&1':
+        continue
+    if 'TEMP_DISABLED_HEALTHCHECK_UNTIL_PATCH_20260524' in line and 'healthcheck.sh' in line:
+        if not has_health:
+            out.append(health_line)
+            has_health=True
+        continue
+    if 'TEMP_DISABLED_EMERGENCY_20260524' in line and 'resource-check.sh' in line:
+        if not has_resource:
+            out.append(resource_line)
+            has_resource=True
+        continue
+    out.append(line)
+dst.write_text('\n'.join(out).rstrip() + '\n', encoding='utf-8')
+PY_CRON2
+  if ! cmp -s "$current" "$tmp"; then
+    cp -a /var/spool/cron/crontabs/ubuntu "$REPO_DIR/crontab.backup.auto-clean.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    sudo -u ubuntu -H crontab "$tmp" || true
+    CRONTAB_HEALTH_STATUS="normalizado; healthcheck/resource-check seguem pausados se estavam pausados"
+  else
+    CRONTAB_HEALTH_STATUS="limpo"
+  fi
+  rm -f "$tmp" "$current" 2>/dev/null || true
+}
+
+deploy_alert_unit() {
+  STAGE="configuração do alerta systemd"
+  if [[ -f "$REPO_DIR/deploy/systemd/tts-bot-alert@.service" ]]; then
+    cp "$REPO_DIR/deploy/systemd/tts-bot-alert@.service" /etc/systemd/system/tts-bot-alert@.service
+    chmod +x "$REPO_DIR/notify-failure.sh" "$REPO_DIR/alert.sh" 2>/dev/null || true
+    systemctl daemon-reload || true
+    ALERT_UNIT_STATUS="unit instalada"
+  else
+    ALERT_UNIT_STATUS="unit ausente no deploy"
+  fi
+}
+
 deploy_audio_services() {
   sanitize_vps_lavalink_units
   if (( AUDIO_SYSTEMD_CHANGED == 0 )); then
@@ -918,7 +1020,14 @@ deploy_phone_worker_watch() {
     worker_value="${worker_value,,}"
   fi
 
-  if [[ "$worker_value" == "1" || "$worker_value" == "true" || "$worker_value" == "yes" || "$worker_value" == "on" || "$worker_value" == "sim" ]]; then
+  local watch_value=""
+  if [[ -f "$REPO_DIR/.env" ]]; then
+    watch_value="$(grep -E '^PHONE_WORKER_WATCH_ENABLED=' "$REPO_DIR/.env" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d ' "' || true)"
+    watch_value="${watch_value,,}"
+  fi
+
+  if [[ "$watch_value" == "1" || "$watch_value" == "true" || "$watch_value" == "yes" || "$watch_value" == "on" || "$watch_value" == "sim" ]]; then
+    chmod +x "$REPO_DIR/scripts/phone-worker-watch.sh" 2>/dev/null || true
     systemctl enable --now phone-worker-watch.timer >/dev/null 2>&1 || true
     systemctl start phone-worker-watch.service >/dev/null 2>&1 || true
     if systemctl is-active --quiet phone-worker-watch.timer; then
@@ -927,8 +1036,8 @@ deploy_phone_worker_watch() {
       PHONE_WORKER_WATCH_STATUS="timer instalado, mas não ativo"
     fi
   else
-    systemctl disable --now phone-worker-watch.timer >/dev/null 2>&1 || true
-    PHONE_WORKER_WATCH_STATUS="instalado; inativo porque PHONE_WORKER_ENABLED não está true"
+    systemctl disable --now phone-worker-watch.timer phone-worker-watch.service >/dev/null 2>&1 || true
+    PHONE_WORKER_WATCH_STATUS="instalado; inativo até PHONE_WORKER_WATCH_ENABLED=true"
   fi
 }
 
@@ -1029,6 +1138,8 @@ PYJSON
 
 
 deploy_bot() {
+  normalize_healthcheck_crontab
+  deploy_alert_unit
   deploy_audio_services
   deploy_cleanup_timer
   deploy_phone_lavalink_watch
@@ -1411,7 +1522,7 @@ fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^requirements\.txt$'; then
   REQUIREMENTS_CHANGED=1
 fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/systemd/(lavalink|tts-bot)\.service$'; then
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/systemd/(lavalink|tts-bot|tts-bot-alert@)\.service$'; then
   AUDIO_SYSTEMD_CHANGED=1
 fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(cleanup-audio-temp\.sh|deploy/systemd/cleanup-audio-temp\.(service|timer))$'; then
@@ -1515,6 +1626,8 @@ Cogs: $BOT_COGS_STATUS
 Avisos: $BOT_WARNINGS_STATUS
 Serviços:
 • Áudio: $AUDIO_SERVICES_STATUS
+• Alerta systemd: $ALERT_UNIT_STATUS
+• Crontab healthcheck: $CRONTAB_HEALTH_STATUS
 • Limpeza de áudio: $CLEANUP_STATUS
 • Watcher Lavalink celular: $PHONE_LAVALINK_WATCH_STATUS
 • Phone worker: $PHONE_WORKER_WATCH_STATUS

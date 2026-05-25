@@ -68,4 +68,5 @@ $STATUS_SNIPPET
 $LOGS
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
-/home/ubuntu/bot/alert.sh "$ALERT_TYPE" "$ALERT_TITLE" "$BODY"
+/home/ubuntu/bot/alert.sh "$ALERT_TYPE" "$ALERT_TITLE" "$BODY" || true
+exit 0
