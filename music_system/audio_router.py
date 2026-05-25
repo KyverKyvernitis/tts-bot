@@ -4454,11 +4454,14 @@ class AudioRouter:
                 if should_repost and state.now_message is not None:
                     old_message = state.now_message
                     state.now_message = None
-                    # Mantém histórico visual, mas remove componentes do painel antigo.
-                    # O painel novo é enviado como mensagem mais recente com View fresca,
-                    # corrigindo botões expirados após fim de música/Music Agent.
-                    with contextlib.suppress(Exception):
-                        await old_message.edit(view=None)
+                    # O painel antigo não deve continuar vivo/visível com controles
+                    # ativos quando uma nova faixa gera painel fresco. Tente deletar;
+                    # se o Discord negar, remova a view como fallback seguro.
+                    try:
+                        await old_message.delete()
+                    except Exception:
+                        with contextlib.suppress(Exception):
+                            await old_message.edit(view=None)
                     logger.info("[music] repostando painel do player | guild=%s track_key=%s", guild_id, current_panel_key)
 
                 if state.now_message is not None and not should_repost:
@@ -5428,6 +5431,7 @@ class AudioRouter:
         vc = guild.voice_client if guild else None
         did_anything = False
         state.skip_requested = True
+        self._cancel_next_prefetch(state)
         state.skip_transition_active = True
         state.skip_history_suppressed_once = not bool(add_current_to_history)
         for _vote_action in ("skip", "stop"):
@@ -5741,6 +5745,28 @@ class AudioRouter:
         items = self.snapshot_queue(guild_id)
         state.control_votes.pop("shuffle", None)
         state.shuffle = not state.shuffle
+        self._cancel_next_prefetch(state)
+        if str(getattr(state, "current_backend", "") or "").lower() == "agent" and self.music_worker_only_enabled():
+            if state.shuffle:
+                try:
+                    result = await _music_agent_command("shuffle", guild_id=int(guild_id))
+                    remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
+                    if remote:
+                        await self.sync_music_agent_state(
+                            int(guild_id),
+                            state.current,
+                            remote,
+                            voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
+                            text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+                            queued=False,
+                            create_panel=True,
+                        )
+                    state.shuffle = bool((result or {}).get("enabled", True))
+                except Exception:
+                    logger.warning("[music/agent] falha ao embaralhar queue remoto | guild=%s", guild_id, exc_info=True)
+                    state.shuffle = False
+            self._schedule_panel_update(guild_id, create=False)
+            return state.shuffle
         if state.shuffle and len(items) > 1:
             random.shuffle(items)
             await self.replace_queue(guild_id, items)

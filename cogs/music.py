@@ -172,12 +172,18 @@ class Music(commands.Cog):
         # Quando o Music Agent responde queued=True, ``state.current`` continua
         # sendo a música que já estava tocando. A confirmação de "adicionada ao
         # queue" precisa usar a faixa selecionada/adicionada, não now-playing.
-        source_payload = {} if queued else current
+        queued_track = result.get("track") if isinstance(result.get("track"), dict) else {}
+        queue_preview = state.get("queue") if isinstance(state.get("queue"), list) else []
+        if queued and not queued_track and queue_preview:
+            last = queue_preview[-1]
+            queued_track = last if isinstance(last, dict) else {}
+        source_payload = queued_track if queued else current
         title = (
             useful(source_payload.get("display_title"))
             or useful(source_payload.get("title"))
             or useful(source_payload.get("name"))
-            or track.short_title
+            or useful(getattr(track, "display_title", ""))
+            or useful(track.short_title)
         )
         if len(title) > 90:
             title = title[:87].rstrip() + "..."
@@ -193,6 +199,8 @@ class Music(commands.Cog):
             pass
         status = str(state.get("status") or "").lower()
         if queued:
+            if not title or title.lower() in {"youtube", "desconhecida", "música", "musica"}:
+                return "`🎶` **Música adicionada ao queue.** Carregando detalhes..."
             return f"`🎶` **Adicionada ao queue:** {title} • `{duration_label}`"
         if self._music_agent_confirmed_playing(state):
             return f"`🎧` **Tocando:** {title} • `{duration_label}`"

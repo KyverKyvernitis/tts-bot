@@ -648,16 +648,20 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
 
     embeds: list[discord.Embed] = []
     if queue:
+        preview_limit = 3
+        preview_items = queue[:preview_limit]
+        remaining_count = max(0, int(queue_total or len(queue)) - len(preview_items))
         mini = discord.Embed(
-            title=f"Músicas no queue: {len(queue)}",
+            title=f"Músicas no queue: {int(queue_total or len(queue))}",
             color=discord.Color.blurple(),
         )
         mini_lines = []
-        for n, item in enumerate(queue[:3], start=1):
+        for n, item in enumerate(preview_items, start=1):
             mini_lines.append(f"-# `{n:02}) [{item.duration_label}]` {_track_link(item, title_limit=42)}")
-        if len(queue) > 3:
-            mini_lines.append(f"-# `+ {len(queue) - 3} restante(s)`")
-        mini_lines.append(f"-# `⌛ Duração aproximada do queue: {_queue_duration_label(queue)}`")
+        if remaining_count:
+            mini_lines.append(f"-# `+ {remaining_count} restante(s)`")
+        duration_prefix = "preview" if int(queue_total or len(queue)) > len(queue) else "queue"
+        mini_lines.append(f"-# `⌛ Duração aproximada do {duration_prefix}: {_queue_duration_label(queue)}`")
         mini.description = "\n".join(mini_lines)
         mini.set_image(url=PLAYER_BAR_URL)
         embeds.append(mini)
@@ -694,14 +698,19 @@ def build_player_embeds(state) -> list[discord.Embed]:
             embed.description = "A música atual foi pulada. O player está finalizando a transição."
     elif queue:
         embed.set_author(name="Queue pronto:", icon_url="https://i.ibb.co/QXtk5VB/neon-circle.gif")
+        queue_total = _queue_total_count(state, queue)
+        preview_limit = 5
+        preview_items = queue[:preview_limit]
+        remaining_count = max(0, int(queue_total or len(queue)) - len(preview_items))
+        duration_prefix = "preview" if int(queue_total or len(queue)) > len(queue) else "queue"
         lines = [
-            f"> -# 🎶 **⠂** `{len(queue)} música{'s' if len(queue) != 1 else ''} aguardando`",
-            f"> -# ⌛ **⠂** `Duração aproximada: {_queue_duration_label(queue)}`",
+            f"> -# 🎶 **⠂** `{int(queue_total or len(queue))} música{'s' if int(queue_total or len(queue)) != 1 else ''} aguardando`",
+            f"> -# ⌛ **⠂** `Duração aproximada do {duration_prefix}: {_queue_duration_label(queue)}`",
         ]
-        for n, item in enumerate(queue[:5], start=1):
+        for n, item in enumerate(preview_items, start=1):
             lines.append(f"-# `{n:02}) [{item.duration_label}]` {_track_link(item, title_limit=48)}")
-        if len(queue) > 5:
-            lines.append(f"-# `+ {len(queue) - 5} restante(s)`")
+        if remaining_count:
+            lines.append(f"-# `+ {remaining_count} restante(s)`")
         embed.description = "\n".join(lines)
         first = queue[0]
         if first.thumbnail:
@@ -770,6 +779,7 @@ def build_now_playing_embed(state, track: MusicTrack) -> discord.Embed:
 
 def build_queue_embed(state, page: int = 0, *, selected_position: int | None = None) -> discord.Embed:
     items = _queue_items(state)
+    queue_total = _queue_total_count(state, items)
     page = max(0, int(page))
     max_page = max(0, (len(items) - 1) // QUEUE_PAGE_SIZE)
     page = min(page, max_page)
@@ -799,7 +809,10 @@ def build_queue_embed(state, page: int = 0, *, selected_position: int | None = N
             lines.append(f"-# `{track.duration_label}` • pedido por {requester}")
 
         lines.append("")
-        lines.append(f"-# ⏳ Duração aproximada do queue: `{_queue_duration_label(items)}`")
+        duration_prefix = "preview" if int(queue_total or len(items)) > len(items) else "queue"
+        if int(queue_total or len(items)) > len(items):
+            lines.append(f"-# `+ {int(queue_total or len(items)) - len(items)} item(ns) fora deste preview`")
+        lines.append(f"-# ⏳ Duração aproximada do {duration_prefix}: `{_queue_duration_label(items)}`")
 
     embed.description = "\n".join(lines)
     if selected_position and 1 <= selected_position <= len(items):
@@ -808,7 +821,9 @@ def build_queue_embed(state, page: int = 0, *, selected_position: int | None = N
             embed.set_thumbnail(url=selected.thumbnail)
         embed.set_footer(text=f"Posição {selected_position} selecionada • escolha uma ação abaixo")
     elif items:
-        embed.set_footer(text=f"{len(items)} item(ns) no queue • selecione uma música para ver ações")
+        footer_total = int(queue_total or len(items))
+        suffix = " • preview parcial" if footer_total > len(items) else ""
+        embed.set_footer(text=f"{footer_total} item(ns) no queue{suffix} • selecione uma música para ver ações")
     else:
         embed.set_footer(text="O queue está pronto para receber músicas")
     return embed
@@ -1674,8 +1689,10 @@ class PlayerOptionsSelect(discord.ui.Select):
             await interaction.response.send_modal(VolumeModal(self.router, self.guild_id))
             return
         if value == "shuffle":
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True, thinking=False)
             _ok, message = await self.router.request_shuffle(self.guild_id, interaction.user)
-            await interaction.response.send_message(message, ephemeral=True)
+            await interaction.followup.send(message, ephemeral=True)
             return
         if value == "seek":
             requester_id = _current_track_requester_id(state)
@@ -1688,8 +1705,10 @@ class PlayerOptionsSelect(discord.ui.Select):
             await interaction.response.send_modal(SeekModal(self.router, self.guild_id))
             return
         if value == "loop":
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True, thinking=False)
             _ok, message = await self.router.request_loop(self.guild_id, interaction.user)
-            await interaction.response.send_message(message, ephemeral=True)
+            await interaction.followup.send(message, ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
 
@@ -1765,6 +1784,7 @@ class MusicPlayerView(discord.ui.View):
 
     @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="music:back")
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._defer_control(interaction)
         ok = await self.router.previous(self.guild_id)
         await self._ack(interaction, "`⏮️` Voltando para a música anterior." if ok else "Não há música anterior no histórico.")
 
@@ -1774,6 +1794,9 @@ class MusicPlayerView(discord.ui.View):
     async def _send_agent_control(self, interaction: discord.Interaction, action: str, message: str) -> bool:
         if not self._music_agent_default_enabled():
             return False
+        if not interaction.response.is_done():
+            with contextlib.suppress(Exception):
+                await interaction.response.defer(ephemeral=True, thinking=False)
         try:
             result = await music_agent_command(action, guild_id=self.guild_id, requester_id=getattr(interaction.user, "id", 0), requester_name=getattr(interaction.user, "display_name", str(interaction.user)))
         except Exception as exc:
