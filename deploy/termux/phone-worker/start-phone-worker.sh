@@ -274,6 +274,18 @@ heavy_python_deps_enabled() {
   [[ "$mode" == "1" || "$mode" == "true" || "$mode" == "on" || "$mode" == "yes" || "$mode" == "sim" ]]
 }
 
+cleanup_stale_heavy_dependency_builds() {
+  truthy "${PHONE_WORKER_KILL_STALE_HEAVY_DEP_BUILDS:-true}" || return 0
+  heavy_python_deps_enabled && return 0
+  command -v ps >/dev/null 2>&1 || return 0
+  ps -ef 2>/dev/null | grep -Ei 'google-cloud-texttospeech|grpcio|GRPC_XDS|pyb/temp\.android|pip/_vendor/pyproject_hooks|build_wheel' | grep -v grep | awk '{print $2}' | while read -r pid; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [[ "$pid" == "$$" ]] && continue
+    log "encerrando build pesado opcional preso; pid=$pid"
+    kill "$pid" 2>/dev/null || true
+  done
+}
+
 ensure_turbo_termux_packages_if_needed() {
   is_turbo_profile || return 0
   deps_install_enabled || return 0
@@ -509,9 +521,7 @@ ensure_turbo_deps_if_needed() {
 }
 
 ensure_music_worker_env_if_needed
-ensure_turbo_deps_if_needed
-ensure_lavalink_for_turbo_if_needed
-ensure_music_agent_for_turbo_if_needed
+cleanup_stale_heavy_dependency_builds
 
 count="$(worker_pid_count)"
 if health_ok && [[ "$count" -le 1 ]]; then
@@ -522,11 +532,20 @@ if health_ok && [[ "$count" -le 1 ]]; then
     write_status "restart_for_update runtime=$running_ver file=$file_ver $(now_iso)"
     kill_worker_processes
   else
+    # Worker saudável não deve rodar auto-install a cada ciclo do watchdog.
+    # Mantém apenas serviços auxiliares de música, que são checagens rápidas.
+    ensure_lavalink_for_turbo_if_needed
+    ensure_music_agent_for_turbo_if_needed
     log "worker já está online; pid(s)=$count"
     write_status "ok already_online $(now_iso)"
     exit 0
   fi
 fi
+
+# Dependências só são verificadas quando o worker não está online ou precisou reiniciar.
+ensure_turbo_deps_if_needed
+ensure_lavalink_for_turbo_if_needed
+ensure_music_agent_for_turbo_if_needed
 
 if [[ "$KILL_DUPLICATES" != "false" ]]; then
   log "limpando processos antigos/duplicados do phone-worker"

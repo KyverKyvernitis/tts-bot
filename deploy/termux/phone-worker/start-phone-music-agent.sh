@@ -54,6 +54,35 @@ truthy() {
   [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "y" || "$value" == "on" || "$value" == "sim" ]]
 }
 
+falsey() {
+  local value="${1:-}"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
+  [[ "$value" == "0" || "$value" == "false" || "$value" == "no" || "$value" == "n" || "$value" == "off" || "$value" == "nao" || "$value" == "não" ]]
+}
+
+agent_deps_install_enabled() {
+  local mode="${MUSIC_AGENT_DEPS_INSTALL_MODE:-${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-${PHONE_WORKER_DEPS_INSTALL_MODE:-auto}}}"
+  falsey "$mode" && return 1
+  return 0
+}
+
+heavy_python_deps_enabled() {
+  local mode="${MUSIC_AGENT_HEAVY_PYTHON_DEPS_INSTALL:-${PHONE_WORKER_HEAVY_PYTHON_DEPS_INSTALL:-false}}"
+  truthy "$mode"
+}
+
+cleanup_stale_heavy_dependency_builds() {
+  truthy "${MUSIC_AGENT_KILL_STALE_HEAVY_DEP_BUILDS:-${PHONE_WORKER_KILL_STALE_HEAVY_DEP_BUILDS:-true}}" || return 0
+  heavy_python_deps_enabled && return 0
+  command -v ps >/dev/null 2>&1 || return 0
+  ps -ef 2>/dev/null | grep -Ei 'google-cloud-texttospeech|grpcio|GRPC_XDS|pyb/temp\.android|pip/_vendor/pyproject_hooks|build_wheel' | grep -v grep | awk '{print $2}' | while read -r pid; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [[ "$pid" == "$$" ]] && continue
+    log "encerrando build pesado opcional preso; pid=$pid"
+    kill "$pid" 2>/dev/null || true
+  done
+}
+
 if [[ ! -f "$WORKER_DIR/music_agent.py" ]]; then
   log "music_agent.py não encontrado em $WORKER_DIR"
   exit 1
@@ -142,24 +171,42 @@ ensure_termux_packages() {
 }
 
 ensure_deps() {
+  agent_deps_install_enabled || {
+    log "auto-install de dependências do Music Agent desativado por env"
+    return 0
+  }
   ensure_termux_packages
   "$PYTHON_BIN" - <<'PYDEPS' >/dev/null 2>&1 && return 0
 import aiohttp, discord, nacl, davey, wavelink, yt_dlp, gtts, edge_tts  # noqa: F401
-import google.cloud.texttospeech_v1  # noqa: F401
 PYDEPS
-  log "dependências do Music Agent/TTS ausentes; instalando aiohttp, discord.py, PyNaCl, davey, wavelink, yt-dlp, gTTS, edge-tts e Google Cloud TTS"
-  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl davey 'wavelink>=3.4,<3.6' 'yt-dlp[default]' gTTS edge-tts google-cloud-texttospeech)
+  log "dependências leves do Music Agent/TTS ausentes; instalando sem Google Cloud TTS/grpcio"
+  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl davey 'wavelink>=3.4,<3.6' 'yt-dlp[default]' gTTS edge-tts)
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-900}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
-      log "não consegui instalar todas as dependências automaticamente dentro do timeout"
+    timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-600}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
+      log "não consegui instalar todas as dependências leves automaticamente dentro do timeout"
   else
     "${pip_cmd[@]}" >/dev/null 2>&1 || \
-      log "não consegui instalar todas as dependências automaticamente"
+      log "não consegui instalar todas as dependências leves automaticamente"
+  fi
+  if heavy_python_deps_enabled; then
+    "$PYTHON_BIN" - <<'PYGCLOUD' >/dev/null 2>&1 || {
+import google.cloud.texttospeech_v1  # noqa: F401
+PYGCLOUD
+      log "Google Cloud TTS/grpcio ausente; instalando porque heavy deps foram ativadas explicitamente"
+      local heavy_cmd=("$PYTHON_BIN" -m pip install --upgrade google-cloud-texttospeech)
+      if command -v timeout >/dev/null 2>&1; then
+        timeout "${MUSIC_AGENT_HEAVY_DEPS_INSTALL_TIMEOUT_SECONDS:-600}" "${heavy_cmd[@]}" >/dev/null 2>&1 || \
+          log "não consegui instalar Google Cloud TTS automaticamente dentro do timeout"
+      else
+        "${heavy_cmd[@]}" >/dev/null 2>&1 || \
+          log "não consegui instalar Google Cloud TTS automaticamente"
+      fi
+    }
   fi
 }
 
-ensure_deps
 mkdir -p "$(dirname "$LOG_FILE")"
+cleanup_stale_heavy_dependency_builds
 
 if health_ok; then
   running_ver="$(running_version)"
@@ -172,6 +219,10 @@ if health_ok; then
     exit 0
   fi
 fi
+
+# Só verifica/instala dependências quando o Music Agent não está online ou será reiniciado.
+# Isso evita que cada watchdog/start tente pip install e trave o celular mesmo com o agente saudável.
+ensure_deps
 
 if truthy "$KILL_DUPLICATES"; then
   kill_agent
