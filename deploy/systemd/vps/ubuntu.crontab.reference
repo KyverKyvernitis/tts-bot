@@ -1,0 +1,7 @@
+# Reference only. Do not blindly install over the live crontab.
+# The install script normalizes broken temporary lines but does not re-enable
+# healthcheck/resource-check until those scripts are patched and reviewed.
+
+# TEMP_DISABLED_HEALTHCHECK_UNTIL_PATCH_20260524 * * * * * /home/ubuntu/bot/healthcheck.sh >/dev/null 2>&1
+# TEMP_DISABLED_EMERGENCY_20260524 */5 * * * * /home/ubuntu/bot/resource-check.sh >/dev/null 2>&1
+0 4 * * * /home/ubuntu/bot/backup-configs.sh >> /home/ubuntu/bot/backup-configs.log 2>&1

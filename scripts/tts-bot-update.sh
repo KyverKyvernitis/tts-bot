@@ -36,6 +36,7 @@ AUDIO_SYSTEMD_CHANGED=0
 CLEANUP_CHANGED=0
 PHONE_LAVALINK_WATCH_CHANGED=0
 PHONE_WORKER_WATCH_CHANGED=0
+VPS_SYSTEMD_UNITS_CHANGED=0
 PHONE_WORKER_SYNC_REQUIRED=0
 CORE_WORKER_APK_CHANGED=0
 CORE_WORKER_AUTOMATION_REQUIRED=0
@@ -54,6 +55,7 @@ AUDIO_SERVICES_STATUS="não alterado"
 CLEANUP_STATUS="não alterada"
 PHONE_LAVALINK_WATCH_STATUS="não alterado"
 PHONE_WORKER_WATCH_STATUS="não alterado"
+VPS_SYSTEMD_UNITS_STATUS="não alterado"
 PHONE_WORKER_SYNC_STATUS="sem mudanças"
 CORE_WORKER_AGENT_UPDATE_STATUS="sem mudanças"
 CORE_WORKER_APK_BUILD_STATUS="sem mudanças"
@@ -840,10 +842,38 @@ PY_CRON2
   rm -f "$tmp" "$current" 2>/dev/null || true
 }
 
+deploy_vps_systemd_units() {
+  if (( VPS_SYSTEMD_UNITS_CHANGED == 0 )); then
+    VPS_SYSTEMD_UNITS_STATUS="não alterado"
+    return 0
+  fi
+
+  STAGE="sincronização dos units systemd da VPS"
+  if [[ ! -x "$REPO_DIR/scripts/install-vps-systemd-units.sh" && ! -f "$REPO_DIR/scripts/install-vps-systemd-units.sh" ]]; then
+    VPS_SYSTEMD_UNITS_STATUS="script ausente"
+    UPDATE_HAS_WARNINGS=1
+    return 0
+  fi
+
+  chmod +x "$REPO_DIR/scripts/install-vps-systemd-units.sh" 2>/dev/null || true
+  if REPO_DIR="$REPO_DIR" "$REPO_DIR/scripts/install-vps-systemd-units.sh" --from-updater; then
+    VPS_SYSTEMD_UNITS_STATUS="sincronizados"
+  else
+    VPS_SYSTEMD_UNITS_STATUS="falha ao sincronizar"
+    UPDATE_HAS_WARNINGS=1
+  fi
+}
+
 deploy_alert_unit() {
   STAGE="configuração do alerta systemd"
-  if [[ -f "$REPO_DIR/deploy/systemd/tts-bot-alert@.service" ]]; then
-    cp "$REPO_DIR/deploy/systemd/tts-bot-alert@.service" /etc/systemd/system/tts-bot-alert@.service
+  local src=""
+  if [[ -f "$REPO_DIR/deploy/systemd/vps/tts-bot-alert@.service" ]]; then
+    src="$REPO_DIR/deploy/systemd/vps/tts-bot-alert@.service"
+  elif [[ -f "$REPO_DIR/deploy/systemd/tts-bot-alert@.service" ]]; then
+    src="$REPO_DIR/deploy/systemd/tts-bot-alert@.service"
+  fi
+  if [[ -n "$src" ]]; then
+    cp "$src" /etc/systemd/system/tts-bot-alert@.service
     chmod +x "$REPO_DIR/notify-failure.sh" "$REPO_DIR/alert.sh" 2>/dev/null || true
     systemctl daemon-reload || true
     ALERT_UNIT_STATUS="unit instalada"
@@ -908,12 +938,17 @@ deploy_cleanup_timer() {
   STAGE="configuração da limpeza de temporários"
   local installed=0
 
-  if [[ -f "$REPO_DIR/deploy/systemd/cleanup-audio-temp.service" ]]; then
-    cp "$REPO_DIR/deploy/systemd/cleanup-audio-temp.service" /etc/systemd/system/cleanup-audio-temp.service
+  local cleanup_service_src="$REPO_DIR/deploy/systemd/vps/cleanup-audio-temp.service"
+  local cleanup_timer_src="$REPO_DIR/deploy/systemd/vps/cleanup-audio-temp.timer"
+  [[ -f "$cleanup_service_src" ]] || cleanup_service_src="$REPO_DIR/deploy/systemd/cleanup-audio-temp.service"
+  [[ -f "$cleanup_timer_src" ]] || cleanup_timer_src="$REPO_DIR/deploy/systemd/cleanup-audio-temp.timer"
+
+  if [[ -f "$cleanup_service_src" ]]; then
+    cp "$cleanup_service_src" /etc/systemd/system/cleanup-audio-temp.service
     installed=1
   fi
-  if [[ -f "$REPO_DIR/deploy/systemd/cleanup-audio-temp.timer" ]]; then
-    cp "$REPO_DIR/deploy/systemd/cleanup-audio-temp.timer" /etc/systemd/system/cleanup-audio-temp.timer
+  if [[ -f "$cleanup_timer_src" ]]; then
+    cp "$cleanup_timer_src" /etc/systemd/system/cleanup-audio-temp.timer
     installed=1
   fi
 
@@ -943,12 +978,17 @@ deploy_phone_lavalink_watch() {
   STAGE="configuração do watcher do Lavalink auxiliar"
   local installed=0
 
-  if [[ -f "$REPO_DIR/deploy/systemd/phone-lavalink-watch.service" ]]; then
-    cp "$REPO_DIR/deploy/systemd/phone-lavalink-watch.service" /etc/systemd/system/phone-lavalink-watch.service
+  local phone_lavalink_service_src="$REPO_DIR/deploy/systemd/vps/phone-lavalink-watch.service"
+  local phone_lavalink_timer_src="$REPO_DIR/deploy/systemd/vps/phone-lavalink-watch.timer"
+  [[ -f "$phone_lavalink_service_src" ]] || phone_lavalink_service_src="$REPO_DIR/deploy/systemd/phone-lavalink-watch.service"
+  [[ -f "$phone_lavalink_timer_src" ]] || phone_lavalink_timer_src="$REPO_DIR/deploy/systemd/phone-lavalink-watch.timer"
+
+  if [[ -f "$phone_lavalink_service_src" ]]; then
+    cp "$phone_lavalink_service_src" /etc/systemd/system/phone-lavalink-watch.service
     installed=1
   fi
-  if [[ -f "$REPO_DIR/deploy/systemd/phone-lavalink-watch.timer" ]]; then
-    cp "$REPO_DIR/deploy/systemd/phone-lavalink-watch.timer" /etc/systemd/system/phone-lavalink-watch.timer
+  if [[ -f "$phone_lavalink_timer_src" ]]; then
+    cp "$phone_lavalink_timer_src" /etc/systemd/system/phone-lavalink-watch.timer
     installed=1
   fi
 
@@ -998,12 +1038,17 @@ deploy_phone_worker_watch() {
   if [[ -f "$REPO_DIR/scripts/phone-worker-watch.sh" ]]; then
     chmod +x "$REPO_DIR/scripts/phone-worker-watch.sh" 2>/dev/null || true
   fi
-  if [[ -f "$REPO_DIR/deploy/systemd/phone-worker-watch.service" ]]; then
-    cp "$REPO_DIR/deploy/systemd/phone-worker-watch.service" /etc/systemd/system/phone-worker-watch.service
+  local phone_worker_service_src="$REPO_DIR/deploy/systemd/vps/phone-worker-watch.service"
+  local phone_worker_timer_src="$REPO_DIR/deploy/systemd/vps/phone-worker-watch.timer"
+  [[ -f "$phone_worker_service_src" ]] || phone_worker_service_src="$REPO_DIR/deploy/systemd/phone-worker-watch.service"
+  [[ -f "$phone_worker_timer_src" ]] || phone_worker_timer_src="$REPO_DIR/deploy/systemd/phone-worker-watch.timer"
+
+  if [[ -f "$phone_worker_service_src" ]]; then
+    cp "$phone_worker_service_src" /etc/systemd/system/phone-worker-watch.service
     installed=1
   fi
-  if [[ -f "$REPO_DIR/deploy/systemd/phone-worker-watch.timer" ]]; then
-    cp "$REPO_DIR/deploy/systemd/phone-worker-watch.timer" /etc/systemd/system/phone-worker-watch.timer
+  if [[ -f "$phone_worker_timer_src" ]]; then
+    cp "$phone_worker_timer_src" /etc/systemd/system/phone-worker-watch.timer
     installed=1
   fi
 
@@ -1139,6 +1184,7 @@ PYJSON
 
 deploy_bot() {
   normalize_healthcheck_crontab
+  deploy_vps_systemd_units
   deploy_alert_unit
   deploy_audio_services
   deploy_cleanup_timer
@@ -1525,6 +1571,13 @@ fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/systemd/(lavalink|tts-bot|tts-bot-alert@)\.service$'; then
   AUDIO_SYSTEMD_CHANGED=1
 fi
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(deploy/systemd/vps/|scripts/install-vps-systemd-units\.sh$)'; then
+  VPS_SYSTEMD_UNITS_CHANGED=1
+  AUDIO_SYSTEMD_CHANGED=1
+  CLEANUP_CHANGED=1
+  PHONE_LAVALINK_WATCH_CHANGED=1
+  PHONE_WORKER_WATCH_CHANGED=1
+fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(cleanup-audio-temp\.sh|deploy/systemd/cleanup-audio-temp\.(service|timer))$'; then
   CLEANUP_CHANGED=1
 fi
@@ -1625,6 +1678,7 @@ Validações:
 Cogs: $BOT_COGS_STATUS
 Avisos: $BOT_WARNINGS_STATUS
 Serviços:
+• Systemd VPS: $VPS_SYSTEMD_UNITS_STATUS
 • Áudio: $AUDIO_SERVICES_STATUS
 • Alerta systemd: $ALERT_UNIT_STATUS
 • Crontab healthcheck: $CRONTAB_HEALTH_STATUS

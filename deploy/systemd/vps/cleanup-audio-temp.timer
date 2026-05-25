@@ -1,0 +1,11 @@
+[Unit]
+Description=Run temporary TTS/audio cleanup periodically
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+Unit=cleanup-audio-temp.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

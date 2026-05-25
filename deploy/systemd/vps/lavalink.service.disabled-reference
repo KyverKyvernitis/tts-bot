@@ -1,0 +1,8 @@
+# Legacy reference only. Do not install as /etc/systemd/system/lavalink.service.
+#
+# VPS-local Lavalink is no longer part of the supported runtime. Music Lavalink
+# belongs on the phone worker / Music Agent side. The installer masks the local
+# VPS lavalink.service and removes tts-bot dependencies on it.
+#
+# This file exists only so the old VPS-only unit is documented in Git and future
+# maintenance does not accidentally recreate the restart loop from /etc/systemd.

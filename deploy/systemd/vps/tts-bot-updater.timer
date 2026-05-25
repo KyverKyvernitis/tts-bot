@@ -1,0 +1,10 @@
+[Unit]
+Description=Verifica updates do tts-bot periodicamente
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Unit=tts-bot-updater.service
+
+[Install]
+WantedBy=timers.target
