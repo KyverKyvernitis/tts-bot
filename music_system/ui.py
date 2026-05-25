@@ -262,18 +262,58 @@ def _is_youtube_text_search(query: str) -> bool:
 
 
 def _worker_only_should_use_lavalink(query: str) -> bool:
-    raw = (query or "").strip()
-    if not raw:
+    # Worker-only é Music Agent/yt-dlp first. Spotify/playlists/SoundCloud não
+    # devem cair em Lavalink só para resolver metadata.
+    return False
+
+
+def _worker_url_should_flatten_first(query: str) -> bool:
+    profile = describe_url((query or "").strip())
+    if not profile.is_url:
         return False
-    lower = raw.lower()
-    profile = describe_url(raw)
-    if lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:")):
-        return True
     if profile.is_youtube and profile.resource_type == "playlist":
         return True
-    if profile.platform in {"spotify", "soundcloud", "apple", "deezer"}:
+    if profile.resource_type in {"playlist", "album"}:
         return True
     return False
+
+
+def _agent_query_for_track(track: MusicTrack, fallback: str = "") -> str:
+    extractor = str(getattr(track, "extractor", "") or "").lower()
+    source = str(getattr(track, "source", "") or getattr(track, "display_source", "") or "").lower()
+    is_metadata = extractor == "metadata" or any(token in source for token in ("spotify", "deezer", "apple", "metadata"))
+    if is_metadata:
+        base = str(getattr(track, "display_title", "") or getattr(track, "title", "") or fallback or "").strip()
+        uploader = str(getattr(track, "display_uploader", "") or getattr(track, "uploader", "") or "").strip()
+        if uploader and uploader.lower() not in base.lower():
+            base = f"{uploader} {base}".strip()
+        if base and "official" not in base.lower():
+            base = f"{base} official audio"
+        return base or fallback or getattr(track, "title", "") or ""
+    return str(getattr(track, "webpage_url", "") or getattr(track, "original_url", "") or getattr(track, "stream_url", "") or getattr(track, "title", "") or fallback or "").strip()
+
+
+def _agent_tracks_payload(tracks: list[MusicTrack], *, requester_id: int = 0, requester_name: str = "") -> list[dict]:
+    payload: list[dict] = []
+    for track in tracks:
+        payload.append({
+            "title": track.title,
+            "webpage_url": track.webpage_url,
+            "original_url": track.original_url,
+            "stream_url": track.stream_url,
+            "duration": track.duration,
+            "uploader": track.uploader,
+            "thumbnail": track.thumbnail,
+            "source": track.source,
+            "extractor": track.extractor,
+            "display_title": getattr(track, "display_title", ""),
+            "display_uploader": getattr(track, "display_uploader", ""),
+            "display_source": getattr(track, "display_source", ""),
+            "query": _agent_query_for_track(track),
+            "requester_id": requester_id or track.requester_id,
+            "requester_name": requester_name or track.requester_name,
+        })
+    return payload
 
 
 async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, requester_id: int, requester_name: str) -> tuple[ExtractedBatch, bool]:
@@ -288,25 +328,25 @@ async def _extract_batch_for_add_modal(router, guild_id: int, query: str, *, req
         selection = await router.ensure_music_worker_available()
         if not getattr(selection, "available", False):
             raise RuntimeError(getattr(selection, "message", "") or getattr(router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
-        if _worker_only_should_use_lavalink(query):
-            if _is_lavalink_search_request(query):
-                batch = await backends.search_lavalink_tracks(
-                    query,
-                    requester_id=requester_id,
-                    requester_name=requester_name,
-                    guild_id=guild_id,
-                    limit=max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))),
-                )
-                return batch, True
-            batch = await backends.resolve_lavalink_direct_tracks(
+        profile = describe_url(query)
+        youtube_text_search = _is_youtube_text_search(query)
+        if profile.is_metadata_only:
+            batch = await router.extractor.extract(
                 query,
                 requester_id=requester_id,
                 requester_name=requester_name,
-                guild_id=guild_id,
-                limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
             )
             return batch, False
-        youtube_text_search = _is_youtube_text_search(query)
+        if _worker_url_should_flatten_first(query):
+            batch = await resolve_music_tracks_on_worker(
+                query,
+                requester_id=requester_id,
+                requester_name=requester_name,
+                limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 100) or 100)),
+                metadata_only=True,
+                allow_playlist=True,
+            )
+            return batch, False
         batch = await resolve_music_tracks_on_worker(
             query,
             requester_id=requester_id,
@@ -925,7 +965,7 @@ class SearchSelect(discord.ui.Select):
                         guild_id=self.guild_id,
                         voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
                         text_channel_id=getattr(text_channel, "id", self.text_channel_id),
-                        query=track.webpage_url or track.original_url or track.title,
+                        query=_agent_query_for_track(track),
                         track=track,
                         requester_id=getattr(interaction.user, "id", 0),
                         requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
@@ -1071,17 +1111,31 @@ class AddSongModal(discord.ui.Modal):
 
         if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
             track = batch.tracks[0]
+            is_multi = bool(len(batch.tracks) > 1)
             try:
-                result = await music_agent_command(
-                    "play",
-                    guild_id=guild.id,
-                    voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
-                    text_channel_id=getattr(text_channel, "id", self.text_channel_id),
-                    query=track.webpage_url or track.original_url or query,
-                    track=track,
-                    requester_id=interaction.user.id,
-                    requester_name=requester_name,
-                )
+                if is_multi:
+                    result = await music_agent_command(
+                        "enqueue_many",
+                        guild_id=guild.id,
+                        voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
+                        text_channel_id=getattr(text_channel, "id", self.text_channel_id),
+                        query=query,
+                        track=track,
+                        tracks=_agent_tracks_payload(batch.tracks, requester_id=interaction.user.id, requester_name=requester_name),
+                        requester_id=interaction.user.id,
+                        requester_name=requester_name,
+                    )
+                else:
+                    result = await music_agent_command(
+                        "play",
+                        guild_id=guild.id,
+                        voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
+                        text_channel_id=getattr(text_channel, "id", self.text_channel_id),
+                        query=_agent_query_for_track(track, query),
+                        track=track,
+                        requester_id=interaction.user.id,
+                        requester_name=requester_name,
+                    )
             except Exception as exc:
                 await interaction.followup.send(f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
                 return
@@ -1094,8 +1148,13 @@ class AddSongModal(discord.ui.Modal):
                 result,
                 queued=bool(result.get("queued")),
             )
-            msg = _agent_play_message(track, result)
-            sent = await interaction.followup.send(msg, ephemeral=True, wait=True)
+            if is_multi:
+                added = int(result.get("added") or len(batch.tracks))
+                label = f" de **{discord.utils.escape_markdown((batch.playlist_title or '')[:80])}**" if batch.playlist_title else ""
+                sent = await interaction.followup.send(f"`📑` **Playlist adicionada ao queue:** `{added}` música(s){label}.", ephemeral=True, wait=True)
+            else:
+                msg = _agent_play_message(track, result)
+                sent = await interaction.followup.send(msg, ephemeral=True, wait=True)
             state = result.get("state") if isinstance(result.get("state"), dict) else {}
             status = str(state.get("status") or "").lower()
             if sent is not None and not result.get("queued") and status not in {"playing", "failed", "error"}:

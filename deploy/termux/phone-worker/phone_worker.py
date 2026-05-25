@@ -54,7 +54,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.12"
+PHONE_WORKER_VERSION = "1.10.13"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -3969,9 +3969,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         fmt = str(body.get("format") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or "bestaudio/best").strip() or "bestaudio/best"
         is_url = bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", query) or query.lower().startswith("www."))
         metadata_only = str(body.get("metadata_only") if body.get("metadata_only") is not None else body.get("search_only") or "").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
-        if metadata_only and is_url:
-            # Link direto precisa de uma fonte tocável; pesquisa leve só vale para texto.
-            metadata_only = False
+        allow_playlist = str(body.get("allow_playlist") or "").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
 
         def _default_search_prefix() -> str:
             raw = str(
@@ -4079,7 +4077,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
-            "noplaylist": not bool(body.get("allow_playlist")),
+            "noplaylist": not allow_playlist,
             "ignoreerrors": True,
             "socket_timeout": max(3, min(20, timeout - 1)),
             "retries": max(0, int(float(os.getenv("PHONE_WORKER_MUSIC_YTDLP_RETRIES", "1") or 1))),
@@ -4219,11 +4217,12 @@ class WorkerHandler(BaseHTTPRequestHandler):
             if metadata_only:
                 cmd_json += ["--flat-playlist"]
             cmd_json += [
-                "--no-playlist",
                 "--no-warnings",
                 "--socket-timeout",
                 str(max(3, min(20, timeout - 1))),
             ]
+            if not allow_playlist:
+                cmd_json += ["--no-playlist"]
             if not metadata_only:
                 cmd_json += ["-f", fmt]
             cmd_json += ["-J", target]
@@ -4269,10 +4268,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
             if remote_components:
                 cmd += ["--remote-components", remote_components]
             cmd += [
-                "--no-playlist",
                 "--no-warnings",
                 "--socket-timeout",
                 str(max(3, min(20, timeout - 1))),
+            ]
+            if not allow_playlist:
+                cmd += ["--no-playlist"]
+            cmd += [
                 "-f",
                 fmt,
                 "-g",
@@ -4342,6 +4344,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "playlist_title": playlist_title,
             "truncated": bool(len(entries) > len(tracks)),
             "metadata_only": bool(metadata_only),
+            "allow_playlist": bool(allow_playlist),
             "elapsed_ms": round((time.time() - started) * 1000.0, 1),
             "cookies": "on" if cookies_ok else "off",
             "js_runtime": ",".join(js_runtimes) if js_runtimes else "",

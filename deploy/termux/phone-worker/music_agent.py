@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.15"
+AGENT_VERSION = "0.3.16"
 STARTED_AT = time.time()
 
 
@@ -644,6 +644,69 @@ class MusicAgent:
         )
         return track
 
+    def _metadata_source_kind(self, track_meta: dict[str, Any]) -> str:
+        raw = " ".join(str(track_meta.get(key) or "") for key in (
+            "source", "display_source", "extractor", "extractor_key", "ie_key", "webpage_url", "original_url", "query"
+        )).lower()
+        if "spotify" in raw:
+            return "spotify"
+        if "deezer" in raw:
+            return "deezer"
+        if "apple" in raw or "music.apple" in raw:
+            return "apple"
+        if "youtube" in raw or "youtu.be" in raw:
+            return "youtube"
+        if "soundcloud" in raw:
+            return "soundcloud"
+        return ""
+
+    def _query_from_track_meta(self, track_meta: dict[str, Any] | None, *, fallback_query: Any = "") -> str:
+        meta = track_meta or {}
+        source_kind = self._metadata_source_kind(meta)
+        raw_query = str(meta.get("query") or fallback_query or "").strip()
+        direct = str(meta.get("stream_url") or meta.get("direct_url") or "").strip()
+        if direct.startswith(("http://", "https://")):
+            return direct
+        original_url = str(meta.get("webpage_url") or meta.get("original_url") or "").strip()
+        url_is_metadata_only = source_kind in {"spotify", "deezer", "apple"}
+        if original_url.startswith(("http://", "https://")) and not url_is_metadata_only:
+            return original_url
+        if raw_query.startswith(("http://", "https://")) and not any(marker in raw_query.lower() for marker in ("spotify.com", "deezer.com", "music.apple.com")):
+            return raw_query
+        title = _metadata_text(meta.get("display_title") or meta.get("title") or meta.get("track") or fallback_query, limit=160)
+        artist = _metadata_text(meta.get("display_uploader") or meta.get("uploader") or meta.get("artist") or meta.get("creator") or meta.get("channel"), limit=120)
+        if artist and title and artist.lower() not in title.lower():
+            text = f"{artist} - {title}"
+        else:
+            text = title or artist or raw_query
+        if source_kind in {"spotify", "deezer", "apple"} and text and "official" not in text.lower():
+            text = f"{text} official audio"
+        return text.strip()
+
+    def _agent_track_from_metadata(self, track_meta: dict[str, Any], *, body: dict[str, Any], fallback_query: Any = "") -> AgentTrack:
+        query = self._query_from_track_meta(track_meta, fallback_query=fallback_query)
+        title = _metadata_text(track_meta.get("display_title") or track_meta.get("title") or query, limit=160) or "Música"
+        uploader = _metadata_text(track_meta.get("display_uploader") or track_meta.get("uploader") or track_meta.get("artist") or track_meta.get("channel"), limit=120)
+        source = short_text(track_meta.get("display_source") or track_meta.get("source") or body.get("source") or "worker-ytdlp", 80)
+        return AgentTrack(
+            title=title,
+            requester_id=safe_id(body.get("requester_id") or track_meta.get("requester_id")),
+            requester_name=short_text(body.get("requester_name") or track_meta.get("requester_name"), 80),
+            query=query,
+            webpage_url=str(track_meta.get("webpage_url") or track_meta.get("original_url") or "").strip(),
+            stream_url=str(track_meta.get("stream_url") or "").strip(),
+            duration=_float_or_none(track_meta.get("duration")),
+            uploader=uploader,
+            thumbnail=short_text(track_meta.get("thumbnail"), 500),
+            source=source,
+            transport_hint="metadata-lazy" if not str(track_meta.get("stream_url") or "").strip() else "direct",
+            audio_format_id=short_text(track_meta.get("resolved_audio_format_id") or track_meta.get("audio_format_id"), 40),
+            audio_ext=short_text(track_meta.get("resolved_audio_ext") or track_meta.get("audio_ext"), 20).lower(),
+            audio_codec=short_text(track_meta.get("resolved_audio_codec") or track_meta.get("audio_codec"), 40).lower(),
+            audio_abr=int(float(track_meta.get("resolved_audio_abr") or track_meta.get("audio_abr") or 0) or 0),
+            start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
+        )
+
     async def _prefetch_track(self, body: dict[str, Any], track_meta: dict[str, Any], query: str, cache_key: str) -> None:
         try:
             started = time.time()
@@ -810,7 +873,9 @@ class MusicAgent:
         action = str(body.get("action") or body.get("command") or "status").strip().lower().replace("-", "_")
         if action in {"status", "get_state"}:
             return self.status_payload()
-        if action in {"play", "enqueue", "play_direct"}:
+        if action in {"play", "enqueue", "play_direct", "enqueue_many", "queue_many", "add_many", "playlist"}:
+            body = dict(body)
+            body["_agent_action"] = action
             return await self.cmd_play(body)
         if action == "pause":
             return await self.cmd_pause(body)
@@ -850,7 +915,7 @@ class MusicAgent:
         for meta in tracks[:limit]:
             if not isinstance(meta, dict):
                 continue
-            query = str(meta.get("webpage_url") or meta.get("original_url") or meta.get("stream_url") or meta.get("title") or body.get("query") or "").strip()
+            query = self._query_from_track_meta(meta, fallback_query=body.get("query") or "")
             if not query:
                 continue
             cache_key = self._resolve_cache_key(query, meta)
@@ -871,11 +936,15 @@ class MusicAgent:
         text_channel_id = safe_id(body.get("text_channel_id"))
         if not guild_id or not voice_channel_id:
             raise ValueError("guild_id e voice_channel_id são obrigatórios")
+        action = str(body.get("_agent_action") or body.get("action") or body.get("command") or "play").strip().lower().replace("-", "_")
         query = str(body.get("query") or body.get("url") or body.get("webpage_url") or body.get("original_url") or "").strip()
         track_meta = body.get("track") if isinstance(body.get("track"), dict) else {}
+        tracks_payload = body.get("tracks") if isinstance(body.get("tracks"), list) else []
+        if not query and tracks_payload and isinstance(tracks_payload[0], dict):
+            query = self._query_from_track_meta(tracks_payload[0], fallback_query="")
         if not query:
-            query = str(track_meta.get("webpage_url") or track_meta.get("original_url") or track_meta.get("stream_url") or track_meta.get("title") or "").strip()
-        if not query:
+            query = self._query_from_track_meta(track_meta, fallback_query="")
+        if not query and not tracks_payload:
             raise ValueError("query/url vazia")
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         st.voice_channel_id = voice_channel_id
@@ -886,7 +955,30 @@ class MusicAgent:
             st.volume_percent = st.normal_volume_percent
         st.last_action = "play"
         self._cancel_idle_disconnect(guild_id)
-        self.log("play_received", guild_id=guild_id, voice=voice_channel_id, query=query)
+        self.log("play_received", guild_id=guild_id, voice=voice_channel_id, query=query, action=action, tracks=len(tracks_payload))
+
+        if tracks_payload:
+            tracks: list[AgentTrack] = []
+            for item in tracks_payload:
+                if not isinstance(item, dict):
+                    continue
+                track = self._agent_track_from_metadata(item, body=body, fallback_query=query)
+                if track.query or track.stream_url or track.webpage_url:
+                    tracks.append(track)
+            if not tracks:
+                raise ValueError("playlist/fila sem faixas válidas")
+            active = bool(st.current and st.status in {"playing", "starting", "preparing", "paused"})
+            st.queue.extend(tracks)
+            st.updated_at = time.time()
+            self.log("queued_many", guild_id=guild_id, added=len(tracks), queue_size=len(st.queue), active=active)
+            if not active:
+                await self._play_next(guild_id)
+                if st.status in {"failed", "error"}:
+                    return {"ok": False, "queued": False, "added": len(tracks), "error": st.last_error or "falha ao iniciar playback", "state": st.public()}
+                return {"ok": True, "queued": False, "added": len(tracks), "state": st.public()}
+            return {"ok": True, "queued": True, "added": len(tracks), "state": st.public()}
+
+        query = self._query_from_track_meta(track_meta, fallback_query=query) or query
         track = await self.resolve_track(query, track_meta=track_meta, body=body)
         if st.current and st.status in {"playing", "starting", "preparing", "paused"}:
             st.queue.append(track)
@@ -1215,8 +1307,23 @@ class MusicAgent:
         st.normal_volume_percent = max(0, min(150, int(st.normal_volume_percent or self.default_volume_percent)))
         st.volume_percent = st.normal_volume_percent
         self._set_status(st, "preparing", event="play_preparing")
-        self.log("track_loading", guild_id=guild_id, title=getattr(st.current, "title", ""), source=getattr(st.current, "source", ""))
+        self.log("track_loading", guild_id=guild_id, title=getattr(st.current, "title", ""), source=getattr(st.current, "source", ""), lazy=not bool(getattr(st.current, "stream_url", "")))
         try:
+            if st.current and not st.current.stream_url:
+                started = time.time()
+                meta = st.current.public()
+                query = self._query_from_track_meta(meta, fallback_query=st.current.query or st.current.title)
+                body = {
+                    "guild_id": guild_id,
+                    "voice_channel_id": st.voice_channel_id,
+                    "text_channel_id": st.text_channel_id,
+                    "requester_id": st.current.requester_id,
+                    "requester_name": st.current.requester_name,
+                    "query": query,
+                    "track": meta,
+                }
+                st.current = await self.resolve_track(query, track_meta=meta, body=body)
+                self.log("lazy_resolve_done", guild_id=guild_id, elapsed_ms=round((time.time() - started) * 1000.0, 1), title=getattr(st.current, "title", ""))
             use_direct = self._should_use_direct_voice(st.current)
             if use_direct:
                 await asyncio.wait_for(self._play_direct_voice(guild_id, st.current), timeout=max(5.0, self.prepare_timeout))
@@ -1229,12 +1336,13 @@ class MusicAgent:
     def _should_use_direct_voice(self, track: AgentTrack) -> bool:
         if not self.direct_audio_enabled or self.lavalink_for_direct_streams:
             return False
-        raw = " ".join([track.source, track.query, track.webpage_url, track.stream_url, track.transport_hint]).lower()
-        if raw.startswith(_LAVALINK_PREFIXES) or any(prefix in raw for prefix in ("spotify.com", "soundcloud.com", "scsearch:", "spsearch:")):
-            return False
+        stream_raw = " ".join([track.stream_url, track.transport_hint, track.source, track.query]).lower()
         if track.stream_url and self.direct_youtube_enabled:
-            if any(marker in raw for marker in ("youtube", "youtu.be", "googlevideo", "yt-dlp", "ytdlp", "music-agent-ytdlp", "worker-ytdlp")):
+            if track.transport_hint.startswith("direct") or any(marker in stream_raw for marker in ("googlevideo", "yt-dlp", "ytdlp", "music-agent-ytdlp", "worker-ytdlp", "youtube", "youtu.be", "soundcloud", "sndcdn", "cdn")):
                 return True
+        raw = " ".join([track.source, track.query, track.webpage_url, track.stream_url, track.transport_hint]).lower()
+        if raw.startswith(_LAVALINK_PREFIXES) or any(prefix in raw for prefix in ("spotify.com", "scsearch:", "spsearch:")):
+            return False
         return False
 
     async def _resolve_guild_and_channel(self, guild_id: int, voice_channel_id: int) -> tuple[Any, Any]:

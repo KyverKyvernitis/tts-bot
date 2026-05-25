@@ -73,8 +73,8 @@ def _resolve_cache_ttl(*, metadata_only: bool) -> float:
     return max(0.0, float(getattr(config, "MUSIC_WORKER_DIRECT_CACHE_TTL_SECONDS", 90.0) or 0.0))
 
 
-def _resolve_cache_key(query: str, limit: int, metadata_only: bool) -> tuple[str, int, bool]:
-    return (str(query or "").strip().lower(), int(limit or 1), bool(metadata_only))
+def _resolve_cache_key(query: str, limit: int, metadata_only: bool, allow_playlist: bool = False) -> tuple[str, int, bool, bool]:
+    return (str(query or "").strip().lower(), int(limit or 1), bool(metadata_only), bool(allow_playlist))
 
 
 def _resolve_cache_get(key: tuple[str, int, bool], *, requester_id: int, requester_name: str, metadata_only: bool) -> ExtractedBatch | None:
@@ -632,6 +632,7 @@ async def resolve_music_tracks_on_worker(
     limit: int = 5,
     timeout_seconds: float | None = None,
     metadata_only: bool | None = None,
+    allow_playlist: bool = False,
 ) -> ExtractedBatch:
     """Resolve pesquisa/link no phone worker turbo usando yt-dlp do celular.
 
@@ -652,10 +653,10 @@ async def resolve_music_tracks_on_worker(
     except Exception:
         max_limit = 5
     is_text_search = not _looks_like_url(clean_query)
-    if not is_text_search:
-        # Link direto deve resolver uma faixa/playlist pelo URL informado; não usar
-        # ytsearchN como fallback padrão, porque isso faz o worker pesquisar em vez
-        # de respeitar exatamente o link enviado.
+    if not is_text_search and not allow_playlist:
+        # Link direto de faixa deve respeitar exatamente o URL enviado. Playlists
+        # passam allow_playlist=True e usam extração flat/metadata para enfileirar
+        # rápido sem resolver todos os streams antes.
         max_limit = 1
     if metadata_only is None:
         metadata_only = bool(is_text_search)
@@ -664,7 +665,7 @@ async def resolve_music_tracks_on_worker(
     else:
         default_timeout = float(getattr(config, "MUSIC_WORKER_YTDLP_TIMEOUT_SECONDS", 28.0) or 28.0)
     total_timeout = max(5.0, float(timeout_seconds if timeout_seconds is not None else default_timeout))
-    cache_key = _resolve_cache_key(clean_query, max_limit, bool(metadata_only))
+    cache_key = _resolve_cache_key(clean_query, max_limit, bool(metadata_only), bool(allow_playlist))
     cached_batch = _resolve_cache_get(cache_key, requester_id=requester_id, requester_name=requester_name, metadata_only=bool(metadata_only))
     if cached_batch is not None:
         logger.info(
@@ -681,6 +682,7 @@ async def resolve_music_tracks_on_worker(
         "limit": max_limit,
         "timeout_seconds": total_timeout,
         "metadata_only": bool(metadata_only),
+        "allow_playlist": bool(allow_playlist),
         "js_runtimes": str(getattr(config, "MUSIC_WORKER_YTDLP_JS_RUNTIMES", "node") or "node"),
         "default_search": (
             f"ytsearch{max_limit}"
@@ -751,10 +753,12 @@ async def resolve_music_tracks_on_worker(
             lavalink_query=direct_stream_url or stream_url,
             lavalink_resolved=bool(direct_stream_url),
         )
+        track.display_title = str(item.get("display_title") or item.get("title") or "").strip()
+        track.display_uploader = str(item.get("display_uploader") or item.get("uploader") or item.get("channel") or "").strip()
         if item_metadata_only:
             track.lavalink_query = ""
             track.lavalink_resolved = False
-            track.display_source = "YouTube"
+            track.display_source = source or "YouTube"
         if direct_stream_url:
             # Metadados vêm do worker/yt-dlp, mas o transporte de áudio é feito
             # pelo Lavalink do worker. Não marque como Worker local/PCM.
@@ -831,16 +835,27 @@ async def music_agent_command(
         if isinstance(track, MusicTrack):
             payload["track"] = {
                 "title": track.title,
+                "display_title": getattr(track, "display_title", "") or track.title,
                 "webpage_url": track.webpage_url,
                 "original_url": track.original_url,
                 "stream_url": track.stream_url,
                 "duration": track.duration,
                 "uploader": track.uploader,
+                "display_uploader": getattr(track, "display_uploader", "") or track.uploader,
                 "thumbnail": track.thumbnail,
                 "source": track.source,
+                "display_source": getattr(track, "display_source", "") or track.source,
                 "extractor": track.extractor,
                 "requester_id": track.requester_id,
                 "requester_name": track.requester_name,
+                "resolved_audio_format_id": getattr(track, "resolved_audio_format_id", ""),
+                "resolved_audio_ext": getattr(track, "resolved_audio_ext", ""),
+                "resolved_audio_codec": getattr(track, "resolved_audio_codec", ""),
+                "resolved_audio_abr": getattr(track, "resolved_audio_abr", 0),
+                "audio_format_id": getattr(track, "audio_format_id", ""),
+                "audio_ext": getattr(track, "audio_ext", ""),
+                "audio_codec": getattr(track, "audio_codec", ""),
+                "audio_abr": getattr(track, "audio_abr", 0),
             }
             if not payload["query"]:
                 payload["query"] = track.webpage_url or track.original_url or track.stream_url or track.title

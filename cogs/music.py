@@ -366,15 +366,8 @@ class Music(commands.Cog):
 
     def _should_use_lavalink_for_input(self, query: str, guild_id: int | None) -> bool:
         if getattr(self.router, "music_worker_only_enabled", lambda: False)():
-            raw = (query or "").strip()
-            lower = raw.lower()
-            profile = self._query_profile(raw)
-            if lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:")):
-                return True
-            if profile.is_youtube and profile.resource_type == "playlist":
-                return True
-            if profile.platform in {"spotify", "soundcloud", "apple", "deezer"}:
-                return True
+            # Worker-only é yt-dlp/Music Agent first. Spotify/álbuns/playlists são
+            # convertidos para metadata + busca YouTube no worker, não para Lavalink.
             return False
         if not self._is_lavalink_real_enabled(guild_id):
             return False
@@ -450,6 +443,52 @@ class Music(commands.Cog):
         )
         return ExtractedBatch(tracks=[track], query=query, is_playlist=False)
 
+    def _worker_url_should_flatten_first(self, query: str) -> bool:
+        profile = self._query_profile(query)
+        if not profile.is_url:
+            return False
+        if profile.is_youtube and profile.resource_type == "playlist":
+            return True
+        if profile.resource_type in {"playlist", "album"}:
+            return True
+        return False
+
+    def _music_agent_query_for_track(self, track: MusicTrack, fallback: str = "") -> str:
+        extractor = str(getattr(track, "extractor", "") or "").lower()
+        source = str(getattr(track, "source", "") or getattr(track, "display_source", "") or "").lower()
+        is_metadata = extractor == "metadata" or any(token in source for token in ("spotify", "deezer", "apple", "metadata"))
+        if is_metadata:
+            base = str(getattr(track, "display_title", "") or getattr(track, "title", "") or fallback or "").strip()
+            uploader = str(getattr(track, "display_uploader", "") or getattr(track, "uploader", "") or "").strip()
+            if uploader and uploader.lower() not in base.lower():
+                base = f"{uploader} {base}".strip()
+            if base and "official" not in base.lower():
+                base = f"{base} official audio"
+            return base or fallback or getattr(track, "title", "") or ""
+        return str(getattr(track, "webpage_url", "") or getattr(track, "original_url", "") or getattr(track, "stream_url", "") or getattr(track, "title", "") or fallback or "").strip()
+
+    def _music_agent_tracks_payload(self, tracks: list[MusicTrack], *, requester_id: int = 0, requester_name: str = "") -> list[dict]:
+        payload: list[dict] = []
+        for track in tracks:
+            payload.append({
+                "title": track.title,
+                "webpage_url": track.webpage_url,
+                "original_url": track.original_url,
+                "stream_url": track.stream_url,
+                "duration": track.duration,
+                "uploader": track.uploader,
+                "thumbnail": track.thumbnail,
+                "source": track.source,
+                "extractor": track.extractor,
+                "display_title": getattr(track, "display_title", ""),
+                "display_uploader": getattr(track, "display_uploader", ""),
+                "display_source": getattr(track, "display_source", ""),
+                "query": self._music_agent_query_for_track(track),
+                "requester_id": requester_id or track.requester_id,
+                "requester_name": requester_name or track.requester_name,
+            })
+        return payload
+
     def _is_lavalink_search_request(self, query: str) -> bool:
         raw = (query or "").strip()
         if not raw:
@@ -523,35 +562,47 @@ class Music(commands.Cog):
 
             if getattr(self.router, "music_worker_only_enabled", lambda: False)():
                 try:
-                    if self._should_use_lavalink_for_input(query, ctx.guild.id):
-                        batch = await self.router.backends.resolve_lavalink_direct_tracks(
+                    youtube_text_search = self._is_youtube_text_search(query)
+                    if input_profile.is_metadata_only:
+                        # Spotify/Deezer/Apple são metadata-only: lemos título/artista
+                        # rapidamente e o Music Agent resolve cada faixa via yt-dlp/YouTube
+                        # no worker. Nunca envie URL crua dessas plataformas ao Lavalink.
+                        resolve_started = time.monotonic()
+                        batch = await self.router.extractor.extract(
                             query,
                             requester_id=ctx.author.id,
                             requester_name=requester_name,
-                            guild_id=getattr(ctx.guild, "id", None),
-                            limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
+                        )
+                        logger.info("[music/worker] metadata-only resolvido sem lavalink | guild=%s source=%s tracks=%s elapsed_ms=%.1f", ctx.guild.id, input_profile.platform, len(batch.tracks), (time.monotonic() - resolve_started) * 1000.0)
+                    elif self._worker_url_should_flatten_first(query):
+                        resolve_started = time.monotonic()
+                        batch = await resolve_music_tracks_on_worker(
+                            query,
+                            requester_id=ctx.author.id,
+                            requester_name=requester_name,
+                            limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 100) or 100)),
+                            metadata_only=True,
+                            allow_playlist=True,
+                        )
+                        logger.info("[music/worker] playlist/link flat resolvido no worker | guild=%s tracks=%s elapsed_ms=%.1f", ctx.guild.id, len(batch.tracks), (time.monotonic() - resolve_started) * 1000.0)
+                    elif input_profile.is_url and not youtube_text_search:
+                        # Link direto de faixa: o Music Agent resolve o stream no phone worker
+                        # no momento do play usando o caminho rápido de URL direta.
+                        batch = self._worker_direct_url_batch(
+                            query,
+                            requester_id=ctx.author.id,
+                            requester_name=requester_name,
                         )
                     else:
-                        youtube_text_search = self._is_youtube_text_search(query)
-                        if input_profile.is_url and not youtube_text_search:
-                            # Link direto: não faça yt-dlp duas vezes antes de responder.
-                            # O Music Agent resolve o stream no phone worker no momento do play
-                            # usando o caminho rápido de URL direta.
-                            batch = self._worker_direct_url_batch(
-                                query,
-                                requester_id=ctx.author.id,
-                                requester_name=requester_name,
-                            )
-                        else:
-                            resolve_started = time.monotonic()
-                            batch = await resolve_music_tracks_on_worker(
-                                query,
-                                requester_id=ctx.author.id,
-                                requester_name=requester_name,
-                                limit=(max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))) if youtube_text_search else 1),
-                                metadata_only=youtube_text_search,
-                            )
-                            logger.info("[music/worker] resolve etapa concluída | guild=%s metadata_only=%s elapsed_ms=%.1f", ctx.guild.id, youtube_text_search, (time.monotonic() - resolve_started) * 1000.0)
+                        resolve_started = time.monotonic()
+                        batch = await resolve_music_tracks_on_worker(
+                            query,
+                            requester_id=ctx.author.id,
+                            requester_name=requester_name,
+                            limit=(max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))) if youtube_text_search else 1),
+                            metadata_only=youtube_text_search,
+                        )
+                        logger.info("[music/worker] resolve etapa concluída | guild=%s metadata_only=%s elapsed_ms=%.1f", ctx.guild.id, youtube_text_search, (time.monotonic() - resolve_started) * 1000.0)
                 except MusicExtractionError as exc:
                     await self._reply(ctx, self._music_error_message(exc))
                     return
@@ -688,19 +739,33 @@ class Music(commands.Cog):
 
             if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
                 track = batch.tracks[0]
+                is_multi = bool(len(batch.tracks) > 1)
                 try:
                     agent_started = time.monotonic()
-                    result = await music_agent_command(
-                        "play",
-                        guild_id=ctx.guild.id,
-                        voice_channel_id=voice_channel.id,
-                        text_channel_id=ctx.channel.id,
-                        query=track.webpage_url or track.original_url or query,
-                        track=track,
-                        requester_id=ctx.author.id,
-                        requester_name=requester_name,
-                    )
-                    logger.info("[music/agent] play etapa concluída | guild=%s elapsed_ms=%.1f queued=%s", ctx.guild.id, (time.monotonic() - agent_started) * 1000.0, bool(result.get("queued")))
+                    if is_multi:
+                        result = await music_agent_command(
+                            "enqueue_many",
+                            guild_id=ctx.guild.id,
+                            voice_channel_id=voice_channel.id,
+                            text_channel_id=ctx.channel.id,
+                            query=query,
+                            track=track,
+                            tracks=self._music_agent_tracks_payload(batch.tracks, requester_id=ctx.author.id, requester_name=requester_name),
+                            requester_id=ctx.author.id,
+                            requester_name=requester_name,
+                        )
+                    else:
+                        result = await music_agent_command(
+                            "play",
+                            guild_id=ctx.guild.id,
+                            voice_channel_id=voice_channel.id,
+                            text_channel_id=ctx.channel.id,
+                            query=self._music_agent_query_for_track(track, query),
+                            track=track,
+                            requester_id=ctx.author.id,
+                            requester_name=requester_name,
+                        )
+                    logger.info("[music/agent] play etapa concluída | guild=%s elapsed_ms=%.1f queued=%s added=%s", ctx.guild.id, (time.monotonic() - agent_started) * 1000.0, bool(result.get("queued")), result.get("added"))
                 except Exception as exc:
                     logger.warning("[music/agent] falha ao enviar play direto | guild=%s erro=%s", ctx.guild.id, exc)
                     await self._reply(ctx, self._music_error_message(exc))
@@ -713,7 +778,13 @@ class Music(commands.Cog):
                     text_channel_id=ctx.channel.id,
                     queued=bool(result.get("queued")),
                 )
-                msg = await self._reply(ctx, self._music_agent_play_message(track, result))
+                if is_multi:
+                    added = int(result.get("added") or len(batch.tracks))
+                    title = (batch.playlist_title or "playlist").strip()
+                    label = f" de **{discord.utils.escape_markdown(title[:80])}**" if title else ""
+                    msg = await self._reply(ctx, f"`📑` **Playlist adicionada ao queue:** `{added}` música(s){label}.\n`🎧` Preparando a primeira faixa...")
+                else:
+                    msg = await self._reply(ctx, self._music_agent_play_message(track, result))
                 state = result.get("state") if isinstance(result.get("state"), dict) else {}
                 status = str(state.get("status") or "").lower()
                 confirmed = self._music_agent_confirmed_playing(state)
