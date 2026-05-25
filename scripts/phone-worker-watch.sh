@@ -72,12 +72,13 @@ SSH_USER="$(env_value PHONE_WORKER_SSH_USER "$(env_value PHONE_LAVALINK_SSH_USER
 SSH_PORT="$(env_value PHONE_WORKER_SSH_PORT "$(env_value PHONE_LAVALINK_SSH_PORT 8022)")"
 SSH_CONNECT_TIMEOUT="$(env_value PHONE_WORKER_SSH_CONNECT_TIMEOUT_SECONDS 5)"
 START_COMMAND="$(env_value PHONE_WORKER_START_COMMAND '__AUTO_WATCHDOG__')"
-COOLDOWN_SECONDS="$(env_value PHONE_WORKER_KICK_COOLDOWN_SECONDS 60)"
+COOLDOWN_SECONDS="$(env_value PHONE_WORKER_KICK_COOLDOWN_SECONDS 900)"
 FORCE_WAKE="$(env_value PHONE_WORKER_FORCE_WAKE false)"
 WAKE_REASON="$(env_value PHONE_WORKER_WATCH_REASON timer)"
 STATE_DIR="${STATE_DIR:-$REPO_DIR/data/runtime}"
 COOLDOWN_FILE="$STATE_DIR/phone-worker-last-kick"
 PENDING_SYNC_FILE="$STATE_DIR/phone-worker-sync-pending.flag"
+OFFLINE_STATE_FILE="$STATE_DIR/phone-worker-watch-offline.state"
 SYNC_SCRIPT="$REPO_DIR/scripts/sync-phone-worker.sh"
 
 if [[ -z "$PHONE_HOST" || -z "$PHONE_TOKEN" ]]; then
@@ -169,6 +170,24 @@ health_probe() {
   return 1
 }
 
+log_offline_once() {
+  local key="${1:-offline}"
+  local message="${2:-worker offline/inacessível}"
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  local previous=""
+  [[ -f "$OFFLINE_STATE_FILE" ]] && previous="$(cat "$OFFLINE_STATE_FILE" 2>/dev/null || true)"
+  if [[ "$previous" != "$key" ]]; then
+    log "$message"
+    printf '%s' "$key" > "$OFFLINE_STATE_FILE" 2>/dev/null || true
+  else
+    log "worker ainda offline; mantendo cooldown/backoff"
+  fi
+}
+
+clear_offline_state() {
+  rm -f "$OFFLINE_STATE_FILE" 2>/dev/null || true
+}
+
 worker_health_ok() {
   curl --max-time "$HEALTH_TIMEOUT" -fsS -H "Authorization: Bearer $PHONE_TOKEN" "$HEALTH_URL" >/dev/null 2>&1
 }
@@ -183,6 +202,7 @@ try_pending_sync() {
 log "config: host=$(mask_host "$PHONE_HOST") porta=$PHONE_PORT ssh_user=$([[ -n "$SSH_USER" ]] && printf configurado || printf vazio) ssh_port=$SSH_PORT motivo=${WAKE_REASON:-timer}"
 tcp_probe "$PHONE_HOST" "$PHONE_PORT" "$HEALTH_TIMEOUT" "worker-http" | while IFS= read -r line; do log "$line"; done
 if health_probe; then
+  clear_offline_state
   try_pending_sync
   if [[ -f "$PENDING_SYNC_FILE" ]]; then
     log "worker online em $(mask_host "$PHONE_HOST"):${PHONE_PORT}; sync ainda pendente"
@@ -193,7 +213,7 @@ if health_probe; then
   exit 0
 fi
 
-log "worker offline/inacessível; tentando recuperação leve"
+log_offline_once "offline:${PHONE_HOST}:${PHONE_PORT}" "worker offline/inacessível; tentando recuperação leve"
 
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 now_epoch="$(date +%s)"

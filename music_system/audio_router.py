@@ -4263,7 +4263,15 @@ class AudioRouter:
                     and (not state.panel_track_key or current_panel_key != state.panel_track_key)
                     and bool(getattr(config, "MUSIC_PANEL_REPOST_ON_TRACK_CHANGE", True))
                 )
-                should_repost = bool(has_player_content and (repost or (create and track_changed)))
+                repost_key = f"{guild_id}:{current_panel_key}" if current_panel_key else ""
+                already_reposted_key = bool(repost_key and repost_key == str(getattr(state, "panel_last_repost_key", "") or ""))
+                if repost and already_reposted_key:
+                    repost = False
+                implicit_repost = bool(create and track_changed and not already_reposted_key)
+                should_repost = bool(has_player_content and (repost or implicit_repost))
+                if should_repost and repost_key:
+                    state.panel_last_repost_key = repost_key
+                    state.panel_last_repost_at = time.monotonic()
                 if should_repost and state.now_message is not None:
                     old_message = state.now_message
                     state.now_message = None

@@ -32,9 +32,16 @@ MAX_LOG_BYTES="${PHONE_WORKER_LOG_MAX_BYTES:-1048576}"
 KILL_DUPLICATES="${PHONE_WORKER_START_KILL_DUPLICATES:-true}"
 SSHD_AUTO_START="${PHONE_WORKER_SSHD_AUTO_START:-true}"
 SSHD_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
-MUSIC_LAVALINK_AUTO_START="${PHONE_WORKER_START_LAVALINK:-${PHONE_LAVALINK_AUTO_START:-true}}"
-PHONE_LAVALINK_START_COMMAND="${PHONE_LAVALINK_START_COMMAND:-$HOME/start-phone-lavalink.sh}"
-MUSIC_AGENT_AUTO_START="${PHONE_WORKER_START_MUSIC_AGENT:-${MUSIC_AGENT_ENABLED:-true}}"
+# Serviços pesados do perfil turbo ficam em modo seguro por padrão quando o operador
+# desativou auto-install. Isso evita Java/Lavalink/pip/clang rodando em loop e
+# aquecendo o celular. Para música completa, defina explicitamente
+# PHONE_WORKER_START_LAVALINK=true e PHONE_WORKER_START_MUSIC_AGENT=true.
+MUSIC_LAVALINK_AUTO_START="${PHONE_WORKER_START_LAVALINK:-${PHONE_LAVALINK_AUTO_START:-auto}}"
+PHONE_LAVALINK_START_COMMAND="${PHONE_LAVALINK_START_COMMAND:-$WORKER_DIR/../start-phone-lavalink.sh}"
+if [[ ! -x "$PHONE_LAVALINK_START_COMMAND" && -x "$HOME/start-phone-lavalink.sh" ]]; then
+  PHONE_LAVALINK_START_COMMAND="$HOME/start-phone-lavalink.sh"
+fi
+MUSIC_AGENT_AUTO_START="${PHONE_WORKER_START_MUSIC_AGENT:-${MUSIC_AGENT_ENABLED:-auto}}"
 MUSIC_AGENT_START_COMMAND="${MUSIC_AGENT_START_COMMAND:-$WORKER_DIR/start-phone-music-agent.sh}"
 
 log() {
@@ -46,6 +53,39 @@ truthy() {
   value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"')"
   value="${value//\'/}"
   [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "y" || "$value" == "on" || "$value" == "sim" ]]
+}
+
+falsey() {
+  local value="${1:-}"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"')"
+  value="${value//\'/}"
+  [[ "$value" == "0" || "$value" == "false" || "$value" == "no" || "$value" == "n" || "$value" == "off" || "$value" == "nao" || "$value" == "não" ]]
+}
+
+normalize_boolish() {
+  local value="${1:-}"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"')"
+  value="${value//\'/}"
+  printf '%s' "$value"
+}
+
+safe_mode_enabled() {
+  truthy "${PHONE_WORKER_SAFE_MODE:-${PHONE_WORKER_BASIC_ONLY:-${PHONE_WORKER_LIGHT_MODE:-false}}}" && return 0
+  truthy "${PHONE_WORKER_DISABLE_HEAVY_SERVICES:-false}" && return 0
+  if falsey "${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-}" || falsey "${PHONE_WORKER_DEPS_INSTALL_MODE:-}"; then
+    truthy "${PHONE_WORKER_ALLOW_HEAVY_SERVICES_WITH_DEPS_OFF:-false}" || return 0
+  fi
+  return 1
+}
+
+autostart_enabled() {
+  local raw="$(normalize_boolish "${1:-}")"
+  case "$raw" in
+    1|true|yes|y|on|sim) return 0 ;;
+    0|false|no|n|off|nao|não) return 1 ;;
+    auto|"") safe_mode_enabled && return 1; return 0 ;;
+    *) safe_mode_enabled && return 1; return 0 ;;
+  esac
 }
 
 sshd_listening() {
@@ -261,8 +301,9 @@ is_turbo_profile() {
 }
 
 deps_install_enabled() {
+  safe_mode_enabled && return 1
   # Novos nomes *_MODE são os preferidos. Mantém compatibilidade com os antigos.
-  local mode="${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-${PHONE_WORKER_DEPS_INSTALL_MODE:-${PHONE_WORKER_TURBO_DEPS_INSTALL:-${PHONE_WORKER_TTS_DEPS_INSTALL:-auto}}}}"
+  local mode="${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-${PHONE_WORKER_DEPS_INSTALL_MODE:-${PHONE_WORKER_TURBO_DEPS_INSTALL:-${PHONE_WORKER_TTS_DEPS_INSTALL:-off}}}}"
   mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
   [[ "$mode" == "0" || "$mode" == "false" || "$mode" == "off" || "$mode" == "no" ]] && return 1
   return 0
@@ -278,13 +319,32 @@ cleanup_stale_heavy_dependency_builds() {
   truthy "${PHONE_WORKER_KILL_STALE_HEAVY_DEP_BUILDS:-true}" || return 0
   heavy_python_deps_enabled && return 0
   command -v ps >/dev/null 2>&1 || return 0
-  ps -ef 2>/dev/null | grep -Ei 'google-cloud-texttospeech|grpcio|GRPC_XDS|pyb/temp\.android|pip/_vendor/pyproject_hooks|build_wheel' | grep -v grep | awk '{print $2}' | while read -r pid; do
-    case "$pid" in ''|*[!0-9]*) continue ;; esac
-    [[ "$pid" == "$$" ]] && continue
-    log "encerrando build pesado opcional preso; pid=$pid"
-    kill "$pid" 2>/dev/null || true
+  local pattern='google-cloud-texttospeech|grpcio|GRPC_XDS|pyb/temp\.android|pip/_vendor|pyproject_hooks|build_wheel|python -m pip install|pip install|aarch64-linux-android-clang|clang\+\+'
+  local round pid
+  for round in 1 2 3; do
+    ps -ef 2>/dev/null | grep -Ei "$pattern" | grep -v grep | grep -v 'phone_worker.py' | awk '{print $2}' | while read -r pid; do
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      [[ "$pid" == "$$" ]] && continue
+      log "encerrando build pesado opcional preso; pid=$pid"
+      kill -9 "$pid" 2>/dev/null || true
+    done
+    sleep 1
   done
 }
+
+cleanup_heavy_services_for_safe_mode() {
+  safe_mode_enabled || return 0
+  truthy "${PHONE_WORKER_KEEP_HEAVY_SERVICES_IN_SAFE_MODE:-false}" && return 0
+  command -v pkill >/dev/null 2>&1 || return 0
+  log "modo seguro ativo; encerrando serviços pesados opcionais do worker"
+  pkill -f '[m]usic_agent.py' 2>/dev/null || true
+  pkill -f '[j]ava.*Lavalink.jar' 2>/dev/null || true
+  if command -v tmux >/dev/null 2>&1; then
+    tmux kill-session -t "${PHONE_LAVALINK_TMUX_SESSION:-lavalink-debian}" 2>/dev/null || true
+    tmux kill-session -t "${PHONE_LAVALINK_TMUX_SESSION:-lavalink}" 2>/dev/null || true
+  fi
+}
+
 
 ensure_turbo_termux_packages_if_needed() {
   is_turbo_profile || return 0
@@ -344,7 +404,7 @@ PYYTDLPDEPS
 ensure_music_agent_deps_if_needed() {
   is_turbo_profile || return 0
   deps_install_enabled || return 0
-  truthy "$MUSIC_AGENT_AUTO_START" || return 0
+  autostart_enabled "$MUSIC_AGENT_AUTO_START" || { log "perfil turbo: Music Agent não será iniciado automaticamente (modo seguro/auto-start off)"; return 0; }
   "$PYTHON_BIN" - <<'PYMUSICAGENTDEPS' >/dev/null 2>&1 && return 0
 import aiohttp, discord, nacl, wavelink, yt_dlp, davey, edge_tts, gtts  # noqa: F401
 PYMUSICAGENTDEPS
@@ -480,7 +540,7 @@ PIPERWRAP
 
 ensure_lavalink_for_turbo_if_needed() {
   is_turbo_profile || return 0
-  truthy "$MUSIC_LAVALINK_AUTO_START" || return 0
+  autostart_enabled "$MUSIC_LAVALINK_AUTO_START" || { log "perfil turbo: Lavalink não será iniciado automaticamente (modo seguro/auto-start off)"; return 0; }
   if [[ ! -x "$PHONE_LAVALINK_START_COMMAND" ]]; then
     log "perfil turbo: start do Lavalink não encontrado em $PHONE_LAVALINK_START_COMMAND"
     return 0
@@ -493,7 +553,7 @@ ensure_lavalink_for_turbo_if_needed() {
 
 ensure_music_agent_for_turbo_if_needed() {
   is_turbo_profile || return 0
-  truthy "$MUSIC_AGENT_AUTO_START" || return 0
+  autostart_enabled "$MUSIC_AGENT_AUTO_START" || { log "perfil turbo: Music Agent não será iniciado automaticamente (modo seguro/auto-start off)"; return 0; }
   if [[ ! -x "$MUSIC_AGENT_START_COMMAND" ]]; then
     log "perfil turbo: start do Music Agent não encontrado em $MUSIC_AGENT_START_COMMAND"
     return 0
@@ -522,6 +582,7 @@ ensure_turbo_deps_if_needed() {
 
 ensure_music_worker_env_if_needed
 cleanup_stale_heavy_dependency_builds
+cleanup_heavy_services_for_safe_mode
 
 count="$(worker_pid_count)"
 if health_ok && [[ "$count" -le 1 ]]; then

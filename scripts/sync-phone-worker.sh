@@ -56,26 +56,26 @@ scp -P "$PHONE_PORT" \
   "$SRC_DIR/music_agent.py" \
   "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/music_agent.py"
 
-# Scripts auxiliares ficam em dois lugares:
-# - ~/phone-worker/*.sh para permitir `cd ~/phone-worker && bash ./start-phone-worker.sh`
-# - ~/*.sh para compatibilidade com instalações antigas e atalhos já existentes.
+# Scripts reais ficam apenas em ~/phone-worker. Em ~/ ficam wrappers pequenos
+# para não preservar cópias antigas que possam disparar pip/clang pesado.
 for f in start-phone-worker.sh start-phone-music-agent.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh install.sh README.md phone-worker.env.example; do
   if [ -f "$SRC_DIR/$f" ]; then
     "${SCP_BASE[@]}" "$SRC_DIR/$f" "$PHONE_USER@$PHONE_HOST:$REMOTE_DIR/$f"
-    case "$f" in
-      start-phone-worker.sh|start-phone-music-agent.sh|watch-phone-worker.sh|pair-phone-worker.sh|bootstrap-phone-worker.sh)
-        "${SCP_BASE[@]}" "$SRC_DIR/$f" "$PHONE_USER@$PHONE_HOST:$REMOTE_HOME/$f"
-        ;;
-    esac
   fi
 done
 
 log "ajustando permissões no celular"
 "${SSH_BASE[@]}" "
 chmod +x '$REMOTE_DIR/phone_worker.py' '$REMOTE_DIR/music_agent.py' '$REMOTE_DIR/start-phone-worker.sh' '$REMOTE_DIR/start-phone-music-agent.sh' '$REMOTE_DIR/watch-phone-worker.sh' '$REMOTE_DIR/pair-phone-worker.sh' '$REMOTE_DIR/bootstrap-phone-worker.sh' 2>/dev/null || true
-chmod +x '$REMOTE_HOME/start-phone-worker.sh' '$REMOTE_HOME/start-phone-music-agent.sh' '$REMOTE_HOME/watch-phone-worker.sh' '$REMOTE_HOME/pair-phone-worker.sh' '$REMOTE_HOME/bootstrap-phone-worker.sh' 2>/dev/null || true
+for f in start-phone-worker.sh start-phone-music-agent.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh; do
+  cat > '$REMOTE_HOME/'\$f <<EOF_WRAPPER
+#!/data/data/com.termux/files/usr/bin/bash
+exec /data/data/com.termux/files/usr/bin/bash '$REMOTE_DIR/'\$f "\\\$@"
+EOF_WRAPPER
+  chmod +x '$REMOTE_HOME/'\$f 2>/dev/null || true
+done
 mkdir -p '$REMOTE_HOME/.termux/boot'
-printf '%s\n' '#!/data/data/com.termux/files/usr/bin/sh' '# Auto-start do Core Worker pelo Termux:Boot.' '# Criado/reparado pelo sync do phone-worker. Não coloque segredos aqui.' 'termux-wake-lock 2>/dev/null || true' 'sleep "\${PHONE_WORKER_BOOT_DELAY_SECONDS:-25}"' 'cd "\$HOME/phone-worker" || exit 0' 'if [ -x "\$HOME/phone-worker/start-phone-worker.sh" ]; then' '  exec "\$HOME/phone-worker/start-phone-worker.sh"' 'fi' 'echo "[core-worker-boot] start-phone-worker.sh não encontrado" >> "\$HOME/phone-worker.log"' > '$REMOTE_HOME/.termux/boot/10-core-worker'
+printf '%s\n' '#!/data/data/com.termux/files/usr/bin/sh' '# Auto-start do Core Worker pelo Termux:Boot.' '# Criado/reparado pelo sync do phone-worker. Não coloque segredos aqui.' 'termux-wake-lock 2>/dev/null || true' 'sleep "\${PHONE_WORKER_BOOT_DELAY_SECONDS:-25}"' 'cd "\$HOME/phone-worker" || exit 0' 'if [ -x "\$HOME/phone-worker/watch-phone-worker.sh" ]; then' '  nohup /data/data/com.termux/files/usr/bin/bash "\$HOME/phone-worker/watch-phone-worker.sh" >> "\$HOME/phone-worker/phone-worker-watch.boot.log" 2>&1 &' '  exit 0' 'fi' 'echo "[core-worker-boot] watch-phone-worker.sh não encontrado" >> "\$HOME/phone-worker.log"' > '$REMOTE_HOME/.termux/boot/10-core-worker'
 chmod +x '$REMOTE_HOME/.termux/boot/10-core-worker' 2>/dev/null || true
 "
 

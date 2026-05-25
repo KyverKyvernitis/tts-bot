@@ -3,7 +3,7 @@ Description=Periodic phone Lavalink helper check
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=1min
+OnUnitActiveSec=5min
 AccuracySec=10s
 Persistent=true
 

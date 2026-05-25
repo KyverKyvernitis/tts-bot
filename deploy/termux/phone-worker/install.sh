@@ -54,6 +54,21 @@ fi
   done
 }
 
+
+write_compat_wrapper() {
+  local name="$1"
+  local target="$WORKER_DIR/$name"
+  local wrapper="$HOME/$name"
+  cat > "$wrapper" <<EOF_WRAPPER
+#!/data/data/com.termux/files/usr/bin/bash
+# Wrapper de compatibilidade gerenciado pelo Core Worker.
+# O script real fica em \$HOME/phone-worker/$name para evitar versões antigas em ~/.
+exec /data/data/com.termux/files/usr/bin/bash "\$HOME/phone-worker/$name" "\$@"
+EOF_WRAPPER
+  chmod +x "$wrapper" 2>/dev/null || true
+  chmod +x "$target" 2>/dev/null || true
+}
+
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
 
@@ -67,13 +82,12 @@ cp "$SRC_DIR/bootstrap-phone-worker.sh" "$WORKER_DIR/bootstrap-phone-worker.sh"
 cp "$SRC_DIR/install.sh" "$WORKER_DIR/install.sh"
 cp "$SRC_DIR/README.md" "$WORKER_DIR/README.md" 2>/dev/null || true
 cp "$SRC_DIR/phone-worker.env.example" "$WORKER_DIR/phone-worker.env.example" 2>/dev/null || true
-# Compatibilidade com atalhos antigos em ~/
-cp "$SRC_DIR/start-phone-worker.sh" "$HOME/start-phone-worker.sh"
-cp "$SRC_DIR/watch-phone-worker.sh" "$HOME/watch-phone-worker.sh"
-cp "$SRC_DIR/pair-phone-worker.sh" "$HOME/pair-phone-worker.sh"
-cp "$SRC_DIR/bootstrap-phone-worker.sh" "$HOME/bootstrap-phone-worker.sh"
+# Compatibilidade com atalhos antigos em ~/ como wrappers pequenos, nunca cópia
+# completa: isso evita script antigo fora de ~/phone-worker disparar pip/clang.
 chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/start-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh" "$WORKER_DIR/pair-phone-worker.sh" "$WORKER_DIR/bootstrap-phone-worker.sh" "$WORKER_DIR/install.sh"
-chmod +x "$HOME/start-phone-worker.sh" "$HOME/watch-phone-worker.sh" "$HOME/pair-phone-worker.sh" "$HOME/bootstrap-phone-worker.sh"
+for f in start-phone-worker.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh; do
+  write_compat_wrapper "$f"
+done
 install_core_worker_boot || true
 install_core_worker_shell_autostart || true
 

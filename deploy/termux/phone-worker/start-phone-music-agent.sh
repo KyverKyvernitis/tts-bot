@@ -60,8 +60,18 @@ falsey() {
   [[ "$value" == "0" || "$value" == "false" || "$value" == "no" || "$value" == "n" || "$value" == "off" || "$value" == "nao" || "$value" == "não" ]]
 }
 
+agent_safe_mode_enabled() {
+  truthy "${MUSIC_AGENT_SAFE_MODE:-${PHONE_WORKER_SAFE_MODE:-${PHONE_WORKER_BASIC_ONLY:-${PHONE_WORKER_LIGHT_MODE:-false}}}}" && return 0
+  truthy "${PHONE_WORKER_DISABLE_HEAVY_SERVICES:-false}" && return 0
+  if falsey "${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-}" || falsey "${PHONE_WORKER_DEPS_INSTALL_MODE:-}"; then
+    truthy "${PHONE_WORKER_ALLOW_HEAVY_SERVICES_WITH_DEPS_OFF:-false}" || return 0
+  fi
+  return 1
+}
+
 agent_deps_install_enabled() {
-  local mode="${MUSIC_AGENT_DEPS_INSTALL_MODE:-${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-${PHONE_WORKER_DEPS_INSTALL_MODE:-auto}}}"
+  agent_safe_mode_enabled && return 1
+  local mode="${MUSIC_AGENT_DEPS_INSTALL_MODE:-${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-${PHONE_WORKER_DEPS_INSTALL_MODE:-off}}}"
   falsey "$mode" && return 1
   return 0
 }
@@ -75,13 +85,25 @@ cleanup_stale_heavy_dependency_builds() {
   truthy "${MUSIC_AGENT_KILL_STALE_HEAVY_DEP_BUILDS:-${PHONE_WORKER_KILL_STALE_HEAVY_DEP_BUILDS:-true}}" || return 0
   heavy_python_deps_enabled && return 0
   command -v ps >/dev/null 2>&1 || return 0
-  ps -ef 2>/dev/null | grep -Ei 'google-cloud-texttospeech|grpcio|GRPC_XDS|pyb/temp\.android|pip/_vendor/pyproject_hooks|build_wheel' | grep -v grep | awk '{print $2}' | while read -r pid; do
-    case "$pid" in ''|*[!0-9]*) continue ;; esac
-    [[ "$pid" == "$$" ]] && continue
-    log "encerrando build pesado opcional preso; pid=$pid"
-    kill "$pid" 2>/dev/null || true
+  local pattern='google-cloud-texttospeech|grpcio|GRPC_XDS|pyb/temp\.android|pip/_vendor|pyproject_hooks|build_wheel|python -m pip install|pip install|aarch64-linux-android-clang|clang\+\+'
+  local round pid
+  for round in 1 2 3; do
+    ps -ef 2>/dev/null | grep -Ei "$pattern" | grep -v grep | grep -v 'music_agent.py' | awk '{print $2}' | while read -r pid; do
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      [[ "$pid" == "$$" ]] && continue
+      log "encerrando build pesado opcional preso; pid=$pid"
+      kill -9 "$pid" 2>/dev/null || true
+    done
+    sleep 1
   done
 }
+
+cleanup_agent_for_safe_mode() {
+  agent_safe_mode_enabled || return 0
+  log "modo seguro ativo; encerrando Music Agent se estiver rodando"
+  pkill -f '[m]usic_agent.py' 2>/dev/null || true
+}
+
 
 if [[ ! -f "$WORKER_DIR/music_agent.py" ]]; then
   log "music_agent.py não encontrado em $WORKER_DIR"
@@ -207,6 +229,12 @@ PYGCLOUD
 
 mkdir -p "$(dirname "$LOG_FILE")"
 cleanup_stale_heavy_dependency_builds
+cleanup_agent_for_safe_mode
+
+if agent_safe_mode_enabled; then
+  log "modo seguro ativo; Music Agent não será iniciado automaticamente"
+  exit 0
+fi
 
 if health_ok; then
   running_ver="$(running_version)"

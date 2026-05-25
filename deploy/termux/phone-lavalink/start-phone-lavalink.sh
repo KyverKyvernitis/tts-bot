@@ -9,6 +9,11 @@ if [[ -f "$ENV_FILE" ]]; then
   # shellcheck disable=SC1090
   source "$ENV_FILE"
 fi
+PHONE_WORKER_ENV_FILE="${PHONE_WORKER_ENV:-$HOME/.phone-worker.env}"
+if [[ -f "$PHONE_WORKER_ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$PHONE_WORKER_ENV_FILE"
+fi
 
 PORT="${PHONE_LAVALINK_PORT:-2333}"
 PASSWORD="${PHONE_LAVALINK_PASSWORD:-${AUX_LAVALINK_PASSWORD:-}}"
@@ -17,16 +22,53 @@ DISTRO="${PHONE_LAVALINK_PROOT_DISTRO:-debian}"
 HOST_LAVALINK_DIR="${PHONE_LAVALINK_HOST_DIR:-$HOME/lavalink}"
 PROOT_LAVALINK_DIR="${PHONE_LAVALINK_PROOT_DIR:-/root/lavalink}"
 JAVA_BIN="${PHONE_LAVALINK_JAVA_BIN:-/usr/bin/java}"
-JAVA_XMX="${PHONE_LAVALINK_JAVA_XMX:-768m}"
+JAVA_XMX="${PHONE_LAVALINK_JAVA_XMX:-384m}"
 JAVA_TMPDIR="${PHONE_LAVALINK_JAVA_TMPDIR:-/tmp/lavalink}"
 LOG_NAME="${PHONE_LAVALINK_LOG_NAME:-lavalink-proot.log}"
 START_WAIT="${PHONE_LAVALINK_START_WAIT_SECONDS:-8}"
+
+truthy() {
+  local value="${1:-}"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -d ' 	
+"' | tr -d "'")"
+  [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "y" || "$value" == "on" || "$value" == "sim" ]]
+}
+
+falsey() {
+  local value="${1:-}"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -d ' 	
+"' | tr -d "'")"
+  [[ "$value" == "0" || "$value" == "false" || "$value" == "no" || "$value" == "n" || "$value" == "off" || "$value" == "nao" || "$value" == "não" ]]
+}
+
+safe_mode_enabled() {
+  truthy "${PHONE_WORKER_SAFE_MODE:-${PHONE_WORKER_BASIC_ONLY:-${PHONE_WORKER_LIGHT_MODE:-false}}}" && return 0
+  truthy "${PHONE_WORKER_DISABLE_HEAVY_SERVICES:-false}" && return 0
+  if falsey "${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-}" || falsey "${PHONE_WORKER_DEPS_INSTALL_MODE:-}"; then
+    truthy "${PHONE_WORKER_ALLOW_HEAVY_SERVICES_WITH_DEPS_OFF:-false}" || return 0
+  fi
+  return 1
+}
+
+cleanup_lavalink_for_safe_mode() {
+  safe_mode_enabled || return 0
+  printf '[phone-lavalink] modo seguro ativo; encerrando Lavalink local do celular
+'
+  pkill -f '[j]ava.*Lavalink.jar' 2>/dev/null || true
+  if command -v tmux >/dev/null 2>&1; then
+    tmux kill-session -t "${PHONE_LAVALINK_TMUX_SESSION:-lavalink-debian}" 2>/dev/null || true
+    tmux kill-session -t "${PHONE_LAVALINK_TMUX_SESSION:-lavalink}" 2>/dev/null || true
+  fi
+  exit 0
+}
+
 
 log() {
   printf '[phone-lavalink] %s\n' "$*"
 }
 
 termux-wake-lock 2>/dev/null || true
+cleanup_lavalink_for_safe_mode
 
 health_ok() {
   if [[ -n "$PASSWORD" ]]; then

@@ -54,7 +54,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.10"
+PHONE_WORKER_VERSION = "1.10.11"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -1494,11 +1494,16 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     profile = _current_core_worker_profile()
     roles = _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))
     capabilities = _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))
+    safe_mode = _phone_worker_safe_mode_enabled()
+    if safe_mode:
+        blocked_prefixes = ("music",)
+        roles = [item for item in roles if not str(item).lower().startswith(blocked_prefixes)]
+        capabilities = [item for item in capabilities if not str(item).lower().startswith(blocked_prefixes)]
     if status.get("ffmpeg") and "ffmpeg" not in capabilities:
         capabilities.append("ffmpeg")
     if status.get("ffprobe") and "ffprobe" not in capabilities:
         capabilities.append("ffprobe")
-    music_ready = bool(music_agent.get("available") or music_node.get("ok") or music_node.get("online") or profile == "turbo")
+    music_ready = (not safe_mode) and bool(music_agent.get("available") or music_node.get("ok") or music_node.get("online") or profile == "turbo")
     if music_ready:
         for role in ("music", "music-agent", "music-node", "music-lavalink", "music-ytdlp"):
             if role not in roles:
@@ -1514,6 +1519,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         "version": PHONE_WORKER_VERSION,
         "profile": profile,
         "profile_label": _core_worker_profile_label(profile),
+        "safe_mode": safe_mode,
         "endpoint": endpoint,
         "roles": roles[:16],
         "capabilities": capabilities[:24],
@@ -1912,7 +1918,7 @@ def _spawn_builtin_lavalink_proot_start() -> tuple[bool, str]:
     session = _phone_lavalink_env_value("PHONE_LAVALINK_TMUX_SESSION", "lavalink-debian") or "lavalink-debian"
     distro = _phone_lavalink_env_value("PHONE_LAVALINK_PROOT_DISTRO", "debian") or "debian"
     proot_dir = _phone_lavalink_env_value("PHONE_LAVALINK_PROOT_DIR", "/root/lavalink") or "/root/lavalink"
-    java_xmx = _phone_lavalink_env_value("PHONE_LAVALINK_JAVA_XMX", "768m") or "768m"
+    java_xmx = _phone_lavalink_env_value("PHONE_LAVALINK_JAVA_XMX", "384m") or "768m"
     log_name = _phone_lavalink_env_value("PHONE_LAVALINK_LOG_NAME", "lavalink-proot.log") or "lavalink-proot.log"
     subprocess.run(["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
     with contextlib.suppress(Exception):
@@ -1935,8 +1941,8 @@ def _spawn_builtin_lavalink_proot_start() -> tuple[bool, str]:
 
 def _ensure_phone_lavalink_started(reason: str = "health") -> dict[str, Any]:
     global _LAVALINK_AUTOSTART_LAST_AT
-    if not _truthy_env("PHONE_LAVALINK_AUTO_START", True):
-        return {"attempted": False, "reason": "auto_start_disabled"}
+    if not _env_autostart_enabled("PHONE_LAVALINK_AUTO_START", "auto"):
+        return {"attempted": False, "reason": "auto_start_disabled_or_safe_mode", "safe_mode": _phone_worker_safe_mode_enabled()}
     roles, capabilities = _current_core_worker_roles_and_capabilities()
     caps = {str(x).strip().lower() for x in (roles + capabilities)}
     if not ({"music", "music-node", "music-lavalink"} & caps) and _current_core_worker_profile() != "turbo":
@@ -2138,12 +2144,36 @@ def _phone_worker_deps_mode_enabled() -> bool:
             return False
         if raw in {"1", "true", "on", "yes", "sim", "auto"}:
             return True
-    return True
+    return False
 
 
 def _phone_worker_heavy_python_deps_enabled() -> bool:
     raw = str(os.getenv("PHONE_WORKER_HEAVY_PYTHON_DEPS_INSTALL") or "").strip().lower().strip('"\'')
     return raw in {"1", "true", "on", "yes", "sim"}
+
+
+def _phone_worker_safe_mode_enabled() -> bool:
+    for key in ("PHONE_WORKER_SAFE_MODE", "PHONE_WORKER_BASIC_ONLY", "PHONE_WORKER_LIGHT_MODE", "PHONE_WORKER_DISABLE_HEAVY_SERVICES"):
+        if _env_bool(key, False):
+            return True
+    # Quando o operador desligou auto-install após aquecimento/travamento, health
+    # não deve religar Java/Lavalink/Music Agent por efeito colateral.
+    for key in ("PHONE_WORKER_TURBO_DEPS_INSTALL_MODE", "PHONE_WORKER_DEPS_INSTALL_MODE"):
+        raw = str(os.getenv(key) or "").strip().lower().strip('"\'')
+        if raw in {"0", "false", "off", "no", "nao", "não"}:
+            return not _env_bool("PHONE_WORKER_ALLOW_HEAVY_SERVICES_WITH_DEPS_OFF", False)
+    return False
+
+
+def _env_autostart_enabled(name: str, default: str = "auto") -> bool:
+    raw = str(os.getenv(name) if os.getenv(name) is not None else default).strip().lower().strip('"\'')
+    if raw in {"1", "true", "on", "yes", "sim"}:
+        return True
+    if raw in {"0", "false", "off", "no", "nao", "não"}:
+        return False
+    if _phone_worker_safe_mode_enabled():
+        return False
+    return True
 
 
 def _start_tts_dependency_autoinstall(missing: list[str], checks: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -2243,6 +2273,7 @@ def _music_agent_snapshot() -> dict[str, Any]:
     except Exception:
         port = 8780
     configured = bool(str(os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or "").strip())
+    safe_mode = _phone_worker_safe_mode_enabled()
     deps = _music_voice_dependencies_snapshot()
     file_version = _read_music_agent_version_from_path()
     url = f"http://{host}:{port}/health"
@@ -2269,6 +2300,8 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "ok": available and bool(deps.get("ok", True)),
             "available": available and bool(deps.get("ok", True)),
             "configured": configured,
+            "safe_mode": safe_mode,
+            "auto_start_allowed": _env_autostart_enabled("MUSIC_AGENT_ENABLED", "auto"),
             "file_version": file_version,
             "runtime_version": runtime_version,
             "needs_restart": needs_restart,
@@ -2289,6 +2322,8 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "ok": False,
             "available": False,
             "configured": configured,
+            "safe_mode": safe_mode,
+            "auto_start_allowed": _env_autostart_enabled("MUSIC_AGENT_ENABLED", "auto"),
             "file_version": file_version,
             "host": host,
             "port": port,
@@ -2303,6 +2338,8 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "ok": False,
             "available": False,
             "configured": configured,
+            "safe_mode": safe_mode,
+            "auto_start_allowed": _env_autostart_enabled("MUSIC_AGENT_ENABLED", "auto"),
             "file_version": file_version,
             "host": host,
             "port": port,
@@ -2371,7 +2408,13 @@ def _system_status() -> dict[str, Any]:
 
 def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
     profile = _current_core_worker_profile()
+    safe_mode = _phone_worker_safe_mode_enabled()
     status = _safe_telemetry("system", _system_status, {"ok": False})
+    roles = _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))
+    capabilities = _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))
+    if safe_mode:
+        roles = [item for item in roles if not str(item).lower().startswith("music")]
+        capabilities = [item for item in capabilities if not str(item).lower().startswith("music")]
     return {
         "ok": True,
         "local_only": True,
@@ -2388,8 +2431,9 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
         "version": PHONE_WORKER_VERSION,
         "profile": profile,
         "profile_label": _core_worker_profile_label(profile),
-        "roles": _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))[:16],
-        "capabilities": _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))[:24],
+        "safe_mode": safe_mode,
+        "roles": roles[:16],
+        "capabilities": capabilities[:24],
         "supported_tasks": _supported_core_worker_job_types(),
         "vps_configured": _heartbeat_configured(),
         "jobs_configured": _core_worker_jobs_configured(),

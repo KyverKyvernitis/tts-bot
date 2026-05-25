@@ -26,9 +26,9 @@ MAX_LOG_BYTES="${PHONE_WORKER_LOG_MAX_BYTES:-1048576}"
 SSHD_AUTO_START="${PHONE_WORKER_SSHD_AUTO_START:-true}"
 SSHD_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
 
-if [[ ! -x "$START_SCRIPT" && -x "$HOME/start-phone-worker.sh" ]]; then
-  START_SCRIPT="$HOME/start-phone-worker.sh"
-fi
+# Não use fallback para ~/start-phone-worker.sh: versões antigas nesse atalho
+# já causaram loops de pip/clang e aquecimento. O instalador cria um wrapper
+# em ~/ que aponta para o script oficial dentro de ~/phone-worker.
 
 mkdir -p "$WORKER_DIR"
 

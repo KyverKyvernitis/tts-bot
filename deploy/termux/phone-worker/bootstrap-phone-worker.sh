@@ -38,6 +38,21 @@ fi
   done
 }
 
+
+write_compat_wrapper() {
+  local name="$1"
+  local target="$WORKER_DIR/$name"
+  local wrapper="$HOME/$name"
+  cat > "$wrapper" <<EOF_WRAPPER
+#!/data/data/com.termux/files/usr/bin/bash
+# Wrapper de compatibilidade gerenciado pelo Core Worker.
+# O script real fica em \$HOME/phone-worker/$name para evitar versões antigas em ~/.
+exec /data/data/com.termux/files/usr/bin/bash "\$HOME/phone-worker/$name" "\$@"
+EOF_WRAPPER
+  chmod +x "$wrapper" 2>/dev/null || true
+  chmod +x "$target" 2>/dev/null || true
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
 CODE="${1:-}"
@@ -95,9 +110,7 @@ for f in phone_worker.py start-phone-worker.sh watch-phone-worker.sh pair-phone-
 done
 for f in start-phone-worker.sh watch-phone-worker.sh pair-phone-worker.sh bootstrap-phone-worker.sh; do
   if [[ -f "$WORKER_DIR/$f" ]]; then
-    chmod +x "$WORKER_DIR/$f"
-    cp "$WORKER_DIR/$f" "$HOME/$f" 2>/dev/null || true
-    chmod +x "$HOME/$f" 2>/dev/null || true
+    write_compat_wrapper "$f"
   fi
 done
 chmod +x "$WORKER_DIR/phone_worker.py" "$WORKER_DIR/install.sh" 2>/dev/null || true
