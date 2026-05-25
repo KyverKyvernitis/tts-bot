@@ -18,6 +18,7 @@ from music_system.providers import describe_url
 from music_system.ui import SearchResultView, QueueView, VoiceStatusSettingsView, build_queue_embed, build_now_playing_embeds
 from music_system.musicnode_ui import MusicNodePanelView
 from music_system.worker_node import music_agent_command, music_agent_status, resolve_music_tracks_on_worker
+from music_system.loading_reaction import MusicLoadingReaction
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +156,7 @@ class Music(commands.Cog):
                 create_panel=True,
             )
 
-    async def _watch_music_agent_message(self, message, guild_id: int, track: MusicTrack, *, voice_channel_id: int = 0, text_channel_id: int = 0, seconds: float | None = None) -> None:
+    async def _watch_music_agent_message(self, message, guild_id: int, track: MusicTrack, *, voice_channel_id: int = 0, text_channel_id: int = 0, seconds: float | None = None, loading_reaction: MusicLoadingReaction | None = None) -> None:
         limit = float(seconds or getattr(config, "MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", 30.0) or 30.0)
         deadline = asyncio.get_running_loop().time() + max(5.0, limit)
         last_status = ""
@@ -171,6 +172,8 @@ class Music(commands.Cog):
                 last_status = status
                 if self._music_agent_confirmed_playing(state):
                     await message.edit(content=self._music_agent_play_message(track, {"state": state}))
+                    if loading_reaction is not None:
+                        await loading_reaction.finish()
                     return
                 if status in {"failed", "error"}:
                     error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:220]
@@ -178,14 +181,20 @@ class Music(commands.Cog):
                     if any(token in lower_error for token in ("music agent", "configure music_agent", "sem token", "pynacl", "davey", "dependency", "unauthorized")):
                         error = "backend musical ainda não está pronto"
                     await message.edit(content=f"`⚠️` Não consegui iniciar **{track.short_title}**: `{error}`")
+                    if loading_reaction is not None:
+                        await loading_reaction.finish()
                     return
                 if status in {"idle", "stopped"} and not state.get("current"):
                     await message.edit(content=f"`⚠️` A música não ficou ativa para **{track.short_title}**. Tente novamente.")
+                    if loading_reaction is not None:
+                        await loading_reaction.finish()
                     return
             except Exception:
                 logger.debug("[music/agent] falha ao acompanhar estado remoto", exc_info=True)
         with contextlib.suppress(Exception):
             await message.edit(content=f"`⚠️` Demorei para confirmar o início de **{track.short_title}**. Tente novamente se não tocar.")
+        if loading_reaction is not None:
+            await loading_reaction.finish()
 
     async def _send_music_agent_control(self, ctx: commands.Context, action: str, success_message: str) -> bool:
         if not self._music_agent_default_enabled():
@@ -410,6 +419,7 @@ class Music(commands.Cog):
     async def _run_play(self, ctx: commands.Context, query: str) -> None:
         """Implementação compartilhada de `_play` e da alias roteada `_p <música>`."""
         query = (query or "").strip()
+        command_started = time.monotonic()
         if not query:
             await self._reply(ctx, "Use `_play <link ou pesquisa>`.")
             return
@@ -419,253 +429,264 @@ class Music(commands.Cog):
             await self._reply(ctx, "Entre em um canal de voz primeiro.")
             return
 
-        if getattr(self.router, "music_worker_only_enabled", lambda: False)():
-            selection = await self.router.ensure_music_worker_available()
-            if not getattr(selection, "available", False):
-                logger.info("[music/worker] play bloqueado: %s", getattr(selection, "reason", "worker indisponível"))
-                await self._reply(ctx, getattr(selection, "message", "") or getattr(self.router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
-                return
+        loading_reaction = MusicLoadingReaction(getattr(ctx, "message", None))
+        await loading_reaction.start()
+        finish_loading_reaction = True
+        try:
+            if getattr(self.router, "music_worker_only_enabled", lambda: False)():
+                selection = await self.router.ensure_music_worker_available()
+                if not getattr(selection, "available", False):
+                    logger.info("[music/worker] play bloqueado: %s", getattr(selection, "reason", "worker indisponível"))
+                    await self._reply(ctx, getattr(selection, "message", "") or getattr(self.router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
+                    return
 
-        input_profile = self._query_profile(query)
+            input_profile = self._query_profile(query)
 
-        # Shadow mode Lavalink: consulta o node em paralelo, mas mantém o áudio real
-        # no player local atual. YouTube direto fica totalmente fora do LavaSrc/node
-        # para não criar atraso nem mirror desnecessário.
-        if not getattr(self.router, "music_worker_only_enabled", lambda: False)() and not input_profile.is_youtube:
-            self.router.schedule_lavalink_shadow_search(
-                ctx.guild.id,
-                query,
-                requester_id=ctx.author.id,
-                requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
-                reason="play_command",
-            )
+            # Shadow mode Lavalink: consulta o node em paralelo, mas mantém o áudio real
+            # no player local atual. YouTube direto fica totalmente fora do LavaSrc/node
+            # para não criar atraso nem mirror desnecessário.
+            if not getattr(self.router, "music_worker_only_enabled", lambda: False)() and not input_profile.is_youtube:
+                self.router.schedule_lavalink_shadow_search(
+                    ctx.guild.id,
+                    query,
+                    requester_id=ctx.author.id,
+                    requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
+                    reason="play_command",
+                )
 
-        requester_name = getattr(ctx.author, "display_name", str(ctx.author))
+            requester_name = getattr(ctx.author, "display_name", str(ctx.author))
 
-        if getattr(self.router, "music_worker_only_enabled", lambda: False)():
-            try:
-                if self._should_use_lavalink_for_input(query, ctx.guild.id):
-                    batch = await self.router.backends.resolve_lavalink_direct_tracks(
-                        query,
-                        requester_id=ctx.author.id,
-                        requester_name=requester_name,
-                        guild_id=getattr(ctx.guild, "id", None),
-                        limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
-                    )
-                else:
-                    youtube_text_search = self._is_youtube_text_search(query)
-                    if input_profile.is_url and not youtube_text_search:
-                        # Link direto: não faça yt-dlp duas vezes antes de responder.
-                        # O Music Agent resolve o stream no phone worker no momento do play
-                        # usando o caminho rápido de URL direta.
-                        batch = self._worker_direct_url_batch(
+            if getattr(self.router, "music_worker_only_enabled", lambda: False)():
+                try:
+                    if self._should_use_lavalink_for_input(query, ctx.guild.id):
+                        batch = await self.router.backends.resolve_lavalink_direct_tracks(
                             query,
                             requester_id=ctx.author.id,
                             requester_name=requester_name,
+                            guild_id=getattr(ctx.guild, "id", None),
+                            limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
                         )
                     else:
-                        resolve_started = time.monotonic()
-                        batch = await resolve_music_tracks_on_worker(
-                            query,
-                            requester_id=ctx.author.id,
-                            requester_name=requester_name,
-                            limit=(max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))) if youtube_text_search else 1),
-                            metadata_only=youtube_text_search,
-                        )
-                        logger.info("[music/worker] resolve etapa concluída | guild=%s metadata_only=%s elapsed_ms=%.1f", ctx.guild.id, youtube_text_search, (time.monotonic() - resolve_started) * 1000.0)
-            except MusicExtractionError as exc:
-                await self._reply(ctx, self._music_error_message(exc))
-                return
-            except Exception as exc:
-                logger.exception("[music/worker] erro ao resolver música no worker")
-                await self._reply(ctx, self._music_error_message(exc))
-                return
+                        youtube_text_search = self._is_youtube_text_search(query)
+                        if input_profile.is_url and not youtube_text_search:
+                            # Link direto: não faça yt-dlp duas vezes antes de responder.
+                            # O Music Agent resolve o stream no phone worker no momento do play
+                            # usando o caminho rápido de URL direta.
+                            batch = self._worker_direct_url_batch(
+                                query,
+                                requester_id=ctx.author.id,
+                                requester_name=requester_name,
+                            )
+                        else:
+                            resolve_started = time.monotonic()
+                            batch = await resolve_music_tracks_on_worker(
+                                query,
+                                requester_id=ctx.author.id,
+                                requester_name=requester_name,
+                                limit=(max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))) if youtube_text_search else 1),
+                                metadata_only=youtube_text_search,
+                            )
+                            logger.info("[music/worker] resolve etapa concluída | guild=%s metadata_only=%s elapsed_ms=%.1f", ctx.guild.id, youtube_text_search, (time.monotonic() - resolve_started) * 1000.0)
+                except MusicExtractionError as exc:
+                    await self._reply(ctx, self._music_error_message(exc))
+                    return
+                except Exception as exc:
+                    logger.exception("[music/worker] erro ao resolver música no worker")
+                    await self._reply(ctx, self._music_error_message(exc))
+                    return
 
-        elif self._should_use_lavalink_for_input(query, ctx.guild.id):
-            # LavaSrc/Lavalink fica responsável por SoundCloud/scsearch e por
-            # links que o node resolve com segurança. Spotify cru passa antes
-            # pela API do bot para não cair em erro bruto do SpotifySourceManager.
-            try:
-                if self._is_lavalink_search_request(query):
-                    try:
-                        batch = await self._lavalink_search_batch_for_query(
-                            ctx,
-                            query,
-                            requester_id=ctx.author.id,
-                            requester_name=requester_name,
-                        )
-                    except Exception as lavalink_exc:
-                        raw_lower = query.lower().strip()
-                        explicit_lavalink = raw_lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:"))
-                        if getattr(self.router, "music_worker_only_enabled", lambda: False)():
-                            # Worker-only é uma fronteira dura: busca textual também
-                            # fica no engine musical do worker. Nada de yt-dlp local na VPS.
-                            raise lavalink_exc
-                        if not self._is_youtube_text_search(query) or explicit_lavalink:
-                            raise
-                        logger.warning(
-                            "[music/lavalink] busca textual no node falhou; fallback local yt-dlp | guild=%s query=%r erro=%s",
-                            ctx.guild.id,
-                            query,
-                            lavalink_exc,
-                        )
-                        batch = await self.router.extractor.search_youtube(
-                            query,
-                            requester_id=ctx.author.id,
-                            requester_name=requester_name,
-                        )
-                    if not batch.tracks and self._is_youtube_text_search(query):
-                        raw_lower = query.lower().strip()
-                        explicit_lavalink = raw_lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:"))
-                        if getattr(self.router, "music_worker_only_enabled", lambda: False)():
-                            batch = ExtractedBatch(tracks=[], query=query, is_playlist=False)
-                        elif not explicit_lavalink:
-                            logger.info(
-                                "[music/lavalink] busca textual no node vazia; fallback local yt-dlp | guild=%s query=%r",
+            elif self._should_use_lavalink_for_input(query, ctx.guild.id):
+                # LavaSrc/Lavalink fica responsável por SoundCloud/scsearch e por
+                # links que o node resolve com segurança. Spotify cru passa antes
+                # pela API do bot para não cair em erro bruto do SpotifySourceManager.
+                try:
+                    if self._is_lavalink_search_request(query):
+                        try:
+                            batch = await self._lavalink_search_batch_for_query(
+                                ctx,
+                                query,
+                                requester_id=ctx.author.id,
+                                requester_name=requester_name,
+                            )
+                        except Exception as lavalink_exc:
+                            raw_lower = query.lower().strip()
+                            explicit_lavalink = raw_lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:"))
+                            if getattr(self.router, "music_worker_only_enabled", lambda: False)():
+                                # Worker-only é uma fronteira dura: busca textual também
+                                # fica no engine musical do worker. Nada de yt-dlp local na VPS.
+                                raise lavalink_exc
+                            if not self._is_youtube_text_search(query) or explicit_lavalink:
+                                raise
+                            logger.warning(
+                                "[music/lavalink] busca textual no node falhou; fallback local yt-dlp | guild=%s query=%r erro=%s",
                                 ctx.guild.id,
                                 query,
+                                lavalink_exc,
                             )
                             batch = await self.router.extractor.search_youtube(
                                 query,
                                 requester_id=ctx.author.id,
                                 requester_name=requester_name,
                             )
-                else:
-                    batch = await self.router.backends.resolve_lavalink_direct_tracks(
-                        query,
-                        requester_id=ctx.author.id,
-                        requester_name=requester_name,
-                        guild_id=getattr(ctx.guild, "id", None),
-                        limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
-                    )
-            except MusicExtractionError as exc:
-                await self._reply(ctx, self._music_error_message(exc))
-                return
-            except Exception as exc:
-                logger.exception("[music/lavalink] erro ao buscar no node")
-                await self._reply(ctx, self._music_error_message(exc))
-                return
-        else:
-            # YouTube direto e pesquisa textual usam yt-dlp/local para metadata.
-            # Links do YouTube tocam direto pelo local; pesquisas abrem seleção
-            # e, na reprodução, tentam mirror LavaSrc antes do fallback local.
-            try:
-                if self._is_youtube_text_search(query):
-                    batch = await self.router.extractor.search_youtube(
-                        query,
-                        requester_id=ctx.author.id,
-                        requester_name=requester_name,
-                    )
-                else:
-                    batch = await self.router.extractor.extract(
-                        query,
-                        requester_id=ctx.author.id,
-                        requester_name=requester_name,
-                    )
-            except MusicExtractionError as exc:
-                await self._reply(ctx, self._music_error_message(exc))
-                return
-            except Exception as exc:
-                logger.exception("[music] erro inesperado na extração")
-                await self._reply(ctx, self._music_error_message(exc))
+                        if not batch.tracks and self._is_youtube_text_search(query):
+                            raw_lower = query.lower().strip()
+                            explicit_lavalink = raw_lower.startswith(("scsearch:", "spsearch:", "amsearch:", "dzsearch:"))
+                            if getattr(self.router, "music_worker_only_enabled", lambda: False)():
+                                batch = ExtractedBatch(tracks=[], query=query, is_playlist=False)
+                            elif not explicit_lavalink:
+                                logger.info(
+                                    "[music/lavalink] busca textual no node vazia; fallback local yt-dlp | guild=%s query=%r",
+                                    ctx.guild.id,
+                                    query,
+                                )
+                                batch = await self.router.extractor.search_youtube(
+                                    query,
+                                    requester_id=ctx.author.id,
+                                    requester_name=requester_name,
+                                )
+                    else:
+                        batch = await self.router.backends.resolve_lavalink_direct_tracks(
+                            query,
+                            requester_id=ctx.author.id,
+                            requester_name=requester_name,
+                            guild_id=getattr(ctx.guild, "id", None),
+                            limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 25) or 25)),
+                        )
+                except MusicExtractionError as exc:
+                    await self._reply(ctx, self._music_error_message(exc))
+                    return
+                except Exception as exc:
+                    logger.exception("[music/lavalink] erro ao buscar no node")
+                    await self._reply(ctx, self._music_error_message(exc))
+                    return
+            else:
+                # YouTube direto e pesquisa textual usam yt-dlp/local para metadata.
+                # Links do YouTube tocam direto pelo local; pesquisas abrem seleção
+                # e, na reprodução, tentam mirror LavaSrc antes do fallback local.
+                try:
+                    if self._is_youtube_text_search(query):
+                        batch = await self.router.extractor.search_youtube(
+                            query,
+                            requester_id=ctx.author.id,
+                            requester_name=requester_name,
+                        )
+                    else:
+                        batch = await self.router.extractor.extract(
+                            query,
+                            requester_id=ctx.author.id,
+                            requester_name=requester_name,
+                        )
+                except MusicExtractionError as exc:
+                    await self._reply(ctx, self._music_error_message(exc))
+                    return
+                except Exception as exc:
+                    logger.exception("[music] erro inesperado na extração")
+                    await self._reply(ctx, self._music_error_message(exc))
+                    return
+
+            if not batch.tracks:
+                await self._reply(ctx, "`📭` Não encontrei nada tocável.")
                 return
 
-        if not batch.tracks:
-            await self._reply(ctx, "`📭` Não encontrei nada tocável.")
-            return
-
-        should_open_selection = bool(
-            (self._should_use_lavalink_for_input(query, ctx.guild.id) and self._is_lavalink_search_request(query))
-            or (self._is_youtube_text_search(query) and len(batch.tracks) > 1)
-            or (not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1)
-        )
-        if should_open_selection:
-            embed = discord.Embed(
-                title="🔎 Escolha a música",
-                description="Selecione um dos resultados abaixo.",
-                color=discord.Color.blurple(),
+            should_open_selection = bool(
+                (self._should_use_lavalink_for_input(query, ctx.guild.id) and self._is_lavalink_search_request(query))
+                or (self._is_youtube_text_search(query) and len(batch.tracks) > 1)
+                or (not self.router.extractor.looks_like_url(query) and len(batch.tracks) > 1)
             )
-            for idx, track in enumerate(batch.tracks[:10], start=1):
-                embed.add_field(
-                    name=f"{idx}. {track.short_title}",
-                    value=f"{track.uploader or track.source or 'resultado'} • `{track.duration_label}`",
-                    inline=False,
+            if should_open_selection:
+                logger.info("[music/timing] resultados prontos | guild=%s elapsed_ms=%.1f tracks=%s", ctx.guild.id, (time.monotonic() - command_started) * 1000.0, len(batch.tracks))
+                embed = discord.Embed(
+                    title="🔎 Escolha a música",
+                    description="Selecione um dos resultados abaixo.",
+                    color=discord.Color.blurple(),
                 )
-            await self._reply(
-                ctx,
-                embed=embed,
-                view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:10], ctx.author.id),
-            )
-            return
+                for idx, track in enumerate(batch.tracks[:10], start=1):
+                    embed.add_field(
+                        name=f"{idx}. {track.short_title}",
+                        value=f"{track.uploader or track.source or 'resultado'} • `{track.duration_label}`",
+                        inline=False,
+                    )
+                await self._reply(
+                    ctx,
+                    embed=embed,
+                    view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:10], ctx.author.id),
+                )
+                return
 
-        if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
-            track = batch.tracks[0]
-            try:
-                agent_started = time.monotonic()
-                result = await music_agent_command(
-                    "play",
-                    guild_id=ctx.guild.id,
+            if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
+                track = batch.tracks[0]
+                try:
+                    agent_started = time.monotonic()
+                    result = await music_agent_command(
+                        "play",
+                        guild_id=ctx.guild.id,
+                        voice_channel_id=voice_channel.id,
+                        text_channel_id=ctx.channel.id,
+                        query=track.webpage_url or track.original_url or query,
+                        track=track,
+                        requester_id=ctx.author.id,
+                        requester_name=requester_name,
+                    )
+                    logger.info("[music/agent] play etapa concluída | guild=%s elapsed_ms=%.1f queued=%s", ctx.guild.id, (time.monotonic() - agent_started) * 1000.0, bool(result.get("queued")))
+                except Exception as exc:
+                    logger.warning("[music/agent] falha ao enviar play direto | guild=%s erro=%s", ctx.guild.id, exc)
+                    await self._reply(ctx, self._music_error_message(exc))
+                    return
+                await self._sync_music_agent_panel(
+                    ctx.guild.id,
+                    track,
+                    result,
                     voice_channel_id=voice_channel.id,
                     text_channel_id=ctx.channel.id,
-                    query=track.webpage_url or track.original_url or query,
-                    track=track,
-                    requester_id=ctx.author.id,
-                    requester_name=requester_name,
+                    queued=bool(result.get("queued")),
                 )
-                logger.info("[music/agent] play etapa concluída | guild=%s elapsed_ms=%.1f queued=%s", ctx.guild.id, (time.monotonic() - agent_started) * 1000.0, bool(result.get("queued")))
-            except Exception as exc:
-                logger.warning("[music/agent] falha ao enviar play direto | guild=%s erro=%s", ctx.guild.id, exc)
-                await self._reply(ctx, self._music_error_message(exc))
+                msg = await self._reply(ctx, self._music_agent_play_message(track, result))
+                state = result.get("state") if isinstance(result.get("state"), dict) else {}
+                status = str(state.get("status") or "").lower()
+                confirmed = self._music_agent_confirmed_playing(state)
+                if msg is not None and not result.get("queued") and not confirmed and status not in {"failed", "error"}:
+                    finish_loading_reaction = False
+                    asyncio.create_task(self._watch_music_agent_message(msg, ctx.guild.id, track, voice_channel_id=voice_channel.id, text_channel_id=ctx.channel.id, loading_reaction=loading_reaction))
+                logger.info("[music/timing] play enviado | guild=%s elapsed_ms=%.1f queued=%s confirmed=%s", ctx.guild.id, (time.monotonic() - command_started) * 1000.0, bool(result.get("queued")), confirmed)
                 return
-            await self._sync_music_agent_panel(
-                ctx.guild.id,
-                track,
-                result,
-                voice_channel_id=voice_channel.id,
-                text_channel_id=ctx.channel.id,
-                queued=bool(result.get("queued")),
+
+            state_before = self.router.get_state(ctx.guild.id)
+            was_session_active = bool(
+                state_before.current
+                or state_before.queue_size() > 0
+                or getattr(state_before, "current_status", "") in {"resolving", "starting", "playing", "paused", "queued"}
             )
-            msg = await self._reply(ctx, self._music_agent_play_message(track, result))
-            state = result.get("state") if isinstance(result.get("state"), dict) else {}
-            status = str(state.get("status") or "").lower()
-            if msg is not None and not result.get("queued") and status not in {"playing", "failed", "error"}:
-                asyncio.create_task(self._watch_music_agent_message(msg, ctx.guild.id, track, voice_channel_id=voice_channel.id, text_channel_id=ctx.channel.id))
-            return
+            added, dropped = await self.router.enqueue(ctx.guild, voice_channel, ctx.channel, batch.tracks)
+            if added <= 0:
+                await self._reply(ctx, "`⚠️` Não adicionei nada: o queue está cheio ou essa música já está no queue/tocando.")
+                return
 
-        state_before = self.router.get_state(ctx.guild.id)
-        was_session_active = bool(
-            state_before.current
-            or state_before.queue_size() > 0
-            or getattr(state_before, "current_status", "") in {"resolving", "starting", "playing", "paused", "queued"}
-        )
-        added, dropped = await self.router.enqueue(ctx.guild, voice_channel, ctx.channel, batch.tracks)
-        if added <= 0:
-            await self._reply(ctx, "`⚠️` Não adicionei nada: o queue está cheio ou essa música já está no queue/tocando.")
-            return
-
-        if batch.is_playlist:
-            count_label = "música" if added == 1 else "músicas"
-            playlist_title = (batch.playlist_title or "").strip()
-            if playlist_title:
-                desc = f"`📑` **Playlist adicionada:** `{added}` {count_label} de **{playlist_title}**"
+            if batch.is_playlist:
+                count_label = "música" if added == 1 else "músicas"
+                playlist_title = (batch.playlist_title or "").strip()
+                if playlist_title:
+                    desc = f"`📑` **Playlist adicionada:** `{added}` {count_label} de **{playlist_title}**"
+                else:
+                    desc = f"`📑` **Adicionadas ao queue:** `{added}` {count_label}"
+                if batch.truncated:
+                    desc += f"\n`⚠️` Playlist limitada aos primeiros `{getattr(config, 'MUSIC_MAX_PLAYLIST_ITEMS', 100)}` itens para não pesar o bot."
+                if dropped:
+                    desc += f"\n`⚠️` `{dropped}` item(ns) não entraram porque já estavam no queue/tocando ou porque o queue está cheio."
+                await self._reply(ctx, desc)
             else:
-                desc = f"`📑` **Adicionadas ao queue:** `{added}` {count_label}"
-            if batch.truncated:
-                desc += f"\n`⚠️` Playlist limitada aos primeiros `{getattr(config, 'MUSIC_MAX_PLAYLIST_ITEMS', 100)}` itens para não pesar o bot."
-            if dropped:
-                desc += f"\n`⚠️` `{dropped}` item(ns) não entraram porque já estavam no queue/tocando ou porque o queue está cheio."
-            await self._reply(ctx, desc)
-        else:
-            track = batch.tracks[0]
-            state = self.router.get_state(ctx.guild.id)
-            position = state.queue_size() + (1 if state.current else 0)
-            if was_session_active:
-                await self._reply(ctx, f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`")
-            else:
-                # O worker pode pegar a primeira música imediatamente após enqueue,
-                # fazendo ``state.current`` existir antes da resposta do comando. Isso
-                # não significa posição 2; ainda é a faixa que está iniciando agora.
-                await self._reply(ctx, f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`")
+                track = batch.tracks[0]
+                state = self.router.get_state(ctx.guild.id)
+                position = state.queue_size() + (1 if state.current else 0)
+                if was_session_active:
+                    await self._reply(ctx, f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`")
+                else:
+                    # O worker pode pegar a primeira música imediatamente após enqueue,
+                    # fazendo ``state.current`` existir antes da resposta do comando. Isso
+                    # não significa posição 2; ainda é a faixa que está iniciando agora.
+                    await self._reply(ctx, f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`")
+        finally:
+            if finish_loading_reaction:
+                await loading_reaction.finish()
 
     @commands.command(name="play", aliases=["tocar", "music", "musica"])
     @commands.guild_only()

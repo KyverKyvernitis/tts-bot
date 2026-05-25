@@ -14,6 +14,7 @@ from .errors import MusicExtractionError
 from .models import ExtractedBatch, MusicTrack
 from .providers import describe_url
 from .worker_node import music_agent_command, music_agent_status, resolve_music_tracks_on_worker
+from .loading_reaction import MusicLoadingReaction
 
 PLAYER_BAR_URL = "https://cdn.discordapp.com/attachments/554468640942981147/1127294696025227367/rainbow_bar3.gif"
 QUEUE_PAGE_SIZE = 8
@@ -96,7 +97,7 @@ async def _sync_agent_panel(router, guild_id: int, voice_channel_id: int, text_c
         )
 
 
-async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, router=None, voice_channel_id: int = 0, text_channel_id: int = 0, seconds: float | None = None) -> None:
+async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, router=None, voice_channel_id: int = 0, text_channel_id: int = 0, seconds: float | None = None, loading_reaction: MusicLoadingReaction | None = None) -> None:
     limit = float(seconds or getattr(config, "MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", 30.0) or 30.0)
     deadline = asyncio.get_running_loop().time() + max(5.0, limit)
     last_status = ""
@@ -113,19 +114,27 @@ async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, rou
             last_status = status
             if _agent_confirmed_playing(state):
                 await message.edit(content=_music_agent_play_message(track, {"state": state}), embed=None, view=None)
+                if loading_reaction is not None:
+                    await loading_reaction.finish()
                 return
             if status in {"failed", "error"}:
                 error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:220]
                 await message.edit(content=f"`⚠️` Não consegui iniciar **{track.short_title}**: `{error}`", embed=None, view=None)
+                if loading_reaction is not None:
+                    await loading_reaction.finish()
                 return
             if status in {"idle", "stopped"} and not state.get("current"):
                 await message.edit(content=f"`⚠️` A música não ficou ativa para **{track.short_title}**. Tente novamente.", embed=None, view=None)
+                if loading_reaction is not None:
+                    await loading_reaction.finish()
                 return
         except Exception:
             # Não quebra o fluxo do usuário se o acompanhamento não conseguir consultar o worker.
             continue
     with contextlib.suppress(Exception):
         await message.edit(content=f"`⚠️` Demorei para confirmar o início de **{track.short_title}**. Tente novamente se não tocar.", embed=None, view=None)
+    if loading_reaction is not None:
+        await loading_reaction.finish()
 
 
 _LAVALINK_SEARCH_PREFIXES = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
@@ -804,76 +813,85 @@ class SearchSelect(discord.ui.Select):
             # Se já foi respondida por algum caminho defensivo, continua usando edit/followup.
             pass
 
-        async def edit_original(content: str) -> None:
-            try:
-                await interaction.edit_original_response(content=content, embed=None, view=None)
-            except discord.NotFound:
-                return
-            except Exception:
-                with contextlib.suppress(Exception):
-                    await interaction.followup.send(content, ephemeral=True)
+        loading_reaction = MusicLoadingReaction(getattr(interaction, "message", None))
+        await loading_reaction.start()
+        finish_loading_reaction = True
+        try:
+            async def edit_original(content: str) -> None:
+                try:
+                    await interaction.edit_original_response(content=content, embed=None, view=None)
+                except discord.NotFound:
+                    return
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        await interaction.followup.send(content, ephemeral=True)
 
-        if not await _require_music_voice_interaction(interaction, self.router, self.guild_id):
-            return
-        idx = int(self.values[0])
-        track = self.tracks[idx]
-        voice_channel = _interaction_user_voice_channel(interaction)
-        text_channel = guild.get_channel(self.text_channel_id) or interaction.channel
-        if voice_channel is None or text_channel is None:
-            await edit_original("Canal não encontrado.")
-            return
-        if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
-            try:
-                result = await music_agent_command(
-                    "play",
-                    guild_id=self.guild_id,
-                    voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
-                    text_channel_id=getattr(text_channel, "id", self.text_channel_id),
-                    query=track.webpage_url or track.original_url or track.title,
-                    track=track,
-                    requester_id=getattr(interaction.user, "id", 0),
-                    requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
-                )
-            except Exception as exc:
-                await edit_original(f"`⚠️` Não consegui preparar essa música: `{exc}`")
+            if not await _require_music_voice_interaction(interaction, self.router, self.guild_id):
                 return
-            await _sync_agent_panel(
-                self.router,
-                self.guild_id,
-                getattr(voice_channel, "id", self.voice_channel_id),
-                getattr(text_channel, "id", self.text_channel_id),
-                track,
-                result,
-                queued=bool(result.get("queued")),
+            idx = int(self.values[0])
+            track = self.tracks[idx]
+            voice_channel = _interaction_user_voice_channel(interaction)
+            text_channel = guild.get_channel(self.text_channel_id) or interaction.channel
+            if voice_channel is None or text_channel is None:
+                await edit_original("Canal não encontrado.")
+                return
+            if bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)():
+                try:
+                    result = await music_agent_command(
+                        "play",
+                        guild_id=self.guild_id,
+                        voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id),
+                        text_channel_id=getattr(text_channel, "id", self.text_channel_id),
+                        query=track.webpage_url or track.original_url or track.title,
+                        track=track,
+                        requester_id=getattr(interaction.user, "id", 0),
+                        requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
+                    )
+                except Exception as exc:
+                    await edit_original(f"`⚠️` Não consegui preparar essa música: `{exc}`")
+                    return
+                await _sync_agent_panel(
+                    self.router,
+                    self.guild_id,
+                    getattr(voice_channel, "id", self.voice_channel_id),
+                    getattr(text_channel, "id", self.text_channel_id),
+                    track,
+                    result,
+                    queued=bool(result.get("queued")),
+                )
+                msg = _agent_play_message(track, result)
+                await edit_original(msg)
+                state = result.get("state") if isinstance(result.get("state"), dict) else {}
+                status = str(state.get("status") or "").lower()
+                confirmed = _agent_confirmed_playing(state)
+                if not result.get("queued") and not confirmed and status not in {"failed", "error"}:
+                    with contextlib.suppress(Exception):
+                        message = await interaction.original_response()
+                        finish_loading_reaction = False
+                        asyncio.create_task(_watch_agent_message(message, self.guild_id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id), loading_reaction=loading_reaction))
+                return
+            state_before = self.router.get_state(self.guild_id)
+            was_session_active = bool(
+                state_before.current
+                or state_before.queue_size() > 0
+                or getattr(state_before, "current_status", "") in {"resolving", "starting", "playing", "paused", "queued"}
             )
-            msg = _agent_play_message(track, result)
+            added, dropped = await self.router.enqueue(guild, voice_channel, text_channel, [track])
+            if added <= 0:
+                await edit_original("`⚠️` Não adicionei nada: essa música já está no queue/tocando ou o queue está cheio.")
+                return
+            state = self.router.get_state(self.guild_id)
+            position = state.queue_size() + (1 if state.current else 0)
+            if was_session_active or position > 1:
+                msg = f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`"
+            else:
+                msg = f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`"
+            if dropped:
+                msg += "\n`⚠️` Alguns itens extras não entraram porque já estavam no queue/tocando ou porque o queue está cheio."
             await edit_original(msg)
-            state = result.get("state") if isinstance(result.get("state"), dict) else {}
-            status = str(state.get("status") or "").lower()
-            if not result.get("queued") and status not in {"playing", "failed", "error"}:
-                with contextlib.suppress(Exception):
-                    message = await interaction.original_response()
-                    asyncio.create_task(_watch_agent_message(message, self.guild_id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id)))
-            return
-        state_before = self.router.get_state(self.guild_id)
-        was_session_active = bool(
-            state_before.current
-            or state_before.queue_size() > 0
-            or getattr(state_before, "current_status", "") in {"resolving", "starting", "playing", "paused", "queued"}
-        )
-        added, dropped = await self.router.enqueue(guild, voice_channel, text_channel, [track])
-        if added <= 0:
-            await edit_original("`⚠️` Não adicionei nada: essa música já está no queue/tocando ou o queue está cheio.")
-            return
-        state = self.router.get_state(self.guild_id)
-        position = state.queue_size() + (1 if state.current else 0)
-        if was_session_active or position > 1:
-            msg = f"`🎶` **Adicionada ao queue:** {track.short_title} • `{track.duration_label}` • posição `{max(1, position)}`"
-        else:
-            msg = f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`"
-        if dropped:
-            msg += "\n`⚠️` Alguns itens extras não entraram porque já estavam no queue/tocando ou porque o queue está cheio."
-        await edit_original(msg)
+        finally:
+            if finish_loading_reaction:
+                await loading_reaction.finish()
 
 
 class SearchResultView(discord.ui.View):

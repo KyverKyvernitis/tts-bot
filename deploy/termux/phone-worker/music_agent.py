@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.11"
+AGENT_VERSION = "0.3.12"
 STARTED_AT = time.time()
 
 
@@ -490,6 +490,8 @@ class MusicAgent:
         # PCMVolumeTransformer lets the worker-owned direct voice path duck TTS and restore volume.
         self.direct_pcm_volume_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_PCM_VOLUME_ENABLED"), True)
         self.prepare_timeout = env_float("MUSIC_AGENT_PREPARING_TIMEOUT_SECONDS", 30.0)
+        self.idle_disconnect_seconds = max(15.0, env_float("MUSIC_AGENT_IDLE_DISCONNECT_SECONDS", env_float("MUSIC_IDLE_DISCONNECT_SECONDS", 120.0)))
+        self._idle_disconnect_tasks: dict[int, asyncio.Task] = {}
         intents = discord.Intents.none()
         intents.guilds = True
         intents.voice_states = True
@@ -551,6 +553,45 @@ class MusicAgent:
             return True
         auth = request.headers.get("Authorization", "")
         return auth == f"Bearer {self.token}" or request.headers.get("X-Music-Agent-Token") == self.token
+
+    def _cancel_idle_disconnect(self, guild_id: int) -> None:
+        task = self._idle_disconnect_tasks.pop(int(guild_id or 0), None)
+        if task and not task.done():
+            task.cancel()
+
+    def _schedule_idle_disconnect(self, guild_id: int) -> None:
+        guild_id = int(guild_id or 0)
+        if not guild_id:
+            return
+        self._cancel_idle_disconnect(guild_id)
+        delay = max(15.0, float(self.idle_disconnect_seconds or 120.0))
+        self._idle_disconnect_tasks[guild_id] = asyncio.create_task(self._idle_disconnect_later(guild_id, delay))
+
+    async def _idle_disconnect_later(self, guild_id: int, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+            if st.current is not None or st.queue or st.status not in {"idle", "stopped"}:
+                return
+            player = st.player
+            if player is None:
+                return
+            st.player = None
+            st.transport = ""
+            st.paused = False
+            self._set_status(st, "idle", event="idle_timeout_disconnect")
+            with contextlib.suppress(Exception):
+                if isinstance(player, getattr(wavelink, "Player", ())):
+                    await player.disconnect()
+                else:
+                    if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
+                        player.stop()
+                    await player.disconnect(force=True)
+            self.log("idle_timeout_disconnect", guild_id=guild_id, delay=round(delay, 1))
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._idle_disconnect_tasks.pop(guild_id, None)
 
     def _set_status(self, st: GuildMusicState, status: str, *, event: str = "", error: str = "") -> None:
         now = time.time()
@@ -701,6 +742,7 @@ class MusicAgent:
         if not st.volume_percent:
             st.volume_percent = st.normal_volume_percent
         st.last_action = "play"
+        self._cancel_idle_disconnect(guild_id)
         self.log("play_received", guild_id=guild_id, voice=voice_channel_id, query=query)
         track = await self.resolve_track(query, track_meta=track_meta, body=body)
         if st.current and st.status in {"playing", "starting", "preparing", "paused"}:
@@ -742,6 +784,7 @@ class MusicAgent:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         st.last_action = "stop"
+        self._cancel_idle_disconnect(guild_id)
         st.queue.clear()
         st.current = None
         self._set_status(st, "idle", event="stop")
@@ -956,11 +999,12 @@ class MusicAgent:
 
     async def _play_next(self, guild_id: int) -> None:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        self._cancel_idle_disconnect(guild_id)
         if not st.queue:
             st.current = None
-            st.transport = ""
             st.paused = False
             self._set_status(st, "idle", event="queue_empty")
+            self._schedule_idle_disconnect(guild_id)
             return
         st.current = st.queue.pop(0)
         st.paused = False
@@ -1032,7 +1076,9 @@ class MusicAgent:
             asyncio.run_coroutine_threadsafe(self._direct_after(guild_id, error), loop)
 
         voice_client.play(source, after=after)
-        confirm_delay = max(0.4, min(2.0, env_float("MUSIC_AGENT_DIRECT_CONFIRM_SECONDS", 0.9)))
+        # Confirmação curta: evita segurar a UI/reação depois que discord.py já
+        # iniciou o FFmpeg, mas ainda confirma que a voz realmente ficou tocando.
+        confirm_delay = max(0.25, min(1.2, env_float("MUSIC_AGENT_DIRECT_CONFIRM_SECONDS", 0.55)))
         await asyncio.sleep(confirm_delay)
         if not getattr(voice_client, "is_connected", lambda: False)():
             raise RuntimeError("conectei no canal, mas a voz caiu antes do áudio")
@@ -1137,11 +1183,9 @@ class MusicAgent:
             await self._play_next(guild_id)
             return
         self._set_status(st, "idle", event=event)
-        player = st.player
-        st.player = None
-        if player and not isinstance(player, getattr(wavelink, "Player", ())):
-            with contextlib.suppress(Exception):
-                await player.disconnect(force=True)
+        # Fim normal de fila não é desconexão externa: mantenha a sessão de voz
+        # viva e deixe o mesmo timeout AFK/idle decidir quando sair da call.
+        self._schedule_idle_disconnect(guild_id)
 
     async def _playable_for_track(self, track: AgentTrack) -> Any:
         identifier = track.stream_url or track.webpage_url or track.query
