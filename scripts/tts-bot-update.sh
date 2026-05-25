@@ -758,7 +758,7 @@ normalize_healthcheck_crontab() {
   # Não reativa healthcheck/resource-check automaticamente: eles continuam
   # pausados até a correção passar pelo patch e pelo operador.
   STAGE="normalização do crontab de emergência"
-  local tmp current changed
+  local tmp current
   tmp="${TMPDIR:-/tmp}/tts-bot-cron.$$"
   current="${TMPDIR:-/tmp}/tts-bot-cron-current.$$"
   if ! sudo -u ubuntu -H crontab -l > "$current" 2>/dev/null; then
@@ -769,69 +769,64 @@ normalize_healthcheck_crontab() {
   python3 - "$current" "$tmp" <<'PY_CRON'
 import sys
 from pathlib import Path
+
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
 text = src.read_text(encoding='utf-8', errors='replace')
-health_line = '# TEMP_DISABLED_HEALTHCHECK_UNTIL_PATCH_20260524 * * * * * /home/ubuntu/bot/healthcheck.sh >/dev/null 2>&1'
-resource_line = '# TEMP_DISABLED_EMERGENCY_20260524 */5 * * * * /home/ubuntu/bot/resource-check.sh >/dev/null 2>&1'
-out=[]
-has_health=False
-has_resource=False
-changed=False
-for line in text.splitlines():
-    s=line.strip()
-    if s == '>/dev/null 2>&1':
-        changed=True
-        continue
+
+HEALTH_DISABLED = '# TEMP_DISABLED_HEALTHCHECK_UNTIL_PATCH_20260524 * * * * * /home/ubuntu/bot/healthcheck.sh >/dev/null 2>&1'
+RESOURCE_DISABLED = '# TEMP_DISABLED_EMERGENCY_20260524 */5 * * * * /home/ubuntu/bot/resource-check.sh >/dev/null 2>&1'
+HEALTH_ACTIVE = '* * * * * /home/ubuntu/bot/healthcheck.sh >/dev/null 2>&1'
+RESOURCE_ACTIVE = '*/5 * * * * /home/ubuntu/bot/resource-check.sh >/dev/null 2>&1'
+
+out = []
+has_disabled_health = False
+has_active_health = False
+has_disabled_resource = False
+has_active_resource = False
+
+def is_redirect_only(line):
+    return line.strip() in {'>/dev/null 2>&1', '>>/dev/null 2>&1', '2>&1', '&>/dev/null'}
+
+def kind_for(line):
     if 'healthcheck.sh' in line:
-        if 'TEMP_DISABLED_HEALTHCHECK_UNTIL_PATCH_20260524' in line or line.lstrip().startswith('#'):
-            if not has_health:
-                out.append(health_line)
-                has_health=True
-            changed = changed or (line != health_line)
-            continue
+        return 'health'
     if 'resource-check.sh' in line:
-        if 'TEMP_DISABLED_EMERGENCY_20260524' in line or line.lstrip().startswith('#'):
-            if not has_resource:
-                out.append(resource_line)
-                has_resource=True
-            changed = changed or (line != resource_line)
-            continue
+        return 'resource'
+    return None
+
+def disabled(line):
+    return line.lstrip().startswith('#') or 'TEMP_DISABLED' in line
+
+for raw in text.splitlines():
+    line = raw.rstrip('\r')
+    if is_redirect_only(line):
+        continue
+    kind = kind_for(line)
+    if kind == 'health':
+        if disabled(line):
+            if not has_disabled_health:
+                out.append(HEALTH_DISABLED)
+                has_disabled_health = True
+        else:
+            if not has_active_health:
+                out.append(HEALTH_ACTIVE)
+                has_active_health = True
+        continue
+    if kind == 'resource':
+        if disabled(line):
+            if not has_disabled_resource:
+                out.append(RESOURCE_DISABLED)
+                has_disabled_resource = True
+        else:
+            if not has_active_resource:
+                out.append(RESOURCE_ACTIVE)
+                has_active_resource = True
+        continue
     out.append(line)
+
 dst.write_text('\n'.join(out).rstrip() + '\n', encoding='utf-8')
-print('changed=1' if changed else 'changed=0')
 PY_CRON
-  changed="$(tail -n 1 "$tmp" 2>/dev/null | grep -E '^changed=' | cut -d= -f2 || true)"
-  # O Python acima escreveu o crontab completo no mesmo arquivo que imprimiu status?
-  # Regera sem o status para manter o arquivo limpo.
-  python3 - "$current" "$tmp" <<'PY_CRON2'
-import sys
-from pathlib import Path
-src = Path(sys.argv[1])
-dst = Path(sys.argv[2])
-text = src.read_text(encoding='utf-8', errors='replace')
-health_line = '# TEMP_DISABLED_HEALTHCHECK_UNTIL_PATCH_20260524 * * * * * /home/ubuntu/bot/healthcheck.sh >/dev/null 2>&1'
-resource_line = '# TEMP_DISABLED_EMERGENCY_20260524 */5 * * * * /home/ubuntu/bot/resource-check.sh >/dev/null 2>&1'
-out=[]
-has_health=False
-has_resource=False
-for line in text.splitlines():
-    s=line.strip()
-    if s == '>/dev/null 2>&1':
-        continue
-    if 'TEMP_DISABLED_HEALTHCHECK_UNTIL_PATCH_20260524' in line and 'healthcheck.sh' in line:
-        if not has_health:
-            out.append(health_line)
-            has_health=True
-        continue
-    if 'TEMP_DISABLED_EMERGENCY_20260524' in line and 'resource-check.sh' in line:
-        if not has_resource:
-            out.append(resource_line)
-            has_resource=True
-        continue
-    out.append(line)
-dst.write_text('\n'.join(out).rstrip() + '\n', encoding='utf-8')
-PY_CRON2
   if ! cmp -s "$current" "$tmp"; then
     cp -a /var/spool/cron/crontabs/ubuntu "$REPO_DIR/crontab.backup.auto-clean.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
     sudo -u ubuntu -H crontab "$tmp" || true

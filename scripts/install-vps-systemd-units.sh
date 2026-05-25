@@ -7,6 +7,7 @@ SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 BACKUP_ROOT="${BACKUP_ROOT:-$REPO_DIR/data/systemd-backups}"
 STATUS_FILE="${STATUS_FILE:-$REPO_DIR/data/vps-systemd-install-status.json}"
 DRY_RUN=0
+AUDIT_ONLY=0
 FROM_UPDATER=0
 INSTALL_LEGACY_VPS_LAVALINK=0
 NOW="$(date +%Y%m%d-%H%M%S)"
@@ -18,6 +19,7 @@ WARNINGS=()
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
+    --audit) AUDIT_ONLY=1; DRY_RUN=1 ;;
     --from-updater) FROM_UPDATER=1 ;;
     --install-legacy-vps-lavalink) INSTALL_LEGACY_VPS_LAVALINK=1 ;;
     *) echo "argumento desconhecido: $arg" >&2; exit 2 ;;
@@ -40,7 +42,9 @@ ensure_paths() {
     echo "diretório de templates não encontrado: $TEMPLATE_DIR" >&2
     exit 1
   fi
-  mkdir -p "$BACKUP_DIR" "$(dirname "$STATUS_FILE")"
+  if [[ "$DRY_RUN" != "1" ]]; then
+    mkdir -p "$BACKUP_DIR" "$(dirname "$STATUS_FILE")"
+  fi
 }
 
 backup_live() {
@@ -61,11 +65,11 @@ install_file() {
     warn "template ausente: $rel"
     return 0
   fi
-  backup_live "$rel"
   if [[ "$DRY_RUN" == "1" ]]; then
     action "dry-run: instalaria $rel"
     return 0
   fi
+  backup_live "$rel"
   mkdir -p "$(dirname "$dst")"
   install -m 0644 "$src" "$dst"
   CHANGED=1
@@ -160,7 +164,7 @@ mask_vps_lavalink() {
 }
 
 normalize_crontab() {
-  local current tmp changed
+  local current tmp
   current="${TMPDIR:-/tmp}/vps-cron-current.$$"
   tmp="${TMPDIR:-/tmp}/vps-cron-normalized.$$"
   if ! sudo -u ubuntu -H crontab -l > "$current" 2>/dev/null; then
@@ -171,31 +175,98 @@ normalize_crontab() {
   python3 - "$current" "$tmp" <<'PY_CRON'
 import sys
 from pathlib import Path
+
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
 text = src.read_text(encoding='utf-8', errors='replace')
-health_line = '# TEMP_DISABLED_HEALTHCHECK_UNTIL_PATCH_20260524 * * * * * /home/ubuntu/bot/healthcheck.sh >/dev/null 2>&1'
-resource_line = '# TEMP_DISABLED_EMERGENCY_20260524 */5 * * * * /home/ubuntu/bot/resource-check.sh >/dev/null 2>&1'
-out = []
-has_health = False
-has_resource = False
-for line in text.splitlines():
-    s = line.strip()
-    if s == '>/dev/null 2>&1':
-        continue
+
+HEALTH_DISABLED = '# TEMP_DISABLED_HEALTHCHECK_UNTIL_PATCH_20260524 * * * * * /home/ubuntu/bot/healthcheck.sh >/dev/null 2>&1'
+RESOURCE_DISABLED = '# TEMP_DISABLED_EMERGENCY_20260524 */5 * * * * /home/ubuntu/bot/resource-check.sh >/dev/null 2>&1'
+HEALTH_ACTIVE = '* * * * * /home/ubuntu/bot/healthcheck.sh >/dev/null 2>&1'
+RESOURCE_ACTIVE = '*/5 * * * * /home/ubuntu/bot/resource-check.sh >/dev/null 2>&1'
+
+REDIRECT_ONLY = {'>/dev/null 2>&1', '>>/dev/null 2>&1'}
+
+def is_redirect_only(line):
+    stripped = line.strip()
+    return stripped in REDIRECT_ONLY or stripped in {'2>&1', '&>/dev/null'}
+
+def classify(line):
     if 'healthcheck.sh' in line:
-        if line.lstrip().startswith('#') or 'TEMP_DISABLED' in line:
-            if not has_health:
-                out.append(health_line)
-                has_health = True
-            continue
+        return 'health'
     if 'resource-check.sh' in line:
-        if line.lstrip().startswith('#') or 'TEMP_DISABLED' in line:
-            if not has_resource:
-                out.append(resource_line)
-                has_resource = True
-            continue
+        return 'resource'
+    return None
+
+def is_disabled(line):
+    stripped = line.lstrip()
+    return stripped.startswith('#') or 'TEMP_DISABLED' in line
+
+def canonical_for(line, kind):
+    disabled = is_disabled(line)
+    if kind == 'health':
+        return HEALTH_DISABLED if disabled else HEALTH_ACTIVE
+    return RESOURCE_DISABLED if disabled else RESOURCE_ACTIVE
+
+out = []
+has_disabled_health = False
+has_active_health = False
+has_disabled_resource = False
+has_active_resource = False
+pending_kind = None
+pending_line = None
+
+def flush_pending():
+    global pending_kind, pending_line, has_disabled_health, has_active_health, has_disabled_resource, has_active_resource
+    if pending_kind is None or pending_line is None:
+        return
+    line = canonical_for(pending_line, pending_kind)
+    disabled = is_disabled(pending_line)
+    if pending_kind == 'health':
+        if disabled:
+            if not has_disabled_health:
+                out.append(line)
+                has_disabled_health = True
+        else:
+            if not has_active_health:
+                out.append(line)
+                has_active_health = True
+    else:
+        if disabled:
+            if not has_disabled_resource:
+                out.append(line)
+                has_disabled_resource = True
+        else:
+            if not has_active_resource:
+                out.append(line)
+                has_active_resource = True
+    pending_kind = None
+    pending_line = None
+
+for raw in text.splitlines():
+    line = raw.rstrip('\r')
+    stripped = line.strip()
+
+    if is_redirect_only(line):
+        # Broken remnants from a split cron line must never remain active by themselves.
+        continue
+
+    kind = classify(line)
+    if kind is not None:
+        flush_pending()
+        pending_kind = kind
+        pending_line = line
+        # The next line might be a stray redirect; flushing immediately is still safe
+        # because redirect-only lines are skipped. Keeping a pending slot lets future
+        # variants be handled without duplicating lines.
+        flush_pending()
+        continue
+
+    flush_pending()
     out.append(line)
+
+flush_pending()
+
 dst.write_text('\n'.join(out).rstrip() + '\n', encoding='utf-8')
 PY_CRON
   if ! cmp -s "$current" "$tmp"; then
@@ -284,9 +355,110 @@ EOF_STATUS
   chown ubuntu:ubuntu "$STATUS_FILE" 2>/dev/null || true
 }
 
+audit_one_file() {
+  local rel="$1" src="$TEMPLATE_DIR/$rel" dst="$SYSTEMD_DIR/$rel"
+  if [[ ! -f "$src" ]]; then
+    warn "audit: template ausente: $rel"
+    return 0
+  fi
+  if [[ ! -e "$dst" && ! -L "$dst" ]]; then
+    action "audit: só no repo: $rel"
+    return 0
+  fi
+  if [[ -L "$dst" ]]; then
+    local target
+    target="$(readlink "$dst" 2>/dev/null || true)"
+    if [[ "$target" == "/dev/null" ]]; then
+      action "audit: live mascarado: $rel -> /dev/null"
+    else
+      warn "audit: live é symlink inesperado: $rel -> $target"
+    fi
+    return 0
+  fi
+  if cmp -s "$src" "$dst"; then
+    action "audit: igual: $rel"
+  else
+    warn "audit: diferente: $rel"
+  fi
+}
+
+audit_vps_systemd() {
+  local unit src rel live name
+  action "audit: comparando templates do repo com $SYSTEMD_DIR"
+  for unit in \
+    tts-bot.service \
+    tts-bot-updater.service tts-bot-updater.timer \
+    tts-bot-alert@.service \
+    callkeeper.service \
+    cleanup-audio-temp.service cleanup-audio-temp.timer \
+    sinuca-activity-server.service \
+    phone-worker-watch.service phone-worker-watch.timer \
+    phone-lavalink-watch.service phone-lavalink-watch.timer; do
+    audit_one_file "$unit"
+  done
+  if [[ -d "$TEMPLATE_DIR/tts-bot.service.d" ]]; then
+    while IFS= read -r -d '' src; do
+      rel="tts-bot.service.d/${src#$TEMPLATE_DIR/tts-bot.service.d/}"
+      audit_one_file "$rel"
+    done < <(find "$TEMPLATE_DIR/tts-bot.service.d" -type f -print0 | sort -z)
+  fi
+
+  while IFS= read -r -d '' live; do
+    name="${live#$SYSTEMD_DIR/}"
+    case "$name" in
+      *.backup.*|*.disabled.*|*.disabled|*.tmp) continue ;;
+      tts-bot.service|tts-bot-updater.service|tts-bot-updater.timer|tts-bot-alert@.service|callkeeper.service|cleanup-audio-temp.service|cleanup-audio-temp.timer|sinuca-activity-server.service|phone-worker-watch.service|phone-worker-watch.timer|phone-lavalink-watch.service|phone-lavalink-watch.timer|tts-bot.service.d/*)
+        [[ -f "$TEMPLATE_DIR/$name" ]] || warn "audit: existe só na VPS: $name"
+        ;;
+      lavalink.service|lavalink.service.d/*)
+        action "audit: Lavalink VPS legado ignorado/mantido fora: $name"
+        ;;
+    esac
+  done < <(find "$SYSTEMD_DIR" -maxdepth 2 \( -type f -o -type l \) -print0 2>/dev/null | sort -z)
+}
+
+audit_crontab() {
+  local current tmp
+  current="${TMPDIR:-/tmp}/vps-cron-audit-current.$$"
+  tmp="${TMPDIR:-/tmp}/vps-cron-audit-normalized.$$"
+  if ! sudo -u ubuntu -H crontab -l > "$current" 2>/dev/null; then
+    action "audit: crontab ubuntu ausente ou ilegível"
+    rm -f "$current" "$tmp"
+    return 0
+  fi
+  python3 - "$current" "$tmp" <<'PY_AUDIT_CRON'
+import sys
+from pathlib import Path
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+text = src.read_text(encoding='utf-8', errors='replace')
+# Only detect the exact emergency mistake here; normalization itself is handled
+# by normalize_crontab() so audit remains read-only.
+broken = any(line.strip() == '>/dev/null 2>&1' for line in text.splitlines())
+dst.write_text('broken_redirect=' + ('1' if broken else '0') + '\n', encoding='utf-8')
+PY_AUDIT_CRON
+  if grep -q '^broken_redirect=1$' "$tmp" 2>/dev/null; then
+    warn "audit: crontab ubuntu tem redirect solto; rode instalador sem --audit para corrigir"
+  else
+    action "audit: crontab ubuntu sem redirect solto"
+  fi
+  rm -f "$current" "$tmp"
+}
+
+run_audit() {
+  audit_vps_systemd
+  audit_crontab
+}
+
 main() {
   require_root
   ensure_paths
+  if [[ "$AUDIT_ONLY" == "1" ]]; then
+    run_audit
+    write_status
+    log "auditoria concluída; nenhuma alteração aplicada"
+    return 0
+  fi
   chmod_scripts
   install_units
   sanitize_lavalink_references

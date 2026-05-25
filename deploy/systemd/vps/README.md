@@ -9,6 +9,12 @@ Use:
 sudo /home/ubuntu/bot/scripts/install-vps-systemd-units.sh
 ```
 
+To compare the live VPS state with the repository templates without changing anything:
+
+```bash
+sudo /home/ubuntu/bot/scripts/install-vps-systemd-units.sh --audit
+```
+
 The installer is idempotent and creates backups before changing live files. It:
 
 - syncs the active VPS unit templates from this directory to `/etc/systemd/system`;
@@ -21,3 +27,15 @@ The installer is idempotent and creates backups before changing live files. It:
 
 Never commit local secrets. Units may reference `/home/ubuntu/bot/.env`, but the
 actual `.env` file stays local to the VPS.
+
+
+## Source of truth
+
+Treat this directory as the clean, reviewable source of truth for VPS units.
+`/etc/systemd/system` is the installed output generated from these templates. Do
+not commit live backups, generated status files, logs, `.env` values, tokens, or
+other local state from the VPS.
+
+The installer intentionally keeps `healthcheck.sh` and `resource-check.sh` paused
+when their emergency `TEMP_DISABLED_*` markers are present. It may normalize
+malformed cron lines, but it must not silently re-enable those jobs.

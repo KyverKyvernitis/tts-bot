@@ -108,6 +108,12 @@ vps-music-diagnostics-*.txt
 vps-files-diagnostics-*.txt
 
 # Arquivos de estado locais
+
+# Backups/status gerados pelos instaladores de manutenção da VPS
+data/systemd-backups/
+data/vps-systemd-install-status.json
+crontab.backup.*
+
 .healthcheck_last_alert
 .update_last_failed_remote_hash
 
