@@ -137,11 +137,14 @@ PYVERCMP
 }
 
 list_worker_pids() {
-  if command -v pgrep >/dev/null 2>&1; then
-    pgrep -f 'phone_worker.py' 2>/dev/null || true
-    return
-  fi
-  ps -ef 2>/dev/null | awk '/phone_worker\.py/ && !/awk/ {print $2}' || true
+  # No Android/Termux, pgrep -f can occasionally match wrappers or report
+  # misleading entries. Use ps and require a real python command running the
+  # official phone_worker.py file. Exclude this helper and shell wrappers.
+  ps -ef 2>/dev/null | awk '
+    /phone_worker\.py/ && /python/ && !/awk/ && !/grep/ && !/start-phone-worker/ && !/watch-phone-worker/ {
+      pid=$2; if (pid ~ /^[0-9]+$/ && pid != "1") print pid
+    }
+  ' | awk 'NF && !seen[$0]++' || true
 }
 
 worker_pid_count() {
@@ -258,10 +261,17 @@ is_turbo_profile() {
 }
 
 deps_install_enabled() {
-  local mode="${PHONE_WORKER_TURBO_DEPS_INSTALL:-${PHONE_WORKER_TTS_DEPS_INSTALL:-auto}}"
+  # Novos nomes *_MODE são os preferidos. Mantém compatibilidade com os antigos.
+  local mode="${PHONE_WORKER_TURBO_DEPS_INSTALL_MODE:-${PHONE_WORKER_DEPS_INSTALL_MODE:-${PHONE_WORKER_TURBO_DEPS_INSTALL:-${PHONE_WORKER_TTS_DEPS_INSTALL:-auto}}}}"
   mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
   [[ "$mode" == "0" || "$mode" == "false" || "$mode" == "off" || "$mode" == "no" ]] && return 1
   return 0
+}
+
+heavy_python_deps_enabled() {
+  local mode="${PHONE_WORKER_HEAVY_PYTHON_DEPS_INSTALL:-manual}"
+  mode="$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n"' | tr -d "'")"
+  [[ "$mode" == "1" || "$mode" == "true" || "$mode" == "on" || "$mode" == "yes" || "$mode" == "sim" ]]
 }
 
 ensure_turbo_termux_packages_if_needed() {
@@ -289,11 +299,22 @@ ensure_turbo_python_tts_deps_if_needed() {
   "$PYTHON_BIN" - <<'PYTTSDEPS' >/dev/null 2>&1 && return 0
 import edge_tts  # noqa: F401
 import gtts  # noqa: F401
-import google.cloud.texttospeech_v1  # noqa: F401
 PYTTSDEPS
-  log "perfil turbo: instalando dependências leves do TTS (edge/gTTS/Google Cloud TTS)"
-  "$PYTHON_BIN" -m pip install --upgrade edge-tts gTTS google-cloud-texttospeech >/dev/null 2>&1 || \
-    log "não consegui instalar edge/gTTS/Google Cloud TTS automaticamente; o benchmark vai mostrar erro curto"
+  log "perfil turbo: instalando dependências leves do TTS (edge/gTTS)"
+  "$PYTHON_BIN" -m pip install --upgrade edge-tts gTTS >/dev/null 2>&1 || \
+    log "não consegui instalar edge/gTTS automaticamente; o benchmark vai mostrar erro curto"
+
+  # google-cloud-texttospeech puxa grpcio e pode compilar nativamente no Termux,
+  # travando/esquentando o celular. Só instala em modo explícito.
+  if heavy_python_deps_enabled; then
+    "$PYTHON_BIN" - <<'PYGCLOUDDEP' >/dev/null 2>&1 || {
+import google.cloud.texttospeech_v1  # noqa: F401
+PYGCLOUDDEP
+      log "dependência pesada Google Cloud TTS ausente; instalando porque PHONE_WORKER_HEAVY_PYTHON_DEPS_INSTALL=true"
+      "$PYTHON_BIN" -m pip install --upgrade google-cloud-texttospeech >/dev/null 2>&1 || \
+        log "não consegui instalar Google Cloud TTS automaticamente; recurso opcional ficará indisponível"
+    }
+  fi
 }
 
 ensure_music_ytdlp_deps_if_needed() {
@@ -314,10 +335,9 @@ ensure_music_agent_deps_if_needed() {
   truthy "$MUSIC_AGENT_AUTO_START" || return 0
   "$PYTHON_BIN" - <<'PYMUSICAGENTDEPS' >/dev/null 2>&1 && return 0
 import aiohttp, discord, nacl, wavelink, yt_dlp, davey, edge_tts, gtts  # noqa: F401
-import google.cloud.texttospeech_v1  # noqa: F401
 PYMUSICAGENTDEPS
   log "perfil turbo: dependências do Music Agent ausentes; instalando somente o necessário"
-  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl davey 'wavelink>=3.4,<3.6' 'yt-dlp[default]' edge-tts gTTS google-cloud-texttospeech)
+  local pip_cmd=("$PYTHON_BIN" -m pip install --upgrade aiohttp 'discord.py>=2.7.1,<2.8' PyNaCl davey 'wavelink>=3.4,<3.6' 'yt-dlp[default]' edge-tts gTTS)
   if command -v timeout >/dev/null 2>&1; then
     timeout "${MUSIC_AGENT_DEPS_INSTALL_TIMEOUT_SECONDS:-600}" "${pip_cmd[@]}" >/dev/null 2>&1 || \
       log "não consegui instalar dependências do Music Agent automaticamente dentro do timeout"
@@ -325,9 +345,14 @@ PYMUSICAGENTDEPS
     "${pip_cmd[@]}" >/dev/null 2>&1 || \
       log "não consegui instalar dependências do Music Agent automaticamente"
   fi
+  if heavy_python_deps_enabled; then
+    "$PYTHON_BIN" - <<'PYGCLOUDCHECK' >/dev/null 2>&1 || \
+      "$PYTHON_BIN" -m pip install --upgrade google-cloud-texttospeech >/dev/null 2>&1 || true
+import google.cloud.texttospeech_v1  # noqa: F401
+PYGCLOUDCHECK
+  fi
   "$PYTHON_BIN" - <<'PYMUSICAGENTCHECK' >/dev/null 2>&1 && log "perfil turbo: dependências do Music Agent prontas" || true
 import aiohttp, discord, nacl, wavelink, yt_dlp, davey, edge_tts, gtts  # noqa: F401
-import google.cloud.texttospeech_v1  # noqa: F401
 PYMUSICAGENTCHECK
 }
 

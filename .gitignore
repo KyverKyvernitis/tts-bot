@@ -199,3 +199,15 @@ data/core_worker_automation_state.json
 data/core_worker_automation_pending.json.tmp
 data/core_worker_automation_status.json.tmp
 data/core_worker_automation_state.json.tmp
+
+# Backups manuais criados durante diagnósticos na VPS
+manual-dirty-backups/
+data/manual-dirty-backups/
+scripts/*.paused-emergency-*
+.fatal-update-dirty
+.fatal-update-local-changes
+.healthcheck_fail_count
+.healthcheck_fail_kind
+.healthcheck_fail_since
+.healthcheck_starting_since
+.healthcheck_last_restart

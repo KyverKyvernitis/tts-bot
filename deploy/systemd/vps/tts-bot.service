@@ -12,7 +12,7 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/bot
 EnvironmentFile=/home/ubuntu/bot/.env
-ExecStart=/home/ubuntu/bot/start.sh
+ExecStart=/usr/bin/env bash /home/ubuntu/bot/start.sh
 
 Restart=always
 RestartSec=5

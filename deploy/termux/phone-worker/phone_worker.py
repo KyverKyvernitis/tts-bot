@@ -2131,27 +2131,54 @@ def _module_import_ok(module_name: str) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {_short_text(exc, limit=120)}"
 
 
+def _phone_worker_deps_mode_enabled() -> bool:
+    for key in ("PHONE_WORKER_TURBO_DEPS_INSTALL_MODE", "PHONE_WORKER_DEPS_INSTALL_MODE", "PHONE_WORKER_TURBO_DEPS_INSTALL", "PHONE_WORKER_TTS_DEPS_INSTALL"):
+        raw = str(os.getenv(key) or "").strip().lower().strip('"\'')
+        if raw in {"0", "false", "off", "no", "nao", "não"}:
+            return False
+        if raw in {"1", "true", "on", "yes", "sim", "auto"}:
+            return True
+    return True
+
+
+def _phone_worker_heavy_python_deps_enabled() -> bool:
+    raw = str(os.getenv("PHONE_WORKER_HEAVY_PYTHON_DEPS_INSTALL") or "").strip().lower().strip('"\'')
+    return raw in {"1", "true", "on", "yes", "sim"}
+
+
 def _start_tts_dependency_autoinstall(missing: list[str], checks: dict[str, dict[str, Any]]) -> dict[str, Any]:
     global _TTS_DEP_AUTOINSTALL_LAST_AT, _TTS_DEP_AUTOINSTALL_RUNNING
-    enabled = _env_bool("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS", True)
+    enabled = _env_bool("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS", True) and _phone_worker_deps_mode_enabled()
     if not enabled:
         return {"enabled": False, "started": False, "reason": "disabled"}
     specs = _music_voice_dependency_specs()
-    pip_packages = [str(specs[name].get("pip")) for name in missing if name in specs and specs[name].get("pip")]
+    heavy_enabled = _phone_worker_heavy_python_deps_enabled()
+    # Optional heavy packages such as google-cloud-texttospeech pull grpcio on
+    # Termux/Python 3.13 and can compile native code for minutes. Never install
+    # them automatically unless explicitly requested.
+    pip_packages = [
+        str(specs[name].get("pip"))
+        for name in missing
+        if name in specs
+        and specs[name].get("pip")
+        and (not bool(specs[name].get("optional")) or heavy_enabled)
+    ]
+    skipped_optional = [name for name in missing if bool(specs.get(name, {}).get("optional")) and not heavy_enabled]
     system_packages: list[str] = []
     if ("ffmpeg" in missing or "ffprobe" in missing) and shutil.which("pkg"):
         system_packages.append("ffmpeg")
     pip_packages = [p for p in dict.fromkeys(pip_packages) if p]
     system_packages = [p for p in dict.fromkeys(system_packages) if p]
     if not pip_packages and not system_packages:
-        return {"enabled": True, "started": False, "reason": "nothing_installable"}
+        reason = "optional_only" if skipped_optional else "nothing_installable"
+        return {"enabled": True, "started": False, "reason": reason, "skipped_optional": skipped_optional}
     cooldown = max(60.0, float(_env_int("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS_COOLDOWN_SECONDS", 900)))
     now = time.time()
     with _TTS_DEP_AUTOINSTALL_LOCK:
         if _TTS_DEP_AUTOINSTALL_RUNNING:
-            return {"enabled": True, "started": False, "reason": "already_running", "pip": pip_packages, "system": system_packages}
+            return {"enabled": True, "started": False, "reason": "already_running", "pip": pip_packages, "system": system_packages, "skipped_optional": skipped_optional}
         if _TTS_DEP_AUTOINSTALL_LAST_AT and now - _TTS_DEP_AUTOINSTALL_LAST_AT < cooldown:
-            return {"enabled": True, "started": False, "reason": "cooldown", "remaining_seconds": round(cooldown - (now - _TTS_DEP_AUTOINSTALL_LAST_AT), 1), "pip": pip_packages, "system": system_packages}
+            return {"enabled": True, "started": False, "reason": "cooldown", "remaining_seconds": round(cooldown - (now - _TTS_DEP_AUTOINSTALL_LAST_AT), 1), "pip": pip_packages, "system": system_packages, "skipped_optional": skipped_optional}
         _TTS_DEP_AUTOINSTALL_RUNNING = True
         _TTS_DEP_AUTOINSTALL_LAST_AT = now
 
@@ -2172,7 +2199,7 @@ def _start_tts_dependency_autoinstall(missing: list[str], checks: dict[str, dict
                 _TTS_DEP_AUTOINSTALL_RUNNING = False
 
     threading.Thread(target=_runner, name="tts-dependency-autoinstall", daemon=True).start()
-    return {"enabled": True, "started": True, "pip": pip_packages, "system": system_packages}
+    return {"enabled": True, "started": True, "pip": pip_packages, "system": system_packages, "skipped_optional": skipped_optional}
 
 
 def _music_voice_dependencies_snapshot() -> dict[str, Any]:

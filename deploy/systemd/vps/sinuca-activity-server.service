@@ -11,8 +11,8 @@ WorkingDirectory=/home/ubuntu/bot
 Environment=ACTIVITY_SERVICE_NAME=sinuca-activity-server
 Environment=ACTIVITY_NOTIFY_COOLDOWN_SECONDS=900
 ExecStartPre=/bin/bash -lc 'fuser -k 8787/tcp >/dev/null 2>&1 || true'
-ExecStart=/home/ubuntu/bot/start-sinuca-server.sh
-ExecStartPost=/home/ubuntu/bot/notify-activity-start.sh
+ExecStart=/usr/bin/env bash /home/ubuntu/bot/start-sinuca-server.sh
+ExecStartPost=/usr/bin/env bash /home/ubuntu/bot/notify-activity-start.sh
 Restart=on-failure
 RestartSec=5
 

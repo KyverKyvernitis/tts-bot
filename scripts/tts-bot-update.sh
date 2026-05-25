@@ -850,8 +850,7 @@ deploy_vps_systemd_units() {
     return 0
   fi
 
-  chmod +x "$REPO_DIR/scripts/install-vps-systemd-units.sh" 2>/dev/null || true
-  if REPO_DIR="$REPO_DIR" "$REPO_DIR/scripts/install-vps-systemd-units.sh" --from-updater; then
+  if REPO_DIR="$REPO_DIR" bash "$REPO_DIR/scripts/install-vps-systemd-units.sh" --from-updater; then
     VPS_SYSTEMD_UNITS_STATUS="sincronizados"
   else
     VPS_SYSTEMD_UNITS_STATUS="falha ao sincronizar"
@@ -869,7 +868,6 @@ deploy_alert_unit() {
   fi
   if [[ -n "$src" ]]; then
     cp "$src" /etc/systemd/system/tts-bot-alert@.service
-    chmod +x "$REPO_DIR/notify-failure.sh" "$REPO_DIR/alert.sh" 2>/dev/null || true
     systemctl daemon-reload || true
     ALERT_UNIT_STATUS="unit instalada"
   else
@@ -1030,9 +1028,7 @@ deploy_phone_worker_watch() {
   STAGE="configuração do watcher do phone worker"
   local installed=0
 
-  if [[ -f "$REPO_DIR/scripts/phone-worker-watch.sh" ]]; then
-    chmod +x "$REPO_DIR/scripts/phone-worker-watch.sh" 2>/dev/null || true
-  fi
+  # Não chmod em script rastreado: systemd usa /usr/bin/env bash e isso evita repo sujo.
   local phone_worker_service_src="$REPO_DIR/deploy/systemd/vps/phone-worker-watch.service"
   local phone_worker_timer_src="$REPO_DIR/deploy/systemd/vps/phone-worker-watch.timer"
   [[ -f "$phone_worker_service_src" ]] || phone_worker_service_src="$REPO_DIR/deploy/systemd/phone-worker-watch.service"
@@ -1067,7 +1063,6 @@ deploy_phone_worker_watch() {
   fi
 
   if [[ "$watch_value" == "1" || "$watch_value" == "true" || "$watch_value" == "yes" || "$watch_value" == "on" || "$watch_value" == "sim" ]]; then
-    chmod +x "$REPO_DIR/scripts/phone-worker-watch.sh" 2>/dev/null || true
     systemctl enable --now phone-worker-watch.timer >/dev/null 2>&1 || true
     systemctl start phone-worker-watch.service >/dev/null 2>&1 || true
     if systemctl is-active --quiet phone-worker-watch.timer; then

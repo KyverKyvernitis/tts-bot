@@ -285,15 +285,10 @@ PY_CRON
 }
 
 chmod_scripts() {
-  local rel
-  for rel in \
-    start.sh alert.sh notify-failure.sh healthcheck.sh resource-check.sh cleanup-audio-temp.sh \
-    scripts/tts-bot-update.sh scripts/install-vps-systemd-units.sh \
-    scripts/phone-worker-watch.sh scripts/phone-lavalink-watch.sh scripts/sync-phone-worker.sh; do
-    if [[ -f "$REPO_DIR/$rel" && "$DRY_RUN" != "1" ]]; then
-      chmod +x "$REPO_DIR/$rel" 2>/dev/null || true
-    fi
-  done
+  # Não altera modos de arquivos rastreados no Git. O systemd chama scripts via
+  # /usr/bin/env bash nos templates, justamente para não sujar o repo com
+  # mode change 100644=>100755 e bloquear git pull --ff-only.
+  action "scripts mantidos sem chmod para preservar repo limpo"
 }
 
 install_units() {
@@ -317,7 +312,7 @@ apply_service_policy() {
     return 0
   fi
   systemctl daemon-reload || true
-  systemctl reset-failed tts-bot.service tts-bot-updater.service tts-bot-alert@tts-bot.service.service >/dev/null 2>&1 || true
+  systemctl reset-failed tts-bot.service tts-bot-updater.service tts-bot-alert@tts-bot.service >/dev/null 2>&1 || true
   systemctl enable tts-bot.service >/dev/null 2>&1 || true
   systemctl enable --now tts-bot-updater.timer >/dev/null 2>&1 || true
   systemctl enable --now cleanup-audio-temp.timer >/dev/null 2>&1 || true

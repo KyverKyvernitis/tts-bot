@@ -7,4 +7,4 @@ Type=oneshot
 User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/bot
-ExecStart=/home/ubuntu/bot/cleanup-audio-temp.sh
+ExecStart=/usr/bin/env bash /home/ubuntu/bot/cleanup-audio-temp.sh

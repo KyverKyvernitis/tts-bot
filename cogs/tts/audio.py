@@ -94,11 +94,50 @@ PHONE_WORKER_TOKEN = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip(
 _RUNTIME_DIR = os.path.join(TTS_TEMP_DIR, "runtime")
 _CACHE_DIR = os.path.join(TTS_TEMP_DIR, "cache")
 _CREDENTIALS_DIR = os.path.join(TTS_TEMP_DIR, "credentials")
-
-for _dir in (TTS_TEMP_DIR, _RUNTIME_DIR, _CACHE_DIR, _CREDENTIALS_DIR):
-    os.makedirs(_dir, exist_ok=True)
+_TTS_REQUIRED_DIRS = (TTS_TEMP_DIR, _RUNTIME_DIR, _CACHE_DIR, _CREDENTIALS_DIR)
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_tts_temp_dirs() -> dict[str, bool]:
+    """Ensure local TTS runtime/cache directories exist.
+
+    The external cleanup timer can legitimately remove empty directories. TTS
+    generation uses tempfile.mkstemp(dir=runtime), so a missing runtime
+    directory makes every engine fail before synthesis even starts. Keep this
+    function tiny and call it before creating/listing temp files, not only at
+    module import.
+    """
+    status: dict[str, bool] = {}
+    for directory in _TTS_REQUIRED_DIRS:
+        try:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+            with contextlib.suppress(Exception):
+                os.chmod(directory, 0o700)
+            status[directory] = os.path.isdir(directory)
+        except Exception:
+            status[directory] = False
+    return status
+
+
+def _tts_temp_dirs_snapshot() -> dict[str, object]:
+    status = _ensure_tts_temp_dirs()
+    return {
+        "root": TTS_TEMP_DIR,
+        "runtime": _RUNTIME_DIR,
+        "cache": _CACHE_DIR,
+        "credentials": _CREDENTIALS_DIR,
+        "ok": all(bool(v) for v in status.values()),
+        "exists": {
+            "root": bool(status.get(TTS_TEMP_DIR)),
+            "runtime": bool(status.get(_RUNTIME_DIR)),
+            "cache": bool(status.get(_CACHE_DIR)),
+            "credentials": bool(status.get(_CREDENTIALS_DIR)),
+        },
+    }
+
+
+_ensure_tts_temp_dirs()
 
 
 @dataclass
@@ -738,6 +777,7 @@ class TTSAudioMixin:
             "queued_items_current": int(sum(state.queue.qsize() for state in self.guild_states.values())),
             "guild_states_current": int(len(self.guild_states)),
             "engines": {},
+            "temp_dirs": _tts_temp_dirs_snapshot(),
         }
         for engine, engine_metrics in dict(metrics.get("engines", {})).items():
             synth_count = int(engine_metrics.get("synth_count", 0) or 0)
@@ -769,11 +809,20 @@ class TTSAudioMixin:
         return True
 
     def _make_runtime_temp_file(self, suffix: str = ".mp3") -> str:
-        fd, path = tempfile.mkstemp(prefix="tts_", suffix=suffix, dir=_RUNTIME_DIR)
+        _ensure_tts_temp_dirs()
+        try:
+            fd, path = tempfile.mkstemp(prefix="tts_", suffix=suffix, dir=_RUNTIME_DIR)
+        except FileNotFoundError:
+            # A cleanup job may have deleted an empty runtime dir between the
+            # import-time mkdir and this synthesis request. Recreate and retry
+            # once so Edge/gTTS/Google do not all fail for the same infra issue.
+            _ensure_tts_temp_dirs()
+            fd, path = tempfile.mkstemp(prefix="tts_", suffix=suffix, dir=_RUNTIME_DIR)
         os.close(fd)
         return path
 
     def _list_tmp_audio_files(self) -> list[tuple[int, float, int, str]]:
+        _ensure_tts_temp_dirs()
         result: list[tuple[int, float, int, str]] = []
         for directory, priority in ((_RUNTIME_DIR, 0), (_CACHE_DIR, 1)):
             try:
@@ -793,6 +842,7 @@ class TTSAudioMixin:
         return result
 
     def _prune_tmp_audio_dir(self, *, protected_paths: Optional[set[str]] = None, force: bool = False) -> None:
+        _ensure_tts_temp_dirs()
         if not self._should_prune_tmp_audio_dir(force=force):
             return
 
