@@ -3778,12 +3778,13 @@ class AudioRouter:
                 "skip",
                 "idle",
                 "stopped",
+                "idle_timeout_disconnect",
             }
             if (
                 status == "idle"
                 and state.current is None
                 and not self._has_pending_track(state)
-                and (reason in {"queue_finished", "manual_stop"} or last_event in internal_idle_events)
+                and (reason in {"queue_finished", "manual_stop", "music_afk"} or last_event in internal_idle_events)
             ):
                 logger.info(
                     "[music/agent] voice_state disconnect tratado como encerramento interno | guild=%s reason=%s event=%s",
@@ -3792,6 +3793,33 @@ class AudioRouter:
                     last_event or "-",
                 )
                 return
+            # O evento de voice_state pode chegar antes do monitor da VPS ver
+            # que o Music Agent entrou em idle/fila vazia. Consulte o worker com
+            # timeout curto antes de acusar desconexão externa.
+            with contextlib.suppress(Exception):
+                payload = await _music_agent_status(timeout_seconds=min(2.0, float(getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0) or 5.0)))
+                remote = self._music_agent_state_from_payload(payload, int(guild.id))
+                if remote:
+                    remote_status = str(remote.get("status") or "").strip().lower()
+                    remote_event = str(remote.get("last_event") or "").strip().lower()
+                    remote_current = remote.get("current") if isinstance(remote.get("current"), dict) else {}
+                    remote_queue_size = int(remote.get("queue_size") or 0)
+                    if remote_status in {"idle", "stopped"} and not remote_current and remote_queue_size <= 0 and remote_event in internal_idle_events:
+                        await self.sync_music_agent_state(
+                            int(guild.id),
+                            None,
+                            remote,
+                            voice_channel_id=int(getattr(before_channel, "id", 0) or 0) or None,
+                            text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+                            queued=False,
+                            create_panel=True,
+                        )
+                        logger.info(
+                            "[music/agent] voice_state disconnect confirmado como idle remoto | guild=%s event=%s",
+                            guild.id,
+                            remote_event or "-",
+                        )
+                        return
 
         actor = await self._find_recent_voice_audit_actor(
             guild,
@@ -3996,6 +4024,16 @@ class AudioRouter:
         track.display_title = title
         track.display_uploader = uploader
         track.display_thumbnail = thumbnail
+        # O Music Agent é dono do áudio, mas o painel da VPS ainda precisa
+        # mostrar a qualidade/fonte como no player antigo. Carregue campos
+        # opcionais enviados pelo worker sem depender de detalhes internos.
+        with contextlib.suppress(Exception):
+            track.resolved_audio_abr = int(float(payload.get("resolved_audio_abr") or payload.get("audio_abr") or payload.get("abr") or 0))
+        with contextlib.suppress(Exception):
+            track.resolved_audio_max_abr = int(float(payload.get("resolved_audio_max_abr") or payload.get("audio_max_abr") or payload.get("max_abr") or track.resolved_audio_abr or 0))
+        track.resolved_audio_ext = str(payload.get("resolved_audio_ext") or payload.get("audio_ext") or payload.get("ext") or "").strip()
+        track.resolved_audio_codec = str(payload.get("resolved_audio_codec") or payload.get("audio_codec") or payload.get("codec") or "").strip()
+        track.resolved_audio_format_id = str(payload.get("resolved_audio_format_id") or payload.get("audio_format_id") or payload.get("format_id") or "").strip()
         return track
 
     def _music_agent_state_from_payload(self, payload: dict, guild_id: int) -> dict:
@@ -4120,6 +4158,34 @@ class AudioRouter:
         except RuntimeError:
             pass
 
+    def _sync_agent_remote_queue(self, state: MusicGuildState, remote: dict) -> None:
+        """Espelha a fila do Music Agent só para painel/controles.
+
+        A fila real continua no worker. A VPS usa essa cópia para mostrar
+        queue/próxima música e manter botões coerentes sem tentar tocar localmente.
+        """
+        if not isinstance(remote, dict):
+            return
+        remote_queue = remote.get("queue")
+        if remote_queue is None and remote.get("queue_size") in (0, "0"):
+            remote_queue = []
+        if not isinstance(remote_queue, list):
+            return
+        mirrored: deque[MusicTrack] = deque(maxlen=MUSIC_HISTORY_MAXSIZE)
+        for item in remote_queue[:MUSIC_QUEUE_MAXSIZE]:
+            if isinstance(item, dict):
+                track = self._track_from_agent_payload(item, None)
+                if track is not None:
+                    mirrored.append(track)
+        state.forward_queue.clear()
+        state.forward_queue.extend(mirrored)
+        # Evita sobras da fila local poluírem o painel quando o backend remoto
+        # assumiu a sessão.
+        with contextlib.suppress(Exception):
+            while not state.queue.empty():
+                state.queue.get_nowait()
+                state.queue.task_done()
+
     async def sync_music_agent_state(
         self,
         guild_id: int,
@@ -4174,6 +4240,7 @@ class AudioRouter:
             ):
                 self._push_history(state, previous_current)
         last_error = str(remote.get("last_error") or "").strip()
+        self._sync_agent_remote_queue(state, remote)
         had_active_agent_session = bool(
             str(getattr(state, "current_backend", "") or "").lower() == "agent"
             and (state.current is not None or previous_status in {"resolving", "starting", "playing", "paused", "queued"})
@@ -4248,6 +4315,15 @@ class AudioRouter:
                 self._set_current_status(state, mapped)
 
         state.current_backend = "agent"
+        if state.current is not None:
+            with contextlib.suppress(Exception):
+                kbps = int(float(getattr(state.current, "resolved_audio_abr", 0) or getattr(state.current, "resolved_audio_max_abr", 0) or 0))
+                if kbps > 0:
+                    state.current_quality_kbps = kbps
+            ext = str(getattr(state.current, "resolved_audio_ext", "") or "").strip()
+            codec = str(getattr(state.current, "resolved_audio_codec", "") or "").strip()
+            if ext or codec:
+                state.current_quality_label = "Worker"
         state.current_lavalink_player = None
         state.current_source = None
         state.paused = raw_status == "paused"

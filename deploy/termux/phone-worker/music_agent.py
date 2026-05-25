@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.13"
+AGENT_VERSION = "0.3.14"
 STARTED_AT = time.time()
 
 
@@ -326,16 +326,26 @@ class AgentMixedAudioSource(discord.AudioSource):
                 self._future_result(future, None)
 
 
-def _select_stream_url(entry: dict[str, Any]) -> str:
+def _format_audio_info(fmt: dict[str, Any], *, url: str = "") -> dict[str, Any]:
+    info = {"stream_url": url or str(fmt.get("url") or "").strip()}
+    info["audio_format_id"] = short_text(fmt.get("format_id"), 40)
+    info["audio_ext"] = short_text(fmt.get("ext"), 20).lower()
+    info["audio_codec"] = short_text(fmt.get("acodec") or fmt.get("codec"), 40).lower()
+    with contextlib.suppress(Exception):
+        info["audio_abr"] = int(float(fmt.get("abr") or fmt.get("tbr") or 0))
+    return info
+
+
+def _select_stream_info(entry: dict[str, Any]) -> dict[str, Any]:
     for item in entry.get("requested_downloads") or []:
         if isinstance(item, dict):
             url = str(item.get("url") or "").strip()
             if url.startswith(("http://", "https://")):
-                return url
+                return _format_audio_info(item, url=url)
     url = str(entry.get("url") or "").strip()
     if url.startswith(("http://", "https://")) and "youtube.com/watch" not in url and "youtu.be/" not in url:
-        return url
-    best_url = ""
+        return _format_audio_info(entry, url=url)
+    best: dict[str, Any] = {}
     best_score = -1.0
     for fmt in entry.get("formats") or []:
         if not isinstance(fmt, dict):
@@ -350,9 +360,13 @@ def _select_stream_url(entry: dict[str, Any]) -> str:
         if str(fmt.get("vcodec") or "").lower() in {"", "none"}:
             score += 10000
         if score > best_score:
-            best_url = candidate
+            best = _format_audio_info(fmt, url=candidate)
             best_score = score
-    return best_url
+    return best
+
+
+def _select_stream_url(entry: dict[str, Any]) -> str:
+    return str(_select_stream_info(entry).get("stream_url") or "")
 
 
 @dataclass
@@ -368,6 +382,10 @@ class AgentTrack:
     thumbnail: str = ""
     source: str = "worker-agent"
     transport_hint: str = ""
+    audio_format_id: str = ""
+    audio_ext: str = ""
+    audio_codec: str = ""
+    audio_abr: int = 0
 
     def public(self) -> dict[str, Any]:
         return {
@@ -381,6 +399,15 @@ class AgentTrack:
             "thumbnail": self.thumbnail,
             "source": self.source,
             "transport_hint": self.transport_hint,
+            "audio_format_id": self.audio_format_id,
+            "audio_ext": self.audio_ext,
+            "audio_codec": self.audio_codec,
+            "audio_abr": self.audio_abr,
+            "resolved_audio_format_id": self.audio_format_id,
+            "resolved_audio_ext": self.audio_ext,
+            "resolved_audio_codec": self.audio_codec,
+            "resolved_audio_abr": self.audio_abr,
+            "resolved_audio_max_abr": self.audio_abr,
         }
 
 
@@ -602,6 +629,10 @@ class MusicAgent:
             thumbnail=short_text(track_meta.get("thumbnail") or resolved.get("thumbnail"), 500),
             source=source if source and source != "worker-agent" else "music-agent-ytdlp",
             transport_hint="direct-cache" if cached else "direct",
+            audio_format_id=short_text(resolved.get("audio_format_id") or resolved.get("format_id"), 40),
+            audio_ext=short_text(resolved.get("audio_ext") or resolved.get("ext"), 20).lower(),
+            audio_codec=short_text(resolved.get("audio_codec") or resolved.get("codec"), 40).lower(),
+            audio_abr=int(float(resolved.get("audio_abr") or resolved.get("abr") or 0) or 0),
         )
         return track
 
@@ -1328,6 +1359,10 @@ class MusicAgent:
                 thumbnail=short_text(track_meta.get("thumbnail"), 500),
                 source=source or "worker-ytdlp",
                 transport_hint="direct",
+                audio_format_id=short_text(track_meta.get("resolved_audio_format_id") or track_meta.get("audio_format_id"), 40),
+                audio_ext=short_text(track_meta.get("resolved_audio_ext") or track_meta.get("audio_ext"), 20).lower(),
+                audio_codec=short_text(track_meta.get("resolved_audio_codec") or track_meta.get("audio_codec"), 40).lower(),
+                audio_abr=int(float(track_meta.get("resolved_audio_abr") or track_meta.get("audio_abr") or 0) or 0),
             )
         cache_key = self._resolve_cache_key(query, track_meta)
         cached = self._resolve_cache_get(cache_key)
@@ -1396,6 +1431,10 @@ class MusicAgent:
                     "thumbnail": thumbnail_hint,
                     "webpage_url": webpage_hint or query,
                     "stream_url": urls[0],
+                    "audio_format_id": "yt-dlp-fast",
+                    "audio_ext": "",
+                    "audio_codec": "",
+                    "audio_abr": 0,
                 }
             self.log("yt_dlp_fast_url_fallback", rc=fast.returncode, error=short_text(fast.stderr, 160))
         cmd = base_cmd + ["-f", self.ytdlp_format, "-J", target]
@@ -1407,7 +1446,8 @@ class MusicAgent:
             data = next((item for item in data.get("entries") or [] if isinstance(item, dict)), {})
         if not isinstance(data, dict) or not data:
             raise RuntimeError("yt-dlp não retornou mídia")
-        stream_url = _select_stream_url(data)
+        stream_info = _select_stream_info(data)
+        stream_url = str(stream_info.get("stream_url") or "")
         if not stream_url:
             raise RuntimeError("yt-dlp não retornou stream_url")
         return {
@@ -1416,7 +1456,7 @@ class MusicAgent:
             "duration": data.get("duration"),
             "thumbnail": data.get("thumbnail") or "",
             "webpage_url": data.get("webpage_url") or data.get("original_url") or query,
-            "stream_url": stream_url,
+            **stream_info,
         }
 
     async def run(self) -> None:

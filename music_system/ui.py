@@ -552,12 +552,20 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
     # não de Music Agent, Lavalink, worker ou fallback.
     backend_label = "Player de música"
     lines.append(f"> -# 🎧 **⠂** `{backend_label}`")
-    if backend not in {"lavalink", "agent"}:
-        format_label = _local_audio_format_label(track)
-        if format_label:
-            lines.append(f"> -# 🎚️ **⠂** `Formato: {format_label}`")
-        elif loading:
-            lines.append("> -# 🎚️ **⠂** `Formato: resolvendo`")
+    format_label = _local_audio_format_label(track)
+    if not format_label and backend == "agent":
+        kbps = 0
+        with contextlib.suppress(Exception):
+            kbps = int(float(getattr(state, "current_quality_kbps", 0) or 0))
+        quality = str(getattr(state, "current_quality_label", "") or "").strip()
+        if kbps:
+            format_label = f"{quality + ' · ' if quality else ''}{kbps}kbps"
+        elif quality:
+            format_label = quality
+    if format_label:
+        lines.append(f"> -# 🎚️ **⠂** `Qualidade: {format_label}`")
+    elif loading:
+        lines.append("> -# 🎚️ **⠂** `Qualidade: resolvendo`")
 
     loop_mode = getattr(state, "loop_mode", None)
     loop_label = getattr(loop_mode, "label", "desligado")

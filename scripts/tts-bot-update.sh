@@ -521,7 +521,7 @@ verify_bot_after_restart() {
   done
 
   if (( health_ok == 1 )); then
-    if [[ "$BOT_WARNINGS_STATUS" != "sem avisos" || "$BOT_COGS_STATUS" == *"com falha"* ]]; then
+    if has_real_warning_text "$BOT_WARNINGS_STATUS" || cogs_have_failures "$BOT_COGS_STATUS"; then
       BOT_HEALTHCHECK_STATUS="OK com avisos"
       UPDATE_HAS_WARNINGS=1
     else
@@ -547,6 +547,27 @@ is_placeholder_status_text() {
   text="$(printf '%s' "$text" | tr -s '[:space:]' ' ' | sed 's/^ *//;s/ *$//')"
   local lower="${text,,}"
   [[ -z "$lower" || "$lower" == "—" || "$lower" == "-" || "$lower" == "sem avisos" || "$lower" == "sem mudanças" || "$lower" == "não alterado" || "$lower" == "nao alterado" || "$lower" == "não verificado" || "$lower" == "nao verificado" ]]
+}
+
+cogs_have_failures() {
+  local text="${1:-}"
+  text="${text//$'\r'/}"
+  text="${text//$'\n'/ }"
+  text="$(printf '%s' "$text" | tr -s '[:space:]' ' ' | sed 's/^ *//;s/ *$//')"
+  local lower="${text,,}"
+  if [[ -z "$lower" || "$lower" == "—" || "$lower" == "-" || "$lower" == "não verificado" || "$lower" == "nao verificado" ]]; then
+    return 1
+  fi
+  if [[ "$lower" =~ (^|[^0-9])0[[:space:]]+com[[:space:]]+falha ]]; then
+    return 1
+  fi
+  if [[ "$lower" =~ ([1-9][0-9]*)[[:space:]]+com[[:space:]]+falha ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"cog"* && ( "$lower" == *"falhou"* || "$lower" == *"erro"* || "$lower" == *"failed"* ) ]]; then
+    return 0
+  fi
+  return 1
 }
 
 has_real_warning_text() {
@@ -577,7 +598,7 @@ normalize_final_health_warning_state() {
   # O status "OK com avisos" só pode permanecer se houver aviso real e exibível.
   # Caso contrário, a mensagem final vira contraditória: título amarelo com "Avisos: sem avisos".
   if [[ "$BOT_HEALTHCHECK_STATUS" == "OK com avisos" ]]; then
-    if ! has_real_warning_text "$BOT_WARNINGS_STATUS" && [[ "$BOT_COGS_STATUS" != *"com falha"* ]]; then
+    if ! has_real_warning_text "$BOT_WARNINGS_STATUS" && ! cogs_have_failures "$BOT_COGS_STATUS"; then
       BOT_HEALTHCHECK_STATUS="OK"
     fi
   fi
@@ -592,7 +613,7 @@ recompute_update_warning_flag() {
   if has_real_warning_text "$BOT_WARNINGS_STATUS"; then
     UPDATE_HAS_WARNINGS=1
   fi
-  if [[ "$BOT_COGS_STATUS" == *"com falha"* ]]; then
+  if cogs_have_failures "$BOT_COGS_STATUS"; then
     UPDATE_HAS_WARNINGS=1
   fi
   if [[ "$BOT_HEALTHCHECK_STATUS" == *"sem resposta"* ]]; then
@@ -1289,7 +1310,7 @@ deploy_bot() {
 
   STAGE="healthcheck do bot"
   if refresh_bot_health_status; then
-    if [[ "$BOT_WARNINGS_STATUS" != "sem avisos" || "$BOT_COGS_STATUS" == *"com falha"* ]]; then
+    if has_real_warning_text "$BOT_WARNINGS_STATUS" || cogs_have_failures "$BOT_COGS_STATUS"; then
       BOT_HEALTHCHECK_STATUS="OK com avisos"
       UPDATE_HAS_WARNINGS=1
     else
@@ -1725,6 +1746,20 @@ if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then
   [[ "$ACTIVITY_HEALTHCHECK_STATUS" == "OK" ]] || OVERALL_FATAL=1
 fi
 recompute_update_warning_flag
+
+# Trava final: a mensagem pública nunca deve ficar amarela quando a própria
+# seção de avisos/saúde não tem aviso real. Detalhes informativos como
+# "timer ativo", "unit instalada" ou "0 com falha" são sucesso, não warning.
+if (( UPDATE_HAS_WARNINGS == 1 )); then
+  if ! has_real_warning_text "$BOT_WARNINGS_STATUS" \
+    && ! cogs_have_failures "$BOT_COGS_STATUS" \
+    && [[ "$BOT_HEALTHCHECK_STATUS" != falhou:* ]] \
+    && [[ "$BOT_HEALTHCHECK_STATUS" != *"sem resposta"* ]] \
+    && [[ "$BOT_HEALTHCHECK_STATUS" != "OK com avisos" ]]; then
+    logger -t "$LOG_TAG" "auto-update: warning público normalizado para sucesso; sem warning exibível"
+    UPDATE_HAS_WARNINGS=0
+  fi
+fi
 
 if (( OVERALL_FATAL == 0 && UPDATE_HAS_WARNINGS == 0 )); then
   ALERT_TYPE="success"
