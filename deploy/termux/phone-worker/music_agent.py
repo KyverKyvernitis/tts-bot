@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.14"
+AGENT_VERSION = "0.3.15"
 STARTED_AT = time.time()
 
 
@@ -386,6 +386,7 @@ class AgentTrack:
     audio_ext: str = ""
     audio_codec: str = ""
     audio_abr: int = 0
+    start_offset_seconds: float = 0.0
 
     def public(self) -> dict[str, Any]:
         return {
@@ -408,6 +409,7 @@ class AgentTrack:
             "resolved_audio_codec": self.audio_codec,
             "resolved_audio_abr": self.audio_abr,
             "resolved_audio_max_abr": self.audio_abr,
+            "start_offset_seconds": self.start_offset_seconds,
         }
 
 
@@ -432,6 +434,7 @@ class GuildMusicState:
     volume_percent: int = 55
     normal_volume_percent: int = 55
     ducked: bool = False
+    playback_token: int = 0
 
     def public(self) -> dict[str, Any]:
         player = self.player
@@ -454,6 +457,10 @@ class GuildMusicState:
                 playing = bool(playing or getattr(player, "playing", False))
             with contextlib.suppress(Exception):
                 position_ms = int(float(getattr(player, "position", 0) or 0))
+        if position_ms <= 0 and self.current is not None and self.status in {"playing", "paused"} and self.started_monotonic:
+            with contextlib.suppress(Exception):
+                base = max(0.0, float(getattr(self.current, "start_offset_seconds", 0.0) or 0.0))
+                position_ms = int(max(0.0, base + (time.monotonic() - float(self.started_monotonic))) * 1000)
         status_age = max(0.0, time.time() - float(self.updated_at or time.time()))
         return {
             "guild_id": self.guild_id,
@@ -633,6 +640,7 @@ class MusicAgent:
             audio_ext=short_text(resolved.get("audio_ext") or resolved.get("ext"), 20).lower(),
             audio_codec=short_text(resolved.get("audio_codec") or resolved.get("codec"), 40).lower(),
             audio_abr=int(float(resolved.get("audio_abr") or resolved.get("abr") or 0) or 0),
+            start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
         )
         return track
 
@@ -814,6 +822,8 @@ class MusicAgent:
             return await self.cmd_skip(body)
         if action == "volume":
             return await self.cmd_volume(body)
+        if action in {"seek", "set_position", "select_moment"}:
+            return await self.cmd_seek(body)
         if action in {"duck", "duck_volume", "tts_duck"}:
             return await self.cmd_duck(body)
         if action in {"unduck", "restore_volume", "tts_restore"}:
@@ -924,6 +934,7 @@ class MusicAgent:
         st.paused = False
         player = st.player
         st.player = None
+        st.playback_token += 1
         if player:
             with contextlib.suppress(Exception):
                 if isinstance(player, getattr(wavelink, "Player", ())):
@@ -941,6 +952,7 @@ class MusicAgent:
         st.last_action = "skip"
         player = st.player
         st.current = None
+        st.playback_token += 1
         if player:
             with contextlib.suppress(Exception):
                 if isinstance(player, getattr(wavelink, "Player", ())):
@@ -949,6 +961,63 @@ class MusicAgent:
                     player.stop()
         await self._play_next(guild_id)
         return {"ok": True, "state": st.public()}
+
+    async def cmd_seek(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id = safe_id(body.get("guild_id"))
+        raw = body.get("position_seconds")
+        if raw is None:
+            raw = body.get("seconds")
+        if raw is None and body.get("position_ms") is not None:
+            raw = float(body.get("position_ms") or 0) / 1000.0
+        try:
+            target = max(0.0, float(raw or 0.0))
+        except Exception:
+            return {"ok": False, "error": "tempo inválido", "state": self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id)).public()}
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        track = st.current
+        if track is None:
+            return {"ok": False, "error": "não há música tocando agora", "state": st.public()}
+        if track.duration is not None:
+            try:
+                duration = float(track.duration)
+                if duration > 0 and target > duration:
+                    return {"ok": False, "error": f"momento passa da duração da música ({int(duration)}s)", "state": st.public()}
+            except Exception:
+                pass
+        st.last_action = "seek"
+        player = st.player
+        if player is not None and isinstance(player, getattr(wavelink, "Player", ())) :
+            position_ms = max(0, int(target * 1000))
+            seeker = getattr(player, "seek", None)
+            if callable(seeker):
+                maybe = seeker(position_ms)
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+                st.started_monotonic = time.monotonic() - target
+                self._set_status(st, "playing", event="seek")
+                return {"ok": True, "position_seconds": target, "state": st.public()}
+            return {"ok": False, "error": "backend atual não aceitou seek", "state": st.public()}
+        if not track.stream_url:
+            try:
+                track = await self.resolve_track(track.webpage_url or track.query or track.title, track_meta=track.public(), body=body)
+                st.current = track
+            except Exception as exc:
+                return {"ok": False, "error": f"não consegui preparar seek: {short_text(exc, 180)}", "state": st.public()}
+        track.start_offset_seconds = target
+        st.current = track
+        st.paused = False
+        st.playback_token += 1
+        if player is not None:
+            with contextlib.suppress(Exception):
+                if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
+                    player.stop()
+        try:
+            await self._play_direct_voice(guild_id, track)
+        except Exception as exc:
+            self._set_status(st, "failed", event="seek_failed", error=short_text(exc, 260))
+            return {"ok": False, "error": st.last_error or "seek falhou", "state": st.public()}
+        self._set_status(st, "playing", event="seek")
+        return {"ok": True, "position_seconds": target, "state": st.public()}
 
     async def _apply_player_volume(self, st: GuildMusicState, volume: int) -> bool:
         volume = max(0, min(1000, int(volume)))
@@ -1196,17 +1265,19 @@ class MusicAgent:
                 await voice_client.move_to(channel)
         if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
             voice_client.stop()
-        source = self._build_ffmpeg_source(track.stream_url, volume_percent=st.volume_percent)
+        source = self._build_ffmpeg_source(track.stream_url, volume_percent=st.volume_percent, start_offset_seconds=getattr(track, "start_offset_seconds", 0.0))
         st.player = voice_client
         st.transport = "direct"
+        st.playback_token += 1
+        playback_token = st.playback_token
         self._set_status(st, "starting", event="direct_player_starting")
-        self.log("player_play_called", guild_id=guild_id, transport="direct", title=track.title)
+        self.log("player_play_called", guild_id=guild_id, transport="direct", title=track.title, offset=round(float(getattr(track, "start_offset_seconds", 0.0) or 0.0), 2))
 
         def after(error: Exception | None) -> None:
             loop = self._loop
             if loop is None or loop.is_closed():
                 return
-            asyncio.run_coroutine_threadsafe(self._direct_after(guild_id, error), loop)
+            asyncio.run_coroutine_threadsafe(self._direct_after(guild_id, error, playback_token), loop)
 
         voice_client.play(source, after=after)
         # Confirmação curta: evita segurar a UI/reação depois que discord.py já
@@ -1217,16 +1288,28 @@ class MusicAgent:
             raise RuntimeError("conectei no canal, mas a voz caiu antes do áudio")
         if not getattr(voice_client, "is_playing", lambda: False)() and not getattr(voice_client, "is_paused", lambda: False)():
             raise RuntimeError("ffmpeg iniciou, mas o áudio não ficou tocando")
+        st.started_monotonic = time.monotonic() - max(0.0, float(getattr(track, "start_offset_seconds", 0.0) or 0.0))
         self._set_status(st, "playing", event="direct_track_start_confirmed")
         self.log("play_started", guild_id=guild_id, transport="direct", title=track.title, confirm_delay=confirm_delay)
 
-    def _build_ffmpeg_source(self, stream_url: str, *, volume_percent: int | None = None) -> discord.AudioSource:
+    def _ffmpeg_before_options_for_offset(self, start_offset_seconds: float = 0.0) -> str:
+        try:
+            offset = max(0.0, float(start_offset_seconds or 0.0))
+        except Exception:
+            offset = 0.0
+        if offset <= 0.05:
+            return self.ffmpeg_before_options
+        # -ss antes do input torna o seek rápido para URLs remotas.
+        return f"-ss {offset:.3f} {self.ffmpeg_before_options}".strip()
+
+    def _build_ffmpeg_source(self, stream_url: str, *, volume_percent: int | None = None, start_offset_seconds: float = 0.0) -> discord.AudioSource:
         volume = max(0.0, min(10.0, float(volume_percent if volume_percent is not None else self.default_volume_percent) / 100.0))
+        before_options = self._ffmpeg_before_options_for_offset(start_offset_seconds)
         if self.direct_pcm_volume_enabled:
             pcm = discord.FFmpegPCMAudio(
                 stream_url,
                 executable=self.ffmpeg_executable,
-                before_options=self.ffmpeg_before_options,
+                before_options=before_options,
                 options=self.ffmpeg_options,
             )
             loop = self._loop or asyncio.get_running_loop()
@@ -1236,20 +1319,22 @@ class MusicAgent:
             return opus_cls(
                 stream_url,
                 executable=self.ffmpeg_executable,
-                before_options=self.ffmpeg_before_options,
+                before_options=before_options,
                 options=self.ffmpeg_options,
                 bitrate=self.ffmpeg_bitrate,
             )
         pcm = discord.FFmpegPCMAudio(
             stream_url,
             executable=self.ffmpeg_executable,
-            before_options=self.ffmpeg_before_options,
+            before_options=before_options,
             options=self.ffmpeg_options,
         )
         return discord.PCMVolumeTransformer(pcm, volume=volume)
 
-    async def _direct_after(self, guild_id: int, error: Exception | None) -> None:
+    async def _direct_after(self, guild_id: int, error: Exception | None, playback_token: int = 0) -> None:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        if playback_token and playback_token != int(getattr(st, "playback_token", 0) or 0):
+            return
         if st.current is None and not st.queue:
             return
         played_for = time.monotonic() - float(st.started_monotonic or 0.0) if st.started_monotonic else 0.0
@@ -1363,6 +1448,7 @@ class MusicAgent:
                 audio_ext=short_text(track_meta.get("resolved_audio_ext") or track_meta.get("audio_ext"), 20).lower(),
                 audio_codec=short_text(track_meta.get("resolved_audio_codec") or track_meta.get("audio_codec"), 40).lower(),
                 audio_abr=int(float(track_meta.get("resolved_audio_abr") or track_meta.get("audio_abr") or 0) or 0),
+                start_offset_seconds=max(0.0, float(track_meta.get("start_offset_seconds") or track_meta.get("start") or body.get("position_seconds") or 0.0)),
             )
         cache_key = self._resolve_cache_key(query, track_meta)
         cached = self._resolve_cache_get(cache_key)

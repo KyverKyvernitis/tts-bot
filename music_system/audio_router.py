@@ -3821,6 +3821,31 @@ class AudioRouter:
                         )
                         return
 
+        if str(getattr(state, "current_backend", "") or "").lower() == "agent" and state.current is not None:
+            # Em alguns eventos do worker-owned voice, o Discord envia o voice_state
+            # antes da VPS receber o idle/queue_empty do Music Agent. Se a faixa já
+            # chegou ao fim esperado, não transforme isso em "desconectado por alguém".
+            with contextlib.suppress(Exception):
+                duration = float(getattr(state.current, "duration", 0) or 0)
+                elapsed = (time.monotonic() - float(getattr(state, "current_started_at_monotonic", 0.0) or 0.0)) + float(getattr(state, "current_start_offset_seconds", 0.0) or 0.0)
+                if duration > 0 and elapsed >= max(0.0, duration - 8.0):
+                    self._push_history(state, state.current)
+                    state.current = None
+                    state.paused = False
+                    state.music_session_active = False
+                    state.agent_last_idle_event = "natural_end_grace"
+                    self._set_idle_reason(state, "queue_finished")
+                    self._set_current_status(state, "idle")
+                    self._mark_internal_voice_disconnect(guild.id, seconds=12.0)
+                    await self.update_panel(guild.id, create=True)
+                    logger.info(
+                        "[music/agent] voice_state disconnect tratado como fim natural por tempo da faixa | guild=%s elapsed=%.1f duration=%.1f",
+                        guild.id,
+                        elapsed,
+                        duration,
+                    )
+                    return
+
         actor = await self._find_recent_voice_audit_actor(
             guild,
             disconnected=True,
@@ -5555,6 +5580,39 @@ class AudioRouter:
 
         target_label = self._format_seconds(target)
         backend = str(getattr(state, "current_backend", "local") or "local").lower()
+        if backend == "agent":
+            try:
+                result = await _music_agent_command(
+                    "seek",
+                    guild_id=int(guild_id),
+                    position_seconds=target,
+                    requester_id=int(getattr(track, "requester_id", 0) or 0),
+                    requester_name=str(getattr(track, "requester_name", "") or ""),
+                )
+            except Exception as exc:
+                logger.warning("[music/agent] falha ao selecionar momento | guild=%s target=%.2fs erro=%s", guild_id, target, exc)
+                return False, "Não consegui selecionar esse momento no player atual."
+            remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
+            if remote:
+                await self.sync_music_agent_state(
+                    int(guild_id),
+                    track,
+                    remote,
+                    voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
+                    text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+                    queued=False,
+                    create_panel=True,
+                )
+            if not bool(isinstance(result, dict) and result.get("ok")):
+                return False, str((result or {}).get("error") or "O player atual não aceitou selecionar momento.")
+            state.current_started_at_monotonic = time.monotonic()
+            state.current_start_offset_seconds = target
+            state.paused = False
+            self._mark_voice_status_track_change(state)
+            self._schedule_voice_status_track_sync(guild_id, repeat_after=0.75, reason="seek")
+            self._schedule_panel_update(guild_id, create=bool(state.now_message))
+            return True, f"`💠` Pulando para `{target_label}`."
+
         if backend == "lavalink" or state.current_lavalink_player is not None:
             try:
                 ok = await self._seek_lavalink_current(guild_id, state, target)
@@ -5608,6 +5666,20 @@ class AudioRouter:
         await self._persist_volume(guild_id, volume)
         if state.current_source is not None:
             state.current_source.set_music_volume(volume)
+        if state.current_backend == "agent":
+            with contextlib.suppress(Exception):
+                result = await _music_agent_command("volume", guild_id=int(guild_id), volume_percent=int(round(volume * 100)))
+                remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
+                if remote:
+                    await self.sync_music_agent_state(
+                        int(guild_id),
+                        state.current,
+                        remote,
+                        voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
+                        text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+                        queued=False,
+                        create_panel=False,
+                    )
         if state.current_backend == "lavalink":
             await self.backends.set_lavalink_player_volume(guild_id, int(round(volume * 100)))
         self._schedule_panel_update(guild_id, create=False)

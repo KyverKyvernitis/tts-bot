@@ -1330,8 +1330,17 @@ deploy_bot() {
 
 
 deploy_callkeeper() {
+  # Regra de isolamento: updates comuns do bot/música/worker NÃO tocam nos
+  # CallKeepers. Eles rodam separados e devem permanecer na call. Mesmo que
+  # arquivos relacionados apareçam no diff, o updater só pode reinstalar ou
+  # reiniciar CallKeeper com opt-in explícito para um patch de CallKeeper.
   if (( CALLKEEPER_CHANGED == 0 )); then
     CALLKEEPER_STATUS="não alterado"
+    return 0
+  fi
+  if [[ "${UPDATE_TOUCH_CALLKEEPER:-}" != "1" && "${CALLKEEPER_UPDATE_ALLOWED:-}" != "1" ]]; then
+    CALLKEEPER_STATUS="não alterado; isolado do updater"
+    logger -t "$LOG_TAG" "CallKeeper não alterado: update sem opt-in UPDATE_TOUCH_CALLKEEPER=1"
     return 0
   fi
 
@@ -1698,7 +1707,10 @@ if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^android/core-worker-app/'; th
   CORE_WORKER_APK_CHANGED=1
   CORE_WORKER_AUTOMATION_REQUIRED=1
 fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(callkeeper_service\.py|callkeeper_runtime/|deploy/systemd/callkeeper\.service|config\.py|db\.py|requirements\.txt)$'; then
+# CallKeeper fica isolado de updates comuns. Não trate mudanças genéricas em
+# config.py/db.py/requirements.txt como motivo para tocar no serviço separado.
+# Mesmo com arquivos de CallKeeper alterados, deploy_callkeeper exige opt-in.
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(callkeeper_service\.py|callkeeper_runtime/|cogs/call_keeper\.py|deploy/systemd(/vps)?/callkeeper\.service)$'; then
   CALLKEEPER_CHANGED=1
 fi
 
@@ -1739,7 +1751,7 @@ OVERALL_FATAL=0
 if [[ "$BOT_HEALTHCHECK_STATUS" == falhou:* ]]; then
   OVERALL_FATAL=1
 fi
-if (( CALLKEEPER_CHANGED == 1 )) && [[ "$CALLKEEPER_STATUS" != "OK" ]]; then
+if (( CALLKEEPER_CHANGED == 1 )) && [[ "$CALLKEEPER_STATUS" != "OK" && "$CALLKEEPER_STATUS" != "não alterado; isolado do updater" ]]; then
   OVERALL_FATAL=1
 fi
 if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then

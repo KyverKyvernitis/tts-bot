@@ -564,6 +564,11 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
             format_label = quality
     if format_label:
         lines.append(f"> -# 🎚️ **⠂** `Qualidade: {format_label}`")
+    elif backend == "agent":
+        # O caminho worker-owned às vezes começa a tocar antes de terminar o
+        # enriquecimento completo de yt-dlp. Ainda assim, mantenha a linha de
+        # qualidade visível para não regredir o painel antigo.
+        lines.append("> -# 🎚️ **⠂** `Qualidade: áudio remoto`")
     elif loading:
         lines.append("> -# 🎚️ **⠂** `Qualidade: resolvendo`")
 
@@ -578,6 +583,8 @@ def build_now_playing_embeds(state, track: MusicTrack) -> list[discord.Embed]:
 
     if queue:
         lines.append(f"> -# 🎶 **⠂** `{len(queue)} música{'s' if len(queue) != 1 else ''} no queue`")
+    else:
+        lines.append("> -# 🎶 **⠂** `Queue vazio`")
 
 
     for label, count, needed in list(getattr(state, "panel_vote_summary", []) or []):
