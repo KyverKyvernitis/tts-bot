@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.12"
+AGENT_VERSION = "0.3.13"
 STARTED_AT = time.time()
 
 
@@ -491,7 +491,13 @@ class MusicAgent:
         self.direct_pcm_volume_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_PCM_VOLUME_ENABLED"), True)
         self.prepare_timeout = env_float("MUSIC_AGENT_PREPARING_TIMEOUT_SECONDS", 30.0)
         self.idle_disconnect_seconds = max(15.0, env_float("MUSIC_AGENT_IDLE_DISCONNECT_SECONDS", env_float("MUSIC_IDLE_DISCONNECT_SECONDS", 120.0)))
+        self.resolve_cache_ttl = max(0.0, env_float("MUSIC_AGENT_RESOLVE_CACHE_TTL_SECONDS", 300.0))
+        self.prefetch_enabled = truthy(os.getenv("MUSIC_AGENT_PREFETCH_ENABLED"), True)
+        self.prefetch_timeout = max(3.0, env_float("MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS", 18.0))
         self._idle_disconnect_tasks: dict[int, asyncio.Task] = {}
+        self._resolve_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._resolve_locks: dict[str, asyncio.Lock] = {}
+        self._prefetch_tasks: dict[str, asyncio.Task] = {}
         intents = discord.Intents.none()
         intents.guilds = True
         intents.voice_states = True
@@ -547,6 +553,69 @@ class MusicAgent:
                 self.log("play_failed", guild_id=guild_id, transport="lavalink", error=err)
                 if st.queue:
                     await self._play_next(guild_id)
+
+    def _resolve_cache_key(self, query: str, track_meta: dict[str, Any] | None = None) -> str:
+        meta = track_meta or {}
+        raw = str(meta.get("webpage_url") or meta.get("original_url") or meta.get("stream_url") or query or "").strip().lower()
+        raw = re.sub(r"[?&](utm_[^=&]+|feature|si)=[^&]+", "", raw)
+        return raw or str(query or "").strip().lower()
+
+    def _resolve_cache_get(self, key: str) -> dict[str, Any] | None:
+        if self.resolve_cache_ttl <= 0 or not key:
+            return None
+        item = self._resolve_cache.get(key)
+        if not item:
+            return None
+        created, data = item
+        if time.monotonic() - created > self.resolve_cache_ttl:
+            self._resolve_cache.pop(key, None)
+            return None
+        return dict(data)
+
+    def _resolve_cache_put(self, key: str, data: dict[str, Any]) -> None:
+        if self.resolve_cache_ttl <= 0 or not key or not data.get("stream_url"):
+            return
+        if len(self._resolve_cache) >= 96:
+            oldest = min(self._resolve_cache.items(), key=lambda item: item[1][0])[0]
+            self._resolve_cache.pop(oldest, None)
+        self._resolve_cache[key] = (time.monotonic(), dict(data))
+
+    def _agent_track_from_resolved(self, resolved: dict[str, Any], *, query: str, track_meta: dict[str, Any], body: dict[str, Any], cached: bool = False) -> AgentTrack:
+        title_hint = _metadata_text(track_meta.get("title") or body.get("title"), limit=160)
+        requester_id = safe_id(body.get("requester_id") or track_meta.get("requester_id"))
+        requester_name = short_text(body.get("requester_name") or track_meta.get("requester_name"), 80)
+        meta_uploader = _metadata_text(track_meta.get("uploader"), limit=120)
+        meta_duration = _float_or_none(track_meta.get("duration"))
+        source = short_text(track_meta.get("source") or body.get("source") or "worker-agent", 80)
+        webpage_url = str(track_meta.get("webpage_url") or track_meta.get("original_url") or resolved.get("webpage_url") or query).strip()
+        resolved_title = _metadata_text(resolved.get("title"), limit=160)
+        resolved_uploader = _metadata_text(resolved.get("uploader"), limit=120)
+        track = AgentTrack(
+            title=title_hint or resolved_title or short_text(query, 160) or "Música",
+            requester_id=requester_id,
+            requester_name=requester_name,
+            query=query,
+            webpage_url=webpage_url,
+            stream_url=str(resolved.get("stream_url") or ""),
+            duration=meta_duration if meta_duration is not None else _float_or_none(resolved.get("duration")),
+            uploader=meta_uploader or resolved_uploader,
+            thumbnail=short_text(track_meta.get("thumbnail") or resolved.get("thumbnail"), 500),
+            source=source if source and source != "worker-agent" else "music-agent-ytdlp",
+            transport_hint="direct-cache" if cached else "direct",
+        )
+        return track
+
+    async def _prefetch_track(self, body: dict[str, Any], track_meta: dict[str, Any], query: str, cache_key: str) -> None:
+        try:
+            started = time.time()
+            await asyncio.wait_for(self.resolve_track(query, track_meta=track_meta, body=body), timeout=self.prefetch_timeout)
+            self.log("prefetch_ok", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), elapsed_ms=round((time.time() - started) * 1000.0, 1))
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            self.log("prefetch_failed", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), error=short_text(exc, 180))
+        finally:
+            self._prefetch_tasks.pop(cache_key, None)
 
     def _auth_ok(self, request: web.Request) -> bool:
         if not self.token:
@@ -720,7 +789,40 @@ class MusicAgent:
             return await self.cmd_unduck(body)
         if action in {"tts", "tts_play", "speak"}:
             return await self.cmd_tts(body)
+        if action in {"prefetch", "prepare", "preload"}:
+            return await self.cmd_prefetch(body)
         raise ValueError("ação do Music Agent não suportada")
+
+    async def cmd_prefetch(self, body: dict[str, Any]) -> dict[str, Any]:
+        if not self.prefetch_enabled:
+            return {"ok": True, "accepted": 0, "disabled": True}
+        tracks = body.get("tracks") if isinstance(body.get("tracks"), list) else []
+        if not tracks:
+            single = body.get("track") if isinstance(body.get("track"), dict) else {}
+            if single:
+                tracks = [single]
+        try:
+            limit = max(0, min(3, int(float(body.get("limit") or len(tracks) or 0))))
+        except Exception:
+            limit = min(2, len(tracks))
+        accepted = 0
+        for meta in tracks[:limit]:
+            if not isinstance(meta, dict):
+                continue
+            query = str(meta.get("webpage_url") or meta.get("original_url") or meta.get("stream_url") or meta.get("title") or body.get("query") or "").strip()
+            if not query:
+                continue
+            cache_key = self._resolve_cache_key(query, meta)
+            if self._resolve_cache_get(cache_key):
+                continue
+            if cache_key in self._prefetch_tasks and not self._prefetch_tasks[cache_key].done():
+                continue
+            child = dict(body)
+            child["track"] = dict(meta)
+            task = asyncio.create_task(self._prefetch_track(child, dict(meta), query, cache_key))
+            self._prefetch_tasks[cache_key] = task
+            accepted += 1
+        return {"ok": True, "accepted": accepted, "cache_size": len(self._resolve_cache)}
 
     async def cmd_play(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
@@ -1078,7 +1180,7 @@ class MusicAgent:
         voice_client.play(source, after=after)
         # Confirmação curta: evita segurar a UI/reação depois que discord.py já
         # iniciou o FFmpeg, mas ainda confirma que a voz realmente ficou tocando.
-        confirm_delay = max(0.25, min(1.2, env_float("MUSIC_AGENT_DIRECT_CONFIRM_SECONDS", 0.55)))
+        confirm_delay = max(0.25, min(1.2, env_float("MUSIC_AGENT_DIRECT_CONFIRM_SECONDS", 0.35)))
         await asyncio.sleep(confirm_delay)
         if not getattr(voice_client, "is_connected", lambda: False)():
             raise RuntimeError("conectei no canal, mas a voz caiu antes do áudio")
@@ -1227,25 +1329,22 @@ class MusicAgent:
                 source=source or "worker-ytdlp",
                 transport_hint="direct",
             )
-        resolved = await asyncio.to_thread(self._resolve_with_ytdlp, query)
-        resolved_title = _metadata_text(resolved.get("title"), limit=160)
-        resolved_uploader = _metadata_text(resolved.get("uploader"), limit=120)
-        meta_uploader = _metadata_text(track_meta.get("uploader"), limit=120)
-        meta_duration = _float_or_none(track_meta.get("duration"))
-        resolved_duration = _float_or_none(resolved.get("duration"))
-        return AgentTrack(
-            title=title_hint or resolved_title or short_text(query, 160) or "Música",
-            requester_id=requester_id,
-            requester_name=requester_name,
-            query=query,
-            webpage_url=str(resolved.get("webpage_url") or webpage_url or query),
-            stream_url=str(resolved.get("stream_url") or ""),
-            duration=meta_duration if meta_duration is not None else resolved_duration,
-            uploader=meta_uploader or resolved_uploader,
-            thumbnail=short_text(track_meta.get("thumbnail") or resolved.get("thumbnail"), 500),
-            source="music-agent-ytdlp",
-            transport_hint="direct",
-        )
+        cache_key = self._resolve_cache_key(query, track_meta)
+        cached = self._resolve_cache_get(cache_key)
+        if cached:
+            self.log("resolve_cache_hit", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
+            return self._agent_track_from_resolved(cached, query=query, track_meta=track_meta, body=body, cached=True)
+        lock = self._resolve_locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            cached = self._resolve_cache_get(cache_key)
+            if cached:
+                self.log("resolve_cache_hit_after_wait", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), query=query[:90])
+                return self._agent_track_from_resolved(cached, query=query, track_meta=track_meta, body=body, cached=True)
+            started = time.time()
+            resolved = await asyncio.to_thread(self._resolve_with_ytdlp, query)
+            self._resolve_cache_put(cache_key, resolved)
+            self.log("resolve_ytdlp_done", guild_id=safe_id(body.get("guild_id")), elapsed_ms=round((time.time() - started) * 1000.0, 1), title=resolved.get("title"))
+            return self._agent_track_from_resolved(resolved, query=query, track_meta=track_meta, body=body, cached=False)
 
     def _resolve_with_ytdlp(self, query: str) -> dict[str, Any]:
         target = query

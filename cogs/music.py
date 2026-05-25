@@ -72,6 +72,68 @@ class Music(commands.Cog):
     def _music_agent_default_enabled(self) -> bool:
         return bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and getattr(self.router, "music_worker_only_enabled", lambda: False)()
 
+    def _schedule_music_agent_prefetch(
+        self,
+        guild_id: int,
+        tracks: list[MusicTrack],
+        *,
+        voice_channel_id: int = 0,
+        text_channel_id: int = 0,
+        requester_id: int = 0,
+        requester_name: str = "",
+    ) -> None:
+        if not self._music_agent_default_enabled() or not bool(getattr(config, "MUSIC_AGENT_PREFETCH_ENABLED", True)):
+            return
+        try:
+            limit = max(0, min(3, int(getattr(config, "MUSIC_AGENT_PREFETCH_TOP_RESULTS", 2) or 0)))
+        except Exception:
+            limit = 2
+        if limit <= 0 or not tracks:
+            return
+
+        def serialize(track: MusicTrack) -> dict:
+            return {
+                "title": track.title,
+                "webpage_url": track.webpage_url,
+                "original_url": track.original_url,
+                "stream_url": track.stream_url,
+                "duration": track.duration,
+                "uploader": track.uploader,
+                "thumbnail": track.thumbnail,
+                "source": track.source,
+                "extractor": track.extractor,
+                "requester_id": requester_id or track.requester_id,
+                "requester_name": requester_name or track.requester_name,
+            }
+
+        payload_tracks = [serialize(track) for track in tracks[:limit]]
+
+        async def runner() -> None:
+            started = time.monotonic()
+            try:
+                result = await music_agent_command(
+                    "prefetch",
+                    guild_id=guild_id,
+                    voice_channel_id=voice_channel_id,
+                    text_channel_id=text_channel_id,
+                    requester_id=requester_id,
+                    requester_name=requester_name,
+                    tracks=payload_tracks,
+                    limit=len(payload_tracks),
+                    timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0),
+                )
+                logger.info(
+                    "[music/timing] prefetch solicitado | guild=%s tracks=%s accepted=%s elapsed_ms=%.1f",
+                    guild_id,
+                    len(payload_tracks),
+                    result.get("accepted") if isinstance(result, dict) else "?",
+                    (time.monotonic() - started) * 1000.0,
+                )
+            except Exception as exc:
+                logger.debug("[music/timing] prefetch ignorado | guild=%s erro=%s", guild_id, exc)
+
+        asyncio.create_task(runner())
+
 
     def _music_agent_guild_state(self, payload: dict, guild_id: int) -> dict:
         guilds = payload.get("guilds") if isinstance(payload, dict) else {}
@@ -160,8 +222,9 @@ class Music(commands.Cog):
         limit = float(seconds or getattr(config, "MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", 30.0) or 30.0)
         deadline = asyncio.get_running_loop().time() + max(5.0, limit)
         last_status = ""
+        poll = max(0.4, min(1.5, float(getattr(config, "MUSIC_AGENT_STATUS_POLL_SECONDS", 0.75) or 0.75)))
         while asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(poll)
             try:
                 payload = await music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 3.5))
                 state = self._music_agent_guild_state(payload, guild_id)
@@ -434,7 +497,9 @@ class Music(commands.Cog):
         finish_loading_reaction = True
         try:
             if getattr(self.router, "music_worker_only_enabled", lambda: False)():
+                worker_check_started = time.monotonic()
                 selection = await self.router.ensure_music_worker_available()
+                logger.info("[music/timing] worker checado | guild=%s elapsed_ms=%.1f available=%s", ctx.guild.id, (time.monotonic() - worker_check_started) * 1000.0, getattr(selection, "available", False))
                 if not getattr(selection, "available", False):
                     logger.info("[music/worker] play bloqueado: %s", getattr(selection, "reason", "worker indisponível"))
                     await self._reply(ctx, getattr(selection, "message", "") or getattr(self.router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online"))
@@ -610,6 +675,14 @@ class Music(commands.Cog):
                     ctx,
                     embed=embed,
                     view=SearchResultView(self.router, ctx.guild.id, voice_channel.id, ctx.channel.id, batch.tracks[:10], ctx.author.id),
+                )
+                self._schedule_music_agent_prefetch(
+                    ctx.guild.id,
+                    batch.tracks[:10],
+                    voice_channel_id=voice_channel.id,
+                    text_channel_id=ctx.channel.id,
+                    requester_id=ctx.author.id,
+                    requester_name=requester_name,
                 )
                 return
 

@@ -20,6 +20,84 @@ from music_system.models import ExtractedBatch, MusicTrack
 
 logger = logging.getLogger(__name__)
 _SELECTION_CACHE: dict[str, Any] = {"at": 0.0, "selection": None}
+_RESOLVE_CACHE: dict[tuple[str, int, bool], tuple[float, ExtractedBatch]] = {}
+_RESOLVE_CACHE_MAX_ITEMS = 96
+
+
+def _track_copy_for_request(track: MusicTrack, *, requester_id: int, requester_name: str) -> MusicTrack:
+    clone = MusicTrack(
+        title=track.title,
+        webpage_url=track.webpage_url,
+        requester_id=int(requester_id or track.requester_id or 0),
+        requester_name=requester_name or track.requester_name or "",
+        stream_url=track.stream_url,
+        duration=track.duration,
+        uploader=track.uploader,
+        thumbnail=track.thumbnail,
+        source=track.source,
+        original_url=track.original_url,
+        extractor=track.extractor,
+        is_live=track.is_live,
+    )
+    clone.resolved_at_monotonic = track.resolved_at_monotonic
+    clone.resolved_audio_max_abr = track.resolved_audio_max_abr
+    clone.resolved_audio_abr = track.resolved_audio_abr
+    clone.resolved_audio_ext = track.resolved_audio_ext
+    clone.resolved_audio_codec = track.resolved_audio_codec
+    clone.resolved_audio_format_id = track.resolved_audio_format_id
+    clone.lavalink_playable = track.lavalink_playable
+    clone.lavalink_encoded = track.lavalink_encoded
+    clone.lavalink_query = track.lavalink_query
+    clone.lavalink_resolved = track.lavalink_resolved
+    clone.fallback_reason = track.fallback_reason
+    clone.display_title = track.display_title
+    clone.display_uploader = track.display_uploader
+    clone.display_thumbnail = track.display_thumbnail
+    clone.display_source = track.display_source
+    return clone
+
+
+def _batch_copy_for_request(batch: ExtractedBatch, *, requester_id: int, requester_name: str) -> ExtractedBatch:
+    return ExtractedBatch(
+        tracks=[_track_copy_for_request(track, requester_id=requester_id, requester_name=requester_name) for track in batch.tracks],
+        query=batch.query,
+        is_playlist=batch.is_playlist,
+        playlist_title=batch.playlist_title,
+        truncated=batch.truncated,
+    )
+
+
+def _resolve_cache_ttl(*, metadata_only: bool) -> float:
+    if metadata_only:
+        return max(0.0, float(getattr(config, "MUSIC_WORKER_SEARCH_CACHE_TTL_SECONDS", 420.0) or 0.0))
+    return max(0.0, float(getattr(config, "MUSIC_WORKER_DIRECT_CACHE_TTL_SECONDS", 90.0) or 0.0))
+
+
+def _resolve_cache_key(query: str, limit: int, metadata_only: bool) -> tuple[str, int, bool]:
+    return (str(query or "").strip().lower(), int(limit or 1), bool(metadata_only))
+
+
+def _resolve_cache_get(key: tuple[str, int, bool], *, requester_id: int, requester_name: str, metadata_only: bool) -> ExtractedBatch | None:
+    ttl = _resolve_cache_ttl(metadata_only=metadata_only)
+    if ttl <= 0:
+        return None
+    item = _RESOLVE_CACHE.get(key)
+    if not item:
+        return None
+    created, batch = item
+    if time.monotonic() - created > ttl:
+        _RESOLVE_CACHE.pop(key, None)
+        return None
+    return _batch_copy_for_request(batch, requester_id=requester_id, requester_name=requester_name)
+
+
+def _resolve_cache_put(key: tuple[str, int, bool], batch: ExtractedBatch, *, metadata_only: bool) -> None:
+    if _resolve_cache_ttl(metadata_only=metadata_only) <= 0 or not batch.tracks:
+        return
+    if len(_RESOLVE_CACHE) >= _RESOLVE_CACHE_MAX_ITEMS:
+        oldest = min(_RESOLVE_CACHE.items(), key=lambda item: item[1][0])[0]
+        _RESOLVE_CACHE.pop(oldest, None)
+    _RESOLVE_CACHE[key] = (time.monotonic(), _batch_copy_for_request(batch, requester_id=0, requester_name=""))
 
 MUSIC_WORKER_UNAVAILABLE_MESSAGE = str(
     getattr(config, "MUSIC_WORKER_UNAVAILABLE_MESSAGE", "Sistema de música indisponível no momento: Nenhum worker online")
@@ -586,6 +664,17 @@ async def resolve_music_tracks_on_worker(
     else:
         default_timeout = float(getattr(config, "MUSIC_WORKER_YTDLP_TIMEOUT_SECONDS", 28.0) or 28.0)
     total_timeout = max(5.0, float(timeout_seconds if timeout_seconds is not None else default_timeout))
+    cache_key = _resolve_cache_key(clean_query, max_limit, bool(metadata_only))
+    cached_batch = _resolve_cache_get(cache_key, requester_id=requester_id, requester_name=requester_name, metadata_only=bool(metadata_only))
+    if cached_batch is not None:
+        logger.info(
+            "[music/worker] resolve cache hit | worker=%s query=%r tracks=%s metadata_only=%s",
+            selection.worker_id or selection.name,
+            clean_query,
+            len(cached_batch.tracks),
+            bool(metadata_only),
+        )
+        return cached_batch
     payload = {
         "task": "music_ytdlp_resolve",
         "query": clean_query,
@@ -692,13 +781,15 @@ async def resolve_music_tracks_on_worker(
         data.get("cli_rc"),
         str(data.get("cli_error") or data.get("api_error") or "")[:220],
     )
-    return ExtractedBatch(
+    batch = ExtractedBatch(
         tracks=tracks,
         query=clean_query,
         is_playlist=bool(data.get("is_playlist")),
         playlist_title=str(data.get("playlist_title") or ""),
         truncated=bool(data.get("truncated")),
     )
+    _resolve_cache_put(cache_key, batch, metadata_only=bool(metadata_only))
+    return _batch_copy_for_request(batch, requester_id=requester_id, requester_name=requester_name)
 
 
 

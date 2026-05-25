@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
+import logging
 import time
 from typing import Optional
 
@@ -18,6 +19,7 @@ from .loading_reaction import MusicLoadingReaction
 
 PLAYER_BAR_URL = "https://cdn.discordapp.com/attachments/554468640942981147/1127294696025227367/rainbow_bar3.gif"
 QUEUE_PAGE_SIZE = 8
+logger = logging.getLogger(__name__)
 
 
 def _agent_guild_state(payload: dict, guild_id: int) -> dict:
@@ -97,12 +99,78 @@ async def _sync_agent_panel(router, guild_id: int, voice_channel_id: int, text_c
         )
 
 
+def _schedule_agent_prefetch(
+    router,
+    guild_id: int,
+    tracks: list[MusicTrack],
+    *,
+    voice_channel_id: int = 0,
+    text_channel_id: int = 0,
+    requester_id: int = 0,
+    requester_name: str = "",
+) -> None:
+    if not bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) or not getattr(router, "music_worker_only_enabled", lambda: False)():
+        return
+    if not bool(getattr(config, "MUSIC_AGENT_PREFETCH_ENABLED", True)):
+        return
+    try:
+        limit = max(0, min(3, int(getattr(config, "MUSIC_AGENT_PREFETCH_TOP_RESULTS", 2) or 0)))
+    except Exception:
+        limit = 2
+    if limit <= 0 or not tracks:
+        return
+
+    def serialize(track: MusicTrack) -> dict:
+        return {
+            "title": track.title,
+            "webpage_url": track.webpage_url,
+            "original_url": track.original_url,
+            "stream_url": track.stream_url,
+            "duration": track.duration,
+            "uploader": track.uploader,
+            "thumbnail": track.thumbnail,
+            "source": track.source,
+            "extractor": track.extractor,
+            "requester_id": requester_id or track.requester_id,
+            "requester_name": requester_name or track.requester_name,
+        }
+
+    payload_tracks = [serialize(track) for track in tracks[:limit]]
+
+    async def runner() -> None:
+        started = time.monotonic()
+        try:
+            result = await music_agent_command(
+                "prefetch",
+                guild_id=guild_id,
+                voice_channel_id=voice_channel_id,
+                text_channel_id=text_channel_id,
+                requester_id=requester_id,
+                requester_name=requester_name,
+                tracks=payload_tracks,
+                limit=len(payload_tracks),
+                timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0),
+            )
+            logger.info(
+                "[music/timing] prefetch solicitado por UI | guild=%s tracks=%s accepted=%s elapsed_ms=%.1f",
+                guild_id,
+                len(payload_tracks),
+                result.get("accepted") if isinstance(result, dict) else "?",
+                (time.monotonic() - started) * 1000.0,
+            )
+        except Exception as exc:
+            logger.debug("[music/timing] prefetch UI ignorado | guild=%s erro=%s", guild_id, exc)
+
+    asyncio.create_task(runner())
+
+
 async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, router=None, voice_channel_id: int = 0, text_channel_id: int = 0, seconds: float | None = None, loading_reaction: MusicLoadingReaction | None = None) -> None:
     limit = float(seconds or getattr(config, "MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", 30.0) or 30.0)
     deadline = asyncio.get_running_loop().time() + max(5.0, limit)
     last_status = ""
+    poll = max(0.4, min(1.5, float(getattr(config, "MUSIC_AGENT_STATUS_POLL_SECONDS", 0.75) or 0.75)))
     while asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(poll)
         try:
             payload = await music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 3.5))
             state = _agent_guild_state(payload, guild_id)
@@ -974,6 +1042,15 @@ class AddSongModal(discord.ui.Modal):
                 embed=embed,
                 view=SearchResultView(self.router, guild.id, getattr(voice_channel, "id", 0), getattr(text_channel, "id", 0), batch.tracks[:10], interaction.user.id),
                 ephemeral=True,
+            )
+            _schedule_agent_prefetch(
+                self.router,
+                guild.id,
+                batch.tracks[:10],
+                voice_channel_id=getattr(voice_channel, "id", 0),
+                text_channel_id=getattr(text_channel, "id", 0),
+                requester_id=interaction.user.id,
+                requester_name=requester_name,
             )
             return
 
