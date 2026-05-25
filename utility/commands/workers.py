@@ -684,7 +684,7 @@ def _core_worker_app_jobs_summary_for_worker(worker_id: str) -> dict[str, Any]:
     for key in (install_id, worker_id, "unknown"):
         summary = summaries.get(key) if key else None
         if isinstance(summary, dict):
-            return summary
+            return _core_worker_app_refine_jobs_summary(summary)
     # Compatibilidade se o arquivo ainda não foi regravado pelo Patch 65.
     latest_by_type: dict[str, dict[str, Any]] = {}
     for item in data.get("results") or []:
@@ -702,8 +702,114 @@ def _core_worker_app_jobs_summary_for_worker(worker_id: str) -> dict[str, Any]:
     auto_ok = sum(1 for typ in CORE_WORKER_APP_AUTO_JOB_TYPES if bool((latest_by_type.get(typ) or {}).get("ok")))
     auto_failed = sum(1 for typ in CORE_WORKER_APP_AUTO_JOB_TYPES if isinstance(latest_by_type.get(typ), dict) and not bool((latest_by_type.get(typ) or {}).get("ok")))
     auto_missing = [typ for typ in sorted(CORE_WORKER_APP_AUTO_JOB_TYPES) if typ not in latest_by_type]
-    return {"autoTotal": len(CORE_WORKER_APP_AUTO_JOB_TYPES), "autoOk": auto_ok, "autoFailed": auto_failed, "autoMissing": auto_missing, "manualTotal": len(CORE_WORKER_APP_MANUAL_JOB_TYPES), "pending": len(data.get("pending") or []), "running": len(data.get("runningByJobId") or {}), "latestByType": {k: {"ok": bool(v.get("ok")), "message": str(v.get("message") or v.get("error") or ""), "receivedAt": int(v.get("receivedAt") or 0)} for k, v in latest_by_type.items()}}
+    return _core_worker_app_refine_jobs_summary({"autoTotal": len(CORE_WORKER_APP_AUTO_JOB_TYPES), "autoOk": auto_ok, "autoFailed": auto_failed, "autoMissing": auto_missing, "manualTotal": len(CORE_WORKER_APP_MANUAL_JOB_TYPES), "pending": len(data.get("pending") or []), "running": len(data.get("runningByJobId") or {}), "latestByType": {k: {"ok": bool(v.get("ok")), "message": str(v.get("message") or v.get("error") or ""), "receivedAt": int(v.get("receivedAt") or 0)} for k, v in latest_by_type.items()}})
 
+
+
+
+def _core_worker_app_job_issue_is_expected(job_type: str, item: dict[str, Any]) -> bool:
+    """Classifica estados esperados para não virarem falha no painel principal."""
+    if not isinstance(item, dict):
+        return False
+    joined_parts: list[str] = []
+    for key in ("state", "status", "message", "error", "summary"):
+        value = item.get(key)
+        if value:
+            joined_parts.append(str(value))
+    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+    diagnostic = item.get("diagnostic") if isinstance(item.get("diagnostic"), dict) else {}
+    for source in (result, diagnostic):
+        for key in ("state", "status", "message", "error", "summary", "native_worker_state", "bedrock_state"):
+            value = source.get(key)
+            if value:
+                joined_parts.append(str(value))
+        missing = source.get("missing")
+        if isinstance(missing, (list, tuple)):
+            joined_parts.extend(str(x) for x in missing[:8])
+    text = " ".join(joined_parts).lower()
+    typ = _core_worker_app_normalize_job_type(job_type).lower()
+    expected_needles = (
+        "not-configured",
+        "não configurado",
+        "nao configurado",
+        "bedrockserver",
+        "serverproperties",
+        "worldsdir",
+        "logsdir",
+        "token nativo ausente",
+        "native token missing",
+        "ponte aguardando",
+        "aguardando",
+        "blocked",
+        "isolado",
+        "isolated",
+        "manual-only",
+        "manual only",
+    )
+    if any(needle in text for needle in expected_needles):
+        return True
+    if typ.startswith("apk_minecraft_bedrock_") and ("missing" in text or "falt" in text):
+        return True
+    return False
+
+
+def _core_worker_app_job_ok(job_type: str, item: Any) -> bool | None:
+    if not isinstance(item, dict):
+        return None
+    if _core_worker_app_job_issue_is_expected(job_type, item):
+        return True
+    for key in ("ok", "success", "succeeded"):
+        if key in item:
+            return bool(item.get(key))
+    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+    if "ok" in result:
+        return bool(result.get("ok")) or _core_worker_app_job_issue_is_expected(job_type, result)
+    state = str(item.get("state") or item.get("status") or "").strip().lower()
+    if state in {"ok", "success", "succeeded", "not-configured", "não configurado", "nao configurado"}:
+        return True
+    if state in {"failed", "error", "erro"}:
+        return False
+    return None
+
+
+def _core_worker_app_refine_jobs_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    refined = dict(summary or {})
+    latest = refined.get("latestByType") if isinstance(refined.get("latestByType"), dict) else {}
+    if latest:
+        total = int(refined.get("autoTotal") or len(CORE_WORKER_APP_AUTO_JOB_TYPES))
+        ok_count = 0
+        failed_count = 0
+        missing: list[str] = []
+        expected_pending: list[str] = []
+        failed_details: list[dict[str, Any]] = []
+        for typ in sorted(CORE_WORKER_APP_AUTO_JOB_TYPES):
+            item = latest.get(typ)
+            state = _core_worker_app_job_ok(typ, item)
+            if state is True:
+                ok_count += 1
+                if isinstance(item, dict) and _core_worker_app_job_issue_is_expected(typ, item):
+                    expected_pending.append(typ)
+            elif state is False:
+                failed_count += 1
+                message = ""
+                if isinstance(item, dict):
+                    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+                    message = str(item.get("message") or item.get("error") or result.get("summary") or result.get("error") or "").strip()
+                failed_details.append({
+                    "type": typ,
+                    "label": CORE_WORKER_APP_JOB_LABELS.get(typ, typ),
+                    "message": _shorten(message, limit=160),
+                    "receivedAt": int((item or {}).get("receivedAt") or 0) if isinstance(item, dict) else 0,
+                })
+            else:
+                missing.append(typ)
+        refined["autoTotal"] = total
+        refined["autoOk"] = ok_count
+        refined["autoFailed"] = failed_count
+        refined["autoMissing"] = missing
+        refined["autoExpectedPending"] = expected_pending
+        refined["autoFailedDetails"] = failed_details
+    return refined
 
 def _queue_core_worker_app_internal_runtime_test(worker_id: str) -> dict[str, Any]:
     worker_id = str(worker_id or "").strip()
@@ -838,6 +944,8 @@ def _core_worker_app_jobs_text(worker_id: str) -> str:
     pending = int(summary.get("pending") or 0)
     running = int(summary.get("running") or 0)
     missing = summary.get("autoMissing") if isinstance(summary.get("autoMissing"), list) else []
+    failed_details = summary.get("autoFailedDetails") if isinstance(summary.get("autoFailedDetails"), list) else []
+    expected_pending = summary.get("autoExpectedPending") if isinstance(summary.get("autoExpectedPending"), list) else []
     if failed:
         label = f"jobs internos: {ok}/{total} ok · {failed} falha(s)"
     elif ok >= total and total:
@@ -853,6 +961,13 @@ def _core_worker_app_jobs_text(worker_id: str) -> str:
         extra.append(f"{pending} pend")
     if missing and ok < total:
         extra.append(f"faltam {len(missing)}")
+    if expected_pending and not failed:
+        extra.append(f"{len(expected_pending)} pendência(s) esperada(s)")
+    if failed_details:
+        first = failed_details[0] if isinstance(failed_details[0], dict) else {}
+        detail = _shorten(first.get("label") or first.get("type") or "job", limit=34)
+        message = _shorten(first.get("message") or "", limit=52)
+        extra.append(f"última falha: {detail}" + (f" ({message})" if message else ""))
     manual_total = int(summary.get("manualTotal") or len(CORE_WORKER_APP_MANUAL_JOB_TYPES))
     if manual_total:
         extra.append(f"{manual_total} manuais")
@@ -1782,6 +1897,8 @@ def _job_result_note(job_type: object, job: dict[str, Any] | None) -> str:
         return f"✅ `{kind}` concluído{suffix}"
     if status == "failed":
         return f"❌ `{kind}` falhou{suffix}"
+    if status in {"superseded", "resolved", "resolved_by_manual_sync"}:
+        return f"✅ `{kind}` superado{suffix}"
     if status == "running":
         return f"⏳ `{kind}` em execução"
     if status == "queued":
@@ -1801,6 +1918,8 @@ def _status_badge(status: object) -> tuple[str, str]:
         return "🕒", "aguardando"
     if raw == "expired":
         return "⌛", "expirado"
+    if raw in {"superseded", "resolved", "resolved_by_manual_sync"}:
+        return "✅", "superado"
     return "📄", raw or "desconhecido"
 
 

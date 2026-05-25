@@ -1110,6 +1110,56 @@ class CoreWorkersRegistry:
                 return {"ok": True, "job": None}
             return {"ok": True, "job": _compact_job_public(candidates[0], include_result=True, now=ts)}
 
+
+    def mark_worker_update_jobs_superseded(self, worker_id: str = "", *, reason: str = "sync manual saudável") -> dict[str, Any]:
+        """Marca falhas antigas de update do phone-worker como superadas.
+
+        Quando o sync SSH copia os arquivos e o health autenticado passa, falhas
+        antigas do job `worker_update` (por exemplo "arquivos demais" ou erro de
+        encoding de uma tentativa parcial) não devem continuar aparecendo como
+        falha atual do painel. O erro original é preservado em `previous_error`.
+        """
+        safe_worker_id = _safe_worker_id(worker_id) if worker_id else ""
+        ts = _now()
+        changed = 0
+        with self._lock:
+            data = self._load_unlocked()
+            jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+            for job in jobs.values():
+                if not isinstance(job, dict):
+                    continue
+                status = str(job.get("status") or "").strip().lower()
+                if status not in {"failed", "expired"}:
+                    continue
+                job_type = _normalize_job_type(job.get("type"))
+                if job_type != "worker_update":
+                    continue
+                assigned = str(job.get("worker_id") or job.get("target_worker_id") or "").strip()
+                if safe_worker_id and assigned and assigned != safe_worker_id:
+                    continue
+                creator = str(job.get("created_by_name") or "").strip().lower()
+                summary = str(job.get("summary") or job.get("error") or "").strip().lower()
+                if creator not in {"vps updater", ""} and "update" not in summary:
+                    continue
+                previous_error = _short_text(job.get("error"), limit=240)
+                if previous_error:
+                    job["previous_error"] = previous_error
+                job["status"] = "superseded"
+                job["summary"] = _short_text(f"update superado por {reason}", limit=160)
+                job["error"] = ""
+                job["resolved_at"] = ts
+                job["resolved_by"] = "sync-phone-worker"
+                if not job.get("finished_at"):
+                    job["finished_at"] = ts
+                result = job.get("result") if isinstance(job.get("result"), dict) else {}
+                result.update({"ok": True, "superseded": True, "summary": job["summary"]})
+                job["result"] = result
+                changed += 1
+            data["jobs"] = jobs
+            if changed:
+                self._save_unlocked(data)
+        return {"ok": True, "worker_id": safe_worker_id, "superseded": changed}
+
     def authenticate_worker(self, worker_id: str, token: str) -> dict[str, Any]:
         ts = _now()
         with self._lock:

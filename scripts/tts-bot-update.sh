@@ -539,6 +539,86 @@ verify_bot_after_restart() {
   return 0
 }
 
+
+is_placeholder_status_text() {
+  local text="${1:-}"
+  text="${text//$'\r'/}"
+  text="${text//$'\n'/ }"
+  text="$(printf '%s' "$text" | tr -s '[:space:]' ' ' | sed 's/^ *//;s/ *$//')"
+  local lower="${text,,}"
+  [[ -z "$lower" || "$lower" == "—" || "$lower" == "-" || "$lower" == "sem avisos" || "$lower" == "sem mudanças" || "$lower" == "não alterado" || "$lower" == "nao alterado" || "$lower" == "não verificado" || "$lower" == "nao verificado" ]]
+}
+
+has_real_warning_text() {
+  local text="${1:-}"
+  text="${text//$'\r'/}"
+  text="${text//$'\n'/ }"
+  text="$(printf '%s' "$text" | tr -s '[:space:]' ' ' | sed 's/^ *//;s/ *$//')"
+  local lower="${text,,}"
+  if is_placeholder_status_text "$text"; then
+    return 1
+  fi
+  case "$lower" in
+    ok|success|sucesso|ativo|online|sincronizados|limpo|"unit instalada"|"timer ativo"|"sem cogs python alteradas"|"sem arquivos python alterados"|"sem scripts bash alterados")
+      return 1
+      ;;
+  esac
+  # Informativo: o sync do phone-worker pode ficar agendado após restart sem ser aviso.
+  if [[ "$lower" == *"agendado para automação por jobs após restart"* ]]; then
+    return 1
+  fi
+  if [[ "$lower" == aviso:* || "$lower" == *" com falha"* || "$lower" == falha* || "$lower" == failed* || "$lower" == *"sem resposta"* || "$lower" == *"degraded"* || "$lower" == *"restart loop"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+normalize_final_health_warning_state() {
+  # O status "OK com avisos" só pode permanecer se houver aviso real e exibível.
+  # Caso contrário, a mensagem final vira contraditória: título amarelo com "Avisos: sem avisos".
+  if [[ "$BOT_HEALTHCHECK_STATUS" == "OK com avisos" ]]; then
+    if ! has_real_warning_text "$BOT_WARNINGS_STATUS" && [[ "$BOT_COGS_STATUS" != *"com falha"* ]]; then
+      BOT_HEALTHCHECK_STATUS="OK"
+    fi
+  fi
+}
+
+recompute_update_warning_flag() {
+  UPDATE_HAS_WARNINGS=0
+  normalize_final_health_warning_state
+  if has_real_warning_text "$PREFLIGHT_COG_IMPORT_STATUS"; then
+    UPDATE_HAS_WARNINGS=1
+  fi
+  if has_real_warning_text "$BOT_WARNINGS_STATUS"; then
+    UPDATE_HAS_WARNINGS=1
+  fi
+  if [[ "$BOT_COGS_STATUS" == *"com falha"* ]]; then
+    UPDATE_HAS_WARNINGS=1
+  fi
+  if [[ "$BOT_HEALTHCHECK_STATUS" == *"sem resposta"* ]]; then
+    UPDATE_HAS_WARNINGS=1
+  fi
+  if [[ "$BOT_HEALTHCHECK_STATUS" == "OK com avisos" ]]; then
+    UPDATE_HAS_WARNINGS=1
+  fi
+  if has_real_warning_text "$VPS_SYSTEMD_UNITS_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$AUDIO_SERVICES_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$ALERT_UNIT_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$CRONTAB_HEALTH_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$CLEANUP_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$PHONE_LAVALINK_WATCH_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$PHONE_WORKER_WATCH_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$PHONE_WORKER_SYNC_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$CORE_WORKER_AGENT_UPDATE_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$CORE_WORKER_APK_BUILD_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$CORE_WORKER_NOTIFY_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$CALLKEEPER_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$FRONT_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$BACK_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "$ACTIVITY_HEALTHCHECK_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+}
+
+
 env_truthy() {
   local key="${1:?}"
   local value=""
@@ -1632,6 +1712,7 @@ PHONE_WORKER_UPDATE_ANALYSIS="$(phone_worker_log_summary_text "$RUN_LOG_FILE")"
 
 # Atualiza o resumo do health no fim, mesmo que o bot não tenha reiniciado.
 refresh_bot_health_status >/dev/null 2>&1 || true
+normalize_final_health_warning_state
 
 OVERALL_FATAL=0
 if [[ "$BOT_HEALTHCHECK_STATUS" == falhou:* ]]; then
@@ -1643,12 +1724,7 @@ fi
 if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then
   [[ "$ACTIVITY_HEALTHCHECK_STATUS" == "OK" ]] || OVERALL_FATAL=1
 fi
-if [[ "$BOT_HEALTHCHECK_STATUS" == "OK com avisos" || "$BOT_HEALTHCHECK_STATUS" == *"sem resposta"* ]]; then
-  UPDATE_HAS_WARNINGS=1
-fi
-if [[ "$PREFLIGHT_COG_IMPORT_STATUS" == aviso:* || "$BOT_WARNINGS_STATUS" != "sem avisos" ]]; then
-  UPDATE_HAS_WARNINGS=1
-fi
+recompute_update_warning_flag
 
 if (( OVERALL_FATAL == 0 && UPDATE_HAS_WARNINGS == 0 )); then
   ALERT_TYPE="success"

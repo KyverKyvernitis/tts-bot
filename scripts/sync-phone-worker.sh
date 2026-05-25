@@ -93,6 +93,26 @@ sleep 2
 log "testando health pela VPS"
 if python3 "$ROOT_DIR/scripts/phone-worker-client.py" health >/dev/null 2>&1; then
   rm -f "$ROOT_DIR/data/phone_worker_sync_pending.flag"
+  python3 - <<'PY_MARK_SYNC' 2>/dev/null || true
+import json
+import subprocess
+from utility.commands.workers_registry import get_core_workers_registry
+
+worker_id = ""
+try:
+    raw = subprocess.check_output(["python3", "scripts/phone-worker-client.py", "status"], text=True, timeout=6)
+    data = json.loads(raw) if raw.strip().startswith("{") else {}
+    worker_id = str(data.get("worker_id") or data.get("id") or "").strip()
+except Exception:
+    worker_id = ""
+try:
+    result = get_core_workers_registry().mark_worker_update_jobs_superseded(worker_id, reason="sync manual saudável")
+    count = int(result.get("superseded") or 0)
+    if count:
+        print(f"[phone-worker-sync] jobs antigos de update marcados como superados: {count}")
+except Exception:
+    pass
+PY_MARK_SYNC
   log "sincronizado e saudável"
   exit 0
 fi

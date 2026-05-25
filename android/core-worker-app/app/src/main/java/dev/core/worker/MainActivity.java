@@ -6720,6 +6720,13 @@ public class MainActivity extends Activity {
     }
 
     private void setButtonsEnabled(boolean enabled) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post(() -> setButtonsEnabled(enabled));
+            return;
+        }
+        if (activityDestroyed) {
+            return;
+        }
         if (prepareButton != null) prepareButton.setEnabled(enabled);
         if (termuxButton != null) termuxButton.setEnabled(enabled);
         if (tailscaleButton != null) tailscaleButton.setEnabled(enabled);
@@ -6744,7 +6751,12 @@ public class MainActivity extends Activity {
     }
 
     private void refreshLocalStatus(String extra) {
-        if (statusText == null) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            final String safeExtra = extra;
+            mainHandler.post(() -> refreshLocalStatus(safeExtra));
+            return;
+        }
+        if (activityDestroyed || statusText == null) {
             return;
         }
         boolean hasExtra = extra != null && !extra.trim().isEmpty();
