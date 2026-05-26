@@ -101,6 +101,14 @@ GOOGLE_CLOUD_TTS_LANGUAGE_CODE = (os.getenv("GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "p
 GOOGLE_CLOUD_TTS_VOICE_NAME = (os.getenv("GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A").strip()
 GOOGLE_CLOUD_TTS_SPEAKING_RATE = _parse_float(os.getenv("GOOGLE_CLOUD_TTS_SPEAKING_RATE", "1.0"), 1.0)
 GOOGLE_CLOUD_TTS_PITCH = _parse_float(os.getenv("GOOGLE_CLOUD_TTS_PITCH", "0.0"), 0.0)
+GOOGLE_CLOUD_TTS_AUDIO_ENCODING = (os.getenv("GOOGLE_CLOUD_TTS_AUDIO_ENCODING", "OGG_OPUS") or "OGG_OPUS").strip().upper().replace("-", "_")
+GOOGLE_CLOUD_TTS_FALLBACK_AUDIO_ENCODING = (os.getenv("GOOGLE_CLOUD_TTS_FALLBACK_AUDIO_ENCODING", "MP3") or "MP3").strip().upper().replace("-", "_")
+# When Google Cloud returns OGG_OPUS, try to keep playback on an Opus path instead of forcing PCM first.
+TTS_OPUS_PLAYBACK_ENABLED = _parse_bool(os.getenv("TTS_OPUS_PLAYBACK_ENABLED", "true"), True)
+TTS_OPUS_PLAYBACK_COPY_CODEC = _parse_bool(os.getenv("TTS_OPUS_PLAYBACK_COPY_CODEC", "true"), True)
+# For direct worker voice, prebuild Google Cloud output on the VPS as OGG_OPUS and send it to the worker.
+WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_GCLOUD = _parse_bool(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_GCLOUD", "true"), True)
+WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB = max(1, _parse_int(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB", "8"), 8))
 
 # TTS tuning recomendado
 # Mantém a call "quente" por mais tempo após falar, reduzindo reconexões

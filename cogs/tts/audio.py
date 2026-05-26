@@ -57,6 +57,12 @@ GOOGLE_CLOUD_TTS_LANGUAGE_CODE = str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_
 GOOGLE_CLOUD_TTS_VOICE_NAME = str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
 GOOGLE_CLOUD_TTS_SPEAKING_RATE = float(getattr(config, "GOOGLE_CLOUD_TTS_SPEAKING_RATE", 1.0))
 GOOGLE_CLOUD_TTS_PITCH = float(getattr(config, "GOOGLE_CLOUD_TTS_PITCH", 0.0))
+GOOGLE_CLOUD_TTS_AUDIO_ENCODING = str(getattr(config, "GOOGLE_CLOUD_TTS_AUDIO_ENCODING", "OGG_OPUS") or "OGG_OPUS").strip().upper().replace("-", "_")
+GOOGLE_CLOUD_TTS_FALLBACK_AUDIO_ENCODING = str(getattr(config, "GOOGLE_CLOUD_TTS_FALLBACK_AUDIO_ENCODING", "MP3") or "MP3").strip().upper().replace("-", "_")
+TTS_OPUS_PLAYBACK_ENABLED = bool(getattr(config, "TTS_OPUS_PLAYBACK_ENABLED", True))
+TTS_OPUS_PLAYBACK_COPY_CODEC = bool(getattr(config, "TTS_OPUS_PLAYBACK_COPY_CODEC", True))
+WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_GCLOUD = bool(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_GCLOUD", True))
+WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB = max(1, int(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB", 8) or 8))
 TTS_FFMPEG_BEFORE_OPTIONS = getattr(config, "TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin")
 TTS_FFMPEG_OPTIONS = getattr(config, "TTS_FFMPEG_OPTIONS", "-vn -loglevel error")
 TTS_TEMP_DIR = os.path.abspath(str(getattr(config, "TTS_TEMP_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio")) or os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio")).strip() or os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_audio"))
@@ -1403,7 +1409,7 @@ class TTSAudioMixin:
 
     async def _store_in_cache(self, state: GuildTTSState, item: QueueItem, source_path: str) -> str:
         key = self._cache_key(item)
-        path = self._cache_path(key)
+        path = self._cache_path(key, suffix=self._cache_suffix_from_path(source_path))
 
         if os.path.exists(path):
             self._touch_cache_entry(state, key)
@@ -1438,7 +1444,8 @@ class TTSAudioMixin:
             voice = self._normalize_gcloud_voice(item.voice)
             rate = self._normalize_gcloud_rate(item.rate)
             pitch = self._normalize_gcloud_pitch(item.pitch)
-            payload = f"gcloud|{language}|{voice}|{rate}|{pitch}|{text}"
+            encoding = self._normalize_gcloud_audio_encoding(GOOGLE_CLOUD_TTS_AUDIO_ENCODING)
+            payload = f"gcloud|{encoding}|{language}|{voice}|{rate}|{pitch}|{text}"
         elif engine == "piper":
             model = str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME).strip() or TTS_PIPER_MODEL_NAME
             payload = f"piper|worker|{model}|{text}"
@@ -1452,20 +1459,50 @@ class TTSAudioMixin:
         item._cache_key_value = cached_key
         return cached_key
 
-    def _cache_path(self, key: str) -> str:
-        return os.path.join(_CACHE_DIR, f"{key}.mp3")
+    def _cache_path(self, key: str, *, suffix: str = ".mp3") -> str:
+        clean_suffix = str(suffix or ".mp3").strip().lower()
+        if not clean_suffix.startswith("."):
+            clean_suffix = f".{clean_suffix}"
+        if clean_suffix not in {".mp3", ".ogg", ".opus", ".wav", ".m4a", ".mulaw", ".alaw"}:
+            clean_suffix = ".mp3"
+        return os.path.join(_CACHE_DIR, f"{key}{clean_suffix}")
+
+    def _cache_suffix_from_path(self, path: str) -> str:
+        suffix = os.path.splitext(str(path or ""))[1].lower()
+        return suffix if suffix in {".mp3", ".ogg", ".opus", ".wav", ".m4a", ".mulaw", ".alaw"} else ".mp3"
+
+    def _cache_suffix_candidates_for_item(self, item: QueueItem) -> list[str]:
+        engine = str(getattr(item, "engine", "") or "gtts").strip().lower()
+        candidates: list[str] = []
+        if engine == "gcloud":
+            candidates.append(self._google_cloud_audio_suffix(self._normalize_gcloud_audio_encoding(GOOGLE_CLOUD_TTS_AUDIO_ENCODING)))
+            candidates.append(self._google_cloud_audio_suffix(self._normalize_gcloud_audio_encoding(GOOGLE_CLOUD_TTS_FALLBACK_AUDIO_ENCODING)))
+        elif engine == "piper":
+            candidates.extend([".wav", ".mp3", ".ogg"])
+        else:
+            candidates.append(".mp3")
+        candidates.extend([".mp3", ".ogg", ".wav"])
+        result: list[str] = []
+        for suffix in candidates:
+            suffix = self._cache_suffix_from_path(f"x{suffix}")
+            if suffix not in result:
+                result.append(suffix)
+        return result
 
 
     def _try_get_cached_path(self, state: GuildTTSState, item: QueueItem) -> Optional[str]:
         key = self._cache_key(item)
-        path = self._cache_path(key)
-
-        if not os.path.exists(path):
+        path = ""
+        for candidate in self._cache_suffix_candidates_for_item(item):
+            path = self._cache_path(key, suffix=candidate)
+            if os.path.exists(path):
+                break
+        else:
             return None
 
         self._touch_cache_entry(state, key)
         self._record_cache_hit(item.engine)
-        self._log_debug(f"[tts_voice] cache hit | guild={item.guild_id} key={key[:10]}")
+        self._log_debug(f"[tts_voice] cache hit | guild={item.guild_id} key={key[:10]} path={os.path.basename(path)}")
         return path
 
 
@@ -1594,6 +1631,52 @@ class TTSAudioMixin:
             setattr(self, "_google_tts_client", client)
         return client
 
+    def _normalize_gcloud_audio_encoding(self, raw: Any) -> str:
+        value = str(raw or "").strip().upper().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "": "MP3",
+            "OGG": "OGG_OPUS",
+            "OPUS": "OGG_OPUS",
+            "OGGOPUS": "OGG_OPUS",
+            "OGG_OPUS": "OGG_OPUS",
+            "WAV": "LINEAR16",
+            "WAVE": "LINEAR16",
+            "LINEAR_16": "LINEAR16",
+        }
+        value = aliases.get(value, value)
+        if value in {"MP3", "OGG_OPUS", "LINEAR16", "MULAW", "ALAW", "PCM", "M4A"}:
+            return value
+        return "MP3"
+
+    def _google_cloud_audio_suffix(self, encoding: str) -> str:
+        encoding = self._normalize_gcloud_audio_encoding(encoding)
+        if encoding == "OGG_OPUS":
+            return ".ogg"
+        if encoding in {"LINEAR16", "PCM"}:
+            return ".wav"
+        if encoding == "M4A":
+            return ".m4a"
+        if encoding == "MULAW":
+            return ".mulaw"
+        if encoding == "ALAW":
+            return ".alaw"
+        return ".mp3"
+
+    def _google_cloud_audio_format_label(self, encoding: str) -> str:
+        encoding = self._normalize_gcloud_audio_encoding(encoding)
+        if encoding == "OGG_OPUS":
+            return "ogg_opus"
+        if encoding == "LINEAR16":
+            return "wav"
+        return encoding.lower()
+
+    def _google_cloud_audio_encoding_enum(self, encoding: str):
+        encoding = self._normalize_gcloud_audio_encoding(encoding)
+        enum = getattr(google_texttospeech.AudioEncoding, encoding, None) if google_texttospeech is not None else None
+        if enum is None:
+            raise RuntimeError(f"Google Cloud TTS não suporta audioEncoding={encoding} nesta dependência")
+        return enum
+
     async def _generate_google_cloud_file(self, text: str, language: str, voice_name: str, rate: str, pitch: str) -> str:
         language = self._normalize_gcloud_language(language)
         voice_name = self._normalize_gcloud_voice(voice_name)
@@ -1601,51 +1684,80 @@ class TTSAudioMixin:
         normalized_pitch = self._normalize_gcloud_pitch(pitch)
         if voice_name and not str(voice_name).lower().startswith(str(language).lower() + '-'):
             voice_name = ''
+
+        primary_encoding = self._normalize_gcloud_audio_encoding(GOOGLE_CLOUD_TTS_AUDIO_ENCODING)
+        fallback_encoding = self._normalize_gcloud_audio_encoding(GOOGLE_CLOUD_TTS_FALLBACK_AUDIO_ENCODING)
+        encoding_candidates: list[str] = []
+        for candidate in (primary_encoding, fallback_encoding, "MP3"):
+            candidate = self._normalize_gcloud_audio_encoding(candidate)
+            if candidate not in encoding_candidates:
+                encoding_candidates.append(candidate)
+
         self._log_debug(
             "[tts_voice] Google Cloud TTS synth | "
-            f"voice={voice_name!r} language={language!r} rate={normalized_rate!r} pitch={normalized_pitch!r} text={text[:80]!r}"
+            f"voice={voice_name!r} language={language!r} rate={normalized_rate!r} pitch={normalized_pitch!r} "
+            f"encoding={primary_encoding!r} text={text[:80]!r}"
         )
 
-        path = self._make_runtime_temp_file(suffix=".mp3")
-
-        try:
-            client = await asyncio.wait_for(asyncio.to_thread(self._get_google_tts_client), timeout=TTS_GCLOUD_TIMEOUT_SECONDS)
-            synthesis_input = google_texttospeech.SynthesisInput(text=text)
-            voice_kwargs = {"language_code": language}
-            if voice_name:
-                voice_kwargs["name"] = voice_name
-            voice = google_texttospeech.VoiceSelectionParams(**voice_kwargs)
-            audio_config = google_texttospeech.AudioConfig(
-                audio_encoding=google_texttospeech.AudioEncoding.MP3,
-                speaking_rate=float(normalized_rate),
-                pitch=float(normalized_pitch),
-            )
-            request = google_texttospeech.SynthesizeSpeechRequest(
-                input=synthesis_input,
-                voice=voice,
-                audio_config=audio_config,
-            )
-
-            async with self._get_synth_semaphore():
-                response = await asyncio.wait_for(asyncio.to_thread(client.synthesize_speech, request=request), timeout=TTS_GCLOUD_TIMEOUT_SECONDS)
-                def _write_audio_file(target_path: str, data: bytes) -> None:
-                    with open(target_path, 'wb') as handle:
-                        handle.write(data)
-                await asyncio.wait_for(asyncio.to_thread(_write_audio_file, path, response.audio_content), timeout=max(5.0, TTS_GCLOUD_TIMEOUT_SECONDS))
-            return path
-        except asyncio.TimeoutError as exc:
-            logger.warning("[tts_voice] Google Cloud TTS travou e foi cancelado | language=%s timeout=%.1fs", language, TTS_GCLOUD_TIMEOUT_SECONDS)
+        last_error: Exception | None = None
+        for index, encoding in enumerate(encoding_candidates):
+            path = self._make_runtime_temp_file(suffix=self._google_cloud_audio_suffix(encoding))
+            attempt_failed = False
             try:
-                os.remove(path)
-            except Exception:
-                pass
-            raise RuntimeError(f"Google Cloud TTS timeout após {TTS_GCLOUD_TIMEOUT_SECONDS:.1f}s") from exc
-        except Exception:
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-            raise
+                client = await asyncio.wait_for(asyncio.to_thread(self._get_google_tts_client), timeout=TTS_GCLOUD_TIMEOUT_SECONDS)
+                synthesis_input = google_texttospeech.SynthesisInput(text=text)
+                voice_kwargs = {"language_code": language}
+                if voice_name:
+                    voice_kwargs["name"] = voice_name
+                voice = google_texttospeech.VoiceSelectionParams(**voice_kwargs)
+                audio_config = google_texttospeech.AudioConfig(
+                    audio_encoding=self._google_cloud_audio_encoding_enum(encoding),
+                    speaking_rate=float(normalized_rate),
+                    pitch=float(normalized_pitch),
+                )
+                request = google_texttospeech.SynthesizeSpeechRequest(
+                    input=synthesis_input,
+                    voice=voice,
+                    audio_config=audio_config,
+                )
+
+                async with self._get_synth_semaphore():
+                    response = await asyncio.wait_for(asyncio.to_thread(client.synthesize_speech, request=request), timeout=TTS_GCLOUD_TIMEOUT_SECONDS)
+
+                    def _write_audio_file(target_path: str, data: bytes) -> None:
+                        with open(target_path, 'wb') as handle:
+                            handle.write(data)
+
+                    await asyncio.wait_for(asyncio.to_thread(_write_audio_file, path, response.audio_content), timeout=max(5.0, TTS_GCLOUD_TIMEOUT_SECONDS))
+                if os.path.getsize(path) <= 0:
+                    raise RuntimeError(f"Google Cloud TTS retornou áudio vazio em {encoding}")
+                if index > 0:
+                    logger.warning(
+                        "[tts_voice] Google Cloud TTS usou fallback de formato | solicitado=%s usado=%s",
+                        primary_encoding,
+                        encoding,
+                    )
+                setattr(self, "_last_gcloud_audio_encoding", encoding)
+                return path
+            except asyncio.TimeoutError as exc:
+                attempt_failed = True
+                last_error = RuntimeError(f"Google Cloud TTS timeout após {TTS_GCLOUD_TIMEOUT_SECONDS:.1f}s em {encoding}")
+                logger.warning("[tts_voice] Google Cloud TTS travou e foi cancelado | language=%s encoding=%s timeout=%.1fs", language, encoding, TTS_GCLOUD_TIMEOUT_SECONDS)
+            except Exception as exc:
+                attempt_failed = True
+                last_error = exc
+                if index < len(encoding_candidates) - 1:
+                    logger.warning(
+                        "[tts_voice] Google Cloud TTS falhou no formato %s; tentando fallback | language=%s erro=%s",
+                        encoding,
+                        language,
+                        exc,
+                    )
+            finally:
+                if attempt_failed and os.path.exists(path):
+                    with contextlib.suppress(Exception):
+                        os.remove(path)
+        raise RuntimeError(str(last_error or "Google Cloud TTS falhou em todos os formatos"))
 
     def _phone_worker_tts_benchmark_base_url(self) -> str:
         if not PHONE_WORKER_ENABLED or not PHONE_WORKER_HOST or not PHONE_WORKER_TOKEN:
@@ -1660,7 +1772,7 @@ class TTSAudioMixin:
         fmt = str(value or "mp3").strip().lower().replace(".", "")
         if fmt in {"wav", "wave"}:
             return "wav"
-        if fmt in {"ogg", "opus"}:
+        if fmt in {"ogg", "opus", "ogg_opus", "oggopus"}:
             return "ogg"
         return "mp3"
 
@@ -2189,6 +2301,43 @@ class TTSAudioMixin:
             "release_after": False,
         }
 
+    async def _maybe_attach_prebuilt_direct_tts_audio(self, payload: dict[str, Any], item: QueueItem) -> str | None:
+        if not WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_GCLOUD:
+            return None
+        if str(item.engine or "").strip().lower() != "gcloud":
+            return None
+        path = await self._run_timed_generation(
+            "gcloud:direct_prebuild",
+            lambda: self._generate_google_cloud_file(item.text, item.language, item.voice, item.rate, item.pitch),
+            guild_id=item.guild_id,
+        )
+        try:
+            size = os.path.getsize(path)
+            max_bytes = WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB * 1024 * 1024
+            if size <= 0:
+                raise RuntimeError("Google Cloud prebuild retornou arquivo vazio")
+            if size > max_bytes:
+                raise RuntimeError(f"Google Cloud prebuild grande demais: {size} bytes")
+            raw = await asyncio.to_thread(lambda p: open(p, "rb").read(), path)
+            payload["audio_b64"] = base64.b64encode(raw).decode("ascii")
+            payload["audio_format"] = self._path_audio_format(path)
+            payload["prebuilt_audio"] = True
+            payload["prebuilt_audio_source"] = "vps_google_cloud"
+            payload["prebuilt_audio_bytes"] = len(raw)
+            payload["engine"] = "gcloud"
+            payload["selected_engine"] = "gcloud"
+            logger.info(
+                "[worker_voice_agent] Google Cloud prebuild para TTS direto | guild=%s format=%s bytes=%s",
+                item.guild_id,
+                payload.get("audio_format"),
+                len(raw),
+            )
+            return path
+        except Exception:
+            with contextlib.suppress(Exception):
+                os.remove(path)
+            raise
+
     async def _worker_voice_agent_begin_transfer(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload = dict(payload)
         payload.setdefault("confirm_transfer", True)
@@ -2255,6 +2404,9 @@ class TTSAudioMixin:
         payload = self._worker_voice_direct_tts_payload(guild, item)
         started = time.monotonic()
         try:
+            prebuilt_path: str | None = None
+            with contextlib.suppress(Exception):
+                prebuilt_path = await self._maybe_attach_prebuilt_direct_tts_audio(payload, item)
             # Garante que o painel/worker tenham a sessão/handoff mais recente quando a VPS ainda está na call.
             vc = self._get_voice_client_for_guild(guild)
             if vc is not None and self._voice_client_is_connected(vc):
@@ -2264,8 +2416,11 @@ class TTSAudioMixin:
                     handoff_payload = self._voice_client_handoff_payload(guild, item, vc, source="tts_worker_voice_direct_prepare")
                     if handoff_payload:
                         await self._worker_voice_agent_register_handoff(handoff_payload)
-                with contextlib.suppress(Exception):
-                    await self._worker_voice_agent_begin_transfer({**payload, "current_owner": "vps", "requested_owner": "worker"})
+                transfer_result = await self._worker_voice_agent_begin_transfer({**payload, "current_owner": "vps", "requested_owner": "worker"})
+                transfer = transfer_result.get("transfer") if isinstance(transfer_result, dict) else {}
+                owner = str((transfer or {}).get("voice_owner") or (transfer or {}).get("current_owner") or "").lower()
+                if owner != "worker":
+                    raise RuntimeError(f"transferência não concedeu posse ao worker: owner={owner or 'desconhecido'}")
                 await self._disconnect_vps_voice_before_worker_direct_tts(guild, item)
             else:
                 # Sem conexão local ativa, o Music Agent pode assumir a voz direto pelo seu gateway interno.
@@ -2282,6 +2437,9 @@ class TTSAudioMixin:
             )
             if not bool(result.get("ok", True)):
                 raise RuntimeError(str(result.get("error") or "worker retornou ok=false no TTS direto"))
+            if prebuilt_path:
+                with contextlib.suppress(Exception):
+                    os.remove(prebuilt_path)
             elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
             self._record_worker_voice_session_metric("direct_tts_ok")
             logger.info(
@@ -2302,6 +2460,9 @@ class TTSAudioMixin:
                 "worker_result": result,
             }
         except Exception as exc:
+            with contextlib.suppress(Exception):
+                if 'prebuilt_path' in locals() and prebuilt_path:
+                    os.remove(prebuilt_path)
             self._record_worker_voice_session_metric("direct_tts_failed")
             self._worker_voice_direct_tts_disabled_untils()[int(guild.id)] = time.monotonic() + WORKER_VOICE_AGENT_DIRECT_TTS_FAILURE_COOLDOWN_SECONDS
             await self._worker_voice_agent_release_transfer(payload, reason=f"direct_tts_failed:{type(exc).__name__}")
@@ -2332,6 +2493,40 @@ class TTSAudioMixin:
         if suffix in {"ogg", "opus"}:
             return "ogg"
         return "mp3"
+
+    def _audio_file_should_use_opus_source(self, path: str) -> bool:
+        return bool(TTS_OPUS_PLAYBACK_ENABLED and self._path_audio_format(path) == "ogg" and getattr(discord, "FFmpegOpusAudio", None) is not None)
+
+    def _make_discord_tts_source(self, path: str) -> tuple[Any, str]:
+        if self._audio_file_should_use_opus_source(path):
+            opus_cls = getattr(discord, "FFmpegOpusAudio", None)
+            if opus_cls is not None:
+                if TTS_OPUS_PLAYBACK_COPY_CODEC:
+                    try:
+                        return opus_cls(
+                            path,
+                            before_options=TTS_FFMPEG_BEFORE_OPTIONS,
+                            options=TTS_FFMPEG_OPTIONS,
+                            codec="copy",
+                        ), "ffmpeg_opus_copy"
+                    except TypeError:
+                        # Older discord.py builds may not accept codec=. Fall through.
+                        pass
+                    except Exception as exc:
+                        logger.debug("[tts_voice] FFmpegOpusAudio codec=copy indisponível; tentando opus normal | path=%s erro=%s", path, exc)
+                try:
+                    return opus_cls(
+                        path,
+                        before_options=TTS_FFMPEG_BEFORE_OPTIONS,
+                        options=TTS_FFMPEG_OPTIONS,
+                    ), "ffmpeg_opus"
+                except Exception as exc:
+                    logger.debug("[tts_voice] FFmpegOpusAudio falhou; usando PCM fallback | path=%s erro=%s", path, exc)
+        return discord.FFmpegPCMAudio(
+            path,
+            before_options=TTS_FFMPEG_BEFORE_OPTIONS,
+            options=TTS_FFMPEG_OPTIONS,
+        ), "ffmpeg_pcm"
 
     async def _try_get_worker_turbo_cache_path(self, item: QueueItem) -> str | None:
         if not TTS_TURBO_WORKER_CACHE_ENABLED:
@@ -3305,11 +3500,7 @@ class TTSAudioMixin:
                 await self._wait_until_voice_playable_for_tts(vc, item=item)
 
                 source_setup_started_at = time.monotonic()
-                source = discord.FFmpegPCMAudio(
-                    path,
-                    before_options=TTS_FFMPEG_BEFORE_OPTIONS,
-                    options=TTS_FFMPEG_OPTIONS,
-                )
+                source, source_kind = self._make_discord_tts_source(path)
                 source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
 
                 play_call_started_at = time.monotonic()
@@ -3336,6 +3527,8 @@ class TTSAudioMixin:
                     "play_call_ms": play_call_ms,
                     "playback_ms": playback_duration_ms,
                     "playback_started_at": playback_started_at,
+                    "playback_source": source_kind,
+                    "audio_format": self._path_audio_format(path),
                 }
             finally:
                 pass

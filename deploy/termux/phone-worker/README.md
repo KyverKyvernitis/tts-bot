@@ -1,3 +1,9 @@
+## Patch 85.10: Google Cloud OGG_OPUS + TTS direto controlado
+
+A versão `1.10.21` mantém a VPS como cérebro do bot, mas melhora o caminho de voz: Google Cloud TTS na VPS passa a preferir `OGG_OPUS` para reduzir trabalho de reencode quando o destino é voz/Opus, com fallback automático para `MP3` se o formato não estiver disponível. O playback local da VPS tenta usar `FFmpegOpusAudio` para arquivos OGG/Opus antes de cair para PCM.
+
+No TTS direto worker→Discord, o Music Agent sobe para `0.3.25` e passa a aceitar áudio prebuilt em OGG/Opus por `audio_b64`, usando a rota Opus quando possível. Para Google Cloud, a VPS pode pré-gerar OGG_OPUS e enviar ao worker, evitando que o worker caia para gTTS só porque não tem Google Cloud local. A transferência de posse continua controlada: o worker só toca voz quando a VPS libera a sessão, e o fallback VPS permanece obrigatório se algo falhar.
+
 ## Patch 85.9: TTS direto worker → Discord voice
 
 A versão `1.10.20` ativa o primeiro caminho direto controlado de TTS pelo worker: quando a rota worker está saudável e não há música local ativa competindo, a VPS continua como cérebro/comandos/UI, mas libera a posse da voz e envia o pedido `voice_agent_play_tts` para o worker. O worker usa o Music Agent como plano de voz, conecta/toca o TTS direto no Discord e reporta o resultado de volta. Se falhar, a VPS usa o fallback normal.

@@ -730,7 +730,15 @@ class VpsCommandMixin:
         last_connection = voice_agent.get("last_connection") if isinstance(voice_agent.get("last_connection"), dict) else {}
         last_transfer = voice_agent.get("last_transfer") if isinstance(voice_agent.get("last_transfer"), dict) else {}
         voice_transfer_count = int(voice_agent.get("transfer_count") or 0)
-        voice_transfer_ready = "sim" if voice_agent.get("transfer_ready") else "não"
+        raw_transfer_state = str(voice_agent.get("transfer_state") or "").strip()
+        if voice_agent.get("transfer_ready"):
+            voice_transfer_ready = "ativa"
+        elif raw_transfer_state.startswith("transfer_staged"):
+            voice_transfer_ready = "preparada"
+        elif voice_transfer_count > 0:
+            voice_transfer_ready = "pendente"
+        else:
+            voice_transfer_ready = "não"
         if last_voice_session:
             voice_session_line = (
                 f"Sessão lógica: `{self._format_vps_int(voice_session_count)}` · compartilhada `{voice_shared_ready}` · "

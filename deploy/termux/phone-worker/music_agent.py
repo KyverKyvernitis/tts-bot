@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.24"
+AGENT_VERSION = "0.3.25"
 STARTED_AT = time.time()
 
 
@@ -1666,7 +1666,45 @@ class MusicAgent:
 
             engine = "worker"
             with tempfile.TemporaryDirectory(prefix="music-agent-direct-tts-") as tmp:
-                path = Path(tmp) / "tts.mp3"
+                def _audio_suffix_from_format(value: Any) -> str:
+                    fmt = str(value or "").strip().lower().replace(".", "").replace("-", "_")
+                    if fmt in {"ogg", "opus", "ogg_opus"}:
+                        return ".ogg"
+                    if fmt in {"wav", "wave", "linear16", "pcm"}:
+                        return ".wav"
+                    if fmt == "m4a":
+                        return ".m4a"
+                    return ".mp3"
+
+                def _build_tts_audio_source(tts_input_path: str, *, audio_format: str = "") -> Any:
+                    suffix = _audio_suffix_from_format(audio_format or Path(str(tts_input_path)).suffix)
+                    opus_cls = getattr(discord, "FFmpegOpusAudio", None)
+                    if suffix == ".ogg" and opus_cls is not None:
+                        try:
+                            return opus_cls(
+                                tts_input_path,
+                                executable=self.ffmpeg_executable,
+                                before_options="-nostdin",
+                                options="-vn -sn -dn -loglevel warning",
+                                codec="copy",
+                            )
+                        except TypeError:
+                            pass
+                        except Exception as exc:
+                            self.log("voice_direct_tts_opus_copy_fallback", error=short_text(exc, 180))
+                        try:
+                            return opus_cls(
+                                tts_input_path,
+                                executable=self.ffmpeg_executable,
+                                before_options="-nostdin",
+                                options="-vn -sn -dn -loglevel warning",
+                            )
+                        except Exception as exc:
+                            self.log("voice_direct_tts_opus_source_fallback", error=short_text(exc, 180))
+                    return discord.FFmpegPCMAudio(tts_input_path, executable=self.ffmpeg_executable, before_options="-nostdin", options="-vn -sn -dn -loglevel warning")
+
+                audio_format = str(body.get("audio_format") or body.get("format") or "").strip().lower()
+                path = Path(tmp) / f"tts{_audio_suffix_from_format(audio_format)}"
                 audio_url = str(body.get("audio_url") or body.get("url") or "").strip()
                 audio_b64 = str(body.get("audio_b64") or body.get("audioBase64") or "").strip()
                 tts_input = ""
@@ -1682,11 +1720,13 @@ class MusicAgent:
                     tts_input = str(path)
                     engine = str(body.get("engine") or "prebuilt-b64").strip() or "prebuilt-b64"
                 else:
+                    path = Path(tmp) / "tts.mp3"
                     engine = await asyncio.wait_for(self._synthesize_tts_file(body, path), timeout=max(3.0, timeout * 0.75))
+                    audio_format = "mp3"
                     if not path.exists() or path.stat().st_size <= 0:
                         raise RuntimeError("TTS não gerou áudio")
                     tts_input = str(path)
-                audio_source = discord.FFmpegPCMAudio(tts_input, executable=self.ffmpeg_executable, before_options="-nostdin", options="-vn -sn -dn -loglevel warning")
+                audio_source = _build_tts_audio_source(tts_input, audio_format=audio_format)
                 play_started = time.monotonic()
                 try:
                     voice_client.play(audio_source, after=_after)
@@ -1709,6 +1749,7 @@ class MusicAgent:
             return {
                 "ok": True,
                 "engine": engine,
+                "audio_format": audio_format or "mp3",
                 "direct_tts": True,
                 "voice_connected": bool(getattr(voice_client, "is_connected", lambda: False)()),
                 "playback_ms": round(playback_ms, 1),
@@ -1857,7 +1898,7 @@ class MusicAgent:
         # -ss antes do input torna o seek rápido para URLs remotas.
         return f"-ss {offset:.3f} {self.ffmpeg_before_options}".strip()
 
-    def _build_ffmpeg_source(self, stream_url: str, *, volume_percent: int | None = None, start_offset_seconds: float = 0.0) -> discord.AudioSource:
+    def _build_ffmpeg_source(self, stream_url: str, *, volume_percent: int | None = None, start_offset_seconds: float = 0.0) -> Any:
         volume = max(0.0, min(10.0, float(volume_percent if volume_percent is not None else self.default_volume_percent) / 100.0))
         before_options = self._ffmpeg_before_options_for_offset(start_offset_seconds)
         if self.direct_pcm_volume_enabled:
