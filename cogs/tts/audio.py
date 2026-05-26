@@ -85,6 +85,19 @@ TTS_TURBO_WORKER_CACHE_STORE_BACKGROUND = bool(getattr(config, "TTS_TURBO_WORKER
 TTS_TURBO_WORKER_CACHE_MISS_COOLDOWN_SECONDS = max(1.0, float(getattr(config, "TTS_TURBO_WORKER_CACHE_MISS_COOLDOWN_SECONDS", 45.0) or 45.0))
 TTS_TURBO_WORKER_CACHE_ERROR_COOLDOWN_SECONDS = max(1.0, float(getattr(config, "TTS_TURBO_WORKER_CACHE_ERROR_COOLDOWN_SECONDS", 10.0) or 10.0))
 TTS_TURBO_WORKER_CACHE_INDEX_MAX_ENTRIES = max(128, int(getattr(config, "TTS_TURBO_WORKER_CACHE_INDEX_MAX_ENTRIES", 4096) or 4096))
+TTS_WORKER_AGENT_ENABLED = bool(getattr(config, "TTS_WORKER_AGENT_ENABLED", True))
+TTS_WORKER_AGENT_HEALTH_INTERVAL_SECONDS = max(5.0, float(getattr(config, "TTS_WORKER_AGENT_HEALTH_INTERVAL_SECONDS", 20.0) or 20.0))
+TTS_WORKER_AGENT_HEALTH_TIMEOUT_SECONDS = max(0.4, float(getattr(config, "TTS_WORKER_AGENT_HEALTH_TIMEOUT_SECONDS", 2.5) or 2.5))
+TTS_WORKER_AGENT_STALE_SECONDS = max(TTS_WORKER_AGENT_HEALTH_INTERVAL_SECONDS + 5.0, float(getattr(config, "TTS_WORKER_AGENT_STALE_SECONDS", 75.0) or 75.0))
+TTS_WORKER_AGENT_FAILURE_THRESHOLD = max(1, int(getattr(config, "TTS_WORKER_AGENT_FAILURE_THRESHOLD", 2) or 2))
+TTS_WORKER_AGENT_FAILURE_COOLDOWN_SECONDS = max(5.0, float(getattr(config, "TTS_WORKER_AGENT_FAILURE_COOLDOWN_SECONDS", 45.0) or 45.0))
+TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS", 10.0) or 10.0))
+TTS_WORKER_AGENT_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_WORKER_AGENT_MAX_AUDIO_MB", 8) or 8))
+TTS_WORKER_AGENT_MAX_TEXT_LENGTH = max(64, int(getattr(config, "TTS_WORKER_AGENT_MAX_TEXT_LENGTH", 1200) or 1200))
+TTS_WORKER_AGENT_PREFERRED_ENGINE = str(getattr(config, "TTS_WORKER_AGENT_PREFERRED_ENGINE", "auto") or "auto").strip().lower().replace("-", "_") or "auto"
+TTS_LONG_TEXT_CHUNK_ENABLED = bool(getattr(config, "TTS_LONG_TEXT_CHUNK_ENABLED", True))
+TTS_LONG_TEXT_CHUNK_MAX_CHARS = max(160, int(getattr(config, "TTS_LONG_TEXT_CHUNK_MAX_CHARS", 420) or 420))
+TTS_LONG_TEXT_CHUNK_MAX_PARTS = max(1, int(getattr(config, "TTS_LONG_TEXT_CHUNK_MAX_PARTS", 8) or 8))
 PHONE_WORKER_ENABLED = bool(getattr(config, "PHONE_WORKER_ENABLED", False))
 PHONE_WORKER_HOST = str(getattr(config, "PHONE_WORKER_HOST", "") or "").strip()
 PHONE_WORKER_PORT = int(getattr(config, "PHONE_WORKER_PORT", 8766) or 8766)
@@ -338,6 +351,305 @@ class TTSAudioMixin:
             setattr(self, "_tts_gtts_rate_lock", lock)
         return lock
 
+
+    def _tts_agent_base_configured(self) -> bool:
+        return bool(TTS_WORKER_AGENT_ENABLED and PHONE_WORKER_ENABLED and PHONE_WORKER_HOST and PHONE_WORKER_TOKEN)
+
+    def _tts_agent_route_state(self) -> dict[str, Any]:
+        state = getattr(self, "_tts_agent_route", None)
+        if not isinstance(state, dict):
+            state = {
+                "route": "vps",
+                "ok": False,
+                "enabled": bool(TTS_WORKER_AGENT_ENABLED),
+                "reason": "not_checked",
+                "worker_id": "",
+                "worker_version": "",
+                "engine": "",
+                "available_engines": [],
+                "last_ok_monotonic": 0.0,
+                "last_check_monotonic": 0.0,
+                "disabled_until_monotonic": 0.0,
+                "failure_count": 0,
+                "last_error": "",
+                "queue_active": 0,
+                "queue_limit": 0,
+                "avg_synth_ms": 0.0,
+            }
+            setattr(self, "_tts_agent_route", state)
+        return state
+
+    def _tts_agent_public_snapshot(self) -> dict[str, Any]:
+        state = dict(self._tts_agent_route_state())
+        now = time.monotonic()
+        last_ok = float(state.get("last_ok_monotonic") or 0.0)
+        last_check = float(state.get("last_check_monotonic") or 0.0)
+        disabled_until = float(state.get("disabled_until_monotonic") or 0.0)
+        return {
+            "enabled": bool(state.get("enabled")),
+            "route": str(state.get("route") or "vps"),
+            "ok": bool(state.get("ok")),
+            "reason": str(state.get("reason") or ""),
+            "worker_id": str(state.get("worker_id") or ""),
+            "worker_version": str(state.get("worker_version") or ""),
+            "engine": str(state.get("engine") or ""),
+            "available_engines": list(state.get("available_engines") or [])[:8],
+            "last_ok_age_seconds": round(now - last_ok, 1) if last_ok else None,
+            "last_check_age_seconds": round(now - last_check, 1) if last_check else None,
+            "cooldown_remaining_seconds": round(max(0.0, disabled_until - now), 1),
+            "failure_count": int(state.get("failure_count") or 0),
+            "last_error": str(state.get("last_error") or "")[:180],
+            "queue_active": int(state.get("queue_active") or 0),
+            "queue_limit": int(state.get("queue_limit") or 0),
+            "avg_synth_ms": float(state.get("avg_synth_ms") or 0.0),
+        }
+
+    def _tts_agent_set_route(
+        self,
+        *,
+        route: str,
+        ok: bool,
+        reason: str,
+        worker_id: str = "",
+        worker_version: str = "",
+        engine: str = "",
+        available_engines: list[Any] | None = None,
+        last_error: str = "",
+        queue_active: int | None = None,
+        queue_limit: int | None = None,
+        avg_synth_ms: float | None = None,
+        reset_failures: bool = False,
+    ) -> None:
+        state = self._tts_agent_route_state()
+        now = time.monotonic()
+        state.update({
+            "route": route if route in {"worker", "vps"} else "vps",
+            "ok": bool(ok),
+            "enabled": bool(TTS_WORKER_AGENT_ENABLED),
+            "reason": str(reason or "unknown")[:160],
+            "worker_id": str(worker_id or state.get("worker_id") or "")[:120],
+            "worker_version": str(worker_version or state.get("worker_version") or "")[:80],
+            "engine": str(engine or state.get("engine") or "")[:80],
+            "available_engines": [str(x)[:40] for x in (available_engines if available_engines is not None else state.get("available_engines") or [])][:8],
+            "last_check_monotonic": now,
+            "last_error": str(last_error or "")[:220],
+        })
+        if ok:
+            state["last_ok_monotonic"] = now
+        if queue_active is not None:
+            state["queue_active"] = int(queue_active)
+        if queue_limit is not None:
+            state["queue_limit"] = int(queue_limit)
+        if avg_synth_ms is not None:
+            state["avg_synth_ms"] = round(float(avg_synth_ms or 0.0), 2)
+        if reset_failures:
+            state["failure_count"] = 0
+            state["disabled_until_monotonic"] = 0.0
+
+    def _tts_agent_route_available(self) -> bool:
+        if not self._tts_agent_base_configured():
+            return False
+        state = self._tts_agent_route_state()
+        now = time.monotonic()
+        if now < float(state.get("disabled_until_monotonic") or 0.0):
+            return False
+        if state.get("route") != "worker" or not bool(state.get("ok")):
+            return False
+        last_ok = float(state.get("last_ok_monotonic") or 0.0)
+        if not last_ok or now - last_ok > TTS_WORKER_AGENT_STALE_SECONDS:
+            return False
+        return True
+
+    def _record_tts_agent_route_sample(self, worker: bool) -> None:
+        metrics = self._get_metrics_store()
+        key = "tts_agent_route_worker_samples" if worker else "tts_agent_route_vps_samples"
+        metrics[key] = int(metrics.get(key, 0) or 0) + 1
+
+    def _mark_tts_agent_synth_failure(self, exc: Exception | str) -> None:
+        state = self._tts_agent_route_state()
+        state["failure_count"] = int(state.get("failure_count") or 0) + 1
+        state["last_error"] = str(exc)[:220]
+        state["reason"] = "synth_failed"
+        metrics = self._get_metrics_store()
+        metrics["tts_agent_synth_failed"] = int(metrics.get("tts_agent_synth_failed", 0) or 0) + 1
+        if int(state.get("failure_count") or 0) >= TTS_WORKER_AGENT_FAILURE_THRESHOLD:
+            state["route"] = "vps"
+            state["ok"] = False
+            state["disabled_until_monotonic"] = time.monotonic() + TTS_WORKER_AGENT_FAILURE_COOLDOWN_SECONDS
+            logger.warning(
+                "[tts_agent] rota worker suspensa temporariamente; failures=%s cooldown=%.1fs erro=%s",
+                state.get("failure_count"),
+                TTS_WORKER_AGENT_FAILURE_COOLDOWN_SECONDS,
+                exc,
+            )
+
+    def _record_tts_agent_synth_success(self, *, total_ms: float, data: dict[str, Any]) -> None:
+        metrics = self._get_metrics_store()
+        metrics["tts_agent_synth_ok"] = int(metrics.get("tts_agent_synth_ok", 0) or 0) + 1
+        self._record_average_metric("tts_agent_synth_total_ms", "tts_agent_synth_samples", float(total_ms))
+        state = self._tts_agent_route_state()
+        state["failure_count"] = 0
+        state["disabled_until_monotonic"] = 0.0
+        self._tts_agent_set_route(
+            route="worker",
+            ok=True,
+            reason="synth_ok",
+            worker_id=str(data.get("worker_id") or state.get("worker_id") or ""),
+            worker_version=str(data.get("worker_version") or state.get("worker_version") or ""),
+            engine=str(data.get("engine") or data.get("selected_engine") or state.get("engine") or ""),
+            available_engines=list(data.get("available_engines") or state.get("available_engines") or []),
+            avg_synth_ms=float(total_ms),
+            reset_failures=True,
+        )
+
+    async def _probe_tts_agent_health_once(self) -> None:
+        metrics = self._get_metrics_store()
+        if not self._tts_agent_base_configured():
+            self._tts_agent_set_route(route="vps", ok=False, reason="disabled_or_unconfigured")
+            return
+        base = self._phone_worker_tts_base_url()
+        if not base:
+            self._tts_agent_set_route(route="vps", ok=False, reason="worker_base_unavailable")
+            return
+        headers = {"Authorization": f"Bearer {PHONE_WORKER_TOKEN}", "Accept": "application/json"}
+        started = time.monotonic()
+        try:
+            timeout = aiohttp.ClientTimeout(total=TTS_WORKER_AGENT_HEALTH_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"{base}/health", headers=headers) as response:
+                    response.raise_for_status()
+                    data = await response.json(content_type=None)
+            agent = data.get("tts_agent") if isinstance(data, dict) else None
+            if not isinstance(agent, dict):
+                agent = {}
+            ok = bool(data.get("ok", True) and agent.get("ok") and agent.get("available") and agent.get("synth_ready"))
+            if ok:
+                metrics["tts_agent_health_ok"] = int(metrics.get("tts_agent_health_ok", 0) or 0) + 1
+                self._tts_agent_set_route(
+                    route="worker",
+                    ok=True,
+                    reason=str(agent.get("state") or "health_ok"),
+                    worker_id=str(data.get("worker_id") or ""),
+                    worker_version=str(data.get("version") or ""),
+                    engine=str(agent.get("preferred_engine") or agent.get("engine") or ""),
+                    available_engines=list(agent.get("available_engines") or []),
+                    queue_active=int(agent.get("active") or 0),
+                    queue_limit=int(agent.get("concurrency_limit") or 0),
+                    avg_synth_ms=float(agent.get("avg_synth_ms") or 0.0),
+                    reset_failures=True,
+                )
+            else:
+                metrics["tts_agent_health_fail"] = int(metrics.get("tts_agent_health_fail", 0) or 0) + 1
+                reason = str(agent.get("reason") or agent.get("state") or "tts_agent_not_ready")
+                self._tts_agent_set_route(route="vps", ok=False, reason=reason, last_error=reason)
+        except Exception as exc:
+            metrics["tts_agent_health_fail"] = int(metrics.get("tts_agent_health_fail", 0) or 0) + 1
+            self._tts_agent_set_route(route="vps", ok=False, reason="health_error", last_error=f"{type(exc).__name__}: {exc}")
+            self._log_debug(f"[tts_agent] health falhou após {(time.monotonic()-started)*1000.0:.1f}ms: {exc}")
+
+    async def _tts_agent_health_loop(self) -> None:
+        try:
+            while True:
+                await self._probe_tts_agent_health_once()
+                await asyncio.sleep(TTS_WORKER_AGENT_HEALTH_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[tts_agent] health loop encerrou inesperadamente")
+
+    def _ensure_tts_agent_health_task(self) -> None:
+        if not self._tts_agent_base_configured():
+            self._tts_agent_set_route(route="vps", ok=False, reason="disabled_or_unconfigured")
+            return
+        task = getattr(self, "_tts_agent_health_task", None)
+        if task is None or task.done():
+            self._tts_agent_health_task = asyncio.create_task(self._tts_agent_health_loop())
+
+    def _cancel_tts_agent_health_task(self) -> None:
+        task = getattr(self, "_tts_agent_health_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _split_tts_text_chunks(self, text: str) -> list[str]:
+        text = " ".join((text or "").strip().split())
+        if not text:
+            return []
+        if not TTS_LONG_TEXT_CHUNK_ENABLED or len(text) <= TTS_LONG_TEXT_CHUNK_MAX_CHARS:
+            return [text]
+        chunks: list[str] = []
+        current = ""
+        parts = []
+        # Keep punctuation with the sentence when possible.
+        start = 0
+        for idx, ch in enumerate(text):
+            if ch in ".!?;:" and idx + 1 < len(text) and text[idx + 1].isspace():
+                parts.append(text[start:idx + 1].strip())
+                start = idx + 1
+        tail = text[start:].strip()
+        if tail:
+            parts.append(tail)
+        if not parts:
+            parts = text.split(" ")
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            while len(part) > TTS_LONG_TEXT_CHUNK_MAX_CHARS:
+                cut = part.rfind(" ", 0, TTS_LONG_TEXT_CHUNK_MAX_CHARS)
+                if cut < 120:
+                    cut = TTS_LONG_TEXT_CHUNK_MAX_CHARS
+                piece = part[:cut].strip()
+                part = part[cut:].strip()
+                if piece:
+                    if current:
+                        chunks.append(current)
+                        current = ""
+                    chunks.append(piece)
+            if not current:
+                current = part
+            elif len(current) + 1 + len(part) <= TTS_LONG_TEXT_CHUNK_MAX_CHARS:
+                current = f"{current} {part}"
+            else:
+                chunks.append(current)
+                current = part
+            if len(chunks) >= TTS_LONG_TEXT_CHUNK_MAX_PARTS:
+                break
+        if current and len(chunks) < TTS_LONG_TEXT_CHUNK_MAX_PARTS:
+            chunks.append(current)
+        if len(chunks) >= TTS_LONG_TEXT_CHUNK_MAX_PARTS:
+            consumed = sum(len(x) for x in chunks)
+            if consumed < len(text):
+                chunks[-1] = chunks[-1].rstrip() + "…"
+        return chunks or [text[:TTS_LONG_TEXT_CHUNK_MAX_CHARS]]
+
+    def _expand_tts_queue_item(self, item: QueueItem) -> list[QueueItem]:
+        chunks = self._split_tts_text_chunks(item.text)
+        if len(chunks) <= 1:
+            return [item]
+        expanded: list[QueueItem] = []
+        for index, chunk in enumerate(chunks, start=1):
+            clone = QueueItem(
+                guild_id=item.guild_id,
+                channel_id=item.channel_id,
+                author_id=item.author_id,
+                text=chunk,
+                engine=item.engine,
+                voice=item.voice,
+                language=item.language,
+                rate=item.rate,
+                pitch=item.pitch,
+                piper_fallback_engine=item.piper_fallback_engine,
+                piper_fallback_voice=item.piper_fallback_voice,
+                piper_fallback_language=item.piper_fallback_language,
+                piper_fallback_rate=item.piper_fallback_rate,
+                piper_fallback_pitch=item.piper_fallback_pitch,
+                piper_model=item.piper_model,
+            )
+            setattr(clone, "_chunk_index", index)
+            setattr(clone, "_chunk_total", len(chunks))
+            expanded.append(clone)
+        return expanded
+
     def _get_global_cache_order(self) -> OrderedDict[str, float]:
         cache_order = getattr(self, "_tts_cache_order", None)
         if cache_order is None:
@@ -412,6 +724,15 @@ class TTSAudioMixin:
                 "worker_cache_store_failed": 0,
                 "worker_cache_hit_total_ms": 0.0,
                 "worker_cache_hit_samples": 0,
+                "tts_agent_health_ok": 0,
+                "tts_agent_health_fail": 0,
+                "tts_agent_synth_attempts": 0,
+                "tts_agent_synth_ok": 0,
+                "tts_agent_synth_failed": 0,
+                "tts_agent_synth_total_ms": 0.0,
+                "tts_agent_synth_samples": 0,
+                "tts_agent_route_worker_samples": 0,
+                "tts_agent_route_vps_samples": 0,
                 "boot_warmups": 0,
                 "last_warmup_started_at": None,
                 "last_warmup_completed_at": None,
@@ -772,6 +1093,15 @@ class TTSAudioMixin:
             "worker_cache_store_failed": int(metrics.get("worker_cache_store_failed", 0) or 0),
             "avg_worker_cache_hit_ms": round((float(metrics.get("worker_cache_hit_total_ms", 0.0) or 0.0) / int(metrics.get("worker_cache_hit_samples", 0) or 1)), 2) if int(metrics.get("worker_cache_hit_samples", 0) or 0) else 0.0,
             "worker_cache_index_entries": int(len(self._get_worker_cache_index())),
+            "tts_agent": self._tts_agent_public_snapshot(),
+            "tts_agent_health_ok": int(metrics.get("tts_agent_health_ok", 0) or 0),
+            "tts_agent_health_fail": int(metrics.get("tts_agent_health_fail", 0) or 0),
+            "tts_agent_synth_attempts": int(metrics.get("tts_agent_synth_attempts", 0) or 0),
+            "tts_agent_synth_ok": int(metrics.get("tts_agent_synth_ok", 0) or 0),
+            "tts_agent_synth_failed": int(metrics.get("tts_agent_synth_failed", 0) or 0),
+            "avg_tts_agent_synth_ms": round((float(metrics.get("tts_agent_synth_total_ms", 0.0) or 0.0) / int(metrics.get("tts_agent_synth_samples", 0) or 1)), 2) if int(metrics.get("tts_agent_synth_samples", 0) or 0) else 0.0,
+            "tts_agent_route_worker_samples": int(metrics.get("tts_agent_route_worker_samples", 0) or 0),
+            "tts_agent_route_vps_samples": int(metrics.get("tts_agent_route_vps_samples", 0) or 0),
             "boot_warmups": int(metrics.get("boot_warmups", 0) or 0),
             "last_warmup_duration_ms": metrics.get("last_warmup_duration_ms"),
             "queued_items_current": int(sum(state.queue.qsize() for state in self.guild_states.values())),
@@ -1292,6 +1622,11 @@ class TTSAudioMixin:
         if not TTS_TURBO_WORKER_CACHE_ENABLED:
             return None
         if not PHONE_WORKER_ENABLED or not PHONE_WORKER_HOST or not PHONE_WORKER_TOKEN:
+            return None
+        # Quando o TTS Agent está ativo, a disponibilidade do worker deve vir do
+        # health loop cacheado, não de uma tentativa HTTP por frase.
+        if TTS_WORKER_AGENT_ENABLED and not self._tts_agent_route_available():
+            self._record_worker_cache_lookup("skip")
             return None
         key = self._cache_key(item)
         recent_negative = self._worker_cache_recent_negative_status(key)
@@ -1965,7 +2300,84 @@ class TTSAudioMixin:
         await self._record_persistent_synt_success(guild_id, engine)
         return result
 
+    def _tts_agent_payload_for_item(self, item: QueueItem) -> dict[str, Any]:
+        return {
+            "text": str(item.text or "")[:TTS_WORKER_AGENT_MAX_TEXT_LENGTH],
+            "engine": str(item.engine or "gtts").strip().lower().replace("-", "_"),
+            "voice": str(item.voice or ""),
+            "language": str(item.language or ""),
+            "rate": str(item.rate or "+0%"),
+            "pitch": str(item.pitch or "+0Hz"),
+            "preferred_engine": TTS_WORKER_AGENT_PREFERRED_ENGINE,
+            "fallback_engine": str(getattr(item, "piper_fallback_engine", "") or "gtts"),
+            "fallback_voice": str(getattr(item, "piper_fallback_voice", "") or item.voice or ""),
+            "fallback_language": str(getattr(item, "piper_fallback_language", "") or item.language or GTTS_DEFAULT_LANGUAGE),
+            "fallback_rate": str(getattr(item, "piper_fallback_rate", "") or item.rate or "+0%"),
+            "fallback_pitch": str(getattr(item, "piper_fallback_pitch", "") or item.pitch or "+0Hz"),
+            "model_name": str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME),
+            "cache_mode": "prefer",
+            "timeout_seconds": TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
+            "max_audio_bytes": TTS_WORKER_AGENT_MAX_AUDIO_MB * 1024 * 1024,
+            "guild_id": int(item.guild_id or 0),
+            "channel_id": int(item.channel_id or 0),
+            "author_id": int(item.author_id or 0),
+        }
+
+    async def _generate_tts_agent_worker_file(self, item: QueueItem) -> str:
+        if not self._tts_agent_route_available():
+            raise RuntimeError("TTS Agent indisponível pela rota cacheada")
+        text = str(item.text or "").strip()
+        if not text:
+            raise RuntimeError("texto vazio para TTS Agent")
+        if len(text) > TTS_WORKER_AGENT_MAX_TEXT_LENGTH:
+            raise RuntimeError(f"texto grande demais para TTS Agent: {len(text)} > {TTS_WORKER_AGENT_MAX_TEXT_LENGTH}")
+
+        metrics = self._get_metrics_store()
+        metrics["tts_agent_synth_attempts"] = int(metrics.get("tts_agent_synth_attempts", 0) or 0) + 1
+        started = time.monotonic()
+        try:
+            data = await self._request_phone_worker_tts_audio(
+                task="tts_agent_synthesize",
+                payload=self._tts_agent_payload_for_item(item),
+                timeout_seconds=TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
+                max_audio_mb=TTS_WORKER_AGENT_MAX_AUDIO_MB,
+            )
+            raw = data.get("audio_bytes")
+            if not isinstance(raw, (bytes, bytearray)) or not raw:
+                raise RuntimeError("TTS Agent não retornou áudio")
+            fmt = self._normalize_worker_audio_format(data.get("audio_format"))
+            suffix = ".wav" if fmt == "wav" else ".ogg" if fmt == "ogg" else ".mp3"
+            path = self._make_runtime_temp_file(suffix=suffix)
+
+            def _write_audio(target: str, content: bytes) -> None:
+                with open(target, "wb") as handle:
+                    handle.write(content)
+
+            await asyncio.to_thread(_write_audio, path, bytes(raw))
+            total_ms = (time.monotonic() - started) * 1000.0
+            self._record_tts_agent_synth_success(total_ms=total_ms, data=data)
+            self._log_debug(
+                f"[tts_agent] synth ok | guild={item.guild_id} engine={item.engine} "
+                f"selected={data.get('engine')} bytes={len(raw)} total={total_ms:.1f}ms"
+            )
+            return path
+        except Exception as exc:
+            self._mark_tts_agent_synth_failure(exc)
+            raise
+
     async def _generate_audio_file(self, item: QueueItem) -> str:
+        agent_available = self._tts_agent_route_available()
+        self._record_tts_agent_route_sample(agent_available)
+        if agent_available:
+            try:
+                return await self._run_timed_generation(
+                    f"tts_agent:{item.engine}",
+                    lambda: self._generate_tts_agent_worker_file(item),
+                    guild_id=item.guild_id,
+                )
+            except Exception as e:
+                logger.warning("[tts_agent] TTS no worker falhou; usando fallback local/VPS | guild=%s engine=%s erro=%s", item.guild_id, item.engine, e)
+
         if item.engine == "piper":
             try:
                 return await self._run_timed_generation(

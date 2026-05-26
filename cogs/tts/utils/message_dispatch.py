@@ -38,6 +38,21 @@ async def dispatch_message_tts(cog: Any, message: Any, *, guild_defaults: dict |
 
     state = cog._get_state(message.guild.id)
     state.last_text_channel_id = getattr(message.channel, "id", None)
-    enqueued, dropped_count, deduplicated = await cog._enqueue_tts_item(message.guild.id, payload.queue_item)
+    items = [payload.queue_item]
+    expand = getattr(cog, "_expand_tts_queue_item", None)
+    if callable(expand):
+        try:
+            items = list(expand(payload.queue_item)) or [payload.queue_item]
+        except Exception:
+            items = [payload.queue_item]
+
+    enqueued = False
+    dropped_count = 0
+    deduplicated = False
+    for item in items:
+        item_enqueued, item_dropped, item_dedup = await cog._enqueue_tts_item(message.guild.id, item)
+        enqueued = enqueued or bool(item_enqueued)
+        dropped_count += int(item_dropped or 0)
+        deduplicated = deduplicated or bool(item_dedup)
     dispatch_ms = (time.perf_counter() - dispatch_started) * 1000.0
     return MessageDispatchResult(payload, enqueued, dropped_count, deduplicated, dispatch_ms, payload_ms)

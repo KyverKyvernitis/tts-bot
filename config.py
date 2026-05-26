@@ -483,6 +483,25 @@ TTS_TURBO_WORKER_CACHE_MISS_COOLDOWN_SECONDS = max(1.0, _parse_float(os.getenv("
 TTS_TURBO_WORKER_CACHE_ERROR_COOLDOWN_SECONDS = max(1.0, _parse_float(os.getenv("TTS_TURBO_WORKER_CACHE_ERROR_COOLDOWN_SECONDS", "10.0"), 10.0))
 TTS_TURBO_WORKER_CACHE_INDEX_MAX_ENTRIES = max(128, _parse_int(os.getenv("TTS_TURBO_WORKER_CACHE_INDEX_MAX_ENTRIES", "4096"), 4096))
 
+# TTS Agent: rota normal do TTS pelo phone-worker quando ele estiver online/saudável.
+# O health loop mantém o modo em cache; a fala não faz probe antes de sintetizar.
+TTS_WORKER_AGENT_ENABLED = _parse_bool(os.getenv("TTS_WORKER_AGENT_ENABLED", "true"), True)
+TTS_WORKER_AGENT_HEALTH_INTERVAL_SECONDS = max(5.0, _parse_float(os.getenv("TTS_WORKER_AGENT_HEALTH_INTERVAL_SECONDS", "20"), 20.0))
+TTS_WORKER_AGENT_HEALTH_TIMEOUT_SECONDS = max(0.4, _parse_float(os.getenv("TTS_WORKER_AGENT_HEALTH_TIMEOUT_SECONDS", "2.5"), 2.5))
+TTS_WORKER_AGENT_STALE_SECONDS = max(10.0, _parse_float(os.getenv("TTS_WORKER_AGENT_STALE_SECONDS", "75"), 75.0))
+TTS_WORKER_AGENT_FAILURE_THRESHOLD = max(1, _parse_int(os.getenv("TTS_WORKER_AGENT_FAILURE_THRESHOLD", "2"), 2))
+TTS_WORKER_AGENT_FAILURE_COOLDOWN_SECONDS = max(5.0, _parse_float(os.getenv("TTS_WORKER_AGENT_FAILURE_COOLDOWN_SECONDS", "45"), 45.0))
+TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS", "10"), 10.0))
+TTS_WORKER_AGENT_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_WORKER_AGENT_MAX_AUDIO_MB", "8"), 8))
+TTS_WORKER_AGENT_MAX_TEXT_LENGTH = max(64, _parse_int(os.getenv("TTS_WORKER_AGENT_MAX_TEXT_LENGTH", "1200"), 1200))
+TTS_WORKER_AGENT_PREFERRED_ENGINE = (os.getenv("TTS_WORKER_AGENT_PREFERRED_ENGINE", "auto") or "auto").strip().lower().replace("-", "_") or "auto"
+
+# Texto longo começa a tocar mais rápido: divide em blocos naturais e enfileira
+# partes menores, permitindo prefetch do próximo áudio durante o playback atual.
+TTS_LONG_TEXT_CHUNK_ENABLED = _parse_bool(os.getenv("TTS_LONG_TEXT_CHUNK_ENABLED", "true"), True)
+TTS_LONG_TEXT_CHUNK_MAX_CHARS = max(160, _parse_int(os.getenv("TTS_LONG_TEXT_CHUNK_MAX_CHARS", "420"), 420))
+TTS_LONG_TEXT_CHUNK_MAX_PARTS = max(1, _parse_int(os.getenv("TTS_LONG_TEXT_CHUNK_MAX_PARTS", "8"), 8))
+
 # Uso do phone-worker fora do /vps: preparação de áudio TTS para Lavalink.
 # A VPS sempre mantém fallback local.
 MUSIC_TTS_PHONE_WORKER_CONVERT_ENABLED = _parse_bool(os.getenv("MUSIC_TTS_PHONE_WORKER_CONVERT_ENABLED", "true"), True)

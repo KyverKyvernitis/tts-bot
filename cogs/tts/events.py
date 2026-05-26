@@ -210,7 +210,15 @@ class TTSVoiceEventsMixin:
 
         state = self._get_state(message.guild.id)
         state.last_text_channel_id = message.channel.id
-        ok, dropped, deduplicated = await self._enqueue_tts_item(message.guild.id, item)
+        items = self._expand_tts_queue_item(item) if hasattr(self, "_expand_tts_queue_item") else [item]
+        ok = False
+        dropped = 0
+        deduplicated = False
+        for queue_item in items:
+            item_ok, item_dropped, item_deduplicated = await self._enqueue_tts_item(message.guild.id, queue_item)
+            ok = ok or bool(item_ok)
+            dropped += int(item_dropped or 0)
+            deduplicated = deduplicated or bool(item_deduplicated)
         self._ensure_worker(message.guild.id)
 
         print(
@@ -219,7 +227,7 @@ class TTSVoiceEventsMixin:
         )
         print(
             f"[tts_voice] enfileirada | guild={message.guild.id} user={message.author.id} "
-            f"canal_voz={voice_channel.id} engine={item.engine} dropped={dropped} deduplicated={deduplicated}"
+            f"canal_voz={voice_channel.id} engine={item.engine} partes={len(items)} dropped={dropped} deduplicated={deduplicated}"
         )
 
     @commands.Cog.listener()

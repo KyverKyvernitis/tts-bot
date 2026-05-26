@@ -174,12 +174,19 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
     async def cog_load(self):
         self._prime_tts_runtime()
         await self._load_edge_voices()
+        self._ensure_tts_agent_health_task()
         if TTS_BOOT_WARMUP_ENABLED:
             asyncio.create_task(self._boot_warmup())
         if self._voice_auto_restore_enabled:
             self._voice_restore_task = asyncio.create_task(self._restore_voice_sessions_after_ready())
         else:
             print("[tts_voice] restore automático de call desativado por TTS_VOICE_AUTO_RESTORE_ENABLED=false")
+
+    def cog_unload(self):
+        self._cancel_tts_agent_health_task()
+        task = getattr(self, "_voice_restore_task", None)
+        if task is not None and not task.done():
+            task.cancel()
 
     async def _get_root_command_ids_cached(self, guild: discord.Guild | None = None, *, ttl_seconds: float = 600.0) -> dict[str, int]:
         return await fetch_root_command_ids_cached(

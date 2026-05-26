@@ -1,5 +1,16 @@
 # Phone Worker Termux
 
+## Patch 85.2: TTS Agent / rota worker
+
+A versão `1.10.14` adiciona as tasks diretas `tts_agent_status` e `tts_agent_synthesize` e expõe `tts_agent` em `/health`, `/status` e `/local/status`. Quando o worker turbo está online, saudável e com alguma engine TTS pronta, a VPS pode trocar o modo do TTS para `worker` sem testar o celular a cada frase. Se o health falhar, se o agent ficar velho ou se a síntese falhar repetidamente, a VPS volta para o modo `vps` por cooldown e tenta recuperar pelo health loop.
+
+O TTS Agent reutiliza as engines já conhecidas do worker: `piper` quando há modelo/config local, `edge` quando `edge-tts` está instalado, `gtts` quando disponível e `gcloud` apenas se `PHONE_WORKER_TTS_AGENT_GCLOUD_ENABLED=true`. O Piper continua usando o cache grande local do worker; a VPS ainda mantém seu cache próprio e consulta o cache remoto como segunda camada.
+
+Textos longos passam a ser divididos em partes menores pela VPS. Isso permite começar a reprodução pelo primeiro bloco e usar o prefetch já existente para preparar o próximo bloco enquanto o áudio atual toca, sem esperar sintetizar a mensagem inteira antes de falar.
+
+Variáveis principais da VPS: `TTS_WORKER_AGENT_ENABLED`, `TTS_WORKER_AGENT_HEALTH_INTERVAL_SECONDS`, `TTS_WORKER_AGENT_STALE_SECONDS`, `TTS_WORKER_AGENT_FAILURE_THRESHOLD`, `TTS_WORKER_AGENT_FAILURE_COOLDOWN_SECONDS`, `TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS`, `TTS_WORKER_AGENT_PREFERRED_ENGINE`, `TTS_LONG_TEXT_CHUNK_ENABLED`, `TTS_LONG_TEXT_CHUNK_MAX_CHARS` e `TTS_LONG_TEXT_CHUNK_MAX_PARTS`. No worker, use `PHONE_WORKER_TTS_AGENT_ENABLED`, `PHONE_WORKER_TTS_AGENT_ENGINE`, `PHONE_WORKER_TTS_AGENT_CONCURRENCY`, `PHONE_WORKER_TTS_AGENT_TIMEOUT_SECONDS` e `PHONE_WORKER_TTS_AGENT_MAX_TEXT_LENGTH`.
+
+
 ## Patch 85.1: Piper Turbo Cache
 
 A versão `1.9.0` mantém a task direta `tts_synthesize_piper`, restrita ao perfil `turbo` com `tts-synth`, mas muda o prefixo experimental do bot para `%texto`. O Piper agora tem cache extra grande no worker turbo e cache separado/maior na VPS: a primeira síntese pode continuar lenta, mas repetições devem responder pelo caminho de cache.

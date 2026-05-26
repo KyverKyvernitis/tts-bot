@@ -54,7 +54,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.13"
+PHONE_WORKER_VERSION = "1.10.14"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -168,6 +168,8 @@ SUPPORTED_DIRECT_TASKS = (
     "tts_cache_store",
     "tts_synthesize_benchmark",
     "tts_synthesize_piper",
+    "tts_agent_status",
+    "tts_agent_synthesize",
     "worker_logs",
     "worker_self_check",
     "worker_update",
@@ -208,6 +210,8 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "tts_cache_store",
     "tts_synthesize_benchmark",
     "tts_synthesize_piper",
+    "tts_agent_status",
+    "tts_agent_synthesize",
     "worker_logs",
     "worker_self_check",
     "worker_update",
@@ -248,8 +252,8 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     },
     "turbo": {
         "label": "Turbo",
-        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "apk-builder", "vps-assist", "cache-worker"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -1773,6 +1777,110 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
     return deps
 
 
+
+def _tts_agent_available_engines(deps: dict[str, Any] | None = None) -> list[str]:
+    deps = deps if isinstance(deps, dict) else _turbo_dependency_snapshot()
+    engines: list[str] = []
+    if deps.get("piper_cli") and deps.get("piper_model") and deps.get("piper_config"):
+        engines.append("piper")
+    if deps.get("edge_tts"):
+        engines.append("edge")
+    if deps.get("gtts"):
+        engines.append("gtts")
+    if _env_bool("PHONE_WORKER_TTS_AGENT_GCLOUD_ENABLED", False):
+        ok, _err = _module_import_ok("google.cloud.texttospeech_v1")
+        if ok:
+            engines.append("gcloud")
+    return engines
+
+
+def _tts_agent_preferred_engine(available: list[str]) -> str:
+    requested = str(os.getenv("PHONE_WORKER_TTS_AGENT_ENGINE") or "auto").strip().lower().replace("-", "_") or "auto"
+    aliases = {"google": "gcloud", "google_cloud": "gcloud", "googlecloud": "gcloud", "edge_tts": "edge"}
+    requested = aliases.get(requested, requested)
+    if requested != "auto" and requested in available:
+        return requested
+    for candidate in ("piper", "edge", "gtts", "gcloud"):
+        if candidate in available:
+            return candidate
+    return ""
+
+
+def _tts_agent_queue_limit() -> int:
+    return max(1, min(8, _env_int("PHONE_WORKER_TTS_AGENT_CONCURRENCY", 1)))
+
+
+def _tts_agent_snapshot() -> dict[str, Any]:
+    profile = _current_core_worker_profile()
+    roles = _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))
+    capabilities = _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))
+    deps = _turbo_dependency_snapshot()
+    available = _tts_agent_available_engines(deps)
+    preferred = _tts_agent_preferred_engine(available)
+    synth_allowed = profile == "turbo" and "tts-synth" in capabilities
+    enabled = _env_bool("PHONE_WORKER_TTS_AGENT_ENABLED", True)
+    with _TTS_AGENT_LOCK:
+        active = int(_TTS_AGENT_ACTIVE)
+        total = int(_TTS_AGENT_TOTAL)
+        failed = int(_TTS_AGENT_FAILED)
+        total_ms = float(_TTS_AGENT_TOTAL_MS)
+        last_error = str(_TTS_AGENT_LAST_ERROR or "")
+        last_engine = str(_TTS_AGENT_LAST_ENGINE or "")
+        last_ok_at = float(_TTS_AGENT_LAST_OK_AT or 0.0)
+    avg_ms = round(total_ms / total, 2) if total else 0.0
+    missing = []
+    if not enabled:
+        missing.append("PHONE_WORKER_TTS_AGENT_ENABLED=false")
+    if profile != "turbo":
+        missing.append("perfil turbo")
+    if "tts-synth" not in capabilities:
+        missing.append("capacidade tts-synth")
+    if not available:
+        missing.append("engine TTS disponível")
+    return {
+        "ok": bool(enabled and synth_allowed and available),
+        "available": bool(enabled and synth_allowed and available),
+        "synth_ready": bool(enabled and synth_allowed and available),
+        "state": "ready" if (enabled and synth_allowed and available) else "not_ready",
+        "reason": "ok" if (enabled and synth_allowed and available) else ", ".join(missing),
+        "profile": profile,
+        "roles": roles[:16],
+        "capabilities": capabilities[:24],
+        "available_engines": available,
+        "preferred_engine": preferred,
+        "selected_engine": preferred or last_engine,
+        "deps": deps,
+        "active": active,
+        "concurrency_limit": _tts_agent_queue_limit(),
+        "total": total,
+        "failed": failed,
+        "avg_synth_ms": avg_ms,
+        "last_error": _short_text(last_error, limit=180),
+        "last_engine": last_engine,
+        "last_ok_age_seconds": round(time.time() - last_ok_at, 1) if last_ok_at else None,
+    }
+
+
+def _tts_agent_record_start() -> None:
+    global _TTS_AGENT_ACTIVE
+    with _TTS_AGENT_LOCK:
+        _TTS_AGENT_ACTIVE += 1
+
+
+def _tts_agent_record_done(*, ok: bool, engine: str, elapsed_ms: float, error: str = "") -> None:
+    global _TTS_AGENT_ACTIVE, _TTS_AGENT_TOTAL, _TTS_AGENT_FAILED, _TTS_AGENT_TOTAL_MS, _TTS_AGENT_LAST_ERROR, _TTS_AGENT_LAST_ENGINE, _TTS_AGENT_LAST_OK_AT
+    with _TTS_AGENT_LOCK:
+        _TTS_AGENT_ACTIVE = max(0, _TTS_AGENT_ACTIVE - 1)
+        _TTS_AGENT_TOTAL += 1
+        _TTS_AGENT_TOTAL_MS += max(0.0, float(elapsed_ms or 0.0))
+        _TTS_AGENT_LAST_ENGINE = str(engine or "")[:40]
+        if ok:
+            _TTS_AGENT_LAST_OK_AT = time.time()
+            _TTS_AGENT_LAST_ERROR = ""
+        else:
+            _TTS_AGENT_FAILED += 1
+            _TTS_AGENT_LAST_ERROR = _short_text(error, limit=220)
+
 def _cache_dir_snapshot(path: Path, *, max_scan_files: int = 20000) -> dict[str, Any]:
     result: dict[str, Any] = {
         "path": str(path),
@@ -2113,6 +2221,14 @@ def _music_agent_log_file() -> Path:
 _TTS_DEP_AUTOINSTALL_LOCK = threading.Lock()
 _TTS_DEP_AUTOINSTALL_LAST_AT = 0.0
 _TTS_DEP_AUTOINSTALL_RUNNING = False
+_TTS_AGENT_LOCK = threading.Lock()
+_TTS_AGENT_ACTIVE = 0
+_TTS_AGENT_TOTAL = 0
+_TTS_AGENT_FAILED = 0
+_TTS_AGENT_TOTAL_MS = 0.0
+_TTS_AGENT_LAST_ERROR = ""
+_TTS_AGENT_LAST_ENGINE = ""
+_TTS_AGENT_LAST_OK_AT = 0.0
 
 
 def _music_voice_dependency_specs() -> dict[str, dict[str, Any]]:
@@ -2485,6 +2601,7 @@ def _system_status() -> dict[str, Any]:
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ffprobe": bool(shutil.which("ffprobe")),
         "turbo_dependencies": _turbo_dependency_snapshot(),
+        "tts_agent": _safe_telemetry("tts agent", _tts_agent_snapshot, {"ok": False, "available": False, "synth_ready": False, "state": "telemetry_failed"}),
         "turbo_cache": _worker_turbo_cache_snapshot(),
     }
 
@@ -2528,6 +2645,7 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
         "bind_port": port,
         "ffmpeg": bool(status.get("ffmpeg")),
         "ffprobe": bool(status.get("ffprobe")),
+        "tts_agent": status.get("tts_agent") if isinstance(status.get("tts_agent"), dict) else _safe_telemetry("tts agent", _tts_agent_snapshot, {"ok": False}),
         "boot_ok": ((status.get("boot") or {}).get("ok") if isinstance(status.get("boot"), dict) else None),
         "supervisor_ok": ((status.get("supervisor") or {}).get("supervisor_ok") if isinstance(status.get("supervisor"), dict) else None),
         "sshd_ok": ((status.get("sshd") or {}).get("ok") if isinstance(status.get("sshd"), dict) else None),
@@ -2767,6 +2885,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_tts_synthesize_benchmark(body)
             elif task == "tts_synthesize_piper":
                 payload = self._task_tts_synthesize_piper(body)
+            elif task == "tts_agent_status":
+                payload = self._task_tts_agent_status(body)
+            elif task == "tts_agent_synthesize":
+                payload = self._task_tts_agent_synthesize(body)
             elif task == "log_extract":
                 payload = self._task_log_extract(body)
             elif task == "log_summary":
@@ -3054,6 +3176,200 @@ class WorkerHandler(BaseHTTPRequestHandler):
         path = tmp_dir / "google-credentials.json"
         path.write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(path)
+
+    def _task_tts_agent_status(self, body: dict[str, Any]) -> dict[str, Any]:
+        snapshot = _tts_agent_snapshot()
+        snapshot.update({
+            "ok": bool(snapshot.get("ok")),
+            "worker_profile": _current_core_worker_profile(),
+            "worker_version": PHONE_WORKER_VERSION,
+            "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
+            "logs": [f"tts agent {snapshot.get('state')} engines={','.join(snapshot.get('available_engines') or [])}"],
+        })
+        return snapshot
+
+    def _tts_agent_engine_order(self, body: dict[str, Any], available: list[str]) -> list[str]:
+        requested = str(body.get("engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
+        preferred = str(body.get("preferred_engine") or os.getenv("PHONE_WORKER_TTS_AGENT_ENGINE") or "auto").strip().lower().replace("-", "_") or "auto"
+        fallback = str(body.get("fallback_engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
+        aliases = {"google": "gcloud", "google_cloud": "gcloud", "googlecloud": "gcloud", "edge_tts": "edge"}
+        requested = aliases.get(requested, requested)
+        preferred = aliases.get(preferred, preferred)
+        fallback = aliases.get(fallback, fallback)
+        order: list[str] = []
+        if preferred != "auto":
+            order.append(preferred)
+        order.append(requested)
+        if fallback != requested:
+            order.append(fallback)
+        for candidate in ("piper", "edge", "gtts", "gcloud"):
+            order.append(candidate)
+        deduped: list[str] = []
+        for engine in order:
+            if engine not in {"piper", "edge", "gtts", "gcloud"}:
+                continue
+            if engine not in available:
+                continue
+            if engine not in deduped:
+                deduped.append(engine)
+        return deduped
+
+    def _synthesize_standard_tts_bytes(self, body: dict[str, Any], *, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, timeout: int) -> dict[str, Any]:
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise ValueError("texto vazio")
+        with tempfile.TemporaryDirectory(prefix="phone-worker-tts-agent-") as tmp:
+            tmp_dir = Path(tmp)
+            out_path = tmp_dir / "speech.mp3"
+            if engine == "edge":
+                try:
+                    import edge_tts  # type: ignore
+                except Exception as exc:
+                    raise RuntimeError(f"edge-tts não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
+                voice = str(body.get("voice") or body.get("fallback_voice") or "pt-BR-FranciscaNeural").strip() or "pt-BR-FranciscaNeural"
+                rate = self._normalize_tts_edge_rate(body.get("rate"))
+                pitch = self._normalize_tts_edge_pitch(body.get("pitch"))
+
+                async def _save_edge() -> None:
+                    communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
+                    await communicate.save(str(out_path))
+
+                asyncio.run(asyncio.wait_for(_save_edge(), timeout=timeout))
+                logs.append(f"edge voice={voice} rate={rate} pitch={pitch}")
+            elif engine == "gcloud":
+                try:
+                    from google.cloud import texttospeech_v1 as google_texttospeech  # type: ignore
+                except Exception as exc:
+                    raise RuntimeError(f"google-cloud-texttospeech não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
+                self._ensure_worker_google_credentials_file(tmp_dir)
+                language = self._normalize_tts_gcloud_language(body.get("language"))
+                voice_name = str(body.get("voice") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
+                rate = self._normalize_tts_gcloud_rate(body.get("rate"))
+                pitch = self._normalize_tts_gcloud_pitch(body.get("pitch"))
+                if voice_name and not voice_name.lower().startswith(language.lower() + "-"):
+                    voice_name = ""
+                client = google_texttospeech.TextToSpeechClient()
+                voice_kwargs = {"language_code": language}
+                if voice_name:
+                    voice_kwargs["name"] = voice_name
+                request = google_texttospeech.SynthesizeSpeechRequest(
+                    input=google_texttospeech.SynthesisInput(text=text),
+                    voice=google_texttospeech.VoiceSelectionParams(**voice_kwargs),
+                    audio_config=google_texttospeech.AudioConfig(
+                        audio_encoding=google_texttospeech.AudioEncoding.MP3,
+                        speaking_rate=rate,
+                        pitch=pitch,
+                    ),
+                )
+                response = client.synthesize_speech(request=request)
+                out_path.write_bytes(response.audio_content)
+                logs.append(f"gcloud language={language} voice={voice_name or 'auto'} rate={rate} pitch={pitch}")
+            else:
+                try:
+                    from gtts import gTTS  # type: ignore
+                except Exception as exc:
+                    raise RuntimeError(f"gTTS não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
+                language = self._normalize_tts_gtts_language(body.get("language") or body.get("fallback_language"))
+                tts = gTTS(text=text, lang=language)
+                with open(out_path, "wb") as handle:
+                    tts.write_to_fp(handle)
+                logs.append(f"gtts language={language}")
+            if not out_path.exists() or out_path.stat().st_size <= 0:
+                raise RuntimeError("engine não gerou arquivo de áudio")
+            data = out_path.read_bytes()
+        if len(data) > max_audio_bytes:
+            raise RuntimeError(f"áudio grande demais: {len(data)} bytes")
+        synth_ms = (time.monotonic() - started) * 1000.0
+        digest = hashlib.sha256(data).hexdigest()
+        return {
+            "ok": True,
+            "engine": engine,
+            "selected_engine": engine,
+            "audio_format": "mp3",
+            "cache_hit": False,
+            "worker_profile": _current_core_worker_profile(),
+            "worker_version": PHONE_WORKER_VERSION,
+            "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
+            "roles": roles[:16],
+            "capabilities": capabilities[:24],
+            "available_engines": _tts_agent_available_engines(),
+            "worker_synth_ms": round(synth_ms, 2),
+            "worker_total_ms": round(synth_ms, 2),
+            "total_ms": round(synth_ms, 2),
+            "size": len(data),
+            "sha256": digest,
+            "logs": logs[:10],
+            "data_b64": _b64encode(data, max_bytes=max_audio_bytes),
+        }
+
+    def _task_tts_agent_synthesize(self, body: dict[str, Any]) -> dict[str, Any]:
+        roles, capabilities = self._ensure_tts_piper_turbo_allowed()
+        if not _env_bool("PHONE_WORKER_TTS_AGENT_ENABLED", True):
+            raise RuntimeError("PHONE_WORKER_TTS_AGENT_ENABLED=false")
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise ValueError("texto vazio")
+        max_chars = max(64, _env_int("PHONE_WORKER_TTS_AGENT_MAX_TEXT_LENGTH", 1200))
+        if len(text) > max_chars:
+            raise ValueError(f"texto grande demais para TTS Agent ({len(text)} > {max_chars})")
+        limit = _tts_agent_queue_limit()
+        with _TTS_AGENT_LOCK:
+            if _TTS_AGENT_ACTIVE >= limit:
+                raise RuntimeError("TTS Agent ocupado; fila local cheia")
+        timeout = max(2, min(self.job_timeout, int(float(body.get("timeout_seconds") or os.getenv("PHONE_WORKER_TTS_AGENT_TIMEOUT_SECONDS") or self.job_timeout))))
+        max_audio_bytes = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
+        deps = _turbo_dependency_snapshot()
+        available = _tts_agent_available_engines(deps)
+        order = self._tts_agent_engine_order(body, available)
+        if not order:
+            raise RuntimeError("nenhuma engine TTS pronta no worker")
+        base_logs = [
+            f"perfil={_current_core_worker_profile()} versão={PHONE_WORKER_VERSION}",
+            f"tts-agent chars={len(text)} order={','.join(order)} timeout={timeout}s",
+        ]
+        errors: list[str] = []
+        _tts_agent_record_start()
+        started = time.monotonic()
+        selected = ""
+        try:
+            for engine in order:
+                selected = engine
+                try:
+                    if engine == "piper":
+                        piper_body = dict(body)
+                        piper_body["engine"] = "piper"
+                        piper_body.setdefault("cache_mode", "prefer")
+                        result = self._synthesize_piper_bytes(piper_body, benchmark=False)
+                        result["engine"] = "piper"
+                        result["selected_engine"] = "piper"
+                        result["worker_id"] = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip()
+                        result["available_engines"] = available
+                        result["logs"] = (base_logs + list(result.get("logs") or []))[:10]
+                        elapsed_ms = (time.monotonic() - started) * 1000.0
+                        result["total_ms"] = round(float(result.get("worker_total_ms") or elapsed_ms), 2)
+                        _tts_agent_record_done(ok=True, engine="piper", elapsed_ms=elapsed_ms)
+                        return result
+                    result = self._synthesize_standard_tts_bytes(
+                        body,
+                        engine=engine,
+                        roles=roles,
+                        capabilities=capabilities,
+                        logs=list(base_logs),
+                        started=started,
+                        max_audio_bytes=max_audio_bytes,
+                        timeout=timeout,
+                    )
+                    elapsed_ms = (time.monotonic() - started) * 1000.0
+                    _tts_agent_record_done(ok=True, engine=engine, elapsed_ms=elapsed_ms)
+                    return result
+                except Exception as exc:
+                    errors.append(f"{engine}: {type(exc).__name__}: {_short_text(exc, limit=140)}")
+                    continue
+            raise RuntimeError("; ".join(errors) or "todas as engines falharam")
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            _tts_agent_record_done(ok=False, engine=selected, elapsed_ms=elapsed_ms, error=str(exc))
+            raise
 
     def _resolve_piper_command(self) -> str:
         configured = str(os.getenv("PHONE_WORKER_PIPER_COMMAND", "") or "").strip()
