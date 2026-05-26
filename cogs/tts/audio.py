@@ -102,6 +102,9 @@ WORKER_VOICE_AGENT_SESSION_REPORT_ENABLED = bool(getattr(config, "WORKER_VOICE_A
 WORKER_VOICE_AGENT_SESSION_REPORT_TIMEOUT_SECONDS = max(0.6, float(getattr(config, "WORKER_VOICE_AGENT_SESSION_REPORT_TIMEOUT_SECONDS", 1.5) or 1.5))
 WORKER_VOICE_AGENT_SESSION_TTL_SECONDS = max(30.0, float(getattr(config, "WORKER_VOICE_AGENT_SESSION_TTL_SECONDS", 180.0) or 180.0))
 WORKER_VOICE_AGENT_SESSION_REPORT_MIN_INTERVAL_SECONDS = max(3.0, float(getattr(config, "WORKER_VOICE_AGENT_SESSION_REPORT_MIN_INTERVAL_SECONDS", 15.0) or 15.0))
+WORKER_VOICE_AGENT_HANDOFF_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_HANDOFF_ENABLED", True))
+WORKER_VOICE_AGENT_HANDOFF_TTL_SECONDS = max(10.0, float(getattr(config, "WORKER_VOICE_AGENT_HANDOFF_TTL_SECONDS", 60.0) or 60.0))
+WORKER_VOICE_AGENT_HANDOFF_TIMEOUT_SECONDS = max(0.6, float(getattr(config, "WORKER_VOICE_AGENT_HANDOFF_TIMEOUT_SECONDS", 1.5) or 1.5))
 TTS_LONG_TEXT_CHUNK_ENABLED = bool(getattr(config, "TTS_LONG_TEXT_CHUNK_ENABLED", True))
 TTS_LONG_TEXT_CHUNK_MAX_CHARS = max(160, int(getattr(config, "TTS_LONG_TEXT_CHUNK_MAX_CHARS", 420) or 420))
 TTS_LONG_TEXT_CHUNK_MAX_PARTS = max(1, int(getattr(config, "TTS_LONG_TEXT_CHUNK_MAX_PARTS", 8) or 8))
@@ -1739,6 +1742,42 @@ class TTSAudioMixin:
             "note": "registro seguro; não contém DISCORD_TOKEN nem voice token bruto",
         }
 
+    def _voice_client_handoff_payload(self, guild: discord.Guild, item: QueueItem, vc: Any | None, *, source: str) -> dict[str, Any] | None:
+        if not WORKER_VOICE_AGENT_HANDOFF_ENABLED or vc is None:
+            return None
+        channel = self._voice_client_channel(vc)
+        me = getattr(guild, "me", None)
+        me_voice = getattr(me, "voice", None)
+        session_id = str(getattr(vc, "session_id", None) or getattr(me_voice, "session_id", None) or "").strip()
+        endpoint = str(getattr(vc, "endpoint", None) or getattr(vc, "_endpoint", None) or "").strip()
+        token = str(getattr(vc, "token", None) or getattr(vc, "_token", None) or "").strip()
+        # Sem esses três campos o worker ainda não conseguiria abrir a conexão de voz
+        # no futuro. No dry-run o worker só guarda isso em memória, com TTL curto.
+        if not (session_id and endpoint and token):
+            return None
+        now_ms = int(time.time() * 1000)
+        return {
+            "guild_id": int(guild.id),
+            "channel_id": int(getattr(channel, "id", None) or item.channel_id or 0),
+            "text_channel_id": int(getattr(self.guild_states.get(int(guild.id)), "last_text_channel_id", 0) or 0) if self.guild_states.get(int(guild.id)) is not None else 0,
+            "requester_id": int(item.author_id or 0),
+            "bot_user_id": int(getattr(me, "id", 0) or 0),
+            "source": str(source or "tts").strip().lower()[:40] or "tts",
+            "state": "voice_handoff_observed_dry_run",
+            "registered_by": "vps_control_plane",
+            "dry_run": True,
+            "expires_in_seconds": int(WORKER_VOICE_AGENT_HANDOFF_TTL_SECONDS),
+            "observed_at_ms": now_ms,
+            "discord_voice_handoff": {
+                "session_id": session_id,
+                "endpoint": self._clean_worker_voice_endpoint(endpoint),
+                "voice_token": token,
+                "channel_id": int(getattr(channel, "id", None) or item.channel_id or 0),
+                "guild_id": int(guild.id),
+            },
+            "note": "handoff temporário; sem DISCORD_TOKEN; worker guarda somente em memória",
+        }
+
     def _compact_worker_voice_agent_snapshot(self, voice_agent: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(voice_agent, dict) or not voice_agent:
             return {}
@@ -1755,13 +1794,20 @@ class TTSAudioMixin:
             "voice_transport": str(voice_agent.get("voice_transport") or "")[:80],
             "ducking_ready": bool(voice_agent.get("ducking_ready")),
             "session_count": int(voice_agent.get("session_count") or 0),
+            "handoff_count": int(voice_agent.get("handoff_count") or 0),
+            "handoff_ready": bool(voice_agent.get("handoff_ready")),
             "active_guilds": [str(item)[:32] for item in list(voice_agent.get("active_guilds") or [])[:8]],
+            "handoff_guilds": [str(item)[:32] for item in list(voice_agent.get("handoff_guilds") or [])[:8]],
             "last_session": dict(voice_agent.get("last_session") or {}) if isinstance(voice_agent.get("last_session"), dict) else {},
+            "last_handoff": dict(voice_agent.get("last_handoff") or {}) if isinstance(voice_agent.get("last_handoff"), dict) else {},
             "missing": [str(item)[:80] for item in list(voice_agent.get("missing") or [])[:6]],
         }
         sessions = voice_agent.get("sessions")
         if isinstance(sessions, list):
             compact["sessions"] = [dict(item) for item in sessions[:5] if isinstance(item, dict)]
+        handoffs = voice_agent.get("handoffs")
+        if isinstance(handoffs, list):
+            compact["handoffs"] = [dict(item) for item in handoffs[:5] if isinstance(item, dict)]
         return compact
 
     def _update_worker_voice_agent_snapshot(self, voice_agent: dict[str, Any] | None) -> None:
@@ -1806,6 +1852,12 @@ class TTSAudioMixin:
         payload = self._voice_client_public_session_payload(guild, item, vc, source=source)
         task = asyncio.create_task(self._worker_voice_agent_register_session(payload))
         task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        handoff_payload = self._voice_client_handoff_payload(guild, item, vc, source=source)
+        if handoff_payload:
+            htask = asyncio.create_task(self._worker_voice_agent_register_handoff(handoff_payload))
+            htask.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        elif WORKER_VOICE_AGENT_HANDOFF_ENABLED:
+            self._record_worker_voice_session_metric("handoff_skipped")
 
     async def _worker_voice_agent_register_session(self, payload: dict[str, Any]) -> None:
         guild_id = int(payload.get("guild_id") or 0)
@@ -1827,6 +1879,29 @@ class TTSAudioMixin:
             self._worker_voice_agent_session_reports().pop(guild_id, None)
             logger.debug("[worker_voice_agent] registro de sessão falhou | guild=%s erro=%s", guild_id, exc)
 
+    async def _worker_voice_agent_register_handoff(self, payload: dict[str, Any]) -> None:
+        guild_id = int(payload.get("guild_id") or 0)
+        try:
+            data = await self._request_worker_voice_agent_json(
+                task="voice_agent_register_handoff",
+                payload=payload,
+                timeout_seconds=WORKER_VOICE_AGENT_HANDOFF_TIMEOUT_SECONDS,
+            )
+            if bool(data.get("ok", True)):
+                self._record_worker_voice_session_metric("handoff_ok")
+                logger.debug(
+                    "[worker_voice_agent] handoff dry-run registrado | guild=%s channel=%s state=%s ready=%s",
+                    guild_id,
+                    payload.get("channel_id"),
+                    data.get("state"),
+                    data.get("handoff_ready"),
+                )
+            else:
+                self._record_worker_voice_session_metric("handoff_failed")
+        except Exception as exc:
+            self._record_worker_voice_session_metric("handoff_failed")
+            logger.debug("[worker_voice_agent] handoff dry-run falhou | guild=%s erro=%s", guild_id, exc)
+
     def _schedule_worker_voice_agent_clear_session(self, guild_id: int, *, reason: str = "unknown") -> None:
         if not self._worker_voice_agent_reports_enabled():
             return
@@ -1834,6 +1909,9 @@ class TTSAudioMixin:
         payload = {"guild_id": int(guild_id or 0), "reason": str(reason or "unknown")[:120], "source": "vps_control_plane"}
         task = asyncio.create_task(self._worker_voice_agent_clear_session(payload))
         task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        if WORKER_VOICE_AGENT_HANDOFF_ENABLED:
+            htask = asyncio.create_task(self._worker_voice_agent_clear_handoff(payload))
+            htask.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     async def _worker_voice_agent_clear_session(self, payload: dict[str, Any]) -> None:
         try:
@@ -1845,6 +1923,21 @@ class TTSAudioMixin:
         except Exception as exc:
             self._record_worker_voice_session_metric("clears_failed")
             logger.debug("[worker_voice_agent] limpar sessão falhou | guild=%s erro=%s", payload.get("guild_id"), exc)
+
+    async def _worker_voice_agent_clear_handoff(self, payload: dict[str, Any]) -> None:
+        try:
+            data = await self._request_worker_voice_agent_json(
+                task="voice_agent_clear_handoff",
+                payload=payload,
+                timeout_seconds=WORKER_VOICE_AGENT_HANDOFF_TIMEOUT_SECONDS,
+            )
+            if bool(data.get("ok", True)):
+                self._record_worker_voice_session_metric("handoff_clears_ok")
+            else:
+                self._record_worker_voice_session_metric("handoff_clears_failed")
+        except Exception as exc:
+            self._record_worker_voice_session_metric("handoff_clears_failed")
+            logger.debug("[worker_voice_agent] limpar handoff falhou | guild=%s erro=%s", payload.get("guild_id"), exc)
 
     def _worker_tts_cache_payload_base(self, item: QueueItem, key: str) -> dict[str, Any]:
         engine = str(item.engine or "gtts").strip().lower() or "gtts"

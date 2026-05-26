@@ -505,6 +505,9 @@ WORKER_VOICE_AGENT_SESSION_REPORT_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_
 WORKER_VOICE_AGENT_SESSION_REPORT_TIMEOUT_SECONDS = max(0.6, _parse_float(os.getenv("WORKER_VOICE_AGENT_SESSION_REPORT_TIMEOUT_SECONDS", "1.5"), 1.5))
 WORKER_VOICE_AGENT_SESSION_TTL_SECONDS = max(30.0, _parse_float(os.getenv("WORKER_VOICE_AGENT_SESSION_TTL_SECONDS", "180"), 180.0))
 WORKER_VOICE_AGENT_SESSION_REPORT_MIN_INTERVAL_SECONDS = max(3.0, _parse_float(os.getenv("WORKER_VOICE_AGENT_SESSION_REPORT_MIN_INTERVAL_SECONDS", "15"), 15.0))
+WORKER_VOICE_AGENT_HANDOFF_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_AGENT_HANDOFF_ENABLED", "true"), True)
+WORKER_VOICE_AGENT_HANDOFF_TTL_SECONDS = max(10.0, _parse_float(os.getenv("WORKER_VOICE_AGENT_HANDOFF_TTL_SECONDS", "60"), 60.0))
+WORKER_VOICE_AGENT_HANDOFF_TIMEOUT_SECONDS = max(0.6, _parse_float(os.getenv("WORKER_VOICE_AGENT_HANDOFF_TIMEOUT_SECONDS", "1.5"), 1.5))
 
 # Texto longo começa a tocar mais rápido: divide em blocos naturais e enfileira
 # partes menores, permitindo prefetch do próximo áudio durante o playback atual.

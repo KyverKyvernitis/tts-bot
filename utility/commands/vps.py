@@ -710,19 +710,33 @@ class VpsCommandMixin:
         voice_music_ready = "sim" if voice_agent.get("music_ready") else "não"
         voice_tts_ready = "sim" if voice_agent.get("tts_ready") else "não"
         voice_session_count = int(voice_agent.get("session_count") or 0)
+        voice_handoff_count = int(voice_agent.get("handoff_count") or 0)
         voice_shared_ready = "sim" if voice_agent.get("shared_session_ready") else "não"
+        voice_handoff_ready = "sim" if voice_agent.get("handoff_ready") else "não"
         last_voice_session = voice_agent.get("last_session") if isinstance(voice_agent.get("last_session"), dict) else {}
+        last_handoff = voice_agent.get("last_handoff") if isinstance(voice_agent.get("last_handoff"), dict) else {}
         if last_voice_session:
             voice_session_line = (
-                f"Sessões registradas: `{self._format_vps_int(voice_session_count)}` · compartilhada pronta: `{voice_shared_ready}` · "
-                f"última guild `{str(last_voice_session.get('guild_id') or '?')}` canal `{str(last_voice_session.get('channel_id') or '?')}` "
+                f"Sessão lógica: `{self._format_vps_int(voice_session_count)}` · compartilhada `{voice_shared_ready}` · "
+                f"guild `{str(last_voice_session.get('guild_id') or '?')}` canal `{str(last_voice_session.get('channel_id') or '?')}` "
                 f"· TTL `{str(last_voice_session.get('ttl_seconds') or 0)}s`"
             )
         else:
-            voice_session_line = f"Sessões registradas: `{self._format_vps_int(voice_session_count)}` · compartilhada pronta: `{voice_shared_ready}` · aguardando primeira sessão da VPS"
+            voice_session_line = f"Sessão lógica: `{self._format_vps_int(voice_session_count)}` · compartilhada `{voice_shared_ready}` · aguardando primeira sessão da VPS"
+        if last_handoff:
+            voice_handoff_line = (
+                f"Handoff voz: `{voice_handoff_ready}` · registros `{self._format_vps_int(voice_handoff_count)}` · "
+                f"session `{ 'sim' if last_handoff.get('session_id_present') else 'não' }` · endpoint `{ 'sim' if last_handoff.get('endpoint_present') else 'não' }` · "
+                f"token temp `{ 'sim' if last_handoff.get('voice_token_present') else 'não' }` · TTL `{str(last_handoff.get('ttl_seconds') or 0)}s`"
+            )
+        else:
+            voice_handoff_line = f"Handoff voz: `{voice_handoff_ready}` · registros `{self._format_vps_int(voice_handoff_count)}` · aguardando session_id/endpoint/token temporário"
         voice_report_ok = int(tts_metrics.get("worker_voice_session_reports_ok", 0) or 0)
         voice_report_failed = int(tts_metrics.get("worker_voice_session_reports_failed", 0) or 0)
         voice_report_skipped = int(tts_metrics.get("worker_voice_session_skipped", 0) or 0)
+        voice_handoff_ok = int(tts_metrics.get("worker_voice_session_handoff_ok", 0) or 0)
+        voice_handoff_failed = int(tts_metrics.get("worker_voice_session_handoff_failed", 0) or 0)
+        voice_handoff_skipped = int(tts_metrics.get("worker_voice_session_handoff_skipped", 0) or 0)
 
         if last_requested or last_selected:
             last_worker_line = (
@@ -744,11 +758,13 @@ class VpsCommandMixin:
             f"Último erro do Agent: `{str(tts_agent.get('last_error') or 'nenhum')[:160]}`",
             "",
             "### 🎛️ Worker Voice Agent",
-            f"{voice_dot} Estado: `{voice_state}` · TTS direto worker→Discord: `{voice_tts_direct}`",
-            f"Plano: VPS controla comandos/UI; worker vira áudio/voz quando pronto · sessão compartilhada: `{'sim' if voice_agent.get('shared_session_enabled') else 'não'}`",
-            f"Music pronto: `{voice_music_ready}` · TTS pronto: `{voice_tts_ready}` · ducking: `{'sim' if voice_agent.get('ducking_ready') else 'não'}`",
+            f"{voice_dot} Estado: `{voice_state}` · direto worker→Discord: `{voice_tts_direct}` · handoff: `{voice_handoff_ready}`",
+            f"Plano: VPS controla comandos/UI; worker controla só áudio/voz quando pronto · sessão compartilhada: `{'sim' if voice_agent.get('shared_session_enabled') else 'não'}`",
+            f"Music `{voice_music_ready}` · TTS `{voice_tts_ready}` · ducking `{'sim' if voice_agent.get('ducking_ready') else 'não'}`",
             voice_session_line,
-            f"Registro VPS→worker: `{self._format_vps_int(voice_report_ok)}` ok · `{self._format_vps_int(voice_report_failed)}` falhas · `{self._format_vps_int(voice_report_skipped)}` pulados",
+            voice_handoff_line,
+            f"Registro sessão: `{self._format_vps_int(voice_report_ok)}` ok · `{self._format_vps_int(voice_report_failed)}` falhas · `{self._format_vps_int(voice_report_skipped)}` pulados",
+            f"Registro handoff: `{self._format_vps_int(voice_handoff_ok)}` ok · `{self._format_vps_int(voice_handoff_failed)}` falhas · `{self._format_vps_int(voice_handoff_skipped)}` pulados",
             f"Pendências: `{voice_missing[:140]}`",
             "",
             "### 📱 TTS do Worker / TTS Agent",
@@ -782,8 +798,8 @@ class VpsCommandMixin:
             f"Worker Agent: {self._format_vps_int(worker_total_synts)} · VPS/fallback: {self._format_vps_int(local_total_synts)}",
         ]
         report = "\n".join(lines).strip()
-        if len(report) > 3400:
-            report = report[:3400].rstrip() + "\n[cortado por tamanho]"
+        if len(report) > 3800:
+            report = report[:3800].rstrip() + "\n[cortado por tamanho]"
         return report
 
     async def _run_vps_action(self, interaction: discord.Interaction, *, selected_items: list[VpsItem]) -> None:

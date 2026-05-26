@@ -54,7 +54,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.15"
+PHONE_WORKER_VERSION = "1.10.16"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -174,6 +174,9 @@ SUPPORTED_DIRECT_TASKS = (
     "voice_agent_register_session",
     "voice_agent_clear_session",
     "voice_agent_guild_status",
+    "voice_agent_register_handoff",
+    "voice_agent_clear_handoff",
+    "voice_agent_handoff_status",
     "worker_logs",
     "worker_self_check",
     "worker_update",
@@ -2559,6 +2562,7 @@ def _music_agent_snapshot() -> dict[str, Any]:
 
 _VOICE_AGENT_SESSION_LOCK = threading.RLock()
 _VOICE_AGENT_SESSION_MEMORY: dict[str, Any] | None = None
+_VOICE_AGENT_HANDOFF_MEMORY: dict[str, dict[str, Any]] = {}
 
 
 def _voice_agent_state_file() -> Path:
@@ -2643,6 +2647,126 @@ def _voice_agent_public_session(raw: dict[str, Any], *, now_ms: int | None = Non
         "endpoint_host": str(voice.get("endpoint_host") or "")[:120],
         "connected": bool(voice.get("connected")),
         "direct_tts_enabled": bool(raw.get("direct_tts_enabled")),
+    }
+
+
+def _voice_agent_public_handoff(raw: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
+    now_ms = int(now_ms or _voice_agent_now_ms())
+    expires_at_ms = _voice_agent_int(raw.get("expires_at_ms"), 0)
+    ttl_ms = max(0, expires_at_ms - now_ms) if expires_at_ms else 0
+    endpoint = _voice_agent_clean_text(raw.get("endpoint_host") or raw.get("endpoint"), limit=160)
+    return {
+        "guild_id": str(raw.get("guild_id") or ""),
+        "channel_id": str(raw.get("channel_id") or ""),
+        "source": str(raw.get("source") or "")[:40],
+        "state": str(raw.get("state") or "handoff_registered")[:60],
+        "dry_run": bool(raw.get("dry_run", True)),
+        "age_seconds": round(max(0, now_ms - _voice_agent_int(raw.get("updated_at_ms"), now_ms)) / 1000.0, 1),
+        "ttl_seconds": round(ttl_ms / 1000.0, 1) if ttl_ms else 0.0,
+        "session_id_present": bool(raw.get("session_id")),
+        "endpoint_present": bool(endpoint),
+        "voice_token_present": bool(raw.get("voice_token")),
+        "endpoint_host": endpoint[:120],
+        "complete": bool(raw.get("session_id") and raw.get("voice_token") and endpoint),
+    }
+
+
+def _voice_agent_prune_handoffs() -> dict[str, dict[str, Any]]:
+    now_ms = _voice_agent_now_ms()
+    with _VOICE_AGENT_SESSION_LOCK:
+        stale = [key for key, data in _VOICE_AGENT_HANDOFF_MEMORY.items() if _voice_agent_int(data.get("expires_at_ms"), 0) and _voice_agent_int(data.get("expires_at_ms"), 0) <= now_ms]
+        for key in stale:
+            _VOICE_AGENT_HANDOFF_MEMORY.pop(key, None)
+        return {str(k): dict(v) for k, v in _VOICE_AGENT_HANDOFF_MEMORY.items() if isinstance(v, dict)}
+
+
+def _voice_agent_handoff_summary(*, guild_id: int | None = None, limit: int = 5) -> dict[str, Any]:
+    now_ms = _voice_agent_now_ms()
+    handoffs_dict = _voice_agent_prune_handoffs()
+    handoffs = []
+    for key, raw in handoffs_dict.items():
+        if guild_id is not None and str(key) != str(int(guild_id)):
+            continue
+        handoffs.append(_voice_agent_public_handoff(raw, now_ms=now_ms))
+    handoffs.sort(key=lambda item: float(item.get("age_seconds", 999999) or 999999))
+    complete_count = sum(1 for item in handoffs if item.get("complete"))
+    return {
+        "handoff_count": len(handoffs),
+        "handoff_complete_count": complete_count,
+        "handoff_ready": complete_count > 0,
+        "handoff_guilds": [str(item.get("guild_id") or "") for item in handoffs[:12] if item.get("guild_id")],
+        "handoffs": handoffs[:limit],
+        "last_handoff": handoffs[0] if handoffs else {},
+    }
+
+
+def _voice_agent_register_handoff_payload(body: dict[str, Any]) -> dict[str, Any]:
+    raw = body.get("discord_voice_handoff") if isinstance(body.get("discord_voice_handoff"), dict) else body
+    guild_id = _voice_agent_int(body.get("guild_id") or raw.get("guild_id"), 0)
+    channel_id = _voice_agent_int(body.get("channel_id") or raw.get("channel_id"), 0)
+    if guild_id <= 0 or channel_id <= 0:
+        raise RuntimeError("guild_id/channel_id obrigatórios para handoff de voz")
+    if not _env_bool("PHONE_WORKER_VOICE_AGENT_HANDOFF_ENABLED", True):
+        raise RuntimeError("handoff do Worker Voice Agent desativado")
+    ttl_seconds = max(10, min(180, _voice_agent_int(body.get("expires_in_seconds"), _env_int("PHONE_WORKER_VOICE_AGENT_HANDOFF_TTL_SECONDS", 60))))
+    now_ms = _voice_agent_now_ms()
+    session_id = _voice_agent_clean_text(raw.get("session_id"), limit=220)
+    endpoint = _voice_agent_clean_text(raw.get("endpoint"), limit=220)
+    token = str(raw.get("voice_token") or raw.get("token") or "").strip()
+    if not (session_id and endpoint and token):
+        raise RuntimeError("handoff incompleto: session_id/endpoint/voice_token obrigatórios")
+    return {
+        "guild_id": str(guild_id),
+        "channel_id": str(channel_id),
+        "text_channel_id": str(_voice_agent_int(body.get("text_channel_id"), 0) or ""),
+        "requester_id": str(_voice_agent_int(body.get("requester_id"), 0) or ""),
+        "bot_user_id": str(_voice_agent_int(body.get("bot_user_id"), 0) or ""),
+        "source": _voice_agent_clean_text(body.get("source") or "tts", limit=40) or "tts",
+        "state": _voice_agent_clean_text(body.get("state") or "voice_handoff_registered_dry_run", limit=60) or "voice_handoff_registered_dry_run",
+        "registered_by": _voice_agent_clean_text(body.get("registered_by") or "vps_control_plane", limit=60) or "vps_control_plane",
+        "dry_run": bool(body.get("dry_run", True)),
+        "created_at_ms": now_ms,
+        "updated_at_ms": now_ms,
+        "expires_at_ms": now_ms + ttl_seconds * 1000,
+        # Dados temporários necessários para a futura conexão Voice WS/UDP.
+        # Eles ficam só em memória, nunca no arquivo voice-agent-state.json e nunca aparecem no painel.
+        "session_id": session_id,
+        "endpoint": endpoint,
+        "endpoint_host": endpoint,
+        "voice_token": token,
+    }
+
+
+def _voice_agent_register_handoff(body: dict[str, Any]) -> dict[str, Any]:
+    if not _env_bool("PHONE_WORKER_VOICE_AGENT_ENABLED", True):
+        raise RuntimeError("Worker Voice Agent desativado")
+    handoff = _voice_agent_register_handoff_payload(body)
+    with _VOICE_AGENT_SESSION_LOCK:
+        _VOICE_AGENT_HANDOFF_MEMORY[str(handoff["guild_id"])] = handoff
+    return {
+        "ok": True,
+        "registered": True,
+        "state": "voice_handoff_registered_dry_run",
+        "handoff": _voice_agent_public_handoff(handoff),
+        **_voice_agent_handoff_summary(guild_id=_voice_agent_int(handoff.get("guild_id"), 0), limit=5),
+    }
+
+
+def _voice_agent_clear_handoff(body: dict[str, Any]) -> dict[str, Any]:
+    guild_id = _voice_agent_int(body.get("guild_id"), 0)
+    removed = False
+    with _VOICE_AGENT_SESSION_LOCK:
+        if guild_id > 0:
+            removed = _VOICE_AGENT_HANDOFF_MEMORY.pop(str(guild_id), None) is not None
+        elif body.get("all"):
+            removed = bool(_VOICE_AGENT_HANDOFF_MEMORY)
+            _VOICE_AGENT_HANDOFF_MEMORY.clear()
+    return {
+        "ok": True,
+        "cleared": removed,
+        "state": "voice_handoff_cleared" if removed else "voice_handoff_not_found",
+        "reason": _voice_agent_clean_text(body.get("reason"), limit=120),
+        **_voice_agent_handoff_summary(limit=5),
     }
 
 
@@ -2780,10 +2904,13 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
     has_voice_capability = "voice-agent" in capabilities or "worker-voice" in capabilities or ("music" in capabilities and "tts-agent" in capabilities)
     base_ready = bool(enabled and profile == "turbo" and has_voice_capability and not safe_mode)
     session_summary = _voice_agent_session_summary(limit=5)
+    handoff_summary = _voice_agent_handoff_summary(limit=5)
     session_count = int(session_summary.get("session_count") or 0)
+    handoff_count = int(handoff_summary.get("handoff_count") or 0)
+    handoff_ready = bool(handoff_summary.get("handoff_ready"))
     shared_ready = bool(base_ready and shared_session_enabled and (music_ready or direct_music_enabled) and tts_ready)
     shared_session_ready = bool(shared_ready and session_count > 0)
-    direct_tts_ready = bool(shared_session_ready and direct_tts_enabled and music_ready)
+    direct_tts_ready = bool(shared_session_ready and handoff_ready and direct_tts_enabled and music_ready)
 
     missing: list[str] = []
     if not enabled:
@@ -2802,9 +2929,13 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
         missing.append("Music Agent/voz pronta")
     if shared_ready and session_count <= 0:
         missing.append("sessão de voz registrada pela VPS")
+    if shared_session_ready and not handoff_ready:
+        missing.append("handoff temporário de voz")
 
     if direct_tts_ready:
         state = "direct_tts_voice_ready"
+    elif shared_session_ready and handoff_ready:
+        state = "voice_handoff_registered_dry_run"
     elif shared_session_ready:
         state = "shared_voice_session_registered"
     elif shared_ready:
@@ -2833,6 +2964,12 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
         "active_guilds": list(session_summary.get("active_guilds") or [])[:12],
         "sessions": list(session_summary.get("sessions") or [])[:5],
         "last_session": dict(session_summary.get("last_session") or {}),
+        "handoff_count": handoff_count,
+        "handoff_complete_count": int(handoff_summary.get("handoff_complete_count") or 0),
+        "handoff_ready": bool(handoff_ready),
+        "handoff_guilds": list(handoff_summary.get("handoff_guilds") or [])[:12],
+        "handoffs": list(handoff_summary.get("handoffs") or [])[:5],
+        "last_handoff": dict(handoff_summary.get("last_handoff") or {}),
         "direct_tts_enabled": bool(direct_tts_enabled),
         "direct_tts_ready": bool(direct_tts_ready),
         "direct_music_enabled": bool(direct_music_enabled),
@@ -3204,6 +3341,12 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_voice_agent_clear_session(body)
             elif task == "voice_agent_guild_status":
                 payload = self._task_voice_agent_guild_status(body)
+            elif task == "voice_agent_register_handoff":
+                payload = self._task_voice_agent_register_handoff(body)
+            elif task == "voice_agent_clear_handoff":
+                payload = self._task_voice_agent_clear_handoff(body)
+            elif task == "voice_agent_handoff_status":
+                payload = self._task_voice_agent_handoff_status(body)
             elif task == "log_extract":
                 payload = self._task_log_extract(body)
             elif task == "log_summary":
@@ -3543,6 +3686,33 @@ class WorkerHandler(BaseHTTPRequestHandler):
         snapshot["ok"] = bool(snapshot.get("ok"))
         snapshot["guild_id"] = str(guild_id or "")
         snapshot.setdefault("logs", []).append("status de sessão por guild coletado")
+        return snapshot
+
+    def _task_voice_agent_register_handoff(self, body: dict[str, Any]) -> dict[str, Any]:
+        result = _voice_agent_register_handoff(body)
+        music_agent = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
+        tts_agent = _safe_telemetry("tts_agent", _tts_agent_snapshot, {"ok": False, "available": False, "synth_ready": False})
+        snapshot = _voice_agent_snapshot(music_agent=music_agent, tts_agent=tts_agent)
+        snapshot.update(result)
+        snapshot["voice_agent"] = _voice_agent_snapshot(music_agent=music_agent, tts_agent=tts_agent)
+        snapshot.setdefault("logs", []).append("handoff temporário de voz recebido em dry-run; raw token guardado só em memória")
+        return snapshot
+
+    def _task_voice_agent_clear_handoff(self, body: dict[str, Any]) -> dict[str, Any]:
+        result = _voice_agent_clear_handoff(body)
+        snapshot = _voice_agent_snapshot()
+        snapshot.update(result)
+        snapshot["voice_agent"] = _voice_agent_snapshot()
+        snapshot.setdefault("logs", []).append("handoff temporário de voz limpo")
+        return snapshot
+
+    def _task_voice_agent_handoff_status(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id = _voice_agent_int(body.get("guild_id"), 0)
+        summary = _voice_agent_handoff_summary(guild_id=guild_id if guild_id > 0 else None, limit=5)
+        snapshot = _voice_agent_snapshot()
+        snapshot.update(summary)
+        snapshot["guild_id"] = str(guild_id or "")
+        snapshot.setdefault("logs", []).append("status de handoff de voz coletado")
         return snapshot
 
     def _task_tts_agent_status(self, body: dict[str, Any]) -> dict[str, Any]:

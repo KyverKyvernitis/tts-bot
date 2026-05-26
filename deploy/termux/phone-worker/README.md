@@ -1,3 +1,9 @@
+## Patch 85.5: handoff dry-run do Worker Voice Agent
+
+A versão `1.10.16` adiciona o handoff temporário de voz em modo dry-run. A VPS continua como cérebro do bot, mas quando uma sessão de voz está ativa ela também envia ao worker os dados temporários necessários para a futura conexão de voz (`session_id`, endpoint e token temporário de voz). Esse handoff fica **somente em memória**, expira rápido e não é salvo no `voice-agent-state.json`. O `DISCORD_TOKEN` geral do bot continua sem ser enviado ao worker.
+
+Novas tasks diretas: `voice_agent_register_handoff`, `voice_agent_clear_handoff` e `voice_agent_handoff_status`. O painel `/vps` agora mostra sessão lógica e handoff separadamente, com presença de session/endpoint/token temporário, sem expor valores crus. A transmissão direta worker → Discord ainda fica desligada por padrão; esta etapa só prova que o worker recebeu o material de voz certo para o próximo patch abrir Voice WebSocket/UDP de forma controlada.
+
 ## Patch 85.4: registro de sessão do Worker Voice Agent
 
 A versão `1.10.15` passa a aceitar as tasks `voice_agent_register_session`, `voice_agent_clear_session` e `voice_agent_guild_status`. A VPS continua como cérebro do bot e apenas registra no worker, quando ele está saudável, qual guild/canal de voz está em uso. Esse registro é uma etapa segura antes do TTS direto worker → Discord: ele não envia `DISCORD_TOKEN` e não persiste o voice token bruto.
