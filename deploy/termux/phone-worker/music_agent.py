@@ -25,7 +25,7 @@ import tempfile
 import threading
 import time
 from array import array
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.21"
+AGENT_VERSION = "0.3.22"
 STARTED_AT = time.time()
 
 
@@ -420,6 +420,7 @@ class GuildMusicState:
     text_channel_id: int = 0
     current: AgentTrack | None = None
     queue: list[AgentTrack] = field(default_factory=list)
+    history: list[AgentTrack] = field(default_factory=list)
     status: str = "idle"
     paused: bool = False
     last_error: str = ""
@@ -490,6 +491,8 @@ class GuildMusicState:
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,
             "queue_size": len(self.queue),
+            "history_size": len(self.history),
+            "previous_available": bool(self.history),
             "volume_percent": self.volume_percent,
             "normal_volume_percent": self.normal_volume_percent,
             "ducked": self.ducked,
@@ -951,6 +954,8 @@ class MusicAgent:
             return await self.cmd_stop(body)
         if action in {"skip", "next"}:
             return await self.cmd_skip(body)
+        if action in {"previous", "back", "prev", "anterior", "voltar"}:
+            return await self.cmd_previous(body)
         if action == "volume":
             return await self.cmd_volume(body)
         if action in {"shuffle", "shuffle_queue", "mix_queue"}:
@@ -1188,6 +1193,64 @@ class MusicAgent:
             self._set_status(st, "playing", event="resume")
         return {"ok": True, "state": st.public()}
 
+    def _track_key(self, track: AgentTrack | None) -> str:
+        if track is None:
+            return ""
+        for value in (track.webpage_url, track.query, track.stream_url, track.title):
+            raw = str(value or "").strip().lower()
+            if raw:
+                return raw[:300]
+        return ""
+
+    def _clone_track(self, track: AgentTrack | None) -> AgentTrack | None:
+        if track is None:
+            return None
+        with contextlib.suppress(Exception):
+            clone = replace(track)
+            clone.start_offset_seconds = 0.0
+            return clone
+        return None
+
+    def _push_history(self, st: GuildMusicState, track: AgentTrack | None) -> None:
+        clone = self._clone_track(track)
+        if clone is None:
+            return
+        key = self._track_key(clone)
+        if key and st.history and self._track_key(st.history[-1]) == key:
+            return
+        st.history.append(clone)
+        max_history = max(1, env_int("MUSIC_AGENT_HISTORY_MAXSIZE", 25))
+        if len(st.history) > max_history:
+            del st.history[:-max_history]
+
+    def _track_from_command_payload(self, body: dict[str, Any], *, fallback_query: str = "") -> AgentTrack | None:
+        meta = body.get("track") if isinstance(body.get("track"), dict) else {}
+        if not meta:
+            return None
+        track = self._agent_track_from_metadata(meta, body=body, fallback_query=fallback_query or self._query_from_track_meta(meta, fallback_query=""))
+        track.start_offset_seconds = 0.0
+        return track
+
+    async def _stop_player_instance(self, player: Any, *, disconnect: bool = False) -> None:
+        if not player:
+            return
+        with contextlib.suppress(Exception):
+            if isinstance(player, getattr(wavelink, "Player", ())):
+                await player.stop()
+                if disconnect:
+                    await player.disconnect()
+            else:
+                if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
+                    player.stop()
+                if disconnect:
+                    await player.disconnect(force=True)
+
+    async def _stop_current_player_for_transition(self, st: GuildMusicState, *, disconnect: bool = False) -> None:
+        player = st.player
+        if disconnect:
+            st.player = None
+        await self._stop_player_instance(player, disconnect=disconnect)
+
     async def cmd_stop(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
@@ -1195,21 +1258,13 @@ class MusicAgent:
         self._cancel_prefetch_tasks(guild_id)
         self._cancel_idle_disconnect(guild_id)
         st.queue.clear()
+        st.history.clear()
+        player = st.player
         st.current = None
         self._set_status(st, "idle", event="stop")
         st.paused = False
-        player = st.player
-        st.player = None
         self._bump_playback_generation(st, reason="stop")
-        if player:
-            with contextlib.suppress(Exception):
-                if isinstance(player, getattr(wavelink, "Player", ())):
-                    await player.stop()
-                    await player.disconnect()
-                else:
-                    if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
-                        player.stop()
-                    await player.disconnect(force=True)
+        await self._stop_player_instance(player, disconnect=True)
         return {"ok": True, "state": st.public()}
 
     async def cmd_skip(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1218,16 +1273,47 @@ class MusicAgent:
         st.last_action = "skip"
         self._cancel_prefetch_tasks(guild_id)
         player = st.player
-        st.current = None
+        self._push_history(st, st.current)
         self._bump_playback_generation(st, reason="skip")
-        if player:
-            with contextlib.suppress(Exception):
-                if isinstance(player, getattr(wavelink, "Player", ())):
-                    await player.stop()
-                elif getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
-                    player.stop()
+        await self._stop_player_instance(player, disconnect=False)
+        st.current = None
         await self._play_next(guild_id)
         return {"ok": True, "state": st.public()}
+
+    async def cmd_previous(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id = safe_id(body.get("guild_id"))
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        st.last_action = "previous"
+        explicit = self._track_from_command_payload(body)
+        previous = explicit
+        if previous is None and st.history:
+            previous = st.history.pop()
+        elif explicit is not None:
+            explicit_key = self._track_key(explicit)
+            if explicit_key:
+                # Remova a mesma faixa do topo do histórico remoto se ela estiver lá.
+                for idx in range(len(st.history) - 1, -1, -1):
+                    if self._track_key(st.history[idx]) == explicit_key:
+                        del st.history[idx]
+                        break
+        if previous is None:
+            return {"ok": False, "error": "sem música anterior no histórico", "state": st.public()}
+
+        current = self._clone_track(st.current)
+        if current is not None:
+            st.queue.insert(0, current)
+        previous.start_offset_seconds = 0.0
+        st.queue.insert(0, previous)
+        self._cancel_prefetch_tasks(guild_id)
+        self._cancel_idle_disconnect(guild_id)
+        player = st.player
+        self._bump_playback_generation(st, reason="previous")
+        await self._stop_player_instance(player, disconnect=False)
+        st.current = None
+        st.paused = False
+        await self._play_next(guild_id)
+        self.log("previous_started", guild_id=guild_id, title=getattr(previous, "title", ""), queue_size=len(st.queue), history_size=len(st.history))
+        return {"ok": True, "previous": previous.public(), "state": st.public()}
 
     async def cmd_shuffle(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
@@ -1737,6 +1823,8 @@ class MusicAgent:
         st.current = None
         st.paused = False
         loop_mode = str(getattr(st, "loop_mode", "off") or "off").strip().lower()
+        if finished is not None and loop_mode != "one":
+            self._push_history(st, finished)
 
         if finished is not None and loop_mode == "one":
             finished.start_offset_seconds = 0.0

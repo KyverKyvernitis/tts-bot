@@ -694,6 +694,7 @@ class MusicGuildState:
     panel_last_repost_at: float = 0.0
     agent_last_idle_event: str = ""
     agent_remote_queue_size: int = 0
+    agent_remote_history_size: int = 0
     voice_status_last_applied_key: str = ""
     voice_status_last_sync_request_key: str = ""
     voice_status_last_sync_request_at: float = 0.0
@@ -4355,6 +4356,8 @@ class AudioRouter:
                 self._push_history(state, previous_current)
         last_error = str(remote.get("last_error") or "").strip()
         self._sync_agent_remote_queue(state, remote)
+        with contextlib.suppress(Exception):
+            state.agent_remote_history_size = max(0, int(remote.get("history_size") or 0))
         had_active_agent_session = bool(
             str(getattr(state, "current_backend", "") or "").lower() == "agent"
             and (state.current is not None or previous_status in {"resolving", "starting", "playing", "paused", "queued"})
@@ -5984,32 +5987,39 @@ class AudioRouter:
 
     async def previous(self, guild_id: int) -> bool:
         state = self.get_state(guild_id)
-        if not state.history:
-            # Sem histórico, o botão de voltar não reinicia a faixa atual.
-            # Ele apenas informa que não existe música anterior.
-            return False
-        try:
-            previous_track = state.history.pop()
-        except IndexError:
-            return False
-
-        if str(getattr(state, "current_backend", "") or "").lower() == "agent" and self.music_worker_only_enabled():
-            if not int(getattr(state, "last_voice_channel_id", 0) or 0):
-                # Sem canal remoto conhecido, devolve ao histórico e falha limpo.
-                state.history.append(previous_track)
-                return False
+        is_agent = str(getattr(state, "current_backend", "") or "").lower() == "agent" and self.music_worker_only_enabled()
+        previous_track: MusicTrack | None = None
+        if state.history:
             try:
-                result = await _music_agent_command(
-                    "play",
-                    guild_id=int(guild_id),
-                    voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0),
-                    text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0),
-                    query=previous_track.webpage_url or previous_track.original_url or previous_track.stream_url or previous_track.title,
-                    track=previous_track,
-                    timeout_seconds=getattr(config, "MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", 12.0),
-                )
+                previous_track = state.history.pop()
+            except IndexError:
+                previous_track = None
+
+        if is_agent:
+            remote_has_history = bool(int(getattr(state, "agent_remote_history_size", 0) or 0) > 0)
+            if previous_track is None and not remote_has_history:
+                # Sem histórico local/remoto, o botão de voltar não reinicia a faixa atual.
+                return False
+            if not int(getattr(state, "last_voice_channel_id", 0) or 0):
+                if previous_track is not None:
+                    state.history.append(previous_track)
+                return False
+            payload = {
+                "guild_id": int(guild_id),
+                "voice_channel_id": int(getattr(state, "last_voice_channel_id", 0) or 0),
+                "text_channel_id": int(getattr(state, "last_text_channel_id", 0) or 0),
+                "timeout_seconds": getattr(config, "MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", 12.0),
+            }
+            if previous_track is not None:
+                payload.update({
+                    "query": previous_track.webpage_url or previous_track.original_url or previous_track.stream_url or previous_track.title,
+                    "track": previous_track,
+                })
+            try:
+                result = await _music_agent_command("previous", **payload)
             except Exception:
-                state.history.append(previous_track)
+                if previous_track is not None:
+                    state.history.append(previous_track)
                 logger.warning("[music/agent] falha ao voltar histórico pelo worker | guild=%s", guild_id, exc_info=True)
                 return False
             state.stop_requested = False
@@ -6024,10 +6034,13 @@ class AudioRouter:
                 remote,
                 voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0),
                 text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0),
-                queued=bool(isinstance(result, dict) and result.get("queued")),
+                queued=False,
                 create_panel=True,
             )
-            return True
+            return bool(result.get("ok", True))
+
+        if previous_track is None:
+            return False
 
         current = state.current
         # ``forward_queue`` tem prioridade sobre o queue normal. Por isso a

@@ -1812,7 +1812,7 @@ class MusicPlayerView(discord.ui.View):
         paused = bool(getattr(state, "paused", False)) or status == "paused"
         has_current = bool(getattr(state, "current", None) or getattr(state, "current_source", None) or status in {"resolving", "starting", "skipping", "playing", "paused"})
         has_queue = bool(_queue_items(state))
-        has_history = bool(list(getattr(state, "history", []) or []))
+        has_history = bool(list(getattr(state, "history", []) or [])) or bool(int(getattr(state, "agent_remote_history_size", 0) or 0) > 0)
         has_session = bool(getattr(state, "music_session_active", False) or has_current or has_queue)
         controls_invalid = _panel_controls_invalid(state)
 
@@ -1847,7 +1847,7 @@ class MusicPlayerView(discord.ui.View):
         state = self.router.get_state(self.guild_id)
         if _panel_controls_invalid(state):
             custom_id = str((getattr(interaction, "data", {}) or {}).get("custom_id") or "")
-            has_history = bool(list(getattr(state, "history", []) or []))
+            has_history = bool(list(getattr(state, "history", []) or [])) or bool(int(getattr(state, "agent_remote_history_size", 0) or 0) > 0)
             if not (custom_id.endswith(":back") or custom_id == "") or not has_history:
                 await _send_interaction_notice(interaction, "`⌛` Esse painel expirou. Use `_play <link ou pesquisa>` para começar de novo.")
                 return False
