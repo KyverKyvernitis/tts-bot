@@ -4351,8 +4351,12 @@ class AudioRouter:
                 and incoming_key
                 and previous_current_key
                 and incoming_key != previous_current_key
-                and previous_status in {"resolving", "starting", "playing", "paused", "queued"}
+                and previous_status not in {"stopped"}
             ):
+                # Quando o Music Agent troca a faixa autoritativa, a VPS também
+                # guarda uma cópia local como fallback. Isso cobre a janela em
+                # que o estado remoto ainda não reportou history_size ou quando
+                # um painel antigo aciona o botão voltar logo após a transição.
                 self._push_history(state, previous_current)
         last_error = str(remote.get("last_error") or "").strip()
         self._sync_agent_remote_queue(state, remote)
@@ -5989,20 +5993,21 @@ class AudioRouter:
         state = self.get_state(guild_id)
         is_agent = str(getattr(state, "current_backend", "") or "").lower() == "agent" and self.music_worker_only_enabled()
         previous_track: MusicTrack | None = None
-        if state.history:
-            try:
-                previous_track = state.history.pop()
-            except IndexError:
-                previous_track = None
 
         if is_agent:
+            # O Music Agent é o dono do histórico quando ele é dono da voz.
+            # Antes de negar o botão, faça uma leitura curta do estado remoto: a
+            # VPS pode estar com agent_remote_history_size atrasado entre uma
+            # transição de faixa e o clique do usuário.
+            with contextlib.suppress(Exception):
+                await self._refresh_music_agent_control_state(guild_id, create_panel=False)
+                state = self.get_state(guild_id)
             remote_has_history = bool(int(getattr(state, "agent_remote_history_size", 0) or 0) > 0)
-            if previous_track is None and not remote_has_history:
+            local_fallback = state.history[-1] if state.history else None
+            if local_fallback is None and not remote_has_history:
                 # Sem histórico local/remoto, o botão de voltar não reinicia a faixa atual.
                 return False
             if not int(getattr(state, "last_voice_channel_id", 0) or 0):
-                if previous_track is not None:
-                    state.history.append(previous_track)
                 return False
             payload = {
                 "guild_id": int(guild_id),
@@ -6010,24 +6015,45 @@ class AudioRouter:
                 "text_channel_id": int(getattr(state, "last_text_channel_id", 0) or 0),
                 "timeout_seconds": getattr(config, "MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", 12.0),
             }
-            if previous_track is not None:
+            # Só envie faixa explícita quando o worker realmente não tem
+            # histórico remoto. Se os dois lados têm histórico, o remoto manda.
+            if not remote_has_history and local_fallback is not None:
                 payload.update({
-                    "query": previous_track.webpage_url or previous_track.original_url or previous_track.stream_url or previous_track.title,
-                    "track": previous_track,
+                    "query": local_fallback.webpage_url or local_fallback.original_url or local_fallback.stream_url or local_fallback.title,
+                    "track": local_fallback,
                 })
             try:
                 result = await _music_agent_command("previous", **payload)
             except Exception:
-                if previous_track is not None:
-                    state.history.append(previous_track)
                 logger.warning("[music/agent] falha ao voltar histórico pelo worker | guild=%s", guild_id, exc_info=True)
                 return False
+            if not bool(result.get("ok", True)):
+                remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
+                if remote:
+                    with contextlib.suppress(Exception):
+                        await self.sync_music_agent_state(
+                            int(guild_id),
+                            None,
+                            remote,
+                            voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0),
+                            text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0),
+                            queued=False,
+                            create_panel=False,
+                        )
+                return False
+            # Se o fallback local foi usado com sucesso, remova só agora.
+            if not remote_has_history and local_fallback is not None and state.history:
+                with contextlib.suppress(Exception):
+                    if state.history[-1] is local_fallback:
+                        state.history.pop()
             state.stop_requested = False
             state.skip_requested = False
             state.skip_transition_active = True
             self._clear_idle_reason(state)
             self._cancel_music_idle_disconnect(state)
             remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
+            previous_payload = result.get("previous") if isinstance(result, dict) and isinstance(result.get("previous"), dict) else {}
+            previous_track = self._track_from_agent_payload(previous_payload, local_fallback) if previous_payload else local_fallback
             await self.sync_music_agent_state(
                 int(guild_id),
                 previous_track,
@@ -6037,7 +6063,13 @@ class AudioRouter:
                 queued=False,
                 create_panel=True,
             )
-            return bool(result.get("ok", True))
+            return True
+
+        if state.history:
+            try:
+                previous_track = state.history.pop()
+            except IndexError:
+                previous_track = None
 
         if previous_track is None:
             return False

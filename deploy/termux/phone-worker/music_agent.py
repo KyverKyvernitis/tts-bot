@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.22"
+AGENT_VERSION = "0.3.23"
 STARTED_AT = time.time()
 
 
@@ -1311,7 +1311,7 @@ class MusicAgent:
         await self._stop_player_instance(player, disconnect=False)
         st.current = None
         st.paused = False
-        await self._play_next(guild_id)
+        await self._play_next(guild_id, preserve_current_to_history=False)
         self.log("previous_started", guild_id=guild_id, title=getattr(previous, "title", ""), queue_size=len(st.queue), history_size=len(st.history))
         return {"ok": True, "previous": previous.public(), "state": st.public()}
 
@@ -1593,16 +1593,26 @@ class MusicAgent:
         self.log("tts_overlay_done", guild_id=guild_id, elapsed_ms=round(elapsed_ms, 1))
         return {"ok": True, "engine": engine, "playback_ms": round(elapsed_ms, 1), "state": st.public()}
 
-    async def _play_next(self, guild_id: int) -> None:
+    async def _play_next(self, guild_id: int, *, preserve_current_to_history: bool = True) -> None:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         self._cancel_idle_disconnect(guild_id)
         if not st.queue:
+            if st.current is not None:
+                self._push_history(st, st.current)
             st.current = None
             st.paused = False
             self._set_status(st, "idle", event="queue_empty")
             self._schedule_idle_disconnect(guild_id)
             return
-        st.current = st.queue.pop(0)
+        next_track = st.queue.pop(0)
+        if preserve_current_to_history and st.current is not None:
+            # A faixa atual precisa virar histórico sempre que deixa de ser a
+            # faixa ativa por troca direta, fallback, playlist ou transição
+            # remota. O comando previous trata esse caso separadamente porque
+            # recoloca a faixa atual na frente da fila.
+            if self._track_key(st.current) != self._track_key(next_track):
+                self._push_history(st, st.current)
+        st.current = next_track
         request_token = int(getattr(st, "playback_token", 0) or 0)
         current_ref = st.current
         st.paused = False

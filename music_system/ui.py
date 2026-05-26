@@ -99,8 +99,11 @@ def _agent_play_message(track: MusicTrack, result: dict | None = None) -> str:
         title = title[:87].rstrip() + "..."
     duration_label = track.duration_label
     try:
-        duration = None if queued else current.get("duration")
-        if duration is not None and str(duration) != "":
+        duration_source = source_payload if isinstance(source_payload, dict) else {}
+        duration = duration_source.get("duration")
+        if duration is None or str(duration).strip() == "":
+            duration = getattr(track, "duration", None)
+        if duration is not None and str(duration).strip() != "":
             total = max(0, int(float(duration)))
             minutes, seconds = divmod(total, 60)
             hours, minutes = divmod(minutes, 60)
