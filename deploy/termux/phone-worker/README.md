@@ -1,5 +1,12 @@
 # Phone Worker Termux
 
+
+## Patch 85.3: base do Worker Voice Agent
+
+A versão `1.10.14` também passa a expor `voice_agent` em `/health`, `/status` e `/local/status`, além da task direta `voice_agent_status`. Essa etapa **não** faz o worker controlar o bot inteiro e ainda não ativa TTS direto worker → Discord por padrão. Ela cria a base de telemetria/contrato para o próximo caminho: VPS continua sendo o cérebro do bot, enquanto o worker turbo vira o plano de voz/áudio compartilhado para Música + TTS quando estiver saudável.
+
+O `voice_agent` junta o estado do `music_agent` e do `tts_agent`, mostra se a sessão compartilhada está preparada, se o ducking Música/TTS está possível, quais pendências ainda existem e se o TTS direto está apenas em preparação ou pronto. Variáveis locais do worker: `PHONE_WORKER_VOICE_AGENT_ENABLED`, `PHONE_WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED`, `PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED` e `PHONE_WORKER_VOICE_AGENT_DIRECT_MUSIC_ENABLED`. Na VPS existem flags espelhadas de roadmap (`WORKER_VOICE_AGENT_*`) para o painel/planejamento, mas a transmissão direta de TTS pelo worker continuará desativada até a etapa própria de voz.
+
 ## Patch 85.2: TTS Agent / rota worker
 
 A versão `1.10.14` adiciona as tasks diretas `tts_agent_status` e `tts_agent_synthesize` e expõe `tts_agent` em `/health`, `/status` e `/local/status`. Quando o worker turbo está online, saudável e com alguma engine TTS pronta, a VPS pode trocar o modo do TTS para `worker` sem testar o celular a cada frase. Se o health falhar, se o agent ficar velho ou se a síntese falhar repetidamente, a VPS volta para o modo `vps` por cooldown e tenta recuperar pelo health loop.

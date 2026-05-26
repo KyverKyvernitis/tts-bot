@@ -496,6 +496,12 @@ TTS_WORKER_AGENT_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_WORKER_AGENT_MA
 TTS_WORKER_AGENT_MAX_TEXT_LENGTH = max(64, _parse_int(os.getenv("TTS_WORKER_AGENT_MAX_TEXT_LENGTH", "1200"), 1200))
 TTS_WORKER_AGENT_PREFERRED_ENGINE = (os.getenv("TTS_WORKER_AGENT_PREFERRED_ENGINE", "auto") or "auto").strip().lower().replace("-", "_") or "auto"
 
+# Worker Voice Agent roadmap: the VPS remains the bot/control plane, while the
+# turbo worker becomes the direct audio/voice plane when this staged path is ready.
+WORKER_VOICE_AGENT_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_AGENT_ENABLED", "true"), True)
+WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", "false"), False)
+WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED", "true"), True)
+
 # Texto longo começa a tocar mais rápido: divide em blocos naturais e enfileira
 # partes menores, permitindo prefetch do próximo áudio durante o playback atual.
 TTS_LONG_TEXT_CHUNK_ENABLED = _parse_bool(os.getenv("TTS_LONG_TEXT_CHUNK_ENABLED", "true"), True)

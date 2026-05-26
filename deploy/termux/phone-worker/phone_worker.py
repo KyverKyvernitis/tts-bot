@@ -170,6 +170,7 @@ SUPPORTED_DIRECT_TASKS = (
     "tts_synthesize_piper",
     "tts_agent_status",
     "tts_agent_synthesize",
+    "voice_agent_status",
     "worker_logs",
     "worker_self_check",
     "worker_update",
@@ -212,6 +213,7 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "tts_synthesize_piper",
     "tts_agent_status",
     "tts_agent_synthesize",
+    "voice_agent_status",
     "worker_logs",
     "worker_self_check",
     "worker_update",
@@ -252,8 +254,8 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     },
     "turbo": {
         "label": "Turbo",
-        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "voice-agent", "apk-builder", "vps-assist", "cache-worker"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -2548,6 +2550,87 @@ def _music_agent_snapshot() -> dict[str, Any]:
             "optional_dependency_missing": list(deps.get("optional_missing") or []),
         }
 
+
+def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agent: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Shared worker voice/audio plane readiness.
+
+    This does not make the worker own the whole bot. It reports whether the
+    worker is prepared to become the direct voice/audio plane for Music + TTS
+    while the VPS remains the control plane/gateway/UI owner.
+    """
+    profile = _current_core_worker_profile()
+    roles = _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))
+    capabilities = _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))
+    enabled = _env_bool("PHONE_WORKER_VOICE_AGENT_ENABLED", True)
+    shared_session_enabled = _env_bool("PHONE_WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED", True)
+    direct_tts_enabled = _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", False)
+    direct_music_enabled = _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_MUSIC_ENABLED", True)
+    safe_mode = _phone_worker_safe_mode_enabled()
+
+    if music_agent is None:
+        music_agent = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
+    if tts_agent is None:
+        tts_agent = _safe_telemetry("tts_agent", _tts_agent_snapshot, {"ok": False, "available": False, "synth_ready": False})
+
+    music_ready = bool((music_agent or {}).get("ok") or (music_agent or {}).get("available") or (music_agent or {}).get("discord_ready"))
+    tts_ready = bool((tts_agent or {}).get("ok") and (tts_agent or {}).get("synth_ready"))
+    has_voice_capability = "voice-agent" in capabilities or "worker-voice" in capabilities or ("music" in capabilities and "tts-agent" in capabilities)
+    base_ready = bool(enabled and profile == "turbo" and has_voice_capability and not safe_mode)
+    shared_ready = bool(base_ready and shared_session_enabled and (music_ready or direct_music_enabled) and tts_ready)
+    direct_tts_ready = bool(shared_ready and direct_tts_enabled and music_ready)
+
+    missing: list[str] = []
+    if not enabled:
+        missing.append("PHONE_WORKER_VOICE_AGENT_ENABLED=false")
+    if profile != "turbo":
+        missing.append("perfil turbo")
+    if safe_mode:
+        missing.append("safe mode")
+    if not has_voice_capability:
+        missing.append("capacidade voice-agent/worker-voice")
+    if not shared_session_enabled:
+        missing.append("sessão compartilhada desativada")
+    if not tts_ready:
+        missing.append("TTS Agent pronto")
+    if not music_ready:
+        missing.append("Music Agent/voz pronta")
+
+    if direct_tts_ready:
+        state = "direct_tts_voice_ready"
+    elif shared_ready:
+        state = "shared_voice_foundation_ready"
+    elif base_ready:
+        state = "waiting_dependencies"
+    elif enabled:
+        state = "not_ready"
+    else:
+        state = "disabled"
+
+    return {
+        "ok": bool(shared_ready),
+        "available": bool(base_ready),
+        "state": state,
+        "enabled": bool(enabled),
+        "profile": profile,
+        "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
+        "worker_version": PHONE_WORKER_VERSION,
+        "control_plane": "vps",
+        "audio_plane": "worker",
+        "authority": "vps_control_plane_worker_audio_plane",
+        "shared_session_enabled": bool(shared_session_enabled),
+        "direct_tts_enabled": bool(direct_tts_enabled),
+        "direct_tts_ready": bool(direct_tts_ready),
+        "direct_music_enabled": bool(direct_music_enabled),
+        "music_ready": bool(music_ready),
+        "tts_ready": bool(tts_ready),
+        "music_state": str((music_agent or {}).get("state") or (music_agent or {}).get("status") or "unknown")[:80],
+        "tts_state": str((tts_agent or {}).get("state") or "unknown")[:80],
+        "voice_transport": "music_agent_shared_session" if music_ready else "not_connected",
+        "ducking_ready": bool(shared_ready and music_ready and tts_ready),
+        "missing": missing[:10],
+        "note": "Base do Worker Voice Agent: VPS segue como cérebro; worker vira plano de voz/áudio quando a etapa direta for ativada.",
+    }
+
 def _system_status() -> dict[str, Any]:
     auto_boot_repair = _auto_repair_local_boot_if_needed()
     disk = shutil.disk_usage(Path.home())
@@ -2556,6 +2639,13 @@ def _system_status() -> dict[str, Any]:
         load = os.getloadavg()
     except Exception:
         load = None
+    music_agent_snapshot = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
+    tts_agent_snapshot = _safe_telemetry("tts agent", _tts_agent_snapshot, {"ok": False, "available": False, "synth_ready": False, "state": "telemetry_failed"})
+    voice_agent_snapshot = _safe_telemetry(
+        "voice agent",
+        lambda: _voice_agent_snapshot(music_agent=music_agent_snapshot, tts_agent=tts_agent_snapshot),
+        {"ok": False, "available": False, "state": "telemetry_failed"},
+    )
     return {
         "ok": True,
         "worker": "phone-worker",
@@ -2575,7 +2665,8 @@ def _system_status() -> dict[str, Any]:
         "core_worker_jobs": {"configured": _core_worker_jobs_configured(), **_core_job_runtime_snapshot()},
         "core_worker_network": _core_worker_network_runtime_snapshot(),
         "music_node": _safe_telemetry("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"}),
-        "music_agent": _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False}),
+        "music_agent": music_agent_snapshot,
+        "voice_agent": voice_agent_snapshot,
         "music_voice_dependencies": _safe_telemetry("music voice dependencies", _music_voice_dependencies_snapshot, {"ok": False, "missing": ["unknown"]}),
         "scripts": _script_inventory(),
         "boot": _safe_telemetry("boot", _termux_boot_status_snapshot, {"ok": False, "source": "telemetry_failed"}),
@@ -2601,7 +2692,7 @@ def _system_status() -> dict[str, Any]:
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "ffprobe": bool(shutil.which("ffprobe")),
         "turbo_dependencies": _turbo_dependency_snapshot(),
-        "tts_agent": _safe_telemetry("tts agent", _tts_agent_snapshot, {"ok": False, "available": False, "synth_ready": False, "state": "telemetry_failed"}),
+        "tts_agent": tts_agent_snapshot,
         "turbo_cache": _worker_turbo_cache_snapshot(),
     }
 
@@ -2646,6 +2737,7 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
         "ffmpeg": bool(status.get("ffmpeg")),
         "ffprobe": bool(status.get("ffprobe")),
         "tts_agent": status.get("tts_agent") if isinstance(status.get("tts_agent"), dict) else _safe_telemetry("tts agent", _tts_agent_snapshot, {"ok": False}),
+        "voice_agent": status.get("voice_agent") if isinstance(status.get("voice_agent"), dict) else _safe_telemetry("voice agent", _voice_agent_snapshot, {"ok": False}),
         "boot_ok": ((status.get("boot") or {}).get("ok") if isinstance(status.get("boot"), dict) else None),
         "supervisor_ok": ((status.get("supervisor") or {}).get("supervisor_ok") if isinstance(status.get("supervisor"), dict) else None),
         "sshd_ok": ((status.get("sshd") or {}).get("ok") if isinstance(status.get("sshd"), dict) else None),
@@ -2889,6 +2981,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_tts_agent_status(body)
             elif task == "tts_agent_synthesize":
                 payload = self._task_tts_agent_synthesize(body)
+            elif task == "voice_agent_status":
+                payload = self._task_voice_agent_status(body)
             elif task == "log_extract":
                 payload = self._task_log_extract(body)
             elif task == "log_summary":
@@ -3176,6 +3270,29 @@ class WorkerHandler(BaseHTTPRequestHandler):
         path = tmp_dir / "google-credentials.json"
         path.write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(path)
+
+    def _task_voice_agent_status(self, body: dict[str, Any]) -> dict[str, Any]:
+        music_agent = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
+        tts_agent = _safe_telemetry("tts_agent", _tts_agent_snapshot, {"ok": False, "available": False, "synth_ready": False})
+        snapshot = _voice_agent_snapshot(music_agent=music_agent, tts_agent=tts_agent)
+        snapshot["music_agent"] = {
+            "ok": bool(music_agent.get("ok")),
+            "available": bool(music_agent.get("available")),
+            "configured": bool(music_agent.get("configured")),
+            "runtime_version": str(music_agent.get("runtime_version") or music_agent.get("version") or "")[:40],
+            "latency_ms": music_agent.get("latency_ms"),
+            "error": str(music_agent.get("error") or "")[:160],
+        }
+        snapshot["tts_agent"] = {
+            "ok": bool(tts_agent.get("ok")),
+            "available": bool(tts_agent.get("available")),
+            "synth_ready": bool(tts_agent.get("synth_ready")),
+            "selected_engine": str(tts_agent.get("selected_engine") or tts_agent.get("preferred_engine") or "")[:40],
+            "available_engines": list(tts_agent.get("available_engines") or [])[:8],
+            "last_error": str(tts_agent.get("last_error") or "")[:160],
+        }
+        snapshot.setdefault("logs", []).append("voice agent status coletado; direct_tts_voice ainda depende de etapa futura")
+        return snapshot
 
     def _task_tts_agent_status(self, body: dict[str, Any]) -> dict[str, Any]:
         snapshot = _tts_agent_snapshot()

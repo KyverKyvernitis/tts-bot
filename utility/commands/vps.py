@@ -589,6 +589,7 @@ class VpsCommandMixin:
         snapshot = self._collect_vps_tts_snapshot()
         tts_metrics = dict(snapshot.get("tts_metrics") or {})
         tts_agent = dict(tts_metrics.get("tts_agent") or {})
+        voice_agent = dict(tts_agent.get("voice_agent") or tts_metrics.get("worker_voice_agent") or {})
         raw_engine_metrics = dict(snapshot.get("engine_metrics") or tts_metrics.get("engines") or {})
 
         def _engine_label(value: Any) -> str:
@@ -702,6 +703,13 @@ class VpsCommandMixin:
         last_bytes = int(tts_agent.get("last_audio_bytes") or tts_metrics.get("tts_agent_last_audio_bytes") or 0)
         last_cache_hit = bool(tts_agent.get("last_cache_hit") or tts_metrics.get("tts_agent_last_cache_hit"))
         last_synth_ms = float(tts_agent.get("last_synth_ms") or tts_metrics.get("tts_agent_last_synth_ms") or tts_metrics.get("avg_tts_agent_synth_ms") or 0.0)
+        voice_state = str(voice_agent.get("state") or "sem health").strip() or "sem health"
+        voice_dot = "🟢" if voice_agent.get("direct_tts_ready") else ("🟡" if voice_agent.get("ok") or voice_agent.get("available") else "🔵")
+        voice_missing = ", ".join(str(item) for item in list(voice_agent.get("missing") or [])[:3]) or "nenhum"
+        voice_tts_direct = "pronto" if voice_agent.get("direct_tts_ready") else ("preparação" if voice_agent.get("available") or voice_agent.get("ok") else "não pronto")
+        voice_music_ready = "sim" if voice_agent.get("music_ready") else "não"
+        voice_tts_ready = "sim" if voice_agent.get("tts_ready") else "não"
+
         if last_requested or last_selected:
             last_worker_line = (
                 f"Última síntese worker: {_engine_label(last_requested)} pedido → {_engine_label(last_selected)} usado"
@@ -720,6 +728,12 @@ class VpsCommandMixin:
             f"Worker selecionado: `{worker_id}`{worker_suffix}",
             f"Motivo/estado: `{str(tts_agent.get('reason') or '—')[:80]}` · cooldown: {self._vps_format_ms(cooldown * 1000.0)}",
             f"Último erro do Agent: `{str(tts_agent.get('last_error') or 'nenhum')[:160]}`",
+            "",
+            "### 🎛️ Worker Voice Agent",
+            f"{voice_dot} Estado: `{voice_state}` · TTS direto worker→Discord: `{voice_tts_direct}`",
+            f"Plano: VPS controla comandos/UI; worker vira áudio/voz quando pronto · sessão compartilhada: `{'sim' if voice_agent.get('shared_session_enabled') else 'não'}`",
+            f"Music pronto: `{voice_music_ready}` · TTS pronto: `{voice_tts_ready}` · ducking: `{'sim' if voice_agent.get('ducking_ready') else 'não'}`",
+            f"Pendências: `{voice_missing[:140]}`",
             "",
             "### 📱 TTS do Worker / TTS Agent",
             f"Estado: `{'pronto' if agent_ok and route == 'worker' else 'fallback/VPS' if agent_enabled else 'desativado'}` · engines disponíveis: {available_engines}",

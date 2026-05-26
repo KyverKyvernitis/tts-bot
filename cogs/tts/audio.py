@@ -381,6 +381,7 @@ class TTSAudioMixin:
                 "last_audio_bytes": 0,
                 "last_cache_hit": False,
                 "last_synth_ms": 0.0,
+                "voice_agent": {},
             }
             setattr(self, "_tts_agent_route", state)
         return state
@@ -414,6 +415,7 @@ class TTSAudioMixin:
             "last_audio_bytes": int(state.get("last_audio_bytes") or 0),
             "last_cache_hit": bool(state.get("last_cache_hit")),
             "last_synth_ms": float(state.get("last_synth_ms") or 0.0),
+            "voice_agent": dict(state.get("voice_agent") or {}),
         }
 
     def _tts_agent_set_route(
@@ -566,8 +568,27 @@ class TTSAudioMixin:
                     response.raise_for_status()
                     data = await response.json(content_type=None)
             agent = data.get("tts_agent") if isinstance(data, dict) else None
+            voice_agent = data.get("voice_agent") if isinstance(data, dict) else None
             if not isinstance(agent, dict):
                 agent = {}
+            if not isinstance(voice_agent, dict):
+                voice_agent = {}
+            if voice_agent:
+                compact_voice_agent = {
+                    "ok": bool(voice_agent.get("ok")),
+                    "available": bool(voice_agent.get("available")),
+                    "state": str(voice_agent.get("state") or "")[:80],
+                    "direct_tts_enabled": bool(voice_agent.get("direct_tts_enabled")),
+                    "direct_tts_ready": bool(voice_agent.get("direct_tts_ready")),
+                    "shared_session_enabled": bool(voice_agent.get("shared_session_enabled")),
+                    "music_ready": bool(voice_agent.get("music_ready")),
+                    "tts_ready": bool(voice_agent.get("tts_ready")),
+                    "voice_transport": str(voice_agent.get("voice_transport") or "")[:80],
+                    "ducking_ready": bool(voice_agent.get("ducking_ready")),
+                    "missing": [str(item)[:80] for item in list(voice_agent.get("missing") or [])[:6]],
+                }
+                metrics["worker_voice_agent"] = compact_voice_agent
+                self._tts_agent_route_state()["voice_agent"] = compact_voice_agent
             ok = bool(data.get("ok", True) and agent.get("ok") and agent.get("available") and agent.get("synth_ready"))
             if ok:
                 metrics["tts_agent_health_ok"] = int(metrics.get("tts_agent_health_ok", 0) or 0) + 1
@@ -779,6 +800,7 @@ class TTSAudioMixin:
                 "tts_agent_synth_samples": 0,
                 "tts_agent_route_worker_samples": 0,
                 "tts_agent_route_vps_samples": 0,
+                "worker_voice_agent": {},
                 "boot_warmups": 0,
                 "last_warmup_started_at": None,
                 "last_warmup_completed_at": None,
@@ -1154,6 +1176,7 @@ class TTSAudioMixin:
             "tts_agent_last_synth_ms": float(metrics.get("tts_agent_last_synth_ms", 0.0) or 0.0),
             "tts_agent_route_worker_samples": int(metrics.get("tts_agent_route_worker_samples", 0) or 0),
             "tts_agent_route_vps_samples": int(metrics.get("tts_agent_route_vps_samples", 0) or 0),
+            "worker_voice_agent": dict(metrics.get("worker_voice_agent") or self._tts_agent_route_state().get("voice_agent") or {}),
             "boot_warmups": int(metrics.get("boot_warmups", 0) or 0),
             "last_warmup_duration_ms": metrics.get("last_warmup_duration_ms"),
             "queued_items_current": int(sum(state.queue.qsize() for state in self.guild_states.values())),
