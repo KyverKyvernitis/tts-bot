@@ -54,7 +54,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.14"
+PHONE_WORKER_VERSION = "1.10.15"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -171,6 +171,9 @@ SUPPORTED_DIRECT_TASKS = (
     "tts_agent_status",
     "tts_agent_synthesize",
     "voice_agent_status",
+    "voice_agent_register_session",
+    "voice_agent_clear_session",
+    "voice_agent_guild_status",
     "worker_logs",
     "worker_self_check",
     "worker_update",
@@ -214,6 +217,9 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "tts_agent_status",
     "tts_agent_synthesize",
     "voice_agent_status",
+    "voice_agent_register_session",
+    "voice_agent_clear_session",
+    "voice_agent_guild_status",
     "worker_logs",
     "worker_self_check",
     "worker_update",
@@ -2551,6 +2557,203 @@ def _music_agent_snapshot() -> dict[str, Any]:
         }
 
 
+_VOICE_AGENT_SESSION_LOCK = threading.RLock()
+_VOICE_AGENT_SESSION_MEMORY: dict[str, Any] | None = None
+
+
+def _voice_agent_state_file() -> Path:
+    base = Path(os.getenv("PHONE_WORKER_DIR") or Path.home() / "phone-worker").expanduser()
+    raw = str(os.getenv("PHONE_WORKER_VOICE_AGENT_STATE_FILE") or "").strip()
+    return Path(raw).expanduser() if raw else base / "voice-agent-state.json"
+
+
+def _voice_agent_now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _voice_agent_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
+def _voice_agent_clean_text(value: Any, *, limit: int = 160) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.:/@# -]+", "", str(value or "")).strip()[:limit]
+
+
+def _voice_agent_load_state() -> dict[str, Any]:
+    global _VOICE_AGENT_SESSION_MEMORY
+    with _VOICE_AGENT_SESSION_LOCK:
+        if isinstance(_VOICE_AGENT_SESSION_MEMORY, dict):
+            return _VOICE_AGENT_SESSION_MEMORY
+        path = _voice_agent_state_file()
+        try:
+            raw = path.read_text(encoding="utf-8")
+            data = json.loads(raw or "{}")
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:
+            data = {}
+        sessions = data.get("sessions") if isinstance(data.get("sessions"), dict) else {}
+        _VOICE_AGENT_SESSION_MEMORY = {
+            "version": 1,
+            "updated_at_ms": _voice_agent_now_ms(),
+            "sessions": {str(k): v for k, v in sessions.items() if isinstance(v, dict)},
+        }
+        return _VOICE_AGENT_SESSION_MEMORY
+
+
+def _voice_agent_save_state(state: dict[str, Any]) -> None:
+    global _VOICE_AGENT_SESSION_MEMORY
+    with _VOICE_AGENT_SESSION_LOCK:
+        state["updated_at_ms"] = _voice_agent_now_ms()
+        _VOICE_AGENT_SESSION_MEMORY = state
+        path = _voice_agent_state_file()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, path)
+            with contextlib.suppress(Exception):
+                os.chmod(path, 0o600)
+        except Exception:
+            # O estado em memória continua suficiente; persistência é só conveniência.
+            pass
+
+
+def _voice_agent_public_session(raw: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
+    now_ms = int(now_ms or _voice_agent_now_ms())
+    expires_at_ms = _voice_agent_int(raw.get("expires_at_ms"), 0)
+    ttl_ms = max(0, expires_at_ms - now_ms) if expires_at_ms else 0
+    voice = raw.get("discord_voice") if isinstance(raw.get("discord_voice"), dict) else {}
+    return {
+        "guild_id": str(raw.get("guild_id") or ""),
+        "channel_id": str(raw.get("channel_id") or ""),
+        "text_channel_id": str(raw.get("text_channel_id") or ""),
+        "requester_id": str(raw.get("requester_id") or ""),
+        "source": str(raw.get("source") or "")[:40],
+        "state": str(raw.get("state") or "registered")[:60],
+        "registered_by": str(raw.get("registered_by") or "vps_control_plane")[:60],
+        "age_seconds": round(max(0, now_ms - _voice_agent_int(raw.get("updated_at_ms"), now_ms)) / 1000.0, 1),
+        "ttl_seconds": round(ttl_ms / 1000.0, 1) if ttl_ms else 0.0,
+        "session_id_present": bool(voice.get("session_id_present")),
+        "endpoint_present": bool(voice.get("endpoint_present")),
+        "voice_token_present": bool(voice.get("voice_token_present")),
+        "endpoint_host": str(voice.get("endpoint_host") or "")[:120],
+        "connected": bool(voice.get("connected")),
+        "direct_tts_enabled": bool(raw.get("direct_tts_enabled")),
+    }
+
+
+def _voice_agent_prune_sessions(state: dict[str, Any] | None = None) -> dict[str, Any]:
+    now_ms = _voice_agent_now_ms()
+    state = state or _voice_agent_load_state()
+    sessions = state.setdefault("sessions", {})
+    stale = [key for key, data in sessions.items() if _voice_agent_int(data.get("expires_at_ms"), 0) and _voice_agent_int(data.get("expires_at_ms"), 0) <= now_ms]
+    for key in stale:
+        sessions.pop(key, None)
+    if stale:
+        _voice_agent_save_state(state)
+    return state
+
+
+def _voice_agent_session_summary(*, guild_id: int | None = None, limit: int = 5) -> dict[str, Any]:
+    state = _voice_agent_prune_sessions()
+    now_ms = _voice_agent_now_ms()
+    sessions_dict = state.get("sessions") if isinstance(state.get("sessions"), dict) else {}
+    sessions = []
+    for key, raw in sessions_dict.items():
+        if guild_id is not None and str(key) != str(int(guild_id)):
+            continue
+        if isinstance(raw, dict):
+            sessions.append(_voice_agent_public_session(raw, now_ms=now_ms))
+    sessions.sort(key=lambda item: float(item.get("age_seconds", 999999) or 999999))
+    return {
+        "session_count": len(sessions),
+        "active_guilds": [str(item.get("guild_id") or "") for item in sessions[:12] if item.get("guild_id")],
+        "sessions": sessions[:limit],
+        "last_session": sessions[0] if sessions else {},
+        "state_file": str(_voice_agent_state_file()),
+    }
+
+
+def _voice_agent_register_session_payload(body: dict[str, Any]) -> dict[str, Any]:
+    guild_id = _voice_agent_int(body.get("guild_id"), 0)
+    channel_id = _voice_agent_int(body.get("channel_id"), 0)
+    if guild_id <= 0 or channel_id <= 0:
+        raise RuntimeError("guild_id/channel_id obrigatórios para registrar sessão de voz")
+    ttl_seconds = max(30, min(900, _voice_agent_int(body.get("expires_in_seconds"), _env_int("PHONE_WORKER_VOICE_AGENT_SESSION_TTL_SECONDS", 180))))
+    now_ms = _voice_agent_now_ms()
+    raw_voice = body.get("discord_voice") if isinstance(body.get("discord_voice"), dict) else {}
+    voice = {
+        "connected": bool(raw_voice.get("connected")),
+        "channel_id": _voice_agent_int(raw_voice.get("channel_id"), channel_id),
+        "session_id_present": bool(raw_voice.get("session_id_present")),
+        "endpoint_present": bool(raw_voice.get("endpoint_present")),
+        "endpoint_host": _voice_agent_clean_text(raw_voice.get("endpoint_host"), limit=160),
+        "voice_token_present": bool(raw_voice.get("voice_token_present")),
+        "self_deaf": raw_voice.get("self_deaf") if isinstance(raw_voice.get("self_deaf"), bool) else None,
+        "self_mute": raw_voice.get("self_mute") if isinstance(raw_voice.get("self_mute"), bool) else None,
+    }
+    return {
+        "guild_id": str(guild_id),
+        "channel_id": str(channel_id),
+        "text_channel_id": str(_voice_agent_int(body.get("text_channel_id"), 0) or ""),
+        "requester_id": str(_voice_agent_int(body.get("requester_id"), 0) or ""),
+        "bot_user_id": str(_voice_agent_int(body.get("bot_user_id"), 0) or ""),
+        "source": _voice_agent_clean_text(body.get("source") or "tts", limit=40) or "tts",
+        "state": _voice_agent_clean_text(body.get("state") or "registered", limit=60) or "registered",
+        "registered_by": _voice_agent_clean_text(body.get("registered_by") or "vps_control_plane", limit=60) or "vps_control_plane",
+        "created_at_ms": now_ms,
+        "updated_at_ms": now_ms,
+        "expires_at_ms": now_ms + ttl_seconds * 1000,
+        "direct_tts_enabled": bool(body.get("direct_tts_enabled")),
+        "discord_voice": voice,
+        "note": "sem DISCORD_TOKEN e sem voice token bruto",
+    }
+
+
+def _voice_agent_register_session(body: dict[str, Any]) -> dict[str, Any]:
+    if not _env_bool("PHONE_WORKER_VOICE_AGENT_ENABLED", True):
+        raise RuntimeError("Worker Voice Agent desativado")
+    if not _env_bool("PHONE_WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED", True):
+        raise RuntimeError("sessão compartilhada do Worker Voice Agent desativada")
+    session = _voice_agent_register_session_payload(body)
+    state = _voice_agent_prune_sessions()
+    sessions = state.setdefault("sessions", {})
+    sessions[str(session["guild_id"])] = session
+    _voice_agent_save_state(state)
+    summary = _voice_agent_session_summary(guild_id=_voice_agent_int(session.get("guild_id"), 0), limit=5)
+    return {
+        "ok": True,
+        "registered": True,
+        "state": "session_registered",
+        "session": _voice_agent_public_session(session),
+        **summary,
+    }
+
+
+def _voice_agent_clear_session(body: dict[str, Any]) -> dict[str, Any]:
+    guild_id = _voice_agent_int(body.get("guild_id"), 0)
+    state = _voice_agent_prune_sessions()
+    sessions = state.setdefault("sessions", {})
+    removed = False
+    if guild_id > 0:
+        removed = sessions.pop(str(guild_id), None) is not None
+    elif body.get("all"):
+        removed = bool(sessions)
+        sessions.clear()
+    _voice_agent_save_state(state)
+    summary = _voice_agent_session_summary(limit=5)
+    return {
+        "ok": True,
+        "cleared": removed,
+        "state": "session_cleared" if removed else "session_not_found",
+        "reason": _voice_agent_clean_text(body.get("reason"), limit=120),
+        **summary,
+    }
+
 def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agent: dict[str, Any] | None = None) -> dict[str, Any]:
     """Shared worker voice/audio plane readiness.
 
@@ -2576,8 +2779,11 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
     tts_ready = bool((tts_agent or {}).get("ok") and (tts_agent or {}).get("synth_ready"))
     has_voice_capability = "voice-agent" in capabilities or "worker-voice" in capabilities or ("music" in capabilities and "tts-agent" in capabilities)
     base_ready = bool(enabled and profile == "turbo" and has_voice_capability and not safe_mode)
+    session_summary = _voice_agent_session_summary(limit=5)
+    session_count = int(session_summary.get("session_count") or 0)
     shared_ready = bool(base_ready and shared_session_enabled and (music_ready or direct_music_enabled) and tts_ready)
-    direct_tts_ready = bool(shared_ready and direct_tts_enabled and music_ready)
+    shared_session_ready = bool(shared_ready and session_count > 0)
+    direct_tts_ready = bool(shared_session_ready and direct_tts_enabled and music_ready)
 
     missing: list[str] = []
     if not enabled:
@@ -2594,11 +2800,15 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
         missing.append("TTS Agent pronto")
     if not music_ready:
         missing.append("Music Agent/voz pronta")
+    if shared_ready and session_count <= 0:
+        missing.append("sessão de voz registrada pela VPS")
 
     if direct_tts_ready:
         state = "direct_tts_voice_ready"
+    elif shared_session_ready:
+        state = "shared_voice_session_registered"
     elif shared_ready:
-        state = "shared_voice_foundation_ready"
+        state = "waiting_shared_voice_session"
     elif base_ready:
         state = "waiting_dependencies"
     elif enabled:
@@ -2618,6 +2828,11 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
         "audio_plane": "worker",
         "authority": "vps_control_plane_worker_audio_plane",
         "shared_session_enabled": bool(shared_session_enabled),
+        "shared_session_ready": bool(shared_session_ready),
+        "session_count": session_count,
+        "active_guilds": list(session_summary.get("active_guilds") or [])[:12],
+        "sessions": list(session_summary.get("sessions") or [])[:5],
+        "last_session": dict(session_summary.get("last_session") or {}),
         "direct_tts_enabled": bool(direct_tts_enabled),
         "direct_tts_ready": bool(direct_tts_ready),
         "direct_music_enabled": bool(direct_music_enabled),
@@ -2625,8 +2840,8 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
         "tts_ready": bool(tts_ready),
         "music_state": str((music_agent or {}).get("state") or (music_agent or {}).get("status") or "unknown")[:80],
         "tts_state": str((tts_agent or {}).get("state") or "unknown")[:80],
-        "voice_transport": "music_agent_shared_session" if music_ready else "not_connected",
-        "ducking_ready": bool(shared_ready and music_ready and tts_ready),
+        "voice_transport": "worker_shared_voice_session" if shared_session_ready else ("music_agent_shared_session" if music_ready else "not_connected"),
+        "ducking_ready": bool(shared_session_ready and music_ready and tts_ready),
         "missing": missing[:10],
         "note": "Base do Worker Voice Agent: VPS segue como cérebro; worker vira plano de voz/áudio quando a etapa direta for ativada.",
     }
@@ -2983,6 +3198,12 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_tts_agent_synthesize(body)
             elif task == "voice_agent_status":
                 payload = self._task_voice_agent_status(body)
+            elif task == "voice_agent_register_session":
+                payload = self._task_voice_agent_register_session(body)
+            elif task == "voice_agent_clear_session":
+                payload = self._task_voice_agent_clear_session(body)
+            elif task == "voice_agent_guild_status":
+                payload = self._task_voice_agent_guild_status(body)
             elif task == "log_extract":
                 payload = self._task_log_extract(body)
             elif task == "log_summary":
@@ -3292,6 +3513,36 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "last_error": str(tts_agent.get("last_error") or "")[:160],
         }
         snapshot.setdefault("logs", []).append("voice agent status coletado; direct_tts_voice ainda depende de etapa futura")
+        return snapshot
+
+    def _task_voice_agent_register_session(self, body: dict[str, Any]) -> dict[str, Any]:
+        result = _voice_agent_register_session(body)
+        music_agent = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
+        tts_agent = _safe_telemetry("tts_agent", _tts_agent_snapshot, {"ok": False, "available": False, "synth_ready": False})
+        snapshot = _voice_agent_snapshot(music_agent=music_agent, tts_agent=tts_agent)
+        snapshot.update(result)
+        snapshot["voice_agent"] = _voice_agent_snapshot(music_agent=music_agent, tts_agent=tts_agent)
+        snapshot.setdefault("logs", []).append("sessão de voz registrada pela VPS; worker ainda não recebeu controle geral do bot")
+        return snapshot
+
+    def _task_voice_agent_clear_session(self, body: dict[str, Any]) -> dict[str, Any]:
+        result = _voice_agent_clear_session(body)
+        music_agent = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
+        tts_agent = _safe_telemetry("tts_agent", _tts_agent_snapshot, {"ok": False, "available": False, "synth_ready": False})
+        snapshot = _voice_agent_snapshot(music_agent=music_agent, tts_agent=tts_agent)
+        snapshot.update(result)
+        snapshot["voice_agent"] = _voice_agent_snapshot(music_agent=music_agent, tts_agent=tts_agent)
+        snapshot.setdefault("logs", []).append("sessão de voz removida pelo controle da VPS")
+        return snapshot
+
+    def _task_voice_agent_guild_status(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id = _voice_agent_int(body.get("guild_id"), 0)
+        summary = _voice_agent_session_summary(guild_id=guild_id if guild_id > 0 else None, limit=5)
+        snapshot = _voice_agent_snapshot()
+        snapshot.update(summary)
+        snapshot["ok"] = bool(snapshot.get("ok"))
+        snapshot["guild_id"] = str(guild_id or "")
+        snapshot.setdefault("logs", []).append("status de sessão por guild coletado")
         return snapshot
 
     def _task_tts_agent_status(self, body: dict[str, Any]) -> dict[str, Any]:

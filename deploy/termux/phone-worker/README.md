@@ -1,3 +1,9 @@
+## Patch 85.4: registro de sessão do Worker Voice Agent
+
+A versão `1.10.15` passa a aceitar as tasks `voice_agent_register_session`, `voice_agent_clear_session` e `voice_agent_guild_status`. A VPS continua como cérebro do bot e apenas registra no worker, quando ele está saudável, qual guild/canal de voz está em uso. Esse registro é uma etapa segura antes do TTS direto worker → Discord: ele não envia `DISCORD_TOKEN` e não persiste o voice token bruto.
+
+O `voice_agent` agora mostra `shared_session_ready`, quantidade de sessões, guilds ativas e uma prévia da última sessão registrada. Enquanto `PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED=false`, isso serve só para estado/handoff e painel; a reprodução continua no caminho seguro atual.
+
 # Phone Worker Termux
 
 

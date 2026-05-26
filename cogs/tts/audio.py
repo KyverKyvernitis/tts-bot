@@ -5,6 +5,7 @@ import hashlib
 import json
 import inspect
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -95,6 +96,12 @@ TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "TTS_WOR
 TTS_WORKER_AGENT_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_WORKER_AGENT_MAX_AUDIO_MB", 8) or 8))
 TTS_WORKER_AGENT_MAX_TEXT_LENGTH = max(64, int(getattr(config, "TTS_WORKER_AGENT_MAX_TEXT_LENGTH", 1200) or 1200))
 TTS_WORKER_AGENT_PREFERRED_ENGINE = str(getattr(config, "TTS_WORKER_AGENT_PREFERRED_ENGINE", "auto") or "auto").strip().lower().replace("-", "_") or "auto"
+WORKER_VOICE_AGENT_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_ENABLED", True))
+WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED", True))
+WORKER_VOICE_AGENT_SESSION_REPORT_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_SESSION_REPORT_ENABLED", True))
+WORKER_VOICE_AGENT_SESSION_REPORT_TIMEOUT_SECONDS = max(0.6, float(getattr(config, "WORKER_VOICE_AGENT_SESSION_REPORT_TIMEOUT_SECONDS", 1.5) or 1.5))
+WORKER_VOICE_AGENT_SESSION_TTL_SECONDS = max(30.0, float(getattr(config, "WORKER_VOICE_AGENT_SESSION_TTL_SECONDS", 180.0) or 180.0))
+WORKER_VOICE_AGENT_SESSION_REPORT_MIN_INTERVAL_SECONDS = max(3.0, float(getattr(config, "WORKER_VOICE_AGENT_SESSION_REPORT_MIN_INTERVAL_SECONDS", 15.0) or 15.0))
 TTS_LONG_TEXT_CHUNK_ENABLED = bool(getattr(config, "TTS_LONG_TEXT_CHUNK_ENABLED", True))
 TTS_LONG_TEXT_CHUNK_MAX_CHARS = max(160, int(getattr(config, "TTS_LONG_TEXT_CHUNK_MAX_CHARS", 420) or 420))
 TTS_LONG_TEXT_CHUNK_MAX_PARTS = max(1, int(getattr(config, "TTS_LONG_TEXT_CHUNK_MAX_PARTS", 8) or 8))
@@ -574,21 +581,7 @@ class TTSAudioMixin:
             if not isinstance(voice_agent, dict):
                 voice_agent = {}
             if voice_agent:
-                compact_voice_agent = {
-                    "ok": bool(voice_agent.get("ok")),
-                    "available": bool(voice_agent.get("available")),
-                    "state": str(voice_agent.get("state") or "")[:80],
-                    "direct_tts_enabled": bool(voice_agent.get("direct_tts_enabled")),
-                    "direct_tts_ready": bool(voice_agent.get("direct_tts_ready")),
-                    "shared_session_enabled": bool(voice_agent.get("shared_session_enabled")),
-                    "music_ready": bool(voice_agent.get("music_ready")),
-                    "tts_ready": bool(voice_agent.get("tts_ready")),
-                    "voice_transport": str(voice_agent.get("voice_transport") or "")[:80],
-                    "ducking_ready": bool(voice_agent.get("ducking_ready")),
-                    "missing": [str(item)[:80] for item in list(voice_agent.get("missing") or [])[:6]],
-                }
-                metrics["worker_voice_agent"] = compact_voice_agent
-                self._tts_agent_route_state()["voice_agent"] = compact_voice_agent
+                self._update_worker_voice_agent_snapshot(voice_agent)
             ok = bool(data.get("ok", True) and agent.get("ok") and agent.get("available") and agent.get("synth_ready"))
             if ok:
                 metrics["tts_agent_health_ok"] = int(metrics.get("tts_agent_health_ok", 0) or 0) + 1
@@ -801,6 +794,11 @@ class TTSAudioMixin:
                 "tts_agent_route_worker_samples": 0,
                 "tts_agent_route_vps_samples": 0,
                 "worker_voice_agent": {},
+                "worker_voice_session_reports_ok": 0,
+                "worker_voice_session_reports_failed": 0,
+                "worker_voice_session_skipped": 0,
+                "worker_voice_session_clears_ok": 0,
+                "worker_voice_session_clears_failed": 0,
                 "boot_warmups": 0,
                 "last_warmup_started_at": None,
                 "last_warmup_completed_at": None,
@@ -1177,6 +1175,11 @@ class TTSAudioMixin:
             "tts_agent_route_worker_samples": int(metrics.get("tts_agent_route_worker_samples", 0) or 0),
             "tts_agent_route_vps_samples": int(metrics.get("tts_agent_route_vps_samples", 0) or 0),
             "worker_voice_agent": dict(metrics.get("worker_voice_agent") or self._tts_agent_route_state().get("voice_agent") or {}),
+            "worker_voice_session_reports_ok": int(metrics.get("worker_voice_session_reports_ok", 0) or 0),
+            "worker_voice_session_reports_failed": int(metrics.get("worker_voice_session_reports_failed", 0) or 0),
+            "worker_voice_session_skipped": int(metrics.get("worker_voice_session_skipped", 0) or 0),
+            "worker_voice_session_clears_ok": int(metrics.get("worker_voice_session_clears_ok", 0) or 0),
+            "worker_voice_session_clears_failed": int(metrics.get("worker_voice_session_clears_failed", 0) or 0),
             "boot_warmups": int(metrics.get("boot_warmups", 0) or 0),
             "last_warmup_duration_ms": metrics.get("last_warmup_duration_ms"),
             "queued_items_current": int(sum(state.queue.qsize() for state in self.guild_states.values())),
@@ -1672,6 +1675,176 @@ class TTSAudioMixin:
             raise_on_worker_error=True,
         )
         return self._decode_worker_audio_payload(data, max_audio_mb=max_audio_mb)
+
+    def _worker_voice_agent_session_reports(self) -> dict[int, dict[str, Any]]:
+        reports = getattr(self, "_worker_voice_agent_session_report_cache", None)
+        if not isinstance(reports, dict):
+            reports = {}
+            setattr(self, "_worker_voice_agent_session_report_cache", reports)
+        return reports
+
+    def _record_worker_voice_session_metric(self, key: str) -> None:
+        metrics = self._get_metrics_store()
+        metric_key = f"worker_voice_session_{key}"
+        metrics[metric_key] = int(metrics.get(metric_key, 0) or 0) + 1
+
+    def _worker_voice_agent_reports_enabled(self) -> bool:
+        return bool(
+            WORKER_VOICE_AGENT_ENABLED
+            and WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED
+            and WORKER_VOICE_AGENT_SESSION_REPORT_ENABLED
+            and self._tts_agent_base_configured()
+        )
+
+    def _clean_worker_voice_endpoint(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", text)
+        text = text.split("?", 1)[0].strip("/")
+        return text[:180]
+
+    def _voice_client_public_session_payload(self, guild: discord.Guild, item: QueueItem, vc: Any | None, *, source: str) -> dict[str, Any]:
+        channel = self._voice_client_channel(vc) if vc is not None else None
+        me = getattr(guild, "me", None)
+        me_voice = getattr(me, "voice", None)
+        session_id = getattr(vc, "session_id", None) or getattr(me_voice, "session_id", None)
+        endpoint = getattr(vc, "endpoint", None) or getattr(vc, "_endpoint", None)
+        token = getattr(vc, "token", None) or getattr(vc, "_token", None)
+        now_ms = int(time.time() * 1000)
+        state = self.guild_states.get(int(guild.id))
+        text_channel_id = int(getattr(state, "last_text_channel_id", 0) or 0) if state is not None else 0
+        return {
+            "guild_id": int(guild.id),
+            "channel_id": int(getattr(channel, "id", None) or item.channel_id or 0),
+            "text_channel_id": text_channel_id,
+            "requester_id": int(item.author_id or 0),
+            "bot_user_id": int(getattr(me, "id", 0) or 0),
+            "source": str(source or "tts").strip().lower()[:40] or "tts",
+            "state": "vps_voice_session_observed",
+            "registered_by": "vps_control_plane",
+            "expires_in_seconds": int(WORKER_VOICE_AGENT_SESSION_TTL_SECONDS),
+            "observed_at_ms": now_ms,
+            "direct_tts_enabled": False,
+            "discord_voice": {
+                "connected": bool(vc is not None and self._voice_client_is_connected(vc)),
+                "channel_id": int(getattr(channel, "id", None) or item.channel_id or 0),
+                "session_id_present": bool(session_id),
+                "endpoint_present": bool(endpoint),
+                "endpoint_host": self._clean_worker_voice_endpoint(endpoint),
+                "voice_token_present": bool(token),
+                "self_deaf": bool(getattr(me_voice, "self_deaf", False)) if me_voice is not None else None,
+                "self_mute": bool(getattr(me_voice, "self_mute", False)) if me_voice is not None else None,
+            },
+            "note": "registro seguro; não contém DISCORD_TOKEN nem voice token bruto",
+        }
+
+    def _compact_worker_voice_agent_snapshot(self, voice_agent: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(voice_agent, dict) or not voice_agent:
+            return {}
+        compact = {
+            "ok": bool(voice_agent.get("ok")),
+            "available": bool(voice_agent.get("available")),
+            "state": str(voice_agent.get("state") or "")[:80],
+            "direct_tts_enabled": bool(voice_agent.get("direct_tts_enabled")),
+            "direct_tts_ready": bool(voice_agent.get("direct_tts_ready")),
+            "shared_session_enabled": bool(voice_agent.get("shared_session_enabled")),
+            "shared_session_ready": bool(voice_agent.get("shared_session_ready")),
+            "music_ready": bool(voice_agent.get("music_ready")),
+            "tts_ready": bool(voice_agent.get("tts_ready")),
+            "voice_transport": str(voice_agent.get("voice_transport") or "")[:80],
+            "ducking_ready": bool(voice_agent.get("ducking_ready")),
+            "session_count": int(voice_agent.get("session_count") or 0),
+            "active_guilds": [str(item)[:32] for item in list(voice_agent.get("active_guilds") or [])[:8]],
+            "last_session": dict(voice_agent.get("last_session") or {}) if isinstance(voice_agent.get("last_session"), dict) else {},
+            "missing": [str(item)[:80] for item in list(voice_agent.get("missing") or [])[:6]],
+        }
+        sessions = voice_agent.get("sessions")
+        if isinstance(sessions, list):
+            compact["sessions"] = [dict(item) for item in sessions[:5] if isinstance(item, dict)]
+        return compact
+
+    def _update_worker_voice_agent_snapshot(self, voice_agent: dict[str, Any] | None) -> None:
+        compact = self._compact_worker_voice_agent_snapshot(voice_agent or {})
+        if not compact:
+            return
+        metrics = self._get_metrics_store()
+        metrics["worker_voice_agent"] = compact
+        self._tts_agent_route_state()["voice_agent"] = compact
+
+    async def _request_worker_voice_agent_json(self, *, task: str, payload: dict[str, Any], timeout_seconds: float | None = None) -> dict[str, Any]:
+        data = await self._request_phone_worker_json(
+            task=task,
+            payload=payload,
+            timeout_seconds=timeout_seconds or WORKER_VOICE_AGENT_SESSION_REPORT_TIMEOUT_SECONDS,
+            max_audio_mb=1,
+            raise_on_worker_error=False,
+        )
+        voice_agent = data.get("voice_agent") if isinstance(data.get("voice_agent"), dict) else data
+        if isinstance(voice_agent, dict):
+            self._update_worker_voice_agent_snapshot(voice_agent)
+        return data
+
+    def _should_report_worker_voice_session(self, guild_id: int, channel_id: int, source: str) -> bool:
+        if not self._worker_voice_agent_reports_enabled() or not self._tts_agent_route_available():
+            self._record_worker_voice_session_metric("skipped")
+            return False
+        reports = self._worker_voice_agent_session_reports()
+        now = time.monotonic()
+        previous = reports.get(int(guild_id)) or {}
+        key = f"{int(channel_id)}:{str(source or 'tts')}"
+        if previous.get("key") == key and (now - float(previous.get("at", 0.0) or 0.0)) < WORKER_VOICE_AGENT_SESSION_REPORT_MIN_INTERVAL_SECONDS:
+            self._record_worker_voice_session_metric("skipped")
+            return False
+        reports[int(guild_id)] = {"key": key, "at": now, "pending": True}
+        return True
+
+    def _schedule_worker_voice_agent_register_session(self, guild: discord.Guild, item: QueueItem, vc: Any | None, *, source: str = "tts") -> None:
+        channel_id = int((getattr(self._voice_client_channel(vc), "id", None) if vc is not None else None) or item.channel_id or 0)
+        if not self._should_report_worker_voice_session(int(guild.id), channel_id, source):
+            return
+        payload = self._voice_client_public_session_payload(guild, item, vc, source=source)
+        task = asyncio.create_task(self._worker_voice_agent_register_session(payload))
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+    async def _worker_voice_agent_register_session(self, payload: dict[str, Any]) -> None:
+        guild_id = int(payload.get("guild_id") or 0)
+        try:
+            data = await self._request_worker_voice_agent_json(task="voice_agent_register_session", payload=payload)
+            if bool(data.get("ok", True)):
+                self._record_worker_voice_session_metric("reports_ok")
+                logger.debug(
+                    "[worker_voice_agent] sessão de voz registrada | guild=%s channel=%s state=%s",
+                    guild_id,
+                    payload.get("channel_id"),
+                    data.get("state"),
+                )
+            else:
+                self._record_worker_voice_session_metric("reports_failed")
+                self._worker_voice_agent_session_reports().pop(guild_id, None)
+        except Exception as exc:
+            self._record_worker_voice_session_metric("reports_failed")
+            self._worker_voice_agent_session_reports().pop(guild_id, None)
+            logger.debug("[worker_voice_agent] registro de sessão falhou | guild=%s erro=%s", guild_id, exc)
+
+    def _schedule_worker_voice_agent_clear_session(self, guild_id: int, *, reason: str = "unknown") -> None:
+        if not self._worker_voice_agent_reports_enabled():
+            return
+        self._worker_voice_agent_session_reports().pop(int(guild_id or 0), None)
+        payload = {"guild_id": int(guild_id or 0), "reason": str(reason or "unknown")[:120], "source": "vps_control_plane"}
+        task = asyncio.create_task(self._worker_voice_agent_clear_session(payload))
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+    async def _worker_voice_agent_clear_session(self, payload: dict[str, Any]) -> None:
+        try:
+            data = await self._request_worker_voice_agent_json(task="voice_agent_clear_session", payload=payload)
+            if bool(data.get("ok", True)):
+                self._record_worker_voice_session_metric("clears_ok")
+            else:
+                self._record_worker_voice_session_metric("clears_failed")
+        except Exception as exc:
+            self._record_worker_voice_session_metric("clears_failed")
+            logger.debug("[worker_voice_agent] limpar sessão falhou | guild=%s erro=%s", payload.get("guild_id"), exc)
 
     def _worker_tts_cache_payload_base(self, item: QueueItem, key: str) -> dict[str, Any]:
         engine = str(item.engine or "gtts").strip().lower() or "gtts"
@@ -2644,6 +2817,7 @@ class TTSAudioMixin:
                 pass
             try:
                 await vc.disconnect(force=True)
+                self._schedule_worker_voice_agent_clear_session(guild.id, reason=f"reset:{reason}")
             except Exception as exc:
                 logger.warning("[tts_voice] Falha ao resetar voice client | guild=%s reason=%s erro=%s", guild.id, reason, exc)
             state = self.guild_states.get(guild.id)
@@ -2803,6 +2977,7 @@ class TTSAudioMixin:
 
         try:
             await vc.disconnect(force=False)
+            self._schedule_worker_voice_agent_clear_session(guild.id, reason="idle_disconnect")
             if hasattr(self, "_clear_remembered_voice_channel"):
                 with contextlib.suppress(Exception):
                     await self._maybe_await(self._clear_remembered_voice_channel(guild.id))
@@ -2851,6 +3026,7 @@ class TTSAudioMixin:
                         state.lavalink_ignore_logged_until = now + 20.0
                     return None
                 state.last_channel_id = int(lavalink_channel_id or item.channel_id)
+                self._schedule_worker_voice_agent_register_session(guild, item, vc, source="tts_lavalink_shared")
                 logger.debug("[tts_voice] TTS encaminhado para reprodução via Lavalink | guild=%s channel=%s", guild.id, state.last_channel_id)
                 return vc
 
@@ -2879,12 +3055,14 @@ class TTSAudioMixin:
             elif self._voice_client_channel(vc) is not None and self._voice_client_channel(vc).id == item.channel_id:
                 await self._ensure_self_deaf_fast(guild, target_channel)
                 state.last_channel_id = item.channel_id
+                self._schedule_worker_voice_agent_register_session(guild, item, vc, source="tts_local_voice")
                 return vc
             else:
                 try:
                     await vc.move_to(target_channel)
                     await self._ensure_self_deaf_fast(guild, target_channel)
                     state.last_channel_id = item.channel_id
+                    self._schedule_worker_voice_agent_register_session(guild, item, vc, source="tts_local_voice")
                     return vc
                 except Exception:
                     pass
@@ -2906,6 +3084,7 @@ class TTSAudioMixin:
         if self._voice_client_is_connected(vc):
             await self._ensure_self_deaf_fast(guild, target_channel)
             state.last_channel_id = item.channel_id
+            self._schedule_worker_voice_agent_register_session(guild, item, vc, source="tts_local_voice")
         return vc
 
     async def _maybe_prefetch_next(self, state: GuildTTSState):
@@ -3008,6 +3187,7 @@ class TTSAudioMixin:
                                 playback_ms=playback_ms,
                                 total_to_playback_ms=max(0.0, (playback_started_at - float(getattr(item, "enqueued_at_monotonic", playback_started_at))) * 1000.0),
                             )
+                            self._schedule_worker_voice_agent_register_session(guild, item, None, source="tts_music_agent_route")
                             logger.info(
                                 "[tts_voice] TTS roteado pelo worker musical | guild=%s channel=%s engine=%s ok=%s",
                                 guild_id,
