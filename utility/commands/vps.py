@@ -703,7 +703,15 @@ class VpsCommandMixin:
         last_bytes = int(tts_agent.get("last_audio_bytes") or tts_metrics.get("tts_agent_last_audio_bytes") or 0)
         last_cache_hit = bool(tts_agent.get("last_cache_hit") or tts_metrics.get("tts_agent_last_cache_hit"))
         last_synth_ms = float(tts_agent.get("last_synth_ms") or tts_metrics.get("tts_agent_last_synth_ms") or tts_metrics.get("avg_tts_agent_synth_ms") or 0.0)
-        voice_state = str(voice_agent.get("state") or "sem health").strip() or "sem health"
+        raw_voice_state = str(voice_agent.get("state") or "sem health").strip() or "sem health"
+        voice_state_labels = {
+            "voice_handoff_received_waiting_transfer": "handoff recebido · aguardando posse da voz",
+            "voice_handoff_registered_dry_run": "handoff recebido · conexão direta não iniciada",
+            "shared_voice_session_registered": "sessão compartilhada registrada",
+            "voice_connection_dry_run_ready": "conexão dry-run pronta",
+            "not_ready": "preparando",
+        }
+        voice_state = voice_state_labels.get(raw_voice_state, raw_voice_state)
         voice_dot = "🟢" if voice_agent.get("direct_tts_ready") else ("🟡" if voice_agent.get("shared_session_ready") or voice_agent.get("ok") or voice_agent.get("available") else "🔵")
         voice_missing = ", ".join(str(item) for item in list(voice_agent.get("missing") or [])[:3]) or "nenhum"
         voice_tts_direct = "pronto" if voice_agent.get("direct_tts_ready") else ("preparação" if voice_agent.get("available") or voice_agent.get("ok") else "não pronto")
@@ -727,8 +735,9 @@ class VpsCommandMixin:
         else:
             voice_session_line = f"Sessão lógica: `{self._format_vps_int(voice_session_count)}` · compartilhada `{voice_shared_ready}` · aguardando primeira sessão da VPS"
         if last_handoff:
+            handoff_owner = str(last_handoff.get('voice_owner') or last_handoff.get('transport_owner') or 'vps')[:30]
             voice_handoff_line = (
-                f"Handoff voz: `{voice_handoff_ready}` · registros `{self._format_vps_int(voice_handoff_count)}` · "
+                f"Handoff voz: `{voice_handoff_ready}` · dono atual `{handoff_owner}` · registros `{self._format_vps_int(voice_handoff_count)}` · "
                 f"session `{ 'sim' if last_handoff.get('session_id_present') else 'não' }` · endpoint `{ 'sim' if last_handoff.get('endpoint_present') else 'não' }` · "
                 f"token temp `{ 'sim' if last_handoff.get('voice_token_present') else 'não' }` · TTL `{str(last_handoff.get('ttl_seconds') or 0)}s`"
             )
@@ -740,14 +749,14 @@ class VpsCommandMixin:
             conn_latency = last_connection.get('latency_ms')
             conn_error = str(last_connection.get('error') or '')[:100]
             voice_connection_line = (
-                f"Conexão dry-run: `{voice_connection_ready}` · registros `{self._format_vps_int(voice_connection_count)}` · "
+                f"Conexão direta: `{voice_connection_ready}` · registros `{self._format_vps_int(voice_connection_count)}` · "
                 f"estado `{conn_state}` · etapa `{conn_stage}` · WS ready `{ 'sim' if last_connection.get('ready_received') else 'não' }` · "
                 f"UDP `{ 'sim' if last_connection.get('udp_probe_ok') else 'não' }` · {self._vps_format_ms(conn_latency or 0)}"
             )
             if conn_error:
                 voice_connection_line += f" · erro `{conn_error}`"
         else:
-            voice_connection_line = f"Conexão dry-run: `{voice_connection_ready}` · registros `{self._format_vps_int(voice_connection_count)}` · aguardando probe do worker"
+            voice_connection_line = f"Conexão direta: `{voice_connection_ready}` · registros `{self._format_vps_int(voice_connection_count)}` · aguardando transferência de posse da voz"
         voice_report_ok = int(tts_metrics.get("worker_voice_session_reports_ok", 0) or 0)
         voice_report_failed = int(tts_metrics.get("worker_voice_session_reports_failed", 0) or 0)
         voice_report_skipped = int(tts_metrics.get("worker_voice_session_skipped", 0) or 0)
@@ -756,6 +765,7 @@ class VpsCommandMixin:
         voice_handoff_skipped = int(tts_metrics.get("worker_voice_session_handoff_skipped", 0) or 0)
         voice_connection_probe_ok = int(tts_metrics.get("worker_voice_session_connection_probe_ok", 0) or 0)
         voice_connection_probe_failed = int(tts_metrics.get("worker_voice_session_connection_probe_failed", 0) or 0)
+        voice_connection_probe_skipped = int(tts_metrics.get("worker_voice_session_connection_probe_skipped", 0) or 0)
 
         if last_requested or last_selected:
             last_worker_line = (
@@ -785,7 +795,7 @@ class VpsCommandMixin:
             voice_connection_line,
             f"Registro sessão: `{self._format_vps_int(voice_report_ok)}` ok · `{self._format_vps_int(voice_report_failed)}` falhas · `{self._format_vps_int(voice_report_skipped)}` pulados",
             f"Registro handoff: `{self._format_vps_int(voice_handoff_ok)}` ok · `{self._format_vps_int(voice_handoff_failed)}` falhas · `{self._format_vps_int(voice_handoff_skipped)}` pulados",
-            f"Probe conexão: `{self._format_vps_int(voice_connection_probe_ok)}` start ok · `{self._format_vps_int(voice_connection_probe_failed)}` falhas",
+            f"Probe conexão: `{self._format_vps_int(voice_connection_probe_ok)}` start ok · `{self._format_vps_int(voice_connection_probe_failed)}` falhas · `{self._format_vps_int(voice_connection_probe_skipped)}` aguardando posse",
             f"Pendências: `{voice_missing[:140]}`",
             "",
             "### 📱 TTS do Worker / TTS Agent",

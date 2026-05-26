@@ -54,7 +54,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.17"
+PHONE_WORKER_VERSION = "1.10.18"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2677,6 +2677,10 @@ def _voice_agent_public_handoff(raw: dict[str, Any], *, now_ms: int | None = Non
         "endpoint_present": bool(endpoint),
         "voice_token_present": bool(raw.get("voice_token")),
         "endpoint_host": endpoint[:120],
+        "voice_owner": str(raw.get("voice_owner") or raw.get("transport_owner") or "vps")[:40],
+        "transport_owner": str(raw.get("transport_owner") or raw.get("voice_owner") or "vps")[:40],
+        "connection_policy": str(raw.get("connection_policy") or "handoff_only_wait_for_voice_ownership")[:80],
+        "allow_connection_probe": bool(raw.get("allow_connection_probe") or raw.get("allow_probe")),
         "complete": bool(raw.get("session_id") and raw.get("voice_token") and endpoint),
     }
 
@@ -2962,6 +2966,41 @@ def _voice_agent_start_connection_probe(body: dict[str, Any]) -> dict[str, Any]:
         else:
             raise RuntimeError("handoff temporário de voz não encontrado para a guild")
     guild_id = _voice_agent_int(handoff.get("guild_id"), 0)
+    force = bool(body.get("force") or body.get("manual") or body.get("diagnostic"))
+    allow_probe = bool(body.get("allow_probe") or body.get("allow_connection_probe") or handoff.get("allow_connection_probe") or handoff.get("allow_probe"))
+    owner = str(handoff.get("voice_owner") or handoff.get("transport_owner") or "vps").strip().lower() or "vps"
+    if owner != "worker" and not (force and allow_probe):
+        blocked = _voice_agent_set_connection(
+            guild_id,
+            channel_id=str(handoff.get("channel_id") or ""),
+            state="waiting_for_voice_ownership",
+            stage="handoff_received",
+            dry_run=True,
+            connected_once=False,
+            endpoint_host=_voice_agent_clean_text(handoff.get("endpoint_host") or handoff.get("endpoint"), limit=160),
+            error="dono atual da voz é a VPS; probe direto não iniciado",
+        )
+        return {
+            "ok": True,
+            "started": False,
+            "blocked": True,
+            "state": "waiting_for_voice_ownership",
+            "reason": "vps_voice_owner",
+            "connection": _voice_agent_public_connection(blocked),
+            **_voice_agent_connection_summary(guild_id=guild_id, limit=5),
+        }
+    if not allow_probe:
+        blocked = _voice_agent_set_connection(
+            guild_id,
+            channel_id=str(handoff.get("channel_id") or ""),
+            state="connection_probe_blocked",
+            stage="probe_not_authorized",
+            dry_run=True,
+            connected_once=False,
+            endpoint_host=_voice_agent_clean_text(handoff.get("endpoint_host") or handoff.get("endpoint"), limit=160),
+            error="probe de conexão exige allow_probe/force explícito",
+        )
+        return {"ok": True, "started": False, "blocked": True, "state": "connection_probe_blocked", "reason": "probe_not_authorized", "connection": _voice_agent_public_connection(blocked), **_voice_agent_connection_summary(guild_id=guild_id, limit=5)}
     timeout_seconds = max(1.0, min(10.0, float(body.get("timeout_seconds") or _env_float("PHONE_WORKER_VOICE_AGENT_CONNECTION_TIMEOUT_SECONDS", 4.0))))
     existing = _voice_agent_connection_summary(guild_id=guild_id, limit=1).get("last_connection") or {}
     if existing.get("state") in {"probing", "connecting", "voice_ws_connecting", "voice_ws_identifying"} and float(existing.get("updated_age_seconds") or 999.0) < 8.0:
@@ -3017,6 +3056,10 @@ def _voice_agent_register_handoff_payload(body: dict[str, Any]) -> dict[str, Any
         "state": _voice_agent_clean_text(body.get("state") or "voice_handoff_registered_dry_run", limit=60) or "voice_handoff_registered_dry_run",
         "registered_by": _voice_agent_clean_text(body.get("registered_by") or "vps_control_plane", limit=60) or "vps_control_plane",
         "dry_run": bool(body.get("dry_run", True)),
+        "voice_owner": str(body.get("voice_owner") or body.get("transport_owner") or "vps")[:40],
+        "transport_owner": str(body.get("transport_owner") or body.get("voice_owner") or "vps")[:40],
+        "allow_connection_probe": bool(body.get("allow_connection_probe") or body.get("allow_probe")),
+        "connection_policy": str(body.get("connection_policy") or "handoff_only_wait_for_voice_ownership")[:80],
         "created_at_ms": now_ms,
         "updated_at_ms": now_ms,
         "expires_at_ms": now_ms + ttl_seconds * 1000,
@@ -3226,14 +3269,14 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
     if shared_session_ready and not handoff_ready:
         missing.append("handoff temporário de voz")
     if shared_session_ready and handoff_ready and not connection_ready:
-        missing.append("conexão voice dry-run")
+        missing.append("transferência de posse da voz")
 
     if direct_tts_ready:
         state = "direct_tts_voice_ready"
     elif shared_session_ready and handoff_ready and connection_ready:
         state = "voice_connection_dry_run_ready"
     elif shared_session_ready and handoff_ready:
-        state = "voice_handoff_registered_dry_run"
+        state = "voice_handoff_received_waiting_transfer"
     elif shared_session_ready:
         state = "shared_voice_session_registered"
     elif shared_ready:
@@ -3279,6 +3322,7 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
         "direct_tts_enabled": bool(direct_tts_enabled),
         "direct_tts_ready": bool(direct_tts_ready),
         "direct_music_enabled": bool(direct_music_enabled),
+        "connection_auto_probe_enabled": bool(_env_bool("PHONE_WORKER_VOICE_AGENT_CONNECTION_AUTO_PROBE_ENABLED", False)),
         "music_ready": bool(music_ready),
         "tts_ready": bool(tts_ready),
         "music_state": str((music_agent or {}).get("state") or (music_agent or {}).get("status") or "unknown")[:80],

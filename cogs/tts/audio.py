@@ -106,6 +106,7 @@ WORKER_VOICE_AGENT_HANDOFF_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_HA
 WORKER_VOICE_AGENT_HANDOFF_TTL_SECONDS = max(10.0, float(getattr(config, "WORKER_VOICE_AGENT_HANDOFF_TTL_SECONDS", 60.0) or 60.0))
 WORKER_VOICE_AGENT_HANDOFF_TIMEOUT_SECONDS = max(0.6, float(getattr(config, "WORKER_VOICE_AGENT_HANDOFF_TIMEOUT_SECONDS", 1.5) or 1.5))
 WORKER_VOICE_AGENT_CONNECTION_DRY_RUN_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_CONNECTION_DRY_RUN_ENABLED", True))
+WORKER_VOICE_AGENT_CONNECTION_AUTO_PROBE_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_CONNECTION_AUTO_PROBE_ENABLED", False))
 WORKER_VOICE_AGENT_CONNECTION_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "WORKER_VOICE_AGENT_CONNECTION_TIMEOUT_SECONDS", 4.0) or 4.0))
 WORKER_VOICE_AGENT_CONNECTION_REPORT_TIMEOUT_SECONDS = max(0.6, float(getattr(config, "WORKER_VOICE_AGENT_CONNECTION_REPORT_TIMEOUT_SECONDS", 1.5) or 1.5))
 TTS_LONG_TEXT_CHUNK_ENABLED = bool(getattr(config, "TTS_LONG_TEXT_CHUNK_ENABLED", True))
@@ -200,6 +201,7 @@ class GuildTTSState:
     pending_signatures: dict[str, int] = field(default_factory=dict)
     last_hard_reset_at: float = 0.0
     lavalink_ignore_logged_until: float = 0.0
+    playback_lock: Optional[asyncio.Lock] = field(default=None, repr=False, compare=False)
 
 
 class TTSAudioMixin:
@@ -1710,6 +1712,30 @@ class TTSAudioMixin:
         text = text.split("?", 1)[0].strip("/")
         return text[:180]
 
+    def _get_tts_playback_lock(self, guild_id: int) -> asyncio.Lock:
+        state = self._get_state(int(guild_id))
+        lock = getattr(state, "playback_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            state.playback_lock = lock
+        return lock
+
+    def _worker_voice_current_owner(self, vc: Any | None) -> str:
+        if vc is not None and self._voice_client_is_connected(vc):
+            return "vps"
+        return "none"
+
+    def _worker_voice_probe_allowed_for_payload(self, payload: dict[str, Any]) -> tuple[bool, str]:
+        if not WORKER_VOICE_AGENT_CONNECTION_DRY_RUN_ENABLED:
+            return False, "connection_dry_run_disabled"
+        if not WORKER_VOICE_AGENT_CONNECTION_AUTO_PROBE_ENABLED:
+            return False, "automatic_probe_disabled"
+        if str(payload.get("voice_owner") or payload.get("transport_owner") or "vps").lower() != "worker":
+            return False, "waiting_for_voice_ownership"
+        if not bool(payload.get("allow_connection_probe") or payload.get("allow_probe")):
+            return False, "probe_not_authorized_by_vps"
+        return True, "allowed"
+
     def _voice_client_public_session_payload(self, guild: discord.Guild, item: QueueItem, vc: Any | None, *, source: str) -> dict[str, Any]:
         channel = self._voice_client_channel(vc) if vc is not None else None
         me = getattr(guild, "me", None)
@@ -1732,6 +1758,9 @@ class TTSAudioMixin:
             "expires_in_seconds": int(WORKER_VOICE_AGENT_SESSION_TTL_SECONDS),
             "observed_at_ms": now_ms,
             "direct_tts_enabled": False,
+            "voice_owner": self._worker_voice_current_owner(vc),
+            "transport_owner": self._worker_voice_current_owner(vc),
+            "connection_policy": "vps_owned_wait_for_transfer",
             "discord_voice": {
                 "connected": bool(vc is not None and self._voice_client_is_connected(vc)),
                 "channel_id": int(getattr(channel, "id", None) or item.channel_id or 0),
@@ -1769,6 +1798,10 @@ class TTSAudioMixin:
             "state": "voice_handoff_observed_dry_run",
             "registered_by": "vps_control_plane",
             "dry_run": True,
+            "voice_owner": self._worker_voice_current_owner(vc),
+            "transport_owner": self._worker_voice_current_owner(vc),
+            "allow_connection_probe": False,
+            "connection_policy": "handoff_only_wait_for_voice_ownership",
             "expires_in_seconds": int(WORKER_VOICE_AGENT_HANDOFF_TTL_SECONDS),
             "observed_at_ms": now_ms,
             "discord_voice_handoff": {
@@ -1804,6 +1837,7 @@ class TTSAudioMixin:
             "connection_probing_count": int(voice_agent.get("connection_probing_count") or 0),
             "connection_failed_count": int(voice_agent.get("connection_failed_count") or 0),
             "connection_ready": bool(voice_agent.get("connection_ready")),
+            "connection_auto_probe_enabled": bool(voice_agent.get("connection_auto_probe_enabled")),
             "active_guilds": [str(item)[:32] for item in list(voice_agent.get("active_guilds") or [])[:8]],
             "handoff_guilds": [str(item)[:32] for item in list(voice_agent.get("handoff_guilds") or [])[:8]],
             "last_session": dict(voice_agent.get("last_session") or {}) if isinstance(voice_agent.get("last_session"), dict) else {},
@@ -1908,14 +1942,24 @@ class TTSAudioMixin:
                     data.get("state"),
                     data.get("handoff_ready"),
                 )
-                if WORKER_VOICE_AGENT_CONNECTION_DRY_RUN_ENABLED:
+                allowed, reason = self._worker_voice_probe_allowed_for_payload(payload)
+                if allowed:
                     ctask = asyncio.create_task(self._worker_voice_agent_probe_connection({
                         "guild_id": guild_id,
                         "channel_id": int(payload.get("channel_id") or 0),
                         "source": str(payload.get("source") or "tts")[:40],
                         "timeout_seconds": WORKER_VOICE_AGENT_CONNECTION_TIMEOUT_SECONDS,
+                        "allow_probe": True,
+                        "force": False,
                     }))
                     ctask.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+                else:
+                    self._record_worker_voice_session_metric("connection_probe_skipped")
+                    logger.debug(
+                        "[worker_voice_agent] conexão voice não iniciada automaticamente | guild=%s reason=%s",
+                        guild_id,
+                        reason,
+                    )
             else:
                 self._record_worker_voice_session_metric("handoff_failed")
         except Exception as exc:
@@ -2849,81 +2893,130 @@ class TTSAudioMixin:
             store_in_cache=should_cache_long_text,
         )
 
-    async def _play_file(self, vc: discord.VoiceClient, path: str, *, item: QueueItem | None = None) -> dict[str, float]:
-        loop = asyncio.get_running_loop()
-        finished = loop.create_future()
+    async def _wait_until_voice_playable_for_tts(self, vc: discord.VoiceClient, *, item: QueueItem | None = None) -> None:
         guild = getattr(vc, "guild", None)
+        guild_id = int(getattr(guild, "id", 0) or getattr(item, "guild_id", 0) or 0)
+        if not self._voice_client_is_connected(vc):
+            raise RuntimeError("voice client não está conectado")
 
-        def _after_playback(error: Optional[Exception]) -> None:
-            if error:
-                if not finished.done():
-                    loop.call_soon_threadsafe(finished.set_exception, error)
-            else:
-                if not finished.done():
-                    loop.call_soon_threadsafe(finished.set_result, None)
+        if not self._voice_client_is_playing_or_paused(vc):
+            return
 
-        try:
-            router = getattr(getattr(self, "bot", None), "audio_router", None)
-            play_tts = getattr(router, "play_tts", None)
-            if callable(play_tts) and guild is not None:
-                router_result = await play_tts(
-                    guild=guild,
-                    vc=vc,
-                    path=path,
-                    before_options=TTS_FFMPEG_BEFORE_OPTIONS,
-                    options=TTS_FFMPEG_OPTIONS,
-                    timeout=self._estimate_playback_timeout(item),
-                    item=item,
-                )
-                if not (isinstance(router_result, dict) and router_result.get("tts_lavalink_failed")):
-                    return router_result
+        if guild_id and self._is_music_active_for_guild(guild_id):
+            raise RuntimeError("voice client ocupado com música ativa")
 
-                fallback = getattr(router, "prepare_tts_local_fallback_after_lavalink_failure", None)
-                if callable(fallback):
-                    reason = str(router_result.get("tts_lavalink_error") or router_result.get("error") or "tts_lavalink_failed")
-                    fallback_vc = await fallback(guild, vc, reason=reason)
-                    if fallback_vc is not None and not getattr(router, "_is_lavalink_voice_client", lambda _vc: False)(fallback_vc):
-                        vc = fallback_vc
-                        logger.warning(
-                            "[tts_voice] TTS via Lavalink falhou; usando playback local direto | guild=%s reason=%s",
-                            getattr(guild, "id", None),
-                            reason,
-                        )
+        deadline = time.monotonic() + 1.8
+        while time.monotonic() < deadline:
+            if not self._voice_client_is_connected(vc):
+                raise RuntimeError("voice client desconectou antes do playback")
+            if not self._voice_client_is_playing_or_paused(vc):
+                return
+            await asyncio.sleep(0.09)
+
+        logger.warning(
+            "[tts_voice] playback anterior parece preso; parando antes do próximo TTS | guild=%s channel=%s",
+            guild_id or None,
+            getattr(item, "channel_id", None),
+        )
+        with contextlib.suppress(Exception):
+            vc.stop()
+        deadline = time.monotonic() + 0.75
+        while time.monotonic() < deadline:
+            if not self._voice_client_is_connected(vc):
+                raise RuntimeError("voice client desconectou depois de parar playback preso")
+            if not self._voice_client_is_playing_or_paused(vc):
+                return
+            await asyncio.sleep(0.08)
+        raise RuntimeError("voice client continuou tocando após stop de segurança")
+
+    async def _play_file(self, vc: discord.VoiceClient, path: str, *, item: QueueItem | None = None) -> dict[str, float]:
+        guild = getattr(vc, "guild", None)
+        guild_id = int(getattr(guild, "id", 0) or getattr(item, "guild_id", 0) or 0)
+        lock = self._get_tts_playback_lock(guild_id) if guild_id else asyncio.Lock()
+
+        async with lock:
+            loop = asyncio.get_running_loop()
+            finished = loop.create_future()
+
+            def _after_playback(error: Optional[Exception]) -> None:
+                if error:
+                    if not finished.done():
+                        loop.call_soon_threadsafe(finished.set_exception, error)
+                else:
+                    if not finished.done():
+                        loop.call_soon_threadsafe(finished.set_result, None)
+
+            source = None
+            try:
+                router = getattr(getattr(self, "bot", None), "audio_router", None)
+                play_tts = getattr(router, "play_tts", None)
+                if callable(play_tts) and guild is not None:
+                    router_result = await play_tts(
+                        guild=guild,
+                        vc=vc,
+                        path=path,
+                        before_options=TTS_FFMPEG_BEFORE_OPTIONS,
+                        options=TTS_FFMPEG_OPTIONS,
+                        timeout=self._estimate_playback_timeout(item),
+                        item=item,
+                    )
+                    if not (isinstance(router_result, dict) and router_result.get("tts_lavalink_failed")):
+                        return router_result
+
+                    fallback = getattr(router, "prepare_tts_local_fallback_after_lavalink_failure", None)
+                    if callable(fallback):
+                        reason = str(router_result.get("tts_lavalink_error") or router_result.get("error") or "tts_lavalink_failed")
+                        fallback_vc = await fallback(guild, vc, reason=reason)
+                        if fallback_vc is not None and not getattr(router, "_is_lavalink_voice_client", lambda _vc: False)(fallback_vc):
+                            vc = fallback_vc
+                            guild = getattr(vc, "guild", guild)
+                            logger.warning(
+                                "[tts_voice] TTS via Lavalink falhou; usando playback local direto | guild=%s reason=%s",
+                                getattr(guild, "id", None),
+                                reason,
+                            )
+                        else:
+                            return router_result
                     else:
                         return router_result
-                else:
-                    return router_result
 
-            source_setup_started_at = time.monotonic()
-            source = discord.FFmpegPCMAudio(
-                path,
-                before_options=TTS_FFMPEG_BEFORE_OPTIONS,
-                options=TTS_FFMPEG_OPTIONS,
-            )
-            source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
+                await self._wait_until_voice_playable_for_tts(vc, item=item)
 
-            play_call_started_at = time.monotonic()
-            vc.play(source, after=_after_playback)
-            play_call_ms = max(0.0, (time.monotonic() - play_call_started_at) * 1000.0)
+                source_setup_started_at = time.monotonic()
+                source = discord.FFmpegPCMAudio(
+                    path,
+                    before_options=TTS_FFMPEG_BEFORE_OPTIONS,
+                    options=TTS_FFMPEG_OPTIONS,
+                )
+                source_setup_ms = max(0.0, (time.monotonic() - source_setup_started_at) * 1000.0)
 
-            playback_started_at = time.monotonic()
-            playback_timeout = self._estimate_playback_timeout(item)
-            try:
-                await asyncio.wait_for(finished, timeout=playback_timeout)
-            except asyncio.TimeoutError as exc:
-                with contextlib.suppress(Exception):
-                    if self._voice_client_is_playing_or_paused(vc):
-                        vc.stop()
-                raise RuntimeError(f"Playback timeout após {playback_timeout:.1f}s") from exc
-            playback_duration_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
-            return {
-                "source_setup_ms": source_setup_ms,
-                "play_call_ms": play_call_ms,
-                "playback_ms": playback_duration_ms,
-                "playback_started_at": playback_started_at,
-            }
-        finally:
-            pass
+                play_call_started_at = time.monotonic()
+                try:
+                    vc.play(source, after=_after_playback)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        source.cleanup()
+                    raise
+                play_call_ms = max(0.0, (time.monotonic() - play_call_started_at) * 1000.0)
+
+                playback_started_at = time.monotonic()
+                playback_timeout = self._estimate_playback_timeout(item)
+                try:
+                    await asyncio.wait_for(finished, timeout=playback_timeout)
+                except asyncio.TimeoutError as exc:
+                    with contextlib.suppress(Exception):
+                        if self._voice_client_is_playing_or_paused(vc):
+                            vc.stop()
+                    raise RuntimeError(f"Playback timeout após {playback_timeout:.1f}s") from exc
+                playback_duration_ms = max(0.0, (time.monotonic() - playback_started_at) * 1000.0)
+                return {
+                    "source_setup_ms": source_setup_ms,
+                    "play_call_ms": play_call_ms,
+                    "playback_ms": playback_duration_ms,
+                    "playback_started_at": playback_started_at,
+                }
+            finally:
+                pass
 
     def _is_music_active_for_guild(self, guild_id: int) -> bool:
         router = getattr(getattr(self, "bot", None), "audio_router", None)

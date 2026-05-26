@@ -1,3 +1,9 @@
+## Patch 85.7: ownership de voz e probe seguro
+
+A versão `1.10.18` mantém o Worker Voice Agent, o registro de sessão e o handoff temporário, mas corrige o dry-run para não competir com a conexão de voz real da VPS. O handoff agora carrega o dono atual da voz (`vps` por padrão) e o worker passa a tratar esse estado como `voice_handoff_received_waiting_transfer`: os dados temporários foram recebidos, mas a conexão direta só deve abrir quando houver transferência explícita de posse da voz para o worker.
+
+`voice_agent_probe_connection` continua existindo para a etapa futura/manual de diagnóstico, mas não deve abrir Voice WebSocket/UDP automaticamente enquanto a VPS ainda está conectada/tocando/reconectando. A flag local nova `PHONE_WORKER_VOICE_AGENT_CONNECTION_AUTO_PROBE_ENABLED=false` documenta esse comportamento seguro. Na VPS, `WORKER_VOICE_AGENT_CONNECTION_AUTO_PROBE_ENABLED=false` mantém o probe automático desligado, sem reverter a arquitetura.
+
 ## Patch 85.6: conexão de voz dry-run do Worker Voice Agent
 
 A versão `1.10.17` adiciona o primeiro teste controlado de conexão de voz do Worker Voice Agent. Depois que a VPS registra a sessão lógica e o handoff temporário, o worker pode iniciar `voice_agent_probe_connection`, abrir o Voice WebSocket do Discord com o `session_id`/endpoint/token temporário, esperar o `READY`, tentar o UDP discovery e fechar a conexão em seguida. Essa etapa **não toca áudio**, não recebe `DISCORD_TOKEN` geral e não transforma o worker no cérebro do bot; ela só valida que o plano de áudio do worker consegue iniciar a conexão de voz quando online.
