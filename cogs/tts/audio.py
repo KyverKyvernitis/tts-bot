@@ -375,6 +375,12 @@ class TTSAudioMixin:
                 "queue_active": 0,
                 "queue_limit": 0,
                 "avg_synth_ms": 0.0,
+                "last_requested_engine": "",
+                "last_selected_engine": "",
+                "last_audio_format": "",
+                "last_audio_bytes": 0,
+                "last_cache_hit": False,
+                "last_synth_ms": 0.0,
             }
             setattr(self, "_tts_agent_route", state)
         return state
@@ -402,6 +408,12 @@ class TTSAudioMixin:
             "queue_active": int(state.get("queue_active") or 0),
             "queue_limit": int(state.get("queue_limit") or 0),
             "avg_synth_ms": float(state.get("avg_synth_ms") or 0.0),
+            "last_requested_engine": str(state.get("last_requested_engine") or ""),
+            "last_selected_engine": str(state.get("last_selected_engine") or state.get("engine") or ""),
+            "last_audio_format": str(state.get("last_audio_format") or ""),
+            "last_audio_bytes": int(state.get("last_audio_bytes") or 0),
+            "last_cache_hit": bool(state.get("last_cache_hit")),
+            "last_synth_ms": float(state.get("last_synth_ms") or 0.0),
         }
 
     def _tts_agent_set_route(
@@ -418,6 +430,12 @@ class TTSAudioMixin:
         queue_active: int | None = None,
         queue_limit: int | None = None,
         avg_synth_ms: float | None = None,
+        last_requested_engine: str | None = None,
+        last_selected_engine: str | None = None,
+        last_audio_format: str | None = None,
+        last_audio_bytes: int | None = None,
+        last_cache_hit: bool | None = None,
+        last_synth_ms: float | None = None,
         reset_failures: bool = False,
     ) -> None:
         state = self._tts_agent_route_state()
@@ -442,6 +460,18 @@ class TTSAudioMixin:
             state["queue_limit"] = int(queue_limit)
         if avg_synth_ms is not None:
             state["avg_synth_ms"] = round(float(avg_synth_ms or 0.0), 2)
+        if last_requested_engine is not None:
+            state["last_requested_engine"] = str(last_requested_engine or "")[:80]
+        if last_selected_engine is not None:
+            state["last_selected_engine"] = str(last_selected_engine or "")[:80]
+        if last_audio_format is not None:
+            state["last_audio_format"] = str(last_audio_format or "")[:24]
+        if last_audio_bytes is not None:
+            state["last_audio_bytes"] = max(0, int(last_audio_bytes or 0))
+        if last_cache_hit is not None:
+            state["last_cache_hit"] = bool(last_cache_hit)
+        if last_synth_ms is not None:
+            state["last_synth_ms"] = round(float(last_synth_ms or 0.0), 2)
         if reset_failures:
             state["failure_count"] = 0
             state["disabled_until_monotonic"] = 0.0
@@ -487,6 +517,16 @@ class TTSAudioMixin:
         metrics = self._get_metrics_store()
         metrics["tts_agent_synth_ok"] = int(metrics.get("tts_agent_synth_ok", 0) or 0) + 1
         self._record_average_metric("tts_agent_synth_total_ms", "tts_agent_synth_samples", float(total_ms))
+        requested_engine = str(data.get("requested_engine") or data.get("requested") or "").strip().lower()
+        selected_engine = str(data.get("selected_engine") or data.get("engine") or "").strip().lower()
+        audio_format = str(data.get("audio_format") or "").strip().lower()
+        audio_bytes = int(data.get("audio_bytes_len") or 0)
+        metrics["tts_agent_last_requested_engine"] = requested_engine
+        metrics["tts_agent_last_selected_engine"] = selected_engine
+        metrics["tts_agent_last_audio_format"] = audio_format
+        metrics["tts_agent_last_audio_bytes"] = audio_bytes
+        metrics["tts_agent_last_cache_hit"] = bool(data.get("cache_hit"))
+        metrics["tts_agent_last_synth_ms"] = round(float(total_ms or 0.0), 2)
         state = self._tts_agent_route_state()
         state["failure_count"] = 0
         state["disabled_until_monotonic"] = 0.0
@@ -496,9 +536,15 @@ class TTSAudioMixin:
             reason="synth_ok",
             worker_id=str(data.get("worker_id") or state.get("worker_id") or ""),
             worker_version=str(data.get("worker_version") or state.get("worker_version") or ""),
-            engine=str(data.get("engine") or data.get("selected_engine") or state.get("engine") or ""),
+            engine=str(selected_engine or state.get("engine") or ""),
             available_engines=list(data.get("available_engines") or state.get("available_engines") or []),
             avg_synth_ms=float(total_ms),
+            last_requested_engine=requested_engine,
+            last_selected_engine=selected_engine,
+            last_audio_format=audio_format,
+            last_audio_bytes=audio_bytes,
+            last_cache_hit=bool(data.get("cache_hit")),
+            last_synth_ms=float(total_ms),
             reset_failures=True,
         )
 
@@ -1100,6 +1146,12 @@ class TTSAudioMixin:
             "tts_agent_synth_ok": int(metrics.get("tts_agent_synth_ok", 0) or 0),
             "tts_agent_synth_failed": int(metrics.get("tts_agent_synth_failed", 0) or 0),
             "avg_tts_agent_synth_ms": round((float(metrics.get("tts_agent_synth_total_ms", 0.0) or 0.0) / int(metrics.get("tts_agent_synth_samples", 0) or 1)), 2) if int(metrics.get("tts_agent_synth_samples", 0) or 0) else 0.0,
+            "tts_agent_last_requested_engine": str(metrics.get("tts_agent_last_requested_engine") or ""),
+            "tts_agent_last_selected_engine": str(metrics.get("tts_agent_last_selected_engine") or ""),
+            "tts_agent_last_audio_format": str(metrics.get("tts_agent_last_audio_format") or ""),
+            "tts_agent_last_audio_bytes": int(metrics.get("tts_agent_last_audio_bytes", 0) or 0),
+            "tts_agent_last_cache_hit": bool(metrics.get("tts_agent_last_cache_hit")),
+            "tts_agent_last_synth_ms": float(metrics.get("tts_agent_last_synth_ms", 0.0) or 0.0),
             "tts_agent_route_worker_samples": int(metrics.get("tts_agent_route_worker_samples", 0) or 0),
             "tts_agent_route_vps_samples": int(metrics.get("tts_agent_route_vps_samples", 0) or 0),
             "boot_warmups": int(metrics.get("boot_warmups", 0) or 0),
@@ -2342,10 +2394,13 @@ class TTSAudioMixin:
                 timeout_seconds=TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
                 max_audio_mb=TTS_WORKER_AGENT_MAX_AUDIO_MB,
             )
-            raw = data.get("audio_bytes")
+            raw = data.get("raw_audio") or data.get("audio_bytes")
             if not isinstance(raw, (bytes, bytearray)) or not raw:
                 raise RuntimeError("TTS Agent não retornou áudio")
+            data["requested_engine"] = str(item.engine or "").strip().lower()
+            data["audio_bytes_len"] = len(raw)
             fmt = self._normalize_worker_audio_format(data.get("audio_format"))
+            data["audio_format"] = fmt
             suffix = ".wav" if fmt == "wav" else ".ogg" if fmt == "ogg" else ".mp3"
             path = self._make_runtime_temp_file(suffix=suffix)
 
@@ -2356,9 +2411,16 @@ class TTSAudioMixin:
             await asyncio.to_thread(_write_audio, path, bytes(raw))
             total_ms = (time.monotonic() - started) * 1000.0
             self._record_tts_agent_synth_success(total_ms=total_ms, data=data)
-            self._log_debug(
-                f"[tts_agent] synth ok | guild={item.guild_id} engine={item.engine} "
-                f"selected={data.get('engine')} bytes={len(raw)} total={total_ms:.1f}ms"
+            selected_engine = str(data.get("selected_engine") or data.get("engine") or "").strip().lower()
+            logger.info(
+                "[tts_agent] synth ok | guild=%s route=worker requested=%s selected=%s format=%s bytes=%s cache_hit=%s total=%.1fms",
+                item.guild_id,
+                item.engine,
+                selected_engine or "unknown",
+                fmt,
+                len(raw),
+                bool(data.get("cache_hit")),
+                total_ms,
             )
             return path
         except Exception as exc:

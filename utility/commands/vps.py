@@ -500,6 +500,11 @@ class VpsCommandMixin:
             return "Google"
         if key in {"gtts", "google_translate", "google_translate_tts"}:
             return "gTTS"
+        if key in {"piper", "piper_tts"}:
+            return "Piper"
+        if key.startswith("tts_agent:"):
+            requested = key.split(":", 1)[1] or "auto"
+            return f"TTS Agent → {VpsCommandMixin._vps_engine_label(requested)}"
         return str(engine or "TTS").strip() or "TTS"
 
     @staticmethod
@@ -583,59 +588,92 @@ class VpsCommandMixin:
     async def _build_vps_tts_report(self) -> str:
         snapshot = self._collect_vps_tts_snapshot()
         tts_metrics = dict(snapshot.get("tts_metrics") or {})
+        tts_agent = dict(tts_metrics.get("tts_agent") or {})
         raw_engine_metrics = dict(snapshot.get("engine_metrics") or tts_metrics.get("engines") or {})
 
-        combined: dict[str, dict[str, Any]] = {}
+        def _engine_label(value: Any) -> str:
+            text = str(value or "").strip()
+            if not text:
+                return "—"
+            return self._vps_engine_label(text)
+
+        def _split_agent_engine(raw_engine: object) -> tuple[bool, str]:
+            key = str(raw_engine or "").strip().lower().replace("-", "_").replace(" ", "_")
+            if key.startswith("tts_agent:"):
+                return True, key.split(":", 1)[1] or "auto"
+            if key in {"tts_agent", "worker_tts_agent"}:
+                return True, "auto"
+            return False, str(raw_engine or "gtts").strip()
+
+        def _combine_engine_lines(entries: list[tuple[str, dict[str, Any]]], *, worker: bool) -> tuple[list[str], int]:
+            combined: dict[str, dict[str, Any]] = {}
+            for raw_engine, raw_data in entries:
+                key = self._vps_engine_key(raw_engine)
+                label = _engine_label(raw_engine)
+                if worker:
+                    label = f"Pedido {_engine_label(raw_engine)}"
+                data = dict(raw_data or {})
+                target = combined.setdefault(key, {
+                    "label": label,
+                    "synth_count": 0,
+                    "synth_failures": 0,
+                    "consecutive_failures": 0,
+                    "synth_total_ms": 0.0,
+                    "samples": 0,
+                    "avg_synth_ms": 0.0,
+                })
+                synth_count = max(0, int(data.get("synth_count", 0) or 0))
+                avg_ms = float(data.get("avg_synth_ms", 0.0) or 0.0)
+                target["synth_count"] = int(target.get("synth_count", 0) or 0) + synth_count
+                target["synth_failures"] = int(target.get("synth_failures", 0) or 0) + max(0, int(data.get("synth_failures", 0) or 0))
+                target["consecutive_failures"] = max(
+                    int(target.get("consecutive_failures", 0) or 0),
+                    max(0, int(data.get("consecutive_failures", 0) or 0)),
+                )
+                if synth_count > 0 and avg_ms > 0:
+                    target["synth_total_ms"] = float(target.get("synth_total_ms", 0.0) or 0.0) + (avg_ms * synth_count)
+                    target["samples"] = int(target.get("samples", 0) or 0) + synth_count
+                elif avg_ms > 0:
+                    target["avg_synth_ms"] = max(float(target.get("avg_synth_ms", 0.0) or 0.0), avg_ms)
+
+            engine_order = {"edge": 0, "google": 1, "gtts": 2, "piper": 3, "auto": 4}
+            lines: list[str] = []
+            total = 0
+            for key, data in sorted(combined.items(), key=lambda item: (engine_order.get(item[0], 99), item[0])):
+                synth_count = int(data.get("synth_count", 0) or 0)
+                failures = int(data.get("synth_failures", 0) or 0)
+                consecutive = int(data.get("consecutive_failures", 0) or 0)
+                total += synth_count
+                samples = int(data.get("samples", 0) or 0)
+                if samples > 0:
+                    avg_value = float(data.get("synth_total_ms", 0.0) or 0.0) / samples
+                else:
+                    avg_value = float(data.get("avg_synth_ms", 0.0) or 0.0)
+                dot = "🟢" if failures == 0 and consecutive == 0 else ("🟡" if consecutive == 0 else "🔴")
+                lines.append(
+                    f"{dot} **{data.get('label', key)}** · synts {self._format_vps_int(synth_count)}"
+                    f" · falhas {self._format_vps_int(failures)}"
+                    f" · seguidas {self._format_vps_int(consecutive)}"
+                    f" · média {self._vps_format_ms(avg_value)}"
+                )
+            return lines, total
+
+        local_entries: list[tuple[str, dict[str, Any]]] = []
+        worker_entries: list[tuple[str, dict[str, Any]]] = []
         for raw_engine, raw_data in raw_engine_metrics.items():
-            key = self._vps_engine_key(raw_engine)
-            label = self._vps_engine_label(raw_engine)
-            data = dict(raw_data or {})
-            target = combined.setdefault(key, {
-                "label": label,
-                "synth_count": 0,
-                "synth_failures": 0,
-                "consecutive_failures": 0,
-                "synth_total_ms": 0.0,
-                "samples": 0,
-                "avg_synth_ms": 0.0,
-            })
-            synth_count = max(0, int(data.get("synth_count", 0) or 0))
-            avg_ms = float(data.get("avg_synth_ms", 0.0) or 0.0)
-            target["synth_count"] = int(target.get("synth_count", 0) or 0) + synth_count
-            target["synth_failures"] = int(target.get("synth_failures", 0) or 0) + max(0, int(data.get("synth_failures", 0) or 0))
-            target["consecutive_failures"] = max(
-                int(target.get("consecutive_failures", 0) or 0),
-                max(0, int(data.get("consecutive_failures", 0) or 0)),
-            )
-            if synth_count > 0 and avg_ms > 0:
-                target["synth_total_ms"] = float(target.get("synth_total_ms", 0.0) or 0.0) + (avg_ms * synth_count)
-                target["samples"] = int(target.get("samples", 0) or 0) + synth_count
-            elif avg_ms > 0:
-                target["avg_synth_ms"] = max(float(target.get("avg_synth_ms", 0.0) or 0.0), avg_ms)
-
-        engine_lines: list[str] = []
-        engine_order = {"edge": 0, "google": 1, "gtts": 2}
-        total_synts = 0
-        for key, data in sorted(combined.items(), key=lambda item: (engine_order.get(item[0], 99), item[0])):
-            synth_count = int(data.get("synth_count", 0) or 0)
-            failures = int(data.get("synth_failures", 0) or 0)
-            consecutive = int(data.get("consecutive_failures", 0) or 0)
-            total_synts += synth_count
-            samples = int(data.get("samples", 0) or 0)
-            if samples > 0:
-                avg_value = float(data.get("synth_total_ms", 0.0) or 0.0) / samples
+            is_worker, clean_engine = _split_agent_engine(raw_engine)
+            if is_worker:
+                worker_entries.append((clean_engine, dict(raw_data or {})))
             else:
-                avg_value = float(data.get("avg_synth_ms", 0.0) or 0.0)
-            dot = "🟢" if failures == 0 and consecutive == 0 else ("🟡" if consecutive == 0 else "🔴")
-            engine_lines.append(
-                f"{dot} **{data.get('label', key)}** · synts {self._format_vps_int(synth_count)}"
-                f" · falhas {self._format_vps_int(failures)}"
-                f" · seguidas {self._format_vps_int(consecutive)}"
-                f" · média {self._vps_format_ms(avg_value)}"
-            )
+                local_entries.append((str(raw_engine), dict(raw_data or {})))
 
-        if not engine_lines:
-            engine_lines.append("Ainda não há synts/metrics de engine desde o último restart.")
+        local_engine_lines, local_total_synts = _combine_engine_lines(local_entries, worker=False)
+        worker_engine_lines, worker_total_synts = _combine_engine_lines(worker_entries, worker=True)
+
+        if not local_engine_lines:
+            local_engine_lines.append("Ainda não há sínteses da VPS/fallback local desde o último restart.")
+        if not worker_engine_lines:
+            worker_engine_lines.append("Ainda não há sínteses pelo TTS Agent desde o último restart.")
 
         cache_hits = max(0, int(tts_metrics.get("cache_hits", 0) or 0))
         cache_misses = max(0, int(tts_metrics.get("cache_misses", 0) or 0))
@@ -643,29 +681,79 @@ class VpsCommandMixin:
         total_cache_lookups = cache_hits + cache_misses
         cache_hit_rate = (cache_hits / total_cache_lookups * 100.0) if total_cache_lookups else 0.0
 
+        worker_cache_hits = max(0, int(tts_metrics.get("worker_cache_lookup_hits", 0) or 0))
+        worker_cache_misses = max(0, int(tts_metrics.get("worker_cache_lookup_misses", 0) or 0))
+        worker_cache_skipped = max(0, int(tts_metrics.get("worker_cache_lookup_skipped", 0) or 0))
+        worker_cache_errors = max(0, int(tts_metrics.get("worker_cache_lookup_errors", 0) or 0))
+
+        route = str(tts_agent.get("route") or "vps").strip().lower()
+        agent_enabled = bool(tts_agent.get("enabled"))
+        agent_ok = bool(tts_agent.get("ok"))
+        cooldown = float(tts_agent.get("cooldown_remaining_seconds") or 0.0)
+        route_label = "Worker" if route == "worker" and agent_ok else "VPS"
+        route_dot = "🟢" if route == "worker" and agent_ok else ("🟡" if agent_enabled and cooldown > 0 else "🔵")
+        worker_id = str(tts_agent.get("worker_id") or "nenhum").strip() or "nenhum"
+        worker_version = str(tts_agent.get("worker_version") or "").strip()
+        worker_suffix = f" · versão {worker_version}" if worker_version else ""
+        available_engines = ", ".join(_engine_label(value) for value in list(tts_agent.get("available_engines") or [])[:6]) or "nenhuma"
+        last_requested = str(tts_agent.get("last_requested_engine") or tts_metrics.get("tts_agent_last_requested_engine") or "").strip()
+        last_selected = str(tts_agent.get("last_selected_engine") or tts_metrics.get("tts_agent_last_selected_engine") or "").strip()
+        last_format = str(tts_agent.get("last_audio_format") or tts_metrics.get("tts_agent_last_audio_format") or "").strip()
+        last_bytes = int(tts_agent.get("last_audio_bytes") or tts_metrics.get("tts_agent_last_audio_bytes") or 0)
+        last_cache_hit = bool(tts_agent.get("last_cache_hit") or tts_metrics.get("tts_agent_last_cache_hit"))
+        last_synth_ms = float(tts_agent.get("last_synth_ms") or tts_metrics.get("tts_agent_last_synth_ms") or tts_metrics.get("avg_tts_agent_synth_ms") or 0.0)
+        if last_requested or last_selected:
+            last_worker_line = (
+                f"Última síntese worker: {_engine_label(last_requested)} pedido → {_engine_label(last_selected)} usado"
+                f" · {last_format or 'formato ?'} · {self._vps_format_bytes_human(last_bytes)}"
+                f" · cache {'hit' if last_cache_hit else 'miss'} · {self._vps_format_ms(last_synth_ms)}"
+            )
+        else:
+            last_worker_line = "Última síntese worker: ainda sem registro."
+
         lines = [
             "## 🔊 TTS",
-            "-# Métricas desde o último restart do bot.",
+            "-# Métricas desde o último restart do bot. Agora separa rota worker e fallback/VPS.",
             "",
-            "### ⚙️ Engines",
-            *engine_lines,
+            "### 🧭 Rota atual",
+            f"{route_dot} **Modo em uso:** {route_label}",
+            f"Worker selecionado: `{worker_id}`{worker_suffix}",
+            f"Motivo/estado: `{str(tts_agent.get('reason') or '—')[:80]}` · cooldown: {self._vps_format_ms(cooldown * 1000.0)}",
+            f"Último erro do Agent: `{str(tts_agent.get('last_error') or 'nenhum')[:160]}`",
             "",
-            "### 📦 Fila, cache e armazenamento",
+            "### 📱 TTS do Worker / TTS Agent",
+            f"Estado: `{'pronto' if agent_ok and route == 'worker' else 'fallback/VPS' if agent_enabled else 'desativado'}` · engines disponíveis: {available_engines}",
+            f"Fila worker: {self._format_vps_int(int(tts_agent.get('queue_active', 0) or 0))}/{self._format_vps_int(int(tts_agent.get('queue_limit', 0) or 0))}",
+            f"Health ok/falha: {self._format_vps_int(int(tts_metrics.get('tts_agent_health_ok', 0) or 0))}/{self._format_vps_int(int(tts_metrics.get('tts_agent_health_fail', 0) or 0))}",
+            f"Synth tentadas/ok/falhas: {self._format_vps_int(int(tts_metrics.get('tts_agent_synth_attempts', 0) or 0))}/"
+            f"{self._format_vps_int(int(tts_metrics.get('tts_agent_synth_ok', 0) or 0))}/"
+            f"{self._format_vps_int(int(tts_metrics.get('tts_agent_synth_failed', 0) or 0))}",
+            f"Média Agent: {self._vps_format_ms(tts_metrics.get('avg_tts_agent_synth_ms'))} · rota worker/VPS: "
+            f"{self._format_vps_int(int(tts_metrics.get('tts_agent_route_worker_samples', 0) or 0))}/"
+            f"{self._format_vps_int(int(tts_metrics.get('tts_agent_route_vps_samples', 0) or 0))}",
+            last_worker_line,
+            *worker_engine_lines,
+            "",
+            "### 🖥️ TTS da VPS / fallback local",
+            *local_engine_lines,
             f"Fila agora: {self._format_vps_int(int(tts_metrics.get('queued_items_current', 0) or 0))} · guild states: {self._format_vps_int(int(tts_metrics.get('guild_states_current', 0) or 0))}",
             "Enfileiradas / deduplicadas / descartadas: "
             f"{self._format_vps_int(int(tts_metrics.get('queue_enqueued', 0) or 0))} / "
             f"{self._format_vps_int(int(tts_metrics.get('queue_deduplicated', 0) or 0))} / "
             f"{self._format_vps_int(int(tts_metrics.get('queue_dropped', 0) or 0))}",
             f"Espera média: {self._vps_format_ms(tts_metrics.get('avg_queue_wait_ms'))} · despacho médio: {self._vps_format_ms(tts_metrics.get('avg_dispatch_ms'))}",
-            f"Cache: {self._format_vps_int(cache_hits)} hits · {self._format_vps_int(cache_misses)} misses · {self._format_vps_int(cache_stores)} stores · {cache_hit_rate:.1f}% hit rate",
+            "",
+            "### 📦 Cache e armazenamento",
+            f"Cache VPS: {self._format_vps_int(cache_hits)} hits · {self._format_vps_int(cache_misses)} misses · {self._format_vps_int(cache_stores)} stores · {cache_hit_rate:.1f}% hit rate",
+            f"Cache worker lookup: {self._format_vps_int(worker_cache_hits)} hits · {self._format_vps_int(worker_cache_misses)} misses · {self._format_vps_int(worker_cache_skipped)} skips · {self._format_vps_int(worker_cache_errors)} erros",
             f"tmp_audio: {self._vps_format_bytes_human(snapshot.get('total_tmp_bytes'))} · runtime/cache/cred {snapshot.get('runtime_files', 0)}/{snapshot.get('cache_files', 0)}/{snapshot.get('cred_files', 0)}",
             "",
-            "### 🧮 Synts desde o último restart",
-            f"Total: {self._format_vps_int(total_synts)}",
+            "### 🧮 Total de sínteses",
+            f"Worker Agent: {self._format_vps_int(worker_total_synts)} · VPS/fallback: {self._format_vps_int(local_total_synts)}",
         ]
         report = "\n".join(lines).strip()
-        if len(report) > 3200:
-            report = report[:3200].rstrip() + "\n[cortado por tamanho]"
+        if len(report) > 3400:
+            report = report[:3400].rstrip() + "\n[cortado por tamanho]"
         return report
 
     async def _run_vps_action(self, interaction: discord.Interaction, *, selected_items: list[VpsItem]) -> None:
