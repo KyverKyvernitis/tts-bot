@@ -240,6 +240,43 @@ def _make_notice_view(title: str, body: str | list[str], *, ok: bool = True) -> 
     return view
 
 
+
+def _advanced_modal_supported(*components: str) -> bool:
+    needed = components or ("Label", "RadioGroup", "CheckboxGroup")
+    return all(hasattr(discord.ui, name) for name in needed)
+
+
+def _modal_values(component: Any) -> list[str]:
+    values = getattr(component, "values", None)
+    if values is None:
+        value = getattr(component, "value", None)
+        if value is None:
+            return []
+        return [str(value)]
+    if isinstance(values, (str, int)):
+        return [str(values)]
+    try:
+        return [str(item) for item in values if str(item)]
+    except TypeError:
+        return [str(values)] if values else []
+
+
+def _modal_value(component: Any, default: str = "") -> str:
+    values = _modal_values(component)
+    return values[0] if values else default
+
+
+def _id_from_text(value: Any) -> int:
+    raw = str(value or "").strip()
+    match = re.search(r"(\d{15,25})", raw)
+    if not match:
+        return 0
+    try:
+        return int(match.group(1))
+    except Exception:
+        return 0
+
+
 class _BackButton(discord.ui.Button):
     def __init__(self, panel: "WelcomeAdminView"):
         self.panel = panel
@@ -390,16 +427,16 @@ class _ModeActionSelect(discord.ui.Select):
     def __init__(self, panel: "WelcomeAdminView"):
         self.panel = panel
         options = [
-            discord.SelectOption(label="Ajuste rápido", value="quick", emoji="⚙️", description="Modo, DM e status em uma tela"),
+            discord.SelectOption(label="Configurar modo", value="config", emoji="⚙️", description="Modo da mensagem, status e privado"),
             discord.SelectOption(label="Ver preview", value="preview", emoji="👁️"),
         ]
-        super().__init__(placeholder="Mais opções do modo", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="O que deseja ajustar no modo?", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        if str(self.values[0]) == "quick":
-            if not all(hasattr(discord.ui, attr) for attr in ("Label", "RadioGroup", "CheckboxGroup")):
+        if str(self.values[0]) == "config":
+            if not _advanced_modal_supported("Label", "RadioGroup", "CheckboxGroup"):
                 await interaction.response.send_message(
-                    view=_make_notice_view("Ainda não disponível", "Essa versão da biblioteca não tem os controles novos de modal.", ok=False),
+                    view=_make_notice_view("Ainda não disponível", "Essa versão da biblioteca não abriu o formulário moderno de modo.", ok=False),
                     ephemeral=True,
                 )
                 return
@@ -487,65 +524,31 @@ class _WebhookNameModeSelect(discord.ui.Select):
 class _WebhookActionSelect(discord.ui.Select):
     def __init__(self, panel: "WelcomeAdminView"):
         self.panel = panel
-        enabled = bool((panel.config.get("webhook") or {}).get("enabled", False))
         options = [
-            discord.SelectOption(label="Criar webhook no canal salvo", value="create", emoji="🪝", description="Uso automático para boas-vindas"),
-            discord.SelectOption(label="Escolher webhook existente", value="existing", emoji="📌", description="Usar um webhook que já existe"),
-            discord.SelectOption(label="Editar nome e avatar", value="edit", emoji="✏️", description="Aparência do envio"),
-            discord.SelectOption(label="Avatar do servidor", value="avatar_server", emoji="🖼️"),
-            discord.SelectOption(label="Avatar do membro", value="avatar_member", emoji="👤"),
-            discord.SelectOption(label="Avatar de quem convidou", value="avatar_inviter", emoji="🎁"),
-            discord.SelectOption(label="Voltar para envio pelo bot", value="bot", emoji="🤖"),
-            discord.SelectOption(label="Remover webhook salvo", value="clear", emoji="🧹"),
+            discord.SelectOption(label="Configurar webhook", value="setup", emoji="🪝", description="Bot, webhook novo ou existente"),
+            discord.SelectOption(label="Aparência do envio", value="appearance", emoji="🎭", description="Nome e avatar usados nas boas-vindas"),
+            discord.SelectOption(label="Remover ou desativar", value="clear", emoji="🧹", description="Voltar para envio simples pelo bot"),
         ]
-        super().__init__(placeholder="O que deseja fazer com o webhook?", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="O que deseja ajustar no webhook?", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         action = str(self.values[0])
-        if action == "edit":
-            await interaction.response.send_modal(WelcomeWebhookModal(self.panel))
+        if action == "setup":
+            if not _advanced_modal_supported("Label"):
+                await interaction.response.send_message(
+                    view=_make_notice_view("Ainda não disponível", "Essa versão da biblioteca não abriu o formulário moderno de webhook.", ok=False),
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_modal(WelcomeWebhookSetupModal(self.panel))
+            return
+        if action == "appearance":
+            await interaction.response.send_modal(WelcomeWebhookAppearanceModal(self.panel))
             return
         cfg = deepcopy(self.panel.config)
-        webhook_cfg = dict(cfg.get("webhook") or {})
-        if action == "create":
-            channel = await self.panel.cog._configured_channel(interaction.guild, cfg)
-            if channel is None:
-                self.panel.notice = "Escolha um canal antes de criar o webhook."
-            else:
-                webhook = await self.panel.cog._create_or_get_welcome_webhook(channel, webhook_cfg)
-                if webhook is None:
-                    self.panel.notice = "Não consegui criar o webhook nesse canal. Veja se posso gerenciar webhooks."
-                else:
-                    webhook_cfg.update({
-                        "enabled": True,
-                        "channel_id": int(getattr(channel, "id", 0) or 0),
-                        "webhook_id": int(getattr(webhook, "id", 0) or 0),
-                        "webhook_token": str(getattr(webhook, "token", None) or webhook_cfg.get("webhook_token") or ""),
-                    })
-                    cfg["webhook"] = webhook_cfg
-                    await self.panel.save_config(cfg, "Webhook pronto para as boas-vindas.")
-            self.panel._rebuild()
-            await interaction.response.edit_message(view=self.panel)
-            return
-        if action == "existing":
-            await self.panel.load_webhooks(interaction.guild)
-            self.panel.go_to("webhook_existing")
-            self.panel.notice = "Escolha um webhook da lista."
-            self.panel._rebuild()
-            await interaction.response.edit_message(view=self.panel)
-            return
-        if action == "bot":
-            webhook_cfg["enabled"] = False
-            cfg["webhook"] = webhook_cfg
-            await self.panel.save_config(cfg, "Envio pelo bot ativado.")
-        elif action == "clear":
-            cfg["webhook"] = self.panel.cog._default_webhook_config()
-            await self.panel.save_config(cfg, "Webhook removido da configuração.")
-        elif action.startswith("avatar_"):
-            webhook_cfg["avatar_mode"] = action.removeprefix("avatar_")
-            cfg["webhook"] = webhook_cfg
-            label = WEBHOOK_AVATAR_LABELS.get(webhook_cfg["avatar_mode"], "Avatar do servidor")
-            await self.panel.save_config(cfg, f"{label} será usado nas boas-vindas.")
+        cfg["webhook"] = self.panel.cog._default_webhook_config()
+        await self.panel.save_config(cfg, "Envio pelo bot ativado.")
+        self.panel.screen = "webhook"
         self.panel._rebuild()
         await interaction.response.edit_message(view=self.panel)
 
@@ -589,11 +592,9 @@ class _WebhookExistingSelect(discord.ui.Select):
 class _DmActionSelect(discord.ui.Select):
     def __init__(self, panel: "WelcomeAdminView"):
         self.panel = panel
-        enabled = bool(panel.config.get("dm_enabled", False))
         options = [
-            discord.SelectOption(label="Desligar mensagem privada" if enabled else "Ligar mensagem privada", value="toggle", emoji="💬"),
-            discord.SelectOption(label="Editar mensagem privada", value="edit", emoji="✏️"),
-            discord.SelectOption(label="Modo da mensagem privada", value="mode", emoji="🎨"),
+            discord.SelectOption(label="Configurar privado", value="config", emoji="⚙️", description="Ligar, desligar e escolher o modo"),
+            discord.SelectOption(label="Editar texto", value="edit", emoji="✏️", description="Título, mensagem e rodapé"),
             discord.SelectOption(label="Restaurar mensagem padrão", value="restore", emoji="↩️"),
             discord.SelectOption(label="Ver preview", value="preview", emoji="👁️"),
         ]
@@ -604,15 +605,17 @@ class _DmActionSelect(discord.ui.Select):
         if action == "edit":
             await interaction.response.send_modal(WelcomeDmModal(self.panel))
             return
+        if action == "config":
+            if not _advanced_modal_supported("Label", "RadioGroup", "CheckboxGroup"):
+                await interaction.response.send_message(
+                    view=_make_notice_view("Ainda não disponível", "Essa versão da biblioteca não abriu as opções modernas de privado.", ok=False),
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_modal(WelcomeDmOptionsModal(self.panel))
+            return
         cfg = deepcopy(self.panel.config)
-        if action == "toggle":
-            cfg["dm_enabled"] = not bool(cfg.get("dm_enabled", False))
-            await self.panel.save_config(cfg, "Mensagem privada ligada." if cfg["dm_enabled"] else "Mensagem privada desligada.")
-            self.panel.screen = "dm"
-        elif action == "mode":
-            self.panel.go_to("dm_mode")
-            self.panel.notice = "Escolha como a mensagem privada deve aparecer."
-        elif action == "restore":
+        if action == "restore":
             cfg["dm"] = dict(DEFAULT_DM)
             await self.panel.save_config(cfg, "Mensagem privada restaurada.")
             self.panel.screen = "dm"
@@ -705,7 +708,7 @@ class _VisualActionSelect(discord.ui.Select):
     def __init__(self, panel: "WelcomeAdminView"):
         self.panel = panel
         options = [
-            discord.SelectOption(label="Editar cor e imagem", value="edit", emoji="🎨"),
+            discord.SelectOption(label="Editar visual", value="edit", emoji="🎨", description="Estilo, cor e imagem"),
             discord.SelectOption(label="Remover imagem", value="clear_image", emoji="🧹"),
             discord.SelectOption(label="Ver preview", value="preview", emoji="👁️"),
         ]
@@ -733,26 +736,21 @@ class _SpecialMainSelect(discord.ui.Select):
         self.panel = panel
         rules = panel.config.get("special_rules") or []
         options = [
-            discord.SelectOption(label="Criar regra por convite", value="create_invite", emoji="🔗", description="Um código de convite específico"),
-            discord.SelectOption(label="Criar regra por convidador", value="create_inviter", emoji="👤", description="Quando uma pessoa específica convidar"),
-            discord.SelectOption(label="Criar regra por canal do convite", value="create_channel", emoji="📍", description="Convites criados em um canal"),
+            discord.SelectOption(label="Criar regra especial", value="create", emoji="🎁", description="Por convite, convidador ou canal"),
             discord.SelectOption(label="Editar regras existentes", value="list", emoji="✏️", description=f"{len(rules)} regra(s) criada(s)"),
-            discord.SelectOption(label="Atualizar convites agora", value="refresh", emoji="🔄", description="Ajuda o bot a reconhecer próximos convites"),
+            discord.SelectOption(label="Atualizar convites agora", value="refresh", emoji="🔄", description="Ajuda a reconhecer próximos convites"),
         ]
         super().__init__(placeholder="O que deseja configurar nas boas-vindas especiais?", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         action = str(self.values[0])
-        if action == "create_invite":
-            await interaction.response.send_modal(SpecialInviteRuleModal(self.panel))
+        if action == "create":
+            if not _advanced_modal_supported("Label"):
+                await interaction.response.send_modal(SpecialInviteRuleModal(self.panel))
+                return
+            await interaction.response.send_modal(SpecialRuleCreateModal(self.panel))
             return
-        if action == "create_inviter":
-            self.panel.go_to("special_create_inviter")
-            self.panel.notice = "Escolha quem pode gerar uma recepção especial."
-        elif action == "create_channel":
-            self.panel.go_to("special_create_channel")
-            self.panel.notice = "Escolha o canal do convite."
-        elif action == "list":
+        if action == "list":
             if not (self.panel.config.get("special_rules") or []):
                 self.panel.notice = "Ainda não há regras especiais."
             else:
@@ -1086,10 +1084,55 @@ class WelcomeDmModal(discord.ui.Modal):
         await interaction.response.edit_message(view=self.panel)
 
 
+
+class WelcomeDmOptionsModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Configurar privado")
+        self.panel = panel
+        cfg = panel.config
+        self.mode_group = discord.ui.RadioGroup(required=True)
+        current_mode = str(cfg.get("dm_render_mode") or cfg.get("render_mode") or "components_v2")
+        for key, label in RENDER_MODE_LABELS.items():
+            self.mode_group.add_option(label=label, value=key, description=RENDER_MODE_DESCRIPTIONS[key], default=current_mode == key)
+        self.flags_group = discord.ui.CheckboxGroup(required=False, min_values=0, max_values=2)
+        self.flags_group.add_option(label="Enviar mensagem privada", value="dm_enabled", description="Manda no privado quando alguém entrar.", default=bool(cfg.get("dm_enabled", False)))
+        self.flags_group.add_option(label="Usar o mesmo modo da pública", value="same_mode", description="A DM acompanha o modo público.", default=str(cfg.get("dm_render_mode") or "") == str(cfg.get("render_mode") or "components_v2"))
+        self.add_item(discord.ui.Label(text="Modo da mensagem privada", component=self.mode_group))
+        self.add_item(discord.ui.Label(text="Opções", description="Marque o que fica ativo.", component=self.flags_group))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        selected = set(_modal_values(self.flags_group))
+        cfg = deepcopy(self.panel.config)
+        cfg["dm_enabled"] = "dm_enabled" in selected
+        if "same_mode" in selected:
+            cfg["dm_render_mode"] = str(cfg.get("render_mode") or "components_v2")
+        else:
+            cfg["dm_render_mode"] = _modal_value(self.mode_group, "components_v2")
+        await self.panel.save_config(cfg, "Mensagem privada configurada.")
+        self.panel.screen = "dm"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
 class WelcomeVisualModal(discord.ui.Modal):
     def __init__(self, panel: "WelcomeAdminView"):
         super().__init__(title="Visual da mensagem")
         self.panel = panel
+        self.style_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.style_group = discord.ui.RadioGroup(required=True)
+            current_style = str(panel.config.get("style") or "complete")
+            for key, label in STYLE_LABELS.items():
+                self.style_group.add_option(label=label, value=key, description="Escolha este estilo visual.", default=current_style == key)
+            self.add_item(discord.ui.Label(text="Estilo", component=self.style_group))
+        else:
+            self.style_input = discord.ui.TextInput(
+                label="Estilo: complete, simple ou compact",
+                default=str(panel.config.get("style") or "complete")[:20],
+                max_length=20,
+                required=True,
+            )
+            self.add_item(self.style_input)
         self.accent_input = discord.ui.TextInput(
             label="Cor lateral em HEX",
             placeholder="#5865F2",
@@ -1122,7 +1165,14 @@ class WelcomeVisualModal(discord.ui.Modal):
                 ephemeral=True,
             )
             return
+        if self.style_group is not None:
+            style = _modal_value(self.style_group, "complete")
+        else:
+            style = str(getattr(self, "style_input").value or "complete").strip().lower()
+        if style not in STYLE_LABELS:
+            style = "complete"
         cfg = deepcopy(self.panel.config)
+        cfg["style"] = style
         cfg["accent_color"] = _parse_hex(raw_hex)
         cfg["media_url"] = _clean_url(raw_url)
         await self.panel.save_config(cfg, "Visual atualizado.")
@@ -1131,11 +1181,94 @@ class WelcomeVisualModal(discord.ui.Modal):
         await interaction.response.edit_message(view=self.panel)
 
 
-class WelcomeWebhookModal(discord.ui.Modal):
+class WelcomeWebhookSetupModal(discord.ui.Modal):
     def __init__(self, panel: "WelcomeAdminView"):
-        super().__init__(title="Webhook de boas-vindas")
+        super().__init__(title="Configurar webhook")
         self.panel = panel
         webhook = dict(panel.config.get("webhook") or {})
+        self.send_select = None
+        if hasattr(discord.ui, "Label"):
+            current = "existing" if webhook.get("enabled") and webhook.get("webhook_id") else "bot"
+            options = [
+                discord.SelectOption(label="Enviar pelo bot", value="bot", emoji="🤖", description="Usa o próprio bot", default=current == "bot"),
+                discord.SelectOption(label="Criar webhook no canal salvo", value="create", emoji="🪝", description="Cria um envio personalizado", default=current == "create"),
+                discord.SelectOption(label="Escolher webhook existente", value="existing", emoji="📌", description="Mostra webhooks do canal salvo", default=current == "existing"),
+            ]
+            self.send_select = discord.ui.Select(placeholder="Como deseja enviar?", min_values=1, max_values=1, options=options)
+            self.add_item(discord.ui.Label(text="Envio das boas-vindas", component=self.send_select))
+        else:
+            self.mode_input = discord.ui.TextInput(label="Envio: bot, create ou existing", default="bot", max_length=20, required=True)
+            self.add_item(self.mode_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        action = _modal_value(self.send_select, "bot") if self.send_select is not None else str(self.mode_input.value or "bot").strip().lower()
+        cfg = deepcopy(self.panel.config)
+        webhook_cfg = dict(cfg.get("webhook") or {})
+        if action == "bot":
+            webhook_cfg["enabled"] = False
+            cfg["webhook"] = webhook_cfg
+            await self.panel.save_config(cfg, "Envio pelo bot ativado.")
+            self.panel.screen = "webhook"
+            self.panel._rebuild()
+            await interaction.response.edit_message(view=self.panel)
+            return
+        if action == "existing":
+            await self.panel.load_webhooks(interaction.guild)
+            self.panel.go_to("webhook_existing")
+            self.panel.notice = "Escolha um webhook da lista."
+            self.panel._rebuild()
+            await interaction.response.edit_message(view=self.panel)
+            return
+        if action != "create":
+            self.panel.notice = "Escolha uma opção válida."
+            self.panel.screen = "webhook"
+            self.panel._rebuild()
+            await interaction.response.edit_message(view=self.panel)
+            return
+        channel = await self.panel.cog._configured_channel(interaction.guild, cfg)
+        if channel is None:
+            self.panel.notice = "Escolha um canal antes de criar o webhook."
+        else:
+            webhook = await self.panel.cog._create_or_get_welcome_webhook(channel, webhook_cfg)
+            if webhook is None:
+                self.panel.notice = "Não consegui criar o webhook nesse canal. Veja se posso gerenciar webhooks."
+            else:
+                webhook_cfg.update({
+                    "enabled": True,
+                    "channel_id": int(getattr(channel, "id", 0) or 0),
+                    "webhook_id": int(getattr(webhook, "id", 0) or 0),
+                    "webhook_token": str(getattr(webhook, "token", None) or webhook_cfg.get("webhook_token") or ""),
+                })
+                cfg["webhook"] = webhook_cfg
+                await self.panel.save_config(cfg, "Webhook pronto para as boas-vindas.")
+        self.panel.screen = "webhook"
+        self.panel._rebuild()
+        await interaction.response.edit_message(view=self.panel)
+
+
+class WelcomeWebhookAppearanceModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Aparência do envio")
+        self.panel = panel
+        webhook = dict(panel.config.get("webhook") or {})
+        self.name_group = None
+        self.avatar_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.name_group = discord.ui.RadioGroup(required=True)
+            current_name = str(webhook.get("name_mode") or "fixed")
+            for key, label in WEBHOOK_NAME_LABELS.items():
+                self.name_group.add_option(label=label, value=key, default=current_name == key)
+            self.avatar_group = discord.ui.RadioGroup(required=True)
+            current_avatar = str(webhook.get("avatar_mode") or "server")
+            for key, label in WEBHOOK_AVATAR_LABELS.items():
+                self.avatar_group.add_option(label=label, value=key, default=current_avatar == key)
+            self.add_item(discord.ui.Label(text="Nome usado no envio", component=self.name_group))
+            self.add_item(discord.ui.Label(text="Avatar usado no envio", component=self.avatar_group))
+        else:
+            self.name_mode_input = discord.ui.TextInput(label="Nome: fixed, server, member ou inviter", default=str(webhook.get("name_mode") or "fixed")[:20], max_length=20, required=True)
+            self.avatar_mode_input = discord.ui.TextInput(label="Avatar: server, member, inviter ou custom", default=str(webhook.get("avatar_mode") or "server")[:20], max_length=20, required=True)
+            self.add_item(self.name_mode_input)
+            self.add_item(self.avatar_mode_input)
         self.name_input = discord.ui.TextInput(
             label="Nome personalizado",
             placeholder="Boas-vindas",
@@ -1161,17 +1294,39 @@ class WelcomeWebhookModal(discord.ui.Modal):
                 ephemeral=True,
             )
             return
+        if self.name_group is not None:
+            name_mode = _modal_value(self.name_group, "fixed")
+            avatar_mode = _modal_value(self.avatar_group, "server")
+        else:
+            name_mode = str(self.name_mode_input.value or "fixed").strip().lower()
+            avatar_mode = str(self.avatar_mode_input.value or "server").strip().lower()
+        if name_mode not in WEBHOOK_NAME_LABELS:
+            name_mode = "fixed"
+        if avatar_mode not in WEBHOOK_AVATAR_LABELS:
+            avatar_mode = "server"
+        if avatar_mode == "custom" and not raw_url:
+            await interaction.response.send_message(
+                view=_make_notice_view("Avatar incompleto", "Escolha um link quando usar avatar personalizado.", ok=False),
+                ephemeral=True,
+            )
+            return
+        avatar_url = _clean_url(raw_url)
         cfg = deepcopy(self.panel.config)
         webhook = dict(cfg.get("webhook") or {})
         webhook["name"] = _safe_webhook_name(self.name_input.value)
-        webhook["avatar_url"] = _clean_url(raw_url)
-        if raw_url:
-            webhook["avatar_mode"] = "custom"
+        webhook["name_mode"] = name_mode
+        webhook["avatar_mode"] = avatar_mode
+        webhook["avatar_url"] = avatar_url
         cfg["webhook"] = webhook
-        await self.panel.save_config(cfg, "Webhook atualizado.")
+        await self.panel.save_config(cfg, "Aparência do envio salva.")
         self.panel.screen = "webhook"
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
+
+
+
+class WelcomeWebhookModal(WelcomeWebhookAppearanceModal):
+    pass
 
 
 class WelcomeQuickOptionsModal(discord.ui.Modal):
@@ -1187,7 +1342,7 @@ class WelcomeQuickOptionsModal(discord.ui.Modal):
         self.flags_group.add_option(label="Boas-vindas ligadas", value="enabled", description="Envia quando alguém entrar.", default=bool(cfg.get("enabled", False)))
         self.flags_group.add_option(label="Mensagem privada ligada", value="dm_enabled", description="Também manda no privado.", default=bool(cfg.get("dm_enabled", False)))
         self.add_item(discord.ui.Label(text="Modo da mensagem pública", component=self.mode_group))
-        self.add_item(discord.ui.Label(text="Opções", description="Marque o que deve ficar ligado.", component=self.flags_group))
+        self.add_item(discord.ui.Label(text="Opções", description="Marque o que fica ativo.", component=self.flags_group))
 
     async def on_submit(self, interaction: discord.Interaction):
         selected = set(getattr(self.flags_group, "values", None) or [])
@@ -1203,6 +1358,73 @@ class WelcomeQuickOptionsModal(discord.ui.Modal):
         await self.panel.save_config(cfg, notice)
         self.panel.screen = "mode"
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+
+class SpecialRuleCreateModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Criar regra especial")
+        self.panel = panel
+        self.type_select = None
+        if hasattr(discord.ui, "Label"):
+            options = [
+                discord.SelectOption(label="Código de convite", value="invite_code", emoji="🔗", description="Ex.: abc123 ou link do convite"),
+                discord.SelectOption(label="Pessoa que convidou", value="inviter", emoji="👤", description="Use ID ou menção da pessoa"),
+                discord.SelectOption(label="Canal do convite", value="invite_channel", emoji="📍", description="Use ID ou menção do canal"),
+            ]
+            self.type_select = discord.ui.Select(placeholder="Quando essa regra deve valer?", min_values=1, max_values=1, options=options)
+            self.add_item(discord.ui.Label(text="Tipo da regra", component=self.type_select))
+        else:
+            self.type_input = discord.ui.TextInput(label="Tipo: invite_code, inviter ou invite_channel", max_length=30, required=True)
+            self.add_item(self.type_input)
+        self.name_input = discord.ui.TextInput(label="Nome da regra", placeholder="Convite do evento", max_length=MAX_RULE_NAME, required=False)
+        self.value_input = discord.ui.TextInput(label="Convite, pessoa ou canal", placeholder="Código/link do convite, menção ou ID", max_length=120, required=True)
+        self.add_item(self.name_input)
+        self.add_item(self.value_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        match_type = _modal_value(self.type_select, "invite_code") if self.type_select is not None else str(self.type_input.value or "invite_code").strip().lower()
+        raw_value = str(self.value_input.value or "").strip()
+        if match_type == "invite_code":
+            match_value = _clean_invite_code(raw_value)
+            default_name = f"Convite {match_value}" if match_value else "Convite especial"
+            if not match_value:
+                await interaction.response.send_message(view=_make_notice_view("Convite inválido", "Coloque o código ou link de um convite.", ok=False), ephemeral=True)
+                return
+        elif match_type == "inviter":
+            user_id = _id_from_text(raw_value)
+            if not user_id:
+                await interaction.response.send_message(view=_make_notice_view("Pessoa inválida", "Use uma menção ou ID da pessoa que convidou.", ok=False), ephemeral=True)
+                return
+            match_value = str(user_id)
+            default_name = f"Convites de {raw_value[:40]}"
+        elif match_type == "invite_channel":
+            channel_id = _id_from_text(raw_value)
+            if not channel_id:
+                await interaction.response.send_message(view=_make_notice_view("Canal inválido", "Use uma menção ou ID do canal do convite.", ok=False), ephemeral=True)
+                return
+            match_value = str(channel_id)
+            default_name = f"Convites do canal {raw_value[:40]}"
+        else:
+            await interaction.response.send_message(view=_make_notice_view("Tipo inválido", "Escolha convite, convidador ou canal.", ok=False), ephemeral=True)
+            return
+        cfg = deepcopy(self.panel.config)
+        rules = list(cfg.get("special_rules") or [])
+        if len(rules) >= MAX_SPECIAL_RULES:
+            await interaction.response.send_message(view=_make_notice_view("Limite atingido", "Remova uma regra antiga antes de criar outra.", ok=False), ephemeral=True)
+            return
+        rule = self.panel.cog._make_rule(
+            name=str(self.name_input.value or default_name).strip(),
+            match_type=match_type,
+            match_value=match_value,
+        )
+        rules.append(rule)
+        cfg["special_rules"] = rules
+        await self.panel.save_config(cfg, "Regra criada.")
+        self.panel.selected_rule_id = rule["id"]
+        self.panel.screen = "special_rule"
+        self.panel._rebuild()
         await interaction.response.edit_message(view=self.panel)
 
 
@@ -1269,12 +1491,21 @@ class SpecialRuleVisualModal(discord.ui.Modal):
         super().__init__(title="Visual especial")
         self.panel = panel
         self.rule_id = str((rule or {}).get("id") or panel.selected_rule_id)
+        self.style_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.style_group = discord.ui.RadioGroup(required=True)
+            current = str((rule or {}).get("style") or "inherit")
+            self.style_group.add_option(label="Usar visual padrão", value="inherit", default=current == "inherit")
+            for key, label in STYLE_LABELS.items():
+                self.style_group.add_option(label=label, value=key, default=current == key)
+            self.add_item(discord.ui.Label(text="Estilo da regra", component=self.style_group))
+        else:
+            self.style_input = discord.ui.TextInput(label="Estilo: inherit, complete, simple ou compact", default=str((rule or {}).get("style") or "inherit")[:20], max_length=20, required=True)
+            self.add_item(self.style_input)
         self.accent_input = discord.ui.TextInput(label="Cor em HEX opcional", placeholder="#5865F2 ou vazio para padrão", default=str((rule or {}).get("accent_color") or "")[:7], max_length=7, required=False)
         self.image_input = discord.ui.TextInput(label="Imagem/banner opcional", placeholder="https://exemplo.com/imagem.png", default=str((rule or {}).get("media_url") or "")[:1000], max_length=1000, required=False)
-        self.style_input = discord.ui.TextInput(label="Estilo: inherit, complete, simple ou compact", default=str((rule or {}).get("style") or "inherit")[:20], max_length=20, required=True)
         self.add_item(self.accent_input)
         self.add_item(self.image_input)
-        self.add_item(self.style_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         raw_hex = str(self.accent_input.value or "").strip()
@@ -1285,7 +1516,10 @@ class SpecialRuleVisualModal(discord.ui.Modal):
         if raw_url and not URL_RE.fullmatch(raw_url):
             await interaction.response.send_message(view=_make_notice_view("Imagem inválida", "Use um link começando com http:// ou https://.", ok=False), ephemeral=True)
             return
-        style = str(self.style_input.value or "inherit").strip().lower()
+        if self.style_group is not None:
+            style = _modal_value(self.style_group, "inherit")
+        else:
+            style = str(self.style_input.value or "inherit").strip().lower()
         if style not in {"inherit", *STYLE_LABELS.keys()}:
             style = "inherit"
         await self.panel.update_rule(self.rule_id, {
@@ -1304,25 +1538,47 @@ class SpecialRuleWebhookModal(discord.ui.Modal):
         self.panel = panel
         self.rule_id = str((rule or {}).get("id") or panel.selected_rule_id)
         webhook = dict((rule or {}).get("webhook") or {})
-        self.mode_input = discord.ui.TextInput(label="Uso: inherit, bot ou webhook", placeholder="inherit", default=str(webhook.get("mode") or "inherit")[:20], max_length=20, required=True)
+        self.mode_group = None
+        self.avatar_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.mode_group = discord.ui.RadioGroup(required=True)
+            current_mode = str(webhook.get("mode") or "inherit")
+            for value, label in (("inherit", "Usar envio padrão"), ("bot", "Enviar pelo bot"), ("webhook", "Enviar pelo webhook")):
+                self.mode_group.add_option(label=label, value=value, default=current_mode == value)
+            self.avatar_group = discord.ui.RadioGroup(required=True)
+            current_avatar = str(webhook.get("avatar_mode") or "inherit")
+            self.avatar_group.add_option(label="Usar avatar padrão", value="inherit", default=current_avatar == "inherit")
+            for key, label in WEBHOOK_AVATAR_LABELS.items():
+                self.avatar_group.add_option(label=label, value=key, default=current_avatar == key)
+            self.add_item(discord.ui.Label(text="Envio dessa regra", component=self.mode_group))
+            self.add_item(discord.ui.Label(text="Avatar dessa regra", component=self.avatar_group))
+        else:
+            self.mode_input = discord.ui.TextInput(label="Uso: inherit, bot ou webhook", placeholder="inherit", default=str(webhook.get("mode") or "inherit")[:20], max_length=20, required=True)
+            self.avatar_mode_input = discord.ui.TextInput(label="Avatar: inherit, server, member, inviter ou custom", placeholder="inherit", default=str(webhook.get("avatar_mode") or "inherit")[:20], max_length=20, required=True)
+            self.add_item(self.mode_input)
+            self.add_item(self.avatar_mode_input)
         self.name_input = discord.ui.TextInput(label="Nome opcional", placeholder="Vazio usa o padrão", default=str(webhook.get("name") or "")[:80], max_length=80, required=False)
-        self.avatar_mode_input = discord.ui.TextInput(label="Avatar: inherit, server, member, inviter ou custom", placeholder="inherit", default=str(webhook.get("avatar_mode") or "inherit")[:20], max_length=20, required=True)
         self.avatar_url_input = discord.ui.TextInput(label="Avatar por link opcional", placeholder="https://exemplo.com/avatar.png", default=str(webhook.get("avatar_url") or "")[:1000], max_length=1000, required=False)
-        self.add_item(self.mode_input)
         self.add_item(self.name_input)
-        self.add_item(self.avatar_mode_input)
         self.add_item(self.avatar_url_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        mode = str(self.mode_input.value or "inherit").strip().lower()
+        if self.mode_group is not None:
+            mode = _modal_value(self.mode_group, "inherit")
+            avatar_mode = _modal_value(self.avatar_group, "inherit")
+        else:
+            mode = str(self.mode_input.value or "inherit").strip().lower()
+            avatar_mode = str(self.avatar_mode_input.value or "inherit").strip().lower()
         if mode not in {"inherit", "bot", "webhook"}:
             mode = "inherit"
-        avatar_mode = str(self.avatar_mode_input.value or "inherit").strip().lower()
         if avatar_mode not in {"inherit", *WEBHOOK_AVATAR_LABELS.keys()}:
             avatar_mode = "inherit"
         raw_url = str(self.avatar_url_input.value or "").strip()
         if raw_url and not URL_RE.fullmatch(raw_url):
             await interaction.response.send_message(view=_make_notice_view("Avatar inválido", "Use um link começando com http:// ou https://.", ok=False), ephemeral=True)
+            return
+        if avatar_mode == "custom" and not raw_url:
+            await interaction.response.send_message(view=_make_notice_view("Avatar incompleto", "Escolha um link quando usar avatar personalizado.", ok=False), ephemeral=True)
             return
         await self.panel.update_rule(self.rule_id, {
             "webhook": {
@@ -1423,33 +1679,41 @@ class WelcomeAdminView(discord.ui.LayoutView):
 
     def _home_lines(self) -> list[str]:
         cfg = self.config
-        role_ids = [int(r) for r in cfg.get("auto_role_ids") or []]
+        role_count = len([int(r) for r in cfg.get("auto_role_ids") or []])
+        rules_count = len(list(cfg.get("special_rules") or []))
         webhook_cfg = dict(cfg.get("webhook") or {})
-        rules = list(cfg.get("special_rules") or [])
+        enabled = bool(cfg.get("enabled", False))
+        channel_id = int(cfg.get("channel_id") or 0)
+        mode = RENDER_MODE_LABELS.get(str(cfg.get("render_mode") or "components_v2"), "Components V2")
+        send_label = "envio pelo webhook" if webhook_cfg.get("enabled") else "envio pelo bot"
+        dm_label = "DM ligada" if bool(cfg.get("dm_enabled", False)) else "DM desligada"
+        role_label = f"{role_count} cargo{'s' if role_count != 1 else ''}" if role_count else "sem cargos"
+        rule_label = f"{rules_count} regra{'s' if rules_count != 1 else ''} especial{'is' if rules_count != 1 else ''}" if rules_count else "sem regras especiais"
+        if enabled and channel_id:
+            first = f"Tudo pronto. Novos membros serão recebidos em {_channel_mention(channel_id)}."
+        elif enabled:
+            first = "Boas-vindas ligadas, mas ainda falta escolher um canal."
+        else:
+            first = "Boas-vindas desligadas."
+        second = "Nenhum canal escolhido ainda." if not channel_id else ""
         lines = [
             "# 🌟 Boas-vindas",
-            "Receba novos membros com uma mensagem personalizada.",
+            "Receba novos membros com uma mensagem feita para o seu servidor.",
             "",
-            f"**Status**\n{_status_label(bool(cfg.get('enabled', False)))}",
-            "",
-            f"**Canal**\n{_channel_mention(cfg.get('channel_id'))}",
-            "",
-            f"**Modo**\n{RENDER_MODE_LABELS.get(str(cfg.get('render_mode') or 'components_v2'), 'Components V2')}",
-            "",
-            f"**Envio**\n{'webhook' if webhook_cfg.get('enabled') else 'bot'}",
-            "",
-            f"**Mensagem**\n{'personalizada' if _template_changed(cfg) else 'padrão'}",
-            "",
-            f"**Mensagem privada**\n{_status_label(bool(cfg.get('dm_enabled', False)))}",
-            "",
-            f"**Cargos automáticos**\n{len(role_ids)} cargo(s)",
-            "",
-            f"**Regras especiais**\n{len(rules)} regra(s)",
+            first,
         ]
+        if second:
+            lines.append(second)
+        lines.extend([
+            "",
+            f"Mensagem em {mode} · {send_label}",
+            f"{dm_label} · {role_label} · {rule_label}",
+        ])
         if self.notice:
             lines.extend(["", self.notice])
         lines.extend(["", "Escolha abaixo o que quer ajustar."])
         return lines
+
 
     def _rebuild(self, *, member: discord.Member | None = None):
         if member is not None:
@@ -1547,7 +1811,6 @@ class WelcomeAdminView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay(_trim("\n".join(lines))),
             discord.ui.Separator(),
-            discord.ui.ActionRow(_RenderModeSelect(self)),
             discord.ui.ActionRow(_ModeActionSelect(self)),
             discord.ui.ActionRow(_BackButton(self)),
             accent_color=_color_from_hex(self.config.get("accent_color")),
@@ -1568,22 +1831,17 @@ class WelcomeAdminView(discord.ui.LayoutView):
         webhook = dict(self.config.get("webhook") or {})
         lines = [
             "# 🪝 Webhook de boas-vindas",
-            "Deixe a recepção com nome e avatar próprios.",
+            "Deixe a recepção com um nome e avatar próprios.",
             "",
-            f"**Envio atual**\n{'webhook' if webhook.get('enabled') else 'bot'}",
-            "",
-            f"**Webhook**\n{webhook.get('webhook_id') or 'nenhum'}",
-            "",
-            f"**Nome**\n{WEBHOOK_NAME_LABELS.get(str(webhook.get('name_mode') or 'fixed'), 'Nome personalizado')} · {_safe_webhook_name(webhook.get('name'))}",
-            "",
-            f"**Avatar**\n{WEBHOOK_AVATAR_LABELS.get(str(webhook.get('avatar_mode') or 'server'), 'Avatar do servidor')}",
+            f"{'Enviando pelo webhook' if webhook.get('enabled') else 'Enviando pelo bot'} · {webhook.get('webhook_id') or 'nenhum webhook salvo'}",
+            f"{WEBHOOK_NAME_LABELS.get(str(webhook.get('name_mode') or 'fixed'), 'Nome personalizado')} · {_safe_webhook_name(webhook.get('name'))}",
+            f"{WEBHOOK_AVATAR_LABELS.get(str(webhook.get('avatar_mode') or 'server'), 'Avatar do servidor')}",
         ]
         if self.notice:
             lines.extend(["", self.notice])
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay(_trim("\n".join(lines))),
             discord.ui.Separator(),
-            discord.ui.ActionRow(_WebhookNameModeSelect(self)),
             discord.ui.ActionRow(_WebhookActionSelect(self)),
             discord.ui.ActionRow(_BackButton(self)),
             accent_color=_color_from_hex(self.config.get("accent_color")),
@@ -1679,7 +1937,6 @@ class WelcomeAdminView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(lines)),
             discord.ui.Separator(),
-            discord.ui.ActionRow(_VisualStyleSelect(self)),
             discord.ui.ActionRow(_VisualActionSelect(self)),
             discord.ui.ActionRow(_BackButton(self)),
             accent_color=_color_from_hex(self.config.get("accent_color")),
