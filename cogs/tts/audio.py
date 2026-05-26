@@ -2130,10 +2130,17 @@ class TTSAudioMixin:
             logger.debug("[worker_voice_agent] limpar handoff falhou | guild=%s erro=%s", payload.get("guild_id"), exc)
 
     def _worker_voice_direct_tts_disabled_untils(self) -> dict[int, float]:
-        data = getattr(self, "_worker_voice_direct_tts_disabled_untils", None)
+        # Não use o mesmo nome do método para guardar o dict. A versão anterior
+        # fazia setattr(self, "_worker_voice_direct_tts_disabled_untils", data),
+        # o que sombreava o método na instância e causava
+        # TypeError: 'dict' object is not callable no próximo TTS.
+        data = getattr(self, "_worker_voice_direct_tts_disabled_untils_data", None)
         if not isinstance(data, dict):
-            data = {}
-            setattr(self, "_worker_voice_direct_tts_disabled_untils", data)
+            legacy = getattr(self, "__dict__", {}).get("_worker_voice_direct_tts_disabled_untils")
+            data = legacy if isinstance(legacy, dict) else {}
+            with contextlib.suppress(Exception):
+                getattr(self, "__dict__", {}).pop("_worker_voice_direct_tts_disabled_untils", None)
+            setattr(self, "_worker_voice_direct_tts_disabled_untils_data", data)
         return data
 
     def _worker_voice_direct_tts_available_for(self, guild: discord.Guild, item: QueueItem) -> tuple[bool, str]:
@@ -2231,7 +2238,16 @@ class TTSAudioMixin:
         )
 
     async def _try_worker_voice_direct_tts(self, guild: discord.Guild, item: QueueItem) -> dict[str, Any] | None:
-        allowed, reason = self._worker_voice_direct_tts_available_for(guild, item)
+        try:
+            allowed, reason = self._worker_voice_direct_tts_available_for(guild, item)
+        except Exception as exc:
+            self._record_worker_voice_session_metric("direct_tts_skipped")
+            logger.warning(
+                "[worker_voice_agent] disponibilidade do TTS direto falhou; seguindo fallback normal | guild=%s erro=%s",
+                guild.id,
+                exc,
+            )
+            return None
         if not allowed:
             self._record_worker_voice_session_metric("direct_tts_skipped")
             logger.debug("[worker_voice_agent] TTS direto worker pulado | guild=%s reason=%s", guild.id, reason)
@@ -3543,7 +3559,7 @@ class TTSAudioMixin:
 
         router = getattr(getattr(self, "bot", None), "audio_router", None)
         should_route_agent = getattr(router, "should_route_tts_to_music_agent", None)
-        if callable(should_route_agent):
+        if callable(should_route_agent) and not bool(getattr(item, "_skip_music_agent_tts_route", False)):
             with contextlib.suppress(Exception):
                 if should_route_agent(guild.id, item.channel_id):
                     state.last_channel_id = item.channel_id
@@ -3705,7 +3721,12 @@ class TTSAudioMixin:
                     router = getattr(getattr(self, "bot", None), "audio_router", None)
                     should_route_agent = getattr(router, "should_route_tts_to_music_agent", None) if router is not None else None
                     play_agent_tts = getattr(router, "play_tts_via_music_agent", None) if router is not None else None
-                    if callable(should_route_agent) and callable(play_agent_tts) and should_route_agent(guild.id, item.channel_id):
+                    if (
+                        callable(should_route_agent)
+                        and callable(play_agent_tts)
+                        and not bool(getattr(item, "_skip_music_agent_tts_route", False))
+                        and should_route_agent(guild.id, item.channel_id)
+                    ):
                         if audio_task is not None and not audio_task.done():
                             audio_task.cancel()
                             with contextlib.suppress(BaseException):
@@ -3744,13 +3765,34 @@ class TTSAudioMixin:
                                 bool(isinstance(playback_result, dict) and playback_result.get("ok", True)),
                             )
                         except Exception as exc:
-                            logger.warning(
-                                "[tts_voice] TTS do worker musical falhou; descartando para não interromper a música | guild=%s channel=%s erro=%s",
-                                guild_id,
-                                item.channel_id,
-                                exc,
+                            exc_text = str(exc or "")
+                            exc_lower = exc_text.lower()
+                            music_active = bool(self._is_music_active_for_guild(int(guild.id)))
+                            safe_to_fallback = (
+                                not music_active
+                                or "sem sessão musical ativa" in exc_lower
+                                or "no active music" in exc_lower
+                                or "no music session" in exc_lower
+                                or "music session" in exc_lower
                             )
-                        continue
+                            if safe_to_fallback:
+                                setattr(item, "_skip_music_agent_tts_route", True)
+                                logger.warning(
+                                    "[tts_voice] TTS do worker musical falhou; seguindo fallback seguro | guild=%s channel=%s erro=%s",
+                                    guild_id,
+                                    item.channel_id,
+                                    exc,
+                                )
+                            else:
+                                logger.warning(
+                                    "[tts_voice] TTS do worker musical falhou; mantendo música ativa e descartando TTS para não interromper | guild=%s channel=%s erro=%s",
+                                    guild_id,
+                                    item.channel_id,
+                                    exc,
+                                )
+                                continue
+                        else:
+                            continue
 
                     direct_worker_result = await self._try_worker_voice_direct_tts(guild, item)
                     if direct_worker_result is not None:
