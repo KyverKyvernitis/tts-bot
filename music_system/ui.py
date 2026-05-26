@@ -40,6 +40,29 @@ def _agent_confirmed_playing(state: dict) -> bool:
     return False
 
 
+def _agent_not_ready_transient(exc: Exception | str) -> bool:
+    text = str(exc or "").strip().lower()
+    return bool(text) and (
+        "a música ainda não está pronta" in text
+        or "musica ainda nao esta pronta" in text
+        or "timed out" in text
+        or "timeout" in text
+        or "connect" in text
+        or "connection" in text
+        or "refused" in text
+    )
+
+
+async def _safe_interaction_followup(interaction: discord.Interaction, content: str, *, ephemeral: bool = True, **kwargs):
+    try:
+        return await interaction.followup.send(content, ephemeral=ephemeral, **kwargs)
+    except discord.NotFound:
+        return None
+    except Exception:
+        logger.debug("[music/ui] falha ao enviar followup", exc_info=True)
+        return None
+
+
 def _agent_play_message(track: MusicTrack, result: dict | None = None) -> str:
     result = result or {}
     state = result.get("state") if isinstance(result.get("state"), dict) else {}
@@ -58,9 +81,20 @@ def _agent_play_message(track: MusicTrack, result: dict | None = None) -> str:
 
     queued = bool(result.get("queued"))
     # Em queued=True o estado remoto ainda descreve a música atual. A confirmação
-    # precisa renderizar o candidato que acabou de entrar na fila.
-    source_payload = {} if queued else current
-    title = useful(source_payload.get("display_title")) or useful(source_payload.get("title")) or useful(source_payload.get("name")) or track.short_title
+    # precisa renderizar o candidato que acabou de entrar na fila, não now-playing.
+    queued_track = result.get("track") if isinstance(result.get("track"), dict) else {}
+    queue_preview = state.get("queue") if isinstance(state.get("queue"), list) else []
+    if queued and not queued_track and queue_preview:
+        last = queue_preview[-1]
+        queued_track = last if isinstance(last, dict) else {}
+    source_payload = queued_track if queued else current
+    title = (
+        useful(source_payload.get("display_title"))
+        or useful(source_payload.get("title"))
+        or useful(source_payload.get("name"))
+        or useful(getattr(track, "display_title", ""))
+        or useful(track.short_title)
+    )
     if len(title) > 90:
         title = title[:87].rstrip() + "..."
     duration_label = track.duration_label
@@ -75,6 +109,8 @@ def _agent_play_message(track: MusicTrack, result: dict | None = None) -> str:
         pass
     status = str(state.get("status") or "").lower()
     if queued:
+        if not title or title.lower() in {"youtube", "desconhecida", "música", "musica"}:
+            return "`🎶` **Música adicionada ao queue.** Carregando detalhes..."
         return f"`🎶` **Adicionada ao queue:** {title} • `{duration_label}`"
     if _agent_confirmed_playing(state):
         return f"`🎧` **Tocando:** {title} • `{duration_label}`"
@@ -192,10 +228,10 @@ async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, rou
                     await loading_reaction.finish()
                 return
             if status in {"idle", "stopped"} and not state.get("current"):
-                await message.edit(content=f"`⚠️` A música não ficou ativa para **{track.short_title}**. Tente novamente.", embed=None, view=None)
-                if loading_reaction is not None:
-                    await loading_reaction.finish()
-                return
+                # Idle pode chegar entre accepted/queued/playing quando o worker ainda
+                # está acordando ou quando a faixa acabou antes do painel atualizar.
+                # Não envie erro público antes do timeout final.
+                continue
         except Exception:
             # Não quebra o fluxo do usuário se o acompanhamento não conseguir consultar o worker.
             continue
@@ -443,7 +479,14 @@ async def _send_interaction_notice(interaction: discord.Interaction, message: st
         return
 
 
-async def _require_music_voice_interaction(interaction: discord.Interaction, router, guild_id: int, *, same_as_bot: bool = True) -> bool:
+async def _require_music_voice_interaction(
+    interaction: discord.Interaction,
+    router,
+    guild_id: int,
+    *,
+    same_as_bot: bool = True,
+    check_worker: bool = True,
+) -> bool:
     state = router.get_state(guild_id)
     user_channel = _interaction_user_voice_channel(interaction)
     if user_channel is None:
@@ -454,7 +497,7 @@ async def _require_music_voice_interaction(interaction: discord.Interaction, rou
         if bot_channel is not None and getattr(bot_channel, "id", None) != getattr(user_channel, "id", None):
             await _send_interaction_notice(interaction, "Entre no mesmo canal de voz do bot para usar isso.")
             return False
-    if getattr(router, "music_worker_only_enabled", lambda: False)():
+    if check_worker and getattr(router, "music_worker_only_enabled", lambda: False)():
         selection = await router.ensure_music_worker_available()
         if not getattr(selection, "available", False):
             message = getattr(selection, "message", "") or getattr(router, "music_worker_unavailable_message", "Sistema de música indisponível no momento: Nenhum worker online")
@@ -996,6 +1039,13 @@ class SearchSelect(discord.ui.Select):
                         requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
                     )
                 except Exception as exc:
+                    if _agent_not_ready_transient(exc):
+                        await edit_original(f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`")
+                        with contextlib.suppress(Exception):
+                            message = await interaction.original_response()
+                            finish_loading_reaction = False
+                            asyncio.create_task(_watch_agent_message(message, self.guild_id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id), loading_reaction=loading_reaction))
+                        return
                     await edit_original(f"`⚠️` Não consegui preparar essa música: `{exc}`")
                     return
                 await _sync_agent_panel(
@@ -1162,7 +1212,17 @@ class AddSongModal(discord.ui.Modal):
                         requester_name=requester_name,
                     )
             except Exception as exc:
-                await interaction.followup.send(f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
+                if _agent_not_ready_transient(exc):
+                    sent = await _safe_interaction_followup(
+                        interaction,
+                        f"`🎧` **Preparando para tocar:** {track.short_title} • `{track.duration_label}`",
+                        ephemeral=True,
+                        wait=True,
+                    )
+                    if sent is not None:
+                        asyncio.create_task(_watch_agent_message(sent, guild.id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id)))
+                    return
+                await _safe_interaction_followup(interaction, f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
                 return
             await _sync_agent_panel(
                 self.router,
@@ -1317,7 +1377,11 @@ class QueueConfirmView(discord.ui.View):
         if self.owner_id and interaction.user and interaction.user.id != self.owner_id:
             await interaction.response.send_message(f"Apenas <@{self.owner_id}> pode confirmar essa ação.", ephemeral=True)
             return False
-        return await _require_music_voice_interaction(interaction, self.router, self.guild_id)
+        # Não faça healthcheck/seleção de worker no interaction_check: o Discord
+        # só chama o callback depois disso, então qualquer I/O aqui pode gerar
+        # "Esta interação falhou" mesmo com a ação aplicada. O callback faz defer
+        # primeiro e só depois consulta o worker/agent.
+        return await _require_music_voice_interaction(interaction, self.router, self.guild_id, check_worker=False)
 
     async def _refresh_parent(self) -> None:
         if self.message is None:
@@ -1368,7 +1432,11 @@ class QueueView(discord.ui.View):
         if self.owner_id and interaction.user and interaction.user.id != self.owner_id:
             await interaction.response.send_message(f"Apenas <@{self.owner_id}> pode interagir nesse painel de queue.", ephemeral=True)
             return False
-        return await _require_music_voice_interaction(interaction, self.router, self.guild_id)
+        # Não faça healthcheck/seleção de worker no interaction_check: o Discord
+        # só chama o callback depois disso, então qualquer I/O aqui pode gerar
+        # "Esta interação falhou" mesmo com a ação aplicada. O callback faz defer
+        # primeiro e só depois consulta o worker/agent.
+        return await _require_music_voice_interaction(interaction, self.router, self.guild_id, check_worker=False)
 
     def _queue_items(self) -> list[MusicTrack]:
         return self.router.snapshot_queue(self.guild_id)
@@ -1692,7 +1760,7 @@ class PlayerOptionsSelect(discord.ui.Select):
             if not interaction.response.is_done():
                 await interaction.response.defer(ephemeral=True, thinking=False)
             _ok, message = await self.router.request_shuffle(self.guild_id, interaction.user)
-            await interaction.followup.send(message, ephemeral=True)
+            await _safe_interaction_followup(interaction, message, ephemeral=True)
             return
         if value == "seek":
             requester_id = _current_track_requester_id(state)
@@ -1708,7 +1776,7 @@ class PlayerOptionsSelect(discord.ui.Select):
             if not interaction.response.is_done():
                 await interaction.response.defer(ephemeral=True, thinking=False)
             _ok, message = await self.router.request_loop(self.guild_id, interaction.user)
-            await interaction.followup.send(message, ephemeral=True)
+            await _safe_interaction_followup(interaction, message, ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
 
@@ -1770,17 +1838,31 @@ class MusicPlayerView(discord.ui.View):
             if not (custom_id.endswith(":back") or custom_id == "") or not has_history:
                 await _send_interaction_notice(interaction, "`⌛` Esse painel expirou. Use `_play <link ou pesquisa>` para começar de novo.")
                 return False
-        return await _require_music_voice_interaction(interaction, self.router, self.guild_id)
+        # Não faça healthcheck/seleção de worker no interaction_check: o Discord
+        # só chama o callback depois disso, então qualquer I/O aqui pode gerar
+        # "Esta interação falhou" mesmo com a ação aplicada. O callback faz defer
+        # primeiro e só depois consulta o worker/agent.
+        return await _require_music_voice_interaction(interaction, self.router, self.guild_id, check_worker=False)
 
     async def _ack(self, interaction: discord.Interaction, message: str) -> None:
-        if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
-        else:
-            await interaction.response.send_message(message, ephemeral=True)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except discord.NotFound:
+            return
+        except Exception:
+            logger.debug("[music/ui] falha ao confirmar interação", exc_info=True)
 
     async def _defer_control(self, interaction: discord.Interaction) -> None:
         if not interaction.response.is_done():
-            await interaction.response.defer()
+            try:
+                await interaction.response.defer(ephemeral=True, thinking=False)
+            except discord.NotFound:
+                return
+            except Exception:
+                logger.debug("[music/ui] falha ao deferir controle", exc_info=True)
 
     @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="music:back")
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1818,6 +1900,7 @@ class MusicPlayerView(discord.ui.View):
 
     @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary, row=0, custom_id="music:pause_resume")
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._defer_control(interaction)
         state = self.router.get_state(self.guild_id)
         if state.paused:
             if await self._send_agent_control(interaction, "resume", "`▶️` Música retomada."):
@@ -1838,6 +1921,7 @@ class MusicPlayerView(discord.ui.View):
 
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._defer_control(interaction)
         if await self._send_agent_control(interaction, "skip", "`⏭️` Pulando música."):
             return
         _ok, message = await self.router.request_skip(self.guild_id, interaction.user)
@@ -1845,6 +1929,7 @@ class MusicPlayerView(discord.ui.View):
 
     @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0, custom_id="music:stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._defer_control(interaction)
         if await self._send_agent_control(interaction, "stop", "`⏹️` Player encerrado e desconectado."):
             return
         _ok, message = await self.router.request_stop(self.guild_id, interaction.user, disconnect=True)

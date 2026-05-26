@@ -30,6 +30,19 @@ def _get_router(bot) -> AudioRouter:
     return router
 
 
+def _agent_not_ready_transient(exc: Exception | str) -> bool:
+    text = str(exc or "").strip().lower()
+    return bool(text) and (
+        "a música ainda não está pronta" in text
+        or "musica ainda nao esta pronta" in text
+        or "timed out" in text
+        or "timeout" in text
+        or "connect" in text
+        or "connection" in text
+        or "refused" in text
+    )
+
+
 class Music(commands.Cog):
     """Player de música modular integrado ao TTS."""
 
@@ -256,10 +269,11 @@ class Music(commands.Cog):
                         await loading_reaction.finish()
                     return
                 if status in {"idle", "stopped"} and not state.get("current"):
-                    await message.edit(content=f"`⚠️` A música não ficou ativa para **{track.short_title}**. Tente novamente.")
-                    if loading_reaction is not None:
-                        await loading_reaction.finish()
-                    return
+                    # Durante wake/playlist/resolve o worker pode piscar idle antes
+                    # de publicar accepted/playing. Não envie erro público antes do
+                    # timeout final; isso causava falso "worker não está pronto"
+                    # enquanto a música começava logo depois.
+                    continue
             except Exception:
                 logger.debug("[music/agent] falha ao acompanhar estado remoto", exc_info=True)
         with contextlib.suppress(Exception):
@@ -776,6 +790,12 @@ class Music(commands.Cog):
                     logger.info("[music/agent] play etapa concluída | guild=%s elapsed_ms=%.1f queued=%s added=%s", ctx.guild.id, (time.monotonic() - agent_started) * 1000.0, bool(result.get("queued")), result.get("added"))
                 except Exception as exc:
                     logger.warning("[music/agent] falha ao enviar play direto | guild=%s erro=%s", ctx.guild.id, exc)
+                    if _agent_not_ready_transient(exc):
+                        msg = await self._reply(ctx, self._music_agent_play_message(track, {"state": {"status": "preparing"}}))
+                        if msg is not None:
+                            finish_loading_reaction = False
+                            asyncio.create_task(self._watch_music_agent_message(msg, ctx.guild.id, track, voice_channel_id=voice_channel.id, text_channel_id=ctx.channel.id, loading_reaction=loading_reaction))
+                        return
                     await self._reply(ctx, self._music_error_message(exc))
                     return
                 await self._sync_music_agent_panel(

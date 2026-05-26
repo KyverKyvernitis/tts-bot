@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.18"
+AGENT_VERSION = "0.3.19"
 STARTED_AT = time.time()
 
 
