@@ -99,6 +99,11 @@ TTS_WORKER_AGENT_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_WORKER_AGENT_MAX
 TTS_WORKER_AGENT_MAX_TEXT_LENGTH = max(64, int(getattr(config, "TTS_WORKER_AGENT_MAX_TEXT_LENGTH", 1200) or 1200))
 TTS_WORKER_AGENT_PREFERRED_ENGINE = str(getattr(config, "TTS_WORKER_AGENT_PREFERRED_ENGINE", "auto") or "auto").strip().lower().replace("-", "_") or "auto"
 WORKER_VOICE_AGENT_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_ENABLED", True))
+WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", True))
+WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED", True))
+WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS = max(16, int(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS", 600) or 600))
+WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS = max(3.0, float(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS", 30.0) or 30.0))
+WORKER_VOICE_AGENT_DIRECT_TTS_FAILURE_COOLDOWN_SECONDS = max(5.0, float(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_FAILURE_COOLDOWN_SECONDS", 45.0) or 45.0))
 WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED", True))
 WORKER_VOICE_AGENT_SESSION_REPORT_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_SESSION_REPORT_ENABLED", True))
 WORKER_VOICE_AGENT_SESSION_REPORT_TIMEOUT_SECONDS = max(0.6, float(getattr(config, "WORKER_VOICE_AGENT_SESSION_REPORT_TIMEOUT_SECONDS", 1.5) or 1.5))
@@ -2124,6 +2129,174 @@ class TTSAudioMixin:
             self._record_worker_voice_session_metric("handoff_clears_failed")
             logger.debug("[worker_voice_agent] limpar handoff falhou | guild=%s erro=%s", payload.get("guild_id"), exc)
 
+    def _worker_voice_direct_tts_disabled_untils(self) -> dict[int, float]:
+        data = getattr(self, "_worker_voice_direct_tts_disabled_untils", None)
+        if not isinstance(data, dict):
+            data = {}
+            setattr(self, "_worker_voice_direct_tts_disabled_untils", data)
+        return data
+
+    def _worker_voice_direct_tts_available_for(self, guild: discord.Guild, item: QueueItem) -> tuple[bool, str]:
+        if not (WORKER_VOICE_AGENT_ENABLED and WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED and WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED):
+            return False, "direct_tts_disabled"
+        if not self._tts_agent_route_available():
+            return False, "worker_route_unavailable"
+        if not str(item.text or "").strip():
+            return False, "empty_text"
+        if len(str(item.text or "")) > WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS:
+            return False, "text_too_long_for_direct_tts"
+        if self._is_music_active_for_guild(int(guild.id)):
+            # O caminho de música/agent já tem uma rota própria acima no worker_loop.
+            return False, "music_active_uses_music_agent_tts_route"
+        disabled_until = float(self._worker_voice_direct_tts_disabled_untils().get(int(guild.id), 0.0) or 0.0)
+        if disabled_until > time.monotonic():
+            return False, "direct_tts_failure_cooldown"
+        voice_agent = self._tts_agent_route_state().get("voice_agent")
+        if isinstance(voice_agent, dict) and voice_agent:
+            if voice_agent.get("available") is False:
+                return False, "voice_agent_unavailable"
+            if voice_agent.get("music_ready") is False:
+                return False, "music_agent_not_ready"
+        return True, "allowed"
+
+    def _worker_voice_direct_tts_payload(self, guild: discord.Guild, item: QueueItem) -> dict[str, Any]:
+        state = self.guild_states.get(int(guild.id))
+        me = getattr(guild, "me", None)
+        return {
+            "guild_id": int(guild.id),
+            "channel_id": int(item.channel_id or 0),
+            "voice_channel_id": int(item.channel_id or 0),
+            "text_channel_id": int(getattr(state, "last_text_channel_id", 0) or 0) if state is not None else 0,
+            "requester_id": int(item.author_id or 0),
+            "bot_user_id": int(getattr(me, "id", 0) or 0),
+            "source": "tts_worker_voice_direct",
+            "text": str(item.text or ""),
+            "engine": str(item.engine or "gtts"),
+            "voice": str(item.voice or ""),
+            "language": str(item.language or "pt-br"),
+            "rate": str(item.rate or "+0%"),
+            "pitch": str(item.pitch or "+0Hz"),
+            "timeout_seconds": max(3.0, min(WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS, self._estimate_playback_timeout(item))),
+            "confirm_transfer": True,
+            "direct_tts": True,
+            "release_after": False,
+        }
+
+    async def _worker_voice_agent_begin_transfer(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(payload)
+        payload.setdefault("confirm_transfer", True)
+        payload.setdefault("confirm", True)
+        payload.setdefault("source", "tts_worker_voice_direct")
+        data = await self._request_worker_voice_agent_json(
+            task="voice_agent_begin_transfer",
+            payload=payload,
+            timeout_seconds=WORKER_VOICE_AGENT_TRANSFER_TIMEOUT_SECONDS,
+        )
+        self._record_worker_voice_session_metric("transfer_begin_ok" if data.get("ok", True) else "transfer_begin_failed")
+        return data
+
+    async def _worker_voice_agent_release_transfer(self, payload: dict[str, Any], *, reason: str = "direct_tts_failed") -> None:
+        try:
+            data = await self._request_worker_voice_agent_json(
+                task="voice_agent_release_transfer",
+                payload={"guild_id": int(payload.get("guild_id") or 0), "reason": reason, "source": "tts_worker_voice_direct"},
+                timeout_seconds=WORKER_VOICE_AGENT_TRANSFER_TIMEOUT_SECONDS,
+            )
+            self._record_worker_voice_session_metric("transfer_release_ok" if data.get("ok", True) else "transfer_release_failed")
+        except Exception as exc:
+            self._record_worker_voice_session_metric("transfer_release_failed")
+            logger.debug("[worker_voice_agent] liberar transferência falhou | guild=%s erro=%s", payload.get("guild_id"), exc)
+
+    async def _disconnect_vps_voice_before_worker_direct_tts(self, guild: discord.Guild, item: QueueItem) -> None:
+        vc = self._get_voice_client_for_guild(guild)
+        if vc is None or not self._voice_client_is_connected(vc):
+            return
+        if getattr(self, "_is_lavalink_voice_client", lambda _vc: False)(vc):
+            raise RuntimeError("voice client local é Lavalink; não transferindo TTS direto")
+        if self._is_music_active_for_guild(int(guild.id)):
+            raise RuntimeError("música ativa; TTS direto deve seguir rota do Music Agent")
+        try:
+            if self._voice_client_is_playing_or_paused(vc):
+                vc.stop()
+        except Exception:
+            pass
+        await vc.disconnect(force=True)
+        state = self.guild_states.get(int(guild.id))
+        if state is not None:
+            state.last_channel_id = None
+        logger.info(
+            "[worker_voice_agent] VPS liberou voice client para TTS direto no worker | guild=%s channel=%s",
+            guild.id,
+            item.channel_id,
+        )
+
+    async def _try_worker_voice_direct_tts(self, guild: discord.Guild, item: QueueItem) -> dict[str, Any] | None:
+        allowed, reason = self._worker_voice_direct_tts_available_for(guild, item)
+        if not allowed:
+            self._record_worker_voice_session_metric("direct_tts_skipped")
+            logger.debug("[worker_voice_agent] TTS direto worker pulado | guild=%s reason=%s", guild.id, reason)
+            return None
+        payload = self._worker_voice_direct_tts_payload(guild, item)
+        started = time.monotonic()
+        try:
+            # Garante que o painel/worker tenham a sessão/handoff mais recente quando a VPS ainda está na call.
+            vc = self._get_voice_client_for_guild(guild)
+            if vc is not None and self._voice_client_is_connected(vc):
+                self._schedule_worker_voice_agent_register_session(guild, item, vc, source="tts_worker_voice_direct_prepare")
+                await asyncio.sleep(0.05)
+                with contextlib.suppress(Exception):
+                    handoff_payload = self._voice_client_handoff_payload(guild, item, vc, source="tts_worker_voice_direct_prepare")
+                    if handoff_payload:
+                        await self._worker_voice_agent_register_handoff(handoff_payload)
+                with contextlib.suppress(Exception):
+                    await self._worker_voice_agent_begin_transfer({**payload, "current_owner": "vps", "requested_owner": "worker"})
+                await self._disconnect_vps_voice_before_worker_direct_tts(guild, item)
+            else:
+                # Sem conexão local ativa, o Music Agent pode assumir a voz direto pelo seu gateway interno.
+                with contextlib.suppress(Exception):
+                    await self._request_worker_voice_agent_json(
+                        task="voice_agent_prepare_transfer",
+                        payload={**payload, "current_owner": "none", "requested_owner": "worker", "reason": "sem voice client VPS ativo; worker pode assumir TTS direto"},
+                        timeout_seconds=WORKER_VOICE_AGENT_TRANSFER_TIMEOUT_SECONDS,
+                    )
+            result = await self._request_worker_voice_agent_json(
+                task="voice_agent_play_tts",
+                payload=payload,
+                timeout_seconds=max(3.0, float(payload.get("timeout_seconds") or WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS) + 4.0),
+            )
+            if not bool(result.get("ok", True)):
+                raise RuntimeError(str(result.get("error") or "worker retornou ok=false no TTS direto"))
+            elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
+            self._record_worker_voice_session_metric("direct_tts_ok")
+            logger.info(
+                "[worker_voice_agent] TTS direto worker→Discord ok | guild=%s channel=%s engine=%s elapsed=%.1fms",
+                guild.id,
+                item.channel_id,
+                result.get("engine") or item.engine,
+                elapsed_ms,
+            )
+            playback_ms = float(result.get("playback_ms") or result.get("worker_result", {}).get("playback_ms") or elapsed_ms)
+            return {
+                "ok": True,
+                "worker_voice_direct_tts": True,
+                "source_setup_ms": 0.0,
+                "play_call_ms": 0.0,
+                "playback_ms": playback_ms,
+                "playback_started_at": time.monotonic() - (playback_ms / 1000.0 if playback_ms > 0 else 0.0),
+                "worker_result": result,
+            }
+        except Exception as exc:
+            self._record_worker_voice_session_metric("direct_tts_failed")
+            self._worker_voice_direct_tts_disabled_untils()[int(guild.id)] = time.monotonic() + WORKER_VOICE_AGENT_DIRECT_TTS_FAILURE_COOLDOWN_SECONDS
+            await self._worker_voice_agent_release_transfer(payload, reason=f"direct_tts_failed:{type(exc).__name__}")
+            logger.warning(
+                "[worker_voice_agent] TTS direto worker falhou; fallback VPS normal | guild=%s channel=%s erro=%s",
+                guild.id,
+                item.channel_id,
+                exc,
+            )
+            return None
+
     def _worker_tts_cache_payload_base(self, item: QueueItem, key: str) -> dict[str, Any]:
         engine = str(item.engine or "gtts").strip().lower() or "gtts"
         payload: dict[str, Any] = {
@@ -3577,6 +3750,23 @@ class TTSAudioMixin:
                                 item.channel_id,
                                 exc,
                             )
+                        continue
+
+                    direct_worker_result = await self._try_worker_voice_direct_tts(guild, item)
+                    if direct_worker_result is not None:
+                        dequeue_started_at = float(getattr(item, "_dequeued_at_monotonic", time.monotonic()))
+                        playback_started_at = float(direct_worker_result.get("playback_started_at", time.monotonic()) or time.monotonic())
+                        queue_wait_ms = max(0.0, (dequeue_started_at - float(getattr(item, "enqueued_at_monotonic", dequeue_started_at))) * 1000.0)
+                        playback_ms = max(0.0, float(direct_worker_result.get("playback_ms", 0.0) or 0.0))
+                        dispatch_ms = max(0.0, (playback_started_at - dequeue_started_at) * 1000.0)
+                        self._record_queue_timing(
+                            queue_wait_ms=queue_wait_ms,
+                            dispatch_ms=dispatch_ms,
+                            source_setup_ms=0.0,
+                            play_call_ms=0.0,
+                            playback_ms=playback_ms,
+                            total_to_playback_ms=max(0.0, (playback_started_at - float(getattr(item, "enqueued_at_monotonic", playback_started_at))) * 1000.0),
+                        )
                         continue
 
                     connect_task = asyncio.create_task(self._ensure_connected_fast(guild, item))

@@ -54,7 +54,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.19"
+PHONE_WORKER_VERSION = "1.10.20"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -181,6 +181,7 @@ SUPPORTED_DIRECT_TASKS = (
     "voice_agent_begin_transfer",
     "voice_agent_release_transfer",
     "voice_agent_transfer_status",
+    "voice_agent_play_tts",
     "voice_agent_probe_connection",
     "voice_agent_connection_status",
     "voice_agent_clear_connection",
@@ -237,6 +238,7 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "voice_agent_begin_transfer",
     "voice_agent_release_transfer",
     "voice_agent_transfer_status",
+    "voice_agent_play_tts",
     "voice_agent_probe_connection",
     "voice_agent_connection_status",
     "voice_agent_clear_connection",
@@ -3409,7 +3411,7 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
     capabilities = _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))
     enabled = _env_bool("PHONE_WORKER_VOICE_AGENT_ENABLED", True)
     shared_session_enabled = _env_bool("PHONE_WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED", True)
-    direct_tts_enabled = _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", False)
+    direct_tts_enabled = _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", True)
     direct_music_enabled = _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_MUSIC_ENABLED", True)
     safe_mode = _phone_worker_safe_mode_enabled()
 
@@ -3434,7 +3436,9 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
     transfer_count = int(transfer_summary.get("transfer_count") or 0)
     shared_ready = bool(base_ready and shared_session_enabled and (music_ready or direct_music_enabled) and tts_ready)
     shared_session_ready = bool(shared_ready and session_count > 0)
-    direct_tts_ready = bool(shared_session_ready and handoff_ready and connection_ready and direct_tts_enabled and music_ready)
+    last_connection = dict(connection_summary.get("last_connection") or {})
+    direct_connection_ready = bool(connection_ready and str(last_connection.get("state") or "").startswith("worker_direct_tts"))
+    direct_tts_ready = bool(direct_tts_enabled and music_ready and tts_ready and (direct_connection_ready or (shared_session_ready and handoff_ready and connection_ready)))
 
     missing: list[str] = []
     if not enabled:
@@ -3459,7 +3463,7 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
         missing.append("preparação de transferência de posse")
     if shared_session_ready and handoff_ready and transfer_count > 0 and not transfer_ready:
         missing.append("transferência explícita de posse da voz")
-    if shared_session_ready and handoff_ready and transfer_ready and not connection_ready:
+    if shared_session_ready and handoff_ready and transfer_ready and not connection_ready and not direct_connection_ready:
         missing.append("conexão worker autorizada ainda não testada")
 
     if direct_tts_ready:
@@ -3910,6 +3914,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_voice_agent_release_transfer(body)
             elif task == "voice_agent_transfer_status":
                 payload = self._task_voice_agent_transfer_status(body)
+            elif task == "voice_agent_play_tts":
+                payload = self._task_voice_agent_play_tts(body)
             elif task == "voice_agent_probe_connection":
                 payload = self._task_voice_agent_probe_connection(body)
             elif task == "voice_agent_connection_status":
@@ -4315,6 +4321,97 @@ class WorkerHandler(BaseHTTPRequestHandler):
         snapshot.update(summary)
         snapshot["guild_id"] = str(guild_id or "")
         snapshot.setdefault("logs", []).append("status de transferência de posse coletado")
+        return snapshot
+
+    def _task_voice_agent_play_tts(self, body: dict[str, Any]) -> dict[str, Any]:
+        if not _env_bool("PHONE_WORKER_VOICE_AGENT_ENABLED", True):
+            raise RuntimeError("Worker Voice Agent desativado")
+        if not _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", True):
+            raise RuntimeError("TTS direto do Worker Voice Agent desativado")
+        guild_id = _voice_agent_int(body.get("guild_id"), 0)
+        channel_id = _voice_agent_int(body.get("voice_channel_id") or body.get("channel_id"), 0)
+        if guild_id <= 0 or channel_id <= 0:
+            raise RuntimeError("guild_id/channel_id obrigatórios para TTS direto")
+        text = _voice_agent_clean_text(body.get("text") or body.get("content"), limit=_env_int("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS", 600))
+        if not text and not (body.get("audio_b64") or body.get("audio_url") or body.get("url")):
+            raise RuntimeError("texto/audio obrigatório para TTS direto")
+        now_ms = _voice_agent_now_ms()
+        transfer: dict[str, Any] = {}
+        with contextlib.suppress(Exception):
+            transfers = _voice_agent_prune_transfers()
+            transfer = dict(transfers.get(str(guild_id)) or {})
+        if bool(body.get("confirm_transfer") or body.get("confirm") or body.get("manual")):
+            if str(transfer.get("voice_owner") or transfer.get("current_owner") or "").lower() != "worker":
+                try:
+                    transfer_result = _voice_agent_begin_transfer({**body, "confirm_transfer": True, "requested_owner": "worker"})
+                    transfer = dict(transfer_result.get("transfer") or {})
+                except Exception:
+                    # Direct TTS can still be valid when the VPS had no active voice handoff;
+                    # mark an explicit worker-owned lease for the Music Agent gateway path.
+                    transfer = _voice_agent_set_transfer(
+                        guild_id,
+                        channel_id=str(channel_id),
+                        text_channel_id=str(_voice_agent_int(body.get("text_channel_id"), 0) or ""),
+                        requester_id=str(_voice_agent_int(body.get("requester_id"), 0) or ""),
+                        bot_user_id=str(_voice_agent_int(body.get("bot_user_id"), 0) or ""),
+                        source="tts_worker_voice_direct",
+                        state="worker_ownership_granted_music_agent_gateway",
+                        current_owner="worker",
+                        voice_owner="worker",
+                        requested_owner="worker",
+                        lease_id=f"direct-tts:{guild_id}:{channel_id}:{now_ms}",
+                        allow_connection_probe=False,
+                        probe_authorized=False,
+                        reason="TTS direto via Music Agent gateway; sem handoff VPS ativo",
+                        error="",
+                        expires_at_ms=now_ms + max(10, min(180, _env_int("PHONE_WORKER_VOICE_AGENT_TRANSFER_LEASE_TTL_SECONDS", 45))) * 1000,
+                    )
+        _voice_agent_set_connection(
+            guild_id,
+            channel_id=str(channel_id),
+            state="worker_direct_tts_starting",
+            stage="music_agent_voice_tts",
+            direct_tts=True,
+            dry_run=False,
+            connected_once=False,
+            error="",
+        )
+        started = time.perf_counter()
+        proxy_body = dict(body)
+        proxy_body["task"] = "music_agent_command"
+        proxy_body["action"] = "voice_tts"
+        proxy_body["voice_channel_id"] = channel_id
+        proxy_body["channel_id"] = channel_id
+        proxy_body["text"] = text or str(body.get("text") or body.get("content") or "")
+        proxy_body["timeout_seconds"] = max(3.0, min(90.0, float(body.get("timeout_seconds") or _env_float("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS", 30.0))))
+        result = self._task_music_agent_proxy(proxy_body)
+        ok = bool(isinstance(result, dict) and result.get("ok", False))
+        elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
+        conn = _voice_agent_set_connection(
+            guild_id,
+            channel_id=str(channel_id),
+            state="worker_direct_tts_ok" if ok else "worker_direct_tts_failed",
+            stage="music_agent_voice_tts_done" if ok else "music_agent_voice_tts_failed",
+            direct_tts=True,
+            dry_run=False,
+            connected_once=ok,
+            ready_received=ok,
+            latency_ms=elapsed_ms,
+            playback_ms=float(result.get("playback_ms") or result.get("elapsed_ms") or 0.0) if isinstance(result, dict) else 0.0,
+            engine=str(result.get("engine") or body.get("engine") or "")[:60] if isinstance(result, dict) else str(body.get("engine") or "")[:60],
+            error="" if ok else _short_text((result or {}).get("error") if isinstance(result, dict) else "Music Agent retornou resposta inválida", limit=180),
+        )
+        music_agent = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
+        tts_agent = _safe_telemetry("tts_agent", _tts_agent_snapshot, {"ok": False, "available": False, "synth_ready": False})
+        snapshot = _voice_agent_snapshot(music_agent=music_agent, tts_agent=tts_agent)
+        if not ok:
+            snapshot.update({"ok": False, "direct_tts": False, "error": str((result or {}).get("error") if isinstance(result, dict) else "Music Agent falhou")[:220]})
+        else:
+            snapshot.update({"ok": True, "direct_tts": True, "engine": str(result.get("engine") or body.get("engine") or ""), "playback_ms": result.get("playback_ms"), "elapsed_ms": elapsed_ms})
+        snapshot["worker_result"] = result
+        snapshot["connection"] = _voice_agent_public_connection(conn)
+        snapshot["voice_agent"] = _voice_agent_snapshot(music_agent=music_agent, tts_agent=tts_agent)
+        snapshot.setdefault("logs", []).append("TTS direto worker→Discord executado via Music Agent voice plane" if ok else "TTS direto worker→Discord falhou; VPS deve usar fallback")
         return snapshot
 
     def _task_voice_agent_probe_connection(self, body: dict[str, Any]) -> dict[str, Any]:

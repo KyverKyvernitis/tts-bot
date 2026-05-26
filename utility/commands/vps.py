@@ -786,6 +786,11 @@ class VpsCommandMixin:
         voice_transfer_prepare_ok = int(tts_metrics.get("worker_voice_session_transfer_prepare_ok", 0) or 0)
         voice_transfer_prepare_failed = int(tts_metrics.get("worker_voice_session_transfer_prepare_failed", 0) or 0)
         voice_transfer_prepare_skipped = int(tts_metrics.get("worker_voice_session_transfer_prepare_skipped", 0) or 0)
+        voice_transfer_begin_ok = int(tts_metrics.get("worker_voice_session_transfer_begin_ok", 0) or 0)
+        voice_transfer_begin_failed = int(tts_metrics.get("worker_voice_session_transfer_begin_failed", 0) or 0)
+        voice_direct_tts_ok = int(tts_metrics.get("worker_voice_session_direct_tts_ok", 0) or 0)
+        voice_direct_tts_failed = int(tts_metrics.get("worker_voice_session_direct_tts_failed", 0) or 0)
+        voice_direct_tts_skipped = int(tts_metrics.get("worker_voice_session_direct_tts_skipped", 0) or 0)
         tts_busy_retries = int(tts_metrics.get("tts_agent_busy_retries", 0) or 0)
         tts_last_failure = str(tts_metrics.get("tts_agent_last_failure_reason") or "")[:120]
 
@@ -819,6 +824,8 @@ class VpsCommandMixin:
             f"Registro sessão: `{self._format_vps_int(voice_report_ok)}` ok · `{self._format_vps_int(voice_report_failed)}` falhas · `{self._format_vps_int(voice_report_skipped)}` pulados",
             f"Registro handoff: `{self._format_vps_int(voice_handoff_ok)}` ok · `{self._format_vps_int(voice_handoff_failed)}` falhas · `{self._format_vps_int(voice_handoff_skipped)}` pulados",
             f"Prep. transferência: `{self._format_vps_int(voice_transfer_prepare_ok)}` ok · `{self._format_vps_int(voice_transfer_prepare_failed)}` falhas · `{self._format_vps_int(voice_transfer_prepare_skipped)}` pulados",
+            f"Início transferência: `{self._format_vps_int(voice_transfer_begin_ok)}` ok · `{self._format_vps_int(voice_transfer_begin_failed)}` falhas",
+            f"TTS direto worker→Discord: `{self._format_vps_int(voice_direct_tts_ok)}` ok · `{self._format_vps_int(voice_direct_tts_failed)}` falhas · `{self._format_vps_int(voice_direct_tts_skipped)}` pulados",
             f"Probe conexão: `{self._format_vps_int(voice_connection_probe_ok)}` start ok · `{self._format_vps_int(voice_connection_probe_failed)}` falhas · `{self._format_vps_int(voice_connection_probe_skipped)}` aguardando posse",
             f"Pendências: `{voice_missing[:140]}`",
             "",

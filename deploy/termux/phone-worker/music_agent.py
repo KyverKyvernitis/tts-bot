@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.23"
+AGENT_VERSION = "0.3.24"
 STARTED_AT = time.time()
 
 
@@ -545,6 +545,7 @@ class MusicAgent:
         self.prefetch_enabled = truthy(os.getenv("MUSIC_AGENT_PREFETCH_ENABLED"), True)
         self.prefetch_timeout = max(3.0, env_float("MUSIC_AGENT_PREFETCH_TIMEOUT_SECONDS", 18.0))
         self._idle_disconnect_tasks: dict[int, asyncio.Task] = {}
+        self._tts_direct_locks: dict[int, asyncio.Lock] = {}
         self._metadata_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._resolve_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._resolve_locks: dict[str, asyncio.Lock] = {}
@@ -968,6 +969,8 @@ class MusicAgent:
             return await self.cmd_duck(body)
         if action in {"unduck", "restore_volume", "tts_restore"}:
             return await self.cmd_unduck(body)
+        if action in {"voice_tts", "voice_tts_direct", "direct_tts", "tts_direct"}:
+            return await self.cmd_voice_tts(body)
         if action in {"tts", "tts_play", "speak"}:
             return await self.cmd_tts(body)
         if action in {"prefetch", "prepare", "preload"}:
@@ -1592,6 +1595,126 @@ class MusicAgent:
         elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
         self.log("tts_overlay_done", guild_id=guild_id, elapsed_ms=round(elapsed_ms, 1))
         return {"ok": True, "engine": engine, "playback_ms": round(elapsed_ms, 1), "state": st.public()}
+
+    def _get_tts_direct_lock(self, guild_id: int) -> asyncio.Lock:
+        lock = self._tts_direct_locks.get(int(guild_id or 0))
+        if lock is None:
+            lock = asyncio.Lock()
+            self._tts_direct_locks[int(guild_id or 0)] = lock
+        return lock
+
+    async def cmd_voice_tts(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Play a short TTS directly from the worker-owned Discord voice plane.
+
+        This is intentionally only a voice/audio-plane command. The VPS still owns
+        commands, permissions, panels and DB state. The Music Agent uses its
+        existing Discord voice client solely to connect/play audio in the target
+        voice channel.
+        """
+        guild_id = safe_id(body.get("guild_id"))
+        voice_channel_id = safe_id(body.get("voice_channel_id") or body.get("channel_id"))
+        if guild_id <= 0 or voice_channel_id <= 0:
+            raise ValueError("guild_id/voice_channel_id obrigatórios para TTS direto")
+        timeout = max(3.0, min(90.0, float(body.get("timeout_seconds") or 30.0)))
+        started = time.monotonic()
+        lock = self._get_tts_direct_lock(guild_id)
+        async with lock:
+            st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+            st.voice_channel_id = voice_channel_id
+            st.text_channel_id = safe_id(body.get("text_channel_id") or st.text_channel_id)
+            # If worker music is currently playing through the mixed source, reuse
+            # the overlay path so TTS and music do not fight over the same voice connection.
+            player = st.player
+            source = getattr(player, "source", None)
+            if st.current is not None and isinstance(source, AgentMixedAudioSource):
+                return await self.cmd_tts(body)
+            if st.current is not None:
+                return {"ok": False, "error": "música ativa sem mixer TTS direto; evitando interromper player", "state": st.public()}
+
+            guild, channel = await self._resolve_guild_and_channel(guild_id, voice_channel_id)
+            existing = guild.voice_client
+            player_cls = getattr(wavelink, "Player", None)
+            if existing is not None and player_cls is not None and isinstance(existing, player_cls):
+                # Wavelink idle/old player should not block a standalone short TTS.
+                with contextlib.suppress(Exception):
+                    await existing.disconnect(force=True)
+                existing = None
+            if existing is None or not getattr(existing, "is_connected", lambda: False)():
+                self.log("voice_direct_tts_connecting", guild_id=guild_id, channel=voice_channel_id)
+                voice_client = await channel.connect(self_deaf=True)
+            else:
+                voice_client = existing
+                if getattr(getattr(voice_client, "channel", None), "id", None) != voice_channel_id:
+                    await voice_client.move_to(channel)
+            st.player = voice_client
+            st.transport = "worker_voice_direct_tts"
+            st.status = "tts_direct"
+            st.updated_at = time.time()
+
+            if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
+                with contextlib.suppress(Exception):
+                    voice_client.stop()
+                await asyncio.sleep(0.15)
+
+            loop = asyncio.get_running_loop()
+            finished = loop.create_future()
+            def _after(error: Exception | None) -> None:
+                if error and not finished.done():
+                    loop.call_soon_threadsafe(finished.set_exception, error)
+                elif not finished.done():
+                    loop.call_soon_threadsafe(finished.set_result, None)
+
+            engine = "worker"
+            with tempfile.TemporaryDirectory(prefix="music-agent-direct-tts-") as tmp:
+                path = Path(tmp) / "tts.mp3"
+                audio_url = str(body.get("audio_url") or body.get("url") or "").strip()
+                audio_b64 = str(body.get("audio_b64") or body.get("audioBase64") or "").strip()
+                tts_input = ""
+                if audio_url.startswith(("http://", "https://", "file://")):
+                    tts_input = audio_url
+                    engine = str(body.get("engine") or "prebuilt-url").strip() or "prebuilt-url"
+                elif audio_b64:
+                    raw = base64.b64decode(audio_b64.encode("ascii"), validate=True)
+                    max_bytes = max(1024, int(env_float("MUSIC_AGENT_TTS_MAX_B64_BYTES", 8 * 1024 * 1024)))
+                    if len(raw) > max_bytes:
+                        raise ValueError("áudio TTS grande demais para o Music Agent")
+                    path.write_bytes(raw)
+                    tts_input = str(path)
+                    engine = str(body.get("engine") or "prebuilt-b64").strip() or "prebuilt-b64"
+                else:
+                    engine = await asyncio.wait_for(self._synthesize_tts_file(body, path), timeout=max(3.0, timeout * 0.75))
+                    if not path.exists() or path.stat().st_size <= 0:
+                        raise RuntimeError("TTS não gerou áudio")
+                    tts_input = str(path)
+                audio_source = discord.FFmpegPCMAudio(tts_input, executable=self.ffmpeg_executable, before_options="-nostdin", options="-vn -sn -dn -loglevel warning")
+                play_started = time.monotonic()
+                try:
+                    voice_client.play(audio_source, after=_after)
+                    self.log("voice_direct_tts_start", guild_id=guild_id, engine=engine, channel=voice_channel_id, chars=len(str(body.get("text") or "")))
+                    await asyncio.wait_for(finished, timeout=timeout)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        if getattr(voice_client, "is_playing", lambda: False)() or getattr(voice_client, "is_paused", lambda: False)():
+                            voice_client.stop()
+                    raise
+                finally:
+                    with contextlib.suppress(Exception):
+                        audio_source.cleanup()
+            elapsed_ms = max(0.0, (time.monotonic() - started) * 1000.0)
+            playback_ms = max(0.0, (time.monotonic() - play_started) * 1000.0)
+            st.status = "idle"
+            st.updated_at = time.time()
+            self._schedule_idle_disconnect(guild_id)
+            self.log("voice_direct_tts_done", guild_id=guild_id, engine=engine, elapsed_ms=round(elapsed_ms, 1))
+            return {
+                "ok": True,
+                "engine": engine,
+                "direct_tts": True,
+                "voice_connected": bool(getattr(voice_client, "is_connected", lambda: False)()),
+                "playback_ms": round(playback_ms, 1),
+                "elapsed_ms": round(elapsed_ms, 1),
+                "state": st.public(),
+            }
 
     async def _play_next(self, guild_id: int, *, preserve_current_to_history: bool = True) -> None:
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))

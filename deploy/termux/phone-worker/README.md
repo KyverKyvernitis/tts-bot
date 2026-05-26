@@ -1,3 +1,9 @@
+## Patch 85.9: TTS direto worker → Discord voice
+
+A versão `1.10.20` ativa o primeiro caminho direto controlado de TTS pelo worker: quando a rota worker está saudável e não há música local ativa competindo, a VPS continua como cérebro/comandos/UI, mas libera a posse da voz e envia o pedido `voice_agent_play_tts` para o worker. O worker usa o Music Agent como plano de voz, conecta/toca o TTS direto no Discord e reporta o resultado de volta. Se falhar, a VPS usa o fallback normal.
+
+Novas peças: task `voice_agent_play_tts` no phone worker e ação `voice_tts` no Music Agent (`0.3.24`). O caminho antigo de síntese worker→VPS→Discord continua como fallback; o worker não registra comandos, não mexe no banco e não vira o cérebro do bot.
+
 ## Patch 85.8: transferência controlada de posse da voz
 
 A versão `1.10.19` mantém a arquitetura segura: a VPS segue como cérebro do bot e o worker controla apenas o plano de áudio/voz quando estiver autorizado. O Worker Voice Agent agora registra uma etapa intermediária de transferência (`voice_agent_prepare_transfer`, `voice_agent_begin_transfer`, `voice_agent_release_transfer` e `voice_agent_transfer_status`). O handoff continua chegando com dono `vps`; o worker só poderá usar a conexão de voz quando a VPS conceder explicitamente a posse para `worker`. O probe de conexão não ignora mais o dono atual da voz, mesmo em modo manual, evitando competição com a conexão `discord.py` da VPS.
