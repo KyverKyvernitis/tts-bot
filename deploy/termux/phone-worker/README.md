@@ -1,3 +1,9 @@
+## Patch 85.8: transferência controlada de posse da voz
+
+A versão `1.10.19` mantém a arquitetura segura: a VPS segue como cérebro do bot e o worker controla apenas o plano de áudio/voz quando estiver autorizado. O Worker Voice Agent agora registra uma etapa intermediária de transferência (`voice_agent_prepare_transfer`, `voice_agent_begin_transfer`, `voice_agent_release_transfer` e `voice_agent_transfer_status`). O handoff continua chegando com dono `vps`; o worker só poderá usar a conexão de voz quando a VPS conceder explicitamente a posse para `worker`. O probe de conexão não ignora mais o dono atual da voz, mesmo em modo manual, evitando competição com a conexão `discord.py` da VPS.
+
+Também foram adicionadas métricas para retries do TTS Agent quando o worker retorna ocupado/fila cheia, reduzindo quedas desnecessárias para fallback local/VPS em falhas transitórias.
+
 ## Patch 85.7: ownership de voz e probe seguro
 
 A versão `1.10.18` mantém o Worker Voice Agent, o registro de sessão e o handoff temporário, mas corrige o dry-run para não competir com a conexão de voz real da VPS. O handoff agora carrega o dono atual da voz (`vps` por padrão) e o worker passa a tratar esse estado como `voice_handoff_received_waiting_transfer`: os dados temporários foram recebidos, mas a conexão direta só deve abrir quando houver transferência explícita de posse da voz para o worker.

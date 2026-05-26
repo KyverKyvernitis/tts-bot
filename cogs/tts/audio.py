@@ -93,6 +93,8 @@ TTS_WORKER_AGENT_STALE_SECONDS = max(TTS_WORKER_AGENT_HEALTH_INTERVAL_SECONDS + 
 TTS_WORKER_AGENT_FAILURE_THRESHOLD = max(1, int(getattr(config, "TTS_WORKER_AGENT_FAILURE_THRESHOLD", 2) or 2))
 TTS_WORKER_AGENT_FAILURE_COOLDOWN_SECONDS = max(5.0, float(getattr(config, "TTS_WORKER_AGENT_FAILURE_COOLDOWN_SECONDS", 45.0) or 45.0))
 TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS = max(2.0, float(getattr(config, "TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS", 10.0) or 10.0))
+TTS_WORKER_AGENT_BUSY_RETRY_ATTEMPTS = max(0, int(getattr(config, "TTS_WORKER_AGENT_BUSY_RETRY_ATTEMPTS", 2) or 2))
+TTS_WORKER_AGENT_BUSY_RETRY_DELAY_SECONDS = max(0.05, float(getattr(config, "TTS_WORKER_AGENT_BUSY_RETRY_DELAY_SECONDS", 0.35) or 0.35))
 TTS_WORKER_AGENT_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_WORKER_AGENT_MAX_AUDIO_MB", 8) or 8))
 TTS_WORKER_AGENT_MAX_TEXT_LENGTH = max(64, int(getattr(config, "TTS_WORKER_AGENT_MAX_TEXT_LENGTH", 1200) or 1200))
 TTS_WORKER_AGENT_PREFERRED_ENGINE = str(getattr(config, "TTS_WORKER_AGENT_PREFERRED_ENGINE", "auto") or "auto").strip().lower().replace("-", "_") or "auto"
@@ -105,6 +107,10 @@ WORKER_VOICE_AGENT_SESSION_REPORT_MIN_INTERVAL_SECONDS = max(3.0, float(getattr(
 WORKER_VOICE_AGENT_HANDOFF_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_HANDOFF_ENABLED", True))
 WORKER_VOICE_AGENT_HANDOFF_TTL_SECONDS = max(10.0, float(getattr(config, "WORKER_VOICE_AGENT_HANDOFF_TTL_SECONDS", 60.0) or 60.0))
 WORKER_VOICE_AGENT_HANDOFF_TIMEOUT_SECONDS = max(0.6, float(getattr(config, "WORKER_VOICE_AGENT_HANDOFF_TIMEOUT_SECONDS", 1.5) or 1.5))
+WORKER_VOICE_AGENT_TRANSFER_CONTROL_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_TRANSFER_CONTROL_ENABLED", True))
+WORKER_VOICE_AGENT_TRANSFER_PREPARE_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_TRANSFER_PREPARE_ENABLED", True))
+WORKER_VOICE_AGENT_TRANSFER_TIMEOUT_SECONDS = max(0.6, float(getattr(config, "WORKER_VOICE_AGENT_TRANSFER_TIMEOUT_SECONDS", 1.5) or 1.5))
+WORKER_VOICE_AGENT_TRANSFER_LEASE_TTL_SECONDS = max(10.0, float(getattr(config, "WORKER_VOICE_AGENT_TRANSFER_LEASE_TTL_SECONDS", 45.0) or 45.0))
 WORKER_VOICE_AGENT_CONNECTION_DRY_RUN_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_CONNECTION_DRY_RUN_ENABLED", True))
 WORKER_VOICE_AGENT_CONNECTION_AUTO_PROBE_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_CONNECTION_AUTO_PROBE_ENABLED", False))
 WORKER_VOICE_AGENT_CONNECTION_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "WORKER_VOICE_AGENT_CONNECTION_TIMEOUT_SECONDS", 4.0) or 4.0))
@@ -519,6 +525,7 @@ class TTSAudioMixin:
         state["reason"] = "synth_failed"
         metrics = self._get_metrics_store()
         metrics["tts_agent_synth_failed"] = int(metrics.get("tts_agent_synth_failed", 0) or 0) + 1
+        metrics["tts_agent_last_failure_reason"] = str(exc)[:220]
         if int(state.get("failure_count") or 0) >= TTS_WORKER_AGENT_FAILURE_THRESHOLD:
             state["route"] = "vps"
             state["ok"] = False
@@ -547,6 +554,7 @@ class TTSAudioMixin:
         state = self._tts_agent_route_state()
         state["failure_count"] = 0
         state["disabled_until_monotonic"] = 0.0
+        metrics["tts_agent_last_failure_reason"] = ""
         self._tts_agent_set_route(
             route="worker",
             ok=True,
@@ -797,6 +805,8 @@ class TTSAudioMixin:
                 "tts_agent_synth_attempts": 0,
                 "tts_agent_synth_ok": 0,
                 "tts_agent_synth_failed": 0,
+                "tts_agent_busy_retries": 0,
+                "tts_agent_last_failure_reason": "",
                 "tts_agent_synth_total_ms": 0.0,
                 "tts_agent_synth_samples": 0,
                 "tts_agent_route_worker_samples": 0,
@@ -805,6 +815,15 @@ class TTSAudioMixin:
                 "worker_voice_session_reports_ok": 0,
                 "worker_voice_session_reports_failed": 0,
                 "worker_voice_session_skipped": 0,
+                "worker_voice_session_handoff_ok": 0,
+                "worker_voice_session_handoff_failed": 0,
+                "worker_voice_session_handoff_skipped": 0,
+                "worker_voice_session_connection_probe_ok": 0,
+                "worker_voice_session_connection_probe_failed": 0,
+                "worker_voice_session_connection_probe_skipped": 0,
+                "worker_voice_session_transfer_prepare_ok": 0,
+                "worker_voice_session_transfer_prepare_failed": 0,
+                "worker_voice_session_transfer_prepare_skipped": 0,
                 "worker_voice_session_clears_ok": 0,
                 "worker_voice_session_clears_failed": 0,
                 "boot_warmups": 0,
@@ -1173,6 +1192,8 @@ class TTSAudioMixin:
             "tts_agent_synth_attempts": int(metrics.get("tts_agent_synth_attempts", 0) or 0),
             "tts_agent_synth_ok": int(metrics.get("tts_agent_synth_ok", 0) or 0),
             "tts_agent_synth_failed": int(metrics.get("tts_agent_synth_failed", 0) or 0),
+            "tts_agent_busy_retries": int(metrics.get("tts_agent_busy_retries", 0) or 0),
+            "tts_agent_last_failure_reason": str(metrics.get("tts_agent_last_failure_reason") or ""),
             "avg_tts_agent_synth_ms": round((float(metrics.get("tts_agent_synth_total_ms", 0.0) or 0.0) / int(metrics.get("tts_agent_synth_samples", 0) or 1)), 2) if int(metrics.get("tts_agent_synth_samples", 0) or 0) else 0.0,
             "tts_agent_last_requested_engine": str(metrics.get("tts_agent_last_requested_engine") or ""),
             "tts_agent_last_selected_engine": str(metrics.get("tts_agent_last_selected_engine") or ""),
@@ -1186,6 +1207,15 @@ class TTSAudioMixin:
             "worker_voice_session_reports_ok": int(metrics.get("worker_voice_session_reports_ok", 0) or 0),
             "worker_voice_session_reports_failed": int(metrics.get("worker_voice_session_reports_failed", 0) or 0),
             "worker_voice_session_skipped": int(metrics.get("worker_voice_session_skipped", 0) or 0),
+            "worker_voice_session_handoff_ok": int(metrics.get("worker_voice_session_handoff_ok", 0) or 0),
+            "worker_voice_session_handoff_failed": int(metrics.get("worker_voice_session_handoff_failed", 0) or 0),
+            "worker_voice_session_handoff_skipped": int(metrics.get("worker_voice_session_handoff_skipped", 0) or 0),
+            "worker_voice_session_connection_probe_ok": int(metrics.get("worker_voice_session_connection_probe_ok", 0) or 0),
+            "worker_voice_session_connection_probe_failed": int(metrics.get("worker_voice_session_connection_probe_failed", 0) or 0),
+            "worker_voice_session_connection_probe_skipped": int(metrics.get("worker_voice_session_connection_probe_skipped", 0) or 0),
+            "worker_voice_session_transfer_prepare_ok": int(metrics.get("worker_voice_session_transfer_prepare_ok", 0) or 0),
+            "worker_voice_session_transfer_prepare_failed": int(metrics.get("worker_voice_session_transfer_prepare_failed", 0) or 0),
+            "worker_voice_session_transfer_prepare_skipped": int(metrics.get("worker_voice_session_transfer_prepare_skipped", 0) or 0),
             "worker_voice_session_clears_ok": int(metrics.get("worker_voice_session_clears_ok", 0) or 0),
             "worker_voice_session_clears_failed": int(metrics.get("worker_voice_session_clears_failed", 0) or 0),
             "boot_warmups": int(metrics.get("boot_warmups", 0) or 0),
@@ -1814,6 +1844,34 @@ class TTSAudioMixin:
             "note": "handoff temporário; sem DISCORD_TOKEN; worker guarda somente em memória",
         }
 
+    def _voice_client_transfer_prepare_payload(self, guild: discord.Guild, item: QueueItem, vc: Any | None, *, source: str) -> dict[str, Any] | None:
+        if not (WORKER_VOICE_AGENT_TRANSFER_CONTROL_ENABLED and WORKER_VOICE_AGENT_TRANSFER_PREPARE_ENABLED):
+            return None
+        if vc is None:
+            return None
+        channel = self._voice_client_channel(vc)
+        if channel is None:
+            return None
+        now_ms = int(time.time() * 1000)
+        return {
+            "guild_id": int(guild.id),
+            "channel_id": int(getattr(channel, "id", None) or item.channel_id or 0),
+            "text_channel_id": int(getattr(self.guild_states.get(int(guild.id)), "last_text_channel_id", 0) or 0) if self.guild_states.get(int(guild.id)) is not None else 0,
+            "requester_id": int(item.author_id or 0),
+            "bot_user_id": int(getattr(getattr(guild, "me", None), "id", 0) or 0),
+            "source": str(source or "tts").strip().lower()[:40] or "tts",
+            "state": "transfer_staged_waiting_vps_release",
+            "current_owner": self._worker_voice_current_owner(vc),
+            "voice_owner": self._worker_voice_current_owner(vc),
+            "requested_owner": "worker",
+            "allow_connection_probe": False,
+            "connection_policy": "prepare_only_no_connection_until_vps_releases",
+            "expires_in_seconds": int(WORKER_VOICE_AGENT_TRANSFER_LEASE_TTL_SECONDS),
+            "observed_at_ms": now_ms,
+            "reason": "TTS worker route active; preparando transferência controlada sem abrir voice ws",
+            "note": "preparação segura; não transfere posse, não abre conexão e não toca áudio",
+        }
+
     def _compact_worker_voice_agent_snapshot(self, voice_agent: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(voice_agent, dict) or not voice_agent:
             return {}
@@ -1843,6 +1901,12 @@ class TTSAudioMixin:
             "last_session": dict(voice_agent.get("last_session") or {}) if isinstance(voice_agent.get("last_session"), dict) else {},
             "last_handoff": dict(voice_agent.get("last_handoff") or {}) if isinstance(voice_agent.get("last_handoff"), dict) else {},
             "last_connection": dict(voice_agent.get("last_connection") or {}) if isinstance(voice_agent.get("last_connection"), dict) else {},
+            "transfer_count": int(voice_agent.get("transfer_count") or 0),
+            "transfer_ready": bool(voice_agent.get("transfer_ready")),
+            "transfer_state": str(voice_agent.get("transfer_state") or "")[:80],
+            "current_voice_owner": str(voice_agent.get("current_voice_owner") or voice_agent.get("voice_owner") or "")[:40],
+            "requested_voice_owner": str(voice_agent.get("requested_voice_owner") or "")[:40],
+            "last_transfer": dict(voice_agent.get("last_transfer") or {}) if isinstance(voice_agent.get("last_transfer"), dict) else {},
             "missing": [str(item)[:80] for item in list(voice_agent.get("missing") or [])[:6]],
         }
         sessions = voice_agent.get("sessions")
@@ -1854,6 +1918,9 @@ class TTSAudioMixin:
         connections = voice_agent.get("connections")
         if isinstance(connections, list):
             compact["connections"] = [dict(item) for item in connections[:5] if isinstance(item, dict)]
+        transfers = voice_agent.get("transfers")
+        if isinstance(transfers, list):
+            compact["transfers"] = [dict(item) for item in transfers[:5] if isinstance(item, dict)]
         return compact
 
     def _update_worker_voice_agent_snapshot(self, voice_agent: dict[str, Any] | None) -> None:
@@ -1902,6 +1969,12 @@ class TTSAudioMixin:
         if handoff_payload:
             htask = asyncio.create_task(self._worker_voice_agent_register_handoff(handoff_payload))
             htask.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            transfer_payload = self._voice_client_transfer_prepare_payload(guild, item, vc, source=source)
+            if transfer_payload:
+                ttask = asyncio.create_task(self._worker_voice_agent_prepare_transfer(transfer_payload))
+                ttask.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+            elif WORKER_VOICE_AGENT_TRANSFER_CONTROL_ENABLED:
+                self._record_worker_voice_session_metric("transfer_prepare_skipped")
         elif WORKER_VOICE_AGENT_HANDOFF_ENABLED:
             self._record_worker_voice_session_metric("handoff_skipped")
 
@@ -1965,6 +2038,32 @@ class TTSAudioMixin:
         except Exception as exc:
             self._record_worker_voice_session_metric("handoff_failed")
             logger.debug("[worker_voice_agent] handoff dry-run falhou | guild=%s erro=%s", guild_id, exc)
+
+    async def _worker_voice_agent_prepare_transfer(self, payload: dict[str, Any]) -> None:
+        guild_id = int(payload.get("guild_id") or 0)
+        if not WORKER_VOICE_AGENT_TRANSFER_CONTROL_ENABLED:
+            self._record_worker_voice_session_metric("transfer_prepare_skipped")
+            return
+        try:
+            data = await self._request_worker_voice_agent_json(
+                task="voice_agent_prepare_transfer",
+                payload=payload,
+                timeout_seconds=WORKER_VOICE_AGENT_TRANSFER_TIMEOUT_SECONDS,
+            )
+            if bool(data.get("ok", True)):
+                self._record_worker_voice_session_metric("transfer_prepare_ok")
+                logger.debug(
+                    "[worker_voice_agent] transferência preparada | guild=%s owner=%s requested=%s state=%s",
+                    guild_id,
+                    payload.get("current_owner") or payload.get("voice_owner"),
+                    payload.get("requested_owner"),
+                    data.get("state"),
+                )
+            else:
+                self._record_worker_voice_session_metric("transfer_prepare_failed")
+        except Exception as exc:
+            self._record_worker_voice_session_metric("transfer_prepare_failed")
+            logger.debug("[worker_voice_agent] preparar transferência falhou | guild=%s erro=%s", guild_id, exc)
 
     async def _worker_voice_agent_probe_connection(self, payload: dict[str, Any]) -> None:
         guild_id = int(payload.get("guild_id") or 0)
@@ -2750,6 +2849,19 @@ class TTSAudioMixin:
             "author_id": int(item.author_id or 0),
         }
 
+    def _is_tts_agent_transient_busy_error(self, exc: Exception | str) -> bool:
+        text = str(exc or "").lower()
+        return any(token in text for token in (
+            "tts agent ocupado",
+            "fila local cheia",
+            "busy",
+            "queue full",
+            "http 429",
+            "http 503",
+            "temporariamente indispon",
+            "temporarily unavailable",
+        ))
+
     async def _generate_tts_agent_worker_file(self, item: QueueItem) -> str:
         if not self._tts_agent_route_available():
             raise RuntimeError("TTS Agent indisponível pela rota cacheada")
@@ -2762,45 +2874,66 @@ class TTSAudioMixin:
         metrics = self._get_metrics_store()
         metrics["tts_agent_synth_attempts"] = int(metrics.get("tts_agent_synth_attempts", 0) or 0) + 1
         started = time.monotonic()
-        try:
-            data = await self._request_phone_worker_tts_audio(
-                task="tts_agent_synthesize",
-                payload=self._tts_agent_payload_for_item(item),
-                timeout_seconds=TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
-                max_audio_mb=TTS_WORKER_AGENT_MAX_AUDIO_MB,
-            )
-            raw = data.get("raw_audio") or data.get("audio_bytes")
-            if not isinstance(raw, (bytes, bytearray)) or not raw:
-                raise RuntimeError("TTS Agent não retornou áudio")
-            data["requested_engine"] = str(item.engine or "").strip().lower()
-            data["audio_bytes_len"] = len(raw)
-            fmt = self._normalize_worker_audio_format(data.get("audio_format"))
-            data["audio_format"] = fmt
-            suffix = ".wav" if fmt == "wav" else ".ogg" if fmt == "ogg" else ".mp3"
-            path = self._make_runtime_temp_file(suffix=suffix)
+        last_error: Exception | None = None
+        max_attempts = max(1, int(TTS_WORKER_AGENT_BUSY_RETRY_ATTEMPTS or 0) + 1)
+        for attempt in range(max_attempts):
+            try:
+                data = await self._request_phone_worker_tts_audio(
+                    task="tts_agent_synthesize",
+                    payload=self._tts_agent_payload_for_item(item),
+                    timeout_seconds=TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
+                    max_audio_mb=TTS_WORKER_AGENT_MAX_AUDIO_MB,
+                )
+                raw = data.get("raw_audio") or data.get("audio_bytes")
+                if not isinstance(raw, (bytes, bytearray)) or not raw:
+                    raise RuntimeError("TTS Agent não retornou áudio")
+                data["requested_engine"] = str(item.engine or "").strip().lower()
+                data["audio_bytes_len"] = len(raw)
+                fmt = self._normalize_worker_audio_format(data.get("audio_format"))
+                data["audio_format"] = fmt
+                suffix = ".wav" if fmt == "wav" else ".ogg" if fmt == "ogg" else ".mp3"
+                path = self._make_runtime_temp_file(suffix=suffix)
 
-            def _write_audio(target: str, content: bytes) -> None:
-                with open(target, "wb") as handle:
-                    handle.write(content)
+                def _write_audio(target: str, content: bytes) -> None:
+                    with open(target, "wb") as handle:
+                        handle.write(content)
 
-            await asyncio.to_thread(_write_audio, path, bytes(raw))
-            total_ms = (time.monotonic() - started) * 1000.0
-            self._record_tts_agent_synth_success(total_ms=total_ms, data=data)
-            selected_engine = str(data.get("selected_engine") or data.get("engine") or "").strip().lower()
-            logger.info(
-                "[tts_agent] synth ok | guild=%s route=worker requested=%s selected=%s format=%s bytes=%s cache_hit=%s total=%.1fms",
-                item.guild_id,
-                item.engine,
-                selected_engine or "unknown",
-                fmt,
-                len(raw),
-                bool(data.get("cache_hit")),
-                total_ms,
-            )
-            return path
-        except Exception as exc:
-            self._mark_tts_agent_synth_failure(exc)
-            raise
+                await asyncio.to_thread(_write_audio, path, bytes(raw))
+                total_ms = (time.monotonic() - started) * 1000.0
+                self._record_tts_agent_synth_success(total_ms=total_ms, data=data)
+                selected_engine = str(data.get("selected_engine") or data.get("engine") or "").strip().lower()
+                logger.info(
+                    "[tts_agent] synth ok | guild=%s route=worker requested=%s selected=%s format=%s bytes=%s cache_hit=%s total=%.1fms",
+                    item.guild_id,
+                    item.engine,
+                    selected_engine or "unknown",
+                    fmt,
+                    len(raw),
+                    bool(data.get("cache_hit")),
+                    total_ms,
+                )
+                return path
+            except Exception as exc:
+                last_error = exc
+                if attempt < max_attempts - 1 and self._is_tts_agent_transient_busy_error(exc):
+                    metrics["tts_agent_busy_retries"] = int(metrics.get("tts_agent_busy_retries", 0) or 0) + 1
+                    delay = TTS_WORKER_AGENT_BUSY_RETRY_DELAY_SECONDS * (attempt + 1)
+                    logger.info(
+                        "[tts_agent] worker ocupado; retry curto antes do fallback | guild=%s engine=%s tentativa=%s/%s delay=%.2fs erro=%s",
+                        item.guild_id,
+                        item.engine,
+                        attempt + 1,
+                        max_attempts,
+                        delay,
+                        exc,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                break
+
+        final_error = last_error or RuntimeError("falha desconhecida no TTS Agent")
+        self._mark_tts_agent_synth_failure(final_error)
+        raise final_error
 
     async def _generate_audio_file(self, item: QueueItem) -> str:
         agent_available = self._tts_agent_route_available()
@@ -3018,6 +3151,9 @@ class TTSAudioMixin:
             finally:
                 pass
 
+    def _is_already_playing_audio_error(self, exc: Exception | str) -> bool:
+        return "already playing audio" in str(exc or "").lower()
+
     def _is_music_active_for_guild(self, guild_id: int) -> bool:
         router = getattr(getattr(self, "bot", None), "audio_router", None)
         is_music_active = getattr(router, "is_music_active", None)
@@ -3085,6 +3221,17 @@ class TTSAudioMixin:
                         "playback_started_at": now,
                         "tts_discarded": True,
                     }
+
+                if self._is_already_playing_audio_error(exc) and attempt == 0:
+                    logger.warning(
+                        "[tts_voice] voice client já estava tocando; aguardando limpar sem resetar call | guild=%s channel=%s",
+                        guild.id,
+                        item.channel_id,
+                    )
+                    with contextlib.suppress(Exception):
+                        await self._wait_until_voice_playable_for_tts(current_vc, item=item)
+                    await asyncio.sleep(0.15)
+                    continue
 
                 logger.warning(
                     "[tts_voice] Falha no playback, tentando recuperar | guild=%s channel=%s tentativa=%s erro=%s",

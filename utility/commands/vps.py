@@ -706,6 +706,8 @@ class VpsCommandMixin:
         raw_voice_state = str(voice_agent.get("state") or "sem health").strip() or "sem health"
         voice_state_labels = {
             "voice_handoff_received_waiting_transfer": "handoff recebido · aguardando posse da voz",
+            "voice_transfer_staged_waiting_vps_release": "transferência preparada · dono ainda VPS",
+            "voice_ownership_granted_waiting_connection": "posse liberada ao worker · aguardando conexão",
             "voice_handoff_registered_dry_run": "handoff recebido · conexão direta não iniciada",
             "shared_voice_session_registered": "sessão compartilhada registrada",
             "voice_connection_dry_run_ready": "conexão dry-run pronta",
@@ -726,6 +728,9 @@ class VpsCommandMixin:
         last_voice_session = voice_agent.get("last_session") if isinstance(voice_agent.get("last_session"), dict) else {}
         last_handoff = voice_agent.get("last_handoff") if isinstance(voice_agent.get("last_handoff"), dict) else {}
         last_connection = voice_agent.get("last_connection") if isinstance(voice_agent.get("last_connection"), dict) else {}
+        last_transfer = voice_agent.get("last_transfer") if isinstance(voice_agent.get("last_transfer"), dict) else {}
+        voice_transfer_count = int(voice_agent.get("transfer_count") or 0)
+        voice_transfer_ready = "sim" if voice_agent.get("transfer_ready") else "não"
         if last_voice_session:
             voice_session_line = (
                 f"Sessão lógica: `{self._format_vps_int(voice_session_count)}` · compartilhada `{voice_shared_ready}` · "
@@ -743,6 +748,18 @@ class VpsCommandMixin:
             )
         else:
             voice_handoff_line = f"Handoff voz: `{voice_handoff_ready}` · registros `{self._format_vps_int(voice_handoff_count)}` · aguardando session_id/endpoint/token temporário"
+        if last_transfer:
+            transfer_state = str(last_transfer.get('state') or voice_agent.get('transfer_state') or '—')[:70]
+            current_owner = str(last_transfer.get('voice_owner') or last_transfer.get('current_owner') or voice_agent.get('current_voice_owner') or 'vps')[:30]
+            requested_owner = str(last_transfer.get('requested_owner') or voice_agent.get('requested_voice_owner') or 'worker')[:30]
+            transfer_ttl = str(last_transfer.get('ttl_seconds') or 0)
+            voice_transfer_line = (
+                f"Transferência: `{voice_transfer_ready}` · registros `{self._format_vps_int(voice_transfer_count)}` · "
+                f"dono `{current_owner}` → pedido `{requested_owner}` · estado `{transfer_state}` · TTL `{transfer_ttl}s`"
+            )
+        else:
+            voice_transfer_line = f"Transferência: `{voice_transfer_ready}` · registros `{self._format_vps_int(voice_transfer_count)}` · preparada só depois do handoff"
+
         if last_connection:
             conn_state = str(last_connection.get('state') or '—')[:60]
             conn_stage = str(last_connection.get('stage') or '—')[:60]
@@ -766,6 +783,11 @@ class VpsCommandMixin:
         voice_connection_probe_ok = int(tts_metrics.get("worker_voice_session_connection_probe_ok", 0) or 0)
         voice_connection_probe_failed = int(tts_metrics.get("worker_voice_session_connection_probe_failed", 0) or 0)
         voice_connection_probe_skipped = int(tts_metrics.get("worker_voice_session_connection_probe_skipped", 0) or 0)
+        voice_transfer_prepare_ok = int(tts_metrics.get("worker_voice_session_transfer_prepare_ok", 0) or 0)
+        voice_transfer_prepare_failed = int(tts_metrics.get("worker_voice_session_transfer_prepare_failed", 0) or 0)
+        voice_transfer_prepare_skipped = int(tts_metrics.get("worker_voice_session_transfer_prepare_skipped", 0) or 0)
+        tts_busy_retries = int(tts_metrics.get("tts_agent_busy_retries", 0) or 0)
+        tts_last_failure = str(tts_metrics.get("tts_agent_last_failure_reason") or "")[:120]
 
         if last_requested or last_selected:
             last_worker_line = (
@@ -792,9 +814,11 @@ class VpsCommandMixin:
             f"Music `{voice_music_ready}` · TTS `{voice_tts_ready}` · ducking `{'sim' if voice_agent.get('ducking_ready') else 'não'}`",
             voice_session_line,
             voice_handoff_line,
+            voice_transfer_line,
             voice_connection_line,
             f"Registro sessão: `{self._format_vps_int(voice_report_ok)}` ok · `{self._format_vps_int(voice_report_failed)}` falhas · `{self._format_vps_int(voice_report_skipped)}` pulados",
             f"Registro handoff: `{self._format_vps_int(voice_handoff_ok)}` ok · `{self._format_vps_int(voice_handoff_failed)}` falhas · `{self._format_vps_int(voice_handoff_skipped)}` pulados",
+            f"Prep. transferência: `{self._format_vps_int(voice_transfer_prepare_ok)}` ok · `{self._format_vps_int(voice_transfer_prepare_failed)}` falhas · `{self._format_vps_int(voice_transfer_prepare_skipped)}` pulados",
             f"Probe conexão: `{self._format_vps_int(voice_connection_probe_ok)}` start ok · `{self._format_vps_int(voice_connection_probe_failed)}` falhas · `{self._format_vps_int(voice_connection_probe_skipped)}` aguardando posse",
             f"Pendências: `{voice_missing[:140]}`",
             "",
@@ -804,7 +828,8 @@ class VpsCommandMixin:
             f"Health ok/falha: {self._format_vps_int(int(tts_metrics.get('tts_agent_health_ok', 0) or 0))}/{self._format_vps_int(int(tts_metrics.get('tts_agent_health_fail', 0) or 0))}",
             f"Synth tentadas/ok/falhas: {self._format_vps_int(int(tts_metrics.get('tts_agent_synth_attempts', 0) or 0))}/"
             f"{self._format_vps_int(int(tts_metrics.get('tts_agent_synth_ok', 0) or 0))}/"
-            f"{self._format_vps_int(int(tts_metrics.get('tts_agent_synth_failed', 0) or 0))}",
+            f"{self._format_vps_int(int(tts_metrics.get('tts_agent_synth_failed', 0) or 0))} · retries ocupado {self._format_vps_int(tts_busy_retries)}",
+            f"Última falha Agent: `{tts_last_failure or 'nenhuma'}`",
             f"Média Agent: {self._vps_format_ms(tts_metrics.get('avg_tts_agent_synth_ms'))} · rota worker/VPS: "
             f"{self._format_vps_int(int(tts_metrics.get('tts_agent_route_worker_samples', 0) or 0))}/"
             f"{self._format_vps_int(int(tts_metrics.get('tts_agent_route_vps_samples', 0) or 0))}",

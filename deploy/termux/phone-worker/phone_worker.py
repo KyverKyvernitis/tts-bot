@@ -54,7 +54,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.18"
+PHONE_WORKER_VERSION = "1.10.19"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -177,6 +177,10 @@ SUPPORTED_DIRECT_TASKS = (
     "voice_agent_register_handoff",
     "voice_agent_clear_handoff",
     "voice_agent_handoff_status",
+    "voice_agent_prepare_transfer",
+    "voice_agent_begin_transfer",
+    "voice_agent_release_transfer",
+    "voice_agent_transfer_status",
     "voice_agent_probe_connection",
     "voice_agent_connection_status",
     "voice_agent_clear_connection",
@@ -229,6 +233,10 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "voice_agent_register_handoff",
     "voice_agent_clear_handoff",
     "voice_agent_handoff_status",
+    "voice_agent_prepare_transfer",
+    "voice_agent_begin_transfer",
+    "voice_agent_release_transfer",
+    "voice_agent_transfer_status",
     "voice_agent_probe_connection",
     "voice_agent_connection_status",
     "voice_agent_clear_connection",
@@ -2573,6 +2581,7 @@ _VOICE_AGENT_SESSION_LOCK = threading.RLock()
 _VOICE_AGENT_SESSION_MEMORY: dict[str, Any] | None = None
 _VOICE_AGENT_HANDOFF_MEMORY: dict[str, dict[str, Any]] = {}
 _VOICE_AGENT_CONNECTION_MEMORY: dict[str, dict[str, Any]] = {}
+_VOICE_AGENT_TRANSFER_MEMORY: dict[str, dict[str, Any]] = {}
 
 
 def _voice_agent_state_file() -> Path:
@@ -2742,6 +2751,181 @@ def _voice_agent_public_connection(raw: dict[str, Any], *, now_ms: int | None = 
         "updated_age_seconds": round(max(0, now_ms - updated_at) / 1000.0, 1),
         "error": str(raw.get("error") or "")[:180],
     }
+
+
+def _voice_agent_public_transfer(raw: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
+    now_ms = int(now_ms or _voice_agent_now_ms())
+    expires_at_ms = _voice_agent_int(raw.get("expires_at_ms"), 0)
+    ttl_ms = max(0, expires_at_ms - now_ms) if expires_at_ms else 0
+    return {
+        "guild_id": str(raw.get("guild_id") or ""),
+        "channel_id": str(raw.get("channel_id") or ""),
+        "state": str(raw.get("state") or "transfer_unknown")[:80],
+        "current_owner": str(raw.get("current_owner") or raw.get("voice_owner") or "vps")[:40],
+        "voice_owner": str(raw.get("voice_owner") or raw.get("current_owner") or "vps")[:40],
+        "requested_owner": str(raw.get("requested_owner") or "worker")[:40],
+        "lease_id": str(raw.get("lease_id") or "")[:80],
+        "allow_connection_probe": bool(raw.get("allow_connection_probe")),
+        "probe_authorized": bool(raw.get("probe_authorized")),
+        "age_seconds": round(max(0, now_ms - _voice_agent_int(raw.get("updated_at_ms"), now_ms)) / 1000.0, 1),
+        "ttl_seconds": round(ttl_ms / 1000.0, 1) if ttl_ms else 0.0,
+        "reason": str(raw.get("reason") or "")[:140],
+        "error": str(raw.get("error") or "")[:160],
+    }
+
+
+def _voice_agent_prune_transfers() -> dict[str, dict[str, Any]]:
+    now_ms = _voice_agent_now_ms()
+    with _VOICE_AGENT_SESSION_LOCK:
+        stale = [key for key, data in _VOICE_AGENT_TRANSFER_MEMORY.items() if _voice_agent_int(data.get("expires_at_ms"), 0) and _voice_agent_int(data.get("expires_at_ms"), 0) <= now_ms]
+        for key in stale:
+            _VOICE_AGENT_TRANSFER_MEMORY.pop(key, None)
+        return {str(k): dict(v) for k, v in _VOICE_AGENT_TRANSFER_MEMORY.items() if isinstance(v, dict)}
+
+
+def _voice_agent_transfer_summary(*, guild_id: int | None = None, limit: int = 5) -> dict[str, Any]:
+    now_ms = _voice_agent_now_ms()
+    transfers_dict = _voice_agent_prune_transfers()
+    transfers = []
+    for key, raw in transfers_dict.items():
+        if guild_id is not None and str(key) != str(int(guild_id)):
+            continue
+        transfers.append(_voice_agent_public_transfer(raw, now_ms=now_ms))
+    transfers.sort(key=lambda item: float(item.get("age_seconds", 999999) or 999999))
+    ready_count = sum(1 for item in transfers if item.get("voice_owner") == "worker" and item.get("probe_authorized"))
+    staged_count = sum(1 for item in transfers if str(item.get("state") or "").startswith("transfer_staged"))
+    last = transfers[0] if transfers else {}
+    return {
+        "transfer_count": len(transfers),
+        "transfer_ready_count": ready_count,
+        "transfer_staged_count": staged_count,
+        "transfer_ready": ready_count > 0,
+        "transfer_guilds": [str(item.get("guild_id") or "") for item in transfers[:12] if item.get("guild_id")],
+        "transfers": transfers[:limit],
+        "last_transfer": last,
+        "transfer_state": str(last.get("state") or ""),
+        "current_voice_owner": str(last.get("voice_owner") or last.get("current_owner") or "vps") if last else "vps",
+        "requested_voice_owner": str(last.get("requested_owner") or "") if last else "",
+    }
+
+
+def _voice_agent_set_transfer(guild_id: int, **updates: Any) -> dict[str, Any]:
+    key = str(int(guild_id or 0))
+    now_ms = _voice_agent_now_ms()
+    with _VOICE_AGENT_SESSION_LOCK:
+        current = dict(_VOICE_AGENT_TRANSFER_MEMORY.get(key) or {})
+        current.setdefault("guild_id", key)
+        current.setdefault("created_at_ms", now_ms)
+        current.update(updates)
+        current["updated_at_ms"] = now_ms
+        _VOICE_AGENT_TRANSFER_MEMORY[key] = current
+        return dict(current)
+
+
+def _voice_agent_prepare_transfer(body: dict[str, Any]) -> dict[str, Any]:
+    if not _env_bool("PHONE_WORKER_VOICE_AGENT_TRANSFER_CONTROL_ENABLED", True):
+        raise RuntimeError("controle de transferência de voz desativado")
+    guild_id = _voice_agent_int(body.get("guild_id"), 0)
+    channel_id = _voice_agent_int(body.get("channel_id"), 0)
+    if guild_id <= 0 or channel_id <= 0:
+        raise RuntimeError("guild_id/channel_id obrigatórios para transferência")
+    ttl_seconds = max(10, min(180, _voice_agent_int(body.get("expires_in_seconds"), _env_int("PHONE_WORKER_VOICE_AGENT_TRANSFER_LEASE_TTL_SECONDS", 45))))
+    now_ms = _voice_agent_now_ms()
+    lease_id = f"vta:{guild_id}:{channel_id}:{now_ms}"
+    current_owner = str(body.get("current_owner") or body.get("voice_owner") or "vps").strip().lower() or "vps"
+    requested_owner = str(body.get("requested_owner") or "worker").strip().lower() or "worker"
+    transfer = _voice_agent_set_transfer(
+        guild_id,
+        channel_id=str(channel_id),
+        text_channel_id=str(_voice_agent_int(body.get("text_channel_id"), 0) or ""),
+        requester_id=str(_voice_agent_int(body.get("requester_id"), 0) or ""),
+        bot_user_id=str(_voice_agent_int(body.get("bot_user_id"), 0) or ""),
+        source=_voice_agent_clean_text(body.get("source") or "tts", limit=40) or "tts",
+        state="transfer_staged_waiting_vps_release",
+        current_owner=current_owner,
+        voice_owner=current_owner,
+        requested_owner=requested_owner,
+        lease_id=lease_id,
+        allow_connection_probe=False,
+        probe_authorized=False,
+        reason=_voice_agent_clean_text(body.get("reason") or "preparado pela VPS; aguardando liberação explícita", limit=160),
+        error="",
+        expires_at_ms=now_ms + ttl_seconds * 1000,
+    )
+    return {"ok": True, "prepared": True, "state": transfer.get("state"), "transfer": _voice_agent_public_transfer(transfer), **_voice_agent_transfer_summary(guild_id=guild_id, limit=5)}
+
+
+def _voice_agent_begin_transfer(body: dict[str, Any]) -> dict[str, Any]:
+    if not _env_bool("PHONE_WORKER_VOICE_AGENT_TRANSFER_CONTROL_ENABLED", True):
+        raise RuntimeError("controle de transferência de voz desativado")
+    guild_id = _voice_agent_int(body.get("guild_id"), 0)
+    if guild_id <= 0:
+        raise RuntimeError("guild_id obrigatório para iniciar transferência")
+    if not bool(body.get("confirm_transfer") or body.get("confirm") or body.get("manual") or body.get("diagnostic")):
+        raise RuntimeError("transferência exige confirmação explícita da VPS")
+    transfers = _voice_agent_prune_transfers()
+    current = dict(transfers.get(str(guild_id)) or {})
+    if not current:
+        current = _voice_agent_prepare_transfer(body).get("transfer") or {}
+    handoffs = _voice_agent_prune_handoffs()
+    handoff = dict(handoffs.get(str(guild_id)) or {})
+    if not handoff:
+        raise RuntimeError("handoff temporário ausente; não é seguro entregar posse")
+    ttl_seconds = max(10, min(120, _voice_agent_int(body.get("expires_in_seconds"), _env_int("PHONE_WORKER_VOICE_AGENT_TRANSFER_LEASE_TTL_SECONDS", 45))))
+    now_ms = _voice_agent_now_ms()
+    lease_id = str(current.get("lease_id") or f"vta:{guild_id}:{now_ms}")
+    current.pop("guild_id", None)
+    transfer = _voice_agent_set_transfer(
+        guild_id,
+        **current,
+        state="worker_ownership_granted_waiting_probe",
+        current_owner="worker",
+        voice_owner="worker",
+        requested_owner="worker",
+        lease_id=lease_id,
+        allow_connection_probe=True,
+        probe_authorized=True,
+        reason="VPS confirmou transferência controlada de posse da voz",
+        error="",
+        expires_at_ms=now_ms + ttl_seconds * 1000,
+    )
+    with _VOICE_AGENT_SESSION_LOCK:
+        handoff["voice_owner"] = "worker"
+        handoff["transport_owner"] = "worker"
+        handoff["allow_connection_probe"] = True
+        handoff["connection_policy"] = "worker_ownership_granted_explicit_transfer"
+        handoff["updated_at_ms"] = now_ms
+        _VOICE_AGENT_HANDOFF_MEMORY[str(guild_id)] = handoff
+    return {"ok": True, "started": True, "state": transfer.get("state"), "transfer": _voice_agent_public_transfer(transfer), **_voice_agent_transfer_summary(guild_id=guild_id, limit=5), **_voice_agent_handoff_summary(guild_id=guild_id, limit=5)}
+
+
+def _voice_agent_release_transfer(body: dict[str, Any]) -> dict[str, Any]:
+    guild_id = _voice_agent_int(body.get("guild_id"), 0)
+    if guild_id <= 0:
+        raise RuntimeError("guild_id obrigatório para liberar transferência")
+    reason = _voice_agent_clean_text(body.get("reason") or "released_by_vps", limit=120)
+    now_ms = _voice_agent_now_ms()
+    transfer = _voice_agent_set_transfer(
+        guild_id,
+        state="released_to_vps",
+        current_owner="vps",
+        voice_owner="vps",
+        requested_owner="",
+        allow_connection_probe=False,
+        probe_authorized=False,
+        reason=reason,
+        expires_at_ms=now_ms + 10_000,
+    )
+    with _VOICE_AGENT_SESSION_LOCK:
+        handoff = dict(_VOICE_AGENT_HANDOFF_MEMORY.get(str(guild_id)) or {})
+        if handoff:
+            handoff["voice_owner"] = "vps"
+            handoff["transport_owner"] = "vps"
+            handoff["allow_connection_probe"] = False
+            handoff["connection_policy"] = "vps_owner_transfer_released"
+            handoff["updated_at_ms"] = now_ms
+            _VOICE_AGENT_HANDOFF_MEMORY[str(guild_id)] = handoff
+    return {"ok": True, "released": True, "state": transfer.get("state"), "transfer": _voice_agent_public_transfer(transfer), **_voice_agent_transfer_summary(guild_id=guild_id, limit=5)}
 
 
 def _voice_agent_connection_summary(*, guild_id: int | None = None, limit: int = 5) -> dict[str, Any]:
@@ -2969,7 +3153,7 @@ def _voice_agent_start_connection_probe(body: dict[str, Any]) -> dict[str, Any]:
     force = bool(body.get("force") or body.get("manual") or body.get("diagnostic"))
     allow_probe = bool(body.get("allow_probe") or body.get("allow_connection_probe") or handoff.get("allow_connection_probe") or handoff.get("allow_probe"))
     owner = str(handoff.get("voice_owner") or handoff.get("transport_owner") or "vps").strip().lower() or "vps"
-    if owner != "worker" and not (force and allow_probe):
+    if owner != "worker":
         blocked = _voice_agent_set_connection(
             guild_id,
             channel_id=str(handoff.get("channel_id") or ""),
@@ -2984,8 +3168,8 @@ def _voice_agent_start_connection_probe(body: dict[str, Any]) -> dict[str, Any]:
             "ok": True,
             "started": False,
             "blocked": True,
-            "state": "waiting_for_voice_ownership",
-            "reason": "vps_voice_owner",
+            "state": "waiting_for_explicit_voice_ownership_transfer",
+            "reason": "vps_voice_owner_requires_explicit_begin_transfer",
             "connection": _voice_agent_public_connection(blocked),
             **_voice_agent_connection_summary(guild_id=guild_id, limit=5),
         }
@@ -3241,10 +3425,13 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
     session_summary = _voice_agent_session_summary(limit=5)
     handoff_summary = _voice_agent_handoff_summary(limit=5)
     connection_summary = _voice_agent_connection_summary(limit=5)
+    transfer_summary = _voice_agent_transfer_summary(limit=5)
     session_count = int(session_summary.get("session_count") or 0)
     handoff_count = int(handoff_summary.get("handoff_count") or 0)
     handoff_ready = bool(handoff_summary.get("handoff_ready"))
     connection_ready = bool(connection_summary.get("connection_ready"))
+    transfer_ready = bool(transfer_summary.get("transfer_ready"))
+    transfer_count = int(transfer_summary.get("transfer_count") or 0)
     shared_ready = bool(base_ready and shared_session_enabled and (music_ready or direct_music_enabled) and tts_ready)
     shared_session_ready = bool(shared_ready and session_count > 0)
     direct_tts_ready = bool(shared_session_ready and handoff_ready and connection_ready and direct_tts_enabled and music_ready)
@@ -3268,13 +3455,21 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
         missing.append("sessão de voz registrada pela VPS")
     if shared_session_ready and not handoff_ready:
         missing.append("handoff temporário de voz")
-    if shared_session_ready and handoff_ready and not connection_ready:
-        missing.append("transferência de posse da voz")
+    if shared_session_ready and handoff_ready and transfer_count <= 0:
+        missing.append("preparação de transferência de posse")
+    if shared_session_ready and handoff_ready and transfer_count > 0 and not transfer_ready:
+        missing.append("transferência explícita de posse da voz")
+    if shared_session_ready and handoff_ready and transfer_ready and not connection_ready:
+        missing.append("conexão worker autorizada ainda não testada")
 
     if direct_tts_ready:
         state = "direct_tts_voice_ready"
     elif shared_session_ready and handoff_ready and connection_ready:
         state = "voice_connection_dry_run_ready"
+    elif shared_session_ready and handoff_ready and transfer_ready:
+        state = "voice_ownership_granted_waiting_connection"
+    elif shared_session_ready and handoff_ready and transfer_count > 0:
+        state = "voice_transfer_staged_waiting_vps_release"
     elif shared_session_ready and handoff_ready:
         state = "voice_handoff_received_waiting_transfer"
     elif shared_session_ready:
@@ -3319,6 +3514,16 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
         "connection_guilds": list(connection_summary.get("connection_guilds") or [])[:12],
         "connections": list(connection_summary.get("connections") or [])[:5],
         "last_connection": dict(connection_summary.get("last_connection") or {}),
+        "transfer_count": transfer_count,
+        "transfer_ready_count": int(transfer_summary.get("transfer_ready_count") or 0),
+        "transfer_staged_count": int(transfer_summary.get("transfer_staged_count") or 0),
+        "transfer_ready": bool(transfer_ready),
+        "transfer_state": str(transfer_summary.get("transfer_state") or "")[:80],
+        "current_voice_owner": str(transfer_summary.get("current_voice_owner") or "vps")[:40],
+        "requested_voice_owner": str(transfer_summary.get("requested_voice_owner") or "")[:40],
+        "transfer_guilds": list(transfer_summary.get("transfer_guilds") or [])[:12],
+        "transfers": list(transfer_summary.get("transfers") or [])[:5],
+        "last_transfer": dict(transfer_summary.get("last_transfer") or {}),
         "direct_tts_enabled": bool(direct_tts_enabled),
         "direct_tts_ready": bool(direct_tts_ready),
         "direct_music_enabled": bool(direct_music_enabled),
@@ -3697,6 +3902,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_voice_agent_clear_handoff(body)
             elif task == "voice_agent_handoff_status":
                 payload = self._task_voice_agent_handoff_status(body)
+            elif task == "voice_agent_prepare_transfer":
+                payload = self._task_voice_agent_prepare_transfer(body)
+            elif task == "voice_agent_begin_transfer":
+                payload = self._task_voice_agent_begin_transfer(body)
+            elif task == "voice_agent_release_transfer":
+                payload = self._task_voice_agent_release_transfer(body)
+            elif task == "voice_agent_transfer_status":
+                payload = self._task_voice_agent_transfer_status(body)
             elif task == "voice_agent_probe_connection":
                 payload = self._task_voice_agent_probe_connection(body)
             elif task == "voice_agent_connection_status":
@@ -4069,6 +4282,39 @@ class WorkerHandler(BaseHTTPRequestHandler):
         snapshot.update(summary)
         snapshot["guild_id"] = str(guild_id or "")
         snapshot.setdefault("logs", []).append("status de handoff de voz coletado")
+        return snapshot
+
+    def _task_voice_agent_prepare_transfer(self, body: dict[str, Any]) -> dict[str, Any]:
+        result = _voice_agent_prepare_transfer(body)
+        snapshot = _voice_agent_snapshot()
+        snapshot.update(result)
+        snapshot["voice_agent"] = _voice_agent_snapshot()
+        snapshot.setdefault("logs", []).append("transferência de posse preparada; owner ainda fica na VPS")
+        return snapshot
+
+    def _task_voice_agent_begin_transfer(self, body: dict[str, Any]) -> dict[str, Any]:
+        result = _voice_agent_begin_transfer(body)
+        snapshot = _voice_agent_snapshot()
+        snapshot.update(result)
+        snapshot["voice_agent"] = _voice_agent_snapshot()
+        snapshot.setdefault("logs", []).append("posse de voz concedida ao worker por confirmação explícita da VPS; ainda sem áudio automático")
+        return snapshot
+
+    def _task_voice_agent_release_transfer(self, body: dict[str, Any]) -> dict[str, Any]:
+        result = _voice_agent_release_transfer(body)
+        snapshot = _voice_agent_snapshot()
+        snapshot.update(result)
+        snapshot["voice_agent"] = _voice_agent_snapshot()
+        snapshot.setdefault("logs", []).append("posse de voz devolvida para a VPS")
+        return snapshot
+
+    def _task_voice_agent_transfer_status(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id = _voice_agent_int(body.get("guild_id"), 0)
+        summary = _voice_agent_transfer_summary(guild_id=guild_id if guild_id > 0 else None, limit=5)
+        snapshot = _voice_agent_snapshot()
+        snapshot.update(summary)
+        snapshot["guild_id"] = str(guild_id or "")
+        snapshot.setdefault("logs", []).append("status de transferência de posse coletado")
         return snapshot
 
     def _task_voice_agent_probe_connection(self, body: dict[str, Any]) -> dict[str, Any]:
