@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.20"
+AGENT_VERSION = "0.3.21"
 STARTED_AT = time.time()
 
 
@@ -436,6 +436,7 @@ class GuildMusicState:
     ducked: bool = False
     playback_token: int = 0
     shuffle: bool = False
+    loop_mode: str = "off"
 
     def public(self) -> dict[str, Any]:
         player = self.player
@@ -492,7 +493,9 @@ class GuildMusicState:
             "volume_percent": self.volume_percent,
             "normal_volume_percent": self.normal_volume_percent,
             "ducked": self.ducked,
-            "shuffle": self.shuffle,
+            "shuffle": False,
+            "loop_mode": self.loop_mode,
+            "repeat": self.loop_mode,
             "queue": [item.public() for item in self.queue[:10]],
         }
 
@@ -952,6 +955,8 @@ class MusicAgent:
             return await self.cmd_volume(body)
         if action in {"shuffle", "shuffle_queue", "mix_queue"}:
             return await self.cmd_shuffle(body)
+        if action in {"loop", "repeat", "cycle_loop", "repeat_mode"}:
+            return await self.cmd_loop(body)
         if action in {"seek", "set_position", "select_moment"}:
             return await self.cmd_seek(body)
         if action in {"duck", "duck_volume", "tts_duck"}:
@@ -1187,6 +1192,7 @@ class MusicAgent:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         st.last_action = "stop"
+        self._cancel_prefetch_tasks(guild_id)
         self._cancel_idle_disconnect(guild_id)
         st.queue.clear()
         st.current = None
@@ -1210,6 +1216,7 @@ class MusicAgent:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         st.last_action = "skip"
+        self._cancel_prefetch_tasks(guild_id)
         player = st.player
         st.current = None
         self._bump_playback_generation(st, reason="skip")
@@ -1242,6 +1249,26 @@ class MusicAgent:
         st.shuffle = False
         st.updated_at = time.time()
         return {"ok": True, "shuffled": False, "enabled": False, "queue_size": len(st.queue), "state": st.public()}
+
+    async def cmd_loop(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id = safe_id(body.get("guild_id"))
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        requested = str(body.get("mode") or body.get("loop_mode") or "").strip().lower()
+        modes = ("off", "one", "all")
+        if requested in modes:
+            st.loop_mode = requested
+        else:
+            current = str(getattr(st, "loop_mode", "off") or "off").strip().lower()
+            if current == "off":
+                st.loop_mode = "one"
+            elif current == "one":
+                st.loop_mode = "all"
+            else:
+                st.loop_mode = "off"
+        st.last_action = "loop"
+        st.updated_at = time.time()
+        self.log("loop_mode_changed", guild_id=guild_id, mode=st.loop_mode)
+        return {"ok": True, "mode": st.loop_mode, "loop_mode": st.loop_mode, "state": st.public()}
 
     async def cmd_seek(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
@@ -1706,8 +1733,23 @@ class MusicAgent:
         if error:
             self._set_status(st, "failed", event=event, error=error)
             return
+        finished = st.current
         st.current = None
         st.paused = False
+        loop_mode = str(getattr(st, "loop_mode", "off") or "off").strip().lower()
+
+        if finished is not None and loop_mode == "one":
+            finished.start_offset_seconds = 0.0
+            st.queue.insert(0, finished)
+            self.log("loop_one_requeue", guild_id=guild_id, title=getattr(finished, "title", ""))
+            await self._play_next(guild_id)
+            return
+
+        if finished is not None and loop_mode == "all":
+            finished.start_offset_seconds = 0.0
+            st.queue.append(finished)
+            self.log("loop_all_requeue", guild_id=guild_id, title=getattr(finished, "title", ""), queue_size=len(st.queue))
+
         if st.queue:
             await self._play_next(guild_id)
             return

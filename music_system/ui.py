@@ -1771,7 +1771,7 @@ class PlayerOptionsSelect(discord.ui.Select):
             return
         if value == "shuffle":
             if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True, thinking=False)
+                await interaction.response.defer(ephemeral=True, thinking=True)
             _ok, message = await self.router.request_shuffle(self.guild_id, interaction.user)
             await _safe_interaction_followup(interaction, message, ephemeral=True)
             return
@@ -1787,7 +1787,7 @@ class PlayerOptionsSelect(discord.ui.Select):
             return
         if value == "loop":
             if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True, thinking=False)
+                await interaction.response.defer(ephemeral=True, thinking=True)
             _ok, message = await self.router.request_loop(self.guild_id, interaction.user)
             await _safe_interaction_followup(interaction, message, ephemeral=True)
             return
@@ -1871,7 +1871,7 @@ class MusicPlayerView(discord.ui.View):
     async def _defer_control(self, interaction: discord.Interaction) -> None:
         if not interaction.response.is_done():
             try:
-                await interaction.response.defer(ephemeral=True, thinking=False)
+                await interaction.response.defer(ephemeral=True, thinking=True)
             except discord.NotFound:
                 return
             except Exception:
@@ -1891,7 +1891,7 @@ class MusicPlayerView(discord.ui.View):
             return False
         if not interaction.response.is_done():
             with contextlib.suppress(Exception):
-                await interaction.response.defer(ephemeral=True, thinking=False)
+                await interaction.response.defer(ephemeral=True, thinking=True)
         if action in {"stop", "skip", "shuffle"}:
             with contextlib.suppress(Exception):
                 self.router.cancel_pending_music_operations(self.guild_id, reason=f"agent_{action}")
