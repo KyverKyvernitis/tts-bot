@@ -284,6 +284,9 @@ class Music(commands.Cog):
     async def _send_music_agent_control(self, ctx: commands.Context, action: str, success_message: str) -> bool:
         if not self._music_agent_default_enabled():
             return False
+        if action in {"stop", "skip", "shuffle"}:
+            with contextlib.suppress(Exception):
+                self.router.cancel_pending_music_operations(ctx.guild.id, reason=f"agent_{action}")
         try:
             result = await music_agent_command(action, guild_id=ctx.guild.id, requester_id=ctx.author.id, requester_name=getattr(ctx.author, "display_name", str(ctx.author)))
         except Exception as exc:
@@ -553,6 +556,7 @@ class Music(commands.Cog):
             await self._reply(ctx, "Entre em um canal de voz primeiro.")
             return
 
+        operation_generation = self.router.current_music_operation_generation(ctx.guild.id)
         loading_reaction = MusicLoadingReaction(getattr(ctx, "message", None))
         await loading_reaction.start()
         finish_loading_reaction = True
@@ -722,6 +726,10 @@ class Music(commands.Cog):
                     await self._reply(ctx, self._music_error_message(exc))
                     return
 
+            if self.router.current_music_operation_generation(ctx.guild.id) != operation_generation:
+                logger.info("[music] play ignorado: operação antiga cancelada | guild=%s query=%r", ctx.guild.id, query)
+                return
+
             if not batch.tracks:
                 await self._reply(ctx, "`📭` Não encontrei nada tocável.")
                 return
@@ -787,7 +795,13 @@ class Music(commands.Cog):
                             requester_id=ctx.author.id,
                             requester_name=requester_name,
                         )
-                    logger.info("[music/agent] play etapa concluída | guild=%s elapsed_ms=%.1f queued=%s added=%s", ctx.guild.id, (time.monotonic() - agent_started) * 1000.0, bool(result.get("queued")), result.get("added"))
+                    logger.info("[music/agent] play etapa concluída | guild=%s elapsed_ms=%.1f queued=%s added=%s cancelled=%s", ctx.guild.id, (time.monotonic() - agent_started) * 1000.0, bool(result.get("queued")), result.get("added"), bool(result.get("cancelled")))
+                    if isinstance(result, dict) and result.get("cancelled"):
+                        logger.info("[music/agent] play cancelado antes de publicar resposta | guild=%s query=%r", ctx.guild.id, query)
+                        return
+                    if isinstance(result, dict) and result.get("ok") is False and result.get("error"):
+                        await self._reply(ctx, self._music_error_message(Exception(str(result.get("error")))))
+                        return
                 except Exception as exc:
                     logger.warning("[music/agent] falha ao enviar play direto | guild=%s erro=%s", ctx.guild.id, exc)
                     if _agent_not_ready_transient(exc):

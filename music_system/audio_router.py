@@ -658,6 +658,7 @@ class MusicGuildState:
     music_session_active: bool = False
     music_idle_disconnect_task: Optional[asyncio.Task] = None
     music_afk_expired: bool = False
+    music_operation_generation: int = 0
     control_votes: dict[str, ControlVote] = field(default_factory=dict)
     control_vote_cleanup_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     volume_loaded: bool = False
@@ -745,6 +746,28 @@ class AudioRouter:
             self._states[int(guild_id)] = state
         self._load_persisted_volume(int(guild_id), state)
         return state
+
+    def current_music_operation_generation(self, guild_id: int) -> int:
+        return int(getattr(self.get_state(guild_id), "music_operation_generation", 0) or 0)
+
+    def cancel_pending_music_operations(self, guild_id: int, *, reason: str = "control") -> int:
+        """Invalidate pending play/search/playlist work for this guild.
+
+        This is intentionally broader than stopping the currently audible source:
+        stop/skip/shuffle can happen while a playlist extraction, yt-dlp resolve,
+        or next-track prefetch is still running. Bumping this generation lets the
+        caller ignore stale results that finish after the user changed the queue.
+        """
+        state = self.get_state(guild_id)
+        state.music_operation_generation = int(getattr(state, "music_operation_generation", 0) or 0) + 1
+        self._cancel_next_prefetch(state)
+        task = getattr(state, "current_resolve_task", None)
+        if task is not None and not task.done():
+            with contextlib.suppress(Exception):
+                task.cancel()
+        state.current_resolve_task = None
+        logger.info("[music] operações pendentes invalidadas | guild=%s reason=%s generation=%s", guild_id, reason, state.music_operation_generation)
+        return state.music_operation_generation
 
     def _load_persisted_volume(self, guild_id: int, state: MusicGuildState) -> None:
         if state.volume_loaded:
@@ -5710,6 +5733,7 @@ class AudioRouter:
         allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "skip")
         if not allowed:
             return False, pending_message
+        self.cancel_pending_music_operations(guild_id, reason="skip")
         ok = await self.skip(guild_id)
         if completed_by_vote:
             return ok, "`⏭️` Votação concluída: pulando música." if ok else "Não havia música para pular."
@@ -5719,18 +5743,32 @@ class AudioRouter:
         allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "stop")
         if not allowed:
             return False, pending_message
+        self.cancel_pending_music_operations(guild_id, reason="stop")
         ok = await self.stop(guild_id, disconnect=disconnect)
         if completed_by_vote:
             return ok, "`⏹️` Votação concluída: player encerrado e queue limpo."
         return ok, "`⏹️` Player encerrado e queue limpo."
 
     async def request_shuffle(self, guild_id: int, member) -> tuple[bool, str]:
-        allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "shuffle")
-        if not allowed:
-            return False, pending_message
-        enabled = await self.toggle_shuffle(guild_id)
-        prefix = "Votação concluída: " if completed_by_vote else ""
-        return True, f"`🔀` {prefix}Shuffle {'ativado' if enabled else 'desativado'}."
+        state = self.get_state(guild_id)
+        state.control_votes.pop("shuffle", None)
+        task = state.control_vote_cleanup_tasks.pop("shuffle", None)
+        if task is not None and not task.done():
+            task.cancel()
+        if member is None or getattr(member, "bot", False):
+            return False, "Bots não podem embaralhar a queue."
+        current = state.current
+        requester_id = int(getattr(current, "requester_id", 0) or 0) if current is not None else 0
+        member_id = int(getattr(member, "id", 0) or 0)
+        # Shuffle não é votação nem modo ligado/desligado: é uma ação única e
+        # exclusiva de quem colocou a música que está tocando agora.
+        if not current or not requester_id:
+            return False, "Não há música tocando para definir quem pode embaralhar a queue."
+        if member_id != requester_id:
+            return False, "Só quem colocou a música atual pode embaralhar a queue."
+        self.cancel_pending_music_operations(guild_id, reason="shuffle")
+        ok = await self.shuffle_queue_once(guild_id, member=member)
+        return ok, "`🔀` Queue embaralhado." if ok else "Não há músicas suficientes no queue para embaralhar."
 
     async def request_loop(self, guild_id: int, member) -> tuple[bool, str]:
         allowed, pending_message, completed_by_vote = await self._control_or_vote(guild_id, member, "loop")
@@ -5741,38 +5779,50 @@ class AudioRouter:
         return True, f"`🔁` {prefix}Repetição: `{mode.label}`."
 
     async def toggle_shuffle(self, guild_id: int) -> bool:
+        # Compatibilidade com chamadas antigas: hoje shuffle é ação única.
+        return await self.shuffle_queue_once(guild_id)
+
+    async def shuffle_queue_once(self, guild_id: int, *, member=None) -> bool:
         state = self.get_state(guild_id)
         items = self.snapshot_queue(guild_id)
         state.control_votes.pop("shuffle", None)
-        state.shuffle = not state.shuffle
+        state.shuffle = False
         self._cancel_next_prefetch(state)
         if str(getattr(state, "current_backend", "") or "").lower() == "agent" and self.music_worker_only_enabled():
-            if state.shuffle:
-                try:
-                    result = await _music_agent_command("shuffle", guild_id=int(guild_id))
-                    remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
-                    if remote:
-                        await self.sync_music_agent_state(
-                            int(guild_id),
-                            state.current,
-                            remote,
-                            voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
-                            text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
-                            queued=False,
-                            create_panel=True,
-                        )
-                    state.shuffle = bool((result or {}).get("enabled", True))
-                except Exception:
-                    logger.warning("[music/agent] falha ao embaralhar queue remoto | guild=%s", guild_id, exc_info=True)
-                    state.shuffle = False
-            self._schedule_panel_update(guild_id, create=False)
-            return state.shuffle
-        if state.shuffle and len(items) > 1:
+            try:
+                result = await _music_agent_command(
+                    "shuffle",
+                    guild_id=int(guild_id),
+                    requester_id=int(getattr(member, "id", 0) or 0),
+                    requester_name=getattr(member, "display_name", str(member)) if member is not None else "",
+                )
+                remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
+                if remote:
+                    await self.sync_music_agent_state(
+                        int(guild_id),
+                        state.current,
+                        remote,
+                        voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
+                        text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+                        queued=False,
+                        create_panel=True,
+                    )
+                state.shuffle = False
+                self._schedule_panel_update(guild_id, create=False)
+                return bool((result or {}).get("shuffled"))
+            except Exception:
+                logger.warning("[music/agent] falha ao embaralhar queue remoto | guild=%s", guild_id, exc_info=True)
+                state.shuffle = False
+                self._schedule_panel_update(guild_id, create=False)
+                return False
+        if len(items) > 1:
             random.shuffle(items)
             await self.replace_queue(guild_id, items)
-        else:
+            state.shuffle = False
             self._schedule_panel_update(guild_id, create=False)
-        return state.shuffle
+            return True
+        self._schedule_panel_update(guild_id, create=False)
+        return False
 
     async def cycle_loop(self, guild_id: int) -> LoopMode:
         state = self.get_state(guild_id)

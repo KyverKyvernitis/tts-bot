@@ -1007,6 +1007,7 @@ class SearchSelect(discord.ui.Select):
         loading_reaction = MusicLoadingReaction(getattr(interaction, "message", None))
         await loading_reaction.start()
         finish_loading_reaction = True
+        operation_generation = self.router.current_music_operation_generation(self.guild_id)
         try:
             async def edit_original(content: str) -> None:
                 try:
@@ -1047,6 +1048,10 @@ class SearchSelect(discord.ui.Select):
                             asyncio.create_task(_watch_agent_message(message, self.guild_id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id), loading_reaction=loading_reaction))
                         return
                     await edit_original(f"`⚠️` Não consegui preparar essa música: `{exc}`")
+                    return
+                if isinstance(result, dict) and result.get("cancelled"):
+                    return
+                if self.router.current_music_operation_generation(self.guild_id) != operation_generation:
                     return
                 await _sync_agent_panel(
                     self.router,
@@ -1133,6 +1138,7 @@ class AddSongModal(discord.ui.Modal):
         await interaction.response.defer(ephemeral=True, thinking=True)
         query = str(self.query.value).strip()
         requester_name = getattr(interaction.user, "display_name", str(interaction.user))
+        operation_generation = self.router.current_music_operation_generation(self.guild_id)
         try:
             batch, force_selection = await _extract_batch_for_add_modal(
                 self.router,
@@ -1150,6 +1156,9 @@ class AddSongModal(discord.ui.Modal):
                 await interaction.followup.send(message, ephemeral=True)
             else:
                 await interaction.followup.send(f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
+            return
+
+        if self.router.current_music_operation_generation(self.guild_id) != operation_generation:
             return
 
         if not batch.tracks:
@@ -1223,6 +1232,10 @@ class AddSongModal(discord.ui.Modal):
                         asyncio.create_task(_watch_agent_message(sent, guild.id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id)))
                     return
                 await _safe_interaction_followup(interaction, f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
+                return
+            if isinstance(result, dict) and result.get("cancelled"):
+                return
+            if self.router.current_music_operation_generation(self.guild_id) != operation_generation:
                 return
             await _sync_agent_panel(
                 self.router,
@@ -1731,7 +1744,7 @@ class PlayerOptionsSelect(discord.ui.Select):
             discord.SelectOption(label=f"Volume: {volume_percent}%", emoji="🔊", value="volume", description="Ajustar volume da música."),
             discord.SelectOption(label="Selecionar momento", emoji="💠", value="seek", description="Ir para um tempo específico da música."),
             discord.SelectOption(label="Repetição", emoji="🔁", value="loop", description="Alternar repetição da música/queue."),
-            discord.SelectOption(label="Shuffle", emoji="🔀", value="shuffle", description="Misturar o queue."),
+            discord.SelectOption(label="Shuffle", emoji="🔀", value="shuffle", description="Embaralhar o queue uma vez."),
         ]
         super().__init__(placeholder="⚙️ Mais opções", min_values=1, max_values=1, options=options, row=1)
         self.router = router
@@ -1879,6 +1892,9 @@ class MusicPlayerView(discord.ui.View):
         if not interaction.response.is_done():
             with contextlib.suppress(Exception):
                 await interaction.response.defer(ephemeral=True, thinking=False)
+        if action in {"stop", "skip", "shuffle"}:
+            with contextlib.suppress(Exception):
+                self.router.cancel_pending_music_operations(self.guild_id, reason=f"agent_{action}")
         try:
             result = await music_agent_command(action, guild_id=self.guild_id, requester_id=getattr(interaction.user, "id", 0), requester_name=getattr(interaction.user, "display_name", str(interaction.user)))
         except Exception as exc:

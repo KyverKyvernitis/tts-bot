@@ -45,7 +45,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
-AGENT_VERSION = "0.3.19"
+AGENT_VERSION = "0.3.20"
 STARTED_AT = time.time()
 
 
@@ -773,6 +773,7 @@ class MusicAgent:
             self.log("prefetch_failed", guild_id=safe_id(body.get("guild_id")), title=track_meta.get("title"), error=short_text(exc, 180))
         finally:
             self._prefetch_tasks.pop(cache_key, None)
+            self._prefetch_tasks.pop(self._guild_prefetch_key(safe_id(body.get("guild_id")), cache_key), None)
 
     def _auth_ok(self, request: web.Request) -> bool:
         if not self.token:
@@ -965,7 +966,10 @@ class MusicAgent:
 
     def _cancel_prefetch_tasks(self, guild_id: int | None = None) -> int:
         cancelled = 0
+        prefix = f"{int(guild_id)}:" if guild_id else ""
         for key, task in list(self._prefetch_tasks.items()):
+            if prefix and not str(key).startswith(prefix):
+                continue
             if task is not None and not task.done():
                 task.cancel()
                 cancelled += 1
@@ -973,6 +977,16 @@ class MusicAgent:
         if cancelled:
             self.log("prefetch_cancelled", guild_id=int(guild_id or 0), count=cancelled)
         return cancelled
+
+    def _bump_playback_generation(self, st: GuildMusicState, *, reason: str = "change") -> int:
+        st.playback_token += 1
+        st.updated_at = time.time()
+        self._cancel_prefetch_tasks(st.guild_id)
+        self.log("playback_generation_bumped", guild_id=st.guild_id, reason=reason, token=st.playback_token)
+        return st.playback_token
+
+    def _guild_prefetch_key(self, guild_id: int, cache_key: str) -> str:
+        return f"{int(guild_id or 0)}:{cache_key}"
 
     def _schedule_next_queue_prefetch(self, guild_id: int, *, reason: str = "playing") -> None:
         if not self.prefetch_enabled:
@@ -985,9 +999,10 @@ class MusicAgent:
         if not query:
             return
         cache_key = self._resolve_cache_key(query, meta)
+        task_key = self._guild_prefetch_key(guild_id, cache_key)
         if self._resolve_cache_get(cache_key):
             return
-        current_task = self._prefetch_tasks.get(cache_key)
+        current_task = self._prefetch_tasks.get(task_key)
         if current_task is not None and not current_task.done():
             return
         token = int(getattr(st, "playback_token", 0) or 0)
@@ -1040,9 +1055,9 @@ class MusicAgent:
             except Exception as exc:
                 self.log("next_prefetch_failed", guild_id=guild_id, reason=reason, error=short_text(exc, 180))
             finally:
-                self._prefetch_tasks.pop(cache_key, None)
+                self._prefetch_tasks.pop(task_key, None)
 
-        self._prefetch_tasks[cache_key] = asyncio.create_task(_runner())
+        self._prefetch_tasks[task_key] = asyncio.create_task(_runner())
         self.log("next_prefetch_scheduled", guild_id=guild_id, delay=round(delay, 2), title=st.queue[0].title, reason=reason)
 
     async def cmd_prefetch(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1065,14 +1080,15 @@ class MusicAgent:
             if not query:
                 continue
             cache_key = self._resolve_cache_key(query, meta)
+            task_key = self._guild_prefetch_key(safe_id(body.get("guild_id")), cache_key)
             if self._resolve_cache_get(cache_key):
                 continue
-            if cache_key in self._prefetch_tasks and not self._prefetch_tasks[cache_key].done():
+            if task_key in self._prefetch_tasks and not self._prefetch_tasks[task_key].done():
                 continue
             child = dict(body)
             child["track"] = dict(meta)
             task = asyncio.create_task(self._prefetch_track(child, dict(meta), query, cache_key))
-            self._prefetch_tasks[cache_key] = task
+            self._prefetch_tasks[task_key] = task
             accepted += 1
         return {"ok": True, "accepted": accepted, "cache_size": len(self._resolve_cache), "metadata_cache_size": len(self._metadata_cache)}
 
@@ -1101,7 +1117,8 @@ class MusicAgent:
             st.volume_percent = st.normal_volume_percent
         st.last_action = "play"
         self._cancel_idle_disconnect(guild_id)
-        self.log("play_received", guild_id=guild_id, voice=voice_channel_id, query=query, action=action, tracks=len(tracks_payload))
+        command_generation = int(getattr(st, "playback_token", 0) or 0)
+        self.log("play_received", guild_id=guild_id, voice=voice_channel_id, query=query, action=action, tracks=len(tracks_payload), generation=command_generation)
 
         if tracks_payload:
             tracks: list[AgentTrack] = []
@@ -1127,6 +1144,9 @@ class MusicAgent:
 
         query = self._query_from_track_meta(track_meta, fallback_query=query) or query
         track = await self.resolve_track(query, track_meta=track_meta, body=body)
+        if int(getattr(st, "playback_token", 0) or 0) != command_generation or str(getattr(st, "last_action", "") or "").lower() == "stop":
+            self.log("play_resolve_ignored", guild_id=guild_id, reason="stale_or_stopped", generation=command_generation, current_generation=getattr(st, "playback_token", 0), title=getattr(track, "title", ""))
+            return {"ok": False, "cancelled": True, "queued": False, "error": "operação cancelada", "state": st.public()}
         if st.current and st.status in {"playing", "starting", "preparing", "paused"}:
             st.queue.append(track)
             st.updated_at = time.time()
@@ -1174,8 +1194,7 @@ class MusicAgent:
         st.paused = False
         player = st.player
         st.player = None
-        st.playback_token += 1
-        self._cancel_prefetch_tasks(guild_id)
+        self._bump_playback_generation(st, reason="stop")
         if player:
             with contextlib.suppress(Exception):
                 if isinstance(player, getattr(wavelink, "Player", ())):
@@ -1193,8 +1212,7 @@ class MusicAgent:
         st.last_action = "skip"
         player = st.player
         st.current = None
-        st.playback_token += 1
-        self._cancel_prefetch_tasks(guild_id)
+        self._bump_playback_generation(st, reason="skip")
         if player:
             with contextlib.suppress(Exception):
                 if isinstance(player, getattr(wavelink, "Player", ())):
@@ -1208,19 +1226,22 @@ class MusicAgent:
         guild_id = safe_id(body.get("guild_id"))
         st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         st.last_action = "shuffle"
+        # Shuffle é uma ação única para embaralhar a fila atual, não um modo
+        # persistente ligado/desligado. Não altere playback_token aqui: ele é
+        # usado pelo callback do áudio atual; mudar esse token faria a faixa
+        # atual terminar sem avançar a queue. Cancele apenas o prefetch antigo.
         self._cancel_prefetch_tasks(guild_id)
-        st.playback_token += 1
         if len(st.queue) > 1:
             import random as _random
             _random.shuffle(st.queue)
-            st.shuffle = True
+            st.shuffle = False
             st.updated_at = time.time()
             self._schedule_next_queue_prefetch(guild_id, reason="shuffle")
             self.log("queue_shuffled", guild_id=guild_id, queue_size=len(st.queue))
-            return {"ok": True, "shuffled": True, "enabled": True, "queue_size": len(st.queue), "state": st.public()}
-        st.shuffle = bool(st.queue)
+            return {"ok": True, "shuffled": True, "enabled": False, "queue_size": len(st.queue), "state": st.public()}
+        st.shuffle = False
         st.updated_at = time.time()
-        return {"ok": True, "shuffled": False, "enabled": st.shuffle, "queue_size": len(st.queue), "state": st.public()}
+        return {"ok": True, "shuffled": False, "enabled": False, "queue_size": len(st.queue), "state": st.public()}
 
     async def cmd_seek(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
