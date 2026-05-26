@@ -54,7 +54,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.16"
+PHONE_WORKER_VERSION = "1.10.17"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -177,6 +177,9 @@ SUPPORTED_DIRECT_TASKS = (
     "voice_agent_register_handoff",
     "voice_agent_clear_handoff",
     "voice_agent_handoff_status",
+    "voice_agent_probe_connection",
+    "voice_agent_connection_status",
+    "voice_agent_clear_connection",
     "worker_logs",
     "worker_self_check",
     "worker_update",
@@ -223,6 +226,12 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "voice_agent_register_session",
     "voice_agent_clear_session",
     "voice_agent_guild_status",
+    "voice_agent_register_handoff",
+    "voice_agent_clear_handoff",
+    "voice_agent_handoff_status",
+    "voice_agent_probe_connection",
+    "voice_agent_connection_status",
+    "voice_agent_clear_connection",
     "worker_logs",
     "worker_self_check",
     "worker_update",
@@ -2563,6 +2572,7 @@ def _music_agent_snapshot() -> dict[str, Any]:
 _VOICE_AGENT_SESSION_LOCK = threading.RLock()
 _VOICE_AGENT_SESSION_MEMORY: dict[str, Any] | None = None
 _VOICE_AGENT_HANDOFF_MEMORY: dict[str, dict[str, Any]] = {}
+_VOICE_AGENT_CONNECTION_MEMORY: dict[str, dict[str, Any]] = {}
 
 
 def _voice_agent_state_file() -> Path:
@@ -2699,6 +2709,288 @@ def _voice_agent_handoff_summary(*, guild_id: int | None = None, limit: int = 5)
         "last_handoff": handoffs[0] if handoffs else {},
     }
 
+
+
+def _voice_agent_public_connection(raw: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
+    now_ms = int(now_ms or _voice_agent_now_ms())
+    started_at = _voice_agent_int(raw.get("started_at_ms"), now_ms)
+    updated_at = _voice_agent_int(raw.get("updated_at_ms"), started_at)
+    return {
+        "guild_id": str(raw.get("guild_id") or ""),
+        "channel_id": str(raw.get("channel_id") or ""),
+        "state": str(raw.get("state") or "unknown")[:80],
+        "stage": str(raw.get("stage") or "")[:80],
+        "dry_run": bool(raw.get("dry_run", True)),
+        "connected_once": bool(raw.get("connected_once")),
+        "closed_after_probe": bool(raw.get("closed_after_probe")),
+        "ws_url_present": bool(raw.get("ws_url_present")),
+        "hello_received": bool(raw.get("hello_received")),
+        "ready_received": bool(raw.get("ready_received")),
+        "udp_probe_attempted": bool(raw.get("udp_probe_attempted")),
+        "udp_probe_ok": bool(raw.get("udp_probe_ok")),
+        "ssrc_present": bool(raw.get("ssrc_present")),
+        "selected_protocol_ready": bool(raw.get("selected_protocol_ready")),
+        "endpoint_host": str(raw.get("endpoint_host") or "")[:120],
+        "voice_ip": str(raw.get("voice_ip") or "")[:80],
+        "voice_port": _voice_agent_int(raw.get("voice_port"), 0),
+        "latency_ms": raw.get("latency_ms"),
+        "age_seconds": round(max(0, now_ms - started_at) / 1000.0, 1),
+        "updated_age_seconds": round(max(0, now_ms - updated_at) / 1000.0, 1),
+        "error": str(raw.get("error") or "")[:180],
+    }
+
+
+def _voice_agent_connection_summary(*, guild_id: int | None = None, limit: int = 5) -> dict[str, Any]:
+    now_ms = _voice_agent_now_ms()
+    with _VOICE_AGENT_SESSION_LOCK:
+        items = {str(k): dict(v) for k, v in _VOICE_AGENT_CONNECTION_MEMORY.items() if isinstance(v, dict)}
+    connections = []
+    for key, raw in items.items():
+        if guild_id is not None and str(key) != str(int(guild_id)):
+            continue
+        connections.append(_voice_agent_public_connection(raw, now_ms=now_ms))
+    connections.sort(key=lambda item: float(item.get("updated_age_seconds", 999999) or 999999))
+    ready_count = sum(1 for item in connections if item.get("state") in {"connected_dry_run", "probe_ok", "voice_ws_ready"} or item.get("connected_once"))
+    probing_count = sum(1 for item in connections if item.get("state") in {"probing", "connecting", "voice_ws_connecting"})
+    failed_count = sum(1 for item in connections if str(item.get("state") or "").endswith("failed") or item.get("state") == "failed")
+    return {
+        "connection_count": len(connections),
+        "connection_ready_count": ready_count,
+        "connection_probing_count": probing_count,
+        "connection_failed_count": failed_count,
+        "connection_ready": ready_count > 0,
+        "connection_guilds": [str(item.get("guild_id") or "") for item in connections[:12] if item.get("guild_id")],
+        "connections": connections[:limit],
+        "last_connection": connections[0] if connections else {},
+    }
+
+
+def _voice_agent_normalize_endpoint(endpoint: str) -> tuple[str, str]:
+    raw = str(endpoint or "").strip()
+    raw = raw.replace("wss://", "").replace("ws://", "").replace("https://", "").replace("http://", "")
+    raw = raw.split("/", 1)[0].strip()
+    host = _voice_agent_clean_text(raw, limit=180)
+    if not host:
+        raise RuntimeError("endpoint de voz vazio")
+    return host, f"wss://{host}/?v=4"
+
+
+def _voice_agent_set_connection(guild_id: int, **updates: Any) -> dict[str, Any]:
+    key = str(int(guild_id or 0))
+    now_ms = _voice_agent_now_ms()
+    with _VOICE_AGENT_SESSION_LOCK:
+        current = dict(_VOICE_AGENT_CONNECTION_MEMORY.get(key) or {})
+        current.setdefault("guild_id", key)
+        current.setdefault("started_at_ms", now_ms)
+        current.update(updates)
+        current["updated_at_ms"] = now_ms
+        _VOICE_AGENT_CONNECTION_MEMORY[key] = current
+        return dict(current)
+
+
+def _voice_agent_udp_discovery_probe(*, ip: str, port: int, ssrc: int, timeout: float = 0.9) -> dict[str, Any]:
+    result = {"attempted": False, "ok": False, "ip": "", "port": 0, "error": ""}
+    if not ip or int(port or 0) <= 0 or int(ssrc or 0) <= 0:
+        result["error"] = "ready sem ip/port/ssrc para UDP discovery"
+        return result
+    result["attempted"] = True
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(max(0.2, min(2.0, float(timeout or 0.9))))
+        packet = bytearray(70)
+        packet[0:4] = int(ssrc).to_bytes(4, "big", signed=False)
+        sock.sendto(packet, (str(ip), int(port)))
+        data, _addr = sock.recvfrom(70)
+        if len(data) >= 70:
+            discovered_ip = data[4:68].split(b"\x00", 1)[0].decode("utf-8", "replace").strip()
+            discovered_port = int.from_bytes(data[68:70], "little", signed=False)
+            result.update({"ok": bool(discovered_ip and discovered_port), "ip": discovered_ip, "port": discovered_port})
+        else:
+            result["error"] = f"resposta UDP curta: {len(data)} bytes"
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {_short_text(exc, limit=120)}"
+    finally:
+        if sock is not None:
+            with contextlib.suppress(Exception):
+                sock.close()
+    return result
+
+
+async def _voice_agent_probe_connection_async(handoff: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
+    try:
+        import aiohttp  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(f"aiohttp indisponível para voice dry-run: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
+
+    guild_id = _voice_agent_int(handoff.get("guild_id"), 0)
+    bot_user_id = _voice_agent_clean_text(handoff.get("bot_user_id"), limit=80)
+    session_id = str(handoff.get("session_id") or "").strip()
+    token = str(handoff.get("voice_token") or "").strip()
+    endpoint_host, ws_url = _voice_agent_normalize_endpoint(str(handoff.get("endpoint") or handoff.get("endpoint_host") or ""))
+    if guild_id <= 0 or not bot_user_id or not session_id or not token:
+        raise RuntimeError("handoff incompleto para conexão: guild_id/bot_user_id/session_id/token")
+
+    started = time.perf_counter()
+    _voice_agent_set_connection(
+        guild_id,
+        channel_id=str(handoff.get("channel_id") or ""),
+        state="voice_ws_connecting",
+        stage="ws_connect",
+        dry_run=True,
+        ws_url_present=True,
+        endpoint_host=endpoint_host,
+        error="",
+    )
+    hello_received = False
+    ready_received = False
+    ready_payload: dict[str, Any] = {}
+    udp_result: dict[str, Any] = {"attempted": False, "ok": False}
+    client_timeout = aiohttp.ClientTimeout(total=max(1.0, float(timeout_seconds or 4.0)))
+    async with aiohttp.ClientSession(timeout=client_timeout, headers={"User-Agent": f"CorePhoneWorkerVoiceAgent/{PHONE_WORKER_VERSION}"}) as session:
+        async with session.ws_connect(ws_url, timeout=max(1.0, min(8.0, float(timeout_seconds or 4.0))), heartbeat=None) as ws:
+            _voice_agent_set_connection(guild_id, state="voice_ws_identifying", stage="identify", endpoint_host=endpoint_host)
+            await ws.send_json({
+                "op": 0,
+                "d": {
+                    "server_id": str(guild_id),
+                    "user_id": str(bot_user_id),
+                    "session_id": session_id,
+                    "token": token,
+                },
+            })
+            deadline = time.monotonic() + max(1.0, float(timeout_seconds or 4.0))
+            while time.monotonic() < deadline:
+                remaining = max(0.1, min(1.0, deadline - time.monotonic()))
+                msg = await ws.receive(timeout=remaining)
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        payload = json.loads(msg.data or "{}")
+                    except Exception:
+                        continue
+                    op = payload.get("op")
+                    data = payload.get("d") if isinstance(payload.get("d"), dict) else {}
+                    if op == 8:
+                        hello_received = True
+                        interval = int(float(data.get("heartbeat_interval") or 0)) if data else 0
+                        _voice_agent_set_connection(guild_id, state="voice_ws_hello", stage="hello", hello_received=True, heartbeat_interval_ms=interval)
+                        # O dry-run não mantém sessão viva, mas manda um heartbeat curto para validar a ida/volta básica.
+                        with contextlib.suppress(Exception):
+                            await ws.send_json({"op": 3, "d": int(time.time() * 1000)})
+                    elif op == 2:
+                        ready_received = True
+                        ready_payload = dict(data)
+                        ssrc = _voice_agent_int(data.get("ssrc"), 0)
+                        voice_ip = str(data.get("ip") or "").strip()
+                        voice_port = _voice_agent_int(data.get("port"), 0)
+                        modes = data.get("modes") if isinstance(data.get("modes"), list) else []
+                        selected_protocol_ready = bool(voice_ip and voice_port and ssrc and modes)
+                        _voice_agent_set_connection(
+                            guild_id,
+                            state="voice_ws_ready",
+                            stage="ready",
+                            ready_received=True,
+                            ssrc_present=bool(ssrc),
+                            selected_protocol_ready=selected_protocol_ready,
+                            voice_ip=voice_ip,
+                            voice_port=voice_port,
+                            modes=[str(item)[:80] for item in modes[:8]],
+                        )
+                        udp_result = _voice_agent_udp_discovery_probe(ip=voice_ip, port=voice_port, ssrc=ssrc, timeout=max(0.2, min(1.2, float(timeout_seconds or 4.0) / 3.0)))
+                        break
+                    elif op == 6:
+                        _voice_agent_set_connection(guild_id, heartbeat_ack=True)
+                    elif op == 9:
+                        raise RuntimeError("Voice WS invalid session no dry-run")
+                elif msg.type in {aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE}:
+                    break
+            with contextlib.suppress(Exception):
+                await ws.close(code=1000, message=b"Core Worker voice dry-run complete")
+
+    if not ready_received:
+        raise RuntimeError("Voice WS não retornou READY no dry-run")
+    elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
+    final = _voice_agent_set_connection(
+        guild_id,
+        state="connected_dry_run",
+        stage="closed_after_probe",
+        hello_received=hello_received,
+        ready_received=ready_received,
+        connected_once=True,
+        closed_after_probe=True,
+        udp_probe_attempted=bool(udp_result.get("attempted")),
+        udp_probe_ok=bool(udp_result.get("ok")),
+        udp_probe_error=str(udp_result.get("error") or "")[:160],
+        external_ip=str(udp_result.get("ip") or "")[:80],
+        external_port=_voice_agent_int(udp_result.get("port"), 0),
+        latency_ms=elapsed_ms,
+        error="",
+    )
+    return _voice_agent_public_connection(final)
+
+
+def _voice_agent_probe_worker(handoff: dict[str, Any], *, timeout_seconds: float) -> None:
+    guild_id = _voice_agent_int(handoff.get("guild_id"), 0)
+    try:
+        result = asyncio.run(_voice_agent_probe_connection_async(handoff, timeout_seconds=timeout_seconds))
+        _voice_agent_set_connection(guild_id, **{k: v for k, v in result.items() if k not in {"guild_id"}})
+    except Exception as exc:
+        _voice_agent_set_connection(
+            guild_id,
+            state="connection_failed",
+            stage="failed",
+            dry_run=True,
+            connected_once=False,
+            error=f"{type(exc).__name__}: {_short_text(exc, limit=180)}",
+        )
+
+
+def _voice_agent_start_connection_probe(body: dict[str, Any]) -> dict[str, Any]:
+    if not _env_bool("PHONE_WORKER_VOICE_AGENT_ENABLED", True):
+        raise RuntimeError("Worker Voice Agent desativado")
+    if not _env_bool("PHONE_WORKER_VOICE_AGENT_CONNECTION_DRY_RUN_ENABLED", True):
+        raise RuntimeError("voice connection dry-run desativado")
+    guild_id = _voice_agent_int(body.get("guild_id"), 0)
+    handoffs = _voice_agent_prune_handoffs()
+    handoff = handoffs.get(str(guild_id)) if guild_id > 0 else None
+    if not handoff:
+        # Se o chamador acabou de mandar um handoff embutido, aceita sem exigir registro prévio.
+        if isinstance(body.get("discord_voice_handoff"), dict):
+            handoff = _voice_agent_register_handoff_payload(body)
+            with _VOICE_AGENT_SESSION_LOCK:
+                _VOICE_AGENT_HANDOFF_MEMORY[str(handoff["guild_id"])] = handoff
+        else:
+            raise RuntimeError("handoff temporário de voz não encontrado para a guild")
+    guild_id = _voice_agent_int(handoff.get("guild_id"), 0)
+    timeout_seconds = max(1.0, min(10.0, float(body.get("timeout_seconds") or _env_float("PHONE_WORKER_VOICE_AGENT_CONNECTION_TIMEOUT_SECONDS", 4.0))))
+    existing = _voice_agent_connection_summary(guild_id=guild_id, limit=1).get("last_connection") or {}
+    if existing.get("state") in {"probing", "connecting", "voice_ws_connecting", "voice_ws_identifying"} and float(existing.get("updated_age_seconds") or 999.0) < 8.0:
+        return {"ok": True, "started": False, "state": "connection_probe_already_running", **_voice_agent_connection_summary(guild_id=guild_id, limit=5)}
+    _voice_agent_set_connection(
+        guild_id,
+        channel_id=str(handoff.get("channel_id") or ""),
+        state="probing",
+        stage="scheduled",
+        dry_run=True,
+        connected_once=False,
+        endpoint_host=_voice_agent_clean_text(handoff.get("endpoint_host") or handoff.get("endpoint"), limit=160),
+        error="",
+    )
+    thread = threading.Thread(target=_voice_agent_probe_worker, kwargs={"handoff": dict(handoff), "timeout_seconds": timeout_seconds}, name=f"voice-agent-probe-{guild_id}", daemon=True)
+    thread.start()
+    return {"ok": True, "started": True, "state": "connection_probe_started", **_voice_agent_connection_summary(guild_id=guild_id, limit=5)}
+
+
+def _voice_agent_clear_connection(body: dict[str, Any]) -> dict[str, Any]:
+    guild_id = _voice_agent_int(body.get("guild_id"), 0)
+    removed = False
+    with _VOICE_AGENT_SESSION_LOCK:
+        if guild_id > 0:
+            removed = _VOICE_AGENT_CONNECTION_MEMORY.pop(str(guild_id), None) is not None
+        elif body.get("all"):
+            removed = bool(_VOICE_AGENT_CONNECTION_MEMORY)
+            _VOICE_AGENT_CONNECTION_MEMORY.clear()
+    return {"ok": True, "cleared": removed, "state": "connection_cleared" if removed else "connection_not_found", **_voice_agent_connection_summary(limit=5)}
 
 def _voice_agent_register_handoff_payload(body: dict[str, Any]) -> dict[str, Any]:
     raw = body.get("discord_voice_handoff") if isinstance(body.get("discord_voice_handoff"), dict) else body
@@ -2905,12 +3197,14 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
     base_ready = bool(enabled and profile == "turbo" and has_voice_capability and not safe_mode)
     session_summary = _voice_agent_session_summary(limit=5)
     handoff_summary = _voice_agent_handoff_summary(limit=5)
+    connection_summary = _voice_agent_connection_summary(limit=5)
     session_count = int(session_summary.get("session_count") or 0)
     handoff_count = int(handoff_summary.get("handoff_count") or 0)
     handoff_ready = bool(handoff_summary.get("handoff_ready"))
+    connection_ready = bool(connection_summary.get("connection_ready"))
     shared_ready = bool(base_ready and shared_session_enabled and (music_ready or direct_music_enabled) and tts_ready)
     shared_session_ready = bool(shared_ready and session_count > 0)
-    direct_tts_ready = bool(shared_session_ready and handoff_ready and direct_tts_enabled and music_ready)
+    direct_tts_ready = bool(shared_session_ready and handoff_ready and connection_ready and direct_tts_enabled and music_ready)
 
     missing: list[str] = []
     if not enabled:
@@ -2931,9 +3225,13 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
         missing.append("sessão de voz registrada pela VPS")
     if shared_session_ready and not handoff_ready:
         missing.append("handoff temporário de voz")
+    if shared_session_ready and handoff_ready and not connection_ready:
+        missing.append("conexão voice dry-run")
 
     if direct_tts_ready:
         state = "direct_tts_voice_ready"
+    elif shared_session_ready and handoff_ready and connection_ready:
+        state = "voice_connection_dry_run_ready"
     elif shared_session_ready and handoff_ready:
         state = "voice_handoff_registered_dry_run"
     elif shared_session_ready:
@@ -2970,6 +3268,14 @@ def _voice_agent_snapshot(*, music_agent: dict[str, Any] | None = None, tts_agen
         "handoff_guilds": list(handoff_summary.get("handoff_guilds") or [])[:12],
         "handoffs": list(handoff_summary.get("handoffs") or [])[:5],
         "last_handoff": dict(handoff_summary.get("last_handoff") or {}),
+        "connection_count": int(connection_summary.get("connection_count") or 0),
+        "connection_ready_count": int(connection_summary.get("connection_ready_count") or 0),
+        "connection_probing_count": int(connection_summary.get("connection_probing_count") or 0),
+        "connection_failed_count": int(connection_summary.get("connection_failed_count") or 0),
+        "connection_ready": bool(connection_summary.get("connection_ready")),
+        "connection_guilds": list(connection_summary.get("connection_guilds") or [])[:12],
+        "connections": list(connection_summary.get("connections") or [])[:5],
+        "last_connection": dict(connection_summary.get("last_connection") or {}),
         "direct_tts_enabled": bool(direct_tts_enabled),
         "direct_tts_ready": bool(direct_tts_ready),
         "direct_music_enabled": bool(direct_music_enabled),
@@ -3347,6 +3653,12 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_voice_agent_clear_handoff(body)
             elif task == "voice_agent_handoff_status":
                 payload = self._task_voice_agent_handoff_status(body)
+            elif task == "voice_agent_probe_connection":
+                payload = self._task_voice_agent_probe_connection(body)
+            elif task == "voice_agent_connection_status":
+                payload = self._task_voice_agent_connection_status(body)
+            elif task == "voice_agent_clear_connection":
+                payload = self._task_voice_agent_clear_connection(body)
             elif task == "log_extract":
                 payload = self._task_log_extract(body)
             elif task == "log_summary":
@@ -3713,6 +4025,31 @@ class WorkerHandler(BaseHTTPRequestHandler):
         snapshot.update(summary)
         snapshot["guild_id"] = str(guild_id or "")
         snapshot.setdefault("logs", []).append("status de handoff de voz coletado")
+        return snapshot
+
+    def _task_voice_agent_probe_connection(self, body: dict[str, Any]) -> dict[str, Any]:
+        result = _voice_agent_start_connection_probe(body)
+        snapshot = _voice_agent_snapshot()
+        snapshot.update(result)
+        snapshot["voice_agent"] = _voice_agent_snapshot()
+        snapshot.setdefault("logs", []).append("voice connection dry-run iniciado; sem áudio e sem DISCORD_TOKEN no worker")
+        return snapshot
+
+    def _task_voice_agent_connection_status(self, body: dict[str, Any]) -> dict[str, Any]:
+        guild_id = _voice_agent_int(body.get("guild_id"), 0)
+        summary = _voice_agent_connection_summary(guild_id=guild_id if guild_id > 0 else None, limit=5)
+        snapshot = _voice_agent_snapshot()
+        snapshot.update(summary)
+        snapshot["guild_id"] = str(guild_id or "")
+        snapshot.setdefault("logs", []).append("status de conexão voice dry-run coletado")
+        return snapshot
+
+    def _task_voice_agent_clear_connection(self, body: dict[str, Any]) -> dict[str, Any]:
+        result = _voice_agent_clear_connection(body)
+        snapshot = _voice_agent_snapshot()
+        snapshot.update(result)
+        snapshot["voice_agent"] = _voice_agent_snapshot()
+        snapshot.setdefault("logs", []).append("estado de conexão voice dry-run limpo")
         return snapshot
 
     def _task_tts_agent_status(self, body: dict[str, Any]) -> dict[str, Any]:

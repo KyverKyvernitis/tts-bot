@@ -1,3 +1,9 @@
+## Patch 85.6: conexão de voz dry-run do Worker Voice Agent
+
+A versão `1.10.17` adiciona o primeiro teste controlado de conexão de voz do Worker Voice Agent. Depois que a VPS registra a sessão lógica e o handoff temporário, o worker pode iniciar `voice_agent_probe_connection`, abrir o Voice WebSocket do Discord com o `session_id`/endpoint/token temporário, esperar o `READY`, tentar o UDP discovery e fechar a conexão em seguida. Essa etapa **não toca áudio**, não recebe `DISCORD_TOKEN` geral e não transforma o worker no cérebro do bot; ela só valida que o plano de áudio do worker consegue iniciar a conexão de voz quando online.
+
+Novas tasks diretas: `voice_agent_probe_connection`, `voice_agent_connection_status` e `voice_agent_clear_connection`. O painel `/vps` passa a exibir a linha de conexão dry-run com estado, etapa, WS ready, UDP e latência. A conexão é curta e fecha após o probe, preparando o próximo patch para manter a sessão viva e, depois disso, tocar TTS direto worker → Discord.
+
 ## Patch 85.5: handoff dry-run do Worker Voice Agent
 
 A versão `1.10.16` adiciona o handoff temporário de voz em modo dry-run. A VPS continua como cérebro do bot, mas quando uma sessão de voz está ativa ela também envia ao worker os dados temporários necessários para a futura conexão de voz (`session_id`, endpoint e token temporário de voz). Esse handoff fica **somente em memória**, expira rápido e não é salvo no `voice-agent-state.json`. O `DISCORD_TOKEN` geral do bot continua sem ser enviado ao worker.

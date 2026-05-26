@@ -105,6 +105,9 @@ WORKER_VOICE_AGENT_SESSION_REPORT_MIN_INTERVAL_SECONDS = max(3.0, float(getattr(
 WORKER_VOICE_AGENT_HANDOFF_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_HANDOFF_ENABLED", True))
 WORKER_VOICE_AGENT_HANDOFF_TTL_SECONDS = max(10.0, float(getattr(config, "WORKER_VOICE_AGENT_HANDOFF_TTL_SECONDS", 60.0) or 60.0))
 WORKER_VOICE_AGENT_HANDOFF_TIMEOUT_SECONDS = max(0.6, float(getattr(config, "WORKER_VOICE_AGENT_HANDOFF_TIMEOUT_SECONDS", 1.5) or 1.5))
+WORKER_VOICE_AGENT_CONNECTION_DRY_RUN_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_CONNECTION_DRY_RUN_ENABLED", True))
+WORKER_VOICE_AGENT_CONNECTION_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "WORKER_VOICE_AGENT_CONNECTION_TIMEOUT_SECONDS", 4.0) or 4.0))
+WORKER_VOICE_AGENT_CONNECTION_REPORT_TIMEOUT_SECONDS = max(0.6, float(getattr(config, "WORKER_VOICE_AGENT_CONNECTION_REPORT_TIMEOUT_SECONDS", 1.5) or 1.5))
 TTS_LONG_TEXT_CHUNK_ENABLED = bool(getattr(config, "TTS_LONG_TEXT_CHUNK_ENABLED", True))
 TTS_LONG_TEXT_CHUNK_MAX_CHARS = max(160, int(getattr(config, "TTS_LONG_TEXT_CHUNK_MAX_CHARS", 420) or 420))
 TTS_LONG_TEXT_CHUNK_MAX_PARTS = max(1, int(getattr(config, "TTS_LONG_TEXT_CHUNK_MAX_PARTS", 8) or 8))
@@ -1796,10 +1799,16 @@ class TTSAudioMixin:
             "session_count": int(voice_agent.get("session_count") or 0),
             "handoff_count": int(voice_agent.get("handoff_count") or 0),
             "handoff_ready": bool(voice_agent.get("handoff_ready")),
+            "connection_count": int(voice_agent.get("connection_count") or 0),
+            "connection_ready_count": int(voice_agent.get("connection_ready_count") or 0),
+            "connection_probing_count": int(voice_agent.get("connection_probing_count") or 0),
+            "connection_failed_count": int(voice_agent.get("connection_failed_count") or 0),
+            "connection_ready": bool(voice_agent.get("connection_ready")),
             "active_guilds": [str(item)[:32] for item in list(voice_agent.get("active_guilds") or [])[:8]],
             "handoff_guilds": [str(item)[:32] for item in list(voice_agent.get("handoff_guilds") or [])[:8]],
             "last_session": dict(voice_agent.get("last_session") or {}) if isinstance(voice_agent.get("last_session"), dict) else {},
             "last_handoff": dict(voice_agent.get("last_handoff") or {}) if isinstance(voice_agent.get("last_handoff"), dict) else {},
+            "last_connection": dict(voice_agent.get("last_connection") or {}) if isinstance(voice_agent.get("last_connection"), dict) else {},
             "missing": [str(item)[:80] for item in list(voice_agent.get("missing") or [])[:6]],
         }
         sessions = voice_agent.get("sessions")
@@ -1808,6 +1817,9 @@ class TTSAudioMixin:
         handoffs = voice_agent.get("handoffs")
         if isinstance(handoffs, list):
             compact["handoffs"] = [dict(item) for item in handoffs[:5] if isinstance(item, dict)]
+        connections = voice_agent.get("connections")
+        if isinstance(connections, list):
+            compact["connections"] = [dict(item) for item in connections[:5] if isinstance(item, dict)]
         return compact
 
     def _update_worker_voice_agent_snapshot(self, voice_agent: dict[str, Any] | None) -> None:
@@ -1896,11 +1908,41 @@ class TTSAudioMixin:
                     data.get("state"),
                     data.get("handoff_ready"),
                 )
+                if WORKER_VOICE_AGENT_CONNECTION_DRY_RUN_ENABLED:
+                    ctask = asyncio.create_task(self._worker_voice_agent_probe_connection({
+                        "guild_id": guild_id,
+                        "channel_id": int(payload.get("channel_id") or 0),
+                        "source": str(payload.get("source") or "tts")[:40],
+                        "timeout_seconds": WORKER_VOICE_AGENT_CONNECTION_TIMEOUT_SECONDS,
+                    }))
+                    ctask.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             else:
                 self._record_worker_voice_session_metric("handoff_failed")
         except Exception as exc:
             self._record_worker_voice_session_metric("handoff_failed")
             logger.debug("[worker_voice_agent] handoff dry-run falhou | guild=%s erro=%s", guild_id, exc)
+
+    async def _worker_voice_agent_probe_connection(self, payload: dict[str, Any]) -> None:
+        guild_id = int(payload.get("guild_id") or 0)
+        try:
+            data = await self._request_worker_voice_agent_json(
+                task="voice_agent_probe_connection",
+                payload=payload,
+                timeout_seconds=WORKER_VOICE_AGENT_CONNECTION_REPORT_TIMEOUT_SECONDS,
+            )
+            if bool(data.get("ok", True)):
+                self._record_worker_voice_session_metric("connection_probe_ok")
+                logger.debug(
+                    "[worker_voice_agent] conexão voice dry-run iniciada | guild=%s state=%s ready=%s",
+                    guild_id,
+                    data.get("state"),
+                    data.get("connection_ready"),
+                )
+            else:
+                self._record_worker_voice_session_metric("connection_probe_failed")
+        except Exception as exc:
+            self._record_worker_voice_session_metric("connection_probe_failed")
+            logger.debug("[worker_voice_agent] conexão voice dry-run falhou ao iniciar | guild=%s erro=%s", guild_id, exc)
 
     def _schedule_worker_voice_agent_clear_session(self, guild_id: int, *, reason: str = "unknown") -> None:
         if not self._worker_voice_agent_reports_enabled():

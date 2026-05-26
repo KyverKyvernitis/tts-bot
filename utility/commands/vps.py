@@ -711,10 +711,13 @@ class VpsCommandMixin:
         voice_tts_ready = "sim" if voice_agent.get("tts_ready") else "não"
         voice_session_count = int(voice_agent.get("session_count") or 0)
         voice_handoff_count = int(voice_agent.get("handoff_count") or 0)
+        voice_connection_count = int(voice_agent.get("connection_count") or 0)
         voice_shared_ready = "sim" if voice_agent.get("shared_session_ready") else "não"
         voice_handoff_ready = "sim" if voice_agent.get("handoff_ready") else "não"
+        voice_connection_ready = "sim" if voice_agent.get("connection_ready") else "não"
         last_voice_session = voice_agent.get("last_session") if isinstance(voice_agent.get("last_session"), dict) else {}
         last_handoff = voice_agent.get("last_handoff") if isinstance(voice_agent.get("last_handoff"), dict) else {}
+        last_connection = voice_agent.get("last_connection") if isinstance(voice_agent.get("last_connection"), dict) else {}
         if last_voice_session:
             voice_session_line = (
                 f"Sessão lógica: `{self._format_vps_int(voice_session_count)}` · compartilhada `{voice_shared_ready}` · "
@@ -731,12 +734,28 @@ class VpsCommandMixin:
             )
         else:
             voice_handoff_line = f"Handoff voz: `{voice_handoff_ready}` · registros `{self._format_vps_int(voice_handoff_count)}` · aguardando session_id/endpoint/token temporário"
+        if last_connection:
+            conn_state = str(last_connection.get('state') or '—')[:60]
+            conn_stage = str(last_connection.get('stage') or '—')[:60]
+            conn_latency = last_connection.get('latency_ms')
+            conn_error = str(last_connection.get('error') or '')[:100]
+            voice_connection_line = (
+                f"Conexão dry-run: `{voice_connection_ready}` · registros `{self._format_vps_int(voice_connection_count)}` · "
+                f"estado `{conn_state}` · etapa `{conn_stage}` · WS ready `{ 'sim' if last_connection.get('ready_received') else 'não' }` · "
+                f"UDP `{ 'sim' if last_connection.get('udp_probe_ok') else 'não' }` · {self._vps_format_ms(conn_latency or 0)}"
+            )
+            if conn_error:
+                voice_connection_line += f" · erro `{conn_error}`"
+        else:
+            voice_connection_line = f"Conexão dry-run: `{voice_connection_ready}` · registros `{self._format_vps_int(voice_connection_count)}` · aguardando probe do worker"
         voice_report_ok = int(tts_metrics.get("worker_voice_session_reports_ok", 0) or 0)
         voice_report_failed = int(tts_metrics.get("worker_voice_session_reports_failed", 0) or 0)
         voice_report_skipped = int(tts_metrics.get("worker_voice_session_skipped", 0) or 0)
         voice_handoff_ok = int(tts_metrics.get("worker_voice_session_handoff_ok", 0) or 0)
         voice_handoff_failed = int(tts_metrics.get("worker_voice_session_handoff_failed", 0) or 0)
         voice_handoff_skipped = int(tts_metrics.get("worker_voice_session_handoff_skipped", 0) or 0)
+        voice_connection_probe_ok = int(tts_metrics.get("worker_voice_session_connection_probe_ok", 0) or 0)
+        voice_connection_probe_failed = int(tts_metrics.get("worker_voice_session_connection_probe_failed", 0) or 0)
 
         if last_requested or last_selected:
             last_worker_line = (
@@ -763,8 +782,10 @@ class VpsCommandMixin:
             f"Music `{voice_music_ready}` · TTS `{voice_tts_ready}` · ducking `{'sim' if voice_agent.get('ducking_ready') else 'não'}`",
             voice_session_line,
             voice_handoff_line,
+            voice_connection_line,
             f"Registro sessão: `{self._format_vps_int(voice_report_ok)}` ok · `{self._format_vps_int(voice_report_failed)}` falhas · `{self._format_vps_int(voice_report_skipped)}` pulados",
             f"Registro handoff: `{self._format_vps_int(voice_handoff_ok)}` ok · `{self._format_vps_int(voice_handoff_failed)}` falhas · `{self._format_vps_int(voice_handoff_skipped)}` pulados",
+            f"Probe conexão: `{self._format_vps_int(voice_connection_probe_ok)}` start ok · `{self._format_vps_int(voice_connection_probe_failed)}` falhas",
             f"Pendências: `{voice_missing[:140]}`",
             "",
             "### 📱 TTS do Worker / TTS Agent",
