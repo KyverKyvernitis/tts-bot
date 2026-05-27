@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import colorsys
 import hashlib
 import io
 import importlib
@@ -5415,78 +5416,106 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raw = "#5865F2"
         return int(raw[1:3], 16), int(raw[3:5], 16), int(raw[5:7], 16)
 
-    def _recolor_rgba_image(self, img: Any, rgb: tuple[int, int, int]) -> Any:
+    def _mix_rgb_worker(self, first: tuple[int, int, int], second: tuple[int, int, int], amount: float) -> tuple[int, int, int]:
+        amount = max(0.0, min(1.0, float(amount)))
+        return (
+            max(0, min(255, int(round(first[0] * (1.0 - amount) + second[0] * amount)))),
+            max(0, min(255, int(round(first[1] * (1.0 - amount) + second[1] * amount)))),
+            max(0, min(255, int(round(first[2] * (1.0 - amount) + second[2] * amount)))),
+        )
+
+    def _adjust_rgb_hsv_worker(self, rgb: tuple[int, int, int], *, sat_mul: float = 1.0, val_mul: float = 1.0, hue_shift: float = 0.0) -> tuple[int, int, int]:
+        h, sat, val = colorsys.rgb_to_hsv(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255)
+        h = (h + hue_shift) % 1.0
+        sat = max(0.0, min(1.0, sat * sat_mul))
+        val = max(0.0, min(1.0, val * val_mul))
+        r, g, b = colorsys.hsv_to_rgb(h, sat, val)
+        return int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
+
+    def _palette_from_hex_worker(self, values: Any, fallback: tuple[int, int, int]) -> list[tuple[int, int, int]]:
+        result: list[tuple[int, int, int]] = []
+        if isinstance(values, list):
+            for item in values[:8]:
+                try:
+                    result.append(self._rgb_from_hex_worker(item))
+                except Exception:
+                    continue
+        if result:
+            return result
+        return [
+            fallback,
+            self._adjust_rgb_hsv_worker(fallback, sat_mul=0.92, val_mul=1.24),
+            self._adjust_rgb_hsv_worker(fallback, sat_mul=1.06, val_mul=0.68),
+        ]
+
+    def _fit_emoji_canvas_frame(self, frame: Any, *, canvas_size: int = 128) -> Any:
+        if Image is None:
+            raise RuntimeError("Pillow não instalado no worker")
+        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+        rgba = frame.convert("RGBA")
+        if rgba.size == (canvas_size, canvas_size):
+            return rgba.copy()
+        width, height = rgba.size
+        if width <= 0 or height <= 0:
+            return Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+        scale = min(canvas_size / float(width), canvas_size / float(height))
+        new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+        resized = rgba.resize(new_size, resampling)
+        canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+        canvas.alpha_composite(resized, ((canvas_size - resized.width) // 2, (canvas_size - resized.height) // 2))
+        return canvas
+
+    def _recolor_rgba_image(self, img: Any, rgb: tuple[int, int, int], palette: list[tuple[int, int, int]] | None = None) -> Any:
         img = img.convert("RGBA")
         px = img.load()
-        tr, tg, tb = rgb
+        base = rgb
+        usable_palette = palette or [base]
+        light = usable_palette[1] if len(usable_palette) > 1 else self._adjust_rgb_hsv_worker(base, sat_mul=0.92, val_mul=1.22)
+        dark = usable_palette[2] if len(usable_palette) > 2 else self._adjust_rgb_hsv_worker(base, sat_mul=1.04, val_mul=0.68)
+        accents = usable_palette[3:] or [base]
         width, height = img.size
         for y in range(height):
             for x in range(width):
                 r, g, b, a = px[x, y]
                 if a < 8:
                     continue
-                brightness = max(0.20, min(1.20, (r * 0.299 + g * 0.587 + b * 0.114) / 185.0))
-                px[x, y] = (min(255, int(tr * brightness)), min(255, int(tg * brightness)), min(255, int(tb * brightness)), a)
+                lum = max(0.0, min(1.0, (r * 0.299 + g * 0.587 + b * 0.114) / 255.0))
+                if lum < 0.50:
+                    target = self._mix_rgb_worker(dark, base, lum / 0.50)
+                else:
+                    target = self._mix_rgb_worker(base, light, (lum - 0.50) / 0.50)
+                try:
+                    oh, osat, _oval = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                    if accents and osat > 0.08:
+                        accent = accents[(int(oh * 12) + (x // 24) + (y // 24)) % len(accents)]
+                        target = self._mix_rgb_worker(target, accent, 0.10)
+                except Exception:
+                    pass
+                px[x, y] = (target[0], target[1], target[2], a)
         return img
 
-    def _visible_alpha_bbox(self, img: Any, *, threshold: int = 10) -> tuple[int, int, int, int] | None:
-        if Image is None:
-            return None
-        rgba = img.convert("RGBA")
-        alpha = rgba.getchannel("A").point(lambda value: 255 if value >= threshold else 0)
-        return alpha.getbbox()
-
-    def _union_alpha_bbox(self, frames: list[Any], *, threshold: int = 10) -> tuple[int, int, int, int] | None:
-        box: tuple[int, int, int, int] | None = None
-        for frame in frames:
-            bbox = self._visible_alpha_bbox(frame, threshold=threshold)
-            if bbox is None:
-                continue
-            if box is None:
-                box = bbox
-            else:
-                box = (min(box[0], bbox[0]), min(box[1], bbox[1]), max(box[2], bbox[2]), max(box[3], bbox[3]))
-        return box
-
-    def _normalize_emoji_frame(self, frame: Any, *, bbox: tuple[int, int, int, int] | None = None, canvas_size: int = 128, fill_ratio: float = 0.88) -> Any:
-        if Image is None:
-            raise RuntimeError("Pillow não instalado no worker")
-        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
-        rgba = frame.convert("RGBA")
-        bbox = bbox or self._visible_alpha_bbox(rgba)
-        canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
-        if not bbox:
-            return canvas
-        left, top, right, bottom = bbox
-        if right <= left or bottom <= top:
-            return canvas
-        cropped = rgba.crop((left, top, right, bottom))
-        max_dim = max(cropped.width, cropped.height)
-        if max_dim <= 0:
-            return canvas
-        target = max(16, min(canvas_size, int(canvas_size * fill_ratio)))
-        scale = target / float(max_dim)
-        new_size = (max(1, int(round(cropped.width * scale))), max(1, int(round(cropped.height * scale))))
-        resized = cropped.resize(new_size, resampling)
-        canvas.alpha_composite(resized, ((canvas_size - resized.width) // 2, (canvas_size - resized.height) // 2))
-        return canvas
-
     def _save_static_emoji_png(self, img: Any) -> bytes:
-        for size in (128, 112, 96):
-            candidate = img if size == 128 else self._normalize_emoji_frame(img, canvas_size=128, fill_ratio=size / 128.0)
-            out = io.BytesIO()
-            candidate.save(out, format="PNG", optimize=True)
-            data = out.getvalue()
-            if len(data) <= 256 * 1024:
-                return data
+        candidate = self._fit_emoji_canvas_frame(img, canvas_size=128)
+        out = io.BytesIO()
+        candidate.save(out, format="PNG", optimize=True)
+        data = out.getvalue()
+        if len(data) <= 256 * 1024:
+            return data
+        quantized = candidate.convert("P", palette=Image.Palette.ADAPTIVE, colors=96).convert("RGBA") if Image is not None else candidate
+        out = io.BytesIO()
+        quantized.save(out, format="PNG", optimize=True)
+        data = out.getvalue()
+        if len(data) <= 256 * 1024:
+            return data
         raise RuntimeError("emoji estático ficou maior que 256 KiB")
 
     def _save_animated_emoji_gif(self, frames: list[Any], durations: list[int]) -> bytes | None:
         if not frames:
             return None
-        for step in (1, 2, 3, 4, 5, 6):
-            selected = [frame for idx, frame in enumerate(frames) if idx % step == 0]
-            selected_durations = [max(20, min(500, int((durations[idx] if idx < len(durations) else 80) * step))) for idx in range(len(frames)) if idx % step == 0]
+        normalized_frames = [self._fit_emoji_canvas_frame(frame, canvas_size=128) for frame in frames]
+        for step in (1, 2, 3, 4, 5, 6, 8, 10):
+            selected = [frame for idx, frame in enumerate(normalized_frames) if idx % step == 0]
+            selected_durations = [max(20, min(500, int((durations[idx] if idx < len(durations) else 80) * step))) for idx in range(len(normalized_frames)) if idx % step == 0]
             if not selected:
                 continue
             out = io.BytesIO()
@@ -5496,24 +5525,22 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 return data
         return None
 
-    def _recolor_emoji_bytes(self, raw: bytes, *, animated: bool, color: str) -> tuple[bytes, str]:
+    def _recolor_emoji_bytes(self, raw: bytes, *, animated: bool, color: str, palette: list[tuple[int, int, int]] | None = None) -> tuple[bytes, str]:
         if Image is None:
             raise RuntimeError("Pillow não instalado no worker")
         rgb = self._rgb_from_hex_worker(color)
+        subtle_palette = palette or self._palette_from_hex_worker([], rgb)
         with Image.open(io.BytesIO(raw)) as img:
             if animated and getattr(img, "is_animated", False) and ImageSequence is not None:
                 raw_frames = [frame.convert("RGBA") for frame in ImageSequence.Iterator(img)]
-                bbox = self._union_alpha_bbox(raw_frames)
-                if not bbox:
-                    raise RuntimeError("emoji animado sem pixels visíveis")
-                frames = [self._recolor_rgba_image(self._normalize_emoji_frame(frame, bbox=bbox), rgb) for frame in raw_frames]
+                frames = [self._recolor_rgba_image(self._fit_emoji_canvas_frame(frame), rgb, subtle_palette) for frame in raw_frames]
                 durations = [int(getattr(frame, "info", {}).get("duration") or img.info.get("duration") or 80) for frame in ImageSequence.Iterator(img)]
                 data = self._save_animated_emoji_gif(frames, durations)
                 if data is not None:
                     return data, "gif"
                 return self._save_static_emoji_png(frames[0]), "png"
-            normalized = self._normalize_emoji_frame(img.convert("RGBA"))
-            out_img = self._recolor_rgba_image(normalized, rgb)
+            fitted = self._fit_emoji_canvas_frame(img.convert("RGBA"))
+            out_img = self._recolor_rgba_image(fitted, rgb, subtle_palette)
             return self._save_static_emoji_png(out_img), "png"
 
     def _task_emoji_recolor(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -5521,6 +5548,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if not isinstance(emojis, list):
             raise ValueError("emojis precisa ser lista")
         color = str(body.get("color") or "#5865F2")
+        base_rgb = self._rgb_from_hex_worker(color)
+        palette = self._palette_from_hex_worker(body.get("palette"), base_rgb)
         items: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
         for raw in emojis[:4]:
@@ -5544,7 +5573,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 continue
             try:
                 data = self._download_emoji_asset(emoji)
-                out, fmt = self._recolor_emoji_bytes(data, animated=bool(emoji.get("animated")), color=color)
+                out, fmt = self._recolor_emoji_bytes(data, animated=bool(emoji.get("animated")), color=color, palette=palette)
                 items.append({**emoji, "format": fmt, "size": len(out), "data_b64": _b64encode(out, max_bytes=512 * 1024)})
             except Exception as exc:
                 errors.append({"id": emoji["id"], "error": str(exc)[:160]})

@@ -4191,86 +4191,145 @@ class WelcomeCog(commands.Cog):
     async def _fetch_custom_emoji_bytes(self, emoji: dict[str, Any]) -> bytes:
         return await asyncio.to_thread(self._fetch_url_bytes_sync, self._emoji_cdn_url(emoji), timeout=4.0, limit=900_000)
 
-    def _recolor_rgba_image(self, img: Any, rgb: tuple[int, int, int]) -> Any:
+    def _mix_rgb(self, first: tuple[int, int, int], second: tuple[int, int, int], amount: float) -> tuple[int, int, int]:
+        amount = max(0.0, min(1.0, float(amount)))
+        return (
+            max(0, min(255, int(round(first[0] * (1.0 - amount) + second[0] * amount)))),
+            max(0, min(255, int(round(first[1] * (1.0 - amount) + second[1] * amount)))),
+            max(0, min(255, int(round(first[2] * (1.0 - amount) + second[2] * amount)))),
+        )
+
+    def _adjust_rgb_hsv(self, rgb: tuple[int, int, int], *, sat_mul: float = 1.0, val_mul: float = 1.0, hue_shift: float = 0.0) -> tuple[int, int, int]:
+        h, sat, val = colorsys.rgb_to_hsv(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255)
+        h = (h + hue_shift) % 1.0
+        sat = max(0.0, min(1.0, sat * sat_mul))
+        val = max(0.0, min(1.0, val * val_mul))
+        r, g, b = colorsys.hsv_to_rgb(h, sat, val)
+        return int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
+
+    def _subtle_emoji_palette(self, base_rgb: tuple[int, int, int], avatar_palette: list[tuple[int, int, int]] | None = None) -> list[tuple[int, int, int]]:
+        """Cria uma paleta coerente com a cor final da mensagem.
+
+        A cor principal do emoji é sempre a cor efetiva do embed/visual. As cores do
+        avatar entram só como nuances discretas, para não virar arco-íris nem fugir do
+        tema escolhido pelo servidor.
+        """
+        palette: list[tuple[int, int, int]] = [base_rgb]
+        palette.append(self._adjust_rgb_hsv(base_rgb, sat_mul=0.92, val_mul=1.24))
+        palette.append(self._adjust_rgb_hsv(base_rgb, sat_mul=1.06, val_mul=0.68))
+        base_h, base_s, base_v = colorsys.rgb_to_hsv(base_rgb[0] / 255, base_rgb[1] / 255, base_rgb[2] / 255)
+        for raw in avatar_palette or []:
+            try:
+                ah, asat, aval = colorsys.rgb_to_hsv(raw[0] / 255, raw[1] / 255, raw[2] / 255)
+            except Exception:
+                continue
+            # Mantém a variação perto da cor principal. Mesmo se o avatar tiver uma cor
+            # muito diferente, usamos só uma influência pequena.
+            diff = ((ah - base_h + 0.5) % 1.0) - 0.5
+            hue_shift = max(-0.035, min(0.035, diff * 0.18))
+            sat_mul = 0.96 + max(-0.10, min(0.10, (asat - base_s) * 0.18))
+            val_mul = 0.96 + max(-0.12, min(0.12, (aval - base_v) * 0.22))
+            candidate = self._adjust_rgb_hsv(base_rgb, sat_mul=sat_mul, val_mul=val_mul, hue_shift=hue_shift)
+            if candidate not in palette:
+                palette.append(candidate)
+            if len(palette) >= 6:
+                break
+        while len(palette) < 4:
+            shift = 0.018 * len(palette)
+            palette.append(self._adjust_rgb_hsv(base_rgb, sat_mul=1.0, val_mul=1.0 + (0.06 if len(palette) % 2 else -0.06), hue_shift=shift))
+        return palette[:6]
+
+    def _hex_palette_from_rgb(self, palette: list[tuple[int, int, int]]) -> list[str]:
+        return [f"#{r:02X}{g:02X}{b:02X}" for r, g, b in (palette or [])]
+
+    def _palette_from_hex_list(self, values: Any, fallback: tuple[int, int, int]) -> list[tuple[int, int, int]]:
+        result: list[tuple[int, int, int]] = []
+        if isinstance(values, list):
+            for item in values[:8]:
+                try:
+                    result.append(self._rgb_from_hex(item, f"#{fallback[0]:02X}{fallback[1]:02X}{fallback[2]:02X}"))
+                except Exception:
+                    continue
+        return result or [fallback]
+
+    def _fit_emoji_canvas_frame(self, frame: Any, *, canvas_size: int = 128) -> Any:
+        """Ajusta o canvas inteiro para 128x128 preservando padding/posição.
+
+        Não recorta a área visível. Isso é importante porque alguns emojis têm espaço
+        transparente proposital; o recolorido deve manter o tamanho visual original e
+        não crescer nem virar pontinho por causa de geometria diferente.
+        """
+        if Image is None:
+            raise RuntimeError("Pillow indisponível")
+        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+        rgba = frame.convert("RGBA")
+        if rgba.size == (canvas_size, canvas_size):
+            return rgba.copy()
+        width, height = rgba.size
+        if width <= 0 or height <= 0:
+            return Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+        scale = min(canvas_size / float(width), canvas_size / float(height))
+        new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+        resized = rgba.resize(new_size, resampling)
+        canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+        canvas.alpha_composite(resized, ((canvas_size - resized.width) // 2, (canvas_size - resized.height) // 2))
+        return canvas
+
+    def _recolor_rgba_image(self, img: Any, rgb: tuple[int, int, int], palette: list[tuple[int, int, int]] | None = None) -> Any:
         img = img.convert("RGBA")
         px = img.load()
-        tr, tg, tb = rgb
+        base = rgb
+        usable_palette = palette or [base]
+        light = usable_palette[1] if len(usable_palette) > 1 else self._adjust_rgb_hsv(base, sat_mul=0.92, val_mul=1.22)
+        dark = usable_palette[2] if len(usable_palette) > 2 else self._adjust_rgb_hsv(base, sat_mul=1.04, val_mul=0.68)
+        accents = usable_palette[3:] or [base]
         width, height = img.size
         for y in range(height):
             for x in range(width):
                 r, g, b, a = px[x, y]
                 if a < 8:
                     continue
-                # Preserva um pouco da luz/sombra original do emoji para ele não virar bloco chapado.
-                brightness = max(0.20, min(1.20, (r * 0.299 + g * 0.587 + b * 0.114) / 185.0))
-                px[x, y] = (min(255, int(tr * brightness)), min(255, int(tg * brightness)), min(255, int(tb * brightness)), a)
+                lum = max(0.0, min(1.0, (r * 0.299 + g * 0.587 + b * 0.114) / 255.0))
+                if lum < 0.50:
+                    target = self._mix_rgb(dark, base, lum / 0.50)
+                else:
+                    target = self._mix_rgb(base, light, (lum - 0.50) / 0.50)
+                # Pequena nuance da paleta perto da cor principal. A influência é baixa
+                # para preservar um tema único baseado na cor do embed.
+                try:
+                    oh, osat, oval = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                    if accents and osat > 0.08:
+                        accent = accents[(int(oh * 12) + (x // 24) + (y // 24)) % len(accents)]
+                        target = self._mix_rgb(target, accent, 0.10)
+                except Exception:
+                    pass
+                px[x, y] = (target[0], target[1], target[2], a)
         return img
 
-    def _visible_alpha_bbox(self, img: Any, *, threshold: int = 10) -> tuple[int, int, int, int] | None:
-        """Retorna a área visível real do emoji, ignorando padding transparente."""
-        if Image is None:
-            return None
-        rgba = img.convert("RGBA")
-        alpha = rgba.getchannel("A").point(lambda value: 255 if value >= threshold else 0)
-        return alpha.getbbox()
-
-    def _union_alpha_bbox(self, frames: list[Any], *, threshold: int = 10) -> tuple[int, int, int, int] | None:
-        box: tuple[int, int, int, int] | None = None
-        for frame in frames:
-            bbox = self._visible_alpha_bbox(frame, threshold=threshold)
-            if bbox is None:
-                continue
-            if box is None:
-                box = bbox
-            else:
-                box = (min(box[0], bbox[0]), min(box[1], bbox[1]), max(box[2], bbox[2]), max(box[3], bbox[3]))
-        return box
-
-    def _normalize_emoji_frame(self, frame: Any, *, bbox: tuple[int, int, int, int] | None = None, canvas_size: int = 128, fill_ratio: float = 0.88) -> Any:
-        """Normaliza o emoji para 128x128, fazendo o conteúdo ocupar quase todo o canvas.
-
-        O bug anterior deixava alguns emojis animados como um pontinho porque o frame
-        original tinha muito padding transparente. Aqui cortamos a área visível,
-        redimensionamos e centralizamos de novo.
-        """
-        if Image is None:
-            raise RuntimeError("Pillow indisponível")
-        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
-        rgba = frame.convert("RGBA")
-        bbox = bbox or self._visible_alpha_bbox(rgba)
-        canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
-        if not bbox:
-            return canvas
-        left, top, right, bottom = bbox
-        if right <= left or bottom <= top:
-            return canvas
-        cropped = rgba.crop((left, top, right, bottom))
-        max_dim = max(cropped.width, cropped.height)
-        if max_dim <= 0:
-            return canvas
-        target = max(16, min(canvas_size, int(canvas_size * fill_ratio)))
-        scale = target / float(max_dim)
-        new_size = (max(1, int(round(cropped.width * scale))), max(1, int(round(cropped.height * scale))))
-        resized = cropped.resize(new_size, resampling)
-        canvas.alpha_composite(resized, ((canvas_size - resized.width) // 2, (canvas_size - resized.height) // 2))
-        return canvas
-
     def _save_static_emoji_png(self, img: Any) -> bytes:
-        for size in (128, 112, 96):
-            candidate = img if size == 128 else self._normalize_emoji_frame(img, canvas_size=128, fill_ratio=size / 128.0)
-            out = BytesIO()
-            candidate.save(out, format="PNG", optimize=True)
-            data = out.getvalue()
-            if len(data) <= DISCORD_EMOJI_MAX_BYTES:
-                return data
+        candidate = self._fit_emoji_canvas_frame(img, canvas_size=128)
+        out = BytesIO()
+        candidate.save(out, format="PNG", optimize=True)
+        data = out.getvalue()
+        if len(data) <= DISCORD_EMOJI_MAX_BYTES:
+            return data
+        # PNG de 128x128 normalmente fica muito abaixo disso; se não ficar, reduz cores
+        # sem mexer na geometria visual.
+        quantized = candidate.convert("P", palette=Image.Palette.ADAPTIVE, colors=96).convert("RGBA") if Image is not None else candidate
+        out = BytesIO()
+        quantized.save(out, format="PNG", optimize=True)
+        data = out.getvalue()
+        if len(data) <= DISCORD_EMOJI_MAX_BYTES:
+            return data
         raise RuntimeError("emoji estático ficou maior que 256 KiB")
 
     def _save_animated_emoji_gif(self, frames: list[Any], durations: list[int]) -> bytes | None:
         if not frames:
             return None
-        for step in (1, 2, 3, 4, 5, 6):
-            selected = [frame for idx, frame in enumerate(frames) if idx % step == 0]
-            selected_durations = [max(20, min(500, int((durations[idx] if idx < len(durations) else 80) * step))) for idx in range(len(frames)) if idx % step == 0]
+        normalized_frames = [self._fit_emoji_canvas_frame(frame, canvas_size=128) for frame in frames]
+        for step in (1, 2, 3, 4, 5, 6, 8, 10):
+            selected = [frame for idx, frame in enumerate(normalized_frames) if idx % step == 0]
+            selected_durations = [max(20, min(500, int((durations[idx] if idx < len(durations) else 80) * step))) for idx in range(len(normalized_frames)) if idx % step == 0]
             if not selected:
                 continue
             out = BytesIO()
@@ -4290,27 +4349,19 @@ class WelcomeCog(commands.Cog):
         return None
 
     def _normalize_emoji_upload_bytes_sync(self, raw: bytes, *, animated: bool) -> tuple[bytes, str]:
-        """Normaliza bytes já processados antes de criar o Application Emoji.
-
-        Isso também protege contra worker antigo/sem patch que devolva GIF/PNG com o
-        conteúdo minúsculo dentro de um canvas transparente.
-        """
+        """Garante formato aceito pelo Discord preservando o tamanho visual original."""
         if Image is None:
             raise RuntimeError("Pillow indisponível")
         with Image.open(BytesIO(raw)) as img:
             if animated and getattr(img, "is_animated", False) and ImageSequence is not None:
                 raw_frames = [frame.convert("RGBA") for frame in ImageSequence.Iterator(img)]
-                bbox = self._union_alpha_bbox(raw_frames)
-                if not bbox:
-                    raise RuntimeError("emoji animado sem pixels visíveis")
-                frames = [self._normalize_emoji_frame(frame, bbox=bbox) for frame in raw_frames]
                 durations = [int(getattr(frame, "info", {}).get("duration") or img.info.get("duration") or 80) for frame in ImageSequence.Iterator(img)]
+                frames = [self._fit_emoji_canvas_frame(frame) for frame in raw_frames]
                 data = self._save_animated_emoji_gif(frames, durations)
                 if data is not None:
                     return data, "gif"
                 return self._save_static_emoji_png(frames[0]), "png"
-            normalized = self._normalize_emoji_frame(img.convert("RGBA"))
-            return self._save_static_emoji_png(normalized), "png"
+            return self._save_static_emoji_png(img.convert("RGBA")), "png"
 
     async def _normalize_emoji_upload_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
         try:
@@ -4325,29 +4376,26 @@ class WelcomeCog(commands.Cog):
             log.debug("não consegui normalizar emoji temporário antes do upload: %r", exc)
             return None
 
-    def _recolor_emoji_bytes_local_sync(self, raw: bytes, *, animated: bool, color_hex: str) -> tuple[bytes, str]:
+    def _recolor_emoji_bytes_local_sync(self, raw: bytes, *, animated: bool, color_hex: str, palette: list[tuple[int, int, int]] | None = None) -> tuple[bytes, str]:
         if Image is None:
             raise RuntimeError("Pillow indisponível")
-        rgb = self._rgb_from_hex(color_hex)
+        base_rgb = self._rgb_from_hex(color_hex)
+        subtle_palette = palette or self._subtle_emoji_palette(base_rgb, [])
         with Image.open(BytesIO(raw)) as img:
             if animated and getattr(img, "is_animated", False) and ImageSequence is not None:
                 raw_frames = [frame.convert("RGBA") for frame in ImageSequence.Iterator(img)]
-                bbox = self._union_alpha_bbox(raw_frames)
-                if not bbox:
-                    raise RuntimeError("emoji animado sem pixels visíveis")
-                frames = [self._recolor_rgba_image(self._normalize_emoji_frame(frame, bbox=bbox), rgb) for frame in raw_frames]
+                frames = [self._recolor_rgba_image(self._fit_emoji_canvas_frame(frame), base_rgb, subtle_palette) for frame in raw_frames]
                 durations = [int(getattr(frame, "info", {}).get("duration") or img.info.get("duration") or 80) for frame in ImageSequence.Iterator(img)]
                 data = self._save_animated_emoji_gif(frames, durations)
                 if data is not None:
                     return data, "gif"
-                # Fallback seguro: mantém o tamanho visual correto usando o primeiro frame.
                 return self._save_static_emoji_png(frames[0]), "png"
-            normalized = self._normalize_emoji_frame(img.convert("RGBA"))
-            out_img = self._recolor_rgba_image(normalized, rgb)
+            fitted = self._fit_emoji_canvas_frame(img.convert("RGBA"))
+            out_img = self._recolor_rgba_image(fitted, base_rgb, subtle_palette)
             return self._save_static_emoji_png(out_img), "png"
 
-    async def _recolor_emoji_bytes_local(self, raw: bytes, *, animated: bool, color_hex: str) -> tuple[bytes, str]:
-        return await asyncio.to_thread(self._recolor_emoji_bytes_local_sync, raw, animated=animated, color_hex=color_hex)
+    async def _recolor_emoji_bytes_local(self, raw: bytes, *, animated: bool, color_hex: str, palette: list[tuple[int, int, int]] | None = None) -> tuple[bytes, str]:
+        return await asyncio.to_thread(self._recolor_emoji_bytes_local_sync, raw, animated=animated, color_hex=color_hex, palette=palette)
 
     def _phone_worker_base_url(self) -> str:
         enabled = str(os.getenv("PHONE_WORKER_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on", "sim"}
@@ -4361,7 +4409,7 @@ class WelcomeCog(commands.Cog):
             port = 8766
         return f"{scheme}://{host}:{port}"
 
-    async def _worker_recolor_emojis(self, emojis: list[dict[str, Any]], *, color_hex: str, limit: int = DEFAULT_DECORATIVE_EMOJI_LIMIT) -> list[dict[str, Any]] | None:
+    async def _worker_recolor_emojis(self, emojis: list[dict[str, Any]], *, color_hex: str, palette_hex: list[str] | None = None, limit: int = DEFAULT_DECORATIVE_EMOJI_LIMIT) -> list[dict[str, Any]] | None:
         base_url = self._phone_worker_base_url()
         token = str(os.getenv("PHONE_WORKER_TOKEN") or "").strip()
         if not base_url or not token or not emojis:
@@ -4372,7 +4420,7 @@ class WelcomeCog(commands.Cog):
         self._emoji_worker_active[worker_key] = int(self._emoji_worker_active.get(worker_key, 0) or 0) + 1
         try:
             effective_limit = max(0, min(MAX_DECORATIVE_EMOJIS, int(limit or DEFAULT_DECORATIVE_EMOJI_LIMIT)))
-            payload = json.dumps({"task": "emoji_recolor", "color": color_hex, "emojis": emojis[:effective_limit]}).encode("utf-8")
+            payload = json.dumps({"task": "emoji_recolor", "color": color_hex, "palette": palette_hex or [], "emojis": emojis[:effective_limit]}).encode("utf-8")
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
             def post() -> dict[str, Any]:
                 req = urllib.request.Request(f"{base_url}/task", data=payload, headers=headers, method="POST")
@@ -4389,13 +4437,13 @@ class WelcomeCog(commands.Cog):
         finally:
             self._emoji_worker_active[worker_key] = max(0, int(self._emoji_worker_active.get(worker_key, 1) or 1) - 1)
 
-    async def _local_recolor_emojis(self, emojis: list[dict[str, Any]], *, color_hex: str, limit: int = DEFAULT_DECORATIVE_EMOJI_LIMIT) -> list[dict[str, Any]]:
+    async def _local_recolor_emojis(self, emojis: list[dict[str, Any]], *, color_hex: str, palette: list[tuple[int, int, int]] | None = None, limit: int = DEFAULT_DECORATIVE_EMOJI_LIMIT) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         effective_limit = max(0, min(MAX_DECORATIVE_EMOJIS, int(limit or DEFAULT_DECORATIVE_EMOJI_LIMIT)))
         for emoji in emojis[:effective_limit]:
             try:
                 raw = await self._fetch_custom_emoji_bytes(emoji)
-                data, fmt = await self._recolor_emoji_bytes_local(raw, animated=bool(emoji.get("animated")), color_hex=color_hex)
+                data, fmt = await self._recolor_emoji_bytes_local(raw, animated=bool(emoji.get("animated")), color_hex=color_hex, palette=palette)
                 result.append({**emoji, "data_b64": base64.b64encode(data).decode("ascii"), "format": fmt})
             except Exception as exc:
                 log.debug("não consegui recolorir emoji localmente: %s %r", emoji.get("raw"), exc)
@@ -4461,12 +4509,16 @@ class WelcomeCog(commands.Cog):
             return cfg
 
         color_hex = _parse_hex((self._normalize_embed_config(cfg.get("embed")).get("color") if mode == "embed" else cfg.get("accent_color")) or cfg.get("accent_color") or DEFAULT_ACCENT)
+        base_rgb = self._rgb_from_hex(color_hex)
+        avatar_palette = await self._member_avatar_palette(member, color_hex, limit=6)
+        emoji_palette = self._subtle_emoji_palette(base_rgb, avatar_palette)
+        emoji_palette_hex = self._hex_palette_from_rgb(emoji_palette)
 
         # O worker pode devolver só parte dos emojis (ex.: o segundo asset animado falhou).
         # Nesse caso, tentamos completar localmente apenas os que faltaram. O fallback é por
         # emoji individual: o que não tiver replacement confirmado permanece original.
         processed_by_key: dict[str, dict[str, Any]] = {}
-        worker_items = await self._worker_recolor_emojis(emojis, color_hex=color_hex, limit=effective_limit)
+        worker_items = await self._worker_recolor_emojis(emojis, color_hex=color_hex, palette_hex=emoji_palette_hex, limit=effective_limit)
         for item in worker_items or []:
             key = str(item.get("key") or "")
             if key:
@@ -4474,7 +4526,7 @@ class WelcomeCog(commands.Cog):
 
         missing = [emoji for emoji in emojis if str(emoji.get("key") or "") not in processed_by_key]
         if missing:
-            local_items = await self._local_recolor_emojis(missing, color_hex=color_hex, limit=effective_limit)
+            local_items = await self._local_recolor_emojis(missing, color_hex=color_hex, palette=emoji_palette, limit=effective_limit)
             for item in local_items or []:
                 key = str(item.get("key") or "")
                 if key and key not in processed_by_key:
