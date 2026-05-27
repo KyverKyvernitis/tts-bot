@@ -4071,6 +4071,13 @@ class WelcomeCog(commands.Cog):
         ))
 
     def _emoji_tokens_from_config(self, cfg: dict[str, Any], *, mode: str, dm: bool = False, limit: int = DEFAULT_DECORATIVE_EMOJI_LIMIT) -> list[dict[str, Any]]:
+        """Detecta emojis customizados usados na mensagem.
+
+        O limite vale para emojis base diferentes, não para quantas vezes o mesmo emoji
+        aparece. Se o mesmo emoji aparece em várias linhas, criamos um emoji temporário
+        só e substituímos todas as aparições conhecidas dele. Também agrupamos pelo ID
+        do emoji, porque o mesmo emoji pode aparecer com nomes diferentes no texto salvo.
+        """
         if dm:
             return []
         try:
@@ -4091,22 +4098,33 @@ class WelcomeCog(commands.Cog):
                 texts.extend(str(public.get(key) or "") for key in ("title", "body", "footer"))
         else:
             texts.extend(str(public.get(key) or "") for key in ("title", "body", "footer"))
+
         found: list[dict[str, Any]] = []
-        seen: set[str] = set()
+        by_key: dict[str, dict[str, Any]] = {}
         for text in texts:
             for match in CUSTOM_EMOJI_RE.finditer(str(text or "")):
                 raw = match.group(0)
-                if raw in seen:
+                emoji_id = str(match.group(3) or "")
+                key = f"{'a' if bool(match.group(1)) else 's'}:{emoji_id}"
+                item = by_key.get(key)
+                if item is not None:
+                    raws = item.setdefault("raw_variants", [])
+                    if raw not in raws:
+                        raws.append(raw)
                     continue
-                seen.add(raw)
-                found.append({
+                if len(found) >= effective_limit:
+                    # O restante fica original. Nunca removemos nem trocamos por texto vazio.
+                    continue
+                item = {
                     "raw": raw,
+                    "raw_variants": [raw],
+                    "key": key,
                     "animated": bool(match.group(1)),
                     "name": str(match.group(2) or "emoji")[:32],
-                    "id": str(match.group(3) or ""),
-                })
-                if len(found) >= effective_limit:
-                    return found
+                    "id": emoji_id,
+                }
+                by_key[key] = item
+                found.append(item)
         return found
 
     def _replace_emoji_tokens_in_config(self, cfg: dict[str, Any], replacements: dict[str, str], *, mode: str, dm: bool = False) -> dict[str, Any]:
@@ -4335,15 +4353,20 @@ class WelcomeCog(commands.Cog):
         replacements: dict[str, str] = {}
         created_for_tracking: list[dict[str, Any]] = []
         for item in processed or []:
-            raw = str(item.get("raw") or "")
-            if not raw:
+            raws = item.get("raw_variants")
+            if not isinstance(raws, list) or not raws:
+                raws = [item.get("raw")]
+            raws = [str(raw or "") for raw in raws if str(raw or "")]
+            if not raws:
                 continue
             created = await self._create_application_emoji(name=str(item.get("name") or "cwemoji"), data_b64=str(item.get("data_b64") or ""), fmt=str(item.get("format") or "png"))
             if not created:
+                # Falhou? Mantém todos os emojis originais exatamente como estavam.
                 continue
             animated = bool(created.get("animated") or item.get("animated"))
             replacement = f"<a:{created.get('name')}:{created.get('id')}>" if animated else f"<:{created.get('name')}:{created.get('id')}>"
-            replacements[raw] = replacement
+            for raw in raws:
+                replacements[raw] = replacement
             created_for_tracking.append(created)
         if not replacements:
             return cfg

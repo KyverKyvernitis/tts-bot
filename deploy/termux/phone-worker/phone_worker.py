@@ -5482,12 +5482,20 @@ class WorkerHandler(BaseHTTPRequestHandler):
         for raw in emojis[:4]:
             if not isinstance(raw, dict):
                 continue
+            raw_variants = raw.get("raw_variants")
+            if not isinstance(raw_variants, list):
+                raw_variants = []
+            raw_variants = [str(item or "") for item in raw_variants if str(item or "")]
             emoji = {
                 "raw": str(raw.get("raw") or ""),
+                "raw_variants": raw_variants,
+                "key": str(raw.get("key") or ""),
                 "id": str(raw.get("id") or ""),
                 "name": str(raw.get("name") or "emoji")[:32],
                 "animated": bool(raw.get("animated")),
             }
+            if emoji["raw"] and emoji["raw"] not in emoji["raw_variants"]:
+                emoji["raw_variants"].insert(0, emoji["raw"])
             if not re.fullmatch(r"\d{15,25}", emoji["id"]):
                 continue
             data = self._download_emoji_asset(emoji)
