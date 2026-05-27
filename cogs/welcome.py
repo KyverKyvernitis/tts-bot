@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import colorsys
+from io import BytesIO
 import logging
+import random
 import re
 import uuid
 from copy import deepcopy
@@ -10,6 +13,11 @@ from typing import Any
 
 import discord
 from discord.ext import commands
+
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover - fallback if Pillow is unavailable
+    Image = None
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +29,8 @@ MAX_FOOTER_LENGTH = 300
 MAX_AUTO_ROLES = 10
 MAX_SPECIAL_RULES = 15
 MAX_RULE_NAME = 80
+MAX_WELCOME_VARIANTS = 3
+MAX_VARIANT_NAME = 60
 VAR_RE = re.compile(r"\{([a-zA-Z0-9_]+)\}")
 HEX_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
 URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
@@ -49,6 +59,7 @@ DEFAULT_EMBED = {
     "title_url": "",
     "description": "",
     "color": "",
+    "color_mode": "fixed",
     "thumbnail_mode": "none",
     "thumbnail_url": "",
     "image_mode": "custom",
@@ -139,6 +150,11 @@ RENDER_MODE_DESCRIPTIONS = {
     "components_v2": "Visual moderno com containers e texto V2",
     "embed": "Visual clássico com embed",
     "normal": "Mensagem leve em texto comum",
+}
+
+COLOR_MODE_LABELS = {
+    "fixed": "Cor fixa",
+    "member_avatar": "Combina com a foto do membro",
 }
 
 WEBHOOK_AVATAR_LABELS = {
@@ -396,6 +412,7 @@ class _MessageActionSelect(discord.ui.Select):
                 discord.SelectOption(label="Título e descrição", value="embed_text", emoji="🏷️", description="Título, descrição, link e cor"),
                 discord.SelectOption(label="Imagens", value="embed_images", emoji="🖼️", description="Thumbnail e imagem principal"),
                 discord.SelectOption(label="Footer do embed", value="embed_footer", emoji="📌", description="Texto pequeno nativo do embed"),
+                discord.SelectOption(label="Variações da mensagem", value="variants", emoji="🎲", description="Até 3 mensagens com chance própria"),
                 discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
                 discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia real do embed"),
             ]
@@ -403,6 +420,7 @@ class _MessageActionSelect(discord.ui.Select):
         elif mode == "normal":
             options = [
                 discord.SelectOption(label="Editar texto", value="normal_edit", emoji="✏️", description="Mensagem normal em texto comum"),
+                discord.SelectOption(label="Variações da mensagem", value="variants", emoji="🎲", description="Até 3 mensagens com chance própria"),
                 discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
                 discord.SelectOption(label="Restaurar texto padrão", value="restore", emoji="↩️", description="Voltar para o texto inicial"),
                 discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia em texto normal"),
@@ -412,6 +430,7 @@ class _MessageActionSelect(discord.ui.Select):
             options = [
                 discord.SelectOption(label="Editar texto V2", value="v2_edit", emoji="✏️", description="Título, texto principal e texto final"),
                 discord.SelectOption(label="Visual e imagem V2", value="v2_visual", emoji="🖼️", description="Estilo, cor e imagem do container"),
+                discord.SelectOption(label="Variações da mensagem", value="variants", emoji="🎲", description="Até 3 mensagens com chance própria"),
                 discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
                 discord.SelectOption(label="Restaurar mensagem padrão", value="restore", emoji="↩️", description="Voltar para o texto inicial"),
                 discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia em Components V2"),
@@ -445,7 +464,10 @@ class _MessageActionSelect(discord.ui.Select):
         if action == "embed_footer":
             await interaction.response.send_modal(WelcomeEmbedFooterModal(self.panel))
             return
-        if action == "presets":
+        if action == "variants":
+            self.panel.go_to("variants")
+            self.panel.notice = ""
+        elif action == "presets":
             self.panel.go_to("presets")
             self.panel.notice = ""
         elif action == "restore":
@@ -1118,6 +1140,280 @@ class _StatusSelect(discord.ui.Select):
         await interaction.response.edit_message(view=self.panel)
 
 
+
+class _VariantListSelect(discord.ui.Select):
+    def __init__(self, panel: "WelcomeAdminView"):
+        self.panel = panel
+        variants = [panel.cog._normalize_variant(v) for v in panel.config.get("variants") or []]
+        percentages = panel.cog._variant_percentages(variants)
+        options: list[discord.SelectOption] = []
+        for index, variant in enumerate(variants, start=1):
+            vid = str(variant.get("id"))
+            percent = percentages.get(vid, 0.0)
+            status = "pausada" if not bool(variant.get("enabled", True)) else f"{percent:.0f}%"
+            options.append(discord.SelectOption(
+                label=str(variant.get("name") or f"Variação {index}")[:80],
+                value=vid,
+                emoji="🎲",
+                description=f"Peso {int(variant.get('weight') or 1)} · {status}",
+            ))
+        if not options:
+            options.append(discord.SelectOption(label="Nenhuma variação", value="none", emoji="🎲", description="Crie uma variação primeiro"))
+        super().__init__(placeholder="Escolha uma variação", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        value = str(self.values[0])
+        if value == "none":
+            await interaction.response.send_message(view=_make_notice_view("Nenhuma variação", "Crie uma variação primeiro.", ok=False), ephemeral=True)
+            return
+        self.panel.selected_variant_id = value
+        self.panel.go_to("variant_detail")
+        self.panel.notice = ""
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+class _VariantActionSelect(discord.ui.Select):
+    def __init__(self, panel: "WelcomeAdminView"):
+        self.panel = panel
+        variants = list(panel.config.get("variants") or [])
+        options = []
+        if len(variants) < MAX_WELCOME_VARIANTS:
+            options.append(discord.SelectOption(label="Criar variação", value="create", emoji="➕", description=f"Até {MAX_WELCOME_VARIANTS} variações"))
+        options.append(discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia com escolha aleatória"))
+        super().__init__(placeholder="O que deseja fazer?", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        action = str(self.values[0])
+        if action == "create":
+            await interaction.response.send_modal(WelcomeVariantCreateModal(self.panel))
+            return
+        if action == "preview":
+            await self.panel.send_preview(interaction)
+            return
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+class _VariantEditActionSelect(discord.ui.Select):
+    def __init__(self, panel: "WelcomeAdminView"):
+        self.panel = panel
+        mode = str(panel.config.get("render_mode") or "components_v2")
+        if mode == "embed":
+            edit_label = "Editar embed da variação"
+            edit_desc = "Mensagem acima, título, descrição e footer"
+        elif mode == "normal":
+            edit_label = "Editar texto da variação"
+            edit_desc = "Mensagem simples"
+        else:
+            edit_label = "Editar mensagem V2 da variação"
+            edit_desc = "Título, texto e texto final"
+        options = [
+            discord.SelectOption(label=edit_label, value="content", emoji="✏️", description=edit_desc),
+            discord.SelectOption(label="Nome e chance", value="settings", emoji="🎚️", description="Nome, peso e ativação"),
+            discord.SelectOption(label="Visual da variação", value="visual", emoji="🖼️", description="Cor, imagem e estilo"),
+            discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia desta variação"),
+            discord.SelectOption(label="Remover variação", value="remove", emoji="🧹", description="Apaga esta variação"),
+        ]
+        super().__init__(placeholder="O que deseja ajustar?", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        action = str(self.values[0])
+        if action == "content":
+            await interaction.response.send_modal(WelcomeVariantContentModal(self.panel))
+            return
+        if action == "settings":
+            await interaction.response.send_modal(WelcomeVariantSettingsModal(self.panel))
+            return
+        if action == "visual":
+            await interaction.response.send_modal(WelcomeVariantVisualModal(self.panel))
+            return
+        if action == "preview":
+            await self.panel.send_preview(interaction, variant_id=self.panel.selected_variant_id)
+            return
+        if action == "remove":
+            cfg = deepcopy(self.panel.config)
+            cfg["variants"] = [v for v in cfg.get("variants") or [] if str(v.get("id")) != str(self.panel.selected_variant_id)]
+            await self.panel.save_config(cfg, "Variação removida.")
+            self.panel.selected_variant_id = ""
+            self.panel.screen = "variants"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+class WelcomeVariantCreateModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Nova variação")
+        self.panel = panel
+        self.name_input = discord.ui.TextInput(label="Nome da variação", placeholder="Ex.: Mensagem divertida", default=f"Variação {len(panel.config.get('variants') or []) + 1}", max_length=MAX_VARIANT_NAME, required=True)
+        self.weight_input = discord.ui.TextInput(label="Chance / peso", placeholder="1, 2, 3...", default="1", max_length=3, required=True)
+        self.add_item(self.name_input)
+        self.add_item(self.weight_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            weight = max(1, min(100, int(str(self.weight_input.value or "1").strip())))
+        except Exception:
+            await interaction.response.send_message(view=_make_notice_view("Chance inválida", "Use um número entre 1 e 100.", ok=False), ephemeral=True)
+            return
+        cfg = deepcopy(self.panel.config)
+        variants = [self.panel.cog._normalize_variant(v) for v in cfg.get("variants") or []]
+        if len(variants) >= MAX_WELCOME_VARIANTS:
+            await interaction.response.send_message(view=_make_notice_view("Limite atingido", f"Use até {MAX_WELCOME_VARIANTS} variações.", ok=False), ephemeral=True)
+            return
+        base_public = self.panel.cog._normalize_public_block(cfg.get("public"), default=DEFAULT_PUBLIC, allow_empty=True)
+        base_embed = self.panel.cog._normalize_embed_config(cfg.get("embed"))
+        variant = self.panel.cog._normalize_variant({
+            "id": _new_variant_id(),
+            "name": str(self.name_input.value or "Variação").strip() or "Variação",
+            "weight": weight,
+            "enabled": True,
+            "public": base_public,
+            "embed": base_embed,
+            "style": "inherit",
+            "accent_color": "",
+            "accent_color_mode": "inherit",
+            "media_url": "",
+        })
+        variants.append(variant)
+        cfg["variants"] = variants[:MAX_WELCOME_VARIANTS]
+        await self.panel.save_config(cfg, "Variação criada.")
+        self.panel.selected_variant_id = str(variant.get("id"))
+        self.panel.screen = "variant_detail"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+class WelcomeVariantSettingsModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Nome e chance")
+        self.panel = panel
+        variant = panel.cog._find_variant(panel.config, panel.selected_variant_id) or {}
+        self.enabled_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.enabled_group = discord.ui.RadioGroup(required=True)
+            enabled = bool(variant.get("enabled", True))
+            self.enabled_group.add_option(label="Ativa", value="yes", default=enabled)
+            self.enabled_group.add_option(label="Pausada", value="no", default=not enabled)
+            self.add_item(discord.ui.Label(text="Status", component=self.enabled_group))
+        self.name_input = discord.ui.TextInput(label="Nome da variação", default=str(variant.get("name") or "Variação")[:MAX_VARIANT_NAME], max_length=MAX_VARIANT_NAME, required=True)
+        self.weight_input = discord.ui.TextInput(label="Chance / peso", placeholder="1, 2, 3...", default=str(int(variant.get("weight") or 1)), max_length=3, required=True)
+        self.add_item(self.name_input)
+        self.add_item(self.weight_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            weight = max(1, min(100, int(str(self.weight_input.value or "1").strip())))
+        except Exception:
+            await interaction.response.send_message(view=_make_notice_view("Chance inválida", "Use um número entre 1 e 100.", ok=False), ephemeral=True)
+            return
+        enabled = _modal_value(self.enabled_group, "yes") != "no" if self.enabled_group is not None else True
+        await self.panel.update_variant(self.panel.selected_variant_id, {
+            "name": str(self.name_input.value or "Variação").strip() or "Variação",
+            "weight": weight,
+            "enabled": enabled,
+        }, "Variação atualizada.")
+        self.panel.screen = "variant_detail"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+class WelcomeVariantContentModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        mode = str(panel.config.get("render_mode") or "components_v2")
+        title = "Embed da variação" if mode == "embed" else "Mensagem da variação"
+        super().__init__(title=title)
+        self.panel = panel
+        self.mode = mode
+        variant = panel.cog._find_variant(panel.config, panel.selected_variant_id) or {}
+        public = panel.cog._normalize_public_block(variant.get("public"), default=DEFAULT_PUBLIC, allow_empty=True)
+        embed = panel.cog._normalize_embed_config(variant.get("embed"))
+        if mode == "embed":
+            self.content_input = discord.ui.TextInput(label="Mensagem acima", default=str(embed.get("content") or "")[:1200], style=discord.TextStyle.paragraph, max_length=1200, required=False)
+            self.title_input = discord.ui.TextInput(label="Título do embed", placeholder="Deixe vazio para não mostrar título", default=str(embed.get("title") or "")[:256], max_length=256, required=False)
+            self.description_input = discord.ui.TextInput(label="Descrição do embed", default=str(embed.get("description") or "")[:MAX_TEMPLATE_LENGTH], style=discord.TextStyle.paragraph, max_length=MAX_TEMPLATE_LENGTH, required=False)
+            self.footer_input = discord.ui.TextInput(label="Footer do embed", default=str(embed.get("footer_text") or "")[:MAX_FOOTER_LENGTH], style=discord.TextStyle.paragraph, max_length=MAX_FOOTER_LENGTH, required=False)
+            for item in (self.content_input, self.title_input, self.description_input, self.footer_input):
+                self.add_item(item)
+        else:
+            self.title_input = discord.ui.TextInput(label="Título", default=str(public.get("title") or "")[:256], max_length=256, required=False)
+            self.body_input = discord.ui.TextInput(label="Mensagem", default=str(public.get("body") or "")[:MAX_TEMPLATE_LENGTH], style=discord.TextStyle.paragraph, max_length=MAX_TEMPLATE_LENGTH, required=True)
+            self.footer_input = discord.ui.TextInput(label="Texto final V2", default=str(public.get("footer") or "")[:MAX_FOOTER_LENGTH], style=discord.TextStyle.paragraph, max_length=MAX_FOOTER_LENGTH, required=False)
+            self.add_item(self.title_input)
+            self.add_item(self.body_input)
+            if mode == "components_v2":
+                self.add_item(self.footer_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if self.mode == "embed":
+            await self.panel.update_variant(self.panel.selected_variant_id, {"embed": {
+                "content": str(self.content_input.value or "").strip(),
+                "title": str(self.title_input.value or "").strip(),
+                "description": str(self.description_input.value or "").strip(),
+                "footer_text": str(self.footer_input.value or "").strip(),
+            }}, "Mensagem da variação salva.")
+        else:
+            await self.panel.update_variant(self.panel.selected_variant_id, {"public": {
+                "title": str(self.title_input.value or "").strip(),
+                "body": str(self.body_input.value or "").strip(),
+                "footer": str(getattr(self, "footer_input", None).value or "").strip() if hasattr(self, "footer_input") else "",
+            }}, "Mensagem da variação salva.")
+        self.panel.screen = "variant_detail"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+class WelcomeVariantVisualModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Visual da variação")
+        self.panel = panel
+        variant = panel.cog._find_variant(panel.config, panel.selected_variant_id) or {}
+        self.style_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.style_group = discord.ui.RadioGroup(required=True)
+            current_style = str(variant.get("style") or "inherit")
+            self.style_group.add_option(label="Usar visual padrão", value="inherit", default=current_style == "inherit")
+            for key, label in STYLE_LABELS.items():
+                self.style_group.add_option(label=label, value=key, default=current_style == key)
+            self.add_item(discord.ui.Label(text="Estilo", component=self.style_group))
+        self.color_mode_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.color_mode_group = discord.ui.RadioGroup(required=True)
+            current_color_mode = str(variant.get("accent_color_mode") or "inherit")
+            self.color_mode_group.add_option(label="Usar cor padrão", value="inherit", default=current_color_mode == "inherit")
+            for key, label in COLOR_MODE_LABELS.items():
+                self.color_mode_group.add_option(label=label, value=key, default=current_color_mode == key)
+            self.add_item(discord.ui.Label(text="Cor", component=self.color_mode_group))
+        self.color_input = discord.ui.TextInput(label="Cor fixa em hex", placeholder="#5865F2", default=str(variant.get("accent_color") or "")[:7], max_length=7, required=False)
+        self.image_input = discord.ui.TextInput(label="Imagem/banner opcional", placeholder="https://exemplo.com/imagem.png", default=str(variant.get("media_url") or "")[:1000], max_length=1000, required=False)
+        self.add_item(self.color_input)
+        self.add_item(self.image_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw_hex = str(self.color_input.value or "").strip()
+        raw_url = str(self.image_input.value or "").strip()
+        if raw_hex and not HEX_RE.fullmatch(raw_hex):
+            await interaction.response.send_message(view=_make_notice_view("Cor inválida", "Use uma cor no formato #5865F2.", ok=False), ephemeral=True)
+            return
+        if raw_url and not URL_RE.fullmatch(raw_url):
+            await interaction.response.send_message(view=_make_notice_view("Imagem inválida", "Use um link começando com http:// ou https://.", ok=False), ephemeral=True)
+            return
+        style = _modal_value(self.style_group, "inherit") if self.style_group is not None else "inherit"
+        if style not in {"inherit", *STYLE_LABELS.keys()}:
+            style = "inherit"
+        color_mode = _modal_value(self.color_mode_group, "inherit") if self.color_mode_group is not None else "inherit"
+        if color_mode not in {"inherit", *COLOR_MODE_LABELS.keys()}:
+            color_mode = "inherit"
+        await self.panel.update_variant(self.panel.selected_variant_id, {
+            "style": style,
+            "accent_color": _parse_hex(raw_hex) if raw_hex else "",
+            "accent_color_mode": color_mode,
+            "media_url": _clean_url(raw_url),
+        }, "Visual da variação salvo.")
+        self.panel.screen = "variant_detail"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
 class WelcomeMessageModal(discord.ui.Modal):
     def __init__(self, panel: "WelcomeAdminView"):
         super().__init__(title="Mensagem Components V2")
@@ -1226,10 +1522,17 @@ class WelcomeEmbedTextModal(discord.ui.Modal):
         super().__init__(title="Título e descrição")
         self.panel = panel
         embed = panel.cog._normalize_embed_config(panel.config.get("embed"))
-        self.title_input = discord.ui.TextInput(label="Título do embed", placeholder="Vazio usa o título da mensagem", default=str(embed.get("title") or "")[:256], max_length=256, required=False)
+        self.title_input = discord.ui.TextInput(label="Título do embed", placeholder="Deixe vazio para não mostrar título", default=str(embed.get("title") or "")[:256], max_length=256, required=False)
         self.description_input = discord.ui.TextInput(label="Descrição do embed", placeholder="Vazio usa a mensagem principal", style=discord.TextStyle.paragraph, default=str(embed.get("description") or "")[:MAX_TEMPLATE_LENGTH], max_length=MAX_TEMPLATE_LENGTH, required=False)
         self.title_url_input = discord.ui.TextInput(label="Link do título opcional", placeholder="https://exemplo.com", default=str(embed.get("title_url") or "")[:1000], max_length=1000, required=False)
-        self.color_input = discord.ui.TextInput(label="Cor do embed", placeholder="Exemplo: #5865F2", default=str(embed.get("color") or "")[:7], max_length=7, required=False)
+        self.color_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.color_group = discord.ui.RadioGroup(required=True)
+            current_color_mode = str(embed.get("color_mode") or "fixed")
+            for key, label in COLOR_MODE_LABELS.items():
+                self.color_group.add_option(label=label, value=key, default=current_color_mode == key)
+            self.add_item(discord.ui.Label(text="Cor do embed", component=self.color_group))
+        self.color_input = discord.ui.TextInput(label="Cor do embed em hex", placeholder="Exemplo: #5865F2", default=str(embed.get("color") or "")[:7], max_length=7, required=False)
         self.add_item(self.title_input)
         self.add_item(self.description_input)
         self.add_item(self.title_url_input)
@@ -1249,6 +1552,10 @@ class WelcomeEmbedTextModal(discord.ui.Modal):
         embed["title"] = str(self.title_input.value or "").strip()
         embed["description"] = str(self.description_input.value or "").strip()
         embed["title_url"] = _clean_url(raw_title_url)
+        color_mode = _modal_value(self.color_group, "fixed") if self.color_group is not None else str(embed.get("color_mode") or "fixed")
+        if color_mode not in COLOR_MODE_LABELS:
+            color_mode = "fixed"
+        embed["color_mode"] = color_mode
         embed["color"] = _parse_hex(raw_color) if raw_color else ""
         cfg["embed"] = embed
         await self.panel.save_config(cfg, "Título e descrição salvos.")
@@ -1497,8 +1804,15 @@ class WelcomeVisualModal(discord.ui.Modal):
                 required=True,
             )
             self.add_item(self.style_input)
+        self.color_mode_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.color_mode_group = discord.ui.RadioGroup(required=True)
+            current_color_mode = str(panel.config.get("accent_color_mode") or "fixed")
+            for key, label in COLOR_MODE_LABELS.items():
+                self.color_mode_group.add_option(label=label, value=key, default=current_color_mode == key)
+            self.add_item(discord.ui.Label(text="Cor da mensagem", component=self.color_mode_group))
         self.accent_input = discord.ui.TextInput(
-            label="Cor lateral em HEX",
+            label="Cor fixa em HEX",
             placeholder="#5865F2",
             default=_parse_hex(panel.config.get("accent_color")),
             max_length=7,
@@ -1537,6 +1851,10 @@ class WelcomeVisualModal(discord.ui.Modal):
             style = "complete"
         cfg = deepcopy(self.panel.config)
         cfg["style"] = style
+        color_mode = _modal_value(self.color_mode_group, "fixed") if self.color_mode_group is not None else str(cfg.get("accent_color_mode") or "fixed")
+        if color_mode not in COLOR_MODE_LABELS:
+            color_mode = "fixed"
+        cfg["accent_color_mode"] = color_mode
         cfg["accent_color"] = _parse_hex(raw_hex)
         cfg["media_url"] = _clean_url(raw_url)
         await self.panel.save_config(cfg, "Visual atualizado.")
@@ -2015,23 +2333,30 @@ class WelcomeAdminView(discord.ui.LayoutView):
     async def load_webhooks(self, guild: discord.Guild | None):
         self.webhook_choices = await self.cog._list_channel_webhooks(guild, self.config)
 
-    async def send_preview(self, interaction: discord.Interaction, *, dm: bool = False):
+    async def send_preview(self, interaction: discord.Interaction, *, dm: bool = False, variant_id: str = ""):
         member = interaction.user if isinstance(interaction.user, discord.Member) else None
-        mode = str(self.config.get("dm_render_mode") if dm else self.config.get("render_mode") or "components_v2")
+        cfg = self.config
+        if not dm:
+            if variant_id:
+                cfg = self.cog._apply_variant(cfg, self.cog._find_variant(cfg, variant_id))
+            else:
+                cfg = self.cog._apply_variant(cfg, self.cog._pick_variant(cfg))
+        cfg = await self.cog._with_dynamic_colors(cfg, member=member)
+        mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")
         allowed = discord.AllowedMentions.none()
         if mode == "embed":
-            content, embed = self.cog._make_embed_payload(self.config, member=member, guild_id=self.guild_id, dm=dm)
+            content, embed = self.cog._make_embed_payload(cfg, member=member, guild_id=self.guild_id, dm=dm)
             kwargs: dict[str, Any] = {"embed": embed, "ephemeral": True, "allowed_mentions": allowed}
             if content:
                 kwargs["content"] = content
             await interaction.response.send_message(**kwargs)
             return
         if mode == "normal":
-            content = self.cog._make_normal_content(self.config, member=member, guild_id=self.guild_id, dm=dm)
+            content = self.cog._make_normal_content(cfg, member=member, guild_id=self.guild_id, dm=dm)
             await interaction.response.send_message(content=content, ephemeral=True, allowed_mentions=allowed)
             return
         view = discord.ui.LayoutView(timeout=None)
-        view.add_item(self.cog._make_welcome_container(self.config, member=member, guild_id=self.guild_id, dm=dm))
+        view.add_item(self.cog._make_welcome_container(cfg, member=member, guild_id=self.guild_id, dm=dm))
         await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=allowed)
 
     async def update_rule(self, rule_id: str, updates: dict[str, Any], notice: str) -> bool:
@@ -2058,6 +2383,27 @@ class WelcomeAdminView(discord.ui.LayoutView):
     async def update_selected_rule(self, updates: dict[str, Any], notice: str) -> bool:
         return await self.update_rule(self.selected_rule_id, updates, notice)
 
+    async def update_variant(self, variant_id: str, updates: dict[str, Any], notice: str) -> bool:
+        cfg = deepcopy(self.config)
+        variants = [self.cog._normalize_variant(v) for v in cfg.get("variants") or []]
+        for idx, variant in enumerate(variants):
+            if str(variant.get("id")) == str(variant_id):
+                merged = deepcopy(variant)
+                for key, value in updates.items():
+                    if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                        nested = dict(merged.get(key) or {})
+                        nested.update(value)
+                        merged[key] = nested
+                    else:
+                        merged[key] = value
+                variants[idx] = self.cog._normalize_variant(merged)
+                cfg["variants"] = variants[:MAX_WELCOME_VARIANTS]
+                ok = await self.save_config(cfg, notice)
+                self.selected_variant_id = str(variant_id)
+                return ok
+        self.notice = "Essa variação não existe mais."
+        return False
+
     def _clear(self):
         for item in list(self.children):
             self.remove_item(item)
@@ -2066,6 +2412,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         cfg = self.config
         role_count = len([int(r) for r in cfg.get("auto_role_ids") or []])
         rules_count = len(list(cfg.get("special_rules") or []))
+        variants_count = len([v for v in cfg.get("variants") or [] if bool(v.get("enabled", True))])
         webhook_cfg = dict(cfg.get("webhook") or {})
         enabled = bool(cfg.get("enabled", False))
         channel_id = int(cfg.get("channel_id") or 0)
@@ -2075,6 +2422,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         delete_label = "apaga ao sair" if bool(cfg.get("delete_on_leave_enabled", False)) else "não apaga ao sair"
         role_label = f"{role_count} cargo{'s' if role_count != 1 else ''}" if role_count else "sem cargos"
         rule_label = f"{rules_count} regra{'s' if rules_count != 1 else ''} especial{'is' if rules_count != 1 else ''}" if rules_count else "sem regras especiais"
+        variant_label = f"{variants_count} variaç{'ões' if variants_count != 1 else 'ão'}" if variants_count else "sem variações"
         if enabled and channel_id:
             first = f"Tudo pronto. Novos membros serão recebidos em {_channel_mention(channel_id)}."
         elif enabled:
@@ -2093,7 +2441,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         lines.extend([
             "",
             f"Mensagem em {mode} · {send_label}",
-            f"{dm_label} · {delete_label} · {role_label} · {rule_label}",
+            f"{dm_label} · {delete_label} · {role_label} · {variant_label} · {rule_label}",
         ])
         if self.notice:
             lines.extend(["", self.notice])
@@ -2110,6 +2458,8 @@ class WelcomeAdminView(discord.ui.LayoutView):
             "message": self._build_message,
             "embed_editor": self._build_embed_editor,
             "presets": self._build_presets,
+            "variants": self._build_variants,
+            "variant_detail": self._build_variant_detail,
             "mode": self._build_mode,
             "channel": self._build_channel,
             "webhook": self._build_webhook,
@@ -2219,7 +2569,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
             "Monte a mensagem clássica do modo Embed.",
             "",
             f"Mensagem acima: {'configurada' if has_content else 'sem texto acima'}",
-            f"Texto do embed: {'título próprio' if has_title else 'usa título padrão'} · {'descrição própria' if has_desc else 'usa mensagem principal'}",
+            f"Texto do embed: {'título próprio' if has_title else 'sem título'} · {'descrição própria' if has_desc else 'usa mensagem principal'}",
             f"Imagens: thumbnail {thumb.lower()} · principal {image.lower()}",
             f"Footer do embed: {_trim(footer, 120) if footer else 'sem footer'}",
             f"Cor do embed: `{_parse_hex(color)}`",
@@ -2236,6 +2586,92 @@ class WelcomeAdminView(discord.ui.LayoutView):
             accent_color=_color_from_hex(embed.get("color") or self.config.get("accent_color")),
         ))
 
+
+    def _build_variants(self):
+        variants = [self.cog._normalize_variant(v) for v in self.config.get("variants") or []]
+        percentages = self.cog._variant_percentages(variants)
+        lines = [
+            "# 🎲 Variações da mensagem",
+            "O bot escolhe uma mensagem quando alguém entra.",
+            "",
+            f"Variações: {len(variants)}/{MAX_WELCOME_VARIANTS}",
+        ]
+        if variants:
+            lines.append("")
+            for idx, variant in enumerate(variants, start=1):
+                vid = str(variant.get("id"))
+                if bool(variant.get("enabled", True)):
+                    chance = percentages.get(vid, 0.0)
+                    status = f"{chance:.0f}% aprox."
+                else:
+                    status = "pausada"
+                lines.append(f"**{idx}. {variant.get('name') or 'Variação'}** · peso {int(variant.get('weight') or 1)} · {status}")
+        else:
+            lines.extend(["", "Nenhuma variação ainda. A mensagem padrão será usada."])
+        if self.notice:
+            lines.extend(["", self.notice])
+        rows: list[discord.ui.Item[Any]] = [discord.ui.TextDisplay(_trim("\n".join(lines))), discord.ui.Separator()]
+        if variants:
+            rows.append(discord.ui.ActionRow(_VariantListSelect(self)))
+        rows.append(discord.ui.ActionRow(_VariantActionSelect(self)))
+        rows.append(discord.ui.ActionRow(_BackButton(self)))
+        self.add_item(discord.ui.Container(*rows, accent_color=_color_from_hex(self.config.get("accent_color"))))
+
+    def _build_variant_detail(self):
+        variant = self.cog._find_variant(self.config, self.selected_variant_id)
+        if variant is None:
+            self.screen = "variants"
+            self._build_variants()
+            return
+        variant = self.cog._normalize_variant(variant)
+        mode = str(self.config.get("render_mode") or "components_v2")
+        percentages = self.cog._variant_percentages([self.cog._normalize_variant(v) for v in self.config.get("variants") or []])
+        chance = percentages.get(str(variant.get("id")), 0.0)
+        public = dict(variant.get("public") or {})
+        embed = self.cog._normalize_embed_config(variant.get("embed"))
+        if mode == "embed":
+            content_bits = []
+            if str(embed.get("content") or "").strip():
+                content_bits.append("mensagem acima")
+            if str(embed.get("title") or "").strip():
+                content_bits.append("título")
+            if str(embed.get("description") or "").strip():
+                content_bits.append("descrição")
+            if str(embed.get("footer_text") or "").strip():
+                content_bits.append("footer")
+            content_label = ", ".join(content_bits) if content_bits else "usa o embed padrão"
+        else:
+            title = str(public.get("title") or "").strip()
+            body = str(public.get("body") or "").strip()
+            footer = str(public.get("footer") or "").strip()
+            content_label = "configurada" if title or body or footer else "usa a mensagem padrão"
+        style = STYLE_LABELS.get(str(variant.get("style") or "inherit"), "Usa o padrão")
+        color_mode = str(variant.get("accent_color_mode") or "inherit")
+        if color_mode == "inherit":
+            color = "usa a cor padrão"
+        elif color_mode == "member_avatar":
+            color = "combina com a foto do membro"
+        else:
+            color = f"cor fixa `{variant.get('accent_color') or self.config.get('accent_color') or DEFAULT_ACCENT}`"
+        lines = [
+            f"# 🎲 {variant.get('name') or 'Variação'}",
+            f"{'Ativa' if bool(variant.get('enabled', True)) else 'Pausada'} · peso {int(variant.get('weight') or 1)} · {chance:.0f}% aprox.",
+            "",
+            f"Mensagem: {content_label}",
+            f"Visual: {style} · {color}",
+            f"Imagem: {'configurada' if _clean_url(variant.get('media_url')) else 'usa a padrão'}",
+            "",
+            "Escolha o que deseja ajustar.",
+        ]
+        if self.notice:
+            lines.extend(["", self.notice])
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(_trim("\n".join(lines))),
+            discord.ui.Separator(),
+            discord.ui.ActionRow(_VariantEditActionSelect(self)),
+            discord.ui.ActionRow(_BackButton(self)),
+            accent_color=_color_from_hex(variant.get("accent_color") or self.config.get("accent_color")),
+        ))
 
     def _build_presets(self):
         lines = ["# ✨ Presets", "Escolha uma base e edite depois como quiser."]
@@ -2563,6 +2999,7 @@ class WelcomeCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._warmup_task: asyncio.Task | None = None
+        self._avatar_color_cache: dict[str, str] = {}
 
     @property
     def db(self):
@@ -2611,7 +3048,9 @@ class WelcomeCog(commands.Cog):
             "render_mode": "components_v2",
             "dm_render_mode": "components_v2",
             "accent_color": DEFAULT_ACCENT,
+            "accent_color_mode": "fixed",
             "media_url": "",
+            "variants": [],
             "public": dict(DEFAULT_PUBLIC),
             "embed": dict(DEFAULT_EMBED),
             "dm": dict(DEFAULT_DM),
@@ -2638,6 +3077,8 @@ class WelcomeCog(commands.Cog):
                 result[key] = raw[:2048]
             elif key.endswith("_url") or key in {"author_url", "title_url"}:
                 result[key] = _clean_url(raw)
+            elif key == "color_mode":
+                result[key] = raw if raw in COLOR_MODE_LABELS else "fixed"
             elif key.endswith("_mode"):
                 fallback = "custom" if key == "image_mode" else "none"
                 result[key] = _image_mode(raw, fallback=fallback)
@@ -2695,6 +3136,69 @@ class WelcomeCog(commands.Cog):
             base["avatar_mode"] = "server"
         base["avatar_url"] = _clean_url(base.get("avatar_url"))
         return base
+
+    def _normalize_variant(self, variant: dict[str, Any] | None) -> dict[str, Any]:
+        data = dict(variant or {})
+        try:
+            weight = int(data.get("weight") or 1)
+        except Exception:
+            weight = 1
+        weight = max(1, min(100, weight))
+        return {
+            "id": str(data.get("id") or _new_variant_id())[:40],
+            "name": str(data.get("name") or "Variação")[:MAX_VARIANT_NAME],
+            "enabled": bool(data.get("enabled", True)),
+            "weight": weight,
+            "public": self._normalize_public_block(data.get("public"), default=DEFAULT_PUBLIC, allow_empty=True),
+            "embed": self._normalize_embed_config(data.get("embed")),
+            "style": str(data.get("style") or "inherit") if str(data.get("style") or "inherit") in {"inherit", *STYLE_LABELS.keys()} else "inherit",
+            "accent_color": _parse_hex(data.get("accent_color")) if data.get("accent_color") else "",
+            "accent_color_mode": str(data.get("accent_color_mode") or "inherit") if str(data.get("accent_color_mode") or "inherit") in {"inherit", *COLOR_MODE_LABELS.keys()} else "inherit",
+            "media_url": _clean_url(data.get("media_url")),
+        }
+
+    def _variant_percentages(self, variants: list[dict[str, Any]]) -> dict[str, float]:
+        active = [self._normalize_variant(v) for v in variants if bool(v.get("enabled", True))]
+        total = sum(int(v.get("weight") or 1) for v in active) or 0
+        if total <= 0:
+            return {}
+        return {str(v.get("id")): (int(v.get("weight") or 1) * 100.0 / total) for v in active}
+
+    def _pick_variant(self, cfg: dict[str, Any]) -> dict[str, Any] | None:
+        variants = [self._normalize_variant(v) for v in cfg.get("variants") or [] if bool(v.get("enabled", True))]
+        if not variants:
+            return None
+        try:
+            return random.choices(variants, weights=[max(1, int(v.get("weight") or 1)) for v in variants], k=1)[0]
+        except Exception:
+            return random.choice(variants)
+
+    def _apply_variant(self, config: dict[str, Any], variant: dict[str, Any] | None) -> dict[str, Any]:
+        cfg = self._normalize_config(config)
+        if not variant:
+            return cfg
+        variant = self._normalize_variant(variant)
+        public = dict(cfg.get("public") or DEFAULT_PUBLIC)
+        for key, value in dict(variant.get("public") or {}).items():
+            if str(value or "").strip():
+                public[key] = str(value)
+        cfg["public"] = public
+        vembed = self._normalize_embed_config(variant.get("embed"))
+        if _has_custom_embed(vembed):
+            embed = self._normalize_embed_config(cfg.get("embed"))
+            for key, value in vembed.items():
+                if str(value or "") != str(DEFAULT_EMBED.get(key) or ""):
+                    embed[key] = value
+            cfg["embed"] = embed
+        if str(variant.get("style") or "inherit") != "inherit":
+            cfg["style"] = str(variant.get("style"))
+        if variant.get("accent_color"):
+            cfg["accent_color"] = _parse_hex(variant.get("accent_color"))
+        if str(variant.get("accent_color_mode") or "inherit") != "inherit":
+            cfg["accent_color_mode"] = str(variant.get("accent_color_mode"))
+        if variant.get("media_url"):
+            cfg["media_url"] = _clean_url(variant.get("media_url"))
+        return self._normalize_config(cfg)
 
     def _normalize_rule(self, rule: dict[str, Any] | None) -> dict[str, Any]:
         data = dict(rule or {})
@@ -2768,7 +3272,15 @@ class WelcomeCog(commands.Cog):
         merged["render_mode"] = str(merged.get("render_mode") or "components_v2") if str(merged.get("render_mode") or "components_v2") in RENDER_MODE_LABELS else "components_v2"
         merged["dm_render_mode"] = str(merged.get("dm_render_mode") or merged["render_mode"]) if str(merged.get("dm_render_mode") or merged["render_mode"]) in RENDER_MODE_LABELS else merged["render_mode"]
         merged["accent_color"] = _parse_hex(merged.get("accent_color"))
+        merged["accent_color_mode"] = str(merged.get("accent_color_mode") or "fixed") if str(merged.get("accent_color_mode") or "fixed") in COLOR_MODE_LABELS else "fixed"
         merged["media_url"] = _clean_url(merged.get("media_url"))
+        variants: list[dict[str, Any]] = []
+        for raw in merged.get("variants") or []:
+            if isinstance(raw, dict):
+                variants.append(self._normalize_variant(raw))
+            if len(variants) >= MAX_WELCOME_VARIANTS:
+                break
+        merged["variants"] = variants
         merged["webhook"] = self._normalize_webhook_config(merged.get("webhook"))
         merged["invite_cache"] = self._normalize_invite_cache(merged.get("invite_cache"))
         rules: list[dict[str, Any]] = []
@@ -2940,6 +3452,60 @@ class WelcomeCog(commands.Cog):
         footer = self._replace_vars(str(source.get("footer") or ""), values).strip()
         return title, body, footer
 
+    async def _member_avatar_color(self, member: discord.Member | None, fallback: str = DEFAULT_ACCENT) -> str:
+        if member is None or Image is None:
+            return _parse_hex(fallback)
+        asset = member.display_avatar.replace(size=64, static_format="png")
+        cache_key = str(getattr(asset, "key", None) or asset.url)
+        cached = self._avatar_color_cache.get(cache_key)
+        if cached:
+            return cached
+        try:
+            data = await asset.read()
+            with Image.open(BytesIO(data)) as img:
+                img = img.convert("RGBA").resize((32, 32))
+                candidates: list[tuple[float, int, int, int]] = []
+                fallback_pixels: list[tuple[int, int, int]] = []
+                for r, g, b, a in img.getdata():
+                    if a < 90:
+                        continue
+                    brightness = (r + g + b) / 3
+                    if 15 <= brightness <= 245:
+                        fallback_pixels.append((r, g, b))
+                    h, sat, val = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                    if 35 <= brightness <= 225 and sat >= 0.22 and val >= 0.18:
+                        score = sat * 0.72 + val * 0.28
+                        candidates.append((score, r, g, b))
+                if candidates:
+                    candidates.sort(reverse=True)
+                    top = candidates[: max(12, len(candidates) // 6)]
+                    r = int(sum(px[1] for px in top) / len(top))
+                    g = int(sum(px[2] for px in top) / len(top))
+                    b = int(sum(px[3] for px in top) / len(top))
+                elif fallback_pixels:
+                    r = int(sum(px[0] for px in fallback_pixels) / len(fallback_pixels))
+                    g = int(sum(px[1] for px in fallback_pixels) / len(fallback_pixels))
+                    b = int(sum(px[2] for px in fallback_pixels) / len(fallback_pixels))
+                else:
+                    return _parse_hex(fallback)
+                result = f"#{r:02X}{g:02X}{b:02X}"
+                self._avatar_color_cache[cache_key] = result
+                if len(self._avatar_color_cache) > 256:
+                    self._avatar_color_cache.pop(next(iter(self._avatar_color_cache)), None)
+                return result
+        except Exception:
+            return _parse_hex(fallback)
+
+    async def _with_dynamic_colors(self, config: dict[str, Any], *, member: discord.Member | None) -> dict[str, Any]:
+        cfg = self._normalize_config(config)
+        if str(cfg.get("accent_color_mode") or "fixed") == "member_avatar":
+            cfg["accent_color"] = await self._member_avatar_color(member, cfg.get("accent_color") or DEFAULT_ACCENT)
+        embed = self._normalize_embed_config(cfg.get("embed"))
+        if str(embed.get("color_mode") or "fixed") == "member_avatar":
+            embed["color"] = await self._member_avatar_color(member, embed.get("color") or cfg.get("accent_color") or DEFAULT_ACCENT)
+            cfg["embed"] = embed
+        return cfg
+
     def _make_welcome_container(self, config: dict[str, Any], *, member: discord.Member | None, guild_id: int | None = None, dm: bool = False, invite_info: dict[str, Any] | None = None) -> discord.ui.Container:
         cfg = self._normalize_config(config)
         title, body, footer = self._build_welcome_text(cfg, member=member, guild_id=guild_id, dm=dm, invite_info=invite_info)
@@ -2993,7 +3559,7 @@ class WelcomeCog(commands.Cog):
         values = self._member_values(member, guild_id=guild_id, invite_info=invite_info)
         embed_cfg = self._normalize_embed_config(cfg.get("embed")) if not dm else dict(DEFAULT_EMBED)
         content = self._replace_vars(str(embed_cfg.get("content") or ""), values).strip() if not dm else ""
-        embed_title = self._replace_vars(str(embed_cfg.get("title") or title), values).strip()
+        embed_title = self._replace_vars(str(embed_cfg.get("title") or ""), values).strip()
         embed_desc = self._replace_vars(str(embed_cfg.get("description") or body), values).strip()
         embed_footer_source = footer if dm else str(embed_cfg.get("footer_text") or "")
         embed_footer = self._replace_vars(str(embed_footer_source or ""), values).strip()
@@ -3057,6 +3623,7 @@ class WelcomeCog(commands.Cog):
         ))
 
     async def _send_rendered(self, destination: discord.abc.Messageable, cfg: dict[str, Any], *, member: discord.Member, dm: bool = False, invite_info: dict[str, Any] | None = None):
+        cfg = await self._with_dynamic_colors(cfg, member=member)
         mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")
         allowed = discord.AllowedMentions.none() if dm else discord.AllowedMentions(users=True, roles=False, everyone=False)
         if mode == "embed":
@@ -3151,6 +3718,7 @@ class WelcomeCog(commands.Cog):
         webhook_cfg = self._normalize_webhook_config(cfg.get("webhook"))
         if not webhook_cfg.get("enabled"):
             return False, None
+        cfg = await self._with_dynamic_colors(cfg, member=member)
         webhook = await self._create_or_get_welcome_webhook(channel, webhook_cfg)
         if webhook is None:
             return False, None
@@ -3352,6 +3920,12 @@ class WelcomeCog(commands.Cog):
         await self._save_config(int(member.guild.id), saved)
         return invite_info
 
+    def _find_variant(self, cfg: dict[str, Any], variant_id: str) -> dict[str, Any] | None:
+        for variant in cfg.get("variants") or []:
+            if str(variant.get("id")) == str(variant_id):
+                return self._normalize_variant(variant)
+        return None
+
     def _find_rule(self, cfg: dict[str, Any], rule_id: str) -> dict[str, Any] | None:
         for rule in cfg.get("special_rules") or []:
             if str(rule.get("id")) == str(rule_id):
@@ -3449,8 +4023,10 @@ class WelcomeCog(commands.Cog):
         if not bool(cfg.get("enabled", False)):
             return
         invite_info = await self._invite_context_on_join(member, cfg)
+        variant = self._pick_variant(cfg)
+        base_effective = self._apply_variant(cfg, variant)
         rule = self._pick_special_rule(cfg, invite_info)
-        effective = self._effective_config_for_rule(cfg, rule)
+        effective = self._effective_config_for_rule(base_effective, rule)
         await self._apply_auto_roles(member, effective)
         channel_id = int(effective.get("channel_id") or 0)
         if channel_id:
