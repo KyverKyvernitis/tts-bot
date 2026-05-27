@@ -5,7 +5,7 @@ import logging
 import re
 import uuid
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import discord
@@ -14,6 +14,7 @@ from discord.ext import commands
 log = logging.getLogger(__name__)
 
 WELCOME_DOC_CONFIG = "welcome_config"
+WELCOME_DOC_SENT = "welcome_sent_message"
 MAX_TEXT_DISPLAY = 3900
 MAX_TEMPLATE_LENGTH = 1800
 MAX_FOOTER_LENGTH = 300
@@ -47,6 +48,7 @@ DEFAULT_EMBED = {
     "title": "",
     "title_url": "",
     "description": "",
+    "color": "",
     "thumbnail_mode": "none",
     "thumbnail_url": "",
     "image_mode": "custom",
@@ -354,10 +356,7 @@ class _PreviewButton(discord.ui.Button):
         super().__init__(label="Preview", emoji="👁️", style=discord.ButtonStyle.secondary)
 
     async def callback(self, interaction: discord.Interaction):
-        self.panel.go_to("preview")
-        self.panel.notice = "Ficaria assim quando alguém entrar."
-        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
-        await interaction.response.edit_message(view=self.panel)
+        await self.panel.send_preview(interaction)
 
 
 class _MainSelect(discord.ui.Select):
@@ -414,8 +413,8 @@ class _MessageActionSelect(discord.ui.Select):
             cfg["public"] = dict(DEFAULT_PUBLIC)
             await self.panel.save_config(cfg, "Mensagem padrão restaurada.")
         elif action == "preview":
-            self.panel.go_to("preview")
-            self.panel.notice = "Ficaria assim quando alguém entrar."
+            await self.panel.send_preview(interaction)
+            return
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
 
@@ -458,17 +457,21 @@ class _EmbedActionSelect(discord.ui.Select):
     def __init__(self, panel: "WelcomeAdminView"):
         self.panel = panel
         options = [
-            discord.SelectOption(label="Mensagem e descrição", value="text", emoji="📝", description="Texto acima, título e descrição"),
-            discord.SelectOption(label="Author do embed", value="author", emoji="👤", description="Nome, ícone e link do author"),
-            discord.SelectOption(label="Imagens do embed", value="images", emoji="🖼️", description="Thumbnail e imagem principal"),
-            discord.SelectOption(label="Footer do embed", value="footer", emoji="📌", description="Rodapé e ícone"),
-            discord.SelectOption(label="Limpar editor de embed", value="clear", emoji="🧹", description="Voltar a usar texto simples como base"),
+            discord.SelectOption(label="Mensagem acima", value="content", emoji="📝", description="Texto normal antes do embed"),
+            discord.SelectOption(label="Author", value="author", emoji="👤", description="Nome, ícone e link do author"),
+            discord.SelectOption(label="Título e descrição", value="text", emoji="🏷️", description="Título, descrição, link e cor"),
+            discord.SelectOption(label="Imagens", value="images", emoji="🖼️", description="Thumbnail e imagem principal"),
+            discord.SelectOption(label="Footer", value="footer", emoji="📌", description="Rodapé e ícone"),
+            discord.SelectOption(label="Limpar embed", value="clear", emoji="🧹", description="Voltar ao padrão"),
             discord.SelectOption(label="Ver preview", value="preview", emoji="👁️"),
         ]
         super().__init__(placeholder="O que deseja editar no embed?", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         action = str(self.values[0])
+        if action == "content":
+            await interaction.response.send_modal(WelcomeEmbedContentModal(self.panel))
+            return
         if action == "text":
             await interaction.response.send_modal(WelcomeEmbedTextModal(self.panel))
             return
@@ -484,13 +487,12 @@ class _EmbedActionSelect(discord.ui.Select):
         if action == "clear":
             cfg = deepcopy(self.panel.config)
             cfg["embed"] = dict(DEFAULT_EMBED)
-            await self.panel.save_config(cfg, "Editor de embed limpo.")
+            await self.panel.save_config(cfg, "Embed limpo.")
             self.panel.screen = "embed_editor"
-        elif action == "preview":
-            self.panel.go_to("preview")
-            self.panel.notice = "Ficaria assim quando alguém entrar."
-        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
-        await interaction.response.edit_message(view=self.panel)
+            self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+            await interaction.response.edit_message(view=self.panel)
+            return
+        await self.panel.send_preview(interaction)
 
 
 class _RenderModeSelect(discord.ui.Select):
@@ -530,10 +532,7 @@ class _ModeActionSelect(discord.ui.Select):
                 return
             await interaction.response.send_modal(WelcomeQuickOptionsModal(self.panel))
             return
-        self.panel.go_to("preview")
-        self.panel.notice = "Ficaria assim quando alguém entrar."
-        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
-        await interaction.response.edit_message(view=self.panel)
+        await self.panel.send_preview(interaction)
 
 
 class _ChannelSelect(discord.ui.ChannelSelect):
@@ -708,8 +707,8 @@ class _DmActionSelect(discord.ui.Select):
             await self.panel.save_config(cfg, "Mensagem privada restaurada.")
             self.panel.screen = "dm"
         elif action == "preview":
-            self.panel.go_to("dm_preview")
-            self.panel.notice = "Ficaria assim no privado."
+            await self.panel.send_preview(interaction, dm=True)
+            return
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
 
@@ -813,8 +812,8 @@ class _VisualActionSelect(discord.ui.Select):
             await self.panel.save_config(cfg, "Imagem removida.")
             self.panel.screen = "visual"
         elif action == "preview":
-            self.panel.go_to("preview")
-            self.panel.notice = "Ficaria assim quando alguém entrar."
+            await self.panel.send_preview(interaction)
+            return
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
 
@@ -1130,33 +1129,63 @@ class WelcomeMessageModal(discord.ui.Modal):
         await interaction.response.edit_message(view=self.panel)
 
 
-class WelcomeEmbedTextModal(discord.ui.Modal):
+class WelcomeEmbedContentModal(discord.ui.Modal):
     def __init__(self, panel: "WelcomeAdminView"):
-        super().__init__(title="Texto do embed")
+        super().__init__(title="Mensagem acima")
         self.panel = panel
         embed = panel.cog._normalize_embed_config(panel.config.get("embed"))
-        self.content_input = discord.ui.TextInput(label="Mensagem acima do embed", placeholder="Ex.: {membro_mencao} chegou no servidor 👋", style=discord.TextStyle.paragraph, default=str(embed.get("content") or "")[:1800], max_length=1800, required=False)
-        self.title_input = discord.ui.TextInput(label="Título do embed", placeholder="Vazio usa o título da mensagem", default=str(embed.get("title") or "")[:256], max_length=256, required=False)
-        self.description_input = discord.ui.TextInput(label="Descrição do embed", placeholder="Vazio usa a mensagem principal", style=discord.TextStyle.paragraph, default=str(embed.get("description") or "")[:MAX_TEMPLATE_LENGTH], max_length=MAX_TEMPLATE_LENGTH, required=False)
-        self.title_url_input = discord.ui.TextInput(label="Link do título opcional", placeholder="https://exemplo.com", default=str(embed.get("title_url") or "")[:1000], max_length=1000, required=False)
+        self.content_input = discord.ui.TextInput(
+            label="Texto acima do embed",
+            placeholder="Ex.: {membro_mencao} chegou no servidor 👋",
+            style=discord.TextStyle.paragraph,
+            default=str(embed.get("content") or "")[:1800],
+            max_length=1800,
+            required=False,
+        )
         self.add_item(self.content_input)
-        self.add_item(self.title_input)
-        self.add_item(self.description_input)
-        self.add_item(self.title_url_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        raw_title_url = str(self.title_url_input.value or "").strip()
-        if raw_title_url and not URL_RE.fullmatch(raw_title_url):
-            await interaction.response.send_message(view=_make_notice_view("Link inválido", "Use um link começando com http:// ou https://.", ok=False), ephemeral=True)
-            return
         cfg = deepcopy(self.panel.config)
         embed = self.panel.cog._normalize_embed_config(cfg.get("embed"))
         embed["content"] = str(self.content_input.value or "").strip()
+        cfg["embed"] = embed
+        await self.panel.save_config(cfg, "Mensagem acima salva.")
+        self.panel.screen = "embed_editor"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+class WelcomeEmbedTextModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Título e descrição")
+        self.panel = panel
+        embed = panel.cog._normalize_embed_config(panel.config.get("embed"))
+        self.title_input = discord.ui.TextInput(label="Título do embed", placeholder="Vazio usa o título da mensagem", default=str(embed.get("title") or "")[:256], max_length=256, required=False)
+        self.description_input = discord.ui.TextInput(label="Descrição do embed", placeholder="Vazio usa a mensagem principal", style=discord.TextStyle.paragraph, default=str(embed.get("description") or "")[:MAX_TEMPLATE_LENGTH], max_length=MAX_TEMPLATE_LENGTH, required=False)
+        self.title_url_input = discord.ui.TextInput(label="Link do título opcional", placeholder="https://exemplo.com", default=str(embed.get("title_url") or "")[:1000], max_length=1000, required=False)
+        self.color_input = discord.ui.TextInput(label="Cor do embed", placeholder="Exemplo: #5865F2", default=str(embed.get("color") or "")[:7], max_length=7, required=False)
+        self.add_item(self.title_input)
+        self.add_item(self.description_input)
+        self.add_item(self.title_url_input)
+        self.add_item(self.color_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw_title_url = str(self.title_url_input.value or "").strip()
+        raw_color = str(self.color_input.value or "").strip()
+        if raw_title_url and not URL_RE.fullmatch(raw_title_url):
+            await interaction.response.send_message(view=_make_notice_view("Link inválido", "Use um link começando com http:// ou https://.", ok=False), ephemeral=True)
+            return
+        if raw_color and not HEX_RE.fullmatch(raw_color):
+            await interaction.response.send_message(view=_make_notice_view("Cor inválida", "Use uma cor em hex, como #5865F2.", ok=False), ephemeral=True)
+            return
+        cfg = deepcopy(self.panel.config)
+        embed = self.panel.cog._normalize_embed_config(cfg.get("embed"))
         embed["title"] = str(self.title_input.value or "").strip()
         embed["description"] = str(self.description_input.value or "").strip()
         embed["title_url"] = _clean_url(raw_title_url)
+        embed["color"] = _parse_hex(raw_color) if raw_color else ""
         cfg["embed"] = embed
-        await self.panel.save_config(cfg, "Texto do embed salvo.")
+        await self.panel.save_config(cfg, "Título e descrição salvos.")
         self.panel.screen = "embed_editor"
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
@@ -1607,9 +1636,10 @@ class WelcomeQuickOptionsModal(discord.ui.Modal):
         current_mode = str(cfg.get("render_mode") or "components_v2")
         for key, label in RENDER_MODE_LABELS.items():
             self.mode_group.add_option(label=label, value=key, description=RENDER_MODE_DESCRIPTIONS[key], default=current_mode == key)
-        self.flags_group = discord.ui.CheckboxGroup(required=False, min_values=0, max_values=2)
+        self.flags_group = discord.ui.CheckboxGroup(required=False, min_values=0, max_values=3)
         self.flags_group.add_option(label="Boas-vindas ligadas", value="enabled", description="Envia quando alguém entrar.", default=bool(cfg.get("enabled", False)))
         self.flags_group.add_option(label="Mensagem privada ligada", value="dm_enabled", description="Também manda no privado.", default=bool(cfg.get("dm_enabled", False)))
+        self.flags_group.add_option(label="Apagar boas-vindas se o membro sair", value="delete_on_leave_enabled", description="Vale por até 1 dia.", default=bool(cfg.get("delete_on_leave_enabled", False)))
         self.add_item(discord.ui.Label(text="Modo da mensagem pública", component=self.mode_group))
         self.add_item(discord.ui.Label(text="Opções", description="Marque o que fica ativo.", component=self.flags_group))
 
@@ -1619,6 +1649,7 @@ class WelcomeQuickOptionsModal(discord.ui.Modal):
         cfg["render_mode"] = str(getattr(self.mode_group, "value", None) or "components_v2")
         cfg["enabled"] = "enabled" in selected
         cfg["dm_enabled"] = "dm_enabled" in selected
+        cfg["delete_on_leave_enabled"] = "delete_on_leave_enabled" in selected
         if cfg["enabled"] and not int(cfg.get("channel_id") or 0):
             cfg["enabled"] = False
             notice = "Modo salvo. Escolha um canal antes de ligar."
@@ -1918,6 +1949,25 @@ class WelcomeAdminView(discord.ui.LayoutView):
     async def load_webhooks(self, guild: discord.Guild | None):
         self.webhook_choices = await self.cog._list_channel_webhooks(guild, self.config)
 
+    async def send_preview(self, interaction: discord.Interaction, *, dm: bool = False):
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        mode = str(self.config.get("dm_render_mode") if dm else self.config.get("render_mode") or "components_v2")
+        allowed = discord.AllowedMentions.none()
+        if mode == "embed":
+            content, embed = self.cog._make_embed_payload(self.config, member=member, guild_id=self.guild_id, dm=dm)
+            kwargs: dict[str, Any] = {"embed": embed, "ephemeral": True, "allowed_mentions": allowed}
+            if content:
+                kwargs["content"] = content
+            await interaction.response.send_message(**kwargs)
+            return
+        if mode == "normal":
+            content = self.cog._make_normal_content(self.config, member=member, guild_id=self.guild_id, dm=dm)
+            await interaction.response.send_message(content=content, ephemeral=True, allowed_mentions=allowed)
+            return
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(self.cog._make_welcome_container(self.config, member=member, guild_id=self.guild_id, dm=dm))
+        await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=allowed)
+
     async def update_rule(self, rule_id: str, updates: dict[str, Any], notice: str) -> bool:
         cfg = deepcopy(self.config)
         rules = list(cfg.get("special_rules") or [])
@@ -1956,6 +2006,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         mode = RENDER_MODE_LABELS.get(str(cfg.get("render_mode") or "components_v2"), "Components V2")
         send_label = "envio pelo webhook" if webhook_cfg.get("enabled") else "envio pelo bot"
         dm_label = "DM ligada" if bool(cfg.get("dm_enabled", False)) else "DM desligada"
+        delete_label = "apaga ao sair" if bool(cfg.get("delete_on_leave_enabled", False)) else "não apaga ao sair"
         role_label = f"{role_count} cargo{'s' if role_count != 1 else ''}" if role_count else "sem cargos"
         rule_label = f"{rules_count} regra{'s' if rules_count != 1 else ''} especial{'is' if rules_count != 1 else ''}" if rules_count else "sem regras especiais"
         if enabled and channel_id:
@@ -1976,7 +2027,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         lines.extend([
             "",
             f"Mensagem em {mode} · {send_label}",
-            f"{dm_label} · {role_label} · {rule_label}",
+            f"{dm_label} · {delete_label} · {role_label} · {rule_label}",
         ])
         if self.notice:
             lines.extend(["", self.notice])
@@ -2056,21 +2107,30 @@ class WelcomeAdminView(discord.ui.LayoutView):
 
     def _build_embed_editor(self):
         embed = self.cog._normalize_embed_config(self.config.get("embed"))
+        has_content = bool(str(embed.get("content") or "").strip())
+        has_title = bool(str(embed.get("title") or "").strip())
+        has_desc = bool(str(embed.get("description") or "").strip())
+        thumb_mode = _image_mode(embed.get("thumbnail_mode"))
+        image_mode = _image_mode(embed.get("image_mode"), fallback="custom")
+        thumb = EMBED_IMAGE_MODE_LABELS.get(thumb_mode, "Sem imagem")
+        image = EMBED_IMAGE_MODE_LABELS.get(image_mode, "Link personalizado")
+        if thumb_mode == "custom" and not _clean_url(embed.get("thumbnail_url")):
+            thumb = "Sem imagem"
+        if image_mode == "custom" and not (_clean_url(embed.get("image_url")) or _clean_url(self.config.get("media_url"))):
+            image = "Sem imagem"
+        footer = str(embed.get("footer_text") or "").strip()
+        color = str(embed.get("color") or self.config.get("accent_color") or DEFAULT_ACCENT)
         lines = [
             "# 🧾 Editor de embed",
-            "Configure o visual clássico do modo Embed.",
+            "Monte a mensagem clássica do modo Embed.",
             "",
-            f"**Mensagem acima**\n{'configurada' if str(embed.get('content') or '').strip() else 'sem texto acima'}",
+            f"Mensagem acima: {'configurada' if has_content else 'sem texto acima'}",
+            f"Embed: {'título próprio' if has_title else 'usa título da mensagem'} · {'descrição própria' if has_desc else 'usa mensagem principal'}",
+            f"Imagens: thumbnail {thumb.lower()} · principal {image.lower()}",
+            f"Rodapé: {_trim(footer, 120) if footer else 'usa o rodapé da mensagem'}",
+            f"Cor: `{_parse_hex(color)}`",
             "",
-            f"**Author**\n{_trim(embed.get('author_name') or 'sem author', 180)}",
-            "",
-            f"**Título**\n{_trim(embed.get('title') or 'usa o título da mensagem', 180)}",
-            "",
-            f"**Thumbnail**\n{EMBED_IMAGE_MODE_LABELS.get(_image_mode(embed.get('thumbnail_mode')), 'Sem imagem')}",
-            "",
-            f"**Imagem principal**\n{EMBED_IMAGE_MODE_LABELS.get(_image_mode(embed.get('image_mode'), fallback='custom'), 'Link personalizado')}",
-            "",
-            f"**Footer**\n{_trim(embed.get('footer_text') or 'usa o rodapé da mensagem', 180)}",
+            "Escolha uma parte para editar.",
         ]
         if self.notice:
             lines.extend(["", self.notice])
@@ -2079,7 +2139,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
             discord.ui.Separator(),
             discord.ui.ActionRow(_EmbedActionSelect(self)),
             discord.ui.ActionRow(_BackButton(self)),
-            accent_color=_color_from_hex(self.config.get("accent_color")),
+            accent_color=_color_from_hex(embed.get("color") or self.config.get("accent_color")),
         ))
 
     def _build_presets(self):
@@ -2427,6 +2487,8 @@ class WelcomeCog(commands.Cog):
             return
         try:
             await db.coll.create_index([("type", 1), ("guild_id", 1)], name="welcome_type_guild")
+            await db.coll.create_index([("type", 1), ("guild_id", 1), ("member_id", 1)], name="welcome_sent_member")
+            await db.coll.create_index([("type", 1), ("expires_at", 1)], name="welcome_sent_expires")
         except Exception as exc:
             log.warning("falha ao criar índice de boas-vindas: %s", exc)
 
@@ -2448,6 +2510,7 @@ class WelcomeCog(commands.Cog):
             "enabled": False,
             "channel_id": 0,
             "dm_enabled": False,
+            "delete_on_leave_enabled": False,
             "auto_role_ids": [],
             "style": "complete",
             "render_mode": "components_v2",
@@ -2474,6 +2537,8 @@ class WelcomeCog(commands.Cog):
                 result[key] = raw[:MAX_TEMPLATE_LENGTH]
             elif key in {"title", "author_name"}:
                 result[key] = raw[:256]
+            elif key == "color":
+                result[key] = _parse_hex(raw) if raw and HEX_RE.fullmatch(raw) else ""
             elif key == "footer_text":
                 result[key] = raw[:2048]
             elif key.endswith("_url") or key in {"author_url", "title_url"}:
@@ -2599,6 +2664,7 @@ class WelcomeCog(commands.Cog):
         merged["auto_role_ids"] = self._normalize_role_ids(merged.get("auto_role_ids") or [])
         merged["enabled"] = bool(merged.get("enabled", False))
         merged["dm_enabled"] = bool(merged.get("dm_enabled", False))
+        merged["delete_on_leave_enabled"] = bool(merged.get("delete_on_leave_enabled", False))
         try:
             merged["channel_id"] = int(merged.get("channel_id") or 0)
         except Exception:
@@ -2835,7 +2901,8 @@ class WelcomeCog(commands.Cog):
         embed_title = self._replace_vars(str(embed_cfg.get("title") or title), values).strip()
         embed_desc = self._replace_vars(str(embed_cfg.get("description") or body), values).strip()
         embed_footer = self._replace_vars(str(embed_cfg.get("footer_text") or footer), values).strip()
-        embed = discord.Embed(title=_trim(embed_title, 256) or None, description=_trim(embed_desc, 4000) or None, color=_color_from_hex(cfg.get("accent_color")))
+        embed_color = embed_cfg.get("color") or cfg.get("accent_color")
+        embed = discord.Embed(title=_trim(embed_title, 256) or None, description=_trim(embed_desc, 4000) or None, color=_color_from_hex(embed_color))
         title_url = _clean_url(self._replace_vars(str(embed_cfg.get("title_url") or ""), values))
         if title_url:
             embed.url = title_url
@@ -2883,24 +2950,15 @@ class WelcomeCog(commands.Cog):
         mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")
         if mode == "components_v2":
             view.add_item(self._make_welcome_container(cfg, member=member, guild_id=guild_id, dm=dm))
-        elif mode == "embed":
-            content, embed = self._make_embed_payload(cfg, member=member, guild_id=guild_id, dm=dm)
-            lines = ["## Embed"]
-            if content:
-                lines.extend(["**Mensagem acima**", content, ""])
-            if embed.author and embed.author.name:
-                lines.append(f"**Author:** {embed.author.name}")
-            lines.extend([f"**{embed.title or ''}**", embed.description or ""])
-            if embed.thumbnail and embed.thumbnail.url:
-                lines.append("Thumbnail configurada")
-            if embed.image and embed.image.url:
-                lines.append("Imagem principal configurada")
-            if embed.footer and embed.footer.text:
-                lines.append(embed.footer.text)
-            view.add_item(discord.ui.Container(discord.ui.TextDisplay(_trim("\n".join(lines))), accent_color=_color_from_hex(cfg.get("accent_color"))))
-        else:
+            return
+        if mode == "normal":
             content = self._make_normal_content(cfg, member=member, guild_id=guild_id, dm=dm)
             view.add_item(discord.ui.Container(discord.ui.TextDisplay(_trim("## Mensagem normal\n" + content)), accent_color=_color_from_hex(cfg.get("accent_color"))))
+            return
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("## Embed\nO preview real em embed é enviado como uma mensagem separada, para aparecer igual ao Discord mostra."),
+            accent_color=_color_from_hex((cfg.get("embed") or {}).get("color") or cfg.get("accent_color")),
+        ))
 
     async def _send_rendered(self, destination: discord.abc.Messageable, cfg: dict[str, Any], *, member: discord.Member, dm: bool = False, invite_info: dict[str, Any] | None = None):
         mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")
@@ -2993,38 +3051,107 @@ class WelcomeCog(commands.Cog):
             })
         return result
 
-    async def _send_webhook_rendered(self, channel: discord.TextChannel | discord.Thread, cfg: dict[str, Any], *, member: discord.Member, invite_info: dict[str, Any] | None = None) -> bool:
+    async def _send_webhook_rendered(self, channel: discord.TextChannel | discord.Thread, cfg: dict[str, Any], *, member: discord.Member, invite_info: dict[str, Any] | None = None, wait: bool = False) -> tuple[bool, discord.Message | None]:
         webhook_cfg = self._normalize_webhook_config(cfg.get("webhook"))
         if not webhook_cfg.get("enabled"):
-            return False
+            return False, None
         webhook = await self._create_or_get_welcome_webhook(channel, webhook_cfg)
         if webhook is None:
-            return False
+            return False, None
         name = self._webhook_username_for(str(webhook_cfg.get("name_mode") or "fixed"), member=member, guild=member.guild, invite_info=invite_info, fixed=str(webhook_cfg.get("name") or DEFAULT_WEBHOOK_NAME))
         avatar_url = self._avatar_url_for(str(webhook_cfg.get("avatar_mode") or "server"), member=member, guild=member.guild, invite_info=invite_info, custom_url=str(webhook_cfg.get("avatar_url") or ""))
         mode = str(cfg.get("render_mode") or "components_v2")
         allowed = discord.AllowedMentions(users=True, roles=False, everyone=False)
-        kwargs: dict[str, Any] = {"username": name, "allowed_mentions": allowed, "wait": False}
+        kwargs: dict[str, Any] = {"username": name, "allowed_mentions": allowed, "wait": bool(wait)}
         if avatar_url:
             kwargs["avatar_url"] = avatar_url
         if isinstance(channel, discord.Thread):
             kwargs["thread"] = channel
         try:
+            message = None
             if mode == "embed":
                 content, embed = self._make_embed_payload(cfg, member=member, guild_id=member.guild.id, invite_info=invite_info)
                 if content:
                     kwargs["content"] = content
-                await webhook.send(embed=embed, **kwargs)
+                message = await webhook.send(embed=embed, **kwargs)
             elif mode == "normal":
-                await webhook.send(content=self._make_normal_content(cfg, member=member, guild_id=member.guild.id, invite_info=invite_info), **kwargs)
+                message = await webhook.send(content=self._make_normal_content(cfg, member=member, guild_id=member.guild.id, invite_info=invite_info), **kwargs)
             else:
-                await webhook.send(view=self._make_components_view(cfg, member=member, invite_info=invite_info), **kwargs)
-            return True
+                message = await webhook.send(view=self._make_components_view(cfg, member=member, invite_info=invite_info), **kwargs)
+            return True, message if isinstance(message, discord.Message) else None
         except TypeError:
             # Algumas versões aceitam webhook sem view V2. Se acontecer, usa o bot no canal.
-            return False
+            return False, None
         except discord.HTTPException:
-            return False
+            return False, None
+
+    async def _track_sent_welcome_message(self, *, guild_id: int, member_id: int, message: discord.Message | None):
+        if message is None:
+            return
+        db = self.db
+        if db is None or not hasattr(db, "coll"):
+            return
+        now = datetime.now(timezone.utc)
+        doc = {
+            "type": WELCOME_DOC_SENT,
+            "guild_id": int(guild_id),
+            "member_id": int(member_id),
+            "channel_id": int(getattr(getattr(message, "channel", None), "id", 0) or 0),
+            "message_id": int(getattr(message, "id", 0) or 0),
+            "sent_at": now,
+            "expires_at": now + timedelta(days=1),
+        }
+        if not doc["channel_id"] or not doc["message_id"]:
+            return
+        try:
+            await db.coll.update_one(
+                {"type": WELCOME_DOC_SENT, "guild_id": int(guild_id), "member_id": int(member_id)},
+                {"$set": doc},
+                upsert=True,
+            )
+            await db.coll.delete_many({"type": WELCOME_DOC_SENT, "expires_at": {"$lt": now}})
+        except Exception as exc:
+            log.debug("não consegui salvar mensagem de boas-vindas para apagar depois: %r", exc)
+
+    async def _delete_tracked_welcome_message(self, member: discord.Member):
+        db = self.db
+        if db is None or not hasattr(db, "coll"):
+            return
+        now = datetime.now(timezone.utc)
+        query = {"type": WELCOME_DOC_SENT, "guild_id": int(member.guild.id), "member_id": int(member.id)}
+        try:
+            doc = await db.coll.find_one(query, {"_id": 0})
+        except Exception as exc:
+            log.debug("não consegui buscar mensagem de boas-vindas para apagar: %r", exc)
+            return
+        if not doc:
+            return
+        expires_at = doc.get("expires_at")
+        if isinstance(expires_at, datetime):
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at < now:
+                try:
+                    await db.coll.delete_one(query)
+                except Exception:
+                    pass
+                return
+        channel_id = int(doc.get("channel_id") or 0)
+        message_id = int(doc.get("message_id") or 0)
+        try:
+            channel = member.guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+            if isinstance(channel, discord.abc.Messageable):
+                message = await channel.fetch_message(message_id)  # type: ignore[attr-defined]
+                await message.delete()
+        except (discord.NotFound, discord.Forbidden):
+            pass
+        except discord.HTTPException as exc:
+            log.debug("não consegui apagar mensagem antiga de boas-vindas guild=%s member=%s: %r", member.guild.id, member.id, exc)
+        finally:
+            try:
+                await db.coll.delete_one(query)
+            except Exception:
+                pass
 
     async def _apply_auto_roles(self, member: discord.Member, cfg: dict[str, Any]):
         role_ids = [int(r) for r in cfg.get("auto_role_ids") or []]
@@ -3239,18 +3366,30 @@ class WelcomeCog(commands.Cog):
                     channel = None
             if isinstance(channel, (discord.TextChannel, discord.Thread)):
                 sent = False
+                sent_message: discord.Message | None = None
+                track_message = bool(cfg.get("delete_on_leave_enabled", False))
                 if (effective.get("webhook") or {}).get("enabled"):
-                    sent = await self._send_webhook_rendered(channel, effective, member=member, invite_info=invite_info)
+                    sent, sent_message = await self._send_webhook_rendered(channel, effective, member=member, invite_info=invite_info, wait=track_message)
                 if not sent:
                     try:
-                        await self._send_rendered(channel, effective, member=member, dm=False, invite_info=invite_info)
+                        sent_message = await self._send_rendered(channel, effective, member=member, dm=False, invite_info=invite_info)
+                        sent = True
                     except discord.HTTPException as exc:
                         log.debug("não consegui enviar boas-vindas guild=%s member=%s: %r", member.guild.id, member.id, exc)
+                if sent and track_message:
+                    await self._track_sent_welcome_message(guild_id=int(member.guild.id), member_id=int(member.id), message=sent_message)
         if bool(cfg.get("dm_enabled", False)):
             try:
                 await self._send_rendered(member, cfg, member=member, dm=True, invite_info=invite_info)
             except discord.HTTPException:
                 pass
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        cfg = await self._get_config(int(member.guild.id))
+        if not bool(cfg.get("delete_on_leave_enabled", False)):
+            return
+        await self._delete_tracked_welcome_message(member)
 
     @commands.command(name="welcome", aliases=("boasvindas", "boas-vindas", "bv"))
     @commands.guild_only()
