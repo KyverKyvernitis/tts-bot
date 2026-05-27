@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
 import colorsys
+import json
+import os
 from io import BytesIO
 from pathlib import Path
 import logging
 import random
 import re
+import urllib.error
+import urllib.request
 import uuid
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
@@ -16,14 +22,16 @@ import discord
 from discord.ext import commands
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageSequence
 except Exception:  # pragma: no cover - fallback if Pillow is unavailable
     Image = None
+    ImageSequence = None
 
 log = logging.getLogger(__name__)
 
 WELCOME_DOC_CONFIG = "welcome_config"
 WELCOME_DOC_SENT = "welcome_sent_message"
+WELCOME_DOC_EMOJI = "welcome_temp_emoji"
 MAX_TEXT_DISPLAY = 3900
 MAX_TEMPLATE_LENGTH = 1800
 MAX_FOOTER_LENGTH = 300
@@ -36,6 +44,9 @@ VAR_RE = re.compile(r"\{([a-zA-Z0-9_]+)\}")
 HEX_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
 URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 INVITE_CODE_RE = re.compile(r"^(?:https?://)?(?:www\.)?(?:discord\.gg/|discord\.com/invite/)?([A-Za-z0-9_-]{2,64})/?$", re.IGNORECASE)
+CUSTOM_EMOJI_RE = re.compile(r"<(a?):([A-Za-z0-9_]{2,32}):(\d{15,25})>")
+MAX_DECORATIVE_EMOJIS = 2
+DISCORD_EMOJI_MAX_BYTES = 256 * 1024
 
 STAR_SEPARATOR_ASSET = Path(__file__).resolve().parents[1] / "assets" / "welcome" / "star_separator.png"
 STAR_SEPARATOR_FILENAME = "welcome-stars.png"
@@ -2059,10 +2070,11 @@ class WelcomeQuickOptionsModal(discord.ui.Modal):
         current_mode = str(cfg.get("render_mode") or "components_v2")
         for key, label in RENDER_MODE_LABELS.items():
             self.mode_group.add_option(label=label, value=key, description=RENDER_MODE_DESCRIPTIONS[key], default=current_mode == key)
-        self.flags_group = discord.ui.CheckboxGroup(required=False, min_values=0, max_values=3)
+        self.flags_group = discord.ui.CheckboxGroup(required=False, min_values=0, max_values=4)
         self.flags_group.add_option(label="Boas-vindas ligadas", value="enabled", description="Envia quando alguém entrar.", default=bool(cfg.get("enabled", False)))
         self.flags_group.add_option(label="Mensagem privada ligada", value="dm_enabled", description="Também manda no privado.", default=bool(cfg.get("dm_enabled", False)))
         self.flags_group.add_option(label="Apagar boas-vindas se o membro sair", value="delete_on_leave_enabled", description="Vale por até 1 dia.", default=bool(cfg.get("delete_on_leave_enabled", False)))
+        self.flags_group.add_option(label="Colorir até 2 emojis da mensagem", value="decorative_emoji_enabled", description="Usa as cores do membro quando possível.", default=bool(cfg.get("decorative_emoji_enabled", False)))
         self.add_item(discord.ui.Label(text="Modo da mensagem pública", component=self.mode_group))
         self.add_item(discord.ui.Label(text="Opções", description="Marque o que fica ativo.", component=self.flags_group))
 
@@ -2073,6 +2085,7 @@ class WelcomeQuickOptionsModal(discord.ui.Modal):
         cfg["enabled"] = "enabled" in selected
         cfg["dm_enabled"] = "dm_enabled" in selected
         cfg["delete_on_leave_enabled"] = "delete_on_leave_enabled" in selected
+        cfg["decorative_emoji_enabled"] = "decorative_emoji_enabled" in selected
         if cfg["enabled"] and not int(cfg.get("channel_id") or 0):
             cfg["enabled"] = False
             notice = "Modo salvo. Escolha um canal antes de ligar."
@@ -2382,6 +2395,16 @@ class WelcomeAdminView(discord.ui.LayoutView):
 
     async def send_preview(self, interaction: discord.Interaction, *, dm: bool = False, variant_id: str = ""):
         member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True, thinking=True)
+        except discord.NotFound:
+            log.warning("preview de boas-vindas ignorado: interação expirou antes do defer")
+            return
+        except Exception as exc:
+            log.warning("não consegui responder ao preview de boas-vindas a tempo: %r", exc)
+            return
+
         cfg = self.config
         if not dm:
             if variant_id:
@@ -2391,30 +2414,42 @@ class WelcomeAdminView(discord.ui.LayoutView):
         cfg = await self.cog._with_dynamic_colors(cfg, member=member)
         mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")
         try:
+            cfg = await self.cog._prepare_decorative_emojis(cfg, member=member, mode=mode, dm=dm, invite_info=None, preview=True)
+        except Exception as exc:
+            log.warning("falha ao preparar emojis do preview de boas-vindas; mantendo originais: %r", exc)
+        try:
             cfg, files = await self.cog._prepare_dynamic_media(cfg, member=member, mode=mode, dm=dm)
         except Exception as exc:
             log.warning("falha ao montar mídia do preview de boas-vindas; usando preview sem imagem dinâmica: %r", exc)
             cfg, files = self.cog._drop_dynamic_star_media(cfg, mode=mode), []
         allowed = discord.AllowedMentions.none()
-        if mode == "embed":
-            content, embed = self.cog._make_embed_payload(cfg, member=member, guild_id=self.guild_id, dm=dm)
-            kwargs: dict[str, Any] = {"embed": embed, "ephemeral": True, "allowed_mentions": allowed}
-            if content:
-                kwargs["content"] = content
+        try:
+            if mode == "embed":
+                content, embed = self.cog._make_embed_payload(cfg, member=member, guild_id=self.guild_id, dm=dm)
+                kwargs: dict[str, Any] = {"embed": embed, "ephemeral": True, "allowed_mentions": allowed}
+                if content:
+                    kwargs["content"] = content
+                if files:
+                    kwargs["files"] = files
+                await interaction.followup.send(**kwargs)
+                return
+            if mode == "normal":
+                content = self.cog._make_normal_content(cfg, member=member, guild_id=self.guild_id, dm=dm)
+                await interaction.followup.send(content=content, ephemeral=True, allowed_mentions=allowed)
+                return
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(self.cog._make_welcome_container(cfg, member=member, guild_id=self.guild_id, dm=dm))
+            kwargs: dict[str, Any] = {"view": view, "ephemeral": True, "allowed_mentions": allowed}
             if files:
                 kwargs["files"] = files
-            await interaction.response.send_message(**kwargs)
-            return
-        if mode == "normal":
-            content = self.cog._make_normal_content(cfg, member=member, guild_id=self.guild_id, dm=dm)
-            await interaction.response.send_message(content=content, ephemeral=True, allowed_mentions=allowed)
-            return
-        view = discord.ui.LayoutView(timeout=None)
-        view.add_item(self.cog._make_welcome_container(cfg, member=member, guild_id=self.guild_id, dm=dm))
-        kwargs: dict[str, Any] = {"view": view, "ephemeral": True, "allowed_mentions": allowed}
-        if files:
-            kwargs["files"] = files
-        await interaction.response.send_message(**kwargs)
+            await interaction.followup.send(**kwargs)
+        except Exception as exc:
+            log.exception("falha ao enviar preview de boas-vindas")
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(
+                    view=_make_notice_view("Preview indisponível", "Não consegui montar a prévia agora. A mensagem real continua protegida por fallback." , ok=False),
+                    ephemeral=True,
+                )
 
     async def update_rule(self, rule_id: str, updates: dict[str, Any], notice: str) -> bool:
         cfg = deepcopy(self.config)
@@ -2477,6 +2512,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         send_label = "envio pelo webhook" if webhook_cfg.get("enabled") else "envio pelo bot"
         dm_label = "DM ligada" if bool(cfg.get("dm_enabled", False)) else "DM desligada"
         delete_label = "apaga ao sair" if bool(cfg.get("delete_on_leave_enabled", False)) else "não apaga ao sair"
+        emoji_label = "emojis coloridos" if bool(cfg.get("decorative_emoji_enabled", False)) else "emojis normais"
         role_label = f"{role_count} cargo{'s' if role_count != 1 else ''}" if role_count else "sem cargos"
         rule_label = f"{rules_count} regra{'s' if rules_count != 1 else ''} especial{'is' if rules_count != 1 else ''}" if rules_count else "sem regras especiais"
         variant_label = f"{variants_count} variaç{'ões' if variants_count != 1 else 'ão'}" if variants_count else "sem variações"
@@ -2498,7 +2534,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         lines.extend([
             "",
             f"Mensagem em {mode} · {send_label}",
-            f"{dm_label} · {delete_label} · {role_label} · {variant_label} · {rule_label}",
+            f"{dm_label} · {delete_label} · {emoji_label} · {role_label} · {variant_label} · {rule_label}",
         ])
         if self.notice:
             lines.extend(["", self.notice])
@@ -3056,6 +3092,8 @@ class WelcomeCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._warmup_task: asyncio.Task | None = None
+        self._emoji_purge_task: asyncio.Task | None = None
+        self._emoji_worker_active: dict[str, int] = {}
         self._avatar_color_cache: dict[str, str] = {}
         self._avatar_palette_cache: dict[str, list[tuple[int, int, int]]] = {}
         self._star_image_cache: dict[str, bytes] = {}
@@ -3067,21 +3105,31 @@ class WelcomeCog(commands.Cog):
     async def cog_load(self):
         await self._ensure_indexes()
         self._warmup_task = asyncio.create_task(self._warmup_invites())
+        self._emoji_purge_task = asyncio.create_task(self._emoji_midnight_purge_loop())
 
     async def cog_unload(self):
         if self._warmup_task is not None:
             self._warmup_task.cancel()
+        if self._emoji_purge_task is not None:
+            self._emoji_purge_task.cancel()
 
     async def _ensure_indexes(self):
         db = self.db
         if db is None or not hasattr(db, "coll"):
             return
         try:
-            await db.coll.create_index([("type", 1), ("guild_id", 1)], name="welcome_type_guild")
+            # Não criamos mais um índice simples (type, guild_id), porque outras cogs
+            # já podem ter criado o mesmo padrão com outro nome. Isso evita aviso inútil
+            # de IndexOptionsConflict a cada restart.
             await db.coll.create_index([("type", 1), ("guild_id", 1), ("member_id", 1)], name="welcome_sent_member")
             await db.coll.create_index([("type", 1), ("expires_at", 1)], name="welcome_sent_expires")
+            await db.coll.create_index([("type", 1), ("delete_after", 1)], name="welcome_temp_emoji_purge")
         except Exception as exc:
-            log.warning("falha ao criar índice de boas-vindas: %s", exc)
+            text = str(exc)
+            if "IndexOptionsConflict" in text or "Index already exists" in text:
+                log.debug("índice de boas-vindas já existe com outro nome: %s", exc)
+            else:
+                log.warning("falha ao criar índice de boas-vindas: %s", exc)
 
     def _default_webhook_config(self) -> dict[str, Any]:
         return {
@@ -3102,6 +3150,7 @@ class WelcomeCog(commands.Cog):
             "channel_id": 0,
             "dm_enabled": False,
             "delete_on_leave_enabled": False,
+            "decorative_emoji_enabled": False,
             "auto_role_ids": [],
             "style": "complete",
             "render_mode": "components_v2",
@@ -3327,6 +3376,7 @@ class WelcomeCog(commands.Cog):
         merged["enabled"] = bool(merged.get("enabled", False))
         merged["dm_enabled"] = bool(merged.get("dm_enabled", False))
         merged["delete_on_leave_enabled"] = bool(merged.get("delete_on_leave_enabled", False))
+        merged["decorative_emoji_enabled"] = bool(merged.get("decorative_emoji_enabled", False))
         try:
             merged["channel_id"] = int(merged.get("channel_id") or 0)
         except Exception:
@@ -3885,9 +3935,341 @@ class WelcomeCog(commands.Cog):
             accent_color=_color_from_hex((cfg.get("embed") or {}).get("color") or cfg.get("accent_color")),
         ))
 
+    def _emoji_tokens_from_config(self, cfg: dict[str, Any], *, mode: str, dm: bool = False) -> list[dict[str, Any]]:
+        if dm:
+            return []
+        mode = str(mode or cfg.get("render_mode") or "components_v2")
+        texts: list[str] = []
+        public = dict(cfg.get("public") or {})
+        embed = self._normalize_embed_config(cfg.get("embed"))
+        if mode == "embed":
+            for key in ("content", "author_name", "title", "description", "footer_text"):
+                texts.append(str(embed.get(key) or ""))
+            # Se a descrição do embed estiver vazia, o corpo público vira fallback.
+            if not str(embed.get("description") or ""):
+                texts.extend(str(public.get(key) or "") for key in ("title", "body", "footer"))
+        else:
+            texts.extend(str(public.get(key) or "") for key in ("title", "body", "footer"))
+        found: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for text in texts:
+            for match in CUSTOM_EMOJI_RE.finditer(str(text or "")):
+                raw = match.group(0)
+                if raw in seen:
+                    continue
+                seen.add(raw)
+                found.append({
+                    "raw": raw,
+                    "animated": bool(match.group(1)),
+                    "name": str(match.group(2) or "emoji")[:32],
+                    "id": str(match.group(3) or ""),
+                })
+                if len(found) >= MAX_DECORATIVE_EMOJIS:
+                    return found
+        return found
+
+    def _replace_emoji_tokens_in_config(self, cfg: dict[str, Any], replacements: dict[str, str], *, mode: str, dm: bool = False) -> dict[str, Any]:
+        if not replacements or dm:
+            return cfg
+        out = self._normalize_config(cfg)
+        def repl(text: Any) -> str:
+            value = str(text or "")
+            for old, new in replacements.items():
+                value = value.replace(old, new)
+            return value
+        public = dict(out.get("public") or {})
+        for key in ("title", "body", "footer"):
+            public[key] = repl(public.get(key))
+        out["public"] = public
+        embed = self._normalize_embed_config(out.get("embed"))
+        for key in ("content", "author_name", "title", "description", "footer_text"):
+            embed[key] = repl(embed.get(key))
+        out["embed"] = embed
+        return out
+
+    def _emoji_cdn_url(self, emoji: dict[str, Any]) -> str:
+        ext = "gif" if bool(emoji.get("animated")) else "png"
+        return f"https://cdn.discordapp.com/emojis/{emoji.get('id')}.{ext}?size=128&quality=lossless"
+
+    def _fetch_url_bytes_sync(self, url: str, *, timeout: float = 4.0, limit: int = 900_000) -> bytes:
+        req = urllib.request.Request(url, headers={"User-Agent": "CoreWelcomeBot/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read(limit + 1)
+        if len(data) > limit:
+            raise RuntimeError("asset grande demais")
+        return data
+
+    async def _fetch_custom_emoji_bytes(self, emoji: dict[str, Any]) -> bytes:
+        return await asyncio.to_thread(self._fetch_url_bytes_sync, self._emoji_cdn_url(emoji), timeout=4.0, limit=900_000)
+
+    def _recolor_rgba_image(self, img: Any, rgb: tuple[int, int, int]) -> Any:
+        img = img.convert("RGBA")
+        px = img.load()
+        tr, tg, tb = rgb
+        width, height = img.size
+        for y in range(height):
+            for x in range(width):
+                r, g, b, a = px[x, y]
+                if a < 8:
+                    continue
+                # Preserva um pouco da luz/sombra original do emoji para ele não virar bloco chapado.
+                brightness = max(0.20, min(1.20, (r * 0.299 + g * 0.587 + b * 0.114) / 185.0))
+                px[x, y] = (min(255, int(tr * brightness)), min(255, int(tg * brightness)), min(255, int(tb * brightness)), a)
+        return img
+
+    def _recolor_emoji_bytes_local_sync(self, raw: bytes, *, animated: bool, color_hex: str) -> tuple[bytes, str]:
+        if Image is None:
+            raise RuntimeError("Pillow indisponível")
+        rgb = self._rgb_from_hex(color_hex)
+        with Image.open(BytesIO(raw)) as img:
+            resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+            if animated and getattr(img, "is_animated", False) and ImageSequence is not None:
+                frames: list[Any] = []
+                durations: list[int] = []
+                raw_frames = [frame.copy() for frame in ImageSequence.Iterator(img)]
+                for size in (128, 96, 64):
+                    for step in (1, 2, 3, 4):
+                        frames.clear()
+                        durations.clear()
+                        for idx, frame in enumerate(raw_frames):
+                            if idx % step != 0:
+                                continue
+                            duration = int(frame.info.get("duration") or img.info.get("duration") or 80) * max(1, step)
+                            frame = frame.convert("RGBA")
+                            frame.thumbnail((size, size), resampling)
+                            canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+                            canvas.alpha_composite(frame, ((size - frame.width) // 2, (size - frame.height) // 2))
+                            frames.append(self._recolor_rgba_image(canvas, rgb))
+                            durations.append(max(20, min(500, duration)))
+                        if not frames:
+                            continue
+                        out = BytesIO()
+                        frames[0].save(
+                            out,
+                            format="GIF",
+                            save_all=True,
+                            append_images=frames[1:],
+                            duration=durations,
+                            loop=0,
+                            optimize=True,
+                            disposal=2,
+                        )
+                        data = out.getvalue()
+                        if len(data) <= DISCORD_EMOJI_MAX_BYTES:
+                            return data, "gif"
+                raise RuntimeError("emoji animado ficou maior que 256 KiB")
+            img = img.convert("RGBA")
+            img.thumbnail((128, 128), resampling)
+            canvas = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+            canvas.alpha_composite(img, ((128 - img.width) // 2, (128 - img.height) // 2))
+            out_img = self._recolor_rgba_image(canvas, rgb)
+            out = BytesIO()
+            out_img.save(out, format="PNG", optimize=True)
+            data = out.getvalue()
+            if len(data) > DISCORD_EMOJI_MAX_BYTES:
+                out = BytesIO()
+                out_img.resize((96, 96), resampling).save(out, format="PNG", optimize=True)
+                data = out.getvalue()
+            if len(data) > DISCORD_EMOJI_MAX_BYTES:
+                raise RuntimeError("emoji estático ficou maior que 256 KiB")
+            return data, "png"
+
+    async def _recolor_emoji_bytes_local(self, raw: bytes, *, animated: bool, color_hex: str) -> tuple[bytes, str]:
+        return await asyncio.to_thread(self._recolor_emoji_bytes_local_sync, raw, animated=animated, color_hex=color_hex)
+
+    def _phone_worker_base_url(self) -> str:
+        enabled = str(os.getenv("PHONE_WORKER_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on", "sim"}
+        host = str(os.getenv("PHONE_WORKER_HOST") or "").strip()
+        if not enabled or not host:
+            return ""
+        scheme = str(os.getenv("PHONE_WORKER_SCHEME") or "http").strip() or "http"
+        try:
+            port = int(str(os.getenv("PHONE_WORKER_PORT") or "8766"))
+        except Exception:
+            port = 8766
+        return f"{scheme}://{host}:{port}"
+
+    async def _worker_recolor_emojis(self, emojis: list[dict[str, Any]], *, color_hex: str) -> list[dict[str, Any]] | None:
+        base_url = self._phone_worker_base_url()
+        token = str(os.getenv("PHONE_WORKER_TOKEN") or "").strip()
+        if not base_url or not token or not emojis:
+            return None
+        worker_key = base_url
+        if int(self._emoji_worker_active.get(worker_key, 0) or 0) >= 2:
+            return None
+        self._emoji_worker_active[worker_key] = int(self._emoji_worker_active.get(worker_key, 0) or 0) + 1
+        try:
+            payload = json.dumps({"task": "emoji_recolor", "color": color_hex, "emojis": emojis[:MAX_DECORATIVE_EMOJIS]}).encode("utf-8")
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+            def post() -> dict[str, Any]:
+                req = urllib.request.Request(f"{base_url}/task", data=payload, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=7.0) as resp:
+                    return json.loads(resp.read().decode("utf-8") or "{}")
+            data = await asyncio.to_thread(post)
+            if not isinstance(data, dict) or data.get("ok") is False:
+                return None
+            items = data.get("items") if isinstance(data.get("items"), list) else []
+            return [item for item in items if isinstance(item, dict)]
+        except Exception as exc:
+            log.debug("worker turbo não recoloriu emojis de boas-vindas: %r", exc)
+            return None
+        finally:
+            self._emoji_worker_active[worker_key] = max(0, int(self._emoji_worker_active.get(worker_key, 1) or 1) - 1)
+
+    async def _local_recolor_emojis(self, emojis: list[dict[str, Any]], *, color_hex: str) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for emoji in emojis[:MAX_DECORATIVE_EMOJIS]:
+            try:
+                raw = await self._fetch_custom_emoji_bytes(emoji)
+                data, fmt = await self._recolor_emoji_bytes_local(raw, animated=bool(emoji.get("animated")), color_hex=color_hex)
+                result.append({**emoji, "data_b64": base64.b64encode(data).decode("ascii"), "format": fmt})
+            except Exception as exc:
+                log.debug("não consegui recolorir emoji localmente: %s %r", emoji.get("raw"), exc)
+        return result
+
+    async def _application_id(self) -> int:
+        app_id = int(getattr(self.bot, "application_id", 0) or 0)
+        if app_id:
+            return app_id
+        info = await self.bot.application_info()
+        return int(info.id)
+
+    async def _create_application_emoji(self, *, name: str, data_b64: str, fmt: str) -> dict[str, Any] | None:
+        try:
+            app_id = await self._application_id()
+            if not app_id:
+                return None
+            fmt = "gif" if str(fmt or "").lower() == "gif" else "png"
+            image_data = f"data:image/{fmt};base64,{data_b64}"
+            clean_name = re.sub(r"[^A-Za-z0-9_]+", "_", str(name or "cwemoji"))[:26].strip("_") or "cwemoji"
+            clean_name = f"cw_{clean_name}_{uuid.uuid4().hex[:5]}"[:32]
+            from discord.http import Route
+            request = getattr(getattr(self.bot, "http", None), "request", None)
+            if not callable(request):
+                return None
+            data = await request(Route("POST", "/applications/{application_id}/emojis", application_id=app_id), json={"name": clean_name, "image": image_data})
+            if not isinstance(data, dict) or not data.get("id"):
+                return None
+            return {"id": str(data.get("id")), "name": str(data.get("name") or clean_name), "animated": bool(data.get("animated"))}
+        except Exception as exc:
+            log.warning("não consegui criar application emoji temporário de boas-vindas: %r", exc)
+            return None
+
+    async def _record_temp_emoji(self, *, guild_id: int, member_id: int, emoji: dict[str, Any], message_id: int = 0) -> None:
+        db = self.db
+        if db is None or not hasattr(db, "coll"):
+            return
+        now = datetime.now(timezone.utc)
+        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        doc = {
+            "type": WELCOME_DOC_EMOJI,
+            "guild_id": int(guild_id or 0),
+            "member_id": int(member_id or 0),
+            "message_id": int(message_id or 0),
+            "emoji_id": str(emoji.get("id") or ""),
+            "emoji_name": str(emoji.get("name") or ""),
+            "animated": bool(emoji.get("animated")),
+            "created_at": now,
+            "delete_after": midnight,
+            "status": "active",
+        }
+        if doc["emoji_id"]:
+            with contextlib.suppress(Exception):
+                await db.coll.insert_one(doc)
+
+    async def _prepare_decorative_emojis(self, config: dict[str, Any], *, member: discord.Member | None, mode: str, dm: bool = False, invite_info: dict[str, Any] | None = None, preview: bool = False) -> dict[str, Any]:
+        cfg = self._normalize_config(config)
+        if dm or member is None or not bool(cfg.get("decorative_emoji_enabled", False)):
+            return cfg
+        emojis = self._emoji_tokens_from_config(cfg, mode=mode, dm=dm)
+        if not emojis:
+            return cfg
+        color_hex = _parse_hex((self._normalize_embed_config(cfg.get("embed")).get("color") if mode == "embed" else cfg.get("accent_color")) or cfg.get("accent_color") or DEFAULT_ACCENT)
+        processed = await self._worker_recolor_emojis(emojis, color_hex=color_hex)
+        if not processed:
+            processed = await self._local_recolor_emojis(emojis, color_hex=color_hex)
+        replacements: dict[str, str] = {}
+        created_for_tracking: list[dict[str, Any]] = []
+        for item in processed or []:
+            raw = str(item.get("raw") or "")
+            if not raw:
+                continue
+            created = await self._create_application_emoji(name=str(item.get("name") or "cwemoji"), data_b64=str(item.get("data_b64") or ""), fmt=str(item.get("format") or "png"))
+            if not created:
+                continue
+            animated = bool(created.get("animated") or item.get("animated"))
+            replacement = f"<a:{created.get('name')}:{created.get('id')}>" if animated else f"<:{created.get('name')}:{created.get('id')}>"
+            replacements[raw] = replacement
+            created_for_tracking.append(created)
+        if not replacements:
+            return cfg
+        cfg = self._replace_emoji_tokens_in_config(cfg, replacements, mode=mode, dm=dm)
+        if not preview:
+            for created in created_for_tracking:
+                await self._record_temp_emoji(guild_id=int(getattr(member.guild, "id", 0) or 0), member_id=int(getattr(member, "id", 0) or 0), emoji=created)
+        else:
+            # Preview também cria emojis temporários; eles entram no purge da meia-noite.
+            for created in created_for_tracking:
+                await self._record_temp_emoji(guild_id=int(getattr(member.guild, "id", 0) or 0), member_id=int(getattr(member, "id", 0) or 0), emoji=created)
+        return cfg
+
+    async def _delete_application_emoji(self, emoji_id: str) -> bool:
+        try:
+            app_id = await self._application_id()
+            from discord.http import Route
+            request = getattr(getattr(self.bot, "http", None), "request", None)
+            if not callable(request):
+                return False
+            await request(Route("DELETE", "/applications/{application_id}/emojis/{emoji_id}", application_id=app_id, emoji_id=int(emoji_id)))
+            return True
+        except discord.NotFound:
+            return True
+        except Exception as exc:
+            log.debug("não consegui apagar emoji temporário de boas-vindas %s: %r", emoji_id, exc)
+            return False
+
+    async def _purge_temp_emojis_once(self) -> None:
+        db = self.db
+        if db is None or not hasattr(db, "coll"):
+            return
+        now = datetime.now(timezone.utc)
+        try:
+            cursor = db.coll.find({"type": WELCOME_DOC_EMOJI, "status": "active", "delete_after": {"$lte": now}}, {"_id": 1, "emoji_id": 1})
+            async for doc in cursor:
+                emoji_id = str(doc.get("emoji_id") or "")
+                if not emoji_id:
+                    await db.coll.update_one({"_id": doc.get("_id")}, {"$set": {"status": "deleted", "deleted_at": now}})
+                    continue
+                ok = await self._delete_application_emoji(emoji_id)
+                if ok:
+                    await db.coll.update_one({"_id": doc.get("_id")}, {"$set": {"status": "deleted", "deleted_at": now}})
+                else:
+                    await asyncio.sleep(2.0)
+                await asyncio.sleep(0.35)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.debug("purge de emojis temporários de boas-vindas falhou: %r", exc)
+
+    async def _emoji_midnight_purge_loop(self) -> None:
+        try:
+            await asyncio.sleep(20)
+            await self._purge_temp_emojis_once()
+            while True:
+                now = datetime.now()
+                tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                await asyncio.sleep(max(60.0, (tomorrow - now).total_seconds()))
+                await self._purge_temp_emojis_once()
+        except asyncio.CancelledError:
+            return
+
     async def _send_rendered(self, destination: discord.abc.Messageable, cfg: dict[str, Any], *, member: discord.Member, dm: bool = False, invite_info: dict[str, Any] | None = None):
         cfg = await self._with_dynamic_colors(cfg, member=member)
         mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")
+        try:
+            cfg = await self._prepare_decorative_emojis(cfg, member=member, mode=mode, dm=dm, invite_info=invite_info)
+        except Exception as exc:
+            log.warning("falha ao preparar emojis de boas-vindas; mantendo originais: %r", exc)
         try:
             cfg, files = await self._prepare_dynamic_media(cfg, member=member, mode=mode, dm=dm)
         except Exception as exc:
@@ -3993,7 +4375,15 @@ class WelcomeCog(commands.Cog):
             return False, None
         cfg = await self._with_dynamic_colors(cfg, member=member)
         mode = str(cfg.get("render_mode") or "components_v2")
-        cfg, files = await self._prepare_dynamic_media(cfg, member=member, mode=mode, dm=False)
+        try:
+            cfg = await self._prepare_decorative_emojis(cfg, member=member, mode=mode, dm=False, invite_info=invite_info)
+        except Exception as exc:
+            log.warning("falha ao preparar emojis de webhook de boas-vindas; mantendo originais: %r", exc)
+        try:
+            cfg, files = await self._prepare_dynamic_media(cfg, member=member, mode=mode, dm=False)
+        except Exception as exc:
+            log.warning("falha ao montar mídia de webhook de boas-vindas; enviando sem imagem dinâmica: %r", exc)
+            cfg, files = self._drop_dynamic_star_media(cfg, mode=mode), []
         webhook = await self._create_or_get_welcome_webhook(channel, webhook_cfg)
         if webhook is None:
             return False, None

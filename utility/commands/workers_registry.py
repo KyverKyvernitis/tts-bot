@@ -45,6 +45,7 @@ CORE_WORKER_JOB_TYPES = {
     "vps_assist_probe",
     "hash_batch",
     "endpoint_probe",
+    "emoji_recolor",
     "media_probe",
     "audio_convert",
     "log_digest",

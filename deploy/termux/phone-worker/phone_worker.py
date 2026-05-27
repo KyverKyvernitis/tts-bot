@@ -33,6 +33,12 @@ from pathlib import Path
 from typing import Any
 from types import SimpleNamespace
 
+try:
+    from PIL import Image, ImageSequence  # type: ignore
+except Exception:
+    Image = None
+    ImageSequence = None
+
 START_TIME = time.time()
 JOBS_STARTED = 0
 JOBS_FAILED = 0
@@ -193,6 +199,7 @@ SUPPORTED_DIRECT_TASKS = (
     "vps_assist_probe",
     "hash_batch",
     "endpoint_probe",
+    "emoji_recolor",
     "media_probe",
     "audio_convert",
     "log_digest",
@@ -250,6 +257,7 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "vps_assist_probe",
     "hash_batch",
     "endpoint_probe",
+    "emoji_recolor",
     "media_probe",
     "audio_convert",
     "log_digest",
@@ -283,7 +291,7 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "turbo": {
         "label": "Turbo",
         "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "voice-agent", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -3966,6 +3974,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_music_ytdlp_resolve(body)
             elif task == "text_stats":
                 payload = self._task_text_stats(body)
+            elif task == "emoji_recolor":
+                payload = self._task_emoji_recolor(body)
             elif task == "tts_cache_lookup":
                 payload = self._task_tts_cache_lookup(body)
             elif task == "tts_cache_store":
@@ -5383,6 +5393,108 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "estimated_reclaimable_logs": reclaimable_logs,
             "recommendations": recommendations[:12],
         }
+
+    def _emoji_cdn_url(self, emoji: dict[str, Any]) -> str:
+        emoji_id = str(emoji.get("id") or "")
+        ext = "gif" if bool(emoji.get("animated")) else "png"
+        return f"https://cdn.discordapp.com/emojis/{emoji_id}.{ext}?size=128&quality=lossless"
+
+    def _download_emoji_asset(self, emoji: dict[str, Any], *, limit: int = 900_000) -> bytes:
+        req = urllib.request.Request(self._emoji_cdn_url(emoji), headers={"User-Agent": "CorePhoneWorker/emoji-recolor"})
+        with urllib.request.urlopen(req, timeout=8.0) as resp:
+            data = resp.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError("emoji base grande demais")
+        return data
+
+    def _rgb_from_hex_worker(self, value: Any) -> tuple[int, int, int]:
+        raw = str(value or "#5865F2").strip().upper()
+        if not raw.startswith("#"):
+            raw = "#" + raw
+        if not re.fullmatch(r"#[0-9A-F]{6}", raw):
+            raw = "#5865F2"
+        return int(raw[1:3], 16), int(raw[3:5], 16), int(raw[5:7], 16)
+
+    def _recolor_rgba_image(self, img: Any, rgb: tuple[int, int, int]) -> Any:
+        img = img.convert("RGBA")
+        px = img.load()
+        tr, tg, tb = rgb
+        width, height = img.size
+        for y in range(height):
+            for x in range(width):
+                r, g, b, a = px[x, y]
+                if a < 8:
+                    continue
+                brightness = max(0.20, min(1.20, (r * 0.299 + g * 0.587 + b * 0.114) / 185.0))
+                px[x, y] = (min(255, int(tr * brightness)), min(255, int(tg * brightness)), min(255, int(tb * brightness)), a)
+        return img
+
+    def _recolor_emoji_bytes(self, raw: bytes, *, animated: bool, color: str) -> tuple[bytes, str]:
+        if Image is None:
+            raise RuntimeError("Pillow não instalado no worker")
+        rgb = self._rgb_from_hex_worker(color)
+        with Image.open(io.BytesIO(raw)) as img:
+            resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+            if animated and getattr(img, "is_animated", False) and ImageSequence is not None:
+                raw_frames = [frame.copy() for frame in ImageSequence.Iterator(img)]
+                for size in (128, 96, 64):
+                    for step in (1, 2, 3, 4):
+                        frames: list[Any] = []
+                        durations: list[int] = []
+                        for idx, frame in enumerate(raw_frames):
+                            if idx % step != 0:
+                                continue
+                            duration = int(frame.info.get("duration") or img.info.get("duration") or 80) * max(1, step)
+                            frame = frame.convert("RGBA")
+                            frame.thumbnail((size, size), resampling)
+                            canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+                            canvas.alpha_composite(frame, ((size - frame.width) // 2, (size - frame.height) // 2))
+                            frames.append(self._recolor_rgba_image(canvas, rgb))
+                            durations.append(max(20, min(500, duration)))
+                        if not frames:
+                            continue
+                        out = io.BytesIO()
+                        frames[0].save(out, format="GIF", save_all=True, append_images=frames[1:], duration=durations, loop=0, optimize=True, disposal=2)
+                        data = out.getvalue()
+                        if len(data) <= 256 * 1024:
+                            return data, "gif"
+                raise RuntimeError("emoji animado ficou maior que 256 KiB")
+            img = img.convert("RGBA")
+            img.thumbnail((128, 128), resampling)
+            canvas = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+            canvas.alpha_composite(img, ((128 - img.width) // 2, (128 - img.height) // 2))
+            out_img = self._recolor_rgba_image(canvas, rgb)
+            for size in (128, 96, 64):
+                out = io.BytesIO()
+                candidate = out_img if size == 128 else out_img.resize((size, size), resampling)
+                candidate.save(out, format="PNG", optimize=True)
+                data = out.getvalue()
+                if len(data) <= 256 * 1024:
+                    return data, "png"
+            raise RuntimeError("emoji estático ficou maior que 256 KiB")
+
+    def _task_emoji_recolor(self, body: dict[str, Any]) -> dict[str, Any]:
+        emojis = body.get("emojis") or []
+        if not isinstance(emojis, list):
+            raise ValueError("emojis precisa ser lista")
+        color = str(body.get("color") or "#5865F2")
+        items: list[dict[str, Any]] = []
+        for raw in emojis[:2]:
+            if not isinstance(raw, dict):
+                continue
+            emoji = {
+                "raw": str(raw.get("raw") or ""),
+                "id": str(raw.get("id") or ""),
+                "name": str(raw.get("name") or "emoji")[:32],
+                "animated": bool(raw.get("animated")),
+            }
+            if not re.fullmatch(r"\d{15,25}", emoji["id"]):
+                continue
+            data = self._download_emoji_asset(emoji)
+            out, fmt = self._recolor_emoji_bytes(data, animated=bool(emoji.get("animated")), color=color)
+            items.append({**emoji, "format": fmt, "size": len(out), "data_b64": _b64encode(out, max_bytes=512 * 1024)})
+        return {"ok": True, "items": items, "count": len(items), "summary": f"{len(items)} emoji(s) recolorido(s)"}
+
 
     def _task_text_stats(self, body: dict[str, Any]) -> dict[str, Any]:
         text = str(body.get("text") or "")
@@ -8250,6 +8362,10 @@ def _execute_core_worker_job(job: dict[str, Any], *, max_body_bytes: int, max_ou
             runner = _task_runner(max_body_bytes, max_output_bytes, job_timeout)
             result = runner._task_music_ytdlp_resolve(payload)
             result.setdefault("summary", "música resolvida pelo worker")
+        elif kind == "emoji_recolor":
+            runner = _task_runner(max_body_bytes, max_output_bytes, job_timeout)
+            result = runner._task_emoji_recolor(payload)
+            result.setdefault("summary", "emojis recoloridos pelo worker")
         elif kind in {"media_probe", "ffprobe_media"}:
             runner = _task_runner(max_body_bytes, max_output_bytes, job_timeout)
             result = runner._task_ffprobe_media(payload)
