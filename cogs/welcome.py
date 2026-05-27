@@ -601,22 +601,10 @@ class _RenderModeSelect(discord.ui.Select):
 class _ModeActionSelect(discord.ui.Select):
     def __init__(self, panel: "WelcomeAdminView"):
         self.panel = panel
-        options = [
-            discord.SelectOption(label="Configurar modo", value="config", emoji="⚙️", description="Modo da mensagem, status e privado"),
-            discord.SelectOption(label="Ver preview", value="preview", emoji="👁️"),
-        ]
-        super().__init__(placeholder="O que deseja ajustar no modo?", min_values=1, max_values=1, options=options)
+        options = [discord.SelectOption(label="Ver preview", value="preview", emoji="👁️")]
+        super().__init__(placeholder="Mais opções do modo", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        if str(self.values[0]) == "config":
-            if not _advanced_modal_supported("Label", "RadioGroup", "CheckboxGroup"):
-                await interaction.response.send_message(
-                    view=_make_notice_view("Ainda não disponível", "Essa versão da biblioteca não abriu o formulário moderno de modo.", ok=False),
-                    ephemeral=True,
-                )
-                return
-            await interaction.response.send_modal(WelcomeQuickOptionsModal(self.panel))
-            return
         await self.panel.send_preview(interaction)
 
 
@@ -881,6 +869,7 @@ class _VisualActionSelect(discord.ui.Select):
         self.panel = panel
         options = [
             discord.SelectOption(label="Editar visual", value="edit", emoji="🎨", description="Estilo, cor e imagem"),
+            discord.SelectOption(label="Emojis decorativos", value="decorative_emojis", emoji="✨", description="Colorir até 2 emojis da mensagem"),
             discord.SelectOption(label="Remover imagem", value="clear_image", emoji="🧹"),
             discord.SelectOption(label="Ver preview", value="preview", emoji="👁️"),
         ]
@@ -890,6 +879,15 @@ class _VisualActionSelect(discord.ui.Select):
         action = str(self.values[0])
         if action == "edit":
             await interaction.response.send_modal(WelcomeVisualModal(self.panel))
+            return
+        if action == "decorative_emojis":
+            if not _advanced_modal_supported("Label", "CheckboxGroup"):
+                await interaction.response.send_message(
+                    view=_make_notice_view("Ainda não disponível", "Essa versão da biblioteca não abriu o formulário moderno de emojis.", ok=False),
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_modal(WelcomeDecorativeEmojiModal(self.panel))
             return
         if action == "clear_image":
             cfg = deepcopy(self.panel.config)
@@ -1153,22 +1151,33 @@ class _StatusSelect(discord.ui.Select):
     def __init__(self, panel: "WelcomeAdminView"):
         self.panel = panel
         enabled = bool(panel.config.get("enabled", False))
+        delete_on_leave = bool(panel.config.get("delete_on_leave_enabled", False))
         options = [
             discord.SelectOption(label="Ligar boas-vindas", value="enable", emoji="✅", default=enabled),
             discord.SelectOption(label="Desligar boas-vindas", value="disable", emoji="⏸️", default=not enabled),
+            discord.SelectOption(label="Apagar mensagem se o membro sair", value="delete_on", emoji="🧹", description="Vale por até 1 dia", default=delete_on_leave),
+            discord.SelectOption(label="Manter mensagem mesmo se sair", value="delete_off", emoji="💬", default=not delete_on_leave),
         ]
-        super().__init__(placeholder="Escolha o status", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="Escolha o que ajustar", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        want_enable = str(self.values[0]) == "enable"
+        action = str(self.values[0])
         cfg = deepcopy(self.panel.config)
-        if want_enable and not int(cfg.get("channel_id") or 0):
-            self.panel.notice = "Escolha um canal antes de ligar."
+        if action in {"delete_on", "delete_off"}:
+            cfg["delete_on_leave_enabled"] = action == "delete_on"
+            await self.panel.save_config(
+                cfg,
+                "Vou apagar a boas-vindas se o membro sair em até 1 dia." if cfg["delete_on_leave_enabled"] else "Vou manter a boas-vindas mesmo se o membro sair.",
+            )
         else:
-            cfg["enabled"] = want_enable
-            await self.panel.save_config(cfg, "Boas-vindas ligadas." if want_enable else "Boas-vindas pausadas.")
-            if want_enable:
-                asyncio.create_task(self.panel.cog._refresh_invite_cache_for_guild(interaction.guild, cfg))
+            want_enable = action == "enable"
+            if want_enable and not int(cfg.get("channel_id") or 0):
+                self.panel.notice = "Escolha um canal antes de ligar."
+            else:
+                cfg["enabled"] = want_enable
+                await self.panel.save_config(cfg, "Boas-vindas ligadas." if want_enable else "Boas-vindas pausadas.")
+                if want_enable:
+                    asyncio.create_task(self.panel.cog._refresh_invite_cache_for_guild(interaction.guild, cfg))
         self.panel._rebuild()
         await interaction.response.edit_message(view=self.panel)
 
@@ -1913,6 +1922,36 @@ class WelcomeVisualModal(discord.ui.Modal):
         await interaction.response.edit_message(view=self.panel)
 
 
+class WelcomeDecorativeEmojiModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Emojis decorativos")
+        self.panel = panel
+        self.flags_group = discord.ui.CheckboxGroup(required=False, min_values=0, max_values=1)
+        self.flags_group.add_option(
+            label="Colorir até 2 emojis da mensagem",
+            value="decorative_emoji_enabled",
+            description="Usa a cor do membro quando possível.",
+            default=bool(panel.config.get("decorative_emoji_enabled", False)),
+        )
+        self.add_item(discord.ui.Label(
+            text="Emojis decorativos",
+            description="O bot lê até 2 emojis customizados do texto e mantém os originais se não conseguir colorir.",
+            component=self.flags_group,
+        ))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        selected = set(_modal_values(self.flags_group))
+        cfg = deepcopy(self.panel.config)
+        cfg["decorative_emoji_enabled"] = "decorative_emoji_enabled" in selected
+        await self.panel.save_config(
+            cfg,
+            "Emojis decorativos ligados." if cfg["decorative_emoji_enabled"] else "Emojis decorativos desligados.",
+        )
+        self.panel.screen = "visual"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
 class WelcomeWebhookSetupModal(discord.ui.Modal):
     def __init__(self, panel: "WelcomeAdminView"):
         super().__init__(title="Configurar webhook")
@@ -2070,22 +2109,18 @@ class WelcomeQuickOptionsModal(discord.ui.Modal):
         current_mode = str(cfg.get("render_mode") or "components_v2")
         for key, label in RENDER_MODE_LABELS.items():
             self.mode_group.add_option(label=label, value=key, description=RENDER_MODE_DESCRIPTIONS[key], default=current_mode == key)
-        self.flags_group = discord.ui.CheckboxGroup(required=False, min_values=0, max_values=4)
+        self.flags_group = discord.ui.CheckboxGroup(required=False, min_values=0, max_values=2)
         self.flags_group.add_option(label="Boas-vindas ligadas", value="enabled", description="Envia quando alguém entrar.", default=bool(cfg.get("enabled", False)))
         self.flags_group.add_option(label="Mensagem privada ligada", value="dm_enabled", description="Também manda no privado.", default=bool(cfg.get("dm_enabled", False)))
-        self.flags_group.add_option(label="Apagar boas-vindas se o membro sair", value="delete_on_leave_enabled", description="Vale por até 1 dia.", default=bool(cfg.get("delete_on_leave_enabled", False)))
-        self.flags_group.add_option(label="Colorir até 2 emojis da mensagem", value="decorative_emoji_enabled", description="Usa as cores do membro quando possível.", default=bool(cfg.get("decorative_emoji_enabled", False)))
         self.add_item(discord.ui.Label(text="Modo da mensagem pública", component=self.mode_group))
-        self.add_item(discord.ui.Label(text="Opções", description="Marque o que fica ativo.", component=self.flags_group))
+        self.add_item(discord.ui.Label(text="Opções básicas", component=self.flags_group))
 
     async def on_submit(self, interaction: discord.Interaction):
-        selected = set(getattr(self.flags_group, "values", None) or [])
+        selected = set(_modal_values(self.flags_group))
         cfg = deepcopy(self.panel.config)
-        cfg["render_mode"] = str(getattr(self.mode_group, "value", None) or "components_v2")
+        cfg["render_mode"] = str(_modal_value(self.mode_group, "components_v2"))
         cfg["enabled"] = "enabled" in selected
         cfg["dm_enabled"] = "dm_enabled" in selected
-        cfg["delete_on_leave_enabled"] = "delete_on_leave_enabled" in selected
-        cfg["decorative_emoji_enabled"] = "decorative_emoji_enabled" in selected
         if cfg["enabled"] and not int(cfg.get("channel_id") or 0):
             cfg["enabled"] = False
             notice = "Modo salvo. Escolha um canal antes de ligar."
@@ -2793,8 +2828,8 @@ class WelcomeAdminView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay(_trim("\n".join(lines))),
             discord.ui.Separator(),
-            discord.ui.ActionRow(_ModeActionSelect(self)),
-            discord.ui.ActionRow(_BackButton(self)),
+            discord.ui.ActionRow(_RenderModeSelect(self)),
+            discord.ui.ActionRow(_PreviewButton(self), _BackButton(self)),
             accent_color=_color_from_hex(self.config.get("accent_color")),
         ))
 
@@ -2904,6 +2939,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(*rows, accent_color=_color_from_hex(self.config.get("accent_color"))))
 
     def _build_visual(self):
+        emoji_status = "ligados" if bool(self.config.get("decorative_emoji_enabled", False)) else "desligados"
         lines = [
             "# 🖼️ Visual da mensagem",
             "Escolha como a mensagem vai aparecer.",
@@ -2913,6 +2949,8 @@ class WelcomeAdminView(discord.ui.LayoutView):
             f"**Cor**\n`{_parse_hex(self.config.get('accent_color'))}`",
             "",
             f"**Imagem**\n{MEDIA_MODE_LABELS.get(_media_mode(self.config.get('media_mode')), 'Link personalizado') if _media_mode(self.config.get('media_mode')) != 'custom' else ('configurada' if _clean_url(self.config.get('media_url')) else 'sem imagem')}",
+            "",
+            f"**Emojis decorativos**\n{emoji_status} · até 2 emojis customizados da mensagem",
         ]
         if self.notice:
             lines.extend(["", self.notice])
@@ -3069,7 +3107,17 @@ class WelcomeAdminView(discord.ui.LayoutView):
 
     def _build_status(self):
         channel_id = int(self.config.get("channel_id") or 0)
-        lines = ["# ⚙️ Ativar ou desativar", "Ligue quando a mensagem estiver pronta.", "", f"**Status atual**\n{_status_label(bool(self.config.get('enabled', False)))}", "", f"**Canal**\n{_channel_mention(channel_id)}"]
+        delete_label = "apaga se o membro sair em até 1 dia" if bool(self.config.get("delete_on_leave_enabled", False)) else "mantém a mensagem"
+        lines = [
+            "# ⚙️ Ativar ou desativar",
+            "Ligue quando a mensagem estiver pronta.",
+            "",
+            f"**Status atual**\n{_status_label(bool(self.config.get('enabled', False)))}",
+            "",
+            f"**Canal**\n{_channel_mention(channel_id)}",
+            "",
+            f"**Quando o membro sair**\n{delete_label}",
+        ]
         if self.notice:
             lines.extend(["", self.notice])
         self.add_item(discord.ui.Container(
