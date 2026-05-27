@@ -2390,7 +2390,11 @@ class WelcomeAdminView(discord.ui.LayoutView):
                 cfg = self.cog._apply_variant(cfg, self.cog._pick_variant(cfg))
         cfg = await self.cog._with_dynamic_colors(cfg, member=member)
         mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")
-        cfg, files = await self.cog._prepare_dynamic_media(cfg, member=member, mode=mode, dm=dm)
+        try:
+            cfg, files = await self.cog._prepare_dynamic_media(cfg, member=member, mode=mode, dm=dm)
+        except Exception as exc:
+            log.warning("falha ao montar mídia do preview de boas-vindas; usando preview sem imagem dinâmica: %r", exc)
+            cfg, files = self.cog._drop_dynamic_star_media(cfg, mode=mode), []
         allowed = discord.AllowedMentions.none()
         if mode == "embed":
             content, embed = self.cog._make_embed_payload(cfg, member=member, guild_id=self.guild_id, dm=dm)
@@ -3576,7 +3580,7 @@ class WelcomeCog(commands.Cog):
     async def _member_avatar_palette(self, member: discord.Member | None, fallback: str = DEFAULT_ACCENT, *, limit: int = 6) -> list[tuple[int, int, int]]:
         if member is None or Image is None:
             return [self._rgb_from_hex(fallback)]
-        asset = member.display_avatar.replace(size=96, static_format="png")
+        asset = member.display_avatar.replace(size=128, static_format="png")
         cache_key = str(getattr(asset, "key", None) or asset.url)
         cached = self._avatar_palette_cache.get(cache_key)
         if cached:
@@ -3699,7 +3703,7 @@ class WelcomeCog(commands.Cog):
             return None
         avatar_key = "default"
         if member is not None:
-            asset = member.display_avatar.replace(size=96, static_format="png")
+            asset = member.display_avatar.replace(size=128, static_format="png")
             avatar_key = str(getattr(asset, "key", None) or asset.url)
         cache_key = f"{avatar_key}:{_parse_hex(fallback)}"
         data = self._star_image_cache.get(cache_key)
@@ -3715,6 +3719,18 @@ class WelcomeCog(commands.Cog):
             if len(self._star_image_cache) > 128:
                 self._star_image_cache.pop(next(iter(self._star_image_cache)), None)
         return discord.File(BytesIO(data), filename=STAR_SEPARATOR_FILENAME)
+
+    def _drop_dynamic_star_media(self, config: dict[str, Any], *, mode: str) -> dict[str, Any]:
+        cfg = self._normalize_config(config)
+        if mode == "components_v2" and _media_mode(cfg.get("media_mode")) == "avatar_stars":
+            cfg["media_mode"] = "none"
+            cfg["media_url"] = ""
+        embed = self._normalize_embed_config(cfg.get("embed"))
+        if mode == "embed" and str(embed.get("image_mode") or "") == "avatar_stars":
+            embed["image_mode"] = "none"
+            embed["image_url"] = ""
+            cfg["embed"] = embed
+        return cfg
 
     async def _prepare_dynamic_media(self, config: dict[str, Any], *, member: discord.Member | None, mode: str, dm: bool = False) -> tuple[dict[str, Any], list[discord.File]]:
         cfg = self._normalize_config(config)
@@ -3733,9 +3749,24 @@ class WelcomeCog(commands.Cog):
             embed["image_url"] = f"attachment://{STAR_SEPARATOR_FILENAME}"
             cfg["embed"] = embed
         if needs_stars:
-            star_file = await self._star_separator_file(member, cfg.get("accent_color") or DEFAULT_ACCENT)
+            star_file = None
+            try:
+                star_file = await self._star_separator_file(member, cfg.get("accent_color") or DEFAULT_ACCENT)
+            except Exception as exc:
+                log.warning("falha ao preparar preset de estrelas de boas-vindas; enviando sem imagem dinâmica: %r", exc)
             if star_file is not None:
                 files.append(star_file)
+            else:
+                # Imagem decorativa nunca pode impedir a mensagem de boas-vindas.
+                if mode == "components_v2":
+                    cfg["media_url"] = ""
+                    cfg["media_mode"] = "none"
+                elif mode == "embed":
+                    embed = self._normalize_embed_config(cfg.get("embed"))
+                    if str(embed.get("image_url") or "").startswith("attachment://"):
+                        embed["image_url"] = ""
+                        embed["image_mode"] = "none"
+                        cfg["embed"] = embed
         return cfg, files
 
     def _make_welcome_container(self, config: dict[str, Any], *, member: discord.Member | None, guild_id: int | None = None, dm: bool = False, invite_info: dict[str, Any] | None = None) -> discord.ui.Container:
@@ -3857,7 +3888,11 @@ class WelcomeCog(commands.Cog):
     async def _send_rendered(self, destination: discord.abc.Messageable, cfg: dict[str, Any], *, member: discord.Member, dm: bool = False, invite_info: dict[str, Any] | None = None):
         cfg = await self._with_dynamic_colors(cfg, member=member)
         mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")
-        cfg, files = await self._prepare_dynamic_media(cfg, member=member, mode=mode, dm=dm)
+        try:
+            cfg, files = await self._prepare_dynamic_media(cfg, member=member, mode=mode, dm=dm)
+        except Exception as exc:
+            log.warning("falha ao montar mídia de boas-vindas; enviando sem imagem dinâmica: %r", exc)
+            cfg, files = self._drop_dynamic_star_media(cfg, mode=mode), []
         allowed = discord.AllowedMentions.none() if dm else discord.AllowedMentions(users=True, roles=False, everyone=False)
         if mode == "embed":
             content, embed = self._make_embed_payload(cfg, member=member, guild_id=member.guild.id, dm=dm, invite_info=invite_info)
