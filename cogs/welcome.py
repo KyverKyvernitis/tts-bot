@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import colorsys
 from io import BytesIO
+from pathlib import Path
 import logging
 import random
 import re
@@ -35,6 +36,9 @@ VAR_RE = re.compile(r"\{([a-zA-Z0-9_]+)\}")
 HEX_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
 URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 INVITE_CODE_RE = re.compile(r"^(?:https?://)?(?:www\.)?(?:discord\.gg/|discord\.com/invite/)?([A-Za-z0-9_-]{2,64})/?$", re.IGNORECASE)
+
+STAR_SEPARATOR_ASSET = Path(__file__).resolve().parents[1] / "assets" / "welcome" / "star_separator.png"
+STAR_SEPARATOR_FILENAME = "welcome-stars.png"
 
 DEFAULT_ACCENT = "#5865F2"
 DEFAULT_WEBHOOK_NAME = "Boas-vindas"
@@ -173,6 +177,16 @@ EMBED_IMAGE_MODE_LABELS = {
     "custom": "Link personalizado",
 }
 
+EMBED_MAIN_IMAGE_MODE_LABELS = {
+    **EMBED_IMAGE_MODE_LABELS,
+    "avatar_stars": "Estrelas combinando com o membro",
+}
+
+MEDIA_MODE_LABELS = {
+    "custom": "Link personalizado",
+    "avatar_stars": "Estrelas combinando com o membro",
+}
+
 WEBHOOK_NAME_LABELS = {
     "fixed": "Nome personalizado",
     "server": "Nome do servidor",
@@ -244,6 +258,8 @@ def _clean_url(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
+    if raw.startswith("attachment://"):
+        return raw[:1000]
     if not URL_RE.fullmatch(raw):
         return ""
     return raw[:1000]
@@ -251,7 +267,12 @@ def _clean_url(value: Any) -> str:
 
 def _image_mode(value: Any, *, fallback: str = "none") -> str:
     mode = str(value or fallback).strip().lower()
-    return mode if mode in EMBED_IMAGE_MODE_LABELS else fallback
+    return mode if mode in EMBED_MAIN_IMAGE_MODE_LABELS else fallback
+
+
+def _media_mode(value: Any, *, fallback: str = "custom") -> str:
+    mode = str(value or fallback).strip().lower()
+    return mode if mode in MEDIA_MODE_LABELS else fallback
 
 
 def _has_custom_embed(embed: dict[str, Any] | None) -> bool:
@@ -862,6 +883,7 @@ class _VisualActionSelect(discord.ui.Select):
         if action == "clear_image":
             cfg = deepcopy(self.panel.config)
             cfg["media_url"] = ""
+            cfg["media_mode"] = "custom"
             await self.panel.save_config(cfg, "Imagem removida.")
             self.panel.screen = "visual"
         elif action == "preview":
@@ -1384,6 +1406,13 @@ class WelcomeVariantVisualModal(discord.ui.Modal):
             for key, label in COLOR_MODE_LABELS.items():
                 self.color_mode_group.add_option(label=label, value=key, default=current_color_mode == key)
             self.add_item(discord.ui.Label(text="Cor", component=self.color_mode_group))
+        self.media_mode_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.media_mode_group = discord.ui.RadioGroup(required=True)
+            current_media_mode = _media_mode(variant.get("media_mode"))
+            for key, label in MEDIA_MODE_LABELS.items():
+                self.media_mode_group.add_option(label=label, value=key, default=current_media_mode == key)
+            self.add_item(discord.ui.Label(text="Imagem/banner", component=self.media_mode_group))
         self.color_input = discord.ui.TextInput(label="Cor fixa em hex", placeholder="#5865F2", default=str(variant.get("accent_color") or "")[:7], max_length=7, required=False)
         self.image_input = discord.ui.TextInput(label="Imagem/banner opcional", placeholder="https://exemplo.com/imagem.png", default=str(variant.get("media_url") or "")[:1000], max_length=1000, required=False)
         self.add_item(self.color_input)
@@ -1409,6 +1438,7 @@ class WelcomeVariantVisualModal(discord.ui.Modal):
             "accent_color": _parse_hex(raw_hex) if raw_hex else "",
             "accent_color_mode": color_mode,
             "media_url": _clean_url(raw_url),
+            "media_mode": _media_mode(_modal_value(self.media_mode_group, "custom") if self.media_mode_group is not None else "custom"),
         }, "Visual da variação salvo.")
         self.panel.screen = "variant_detail"
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
@@ -1627,13 +1657,13 @@ class WelcomeEmbedImagesModal(discord.ui.Modal):
                 self.thumbnail_group.add_option(label=label, value=key, default=current_thumb == key)
             self.image_group = discord.ui.RadioGroup(required=True)
             current_image = _image_mode(embed.get("image_mode"), fallback="custom")
-            for key, label in EMBED_IMAGE_MODE_LABELS.items():
+            for key, label in EMBED_MAIN_IMAGE_MODE_LABELS.items():
                 self.image_group.add_option(label=label, value=key, default=current_image == key)
             self.add_item(discord.ui.Label(text="Thumbnail / imagem lateral", component=self.thumbnail_group))
             self.add_item(discord.ui.Label(text="Imagem principal / banner", component=self.image_group))
         else:
             self.thumbnail_mode_input = discord.ui.TextInput(label="Thumbnail: none, member, inviter, server, bot ou custom", default=str(embed.get("thumbnail_mode") or "none")[:20], max_length=20, required=True)
-            self.image_mode_input = discord.ui.TextInput(label="Imagem: none, member, inviter, server, bot ou custom", default=str(embed.get("image_mode") or "custom")[:20], max_length=20, required=True)
+            self.image_mode_input = discord.ui.TextInput(label="Imagem: none, member, inviter, server, bot, custom ou avatar_stars", default=str(embed.get("image_mode") or "custom")[:20], max_length=20, required=True)
             self.add_item(self.thumbnail_mode_input)
             self.add_item(self.image_mode_input)
         self.thumbnail_url_input = discord.ui.TextInput(label="Thumbnail por link opcional", placeholder="https://exemplo.com/avatar.png", default=str(embed.get("thumbnail_url") or "")[:1000], max_length=1000, required=False)
@@ -1811,6 +1841,13 @@ class WelcomeVisualModal(discord.ui.Modal):
             for key, label in COLOR_MODE_LABELS.items():
                 self.color_mode_group.add_option(label=label, value=key, default=current_color_mode == key)
             self.add_item(discord.ui.Label(text="Cor da mensagem", component=self.color_mode_group))
+        self.media_mode_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.media_mode_group = discord.ui.RadioGroup(required=True)
+            current_media_mode = _media_mode(panel.config.get("media_mode"))
+            for key, label in MEDIA_MODE_LABELS.items():
+                self.media_mode_group.add_option(label=label, value=key, default=current_media_mode == key)
+            self.add_item(discord.ui.Label(text="Imagem/banner", component=self.media_mode_group))
         self.accent_input = discord.ui.TextInput(
             label="Cor fixa em HEX",
             placeholder="#5865F2",
@@ -1856,6 +1893,8 @@ class WelcomeVisualModal(discord.ui.Modal):
             color_mode = "fixed"
         cfg["accent_color_mode"] = color_mode
         cfg["accent_color"] = _parse_hex(raw_hex)
+        media_mode = _modal_value(self.media_mode_group, "custom") if self.media_mode_group is not None else str(cfg.get("media_mode") or "custom")
+        cfg["media_mode"] = _media_mode(media_mode)
         cfg["media_url"] = _clean_url(raw_url)
         await self.panel.save_config(cfg, "Visual atualizado.")
         self.panel.screen = "visual"
@@ -2186,6 +2225,13 @@ class SpecialRuleVisualModal(discord.ui.Modal):
         else:
             self.style_input = discord.ui.TextInput(label="Estilo: inherit, complete, simple ou compact", default=str((rule or {}).get("style") or "inherit")[:20], max_length=20, required=True)
             self.add_item(self.style_input)
+        self.media_mode_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.media_mode_group = discord.ui.RadioGroup(required=True)
+            current_media_mode = _media_mode((rule or {}).get("media_mode"))
+            for key, label in MEDIA_MODE_LABELS.items():
+                self.media_mode_group.add_option(label=label, value=key, default=current_media_mode == key)
+            self.add_item(discord.ui.Label(text="Imagem/banner", component=self.media_mode_group))
         self.accent_input = discord.ui.TextInput(label="Cor em HEX opcional", placeholder="#5865F2 ou vazio para padrão", default=str((rule or {}).get("accent_color") or "")[:7], max_length=7, required=False)
         self.image_input = discord.ui.TextInput(label="Imagem/banner opcional", placeholder="https://exemplo.com/imagem.png", default=str((rule or {}).get("media_url") or "")[:1000], max_length=1000, required=False)
         self.add_item(self.accent_input)
@@ -2209,6 +2255,7 @@ class SpecialRuleVisualModal(discord.ui.Modal):
         await self.panel.update_rule(self.rule_id, {
             "accent_color": _parse_hex(raw_hex) if raw_hex else "",
             "media_url": _clean_url(raw_url),
+            "media_mode": _media_mode(_modal_value(self.media_mode_group, "custom") if self.media_mode_group is not None else "custom"),
             "style": style,
         }, "Visual especial salvo.")
         self.panel.screen = "special_rule"
@@ -2343,12 +2390,15 @@ class WelcomeAdminView(discord.ui.LayoutView):
                 cfg = self.cog._apply_variant(cfg, self.cog._pick_variant(cfg))
         cfg = await self.cog._with_dynamic_colors(cfg, member=member)
         mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")
+        cfg, files = await self.cog._prepare_dynamic_media(cfg, member=member, mode=mode, dm=dm)
         allowed = discord.AllowedMentions.none()
         if mode == "embed":
             content, embed = self.cog._make_embed_payload(cfg, member=member, guild_id=self.guild_id, dm=dm)
             kwargs: dict[str, Any] = {"embed": embed, "ephemeral": True, "allowed_mentions": allowed}
             if content:
                 kwargs["content"] = content
+            if files:
+                kwargs["files"] = files
             await interaction.response.send_message(**kwargs)
             return
         if mode == "normal":
@@ -2357,7 +2407,10 @@ class WelcomeAdminView(discord.ui.LayoutView):
             return
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(self.cog._make_welcome_container(cfg, member=member, guild_id=self.guild_id, dm=dm))
-        await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=allowed)
+        kwargs: dict[str, Any] = {"view": view, "ephemeral": True, "allowed_mentions": allowed}
+        if files:
+            kwargs["files"] = files
+        await interaction.response.send_message(**kwargs)
 
     async def update_rule(self, rule_id: str, updates: dict[str, Any], notice: str) -> bool:
         cfg = deepcopy(self.config)
@@ -2557,7 +2610,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         thumb_mode = _image_mode(embed.get("thumbnail_mode"))
         image_mode = _image_mode(embed.get("image_mode"), fallback="custom")
         thumb = EMBED_IMAGE_MODE_LABELS.get(thumb_mode, "Sem imagem")
-        image = EMBED_IMAGE_MODE_LABELS.get(image_mode, "Link personalizado")
+        image = EMBED_MAIN_IMAGE_MODE_LABELS.get(image_mode, "Link personalizado")
         if thumb_mode == "custom" and not _clean_url(embed.get("thumbnail_url")):
             thumb = "Sem imagem"
         if image_mode == "custom" and not (_clean_url(embed.get("image_url")) or _clean_url(self.config.get("media_url"))):
@@ -2659,7 +2712,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
             "",
             f"Mensagem: {content_label}",
             f"Visual: {style} · {color}",
-            f"Imagem: {'configurada' if _clean_url(variant.get('media_url')) else 'usa a padrão'}",
+            f"Imagem: {MEDIA_MODE_LABELS.get(_media_mode(variant.get('media_mode')), 'Link personalizado') if _media_mode(variant.get('media_mode')) != 'custom' else ('configurada' if _clean_url(variant.get('media_url')) else 'usa a padrão')}",
             "",
             "Escolha o que deseja ajustar.",
         ]
@@ -2819,7 +2872,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
             "",
             f"**Cor**\n`{_parse_hex(self.config.get('accent_color'))}`",
             "",
-            f"**Imagem**\n{'configurada' if _clean_url(self.config.get('media_url')) else 'sem imagem'}",
+            f"**Imagem**\n{MEDIA_MODE_LABELS.get(_media_mode(self.config.get('media_mode')), 'Link personalizado') if _media_mode(self.config.get('media_mode')) != 'custom' else ('configurada' if _clean_url(self.config.get('media_url')) else 'sem imagem')}",
         ]
         if self.notice:
             lines.extend(["", self.notice])
@@ -3000,6 +3053,8 @@ class WelcomeCog(commands.Cog):
         self.bot = bot
         self._warmup_task: asyncio.Task | None = None
         self._avatar_color_cache: dict[str, str] = {}
+        self._avatar_palette_cache: dict[str, list[tuple[int, int, int]]] = {}
+        self._star_image_cache: dict[str, bytes] = {}
 
     @property
     def db(self):
@@ -3050,6 +3105,7 @@ class WelcomeCog(commands.Cog):
             "accent_color": DEFAULT_ACCENT,
             "accent_color_mode": "fixed",
             "media_url": "",
+            "media_mode": "custom",
             "variants": [],
             "public": dict(DEFAULT_PUBLIC),
             "embed": dict(DEFAULT_EMBED),
@@ -3198,6 +3254,8 @@ class WelcomeCog(commands.Cog):
             cfg["accent_color_mode"] = str(variant.get("accent_color_mode"))
         if variant.get("media_url"):
             cfg["media_url"] = _clean_url(variant.get("media_url"))
+        if str(variant.get("media_mode") or "custom") != "custom":
+            cfg["media_mode"] = _media_mode(variant.get("media_mode"))
         return self._normalize_config(cfg)
 
     def _normalize_rule(self, rule: dict[str, Any] | None) -> dict[str, Any]:
@@ -3234,6 +3292,7 @@ class WelcomeCog(commands.Cog):
             "style": style,
             "accent_color": _parse_hex(data.get("accent_color")) if data.get("accent_color") else "",
             "media_url": _clean_url(data.get("media_url")),
+            "media_mode": _media_mode(data.get("media_mode")),
             "public": self._normalize_public_block(data.get("public"), default=DEFAULT_PUBLIC, allow_empty=True),
             "embed": self._normalize_embed_config(data.get("embed")),
             "webhook": {
@@ -3274,6 +3333,7 @@ class WelcomeCog(commands.Cog):
         merged["accent_color"] = _parse_hex(merged.get("accent_color"))
         merged["accent_color_mode"] = str(merged.get("accent_color_mode") or "fixed") if str(merged.get("accent_color_mode") or "fixed") in COLOR_MODE_LABELS else "fixed"
         merged["media_url"] = _clean_url(merged.get("media_url"))
+        merged["media_mode"] = _media_mode(merged.get("media_mode"))
         variants: list[dict[str, Any]] = []
         for raw in merged.get("variants") or []:
             if isinstance(raw, dict):
@@ -3506,6 +3566,178 @@ class WelcomeCog(commands.Cog):
             cfg["embed"] = embed
         return cfg
 
+    def _rgb_from_hex(self, value: Any, fallback: str = DEFAULT_ACCENT) -> tuple[int, int, int]:
+        raw = _parse_hex(value, fallback).lstrip("#")
+        try:
+            return int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
+        except Exception:
+            return (88, 101, 242)
+
+    async def _member_avatar_palette(self, member: discord.Member | None, fallback: str = DEFAULT_ACCENT, *, limit: int = 6) -> list[tuple[int, int, int]]:
+        if member is None or Image is None:
+            return [self._rgb_from_hex(fallback)]
+        asset = member.display_avatar.replace(size=96, static_format="png")
+        cache_key = str(getattr(asset, "key", None) or asset.url)
+        cached = self._avatar_palette_cache.get(cache_key)
+        if cached:
+            return cached[:limit]
+        try:
+            data = await asset.read()
+            with Image.open(BytesIO(data)) as img:
+                resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+                img = img.convert("RGBA").resize((64, 64), resampling)
+                buckets: dict[tuple[int, int, int], list[float]] = {}
+                fallback_pixels: list[tuple[int, int, int]] = []
+                for r, g, b, a in img.getdata():
+                    if a < 90:
+                        continue
+                    brightness = (r + g + b) / 3
+                    if 18 <= brightness <= 242:
+                        fallback_pixels.append((r, g, b))
+                    h, sat, val = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                    if 28 <= brightness <= 232 and sat >= 0.16 and val >= 0.16:
+                        key = (r // 32, g // 32, b // 32)
+                        item = buckets.setdefault(key, [0.0, 0.0, 0.0, 0.0, 0.0])
+                        item[0] += 1
+                        item[1] += r
+                        item[2] += g
+                        item[3] += b
+                        item[4] += sat * 1.35 + val * 0.35
+                colors: list[tuple[float, int, int, int]] = []
+                for item in buckets.values():
+                    count = max(1.0, item[0])
+                    r = int(item[1] / count)
+                    g = int(item[2] / count)
+                    b = int(item[3] / count)
+                    score = count * 0.45 + item[4] * 18.0
+                    colors.append((score, r, g, b))
+                colors.sort(reverse=True)
+                palette: list[tuple[int, int, int]] = []
+                used_hues: list[float] = []
+                for _, r, g, b in colors:
+                    hue, sat, val = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                    if any(abs(hue - old) < 0.045 or abs(abs(hue - old) - 1.0) < 0.045 for old in used_hues) and len(palette) >= 3:
+                        continue
+                    palette.append((r, g, b))
+                    used_hues.append(hue)
+                    if len(palette) >= limit:
+                        break
+                if not palette and fallback_pixels:
+                    r = int(sum(px[0] for px in fallback_pixels) / len(fallback_pixels))
+                    g = int(sum(px[1] for px in fallback_pixels) / len(fallback_pixels))
+                    b = int(sum(px[2] for px in fallback_pixels) / len(fallback_pixels))
+                    palette = [(r, g, b)]
+                if not palette:
+                    palette = [self._rgb_from_hex(fallback)]
+                while len(palette) < 3:
+                    base = palette[-1]
+                    h, sat, val = colorsys.rgb_to_hsv(base[0] / 255, base[1] / 255, base[2] / 255)
+                    h = (h + 0.09 * len(palette)) % 1.0
+                    sat = min(1.0, max(0.35, sat + 0.08))
+                    val = min(1.0, max(0.45, val + 0.05))
+                    rr, gg, bb = colorsys.hsv_to_rgb(h, sat, val)
+                    palette.append((int(rr * 255), int(gg * 255), int(bb * 255)))
+                self._avatar_palette_cache[cache_key] = palette[:limit]
+                if len(self._avatar_palette_cache) > 128:
+                    self._avatar_palette_cache.pop(next(iter(self._avatar_palette_cache)), None)
+                return palette[:limit]
+        except Exception:
+            return [self._rgb_from_hex(fallback)]
+
+    def _recolor_star_template(self, palette: list[tuple[int, int, int]]) -> bytes | None:
+        if Image is None or not STAR_SEPARATOR_ASSET.exists():
+            return None
+        try:
+            with Image.open(STAR_SEPARATOR_ASSET) as src:
+                img = src.convert("RGBA")
+            width, height = img.size
+            pixels = img.load()
+            visited = bytearray(width * height)
+            components: list[tuple[float, list[tuple[int, int]]]] = []
+            for y in range(height):
+                for x in range(width):
+                    idx = y * width + x
+                    if visited[idx]:
+                        continue
+                    visited[idx] = 1
+                    if pixels[x, y][3] <= 18:
+                        continue
+                    stack = [(x, y)]
+                    points: list[tuple[int, int]] = []
+                    sx = 0
+                    while stack:
+                        px, py = stack.pop()
+                        points.append((px, py))
+                        sx += px
+                        for nx, ny in ((px + 1, py), (px - 1, py), (px, py + 1), (px, py - 1)):
+                            if nx < 0 or ny < 0 or nx >= width or ny >= height:
+                                continue
+                            nidx = ny * width + nx
+                            if visited[nidx]:
+                                continue
+                            visited[nidx] = 1
+                            if pixels[nx, ny][3] > 18:
+                                stack.append((nx, ny))
+                    if points:
+                        components.append((sx / max(1, len(points)), points))
+            components.sort(key=lambda item: item[0])
+            palette = palette or [self._rgb_from_hex(DEFAULT_ACCENT)]
+            for idx, (_, points) in enumerate(components):
+                r, g, b = palette[idx % len(palette)]
+                for x, y in points:
+                    _, _, _, a = pixels[x, y]
+                    pixels[x, y] = (r, g, b, a)
+            out = BytesIO()
+            img.save(out, format="PNG", optimize=True)
+            return out.getvalue()
+        except Exception as exc:
+            log.debug("não consegui recolorir estrelas de boas-vindas: %r", exc)
+            return None
+
+    async def _star_separator_file(self, member: discord.Member | None, fallback: str = DEFAULT_ACCENT) -> discord.File | None:
+        if not STAR_SEPARATOR_ASSET.exists():
+            return None
+        avatar_key = "default"
+        if member is not None:
+            asset = member.display_avatar.replace(size=96, static_format="png")
+            avatar_key = str(getattr(asset, "key", None) or asset.url)
+        cache_key = f"{avatar_key}:{_parse_hex(fallback)}"
+        data = self._star_image_cache.get(cache_key)
+        if data is None:
+            palette = await self._member_avatar_palette(member, fallback)
+            data = self._recolor_star_template(palette)
+            if data is None:
+                try:
+                    data = STAR_SEPARATOR_ASSET.read_bytes()
+                except Exception:
+                    return None
+            self._star_image_cache[cache_key] = data
+            if len(self._star_image_cache) > 128:
+                self._star_image_cache.pop(next(iter(self._star_image_cache)), None)
+        return discord.File(BytesIO(data), filename=STAR_SEPARATOR_FILENAME)
+
+    async def _prepare_dynamic_media(self, config: dict[str, Any], *, member: discord.Member | None, mode: str, dm: bool = False) -> tuple[dict[str, Any], list[discord.File]]:
+        cfg = self._normalize_config(config)
+        if dm:
+            return cfg, []
+        files: list[discord.File] = []
+        needs_stars = False
+        if mode == "components_v2" and _media_mode(cfg.get("media_mode")) == "avatar_stars":
+            needs_stars = True
+            cfg["media_url"] = f"attachment://{STAR_SEPARATOR_FILENAME}"
+            cfg["media_mode"] = "custom"
+        embed = self._normalize_embed_config(cfg.get("embed"))
+        if mode == "embed" and str(embed.get("image_mode") or "") == "avatar_stars":
+            needs_stars = True
+            embed["image_mode"] = "custom"
+            embed["image_url"] = f"attachment://{STAR_SEPARATOR_FILENAME}"
+            cfg["embed"] = embed
+        if needs_stars:
+            star_file = await self._star_separator_file(member, cfg.get("accent_color") or DEFAULT_ACCENT)
+            if star_file is not None:
+                files.append(star_file)
+        return cfg, files
+
     def _make_welcome_container(self, config: dict[str, Any], *, member: discord.Member | None, guild_id: int | None = None, dm: bool = False, invite_info: dict[str, Any] | None = None) -> discord.ui.Container:
         cfg = self._normalize_config(config)
         title, body, footer = self._build_welcome_text(cfg, member=member, guild_id=guild_id, dm=dm, invite_info=invite_info)
@@ -3625,16 +3857,22 @@ class WelcomeCog(commands.Cog):
     async def _send_rendered(self, destination: discord.abc.Messageable, cfg: dict[str, Any], *, member: discord.Member, dm: bool = False, invite_info: dict[str, Any] | None = None):
         cfg = await self._with_dynamic_colors(cfg, member=member)
         mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")
+        cfg, files = await self._prepare_dynamic_media(cfg, member=member, mode=mode, dm=dm)
         allowed = discord.AllowedMentions.none() if dm else discord.AllowedMentions(users=True, roles=False, everyone=False)
         if mode == "embed":
             content, embed = self._make_embed_payload(cfg, member=member, guild_id=member.guild.id, dm=dm, invite_info=invite_info)
             kwargs: dict[str, Any] = {"embed": embed, "allowed_mentions": allowed}
             if content:
                 kwargs["content"] = content
+            if files:
+                kwargs["files"] = files
             return await destination.send(**kwargs)
         if mode == "normal":
             return await destination.send(content=self._make_normal_content(cfg, member=member, guild_id=member.guild.id, dm=dm, invite_info=invite_info), allowed_mentions=allowed)
-        return await destination.send(view=self._make_components_view(cfg, member=member, dm=dm, invite_info=invite_info), allowed_mentions=allowed)
+        kwargs: dict[str, Any] = {"view": self._make_components_view(cfg, member=member, dm=dm, invite_info=invite_info), "allowed_mentions": allowed}
+        if files:
+            kwargs["files"] = files
+        return await destination.send(**kwargs)
 
     def _avatar_url_for(self, mode: str, *, member: discord.Member, guild: discord.Guild, invite_info: dict[str, Any] | None, custom_url: str = "") -> str:
         if mode == "custom" and custom_url:
@@ -3719,18 +3957,21 @@ class WelcomeCog(commands.Cog):
         if not webhook_cfg.get("enabled"):
             return False, None
         cfg = await self._with_dynamic_colors(cfg, member=member)
+        mode = str(cfg.get("render_mode") or "components_v2")
+        cfg, files = await self._prepare_dynamic_media(cfg, member=member, mode=mode, dm=False)
         webhook = await self._create_or_get_welcome_webhook(channel, webhook_cfg)
         if webhook is None:
             return False, None
         name = self._webhook_username_for(str(webhook_cfg.get("name_mode") or "fixed"), member=member, guild=member.guild, invite_info=invite_info, fixed=str(webhook_cfg.get("name") or DEFAULT_WEBHOOK_NAME))
         avatar_url = self._avatar_url_for(str(webhook_cfg.get("avatar_mode") or "server"), member=member, guild=member.guild, invite_info=invite_info, custom_url=str(webhook_cfg.get("avatar_url") or ""))
-        mode = str(cfg.get("render_mode") or "components_v2")
         allowed = discord.AllowedMentions(users=True, roles=False, everyone=False)
         kwargs: dict[str, Any] = {"username": name, "allowed_mentions": allowed, "wait": bool(wait)}
         if avatar_url:
             kwargs["avatar_url"] = avatar_url
         if isinstance(channel, discord.Thread):
             kwargs["thread"] = channel
+        if files:
+            kwargs["files"] = files
         try:
             message = None
             if mode == "embed":
@@ -3982,6 +4223,8 @@ class WelcomeCog(commands.Cog):
             cfg["accent_color"] = _parse_hex(rule.get("accent_color"))
         if rule.get("media_url"):
             cfg["media_url"] = _clean_url(rule.get("media_url"))
+        if str(rule.get("media_mode") or "custom") != "custom":
+            cfg["media_mode"] = _media_mode(rule.get("media_mode"))
         public = dict(cfg.get("public") or DEFAULT_PUBLIC)
         for key, value in dict(rule.get("public") or {}).items():
             if str(value or "").strip():
