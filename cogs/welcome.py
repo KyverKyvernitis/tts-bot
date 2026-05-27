@@ -4128,14 +4128,44 @@ class WelcomeCog(commands.Cog):
         return found
 
     def _replace_emoji_tokens_in_config(self, cfg: dict[str, Any], replacements: dict[str, str], *, mode: str, dm: bool = False) -> dict[str, Any]:
+        """Substitui emojis decorativos sem corromper fallback.
+
+        `replacements` aceita duas formas:
+        - chave raw (`<:nome:id>` / `<a:nome:id>`) para compatibilidade;
+        - chave `id:<emoji_id>` para trocar globalmente qualquer ocorrência daquele ID,
+          mesmo que o nome salvo no texto seja diferente.
+
+        Se um emoji não tiver replacement confirmado, o texto fica exatamente como estava.
+        """
         if not replacements or dm:
             return cfg
         out = self._normalize_config(cfg)
+        id_replacements: dict[str, str] = {}
+        raw_replacements: dict[str, str] = {}
+        for old, new in (replacements or {}).items():
+            old_s = str(old or "")
+            new_s = str(new or "")
+            if not old_s or not new_s:
+                continue
+            if old_s.startswith("id:"):
+                emoji_id = old_s[3:]
+                if re.fullmatch(r"\d{15,25}", emoji_id):
+                    id_replacements[emoji_id] = new_s
+            else:
+                raw_replacements[old_s] = new_s
+
         def repl(text: Any) -> str:
             value = str(text or "")
-            for old, new in replacements.items():
+            if id_replacements:
+                def by_id(match: re.Match[str]) -> str:
+                    emoji_id = str(match.group(3) or "")
+                    return id_replacements.get(emoji_id, match.group(0))
+                value = CUSTOM_EMOJI_RE.sub(by_id, value)
+            # Raw fallback para qualquer variação não coberta por ID.
+            for old, new in raw_replacements.items():
                 value = value.replace(old, new)
             return value
+
         public = dict(out.get("public") or {})
         for key in ("title", "body", "footer"):
             public[key] = repl(public.get(key))
@@ -4216,6 +4246,21 @@ class WelcomeCog(commands.Cog):
                         data = out.getvalue()
                         if len(data) <= DISCORD_EMOJI_MAX_BYTES:
                             return data, "gif"
+                # Fallback seguro: se a animação não couber no limite do Discord,
+                # cria uma versão estática do primeiro frame em vez de falhar o emoji todo.
+                if raw_frames:
+                    frame = raw_frames[0].convert("RGBA")
+                    frame.thumbnail((128, 128), resampling)
+                    canvas = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+                    canvas.alpha_composite(frame, ((128 - frame.width) // 2, (128 - frame.height) // 2))
+                    out_img = self._recolor_rgba_image(canvas, rgb)
+                    for size in (128, 96, 64):
+                        out = BytesIO()
+                        candidate = out_img if size == 128 else out_img.resize((size, size), resampling)
+                        candidate.save(out, format="PNG", optimize=True)
+                        data = out.getvalue()
+                        if len(data) <= DISCORD_EMOJI_MAX_BYTES:
+                            return data, "png"
                 raise RuntimeError("emoji animado ficou maior que 256 KiB")
             img = img.convert("RGBA")
             img.thumbnail((128, 128), resampling)
@@ -4346,38 +4391,61 @@ class WelcomeCog(commands.Cog):
         emojis = self._emoji_tokens_from_config(cfg, mode=mode, dm=dm, limit=effective_limit)
         if not emojis:
             return cfg
+
         color_hex = _parse_hex((self._normalize_embed_config(cfg.get("embed")).get("color") if mode == "embed" else cfg.get("accent_color")) or cfg.get("accent_color") or DEFAULT_ACCENT)
-        processed = await self._worker_recolor_emojis(emojis, color_hex=color_hex, limit=effective_limit)
-        if not processed:
-            processed = await self._local_recolor_emojis(emojis, color_hex=color_hex, limit=effective_limit)
+
+        # O worker pode devolver só parte dos emojis (ex.: o segundo asset animado falhou).
+        # Nesse caso, tentamos completar localmente apenas os que faltaram. O fallback é por
+        # emoji individual: o que não tiver replacement confirmado permanece original.
+        processed_by_key: dict[str, dict[str, Any]] = {}
+        worker_items = await self._worker_recolor_emojis(emojis, color_hex=color_hex, limit=effective_limit)
+        for item in worker_items or []:
+            key = str(item.get("key") or "")
+            if key:
+                processed_by_key[key] = item
+
+        missing = [emoji for emoji in emojis if str(emoji.get("key") or "") not in processed_by_key]
+        if missing:
+            local_items = await self._local_recolor_emojis(missing, color_hex=color_hex, limit=effective_limit)
+            for item in local_items or []:
+                key = str(item.get("key") or "")
+                if key and key not in processed_by_key:
+                    processed_by_key[key] = item
+
+        if not processed_by_key:
+            return cfg
+
         replacements: dict[str, str] = {}
         created_for_tracking: list[dict[str, Any]] = []
-        for item in processed or []:
-            raws = item.get("raw_variants")
-            if not isinstance(raws, list) or not raws:
-                raws = [item.get("raw")]
-            raws = [str(raw or "") for raw in raws if str(raw or "")]
-            if not raws:
+        for original in emojis:
+            key = str(original.get("key") or "")
+            item = processed_by_key.get(key)
+            if not item:
                 continue
-            created = await self._create_application_emoji(name=str(item.get("name") or "cwemoji"), data_b64=str(item.get("data_b64") or ""), fmt=str(item.get("format") or "png"))
+            emoji_id = str(original.get("id") or item.get("id") or "")
+            if not re.fullmatch(r"\d{15,25}", emoji_id):
+                continue
+            created = await self._create_application_emoji(name=str(item.get("name") or original.get("name") or "cwemoji"), data_b64=str(item.get("data_b64") or ""), fmt=str(item.get("format") or "png"))
             if not created:
-                # Falhou? Mantém todos os emojis originais exatamente como estavam.
+                # Falhou? Mantém esse emoji base original em todas as ocorrências.
                 continue
-            animated = bool(created.get("animated") or item.get("animated"))
+            animated = bool(created.get("animated") or item.get("animated") or original.get("animated"))
             replacement = f"<a:{created.get('name')}:{created.get('id')}>" if animated else f"<:{created.get('name')}:{created.get('id')}>"
-            for raw in raws:
+            # Troca global por ID para cobrir nomes diferentes e todas as ocorrências.
+            replacements[f"id:{emoji_id}"] = replacement
+            # Compatibilidade: também troca os tokens raw conhecidos.
+            raws = item.get("raw_variants") if isinstance(item.get("raw_variants"), list) else original.get("raw_variants")
+            if not isinstance(raws, list) or not raws:
+                raws = [item.get("raw") or original.get("raw")]
+            for raw in [str(raw or "") for raw in raws if str(raw or "")]:
                 replacements[raw] = replacement
             created_for_tracking.append(created)
+
         if not replacements:
             return cfg
         cfg = self._replace_emoji_tokens_in_config(cfg, replacements, mode=mode, dm=dm)
-        if not preview:
-            for created in created_for_tracking:
-                await self._record_temp_emoji(guild_id=int(getattr(member.guild, "id", 0) or 0), member_id=int(getattr(member, "id", 0) or 0), emoji=created)
-        else:
-            # Preview também cria emojis temporários; eles entram no purge da meia-noite.
-            for created in created_for_tracking:
-                await self._record_temp_emoji(guild_id=int(getattr(member.guild, "id", 0) or 0), member_id=int(getattr(member, "id", 0) or 0), emoji=created)
+        for created in created_for_tracking:
+            await self._record_temp_emoji(guild_id=int(getattr(member.guild, "id", 0) or 0), member_id=int(getattr(member, "id", 0) or 0), emoji=created)
         return cfg
 
     async def _delete_application_emoji(self, emoji_id: str) -> bool:

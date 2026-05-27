@@ -5458,6 +5458,21 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         data = out.getvalue()
                         if len(data) <= 256 * 1024:
                             return data, "gif"
+                # Fallback: se a animação não couber no limite do Discord, devolve
+                # uma versão estática do primeiro frame em vez de perder o emoji inteiro.
+                if raw_frames:
+                    frame = raw_frames[0].convert("RGBA")
+                    frame.thumbnail((128, 128), resampling)
+                    canvas = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+                    canvas.alpha_composite(frame, ((128 - frame.width) // 2, (128 - frame.height) // 2))
+                    out_img = self._recolor_rgba_image(canvas, rgb)
+                    for size in (128, 96, 64):
+                        out = io.BytesIO()
+                        candidate = out_img if size == 128 else out_img.resize((size, size), resampling)
+                        candidate.save(out, format="PNG", optimize=True)
+                        data = out.getvalue()
+                        if len(data) <= 256 * 1024:
+                            return data, "png"
                 raise RuntimeError("emoji animado ficou maior que 256 KiB")
             img = img.convert("RGBA")
             img.thumbnail((128, 128), resampling)
@@ -5479,6 +5494,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raise ValueError("emojis precisa ser lista")
         color = str(body.get("color") or "#5865F2")
         items: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
         for raw in emojis[:4]:
             if not isinstance(raw, dict):
                 continue
@@ -5498,10 +5514,15 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 emoji["raw_variants"].insert(0, emoji["raw"])
             if not re.fullmatch(r"\d{15,25}", emoji["id"]):
                 continue
-            data = self._download_emoji_asset(emoji)
-            out, fmt = self._recolor_emoji_bytes(data, animated=bool(emoji.get("animated")), color=color)
-            items.append({**emoji, "format": fmt, "size": len(out), "data_b64": _b64encode(out, max_bytes=512 * 1024)})
-        return {"ok": True, "items": items, "count": len(items), "summary": f"{len(items)} emoji(s) recolorido(s)"}
+            try:
+                data = self._download_emoji_asset(emoji)
+                out, fmt = self._recolor_emoji_bytes(data, animated=bool(emoji.get("animated")), color=color)
+                items.append({**emoji, "format": fmt, "size": len(out), "data_b64": _b64encode(out, max_bytes=512 * 1024)})
+            except Exception as exc:
+                errors.append({"id": emoji["id"], "error": str(exc)[:160]})
+                continue
+        return {"ok": True, "items": items, "count": len(items), "errors": errors[:4], "summary": f"{len(items)} emoji(s) recolorido(s)"}
+
 
 
     def _task_text_stats(self, body: dict[str, Any]) -> dict[str, Any]:
