@@ -43,6 +43,15 @@ O `voice_agent` agora mostra `shared_session_ready`, quantidade de sessões, gui
 # Phone Worker Termux
 
 
+
+## Patch 85.10: Google Cloud TTS nativo no worker turbo
+
+A versão `1.10.22` integra Google Cloud TTS diretamente no `TTS Agent` do worker turbo confiável. Quando `google-cloud-texttospeech` está instalado e existe uma service account em runtime, o worker anuncia `gcloud` como engine pronta, usa `OGG_OPUS` por padrão e mostra no health se a biblioteca, credencial e encoding estão prontos. A ordem automática de engine passa a preferir `gcloud`, depois `piper`, `edge` e `gtts`.
+
+A chave deve ficar apenas em `~/phone-worker/secrets/google-tts-service-account.json` ou caminho privado equivalente apontado por `PHONE_WORKER_GOOGLE_APPLICATION_CREDENTIALS`/`GOOGLE_APPLICATION_CREDENTIALS`. Não coloque o JSON no repositório, patch zip, logs ou GitHub. O painel/health mostra apenas presença da credencial, nunca o conteúdo.
+
+No Termux, o caminho testado para dependências é: primeiro `pkg install python-grpcio python-cryptography protobuf libprotobuf`, depois `pip install google-cloud-texttospeech`. O start script passa a respeitar essa ordem quando Google Cloud TTS estiver habilitado ou a credencial existir, evitando compilar `grpcio`/`cryptography` pelo pip.
+
 ## Patch 85.3: base do Worker Voice Agent
 
 A versão `1.10.14` também passa a expor `voice_agent` em `/health`, `/status` e `/local/status`, além da task direta `voice_agent_status`. Essa etapa **não** faz o worker controlar o bot inteiro e ainda não ativa TTS direto worker → Discord por padrão. Ela cria a base de telemetria/contrato para o próximo caminho: VPS continua sendo o cérebro do bot, enquanto o worker turbo vira o plano de voz/áudio compartilhado para Música + TTS quando estiver saudável.

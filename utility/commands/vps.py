@@ -697,6 +697,17 @@ class VpsCommandMixin:
         worker_version = str(tts_agent.get("worker_version") or "").strip()
         worker_suffix = f" · versão {worker_version}" if worker_version else ""
         available_engines = ", ".join(_engine_label(value) for value in list(tts_agent.get("available_engines") or [])[:6]) or "nenhuma"
+        gcloud_status = tts_agent.get("gcloud") if isinstance(tts_agent.get("gcloud"), dict) else {}
+        if gcloud_status:
+            gcloud_ready = "pronto" if gcloud_status.get("ready") else ("sem credencial" if gcloud_status.get("library") and not gcloud_status.get("credentials") else "indisponível")
+            gcloud_line = (
+                f"Google Cloud worker: `{gcloud_ready}` · encoding `{str(gcloud_status.get('encoding') or '—')[:24]}`"
+                f" · lib `{'sim' if gcloud_status.get('library') else 'não'}` · credencial `{'sim' if gcloud_status.get('credentials') else 'não'}`"
+            )
+            if gcloud_status.get("last_error") and not gcloud_status.get("ready"):
+                gcloud_line += f" · erro `{str(gcloud_status.get('last_error'))[:80]}`"
+        else:
+            gcloud_line = "Google Cloud worker: `sem health`"
         last_requested = str(tts_agent.get("last_requested_engine") or tts_metrics.get("tts_agent_last_requested_engine") or "").strip()
         last_selected = str(tts_agent.get("last_selected_engine") or tts_metrics.get("tts_agent_last_selected_engine") or "").strip()
         last_format = str(tts_agent.get("last_audio_format") or tts_metrics.get("tts_agent_last_audio_format") or "").strip()
@@ -839,6 +850,7 @@ class VpsCommandMixin:
             "",
             "### 📱 TTS do Worker / TTS Agent",
             f"Estado: `{'pronto' if agent_ok and route == 'worker' else 'fallback/VPS' if agent_enabled else 'desativado'}` · engines disponíveis: {available_engines}",
+            gcloud_line,
             f"Fila worker: {self._format_vps_int(int(tts_agent.get('queue_active', 0) or 0))}/{self._format_vps_int(int(tts_agent.get('queue_limit', 0) or 0))}",
             f"Health ok/falha: {self._format_vps_int(int(tts_metrics.get('tts_agent_health_ok', 0) or 0))}/{self._format_vps_int(int(tts_metrics.get('tts_agent_health_fail', 0) or 0))}",
             f"Synth tentadas/ok/falhas: {self._format_vps_int(int(tts_metrics.get('tts_agent_synth_attempts', 0) or 0))}/"

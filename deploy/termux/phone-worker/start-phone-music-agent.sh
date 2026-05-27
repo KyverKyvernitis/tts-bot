@@ -79,6 +79,14 @@ pip_source_builds_enabled() {
   truthy "${MUSIC_AGENT_ALLOW_PIP_SOURCE_BUILDS:-${PHONE_WORKER_ALLOW_PIP_SOURCE_BUILDS:-false}}"
 }
 
+
+google_cloud_tts_native_enabled() {
+  truthy "${PHONE_WORKER_TTS_AGENT_GCLOUD_ENABLED:-${PHONE_WORKER_GOOGLE_TTS_ENABLED:-false}}" && return 0
+  local cred="${PHONE_WORKER_GOOGLE_APPLICATION_CREDENTIALS:-${GOOGLE_APPLICATION_CREDENTIALS:-}}"
+  [[ -n "$cred" && -s "$cred" ]] && return 0
+  return 1
+}
+
 install_attempt_allowed() {
   local key="$1"
   local cooldown="${2:-900}"
@@ -103,6 +111,23 @@ python_module_ok() {
 import importlib, sys
 importlib.import_module(sys.argv[1])
 PYMODCHECK
+}
+
+safe_pkg_install_missing() {
+  local label="$1"; shift
+  agent_deps_install_enabled || { log "pacote Termux ausente: $label; auto-install seguro desativado"; return 1; }
+  command -v pkg >/dev/null 2>&1 || return 1
+  [[ "$#" -gt 0 ]] || return 0
+  local cooldown timeout
+  cooldown="${MUSIC_AGENT_DEPS_INSTALL_COOLDOWN_SECONDS:-${PHONE_WORKER_DEPS_INSTALL_COOLDOWN_SECONDS:-900}}"
+  timeout="${MUSIC_AGENT_TERMUX_DEPS_INSTALL_TIMEOUT_SECONDS:-${PHONE_WORKER_TERMUX_DEPS_INSTALL_TIMEOUT_SECONDS:-180}}"
+  install_attempt_allowed "music-agent-pkg-$label" "$cooldown" || return 1
+  log "auto-install seguro: pacote(s) Termux ausentes para $label: $*"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$timeout" pkg install -y "$@" >/dev/null 2>&1 || log "pkg install falhou/expirou para $label"
+  else
+    pkg install -y "$@" >/dev/null 2>&1 || log "pkg install falhou para $label"
+  fi
 }
 
 safe_pip_install_module() {
@@ -269,7 +294,10 @@ ensure_deps() {
   safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp[default]" light || missing=1
   safe_pip_install_module "gTTS" "gtts" "gTTS" light || true
   safe_pip_install_module "edge-tts" "edge_tts" "edge-tts" light || true
-  safe_pip_install_module "google-cloud-texttospeech" "google.cloud.texttospeech_v1" "google-cloud-texttospeech" heavy || true
+  if google_cloud_tts_native_enabled; then
+    safe_pkg_install_missing "google-cloud-tts-native" python-grpcio python-cryptography protobuf libprotobuf || true
+    safe_pip_install_module "google-cloud-texttospeech" "google.cloud.texttospeech_v1" "google-cloud-texttospeech" light || true
+  fi
   if "$PYTHON_BIN" - <<'PYDEPS' >/dev/null 2>&1; then
 import aiohttp, discord, nacl, davey, wavelink, yt_dlp  # noqa: F401
 PYDEPS

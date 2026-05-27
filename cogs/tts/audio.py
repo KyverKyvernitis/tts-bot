@@ -414,6 +414,7 @@ class TTSAudioMixin:
                 "last_cache_hit": False,
                 "last_synth_ms": 0.0,
                 "voice_agent": {},
+                "gcloud": {},
             }
             setattr(self, "_tts_agent_route", state)
         return state
@@ -448,6 +449,7 @@ class TTSAudioMixin:
             "last_cache_hit": bool(state.get("last_cache_hit")),
             "last_synth_ms": float(state.get("last_synth_ms") or 0.0),
             "voice_agent": dict(state.get("voice_agent") or {}),
+            "gcloud": dict(state.get("gcloud") or {}),
         }
 
     def _tts_agent_set_route(
@@ -609,6 +611,9 @@ class TTSAudioMixin:
                 voice_agent = {}
             if voice_agent:
                 self._update_worker_voice_agent_snapshot(voice_agent)
+            gcloud_status = agent.get("gcloud") if isinstance(agent.get("gcloud"), dict) else {}
+            if gcloud_status:
+                self._tts_agent_route_state()["gcloud"] = dict(gcloud_status)
             ok = bool(data.get("ok", True) and agent.get("ok") and agent.get("available") and agent.get("synth_ready"))
             if ok:
                 metrics["tts_agent_health_ok"] = int(metrics.get("tts_agent_health_ok", 0) or 0) + 1
