@@ -4206,77 +4206,145 @@ class WelcomeCog(commands.Cog):
                 px[x, y] = (min(255, int(tr * brightness)), min(255, int(tg * brightness)), min(255, int(tb * brightness)), a)
         return img
 
+    def _visible_alpha_bbox(self, img: Any, *, threshold: int = 10) -> tuple[int, int, int, int] | None:
+        """Retorna a área visível real do emoji, ignorando padding transparente."""
+        if Image is None:
+            return None
+        rgba = img.convert("RGBA")
+        alpha = rgba.getchannel("A").point(lambda value: 255 if value >= threshold else 0)
+        return alpha.getbbox()
+
+    def _union_alpha_bbox(self, frames: list[Any], *, threshold: int = 10) -> tuple[int, int, int, int] | None:
+        box: tuple[int, int, int, int] | None = None
+        for frame in frames:
+            bbox = self._visible_alpha_bbox(frame, threshold=threshold)
+            if bbox is None:
+                continue
+            if box is None:
+                box = bbox
+            else:
+                box = (min(box[0], bbox[0]), min(box[1], bbox[1]), max(box[2], bbox[2]), max(box[3], bbox[3]))
+        return box
+
+    def _normalize_emoji_frame(self, frame: Any, *, bbox: tuple[int, int, int, int] | None = None, canvas_size: int = 128, fill_ratio: float = 0.88) -> Any:
+        """Normaliza o emoji para 128x128, fazendo o conteúdo ocupar quase todo o canvas.
+
+        O bug anterior deixava alguns emojis animados como um pontinho porque o frame
+        original tinha muito padding transparente. Aqui cortamos a área visível,
+        redimensionamos e centralizamos de novo.
+        """
+        if Image is None:
+            raise RuntimeError("Pillow indisponível")
+        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+        rgba = frame.convert("RGBA")
+        bbox = bbox or self._visible_alpha_bbox(rgba)
+        canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+        if not bbox:
+            return canvas
+        left, top, right, bottom = bbox
+        if right <= left or bottom <= top:
+            return canvas
+        cropped = rgba.crop((left, top, right, bottom))
+        max_dim = max(cropped.width, cropped.height)
+        if max_dim <= 0:
+            return canvas
+        target = max(16, min(canvas_size, int(canvas_size * fill_ratio)))
+        scale = target / float(max_dim)
+        new_size = (max(1, int(round(cropped.width * scale))), max(1, int(round(cropped.height * scale))))
+        resized = cropped.resize(new_size, resampling)
+        canvas.alpha_composite(resized, ((canvas_size - resized.width) // 2, (canvas_size - resized.height) // 2))
+        return canvas
+
+    def _save_static_emoji_png(self, img: Any) -> bytes:
+        for size in (128, 112, 96):
+            candidate = img if size == 128 else self._normalize_emoji_frame(img, canvas_size=128, fill_ratio=size / 128.0)
+            out = BytesIO()
+            candidate.save(out, format="PNG", optimize=True)
+            data = out.getvalue()
+            if len(data) <= DISCORD_EMOJI_MAX_BYTES:
+                return data
+        raise RuntimeError("emoji estático ficou maior que 256 KiB")
+
+    def _save_animated_emoji_gif(self, frames: list[Any], durations: list[int]) -> bytes | None:
+        if not frames:
+            return None
+        for step in (1, 2, 3, 4, 5, 6):
+            selected = [frame for idx, frame in enumerate(frames) if idx % step == 0]
+            selected_durations = [max(20, min(500, int((durations[idx] if idx < len(durations) else 80) * step))) for idx in range(len(frames)) if idx % step == 0]
+            if not selected:
+                continue
+            out = BytesIO()
+            selected[0].save(
+                out,
+                format="GIF",
+                save_all=True,
+                append_images=selected[1:],
+                duration=selected_durations,
+                loop=0,
+                optimize=True,
+                disposal=2,
+            )
+            data = out.getvalue()
+            if len(data) <= DISCORD_EMOJI_MAX_BYTES:
+                return data
+        return None
+
+    def _normalize_emoji_upload_bytes_sync(self, raw: bytes, *, animated: bool) -> tuple[bytes, str]:
+        """Normaliza bytes já processados antes de criar o Application Emoji.
+
+        Isso também protege contra worker antigo/sem patch que devolva GIF/PNG com o
+        conteúdo minúsculo dentro de um canvas transparente.
+        """
+        if Image is None:
+            raise RuntimeError("Pillow indisponível")
+        with Image.open(BytesIO(raw)) as img:
+            if animated and getattr(img, "is_animated", False) and ImageSequence is not None:
+                raw_frames = [frame.convert("RGBA") for frame in ImageSequence.Iterator(img)]
+                bbox = self._union_alpha_bbox(raw_frames)
+                if not bbox:
+                    raise RuntimeError("emoji animado sem pixels visíveis")
+                frames = [self._normalize_emoji_frame(frame, bbox=bbox) for frame in raw_frames]
+                durations = [int(getattr(frame, "info", {}).get("duration") or img.info.get("duration") or 80) for frame in ImageSequence.Iterator(img)]
+                data = self._save_animated_emoji_gif(frames, durations)
+                if data is not None:
+                    return data, "gif"
+                return self._save_static_emoji_png(frames[0]), "png"
+            normalized = self._normalize_emoji_frame(img.convert("RGBA"))
+            return self._save_static_emoji_png(normalized), "png"
+
+    async def _normalize_emoji_upload_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            raw_b64 = str(item.get("data_b64") or "")
+            if not raw_b64:
+                return None
+            raw = base64.b64decode(raw_b64)
+            animated = str(item.get("format") or "").lower() == "gif" or bool(item.get("animated"))
+            data, fmt = await asyncio.to_thread(self._normalize_emoji_upload_bytes_sync, raw, animated=animated)
+            return {**item, "data_b64": base64.b64encode(data).decode("ascii"), "format": fmt, "animated": fmt == "gif", "size": len(data)}
+        except Exception as exc:
+            log.debug("não consegui normalizar emoji temporário antes do upload: %r", exc)
+            return None
+
     def _recolor_emoji_bytes_local_sync(self, raw: bytes, *, animated: bool, color_hex: str) -> tuple[bytes, str]:
         if Image is None:
             raise RuntimeError("Pillow indisponível")
         rgb = self._rgb_from_hex(color_hex)
         with Image.open(BytesIO(raw)) as img:
-            resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
             if animated and getattr(img, "is_animated", False) and ImageSequence is not None:
-                frames: list[Any] = []
-                durations: list[int] = []
-                raw_frames = [frame.copy() for frame in ImageSequence.Iterator(img)]
-                for size in (128, 96, 64):
-                    for step in (1, 2, 3, 4):
-                        frames.clear()
-                        durations.clear()
-                        for idx, frame in enumerate(raw_frames):
-                            if idx % step != 0:
-                                continue
-                            duration = int(frame.info.get("duration") or img.info.get("duration") or 80) * max(1, step)
-                            frame = frame.convert("RGBA")
-                            frame.thumbnail((size, size), resampling)
-                            canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-                            canvas.alpha_composite(frame, ((size - frame.width) // 2, (size - frame.height) // 2))
-                            frames.append(self._recolor_rgba_image(canvas, rgb))
-                            durations.append(max(20, min(500, duration)))
-                        if not frames:
-                            continue
-                        out = BytesIO()
-                        frames[0].save(
-                            out,
-                            format="GIF",
-                            save_all=True,
-                            append_images=frames[1:],
-                            duration=durations,
-                            loop=0,
-                            optimize=True,
-                            disposal=2,
-                        )
-                        data = out.getvalue()
-                        if len(data) <= DISCORD_EMOJI_MAX_BYTES:
-                            return data, "gif"
-                # Fallback seguro: se a animação não couber no limite do Discord,
-                # cria uma versão estática do primeiro frame em vez de falhar o emoji todo.
-                if raw_frames:
-                    frame = raw_frames[0].convert("RGBA")
-                    frame.thumbnail((128, 128), resampling)
-                    canvas = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
-                    canvas.alpha_composite(frame, ((128 - frame.width) // 2, (128 - frame.height) // 2))
-                    out_img = self._recolor_rgba_image(canvas, rgb)
-                    for size in (128, 96, 64):
-                        out = BytesIO()
-                        candidate = out_img if size == 128 else out_img.resize((size, size), resampling)
-                        candidate.save(out, format="PNG", optimize=True)
-                        data = out.getvalue()
-                        if len(data) <= DISCORD_EMOJI_MAX_BYTES:
-                            return data, "png"
-                raise RuntimeError("emoji animado ficou maior que 256 KiB")
-            img = img.convert("RGBA")
-            img.thumbnail((128, 128), resampling)
-            canvas = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
-            canvas.alpha_composite(img, ((128 - img.width) // 2, (128 - img.height) // 2))
-            out_img = self._recolor_rgba_image(canvas, rgb)
-            out = BytesIO()
-            out_img.save(out, format="PNG", optimize=True)
-            data = out.getvalue()
-            if len(data) > DISCORD_EMOJI_MAX_BYTES:
-                out = BytesIO()
-                out_img.resize((96, 96), resampling).save(out, format="PNG", optimize=True)
-                data = out.getvalue()
-            if len(data) > DISCORD_EMOJI_MAX_BYTES:
-                raise RuntimeError("emoji estático ficou maior que 256 KiB")
-            return data, "png"
+                raw_frames = [frame.convert("RGBA") for frame in ImageSequence.Iterator(img)]
+                bbox = self._union_alpha_bbox(raw_frames)
+                if not bbox:
+                    raise RuntimeError("emoji animado sem pixels visíveis")
+                frames = [self._recolor_rgba_image(self._normalize_emoji_frame(frame, bbox=bbox), rgb) for frame in raw_frames]
+                durations = [int(getattr(frame, "info", {}).get("duration") or img.info.get("duration") or 80) for frame in ImageSequence.Iterator(img)]
+                data = self._save_animated_emoji_gif(frames, durations)
+                if data is not None:
+                    return data, "gif"
+                # Fallback seguro: mantém o tamanho visual correto usando o primeiro frame.
+                return self._save_static_emoji_png(frames[0]), "png"
+            normalized = self._normalize_emoji_frame(img.convert("RGBA"))
+            out_img = self._recolor_rgba_image(normalized, rgb)
+            return self._save_static_emoji_png(out_img), "png"
 
     async def _recolor_emoji_bytes_local(self, raw: bytes, *, animated: bool, color_hex: str) -> tuple[bytes, str]:
         return await asyncio.to_thread(self._recolor_emoji_bytes_local_sync, raw, animated=animated, color_hex=color_hex)
@@ -4425,11 +4493,17 @@ class WelcomeCog(commands.Cog):
             emoji_id = str(original.get("id") or item.get("id") or "")
             if not re.fullmatch(r"\d{15,25}", emoji_id):
                 continue
-            created = await self._create_application_emoji(name=str(item.get("name") or original.get("name") or "cwemoji"), data_b64=str(item.get("data_b64") or ""), fmt=str(item.get("format") or "png"))
+            normalized_item = await self._normalize_emoji_upload_item(item)
+            if normalized_item is None:
+                # Falhou? Mantém esse emoji base original em todas as ocorrências.
+                continue
+            created = await self._create_application_emoji(name=str(normalized_item.get("name") or item.get("name") or original.get("name") or "cwemoji"), data_b64=str(normalized_item.get("data_b64") or ""), fmt=str(normalized_item.get("format") or "png"))
             if not created:
                 # Falhou? Mantém esse emoji base original em todas as ocorrências.
                 continue
-            animated = bool(created.get("animated") or item.get("animated") or original.get("animated"))
+            # Use somente o tipo real do emoji criado. Se a animação caiu para PNG,
+            # o token precisa ser estático; usar <a:...> para emoji estático pode renderizar estranho.
+            animated = bool(created.get("animated")) or str(normalized_item.get("format") or "").lower() == "gif"
             replacement = f"<a:{created.get('name')}:{created.get('id')}>" if animated else f"<:{created.get('name')}:{created.get('id')}>"
             # Troca global por ID para cobrir nomes diferentes e todas as ocorrências.
             replacements[f"id:{emoji_id}"] = replacement
