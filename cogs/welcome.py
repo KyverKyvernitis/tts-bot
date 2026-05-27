@@ -38,6 +38,24 @@ DEFAULT_DM = {
     "footer": "",
 }
 
+DEFAULT_EMBED = {
+    "content": "",
+    "author_name": "",
+    "author_icon_mode": "none",
+    "author_icon_url": "",
+    "author_url": "",
+    "title": "",
+    "title_url": "",
+    "description": "",
+    "thumbnail_mode": "none",
+    "thumbnail_url": "",
+    "image_mode": "custom",
+    "image_url": "",
+    "footer_text": "",
+    "footer_icon_mode": "none",
+    "footer_icon_url": "",
+}
+
 PRESETS: dict[str, dict[str, str]] = {
     "simple": {
         "label": "Simples",
@@ -81,8 +99,11 @@ VARIABLE_HELP: dict[str, str] = {
     "membro_mencao": "menção do membro",
     "usuario": "nome de usuário",
     "usuario_id": "ID do membro",
+    "membro_id": "ID do membro",
+    "membro_avatar": "avatar do membro",
     "servidor": "nome do servidor",
     "servidor_id": "ID do servidor",
+    "servidor_icone": "ícone do servidor",
     "contador": "quantidade atual de membros",
     "criado_em": "data de criação da conta",
     "criado_relativo": "há quanto tempo a conta foi criada",
@@ -95,6 +116,8 @@ VARIABLE_HELP: dict[str, str] = {
     "convidador": "nome de quem convidou",
     "convidador_nome": "nome de quem convidou",
     "convidador_mencao": "menção de quem convidou",
+    "convidador_avatar": "avatar de quem convidou",
+    "bot_avatar": "avatar do bot",
     "convite_desconhecido": "texto curto quando o convite não for detectado",
 }
 
@@ -121,6 +144,15 @@ WEBHOOK_AVATAR_LABELS = {
     "member": "Avatar do membro",
     "inviter": "Avatar de quem convidou",
     "custom": "Avatar por link",
+}
+
+EMBED_IMAGE_MODE_LABELS = {
+    "none": "Sem imagem",
+    "member": "Avatar do membro",
+    "inviter": "Avatar de quem convidou",
+    "server": "Ícone do servidor",
+    "bot": "Avatar do bot",
+    "custom": "Link personalizado",
 }
 
 WEBHOOK_NAME_LABELS = {
@@ -197,6 +229,19 @@ def _clean_url(value: Any) -> str:
     if not URL_RE.fullmatch(raw):
         return ""
     return raw[:1000]
+
+
+def _image_mode(value: Any, *, fallback: str = "none") -> str:
+    mode = str(value or fallback).strip().lower()
+    return mode if mode in EMBED_IMAGE_MODE_LABELS else fallback
+
+
+def _has_custom_embed(embed: dict[str, Any] | None) -> bool:
+    data = dict(embed or {}) if isinstance(embed, dict) else {}
+    for key, default in DEFAULT_EMBED.items():
+        if str(data.get(key) or "") != str(default or ""):
+            return True
+    return False
 
 
 def _clean_invite_code(value: Any) -> str:
@@ -346,6 +391,7 @@ class _MessageActionSelect(discord.ui.Select):
         self.panel = panel
         options = [
             discord.SelectOption(label="Editar texto", value="edit", emoji="✏️", description="Título, mensagem e rodapé"),
+            discord.SelectOption(label="Editor de embed", value="embed", emoji="🧾", description="Author, imagens, footer e texto acima"),
             discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
             discord.SelectOption(label="Restaurar mensagem padrão", value="restore", emoji="↩️", description="Voltar para o texto inicial"),
             discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia dentro deste painel"),
@@ -357,7 +403,10 @@ class _MessageActionSelect(discord.ui.Select):
         if action == "edit":
             await interaction.response.send_modal(WelcomeMessageModal(self.panel))
             return
-        if action == "presets":
+        if action == "embed":
+            self.panel.go_to("embed_editor")
+            self.panel.notice = ""
+        elif action == "presets":
             self.panel.go_to("presets")
             self.panel.notice = ""
         elif action == "restore":
@@ -402,6 +451,45 @@ class _PresetSelect(discord.ui.Select):
         await self.panel.save_config(cfg, f"Preset **{preset['label']}** aplicado.")
         self.panel.screen = "message"
         self.panel._rebuild()
+        await interaction.response.edit_message(view=self.panel)
+
+
+class _EmbedActionSelect(discord.ui.Select):
+    def __init__(self, panel: "WelcomeAdminView"):
+        self.panel = panel
+        options = [
+            discord.SelectOption(label="Mensagem e descrição", value="text", emoji="📝", description="Texto acima, título e descrição"),
+            discord.SelectOption(label="Author do embed", value="author", emoji="👤", description="Nome, ícone e link do author"),
+            discord.SelectOption(label="Imagens do embed", value="images", emoji="🖼️", description="Thumbnail e imagem principal"),
+            discord.SelectOption(label="Footer do embed", value="footer", emoji="📌", description="Rodapé e ícone"),
+            discord.SelectOption(label="Limpar editor de embed", value="clear", emoji="🧹", description="Voltar a usar texto simples como base"),
+            discord.SelectOption(label="Ver preview", value="preview", emoji="👁️"),
+        ]
+        super().__init__(placeholder="O que deseja editar no embed?", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        action = str(self.values[0])
+        if action == "text":
+            await interaction.response.send_modal(WelcomeEmbedTextModal(self.panel))
+            return
+        if action == "author":
+            await interaction.response.send_modal(WelcomeEmbedAuthorModal(self.panel))
+            return
+        if action == "images":
+            await interaction.response.send_modal(WelcomeEmbedImagesModal(self.panel))
+            return
+        if action == "footer":
+            await interaction.response.send_modal(WelcomeEmbedFooterModal(self.panel))
+            return
+        if action == "clear":
+            cfg = deepcopy(self.panel.config)
+            cfg["embed"] = dict(DEFAULT_EMBED)
+            await self.panel.save_config(cfg, "Editor de embed limpo.")
+            self.panel.screen = "embed_editor"
+        elif action == "preview":
+            self.panel.go_to("preview")
+            self.panel.notice = "Ficaria assim quando alguém entrar."
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
 
 
@@ -1038,6 +1126,187 @@ class WelcomeMessageModal(discord.ui.Modal):
         }
         await self.panel.save_config(cfg, "Mensagem atualizada.")
         self.panel.screen = "message"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+class WelcomeEmbedTextModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Texto do embed")
+        self.panel = panel
+        embed = panel.cog._normalize_embed_config(panel.config.get("embed"))
+        self.content_input = discord.ui.TextInput(label="Mensagem acima do embed", placeholder="Ex.: {membro_mencao} chegou no servidor 👋", style=discord.TextStyle.paragraph, default=str(embed.get("content") or "")[:1800], max_length=1800, required=False)
+        self.title_input = discord.ui.TextInput(label="Título do embed", placeholder="Vazio usa o título da mensagem", default=str(embed.get("title") or "")[:256], max_length=256, required=False)
+        self.description_input = discord.ui.TextInput(label="Descrição do embed", placeholder="Vazio usa a mensagem principal", style=discord.TextStyle.paragraph, default=str(embed.get("description") or "")[:MAX_TEMPLATE_LENGTH], max_length=MAX_TEMPLATE_LENGTH, required=False)
+        self.title_url_input = discord.ui.TextInput(label="Link do título opcional", placeholder="https://exemplo.com", default=str(embed.get("title_url") or "")[:1000], max_length=1000, required=False)
+        self.add_item(self.content_input)
+        self.add_item(self.title_input)
+        self.add_item(self.description_input)
+        self.add_item(self.title_url_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw_title_url = str(self.title_url_input.value or "").strip()
+        if raw_title_url and not URL_RE.fullmatch(raw_title_url):
+            await interaction.response.send_message(view=_make_notice_view("Link inválido", "Use um link começando com http:// ou https://.", ok=False), ephemeral=True)
+            return
+        cfg = deepcopy(self.panel.config)
+        embed = self.panel.cog._normalize_embed_config(cfg.get("embed"))
+        embed["content"] = str(self.content_input.value or "").strip()
+        embed["title"] = str(self.title_input.value or "").strip()
+        embed["description"] = str(self.description_input.value or "").strip()
+        embed["title_url"] = _clean_url(raw_title_url)
+        cfg["embed"] = embed
+        await self.panel.save_config(cfg, "Texto do embed salvo.")
+        self.panel.screen = "embed_editor"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+class WelcomeEmbedAuthorModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Author do embed")
+        self.panel = panel
+        embed = panel.cog._normalize_embed_config(panel.config.get("embed"))
+        self.icon_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.icon_group = discord.ui.RadioGroup(required=True)
+            current = _image_mode(embed.get("author_icon_mode"), fallback="none")
+            for key, label in EMBED_IMAGE_MODE_LABELS.items():
+                self.icon_group.add_option(label=label, value=key, default=current == key)
+            self.add_item(discord.ui.Label(text="Ícone do author", component=self.icon_group))
+        else:
+            self.icon_mode_input = discord.ui.TextInput(label="Ícone: none, member, inviter, server, bot ou custom", default=str(embed.get("author_icon_mode") or "none")[:20], max_length=20, required=True)
+            self.add_item(self.icon_mode_input)
+        self.name_input = discord.ui.TextInput(label="Nome do author", placeholder="Ex.: {membro}", default=str(embed.get("author_name") or "")[:256], max_length=256, required=False)
+        self.icon_url_input = discord.ui.TextInput(label="Ícone por link opcional", placeholder="https://exemplo.com/avatar.png", default=str(embed.get("author_icon_url") or "")[:1000], max_length=1000, required=False)
+        self.author_url_input = discord.ui.TextInput(label="Link do author opcional", placeholder="https://exemplo.com", default=str(embed.get("author_url") or "")[:1000], max_length=1000, required=False)
+        self.add_item(self.name_input)
+        self.add_item(self.icon_url_input)
+        self.add_item(self.author_url_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw_icon_url = str(self.icon_url_input.value or "").strip()
+        raw_author_url = str(self.author_url_input.value or "").strip()
+        if raw_icon_url and not URL_RE.fullmatch(raw_icon_url):
+            await interaction.response.send_message(view=_make_notice_view("Ícone inválido", "Use um link começando com http:// ou https://.", ok=False), ephemeral=True)
+            return
+        if raw_author_url and not URL_RE.fullmatch(raw_author_url):
+            await interaction.response.send_message(view=_make_notice_view("Link inválido", "Use um link começando com http:// ou https://.", ok=False), ephemeral=True)
+            return
+        mode = _modal_value(self.icon_group, "none") if self.icon_group is not None else str(self.icon_mode_input.value or "none").strip().lower()
+        mode = _image_mode(mode, fallback="none")
+        if mode == "custom" and not raw_icon_url:
+            await interaction.response.send_message(view=_make_notice_view("Ícone incompleto", "Coloque um link quando usar ícone personalizado.", ok=False), ephemeral=True)
+            return
+        cfg = deepcopy(self.panel.config)
+        embed = self.panel.cog._normalize_embed_config(cfg.get("embed"))
+        embed["author_name"] = str(self.name_input.value or "").strip()
+        embed["author_icon_mode"] = mode
+        embed["author_icon_url"] = _clean_url(raw_icon_url)
+        embed["author_url"] = _clean_url(raw_author_url)
+        cfg["embed"] = embed
+        await self.panel.save_config(cfg, "Author do embed salvo.")
+        self.panel.screen = "embed_editor"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+class WelcomeEmbedImagesModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Imagens do embed")
+        self.panel = panel
+        embed = panel.cog._normalize_embed_config(panel.config.get("embed"))
+        self.thumbnail_group = None
+        self.image_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.thumbnail_group = discord.ui.RadioGroup(required=True)
+            current_thumb = _image_mode(embed.get("thumbnail_mode"), fallback="none")
+            for key, label in EMBED_IMAGE_MODE_LABELS.items():
+                self.thumbnail_group.add_option(label=label, value=key, default=current_thumb == key)
+            self.image_group = discord.ui.RadioGroup(required=True)
+            current_image = _image_mode(embed.get("image_mode"), fallback="custom")
+            for key, label in EMBED_IMAGE_MODE_LABELS.items():
+                self.image_group.add_option(label=label, value=key, default=current_image == key)
+            self.add_item(discord.ui.Label(text="Thumbnail / imagem lateral", component=self.thumbnail_group))
+            self.add_item(discord.ui.Label(text="Imagem principal / banner", component=self.image_group))
+        else:
+            self.thumbnail_mode_input = discord.ui.TextInput(label="Thumbnail: none, member, inviter, server, bot ou custom", default=str(embed.get("thumbnail_mode") or "none")[:20], max_length=20, required=True)
+            self.image_mode_input = discord.ui.TextInput(label="Imagem: none, member, inviter, server, bot ou custom", default=str(embed.get("image_mode") or "custom")[:20], max_length=20, required=True)
+            self.add_item(self.thumbnail_mode_input)
+            self.add_item(self.image_mode_input)
+        self.thumbnail_url_input = discord.ui.TextInput(label="Thumbnail por link opcional", placeholder="https://exemplo.com/avatar.png", default=str(embed.get("thumbnail_url") or "")[:1000], max_length=1000, required=False)
+        self.image_url_input = discord.ui.TextInput(label="Imagem por link opcional", placeholder="https://exemplo.com/banner.png", default=str(embed.get("image_url") or panel.config.get("media_url") or "")[:1000], max_length=1000, required=False)
+        self.add_item(self.thumbnail_url_input)
+        self.add_item(self.image_url_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw_thumb = str(self.thumbnail_url_input.value or "").strip()
+        raw_image = str(self.image_url_input.value or "").strip()
+        for label, raw in (("Thumbnail", raw_thumb), ("Imagem", raw_image)):
+            if raw and not URL_RE.fullmatch(raw):
+                await interaction.response.send_message(view=_make_notice_view(f"{label} inválida", "Use um link começando com http:// ou https://.", ok=False), ephemeral=True)
+                return
+        thumb_mode = _modal_value(self.thumbnail_group, "none") if self.thumbnail_group is not None else str(self.thumbnail_mode_input.value or "none").strip().lower()
+        image_mode = _modal_value(self.image_group, "custom") if self.image_group is not None else str(self.image_mode_input.value or "custom").strip().lower()
+        thumb_mode = _image_mode(thumb_mode, fallback="none")
+        image_mode = _image_mode(image_mode, fallback="custom")
+        if thumb_mode == "custom" and not raw_thumb:
+            await interaction.response.send_message(view=_make_notice_view("Thumbnail incompleta", "Coloque um link ou escolha outra origem.", ok=False), ephemeral=True)
+            return
+        if image_mode == "custom" and not raw_image:
+            await interaction.response.send_message(view=_make_notice_view("Imagem incompleta", "Coloque um link ou escolha outra origem.", ok=False), ephemeral=True)
+            return
+        cfg = deepcopy(self.panel.config)
+        embed = self.panel.cog._normalize_embed_config(cfg.get("embed"))
+        embed["thumbnail_mode"] = thumb_mode
+        embed["thumbnail_url"] = _clean_url(raw_thumb)
+        embed["image_mode"] = image_mode
+        embed["image_url"] = _clean_url(raw_image)
+        cfg["embed"] = embed
+        await self.panel.save_config(cfg, "Imagens do embed salvas.")
+        self.panel.screen = "embed_editor"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+class WelcomeEmbedFooterModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Footer do embed")
+        self.panel = panel
+        embed = panel.cog._normalize_embed_config(panel.config.get("embed"))
+        self.icon_group = None
+        if _advanced_modal_supported("Label", "RadioGroup"):
+            self.icon_group = discord.ui.RadioGroup(required=True)
+            current = _image_mode(embed.get("footer_icon_mode"), fallback="none")
+            for key, label in EMBED_IMAGE_MODE_LABELS.items():
+                self.icon_group.add_option(label=label, value=key, default=current == key)
+            self.add_item(discord.ui.Label(text="Ícone do footer", component=self.icon_group))
+        else:
+            self.icon_mode_input = discord.ui.TextInput(label="Ícone: none, member, inviter, server, bot ou custom", default=str(embed.get("footer_icon_mode") or "none")[:20], max_length=20, required=True)
+            self.add_item(self.icon_mode_input)
+        self.footer_text_input = discord.ui.TextInput(label="Texto do footer", placeholder="Ex.: ID do usuário: {membro_id}", style=discord.TextStyle.paragraph, default=str(embed.get("footer_text") or "")[:2048], max_length=2048, required=False)
+        self.footer_icon_url_input = discord.ui.TextInput(label="Ícone por link opcional", placeholder="https://exemplo.com/icone.png", default=str(embed.get("footer_icon_url") or "")[:1000], max_length=1000, required=False)
+        self.add_item(self.footer_text_input)
+        self.add_item(self.footer_icon_url_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw_icon = str(self.footer_icon_url_input.value or "").strip()
+        if raw_icon and not URL_RE.fullmatch(raw_icon):
+            await interaction.response.send_message(view=_make_notice_view("Ícone inválido", "Use um link começando com http:// ou https://.", ok=False), ephemeral=True)
+            return
+        mode = _modal_value(self.icon_group, "none") if self.icon_group is not None else str(self.icon_mode_input.value or "none").strip().lower()
+        mode = _image_mode(mode, fallback="none")
+        if mode == "custom" and not raw_icon:
+            await interaction.response.send_message(view=_make_notice_view("Ícone incompleto", "Coloque um link quando usar ícone personalizado.", ok=False), ephemeral=True)
+            return
+        cfg = deepcopy(self.panel.config)
+        embed = self.panel.cog._normalize_embed_config(cfg.get("embed"))
+        embed["footer_text"] = str(self.footer_text_input.value or "").strip()
+        embed["footer_icon_mode"] = mode
+        embed["footer_icon_url"] = _clean_url(raw_icon)
+        cfg["embed"] = embed
+        await self.panel.save_config(cfg, "Footer do embed salvo.")
+        self.panel.screen = "embed_editor"
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
 
@@ -1722,6 +1991,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         builders = {
             "home": self._build_home,
             "message": self._build_message,
+            "embed_editor": self._build_embed_editor,
             "presets": self._build_presets,
             "mode": self._build_mode,
             "channel": self._build_channel,
@@ -1780,6 +2050,34 @@ class WelcomeAdminView(discord.ui.LayoutView):
             discord.ui.TextDisplay(_trim("\n".join(lines))),
             discord.ui.Separator(),
             discord.ui.ActionRow(_MessageActionSelect(self)),
+            discord.ui.ActionRow(_BackButton(self)),
+            accent_color=_color_from_hex(self.config.get("accent_color")),
+        ))
+
+    def _build_embed_editor(self):
+        embed = self.cog._normalize_embed_config(self.config.get("embed"))
+        lines = [
+            "# 🧾 Editor de embed",
+            "Configure o visual clássico do modo Embed.",
+            "",
+            f"**Mensagem acima**\n{'configurada' if str(embed.get('content') or '').strip() else 'sem texto acima'}",
+            "",
+            f"**Author**\n{_trim(embed.get('author_name') or 'sem author', 180)}",
+            "",
+            f"**Título**\n{_trim(embed.get('title') or 'usa o título da mensagem', 180)}",
+            "",
+            f"**Thumbnail**\n{EMBED_IMAGE_MODE_LABELS.get(_image_mode(embed.get('thumbnail_mode')), 'Sem imagem')}",
+            "",
+            f"**Imagem principal**\n{EMBED_IMAGE_MODE_LABELS.get(_image_mode(embed.get('image_mode'), fallback='custom'), 'Link personalizado')}",
+            "",
+            f"**Footer**\n{_trim(embed.get('footer_text') or 'usa o rodapé da mensagem', 180)}",
+        ]
+        if self.notice:
+            lines.extend(["", self.notice])
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(_trim("\n".join(lines))),
+            discord.ui.Separator(),
+            discord.ui.ActionRow(_EmbedActionSelect(self)),
             discord.ui.ActionRow(_BackButton(self)),
             accent_color=_color_from_hex(self.config.get("accent_color")),
         ))
@@ -2157,6 +2455,7 @@ class WelcomeCog(commands.Cog):
             "accent_color": DEFAULT_ACCENT,
             "media_url": "",
             "public": dict(DEFAULT_PUBLIC),
+            "embed": dict(DEFAULT_EMBED),
             "dm": dict(DEFAULT_DM),
             "webhook": self._default_webhook_config(),
             "invite_cache": {},
@@ -2165,6 +2464,26 @@ class WelcomeCog(commands.Cog):
         if guild_id is not None:
             cfg["guild_id"] = int(guild_id)
         return cfg
+
+    def _normalize_embed_config(self, value: Any) -> dict[str, Any]:
+        data = dict(value or {}) if isinstance(value, dict) else {}
+        result = dict(DEFAULT_EMBED)
+        for key in DEFAULT_EMBED:
+            raw = str(data.get(key) or "")
+            if key in {"content", "description"}:
+                result[key] = raw[:MAX_TEMPLATE_LENGTH]
+            elif key in {"title", "author_name"}:
+                result[key] = raw[:256]
+            elif key == "footer_text":
+                result[key] = raw[:2048]
+            elif key.endswith("_url") or key in {"author_url", "title_url"}:
+                result[key] = _clean_url(raw)
+            elif key.endswith("_mode"):
+                fallback = "custom" if key == "image_mode" else "none"
+                result[key] = _image_mode(raw, fallback=fallback)
+            else:
+                result[key] = raw
+        return result
 
     def _normalize_public_block(self, value: Any, *, default: dict[str, str], allow_empty: bool = False) -> dict[str, str]:
         result = {"title": "", "body": "", "footer": ""} if allow_empty else dict(default)
@@ -2252,6 +2571,7 @@ class WelcomeCog(commands.Cog):
             "accent_color": _parse_hex(data.get("accent_color")) if data.get("accent_color") else "",
             "media_url": _clean_url(data.get("media_url")),
             "public": self._normalize_public_block(data.get("public"), default=DEFAULT_PUBLIC, allow_empty=True),
+            "embed": self._normalize_embed_config(data.get("embed")),
             "webhook": {
                 "mode": mode,
                 "name": _safe_webhook_name(webhook.get("name"), "") if str(webhook.get("name") or "").strip() else "",
@@ -2274,6 +2594,7 @@ class WelcomeCog(commands.Cog):
         cfg = dict(config or {})
         merged = {**base, **cfg}
         merged["public"] = self._normalize_public_block(merged.get("public"), default=DEFAULT_PUBLIC)
+        merged["embed"] = self._normalize_embed_config(merged.get("embed"))
         merged["dm"] = self._normalize_public_block(merged.get("dm"), default=DEFAULT_DM)
         merged["auto_role_ids"] = self._normalize_role_ids(merged.get("auto_role_ids") or [])
         merged["enabled"] = bool(merged.get("enabled", False))
@@ -2410,13 +2731,23 @@ class WelcomeCog(commands.Cog):
         channel_id = int(invite.get("channel_id") or 0)
         inviter_name = str(invite.get("inviter_name") or "quem convidou")
         channel_name = str(invite.get("channel_name") or "canal")
+        inviter_member = guild.get_member(inviter_id) if guild is not None and inviter_id else None
+        guild_icon = getattr(guild, "icon", None) if guild is not None else None
+        bot_user = getattr(self.bot, "user", None)
+        member_avatar = str(member.display_avatar.url) if member is not None else ""
+        inviter_avatar = str(inviter_member.display_avatar.url) if inviter_member is not None else ""
+        server_icon = str(guild_icon.url) if guild_icon else ""
+        bot_avatar = str(bot_user.display_avatar.url) if bot_user is not None else ""
         return {
             "membro": str(getattr(member, "display_name", None) or getattr(member, "name", None) or "novo membro"),
             "membro_mencao": str(getattr(member, "mention", None) or "@membro"),
             "usuario": str(getattr(member, "name", None) or getattr(member, "display_name", None) or "membro"),
             "usuario_id": str(getattr(member, "id", "") or ""),
+            "membro_id": str(getattr(member, "id", "") or ""),
+            "membro_avatar": member_avatar,
             "servidor": str(getattr(guild, "name", None) or "servidor"),
             "servidor_id": str(getattr(guild, "id", "") or guild_id or ""),
+            "servidor_icone": server_icon,
             "contador": str(getattr(guild, "member_count", None) or ""),
             "criado_em": f"<t:{created_ts}:D>",
             "criado_relativo": f"<t:{created_ts}:R>",
@@ -2429,6 +2760,8 @@ class WelcomeCog(commands.Cog):
             "convidador": inviter_name if inviter_id else "convite desconhecido",
             "convidador_nome": inviter_name if inviter_id else "convite desconhecido",
             "convidador_mencao": _user_mention(inviter_id) if inviter_id else "convite desconhecido",
+            "convidador_avatar": inviter_avatar,
+            "bot_avatar": bot_avatar,
             "convite_desconhecido": "convite desconhecido",
         }
 
@@ -2469,16 +2802,70 @@ class WelcomeCog(commands.Cog):
         view.add_item(self._make_welcome_container(config, member=member, guild_id=int(member.guild.id), dm=dm, invite_info=invite_info))
         return view
 
-    def _make_embed(self, config: dict[str, Any], *, member: discord.Member | None, guild_id: int | None = None, dm: bool = False, invite_info: dict[str, Any] | None = None) -> discord.Embed:
+    def _image_url_from_mode(self, mode: str, custom_url: str, *, member: discord.Member | None, guild_id: int | None = None, invite_info: dict[str, Any] | None = None) -> str:
+        mode = _image_mode(mode, fallback="none")
+        if mode == "none":
+            return ""
+        if mode == "custom":
+            return _clean_url(custom_url)
+        guild = getattr(member, "guild", None) if member is not None else None
+        if guild is None and guild_id:
+            guild = self.bot.get_guild(int(guild_id))
+        if mode == "member" and member is not None:
+            return str(member.display_avatar.url)
+        if mode == "inviter" and guild is not None:
+            inviter_id = int((invite_info or {}).get("inviter_id") or 0)
+            inviter = guild.get_member(inviter_id) if inviter_id else None
+            if inviter is not None:
+                return str(inviter.display_avatar.url)
+        if mode == "server" and guild is not None and getattr(guild, "icon", None):
+            return str(guild.icon.url)
+        if mode == "bot":
+            bot_user = getattr(self.bot, "user", None)
+            if bot_user is not None:
+                return str(bot_user.display_avatar.url)
+        return ""
+
+    def _make_embed_payload(self, config: dict[str, Any], *, member: discord.Member | None, guild_id: int | None = None, dm: bool = False, invite_info: dict[str, Any] | None = None) -> tuple[str, discord.Embed]:
         cfg = self._normalize_config(config)
         title, body, footer = self._build_welcome_text(cfg, member=member, guild_id=guild_id, dm=dm, invite_info=invite_info)
-        embed = discord.Embed(title=_trim(title, 256) or None, description=_trim(body, 4000) or None, color=_color_from_hex(cfg.get("accent_color")))
-        if footer:
-            embed.set_footer(text=_trim(footer, 2048))
-        media_url = _clean_url(cfg.get("media_url")) if not dm else ""
-        if media_url:
-            embed.set_image(url=media_url)
-        return embed
+        values = self._member_values(member, guild_id=guild_id, invite_info=invite_info)
+        embed_cfg = self._normalize_embed_config(cfg.get("embed")) if not dm else dict(DEFAULT_EMBED)
+        content = self._replace_vars(str(embed_cfg.get("content") or ""), values).strip() if not dm else ""
+        embed_title = self._replace_vars(str(embed_cfg.get("title") or title), values).strip()
+        embed_desc = self._replace_vars(str(embed_cfg.get("description") or body), values).strip()
+        embed_footer = self._replace_vars(str(embed_cfg.get("footer_text") or footer), values).strip()
+        embed = discord.Embed(title=_trim(embed_title, 256) or None, description=_trim(embed_desc, 4000) or None, color=_color_from_hex(cfg.get("accent_color")))
+        title_url = _clean_url(self._replace_vars(str(embed_cfg.get("title_url") or ""), values))
+        if title_url:
+            embed.url = title_url
+        author_name = self._replace_vars(str(embed_cfg.get("author_name") or ""), values).strip()
+        if author_name:
+            author_icon = self._image_url_from_mode(str(embed_cfg.get("author_icon_mode") or "none"), self._replace_vars(str(embed_cfg.get("author_icon_url") or ""), values), member=member, guild_id=guild_id, invite_info=invite_info)
+            author_url = _clean_url(self._replace_vars(str(embed_cfg.get("author_url") or ""), values))
+            kwargs: dict[str, Any] = {"name": _trim(author_name, 256)}
+            if author_icon:
+                kwargs["icon_url"] = author_icon
+            if author_url:
+                kwargs["url"] = author_url
+            embed.set_author(**kwargs)
+        thumbnail_url = self._image_url_from_mode(str(embed_cfg.get("thumbnail_mode") or "none"), self._replace_vars(str(embed_cfg.get("thumbnail_url") or ""), values), member=member, guild_id=guild_id, invite_info=invite_info)
+        if thumbnail_url:
+            embed.set_thumbnail(url=thumbnail_url)
+        custom_image = self._replace_vars(str(embed_cfg.get("image_url") or cfg.get("media_url") or ""), values)
+        image_url = self._image_url_from_mode(str(embed_cfg.get("image_mode") or "custom"), custom_image, member=member, guild_id=guild_id, invite_info=invite_info)
+        if image_url:
+            embed.set_image(url=image_url)
+        if embed_footer:
+            footer_icon = self._image_url_from_mode(str(embed_cfg.get("footer_icon_mode") or "none"), self._replace_vars(str(embed_cfg.get("footer_icon_url") or ""), values), member=member, guild_id=guild_id, invite_info=invite_info)
+            if footer_icon:
+                embed.set_footer(text=_trim(embed_footer, 2048), icon_url=footer_icon)
+            else:
+                embed.set_footer(text=_trim(embed_footer, 2048))
+        return _trim(content, 1990), embed
+
+    def _make_embed(self, config: dict[str, Any], *, member: discord.Member | None, guild_id: int | None = None, dm: bool = False, invite_info: dict[str, Any] | None = None) -> discord.Embed:
+        return self._make_embed_payload(config, member=member, guild_id=guild_id, dm=dm, invite_info=invite_info)[1]
 
     def _make_normal_content(self, config: dict[str, Any], *, member: discord.Member | None, guild_id: int | None = None, dm: bool = False, invite_info: dict[str, Any] | None = None) -> str:
         title, body, footer = self._build_welcome_text(config, member=member, guild_id=guild_id, dm=dm, invite_info=invite_info)
@@ -2497,8 +2884,17 @@ class WelcomeCog(commands.Cog):
         if mode == "components_v2":
             view.add_item(self._make_welcome_container(cfg, member=member, guild_id=guild_id, dm=dm))
         elif mode == "embed":
-            embed = self._make_embed(cfg, member=member, guild_id=guild_id, dm=dm)
-            lines = ["## Embed", f"**{embed.title or ''}**", embed.description or ""]
+            content, embed = self._make_embed_payload(cfg, member=member, guild_id=guild_id, dm=dm)
+            lines = ["## Embed"]
+            if content:
+                lines.extend(["**Mensagem acima**", content, ""])
+            if embed.author and embed.author.name:
+                lines.append(f"**Author:** {embed.author.name}")
+            lines.extend([f"**{embed.title or ''}**", embed.description or ""])
+            if embed.thumbnail and embed.thumbnail.url:
+                lines.append("Thumbnail configurada")
+            if embed.image and embed.image.url:
+                lines.append("Imagem principal configurada")
             if embed.footer and embed.footer.text:
                 lines.append(embed.footer.text)
             view.add_item(discord.ui.Container(discord.ui.TextDisplay(_trim("\n".join(lines))), accent_color=_color_from_hex(cfg.get("accent_color"))))
@@ -2510,7 +2906,11 @@ class WelcomeCog(commands.Cog):
         mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")
         allowed = discord.AllowedMentions.none() if dm else discord.AllowedMentions(users=True, roles=False, everyone=False)
         if mode == "embed":
-            return await destination.send(embed=self._make_embed(cfg, member=member, guild_id=member.guild.id, dm=dm, invite_info=invite_info), allowed_mentions=allowed)
+            content, embed = self._make_embed_payload(cfg, member=member, guild_id=member.guild.id, dm=dm, invite_info=invite_info)
+            kwargs: dict[str, Any] = {"embed": embed, "allowed_mentions": allowed}
+            if content:
+                kwargs["content"] = content
+            return await destination.send(**kwargs)
         if mode == "normal":
             return await destination.send(content=self._make_normal_content(cfg, member=member, guild_id=member.guild.id, dm=dm, invite_info=invite_info), allowed_mentions=allowed)
         return await destination.send(view=self._make_components_view(cfg, member=member, dm=dm, invite_info=invite_info), allowed_mentions=allowed)
@@ -2611,7 +3011,10 @@ class WelcomeCog(commands.Cog):
             kwargs["thread"] = channel
         try:
             if mode == "embed":
-                await webhook.send(embed=self._make_embed(cfg, member=member, guild_id=member.guild.id, invite_info=invite_info), **kwargs)
+                content, embed = self._make_embed_payload(cfg, member=member, guild_id=member.guild.id, invite_info=invite_info)
+                if content:
+                    kwargs["content"] = content
+                await webhook.send(embed=embed, **kwargs)
             elif mode == "normal":
                 await webhook.send(content=self._make_normal_content(cfg, member=member, guild_id=member.guild.id, invite_info=invite_info), **kwargs)
             else:
@@ -2787,6 +3190,13 @@ class WelcomeCog(commands.Cog):
             if str(value or "").strip():
                 public[key] = str(value)
         cfg["public"] = public
+        rule_embed = self._normalize_embed_config(rule.get("embed"))
+        if _has_custom_embed(rule_embed):
+            embed = self._normalize_embed_config(cfg.get("embed"))
+            for key, value in rule_embed.items():
+                if str(value or "") != str(DEFAULT_EMBED.get(key) or ""):
+                    embed[key] = value
+            cfg["embed"] = embed
         base_roles = list(cfg.get("auto_role_ids") or [])
         for role_id in rule.get("auto_role_ids") or []:
             if int(role_id) not in base_roles:
