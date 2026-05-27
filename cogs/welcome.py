@@ -388,24 +388,64 @@ class _MainSelect(discord.ui.Select):
 class _MessageActionSelect(discord.ui.Select):
     def __init__(self, panel: "WelcomeAdminView"):
         self.panel = panel
-        options = [
-            discord.SelectOption(label="Editar texto", value="edit", emoji="✏️", description="Título, mensagem e rodapé"),
-            discord.SelectOption(label="Editor de embed", value="embed", emoji="🧾", description="Author, imagens, footer e texto acima"),
-            discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
-            discord.SelectOption(label="Restaurar mensagem padrão", value="restore", emoji="↩️", description="Voltar para o texto inicial"),
-            discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia dentro deste painel"),
-        ]
-        super().__init__(placeholder="O que deseja ajustar na mensagem?", min_values=1, max_values=1, options=options)
+        mode = str(panel.config.get("render_mode") or "components_v2")
+        if mode == "embed":
+            options = [
+                discord.SelectOption(label="Mensagem acima", value="embed_content", emoji="📝", description="Texto normal antes do embed"),
+                discord.SelectOption(label="Author", value="embed_author", emoji="👤", description="Nome, ícone e link do author"),
+                discord.SelectOption(label="Título e descrição", value="embed_text", emoji="🏷️", description="Título, descrição, link e cor"),
+                discord.SelectOption(label="Imagens", value="embed_images", emoji="🖼️", description="Thumbnail e imagem principal"),
+                discord.SelectOption(label="Footer do embed", value="embed_footer", emoji="📌", description="Texto pequeno nativo do embed"),
+                discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
+                discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia real do embed"),
+            ]
+            placeholder = "O que deseja editar no embed?"
+        elif mode == "normal":
+            options = [
+                discord.SelectOption(label="Editar texto", value="normal_edit", emoji="✏️", description="Mensagem normal em texto comum"),
+                discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
+                discord.SelectOption(label="Restaurar texto padrão", value="restore", emoji="↩️", description="Voltar para o texto inicial"),
+                discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia em texto normal"),
+            ]
+            placeholder = "O que deseja editar no texto?"
+        else:
+            options = [
+                discord.SelectOption(label="Editar texto V2", value="v2_edit", emoji="✏️", description="Título, texto principal e texto final"),
+                discord.SelectOption(label="Visual e imagem V2", value="v2_visual", emoji="🖼️", description="Estilo, cor e imagem do container"),
+                discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
+                discord.SelectOption(label="Restaurar mensagem padrão", value="restore", emoji="↩️", description="Voltar para o texto inicial"),
+                discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia em Components V2"),
+            ]
+            placeholder = "O que deseja editar na mensagem V2?"
+        super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         action = str(self.values[0])
-        if action == "edit":
+        if action == "v2_edit":
             await interaction.response.send_modal(WelcomeMessageModal(self.panel))
             return
-        if action == "embed":
-            self.panel.go_to("embed_editor")
-            self.panel.notice = ""
-        elif action == "presets":
+        if action == "normal_edit":
+            await interaction.response.send_modal(WelcomeNormalMessageModal(self.panel))
+            return
+        if action == "v2_visual":
+            await interaction.response.send_modal(WelcomeVisualModal(self.panel))
+            return
+        if action == "embed_content":
+            await interaction.response.send_modal(WelcomeEmbedContentModal(self.panel))
+            return
+        if action == "embed_text":
+            await interaction.response.send_modal(WelcomeEmbedTextModal(self.panel))
+            return
+        if action == "embed_author":
+            await interaction.response.send_modal(WelcomeEmbedAuthorModal(self.panel))
+            return
+        if action == "embed_images":
+            await interaction.response.send_modal(WelcomeEmbedImagesModal(self.panel))
+            return
+        if action == "embed_footer":
+            await interaction.response.send_modal(WelcomeEmbedFooterModal(self.panel))
+            return
+        if action == "presets":
             self.panel.go_to("presets")
             self.panel.notice = ""
         elif action == "restore":
@@ -461,8 +501,7 @@ class _EmbedActionSelect(discord.ui.Select):
             discord.SelectOption(label="Author", value="author", emoji="👤", description="Nome, ícone e link do author"),
             discord.SelectOption(label="Título e descrição", value="text", emoji="🏷️", description="Título, descrição, link e cor"),
             discord.SelectOption(label="Imagens", value="images", emoji="🖼️", description="Thumbnail e imagem principal"),
-            discord.SelectOption(label="Footer", value="footer", emoji="📌", description="Rodapé e ícone"),
-            discord.SelectOption(label="Limpar embed", value="clear", emoji="🧹", description="Voltar ao padrão"),
+            discord.SelectOption(label="Footer do embed", value="footer", emoji="📌", description="Texto pequeno nativo do embed"),
             discord.SelectOption(label="Ver preview", value="preview", emoji="👁️"),
         ]
         super().__init__(placeholder="O que deseja editar no embed?", min_values=1, max_values=1, options=options)
@@ -483,14 +522,6 @@ class _EmbedActionSelect(discord.ui.Select):
             return
         if action == "footer":
             await interaction.response.send_modal(WelcomeEmbedFooterModal(self.panel))
-            return
-        if action == "clear":
-            cfg = deepcopy(self.panel.config)
-            cfg["embed"] = dict(DEFAULT_EMBED)
-            await self.panel.save_config(cfg, "Embed limpo.")
-            self.panel.screen = "embed_editor"
-            self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
-            await interaction.response.edit_message(view=self.panel)
             return
         await self.panel.send_preview(interaction)
 
@@ -681,7 +712,7 @@ class _DmActionSelect(discord.ui.Select):
         self.panel = panel
         options = [
             discord.SelectOption(label="Configurar privado", value="config", emoji="⚙️", description="Ligar, desligar e escolher o modo"),
-            discord.SelectOption(label="Editar texto", value="edit", emoji="✏️", description="Título, mensagem e rodapé"),
+            discord.SelectOption(label="Editar texto", value="edit", emoji="✏️", description="Título, mensagem e texto final"),
             discord.SelectOption(label="Restaurar mensagem padrão", value="restore", emoji="↩️"),
             discord.SelectOption(label="Ver preview", value="preview", emoji="👁️"),
         ]
@@ -1089,7 +1120,7 @@ class _StatusSelect(discord.ui.Select):
 
 class WelcomeMessageModal(discord.ui.Modal):
     def __init__(self, panel: "WelcomeAdminView"):
-        super().__init__(title="Mensagem de boas-vindas")
+        super().__init__(title="Mensagem Components V2")
         self.panel = panel
         public = dict(panel.config.get("public") or {})
         self.title_input = discord.ui.TextInput(
@@ -1106,7 +1137,8 @@ class WelcomeMessageModal(discord.ui.Modal):
             required=True,
         )
         self.footer_input = discord.ui.TextInput(
-            label="Rodapé opcional",
+            label="Texto final da mensagem V2",
+            placeholder="Opcional. Aparece no final do container.",
             style=discord.TextStyle.paragraph,
             default=str(public.get("footer") or "")[:MAX_FOOTER_LENGTH],
             max_length=MAX_FOOTER_LENGTH,
@@ -1123,7 +1155,41 @@ class WelcomeMessageModal(discord.ui.Modal):
             "body": str(self.body_input.value or "").strip() or DEFAULT_PUBLIC["body"],
             "footer": str(self.footer_input.value or "").strip(),
         }
-        await self.panel.save_config(cfg, "Mensagem atualizada.")
+        await self.panel.save_config(cfg, "Mensagem V2 atualizada.")
+        self.panel.screen = "message"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+class WelcomeNormalMessageModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Mensagem normal")
+        self.panel = panel
+        public = dict(panel.config.get("public") or {})
+        current = "\n\n".join(part for part in (
+            str(public.get("title") or "").strip(),
+            str(public.get("body") or "").strip(),
+        ) if part).strip()
+        if not current:
+            current = DEFAULT_PUBLIC["body"]
+        self.content_input = discord.ui.TextInput(
+            label="Mensagem",
+            placeholder="Texto que será enviado no canal.",
+            style=discord.TextStyle.paragraph,
+            default=current[:1900],
+            max_length=1900,
+            required=True,
+        )
+        self.add_item(self.content_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = deepcopy(self.panel.config)
+        cfg["public"] = {
+            "title": "",
+            "body": str(self.content_input.value or "").strip() or DEFAULT_PUBLIC["body"],
+            "footer": "",
+        }
+        await self.panel.save_config(cfg, "Mensagem normal atualizada.")
         self.panel.screen = "message"
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
@@ -1359,7 +1425,7 @@ class WelcomeDmModal(discord.ui.Modal):
             required=True,
         )
         self.footer_input = discord.ui.TextInput(
-            label="Rodapé opcional",
+            label="Texto final opcional",
             style=discord.TextStyle.paragraph,
             default=str(dm.get("footer") or "")[:MAX_FOOTER_LENGTH],
             max_length=MAX_FOOTER_LENGTH,
@@ -1766,7 +1832,7 @@ class SpecialRuleTextModal(discord.ui.Modal):
         self.name_input = discord.ui.TextInput(label="Nome da regra", default=str((rule or {}).get("name") or "Regra especial")[:MAX_RULE_NAME], max_length=MAX_RULE_NAME, required=True)
         self.title_input = discord.ui.TextInput(label="Título", default=str(public.get("title") or "")[:256], placeholder="Vazio usa o título padrão", max_length=256, required=False)
         self.body_input = discord.ui.TextInput(label="Mensagem", style=discord.TextStyle.paragraph, default=str(public.get("body") or "")[:MAX_TEMPLATE_LENGTH], placeholder="Vazio usa a mensagem padrão", max_length=MAX_TEMPLATE_LENGTH, required=False)
-        self.footer_input = discord.ui.TextInput(label="Rodapé opcional", style=discord.TextStyle.paragraph, default=str(public.get("footer") or "")[:MAX_FOOTER_LENGTH], max_length=MAX_FOOTER_LENGTH, required=False)
+        self.footer_input = discord.ui.TextInput(label="Texto final V2 opcional", style=discord.TextStyle.paragraph, default=str(public.get("footer") or "")[:MAX_FOOTER_LENGTH], max_length=MAX_FOOTER_LENGTH, required=False)
         self.add_item(self.name_input)
         self.add_item(self.title_input)
         self.add_item(self.body_input)
@@ -2081,22 +2147,46 @@ class WelcomeAdminView(discord.ui.LayoutView):
         ))
 
     def _build_message(self):
+        mode = str(self.config.get("render_mode") or "components_v2")
+        if mode == "embed":
+            self._build_embed_editor()
+            return
         public = dict(self.config.get("public") or {})
-        lines = [
-            "# 📢 Mensagem de boas-vindas",
-            "Edite o texto que aparece quando alguém entra.",
-            "",
-            "**Título**",
-            _trim(public.get("title") or DEFAULT_PUBLIC["title"], 500),
-            "",
-            "**Mensagem**",
-            _trim(public.get("body") or DEFAULT_PUBLIC["body"], 900),
-        ]
-        footer = str(public.get("footer") or "").strip()
-        if footer:
-            lines.extend(["", "**Rodapé**", _trim(footer, 300)])
+        if mode == "normal":
+            body = str(public.get("body") or DEFAULT_PUBLIC["body"]).strip()
+            title = str(public.get("title") or "").strip()
+            lines = [
+                "# 💬 Editor de texto",
+                "Edite a mensagem simples enviada no canal.",
+                "",
+            ]
+            if title:
+                lines.extend(["**Título**", _trim(title, 400), ""])
+            lines.extend(["**Mensagem**", _trim(body, 1200)])
+        else:
+            title = str(public.get("title") or DEFAULT_PUBLIC["title"]).strip()
+            body = str(public.get("body") or DEFAULT_PUBLIC["body"]).strip()
+            final_text = str(public.get("footer") or "").strip()
+            lines = [
+                "# ✨ Editor Components V2",
+                "Monte a mensagem moderna com container e texto V2.",
+                "",
+                "**Título da mensagem**",
+                _trim(title, 400),
+                "",
+                "**Texto principal**",
+                _trim(body, 900),
+            ]
+            if final_text:
+                lines.extend(["", "**Texto final da mensagem V2**", _trim(final_text, 300)])
+            media_label = "imagem configurada" if _clean_url(self.config.get("media_url")) else "sem imagem"
+            lines.extend([
+                "",
+                f"Visual: {STYLE_LABELS.get(str(self.config.get('style') or 'complete'), 'Completo')} · cor `{_parse_hex(self.config.get('accent_color'))}` · {media_label}",
+            ])
         if self.notice:
             lines.extend(["", self.notice])
+        lines.extend(["", "Escolha uma parte para editar."])
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay(_trim("\n".join(lines))),
             discord.ui.Separator(),
@@ -2106,6 +2196,10 @@ class WelcomeAdminView(discord.ui.LayoutView):
         ))
 
     def _build_embed_editor(self):
+        if str(self.config.get("render_mode") or "components_v2") != "embed":
+            self.screen = "message"
+            self._build_message()
+            return
         embed = self.cog._normalize_embed_config(self.config.get("embed"))
         has_content = bool(str(embed.get("content") or "").strip())
         has_title = bool(str(embed.get("title") or "").strip())
@@ -2125,10 +2219,10 @@ class WelcomeAdminView(discord.ui.LayoutView):
             "Monte a mensagem clássica do modo Embed.",
             "",
             f"Mensagem acima: {'configurada' if has_content else 'sem texto acima'}",
-            f"Embed: {'título próprio' if has_title else 'usa título da mensagem'} · {'descrição própria' if has_desc else 'usa mensagem principal'}",
+            f"Texto do embed: {'título próprio' if has_title else 'usa título padrão'} · {'descrição própria' if has_desc else 'usa mensagem principal'}",
             f"Imagens: thumbnail {thumb.lower()} · principal {image.lower()}",
-            f"Rodapé: {_trim(footer, 120) if footer else 'usa o rodapé da mensagem'}",
-            f"Cor: `{_parse_hex(color)}`",
+            f"Footer do embed: {_trim(footer, 120) if footer else 'sem footer'}",
+            f"Cor do embed: `{_parse_hex(color)}`",
             "",
             "Escolha uma parte para editar.",
         ]
@@ -2137,10 +2231,11 @@ class WelcomeAdminView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay(_trim("\n".join(lines))),
             discord.ui.Separator(),
-            discord.ui.ActionRow(_EmbedActionSelect(self)),
+            discord.ui.ActionRow(_MessageActionSelect(self)),
             discord.ui.ActionRow(_BackButton(self)),
             accent_color=_color_from_hex(embed.get("color") or self.config.get("accent_color")),
         ))
+
 
     def _build_presets(self):
         lines = ["# ✨ Presets", "Escolha uma base e edite depois como quiser."]
@@ -2238,7 +2333,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         ]
         footer = str(dm.get("footer") or "").strip()
         if footer:
-            lines.extend(["", "**Rodapé**", _trim(footer, 300)])
+            lines.extend(["", "**Texto final**", _trim(footer, 300)])
         if self.notice:
             lines.extend(["", self.notice])
         self.add_item(discord.ui.Container(
@@ -2900,7 +2995,8 @@ class WelcomeCog(commands.Cog):
         content = self._replace_vars(str(embed_cfg.get("content") or ""), values).strip() if not dm else ""
         embed_title = self._replace_vars(str(embed_cfg.get("title") or title), values).strip()
         embed_desc = self._replace_vars(str(embed_cfg.get("description") or body), values).strip()
-        embed_footer = self._replace_vars(str(embed_cfg.get("footer_text") or footer), values).strip()
+        embed_footer_source = footer if dm else str(embed_cfg.get("footer_text") or "")
+        embed_footer = self._replace_vars(str(embed_footer_source or ""), values).strip()
         embed_color = embed_cfg.get("color") or cfg.get("accent_color")
         embed = discord.Embed(title=_trim(embed_title, 256) or None, description=_trim(embed_desc, 4000) or None, color=_color_from_hex(embed_color))
         title_url = _clean_url(self._replace_vars(str(embed_cfg.get("title_url") or ""), values))
@@ -2941,7 +3037,7 @@ class WelcomeCog(commands.Cog):
             parts.append(f"**{title}**")
         if body:
             parts.append(body)
-        if footer:
+        if dm and footer:
             parts.append(footer)
         return _trim("\n\n".join(parts) or "Bem-vindo(a)!", 1990)
 
