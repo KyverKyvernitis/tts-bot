@@ -11,6 +11,7 @@ from pathlib import Path
 import logging
 import random
 import re
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -45,7 +46,10 @@ HEX_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
 URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 INVITE_CODE_RE = re.compile(r"^(?:https?://)?(?:www\.)?(?:discord\.gg/|discord\.com/invite/)?([A-Za-z0-9_-]{2,64})/?$", re.IGNORECASE)
 CUSTOM_EMOJI_RE = re.compile(r"<(a?):([A-Za-z0-9_]{2,32}):(\d{15,25})>")
-MAX_DECORATIVE_EMOJIS = 2
+DEFAULT_DECORATIVE_EMOJI_LIMIT = 2
+OWNER_GUILD_DECORATIVE_EMOJI_LIMIT = 4
+MAX_DECORATIVE_EMOJIS = OWNER_GUILD_DECORATIVE_EMOJI_LIMIT
+OWNER_PRESENCE_CACHE_SECONDS = 600.0
 DISCORD_EMOJI_MAX_BYTES = 256 * 1024
 
 STAR_SEPARATOR_ASSET = Path(__file__).resolve().parents[1] / "assets" / "welcome" / "star_separator.png"
@@ -869,7 +873,7 @@ class _VisualActionSelect(discord.ui.Select):
         self.panel = panel
         options = [
             discord.SelectOption(label="Editar visual", value="edit", emoji="🎨", description="Estilo, cor e imagem"),
-            discord.SelectOption(label="Emojis decorativos", value="decorative_emojis", emoji="✨", description="Colorir até 2 emojis da mensagem"),
+            discord.SelectOption(label="Emojis decorativos", value="decorative_emojis", emoji="✨", description="Colorir os emojis da mensagem"),
             discord.SelectOption(label="Remover imagem", value="clear_image", emoji="🧹"),
             discord.SelectOption(label="Ver preview", value="preview", emoji="👁️"),
         ]
@@ -1926,16 +1930,17 @@ class WelcomeDecorativeEmojiModal(discord.ui.Modal):
     def __init__(self, panel: "WelcomeAdminView"):
         super().__init__(title="Emojis decorativos")
         self.panel = panel
+        self.limit = panel.cog._decorative_emoji_limit_for_guild_id(panel.guild_id)
         self.flags_group = discord.ui.CheckboxGroup(required=False, min_values=0, max_values=1)
         self.flags_group.add_option(
-            label="Colorir até 2 emojis da mensagem",
+            label=f"Colorir até {self.limit} emojis da mensagem",
             value="decorative_emoji_enabled",
-            description="Usa a cor do membro quando possível.",
+            description="Se não conseguir colorir, mantém o emoji original.",
             default=bool(panel.config.get("decorative_emoji_enabled", False)),
         )
         self.add_item(discord.ui.Label(
             text="Emojis decorativos",
-            description="O bot lê até 2 emojis customizados do texto e mantém os originais se não conseguir colorir.",
+            description=f"Neste servidor: até {self.limit}. Se falhar, os emojis originais continuam.",
             component=self.flags_group,
         ))
 
@@ -2950,7 +2955,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
             "",
             f"**Imagem**\n{MEDIA_MODE_LABELS.get(_media_mode(self.config.get('media_mode')), 'Link personalizado') if _media_mode(self.config.get('media_mode')) != 'custom' else ('configurada' if _clean_url(self.config.get('media_url')) else 'sem imagem')}",
             "",
-            f"**Emojis decorativos**\n{emoji_status} · até 2 emojis customizados da mensagem",
+            f"**Emojis decorativos**\n{emoji_status} · até {self.cog._decorative_emoji_limit_for_guild_id(self.guild_id)} emojis neste servidor",
         ]
         if self.notice:
             lines.extend(["", self.notice])
@@ -3145,12 +3150,94 @@ class WelcomeCog(commands.Cog):
         self._avatar_color_cache: dict[str, str] = {}
         self._avatar_palette_cache: dict[str, list[tuple[int, int, int]]] = {}
         self._star_image_cache: dict[str, bytes] = {}
+        self._bot_owner_ids: set[int] = self._collect_known_bot_owner_ids()
+        self._owner_presence_cache: dict[int, tuple[float, bool]] = {}
 
     @property
     def db(self):
         return getattr(self.bot, "settings_db", None)
 
+    def _collect_known_bot_owner_ids(self) -> set[int]:
+        ids: set[int] = set()
+
+        def add(value: Any) -> None:
+            try:
+                parsed = int(value or 0)
+            except Exception:
+                return
+            if parsed > 0:
+                ids.add(parsed)
+
+        add(getattr(self.bot, "owner_id", 0))
+        for raw in (getattr(self.bot, "owner_ids", None) or []):
+            add(raw)
+        for env_name in ("BOT_OWNER_ID", "OWNER_ID", "TTS_VOICE_FAILURE_DM_USER_ID", "VOICE_FAILURE_DM_USER_ID"):
+            add(os.getenv(env_name))
+        with contextlib.suppress(Exception):
+            import config as bot_config  # type: ignore
+            for attr in ("BOT_OWNER_ID", "OWNER_ID", "TTS_VOICE_FAILURE_DM_USER_ID", "VOICE_FAILURE_DM_USER_ID"):
+                add(getattr(bot_config, attr, 0))
+        return ids
+
+    async def _refresh_bot_owner_ids(self) -> None:
+        ids = self._collect_known_bot_owner_ids()
+        try:
+            app = await self.bot.application_info()
+        except Exception:
+            self._bot_owner_ids = ids
+            return
+        owner = getattr(app, "owner", None)
+        if owner is not None:
+            with contextlib.suppress(Exception):
+                ids.add(int(owner.id))
+        team = getattr(app, "team", None)
+        for member in getattr(team, "members", None) or []:
+            user = getattr(member, "user", member)
+            with contextlib.suppress(Exception):
+                ids.add(int(user.id))
+        self._bot_owner_ids = ids
+
+    def _guild_has_bot_owner_cached(self, guild: discord.Guild | None) -> bool:
+        if guild is None or not self._bot_owner_ids:
+            return False
+        cached = self._owner_presence_cache.get(int(guild.id))
+        if cached and (time.monotonic() - float(cached[0])) < OWNER_PRESENCE_CACHE_SECONDS:
+            return bool(cached[1])
+        for owner_id in self._bot_owner_ids:
+            if int(getattr(guild, "owner_id", 0) or 0) == int(owner_id):
+                self._owner_presence_cache[int(guild.id)] = (time.monotonic(), True)
+                return True
+            if guild.get_member(int(owner_id)) is not None:
+                self._owner_presence_cache[int(guild.id)] = (time.monotonic(), True)
+                return True
+        return False
+
+    def _decorative_emoji_limit_for_guild_id(self, guild_id: int | None) -> int:
+        guild = self.bot.get_guild(int(guild_id or 0)) if guild_id else None
+        return OWNER_GUILD_DECORATIVE_EMOJI_LIMIT if self._guild_has_bot_owner_cached(guild) else DEFAULT_DECORATIVE_EMOJI_LIMIT
+
+    async def _decorative_emoji_limit_for_member(self, member: discord.Member | None) -> int:
+        guild = getattr(member, "guild", None)
+        if guild is None or not self._bot_owner_ids:
+            return DEFAULT_DECORATIVE_EMOJI_LIMIT
+        if self._guild_has_bot_owner_cached(guild):
+            return OWNER_GUILD_DECORATIVE_EMOJI_LIMIT
+        cached = self._owner_presence_cache.get(int(guild.id))
+        if cached and (time.monotonic() - float(cached[0])) < OWNER_PRESENCE_CACHE_SECONDS:
+            return OWNER_GUILD_DECORATIVE_EMOJI_LIMIT if bool(cached[1]) else DEFAULT_DECORATIVE_EMOJI_LIMIT
+        present = False
+        for owner_id in self._bot_owner_ids:
+            try:
+                await asyncio.wait_for(guild.fetch_member(int(owner_id)), timeout=1.5)
+                present = True
+                break
+            except Exception:
+                continue
+        self._owner_presence_cache[int(guild.id)] = (time.monotonic(), present)
+        return OWNER_GUILD_DECORATIVE_EMOJI_LIMIT if present else DEFAULT_DECORATIVE_EMOJI_LIMIT
+
     async def cog_load(self):
+        await self._refresh_bot_owner_ids()
         await self._ensure_indexes()
         self._warmup_task = asyncio.create_task(self._warmup_invites())
         self._emoji_purge_task = asyncio.create_task(self._emoji_midnight_purge_loop())
@@ -3983,8 +4070,14 @@ class WelcomeCog(commands.Cog):
             accent_color=_color_from_hex((cfg.get("embed") or {}).get("color") or cfg.get("accent_color")),
         ))
 
-    def _emoji_tokens_from_config(self, cfg: dict[str, Any], *, mode: str, dm: bool = False) -> list[dict[str, Any]]:
+    def _emoji_tokens_from_config(self, cfg: dict[str, Any], *, mode: str, dm: bool = False, limit: int = DEFAULT_DECORATIVE_EMOJI_LIMIT) -> list[dict[str, Any]]:
         if dm:
+            return []
+        try:
+            effective_limit = max(0, min(MAX_DECORATIVE_EMOJIS, int(limit or DEFAULT_DECORATIVE_EMOJI_LIMIT)))
+        except Exception:
+            effective_limit = DEFAULT_DECORATIVE_EMOJI_LIMIT
+        if effective_limit <= 0:
             return []
         mode = str(mode or cfg.get("render_mode") or "components_v2")
         texts: list[str] = []
@@ -4012,7 +4105,7 @@ class WelcomeCog(commands.Cog):
                     "name": str(match.group(2) or "emoji")[:32],
                     "id": str(match.group(3) or ""),
                 })
-                if len(found) >= MAX_DECORATIVE_EMOJIS:
+                if len(found) >= effective_limit:
                     return found
         return found
 
@@ -4137,7 +4230,7 @@ class WelcomeCog(commands.Cog):
             port = 8766
         return f"{scheme}://{host}:{port}"
 
-    async def _worker_recolor_emojis(self, emojis: list[dict[str, Any]], *, color_hex: str) -> list[dict[str, Any]] | None:
+    async def _worker_recolor_emojis(self, emojis: list[dict[str, Any]], *, color_hex: str, limit: int = DEFAULT_DECORATIVE_EMOJI_LIMIT) -> list[dict[str, Any]] | None:
         base_url = self._phone_worker_base_url()
         token = str(os.getenv("PHONE_WORKER_TOKEN") or "").strip()
         if not base_url or not token or not emojis:
@@ -4147,7 +4240,8 @@ class WelcomeCog(commands.Cog):
             return None
         self._emoji_worker_active[worker_key] = int(self._emoji_worker_active.get(worker_key, 0) or 0) + 1
         try:
-            payload = json.dumps({"task": "emoji_recolor", "color": color_hex, "emojis": emojis[:MAX_DECORATIVE_EMOJIS]}).encode("utf-8")
+            effective_limit = max(0, min(MAX_DECORATIVE_EMOJIS, int(limit or DEFAULT_DECORATIVE_EMOJI_LIMIT)))
+            payload = json.dumps({"task": "emoji_recolor", "color": color_hex, "emojis": emojis[:effective_limit]}).encode("utf-8")
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
             def post() -> dict[str, Any]:
                 req = urllib.request.Request(f"{base_url}/task", data=payload, headers=headers, method="POST")
@@ -4164,9 +4258,10 @@ class WelcomeCog(commands.Cog):
         finally:
             self._emoji_worker_active[worker_key] = max(0, int(self._emoji_worker_active.get(worker_key, 1) or 1) - 1)
 
-    async def _local_recolor_emojis(self, emojis: list[dict[str, Any]], *, color_hex: str) -> list[dict[str, Any]]:
+    async def _local_recolor_emojis(self, emojis: list[dict[str, Any]], *, color_hex: str, limit: int = DEFAULT_DECORATIVE_EMOJI_LIMIT) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
-        for emoji in emojis[:MAX_DECORATIVE_EMOJIS]:
+        effective_limit = max(0, min(MAX_DECORATIVE_EMOJIS, int(limit or DEFAULT_DECORATIVE_EMOJI_LIMIT)))
+        for emoji in emojis[:effective_limit]:
             try:
                 raw = await self._fetch_custom_emoji_bytes(emoji)
                 data, fmt = await self._recolor_emoji_bytes_local(raw, animated=bool(emoji.get("animated")), color_hex=color_hex)
@@ -4229,13 +4324,14 @@ class WelcomeCog(commands.Cog):
         cfg = self._normalize_config(config)
         if dm or member is None or not bool(cfg.get("decorative_emoji_enabled", False)):
             return cfg
-        emojis = self._emoji_tokens_from_config(cfg, mode=mode, dm=dm)
+        effective_limit = await self._decorative_emoji_limit_for_member(member)
+        emojis = self._emoji_tokens_from_config(cfg, mode=mode, dm=dm, limit=effective_limit)
         if not emojis:
             return cfg
         color_hex = _parse_hex((self._normalize_embed_config(cfg.get("embed")).get("color") if mode == "embed" else cfg.get("accent_color")) or cfg.get("accent_color") or DEFAULT_ACCENT)
-        processed = await self._worker_recolor_emojis(emojis, color_hex=color_hex)
+        processed = await self._worker_recolor_emojis(emojis, color_hex=color_hex, limit=effective_limit)
         if not processed:
-            processed = await self._local_recolor_emojis(emojis, color_hex=color_hex)
+            processed = await self._local_recolor_emojis(emojis, color_hex=color_hex, limit=effective_limit)
         replacements: dict[str, str] = {}
         created_for_tracking: list[dict[str, Any]] = []
         for item in processed or []:

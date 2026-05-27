@@ -5479,7 +5479,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raise ValueError("emojis precisa ser lista")
         color = str(body.get("color") or "#5865F2")
         items: list[dict[str, Any]] = []
-        for raw in emojis[:2]:
+        for raw in emojis[:4]:
             if not isinstance(raw, dict):
                 continue
             emoji = {
