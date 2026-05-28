@@ -394,12 +394,15 @@ class _CloseButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         self.panel.stop()
-        closed = discord.ui.LayoutView(timeout=None)
-        closed.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("# 🌟 Boas-vindas\nPainel fechado."),
-            accent_color=_color_from_hex(self.panel.config.get("accent_color")),
-        ))
-        await interaction.response.edit_message(view=closed)
+        with contextlib.suppress(Exception):
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        targets = [self.panel.message, self.panel.command_message]
+        for message in targets:
+            if message is None:
+                continue
+            with contextlib.suppress(discord.HTTPException, discord.NotFound, discord.Forbidden):
+                await message.delete()
 
 
 class _PreviewButton(discord.ui.Button):
@@ -415,22 +418,28 @@ class _MainSelect(discord.ui.Select):
     def __init__(self, panel: "WelcomeAdminView"):
         self.panel = panel
         options = [
-            discord.SelectOption(label="Mensagem de boas-vindas", value="message", emoji="📢", description="Texto que aparece no canal"),
-            discord.SelectOption(label="Modo da mensagem", value="mode", emoji="🎨", description="Normal, embed ou Components V2"),
+            discord.SelectOption(label="Boas-vindas", value="message", emoji="📢", description="Editar mensagem, modo e variações"),
             discord.SelectOption(label="Canal de envio", value="channel", emoji="📍", description="Onde a mensagem vai aparecer"),
             discord.SelectOption(label="Webhook de boas-vindas", value="webhook", emoji="🪝", description="Nome e avatar próprios para receber membros"),
             discord.SelectOption(label="Mensagem privada", value="dm", emoji="💬", description="Mensagem opcional no privado"),
             discord.SelectOption(label="Cargos automáticos", value="roles", emoji="🎭", description="Cargos entregues ao entrar"),
-            discord.SelectOption(label="Visual da mensagem", value="visual", emoji="🖼️", description="Estilo, cor e imagem"),
+            discord.SelectOption(label="Visual da mensagem", value="visual", emoji="🖼️", description="Estilo, cor, imagem e emojis"),
             discord.SelectOption(label="Variáveis", value="variables", emoji="🧬", description="Palavras que o bot troca sozinho"),
             discord.SelectOption(label="Boas-vindas especiais", value="special", emoji="🎁", description="Estilos diferentes por convite"),
-            discord.SelectOption(label="Ativar ou desativar", value="status", emoji="⚙️", description="Ligar ou pausar as boas-vindas"),
+            discord.SelectOption(label="Configurações", value="settings", emoji="⚙️", description="Ligar, pausar e apagar ao sair"),
         ]
         super().__init__(placeholder="O que você quer configurar?", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        self.panel.go_to(str(self.values[0]))
+        value = str(self.values[0])
         self.panel.notice = ""
+        if value == "message":
+            await interaction.response.send_modal(WelcomeEntryModal(self.panel))
+            return
+        if value == "settings":
+            await interaction.response.send_modal(WelcomeSettingsModal(self.panel))
+            return
+        self.panel.go_to(value)
         if self.panel.screen == "webhook_existing":
             await self.panel.load_webhooks(interaction.guild)
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
@@ -450,7 +459,6 @@ class _MessageActionSelect(discord.ui.Select):
                 discord.SelectOption(label="Footer do embed", value="embed_footer", emoji="📌", description="Texto pequeno nativo do embed"),
                 discord.SelectOption(label="Variações da mensagem", value="variants", emoji="🎲", description="Até 3 mensagens com chance própria"),
                 discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
-                discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia real do embed"),
             ]
             placeholder = "O que deseja editar no embed?"
         elif mode == "normal":
@@ -459,7 +467,6 @@ class _MessageActionSelect(discord.ui.Select):
                 discord.SelectOption(label="Variações da mensagem", value="variants", emoji="🎲", description="Até 3 mensagens com chance própria"),
                 discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
                 discord.SelectOption(label="Restaurar texto padrão", value="restore", emoji="↩️", description="Voltar para o texto inicial"),
-                discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia em texto normal"),
             ]
             placeholder = "O que deseja editar no texto?"
         else:
@@ -469,7 +476,6 @@ class _MessageActionSelect(discord.ui.Select):
                 discord.SelectOption(label="Variações da mensagem", value="variants", emoji="🎲", description="Até 3 mensagens com chance própria"),
                 discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
                 discord.SelectOption(label="Restaurar mensagem padrão", value="restore", emoji="↩️", description="Voltar para o texto inicial"),
-                discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia em Components V2"),
             ]
             placeholder = "O que deseja editar na mensagem V2?"
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
@@ -510,9 +516,6 @@ class _MessageActionSelect(discord.ui.Select):
             cfg = deepcopy(self.panel.config)
             cfg["public"] = dict(DEFAULT_PUBLIC)
             await self.panel.save_config(cfg, "Mensagem padrão restaurada.")
-        elif action == "preview":
-            await self.panel.send_preview(interaction)
-            return
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
 
@@ -560,7 +563,6 @@ class _EmbedActionSelect(discord.ui.Select):
             discord.SelectOption(label="Título e descrição", value="text", emoji="🏷️", description="Título, descrição, link e cor"),
             discord.SelectOption(label="Imagens", value="images", emoji="🖼️", description="Thumbnail e imagem principal"),
             discord.SelectOption(label="Footer do embed", value="footer", emoji="📌", description="Texto pequeno nativo do embed"),
-            discord.SelectOption(label="Ver preview", value="preview", emoji="👁️"),
         ]
         super().__init__(placeholder="O que deseja editar no embed?", min_values=1, max_values=1, options=options)
 
@@ -581,7 +583,6 @@ class _EmbedActionSelect(discord.ui.Select):
         if action == "footer":
             await interaction.response.send_modal(WelcomeEmbedFooterModal(self.panel))
             return
-        await self.panel.send_preview(interaction)
 
 
 class _RenderModeSelect(discord.ui.Select):
@@ -595,9 +596,9 @@ class _RenderModeSelect(discord.ui.Select):
         super().__init__(placeholder="Escolha o modo da mensagem pública", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        cfg = deepcopy(self.panel.config)
-        cfg["render_mode"] = str(self.values[0])
-        await self.panel.save_config(cfg, f"Modo ajustado para **{RENDER_MODE_LABELS.get(cfg['render_mode'], 'Components V2')}**.")
+        mode = str(self.values[0])
+        cfg = self.panel.cog._switch_public_mode(self.panel.config, mode)
+        await self.panel.save_config(cfg, f"Modo ajustado para **{RENDER_MODE_LABELS.get(mode, 'Components V2')}**.")
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
 
@@ -605,11 +606,13 @@ class _RenderModeSelect(discord.ui.Select):
 class _ModeActionSelect(discord.ui.Select):
     def __init__(self, panel: "WelcomeAdminView"):
         self.panel = panel
-        options = [discord.SelectOption(label="Ver preview", value="preview", emoji="👁️")]
+        options = [discord.SelectOption(label="Voltar ao início", value="home", emoji="↩️")]
         super().__init__(placeholder="Mais opções do modo", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        await self.panel.send_preview(interaction)
+        self.panel.screen = "home"
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
 
 
 class _ChannelSelect(discord.ui.ChannelSelect):
@@ -760,7 +763,6 @@ class _DmActionSelect(discord.ui.Select):
             discord.SelectOption(label="Configurar privado", value="config", emoji="⚙️", description="Ligar, desligar e escolher o modo"),
             discord.SelectOption(label="Editar texto", value="edit", emoji="✏️", description="Título, mensagem e texto final"),
             discord.SelectOption(label="Restaurar mensagem padrão", value="restore", emoji="↩️"),
-            discord.SelectOption(label="Ver preview", value="preview", emoji="👁️"),
         ]
         super().__init__(placeholder="O que deseja ajustar no privado?", min_values=1, max_values=1, options=options)
 
@@ -783,9 +785,6 @@ class _DmActionSelect(discord.ui.Select):
             cfg["dm"] = dict(DEFAULT_DM)
             await self.panel.save_config(cfg, "Mensagem privada restaurada.")
             self.panel.screen = "dm"
-        elif action == "preview":
-            await self.panel.send_preview(interaction, dm=True)
-            return
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
 
@@ -875,7 +874,6 @@ class _VisualActionSelect(discord.ui.Select):
             discord.SelectOption(label="Editar visual", value="edit", emoji="🎨", description="Estilo, cor e imagem"),
             discord.SelectOption(label="Emojis decorativos", value="decorative_emojis", emoji="✨", description="Colorir os emojis da mensagem"),
             discord.SelectOption(label="Remover imagem", value="clear_image", emoji="🧹"),
-            discord.SelectOption(label="Ver preview", value="preview", emoji="👁️"),
         ]
         super().__init__(placeholder="Mais opções do visual", min_values=1, max_values=1, options=options)
 
@@ -899,9 +897,6 @@ class _VisualActionSelect(discord.ui.Select):
             cfg["media_mode"] = "custom"
             await self.panel.save_config(cfg, "Imagem removida.")
             self.panel.screen = "visual"
-        elif action == "preview":
-            await self.panel.send_preview(interaction)
-            return
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
 
@@ -1246,10 +1241,10 @@ class _VariantActionSelect(discord.ui.Select):
     def __init__(self, panel: "WelcomeAdminView"):
         self.panel = panel
         variants = list(panel.config.get("variants") or [])
-        options = []
         if len(variants) < MAX_WELCOME_VARIANTS:
-            options.append(discord.SelectOption(label="Criar variação", value="create", emoji="➕", description=f"Até {MAX_WELCOME_VARIANTS} variações"))
-        options.append(discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia com escolha aleatória"))
+            options = [discord.SelectOption(label="Criar variação", value="create", emoji="➕", description=f"Até {MAX_WELCOME_VARIANTS} variações")]
+        else:
+            options = [discord.SelectOption(label="Limite de variações atingido", value="noop", emoji="🎲", description=f"Máximo: {MAX_WELCOME_VARIANTS}")]
         super().__init__(placeholder="O que deseja fazer?", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
@@ -1257,9 +1252,7 @@ class _VariantActionSelect(discord.ui.Select):
         if action == "create":
             await interaction.response.send_modal(WelcomeVariantCreateModal(self.panel))
             return
-        if action == "preview":
-            await self.panel.send_preview(interaction)
-            return
+        self.panel.notice = "Você já chegou ao limite de variações." if action == "noop" else ""
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
 
@@ -1281,7 +1274,6 @@ class _VariantEditActionSelect(discord.ui.Select):
             discord.SelectOption(label=edit_label, value="content", emoji="✏️", description=edit_desc),
             discord.SelectOption(label="Nome e chance", value="settings", emoji="🎚️", description="Nome, peso e ativação"),
             discord.SelectOption(label="Visual da variação", value="visual", emoji="🖼️", description="Cor, imagem e estilo"),
-            discord.SelectOption(label="Ver preview", value="preview", emoji="👁️", description="Prévia desta variação"),
             discord.SelectOption(label="Remover variação", value="remove", emoji="🧹", description="Apaga esta variação"),
         ]
         super().__init__(placeholder="O que deseja ajustar?", min_values=1, max_values=1, options=options)
@@ -1296,9 +1288,6 @@ class _VariantEditActionSelect(discord.ui.Select):
             return
         if action == "visual":
             await interaction.response.send_modal(WelcomeVariantVisualModal(self.panel))
-            return
-        if action == "preview":
-            await self.panel.send_preview(interaction, variant_id=self.panel.selected_variant_id)
             return
         if action == "remove":
             cfg = deepcopy(self.panel.config)
@@ -1490,6 +1479,149 @@ class WelcomeVariantVisualModal(discord.ui.Modal):
         self.panel.screen = "variant_detail"
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
+
+class WelcomeEntryModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Boas-vindas")
+        self.panel = panel
+        self.mode_group = None
+        self.action_select = None
+        current_mode = str(panel.config.get("render_mode") or "components_v2")
+        if _advanced_modal_supported("Label", "RadioGroup", "Select"):
+            self.mode_group = discord.ui.RadioGroup(required=True)
+            for key, label in RENDER_MODE_LABELS.items():
+                self.mode_group.add_option(
+                    label=label,
+                    value=key,
+                    description=RENDER_MODE_DESCRIPTIONS.get(key, ""),
+                    default=current_mode == key,
+                )
+            self.action_select = discord.ui.Select(
+                placeholder="O que você quer abrir?",
+                min_values=1,
+                max_values=1,
+                options=[
+                    discord.SelectOption(label="Texto principal", value="main", emoji="✏️", description="Título, texto ou descrição"),
+                    discord.SelectOption(label="Mensagem acima", value="above", emoji="📝", description="Parte do modo Embed"),
+                    discord.SelectOption(label="Author", value="author", emoji="👤", description="Parte do modo Embed"),
+                    discord.SelectOption(label="Imagens / visual", value="images", emoji="🖼️", description="Imagens do embed ou visual V2"),
+                    discord.SelectOption(label="Footer / texto final", value="footer", emoji="📌", description="Footer do embed ou texto final V2"),
+                    discord.SelectOption(label="Variações da mensagem", value="variants", emoji="🎲", description="Até 3 variações com peso"),
+                    discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
+                ],
+            )
+            self.add_item(discord.ui.Label(text="Modo do editor", component=self.mode_group))
+            self.add_item(discord.ui.Label(text="O que editar", component=self.action_select))
+        else:
+            self.mode_input = discord.ui.TextInput(
+                label="Modo: components_v2, embed ou normal",
+                default=current_mode,
+                max_length=20,
+                required=True,
+            )
+            self.action_input = discord.ui.TextInput(
+                label="Ação: main, above, author, images, footer, variants ou presets",
+                default="main",
+                max_length=20,
+                required=True,
+            )
+            self.add_item(self.mode_input)
+            self.add_item(self.action_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if self.mode_group is not None:
+            mode = _modal_value(self.mode_group, str(self.panel.config.get("render_mode") or "components_v2"))
+            action = _modal_value(self.action_select, "main")
+        else:
+            mode = str(self.mode_input.value or "components_v2").strip().lower()
+            action = str(self.action_input.value or "main").strip().lower()
+        if mode not in RENDER_MODE_LABELS:
+            mode = str(self.panel.config.get("render_mode") or "components_v2")
+
+        cfg = self.panel.cog._switch_public_mode(self.panel.config, mode)
+        await self.panel.save_config(cfg, f"Editor em **{RENDER_MODE_LABELS.get(mode, 'Components V2')}**.")
+
+        if action == "variants":
+            self.panel.go_to("variants")
+        elif action == "presets":
+            self.panel.go_to("presets")
+        elif mode == "embed":
+            self.panel.go_to("embed_editor")
+            labels = {
+                "above": "Mensagem acima",
+                "author": "Author",
+                "images": "Imagens",
+                "footer": "Footer do embed",
+                "main": "Título e descrição",
+            }
+            self.panel.notice = f"Escolha **{labels.get(action, 'Título e descrição')}** no editor de embed."
+        elif mode == "components_v2":
+            if action == "images":
+                self.panel.go_to("visual")
+                self.panel.notice = "Abra **Editar visual** para ajustar imagem e cor V2."
+            else:
+                self.panel.go_to("message")
+                self.panel.notice = "Abra **Editar texto V2** para ajustar título, texto e texto final."
+        else:
+            self.panel.go_to("message")
+            self.panel.notice = "Abra **Editar texto** para ajustar a mensagem normal."
+
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
+
+class WelcomeSettingsModal(discord.ui.Modal):
+    def __init__(self, panel: "WelcomeAdminView"):
+        super().__init__(title="Configurações")
+        self.panel = panel
+        self.status_group = None
+        self.flags_group = None
+        enabled = bool(panel.config.get("enabled", False))
+        delete_on_leave = bool(panel.config.get("delete_on_leave_enabled", False))
+        if _advanced_modal_supported("Label", "RadioGroup", "CheckboxGroup"):
+            self.status_group = discord.ui.RadioGroup(required=True)
+            self.status_group.add_option(label="Boas-vindas ligadas", value="on", description="Enviar quando alguém entrar", default=enabled)
+            self.status_group.add_option(label="Boas-vindas desligadas", value="off", description="Pausar as mensagens", default=not enabled)
+            self.flags_group = discord.ui.CheckboxGroup(min_values=0, max_values=1, required=False)
+            self.flags_group.add_option(
+                label="Apagar boas-vindas se o membro sair",
+                value="delete_on_leave",
+                description="Sempre em até 1 dia",
+                default=delete_on_leave,
+            )
+            self.add_item(discord.ui.Label(text="Status", component=self.status_group))
+            self.add_item(discord.ui.Label(text="Opções", component=self.flags_group))
+        else:
+            self.status_input = discord.ui.TextInput(label="Status: ligado ou desligado", default="ligado" if enabled else "desligado", max_length=20, required=True)
+            self.delete_input = discord.ui.TextInput(label="Apagar ao sair? sim ou não", default="sim" if delete_on_leave else "não", max_length=10, required=True)
+            self.add_item(self.status_input)
+            self.add_item(self.delete_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = deepcopy(self.panel.config)
+        if self.status_group is not None:
+            enabled = _modal_value(self.status_group, "off") == "on"
+            delete_on_leave = "delete_on_leave" in set(_modal_values(self.flags_group))
+        else:
+            enabled = str(self.status_input.value or "").strip().lower() in {"ligado", "on", "sim", "s", "true", "1"}
+            delete_on_leave = str(self.delete_input.value or "").strip().lower() in {"sim", "s", "yes", "y", "true", "1", "ligado", "on"}
+        if enabled and not int(cfg.get("channel_id") or 0):
+            cfg["enabled"] = False
+            cfg["delete_on_leave_enabled"] = delete_on_leave
+            notice = "Escolha um canal antes de ligar."
+        else:
+            cfg["enabled"] = enabled
+            cfg["delete_on_leave_enabled"] = delete_on_leave
+            leave = "apaga se o membro sair em até 1 dia" if delete_on_leave else "mantém a mensagem ao sair"
+            notice = f"Configurações salvas: boas-vindas {'ligadas' if enabled else 'desligadas'} · {leave}."
+        await self.panel.save_config(cfg, notice)
+        if cfg.get("enabled"):
+            asyncio.create_task(self.panel.cog._refresh_invite_cache_for_guild(interaction.guild, cfg))
+        self.panel.screen = "home"
+        self.panel.screen_history.clear()
+        self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+        await interaction.response.edit_message(view=self.panel)
+
 
 class WelcomeMessageModal(discord.ui.Modal):
     def __init__(self, panel: "WelcomeAdminView"):
@@ -2411,6 +2543,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         self.screen_history: list[str] = []
         self.notice = ""
         self.message: discord.Message | None = None
+        self.command_message: discord.Message | None = None
         self._preview_member: discord.Member | None = None
         self.webhook_choices: list[dict[str, Any]] = []
         self.selected_rule_id = ""
@@ -2448,6 +2581,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         self.notice = ""
 
     async def save_config(self, cfg: dict[str, Any], notice: str) -> bool:
+        cfg = self.cog._sync_active_mode_config(cfg)
         ok = await self.cog._save_config(self.guild_id, cfg)
         self.config = await self.cog._get_config(self.guild_id)
         self.notice = notice if ok else "Não consegui salvar agora. Tente novamente em alguns segundos."
@@ -3137,8 +3271,8 @@ class WelcomeAdminView(discord.ui.LayoutView):
         channel_id = int(self.config.get("channel_id") or 0)
         delete_label = "apaga se o membro sair em até 1 dia" if bool(self.config.get("delete_on_leave_enabled", False)) else "mantém a mensagem"
         lines = [
-            "# ⚙️ Ativar ou desativar",
-            "Ligue quando a mensagem estiver pronta.",
+            "# ⚙️ Configurações",
+            "Ligue, pause e escolha o que acontece quando alguém sair.",
             "",
             f"**Status atual**\n{_status_label(bool(self.config.get('enabled', False)))}",
             "",
@@ -3318,6 +3452,7 @@ class WelcomeCog(commands.Cog):
             "media_url": "",
             "media_mode": "custom",
             "variants": [],
+            "mode_configs": {},
             "public": dict(DEFAULT_PUBLIC),
             "embed": dict(DEFAULT_EMBED),
             "dm": dict(DEFAULT_DM),
@@ -3469,6 +3604,131 @@ class WelcomeCog(commands.Cog):
             cfg["media_mode"] = _media_mode(variant.get("media_mode"))
         return self._normalize_config(cfg)
 
+    def _normalize_mode_state(self, mode: str, value: Any) -> dict[str, Any]:
+        data = dict(value or {}) if isinstance(value, dict) else {}
+        style = str(data.get("style") or "complete")
+        if style not in STYLE_LABELS:
+            style = "complete"
+        accent_mode = str(data.get("accent_color_mode") or "fixed")
+        if accent_mode not in COLOR_MODE_LABELS:
+            accent_mode = "fixed"
+        variants: list[dict[str, Any]] = []
+        for raw in data.get("variants") or []:
+            if isinstance(raw, dict):
+                variants.append(self._normalize_variant(raw))
+            if len(variants) >= MAX_WELCOME_VARIANTS:
+                break
+        return {
+            "public": self._normalize_public_block(data.get("public"), default=DEFAULT_PUBLIC),
+            "embed": self._normalize_embed_config(data.get("embed")),
+            "style": style,
+            "accent_color": _parse_hex(data.get("accent_color")),
+            "accent_color_mode": accent_mode,
+            "media_url": _clean_url(data.get("media_url")),
+            "media_mode": _media_mode(data.get("media_mode")),
+            "decorative_emoji_enabled": bool(data.get("decorative_emoji_enabled", False)),
+            "variants": variants,
+        }
+
+    def _normalize_mode_configs(self, value: Any) -> dict[str, dict[str, Any]]:
+        raw = dict(value or {}) if isinstance(value, dict) else {}
+        return {mode: self._normalize_mode_state(mode, raw.get(mode)) for mode in RENDER_MODE_LABELS}
+
+    def _extract_mode_state(self, cfg: dict[str, Any], mode: str | None = None) -> dict[str, Any]:
+        return self._normalize_mode_state(str(mode or cfg.get("render_mode") or "components_v2"), {
+            "public": cfg.get("public"),
+            "embed": cfg.get("embed"),
+            "style": cfg.get("style"),
+            "accent_color": cfg.get("accent_color"),
+            "accent_color_mode": cfg.get("accent_color_mode"),
+            "media_url": cfg.get("media_url"),
+            "media_mode": cfg.get("media_mode"),
+            "decorative_emoji_enabled": cfg.get("decorative_emoji_enabled"),
+            "variants": cfg.get("variants"),
+        })
+
+    def _mode_state_is_empty(self, state: dict[str, Any], mode: str) -> bool:
+        state = self._normalize_mode_state(mode, state)
+        variants = list(state.get("variants") or [])
+        public_default = not _template_changed({"public": state.get("public") or {}})
+        embed_default = not _has_custom_embed(state.get("embed"))
+        common_default = (
+            not variants
+            and not bool(state.get("decorative_emoji_enabled", False))
+            and str(state.get("style") or "complete") == "complete"
+            and _parse_hex(state.get("accent_color")) == _parse_hex(DEFAULT_ACCENT)
+            and str(state.get("accent_color_mode") or "fixed") == "fixed"
+            and not _clean_url(state.get("media_url"))
+            and _media_mode(state.get("media_mode")) == "custom"
+        )
+        if mode == "embed":
+            return common_default and embed_default
+        return common_default and public_default
+
+    def _adapt_mode_state(self, cfg: dict[str, Any], source_mode: str, target_mode: str) -> dict[str, Any]:
+        source = self._extract_mode_state(cfg, source_mode)
+        public = dict(source.get("public") or DEFAULT_PUBLIC)
+        embed = self._normalize_embed_config(source.get("embed"))
+        if source_mode == "embed" and target_mode in {"components_v2", "normal"}:
+            public = {
+                "title": str(embed.get("title") or public.get("title") or DEFAULT_PUBLIC["title"]),
+                "body": str(embed.get("description") or public.get("body") or DEFAULT_PUBLIC["body"]),
+                "footer": str(embed.get("footer_text") or public.get("footer") or ""),
+            }
+            source["public"] = self._normalize_public_block(public, default=DEFAULT_PUBLIC)
+            if embed.get("color"):
+                source["accent_color"] = _parse_hex(embed.get("color"))
+            image_url = _clean_url(embed.get("image_url"))
+            if image_url:
+                source["media_url"] = image_url
+                source["media_mode"] = "custom"
+            elif str(embed.get("image_mode") or "") == "avatar_stars":
+                source["media_mode"] = "avatar_stars"
+        elif source_mode in {"components_v2", "normal"} and target_mode == "embed":
+            source["embed"] = self._normalize_embed_config({
+                "content": "",
+                "title": public.get("title") or "",
+                "description": public.get("body") or "",
+                "footer_text": public.get("footer") or "",
+                "color": source.get("accent_color") or DEFAULT_ACCENT,
+                "image_mode": source.get("media_mode") if str(source.get("media_mode") or "custom") == "avatar_stars" else "custom",
+                "image_url": source.get("media_url") or "",
+            })
+        return self._normalize_mode_state(target_mode, source)
+
+    def _apply_mode_state(self, cfg: dict[str, Any], mode: str, state: dict[str, Any]) -> dict[str, Any]:
+        out = dict(cfg or {})
+        state = self._normalize_mode_state(mode, state)
+        out["render_mode"] = mode if mode in RENDER_MODE_LABELS else "components_v2"
+        for key in ("public", "embed", "style", "accent_color", "accent_color_mode", "media_url", "media_mode", "decorative_emoji_enabled", "variants"):
+            out[key] = deepcopy(state.get(key))
+        return out
+
+    def _sync_active_mode_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        cfg = self._normalize_config(config)
+        mode = str(cfg.get("render_mode") or "components_v2")
+        modes = self._normalize_mode_configs(cfg.get("mode_configs"))
+        modes[mode] = self._extract_mode_state(cfg, mode)
+        cfg["mode_configs"] = modes
+        return cfg
+
+    def _switch_public_mode(self, config: dict[str, Any], target_mode: str) -> dict[str, Any]:
+        target_mode = str(target_mode or "components_v2")
+        if target_mode not in RENDER_MODE_LABELS:
+            target_mode = "components_v2"
+        cfg = self._normalize_config(config)
+        current_mode = str(cfg.get("render_mode") or "components_v2")
+        modes = self._normalize_mode_configs(cfg.get("mode_configs"))
+        modes[current_mode] = self._extract_mode_state(cfg, current_mode)
+        target_state = modes.get(target_mode) or self._normalize_mode_state(target_mode, {})
+        if self._mode_state_is_empty(target_state, target_mode):
+            target_state = self._adapt_mode_state(cfg, current_mode, target_mode)
+            modes[target_mode] = target_state
+        cfg["mode_configs"] = modes
+        cfg = self._apply_mode_state(cfg, target_mode, target_state)
+        cfg["mode_configs"] = modes
+        return self._normalize_config(cfg)
+
     def _normalize_rule(self, rule: dict[str, Any] | None) -> dict[str, Any]:
         data = dict(rule or {})
         match_type = str(data.get("match_type") or "invite_code")
@@ -3553,6 +3813,12 @@ class WelcomeCog(commands.Cog):
             if len(variants) >= MAX_WELCOME_VARIANTS:
                 break
         merged["variants"] = variants
+        modes = self._normalize_mode_configs(merged.get("mode_configs"))
+        active_mode = str(merged.get("render_mode") or "components_v2")
+        raw_modes = merged.get("mode_configs") if isinstance(merged.get("mode_configs"), dict) else {}
+        if active_mode not in raw_modes:
+            modes[active_mode] = self._extract_mode_state(merged, active_mode)
+        merged["mode_configs"] = modes
         merged["webhook"] = self._normalize_webhook_config(merged.get("webhook"))
         merged["invite_cache"] = self._normalize_invite_cache(merged.get("invite_cache"))
         rules: list[dict[str, Any]] = []
@@ -3600,7 +3866,8 @@ class WelcomeCog(commands.Cog):
         db = self.db
         if db is None or not hasattr(db, "coll"):
             return False
-        cfg = self._normalize_config(config)
+        cfg = self._sync_active_mode_config(config)
+        cfg = self._normalize_config(cfg)
         cfg["guild_id"] = int(guild_id)
         cfg["type"] = WELCOME_DOC_CONFIG
         await db.coll.update_one({"type": WELCOME_DOC_CONFIG, "guild_id": int(guild_id)}, {"$set": cfg}, upsert=True)
@@ -5125,6 +5392,7 @@ class WelcomeCog(commands.Cog):
         view = WelcomeAdminView(self, owner_id=int(ctx.author.id), guild_id=int(ctx.guild.id), config=cfg)
         msg = await ctx.reply(view=view, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
         view.message = msg
+        view.command_message = ctx.message
 
 
 async def setup(bot: commands.Bot):
