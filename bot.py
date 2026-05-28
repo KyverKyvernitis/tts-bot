@@ -629,9 +629,29 @@ class BotLocal(commands.Bot):
         view.add_item(discord.ui.Container(discord.ui.TextDisplay(text), accent_color=color))
         return view
 
-    async def _send_zip_update_message(self, message: discord.Message, title: str, description: str, color: discord.Color):
+    async def _send_zip_update_message(self, message: discord.Message, title: str, description: str, color: discord.Color) -> discord.Message:
         view = self._make_zip_update_view(title, description, color)
-        await message.reply(view=view, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        return await message.reply(view=view, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _edit_zip_update_message(
+        self,
+        source_message: discord.Message,
+        status_message: discord.Message | None,
+        title: str,
+        description: str,
+        color: discord.Color,
+    ) -> discord.Message:
+        view = self._make_zip_update_view(title, description, color)
+        if status_message is not None:
+            try:
+                await status_message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+                return status_message
+            except discord.HTTPException:
+                logging.getLogger("zip_update").warning(
+                    "não consegui editar a mensagem de status do ZIP; enviando resultado final",
+                    exc_info=True,
+                )
+        return await source_message.reply(view=view, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
     def _git_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -1119,16 +1139,17 @@ class BotLocal(commands.Bot):
             await self._send_zip_update_message(
                 message,
                 "❌ Arquivo inválido",
-                "Envie um arquivo **.zip** neste canal para iniciar a atualização automática do projeto.",
+                "Envie um arquivo **.zip** neste canal.",
                 discord.Color.red(),
             )
             return
 
+        status_message: discord.Message | None = None
         if self._zip_update_lock.locked():
-            await self._send_zip_update_message(
+            status_message = await self._send_zip_update_message(
                 message,
-                "⏳ Update na fila",
-                "Já existe um ZIP sendo processado. Vou aplicar este assim que o update atual terminar, sem sobrepor git, push ou updater.",
+                "📦 ZIP recebido",
+                "Na fila. Aguardando o update atual terminar.",
                 discord.Color.orange(),
             )
 
@@ -1138,12 +1159,13 @@ class BotLocal(commands.Bot):
             zip_path = work_dir / zip_attachment.filename
             try:
                 await zip_attachment.save(zip_path)
-                await self._send_zip_update_message(
-                    message,
-                    "📦 ZIP recebido",
-                    "Arquivo baixado fora do repositório. Vou validar, ignorar lixo de build, aplicar em staging persistente, enviar ao GitHub e disparar o updater imediatamente.",
-                    discord.Color.blurple(),
-                )
+                if status_message is None:
+                    status_message = await self._send_zip_update_message(
+                        message,
+                        "📦 ZIP recebido",
+                        "Processando...",
+                        discord.Color.blurple(),
+                    )
 
                 result = await asyncio.to_thread(self._process_zip_update_sync, zip_path)
                 changed_files = list(result.get("changed_files") or [])
@@ -1152,10 +1174,11 @@ class BotLocal(commands.Bot):
                 triggered_update = bool(result.get("triggered_update"))
 
                 if not changed_files:
-                    await self._send_zip_update_message(
+                    await self._edit_zip_update_message(
                         message,
-                        "ℹ️ Nenhuma alteração aplicada",
-                        "O ZIP foi válido, mas não mudou nenhum arquivo do repositório. Nada foi commitado no GitHub.",
+                        status_message,
+                        "ℹ️ Nenhuma alteração",
+                        "O ZIP é válido, mas não alterou arquivos do repositório.",
                         discord.Color.gold(),
                     )
                     return
@@ -1185,43 +1208,48 @@ class BotLocal(commands.Bot):
 
                 short_hash = str(commit_hash)[:7] if commit_hash else "desconhecido"
                 trigger_detail = str(result.get("trigger_detail") or "").strip()
-                update_line = trigger_detail or ("updater disparado agora" if triggered_update else "commit enviado; aguardando timer")
-                worker_validation = result.get("phone_worker_zip_validation")
-                worker_line = ""
-                if isinstance(worker_validation, dict):
-                    risk = worker_validation.get("risk") or "ok"
-                    files = worker_validation.get("files")
-                    worker_line = f"\nValidação worker: **{risk}** ({files} arquivo(s))."
+                if triggered_update:
+                    apply_line = "Aplicação: iniciada"
+                elif trigger_detail:
+                    apply_line = "Aplicação: aguardando updater automático"
+                else:
+                    apply_line = "Aplicação: aguardando updater"
+
                 timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
                 total_ms = int(timings.get("total_ms") or 0) if isinstance(timings, dict) else 0
-                time_line = f"\nTempo do envio: **{total_ms / 1000:.1f}s**" if total_ms else ""
-                await self._send_zip_update_message(
+                time_line = f"\nTempo: **{total_ms / 1000:.1f}s**" if total_ms else ""
+                await self._edit_zip_update_message(
                     message,
-                    "✅ Update enviado para o GitHub",
+                    status_message,
+                    "✅ Update enviado",
                     (
-                        f"Branch: **{branch}**\n"
-                        f"Commit: **{short_hash}**\n"
-                        f"Mudanças: **{len(changed_files)} arquivo(s) · {diff_summary}**{worker_line}{time_line}\n"
-                        f"Updater: **{update_line}**\n\n"
+                        f"{branch} · commit **{short_hash}**\n"
+                        f"{len(changed_files)} arquivo(s) alterado(s) · **{diff_summary}**\n"
+                        f"{apply_line}{time_line}\n\n"
                         f"## Arquivos alterados\n{preview_files}"
                     ),
                     discord.Color.green(),
                 )
             except zipfile.BadZipFile:
-                await self._send_zip_update_message(
+                await self._edit_zip_update_message(
                     message,
+                    status_message,
                     "❌ ZIP inválido",
-                    "O arquivo enviado não pôde ser aberto como ZIP válido. Nenhuma alteração foi aplicada.",
+                    "O arquivo não pôde ser aberto como ZIP válido.",
                     discord.Color.red(),
                 )
             except Exception as e:
                 logging.getLogger("zip_update").exception(
                     "Falha no auto-update via ZIP do Discord"
                 )
-                await self._send_zip_update_message(
+                reason = str(e).strip() or type(e).__name__
+                if len(reason) > 600:
+                    reason = reason[:597].rstrip() + "..."
+                await self._edit_zip_update_message(
                     message,
-                    "❌ Falha no update automático",
-                    f"Nada foi aplicado. Motivo: **{e}**",
+                    status_message,
+                    "❌ Falha no update",
+                    f"Nada foi aplicado. Motivo: **{reason}**",
                     discord.Color.red(),
                 )
             finally:
