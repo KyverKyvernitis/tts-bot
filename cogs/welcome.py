@@ -1157,11 +1157,34 @@ class _StatusSelect(discord.ui.Select):
         enabled = bool(panel.config.get("enabled", False))
         delete_on_leave = bool(panel.config.get("delete_on_leave_enabled", False))
         options = [
-            discord.SelectOption(label="Ligar boas-vindas", value="enable", emoji="✅", default=enabled),
-            discord.SelectOption(label="Desligar boas-vindas", value="disable", emoji="⏸️", default=not enabled),
-            discord.SelectOption(label="Apagar mensagem se o membro sair", value="delete_on", emoji="🧹", description="Vale por até 1 dia", default=delete_on_leave),
-            discord.SelectOption(label="Manter mensagem mesmo se sair", value="delete_off", emoji="💬", default=not delete_on_leave),
+            discord.SelectOption(
+                label="Ligar boas-vindas",
+                value="enable",
+                emoji="✅",
+                description="Já está ligado" if enabled else "Começar a enviar quando alguém entrar",
+            ),
+            discord.SelectOption(
+                label="Desligar boas-vindas",
+                value="disable",
+                emoji="⏸️",
+                description="Pausar as mensagens" if enabled else "Já está desligado",
+            ),
+            discord.SelectOption(
+                label="Apagar quando sair",
+                value="delete_on",
+                emoji="🧹",
+                description="Ativo · até 1 dia" if delete_on_leave else "Apagar a boas-vindas se o membro sair",
+            ),
+            discord.SelectOption(
+                label="Manter quando sair",
+                value="delete_off",
+                emoji="💬",
+                description="Ativo" if not delete_on_leave else "Não apagar a mensagem ao sair",
+            ),
         ]
+        # Não marcamos nenhuma opção como default aqui: este select mistura duas
+        # escolhas independentes (status e apagar ao sair). Um select de valor
+        # único com dois defaults gera HTTP 400 Invalid Form Body no Discord.
         super().__init__(placeholder="Escolha o que ajustar", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
