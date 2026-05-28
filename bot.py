@@ -1149,7 +1149,7 @@ class BotLocal(commands.Bot):
             status_message = await self._send_zip_update_message(
                 message,
                 "📦 ZIP recebido",
-                "Na fila. Aguardando o update atual terminar.",
+                "Na fila. Vou editar esta mensagem quando terminar.",
                 discord.Color.orange(),
             )
 
@@ -1163,7 +1163,7 @@ class BotLocal(commands.Bot):
                     status_message = await self._send_zip_update_message(
                         message,
                         "📦 ZIP recebido",
-                        "Processando...",
+                        "Processando.",
                         discord.Color.blurple(),
                     )
 
@@ -1178,7 +1178,7 @@ class BotLocal(commands.Bot):
                         message,
                         status_message,
                         "ℹ️ Nenhuma alteração",
-                        "O ZIP é válido, mas não alterou arquivos do repositório.",
+                        "ZIP válido. Nenhuma mudança no repositório.",
                         discord.Color.gold(),
                     )
                     return
@@ -1209,11 +1209,11 @@ class BotLocal(commands.Bot):
                 short_hash = str(commit_hash)[:7] if commit_hash else "desconhecido"
                 trigger_detail = str(result.get("trigger_detail") or "").strip()
                 if triggered_update:
-                    apply_line = "Aplicação: iniciada"
+                    apply_line = "Updater: iniciado"
                 elif trigger_detail:
-                    apply_line = "Aplicação: aguardando updater automático"
+                    apply_line = "Updater: timer automático"
                 else:
-                    apply_line = "Aplicação: aguardando updater"
+                    apply_line = "Updater: aguardando"
 
                 timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
                 total_ms = int(timings.get("total_ms") or 0) if isinstance(timings, dict) else 0

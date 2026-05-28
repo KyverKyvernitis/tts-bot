@@ -144,6 +144,8 @@ LABEL_MAP = {
     "serviços": "Serviços",
     "servicos": "Serviços",
     "core worker": "Core Worker",
+    "processos alterados": "Processos alterados",
+    "processo alterado": "Processos alterados",
 }
 
 HEADER_FIELDS = {
@@ -161,6 +163,7 @@ HEADER_FIELDS = {
     "Update",
     "ZIP",
     "Aplicação",
+    "Processos alterados",
     "Resultado",
     "Código",
     "Status",

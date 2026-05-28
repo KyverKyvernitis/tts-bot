@@ -70,6 +70,8 @@ DIFF_TOTAL_SUMMARY=""
 FAST_RELOAD_STATUS="não usado"
 UPDATER_UNIT="tts-bot-updater.service"
 RUN_LOG_FILE="${TMPDIR:-/tmp}/tts-bot-updater.$$.log"
+UPDATER_STEP_LAST=0
+UPDATER_TIMINGS=""
 : > "$RUN_LOG_FILE"
 chmod 0644 "$RUN_LOG_FILE" 2>/dev/null || true
 
@@ -240,6 +242,50 @@ human_duration() {
   else
     printf "%ds" "$s"
   fi
+}
+
+mark_update_timing() {
+  local label="${1:-etapa}"
+  local now="$SECONDS"
+  local delta=$((now - UPDATER_STEP_LAST))
+  UPDATER_STEP_LAST="$now"
+  if [[ -n "$UPDATER_TIMINGS" ]]; then
+    UPDATER_TIMINGS+=", "
+  fi
+  UPDATER_TIMINGS+="${label}=${delta}s"
+  logger -t "$LOG_TAG" "timing ${label}=${delta}s total=${now}s"
+}
+
+format_changed_processes() {
+  local items=()
+  if (( BOT_CHANGED == 1 || REQUIREMENTS_CHANGED == 1 )); then
+    items+=("bot")
+  fi
+  if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then
+    items+=("atividade")
+  fi
+  if (( PHONE_WORKER_SYNC_REQUIRED == 1 || PHONE_WORKER_WATCH_CHANGED == 1 || PHONE_LAVALINK_WATCH_CHANGED == 1 || CORE_WORKER_APK_CHANGED == 1 || CORE_WORKER_AUTOMATION_REQUIRED == 1 )); then
+    items+=("worker")
+  fi
+  if (( AUDIO_SYSTEMD_CHANGED == 1 || CLEANUP_CHANGED == 1 )); then
+    items+=("áudio")
+  fi
+  if (( VPS_SYSTEMD_UNITS_CHANGED == 1 )); then
+    items+=("sistema VPS")
+  fi
+  if (( CALLKEEPER_CHANGED == 1 )) && [[ "${UPDATE_TOUCH_CALLKEEPER:-}" == "1" && "${CALLKEEPER_UPDATE_ALLOWED:-}" == "1" ]]; then
+    items+=("CallKeeper")
+  fi
+  if ((${#items[@]} == 0)); then
+    printf 'nenhum processo alterado'
+    return 0
+  fi
+  local joined="" item
+  for item in "${items[@]}"; do
+    [[ -z "$joined" ]] || joined+=", "
+    joined+="$item"
+  done
+  printf '%s' "$joined"
 }
 
 run_as_ubuntu() {
@@ -1783,6 +1829,7 @@ STAGE="fetch remoto"
 sudo -u ubuntu -H git fetch origin "$BRANCH"
 REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse "origin/$BRANCH")"
 COMMIT_SUBJECT="$(sudo -u ubuntu -H git log -1 --pretty=%s "$REMOTE_COMMIT")"
+mark_update_timing "fetch"
 
 if [[ -f "$DIRTY_MARKER_FILE" ]]; then
   MARKED_FAILED_COMMIT="$(marker_value FAILED_REMOTE_COMMIT)"
@@ -1803,6 +1850,7 @@ SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
 
 CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --name-only "$CURRENT_COMMIT" "$REMOTE_COMMIT" || true)"
 CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --numstat "$CURRENT_COMMIT" "$REMOTE_COMMIT" || true)"
+mark_update_timing "diff"
 
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity /sinuca/'; then
   FRONT_CHANGED=1
@@ -1876,23 +1924,31 @@ logger -t "$LOG_TAG" "Atualizando de $CURRENT_COMMIT para $REMOTE_COMMIT"
 STAGE="git pull"
 sudo -u ubuntu -H git pull --ff-only origin "$BRANCH"
 UPDATE_APPLIED=1
+mark_update_timing "pull"
 
 FAILED_STAGE=""
 
 run_preflight_checks
+mark_update_timing "preflight"
 
 deploy_bot
+mark_update_timing "bot"
 deploy_callkeeper
+mark_update_timing "callkeeper"
 deploy_frontend
+mark_update_timing "frontend"
 deploy_backend
+mark_update_timing "backend"
 run_core_worker_post_update_automation
+mark_update_timing "worker"
 
 DURATION="$(human_duration "$SECONDS")"
 ROLLBACK_STATUS="não foi necessário"
 CHANGED_FILES="$(format_changed_files)"
 DIFF_TOTAL_SUMMARY="$(format_diff_total_summary)"
 CHANGED_FILES_COUNT="$(printf '%s\n' "$CHANGED_FILES_RAW" | awk 'NF {c++} END {print c+0}')"
-PHONE_WORKER_UPDATE_ANALYSIS="$(phone_worker_log_summary_text "$RUN_LOG_FILE")"
+# O resumo por phone-worker é caro e só deve ser chamado por fluxos de erro/anexo.
+# No update saudável, o webhook compacto não precisa dessa análise.
 
 # Atualiza o resumo do health no fim, mesmo que o bot não tenha reiniciado.
 refresh_bot_health_status >/dev/null 2>&1 || true
@@ -1927,15 +1983,15 @@ fi
 if (( OVERALL_FATAL == 0 && UPDATE_HAS_WARNINGS == 0 )); then
   ALERT_TYPE="success"
   ALERT_TITLE="Update aplicado"
-  ALERT_SUMMARY="O update foi aplicado, o serviço ficou online e as validações principais passaram."
+  ALERT_SUMMARY="Update aplicado e tudo está saudável."
 elif (( OVERALL_FATAL == 0 )); then
   ALERT_TYPE="warn"
   ALERT_TITLE="Update aplicado com avisos"
-  ALERT_SUMMARY="O update foi aplicado e o bot está online, mas há avisos que merecem revisão."
+  ALERT_SUMMARY="Update aplicado, mas há avisos para revisar."
 else
   ALERT_TYPE="warn"
   ALERT_TITLE="Update aplicado com alerta"
-  ALERT_SUMMARY="O update terminou, mas pelo menos uma validação ou serviço ficou em alerta."
+  ALERT_SUMMARY="Update concluído com alerta. Verifique os pontos abaixo."
 fi
 
 APPLY_MODE="restart completo"
@@ -1965,25 +2021,32 @@ if (( UPDATE_HAS_WARNINGS == 1 )); then
 fi
 [[ -n "${PUBLIC_WARNINGS//[[:space:]]/}" ]] || PUBLIC_WARNINGS="sem avisos"
 
+CHANGED_PROCESSES="$(format_changed_processes)"
 BODY="Resumo: $ALERT_SUMMARY
 Branch: $BRANCH
 Commit: ${SHORT_FROM} → ${SHORT_TO}
-Mudança: ${COMMIT_SUBJECT:-sem mensagem}
 Update: ${CHANGED_FILES_COUNT} arquivo(s) · $DIFF_TOTAL_SUMMARY
-Bot: $BOT_HEALTHCHECK_STATUS
-Cogs: $BOT_COGS_STATUS
-Health: $BOT_HEALTH_DETAIL_STATUS
 Aplicação: $APPLY_MODE
+Processos alterados: $CHANGED_PROCESSES
 Arquivos:
 $CHANGED_FILES
 Duração: $DURATION"
 
+if (( UPDATE_HAS_WARNINGS == 1 || OVERALL_FATAL == 1 )); then
+  BODY+=$'
+'"Bot: $BOT_HEALTHCHECK_STATUS"
+  BODY+=$'
+'"Cogs: $BOT_COGS_STATUS"
+  BODY+=$'
+'"Health: $BOT_HEALTH_DETAIL_STATUS"
+fi
 if (( UPDATE_HAS_WARNINGS == 1 )); then
   BODY+=$'
 '"Avisos: $PUBLIC_WARNINGS"
 fi
 BODY+=$'
 '"Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+logger -t "$LOG_TAG" "timings: ${UPDATER_TIMINGS:-sem etapas}; total=$DURATION"
 
 /home/ubuntu/bot/alert.sh "$ALERT_TYPE" "$ALERT_TITLE" "$BODY"
 logger -t "$LOG_TAG" "$ALERT_TITLE"
