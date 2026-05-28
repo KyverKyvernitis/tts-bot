@@ -19,6 +19,7 @@ from pathlib import Path
 app = Flask(__name__)
 
 _health_provider = None
+_update_action_provider = None
 _tts_audio_lock = threading.RLock()
 _core_worker_notification_lock = threading.RLock()
 _core_worker_fcm_tokens_lock = threading.RLock()
@@ -1693,6 +1694,16 @@ def set_health_provider(provider):
     _health_provider = provider
 
 
+def set_update_action_provider(provider):
+    global _update_action_provider
+    _update_action_provider = provider
+
+
+def _is_local_request() -> bool:
+    remote = (request.remote_addr or "").strip()
+    return remote in {"127.0.0.1", "::1", "localhost"}
+
+
 def _purge_expired_tts_audio(now: float | None = None) -> None:
     now = time.time() if now is None else float(now)
     with _tts_audio_lock:
@@ -1739,6 +1750,24 @@ def health():
                 "error": str(e),
             }), 500
     return jsonify({"ok": True}), 200
+
+
+@app.post("/internal/update/reload-cogs")
+def internal_update_reload_cogs():
+    if not _is_local_request():
+        abort(403)
+    expected_token = os.getenv("BOT_INTERNAL_UPDATE_TOKEN", "").strip()
+    if expected_token and request.headers.get("X-Update-Token", "") != expected_token:
+        abort(403)
+    if not callable(_update_action_provider):
+        return jsonify({"ok": False, "error": "update action provider indisponível"}), 503
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = _update_action_provider("reload_cogs", payload)
+        status = 200 if isinstance(result, dict) and result.get("ok") else 500
+        return jsonify(result), status
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 

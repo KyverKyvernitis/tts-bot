@@ -91,7 +91,7 @@ from discord.ext import commands
 
 import config
 from db import SettingsDB
-from webserver import run_webserver, set_health_provider
+from webserver import run_webserver, set_health_provider, set_update_action_provider
 from music_system import AudioRouter
 from utility.interaction_safety import is_unknown_interaction, safe_send_interaction_message
 
@@ -213,6 +213,7 @@ class BotLocal(commands.Bot):
         self._zip_update_lock = asyncio.Lock()
         self._repo_root = Path(__file__).resolve().parent
         self._update_temp_root = Path("/tmp/discord-auto-update")
+        self._update_staging_root = Path(os.getenv("DISCORD_AUTO_UPDATE_STAGING_DIR", str(self._repo_root.parent / "bot-update-staging")))
         self.audio_router = AudioRouter(self)
         self._music_bitrate_reconciled = False
         self._music_voice_status_reconciled = False
@@ -224,6 +225,7 @@ class BotLocal(commands.Bot):
         self.cog_loading_finished = False
 
         set_health_provider(self.get_health_snapshot)
+        set_update_action_provider(self.handle_internal_update_action)
 
     def _read_critical_extensions(self) -> set[str]:
         """Lê a lista de cogs realmente críticas.
@@ -619,14 +621,17 @@ class BotLocal(commands.Bot):
                         lag_ms,
                     )
 
-    def _make_zip_update_embed(self, title: str, description: str, color: discord.Color) -> discord.Embed:
-        embed = discord.Embed(title=title, description=description, color=color)
-        embed.timestamp = datetime.now(timezone.utc)
-        return embed
+    def _make_zip_update_view(self, title: str, description: str, color: discord.Color) -> discord.ui.LayoutView:
+        view = discord.ui.LayoutView(timeout=None)
+        text = f"# {title}\n{description.strip()}".strip()
+        if len(text) > 3900:
+            text = text[:3897].rstrip() + "..."
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay(text), accent_color=color))
+        return view
 
     async def _send_zip_update_message(self, message: discord.Message, title: str, description: str, color: discord.Color):
-        embed = self._make_zip_update_embed(title, description, color)
-        await message.reply(embed=embed, mention_author=False)
+        view = self._make_zip_update_view(title, description, color)
+        await message.reply(view=view, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
     def _git_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -669,6 +674,96 @@ class BotLocal(commands.Bot):
             if len(parts) >= 3 and parts[2] == "releases":
                 return True
         return False
+
+    def _zip_update_is_callkeeper_protected_path(self, rel_path: Path | str) -> bool:
+        parts = tuple(Path(str(rel_path)).parts)
+        if not parts:
+            return False
+        first = parts[0]
+        if first == "callkeeper_runtime":
+            return True
+        if first in {"callkeeper_service.py"}:
+            return True
+        if len(parts) >= 2 and parts[0] == "cogs" and parts[1] == "call_keeper.py":
+            return True
+        if len(parts) >= 3 and parts[0] == "deploy" and parts[1] == "systemd" and parts[-1] == "callkeeper.service":
+            return True
+        return False
+
+    def _prepare_update_staging_clone(self, origin_url: str, branch_name: str, env: dict[str, str]) -> Path:
+        """Mantém um clone staging reutilizável para não clonar o repositório inteiro a cada ZIP."""
+        self._update_staging_root.mkdir(parents=True, exist_ok=True)
+        clone_dir = self._update_staging_root / "repo"
+
+        def clone_fresh() -> Path:
+            shutil.rmtree(clone_dir, ignore_errors=True)
+            clone_result = self._run_cmd(["git", "clone", "--branch", branch_name, "--single-branch", origin_url, str(clone_dir)], self._update_staging_root, env=env)
+            if clone_result.returncode != 0:
+                err = (clone_result.stderr or clone_result.stdout or "").strip()
+                raise RuntimeError(f"Falha ao preparar staging persistente do update. {err}")
+            return clone_dir
+
+        if not (clone_dir / ".git").exists():
+            return clone_fresh()
+
+        # Se o staging antigo ficou corrompido, recria do zero. Caso contrário,
+        # reset/clean é muito mais rápido do que um clone completo.
+        for args in (
+            ["git", "remote", "set-url", "origin", origin_url],
+            ["git", "fetch", "--prune", "origin", branch_name],
+            ["git", "checkout", "-B", branch_name, f"origin/{branch_name}"],
+            ["git", "reset", "--hard", f"origin/{branch_name}"],
+            ["git", "clean", "-fdx"],
+        ):
+            result = self._run_cmd(args, clone_dir, env=env)
+            if result.returncode != 0:
+                logging.getLogger("zip_update").warning("staging persistente falhou em %s; recriando clone", " ".join(args))
+                return clone_fresh()
+        return clone_dir
+
+    def _git_diff_numstat_sync(self, repo_dir: Path, env: dict[str, str]) -> dict[str, object]:
+        result = self._run_cmd(["git", "diff", "--cached", "--numstat"], repo_dir, env=env)
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(f"Falha ao calcular diff de linhas. {err}")
+
+        entries: list[dict[str, object]] = []
+        total_added = 0
+        total_removed = 0
+        binary_files = 0
+        for raw in (result.stdout or "").splitlines():
+            parts = raw.split("\t")
+            if len(parts) < 3:
+                continue
+            added_raw, removed_raw, path_raw = parts[0], parts[1], parts[-1]
+            is_binary = added_raw == "-" or removed_raw == "-"
+            added = 0 if is_binary else int(added_raw or 0)
+            removed = 0 if is_binary else int(removed_raw or 0)
+            if is_binary:
+                binary_files += 1
+            else:
+                total_added += added
+                total_removed += removed
+            entries.append({"path": path_raw, "added": added, "removed": removed, "binary": is_binary})
+
+        summary = f"+{total_added} -{total_removed}"
+        if binary_files:
+            summary += f" · {binary_files} binário(s)"
+        return {"entries": entries, "summary": summary, "total_added": total_added, "total_removed": total_removed, "binary_files": binary_files}
+
+    def _trigger_updater_service_sync(self) -> tuple[bool, str]:
+        service = Path("/etc/systemd/system/tts-bot-updater.service")
+        if not service.exists():
+            return False, "updater via systemd não encontrado"
+        for args in (["sudo", "-n", "systemctl", "start", "tts-bot-updater.service"], ["systemctl", "start", "tts-bot-updater.service"]):
+            result = self._run_cmd(args, self._repo_root, env=self._git_env())
+            if result.returncode == 0:
+                return True, "updater disparado agora"
+        detail = (result.stderr or result.stdout or "").strip() if 'result' in locals() else ""
+        if detail:
+            detail = detail.splitlines()[-1][:180]
+            return False, f"commit enviado; timer aplicará depois ({detail})"
+        return False, "commit enviado; timer aplicará depois"
 
     def _guess_repo_name(self, origin_url: str) -> str:
         cleaned = (origin_url or "").strip().rstrip("/")
@@ -853,6 +948,8 @@ class BotLocal(commands.Bot):
             data = extracted_path.read_bytes()
             if before == data:
                 continue
+            if self._zip_update_is_callkeeper_protected_path(rel_path):
+                raise RuntimeError(f"Arquivo protegido do CallKeeper não pode ser alterado pelo updater comum: {rel_path.as_posix()}")
             destination.write_bytes(data)
             changed_files.append(rel_path.as_posix())
         return changed_files
@@ -874,12 +971,21 @@ class BotLocal(commands.Bot):
 
         work_dir = Path(tempfile.mkdtemp(prefix="discord-auto-update-", dir=str(self._update_temp_root)))
         extract_dir = work_dir / "extracted"
-        clone_dir = work_dir / "clone"
         extract_dir.mkdir(parents=True, exist_ok=True)
+        timings: dict[str, int] = {}
+        t0 = time.monotonic()
+        last = t0
+
+        def mark(label: str) -> None:
+            nonlocal last
+            now = time.monotonic()
+            timings[label] = int((now - last) * 1000)
+            last = now
 
         try:
             repo_name_hint = self._guess_repo_name(origin_url)
             worker_zip_validation = self._phone_worker_validate_zip_sync(zip_path)
+            mark("phone_worker_zip_validate_ms")
             if worker_zip_validation and not bool(worker_zip_validation.get("ok", True)):
                 errors = worker_zip_validation.get("errors") or []
                 if isinstance(errors, list) and errors:
@@ -887,19 +993,22 @@ class BotLocal(commands.Bot):
                 raise RuntimeError("ZIP bloqueado pelo phone-worker")
 
             extracted_files = self._safe_extract_patch(zip_path, extract_dir, repo_name_hint, branch_name)
+            mark("extract_ms")
 
-            clone_result = self._run_cmd(["git", "clone", "--branch", branch_name, "--single-branch", origin_url, str(clone_dir)], work_dir, env=env)
-            if clone_result.returncode != 0:
-                err = (clone_result.stderr or clone_result.stdout or "").strip()
-                raise RuntimeError(f"Falha ao clonar o repositório temporário. {err}")
+            clone_dir = self._prepare_update_staging_clone(origin_url, branch_name, env)
+            mark("staging_prepare_ms")
 
             changed_files = self._apply_patch_to_clone(extracted_files, clone_dir)
+            mark("apply_patch_ms")
             if not changed_files:
+                timings["total_ms"] = int((time.monotonic() - t0) * 1000)
                 return {
                     "changed_files": [],
                     "commit_hash": None,
                     "triggered_update": False,
+                    "trigger_detail": "sem mudanças",
                     "branch": branch_name,
+                    "timings": timings,
                 }
 
             self._run_cmd(["git", "config", "user.name", "Discord Auto Update"], clone_dir, env=env)
@@ -913,14 +1022,24 @@ class BotLocal(commands.Bot):
             status_result = self._run_cmd(["git", "status", "--porcelain"], clone_dir, env=env)
             if status_result.returncode != 0:
                 err = (status_result.stderr or status_result.stdout or "").strip()
-                raise RuntimeError(f"Falha ao verificar alterações do clone temporário. {err}")
+                raise RuntimeError(f"Falha ao verificar alterações do staging persistente. {err}")
             if not (status_result.stdout or "").strip():
+                timings["total_ms"] = int((time.monotonic() - t0) * 1000)
                 return {
                     "changed_files": [],
                     "commit_hash": None,
                     "triggered_update": False,
+                    "trigger_detail": "sem mudanças",
                     "branch": branch_name,
+                    "timings": timings,
                 }
+
+            diff_stats = self._git_diff_numstat_sync(clone_dir, env)
+            changed_files = [str(item.get("path")) for item in diff_stats.get("entries", []) if item.get("path")] or changed_files
+            protected_changed = [path for path in changed_files if self._zip_update_is_callkeeper_protected_path(path)]
+            if protected_changed:
+                raise RuntimeError("Patch bloqueado: arquivos do CallKeeper são protegidos pelo updater comum: " + ", ".join(protected_changed[:5]))
+            mark("diff_ms")
 
             commit_message = f"auto update from discord zip ({len(changed_files)} arquivo(s))"
             commit_result = self._run_cmd(["git", "commit", "-m", commit_message], clone_dir, env=env)
@@ -932,23 +1051,61 @@ class BotLocal(commands.Bot):
             if push_result.returncode != 0:
                 err = (push_result.stderr or push_result.stdout or "").strip()
                 raise RuntimeError(f"Falha ao enviar update para o GitHub. {err}")
+            mark("commit_push_ms")
 
             hash_result = self._run_cmd(["git", "rev-parse", "HEAD"], clone_dir, env=env)
             commit_hash = (hash_result.stdout or "").strip() if hash_result.returncode == 0 else None
 
-            updater_service = Path("/etc/systemd/system/tts-bot-updater.service")
-            updater_timer = Path("/etc/systemd/system/tts-bot-updater.timer")
-            triggered_update = updater_service.exists() and updater_timer.exists()
+            triggered_update, trigger_detail = self._trigger_updater_service_sync()
+            mark("trigger_updater_ms")
+            timings["total_ms"] = int((time.monotonic() - t0) * 1000)
 
             return {
                 "changed_files": changed_files,
+                "diff_stats": diff_stats,
                 "commit_hash": commit_hash,
                 "triggered_update": triggered_update,
+                "trigger_detail": trigger_detail,
                 "branch": branch_name,
                 "phone_worker_zip_validation": worker_zip_validation,
+                "timings": timings,
+                "staging_dir": str(clone_dir),
             }
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
+
+
+    def handle_internal_update_action(self, action: str, payload: dict[str, object]) -> dict[str, object]:
+        if action != "reload_cogs":
+            return {"ok": False, "error": "ação interna desconhecida"}
+        modules_raw = payload.get("modules") if isinstance(payload, dict) else None
+        if not isinstance(modules_raw, list):
+            return {"ok": False, "error": "lista de módulos ausente"}
+        modules = [str(item).strip() for item in modules_raw if str(item).strip()]
+        if not modules:
+            return {"ok": False, "error": "nenhuma cog para recarregar"}
+        if any(module == "cogs.call_keeper" for module in modules):
+            return {"ok": False, "error": "CallKeeper é protegido e não pode ser recarregado pelo updater comum"}
+
+        future = asyncio.run_coroutine_threadsafe(self._reload_cogs_for_update(modules), self.loop)
+        return future.result(timeout=25)
+
+    async def _reload_cogs_for_update(self, modules: list[str]) -> dict[str, object]:
+        results: list[dict[str, str]] = []
+        for module in modules:
+            if module == "cogs.call_keeper":
+                return {"ok": False, "error": "CallKeeper é protegido", "results": results}
+            try:
+                if module in self.extensions:
+                    await self.reload_extension(module)
+                    results.append({"module": module, "status": "reloaded"})
+                else:
+                    await self.load_extension(module)
+                    results.append({"module": module, "status": "loaded"})
+            except Exception as exc:
+                logging.getLogger("zip_update").exception("falha ao recarregar cog %s pelo updater", module)
+                return {"ok": False, "error": f"{module}: {type(exc).__name__}: {str(exc)[:300]}", "results": results}
+        return {"ok": True, "results": results}
 
 
     async def _handle_zip_update_message(self, message: discord.Message):
@@ -970,11 +1127,10 @@ class BotLocal(commands.Bot):
         if self._zip_update_lock.locked():
             await self._send_zip_update_message(
                 message,
-                "⏳ Atualização em andamento",
-                "Já existe outra atualização automática processando um ZIP neste momento. Aguarde ela terminar e envie novamente.",
+                "⏳ Update na fila",
+                "Já existe um ZIP sendo processado. Vou aplicar este assim que o update atual terminar, sem sobrepor git, push ou updater.",
                 discord.Color.orange(),
             )
-            return
 
         async with self._zip_update_lock:
             self._update_temp_root.mkdir(parents=True, exist_ok=True)
@@ -985,7 +1141,7 @@ class BotLocal(commands.Bot):
                 await self._send_zip_update_message(
                     message,
                     "📦 ZIP recebido",
-                    "Arquivo baixado fora do repositório. Vou validar, ignorar lixo de build, aplicar em clone temporário, enviar para o GitHub e deixar o updater via systemd aplicar automaticamente.",
+                    "Arquivo baixado fora do repositório. Vou validar, ignorar lixo de build, aplicar em staging persistente, enviar ao GitHub e disparar o updater imediatamente.",
                     discord.Color.blurple(),
                 )
 
@@ -1004,21 +1160,51 @@ class BotLocal(commands.Bot):
                     )
                     return
 
-                preview_files = "\n".join(f"• `{path}`" for path in changed_files[:10])
-                if len(changed_files) > 10:
-                    preview_files += f"\n• ... e mais {len(changed_files) - 10} arquivo(s)"
+                diff_stats = result.get("diff_stats") if isinstance(result.get("diff_stats"), dict) else {}
+                entries = list(diff_stats.get("entries") or []) if isinstance(diff_stats, dict) else []
+                diff_summary = str(diff_stats.get("summary") or "").strip() if isinstance(diff_stats, dict) else ""
+                if not diff_summary:
+                    diff_summary = "diff indisponível"
+
+                def fmt_entry(entry: object) -> str:
+                    if isinstance(entry, dict):
+                        path = str(entry.get("path") or "")
+                        if bool(entry.get("binary")):
+                            return f"• `{path}`  binário"
+                        return f"• `{path}`  +{int(entry.get('added') or 0)} -{int(entry.get('removed') or 0)}"
+                    return f"• `{entry}`"
+
+                if entries:
+                    preview_files = "\n".join(fmt_entry(entry) for entry in entries[:20])
+                    remaining = max(0, len(entries) - 20)
+                else:
+                    preview_files = "\n".join(f"• `{path}`" for path in changed_files[:20])
+                    remaining = max(0, len(changed_files) - 20)
+                if remaining:
+                    preview_files += f"\n+{remaining} arquivo(s) restante(s)"
+
                 short_hash = str(commit_hash)[:7] if commit_hash else "desconhecido"
-                update_line = "O commit foi enviado ao GitHub. O updater via systemd verificará e aplicará automaticamente em até 1 minuto." if triggered_update else "O commit foi enviado ao GitHub, mas o updater via systemd não foi encontrado nesta VPS."
+                trigger_detail = str(result.get("trigger_detail") or "").strip()
+                update_line = trigger_detail or ("updater disparado agora" if triggered_update else "commit enviado; aguardando timer")
                 worker_validation = result.get("phone_worker_zip_validation")
                 worker_line = ""
                 if isinstance(worker_validation, dict):
                     risk = worker_validation.get("risk") or "ok"
                     files = worker_validation.get("files")
-                    worker_line = f"\nValidação celular: **{risk}** ({files} arquivo(s))."
+                    worker_line = f"\nValidação worker: **{risk}** ({files} arquivo(s))."
+                timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
+                total_ms = int(timings.get("total_ms") or 0) if isinstance(timings, dict) else 0
+                time_line = f"\nTempo do envio: **{total_ms / 1000:.1f}s**" if total_ms else ""
                 await self._send_zip_update_message(
                     message,
                     "✅ Update enviado para o GitHub",
-                    f"Branch: **{branch}**\nCommit: **{short_hash}**\nArquivos alterados: **{len(changed_files)}**{worker_line}\n\n{preview_files}\n\n{update_line}",
+                    (
+                        f"Branch: **{branch}**\n"
+                        f"Commit: **{short_hash}**\n"
+                        f"Mudanças: **{len(changed_files)} arquivo(s) · {diff_summary}**{worker_line}{time_line}\n"
+                        f"Updater: **{update_line}**\n\n"
+                        f"## Arquivos alterados\n{preview_files}"
+                    ),
                     discord.Color.green(),
                 )
             except zipfile.BadZipFile:

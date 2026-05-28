@@ -111,6 +111,9 @@ LABEL_MAP = {
     "servico afetado": "Serviço afetado",
     "update": "Update",
     "zip": "ZIP",
+    "health": "Health",
+    "aplicação": "Aplicação",
+    "aplicacao": "Aplicação",
     "últimas linhas": "Últimas linhas",
     "ultimas linhas": "Últimas linhas",
     "últimas linhas do erro": "Últimas linhas",
@@ -157,13 +160,14 @@ HEADER_FIELDS = {
     "Serviço afetado",
     "Update",
     "ZIP",
+    "Aplicação",
     "Resultado",
     "Código",
     "Status",
     "Estado ativo",
     "Subestado",
 }
-STATUS_FIELDS = {"Bot health", "Serviços de áudio", "Limpeza de áudio", "Watcher Lavalink celular", "Phone-worker", "Phone-worker sync", "CallKeeper", "Frontend", "Backend", "Activity", "Cogs", "Avisos"}
+STATUS_FIELDS = {"Bot health", "Health", "Serviços de áudio", "Limpeza de áudio", "Watcher Lavalink celular", "Phone-worker", "Phone-worker sync", "CallKeeper", "Frontend", "Backend", "Activity", "Cogs", "Avisos"}
 DETAIL_FIELDS = {"Etapa", "Motivo", "URL", "Diagnóstico", "Análise phone-worker", "Validações", "Serviços", "Core Worker"}
 BULLET_FIELDS = {"Arquivos"}
 CODE_FIELDS = {"Últimas linhas", "Comando", "Stderr", "Status git", "Arquivos locais", "Log", "Log completo"}

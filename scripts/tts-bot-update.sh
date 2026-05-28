@@ -65,6 +65,9 @@ BACK_STATUS="não alterado"
 ACTIVITY_HEALTHCHECK_STATUS="não verificado"
 ROLLBACK_STATUS="não foi necessário"
 CHANGED_FILES_RAW=""
+CHANGED_DIFF_NUMSTAT_RAW=""
+DIFF_TOTAL_SUMMARY=""
+FAST_RELOAD_STATUS="não usado"
 UPDATER_UNIT="tts-bot-updater.service"
 RUN_LOG_FILE="${TMPDIR:-/tmp}/tts-bot-updater.$$.log"
 : > "$RUN_LOG_FILE"
@@ -701,11 +704,134 @@ clear_dirty_marker() {
 }
 
 format_changed_files() {
-  if [[ -n "$CHANGED_FILES_RAW" ]]; then
+  if [[ -n "$CHANGED_DIFF_NUMSTAT_RAW" ]]; then
+    CHANGED_DIFF_NUMSTAT_INPUT="$CHANGED_DIFF_NUMSTAT_RAW" python3 - <<'PYDIFF'
+import os
+raw = os.environ.get("CHANGED_DIFF_NUMSTAT_INPUT") or ""
+lines = []
+for item in raw.splitlines():
+    parts = item.split("\t")
+    if len(parts) < 3:
+        continue
+    add, rem, path = parts[0], parts[1], parts[-1]
+    if add == "-" or rem == "-":
+        lines.append(f"• {path}  binário")
+    else:
+        lines.append(f"• {path}  +{int(add or 0)} -{int(rem or 0)}")
+limit = 20
+for line in lines[:limit]:
+    print(line)
+if len(lines) > limit:
+    print(f"+{len(lines) - limit} arquivo(s) restante(s)")
+if not lines:
+    print("• nenhum arquivo listado")
+PYDIFF
+  elif [[ -n "$CHANGED_FILES_RAW" ]]; then
     printf '%s\n' "$CHANGED_FILES_RAW" | head -n 20 | sed 's/^/• /'
+    local total
+    total="$(printf '%s\n' "$CHANGED_FILES_RAW" | awk 'NF {c++} END {print c+0}')"
+    if [[ "$total" =~ ^[0-9]+$ && "$total" -gt 20 ]]; then
+      printf '+%s arquivo(s) restante(s)\n' "$((total - 20))"
+    fi
   else
     printf '• nenhum arquivo listado'
   fi
+}
+
+format_diff_total_summary() {
+  if [[ -z "$CHANGED_DIFF_NUMSTAT_RAW" ]]; then
+    printf 'diff indisponível'
+    return 0
+  fi
+  CHANGED_DIFF_NUMSTAT_INPUT="$CHANGED_DIFF_NUMSTAT_RAW" python3 - <<'PYDIFF'
+import os
+raw = os.environ.get("CHANGED_DIFF_NUMSTAT_INPUT") or ""
+added = removed = binaries = 0
+for item in raw.splitlines():
+    parts = item.split("\t")
+    if len(parts) < 3:
+        continue
+    add, rem = parts[0], parts[1]
+    if add == "-" or rem == "-":
+        binaries += 1
+        continue
+    added += int(add or 0)
+    removed += int(rem or 0)
+out = f"+{added} -{removed}"
+if binaries:
+    out += f" · {binaries} binário(s)"
+print(out)
+PYDIFF
+}
+
+fast_reload_modules_for_changed_files() {
+  CHANGED_FILES_RAW_INPUT="$CHANGED_FILES_RAW" python3 - <<'PYFAST'
+import os, pathlib, sys
+raw = [line.strip() for line in (os.environ.get("CHANGED_FILES_RAW_INPUT") or "").splitlines() if line.strip()]
+if not raw:
+    raise SystemExit(1)
+modules = []
+for path in raw:
+    parts = pathlib.PurePosixPath(path).parts
+    if len(parts) != 2 or parts[0] != "cogs" or not parts[1].endswith(".py"):
+        raise SystemExit(1)
+    if parts[1] in {"__init__.py", "call_keeper.py"}:
+        raise SystemExit(1)
+    modules.append("cogs." + parts[1][:-3])
+print("\n".join(dict.fromkeys(modules)))
+PYFAST
+}
+
+try_fast_cog_reload() {
+  local modules_text="${1:-}"
+  [[ -n "${modules_text//[[:space:]]/}" ]] || return 1
+  local payload token header_args=() response http_code
+  payload="$(MODULES_TEXT="$modules_text" python3 - <<'PYPAYLOAD'
+import json, os
+mods = [line.strip() for line in (os.environ.get("MODULES_TEXT") or "").splitlines() if line.strip()]
+print(json.dumps({"modules": mods}, ensure_ascii=False))
+PYPAYLOAD
+)"
+  token=""
+  if [[ -f "$REPO_DIR/.env" ]]; then
+    token="$(grep -E '^BOT_INTERNAL_UPDATE_TOKEN=' "$REPO_DIR/.env" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d ' "' || true)"
+  fi
+  if [[ -n "$token" ]]; then
+    header_args=(-H "X-Update-Token: $token")
+  fi
+  response="$(mktemp)"
+  http_code="$(curl -sS -o "$response" -w '%{http_code}' --max-time 30 -H 'Content-Type: application/json' "${header_args[@]}" -d "$payload" http://127.0.0.1:10000/internal/update/reload-cogs 2>/dev/null || true)"
+  if [[ "$http_code" != "200" ]]; then
+    FAST_RELOAD_STATUS="falhou; fallback restart (${http_code:-sem HTTP})"
+    logger -t "$LOG_TAG" "Fast reload falhou HTTP=${http_code:-sem HTTP}: $(cat "$response" 2>/dev/null | tail -c 300)"
+    rm -f "$response"
+    return 1
+  fi
+  if ! python3 - "$response" <<'PYOK' >/dev/null 2>&1; then
+import json, sys
+p = sys.argv[1]
+data = json.load(open(p, encoding='utf-8'))
+raise SystemExit(0 if data.get('ok') is True else 1)
+PYOK
+    FAST_RELOAD_STATUS="falhou; fallback restart"
+    logger -t "$LOG_TAG" "Fast reload retornou falha: $(cat "$response" 2>/dev/null | tail -c 500)"
+    rm -f "$response"
+    return 1
+  fi
+  rm -f "$response"
+  STAGE="healthcheck pós reload rápido"
+  if refresh_bot_health_status; then
+    if has_real_warning_text "$BOT_WARNINGS_STATUS" || cogs_have_failures "$BOT_COGS_STATUS"; then
+      BOT_HEALTHCHECK_STATUS="OK com avisos"
+      UPDATE_HAS_WARNINGS=1
+    else
+      BOT_HEALTHCHECK_STATUS="OK (reload rápido)"
+    fi
+    FAST_RELOAD_STATUS="OK"
+    return 0
+  fi
+  FAST_RELOAD_STATUS="reload executado; health falhou; fallback restart"
+  return 1
 }
 
 cleanup_known_generated_update_artifacts() {
@@ -1291,7 +1417,16 @@ deploy_bot() {
   fi
 
   if (( BOT_CHANGED == 1 )); then
-    local restart_epoch restarts_before
+    local fast_modules restart_epoch restarts_before
+    fast_modules="$(fast_reload_modules_for_changed_files || true)"
+    if [[ -n "${fast_modules//[[:space:]]/}" ]]; then
+      STAGE="reload rápido de cogs"
+      if try_fast_cog_reload "$fast_modules"; then
+        return 0
+      fi
+      logger -t "$LOG_TAG" "Fast reload indisponível; usando restart completo seguro do bot principal. Status: $FAST_RELOAD_STATUS"
+    fi
+
     restarts_before="$(service_restart_count "$SERVICE")"
 
     STAGE="reinício do bot"
@@ -1667,6 +1802,7 @@ SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
 SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
 
 CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --name-only "$CURRENT_COMMIT" "$REMOTE_COMMIT" || true)"
+CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --numstat "$CURRENT_COMMIT" "$REMOTE_COMMIT" || true)"
 
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity /sinuca/'; then
   FRONT_CHANGED=1
@@ -1714,6 +1850,20 @@ if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(callkeeper_service\.py|callk
   CALLKEEPER_CHANGED=1
 fi
 
+if (( CALLKEEPER_CHANGED == 1 )) && [[ "${UPDATE_TOUCH_CALLKEEPER:-}" != "1" || "${CALLKEEPER_UPDATE_ALLOWED:-}" != "1" ]]; then
+  CHANGED_FILES="$(format_changed_files)"
+  body="Resumo: Update bloqueado antes do git pull porque contém arquivo protegido do CallKeeper.
+Branch: $BRANCH
+Commit: $(short_commit "$CURRENT_COMMIT") → $(short_commit "$REMOTE_COMMIT")
+Mudança: ${COMMIT_SUBJECT:-sem mensagem}
+Arquivos:
+$CHANGED_FILES
+Ação sugerida: Remova arquivos do CallKeeper deste patch ou faça um patch CallKeeper explícito e isolado.
+Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+  send_error "Update bloqueado: CallKeeper protegido" "$body"
+  exit 1
+fi
+
 STAGE="limpeza de artefatos gerados"
 cleanup_known_generated_update_artifacts
 
@@ -1740,6 +1890,7 @@ run_core_worker_post_update_automation
 DURATION="$(human_duration "$SECONDS")"
 ROLLBACK_STATUS="não foi necessário"
 CHANGED_FILES="$(format_changed_files)"
+DIFF_TOTAL_SUMMARY="$(format_diff_total_summary)"
 CHANGED_FILES_COUNT="$(printf '%s\n' "$CHANGED_FILES_RAW" | awk 'NF {c++} END {print c+0}')"
 PHONE_WORKER_UPDATE_ANALYSIS="$(phone_worker_log_summary_text "$RUN_LOG_FILE")"
 
@@ -1787,42 +1938,52 @@ else
   ALERT_SUMMARY="O update terminou, mas pelo menos uma validação ou serviço ficou em alerta."
 fi
 
+APPLY_MODE="restart completo"
+if [[ "$FAST_RELOAD_STATUS" == "OK" ]]; then
+  APPLY_MODE="reload rápido de cog"
+elif (( BOT_CHANGED == 0 )); then
+  APPLY_MODE="sem restart do bot"
+fi
+
+PUBLIC_WARNINGS=""
+if (( UPDATE_HAS_WARNINGS == 1 )); then
+  if has_real_warning_text "$BOT_WARNINGS_STATUS"; then
+    PUBLIC_WARNINGS+="${BOT_WARNINGS_STATUS}"
+  fi
+  if cogs_have_failures "$BOT_COGS_STATUS"; then
+    [[ -z "$PUBLIC_WARNINGS" ]] || PUBLIC_WARNINGS+="; "
+    PUBLIC_WARNINGS+="$BOT_COGS_STATUS"
+  fi
+  if has_real_warning_text "$PREFLIGHT_COG_IMPORT_STATUS"; then
+    [[ -z "$PUBLIC_WARNINGS" ]] || PUBLIC_WARNINGS+="; "
+    PUBLIC_WARNINGS+="$PREFLIGHT_COG_IMPORT_STATUS"
+  fi
+  if [[ "$BOT_HEALTHCHECK_STATUS" == *"sem resposta"* || "$BOT_HEALTHCHECK_STATUS" == falhou:* ]]; then
+    [[ -z "$PUBLIC_WARNINGS" ]] || PUBLIC_WARNINGS+="; "
+    PUBLIC_WARNINGS+="$BOT_HEALTHCHECK_STATUS"
+  fi
+fi
+[[ -n "${PUBLIC_WARNINGS//[[:space:]]/}" ]] || PUBLIC_WARNINGS="sem avisos"
+
 BODY="Resumo: $ALERT_SUMMARY
-Host: $HOSTNAME
 Branch: $BRANCH
 Commit: ${SHORT_FROM} → ${SHORT_TO}
 Mudança: ${COMMIT_SUBJECT:-sem mensagem}
+Update: ${CHANGED_FILES_COUNT} arquivo(s) · $DIFF_TOTAL_SUMMARY
+Bot: $BOT_HEALTHCHECK_STATUS
+Cogs: $BOT_COGS_STATUS
+Health: $BOT_HEALTH_DETAIL_STATUS
+Aplicação: $APPLY_MODE
 Arquivos:
 $CHANGED_FILES
-Validações:
-• Python: $PREFLIGHT_PY_STATUS
-• Bash: $PREFLIGHT_BASH_STATUS
-• Import de cogs alteradas: $PREFLIGHT_COG_IMPORT_STATUS
-• Serviço do bot: $BOT_HEALTHCHECK_STATUS
-• Health: $BOT_HEALTH_DETAIL_STATUS
-Cogs: $BOT_COGS_STATUS
-Avisos: $BOT_WARNINGS_STATUS
-Serviços:
-• Systemd VPS: $VPS_SYSTEMD_UNITS_STATUS
-• Áudio: $AUDIO_SERVICES_STATUS
-• Alerta systemd: $ALERT_UNIT_STATUS
-• Crontab healthcheck: $CRONTAB_HEALTH_STATUS
-• Limpeza de áudio: $CLEANUP_STATUS
-• Watcher Lavalink celular: $PHONE_LAVALINK_WATCH_STATUS
-• Phone worker: $PHONE_WORKER_WATCH_STATUS
-• Phone-worker sync: $PHONE_WORKER_SYNC_STATUS
-• CallKeeper: $CALLKEEPER_STATUS
-• Frontend: $FRONT_STATUS
-• Backend: $BACK_STATUS
-• Activity: $ACTIVITY_HEALTHCHECK_STATUS
-Core Worker:
-• Agent auto-update: $CORE_WORKER_AGENT_UPDATE_STATUS
-• APK build: $CORE_WORKER_APK_BUILD_STATUS
-• Notificação APK: $CORE_WORKER_NOTIFY_STATUS
-• Análise phone-worker: $PHONE_WORKER_UPDATE_ANALYSIS
-Rollback: $ROLLBACK_STATUS; ponto salvo em $(short_commit "$PREVIOUS_COMMIT")
-Duração: $DURATION
-Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+Duração: $DURATION"
+
+if (( UPDATE_HAS_WARNINGS == 1 )); then
+  BODY+=$'
+'"Avisos: $PUBLIC_WARNINGS"
+fi
+BODY+=$'
+'"Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
 /home/ubuntu/bot/alert.sh "$ALERT_TYPE" "$ALERT_TITLE" "$BODY"
 logger -t "$LOG_TAG" "$ALERT_TITLE"
