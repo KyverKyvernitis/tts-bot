@@ -3991,6 +3991,48 @@ class WelcomeCog(commands.Cog):
         footer = self._replace_vars(str(source.get("footer") or ""), values).strip()
         return title, body, footer
 
+    def _is_monochrome_pixels(self, pixels: list[tuple[int, int, int, float, float, float]]) -> bool:
+        if not pixels:
+            return False
+        low_sat = sum(1 for _, _, _, brightness, sat, _ in pixels if sat <= 0.18)
+        very_low_sat = sum(1 for _, _, _, brightness, sat, _ in pixels if sat <= 0.10)
+        # Se a foto é majoritariamente preto/branco/cinza, isso é o estilo dela.
+        # Não force uma cor colorida só porque existe um pequeno ruído saturado no avatar.
+        return (low_sat / len(pixels)) >= 0.70 or (very_low_sat / len(pixels)) >= 0.58
+
+    def _monochrome_color_from_pixels(self, pixels: list[tuple[int, int, int, float, float, float]], fallback: str = DEFAULT_ACCENT) -> tuple[int, int, int]:
+        if not pixels:
+            return self._rgb_from_hex(fallback)
+        # Usa apenas pixels pouco saturados quando possível para respeitar imagens P&B.
+        mono = [(r, g, b, brightness) for r, g, b, brightness, sat, _ in pixels if sat <= 0.20]
+        source = mono or [(r, g, b, brightness) for r, g, b, brightness, _, _ in pixels]
+        # Remove só extremos minúsculos de ruído; se preto/branco forem dominantes, ficam.
+        source.sort(key=lambda item: item[3])
+        cut = max(0, min(len(source) // 12, 24))
+        trimmed = source[cut: len(source) - cut] if len(source) > cut * 2 + 4 else source
+        if not trimmed:
+            trimmed = source
+        r = int(sum(px[0] for px in trimmed) / len(trimmed))
+        g = int(sum(px[1] for px in trimmed) / len(trimmed))
+        b = int(sum(px[2] for px in trimmed) / len(trimmed))
+        # Mantém monocromático de verdade, sem puxar para azul/verde por ruído de compressão.
+        gray = int(round((r * 0.299 + g * 0.587 + b * 0.114)))
+        return (max(0, min(255, gray)), max(0, min(255, gray)), max(0, min(255, gray)))
+
+    def _monochrome_palette_from_rgb(self, rgb: tuple[int, int, int], *, limit: int = 6) -> list[tuple[int, int, int]]:
+        base = int(round((rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114)))
+        # Pequenas variações de luz/sombra mantendo a família preto/branco/cinza.
+        values = [base, min(255, int(base * 1.22 + 10)), max(0, int(base * 0.72)), min(255, int(base * 1.45 + 6)), max(0, int(base * 0.48)), min(255, int(base * 1.08 + 3))]
+        palette: list[tuple[int, int, int]] = []
+        for value in values:
+            value = max(0, min(255, int(value)))
+            item = (value, value, value)
+            if item not in palette:
+                palette.append(item)
+            if len(palette) >= limit:
+                break
+        return palette or [rgb]
+
     async def _member_avatar_color(self, member: discord.Member | None, fallback: str = DEFAULT_ACCENT) -> str:
         if member is None or Image is None:
             return _parse_hex(fallback)
@@ -4005,17 +4047,21 @@ class WelcomeCog(commands.Cog):
                 img = img.convert("RGBA").resize((32, 32))
                 candidates: list[tuple[float, int, int, int]] = []
                 fallback_pixels: list[tuple[int, int, int]] = []
+                opaque_pixels: list[tuple[int, int, int, float, float, float]] = []
                 for r, g, b, a in img.getdata():
                     if a < 90:
                         continue
                     brightness = (r + g + b) / 3
-                    if 15 <= brightness <= 245:
-                        fallback_pixels.append((r, g, b))
                     h, sat, val = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
-                    if 35 <= brightness <= 225 and sat >= 0.22 and val >= 0.18:
+                    opaque_pixels.append((r, g, b, brightness, sat, val))
+                    if 8 <= brightness <= 248:
+                        fallback_pixels.append((r, g, b))
+                    if 28 <= brightness <= 232 and sat >= 0.22 and val >= 0.18:
                         score = sat * 0.72 + val * 0.28
                         candidates.append((score, r, g, b))
-                if candidates:
+                if self._is_monochrome_pixels(opaque_pixels):
+                    r, g, b = self._monochrome_color_from_pixels(opaque_pixels, fallback)
+                elif candidates:
                     candidates.sort(reverse=True)
                     top = candidates[: max(12, len(candidates) // 6)]
                     r = int(sum(px[1] for px in top) / len(top))
@@ -4067,13 +4113,15 @@ class WelcomeCog(commands.Cog):
                 img = img.convert("RGBA").resize((64, 64), resampling)
                 buckets: dict[tuple[int, int, int], list[float]] = {}
                 fallback_pixels: list[tuple[int, int, int]] = []
+                opaque_pixels: list[tuple[int, int, int, float, float, float]] = []
                 for r, g, b, a in img.getdata():
                     if a < 90:
                         continue
                     brightness = (r + g + b) / 3
-                    if 18 <= brightness <= 242:
-                        fallback_pixels.append((r, g, b))
                     h, sat, val = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                    opaque_pixels.append((r, g, b, brightness, sat, val))
+                    if 8 <= brightness <= 248:
+                        fallback_pixels.append((r, g, b))
                     if 28 <= brightness <= 232 and sat >= 0.16 and val >= 0.16:
                         key = (r // 32, g // 32, b // 32)
                         item = buckets.setdefault(key, [0.0, 0.0, 0.0, 0.0, 0.0])
@@ -4082,6 +4130,13 @@ class WelcomeCog(commands.Cog):
                         item[2] += g
                         item[3] += b
                         item[4] += sat * 1.35 + val * 0.35
+                if self._is_monochrome_pixels(opaque_pixels):
+                    mono_base = self._monochrome_color_from_pixels(opaque_pixels, fallback)
+                    palette = self._monochrome_palette_from_rgb(mono_base, limit=limit)
+                    self._avatar_palette_cache[cache_key] = palette[:limit]
+                    if len(self._avatar_palette_cache) > 128:
+                        self._avatar_palette_cache.pop(next(iter(self._avatar_palette_cache)), None)
+                    return palette[:limit]
                 colors: list[tuple[float, int, int, int]] = []
                 for item in buckets.values():
                     count = max(1.0, item[0])
@@ -4111,6 +4166,10 @@ class WelcomeCog(commands.Cog):
                 while len(palette) < 3:
                     base = palette[-1]
                     h, sat, val = colorsys.rgb_to_hsv(base[0] / 255, base[1] / 255, base[2] / 255)
+                    if sat <= 0.10:
+                        # Não transforme uma paleta cinza em azul/verde só para preencher slots.
+                        palette.extend(self._monochrome_palette_from_rgb(base, limit=max(3, limit))[len(palette):])
+                        break
                     h = (h + 0.09 * len(palette)) % 1.0
                     sat = min(1.0, max(0.35, sat + 0.08))
                     val = min(1.0, max(0.45, val + 0.05))
