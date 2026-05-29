@@ -12,6 +12,21 @@ LOCAL_CHANGES_MARKER_FILE="$REPO_DIR/.fatal-update-local-changes"
 CANDIDATE_ROOT="${DISCORD_AUTO_UPDATE_STAGING_DIR:-$(dirname "$REPO_DIR")/bot-update-staging}/candidates"
 CANDIDATE_PENDING_FILE="$CANDIDATE_ROOT/pending.json"
 
+# O updater pode substituir scripts/tts-bot-update.sh enquanto ele mesmo está
+# rodando. Bash lê partes do arquivo sob demanda; se o arquivo for alterado no
+# meio da execução, o processo pode continuar lendo uma versão diferente e
+# quebrar com variáveis antigas/novas fora de sincronia. Por isso o processo
+# real sempre roda a partir de uma cópia temporária estável.
+if [[ "${TTS_BOT_UPDATER_RUNNING_COPY:-0}" != "1" ]]; then
+  UPDATER_RUNTIME_COPY="${TMPDIR:-/tmp}/tts-bot-update.$$.run"
+  cp "$0" "$UPDATER_RUNTIME_COPY"
+  chmod 0700 "$UPDATER_RUNTIME_COPY" 2>/dev/null || true
+  export TTS_BOT_UPDATER_RUNNING_COPY=1
+  export TTS_BOT_UPDATER_RUNTIME_COPY
+  exec /usr/bin/env bash "$UPDATER_RUNTIME_COPY" "$@"
+fi
+UPDATER_RUNTIME_COPY="${TTS_BOT_UPDATER_RUNTIME_COPY:-}"
+
 FRONT_DIR="$REPO_DIR/activity /sinuca"
 BACK_DIR="$REPO_DIR/activity /sinuca-server"
 FRONT_PUBLISH_DIR="/var/www/sinuca"
@@ -110,6 +125,9 @@ exec > >(tee -a "$RUN_LOG_FILE" "$PERSISTENT_LOG_FILE") 2>&1
 
 cleanup_runtime_artifacts() {
   rm -f "$RUN_LOG_FILE"
+  if [[ -n "${UPDATER_RUNTIME_COPY:-}" && -f "$UPDATER_RUNTIME_COPY" ]]; then
+    rm -f "$UPDATER_RUNTIME_COPY" 2>/dev/null || true
+  fi
 }
 
 trim_alert_text() {
@@ -227,11 +245,15 @@ LAST_ERROR_STDERR=""
 LAST_ERROR_LOGS=""
 
 send_info() {
-  sudo -u ubuntu /home/ubuntu/bot/alert.sh info "$1" "$2" || true
+  local title="${1:-Auto update}"
+  local body="${2:-}"
+  sudo -u ubuntu /home/ubuntu/bot/alert.sh info "$title" "$body" || true
 }
 
 send_warn() {
-  sudo -u ubuntu /home/ubuntu/bot/alert.sh warn "$1" "$2" || true
+  local title="${1:-Auto update}"
+  local body="${2:-}"
+  sudo -u ubuntu /home/ubuntu/bot/alert.sh warn "$title" "$body" || true
 }
 
 send_error() {
@@ -813,18 +835,34 @@ PYJSON
 }
 
 load_pending_local_candidate() {
-  [[ -f "$CANDIDATE_PENDING_FILE" ]] || return 1
-  local manifest
-  LOCAL_CANDIDATE_PENDING_FILE="$CANDIDATE_PENDING_FILE"
-  LOCAL_CANDIDATE_DIR="$(json_field_from_file "$CANDIDATE_PENDING_FILE" candidate_dir 2>/dev/null || true)"
-  if [[ -z "${LOCAL_CANDIDATE_DIR//[[:space:]]/}" || ! -d "$LOCAL_CANDIDATE_DIR" ]]; then
-    rm -f "$CANDIDATE_PENDING_FILE" 2>/dev/null || true
-    return 1
+  local manifest active_file
+  LOCAL_CANDIDATE_PENDING_FILE=""
+  LOCAL_CANDIDATE_DIR=""
+
+  if [[ -f "$CANDIDATE_PENDING_FILE" ]]; then
+    LOCAL_CANDIDATE_PENDING_FILE="$CANDIDATE_PENDING_FILE"
+    LOCAL_CANDIDATE_DIR="$(json_field_from_file "$CANDIDATE_PENDING_FILE" candidate_dir 2>/dev/null || true)"
+    if [[ -z "${LOCAL_CANDIDATE_DIR//[[:space:]]/}" || ! -d "$LOCAL_CANDIDATE_DIR" ]]; then
+      rm -f "$CANDIDATE_PENDING_FILE" 2>/dev/null || true
+      return 1
+    fi
+    # O pending é consumido logo no início. Assim, um ZIP novo pode criar outro
+    # pending sem risco do updater antigo apagar a fila nova ao arquivar o candidato.
+    LOCAL_CANDIDATE_PENDING_FILE="$LOCAL_CANDIDATE_DIR/active.json"
+    mv "$CANDIDATE_PENDING_FILE" "$LOCAL_CANDIDATE_PENDING_FILE" 2>/dev/null || true
+  else
+    # Recuperação: se o updater anterior caiu depois de mover pending.json para
+    # active.json, o timer não pode fingir "Sem mudanças em main". Ele precisa
+    # retomar ou reverter o candidato ativo.
+    active_file="$(find "$CANDIDATE_ROOT" -mindepth 2 -maxdepth 2 -type f -name active.json 2>/dev/null | sort | head -n 1 || true)"
+    if [[ -z "${active_file//[[:space:]]/}" ]]; then
+      return 1
+    fi
+    LOCAL_CANDIDATE_PENDING_FILE="$active_file"
+    LOCAL_CANDIDATE_DIR="$(dirname "$active_file")"
+    logger -t "$LOG_TAG" "Retomando candidato local ativo: $(basename "$LOCAL_CANDIDATE_DIR")"
   fi
-  # O pending é consumido logo no início. Assim, um ZIP novo pode criar outro
-  # pending sem risco do updater antigo apagar a fila nova ao arquivar o candidato.
-  LOCAL_CANDIDATE_PENDING_FILE="$LOCAL_CANDIDATE_DIR/active.json"
-  mv "$CANDIDATE_PENDING_FILE" "$LOCAL_CANDIDATE_PENDING_FILE" 2>/dev/null || true
+
   manifest="$LOCAL_CANDIDATE_DIR/manifest.json"
   [[ -f "$manifest" ]] || return 1
   LOCAL_CANDIDATE_MODE=1
@@ -867,7 +905,6 @@ PYDIFF
 )"
   return 0
 }
-
 archive_local_candidate() {
   local status="${1:-done}"
   if [[ -z "${LOCAL_CANDIDATE_DIR:-}" ]]; then
@@ -956,7 +993,11 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
   STAGE="verificação de alterações locais"
   clear_local_changes_marker_if_clean
-  fail_local_changes_before_pull
+  if candidate_local_changes_are_expected; then
+    logger -t "$LOG_TAG" "Alterações locais correspondem ao candidato ativo; retomando aplicação segura."
+  else
+    fail_local_changes_before_pull
+  fi
 
   if [[ "$CURRENT_COMMIT" != "$REMOTE_COMMIT" ]]; then
     STAGE="sincronização com GitHub antes do candidato"
@@ -1257,6 +1298,33 @@ collect_local_tracked_files() {
     sudo -u ubuntu -H git diff --name-only 2>/dev/null || true
     sudo -u ubuntu -H git diff --name-only --cached 2>/dev/null || true
   } | awk 'NF && !seen[$0]++' | head -n 40 | sed 's/^/• /' | trim_alert_text 1500
+}
+
+candidate_local_changes_are_expected() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 1
+  [[ -n "${CHANGED_FILES_RAW//[[:space:]]/}" ]] || return 1
+  CHANGED_FILES_RAW="$CHANGED_FILES_RAW" REPO_DIR="$REPO_DIR" python3 - <<'PYCANDIDATE_DIRTY'
+import subprocess, sys, os
+expected = {line.strip() for line in os.environ.get('CHANGED_FILES_RAW', '').splitlines() if line.strip()}
+if not expected:
+    raise SystemExit(1)
+
+def git_lines(*args):
+    cp = subprocess.run(['git', *args], cwd=os.environ.get('REPO_DIR', '/home/ubuntu/bot'), text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return {line.strip() for line in cp.stdout.splitlines() if line.strip()}
+
+dirty = set()
+dirty |= git_lines('diff', '--name-only')
+dirty |= git_lines('diff', '--name-only', '--cached')
+if not dirty:
+    raise SystemExit(0)
+extra = dirty - expected
+if extra:
+    for item in sorted(extra):
+        print(item)
+    raise SystemExit(1)
+raise SystemExit(0)
+PYCANDIDATE_DIRTY
 }
 
 fail_local_changes_before_pull() {
@@ -2069,16 +2137,8 @@ rollback_after_failure() {
       rollback_bot_status="falhou: $BOT_HEALTHCHECK_STATUS"
     fi
 
-    if (( CALLKEEPER_CHANGED == 1 )); then
-      if deploy_callkeeper; then
-        rollback_callkeeper_status="$CALLKEEPER_STATUS"
-      else
-        rollback_success=0
-        rollback_callkeeper_status="falhou: $CALLKEEPER_STATUS"
-      fi
-    else
-      rollback_callkeeper_status="não precisou reiniciar"
-    fi
+    # CallKeeper é isolado: rollback/update geral não pode reiniciar nem reconciliar.
+    rollback_callkeeper_status="protegido; não tocado"
   else
     rollback_front_status="não executado porque o git reset falhou"
     rollback_back_status="não executado porque o git reset falhou"
@@ -2149,6 +2209,9 @@ on_error() {
 
   if (( UPDATE_APPLIED == 1 )) && [[ -n "$PREVIOUS_COMMIT" ]]; then
     rollback_after_failure "$exit_code" "$failed_command"
+  fi
+  if (( LOCAL_CANDIDATE_MODE == 1 )); then
+    archive_local_candidate "failed"
   fi
 
   local dirty_status dirty_files
