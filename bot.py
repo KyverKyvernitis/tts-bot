@@ -215,6 +215,7 @@ class BotLocal(commands.Bot):
         self._repo_root = Path(__file__).resolve().parent
         self._update_temp_root = Path("/tmp/discord-auto-update")
         self._update_staging_root = Path(os.getenv("DISCORD_AUTO_UPDATE_STAGING_DIR", str(self._repo_root.parent / "bot-update-staging")))
+        self._zip_rollback_state_path = self._update_staging_root / "zip_update_rollback_state.json"
         self.audio_router = AudioRouter(self)
         self._music_bitrate_reconciled = False
         self._music_voice_status_reconciled = False
@@ -635,16 +636,98 @@ class BotLocal(commands.Bot):
                         lag_ms,
                     )
 
-    def _make_zip_update_view(self, title: str, description: str, color: discord.Color) -> discord.ui.LayoutView:
+    def _make_zip_update_view(
+        self,
+        title: str,
+        description: str,
+        color: discord.Color,
+        control: dict[str, object] | None = None,
+    ) -> discord.ui.LayoutView:
         view = discord.ui.LayoutView(timeout=None)
         text = f"# {title}\n{description.strip()}".strip()
         if len(text) > 3900:
             text = text[:3897].rstrip() + "..."
-        view.add_item(discord.ui.Container(discord.ui.TextDisplay(text), accent_color=color))
+        children: list[discord.ui.Item] = [discord.ui.TextDisplay(text)]
+        if isinstance(control, dict) and control.get("enabled"):
+            emoji = str(control.get("emoji") or "◀️")
+            custom_id = str(control.get("custom_id") or "")[:100]
+            disabled = bool(control.get("disabled"))
+            if custom_id:
+                button = discord.ui.Button(
+                    emoji=emoji,
+                    style=discord.ButtonStyle.secondary,
+                    custom_id=custom_id,
+                    disabled=disabled,
+                )
+                children.append(discord.ui.Separator())
+                children.append(discord.ui.ActionRow(button))
+        view.add_item(discord.ui.Container(*children, accent_color=color))
         return view
 
-    async def _send_zip_update_message(self, message: discord.Message, title: str, description: str, color: discord.Color) -> discord.Message:
-        view = self._make_zip_update_view(title, description, color)
+    def _zip_update_state_load(self) -> dict[str, object]:
+        try:
+            if self._zip_rollback_state_path.is_file():
+                data = json.loads(self._zip_rollback_state_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            logging.getLogger("zip_update").warning("falha ao ler estado de rollback do updater", exc_info=True)
+        return {}
+
+    def _zip_update_state_save(self, data: dict[str, object]) -> None:
+        try:
+            self._zip_rollback_state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._zip_rollback_state_path.with_name(f".{self._zip_rollback_state_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, self._zip_rollback_state_path)
+        except Exception:
+            logging.getLogger("zip_update").warning("falha ao salvar estado de rollback do updater", exc_info=True)
+
+    def _zip_update_control_for_record(self, record: dict[str, object], *, disabled: bool = False) -> dict[str, object] | None:
+        token = str(record.get("token") or "").strip()
+        mode = str(record.get("mode") or "rollback").strip().lower()
+        if not token or mode not in {"rollback", "redo"}:
+            return None
+        return {
+            "enabled": True,
+            "emoji": "▶️" if mode == "redo" else "◀️",
+            "custom_id": f"zip_update:{mode}:{token}"[:100],
+            "disabled": disabled,
+        }
+
+    def _zip_update_authorized_user_ids(self, record: dict[str, object] | None = None) -> set[int]:
+        ids: set[int] = set()
+        raw_values = [os.getenv("DISCORD_AUTO_UPDATE_USER_IDS", ""), os.getenv("BOT_OWNER_IDS", "")]
+        if isinstance(record, dict):
+            raw_values.extend([
+                str(record.get("source_author_id") or ""),
+                str(record.get("requested_by") or ""),
+            ])
+        for raw in raw_values:
+            for piece in re.split(r"[,;\s]+", str(raw or "")):
+                piece = piece.strip()
+                if piece.isdigit():
+                    ids.add(int(piece))
+        return ids
+
+    def _zip_update_can_control(self, interaction: discord.Interaction, record: dict[str, object]) -> bool:
+        user_id = int(getattr(interaction.user, "id", 0) or 0)
+        if user_id in self._zip_update_authorized_user_ids(record):
+            return True
+        perms = getattr(getattr(interaction, "user", None), "guild_permissions", None)
+        if perms and (getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)):
+            return True
+        return False
+
+    async def _send_zip_update_message(
+        self,
+        message: discord.Message,
+        title: str,
+        description: str,
+        color: discord.Color,
+        control: dict[str, object] | None = None,
+    ) -> discord.Message:
+        view = self._make_zip_update_view(title, description, color, control=control)
         return await message.reply(view=view, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
     async def _edit_zip_update_message(
@@ -654,8 +737,9 @@ class BotLocal(commands.Bot):
         title: str,
         description: str,
         color: discord.Color,
+        control: dict[str, object] | None = None,
     ) -> discord.Message:
-        view = self._make_zip_update_view(title, description, color)
+        view = self._make_zip_update_view(title, description, color, control=control)
         if status_message is not None:
             try:
                 await status_message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
@@ -666,6 +750,52 @@ class BotLocal(commands.Bot):
                     exc_info=True,
                 )
         return await source_message.reply(view=view, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _zip_update_fetch_message(self, channel_id: int, message_id: int) -> discord.Message | None:
+        try:
+            channel = self.get_channel(int(channel_id))
+            if channel is None:
+                channel = await self.fetch_channel(int(channel_id))
+            if not hasattr(channel, "fetch_message"):
+                return None
+            return await channel.fetch_message(int(message_id))
+        except Exception:
+            logging.getLogger("zip_update").warning("falha ao buscar mensagem de update", exc_info=True)
+            return None
+
+    async def _zip_update_clear_previous_control(self, previous: dict[str, object] | None, *, keep_message_id: int = 0) -> None:
+        if not isinstance(previous, dict):
+            return
+        try:
+            channel_id = int(str(previous.get("channel_id") or "0"))
+            message_id = int(str(previous.get("message_id") or "0"))
+        except Exception:
+            return
+        if not channel_id or not message_id or message_id == keep_message_id:
+            return
+        msg = await self._zip_update_fetch_message(channel_id, message_id)
+        if msg is None:
+            return
+        title = str(previous.get("title") or "Update aplicado")
+        description = str(previous.get("description") or "")
+        status = str(previous.get("status") or "success")
+        color = self._zip_update_status_color(status)
+        try:
+            await msg.edit(view=self._make_zip_update_view(title, description, color), allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            logging.getLogger("zip_update").warning("falha ao remover controle de update antigo", exc_info=True)
+
+    def _zip_update_status_color(self, status: str) -> discord.Color:
+        status = str(status or "info").lower().strip()
+        if status in {"success", "ok", "done"}:
+            return discord.Color.green()
+        if status in {"warn", "warning", "progress"}:
+            return discord.Color.gold()
+        if status in {"error", "failed", "failure"}:
+            return discord.Color.red()
+        if status in {"applying", "pending"}:
+            return discord.Color.blurple()
+        return discord.Color.blurple()
 
     def _git_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -841,6 +971,7 @@ class BotLocal(commands.Bot):
                 "channel_id": str(status_context.get("channel_id") or ""),
                 "message_id": str(status_context.get("message_id") or ""),
                 "source_message_id": str(status_context.get("source_message_id") or ""),
+                "source_author_id": str(status_context.get("source_author_id") or ""),
             }
         (candidate_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1205,28 +1336,145 @@ class BotLocal(commands.Bot):
         title = str(payload.get("title") or "Update").strip() or "Update"
         description = str(payload.get("description") or "").strip()
         status = str(payload.get("status") or "info").lower().strip()
-        if status in {"success", "ok"}:
-            color = discord.Color.green()
-        elif status in {"warn", "warning"}:
-            color = discord.Color.gold()
-        elif status in {"error", "failed", "failure"}:
-            color = discord.Color.red()
-        else:
-            color = discord.Color.blurple()
+        color = self._zip_update_status_color(status)
+        control_raw = payload.get("control") if isinstance(payload, dict) else None
+        control: dict[str, object] | None = None
+        state_record: dict[str, object] | None = None
+
+        if isinstance(control_raw, dict) and control_raw.get("enabled"):
+            old_state = self._zip_update_state_load()
+            previous = old_state.get("latest") if isinstance(old_state.get("latest"), dict) else None
+            token = str(control_raw.get("token") or uuid.uuid4().hex[:16])[:24]
+            mode = str(control_raw.get("mode") or "rollback").lower().strip()
+            if mode not in {"rollback", "redo"}:
+                mode = "rollback"
+            state_record = {
+                "token": token,
+                "mode": mode,
+                "channel_id": str(channel_id),
+                "message_id": str(message_id),
+                "title": title,
+                "description": description,
+                "status": status,
+                "branch": str(control_raw.get("branch") or payload.get("branch") or "main"),
+                "expected_head": str(control_raw.get("expected_head") or control_raw.get("head_commit") or ""),
+                "revert_commit": str(control_raw.get("revert_commit") or control_raw.get("head_commit") or ""),
+                "source_author_id": str(control_raw.get("source_author_id") or ""),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            for key in ("update_from", "update_to", "rollback_commit", "redo_commit"):
+                if control_raw.get(key):
+                    state_record[key] = str(control_raw.get(key))
+            await self._zip_update_clear_previous_control(previous, keep_message_id=message_id)
+            self._zip_update_state_save({"latest": state_record})
+            control = self._zip_update_control_for_record(state_record)
+        elif status in {"success", "ok"}:
+            # Um update finalizado sem controle explícito deixa os controles antigos inativos.
+            old_state = self._zip_update_state_load()
+            previous = old_state.get("latest") if isinstance(old_state.get("latest"), dict) else None
+            await self._zip_update_clear_previous_control(previous, keep_message_id=message_id)
+            self._zip_update_state_save({})
 
         try:
-            channel = self.get_channel(channel_id)
-            if channel is None:
-                channel = await self.fetch_channel(channel_id)
-            if not hasattr(channel, "fetch_message"):
-                return {"ok": False, "error": "canal não suporta mensagens"}
-            status_message = await channel.fetch_message(message_id)
-            view = self._make_zip_update_view(title, description, color)
+            status_message = await self._zip_update_fetch_message(channel_id, message_id)
+            if status_message is None:
+                return {"ok": False, "error": "mensagem não encontrada"}
+            view = self._make_zip_update_view(title, description, color, control=control)
             await status_message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
             return {"ok": True}
-        except Exception as exc:
+        except Exception:
             logging.getLogger("zip_update").warning("falha ao finalizar mensagem do ZIP pelo updater", exc_info=True)
-            return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+            return {"ok": False, "error": "falha ao editar mensagem"}
+
+    async def _on_zip_update_control_click(self, interaction: discord.Interaction) -> None:
+        custom_id = str(getattr(getattr(interaction, "data", None), "get", lambda *_: "")("custom_id") or "")
+        if not custom_id.startswith("zip_update:"):
+            return
+        parts = custom_id.split(":", 2)
+        if len(parts) != 3:
+            return
+        requested_mode, token = parts[1], parts[2]
+        state = self._zip_update_state_load()
+        record = state.get("latest") if isinstance(state.get("latest"), dict) else None
+        if not isinstance(record, dict) or str(record.get("token") or "") != token:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("Esse controle não está mais disponível.", ephemeral=True)
+            return
+        if str(record.get("mode") or "") != requested_mode:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("Esse controle não está mais disponível.", ephemeral=True)
+            return
+        if not self._zip_update_can_control(interaction, record):
+            if not interaction.response.is_done():
+                await interaction.response.send_message("Você não pode controlar este update.", ephemeral=True)
+            return
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=False)
+        await self._start_zip_update_rollback_flow(interaction, record, requested_mode)
+
+    async def _start_zip_update_rollback_flow(self, interaction: discord.Interaction, record: dict[str, object], mode: str) -> None:
+        title = "<a:areia:1496606578395189473> Reaplicando update" if mode == "redo" else "<a:areia:1496606578395189473> Revertendo update"
+        branch = str(record.get("branch") or "main")
+        description = f"{branch} · validação local em andamento.\nAplicando e validando..."
+        try:
+            msg = interaction.message
+            if msg is not None:
+                view = self._make_zip_update_view(title, description, discord.Color.gold(), control=self._zip_update_control_for_record(record, disabled=True))
+                await msg.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            UPDATE_LOG.warning("falha ao colocar update em estado de processamento", exc_info=True)
+
+        request_root = self._update_staging_root / "candidates" / "rollback"
+        request_root.mkdir(parents=True, exist_ok=True)
+        pending = request_root / "pending.json"
+        active = request_root / "active.json"
+        if pending.exists() or active.exists():
+            try:
+                await interaction.followup.send("Já existe uma ação de update em andamento.", ephemeral=True)
+            except Exception:
+                pass
+            return
+        request_id = f"{mode}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        payload = {
+            "id": request_id,
+            "mode": mode,
+            "branch": branch,
+            "expected_head": str(record.get("expected_head") or ""),
+            "revert_commit": str(record.get("revert_commit") or ""),
+            "message": {"channel_id": str(record.get("channel_id") or ""), "message_id": str(record.get("message_id") or "")},
+            "source_author_id": str(record.get("source_author_id") or ""),
+            "requested_by": str(getattr(interaction.user, "id", "") or ""),
+            "previous_record": record,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if not payload["expected_head"] or not payload["revert_commit"]:
+            try:
+                await interaction.followup.send("Não encontrei os dados necessários para essa ação.", ephemeral=True)
+            except Exception:
+                pass
+            return
+        tmp = pending.with_name(f"pending.{request_id}.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, pending)
+        triggered, detail = self._trigger_updater_service_sync()
+        if not triggered:
+            UPDATE_LOG.warning("rollback/redo aguardando timer do updater: %s", detail)
+
+    async def on_interaction(self, interaction: discord.Interaction):
+        try:
+            custom_id = ""
+            data = getattr(interaction, "data", None)
+            if isinstance(data, dict):
+                custom_id = str(data.get("custom_id") or "")
+            if custom_id.startswith("zip_update:"):
+                await self._on_zip_update_control_click(interaction)
+        except Exception:
+            UPDATE_LOG.exception("falha ao processar controle de update")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("Falha ao processar esta ação.", ephemeral=True)
+            except Exception:
+                pass
 
     async def _reload_cogs_for_update(self, modules: list[str]) -> dict[str, object]:
         results: list[dict[str, str]] = []
@@ -1290,6 +1538,7 @@ class BotLocal(commands.Bot):
                     "channel_id": getattr(status_message.channel, "id", None) if status_message else getattr(message.channel, "id", None),
                     "message_id": getattr(status_message, "id", None),
                     "source_message_id": getattr(message, "id", None),
+                    "source_author_id": getattr(message.author, "id", None),
                 }
                 result = await asyncio.to_thread(self._process_zip_update_sync, zip_path, status_context)
                 changed_files = list(result.get("changed_files") or [])
@@ -1345,7 +1594,7 @@ class BotLocal(commands.Bot):
                 await self._edit_zip_update_message(
                     message,
                     status_message,
-                    "✅ Update em aplicação",
+                    "<a:areia:1496606578395189473> Update em aplicação",
                     (
                         f"{branch} · candidato **{candidate_id[:16] or 'local'}**\n"
                         f"{len(changed_files)} arquivo(s) alterado(s) · **{diff_summary}**\n"
@@ -1353,7 +1602,7 @@ class BotLocal(commands.Bot):
                         "GitHub só será atualizado depois da validação local.\n\n"
                         f"## Arquivos alterados\n{preview_files}"
                     ),
-                    discord.Color.green(),
+                    discord.Color.blurple(),
                 )
             except zipfile.BadZipFile:
                 await self._edit_zip_update_message(

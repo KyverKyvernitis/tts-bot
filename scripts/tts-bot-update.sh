@@ -11,6 +11,9 @@ DIRTY_MARKER_FILE="$REPO_DIR/.fatal-update-dirty"
 LOCAL_CHANGES_MARKER_FILE="$REPO_DIR/.fatal-update-local-changes"
 CANDIDATE_ROOT="${DISCORD_AUTO_UPDATE_STAGING_DIR:-$(dirname "$REPO_DIR")/bot-update-staging}/candidates"
 CANDIDATE_PENDING_FILE="$CANDIDATE_ROOT/pending.json"
+ROLLBACK_REQUEST_ROOT="$CANDIDATE_ROOT/rollback"
+ROLLBACK_REQUEST_PENDING_FILE="$ROLLBACK_REQUEST_ROOT/pending.json"
+ROLLBACK_REQUEST_ACTIVE_FILE="$ROLLBACK_REQUEST_ROOT/active.json"
 
 # O updater pode substituir scripts/tts-bot-update.sh enquanto ele mesmo está
 # rodando. Bash lê partes do arquivo sob demanda; se o arquivo for alterado no
@@ -51,6 +54,19 @@ LOCAL_CANDIDATE_COMMIT_MESSAGE=""
 LOCAL_CANDIDATE_PENDING_FILE=""
 LOCAL_CANDIDATE_FILES_DIR=""
 LOCAL_CANDIDATE_PUBLISHED=0
+ROLLBACK_CONTROL_MODE=0
+ROLLBACK_REQUEST_ID=""
+ROLLBACK_REQUEST_FILE=""
+ROLLBACK_REQUEST_ACTION=""
+ROLLBACK_REQUEST_BRANCH=""
+ROLLBACK_EXPECTED_HEAD=""
+ROLLBACK_REVERT_COMMIT=""
+ROLLBACK_MESSAGE_CHANNEL_ID=""
+ROLLBACK_MESSAGE_ID=""
+ROLLBACK_SOURCE_AUTHOR_ID=""
+ROLLBACK_REQUESTED_BY=""
+ROLLBACK_PREVIOUS_RECORD_JSON="{}"
+ROLLBACK_NEW_COMMIT=""
 
 FRONT_CHANGED=0
 BACK_CHANGED=0
@@ -101,6 +117,7 @@ DIFF_TOTAL_SUMMARY=""
 FAST_RELOAD_STATUS="não usado"
 UPDATER_UNIT="tts-bot-updater.service"
 RUN_LOG_FILE="${TMPDIR:-/tmp}/tts-bot-updater.$$.log"
+ZIP_STATUS_CONTROL_JSON=""
 UPDATER_STEP_LAST=0
 UPDATER_TIMINGS=""
 : > "$RUN_LOG_FILE"
@@ -958,6 +975,7 @@ notify_zip_status_message() {
   local description="${3:-}"
   MANIFEST_PATH="$LOCAL_CANDIDATE_DIR/manifest.json" \
   STATUS_VALUE="$status" TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" \
+  ZIP_STATUS_CONTROL_JSON="${ZIP_STATUS_CONTROL_JSON:-}" \
   BOT_HEALTH_URL="$BOT_HEALTH_URL" REPO_DIR="$REPO_DIR" python3 - <<'PYSTATUS' 2>/dev/null || true
 import json, os, urllib.request, urllib.error
 from pathlib import Path
@@ -978,6 +996,14 @@ payload = {
     "title": os.environ.get("TITLE_VALUE") or "Update",
     "description": os.environ.get("DESCRIPTION_VALUE") or "",
 }
+try:
+    control_raw = os.environ.get("ZIP_STATUS_CONTROL_JSON") or ""
+    if control_raw.strip():
+        control = json.loads(control_raw)
+        if isinstance(control, dict):
+            payload["control"] = control
+except Exception:
+    pass
 url = (os.environ.get("BOT_HEALTH_URL") or "http://127.0.0.1:10000/health").replace("/health", "/internal/update/zip-status")
 headers = {"Content-Type": "application/json"}
 # Mesmo token do endpoint interno de reload, quando configurado.
@@ -1000,6 +1026,232 @@ except Exception:
     # Notificação visual é best-effort; nunca pode quebrar o updater.
     pass
 PYSTATUS
+}
+
+post_direct_update_message() {
+  local channel_id="${1:-}"
+  local message_id="${2:-}"
+  local status="${3:-info}"
+  local title="${4:-Update}"
+  local description="${5:-}"
+  local control_json="${6:-}"
+  [[ -n "$channel_id" && -n "$message_id" ]] || return 0
+  CHANNEL_ID_VALUE="$channel_id" MESSAGE_ID_VALUE="$message_id" STATUS_VALUE="$status" \
+  TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" ZIP_STATUS_CONTROL_JSON="$control_json" \
+  BOT_HEALTH_URL="$BOT_HEALTH_URL" REPO_DIR="$REPO_DIR" python3 - <<'PYDIRECT' 2>/dev/null || true
+import json, os, urllib.request
+payload = {
+    "channel_id": os.environ.get("CHANNEL_ID_VALUE") or "",
+    "message_id": os.environ.get("MESSAGE_ID_VALUE") or "",
+    "status": os.environ.get("STATUS_VALUE") or "info",
+    "title": os.environ.get("TITLE_VALUE") or "Update",
+    "description": os.environ.get("DESCRIPTION_VALUE") or "",
+}
+try:
+    raw = os.environ.get("ZIP_STATUS_CONTROL_JSON") or ""
+    if raw.strip():
+        control = json.loads(raw)
+        if isinstance(control, dict):
+            payload["control"] = control
+except Exception:
+    pass
+url = (os.environ.get("BOT_HEALTH_URL") or "http://127.0.0.1:10000/health").replace("/health", "/internal/update/zip-status")
+headers = {"Content-Type": "application/json"}
+try:
+    from pathlib import Path
+    env_path = Path(os.environ.get("REPO_DIR", "/home/ubuntu/bot")) / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("BOT_INTERNAL_UPDATE_TOKEN="):
+                token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if token:
+                    headers["X-Update-Token"] = token
+                break
+except Exception:
+    pass
+req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+try:
+    with urllib.request.urlopen(req, timeout=4) as resp:
+        resp.read()
+except Exception:
+    pass
+PYDIRECT
+}
+
+load_pending_rollback_request() {
+  ROLLBACK_CONTROL_MODE=0
+  ROLLBACK_REQUEST_FILE=""
+  mkdir -p "$ROLLBACK_REQUEST_ROOT" 2>/dev/null || true
+  if [[ -f "$ROLLBACK_REQUEST_PENDING_FILE" ]]; then
+    mv "$ROLLBACK_REQUEST_PENDING_FILE" "$ROLLBACK_REQUEST_ACTIVE_FILE" 2>/dev/null || true
+  fi
+  [[ -f "$ROLLBACK_REQUEST_ACTIVE_FILE" ]] || return 1
+  ROLLBACK_CONTROL_MODE=1
+  ROLLBACK_REQUEST_FILE="$ROLLBACK_REQUEST_ACTIVE_FILE"
+  ROLLBACK_REQUEST_ID="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" id 2>/dev/null || true)"
+  ROLLBACK_REQUEST_ACTION="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" mode 2>/dev/null || true)"
+  ROLLBACK_REQUEST_BRANCH="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" branch 2>/dev/null || true)"
+  ROLLBACK_EXPECTED_HEAD="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" expected_head 2>/dev/null || true)"
+  ROLLBACK_REVERT_COMMIT="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" revert_commit 2>/dev/null || true)"
+  ROLLBACK_MESSAGE_CHANNEL_ID="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" message.channel_id 2>/dev/null || true)"
+  ROLLBACK_MESSAGE_ID="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" message.message_id 2>/dev/null || true)"
+  ROLLBACK_SOURCE_AUTHOR_ID="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" source_author_id 2>/dev/null || true)"
+  ROLLBACK_REQUESTED_BY="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" requested_by 2>/dev/null || true)"
+  ROLLBACK_PREVIOUS_RECORD_JSON="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" previous_record 2>/dev/null || echo '{}')"
+  [[ -n "${ROLLBACK_REQUEST_ID//[[:space:]]/}" ]] || ROLLBACK_REQUEST_ID="rollback-$(date +%Y%m%d%H%M%S)"
+  [[ -n "${ROLLBACK_REQUEST_BRANCH//[[:space:]]/}" ]] || ROLLBACK_REQUEST_BRANCH="main"
+  BRANCH="$ROLLBACK_REQUEST_BRANCH"
+  if [[ "$ROLLBACK_REQUEST_ACTION" != "rollback" && "$ROLLBACK_REQUEST_ACTION" != "redo" ]]; then
+    ROLLBACK_REQUEST_ACTION="rollback"
+  fi
+  [[ -n "${ROLLBACK_EXPECTED_HEAD//[[:space:]]/}" && -n "${ROLLBACK_REVERT_COMMIT//[[:space:]]/}" ]]
+}
+
+archive_rollback_request() {
+  local status="${1:-done}"
+  [[ -n "${ROLLBACK_REQUEST_FILE:-}" ]] || return 0
+  mkdir -p "$ROLLBACK_REQUEST_ROOT/$status" 2>/dev/null || true
+  if [[ -f "$ROLLBACK_REQUEST_FILE" ]]; then
+    mv "$ROLLBACK_REQUEST_FILE" "$ROLLBACK_REQUEST_ROOT/$status/${ROLLBACK_REQUEST_ID:-rollback}.$(date +%Y%m%d%H%M%S).json" 2>/dev/null || rm -f "$ROLLBACK_REQUEST_FILE" 2>/dev/null || true
+  fi
+}
+
+rollback_control_json() {
+  local mode="${1:-rollback}"
+  local head_commit="${2:-}"
+  python3 - "$mode" "$head_commit" "$BRANCH" "$ROLLBACK_SOURCE_AUTHOR_ID" <<'PYCTRL'
+import json, sys, os
+mode, head, branch, author = sys.argv[1:5]
+print(json.dumps({
+    "enabled": True,
+    "mode": mode,
+    "branch": branch or "main",
+    "expected_head": head,
+    "revert_commit": head,
+    "head_commit": head,
+    "source_author_id": author,
+}, ensure_ascii=False))
+PYCTRL
+}
+
+prepare_rollback_request_update() {
+  ROLLBACK_CONTROL_MODE=1
+  LOCAL_CANDIDATE_MODE=0
+  STAGE="fetch remoto"
+  sudo -u ubuntu -H git fetch origin "$BRANCH"
+  CURRENT_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
+  REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse "origin/$BRANCH")"
+  PREVIOUS_COMMIT="$CURRENT_COMMIT"
+  SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
+  mark_update_timing "fetch"
+
+  if [[ "$CURRENT_COMMIT" != "$REMOTE_COMMIT" || "$CURRENT_COMMIT" != "$ROLLBACK_EXPECTED_HEAD" ]]; then
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Reversão indisponível" "O estado atual mudou. Nenhuma alteração foi aplicada."
+    archive_rollback_request "failed"
+    exit 1
+  fi
+
+  STAGE="verificação de alterações locais"
+  clear_local_changes_marker_if_clean
+  fail_local_changes_before_pull
+
+  STAGE="reversão local"
+  git -C "$REPO_DIR" rev-parse --verify "$ROLLBACK_REVERT_COMMIT^{commit}" >/dev/null
+  if ! sudo -u ubuntu -H git revert --no-commit "$ROLLBACK_REVERT_COMMIT"; then
+    sudo -u ubuntu -H git revert --abort >/dev/null 2>&1 || true
+    sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Falha ao reverter" "O estado local foi restaurado. Nada foi publicado no GitHub."
+    archive_rollback_request "failed"
+    exit 1
+  fi
+  UPDATE_APPLIED=1
+  CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only || true)"
+  CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --cached --numstat || true)"
+  if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
+    sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "warn" "Nenhuma alteração" "O estado já estava equivalente."
+    archive_rollback_request "done"
+    exit 0
+  fi
+  classify_changed_files
+  if (( CALLKEEPER_CHANGED == 1 )) && [[ "${UPDATE_TOUCH_CALLKEEPER:-}" != "1" || "${CALLKEEPER_UPDATE_ALLOWED:-}" != "1" ]]; then
+    sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Update bloqueado" "CallKeeper é protegido e não foi tocado."
+    archive_rollback_request "failed"
+    exit 1
+  fi
+  COMMIT_SUBJECT="${ROLLBACK_REQUEST_ACTION} discord zip update"
+  mark_update_timing "rollback_apply"
+}
+
+publish_rollback_request_after_validation() {
+  (( ROLLBACK_CONTROL_MODE == 1 )) || return 0
+  STAGE="commit da reversão"
+  local msg
+  if [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]]; then
+    msg="redo discord zip update $(short_commit "$ROLLBACK_REVERT_COMMIT")"
+  else
+    msg="rollback discord zip update $(short_commit "$ROLLBACK_REVERT_COMMIT")"
+  fi
+  git_add_changed_files
+  sudo -u ubuntu -H git commit -m "$msg"
+  REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
+  ROLLBACK_NEW_COMMIT="$REMOTE_COMMIT"
+  SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
+  mark_update_timing "commit"
+  STAGE="push GitHub"
+  sudo -u ubuntu -H git push origin "HEAD:$BRANCH"
+  mark_update_timing "push"
+}
+
+finalize_rollback_request_success() {
+  (( ROLLBACK_CONTROL_MODE == 1 )) || return 1
+  local duration changed_files diff_summary apply_mode control_json title summary next_mode status_title
+  duration="$(human_duration "$SECONDS")"
+  changed_files="$(format_changed_files)"
+  diff_summary="$(format_diff_total_summary)"
+  if [[ "$FAST_RELOAD_STATUS" == "OK" ]]; then
+    apply_mode="reload rápido de cog"
+  elif (( BOT_CHANGED == 0 )); then
+    apply_mode="sem restart do bot"
+  else
+    apply_mode="restart completo"
+  fi
+  if [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]]; then
+    title="Update reaplicado"
+    summary="Update reaplicado e tudo está saudável."
+    next_mode="rollback"
+  else
+    title="Update revertido"
+    summary="Reversão aplicada e tudo está saudável."
+    next_mode="redo"
+  fi
+  control_json="$(rollback_control_json "$next_mode" "$REMOTE_COMMIT")"
+  local desc
+  desc="$summary
+
+$BRANCH · ${SHORT_FROM} → ${SHORT_TO}
+$(printf '%s\n' "$CHANGED_FILES_RAW" | awk 'NF {c++} END {print c+0}') arquivo(s) alterado(s) · $diff_summary
+Aplicação: $apply_mode · $duration
+
+## Arquivos alterados
+$changed_files"
+  post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "success" "$title" "$desc" "$control_json"
+  local body
+  body="Resumo: $summary
+Branch: $BRANCH
+Commit: ${SHORT_FROM} → ${SHORT_TO}
+Update: $(printf '%s\n' "$CHANGED_FILES_RAW" | awk 'NF {c++} END {print c+0}') arquivo(s) · $diff_summary
+Aplicação: $apply_mode
+Processos alterados: $(format_changed_processes)
+Arquivos:
+$changed_files
+Duração: $duration
+Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+  /home/ubuntu/bot/alert.sh success "$title" "$body" || true
+  archive_rollback_request "done"
+  logger -t "$LOG_TAG" "$title"
+  exit 0
 }
 
 copy_local_candidate_files() {
@@ -2342,7 +2594,12 @@ ${LAST_ERROR_STDERR:-nenhuma saída adicional capturada}
 Últimas linhas:
 ${LAST_ERROR_LOGS:-nenhum log adicional encontrado}
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
-  notify_zip_status_message "error" "Falha no update" "O updater falhou antes de concluir a finalização. Verifique o webhook/log interno." || true
+  if (( ROLLBACK_CONTROL_MODE == 1 )); then
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Falha no update" "O estado local foi restaurado quando possível. Verifique o webhook/log interno." || true
+    archive_rollback_request "failed"
+  else
+    notify_zip_status_message "error" "Falha no update" "O updater falhou antes de concluir a finalização. Verifique o webhook/log interno." || true
+  fi
   send_error "Falha no auto update" "$body"
   exit "$exit_code"
 }
@@ -2353,7 +2610,10 @@ trap 'on_error' ERR
 SECONDS=0
 cd "$REPO_DIR"
 
-if load_pending_local_candidate; then
+if load_pending_rollback_request; then
+  logger -t "$LOG_TAG" "Controle de update recebido: $ROLLBACK_REQUEST_ACTION $ROLLBACK_REQUEST_ID"
+  prepare_rollback_request_update
+elif load_pending_local_candidate; then
   logger -t "$LOG_TAG" "Candidato local recebido: $LOCAL_CANDIDATE_ID"
   prepare_local_candidate_update
 else
@@ -2434,6 +2694,11 @@ deploy_backend
 mark_update_timing "backend"
 run_core_worker_post_update_automation
 mark_update_timing "worker"
+
+publish_rollback_request_after_validation
+if (( ROLLBACK_CONTROL_MODE == 1 )); then
+  finalize_rollback_request_success
+fi
 
 publish_local_candidate_after_validation
 
@@ -2551,6 +2816,29 @@ Aplicação: ${APPLY_MODE} · ${DURATION}
 
 ## Arquivos alterados
 ${CHANGED_FILES}"
+ZIP_STATUS_CONTROL_JSON=""
+if (( LOCAL_CANDIDATE_MODE == 1 && OVERALL_FATAL == 0 )); then
+  source_author_id=""
+  if [[ -f "$LOCAL_CANDIDATE_DIR/manifest.json" ]]; then
+    source_author_id="$(json_field_from_file "$LOCAL_CANDIDATE_DIR/manifest.json" discord_status.source_author_id 2>/dev/null || true)"
+  fi
+  ZIP_STATUS_CONTROL_JSON="$(python3 - "$BRANCH" "$REMOTE_COMMIT" "$PREVIOUS_COMMIT" "$source_author_id" <<'PYCTRL'
+import json, sys
+branch, head, previous, author = sys.argv[1:5]
+print(json.dumps({
+    "enabled": True,
+    "mode": "rollback",
+    "branch": branch or "main",
+    "expected_head": head,
+    "revert_commit": head,
+    "head_commit": head,
+    "update_from": previous,
+    "update_to": head,
+    "source_author_id": author,
+}, ensure_ascii=False))
+PYCTRL
+)"
+fi
 notify_zip_status_message "$ALERT_TYPE" "$ALERT_TITLE" "$ZIP_STATUS_DESCRIPTION" || true
 
 /home/ubuntu/bot/alert.sh "$ALERT_TYPE" "$ALERT_TITLE" "$BODY" || true
