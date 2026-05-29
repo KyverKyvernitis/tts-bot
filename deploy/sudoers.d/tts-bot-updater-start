@@ -1,0 +1,6 @@
+# Permite que o bot dispare o updater imediatamente após o push do ZIP.
+# Escopo mínimo: iniciar apenas a unit tts-bot-updater.service.
+ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block tts-bot-updater.service
+ubuntu ALL=(root) NOPASSWD: /bin/systemctl start --no-block tts-bot-updater.service
+ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl start tts-bot-updater.service
+ubuntu ALL=(root) NOPASSWD: /bin/systemctl start tts-bot-updater.service

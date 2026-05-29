@@ -37,6 +37,7 @@ CLEANUP_CHANGED=0
 PHONE_LAVALINK_WATCH_CHANGED=0
 PHONE_WORKER_WATCH_CHANGED=0
 VPS_SYSTEMD_UNITS_CHANGED=0
+ALERT_CHANGED=0
 PHONE_WORKER_SYNC_REQUIRED=0
 CORE_WORKER_APK_CHANGED=0
 CORE_WORKER_AUTOMATION_REQUIRED=0
@@ -309,7 +310,7 @@ wait_for_health() {
 }
 
 fetch_bot_health_json() {
-  curl -fsS --max-time 4 "$BOT_HEALTH_URL" 2>/dev/null || true
+  curl -fsS --max-time 2 "$BOT_HEALTH_URL" 2>/dev/null || true
 }
 
 bot_health_python() {
@@ -328,6 +329,20 @@ except Exception as exc:
         raise SystemExit(1)
     print(f"health inválido: {type(exc).__name__}: {exc}")
     raise SystemExit(0)
+
+if mode == "is_ready_healthy":
+    critical = data.get("critical_failed_cogs") or []
+    if (
+        data.get("healthy") is True
+        and data.get("status") == "ok"
+        and data.get("discord_ready") is True
+        and data.get("discord_closed") is not True
+        and data.get("mongo_ok") is True
+        and data.get("cog_loading_finished") is True
+        and not critical
+    ):
+        raise SystemExit(0)
+    raise SystemExit(1)
 
 if mode == "is_healthy":
     if data.get("healthy") is True:
@@ -525,48 +540,55 @@ PYIMPORT
 verify_bot_after_restart() {
   local restart_epoch="${1:?}"
   local restarts_before="${2:-0}"
-  local checkpoints=(8 20 35)
-  local waited=0 checkpoint sleep_for restarts_after health_ok=0
+  local timeout="${UPDATE_BOT_RESTART_TIMEOUT_SECONDS:-35}"
+  local interval="${UPDATE_BOT_RESTART_POLL_SECONDS:-1}"
+  local waited=0 restarts_after health_ok=0 last_log_check=0
 
-  for checkpoint in "${checkpoints[@]}"; do
-    sleep_for=$((checkpoint - waited))
-    if (( sleep_for > 0 )); then
-      sleep "$sleep_for"
-      waited="$checkpoint"
-    fi
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=35
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=1
+  (( timeout < 8 )) && timeout=8
+  (( interval < 1 )) && interval=1
 
+  while (( waited <= timeout )); do
     if systemctl is-failed --quiet "$SERVICE"; then
       BOT_HEALTHCHECK_STATUS="falhou: serviço em failed"
       return 1
     fi
 
-    if ! systemctl is-active --quiet "$SERVICE"; then
+    if systemctl is-active --quiet "$SERVICE"; then
+      restarts_after="$(service_restart_count "$SERVICE")"
+      if [[ "$restarts_after" =~ ^[0-9]+$ && "$restarts_before" =~ ^[0-9]+$ ]]; then
+        if (( restarts_after > restarts_before + 1 )); then
+          BOT_HEALTHCHECK_STATUS="falhou: restart loop detectado (${restarts_before}→${restarts_after})"
+          return 1
+        fi
+      fi
+
+      # journalctl é útil, mas não deve ser consultado em loop fechado.
+      if (( waited == 0 || waited - last_log_check >= 5 )); then
+        last_log_check="$waited"
+        if has_fatal_boot_logs "$SERVICE" "$restart_epoch"; then
+          BOT_HEALTHCHECK_STATUS="falhou: erro fatal de boot nas logs"
+          return 1
+        fi
+      fi
+
+      if refresh_bot_health_status; then
+        if bot_health_python is_ready_healthy >/dev/null; then
+          health_ok=1
+          break
+        fi
+        logger -t "$LOG_TAG" "Health respondeu, aguardando ready real (${waited}s): $BOT_HEALTH_DETAIL_STATUS"
+      elif [[ -n "${BOT_HEALTH_DETAIL_STATUS//[[:space:]]/}" && "$BOT_HEALTH_DETAIL_STATUS" != "HTTP sem resposta" ]]; then
+        logger -t "$LOG_TAG" "Health ainda não saudável (${waited}s): $BOT_HEALTH_DETAIL_STATUS"
+      fi
+    elif (( waited >= 5 )); then
       BOT_HEALTHCHECK_STATUS="falhou: serviço não ficou active"
       return 1
     fi
 
-    restarts_after="$(service_restart_count "$SERVICE")"
-    if [[ "$restarts_after" =~ ^[0-9]+$ && "$restarts_before" =~ ^[0-9]+$ ]]; then
-      if (( restarts_after > restarts_before + 1 )); then
-        BOT_HEALTHCHECK_STATUS="falhou: restart loop detectado (${restarts_before}→${restarts_after})"
-        return 1
-      fi
-    fi
-
-    if has_fatal_boot_logs "$SERVICE" "$restart_epoch"; then
-      BOT_HEALTHCHECK_STATUS="falhou: erro fatal de boot nas logs"
-      return 1
-    fi
-
-    if refresh_bot_health_status; then
-      health_ok=1
-    else
-      # Health HTTP pode estar em starting nos primeiros segundos; só falha
-      # no final se nunca ficar healthy.
-      if [[ -n "${BOT_HEALTH_DETAIL_STATUS//[[:space:]]/}" && "$BOT_HEALTH_DETAIL_STATUS" != "HTTP sem resposta" ]]; then
-        logger -t "$LOG_TAG" "Health ainda não saudável no checkpoint ${checkpoint}s: $BOT_HEALTH_DETAIL_STATUS"
-      fi
-    fi
+    sleep "$interval"
+    waited=$((waited + interval))
   done
 
   if (( health_ok == 1 )); then
@@ -577,12 +599,17 @@ verify_bot_after_restart() {
       BOT_HEALTHCHECK_STATUS="OK"
     fi
   else
+    # Última checagem fatal antes de aceitar qualquer estado parcial.
+    if has_fatal_boot_logs "$SERVICE" "$restart_epoch"; then
+      BOT_HEALTHCHECK_STATUS="falhou: erro fatal de boot nas logs"
+      return 1
+    fi
     if [[ "$BOT_HEALTH_DETAIL_STATUS" == "HTTP sem resposta" ]]; then
       BOT_HEALTHCHECK_STATUS="ativo; health HTTP sem resposta"
       UPDATE_HAS_WARNINGS=1
       return 0
     fi
-    BOT_HEALTHCHECK_STATUS="falhou: health não saudável ($BOT_HEALTH_DETAIL_STATUS)"
+    BOT_HEALTHCHECK_STATUS="falhou: health não ficou pronto em ${timeout}s ($BOT_HEALTH_DETAIL_STATUS)"
     return 1
   fi
   return 0
@@ -1446,14 +1473,31 @@ PYJSON
 
 
 deploy_bot() {
-  normalize_healthcheck_crontab
-  deploy_vps_systemd_units
-  deploy_alert_unit
-  deploy_audio_services
-  deploy_cleanup_timer
-  deploy_phone_lavalink_watch
-  deploy_phone_worker_watch
-  deploy_phone_worker_sync
+  # Caminho rápido: não reinstale systemd/watchers/áudio em todo update.
+  # Cada rotina só roda quando os arquivos dela mudaram; isso reduz bastante
+  # patches comuns e mantém CallKeeper fora de qualquer fluxo amplo.
+  if (( VPS_SYSTEMD_UNITS_CHANGED == 1 )); then
+    normalize_healthcheck_crontab
+    deploy_vps_systemd_units
+  fi
+  if (( ALERT_CHANGED == 1 || VPS_SYSTEMD_UNITS_CHANGED == 1 )); then
+    deploy_alert_unit
+  fi
+  if (( AUDIO_SYSTEMD_CHANGED == 1 )); then
+    deploy_audio_services
+  fi
+  if (( CLEANUP_CHANGED == 1 )); then
+    deploy_cleanup_timer
+  fi
+  if (( PHONE_LAVALINK_WATCH_CHANGED == 1 )); then
+    deploy_phone_lavalink_watch
+  fi
+  if (( PHONE_WORKER_WATCH_CHANGED == 1 )); then
+    deploy_phone_worker_watch
+  fi
+  if (( PHONE_WORKER_SYNC_REQUIRED == 1 )); then
+    deploy_phone_worker_sync
+  fi
 
   if (( REQUIREMENTS_CHANGED == 1 )); then
     STAGE="dependências do bot"
@@ -1858,7 +1902,13 @@ fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity /sinuca-server/'; then
   BACK_CHANGED=1
 fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -vq '^activity /sinuca'; then
+# Só reinicie/recarregue o bot quando o runtime dele mudou. Scripts do
+# updater, systemd auxiliar, worker/activity e arquivos de deploy não devem
+# forçar restart completo do bot principal.
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(bot\.py|webserver\.py|config\.py|db\.py|start\.sh|requirements\.txt|cogs/|music_system/|utility/)'; then
+  BOT_CHANGED=1
+fi
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/systemd(/vps)?/tts-bot\.service$'; then
   BOT_CHANGED=1
 fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^requirements\.txt$'; then
@@ -1867,7 +1917,10 @@ fi
 if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/systemd/(lavalink|tts-bot|tts-bot-alert@)\.service$'; then
   AUDIO_SYSTEMD_CHANGED=1
 fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(deploy/systemd/vps/|scripts/install-vps-systemd-units\.sh$)'; then
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(alert\.sh|deploy/systemd(/vps)?/tts-bot-alert@\.service)$'; then
+  ALERT_CHANGED=1
+fi
+if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(deploy/systemd/vps/|deploy/sudoers\.d/|scripts/install-vps-systemd-units\.sh$)'; then
   VPS_SYSTEMD_UNITS_CHANGED=1
   AUDIO_SYSTEMD_CHANGED=1
   CLEANUP_CHANGED=1

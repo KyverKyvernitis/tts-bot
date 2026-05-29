@@ -413,6 +413,7 @@ class BotLocal(commands.Bot):
             mongo_collection_name,
         )
         await self.settings_db.init()
+        self.health_state.update({"mongo_ok": True, "mongo_error": None})
 
         print("Carregando cogs...")
         await self._load_cogs_safely()
@@ -529,6 +530,18 @@ class BotLocal(commands.Bot):
         snapshot = dict(self.health_state)
         uptime_seconds = (datetime.now(timezone.utc) - self.started_at).total_seconds()
         snapshot["uptime_seconds"] = round(uptime_seconds, 2)
+
+        # Não espere o monitor periódico de 15s para refletir que o bot já
+        # voltou. O updater consulta /health logo após restart/reload; usar o
+        # estado vivo aqui reduz atraso sem afrouxar a validação real.
+        try:
+            snapshot["discord_ready"] = self.is_ready()
+            snapshot["discord_closed"] = self.is_closed()
+            snapshot["guild_count"] = len(self.guilds)
+            snapshot["latency_ms"] = round(float(self.latency) * 1000, 2)
+        except Exception:
+            pass
+
         ready = bool(snapshot.get("discord_ready"))
         closed = bool(snapshot.get("discord_closed"))
         mongo_ok = bool(snapshot.get("mongo_ok"))
@@ -775,7 +788,7 @@ class BotLocal(commands.Bot):
         service = Path("/etc/systemd/system/tts-bot-updater.service")
         if not service.exists():
             return False, "updater via systemd não encontrado"
-        for args in (["sudo", "-n", "systemctl", "start", "tts-bot-updater.service"], ["systemctl", "start", "tts-bot-updater.service"]):
+        for args in (["sudo", "-n", "systemctl", "start", "--no-block", "tts-bot-updater.service"], ["systemctl", "start", "--no-block", "tts-bot-updater.service"]):
             result = self._run_cmd(args, self._repo_root, env=self._git_env())
             if result.returncode == 0:
                 return True, "updater disparado agora"

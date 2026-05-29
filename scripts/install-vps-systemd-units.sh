@@ -4,6 +4,7 @@ set -Eeuo pipefail
 REPO_DIR="${REPO_DIR:-/home/ubuntu/bot}"
 TEMPLATE_DIR="${TEMPLATE_DIR:-$REPO_DIR/deploy/systemd/vps}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
+SUDOERS_DIR="${SUDOERS_DIR:-/etc/sudoers.d}"
 BACKUP_ROOT="${BACKUP_ROOT:-$REPO_DIR/data/systemd-backups}"
 STATUS_FILE="${STATUS_FILE:-$REPO_DIR/data/vps-systemd-install-status.json}"
 DRY_RUN=0
@@ -284,6 +285,47 @@ PY_CRON
   rm -f "$current" "$tmp"
 }
 
+backup_sudoers_live() {
+  local rel="$1"
+  local live="$SUDOERS_DIR/$rel"
+  local dest="$BACKUP_DIR/sudoers.d/$rel"
+  if [[ -e "$live" || -L "$live" ]]; then
+    mkdir -p "$(dirname "$dest")"
+    cp -a "$live" "$dest" 2>/dev/null || true
+  fi
+}
+
+install_sudoers_files() {
+  local src_dir="$REPO_DIR/deploy/sudoers.d"
+  local src rel dst tmp
+  if [[ ! -d "$src_dir" ]]; then
+    action "sudoers do updater ausente"
+    return 0
+  fi
+  while IFS= read -r -d '' src; do
+    rel="${src#$src_dir/}"
+    dst="$SUDOERS_DIR/$rel"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      action "dry-run: instalaria sudoers $rel"
+      continue
+    fi
+    tmp="${TMPDIR:-/tmp}/sudoers-${rel//\//_}.$$"
+    cp "$src" "$tmp"
+    chmod 0440 "$tmp"
+    if ! visudo -cf "$tmp" >/dev/null; then
+      rm -f "$tmp"
+      warn "sudoers inválido ignorado: $rel"
+      continue
+    fi
+    backup_sudoers_live "$rel"
+    mkdir -p "$(dirname "$dst")"
+    install -m 0440 "$tmp" "$dst"
+    rm -f "$tmp"
+    CHANGED=1
+    action "sudoers instalado: $rel"
+  done < <(find "$src_dir" -type f -print0 | sort -z)
+}
+
 chmod_scripts() {
   # Não altera modos de arquivos rastreados no Git. O systemd chama scripts via
   # /usr/bin/env bash nos templates, justamente para não sujar o repo com
@@ -463,6 +505,7 @@ main() {
   fi
   chmod_scripts
   install_units
+  install_sudoers_files
   sanitize_lavalink_references
   mask_vps_lavalink
   normalize_crontab
