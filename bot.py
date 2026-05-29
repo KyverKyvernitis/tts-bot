@@ -794,6 +794,7 @@ class BotLocal(commands.Bot):
         diff_stats: dict[str, object],
         extracted_files: list[tuple[Path, Path]],
         zip_name: str,
+        status_context: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """Grava um candidato local para o updater testar na VPS antes do push.
 
@@ -834,6 +835,13 @@ class BotLocal(commands.Bot):
             "changed_files": changed_files,
             "diff_stats": diff_stats,
         }
+        if isinstance(status_context, dict) and status_context.get("message_id") and status_context.get("channel_id"):
+            manifest["discord_status"] = {
+                "guild_id": str(status_context.get("guild_id") or ""),
+                "channel_id": str(status_context.get("channel_id") or ""),
+                "message_id": str(status_context.get("message_id") or ""),
+                "source_message_id": str(status_context.get("source_message_id") or ""),
+            }
         (candidate_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
         pending_path = candidate_root / "pending.json"
@@ -1045,7 +1053,7 @@ class BotLocal(commands.Bot):
             changed_files.append(rel_path.as_posix())
         return changed_files
 
-    def _process_zip_update_sync(self, zip_path: Path) -> dict[str, object]:
+    def _process_zip_update_sync(self, zip_path: Path, status_context: dict[str, object] | None = None) -> dict[str, object]:
         self._update_temp_root.mkdir(parents=True, exist_ok=True)
         env = self._git_env()
         origin_result = self._run_cmd(["git", "remote", "get-url", "origin"], self._repo_root, env=env)
@@ -1142,6 +1150,7 @@ class BotLocal(commands.Bot):
                 diff_stats=diff_stats,
                 extracted_files=extracted_files,
                 zip_name=zip_path.name,
+                status_context=status_context,
             )
             mark("candidate_write_ms")
 
@@ -1167,6 +1176,9 @@ class BotLocal(commands.Bot):
 
 
     def handle_internal_update_action(self, action: str, payload: dict[str, object]) -> dict[str, object]:
+        if action == "zip_status":
+            future = asyncio.run_coroutine_threadsafe(self._edit_zip_status_from_update(payload), self.loop)
+            return future.result(timeout=15)
         if action != "reload_cogs":
             return {"ok": False, "error": "ação interna desconhecida"}
         modules_raw = payload.get("modules") if isinstance(payload, dict) else None
@@ -1180,6 +1192,41 @@ class BotLocal(commands.Bot):
 
         future = asyncio.run_coroutine_threadsafe(self._reload_cogs_for_update(modules), self.loop)
         return future.result(timeout=25)
+
+    async def _edit_zip_status_from_update(self, payload: dict[str, object]) -> dict[str, object]:
+        try:
+            channel_id = int(str(payload.get("channel_id") or "0"))
+            message_id = int(str(payload.get("message_id") or "0"))
+        except Exception:
+            return {"ok": False, "error": "channel_id/message_id inválido"}
+        if not channel_id or not message_id:
+            return {"ok": False, "error": "channel_id/message_id ausente"}
+
+        title = str(payload.get("title") or "Update").strip() or "Update"
+        description = str(payload.get("description") or "").strip()
+        status = str(payload.get("status") or "info").lower().strip()
+        if status in {"success", "ok"}:
+            color = discord.Color.green()
+        elif status in {"warn", "warning"}:
+            color = discord.Color.gold()
+        elif status in {"error", "failed", "failure"}:
+            color = discord.Color.red()
+        else:
+            color = discord.Color.blurple()
+
+        try:
+            channel = self.get_channel(channel_id)
+            if channel is None:
+                channel = await self.fetch_channel(channel_id)
+            if not hasattr(channel, "fetch_message"):
+                return {"ok": False, "error": "canal não suporta mensagens"}
+            status_message = await channel.fetch_message(message_id)
+            view = self._make_zip_update_view(title, description, color)
+            await status_message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+            return {"ok": True}
+        except Exception as exc:
+            logging.getLogger("zip_update").warning("falha ao finalizar mensagem do ZIP pelo updater", exc_info=True)
+            return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
 
     async def _reload_cogs_for_update(self, modules: list[str]) -> dict[str, object]:
         results: list[dict[str, str]] = []
@@ -1238,7 +1285,13 @@ class BotLocal(commands.Bot):
                         discord.Color.blurple(),
                     )
 
-                result = await asyncio.to_thread(self._process_zip_update_sync, zip_path)
+                status_context = {
+                    "guild_id": getattr(message.guild, "id", None),
+                    "channel_id": getattr(status_message.channel, "id", None) if status_message else getattr(message.channel, "id", None),
+                    "message_id": getattr(status_message, "id", None),
+                    "source_message_id": getattr(message, "id", None),
+                }
+                result = await asyncio.to_thread(self._process_zip_update_sync, zip_path, status_context)
                 changed_files = list(result.get("changed_files") or [])
                 commit_hash = result.get("commit_hash")
                 branch = result.get("branch") or "main"

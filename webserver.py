@@ -1752,8 +1752,7 @@ def health():
     return jsonify({"ok": True}), 200
 
 
-@app.post("/internal/update/reload-cogs")
-def internal_update_reload_cogs():
+def _dispatch_internal_update_action(action: str):
     if not _is_local_request():
         abort(403)
     expected_token = os.getenv("BOT_INTERNAL_UPDATE_TOKEN", "").strip()
@@ -1763,11 +1762,21 @@ def internal_update_reload_cogs():
         return jsonify({"ok": False, "error": "update action provider indisponível"}), 503
     payload = request.get_json(silent=True) or {}
     try:
-        result = _update_action_provider("reload_cogs", payload)
+        result = _update_action_provider(action, payload)
         status = 200 if isinstance(result, dict) and result.get("ok") else 500
         return jsonify(result), status
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.post("/internal/update/reload-cogs")
+def internal_update_reload_cogs():
+    return _dispatch_internal_update_action("reload_cogs")
+
+
+@app.post("/internal/update/zip-status")
+def internal_update_zip_status():
+    return _dispatch_internal_update_action("zip_status")
 
 
 

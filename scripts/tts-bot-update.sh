@@ -90,6 +90,11 @@ FRONT_STATUS="não alterado"
 BACK_STATUS="não alterado"
 ACTIVITY_HEALTHCHECK_STATUS="não verificado"
 ROLLBACK_STATUS="não foi necessário"
+# Variáveis opcionais usadas apenas quando certos scripts/instaladores mudam.
+# Com `set -u`, elas precisam existir desde o topo para a etapa final de
+# webhook/mensagem nunca derrubar o updater após o commit/push já ter passado.
+ALERT_UNIT_STATUS="não alterado"
+CRONTAB_HEALTH_STATUS="não alterado"
 CHANGED_FILES_RAW=""
 CHANGED_DIFF_NUMSTAT_RAW=""
 DIFF_TOTAL_SUMMARY=""
@@ -730,21 +735,21 @@ recompute_update_warning_flag() {
   if [[ "$BOT_HEALTHCHECK_STATUS" == "OK com avisos" ]]; then
     UPDATE_HAS_WARNINGS=1
   fi
-  if has_real_warning_text "$VPS_SYSTEMD_UNITS_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$AUDIO_SERVICES_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$ALERT_UNIT_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$CRONTAB_HEALTH_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$CLEANUP_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$PHONE_LAVALINK_WATCH_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$PHONE_WORKER_WATCH_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$PHONE_WORKER_SYNC_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$CORE_WORKER_AGENT_UPDATE_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$CORE_WORKER_APK_BUILD_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$CORE_WORKER_NOTIFY_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$CALLKEEPER_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$FRONT_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$BACK_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "$ACTIVITY_HEALTHCHECK_STATUS"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${VPS_SYSTEMD_UNITS_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${AUDIO_SERVICES_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${ALERT_UNIT_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${CRONTAB_HEALTH_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${CLEANUP_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${PHONE_LAVALINK_WATCH_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${PHONE_WORKER_WATCH_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${PHONE_WORKER_SYNC_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${CORE_WORKER_AGENT_UPDATE_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${CORE_WORKER_APK_BUILD_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${CORE_WORKER_NOTIFY_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${CALLKEEPER_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${FRONT_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${BACK_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
+  if has_real_warning_text "${ACTIVITY_HEALTHCHECK_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
 }
 
 
@@ -919,6 +924,84 @@ archive_local_candidate() {
   fi
 }
 
+write_local_candidate_state() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 0
+  [[ -n "${LOCAL_CANDIDATE_DIR:-}" && -d "$LOCAL_CANDIDATE_DIR" ]] || return 0
+  local state_name="${1:-state}"
+  local extra_commit="${2:-}"
+  python3 - "$LOCAL_CANDIDATE_DIR" "$state_name" "$extra_commit" <<'PYSTATE' 2>/dev/null || true
+import json, pathlib, sys, datetime
+root = pathlib.Path(sys.argv[1])
+state = sys.argv[2]
+commit = sys.argv[3]
+path = root / "state.json"
+data = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+data.update({
+    "state": state,
+    "commit": commit,
+    "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+})
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+PYSTATE
+}
+
+notify_zip_status_message() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 0
+  [[ -n "${LOCAL_CANDIDATE_DIR:-}" && -f "$LOCAL_CANDIDATE_DIR/manifest.json" ]] || return 0
+  local status="${1:-info}"
+  local title="${2:-Update}"
+  local description="${3:-}"
+  MANIFEST_PATH="$LOCAL_CANDIDATE_DIR/manifest.json" \
+  STATUS_VALUE="$status" TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" \
+  BOT_HEALTH_URL="$BOT_HEALTH_URL" REPO_DIR="$REPO_DIR" python3 - <<'PYSTATUS' 2>/dev/null || true
+import json, os, urllib.request, urllib.error
+from pathlib import Path
+manifest_path = Path(os.environ["MANIFEST_PATH"])
+try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+info = manifest.get("discord_status") or {}
+channel_id = info.get("channel_id")
+message_id = info.get("message_id")
+if not channel_id or not message_id:
+    raise SystemExit(0)
+payload = {
+    "channel_id": str(channel_id),
+    "message_id": str(message_id),
+    "status": os.environ.get("STATUS_VALUE") or "info",
+    "title": os.environ.get("TITLE_VALUE") or "Update",
+    "description": os.environ.get("DESCRIPTION_VALUE") or "",
+}
+url = (os.environ.get("BOT_HEALTH_URL") or "http://127.0.0.1:10000/health").replace("/health", "/internal/update/zip-status")
+headers = {"Content-Type": "application/json"}
+# Mesmo token do endpoint interno de reload, quando configurado.
+try:
+    env_path = Path(os.environ.get("REPO_DIR", "/home/ubuntu/bot")) / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("BOT_INTERNAL_UPDATE_TOKEN="):
+                token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if token:
+                    headers["X-Update-Token"] = token
+                break
+except Exception:
+    pass
+req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+try:
+    with urllib.request.urlopen(req, timeout=4) as resp:
+        resp.read()
+except Exception:
+    # Notificação visual é best-effort; nunca pode quebrar o updater.
+    pass
+PYSTATUS
+}
+
 copy_local_candidate_files() {
   [[ -d "$LOCAL_CANDIDATE_FILES_DIR" ]] || return 1
   MANIFEST_PATH="$LOCAL_CANDIDATE_DIR/manifest.json" REPO_DIR="$REPO_DIR" FILES_DIR="$LOCAL_CANDIDATE_FILES_DIR" python3 - <<'PYCOPY'
@@ -1037,6 +1120,16 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only || true)"
   CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --cached --numstat || true)"
   if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
+    local head_subject=""
+    head_subject="$(sudo -u ubuntu -H git log -1 --pretty=%s HEAD 2>/dev/null || true)"
+    if [[ "$CURRENT_COMMIT" == "$REMOTE_COMMIT" && "$head_subject" == "$LOCAL_CANDIDATE_COMMIT_MESSAGE" ]]; then
+      LOCAL_CANDIDATE_PUBLISHED=1
+      REMOTE_COMMIT="$CURRENT_COMMIT"
+      SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
+      write_local_candidate_state "published" "$REMOTE_COMMIT"
+      logger -t "$LOG_TAG" "Candidato local já publicado; retomando finalização visual/webhook."
+      return 0
+    fi
     archive_local_candidate "done"
     logger -t "$LOG_TAG" "Candidato local não mudou o repositório"
     exit 0
@@ -1056,10 +1149,12 @@ publish_local_candidate_after_validation() {
   SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
   mark_update_timing "commit"
 
+  write_local_candidate_state "committed" "$REMOTE_COMMIT"
+
   STAGE="push GitHub pós-validação"
   sudo -u ubuntu -H git push origin "HEAD:$BRANCH"
   LOCAL_CANDIDATE_PUBLISHED=1
-  archive_local_candidate "done"
+  write_local_candidate_state "published" "$REMOTE_COMMIT"
   mark_update_timing "push"
 }
 
@@ -2103,7 +2198,7 @@ rollback_after_failure() {
   if (( rollback_success == 1 )); then
     if (( FRONT_CHANGED == 1 )); then
       if deploy_frontend; then
-        rollback_front_status="$FRONT_STATUS"
+        rollback_front_status="${FRONT_STATUS:-}"
       else
         rollback_success=0
         rollback_front_status="falhou: $FRONT_STATUS"
@@ -2114,12 +2209,12 @@ rollback_after_failure() {
 
     if (( BACK_CHANGED == 1 )); then
       if deploy_backend; then
-        rollback_back_status="$BACK_STATUS"
-        rollback_activity_status="$ACTIVITY_HEALTHCHECK_STATUS"
+        rollback_back_status="${BACK_STATUS:-}"
+        rollback_activity_status="${ACTIVITY_HEALTHCHECK_STATUS:-}"
       else
         rollback_success=0
         rollback_back_status="falhou: $BACK_STATUS"
-        rollback_activity_status="$ACTIVITY_HEALTHCHECK_STATUS"
+        rollback_activity_status="${ACTIVITY_HEALTHCHECK_STATUS:-}"
       fi
     else
       if wait_for_health "$BACK_HEALTH_URL" 2 2; then
@@ -2194,6 +2289,7 @@ ${LAST_ERROR_LOGS:-nenhum log adicional encontrado}
 Duração: $duration
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
+  notify_zip_status_message "error" "$title" "$summary" || true
   send_error "$title" "$body"
   exit "$exit_code"
 }
@@ -2246,6 +2342,7 @@ ${LAST_ERROR_STDERR:-nenhuma saída adicional capturada}
 Últimas linhas:
 ${LAST_ERROR_LOGS:-nenhum log adicional encontrado}
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+  notify_zip_status_message "error" "Falha no update" "O updater falhou antes de concluir a finalização. Verifique o webhook/log interno." || true
   send_error "Falha no auto update" "$body"
   exit "$exit_code"
 }
@@ -2356,11 +2453,11 @@ OVERALL_FATAL=0
 if [[ "$BOT_HEALTHCHECK_STATUS" == falhou:* ]]; then
   OVERALL_FATAL=1
 fi
-if (( CALLKEEPER_CHANGED == 1 )) && [[ "$CALLKEEPER_STATUS" != "OK" && "$CALLKEEPER_STATUS" != "não alterado; isolado do updater" ]]; then
+if (( CALLKEEPER_CHANGED == 1 )) && [[ "${CALLKEEPER_STATUS:-}" != "OK" && "${CALLKEEPER_STATUS:-}" != "não alterado; isolado do updater" ]]; then
   OVERALL_FATAL=1
 fi
 if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then
-  [[ "$ACTIVITY_HEALTHCHECK_STATUS" == "OK" ]] || OVERALL_FATAL=1
+  [[ "${ACTIVITY_HEALTHCHECK_STATUS:-}" == "OK" ]] || OVERALL_FATAL=1
 fi
 recompute_update_warning_flag
 
@@ -2446,6 +2543,20 @@ BODY+=$'
 '"Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 logger -t "$LOG_TAG" "timings: ${UPDATER_TIMINGS:-sem etapas}; total=$DURATION"
 
+ZIP_STATUS_DESCRIPTION="$ALERT_SUMMARY
+
+$BRANCH · ${SHORT_FROM} → ${SHORT_TO}
+${CHANGED_FILES_COUNT} arquivo(s) alterado(s) · ${DIFF_TOTAL_SUMMARY}
+Aplicação: ${APPLY_MODE} · ${DURATION}
+
+## Arquivos alterados
+${CHANGED_FILES}"
+notify_zip_status_message "$ALERT_TYPE" "$ALERT_TITLE" "$ZIP_STATUS_DESCRIPTION" || true
+
 /home/ubuntu/bot/alert.sh "$ALERT_TYPE" "$ALERT_TITLE" "$BODY" || true
+if (( LOCAL_CANDIDATE_MODE == 1 )); then
+  write_local_candidate_state "notified" "$REMOTE_COMMIT"
+  archive_local_candidate "done"
+fi
 logger -t "$LOG_TAG" "$ALERT_TITLE"
 
