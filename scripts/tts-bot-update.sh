@@ -9,6 +9,8 @@ LAVALINK_SERVICE="lavalink"
 LOG_TAG="tts-bot-updater"
 DIRTY_MARKER_FILE="$REPO_DIR/.fatal-update-dirty"
 LOCAL_CHANGES_MARKER_FILE="$REPO_DIR/.fatal-update-local-changes"
+CANDIDATE_ROOT="${DISCORD_AUTO_UPDATE_STAGING_DIR:-$(dirname "$REPO_DIR")/bot-update-staging}/candidates"
+CANDIDATE_PENDING_FILE="$CANDIDATE_ROOT/pending.json"
 
 FRONT_DIR="$REPO_DIR/activity /sinuca"
 BACK_DIR="$REPO_DIR/activity /sinuca-server"
@@ -26,6 +28,14 @@ COMMIT_SUBJECT=""
 UPDATE_APPLIED=0
 ROLLBACK_DONE=0
 MANUAL_FAILURE_ALERT_SENT=0
+LOCAL_CANDIDATE_MODE=0
+LOCAL_CANDIDATE_ID=""
+LOCAL_CANDIDATE_DIR=""
+LOCAL_CANDIDATE_BASE_COMMIT=""
+LOCAL_CANDIDATE_COMMIT_MESSAGE=""
+LOCAL_CANDIDATE_PENDING_FILE=""
+LOCAL_CANDIDATE_FILES_DIR=""
+LOCAL_CANDIDATE_PUBLISHED=0
 
 FRONT_CHANGED=0
 BACK_CHANGED=0
@@ -776,6 +786,242 @@ clear_dirty_marker() {
   rm -f "$DIRTY_MARKER_FILE"
 }
 
+json_field_from_file() {
+  local file="${1:?}"
+  local field="${2:?}"
+  python3 - "$file" "$field" <<'PYJSON'
+import json, sys
+path, field = sys.argv[1], sys.argv[2]
+try:
+    data = json.load(open(path, encoding='utf-8'))
+except Exception:
+    raise SystemExit(1)
+value = data
+for part in field.split('.'):
+    if isinstance(value, dict):
+        value = value.get(part)
+    else:
+        value = None
+        break
+if value is None:
+    raise SystemExit(0)
+if isinstance(value, (list, dict)):
+    print(json.dumps(value, ensure_ascii=False))
+else:
+    print(str(value))
+PYJSON
+}
+
+load_pending_local_candidate() {
+  [[ -f "$CANDIDATE_PENDING_FILE" ]] || return 1
+  local manifest
+  LOCAL_CANDIDATE_PENDING_FILE="$CANDIDATE_PENDING_FILE"
+  LOCAL_CANDIDATE_DIR="$(json_field_from_file "$CANDIDATE_PENDING_FILE" candidate_dir 2>/dev/null || true)"
+  if [[ -z "${LOCAL_CANDIDATE_DIR//[[:space:]]/}" || ! -d "$LOCAL_CANDIDATE_DIR" ]]; then
+    rm -f "$CANDIDATE_PENDING_FILE" 2>/dev/null || true
+    return 1
+  fi
+  # O pending é consumido logo no início. Assim, um ZIP novo pode criar outro
+  # pending sem risco do updater antigo apagar a fila nova ao arquivar o candidato.
+  LOCAL_CANDIDATE_PENDING_FILE="$LOCAL_CANDIDATE_DIR/active.json"
+  mv "$CANDIDATE_PENDING_FILE" "$LOCAL_CANDIDATE_PENDING_FILE" 2>/dev/null || true
+  manifest="$LOCAL_CANDIDATE_DIR/manifest.json"
+  [[ -f "$manifest" ]] || return 1
+  LOCAL_CANDIDATE_MODE=1
+  LOCAL_CANDIDATE_ID="$(json_field_from_file "$manifest" id 2>/dev/null || true)"
+  LOCAL_CANDIDATE_BASE_COMMIT="$(json_field_from_file "$manifest" base_commit 2>/dev/null || true)"
+  LOCAL_CANDIDATE_COMMIT_MESSAGE="$(json_field_from_file "$manifest" commit_message 2>/dev/null || true)"
+  LOCAL_CANDIDATE_FILES_DIR="$LOCAL_CANDIDATE_DIR/files"
+  BRANCH="$(json_field_from_file "$manifest" branch 2>/dev/null || true)"
+  [[ -n "${BRANCH//[[:space:]]/}" ]] || BRANCH="main"
+  [[ -n "${LOCAL_CANDIDATE_ID//[[:space:]]/}" ]] || LOCAL_CANDIDATE_ID="$(basename "$LOCAL_CANDIDATE_DIR")"
+  [[ -n "${LOCAL_CANDIDATE_COMMIT_MESSAGE//[[:space:]]/}" ]] || LOCAL_CANDIDATE_COMMIT_MESSAGE="auto update from discord zip"
+
+  CHANGED_FILES_RAW="$(python3 - "$manifest" <<'PYFILES'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding='utf-8'))
+except Exception:
+    raise SystemExit(1)
+for item in data.get('changed_files') or []:
+    item = str(item).strip()
+    if item:
+        print(item)
+PYFILES
+)"
+  CHANGED_DIFF_NUMSTAT_RAW="$(python3 - "$manifest" <<'PYDIFF'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding='utf-8'))
+except Exception:
+    raise SystemExit(1)
+for item in ((data.get('diff_stats') or {}).get('entries') or []):
+    path = str(item.get('path') or '').strip()
+    if not path:
+        continue
+    if item.get('binary'):
+        print(f'-\t-\t{path}')
+    else:
+        print(f"{int(item.get('added') or 0)}\t{int(item.get('removed') or 0)}\t{path}")
+PYDIFF
+)"
+  return 0
+}
+
+archive_local_candidate() {
+  local status="${1:-done}"
+  if [[ -z "${LOCAL_CANDIDATE_DIR:-}" ]]; then
+    return 0
+  fi
+  mkdir -p "$CANDIDATE_ROOT/$status" 2>/dev/null || true
+  if [[ -f "$LOCAL_CANDIDATE_PENDING_FILE" ]]; then
+    rm -f "$LOCAL_CANDIDATE_PENDING_FILE" 2>/dev/null || true
+  fi
+  if [[ -d "$LOCAL_CANDIDATE_DIR" ]]; then
+    mv "$LOCAL_CANDIDATE_DIR" "$CANDIDATE_ROOT/$status/$(basename "$LOCAL_CANDIDATE_DIR").$(date +%Y%m%d%H%M%S)" 2>/dev/null || rm -rf "$LOCAL_CANDIDATE_DIR" 2>/dev/null || true
+  fi
+}
+
+copy_local_candidate_files() {
+  [[ -d "$LOCAL_CANDIDATE_FILES_DIR" ]] || return 1
+  MANIFEST_PATH="$LOCAL_CANDIDATE_DIR/manifest.json" REPO_DIR="$REPO_DIR" FILES_DIR="$LOCAL_CANDIDATE_FILES_DIR" python3 - <<'PYCOPY'
+import json, os, pathlib, shutil
+repo = pathlib.Path(os.environ['REPO_DIR']).resolve()
+files_dir = pathlib.Path(os.environ['FILES_DIR']).resolve()
+data = json.loads(pathlib.Path(os.environ['MANIFEST_PATH']).read_text(encoding='utf-8'))
+for raw in data.get('changed_files') or []:
+    rel = pathlib.PurePosixPath(str(raw))
+    if rel.is_absolute() or '..' in rel.parts:
+        raise SystemExit(f'caminho inválido no candidato: {raw}')
+    src = files_dir.joinpath(*rel.parts).resolve()
+    dst = repo.joinpath(*rel.parts).resolve()
+    if files_dir not in src.parents and src != files_dir:
+        raise SystemExit(f'origem fora do candidato: {raw}')
+    if repo not in dst.parents and dst != repo:
+        raise SystemExit(f'destino fora do repo: {raw}')
+    if not src.is_file():
+        raise SystemExit(f'arquivo ausente no candidato: {raw}')
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+PYCOPY
+}
+
+cleanup_local_candidate_new_files_after_reset() {
+  if (( LOCAL_CANDIDATE_MODE == 0 )) || [[ -z "${PREVIOUS_COMMIT:-}" ]]; then
+    return 0
+  fi
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    if printf '%s\n' "$rel" | grep -Eq '(^|/)\.\.(\/|$)|^/'; then
+      continue
+    fi
+    if sudo -u ubuntu -H git cat-file -e "$PREVIOUS_COMMIT:$rel" 2>/dev/null; then
+      continue
+    fi
+    rm -f "$REPO_DIR/$rel" 2>/dev/null || true
+  done <<< "$CHANGED_FILES_RAW"
+}
+
+git_add_changed_files() {
+  [[ -n "${CHANGED_FILES_RAW//[[:space:]]/}" ]] || return 0
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    printf '%s\0' "$rel"
+  done <<< "$CHANGED_FILES_RAW" | sudo -u ubuntu -H git add --pathspec-from-file=- --pathspec-file-nul
+}
+
+prepare_local_candidate_update() {
+  LOCAL_CANDIDATE_MODE=1
+  STAGE="fetch remoto"
+  sudo -u ubuntu -H git fetch origin "$BRANCH"
+  REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse "origin/$BRANCH")"
+  CURRENT_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
+  PREVIOUS_COMMIT="$CURRENT_COMMIT"
+  COMMIT_SUBJECT="$LOCAL_CANDIDATE_COMMIT_MESSAGE"
+  SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
+  SHORT_TO="local"
+  mark_update_timing "fetch"
+
+  if [[ -n "$LOCAL_CANDIDATE_BASE_COMMIT" && "$LOCAL_CANDIDATE_BASE_COMMIT" != "$REMOTE_COMMIT" ]]; then
+    MANUAL_FAILURE_ALERT_SENT=1
+    archive_local_candidate "failed"
+    send_error "Update bloqueado: base mudou" "Resumo: O ZIP foi preparado sobre outro commit. Nada foi aplicado e nada foi enviado ao GitHub.
+Branch: $BRANCH
+Base do ZIP: $(short_commit "$LOCAL_CANDIDATE_BASE_COMMIT")
+GitHub atual: $(short_commit "$REMOTE_COMMIT")
+Ação sugerida: envie o ZIP novamente usando a base atual.
+Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+    exit 1
+  fi
+
+  STAGE="verificação de alterações locais"
+  clear_local_changes_marker_if_clean
+  fail_local_changes_before_pull
+
+  if [[ "$CURRENT_COMMIT" != "$REMOTE_COMMIT" ]]; then
+    STAGE="sincronização com GitHub antes do candidato"
+    sudo -u ubuntu -H git pull --ff-only origin "$BRANCH"
+    CURRENT_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
+    PREVIOUS_COMMIT="$CURRENT_COMMIT"
+    SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
+    mark_update_timing "sync"
+  fi
+
+  if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
+    archive_local_candidate "done"
+    logger -t "$LOG_TAG" "Candidato local sem arquivos alterados"
+    exit 0
+  fi
+
+  classify_changed_files
+  if (( CALLKEEPER_CHANGED == 1 )) && [[ "${UPDATE_TOUCH_CALLKEEPER:-}" != "1" || "${CALLKEEPER_UPDATE_ALLOWED:-}" != "1" ]]; then
+    CHANGED_FILES="$(format_changed_files)"
+    archive_local_candidate "failed"
+    send_error "Update bloqueado: CallKeeper protegido" "Resumo: Update bloqueado antes de aplicar porque contém arquivo protegido do CallKeeper.
+Branch: $BRANCH
+Arquivos:
+$CHANGED_FILES
+Ação sugerida: remova arquivos do CallKeeper deste patch ou faça um patch CallKeeper explícito e isolado.
+Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+    exit 1
+  fi
+
+  STAGE="limpeza de artefatos gerados"
+  cleanup_known_generated_update_artifacts
+
+  STAGE="aplicação local do candidato"
+  UPDATE_APPLIED=1
+  copy_local_candidate_files
+  git_add_changed_files
+  CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only || true)"
+  CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --cached --numstat || true)"
+  if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
+    archive_local_candidate "done"
+    logger -t "$LOG_TAG" "Candidato local não mudou o repositório"
+    exit 0
+  fi
+  classify_changed_files
+  mark_update_timing "candidate_apply"
+}
+
+publish_local_candidate_after_validation() {
+  if (( LOCAL_CANDIDATE_MODE == 0 )); then
+    return 0
+  fi
+  STAGE="commit local validado"
+  git_add_changed_files
+  sudo -u ubuntu -H git commit -m "$LOCAL_CANDIDATE_COMMIT_MESSAGE"
+  REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
+  SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
+  mark_update_timing "commit"
+
+  STAGE="push GitHub pós-validação"
+  sudo -u ubuntu -H git push origin "HEAD:$BRANCH"
+  LOCAL_CANDIDATE_PUBLISHED=1
+  archive_local_candidate "done"
+  mark_update_timing "push"
+}
+
 format_changed_files() {
   if [[ -n "$CHANGED_DIFF_NUMSTAT_RAW" ]]; then
     CHANGED_DIFF_NUMSTAT_INPUT="$CHANGED_DIFF_NUMSTAT_RAW" python3 - <<'PYDIFF'
@@ -835,6 +1081,72 @@ if binaries:
     out += f" · {binaries} binário(s)"
 print(out)
 PYDIFF
+}
+
+classify_changed_files() {
+  FRONT_CHANGED=0
+  BACK_CHANGED=0
+  BOT_CHANGED=0
+  CALLKEEPER_CHANGED=0
+  REQUIREMENTS_CHANGED=0
+  AUDIO_SYSTEMD_CHANGED=0
+  CLEANUP_CHANGED=0
+  PHONE_LAVALINK_WATCH_CHANGED=0
+  PHONE_WORKER_WATCH_CHANGED=0
+  VPS_SYSTEMD_UNITS_CHANGED=0
+  ALERT_CHANGED=0
+  PHONE_WORKER_SYNC_REQUIRED=0
+  CORE_WORKER_APK_CHANGED=0
+  CORE_WORKER_AUTOMATION_REQUIRED=0
+
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity /sinuca/'; then
+    FRONT_CHANGED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity /sinuca-server/'; then
+    BACK_CHANGED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(bot\.py|webserver\.py|config\.py|db\.py|start\.sh|requirements\.txt|cogs/|music_system/|utility/)'; then
+    BOT_CHANGED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/systemd(/vps)?/tts-bot\.service$'; then
+    BOT_CHANGED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^requirements\.txt$'; then
+    REQUIREMENTS_CHANGED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/systemd/(lavalink|tts-bot|tts-bot-alert@)\.service$'; then
+    AUDIO_SYSTEMD_CHANGED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(alert\.sh|deploy/systemd(/vps)?/tts-bot-alert@\.service)$'; then
+    ALERT_CHANGED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(deploy/systemd/vps/|deploy/sudoers\.d/|scripts/install-vps-systemd-units\.sh$)'; then
+    VPS_SYSTEMD_UNITS_CHANGED=1
+    AUDIO_SYSTEMD_CHANGED=1
+    CLEANUP_CHANGED=1
+    PHONE_LAVALINK_WATCH_CHANGED=1
+    PHONE_WORKER_WATCH_CHANGED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(cleanup-audio-temp\.sh|deploy/systemd/cleanup-audio-temp\.(service|timer))$'; then
+    CLEANUP_CHANGED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(scripts/phone-lavalink-watch\.sh|deploy/systemd/phone-lavalink-watch\.(service|timer)|deploy/termux/phone-lavalink/)'; then
+    PHONE_LAVALINK_WATCH_CHANGED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(scripts/phone-worker-watch\.sh|scripts/phone-worker-client\.py|deploy/systemd/phone-worker-watch\.(service|timer)|deploy/termux/phone-worker/)'; then
+    PHONE_WORKER_WATCH_CHANGED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/termux/phone-worker/'; then
+    PHONE_WORKER_SYNC_REQUIRED=1
+    CORE_WORKER_AUTOMATION_REQUIRED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^android/core-worker-app/'; then
+    CORE_WORKER_APK_CHANGED=1
+    CORE_WORKER_AUTOMATION_REQUIRED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(callkeeper_service\.py|callkeeper_runtime/|cogs/call_keeper\.py|deploy/systemd(/vps)?/callkeeper\.service)$'; then
+    CALLKEEPER_CHANGED=1
+  fi
 }
 
 fast_reload_modules_for_changed_files() {
@@ -1693,7 +2005,11 @@ rollback_after_failure() {
   fi
   ROLLBACK_DONE=1
 
-  logger -t "$LOG_TAG" "Erro fatal após update. Tentando rollback de $(short_commit "$REMOTE_COMMIT") para $(short_commit "$PREVIOUS_COMMIT")"
+  if (( LOCAL_CANDIDATE_MODE == 1 )); then
+    logger -t "$LOG_TAG" "Erro fatal no candidato local. Tentando rollback para $(short_commit "$PREVIOUS_COMMIT") antes de push GitHub"
+  else
+    logger -t "$LOG_TAG" "Erro fatal após update. Tentando rollback de $(short_commit "$REMOTE_COMMIT") para $(short_commit "$PREVIOUS_COMMIT")"
+  fi
 
   STAGE="rollback git"
   sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1
@@ -1701,9 +2017,15 @@ rollback_after_failure() {
   head_after_reset="$(sudo -u ubuntu -H git rev-parse HEAD 2>/dev/null || true)"
 
   if (( reset_status == 0 )) && [[ -n "$head_after_reset" && "$head_after_reset" == "$PREVIOUS_COMMIT" ]]; then
+    cleanup_local_candidate_new_files_after_reset
     rollback_git_status="OK: repositório voltou para $(short_commit "$PREVIOUS_COMMIT")"
-    write_dirty_marker "$REMOTE_COMMIT" "$PREVIOUS_COMMIT" "$FAILED_STAGE" "$failed_command"
-    ROLLBACK_STATUS="aplicado para $(short_commit "$PREVIOUS_COMMIT"); commit remoto marcado como sujo"
+    if (( LOCAL_CANDIDATE_MODE == 1 )); then
+      archive_local_candidate "failed"
+      ROLLBACK_STATUS="aplicado para $(short_commit "$PREVIOUS_COMMIT"); GitHub não foi alterado"
+    else
+      write_dirty_marker "$REMOTE_COMMIT" "$PREVIOUS_COMMIT" "$FAILED_STAGE" "$failed_command"
+      ROLLBACK_STATUS="aplicado para $(short_commit "$PREVIOUS_COMMIT"); commit remoto marcado como sujo"
+    fi
   else
     rollback_success=0
     rollback_git_status="falhou: reset=$reset_status head=$(short_commit "$head_after_reset") esperado=$(short_commit "$PREVIOUS_COMMIT")"
@@ -1768,9 +2090,15 @@ rollback_after_failure() {
   local duration title summary commit_dirty
   duration="$(human_duration "$SECONDS")"
   if (( rollback_success == 1 )); then
-    title="Rollback aplicado após erro fatal"
-    summary="O update falhou, mas o rollback voltou o repositório para o commit anterior e os serviços foram validados."
-    commit_dirty="sim"
+    if (( LOCAL_CANDIDATE_MODE == 1 )); then
+      title="Update revertido"
+      summary="O ZIP foi testado na VPS, falhou na validação e o bot voltou ao estado anterior. Nenhum commit foi enviado ao GitHub."
+      commit_dirty="não; GitHub não foi alterado"
+    else
+      title="Rollback aplicado após erro fatal"
+      summary="O update falhou, mas o rollback voltou o repositório para o commit anterior e os serviços foram validados."
+      commit_dirty="sim"
+    fi
   else
     title="Rollback falhou após erro fatal"
     summary="O update falhou e o rollback não conseguiu restaurar completamente o estado anterior. Verificação manual necessária."
@@ -1865,95 +2193,46 @@ trap 'on_error' ERR
 SECONDS=0
 cd "$REPO_DIR"
 
-STAGE="commit atual"
-CURRENT_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
-PREVIOUS_COMMIT="$CURRENT_COMMIT"
+if load_pending_local_candidate; then
+  logger -t "$LOG_TAG" "Candidato local recebido: $LOCAL_CANDIDATE_ID"
+  prepare_local_candidate_update
+else
+  STAGE="commit atual"
+  CURRENT_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
+  PREVIOUS_COMMIT="$CURRENT_COMMIT"
 
-STAGE="fetch remoto"
-sudo -u ubuntu -H git fetch origin "$BRANCH"
-REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse "origin/$BRANCH")"
-COMMIT_SUBJECT="$(sudo -u ubuntu -H git log -1 --pretty=%s "$REMOTE_COMMIT")"
-mark_update_timing "fetch"
+  STAGE="fetch remoto"
+  sudo -u ubuntu -H git fetch origin "$BRANCH"
+  REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse "origin/$BRANCH")"
+  COMMIT_SUBJECT="$(sudo -u ubuntu -H git log -1 --pretty=%s "$REMOTE_COMMIT")"
+  mark_update_timing "fetch"
 
-if [[ -f "$DIRTY_MARKER_FILE" ]]; then
-  MARKED_FAILED_COMMIT="$(marker_value FAILED_REMOTE_COMMIT)"
-  if [[ -n "$MARKED_FAILED_COMMIT" && "$REMOTE_COMMIT" == "$MARKED_FAILED_COMMIT" ]]; then
-    logger -t "$LOG_TAG" "Commit remoto $(short_commit "$REMOTE_COMMIT") continua marcado como sujo após rollback fatal; aguardando um novo commit no GitHub."
+  if [[ -f "$DIRTY_MARKER_FILE" ]]; then
+    MARKED_FAILED_COMMIT="$(marker_value FAILED_REMOTE_COMMIT)"
+    if [[ -n "$MARKED_FAILED_COMMIT" && "$REMOTE_COMMIT" == "$MARKED_FAILED_COMMIT" ]]; then
+      logger -t "$LOG_TAG" "Commit remoto $(short_commit "$REMOTE_COMMIT") continua marcado como sujo após rollback fatal; aguardando um novo commit no GitHub."
+      exit 0
+    fi
+    clear_dirty_marker
+  fi
+
+  if [[ "$CURRENT_COMMIT" == "$REMOTE_COMMIT" ]]; then
+    logger -t "$LOG_TAG" "Sem mudanças em $BRANCH"
     exit 0
   fi
-  clear_dirty_marker
-fi
 
-if [[ "$CURRENT_COMMIT" == "$REMOTE_COMMIT" ]]; then
-  logger -t "$LOG_TAG" "Sem mudanças em $BRANCH"
-  exit 0
-fi
+  SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
+  SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
 
-SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
-SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
+  CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --name-only "$CURRENT_COMMIT" "$REMOTE_COMMIT" || true)"
+  CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --numstat "$CURRENT_COMMIT" "$REMOTE_COMMIT" || true)"
+  mark_update_timing "diff"
 
-CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --name-only "$CURRENT_COMMIT" "$REMOTE_COMMIT" || true)"
-CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --numstat "$CURRENT_COMMIT" "$REMOTE_COMMIT" || true)"
-mark_update_timing "diff"
+  classify_changed_files
 
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity /sinuca/'; then
-  FRONT_CHANGED=1
-fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity /sinuca-server/'; then
-  BACK_CHANGED=1
-fi
-# Só reinicie/recarregue o bot quando o runtime dele mudou. Scripts do
-# updater, systemd auxiliar, worker/activity e arquivos de deploy não devem
-# forçar restart completo do bot principal.
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(bot\.py|webserver\.py|config\.py|db\.py|start\.sh|requirements\.txt|cogs/|music_system/|utility/)'; then
-  BOT_CHANGED=1
-fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/systemd(/vps)?/tts-bot\.service$'; then
-  BOT_CHANGED=1
-fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^requirements\.txt$'; then
-  REQUIREMENTS_CHANGED=1
-fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/systemd/(lavalink|tts-bot|tts-bot-alert@)\.service$'; then
-  AUDIO_SYSTEMD_CHANGED=1
-fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(alert\.sh|deploy/systemd(/vps)?/tts-bot-alert@\.service)$'; then
-  ALERT_CHANGED=1
-fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(deploy/systemd/vps/|deploy/sudoers\.d/|scripts/install-vps-systemd-units\.sh$)'; then
-  VPS_SYSTEMD_UNITS_CHANGED=1
-  AUDIO_SYSTEMD_CHANGED=1
-  CLEANUP_CHANGED=1
-  PHONE_LAVALINK_WATCH_CHANGED=1
-  PHONE_WORKER_WATCH_CHANGED=1
-fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(cleanup-audio-temp\.sh|deploy/systemd/cleanup-audio-temp\.(service|timer))$'; then
-  CLEANUP_CHANGED=1
-fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(scripts/phone-lavalink-watch\.sh|deploy/systemd/phone-lavalink-watch\.(service|timer)|deploy/termux/phone-lavalink/)'; then
-  PHONE_LAVALINK_WATCH_CHANGED=1
-fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(scripts/phone-worker-watch\.sh|scripts/phone-worker-client\.py|deploy/systemd/phone-worker-watch\.(service|timer)|deploy/termux/phone-worker/)'; then
-  PHONE_WORKER_WATCH_CHANGED=1
-fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/termux/phone-worker/'; then
-  PHONE_WORKER_SYNC_REQUIRED=1
-  CORE_WORKER_AUTOMATION_REQUIRED=1
-fi
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^android/core-worker-app/'; then
-  CORE_WORKER_APK_CHANGED=1
-  CORE_WORKER_AUTOMATION_REQUIRED=1
-fi
-# CallKeeper fica isolado de updates comuns. Não trate mudanças genéricas em
-# config.py/db.py/requirements.txt como motivo para tocar no serviço separado.
-# Mesmo com arquivos de CallKeeper alterados, deploy_callkeeper exige opt-in.
-if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(callkeeper_service\.py|callkeeper_runtime/|cogs/call_keeper\.py|deploy/systemd(/vps)?/callkeeper\.service)$'; then
-  CALLKEEPER_CHANGED=1
-fi
-
-if (( CALLKEEPER_CHANGED == 1 )) && [[ "${UPDATE_TOUCH_CALLKEEPER:-}" != "1" || "${CALLKEEPER_UPDATE_ALLOWED:-}" != "1" ]]; then
-  CHANGED_FILES="$(format_changed_files)"
-  body="Resumo: Update bloqueado antes do git pull porque contém arquivo protegido do CallKeeper.
+  if (( CALLKEEPER_CHANGED == 1 )) && [[ "${UPDATE_TOUCH_CALLKEEPER:-}" != "1" || "${CALLKEEPER_UPDATE_ALLOWED:-}" != "1" ]]; then
+    CHANGED_FILES="$(format_changed_files)"
+    body="Resumo: Update bloqueado antes do git pull porque contém arquivo protegido do CallKeeper.
 Branch: $BRANCH
 Commit: $(short_commit "$CURRENT_COMMIT") → $(short_commit "$REMOTE_COMMIT")
 Mudança: ${COMMIT_SUBJECT:-sem mensagem}
@@ -1961,23 +2240,24 @@ Arquivos:
 $CHANGED_FILES
 Ação sugerida: Remova arquivos do CallKeeper deste patch ou faça um patch CallKeeper explícito e isolado.
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
-  send_error "Update bloqueado: CallKeeper protegido" "$body"
-  exit 1
+    send_error "Update bloqueado: CallKeeper protegido" "$body"
+    exit 1
+  fi
+
+  STAGE="limpeza de artefatos gerados"
+  cleanup_known_generated_update_artifacts
+
+  STAGE="verificação de alterações locais"
+  clear_local_changes_marker_if_clean
+  fail_local_changes_before_pull
+
+  logger -t "$LOG_TAG" "Atualizando de $CURRENT_COMMIT para $REMOTE_COMMIT"
+
+  STAGE="git pull"
+  sudo -u ubuntu -H git pull --ff-only origin "$BRANCH"
+  UPDATE_APPLIED=1
+  mark_update_timing "pull"
 fi
-
-STAGE="limpeza de artefatos gerados"
-cleanup_known_generated_update_artifacts
-
-STAGE="verificação de alterações locais"
-clear_local_changes_marker_if_clean
-fail_local_changes_before_pull
-
-logger -t "$LOG_TAG" "Atualizando de $CURRENT_COMMIT para $REMOTE_COMMIT"
-
-STAGE="git pull"
-sudo -u ubuntu -H git pull --ff-only origin "$BRANCH"
-UPDATE_APPLIED=1
-mark_update_timing "pull"
 
 FAILED_STAGE=""
 
@@ -1994,6 +2274,8 @@ deploy_backend
 mark_update_timing "backend"
 run_core_worker_post_update_automation
 mark_update_timing "worker"
+
+publish_local_candidate_after_validation
 
 DURATION="$(human_duration "$SECONDS")"
 ROLLBACK_STATUS="não foi necessário"
@@ -2101,6 +2383,6 @@ BODY+=$'
 '"Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 logger -t "$LOG_TAG" "timings: ${UPDATER_TIMINGS:-sem etapas}; total=$DURATION"
 
-/home/ubuntu/bot/alert.sh "$ALERT_TYPE" "$ALERT_TITLE" "$BODY"
+/home/ubuntu/bot/alert.sh "$ALERT_TYPE" "$ALERT_TITLE" "$BODY" || true
 logger -t "$LOG_TAG" "$ALERT_TITLE"
 

@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 import zipfile
 import urllib.error
 import urllib.request
@@ -784,6 +785,63 @@ class BotLocal(commands.Bot):
             summary += f" · {binary_files} binário(s)"
         return {"entries": entries, "summary": summary, "total_added": total_added, "total_removed": total_removed, "binary_files": binary_files}
 
+    def _write_local_update_candidate_sync(
+        self,
+        *,
+        branch_name: str,
+        base_commit: str | None,
+        changed_files: list[str],
+        diff_stats: dict[str, object],
+        extracted_files: list[tuple[Path, Path]],
+        zip_name: str,
+    ) -> dict[str, object]:
+        """Grava um candidato local para o updater testar na VPS antes do push.
+
+        O GitHub só recebe commit depois que scripts/tts-bot-update.sh aplica o
+        candidato, valida reload/restart/health e confirma que o estado ficou bom.
+        """
+        candidate_root = self._update_staging_root / "candidates"
+        candidate_root.mkdir(parents=True, exist_ok=True)
+        candidate_id = f"zip-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        candidate_dir = candidate_root / candidate_id
+        files_dir = candidate_dir / "files"
+        files_dir.mkdir(parents=True, exist_ok=False)
+
+        written_files: list[str] = []
+        for extracted_path, rel_path in extracted_files:
+            rel_posix = rel_path.as_posix()
+            if rel_posix not in changed_files:
+                continue
+            if self._zip_update_is_callkeeper_protected_path(rel_path):
+                raise RuntimeError(f"Arquivo protegido do CallKeeper não pode ser alterado pelo updater comum: {rel_posix}")
+            target = files_dir / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(extracted_path, target)
+            written_files.append(rel_posix)
+
+        if not written_files:
+            shutil.rmtree(candidate_dir, ignore_errors=True)
+            raise RuntimeError("O candidato local não trouxe nenhum arquivo alterado.")
+
+        manifest = {
+            "id": candidate_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "branch": branch_name,
+            "base_commit": base_commit,
+            "source": "discord_zip",
+            "zip_name": zip_name,
+            "commit_message": f"auto update from discord zip ({len(changed_files)} arquivo(s))",
+            "changed_files": changed_files,
+            "diff_stats": diff_stats,
+        }
+        (candidate_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        pending_path = candidate_root / "pending.json"
+        tmp_pending = candidate_root / f"pending.{candidate_id}.tmp"
+        tmp_pending.write_text(json.dumps({"candidate_dir": str(candidate_dir), "id": candidate_id}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_pending, pending_path)
+        return {"candidate_id": candidate_id, "candidate_dir": str(candidate_dir), "pending_path": str(pending_path)}
+
     def _trigger_updater_service_sync(self) -> tuple[bool, str]:
         service = Path("/etc/systemd/system/tts-bot-updater.service")
         if not service.exists():
@@ -1074,20 +1132,18 @@ class BotLocal(commands.Bot):
                 raise RuntimeError("Patch bloqueado: arquivos do CallKeeper são protegidos pelo updater comum: " + ", ".join(protected_changed[:5]))
             mark("diff_ms")
 
-            commit_message = f"auto update from discord zip ({len(changed_files)} arquivo(s))"
-            commit_result = self._run_cmd(["git", "commit", "-m", commit_message], clone_dir, env=env)
-            if commit_result.returncode != 0:
-                err = (commit_result.stderr or commit_result.stdout or "").strip()
-                raise RuntimeError(f"Falha ao criar commit do update automático. {err}")
+            base_result = self._run_cmd(["git", "rev-parse", f"origin/{branch_name}"], clone_dir, env=env)
+            base_commit = (base_result.stdout or "").strip() if base_result.returncode == 0 else None
 
-            push_result = self._run_cmd(["git", "push", "origin", branch_name], clone_dir, env=env)
-            if push_result.returncode != 0:
-                err = (push_result.stderr or push_result.stdout or "").strip()
-                raise RuntimeError(f"Falha ao enviar update para o GitHub. {err}")
-            mark("commit_push_ms")
-
-            hash_result = self._run_cmd(["git", "rev-parse", "HEAD"], clone_dir, env=env)
-            commit_hash = (hash_result.stdout or "").strip() if hash_result.returncode == 0 else None
+            candidate = self._write_local_update_candidate_sync(
+                branch_name=branch_name,
+                base_commit=base_commit,
+                changed_files=changed_files,
+                diff_stats=diff_stats,
+                extracted_files=extracted_files,
+                zip_name=zip_path.name,
+            )
+            mark("candidate_write_ms")
 
             triggered_update, trigger_detail = self._trigger_updater_service_sync()
             mark("trigger_updater_ms")
@@ -1096,7 +1152,9 @@ class BotLocal(commands.Bot):
             return {
                 "changed_files": changed_files,
                 "diff_stats": diff_stats,
-                "commit_hash": commit_hash,
+                "commit_hash": None,
+                "candidate_id": candidate.get("candidate_id"),
+                "candidate_dir": candidate.get("candidate_dir"),
                 "triggered_update": triggered_update,
                 "trigger_detail": trigger_detail,
                 "branch": branch_name,
@@ -1219,14 +1277,14 @@ class BotLocal(commands.Bot):
                 if remaining:
                     preview_files += f"\n+{remaining} arquivo(s) restante(s)"
 
-                short_hash = str(commit_hash)[:7] if commit_hash else "desconhecido"
+                candidate_id = str(result.get("candidate_id") or "").strip()
                 trigger_detail = str(result.get("trigger_detail") or "").strip()
                 if triggered_update:
-                    apply_line = "Updater: iniciado"
+                    apply_line = "Aplicação: iniciada na VPS"
                 elif trigger_detail:
-                    apply_line = "Updater: timer automático"
+                    apply_line = "Aplicação: aguardando updater automático"
                 else:
-                    apply_line = "Updater: aguardando"
+                    apply_line = "Aplicação: aguardando"
 
                 timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
                 total_ms = int(timings.get("total_ms") or 0) if isinstance(timings, dict) else 0
@@ -1234,11 +1292,12 @@ class BotLocal(commands.Bot):
                 await self._edit_zip_update_message(
                     message,
                     status_message,
-                    "✅ Update enviado",
+                    "✅ Update em aplicação",
                     (
-                        f"{branch} · commit **{short_hash}**\n"
+                        f"{branch} · candidato **{candidate_id[:16] or 'local'}**\n"
                         f"{len(changed_files)} arquivo(s) alterado(s) · **{diff_summary}**\n"
-                        f"{apply_line}{time_line}\n\n"
+                        f"{apply_line}{time_line}\n"
+                        "GitHub só será atualizado depois da validação local.\n\n"
                         f"## Arquivos alterados\n{preview_files}"
                     ),
                     discord.Color.green(),
