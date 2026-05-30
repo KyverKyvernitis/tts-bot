@@ -434,7 +434,10 @@ class _MainSelect(discord.ui.Select):
         value = str(self.values[0])
         self.panel.notice = ""
         if value == "message":
-            await interaction.response.send_modal(WelcomeEntryModal(self.panel))
+            self.panel.go_to("message")
+            self.panel.notice = ""
+            self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
+            await interaction.response.edit_message(view=self.panel)
             return
         if value == "settings":
             await interaction.response.send_modal(WelcomeSettingsModal(self.panel))
@@ -452,6 +455,7 @@ class _MessageActionSelect(discord.ui.Select):
         mode = str(panel.config.get("render_mode") or "components_v2")
         if mode == "embed":
             options = [
+                discord.SelectOption(label="Trocar modo", value="change_mode", emoji="🎨", description="Components V2, Embed ou mensagem normal"),
                 discord.SelectOption(label="Mensagem acima", value="embed_content", emoji="📝", description="Texto normal antes do embed"),
                 discord.SelectOption(label="Author", value="embed_author", emoji="👤", description="Nome, ícone e link do author"),
                 discord.SelectOption(label="Título e descrição", value="embed_text", emoji="🏷️", description="Título, descrição, link e cor"),
@@ -463,6 +467,7 @@ class _MessageActionSelect(discord.ui.Select):
             placeholder = "O que deseja editar no embed?"
         elif mode == "normal":
             options = [
+                discord.SelectOption(label="Trocar modo", value="change_mode", emoji="🎨", description="Components V2, Embed ou mensagem normal"),
                 discord.SelectOption(label="Editar texto", value="normal_edit", emoji="✏️", description="Mensagem normal em texto comum"),
                 discord.SelectOption(label="Variações da mensagem", value="variants", emoji="🎲", description="Até 3 mensagens com chance própria"),
                 discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
@@ -471,6 +476,7 @@ class _MessageActionSelect(discord.ui.Select):
             placeholder = "O que deseja editar no texto?"
         else:
             options = [
+                discord.SelectOption(label="Trocar modo", value="change_mode", emoji="🎨", description="Components V2, Embed ou mensagem normal"),
                 discord.SelectOption(label="Editar texto V2", value="v2_edit", emoji="✏️", description="Título, texto principal e texto final"),
                 discord.SelectOption(label="Visual e imagem V2", value="v2_visual", emoji="🖼️", description="Estilo, cor e imagem do container"),
                 discord.SelectOption(label="Variações da mensagem", value="variants", emoji="🎲", description="Até 3 mensagens com chance própria"),
@@ -482,6 +488,9 @@ class _MessageActionSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         action = str(self.values[0])
+        if action == "change_mode":
+            await interaction.response.send_modal(WelcomeModeModal(self.panel))
+            return
         if action == "v2_edit":
             await interaction.response.send_modal(WelcomeMessageModal(self.panel))
             return
@@ -1480,14 +1489,14 @@ class WelcomeVariantVisualModal(discord.ui.Modal):
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
 
-class WelcomeEntryModal(discord.ui.Modal):
+
+class WelcomeModeModal(discord.ui.Modal):
     def __init__(self, panel: "WelcomeAdminView"):
-        super().__init__(title="Boas-vindas")
+        super().__init__(title="Modo da mensagem")
         self.panel = panel
         self.mode_group = None
-        self.action_select = None
         current_mode = str(panel.config.get("render_mode") or "components_v2")
-        if _advanced_modal_supported("Label", "RadioGroup", "Select"):
+        if _advanced_modal_supported("Label", "RadioGroup"):
             self.mode_group = discord.ui.RadioGroup(required=True)
             for key, label in RENDER_MODE_LABELS.items():
                 self.mode_group.add_option(
@@ -1496,22 +1505,7 @@ class WelcomeEntryModal(discord.ui.Modal):
                     description=RENDER_MODE_DESCRIPTIONS.get(key, ""),
                     default=current_mode == key,
                 )
-            self.action_select = discord.ui.Select(
-                placeholder="O que você quer abrir?",
-                min_values=1,
-                max_values=1,
-                options=[
-                    discord.SelectOption(label="Texto principal", value="main", emoji="✏️", description="Título, texto ou descrição"),
-                    discord.SelectOption(label="Mensagem acima", value="above", emoji="📝", description="Parte do modo Embed"),
-                    discord.SelectOption(label="Author", value="author", emoji="👤", description="Parte do modo Embed"),
-                    discord.SelectOption(label="Imagens / visual", value="images", emoji="🖼️", description="Imagens do embed ou visual V2"),
-                    discord.SelectOption(label="Footer / texto final", value="footer", emoji="📌", description="Footer do embed ou texto final V2"),
-                    discord.SelectOption(label="Variações da mensagem", value="variants", emoji="🎲", description="Até 3 variações com peso"),
-                    discord.SelectOption(label="Escolher preset", value="presets", emoji="✨", description="Usar uma base pronta"),
-                ],
-            )
-            self.add_item(discord.ui.Label(text="Modo do editor", component=self.mode_group))
-            self.add_item(discord.ui.Label(text="O que editar", component=self.action_select))
+            self.add_item(discord.ui.Label(text="Como a mensagem deve aparecer", component=self.mode_group))
         else:
             self.mode_input = discord.ui.TextInput(
                 label="Modo: components_v2, embed ou normal",
@@ -1519,56 +1513,20 @@ class WelcomeEntryModal(discord.ui.Modal):
                 max_length=20,
                 required=True,
             )
-            self.action_input = discord.ui.TextInput(
-                label="Ação: main, above, author, images, footer, variants ou presets",
-                default="main",
-                max_length=20,
-                required=True,
-            )
             self.add_item(self.mode_input)
-            self.add_item(self.action_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         if self.mode_group is not None:
             mode = _modal_value(self.mode_group, str(self.panel.config.get("render_mode") or "components_v2"))
-            action = _modal_value(self.action_select, "main")
         else:
             mode = str(self.mode_input.value or "components_v2").strip().lower()
-            action = str(self.action_input.value or "main").strip().lower()
         if mode not in RENDER_MODE_LABELS:
             mode = str(self.panel.config.get("render_mode") or "components_v2")
-
         cfg = self.panel.cog._switch_public_mode(self.panel.config, mode)
-        await self.panel.save_config(cfg, f"Editor em **{RENDER_MODE_LABELS.get(mode, 'Components V2')}**.")
-
-        if action == "variants":
-            self.panel.go_to("variants")
-        elif action == "presets":
-            self.panel.go_to("presets")
-        elif mode == "embed":
-            self.panel.go_to("embed_editor")
-            labels = {
-                "above": "Mensagem acima",
-                "author": "Author",
-                "images": "Imagens",
-                "footer": "Footer do embed",
-                "main": "Título e descrição",
-            }
-            self.panel.notice = f"Escolha **{labels.get(action, 'Título e descrição')}** no editor de embed."
-        elif mode == "components_v2":
-            if action == "images":
-                self.panel.go_to("visual")
-                self.panel.notice = "Abra **Editar visual** para ajustar imagem e cor V2."
-            else:
-                self.panel.go_to("message")
-                self.panel.notice = "Abra **Editar texto V2** para ajustar título, texto e texto final."
-        else:
-            self.panel.go_to("message")
-            self.panel.notice = "Abra **Editar texto** para ajustar a mensagem normal."
-
+        await self.panel.save_config(cfg, f"Modo ajustado para **{RENDER_MODE_LABELS.get(mode, 'Components V2')}**.")
+        self.panel.go_to("message")
         self.panel._rebuild(member=interaction.user if isinstance(interaction.user, discord.Member) else None)
         await interaction.response.edit_message(view=self.panel)
-
 
 class WelcomeSettingsModal(discord.ui.Modal):
     def __init__(self, panel: "WelcomeAdminView"):
@@ -1584,16 +1542,16 @@ class WelcomeSettingsModal(discord.ui.Modal):
             self.status_group.add_option(label="Boas-vindas desligadas", value="off", description="Pausar as mensagens", default=not enabled)
             self.flags_group = discord.ui.CheckboxGroup(min_values=0, max_values=1, required=False)
             self.flags_group.add_option(
-                label="Apagar boas-vindas se o membro sair",
+                label="Apagar se sair em até 1 dia",
                 value="delete_on_leave",
-                description="Sempre em até 1 dia",
+                description="Só apaga se o membro sair nesse período",
                 default=delete_on_leave,
             )
             self.add_item(discord.ui.Label(text="Status", component=self.status_group))
             self.add_item(discord.ui.Label(text="Opções", component=self.flags_group))
         else:
             self.status_input = discord.ui.TextInput(label="Status: ligado ou desligado", default="ligado" if enabled else "desligado", max_length=20, required=True)
-            self.delete_input = discord.ui.TextInput(label="Apagar ao sair? sim ou não", default="sim" if delete_on_leave else "não", max_length=10, required=True)
+            self.delete_input = discord.ui.TextInput(label="Apagar se sair em até 1 dia? sim ou não", default="sim" if delete_on_leave else "não", max_length=10, required=True)
             self.add_item(self.status_input)
             self.add_item(self.delete_input)
 
@@ -2708,7 +2666,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         mode = RENDER_MODE_LABELS.get(str(cfg.get("render_mode") or "components_v2"), "Components V2")
         send_label = "envio pelo webhook" if webhook_cfg.get("enabled") else "envio pelo bot"
         dm_label = "DM ligada" if bool(cfg.get("dm_enabled", False)) else "DM desligada"
-        delete_label = "apaga ao sair" if bool(cfg.get("delete_on_leave_enabled", False)) else "não apaga ao sair"
+        delete_label = "apaga se sair em até 1 dia" if bool(cfg.get("delete_on_leave_enabled", False)) else "mantém se sair"
         emoji_label = "emojis coloridos" if bool(cfg.get("decorative_emoji_enabled", False)) else "emojis normais"
         role_label = f"{role_count} cargo{'s' if role_count != 1 else ''}" if role_count else "sem cargos"
         rule_label = f"{rules_count} regra{'s' if rules_count != 1 else ''} especial{'is' if rules_count != 1 else ''}" if rules_count else "sem regras especiais"
@@ -3269,7 +3227,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
 
     def _build_status(self):
         channel_id = int(self.config.get("channel_id") or 0)
-        delete_label = "apaga se o membro sair em até 1 dia" if bool(self.config.get("delete_on_leave_enabled", False)) else "mantém a mensagem"
+        delete_label = "apaga só se sair em até 1 dia" if bool(self.config.get("delete_on_leave_enabled", False)) else "mantém a mensagem"
         lines = [
             "# ⚙️ Configurações",
             "Ligue, pause e escolha o que acontece quando alguém sair.",
