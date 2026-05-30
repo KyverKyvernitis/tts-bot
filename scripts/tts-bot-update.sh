@@ -1201,6 +1201,8 @@ load_pending_rollback_request() {
   ROLLBACK_REQUEST_BRANCH="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" branch 2>/dev/null || true)"
   ROLLBACK_EXPECTED_HEAD="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" expected_head 2>/dev/null || true)"
   ROLLBACK_REVERT_COMMIT="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" revert_commit 2>/dev/null || true)"
+  ROLLBACK_EXPECTED_HEAD="$(printf '%s' "$ROLLBACK_EXPECTED_HEAD" | tr -d '[:space:]')"
+  ROLLBACK_REVERT_COMMIT="$(printf '%s' "$ROLLBACK_REVERT_COMMIT" | tr -d '[:space:]')"
   ROLLBACK_MESSAGE_CHANNEL_ID="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" message.channel_id 2>/dev/null || true)"
   ROLLBACK_MESSAGE_ID="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" message.message_id 2>/dev/null || true)"
   ROLLBACK_SOURCE_AUTHOR_ID="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" source_author_id 2>/dev/null || true)"
@@ -1272,7 +1274,15 @@ prepare_rollback_request_update() {
   zip_progress_done_and_publish "Estado validado" "Aplicando reversão"
 
   STAGE="reversão local"
-  git -C "$REPO_DIR" rev-parse --verify "$ROLLBACK_REVERT_COMMIT^{commit}" >/dev/null
+  if ! git -C "$REPO_DIR" rev-parse --verify "$ROLLBACK_REVERT_COMMIT^{commit}" >/dev/null 2>&1; then
+    local fail_title="Falha ao reverter"
+    [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]] && fail_title="Falha ao reaplicar"
+    local retry_control
+    retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "Não encontrei o commit de destino. Nenhuma alteração foi aplicada." "$retry_control"
+    archive_rollback_request "failed"
+    exit 1
+  fi
   if ! sudo -u ubuntu -H git revert --no-commit "$ROLLBACK_REVERT_COMMIT"; then
     sudo -u ubuntu -H git revert --abort >/dev/null 2>&1 || true
     sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
@@ -2836,7 +2846,11 @@ if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
   process_detail="$(zip_progress_process_detail)"
   zip_progress_done "Arquivos validados"
   if [[ -n "${process_detail//[[:space:]]/}" ]]; then
-    zip_progress_publish "Atualizando processos" "$process_detail"
+    if [[ "$process_detail" == *,* ]]; then
+      zip_progress_publish "Reiniciando processos: $process_detail"
+    else
+      zip_progress_publish "Reiniciando processo: $process_detail"
+    fi
   else
     zip_progress_publish "Validando aplicação"
   fi
@@ -2855,7 +2869,7 @@ mark_update_timing "worker"
 if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
   process_detail="$(zip_progress_process_detail)"
   if [[ -n "${process_detail//[[:space:]]/}" ]]; then
-    zip_progress_done "Processos atualizados: **$process_detail**"
+    zip_progress_done "Processos reiniciados: **$process_detail**"
   else
     zip_progress_done "Aplicação validada"
   fi

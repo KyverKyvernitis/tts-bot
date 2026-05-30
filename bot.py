@@ -1501,8 +1501,25 @@ class BotLocal(commands.Bot):
         mode = "redo" if str(mode).lower().strip() == "redo" else "rollback"
         branch = str(record.get("branch") or "main")
         channel_id, message_id = self._zip_update_latest_message_ref(interaction, record)
+        update_from = str(record.get("update_from") or "").strip()
+        update_to = str(record.get("update_to") or "").strip()
+        rollback_commit = str(record.get("rollback_commit") or "").strip()
+        redo_commit = str(record.get("redo_commit") or "").strip()
         expected_head = str(record.get("expected_head") or "").strip()
         revert_commit = str(record.get("revert_commit") or "").strip()
+
+        # O controle usa `git revert`, então o alvo técnico da ação é o commit
+        # que precisa ser revertido, não o commit para onde queremos "voltar".
+        # Para ◀️, o HEAD esperado é o update aplicado e o commit revertido é
+        # esse próprio update. Para ▶️, o HEAD esperado é o commit de rollback e
+        # o commit revertido é o rollback. Mantemos fallback explícito para
+        # estados antigos/legados já salvos em disco.
+        if mode == "rollback":
+            expected_head = expected_head or update_to or revert_commit
+            revert_commit = revert_commit or update_to or expected_head
+        else:
+            expected_head = expected_head or rollback_commit or revert_commit or update_to
+            revert_commit = redo_commit or revert_commit or rollback_commit or expected_head
 
         if not expected_head or not revert_commit or not channel_id or not message_id:
             try:
@@ -1539,6 +1556,10 @@ class BotLocal(commands.Bot):
             "branch": branch,
             "expected_head": expected_head,
             "revert_commit": revert_commit,
+            "update_from": update_from,
+            "update_to": update_to,
+            "rollback_commit": rollback_commit,
+            "redo_commit": redo_commit,
             "message": {"channel_id": channel_id, "message_id": message_id},
             "source_author_id": str(record.get("source_author_id") or ""),
             "requested_by": str(getattr(interaction.user, "id", "") or ""),
