@@ -90,6 +90,7 @@ logging.getLogger("discord.voice_client").setLevel(logging.WARNING)
 logging.getLogger("discord.player").setLevel(logging.WARNING)
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 import config
@@ -565,6 +566,35 @@ class BotLocal(commands.Bot):
         except Exception:
             BOOT_LOG.warning("[SYNC] falha ao salvar marcador de limpeza slash", exc_info=True)
 
+    def _register_temporary_updater_sync_test_command(self) -> None:
+        """Registra um slash temporário para testar o sync inteligente.
+
+        Este comando existe só para validar o fluxo de manifest/sync e deve sair
+        no rollback deste patch. Mantém a resposta discreta/ephemeral para não
+        poluir os servidores durante o teste.
+        """
+        command_name = "updater_teste"
+        for command in self.tree.get_commands():
+            if getattr(command, "name", None) == command_name:
+                return
+
+        @app_commands.command(
+            name=command_name,
+            description="Comando temporário para testar o sync do updater",
+        )
+        async def updater_teste(interaction: discord.Interaction):
+            message = "✅ Comando temporário carregado."
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(message, ephemeral=True)
+                else:
+                    await interaction.response.send_message(message, ephemeral=True)
+            except Exception:
+                BOOT_LOG.warning("[SYNC] falha ao responder /updater_teste", exc_info=True)
+
+        self.tree.add_command(updater_teste)
+        BOOT_LOG.info("[SYNC] comando temporário registrado: /%s", command_name)
+
     async def _smart_sync_app_commands(self, guild_ids: set[int], *, should_sync: bool, allow_global_sync: bool, clear_globals_allowed: bool) -> None:
         current_manifest = self._build_app_commands_manifest(guild_ids)
         previous_manifest = self._load_previous_app_commands_manifest()
@@ -687,6 +717,7 @@ class BotLocal(commands.Bot):
 
         print("Carregando cogs...")
         await self._load_cogs_safely()
+        self._register_temporary_updater_sync_test_command()
 
         should_sync = _env_truthy("SYNC_SLASH_COMMANDS")
         allow_global_sync = _env_truthy("SYNC_GLOBAL_SLASH_COMMANDS")
