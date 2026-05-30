@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import logging.handlers
@@ -644,6 +645,7 @@ class BotLocal(commands.Bot):
         control: dict[str, object] | None = None,
     ) -> discord.ui.LayoutView:
         view = discord.ui.LayoutView(timeout=None)
+        title = self._zip_update_normalize_title(title, "")
         text = f"# {title}\n{description.strip()}".strip()
         if len(text) > 3900:
             text = text[:3897].rstrip() + "..."
@@ -796,6 +798,39 @@ class BotLocal(commands.Bot):
         if status in {"applying", "pending"}:
             return discord.Color.blurple()
         return discord.Color.blurple()
+
+    def _zip_update_normalize_title(self, title: str, status: str = "") -> str:
+        title = str(title or "").strip() or "Update"
+        normalized = re.sub(r"\s+", " ", title).strip()
+        lowered = normalized.casefold()
+        status = str(status or "").lower().strip()
+        if lowered == "update aplicado":
+            return "✅ Update aplicado"
+        if status in {"success", "ok", "done"} and lowered == "update":
+            return "✅ Update aplicado"
+        return title
+
+    def _zip_update_latest_message_ref(self, interaction: discord.Interaction, record: dict[str, object]) -> tuple[str, str]:
+        channel_id = str(record.get("channel_id") or "").strip()
+        message_id = str(record.get("message_id") or "").strip()
+        msg = getattr(interaction, "message", None)
+        if msg is not None:
+            if not channel_id:
+                channel_id = str(getattr(getattr(msg, "channel", None), "id", "") or "")
+            if not message_id:
+                message_id = str(getattr(msg, "id", "") or "")
+        return channel_id, message_id
+
+    def _zip_update_restore_record_message_view(self, record: dict[str, object]) -> discord.ui.LayoutView:
+        title = self._zip_update_normalize_title(str(record.get("title") or "Update aplicado"), str(record.get("status") or "success"))
+        description = str(record.get("description") or "")
+        status = str(record.get("status") or "success")
+        return self._make_zip_update_view(
+            title,
+            description,
+            self._zip_update_status_color(status),
+            control=self._zip_update_control_for_record(record),
+        )
 
     def _git_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -1336,6 +1371,7 @@ class BotLocal(commands.Bot):
         title = str(payload.get("title") or "Update").strip() or "Update"
         description = str(payload.get("description") or "").strip()
         status = str(payload.get("status") or "info").lower().strip()
+        title = self._zip_update_normalize_title(title, status)
         color = self._zip_update_status_color(status)
         control_raw = payload.get("control") if isinstance(payload, dict) else None
         control: dict[str, object] | None = None
@@ -1413,52 +1449,125 @@ class BotLocal(commands.Bot):
         await self._start_zip_update_rollback_flow(interaction, record, requested_mode)
 
     async def _start_zip_update_rollback_flow(self, interaction: discord.Interaction, record: dict[str, object], mode: str) -> None:
-        title = "<a:areia:1496606578395189473> Reaplicando update" if mode == "redo" else "<a:areia:1496606578395189473> Revertendo update"
+        mode = "redo" if str(mode).lower().strip() == "redo" else "rollback"
         branch = str(record.get("branch") or "main")
-        description = f"{branch} · validação local em andamento.\nAplicando e validando..."
-        try:
-            msg = interaction.message
-            if msg is not None:
-                view = self._make_zip_update_view(title, description, discord.Color.gold(), control=self._zip_update_control_for_record(record, disabled=True))
-                await msg.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
-        except Exception:
-            UPDATE_LOG.warning("falha ao colocar update em estado de processamento", exc_info=True)
+        channel_id, message_id = self._zip_update_latest_message_ref(interaction, record)
+        expected_head = str(record.get("expected_head") or "").strip()
+        revert_commit = str(record.get("revert_commit") or "").strip()
+
+        if not expected_head or not revert_commit or not channel_id or not message_id:
+            try:
+                await interaction.followup.send("Não encontrei os dados necessários para essa ação.", ephemeral=True)
+            except Exception:
+                pass
+            return
 
         request_root = self._update_staging_root / "candidates" / "rollback"
-        request_root.mkdir(parents=True, exist_ok=True)
         pending = request_root / "pending.json"
         active = request_root / "active.json"
+        request_root.mkdir(parents=True, exist_ok=True)
         if pending.exists() or active.exists():
             try:
                 await interaction.followup.send("Já existe uma ação de update em andamento.", ephemeral=True)
             except Exception:
                 pass
             return
+
         request_id = f"{mode}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
         payload = {
             "id": request_id,
             "mode": mode,
             "branch": branch,
-            "expected_head": str(record.get("expected_head") or ""),
-            "revert_commit": str(record.get("revert_commit") or ""),
-            "message": {"channel_id": str(record.get("channel_id") or ""), "message_id": str(record.get("message_id") or "")},
+            "expected_head": expected_head,
+            "revert_commit": revert_commit,
+            "message": {"channel_id": channel_id, "message_id": message_id},
             "source_author_id": str(record.get("source_author_id") or ""),
             "requested_by": str(getattr(interaction.user, "id", "") or ""),
             "previous_record": record,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        if not payload["expected_head"] or not payload["revert_commit"]:
+
+        tmp = pending.with_name(f"pending.{request_id}.tmp")
+        try:
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, pending)
+            # Confirma que o pedido existe antes de mexer visualmente na mensagem.
+            saved = json.loads(pending.read_text(encoding="utf-8"))
+            if str(saved.get("id") or "") != request_id:
+                raise RuntimeError("pedido de rollback não foi salvo corretamente")
+        except Exception:
+            with contextlib.suppress(Exception):
+                tmp.unlink()
+            UPDATE_LOG.warning("falha ao salvar pedido de rollback/redo", exc_info=True)
             try:
-                await interaction.followup.send("Não encontrei os dados necessários para essa ação.", ephemeral=True)
+                await interaction.followup.send("Não consegui iniciar a ação agora.", ephemeral=True)
             except Exception:
                 pass
             return
-        tmp = pending.with_name(f"pending.{request_id}.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, pending)
-        triggered, detail = self._trigger_updater_service_sync()
+
+        title = "<a:areia:1496606578395189473> Reaplicando update..." if mode == "redo" else "<a:areia:1496606578395189473> Revertendo update..."
+        description = "<a:loading:1510065277868445796> **Preparando validação local**"
+        processing_record = dict(record)
+        processing_record["status"] = "processing"
+        processing_record["processing_mode"] = mode
+        processing_record["processing_request_id"] = request_id
+        processing_record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        state = self._zip_update_state_load()
+        state["latest"] = processing_record
+        state["active_request"] = payload
+        self._zip_update_state_save(state)
+
+        try:
+            msg = interaction.message
+            if msg is not None:
+                view = self._make_zip_update_view(
+                    title,
+                    description,
+                    discord.Color.gold(),
+                    control=self._zip_update_control_for_record(record, disabled=True),
+                )
+                await msg.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+        except Exception:
+            UPDATE_LOG.warning("falha ao colocar update em estado de processamento", exc_info=True)
+
+        triggered, detail = await asyncio.to_thread(self._trigger_updater_service_sync)
         if not triggered:
             UPDATE_LOG.warning("rollback/redo aguardando timer do updater: %s", detail)
+
+        async def _rollback_start_watchdog() -> None:
+            await asyncio.sleep(90)
+            try:
+                # Se o pedido ainda existir igual após um tempo razoável, o updater não consumiu.
+                for path in (pending, active):
+                    if not path.exists():
+                        continue
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    if str(data.get("id") or "") != request_id:
+                        continue
+                    msg = await self._zip_update_fetch_message(int(channel_id), int(message_id))
+                    if msg is not None:
+                        fail_title = "Falha ao reaplicar" if mode == "redo" else "Falha ao reverter"
+                        fail_desc = "A ação não avançou. O estado atual foi mantido."
+                        await msg.edit(
+                            view=self._make_zip_update_view(
+                                fail_title,
+                                fail_desc,
+                                discord.Color.red(),
+                                control=self._zip_update_control_for_record(record),
+                            ),
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                    # Restaura o estado para permitir nova tentativa manual, mas não apaga o arquivo;
+                    # o updater ainda poderá arquivar/limpar no próximo ciclo se necessário.
+                    state = self._zip_update_state_load()
+                    state.pop("active_request", None)
+                    state["latest"] = record
+                    self._zip_update_state_save(state)
+                    return
+            except Exception:
+                UPDATE_LOG.warning("falha no watchdog de rollback/redo", exc_info=True)
+
+        asyncio.create_task(_rollback_start_watchdog())
 
     async def on_interaction(self, interaction: discord.Interaction):
         try:

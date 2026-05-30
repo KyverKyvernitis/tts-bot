@@ -1188,15 +1188,16 @@ archive_rollback_request() {
 rollback_control_json() {
   local mode="${1:-rollback}"
   local head_commit="${2:-}"
-  python3 - "$mode" "$head_commit" "$BRANCH" "$ROLLBACK_SOURCE_AUTHOR_ID" <<'PYCTRL'
-import json, sys, os
-mode, head, branch, author = sys.argv[1:5]
+  local revert_commit="${3:-$head_commit}"
+  python3 - "$mode" "$head_commit" "$revert_commit" "$BRANCH" "$ROLLBACK_SOURCE_AUTHOR_ID" <<'PYCTRL'
+import json, sys
+mode, head, revert, branch, author = sys.argv[1:6]
 print(json.dumps({
     "enabled": True,
     "mode": mode,
     "branch": branch or "main",
     "expected_head": head,
-    "revert_commit": head,
+    "revert_commit": revert or head,
     "head_commit": head,
     "source_author_id": author,
 }, ensure_ascii=False))
@@ -1216,7 +1217,9 @@ prepare_rollback_request_update() {
   mark_update_timing "fetch"
 
   if [[ "$CURRENT_COMMIT" != "$REMOTE_COMMIT" || "$CURRENT_COMMIT" != "$ROLLBACK_EXPECTED_HEAD" ]]; then
-    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Reversão indisponível" "O estado atual mudou. Nenhuma alteração foi aplicada."
+    local unavailable_title="Reversão indisponível"
+    [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]] && unavailable_title="Reaplicação indisponível"
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$unavailable_title" "O estado atual mudou. Nenhuma alteração foi aplicada."
     archive_rollback_request "failed"
     exit 1
   fi
@@ -1232,7 +1235,11 @@ prepare_rollback_request_update() {
   if ! sudo -u ubuntu -H git revert --no-commit "$ROLLBACK_REVERT_COMMIT"; then
     sudo -u ubuntu -H git revert --abort >/dev/null 2>&1 || true
     sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
-    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Falha ao reverter" "O estado local foi restaurado. Nada foi publicado no GitHub."
+    local fail_title="Falha ao reverter"
+    [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]] && fail_title="Falha ao reaplicar"
+    local retry_control
+    retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "O estado local foi restaurado. Nada foi publicado no GitHub." "$retry_control"
     archive_rollback_request "failed"
     exit 1
   fi
@@ -1241,14 +1248,18 @@ prepare_rollback_request_update() {
   CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --cached --numstat || true)"
   if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
     sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
-    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "warn" "Nenhuma alteração" "O estado já estava equivalente."
+    local retry_control
+    retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "warn" "Nenhuma alteração" "O estado já estava equivalente." "$retry_control"
     archive_rollback_request "done"
     exit 0
   fi
   classify_changed_files
   if (( CALLKEEPER_CHANGED == 1 )) && [[ "${UPDATE_TOUCH_CALLKEEPER:-}" != "1" || "${CALLKEEPER_UPDATE_ALLOWED:-}" != "1" ]]; then
     sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
-    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Update bloqueado" "CallKeeper é protegido e não foi tocado."
+    local retry_control
+    retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Update bloqueado" "CallKeeper é protegido e não foi tocado." "$retry_control"
     archive_rollback_request "failed"
     exit 1
   fi
@@ -2683,7 +2694,13 @@ ${LAST_ERROR_STDERR:-nenhuma saída adicional capturada}
 ${LAST_ERROR_LOGS:-nenhum log adicional encontrado}
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   if (( ROLLBACK_CONTROL_MODE == 1 )); then
-    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Falha no update" "O estado local foi restaurado quando possível. Verifique o webhook/log interno." || true
+    fail_title="Falha ao reverter"
+    [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]] && fail_title="Falha ao reaplicar"
+    retry_control=""
+    if (( UPDATE_APPLIED == 0 )); then
+      retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
+    fi
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "O estado local foi mantido quando possível. Verifique o webhook/log interno." "$retry_control" || true
     archive_rollback_request "failed"
   else
     notify_zip_status_message "error" "Falha no update" "O updater falhou antes de concluir a finalização. Verifique o webhook/log interno." || true
