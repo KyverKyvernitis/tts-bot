@@ -685,6 +685,55 @@ class BotLocal(commands.Bot):
         except Exception:
             logging.getLogger("zip_update").warning("falha ao salvar estado de rollback do updater", exc_info=True)
 
+    def _zip_update_rollback_request_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        raw_env = os.getenv("DISCORD_AUTO_UPDATE_ROLLBACK_REQUEST_DIRS") or os.getenv("DISCORD_AUTO_UPDATE_ROLLBACK_REQUEST_DIR") or ""
+        for raw in re.split(r"[:;,]", raw_env):
+            raw = raw.strip()
+            if raw:
+                roots.append(Path(raw))
+        roots.extend([
+            self._update_staging_root / "candidates" / "rollback",
+            self._repo_root / "data" / "runtime" / "update-rollback",
+            Path(tempfile.gettempdir()) / "tts-bot-update-rollback",
+        ])
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            try:
+                key = str(root.expanduser().resolve(strict=False))
+            except Exception:
+                key = str(root)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(root)
+        return unique
+
+    def _zip_update_find_writable_rollback_request_root(self) -> tuple[Path | None, list[str]]:
+        details: list[str] = []
+        for root in self._zip_update_rollback_request_roots():
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+                with contextlib.suppress(Exception):
+                    root.chmod(0o775)
+                probe = root / f".write-test.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+                probe.write_text("ok", encoding="utf-8")
+                probe.unlink(missing_ok=True)
+                return root, details
+            except Exception as exc:
+                details.append(f"{root}: {exc.__class__.__name__}: {exc}")
+        return None, details
+
+    def _zip_update_has_pending_rollback_request(self) -> bool:
+        for root in self._zip_update_rollback_request_roots():
+            try:
+                if (root / "pending.json").exists() or (root / "active.json").exists():
+                    return True
+            except Exception:
+                continue
+        return False
+
     def _zip_update_control_for_record(self, record: dict[str, object], *, disabled: bool = False) -> dict[str, object] | None:
         token = str(record.get("token") or "").strip()
         mode = str(record.get("mode") or "rollback").strip().lower()
@@ -1462,16 +1511,26 @@ class BotLocal(commands.Bot):
                 pass
             return
 
-        request_root = self._update_staging_root / "candidates" / "rollback"
-        pending = request_root / "pending.json"
-        active = request_root / "active.json"
-        request_root.mkdir(parents=True, exist_ok=True)
-        if pending.exists() or active.exists():
+        if self._zip_update_has_pending_rollback_request():
             try:
                 await interaction.followup.send("Já existe uma ação de update em andamento.", ephemeral=True)
             except Exception:
                 pass
             return
+
+        request_root, permission_details = self._zip_update_find_writable_rollback_request_root()
+        if request_root is None:
+            detail = "; ".join(permission_details[-3:]) or "nenhuma pasta gravável encontrada"
+            UPDATE_LOG.warning("falha ao preparar pasta de pedido de rollback/redo: %s", detail)
+            action_name = "reaplicação" if mode == "redo" else "reversão"
+            try:
+                await interaction.followup.send(f"Não consegui iniciar a {action_name}: pasta de controle sem permissão de escrita.", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        pending = request_root / "pending.json"
+        active = request_root / "active.json"
 
         request_id = f"{mode}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
         payload = {
@@ -1498,9 +1557,10 @@ class BotLocal(commands.Bot):
         except Exception:
             with contextlib.suppress(Exception):
                 tmp.unlink()
-            UPDATE_LOG.warning("falha ao salvar pedido de rollback/redo", exc_info=True)
+            UPDATE_LOG.warning("falha ao salvar pedido de rollback/redo em %s", request_root, exc_info=True)
+            action_name = "reaplicação" if mode == "redo" else "reversão"
             try:
-                await interaction.followup.send("Não consegui iniciar a ação agora.", ephemeral=True)
+                await interaction.followup.send(f"Não consegui iniciar a {action_name}: não foi possível gravar o pedido de controle.", ephemeral=True)
             except Exception:
                 pass
             return

@@ -11,7 +11,10 @@ DIRTY_MARKER_FILE="$REPO_DIR/.fatal-update-dirty"
 LOCAL_CHANGES_MARKER_FILE="$REPO_DIR/.fatal-update-local-changes"
 CANDIDATE_ROOT="${DISCORD_AUTO_UPDATE_STAGING_DIR:-$(dirname "$REPO_DIR")/bot-update-staging}/candidates"
 CANDIDATE_PENDING_FILE="$CANDIDATE_ROOT/pending.json"
-ROLLBACK_REQUEST_ROOT="$CANDIDATE_ROOT/rollback"
+ROLLBACK_REQUEST_DEFAULT_ROOT="$CANDIDATE_ROOT/rollback"
+ROLLBACK_REQUEST_DATA_ROOT="${DISCORD_AUTO_UPDATE_ROLLBACK_REQUEST_DIR:-$REPO_DIR/data/runtime/update-rollback}"
+ROLLBACK_REQUEST_TMP_ROOT="${TMPDIR:-/tmp}/tts-bot-update-rollback"
+ROLLBACK_REQUEST_ROOT="$ROLLBACK_REQUEST_DEFAULT_ROOT"
 ROLLBACK_REQUEST_PENDING_FILE="$ROLLBACK_REQUEST_ROOT/pending.json"
 ROLLBACK_REQUEST_ACTIVE_FILE="$ROLLBACK_REQUEST_ROOT/active.json"
 
@@ -1147,14 +1150,50 @@ zip_progress_process_detail() {
   fi
 }
 
+rollback_request_roots() {
+  printf '%s\n' "$ROLLBACK_REQUEST_DEFAULT_ROOT"
+  if [[ -n "${ROLLBACK_REQUEST_DATA_ROOT//[[:space:]]/}" && "$ROLLBACK_REQUEST_DATA_ROOT" != "$ROLLBACK_REQUEST_DEFAULT_ROOT" ]]; then
+    printf '%s\n' "$ROLLBACK_REQUEST_DATA_ROOT"
+  fi
+  if [[ -n "${ROLLBACK_REQUEST_TMP_ROOT//[[:space:]]/}" && "$ROLLBACK_REQUEST_TMP_ROOT" != "$ROLLBACK_REQUEST_DEFAULT_ROOT" && "$ROLLBACK_REQUEST_TMP_ROOT" != "$ROLLBACK_REQUEST_DATA_ROOT" ]]; then
+    printf '%s\n' "$ROLLBACK_REQUEST_TMP_ROOT"
+  fi
+}
+
+ensure_rollback_request_dirs() {
+  local root
+  while IFS= read -r root; do
+    [[ -n "${root//[[:space:]]/}" ]] || continue
+    mkdir -p "$root" "$root/done" "$root/failed" 2>/dev/null || true
+    chown ubuntu:ubuntu "$root" "$root/done" "$root/failed" 2>/dev/null || true
+    chmod 0775 "$root" "$root/done" "$root/failed" 2>/dev/null || true
+  done < <(rollback_request_roots)
+}
+
+select_rollback_request_root() {
+  local root pending active
+  ensure_rollback_request_dirs
+  while IFS= read -r root; do
+    [[ -n "${root//[[:space:]]/}" ]] || continue
+    pending="$root/pending.json"
+    active="$root/active.json"
+    if [[ -f "$pending" ]]; then
+      mv "$pending" "$active" 2>/dev/null || true
+    fi
+    if [[ -f "$active" ]]; then
+      ROLLBACK_REQUEST_ROOT="$root"
+      ROLLBACK_REQUEST_PENDING_FILE="$pending"
+      ROLLBACK_REQUEST_ACTIVE_FILE="$active"
+      return 0
+    fi
+  done < <(rollback_request_roots)
+  return 1
+}
+
 load_pending_rollback_request() {
   ROLLBACK_CONTROL_MODE=0
   ROLLBACK_REQUEST_FILE=""
-  mkdir -p "$ROLLBACK_REQUEST_ROOT" 2>/dev/null || true
-  if [[ -f "$ROLLBACK_REQUEST_PENDING_FILE" ]]; then
-    mv "$ROLLBACK_REQUEST_PENDING_FILE" "$ROLLBACK_REQUEST_ACTIVE_FILE" 2>/dev/null || true
-  fi
-  [[ -f "$ROLLBACK_REQUEST_ACTIVE_FILE" ]] || return 1
+  select_rollback_request_root || return 1
   ROLLBACK_CONTROL_MODE=1
   ROLLBACK_REQUEST_FILE="$ROLLBACK_REQUEST_ACTIVE_FILE"
   ROLLBACK_REQUEST_ID="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" id 2>/dev/null || true)"
@@ -1180,6 +1219,8 @@ archive_rollback_request() {
   local status="${1:-done}"
   [[ -n "${ROLLBACK_REQUEST_FILE:-}" ]] || return 0
   mkdir -p "$ROLLBACK_REQUEST_ROOT/$status" 2>/dev/null || true
+  chown ubuntu:ubuntu "$ROLLBACK_REQUEST_ROOT" "$ROLLBACK_REQUEST_ROOT/$status" 2>/dev/null || true
+  chmod 0775 "$ROLLBACK_REQUEST_ROOT" "$ROLLBACK_REQUEST_ROOT/$status" 2>/dev/null || true
   if [[ -f "$ROLLBACK_REQUEST_FILE" ]]; then
     mv "$ROLLBACK_REQUEST_FILE" "$ROLLBACK_REQUEST_ROOT/$status/${ROLLBACK_REQUEST_ID:-rollback}.$(date +%Y%m%d%H%M%S).json" 2>/dev/null || rm -f "$ROLLBACK_REQUEST_FILE" 2>/dev/null || true
   fi
