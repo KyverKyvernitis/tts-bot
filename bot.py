@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import logging
 import logging.handlers
@@ -217,6 +218,9 @@ class BotLocal(commands.Bot):
         self._update_temp_root = Path("/tmp/discord-auto-update")
         self._update_staging_root = Path(os.getenv("DISCORD_AUTO_UPDATE_STAGING_DIR", str(self._repo_root.parent / "bot-update-staging")))
         self._zip_rollback_state_path = self._update_staging_root / "zip_update_rollback_state.json"
+        self._app_command_manifest_path = self._repo_root / "data" / "app_commands_manifest.json"
+        self._app_command_sync_status_path = self._repo_root / "data" / "app_commands_sync_status.json"
+        self._removed_slash_cleanup_state_path = self._repo_root / "data" / "removed_slash_cleanup_state.json"
         self.audio_router = AudioRouter(self)
         self._music_bitrate_reconciled = False
         self._music_voice_status_reconciled = False
@@ -394,6 +398,269 @@ class BotLocal(commands.Bot):
                 guild=discord.Object(id=int(guild_id)),
             )
 
+    def _json_safe_value(self, value):
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, dict):
+            return {str(k): self._json_safe_value(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
+        if isinstance(value, (list, tuple, set)):
+            return [self._json_safe_value(v) for v in value]
+        enum_value = getattr(value, "value", None)
+        if isinstance(enum_value, (str, int, float, bool)):
+            return enum_value
+        enum_name = getattr(value, "name", None)
+        if isinstance(enum_name, str):
+            return enum_name
+        return str(value)
+
+    def _app_command_to_dict(self, command) -> dict[str, object]:
+        data = None
+        to_dict = getattr(command, "to_dict", None)
+        if callable(to_dict):
+            for args in ((self.tree,), tuple()):
+                try:
+                    data = to_dict(*args)
+                    break
+                except TypeError:
+                    continue
+                except Exception:
+                    data = None
+                    break
+        if not isinstance(data, dict):
+            data = {
+                "name": getattr(command, "name", ""),
+                "description": getattr(command, "description", ""),
+                "type": self._json_safe_value(getattr(command, "type", None)),
+            }
+            children = list(getattr(command, "commands", []) or [])
+            if children:
+                data["options"] = [self._app_command_to_dict(child) for child in children]
+            params = list(getattr(command, "parameters", []) or [])
+            if params:
+                data["parameters"] = [
+                    {
+                        "name": getattr(param, "name", ""),
+                        "description": getattr(param, "description", ""),
+                        "required": getattr(param, "required", None),
+                        "type": self._json_safe_value(getattr(param, "type", None)),
+                        "choices": self._json_safe_value(getattr(param, "choices", None)),
+                        "autocomplete": getattr(param, "autocomplete", None),
+                    }
+                    for param in params
+                ]
+        return self._json_safe_value(data)
+
+    def _app_command_labels_from_dict(self, command_data: dict[str, object], prefix: str = "") -> list[str]:
+        name = str(command_data.get("name") or "").strip()
+        current = f"{prefix} {name}".strip()
+        labels = [f"/{current}"] if current else []
+        options = command_data.get("options") or command_data.get("parameters") or []
+        if isinstance(options, list):
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                # Discord slash subcommand/subcommand group option types are 1/2.
+                option_type = option.get("type")
+                if str(option_type) in {"1", "2", "subcommand", "sub_command", "subcommand_group", "sub_command_group"}:
+                    labels.extend(self._app_command_labels_from_dict(option, current))
+        return labels
+
+    def _build_app_commands_manifest(self, guild_ids: set[int]) -> dict[str, object]:
+        scopes: list[dict[str, object]] = []
+        all_labels: set[str] = set()
+
+        def add_scope(scope: str, commands_list) -> None:
+            entries = [self._app_command_to_dict(cmd) for cmd in commands_list]
+            entries.sort(key=lambda item: (str(item.get("type", "")), str(item.get("name", ""))))
+            for entry in entries:
+                all_labels.update(self._app_command_labels_from_dict(entry))
+            scopes.append({"scope": scope, "commands": entries})
+
+        try:
+            add_scope("global", list(self.tree.get_commands()))
+        except Exception as exc:
+            scopes.append({"scope": "global", "error": f"{type(exc).__name__}: {exc}", "commands": []})
+
+        for guild_id in sorted(guild_ids):
+            guild_obj = discord.Object(id=int(guild_id))
+            try:
+                add_scope(f"guild:{guild_id}", list(self.tree.get_commands(guild=guild_obj)))
+            except Exception as exc:
+                scopes.append({"scope": f"guild:{guild_id}", "error": f"{type(exc).__name__}: {exc}", "commands": []})
+
+        body = {
+            "version": 1,
+            "scopes": scopes,
+            "labels": sorted(all_labels),
+        }
+        canonical = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return {
+            **body,
+            "hash": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _load_previous_app_commands_manifest(self) -> dict[str, object] | None:
+        try:
+            return json.loads(self._app_command_manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _app_command_manifest_diff(self, previous: dict[str, object] | None, current: dict[str, object]) -> dict[str, object]:
+        current_labels = set(current.get("labels") or [])
+        if not isinstance(previous, dict):
+            # Primeiro boot com o manifest novo: sincroniza e cria baseline, mas
+            # não trata todos os comandos existentes como “adicionados” no log.
+            return {
+                "added": [],
+                "removed": [],
+                "previous_hash": "",
+                "current_hash": str(current.get("hash") or ""),
+            }
+        previous_labels = set(previous.get("labels") or [])
+        return {
+            "added": sorted(current_labels - previous_labels),
+            "removed": sorted(previous_labels - current_labels),
+            "previous_hash": str(previous.get("hash") or ""),
+            "current_hash": str(current.get("hash") or ""),
+        }
+
+    def _write_app_command_sync_status(self, status: dict[str, object]) -> None:
+        try:
+            self._app_command_sync_status_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._app_command_sync_status_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(status, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+            tmp.replace(self._app_command_sync_status_path)
+        except Exception:
+            BOOT_LOG.warning("[SYNC] falha ao salvar status de comandos", exc_info=True)
+
+    def _save_app_commands_manifest(self, manifest: dict[str, object]) -> None:
+        self._app_command_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._app_command_manifest_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(self._app_command_manifest_path)
+
+    def _removed_slash_cleanup_signature(self, guild_ids: set[int]) -> str:
+        payload = {
+            "names": sorted(REMOVED_SLASH_COMMANDS),
+            "guild_ids": sorted(int(gid) for gid in guild_ids),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    async def _cleanup_removed_slash_commands_if_needed(self, guild_ids: set[int]) -> None:
+        signature = self._removed_slash_cleanup_signature(guild_ids)
+        try:
+            state = json.loads(self._removed_slash_cleanup_state_path.read_text(encoding="utf-8"))
+        except Exception:
+            state = {}
+        if isinstance(state, dict) and state.get("signature") == signature:
+            print("[SYNC] limpeza de slash antigos já conferida; pulando.")
+            return
+        await self._cleanup_removed_slash_commands(guild_ids)
+        try:
+            self._removed_slash_cleanup_state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._removed_slash_cleanup_state_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"signature": signature, "updated_at": datetime.now(timezone.utc).isoformat()}, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self._removed_slash_cleanup_state_path)
+        except Exception:
+            BOOT_LOG.warning("[SYNC] falha ao salvar marcador de limpeza slash", exc_info=True)
+
+    async def _smart_sync_app_commands(self, guild_ids: set[int], *, should_sync: bool, allow_global_sync: bool, clear_globals_allowed: bool) -> None:
+        current_manifest = self._build_app_commands_manifest(guild_ids)
+        previous_manifest = self._load_previous_app_commands_manifest()
+        diff = self._app_command_manifest_diff(previous_manifest, current_manifest)
+        manifest_changed = previous_manifest is None or diff["previous_hash"] != diff["current_hash"]
+        status: dict[str, object] = {
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "manifest_changed": manifest_changed,
+            "sync_enabled": bool(should_sync),
+            "global_sync_allowed": bool(allow_global_sync),
+            "clear_global_allowed": bool(clear_globals_allowed),
+            "sync_performed": False,
+            "clear_performed": False,
+            "added": diff["added"],
+            "removed": diff["removed"],
+            "previous_hash": diff["previous_hash"],
+            "current_hash": diff["current_hash"],
+            "reason": "manifest_changed" if manifest_changed else "unchanged",
+        }
+
+        if not should_sync:
+            status["reason"] = "disabled_by_env"
+            self._write_app_command_sync_status(status)
+            print("[SYNC] Pulado no boot: SYNC_SLASH_COMMANDS=false")
+            return
+
+        if not manifest_changed:
+            status["reason"] = "unchanged"
+            self._write_app_command_sync_status(status)
+            print("[SYNC] Manifest de slash commands sem mudanças; sync/clear global pulados.")
+            return
+
+        try:
+            if allow_global_sync:
+                synced_global = await self.tree.sync()
+                status["sync_performed"] = True
+                status["global_count"] = len(synced_global)
+                print(f"[SYNC] Slash commands sincronizados globalmente: {len(synced_global)}")
+                for cmd in synced_global:
+                    name = getattr(cmd, "name", None) or str(cmd)
+                    print(f"[SYNC][GLOBAL] /{name}")
+                for guild_id in sorted(guild_ids):
+                    guild_obj = discord.Object(id=guild_id)
+                    synced_guild = await self.tree.sync(guild=guild_obj)
+                    print(f"[SYNC] Comandos guild-specific sincronizados na guild {guild_id}: {len(synced_guild)}")
+                    for cmd in synced_guild:
+                        name = getattr(cmd, "name", None) or str(cmd)
+                        print(f"[SYNC][GUILD {guild_id}] /{name}")
+            else:
+                if clear_globals_allowed and diff["removed"]:
+                    try:
+                        existing_globals = await self.tree.fetch_commands()
+                    except Exception as e:
+                        print(f"[SYNC] Não consegui buscar comandos globais: {e}")
+                        existing_globals = []
+                    removed_names = {label.lstrip('/').split()[0] for label in diff["removed"]}
+                    deleted = 0
+                    preserved = 0
+                    for cmd in existing_globals:
+                        cmd_type = getattr(cmd, "type", None)
+                        type_value = getattr(cmd_type, "value", cmd_type)
+                        if type_value == 4:
+                            preserved += 1
+                            print(f"[SYNC][GLOBAL] preservado Entry Point: /{cmd.name}")
+                            continue
+                        if getattr(cmd, "name", "") not in removed_names:
+                            continue
+                        try:
+                            await cmd.delete()
+                            deleted += 1
+                            status["clear_performed"] = True
+                            print(f"[SYNC][GLOBAL] deletado após remoção local: /{cmd.name}")
+                        except Exception as e:
+                            print(f"[SYNC][GLOBAL] falha ao deletar /{cmd.name}: {e}")
+                    print(f"[SYNC] Limpeza global controlada: {deleted} deletados, {preserved} preservados (Entry Point)")
+                else:
+                    print("[SYNC] Limpeza global pulada; sem remoção que exija clear controlado.")
+
+                for guild_id in sorted(guild_ids):
+                    guild_obj = discord.Object(id=guild_id)
+                    self.tree.copy_global_to(guild=guild_obj)
+                    synced_guild = await self.tree.sync(guild=guild_obj)
+                    status["sync_performed"] = True
+                    print(f"[SYNC] Slash commands sincronizados na guild {guild_id}: {len(synced_guild)}")
+                    for cmd in synced_guild:
+                        name = getattr(cmd, "name", None) or str(cmd)
+                        print(f"[SYNC][GUILD {guild_id}] /{name}")
+            self._save_app_commands_manifest(current_manifest)
+            status["reason"] = "synced"
+        except Exception as exc:
+            status["reason"] = "failed"
+            status["error"] = f"{type(exc).__name__}: {exc}"
+            self._write_app_command_sync_status(status)
+            raise
+        self._write_app_command_sync_status(status)
+
     async def setup_hook(self):
         print("SETUP_HOOK INICIOU")
         try:
@@ -423,6 +690,7 @@ class BotLocal(commands.Bot):
 
         should_sync = _env_truthy("SYNC_SLASH_COMMANDS")
         allow_global_sync = _env_truthy("SYNC_GLOBAL_SLASH_COMMANDS")
+        clear_globals_allowed = _env_truthy("CLEAR_GLOBAL_COMMANDS")
 
         health_guild_id = 927002914449424404
         guild_ids = {int(gid) for gid in (getattr(config, "GUILD_IDS", []) or []) if gid}
@@ -435,99 +703,21 @@ class BotLocal(commands.Bot):
         if callkeeper_guild_id > 0:
             guild_ids.add(callkeeper_guild_id)
 
-        # Limpa slash antigos que foram substituídos por comandos de prefixo/triggers,
-        # sem usar clear_commands e sem afetar comandos de outras cogs.
-        await self._cleanup_removed_slash_commands(guild_ids)
+        # Limpa comandos antigos só quando a lista/guilds mudarem. Isso evita
+        # fetch/delete remoto em todo boot e mantém a proteção contra slash
+        # commands que foram migrados para prefixo.
+        await self._cleanup_removed_slash_commands_if_needed(guild_ids)
 
-        # One-shot flag: limpa comandos globais antes de sync guild. Útil quando
-        # o bot antes rodava com sync global e agora tá em modo guild-only —
-        # sem isso, os comandos globais fantasmas continuam registrados e o
-        # Discord mostra cada comando em duplicata (um global + um guild).
-        clear_globals_on_boot = _env_truthy("CLEAR_GLOBAL_COMMANDS")
-        if should_sync:
-            if allow_global_sync:
-                # Modo global: sincroniza global mas TAMBÉM faz sync de cada
-                # guild registrada pra propagar os Groups com guild_ids
-                # explícitos (que NÃO entram no sync global). Não usamos
-                # clear_commands aqui pelas mesmas razões do branch guild-only
-                # mais abaixo.
-                synced_global = await self.tree.sync()
-                print(f"[SYNC] Slash commands sincronizados globalmente: {len(synced_global)}")
-                for cmd in synced_global:
-                    name = getattr(cmd, "name", None) or str(cmd)
-                    print(f"[SYNC][GLOBAL] /{name}")
-                for guild_id in sorted(guild_ids):
-                    guild_obj = discord.Object(id=guild_id)
-                    synced_guild = await self.tree.sync(guild=guild_obj)
-                    print(f"[SYNC] Comandos guild-specific sincronizados na guild {guild_id}: {len(synced_guild)}")
-                    for cmd in synced_guild:
-                        name = getattr(cmd, "name", None) or str(cmd)
-                        print(f"[SYNC][GUILD {guild_id}] /{name}")
-            else:
-                # Modo guild-only: se vinha de sync global antes, limpa os
-                # globais pra evitar duplicação. Só faz isso se
-                # CLEAR_GLOBAL_COMMANDS=true no .env.
-                #
-                # IMPORTANTE: NÃO usar `clear_commands(guild=None) + sync()` pra
-                # limpar globais — isso é um bulk update com lista vazia e o
-                # Discord rejeita (error 50240) porque apagaria o Entry Point
-                # da Activity junto. Em vez disso, busca os comandos globais
-                # registrados e deleta um por um, preservando Entry Point
-                # (AppCommandType.primary_entry_point, valor 4).
-                if clear_globals_on_boot:
-                    try:
-                        existing_globals = await self.tree.fetch_commands()
-                    except Exception as e:
-                        print(f"[SYNC] Não consegui buscar comandos globais: {e}")
-                        existing_globals = []
-                    deleted = 0
-                    preserved = 0
-                    for cmd in existing_globals:
-                        # Entry Point da Activity = type 4. Discord força a
-                        # preservação dele; qualquer tentativa de deletar
-                        # via bulk com lista vazia falha.
-                        cmd_type = getattr(cmd, "type", None)
-                        type_value = getattr(cmd_type, "value", cmd_type)
-                        if type_value == 4:
-                            preserved += 1
-                            print(f"[SYNC][GLOBAL] preservado Entry Point: /{cmd.name}")
-                            continue
-                        try:
-                            await cmd.delete()
-                            deleted += 1
-                            print(f"[SYNC][GLOBAL] deletado: /{cmd.name}")
-                        except Exception as e:
-                            print(f"[SYNC][GLOBAL] falha ao deletar /{cmd.name}: {e}")
-                    print(f"[SYNC] Limpeza global: {deleted} deletados, {preserved} preservados (Entry Point)")
-                else:
-                    print("[SYNC] Sync global pulado. Se você vê comandos duplicados,")
-                    print("[SYNC] rode UMA VEZ com CLEAR_GLOBAL_COMMANDS=true no .env pra limpar.")
-
-                for guild_id in sorted(guild_ids):
-                    guild_obj = discord.Object(id=guild_id)
-                    # NÃO chamar `clear_commands(guild=guild_obj)` aqui!
-                    # Isso apaga da árvore local TODOS os comandos guild-specific,
-                    # incluindo os Groups com `guild_ids=[...]` que estão
-                    # registrados nativamente pra essa guild (ex: /chatbotadmin
-                    # registrado pra MANAGEMENT_GUILD_ID, /vps da Utility).
-                    # Depois do clear, copy_global_to só repõe os globais —
-                    # os guild-restricted desaparecem do sync e o usuário não
-                    # vê os comandos no autocomplete.
-                    #
-                    # Tradeoff: comandos que foram REMOVIDOS do código continuam
-                    # como "fantasmas" no Discord até alguém rodar manualmente
-                    # `tree.clear_commands(guild=...)` + sync. Isso é raro e
-                    # vale a pena pelo benefício de Groups guild-restricted
-                    # funcionarem sem cuidado especial.
-                    self.tree.copy_global_to(guild=guild_obj)
-                    synced_guild = await self.tree.sync(guild=guild_obj)
-                    print(f"[SYNC] Slash commands sincronizados na guild {guild_id}: {len(synced_guild)}")
-                    for cmd in synced_guild:
-                        name = getattr(cmd, "name", None) or str(cmd)
-                        print(f"[SYNC][GUILD {guild_id}] /{name}")
-        else:
-            print("[SYNC] Pulado no boot (defina SYNC_SLASH_COMMANDS=true para sincronizar no startup)")
-            print("[SYNC] Observação: comandos limitados por guild, como /vps, só aparecem após sync da guild correspondente.")
+        # SYNC_SLASH_COMMANDS e CLEAR_GLOBAL_COMMANDS continuam existindo, mas
+        # agora são permissões: sync/clear só roda quando o manifest local de
+        # comandos realmente muda. Restart comum sem mudança de comando fica
+        # muito mais rápido.
+        await self._smart_sync_app_commands(
+            guild_ids,
+            should_sync=should_sync,
+            allow_global_sync=allow_global_sync,
+            clear_globals_allowed=clear_globals_allowed,
+        )
 
     def get_health_snapshot(self) -> dict[str, object]:
         snapshot = dict(self.health_state)

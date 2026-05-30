@@ -39,6 +39,7 @@ FRONT_PUBLISH_DIR="/var/www/sinuca"
 BACK_PORT="8787"
 BACK_HEALTH_URL="http://127.0.0.1:${BACK_PORT}/health"
 BOT_HEALTH_URL="http://127.0.0.1:10000/health"
+APP_COMMAND_SYNC_STATUS_FILE="$REPO_DIR/data/app_commands_sync_status.json"
 
 STAGE="inicialização"
 FAILED_STAGE=""
@@ -118,6 +119,12 @@ ROLLBACK_STATUS="não foi necessário"
 # webhook/mensagem nunca derrubar o updater após o commit/push já ter passado.
 ALERT_UNIT_STATUS="não alterado"
 CRONTAB_HEALTH_STATUS="não alterado"
+APP_COMMAND_SYNC_SUMMARY="Comandos sem mudanças"
+APP_COMMAND_SYNC_WEBHOOK_BLOCK=""
+APP_COMMAND_SYNC_ADDED_COUNT=0
+APP_COMMAND_SYNC_REMOVED_COUNT=0
+APP_COMMAND_SYNC_CHANGED=0
+APP_COMMAND_SYNC_PERFORMED=0
 CHANGED_FILES_RAW=""
 CHANGED_DIFF_NUMSTAT_RAW=""
 DIFF_TOTAL_SUMMARY=""
@@ -864,6 +871,60 @@ if isinstance(value, (list, dict)):
 else:
     print(str(value))
 PYJSON
+}
+
+read_app_command_sync_status() {
+  APP_COMMAND_SYNC_SUMMARY="Comandos sem mudanças"
+  APP_COMMAND_SYNC_WEBHOOK_BLOCK=""
+  APP_COMMAND_SYNC_ADDED_COUNT=0
+  APP_COMMAND_SYNC_REMOVED_COUNT=0
+  APP_COMMAND_SYNC_CHANGED=0
+  APP_COMMAND_SYNC_PERFORMED=0
+  [[ -f "$APP_COMMAND_SYNC_STATUS_FILE" ]] || return 0
+  local output
+  output="$(python3 - "$APP_COMMAND_SYNC_STATUS_FILE" <<'PYCMD' 2>/dev/null || true
+import json, shlex, sys
+path = sys.argv[1]
+try:
+    data = json.load(open(path, encoding='utf-8'))
+except Exception:
+    raise SystemExit(0)
+added = [str(x) for x in data.get('added') or []]
+removed = [str(x) for x in data.get('removed') or []]
+changed = bool(data.get('manifest_changed'))
+performed = bool(data.get('sync_performed'))
+reason = str(data.get('reason') or '')
+
+def assign(name, value):
+    print(f"{name}={shlex.quote(str(value))}")
+
+assign('APP_COMMAND_SYNC_ADDED_COUNT', len(added))
+assign('APP_COMMAND_SYNC_REMOVED_COUNT', len(removed))
+assign('APP_COMMAND_SYNC_CHANGED', 1 if changed else 0)
+assign('APP_COMMAND_SYNC_PERFORMED', 1 if performed else 0)
+if added or removed:
+    summary = f"Comandos sincronizados: +{len(added)} -{len(removed)}"
+    lines = [f"Comandos: +{len(added)} -{len(removed)}"]
+    if added:
+        lines.append('Adicionados: ' + ', '.join(added[:12]) + (f", +{len(added)-12}" if len(added) > 12 else ''))
+    if removed:
+        lines.append('Removidos: ' + ', '.join(removed[:12]) + (f", +{len(removed)-12}" if len(removed) > 12 else ''))
+    webhook = '\n'.join(lines)
+else:
+    if changed and performed:
+        summary = 'Comandos sincronizados'
+    elif changed:
+        summary = 'Comandos revisados'
+    else:
+        summary = 'Comandos sem mudanças'
+    webhook = ''
+assign('APP_COMMAND_SYNC_SUMMARY', summary)
+assign('APP_COMMAND_SYNC_WEBHOOK_BLOCK', webhook)
+assign('APP_COMMAND_SYNC_REASON', reason)
+PYCMD
+)"
+  [[ -n "${output//[[:space:]]/}" ]] || return 0
+  eval "$output"
 }
 
 sanitize_commit_ref() {
@@ -2930,6 +2991,11 @@ if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
   else
     zip_progress_done "Aplicação validada"
   fi
+  zip_progress_publish "Verificando comandos"
+fi
+read_app_command_sync_status
+if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
+  zip_progress_done "$APP_COMMAND_SYNC_SUMMARY"
 fi
 
 publish_rollback_request_after_validation
@@ -3018,6 +3084,7 @@ if (( UPDATE_HAS_WARNINGS == 1 )); then
 fi
 [[ -n "${PUBLIC_WARNINGS//[[:space:]]/}" ]] || PUBLIC_WARNINGS="sem avisos"
 
+read_app_command_sync_status
 CHANGED_PROCESSES="$(format_changed_processes)"
 BODY="Resumo: $ALERT_SUMMARY
 Branch: $BRANCH
@@ -3040,6 +3107,10 @@ fi
 if (( UPDATE_HAS_WARNINGS == 1 )); then
   BODY+=$'
 '"Avisos: $PUBLIC_WARNINGS"
+fi
+if [[ -n "${APP_COMMAND_SYNC_WEBHOOK_BLOCK//[[:space:]]/}" ]]; then
+  BODY+=$'
+'"$APP_COMMAND_SYNC_WEBHOOK_BLOCK"
 fi
 BODY+=$'
 '"Hora: $(date '+%d/%m/%Y %H:%M:%S')"
