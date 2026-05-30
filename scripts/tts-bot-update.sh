@@ -118,6 +118,9 @@ FAST_RELOAD_STATUS="não usado"
 UPDATER_UNIT="tts-bot-updater.service"
 RUN_LOG_FILE="${TMPDIR:-/tmp}/tts-bot-updater.$$.log"
 ZIP_STATUS_CONTROL_JSON=""
+UPDATE_TITLE_EMOJI="<a:areia:1496606578395189473>"
+UPDATE_STAGE_EMOJI="<a:loading:1510065277868445796>"
+ZIP_PROGRESS_HISTORY=""
 UPDATER_STEP_LAST=0
 UPDATER_TIMINGS=""
 : > "$RUN_LOG_FILE"
@@ -1078,6 +1081,72 @@ except Exception:
 PYDIRECT
 }
 
+zip_progress_title() {
+  if (( ROLLBACK_CONTROL_MODE == 1 )); then
+    if [[ "${ROLLBACK_REQUEST_ACTION:-rollback}" == "redo" ]]; then
+      printf '%s Reaplicando update...' "$UPDATE_TITLE_EMOJI"
+    else
+      printf '%s Revertendo update...' "$UPDATE_TITLE_EMOJI"
+    fi
+    return 0
+  fi
+  printf '%s Aplicando update...' "$UPDATE_TITLE_EMOJI"
+}
+
+zip_progress_status() {
+  if (( ROLLBACK_CONTROL_MODE == 1 )); then
+    printf 'progress'
+  else
+    printf 'applying'
+  fi
+}
+
+zip_progress_publish() {
+  local stage_label="${1:-Preparando}"
+  local detail="${2:-}"
+  local title status description
+  title="$(zip_progress_title)"
+  status="$(zip_progress_status)"
+  description=""
+  if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
+    description="$ZIP_PROGRESS_HISTORY"$'\n'
+  fi
+  description+="$UPDATE_STAGE_EMOJI **$stage_label**"
+  if [[ -n "${detail//[[:space:]]/}" ]]; then
+    description+=$'\n'"$detail"
+  fi
+  if (( ROLLBACK_CONTROL_MODE == 1 )); then
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "$status" "$title" "$description" || true
+  else
+    notify_zip_status_message "$status" "$title" "$description" || true
+  fi
+}
+
+zip_progress_done() {
+  local done_label="${1:-}"
+  [[ -n "${done_label//[[:space:]]/}" ]] || return 0
+  if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
+    ZIP_PROGRESS_HISTORY+=$'\n'
+  fi
+  ZIP_PROGRESS_HISTORY+="-# ✅ $done_label"
+}
+
+zip_progress_done_and_publish() {
+  local done_label="${1:-}"
+  local next_label="${2:-Preparando}"
+  local detail="${3:-}"
+  zip_progress_done "$done_label"
+  zip_progress_publish "$next_label" "$detail"
+}
+
+zip_progress_process_detail() {
+  local processes
+  processes="$(format_changed_processes 2>/dev/null || true)"
+  if [[ -n "${processes//[[:space:]]/}" && "$processes" != "nenhum processo alterado" ]]; then
+    printf '%s' "$processes"
+  fi
+}
+
 load_pending_rollback_request() {
   ROLLBACK_CONTROL_MODE=0
   ROLLBACK_REQUEST_FILE=""
@@ -1137,6 +1206,7 @@ PYCTRL
 prepare_rollback_request_update() {
   ROLLBACK_CONTROL_MODE=1
   LOCAL_CANDIDATE_MODE=0
+  zip_progress_publish "Validando estado atual"
   STAGE="fetch remoto"
   sudo -u ubuntu -H git fetch origin "$BRANCH"
   CURRENT_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
@@ -1154,6 +1224,8 @@ prepare_rollback_request_update() {
   STAGE="verificação de alterações locais"
   clear_local_changes_marker_if_clean
   fail_local_changes_before_pull
+
+  zip_progress_done_and_publish "Estado validado" "Aplicando reversão"
 
   STAGE="reversão local"
   git -C "$REPO_DIR" rev-parse --verify "$ROLLBACK_REVERT_COMMIT^{commit}" >/dev/null
@@ -1182,6 +1254,7 @@ prepare_rollback_request_update() {
   fi
   COMMIT_SUBJECT="${ROLLBACK_REQUEST_ACTION} discord zip update"
   mark_update_timing "rollback_apply"
+  zip_progress_done "Reversão preparada"
 }
 
 publish_rollback_request_after_validation() {
@@ -1193,15 +1266,19 @@ publish_rollback_request_after_validation() {
   else
     msg="rollback discord zip update $(short_commit "$ROLLBACK_REVERT_COMMIT")"
   fi
+  zip_progress_publish "Fazendo commit..."
   git_add_changed_files
   sudo -u ubuntu -H git commit -m "$msg"
   REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
   ROLLBACK_NEW_COMMIT="$REMOTE_COMMIT"
   SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
   mark_update_timing "commit"
+  zip_progress_done "Commit criado"
   STAGE="push GitHub"
+  zip_progress_publish "Publicando no GitHub..."
   sudo -u ubuntu -H git push origin "HEAD:$BRANCH"
   mark_update_timing "push"
+  zip_progress_done "GitHub atualizado"
 }
 
 finalize_rollback_request_success() {
@@ -1218,11 +1295,11 @@ finalize_rollback_request_success() {
     apply_mode="restart completo"
   fi
   if [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]]; then
-    title="Update reaplicado"
+    title="↪️ Update reaplicado"
     summary="Update reaplicado e tudo está saudável."
     next_mode="rollback"
   else
-    title="Update revertido"
+    title="↩️ Update revertido"
     summary="Reversão aplicada e tudo está saudável."
     next_mode="redo"
   fi
@@ -1304,6 +1381,7 @@ git_add_changed_files() {
 
 prepare_local_candidate_update() {
   LOCAL_CANDIDATE_MODE=1
+  zip_progress_publish "Validando candidato" "Conferindo base local e arquivos recebidos."
   STAGE="fetch remoto"
   sudo -u ubuntu -H git fetch origin "$BRANCH"
   REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse "origin/$BRANCH")"
@@ -1365,6 +1443,8 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   STAGE="limpeza de artefatos gerados"
   cleanup_known_generated_update_artifacts
 
+  zip_progress_done_and_publish "Candidato validado" "Aplicando arquivos"
+
   STAGE="aplicação local do candidato"
   UPDATE_APPLIED=1
   copy_local_candidate_files
@@ -1388,26 +1468,34 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   fi
   classify_changed_files
   mark_update_timing "candidate_apply"
+  zip_progress_done "Arquivos aplicados"
 }
 
 publish_local_candidate_after_validation() {
   if (( LOCAL_CANDIDATE_MODE == 0 )); then
     return 0
   fi
+  if (( LOCAL_CANDIDATE_PUBLISHED == 1 )); then
+    return 0
+  fi
   STAGE="commit local validado"
+  zip_progress_publish "Fazendo commit..."
   git_add_changed_files
   sudo -u ubuntu -H git commit -m "$LOCAL_CANDIDATE_COMMIT_MESSAGE"
   REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
   SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
   mark_update_timing "commit"
+  zip_progress_done "Commit criado"
 
   write_local_candidate_state "committed" "$REMOTE_COMMIT"
 
   STAGE="push GitHub pós-validação"
+  zip_progress_publish "Publicando no GitHub..."
   sudo -u ubuntu -H git push origin "HEAD:$BRANCH"
   LOCAL_CANDIDATE_PUBLISHED=1
   write_local_candidate_state "published" "$REMOTE_COMMIT"
   mark_update_timing "push"
+  zip_progress_done "GitHub atualizado"
 }
 
 format_changed_files() {
@@ -2681,8 +2769,20 @@ fi
 
 FAILED_STAGE=""
 
+if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
+  zip_progress_publish "Validando arquivos"
+fi
 run_preflight_checks
 mark_update_timing "preflight"
+if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
+  process_detail="$(zip_progress_process_detail)"
+  zip_progress_done "Arquivos validados"
+  if [[ -n "${process_detail//[[:space:]]/}" ]]; then
+    zip_progress_publish "Atualizando processos" "$process_detail"
+  else
+    zip_progress_publish "Validando aplicação"
+  fi
+fi
 
 deploy_bot
 mark_update_timing "bot"
@@ -2694,6 +2794,14 @@ deploy_backend
 mark_update_timing "backend"
 run_core_worker_post_update_automation
 mark_update_timing "worker"
+if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
+  process_detail="$(zip_progress_process_detail)"
+  if [[ -n "${process_detail//[[:space:]]/}" ]]; then
+    zip_progress_done "Processos atualizados: **$process_detail**"
+  else
+    zip_progress_done "Aplicação validada"
+  fi
+fi
 
 publish_rollback_request_after_validation
 if (( ROLLBACK_CONTROL_MODE == 1 )); then
@@ -2742,15 +2850,15 @@ fi
 
 if (( OVERALL_FATAL == 0 && UPDATE_HAS_WARNINGS == 0 )); then
   ALERT_TYPE="success"
-  ALERT_TITLE="Update aplicado"
+  ALERT_TITLE="✅ Update aplicado"
   ALERT_SUMMARY="Update aplicado e tudo está saudável."
 elif (( OVERALL_FATAL == 0 )); then
   ALERT_TYPE="warn"
-  ALERT_TITLE="Update aplicado com avisos"
+  ALERT_TITLE="⚠️ Update aplicado com avisos"
   ALERT_SUMMARY="Update aplicado, mas há avisos para revisar."
 else
   ALERT_TYPE="warn"
-  ALERT_TITLE="Update aplicado com alerta"
+  ALERT_TITLE="⚠️ Update aplicado com alerta"
   ALERT_SUMMARY="Update concluído com alerta. Verifique os pontos abaixo."
 fi
 
@@ -2807,6 +2915,9 @@ fi
 BODY+=$'
 '"Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 logger -t "$LOG_TAG" "timings: ${UPDATER_TIMINGS:-sem etapas}; total=$DURATION"
+if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
+  zip_progress_publish "Finalizando..."
+fi
 
 ZIP_STATUS_DESCRIPTION="$ALERT_SUMMARY
 

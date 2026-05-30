@@ -1594,12 +1594,14 @@ class BotLocal(commands.Bot):
                 await self._edit_zip_update_message(
                     message,
                     status_message,
-                    "<a:areia:1496606578395189473> Update em aplicação",
+                    "<a:areia:1496606578395189473> Aplicando update...",
                     (
                         f"{branch} · candidato **{candidate_id[:16] or 'local'}**\n"
                         f"{len(changed_files)} arquivo(s) alterado(s) · **{diff_summary}**\n"
-                        f"{apply_line}{time_line}\n"
-                        "GitHub só será atualizado depois da validação local.\n\n"
+                        f"{apply_line}{time_line}\n\n"
+                        "-# ✅ ZIP validado\n"
+                        "<a:loading:1510065277868445796> **Aplicando na VPS**\n"
+                        "GitHub será atualizado depois da validação local.\n\n"
                         f"## Arquivos alterados\n{preview_files}"
                     ),
                     discord.Color.blurple(),
