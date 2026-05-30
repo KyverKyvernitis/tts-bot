@@ -70,6 +70,10 @@ ROLLBACK_SOURCE_AUTHOR_ID=""
 ROLLBACK_REQUESTED_BY=""
 ROLLBACK_PREVIOUS_RECORD_JSON="{}"
 ROLLBACK_NEW_COMMIT=""
+ROLLBACK_UPDATE_FROM=""
+ROLLBACK_UPDATE_TO=""
+ROLLBACK_ROLLBACK_COMMIT=""
+ROLLBACK_REDO_COMMIT=""
 
 FRONT_CHANGED=0
 BACK_CHANGED=0
@@ -862,6 +866,14 @@ else:
 PYJSON
 }
 
+sanitize_commit_ref() {
+  local value="${1:-}"
+  value="$(printf '%s' "$value" | tr -d '[:space:]')"
+  if [[ "$value" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    printf '%s' "$value"
+  fi
+}
+
 load_pending_local_candidate() {
   local manifest active_file
   LOCAL_CANDIDATE_PENDING_FILE=""
@@ -1199,10 +1211,12 @@ load_pending_rollback_request() {
   ROLLBACK_REQUEST_ID="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" id 2>/dev/null || true)"
   ROLLBACK_REQUEST_ACTION="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" mode 2>/dev/null || true)"
   ROLLBACK_REQUEST_BRANCH="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" branch 2>/dev/null || true)"
-  ROLLBACK_EXPECTED_HEAD="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" expected_head 2>/dev/null || true)"
-  ROLLBACK_REVERT_COMMIT="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" revert_commit 2>/dev/null || true)"
-  ROLLBACK_EXPECTED_HEAD="$(printf '%s' "$ROLLBACK_EXPECTED_HEAD" | tr -d '[:space:]')"
-  ROLLBACK_REVERT_COMMIT="$(printf '%s' "$ROLLBACK_REVERT_COMMIT" | tr -d '[:space:]')"
+  ROLLBACK_EXPECTED_HEAD="$(sanitize_commit_ref "$(json_field_from_file "$ROLLBACK_REQUEST_FILE" expected_head 2>/dev/null || true)")"
+  ROLLBACK_REVERT_COMMIT="$(sanitize_commit_ref "$(json_field_from_file "$ROLLBACK_REQUEST_FILE" revert_commit 2>/dev/null || true)")"
+  ROLLBACK_UPDATE_FROM="$(sanitize_commit_ref "$(json_field_from_file "$ROLLBACK_REQUEST_FILE" update_from 2>/dev/null || true)")"
+  ROLLBACK_UPDATE_TO="$(sanitize_commit_ref "$(json_field_from_file "$ROLLBACK_REQUEST_FILE" update_to 2>/dev/null || true)")"
+  ROLLBACK_ROLLBACK_COMMIT="$(sanitize_commit_ref "$(json_field_from_file "$ROLLBACK_REQUEST_FILE" rollback_commit 2>/dev/null || true)")"
+  ROLLBACK_REDO_COMMIT="$(sanitize_commit_ref "$(json_field_from_file "$ROLLBACK_REQUEST_FILE" redo_commit 2>/dev/null || true)")"
   ROLLBACK_MESSAGE_CHANNEL_ID="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" message.channel_id 2>/dev/null || true)"
   ROLLBACK_MESSAGE_ID="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" message.message_id 2>/dev/null || true)"
   ROLLBACK_SOURCE_AUTHOR_ID="$(json_field_from_file "$ROLLBACK_REQUEST_FILE" source_author_id 2>/dev/null || true)"
@@ -1214,7 +1228,23 @@ load_pending_rollback_request() {
   if [[ "$ROLLBACK_REQUEST_ACTION" != "rollback" && "$ROLLBACK_REQUEST_ACTION" != "redo" ]]; then
     ROLLBACK_REQUEST_ACTION="rollback"
   fi
-  [[ -n "${ROLLBACK_EXPECTED_HEAD//[[:space:]]/}" && -n "${ROLLBACK_REVERT_COMMIT//[[:space:]]/}" ]]
+
+  if [[ "$ROLLBACK_REQUEST_ACTION" == "rollback" ]]; then
+    # Para desfazer o update, o commit a reverter é o update aplicado.
+    ROLLBACK_EXPECTED_HEAD="${ROLLBACK_UPDATE_TO:-${ROLLBACK_EXPECTED_HEAD:-${ROLLBACK_REVERT_COMMIT:-}}}"
+    ROLLBACK_REVERT_COMMIT="${ROLLBACK_UPDATE_TO:-${ROLLBACK_REVERT_COMMIT:-$ROLLBACK_EXPECTED_HEAD}}"
+  else
+    # Para refazer, revertemos o commit de rollback.
+    ROLLBACK_EXPECTED_HEAD="${ROLLBACK_ROLLBACK_COMMIT:-${ROLLBACK_EXPECTED_HEAD:-${ROLLBACK_REVERT_COMMIT:-}}}"
+    ROLLBACK_REVERT_COMMIT="${ROLLBACK_ROLLBACK_COMMIT:-${ROLLBACK_REDO_COMMIT:-${ROLLBACK_REVERT_COMMIT:-$ROLLBACK_EXPECTED_HEAD}}}"
+  fi
+  ROLLBACK_EXPECTED_HEAD="$(sanitize_commit_ref "$ROLLBACK_EXPECTED_HEAD")"
+  ROLLBACK_REVERT_COMMIT="$(sanitize_commit_ref "$ROLLBACK_REVERT_COMMIT")"
+
+  # Retorna sucesso sempre que existe um request ativo. Campos inválidos são
+  # tratados por prepare_rollback_request_update, que arquiva o request e edita
+  # a mensagem em vez de deixar o timer ignorar o estado e repetir forever.
+  return 0
 }
 
 archive_rollback_request() {
@@ -1230,12 +1260,16 @@ archive_rollback_request() {
 
 rollback_control_json() {
   local mode="${1:-rollback}"
-  local head_commit="${2:-}"
-  local revert_commit="${3:-$head_commit}"
-  python3 - "$mode" "$head_commit" "$revert_commit" "$BRANCH" "$ROLLBACK_SOURCE_AUTHOR_ID" <<'PYCTRL'
+  local head_commit="$(sanitize_commit_ref "${2:-}")"
+  local revert_commit="$(sanitize_commit_ref "${3:-$head_commit}")"
+  local update_from="$(sanitize_commit_ref "${4:-${ROLLBACK_UPDATE_FROM:-}}")"
+  local update_to="$(sanitize_commit_ref "${5:-${ROLLBACK_UPDATE_TO:-}}")"
+  local rollback_commit="$(sanitize_commit_ref "${6:-${ROLLBACK_ROLLBACK_COMMIT:-}}")"
+  local redo_commit="$(sanitize_commit_ref "${7:-${ROLLBACK_REDO_COMMIT:-}}")"
+  python3 - "$mode" "$head_commit" "$revert_commit" "$BRANCH" "$ROLLBACK_SOURCE_AUTHOR_ID" "$update_from" "$update_to" "$rollback_commit" "$redo_commit" <<'PYCTRL'
 import json, sys
-mode, head, revert, branch, author = sys.argv[1:6]
-print(json.dumps({
+mode, head, revert, branch, author, update_from, update_to, rollback_commit, redo_commit = sys.argv[1:10]
+payload = {
     "enabled": True,
     "mode": mode,
     "branch": branch or "main",
@@ -1243,13 +1277,30 @@ print(json.dumps({
     "revert_commit": revert or head,
     "head_commit": head,
     "source_author_id": author,
-}, ensure_ascii=False))
+}
+for key, value in {
+    "update_from": update_from,
+    "update_to": update_to,
+    "rollback_commit": rollback_commit,
+    "redo_commit": redo_commit,
+}.items():
+    if value:
+        payload[key] = value
+print(json.dumps(payload, ensure_ascii=False))
 PYCTRL
 }
 
 prepare_rollback_request_update() {
   ROLLBACK_CONTROL_MODE=1
   LOCAL_CANDIDATE_MODE=0
+  if [[ -z "${ROLLBACK_EXPECTED_HEAD//[[:space:]]/}" || -z "${ROLLBACK_REVERT_COMMIT//[[:space:]]/}" ]]; then
+    local fail_title="Falha ao reverter"
+    [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]] && fail_title="Falha ao reaplicar"
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "Não encontrei o commit de destino. Nenhuma alteração foi aplicada." || true
+    logger -t "$LOG_TAG" "rollback/redo inválido: action=$ROLLBACK_REQUEST_ACTION expected=${ROLLBACK_EXPECTED_HEAD:-vazio} revert=${ROLLBACK_REVERT_COMMIT:-vazio} update_from=${ROLLBACK_UPDATE_FROM:-vazio} update_to=${ROLLBACK_UPDATE_TO:-vazio}"
+    archive_rollback_request "failed"
+    exit 0
+  fi
   zip_progress_publish "Validando estado atual"
   STAGE="fetch remoto"
   sudo -u ubuntu -H git fetch origin "$BRANCH"
@@ -1274,14 +1325,15 @@ prepare_rollback_request_update() {
   zip_progress_done_and_publish "Estado validado" "Aplicando reversão"
 
   STAGE="reversão local"
-  if ! git -C "$REPO_DIR" rev-parse --verify "$ROLLBACK_REVERT_COMMIT^{commit}" >/dev/null 2>&1; then
+  if ! sudo -u ubuntu -H git -C "$REPO_DIR" rev-parse --verify "${ROLLBACK_REVERT_COMMIT}^{commit}" >/dev/null 2>&1; then
     local fail_title="Falha ao reverter"
     [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]] && fail_title="Falha ao reaplicar"
     local retry_control
     retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
+    logger -t "$LOG_TAG" "commit de rollback/redo não encontrado: action=$ROLLBACK_REQUEST_ACTION expected=$ROLLBACK_EXPECTED_HEAD revert=$ROLLBACK_REVERT_COMMIT current=$CURRENT_COMMIT remote=$REMOTE_COMMIT"
     post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "Não encontrei o commit de destino. Nenhuma alteração foi aplicada." "$retry_control"
     archive_rollback_request "failed"
-    exit 1
+    exit 0
   fi
   if ! sudo -u ubuntu -H git revert --no-commit "$ROLLBACK_REVERT_COMMIT"; then
     sudo -u ubuntu -H git revert --abort >/dev/null 2>&1 || true
@@ -1333,6 +1385,11 @@ publish_rollback_request_after_validation() {
   sudo -u ubuntu -H git commit -m "$msg"
   REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
   ROLLBACK_NEW_COMMIT="$REMOTE_COMMIT"
+  if [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]]; then
+    ROLLBACK_REDO_COMMIT="$REMOTE_COMMIT"
+  else
+    ROLLBACK_ROLLBACK_COMMIT="$REMOTE_COMMIT"
+  fi
   SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
   mark_update_timing "commit"
   zip_progress_done "Commit criado"
@@ -1365,7 +1422,7 @@ finalize_rollback_request_success() {
     summary="Reversão aplicada e tudo está saudável."
     next_mode="redo"
   fi
-  control_json="$(rollback_control_json "$next_mode" "$REMOTE_COMMIT")"
+  control_json="$(rollback_control_json "$next_mode" "$REMOTE_COMMIT" "$REMOTE_COMMIT" "$ROLLBACK_UPDATE_FROM" "$ROLLBACK_UPDATE_TO" "$ROLLBACK_ROLLBACK_COMMIT" "$ROLLBACK_REDO_COMMIT")"
   local desc
   desc="$summary
 

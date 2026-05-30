@@ -853,11 +853,11 @@ class BotLocal(commands.Bot):
         normalized = re.sub(r"\s+", " ", title).strip()
         lowered = normalized.casefold()
         status = str(status or "").lower().strip()
-        if lowered == "update aplicado":
+        if re.fullmatch(r"(?:✅\s*)?update aplicado", lowered):
             return "✅ Update aplicado"
         if status in {"success", "ok", "done"} and lowered == "update":
             return "✅ Update aplicado"
-        return title
+        return normalized
 
     def _zip_update_latest_message_ref(self, interaction: discord.Interaction, record: dict[str, object]) -> tuple[str, str]:
         channel_id = str(record.get("channel_id") or "").strip()
@@ -1515,11 +1515,25 @@ class BotLocal(commands.Bot):
         # o commit revertido é o rollback. Mantemos fallback explícito para
         # estados antigos/legados já salvos em disco.
         if mode == "rollback":
-            expected_head = expected_head or update_to or revert_commit
-            revert_commit = revert_commit or update_to or expected_head
+            # O estado salvo por updates antigos pode conter `revert_commit` obsoleto.
+            # Para desfazer o último update, o commit a reverter deve ser sempre o
+            # update aplicado (`update_to`), com fallback para o HEAD esperado.
+            expected_head = update_to or expected_head or revert_commit
+            revert_commit = update_to or expected_head or revert_commit
         else:
-            expected_head = expected_head or rollback_commit or revert_commit or update_to
-            revert_commit = redo_commit or revert_commit or rollback_commit or expected_head
+            # Para refazer, revertemos o commit de rollback. Estados novos salvam
+            # `rollback_commit`; em estados legados, `revert_commit`/expected_head
+            # apontam para o commit atual que precisa ser revertido.
+            expected_head = rollback_commit or expected_head or revert_commit or update_to
+            revert_commit = rollback_commit or redo_commit or revert_commit or expected_head
+
+        commit_re = re.compile(r"^[0-9a-fA-F]{7,40}$")
+        if expected_head and not commit_re.fullmatch(expected_head):
+            UPDATE_LOG.warning("rollback/redo com expected_head inválido: %r", expected_head)
+            expected_head = ""
+        if revert_commit and not commit_re.fullmatch(revert_commit):
+            UPDATE_LOG.warning("rollback/redo com revert_commit inválido: %r", revert_commit)
+            revert_commit = ""
 
         if not expected_head or not revert_commit or not channel_id or not message_id:
             try:
