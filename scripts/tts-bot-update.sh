@@ -135,6 +135,7 @@ ZIP_STATUS_CONTROL_JSON=""
 UPDATE_TITLE_EMOJI="<a:areia:1496606578395189473>"
 UPDATE_STAGE_EMOJI="<a:loading:1510065277868445796>"
 ZIP_PROGRESS_HISTORY=""
+ZIP_PROGRESS_STAGE_STARTED_MS=0
 UPDATER_STEP_LAST=0
 UPDATER_TIMINGS=""
 : > "$RUN_LOG_FILE"
@@ -1157,6 +1158,32 @@ except Exception:
 PYDIRECT
 }
 
+zip_progress_now_ms() {
+  date +%s%3N 2>/dev/null || python3 - <<'PYMS'
+import time
+print(int(time.time() * 1000))
+PYMS
+}
+
+zip_progress_format_ms() {
+  local ms="${1:-0}"
+  python3 - "$ms" <<'PYFMT'
+import sys
+try:
+    ms = int(str(sys.argv[1] or "0"))
+except Exception:
+    ms = 0
+if ms < 0:
+    ms = 0
+if ms >= 60000:
+    minutes = ms // 60000
+    seconds = (ms % 60000) / 1000
+    print(f"{minutes}m {seconds:04.1f}s")
+else:
+    print(f"{ms / 1000:.1f}s")
+PYFMT
+}
+
 zip_progress_title() {
   if (( ROLLBACK_CONTROL_MODE == 1 )); then
     if [[ "${ROLLBACK_REQUEST_ACTION:-rollback}" == "redo" ]]; then
@@ -1181,6 +1208,9 @@ zip_progress_publish() {
   local stage_label="${1:-Preparando}"
   local detail="${2:-}"
   local title status description
+  if (( ZIP_PROGRESS_STAGE_STARTED_MS <= 0 )); then
+    ZIP_PROGRESS_STAGE_STARTED_MS="$(zip_progress_now_ms)"
+  fi
   title="$(zip_progress_title)"
   status="$(zip_progress_status)"
   description=""
@@ -1200,11 +1230,19 @@ zip_progress_publish() {
 
 zip_progress_done() {
   local done_label="${1:-}"
+  local now elapsed suffix
   [[ -n "${done_label//[[:space:]]/}" ]] || return 0
+  suffix=""
+  if (( ZIP_PROGRESS_STAGE_STARTED_MS > 0 )); then
+    now="$(zip_progress_now_ms)"
+    elapsed=$((now - ZIP_PROGRESS_STAGE_STARTED_MS))
+    suffix=" ($(zip_progress_format_ms "$elapsed"))"
+  fi
   if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
     ZIP_PROGRESS_HISTORY+=$'\n'
   fi
-  ZIP_PROGRESS_HISTORY+="-# ✅ $done_label"
+  ZIP_PROGRESS_HISTORY+="-# ✅ $done_label$suffix"
+  ZIP_PROGRESS_STAGE_STARTED_MS=0
 }
 
 zip_progress_done_and_publish() {
@@ -1561,7 +1599,7 @@ git_add_changed_files() {
 
 prepare_local_candidate_update() {
   LOCAL_CANDIDATE_MODE=1
-  zip_progress_publish "Validando candidato" "Conferindo base local e arquivos recebidos."
+  zip_progress_publish "Validando ZIP" "Conferindo base local e arquivos recebidos."
   STAGE="fetch remoto"
   sudo -u ubuntu -H git fetch origin "$BRANCH"
   REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse "origin/$BRANCH")"
@@ -1623,7 +1661,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   STAGE="limpeza de artefatos gerados"
   cleanup_known_generated_update_artifacts
 
-  zip_progress_done_and_publish "Candidato validado" "Aplicando arquivos"
+  zip_progress_done_and_publish "ZIP validado" "Aplicando na VPS"
 
   STAGE="aplicação local do candidato"
   UPDATE_APPLIED=1
@@ -1648,7 +1686,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   fi
   classify_changed_files
   mark_update_timing "candidate_apply"
-  zip_progress_done "Arquivos aplicados"
+  zip_progress_done "Aplicado na VPS"
 }
 
 publish_local_candidate_after_validation() {

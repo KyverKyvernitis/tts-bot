@@ -661,6 +661,25 @@ class BotLocal(commands.Bot):
             raise
         self._write_app_command_sync_status(status)
 
+    def _register_temp_updater_sync_command(self) -> None:
+        if any(getattr(cmd, "name", "") == "updater_teste" for cmd in self.tree.get_commands()):
+            return
+
+        async def updater_teste(interaction: discord.Interaction) -> None:
+            await safe_send_interaction_message(
+                interaction,
+                "✅ Comando temporário carregado.",
+                ephemeral=True,
+                log=logging.getLogger("zip_update"),
+                label="updater_teste",
+            )
+
+        updater_teste.__name__ = "updater_teste"
+        self.tree.command(
+            name="updater_teste",
+            description="Comando temporário para testar sync do updater.",
+        )(updater_teste)
+
     async def setup_hook(self):
         print("SETUP_HOOK INICIOU")
         try:
@@ -687,6 +706,7 @@ class BotLocal(commands.Bot):
 
         print("Carregando cogs...")
         await self._load_cogs_safely()
+        self._register_temp_updater_sync_command()
 
         should_sync = _env_truthy("SYNC_SLASH_COMMANDS")
         allow_global_sync = _env_truthy("SYNC_GLOBAL_SLASH_COMMANDS")
@@ -1973,30 +1993,13 @@ class BotLocal(commands.Bot):
                 if remaining:
                     preview_files += f"\n+{remaining} arquivo(s) restante(s)"
 
-                candidate_id = str(result.get("candidate_id") or "").strip()
-                trigger_detail = str(result.get("trigger_detail") or "").strip()
-                if triggered_update:
-                    apply_line = "Aplicação: iniciada na VPS"
-                elif trigger_detail:
-                    apply_line = "Aplicação: aguardando updater automático"
-                else:
-                    apply_line = "Aplicação: aguardando"
-
-                timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
-                total_ms = int(timings.get("total_ms") or 0) if isinstance(timings, dict) else 0
-                time_line = f"\nTempo: **{total_ms / 1000:.1f}s**" if total_ms else ""
                 await self._edit_zip_update_message(
                     message,
                     status_message,
                     "<a:areia:1496606578395189473> Aplicando update...",
                     (
-                        f"{branch} · candidato **{candidate_id[:16] or 'local'}**\n"
-                        f"{len(changed_files)} arquivo(s) alterado(s) · **{diff_summary}**\n"
-                        f"{apply_line}{time_line}\n\n"
-                        "-# ✅ ZIP validado\n"
-                        "<a:loading:1510065277868445796> **Aplicando na VPS**\n"
-                        "GitHub será atualizado depois da validação local.\n\n"
-                        f"## Arquivos alterados\n{preview_files}"
+                        "<a:loading:1510065277868445796> **Validando ZIP**\n"
+                        "Conferindo base local e arquivos recebidos."
                     ),
                     discord.Color.blurple(),
                 )
