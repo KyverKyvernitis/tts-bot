@@ -1666,8 +1666,10 @@ class BotLocal(commands.Bot):
             await self._zip_update_clear_previous_control(previous, keep_message_id=message_id)
             self._zip_update_state_save({"latest": state_record})
             control = self._zip_update_control_for_record(state_record)
-        elif status in {"success", "ok"}:
-            # Um update finalizado sem controle explícito deixa os controles antigos inativos.
+        elif status in {"success", "ok", "warn", "error"}:
+            # Um estado finalizado sem controle explícito deixa controles antigos
+            # inativos. Isso evita que rollback/redo indisponível mantenha estado
+            # interno de processamento depois que a própria mensagem já ficou sem botão.
             old_state = self._zip_update_state_load()
             previous = old_state.get("latest") if isinstance(old_state.get("latest"), dict) else None
             await self._zip_update_clear_previous_control(previous, keep_message_id=message_id)
@@ -1728,17 +1730,18 @@ class BotLocal(commands.Bot):
         # o commit revertido é o rollback. Mantemos fallback explícito para
         # estados antigos/legados já salvos em disco.
         if mode == "rollback":
-            # O estado salvo por updates antigos pode conter `revert_commit` obsoleto.
-            # Para desfazer o último update, o commit a reverter deve ser sempre o
-            # update aplicado (`update_to`), com fallback para o HEAD esperado.
-            expected_head = update_to or expected_head or revert_commit
-            revert_commit = update_to or expected_head or revert_commit
+            # O commit técnico a reverter é sempre o HEAD atual salvo no controle.
+            # `update_to` é mantido como metadado do update original e pode ficar
+            # diferente depois de uma reaplicação; por isso ele só serve como
+            # fallback para estados antigos que ainda não gravavam expected_head.
+            expected_head = expected_head or revert_commit or update_to
+            revert_commit = revert_commit or expected_head or update_to
         else:
             # Para refazer, revertemos o commit de rollback. Estados novos salvam
             # `rollback_commit`; em estados legados, `revert_commit`/expected_head
             # apontam para o commit atual que precisa ser revertido.
             expected_head = rollback_commit or expected_head or revert_commit or update_to
-            revert_commit = rollback_commit or redo_commit or revert_commit or expected_head
+            revert_commit = rollback_commit or revert_commit or redo_commit or expected_head
 
         commit_re = re.compile(r"^[0-9a-fA-F]{7,40}$")
         if expected_head and not commit_re.fullmatch(expected_head):

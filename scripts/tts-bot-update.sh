@@ -1578,13 +1578,15 @@ load_pending_rollback_request() {
   fi
 
   if [[ "$ROLLBACK_REQUEST_ACTION" == "rollback" ]]; then
-    # Para desfazer o update, o commit a reverter é o update aplicado.
-    ROLLBACK_EXPECTED_HEAD="${ROLLBACK_UPDATE_TO:-${ROLLBACK_EXPECTED_HEAD:-${ROLLBACK_REVERT_COMMIT:-}}}"
-    ROLLBACK_REVERT_COMMIT="${ROLLBACK_UPDATE_TO:-${ROLLBACK_REVERT_COMMIT:-$ROLLBACK_EXPECTED_HEAD}}"
+    # O alvo técnico é o commit atual salvo no controle. `ROLLBACK_UPDATE_TO`
+    # é metadado do update original e pode não ser mais o HEAD depois de uma
+    # reaplicação; use apenas como fallback para estados antigos.
+    ROLLBACK_EXPECTED_HEAD="${ROLLBACK_EXPECTED_HEAD:-${ROLLBACK_REVERT_COMMIT:-${ROLLBACK_UPDATE_TO:-}}}"
+    ROLLBACK_REVERT_COMMIT="${ROLLBACK_REVERT_COMMIT:-${ROLLBACK_EXPECTED_HEAD:-${ROLLBACK_UPDATE_TO:-}}}"
   else
     # Para refazer, revertemos o commit de rollback.
     ROLLBACK_EXPECTED_HEAD="${ROLLBACK_ROLLBACK_COMMIT:-${ROLLBACK_EXPECTED_HEAD:-${ROLLBACK_REVERT_COMMIT:-}}}"
-    ROLLBACK_REVERT_COMMIT="${ROLLBACK_ROLLBACK_COMMIT:-${ROLLBACK_REDO_COMMIT:-${ROLLBACK_REVERT_COMMIT:-$ROLLBACK_EXPECTED_HEAD}}}"
+    ROLLBACK_REVERT_COMMIT="${ROLLBACK_ROLLBACK_COMMIT:-${ROLLBACK_REVERT_COMMIT:-${ROLLBACK_REDO_COMMIT:-$ROLLBACK_EXPECTED_HEAD}}}"
   fi
   ROLLBACK_EXPECTED_HEAD="$(sanitize_commit_ref "$ROLLBACK_EXPECTED_HEAD")"
   ROLLBACK_REVERT_COMMIT="$(sanitize_commit_ref "$ROLLBACK_REVERT_COMMIT")"
@@ -1603,6 +1605,29 @@ archive_rollback_request() {
   chmod 0775 "$ROLLBACK_REQUEST_ROOT" "$ROLLBACK_REQUEST_ROOT/$status" 2>/dev/null || true
   if [[ -f "$ROLLBACK_REQUEST_FILE" ]]; then
     mv "$ROLLBACK_REQUEST_FILE" "$ROLLBACK_REQUEST_ROOT/$status/${ROLLBACK_REQUEST_ID:-rollback}.$(date +%Y%m%d%H%M%S).json" 2>/dev/null || rm -f "$ROLLBACK_REQUEST_FILE" 2>/dev/null || true
+  fi
+}
+
+commit_exists() {
+  local commit="$(sanitize_commit_ref "${1:-}")"
+  [[ -n "$commit" ]] || return 1
+  sudo -u ubuntu -H git -C "$REPO_DIR" rev-parse --verify "${commit}^{commit}" >/dev/null 2>&1
+}
+
+commits_have_same_tree() {
+  local left="$(sanitize_commit_ref "${1:-}")"
+  local right="$(sanitize_commit_ref "${2:-}")"
+  [[ -n "$left" && -n "$right" ]] || return 1
+  commit_exists "$left" || return 1
+  commit_exists "$right" || return 1
+  sudo -u ubuntu -H git -C "$REPO_DIR" diff --quiet "$left" "$right" --
+}
+
+rollback_desired_tree_commit() {
+  if [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]]; then
+    sanitize_commit_ref "${ROLLBACK_UPDATE_TO:-}"
+  else
+    sanitize_commit_ref "${ROLLBACK_UPDATE_FROM:-}"
   fi
 }
 
@@ -1660,10 +1685,18 @@ prepare_rollback_request_update() {
 
   if [[ "$CURRENT_COMMIT" != "$REMOTE_COMMIT" || "$CURRENT_COMMIT" != "$ROLLBACK_EXPECTED_HEAD" ]]; then
     local unavailable_title="Reversão indisponível"
+    local desired_commit noop_title
     [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]] && unavailable_title="Reaplicação indisponível"
-    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$unavailable_title" "O estado atual mudou. Nenhuma alteração foi aplicada."
+    desired_commit="$(rollback_desired_tree_commit)"
+    if [[ -n "$desired_commit" ]] && commits_have_same_tree "$CURRENT_COMMIT" "$desired_commit"; then
+      noop_title="Nenhuma alteração necessária"
+      post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "warn" "$noop_title" "O estado atual já corresponde ao resultado esperado. Nada foi alterado." || true
+      archive_rollback_request "done"
+      exit 0
+    fi
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$unavailable_title" "O estado atual mudou. Nenhuma alteração foi aplicada." || true
     archive_rollback_request "failed"
-    exit 1
+    exit 0
   fi
 
   STAGE="verificação de alterações locais"
@@ -1690,9 +1723,9 @@ prepare_rollback_request_update() {
     [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]] && fail_title="Falha ao reaplicar"
     local retry_control
     retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
-    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "O estado local foi restaurado. Nada foi publicado no GitHub." "$retry_control"
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "O estado local foi restaurado. Nada foi publicado no GitHub." "$retry_control" || true
     archive_rollback_request "failed"
-    exit 1
+    exit 0
   fi
   UPDATE_APPLIED=1
   CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only || true)"
@@ -1710,9 +1743,9 @@ prepare_rollback_request_update() {
     sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
     local retry_control
     retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
-    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Update bloqueado" "CallKeeper é protegido e não foi tocado." "$retry_control"
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Update bloqueado" "CallKeeper é protegido e não foi tocado." "$retry_control" || true
     archive_rollback_request "failed"
-    exit 1
+    exit 0
   fi
   COMMIT_SUBJECT="${ROLLBACK_REQUEST_ACTION} discord zip update"
   mark_update_timing "rollback_apply"
