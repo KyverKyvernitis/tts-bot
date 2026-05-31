@@ -3380,6 +3380,7 @@ class WelcomeCog(commands.Cog):
                 log.debug("índice de boas-vindas já existe com outro nome: %s", exc)
             else:
                 log.warning("falha ao criar índice de boas-vindas: %s", exc)
+        await self._migrate_welcome_tracking_user_ids()
 
     def _default_webhook_config(self) -> dict[str, Any]:
         return {
@@ -5120,6 +5121,46 @@ class WelcomeCog(commands.Cog):
         except Exception as exc:
             log.debug("[welcome] não consegui limpar tracking expirado: %r", exc)
 
+    async def _migrate_welcome_tracking_user_ids(self) -> None:
+        """Backfill legacy welcome tracking docs so they respect the shared unique DB index.
+
+        The settings collection already has a unique index on (guild_id, user_id, type).
+        Older welcome_sent_message docs used member_id but not user_id, which makes MongoDB
+        see every tracking row in a guild as user_id=None and reject new rows.
+        """
+        db = self.db
+        if db is None or not hasattr(db, "coll"):
+            return
+        try:
+            cursor = db.coll.find({
+                "type": WELCOME_DOC_SENT,
+                "$or": [{"user_id": {"$exists": False}}, {"user_id": None}, {"user_id": 0}],
+            }).limit(200)
+            fixed = 0
+            removed = 0
+            async for doc in cursor:
+                doc_id = doc.get("_id")
+                try:
+                    member_id = int(doc.get("member_id") or 0)
+                except Exception:
+                    member_id = 0
+                if member_id:
+                    try:
+                        await db.coll.update_one({"_id": doc_id}, {"$set": {"user_id": member_id}})
+                        fixed += 1
+                        continue
+                    except Exception as exc:
+                        log.debug("[welcome] não consegui migrar user_id do tracking _id=%s member=%s: %r", doc_id, member_id, exc)
+                # Documento sem member_id não serve para apagar uma mensagem de um membro específico.
+                # Remover evita manter o índice único preso em user_id=null.
+                with contextlib.suppress(Exception):
+                    await db.coll.delete_one({"_id": doc_id})
+                    removed += 1
+            if fixed or removed:
+                log.info("[welcome] tracking antigo normalizado: %s corrigido(s), %s removido(s)", fixed, removed)
+        except Exception as exc:
+            log.debug("[welcome] não consegui normalizar tracking antigo: %r", exc)
+
     async def _track_sent_welcome_message(self, *, guild_id: int, member_id: int, message: discord.Message | None):
         db = self.db
         if db is None or not hasattr(db, "coll"):
@@ -5132,6 +5173,7 @@ class WelcomeCog(commands.Cog):
         doc = {
             "type": WELCOME_DOC_SENT,
             "guild_id": int(guild_id),
+            "user_id": int(member_id),
             "member_id": int(member_id),
             "channel_id": int(getattr(getattr(message, "channel", None), "id", 0) or 0),
             "message_id": int(getattr(message, "id", 0) or 0),
@@ -5143,7 +5185,7 @@ class WelcomeCog(commands.Cog):
             return
         try:
             await db.coll.update_one(
-                {"type": WELCOME_DOC_SENT, "guild_id": int(guild_id), "member_id": int(member_id)},
+                {"type": WELCOME_DOC_SENT, "guild_id": int(guild_id), "user_id": int(member_id)},
                 {"$set": doc},
                 upsert=True,
             )
@@ -5165,9 +5207,14 @@ class WelcomeCog(commands.Cog):
             log.debug("[welcome] delete-on-leave ignorado: settings_db indisponível guild=%s member=%s", member.guild.id, member.id)
             return
         now = self._welcome_utc_now()
-        query = {"type": WELCOME_DOC_SENT, "guild_id": int(member.guild.id), "member_id": int(member.id)}
+        query = {"type": WELCOME_DOC_SENT, "guild_id": int(member.guild.id), "user_id": int(member.id)}
+        legacy_query = {"type": WELCOME_DOC_SENT, "guild_id": int(member.guild.id), "member_id": int(member.id)}
         try:
             doc = await db.coll.find_one(query, {"_id": 0})
+            if not doc:
+                doc = await db.coll.find_one(legacy_query, {"_id": 0})
+                if doc:
+                    query = legacy_query
         except Exception as exc:
             log.warning("[welcome] não consegui buscar tracking para apagar guild=%s member=%s: %r", member.guild.id, member.id, exc)
             return
