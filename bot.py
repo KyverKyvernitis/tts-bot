@@ -1585,6 +1585,9 @@ class BotLocal(commands.Bot):
         if action == "zip_status":
             future = asyncio.run_coroutine_threadsafe(self._edit_zip_status_from_update(payload), self.loop)
             return future.result(timeout=15)
+        if action == "create_zip_status":
+            future = asyncio.run_coroutine_threadsafe(self._create_zip_status_from_update(payload), self.loop)
+            return future.result(timeout=15)
         if action != "reload_cogs":
             return {"ok": False, "error": "ação interna desconhecida"}
         modules_raw = payload.get("modules") if isinstance(payload, dict) else None
@@ -1598,6 +1601,25 @@ class BotLocal(commands.Bot):
 
         future = asyncio.run_coroutine_threadsafe(self._reload_cogs_for_update(modules), self.loop)
         return future.result(timeout=25)
+
+    async def _create_zip_status_from_update(self, payload: dict[str, object]) -> dict[str, object]:
+        title = str(payload.get("title") or "Update").strip() or "Update"
+        description = str(payload.get("description") or "").strip()
+        status = str(payload.get("status") or "info").lower().strip()
+        title = self._zip_update_normalize_title(title, status)
+        color = self._zip_update_status_color(status)
+        try:
+            channel = self.get_channel(self.ZIP_UPDATE_CHANNEL_ID)
+            if channel is None:
+                channel = await self.fetch_channel(self.ZIP_UPDATE_CHANNEL_ID)
+            if channel is None or not hasattr(channel, "send"):
+                return {"ok": False, "error": "canal de update indisponível"}
+            view = self._make_zip_update_view(title, description, color)
+            msg = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
+            return {"ok": True, "channel_id": str(getattr(channel, "id", self.ZIP_UPDATE_CHANNEL_ID)), "message_id": str(msg.id)}
+        except Exception as exc:
+            logging.getLogger("zip_update").warning("falha ao criar mensagem de update pelo updater", exc_info=True)
+            return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
 
     async def _edit_zip_status_from_update(self, payload: dict[str, object]) -> dict[str, object]:
         try:

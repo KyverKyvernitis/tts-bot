@@ -11,6 +11,7 @@ DIRTY_MARKER_FILE="$REPO_DIR/.fatal-update-dirty"
 LOCAL_CHANGES_MARKER_FILE="$REPO_DIR/.fatal-update-local-changes"
 CANDIDATE_ROOT="${DISCORD_AUTO_UPDATE_STAGING_DIR:-$(dirname "$REPO_DIR")/bot-update-staging}/candidates"
 CANDIDATE_PENDING_FILE="$CANDIDATE_ROOT/pending.json"
+REMOTE_REJECTED_FILE="${DISCORD_AUTO_UPDATE_REJECTED_REMOTE_FILE:-$REPO_DIR/data/updater/rejected_remote_commits.json}"
 ROLLBACK_REQUEST_DEFAULT_ROOT="$CANDIDATE_ROOT/rollback"
 ROLLBACK_REQUEST_DATA_ROOT="${DISCORD_AUTO_UPDATE_ROLLBACK_REQUEST_DIR:-$REPO_DIR/data/runtime/update-rollback}"
 ROLLBACK_REQUEST_TMP_ROOT="${TMPDIR:-/tmp}/tts-bot-update-rollback"
@@ -58,6 +59,11 @@ LOCAL_CANDIDATE_COMMIT_MESSAGE=""
 LOCAL_CANDIDATE_PENDING_FILE=""
 LOCAL_CANDIDATE_FILES_DIR=""
 LOCAL_CANDIDATE_PUBLISHED=0
+REMOTE_CANDIDATE_MODE=0
+REMOTE_STATUS_CHANNEL_ID=""
+REMOTE_STATUS_MESSAGE_ID=""
+REMOTE_WORKTREE_DIR=""
+REMOTE_REJECT_REASON=""
 ROLLBACK_CONTROL_MODE=0
 ROLLBACK_REQUEST_ID=""
 ROLLBACK_REQUEST_FILE=""
@@ -165,6 +171,9 @@ exec > >(tee -a "$RUN_LOG_FILE" "$PERSISTENT_LOG_FILE") 2>&1
 
 cleanup_runtime_artifacts() {
   rm -f "$RUN_LOG_FILE"
+  if [[ -n "${REMOTE_WORKTREE_DIR:-}" && -d "$REMOTE_WORKTREE_DIR" ]]; then
+    sudo -u ubuntu -H git -C "$REPO_DIR" worktree remove --force "$REMOTE_WORKTREE_DIR" >/dev/null 2>&1 || rm -rf "$REMOTE_WORKTREE_DIR" 2>/dev/null || true
+  fi
   if [[ -n "${UPDATER_RUNTIME_COPY:-}" && -f "$UPDATER_RUNTIME_COPY" ]]; then
     rm -f "$UPDATER_RUNTIME_COPY" 2>/dev/null || true
   fi
@@ -936,6 +945,121 @@ sanitize_commit_ref() {
   fi
 }
 
+remote_commit_is_rejected() {
+  local commit="$(sanitize_commit_ref "${1:-}")"
+  [[ -n "$commit" && -f "$REMOTE_REJECTED_FILE" ]] || return 1
+  python3 - "$REMOTE_REJECTED_FILE" "$commit" <<'PYREJ' >/dev/null 2>&1
+import json, sys
+path, commit = sys.argv[1], sys.argv[2]
+try:
+    data = json.load(open(path, encoding='utf-8'))
+except Exception:
+    raise SystemExit(1)
+items = data.get('commits') if isinstance(data, dict) else None
+if not isinstance(items, dict):
+    raise SystemExit(1)
+raise SystemExit(0 if commit in items else 1)
+PYREJ
+}
+
+mark_remote_commit_rejected() {
+  local commit="$(sanitize_commit_ref "${1:-}")"
+  local reason="${2:-rejeitado}"
+  [[ -n "$commit" ]] || return 0
+  mkdir -p "$(dirname "$REMOTE_REJECTED_FILE")" 2>/dev/null || true
+  python3 - "$REMOTE_REJECTED_FILE" "$commit" "$reason" "$CURRENT_COMMIT" <<'PYREJ' 2>/dev/null || true
+import json, pathlib, sys, datetime
+path = pathlib.Path(sys.argv[1])
+commit, reason, live = sys.argv[2:5]
+try:
+    data = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+except Exception:
+    data = {}
+if not isinstance(data, dict):
+    data = {}
+items = data.get('commits') if isinstance(data.get('commits'), dict) else {}
+items[commit] = {
+    'reason': reason,
+    'live_commit': live,
+    'rejected_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+}
+data['commits'] = items
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+PYREJ
+  chown ubuntu:ubuntu "$REMOTE_REJECTED_FILE" 2>/dev/null || true
+}
+
+run_preflight_checks_in_dir() {
+  local root="${1:?}"
+  local py="$REPO_DIR/.venv/bin/python"
+  local file checked_py=0 checked_sh=0 rc=0
+  [[ -x "$py" ]] || py="$(command -v python3 || true)"
+  [[ -n "$py" ]] || { PREFLIGHT_PY_STATUS="python indisponível"; PREFLIGHT_BASH_STATUS="não executado"; return 1; }
+
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    [[ -f "$root/$file" ]] || continue
+    checked_py=1
+    if ! sudo -u ubuntu -H "$py" -m py_compile "$root/$file"; then
+      rc=1
+    fi
+  done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.py$' | grep -v '^activity ' || true)
+  if (( checked_py == 1 && rc == 0 )); then
+    PREFLIGHT_PY_STATUS="OK"
+  elif (( checked_py == 1 )); then
+    PREFLIGHT_PY_STATUS="falhou"
+  else
+    PREFLIGHT_PY_STATUS="sem arquivos Python alterados"
+  fi
+
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    [[ -f "$root/$file" ]] || continue
+    checked_sh=1
+    if ! bash -n "$root/$file"; then
+      rc=1
+    fi
+  done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.sh$' || true)
+  if (( checked_sh == 1 && rc == 0 )); then
+    PREFLIGHT_BASH_STATUS="OK"
+  elif (( checked_sh == 1 )); then
+    PREFLIGHT_BASH_STATUS="falhou"
+  else
+    PREFLIGHT_BASH_STATUS="sem scripts Bash alterados"
+  fi
+  PREFLIGHT_COG_IMPORT_STATUS="não executado no staging remoto"
+  logger -t "$LOG_TAG" "Preflight staging: Python=$PREFLIGHT_PY_STATUS Bash=$PREFLIGHT_BASH_STATUS"
+  return "$rc"
+}
+
+validate_remote_commit_in_staging() {
+  local remote_commit="$(sanitize_commit_ref "${1:-}")"
+  [[ -n "$remote_commit" ]] || return 1
+  REMOTE_WORKTREE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tts-bot-remote-candidate.XXXXXX")"
+  rmdir "$REMOTE_WORKTREE_DIR" 2>/dev/null || true
+  sudo -u ubuntu -H git -C "$REPO_DIR" worktree add --detach "$REMOTE_WORKTREE_DIR" "$remote_commit" >/dev/null || return 1
+  run_preflight_checks_in_dir "$REMOTE_WORKTREE_DIR"
+}
+
+reject_remote_commit_without_live_apply() {
+  local reason="${1:-validação local falhou}"
+  mark_remote_commit_rejected "$REMOTE_COMMIT" "$reason"
+  MANUAL_FAILURE_ALERT_SENT=1
+  REMOTE_REJECT_REASON="$reason"
+  local body
+  body="Resumo: O commit do GitHub foi rejeitado antes de alterar a VPS.
+Commit: $(short_commit "$REMOTE_COMMIT")
+Estado preservado: $(short_commit "$CURRENT_COMMIT")
+Motivo: $reason
+Arquivos:
+$(format_changed_files)
+Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+  notify_zip_status_message "error" "❌ Update rejeitado" $'O commit do GitHub não passou na validação local.\nA VPS continuou no último estado saudável.' || true
+  send_error "Update do GitHub rejeitado" "$body"
+  logger -t "$LOG_TAG" "Commit remoto $(short_commit "$REMOTE_COMMIT") rejeitado antes do live: $reason"
+  exit 0
+}
+
 load_pending_local_candidate() {
   local manifest active_file
   LOCAL_CANDIDATE_PENDING_FILE=""
@@ -1048,11 +1172,15 @@ PYSTATE
 }
 
 notify_zip_status_message() {
-  (( LOCAL_CANDIDATE_MODE == 1 )) || return 0
-  [[ -n "${LOCAL_CANDIDATE_DIR:-}" && -f "$LOCAL_CANDIDATE_DIR/manifest.json" ]] || return 0
   local status="${1:-info}"
   local title="${2:-Update}"
   local description="${3:-}"
+  if (( REMOTE_CANDIDATE_MODE == 1 )); then
+    post_direct_update_message "$REMOTE_STATUS_CHANNEL_ID" "$REMOTE_STATUS_MESSAGE_ID" "$status" "$title" "$description" "${ZIP_STATUS_CONTROL_JSON:-}" || true
+    return 0
+  fi
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 0
+  [[ -n "${LOCAL_CANDIDATE_DIR:-}" && -f "$LOCAL_CANDIDATE_DIR/manifest.json" ]] || return 0
   MANIFEST_PATH="$LOCAL_CANDIDATE_DIR/manifest.json" \
   STATUS_VALUE="$status" TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" \
   ZIP_STATUS_CONTROL_JSON="${ZIP_STATUS_CONTROL_JSON:-}" \
@@ -1156,6 +1284,44 @@ try:
 except Exception:
     pass
 PYDIRECT
+}
+
+create_direct_update_message() {
+  local status="${1:-applying}"
+  local title="${2:-$UPDATE_TITLE_EMOJI Aplicando update...}"
+  local description="${3:-}"
+  STATUS_VALUE="$status" TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" \
+  BOT_HEALTH_URL="$BOT_HEALTH_URL" REPO_DIR="$REPO_DIR" python3 - <<'PYCREATE' 2>/dev/null || true
+import json, os, shlex, urllib.request
+from pathlib import Path
+payload = {
+    "status": os.environ.get("STATUS_VALUE") or "applying",
+    "title": os.environ.get("TITLE_VALUE") or "Update",
+    "description": os.environ.get("DESCRIPTION_VALUE") or "",
+}
+url = (os.environ.get("BOT_HEALTH_URL") or "http://127.0.0.1:10000/health").replace("/health", "/internal/update/create-zip-status")
+headers = {"Content-Type": "application/json"}
+try:
+    env_path = Path(os.environ.get("REPO_DIR", "/home/ubuntu/bot")) / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("BOT_INTERNAL_UPDATE_TOKEN="):
+                token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if token:
+                    headers["X-Update-Token"] = token
+                break
+except Exception:
+    pass
+try:
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=4) as resp:
+        data = json.loads(resp.read().decode("utf-8", errors="ignore") or "{}")
+    if data.get("ok"):
+        print("REMOTE_STATUS_CHANNEL_ID=" + shlex.quote(str(data.get("channel_id") or "")))
+        print("REMOTE_STATUS_MESSAGE_ID=" + shlex.quote(str(data.get("message_id") or "")))
+except Exception:
+    pass
+PYCREATE
 }
 
 zip_progress_now_ms() {
@@ -2728,6 +2894,8 @@ rollback_after_failure() {
 
   if (( LOCAL_CANDIDATE_MODE == 1 )); then
     logger -t "$LOG_TAG" "Erro fatal no candidato local. Tentando rollback para $(short_commit "$PREVIOUS_COMMIT") antes de push GitHub"
+  elif (( REMOTE_CANDIDATE_MODE == 1 )); then
+    logger -t "$LOG_TAG" "Erro fatal no commit do GitHub. Tentando rollback de $(short_commit "$REMOTE_COMMIT") para $(short_commit "$PREVIOUS_COMMIT")"
   else
     logger -t "$LOG_TAG" "Erro fatal após update. Tentando rollback de $(short_commit "$REMOTE_COMMIT") para $(short_commit "$PREVIOUS_COMMIT")"
   fi
@@ -2743,6 +2911,9 @@ rollback_after_failure() {
     if (( LOCAL_CANDIDATE_MODE == 1 )); then
       archive_local_candidate "failed"
       ROLLBACK_STATUS="aplicado para $(short_commit "$PREVIOUS_COMMIT"); GitHub não foi alterado"
+    elif (( REMOTE_CANDIDATE_MODE == 1 )); then
+      mark_remote_commit_rejected "$REMOTE_COMMIT" "health falhou após aplicar; rollback para $(short_commit "$PREVIOUS_COMMIT")"
+      ROLLBACK_STATUS="aplicado para $(short_commit "$PREVIOUS_COMMIT"); commit GitHub rejeitado"
     else
       write_dirty_marker "$REMOTE_COMMIT" "$PREVIOUS_COMMIT" "$FAILED_STAGE" "$failed_command"
       ROLLBACK_STATUS="aplicado para $(short_commit "$PREVIOUS_COMMIT"); commit remoto marcado como sujo"
@@ -2807,6 +2978,10 @@ rollback_after_failure() {
       title="Update revertido"
       summary="O ZIP foi testado na VPS, falhou na validação e o bot voltou ao estado anterior. Nenhum commit foi enviado ao GitHub."
       commit_dirty="não; GitHub não foi alterado"
+    elif (( REMOTE_CANDIDATE_MODE == 1 )); then
+      title="Update do GitHub revertido"
+      summary="O commit do GitHub falhou depois da aplicação. A VPS voltou ao último estado saudável e esse commit foi rejeitado."
+      commit_dirty="sim; commit GitHub rejeitado"
     else
       title="Rollback aplicado após erro fatal"
       summary="O update falhou, mas o rollback voltou o repositório para o commit anterior e os serviços foram validados."
@@ -2948,11 +3123,17 @@ else
     clear_dirty_marker
   fi
 
+  if remote_commit_is_rejected "$REMOTE_COMMIT"; then
+    logger -t "$LOG_TAG" "Commit remoto $(short_commit "$REMOTE_COMMIT") já foi rejeitado; aguardando novo commit no GitHub ou ZIP."
+    exit 0
+  fi
+
   if [[ "$CURRENT_COMMIT" == "$REMOTE_COMMIT" ]]; then
     logger -t "$LOG_TAG" "Sem mudanças em $BRANCH"
     exit 0
   fi
 
+  REMOTE_CANDIDATE_MODE=1
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
   SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
 
@@ -2964,17 +3145,27 @@ else
 
   if (( CALLKEEPER_CHANGED == 1 )) && [[ "${UPDATE_TOUCH_CALLKEEPER:-}" != "1" || "${CALLKEEPER_UPDATE_ALLOWED:-}" != "1" ]]; then
     CHANGED_FILES="$(format_changed_files)"
-    body="Resumo: Update bloqueado antes do git pull porque contém arquivo protegido do CallKeeper.
-Branch: $BRANCH
+    body="Resumo: Update do GitHub bloqueado porque contém arquivo protegido do CallKeeper.
 Commit: $(short_commit "$CURRENT_COMMIT") → $(short_commit "$REMOTE_COMMIT")
 Mudança: ${COMMIT_SUBJECT:-sem mensagem}
 Arquivos:
 $CHANGED_FILES
-Ação sugerida: Remova arquivos do CallKeeper deste patch ou faça um patch CallKeeper explícito e isolado.
+Ação sugerida: Remova arquivos do CallKeeper ou faça um patch CallKeeper explícito e isolado.
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+    mark_remote_commit_rejected "$REMOTE_COMMIT" "alteração protegida de CallKeeper"
     send_error "Update bloqueado: CallKeeper protegido" "$body"
-    exit 1
+    exit 0
   fi
+
+  eval "$(create_direct_update_message "applying" "$(zip_progress_title)" "$UPDATE_STAGE_EMOJI **Validando commit do GitHub**")"
+  zip_progress_publish "Validando commit do GitHub"
+
+  STAGE="validação do commit remoto em staging"
+  if ! validate_remote_commit_in_staging "$REMOTE_COMMIT"; then
+    reject_remote_commit_without_live_apply "preflight falhou no staging remoto"
+  fi
+  mark_update_timing "remote_preflight"
+  zip_progress_done_and_publish "Commit validado" "Aplicando na VPS"
 
   STAGE="limpeza de artefatos gerados"
   cleanup_known_generated_update_artifacts
@@ -2983,22 +3174,23 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   clear_local_changes_marker_if_clean
   fail_local_changes_before_pull
 
-  logger -t "$LOG_TAG" "Atualizando de $CURRENT_COMMIT para $REMOTE_COMMIT"
+  logger -t "$LOG_TAG" "Aplicando commit remoto validado de $CURRENT_COMMIT para $REMOTE_COMMIT"
 
-  STAGE="git pull"
-  sudo -u ubuntu -H git pull --ff-only origin "$BRANCH"
+  STAGE="aplicação do commit GitHub"
+  sudo -u ubuntu -H git merge --ff-only "$REMOTE_COMMIT"
   UPDATE_APPLIED=1
-  mark_update_timing "pull"
+  mark_update_timing "apply"
+  zip_progress_done "Aplicado na VPS"
 fi
 
 FAILED_STAGE=""
 
-if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
+if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
   zip_progress_publish "Validando arquivos"
 fi
 run_preflight_checks
 mark_update_timing "preflight"
-if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
+if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
   process_detail="$(zip_progress_process_detail)"
   zip_progress_done "Arquivos validados"
   if [[ -n "${process_detail//[[:space:]]/}" ]]; then
@@ -3022,7 +3214,7 @@ deploy_backend
 mark_update_timing "backend"
 run_core_worker_post_update_automation
 mark_update_timing "worker"
-if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
+if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
   process_detail="$(zip_progress_process_detail)"
   if [[ -n "${process_detail//[[:space:]]/}" ]]; then
     zip_progress_done "Processos reiniciados: **$process_detail**"
@@ -3032,7 +3224,7 @@ if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
   zip_progress_publish "Verificando comandos"
 fi
 read_app_command_sync_status
-if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
+if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
   zip_progress_done "$APP_COMMAND_SYNC_SUMMARY"
 fi
 
@@ -3153,22 +3345,22 @@ fi
 BODY+=$'
 '"Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 logger -t "$LOG_TAG" "timings: ${UPDATER_TIMINGS:-sem etapas}; total=$DURATION"
-if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 )); then
+if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
   zip_progress_publish "Finalizando..."
 fi
 
 ZIP_STATUS_DESCRIPTION="$ALERT_SUMMARY
 
-$BRANCH · ${SHORT_FROM} → ${SHORT_TO}
+${SHORT_FROM} → ${SHORT_TO}
 ${CHANGED_FILES_COUNT} arquivo(s) alterado(s) · ${DIFF_TOTAL_SUMMARY}
 Aplicação: ${APPLY_MODE} · ${DURATION}
 
 ## Arquivos alterados
 ${CHANGED_FILES}"
 ZIP_STATUS_CONTROL_JSON=""
-if (( LOCAL_CANDIDATE_MODE == 1 && OVERALL_FATAL == 0 )); then
+if (( (LOCAL_CANDIDATE_MODE == 1 || REMOTE_CANDIDATE_MODE == 1) && OVERALL_FATAL == 0 )); then
   source_author_id=""
-  if [[ -f "$LOCAL_CANDIDATE_DIR/manifest.json" ]]; then
+  if (( LOCAL_CANDIDATE_MODE == 1 )) && [[ -f "$LOCAL_CANDIDATE_DIR/manifest.json" ]]; then
     source_author_id="$(json_field_from_file "$LOCAL_CANDIDATE_DIR/manifest.json" discord_status.source_author_id 2>/dev/null || true)"
   fi
   ZIP_STATUS_CONTROL_JSON="$(python3 - "$BRANCH" "$REMOTE_COMMIT" "$PREVIOUS_COMMIT" "$source_author_id" <<'PYCTRL'
