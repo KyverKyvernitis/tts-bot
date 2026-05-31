@@ -136,6 +136,7 @@ CHANGED_FILES_RAW=""
 CHANGED_DIFF_NUMSTAT_RAW=""
 DIFF_TOTAL_SUMMARY=""
 FAST_RELOAD_STATUS="não usado"
+FAST_RELOAD_MODULES=""
 UPDATER_UNIT="tts-bot-updater.service"
 RUN_LOG_FILE="${TMPDIR:-/tmp}/tts-bot-updater.$$.log"
 ZIP_STATUS_CONTROL_JSON=""
@@ -341,8 +342,16 @@ mark_update_timing() {
 
 format_changed_processes() {
   local items=()
+  # Quando o patch é somente de cog recarregável, não trate como reinício de bot.
+  # O estágio visual mostra "Recarregando cog/cogs" em vez de "Reiniciando processo".
+  local fast_modules_for_process=""
+  fast_modules_for_process="$(fast_reload_modules_for_changed_files 2>/dev/null || true)"
   if (( BOT_CHANGED == 1 || REQUIREMENTS_CHANGED == 1 )); then
-    items+=("bot")
+    if [[ -n "${fast_modules_for_process//[[:space:]]/}" && "${FAST_RELOAD_STATUS:-não usado}" != *"fallback"* ]]; then
+      :
+    else
+      items+=("bot")
+    fi
   fi
   if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then
     items+=("atividade")
@@ -1510,6 +1519,76 @@ zip_progress_process_detail() {
   fi
 }
 
+format_cog_module_names() {
+  local modules_text="${1:-}"
+  MODULES_TEXT="$modules_text" python3 - <<'PYCOGS'
+import os
+mods = []
+for raw in (os.environ.get("MODULES_TEXT") or "").splitlines():
+    raw = raw.strip()
+    if not raw:
+        continue
+    name = raw
+    if name.startswith("cogs."):
+        name = name[5:]
+    mods.append(name.replace("_", "-"))
+print(", ".join(dict.fromkeys(mods)))
+PYCOGS
+}
+
+fast_reload_stage_label() {
+  local modules_text="${1:-}"
+  [[ -n "${modules_text//[[:space:]]/}" ]] || return 1
+  local names count
+  names="$(format_cog_module_names "$modules_text")"
+  count="$(printf '%s\n' "$modules_text" | awk 'NF {c++} END {print c+0}')"
+  if [[ "$count" =~ ^[0-9]+$ && "$count" -gt 1 ]]; then
+    printf 'Recarregando cogs: %s' "$names"
+  else
+    printf 'Recarregando cog: %s' "$names"
+  fi
+}
+
+zip_progress_next_apply_stage() {
+  local fast_modules process_detail
+  fast_modules="$(fast_reload_modules_for_changed_files 2>/dev/null || true)"
+  FAST_RELOAD_MODULES="$fast_modules"
+  if [[ -n "${fast_modules//[[:space:]]/}" ]]; then
+    fast_reload_stage_label "$fast_modules"
+    return 0
+  fi
+  process_detail="$(zip_progress_process_detail)"
+  if [[ -n "${process_detail//[[:space:]]/}" ]]; then
+    if [[ "$process_detail" == *,* ]]; then
+      printf 'Reiniciando processos: %s' "$process_detail"
+    else
+      printf 'Reiniciando processo: %s' "$process_detail"
+    fi
+    return 0
+  fi
+  printf 'Validando aplicação'
+}
+
+zip_progress_done_apply_stage() {
+  local process_detail names count
+  if [[ "${FAST_RELOAD_STATUS:-}" == "OK" && -n "${FAST_RELOAD_MODULES//[[:space:]]/}" ]]; then
+    names="$(format_cog_module_names "$FAST_RELOAD_MODULES")"
+    count="$(printf '%s\n' "$FAST_RELOAD_MODULES" | awk 'NF {c++} END {print c+0}')"
+    if [[ "$count" =~ ^[0-9]+$ && "$count" -gt 1 ]]; then
+      zip_progress_done "Cogs recarregadas: **$names**"
+    else
+      zip_progress_done "Cog recarregada: **$names**"
+    fi
+    return 0
+  fi
+  process_detail="$(zip_progress_process_detail)"
+  if [[ -n "${process_detail//[[:space:]]/}" ]]; then
+    zip_progress_done "Processos reiniciados: **$process_detail**"
+  else
+    zip_progress_done "Aplicação validada"
+  fi
+}
+
 rollback_request_roots() {
   printf '%s\n' "$ROLLBACK_REQUEST_DEFAULT_ROOT"
   if [[ -n "${ROLLBACK_REQUEST_DATA_ROOT//[[:space:]]/}" && "$ROLLBACK_REQUEST_DATA_ROOT" != "$ROLLBACK_REQUEST_DEFAULT_ROOT" ]]; then
@@ -1788,7 +1867,7 @@ finalize_rollback_request_success() {
   changed_files="$(format_changed_files)"
   diff_summary="$(format_diff_total_summary)"
   if [[ "$FAST_RELOAD_STATUS" == "OK" ]]; then
-    apply_mode="reload rápido de cog"
+    apply_mode="cog recarregada"
   elif (( BOT_CHANGED == 0 )); then
     apply_mode="sem restart do bot"
   else
@@ -1807,9 +1886,10 @@ finalize_rollback_request_success() {
   local desc
   desc="$summary
 
-$BRANCH · ${SHORT_FROM} → ${SHORT_TO}
+${SHORT_FROM} → ${SHORT_TO}
 $(printf '%s\n' "$CHANGED_FILES_RAW" | awk 'NF {c++} END {print c+0}') arquivo(s) alterado(s) · $diff_summary
-Aplicação: $apply_mode · $duration
+Aplicação: $apply_mode
+Tempo total: $duration
 
 ## Arquivos alterados
 $changed_files"
@@ -1881,7 +1961,7 @@ git_add_changed_files() {
 
 prepare_local_candidate_update() {
   LOCAL_CANDIDATE_MODE=1
-  zip_progress_publish "Validando ZIP" "Conferindo base local e arquivos recebidos."
+  zip_progress_publish "Conferindo ZIP" "Checando arquivo recebido e base local."
   STAGE="fetch remoto"
   sudo -u ubuntu -H git fetch origin "$BRANCH"
   REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse "origin/$BRANCH")"
@@ -1891,6 +1971,7 @@ prepare_local_candidate_update() {
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
   SHORT_TO="local"
   mark_update_timing "fetch"
+  zip_progress_done_and_publish "Base conferida" "Validando segurança do ZIP"
 
   STAGE="validação de segurança do ZIP"
   local suspicion_reason=""
@@ -1901,6 +1982,7 @@ prepare_local_candidate_update() {
       "Esse arquivo parece uma base completa ou contém caminhos suspeitos. Nenhuma alteração foi aplicada." \
       "$suspicion_reason"
   fi
+  zip_progress_done_and_publish "Segurança conferida" "Validando estado local"
 
   if [[ -n "$LOCAL_CANDIDATE_BASE_COMMIT" && "$LOCAL_CANDIDATE_BASE_COMMIT" != "$REMOTE_COMMIT" ]]; then
     MANUAL_FAILURE_ALERT_SENT=1
@@ -1930,6 +2012,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
     mark_update_timing "sync"
   fi
+  zip_progress_done_and_publish "Estado local validado" "Preparando arquivos"
 
   if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
     archive_local_candidate "done"
@@ -1953,7 +2036,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   STAGE="limpeza de artefatos gerados"
   cleanup_known_generated_update_artifacts
 
-  zip_progress_done_and_publish "ZIP validado" "Aplicando na VPS"
+  zip_progress_done_and_publish "ZIP conferido" "Aplicando na VPS"
 
   STAGE="aplicação local do candidato"
   UPDATE_APPLIED=1
@@ -2834,12 +2917,18 @@ deploy_bot() {
   if (( BOT_CHANGED == 1 )); then
     local fast_modules restart_epoch restarts_before
     fast_modules="$(fast_reload_modules_for_changed_files || true)"
+    FAST_RELOAD_MODULES="$fast_modules"
     if [[ -n "${fast_modules//[[:space:]]/}" ]]; then
       STAGE="reload rápido de cogs"
       if try_fast_cog_reload "$fast_modules"; then
         return 0
       fi
       logger -t "$LOG_TAG" "Fast reload indisponível; usando restart completo seguro do bot principal. Status: $FAST_RELOAD_STATUS"
+      if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
+        zip_progress_done "Reload da cog falhou"
+        zip_progress_publish "Reiniciando processo: bot"
+      fi
+      FAST_RELOAD_MODULES=""
     fi
 
     restarts_before="$(service_restart_count "$SERVICE")"
@@ -3288,15 +3377,15 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     exit 0
   fi
 
-  eval "$(create_direct_update_message "applying" "$(zip_progress_title)" "$UPDATE_STAGE_EMOJI **Validando commit do GitHub**")"
-  zip_progress_publish "Validando commit do GitHub"
+  eval "$(create_direct_update_message "applying" "$(zip_progress_title)" "$UPDATE_STAGE_EMOJI **Conferindo commit do GitHub**")"
+  zip_progress_publish "Conferindo commit do GitHub"
 
   STAGE="validação do commit remoto em staging"
   if ! validate_remote_commit_in_staging "$REMOTE_COMMIT"; then
     reject_remote_commit_without_live_apply "preflight falhou no staging remoto"
   fi
   mark_update_timing "remote_preflight"
-  zip_progress_done_and_publish "Commit validado" "Aplicando na VPS"
+  zip_progress_done_and_publish "Commit conferido" "Aplicando na VPS"
 
   STAGE="limpeza de artefatos gerados"
   cleanup_known_generated_update_artifacts
@@ -3322,17 +3411,8 @@ fi
 run_preflight_checks
 mark_update_timing "preflight"
 if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
-  process_detail="$(zip_progress_process_detail)"
   zip_progress_done "Arquivos validados"
-  if [[ -n "${process_detail//[[:space:]]/}" ]]; then
-    if [[ "$process_detail" == *,* ]]; then
-      zip_progress_publish "Reiniciando processos: $process_detail"
-    else
-      zip_progress_publish "Reiniciando processo: $process_detail"
-    fi
-  else
-    zip_progress_publish "Validando aplicação"
-  fi
+  zip_progress_publish "$(zip_progress_next_apply_stage)"
 fi
 
 deploy_bot
@@ -3346,12 +3426,7 @@ mark_update_timing "backend"
 run_core_worker_post_update_automation
 mark_update_timing "worker"
 if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
-  process_detail="$(zip_progress_process_detail)"
-  if [[ -n "${process_detail//[[:space:]]/}" ]]; then
-    zip_progress_done "Processos reiniciados: **$process_detail**"
-  else
-    zip_progress_done "Aplicação validada"
-  fi
+  zip_progress_done_apply_stage
   zip_progress_publish "Verificando comandos"
 fi
 read_app_command_sync_status
@@ -3420,7 +3495,7 @@ fi
 
 APPLY_MODE="restart completo"
 if [[ "$FAST_RELOAD_STATUS" == "OK" ]]; then
-  APPLY_MODE="reload rápido de cog"
+  APPLY_MODE="cog recarregada"
 elif (( BOT_CHANGED == 0 )); then
   APPLY_MODE="sem restart do bot"
 fi
@@ -3484,7 +3559,8 @@ ZIP_STATUS_DESCRIPTION="$ALERT_SUMMARY
 
 ${SHORT_FROM} → ${SHORT_TO}
 ${CHANGED_FILES_COUNT} arquivo(s) alterado(s) · ${DIFF_TOTAL_SUMMARY}
-Aplicação: ${APPLY_MODE} · ${DURATION}
+Aplicação: ${APPLY_MODE}
+Tempo total: ${DURATION}
 
 ## Arquivos alterados
 ${CHANGED_FILES}"

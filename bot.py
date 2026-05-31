@@ -1948,8 +1948,8 @@ class BotLocal(commands.Bot):
                 if status_message is None:
                     status_message = await self._send_zip_update_message(
                         message,
-                        "📦 ZIP recebido",
-                        "Processando.",
+                        "<a:areia:1496606578395189473> Aplicando update...",
+                        "<a:loading:1510065277868445796> **Preparando update**\nLendo anexo e preparando candidato.",
                         discord.Color.blurple(),
                     )
 
@@ -2004,8 +2004,8 @@ class BotLocal(commands.Bot):
                     status_message,
                     "<a:areia:1496606578395189473> Aplicando update...",
                     (
-                        "<a:loading:1510065277868445796> **Validando ZIP**\n"
-                        "Conferindo base local e arquivos recebidos."
+                        "<a:loading:1510065277868445796> **Conferindo ZIP**\n"
+                        "Checando arquivo recebido e base local."
                     ),
                     discord.Color.blurple(),
                 )
