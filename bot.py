@@ -661,24 +661,6 @@ class BotLocal(commands.Bot):
             raise
         self._write_app_command_sync_status(status)
 
-    def _register_temp_updater_sync_command(self) -> None:
-        if any(getattr(cmd, "name", "") == "updater_teste" for cmd in self.tree.get_commands()):
-            return
-
-        async def updater_teste(interaction: discord.Interaction) -> None:
-            await safe_send_interaction_message(
-                interaction,
-                "✅ Comando temporário carregado.",
-                ephemeral=True,
-                log=logging.getLogger("zip_update"),
-                label="updater_teste",
-            )
-
-        updater_teste.__name__ = "updater_teste"
-        self.tree.command(
-            name="updater_teste",
-            description="Comando temporário para testar sync do updater.",
-        )(updater_teste)
 
     async def setup_hook(self):
         print("SETUP_HOOK INICIOU")
@@ -706,7 +688,6 @@ class BotLocal(commands.Bot):
 
         print("Carregando cogs...")
         await self._load_cogs_safely()
-        self._register_temp_updater_sync_command()
 
         should_sync = _env_truthy("SYNC_SLASH_COMMANDS")
         allow_global_sync = _env_truthy("SYNC_GLOBAL_SLASH_COMMANDS")
