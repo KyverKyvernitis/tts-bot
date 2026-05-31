@@ -56,6 +56,7 @@ LOCAL_CANDIDATE_ID=""
 LOCAL_CANDIDATE_DIR=""
 LOCAL_CANDIDATE_BASE_COMMIT=""
 LOCAL_CANDIDATE_COMMIT_MESSAGE=""
+LOCAL_CANDIDATE_ZIP_NAME=""
 LOCAL_CANDIDATE_PENDING_FILE=""
 LOCAL_CANDIDATE_FILES_DIR=""
 LOCAL_CANDIDATE_PUBLISHED=0
@@ -1095,6 +1096,7 @@ load_pending_local_candidate() {
   LOCAL_CANDIDATE_ID="$(json_field_from_file "$manifest" id 2>/dev/null || true)"
   LOCAL_CANDIDATE_BASE_COMMIT="$(json_field_from_file "$manifest" base_commit 2>/dev/null || true)"
   LOCAL_CANDIDATE_COMMIT_MESSAGE="$(json_field_from_file "$manifest" commit_message 2>/dev/null || true)"
+  LOCAL_CANDIDATE_ZIP_NAME="$(json_field_from_file "$manifest" zip_name 2>/dev/null || true)"
   LOCAL_CANDIDATE_FILES_DIR="$LOCAL_CANDIDATE_DIR/files"
   BRANCH="$(json_field_from_file "$manifest" branch 2>/dev/null || true)"
   [[ -n "${BRANCH//[[:space:]]/}" ]] || BRANCH="main"
@@ -1137,12 +1139,93 @@ archive_local_candidate() {
     return 0
   fi
   mkdir -p "$CANDIDATE_ROOT/$status" 2>/dev/null || true
+  chown ubuntu:ubuntu "$CANDIDATE_ROOT" "$CANDIDATE_ROOT/$status" 2>/dev/null || true
+  chmod 0775 "$CANDIDATE_ROOT" "$CANDIDATE_ROOT/$status" 2>/dev/null || true
   if [[ -f "$LOCAL_CANDIDATE_PENDING_FILE" ]]; then
     rm -f "$LOCAL_CANDIDATE_PENDING_FILE" 2>/dev/null || true
   fi
   if [[ -d "$LOCAL_CANDIDATE_DIR" ]]; then
     mv "$LOCAL_CANDIDATE_DIR" "$CANDIDATE_ROOT/$status/$(basename "$LOCAL_CANDIDATE_DIR").$(date +%Y%m%d%H%M%S)" 2>/dev/null || rm -rf "$LOCAL_CANDIDATE_DIR" 2>/dev/null || true
   fi
+}
+
+local_candidate_suspicion_reason() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 1
+  [[ "${DISCORD_AUTO_UPDATE_ALLOW_FULL_REPO_ZIP:-0}" == "1" ]] && return 1
+  [[ -f "${LOCAL_CANDIDATE_DIR:-}/manifest.json" ]] || return 1
+  python3 - "$LOCAL_CANDIDATE_DIR/manifest.json" <<'PYSUSPECT'
+import json, pathlib, sys
+try:
+    data = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit(1)
+zip_name = str(data.get('zip_name') or '').strip().lower()
+changed = [str(x).strip() for x in (data.get('changed_files') or []) if str(x).strip()]
+protected_prefixes = (
+    '.git/', '.github/workflows/', 'data/', 'logs/', 'node_modules/',
+    'secrets/', '.env', 'google-credentials', 'youtube-cookies',
+)
+reasons = []
+if zip_name.startswith('repo-') or zip_name.startswith('tts-bot-main') or zip_name.startswith('tts-bot-base'):
+    reasons.append('o arquivo parece uma base completa, não um patch')
+if len(changed) > 120:
+    reasons.append(f'muitos arquivos alterados para um patch normal ({len(changed)})')
+for path in changed:
+    low = path.lower()
+    if path == 'activity /A' or path.endswith(' /A'):
+        reasons.append(f'caminho suspeito ou inválido: {path}')
+        break
+    if low.startswith(protected_prefixes) or '/node_modules/' in low or '/.git/' in low:
+        reasons.append(f'caminho protegido/suspeito no ZIP: {path}')
+        break
+lockfiles = [p for p in changed if p.endswith('package-lock.json')]
+if len(lockfiles) >= 2 and len(changed) > 20:
+    reasons.append('parece conter árvore de projeto/frontend completa')
+if reasons:
+    print('; '.join(dict.fromkeys(reasons)))
+PYSUSPECT
+}
+
+reject_local_candidate_safely() {
+  local title="${1:-Update bloqueado}"
+  local summary="${2:-O candidato foi arquivado sem alterar a VPS.}"
+  local reason="${3:-candidato rejeitado}"
+  MANUAL_FAILURE_ALERT_SENT=1
+  trap - ERR
+  set +e
+  STAGE="candidato rejeitado"
+  cleanup_local_candidate_new_files_after_reset
+  sudo -u ubuntu -H git reset --hard "${PREVIOUS_COMMIT:-HEAD}" >/dev/null 2>&1 || true
+  cleanup_local_candidate_new_files_after_reset
+  archive_local_candidate "failed"
+  notify_zip_status_message "error" "$title" "$summary" || true
+  send_error "$title" "Resumo: $summary
+Motivo: $reason
+Candidato: ${LOCAL_CANDIDATE_ID:-desconhecido}
+ZIP: ${LOCAL_CANDIDATE_ZIP_NAME:-desconhecido}
+Commit preservado: $(short_commit "${PREVIOUS_COMMIT:-$CURRENT_COMMIT}")
+Arquivos:
+$(format_changed_files)
+Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+  logger -t "$LOG_TAG" "Candidato local ${LOCAL_CANDIDATE_ID:-desconhecido} rejeitado: $reason"
+  exit 0
+}
+
+git_add_changed_files_or_reject() {
+  local context="${1:-git add}"
+  [[ -n "${CHANGED_FILES_RAW//[[:space:]]/}" ]] || return 0
+  local errfile
+  errfile="$(mktemp "${TMPDIR:-/tmp}/tts-bot-git-add.XXXXXX")"
+  if git_add_changed_files 2>"$errfile"; then
+    rm -f "$errfile" 2>/dev/null || true
+    return 0
+  fi
+  LAST_ERROR_STDERR="$(cat "$errfile" 2>/dev/null || true)"
+  rm -f "$errfile" 2>/dev/null || true
+  reject_local_candidate_safely \
+    "Falha ao aplicar update" \
+    "Não consegui preparar os arquivos do ZIP. A VPS foi restaurada e o candidato foi arquivado." \
+    "$context: ${LAST_ERROR_STDERR:-git add falhou}"
 }
 
 write_local_candidate_state() {
@@ -1751,7 +1834,7 @@ cleanup_local_candidate_new_files_after_reset() {
     if sudo -u ubuntu -H git cat-file -e "$PREVIOUS_COMMIT:$rel" 2>/dev/null; then
       continue
     fi
-    rm -f "$REPO_DIR/$rel" 2>/dev/null || true
+    rm -rf -- "$REPO_DIR/$rel" 2>/dev/null || true
   done <<< "$CHANGED_FILES_RAW"
 }
 
@@ -1775,6 +1858,16 @@ prepare_local_candidate_update() {
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
   SHORT_TO="local"
   mark_update_timing "fetch"
+
+  STAGE="validação de segurança do ZIP"
+  local suspicion_reason=""
+  suspicion_reason="$(local_candidate_suspicion_reason 2>/dev/null || true)"
+  if [[ -n "${suspicion_reason//[[:space:]]/}" ]]; then
+    reject_local_candidate_safely \
+      "Update bloqueado" \
+      "Esse arquivo parece uma base completa ou contém caminhos suspeitos. Nenhuma alteração foi aplicada." \
+      "$suspicion_reason"
+  fi
 
   if [[ -n "$LOCAL_CANDIDATE_BASE_COMMIT" && "$LOCAL_CANDIDATE_BASE_COMMIT" != "$REMOTE_COMMIT" ]]; then
     MANUAL_FAILURE_ALERT_SENT=1
@@ -1832,7 +1925,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   STAGE="aplicação local do candidato"
   UPDATE_APPLIED=1
   copy_local_candidate_files
-  git_add_changed_files
+  git_add_changed_files_or_reject "git add do candidato local"
   CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only || true)"
   CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --cached --numstat || true)"
   if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
@@ -1864,7 +1957,7 @@ publish_local_candidate_after_validation() {
   fi
   STAGE="commit local validado"
   zip_progress_publish "Fazendo commit..."
-  git_add_changed_files
+  git_add_changed_files_or_reject "git add antes do commit"
   sudo -u ubuntu -H git commit -m "$LOCAL_CANDIDATE_COMMIT_MESSAGE"
   REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
   SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
@@ -3040,6 +3133,7 @@ on_error() {
     rollback_after_failure "$exit_code" "$failed_command"
   fi
   if (( LOCAL_CANDIDATE_MODE == 1 )); then
+    cleanup_local_candidate_new_files_after_reset || true
     archive_local_candidate "failed"
   fi
 
@@ -3085,7 +3179,11 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "O estado local foi mantido quando possível. Verifique o webhook/log interno." "$retry_control" || true
     archive_rollback_request "failed"
   else
-    notify_zip_status_message "error" "Falha no update" "O updater falhou antes de concluir a finalização. Verifique o webhook/log interno." || true
+    if (( LOCAL_CANDIDATE_MODE == 1 )); then
+      notify_zip_status_message "error" "Falha ao aplicar update" "A VPS foi restaurada quando possível e o candidato foi arquivado. Verifique o webhook/log interno." || true
+    else
+      notify_zip_status_message "error" "Falha no update" "O updater falhou antes de concluir a finalização. Verifique o webhook/log interno." || true
+    fi
   fi
   send_error "Falha no auto update" "$body"
   exit "$exit_code"
