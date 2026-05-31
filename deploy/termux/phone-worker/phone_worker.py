@@ -5549,7 +5549,17 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raise ValueError("emojis precisa ser lista")
         color = str(body.get("color") or "#5865F2")
         base_rgb = self._rgb_from_hex_worker(color)
+        monochrome = bool(body.get("monochrome", False))
         palette = self._palette_from_hex_worker(body.get("palette"), base_rgb)
+        # A VPS já escolhe a cor/paleta efetiva da mensagem. O worker só executa
+        # o processamento pesado e não deve trocar essa decisão por outra cor.
+        # Quando o avatar é monocromático, a paleta recebida já vem coerente com isso.
+        if monochrome and not body.get("palette"):
+            palette = [
+                base_rgb,
+                self._adjust_rgb_hsv_worker(base_rgb, sat_mul=0.70, val_mul=1.18),
+                self._adjust_rgb_hsv_worker(base_rgb, sat_mul=0.85, val_mul=0.72),
+            ]
         items: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
         for raw in emojis[:4]:
@@ -5578,7 +5588,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 errors.append({"id": emoji["id"], "error": str(exc)[:160]})
                 continue
-        return {"ok": True, "items": items, "count": len(items), "errors": errors[:4], "summary": f"{len(items)} emoji(s) recolorido(s)"}
+        return {"ok": True, "items": items, "count": len(items), "errors": errors[:4], "monochrome": monochrome, "summary": f"{len(items)} emoji(s) recolorido(s)"}
 
 
 

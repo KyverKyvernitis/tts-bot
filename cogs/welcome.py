@@ -1177,7 +1177,7 @@ class _StatusSelect(discord.ui.Select):
                 label="Apagar quando sair",
                 value="delete_on",
                 emoji="🧹",
-                description="Ativo · até 1 dia" if delete_on_leave else "Apagar a boas-vindas se o membro sair",
+                description="Ativo · até 24 horas" if delete_on_leave else "Apagar se sair em até 24 horas",
             ),
             discord.SelectOption(
                 label="Manter quando sair",
@@ -1198,7 +1198,7 @@ class _StatusSelect(discord.ui.Select):
             cfg["delete_on_leave_enabled"] = action == "delete_on"
             await self.panel.save_config(
                 cfg,
-                "Vou apagar a boas-vindas se o membro sair em até 1 dia." if cfg["delete_on_leave_enabled"] else "Vou manter a boas-vindas mesmo se o membro sair.",
+                "Vou apagar a boas-vindas se o membro sair em até 24 horas." if cfg["delete_on_leave_enabled"] else "Vou manter a boas-vindas mesmo se o membro sair.",
             )
         else:
             want_enable = action == "enable"
@@ -1542,7 +1542,7 @@ class WelcomeSettingsModal(discord.ui.Modal):
             self.status_group.add_option(label="Boas-vindas desligadas", value="off", description="Pausar as mensagens", default=not enabled)
             self.flags_group = discord.ui.CheckboxGroup(min_values=0, max_values=1, required=False)
             self.flags_group.add_option(
-                label="Apagar se sair em até 1 dia",
+                label="Apagar se sair em até 24 horas",
                 value="delete_on_leave",
                 description="Só apaga se o membro sair nesse período",
                 default=delete_on_leave,
@@ -1551,7 +1551,7 @@ class WelcomeSettingsModal(discord.ui.Modal):
             self.add_item(discord.ui.Label(text="Opções", component=self.flags_group))
         else:
             self.status_input = discord.ui.TextInput(label="Status: ligado ou desligado", default="ligado" if enabled else "desligado", max_length=20, required=True)
-            self.delete_input = discord.ui.TextInput(label="Apagar se sair em até 1 dia? sim ou não", default="sim" if delete_on_leave else "não", max_length=10, required=True)
+            self.delete_input = discord.ui.TextInput(label="Apagar se sair em até 24 horas? sim ou não", default="sim" if delete_on_leave else "não", max_length=10, required=True)
             self.add_item(self.status_input)
             self.add_item(self.delete_input)
 
@@ -1570,7 +1570,7 @@ class WelcomeSettingsModal(discord.ui.Modal):
         else:
             cfg["enabled"] = enabled
             cfg["delete_on_leave_enabled"] = delete_on_leave
-            leave = "apaga se o membro sair em até 1 dia" if delete_on_leave else "mantém a mensagem ao sair"
+            leave = "apaga se o membro sair em até 24 horas" if delete_on_leave else "mantém a mensagem ao sair"
             notice = f"Configurações salvas: boas-vindas {'ligadas' if enabled else 'desligadas'} · {leave}."
         await self.panel.save_config(cfg, notice)
         if cfg.get("enabled"):
@@ -2666,7 +2666,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
         mode = RENDER_MODE_LABELS.get(str(cfg.get("render_mode") or "components_v2"), "Components V2")
         send_label = "envio pelo webhook" if webhook_cfg.get("enabled") else "envio pelo bot"
         dm_label = "DM ligada" if bool(cfg.get("dm_enabled", False)) else "DM desligada"
-        delete_label = "apaga se sair em até 1 dia" if bool(cfg.get("delete_on_leave_enabled", False)) else "mantém se sair"
+        delete_label = "apaga se sair em até 24 horas" if bool(cfg.get("delete_on_leave_enabled", False)) else "mantém se sair"
         emoji_label = "emojis coloridos" if bool(cfg.get("decorative_emoji_enabled", False)) else "emojis normais"
         role_label = f"{role_count} cargo{'s' if role_count != 1 else ''}" if role_count else "sem cargos"
         rule_label = f"{rules_count} regra{'s' if rules_count != 1 else ''} especial{'is' if rules_count != 1 else ''}" if rules_count else "sem regras especiais"
@@ -2789,7 +2789,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
             discord.ui.TextDisplay(_trim("\n".join(lines))),
             discord.ui.Separator(),
             discord.ui.ActionRow(_MessageActionSelect(self)),
-            discord.ui.ActionRow(_BackButton(self)),
+            discord.ui.ActionRow(_PreviewButton(self), _BackButton(self)),
             accent_color=_color_from_hex(self.config.get("accent_color")),
         ))
 
@@ -2830,7 +2830,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
             discord.ui.TextDisplay(_trim("\n".join(lines))),
             discord.ui.Separator(),
             discord.ui.ActionRow(_MessageActionSelect(self)),
-            discord.ui.ActionRow(_BackButton(self)),
+            discord.ui.ActionRow(_PreviewButton(self), _BackButton(self)),
             accent_color=_color_from_hex(embed.get("color") or self.config.get("accent_color")),
         ))
 
@@ -3227,7 +3227,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
 
     def _build_status(self):
         channel_id = int(self.config.get("channel_id") or 0)
-        delete_label = "apaga só se sair em até 1 dia" if bool(self.config.get("delete_on_leave_enabled", False)) else "mantém a mensagem"
+        delete_label = "apaga só se sair em até 24 horas" if bool(self.config.get("delete_on_leave_enabled", False)) else "mantém a mensagem"
         lines = [
             "# ⚙️ Configurações",
             "Ligue, pause e escolha o que acontece quando alguém sair.",
@@ -4546,6 +4546,20 @@ class WelcomeCog(commands.Cog):
             palette.append(self._adjust_rgb_hsv(base_rgb, sat_mul=1.0, val_mul=1.0 + (0.06 if len(palette) % 2 else -0.06), hue_shift=shift))
         return palette[:6]
 
+    def _palette_is_mostly_monochrome(self, palette: list[tuple[int, int, int]] | None) -> bool:
+        values = list(palette or [])[:6]
+        if not values:
+            return False
+        low_sat = 0
+        for r, g, b in values:
+            try:
+                _h, sat, _val = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+            except Exception:
+                continue
+            if sat < 0.14:
+                low_sat += 1
+        return low_sat >= max(1, len(values) - 1)
+
     def _hex_palette_from_rgb(self, palette: list[tuple[int, int, int]]) -> list[str]:
         return [f"#{r:02X}{g:02X}{b:02X}" for r, g, b in (palette or [])]
 
@@ -4716,7 +4730,7 @@ class WelcomeCog(commands.Cog):
             port = 8766
         return f"{scheme}://{host}:{port}"
 
-    async def _worker_recolor_emojis(self, emojis: list[dict[str, Any]], *, color_hex: str, palette_hex: list[str] | None = None, limit: int = DEFAULT_DECORATIVE_EMOJI_LIMIT) -> list[dict[str, Any]] | None:
+    async def _worker_recolor_emojis(self, emojis: list[dict[str, Any]], *, color_hex: str, palette_hex: list[str] | None = None, limit: int = DEFAULT_DECORATIVE_EMOJI_LIMIT, monochrome: bool = False) -> list[dict[str, Any]] | None:
         base_url = self._phone_worker_base_url()
         token = str(os.getenv("PHONE_WORKER_TOKEN") or "").strip()
         if not base_url or not token or not emojis:
@@ -4727,7 +4741,7 @@ class WelcomeCog(commands.Cog):
         self._emoji_worker_active[worker_key] = int(self._emoji_worker_active.get(worker_key, 0) or 0) + 1
         try:
             effective_limit = max(0, min(MAX_DECORATIVE_EMOJIS, int(limit or DEFAULT_DECORATIVE_EMOJI_LIMIT)))
-            payload = json.dumps({"task": "emoji_recolor", "color": color_hex, "palette": palette_hex or [], "emojis": emojis[:effective_limit]}).encode("utf-8")
+            payload = json.dumps({"task": "emoji_recolor", "color": color_hex, "palette": palette_hex or [], "monochrome": bool(monochrome), "emojis": emojis[:effective_limit]}).encode("utf-8")
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
             def post() -> dict[str, Any]:
                 req = urllib.request.Request(f"{base_url}/task", data=payload, headers=headers, method="POST")
@@ -4825,7 +4839,7 @@ class WelcomeCog(commands.Cog):
         # Nesse caso, tentamos completar localmente apenas os que faltaram. O fallback é por
         # emoji individual: o que não tiver replacement confirmado permanece original.
         processed_by_key: dict[str, dict[str, Any]] = {}
-        worker_items = await self._worker_recolor_emojis(emojis, color_hex=color_hex, palette_hex=emoji_palette_hex, limit=effective_limit)
+        worker_items = await self._worker_recolor_emojis(emojis, color_hex=color_hex, palette_hex=emoji_palette_hex, limit=effective_limit, monochrome=self._palette_is_mostly_monochrome(emoji_palette))
         for item in worker_items or []:
             key = str(item.get("key") or "")
             if key:
@@ -5083,13 +5097,38 @@ class WelcomeCog(commands.Cog):
         except discord.HTTPException:
             return False, None
 
-    async def _track_sent_welcome_message(self, *, guild_id: int, member_id: int, message: discord.Message | None):
-        if message is None:
-            return
+    def _welcome_utc_now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def _welcome_as_utc(self, value: Any) -> datetime | None:
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    async def _cleanup_expired_welcome_tracking(self, *, now: datetime | None = None) -> None:
         db = self.db
         if db is None or not hasattr(db, "coll"):
             return
-        now = datetime.now(timezone.utc)
+        now = now or self._welcome_utc_now()
+        try:
+            result = await db.coll.delete_many({"type": WELCOME_DOC_SENT, "expires_at": {"$lt": now}})
+            deleted = int(getattr(result, "deleted_count", 0) or 0)
+            if deleted:
+                log.info("[welcome] tracking expirado limpo: %s registro(s)", deleted)
+        except Exception as exc:
+            log.debug("[welcome] não consegui limpar tracking expirado: %r", exc)
+
+    async def _track_sent_welcome_message(self, *, guild_id: int, member_id: int, message: discord.Message | None):
+        db = self.db
+        if db is None or not hasattr(db, "coll"):
+            log.debug("[welcome] tracking ignorado: settings_db indisponível guild=%s member=%s", guild_id, member_id)
+            return
+        if message is None:
+            log.info("[welcome] tracking não salvo: mensagem enviada sem message_id guild=%s member=%s", guild_id, member_id)
+            return
+        now = self._welcome_utc_now()
         doc = {
             "type": WELCOME_DOC_SENT,
             "guild_id": int(guild_id),
@@ -5097,9 +5136,10 @@ class WelcomeCog(commands.Cog):
             "channel_id": int(getattr(getattr(message, "channel", None), "id", 0) or 0),
             "message_id": int(getattr(message, "id", 0) or 0),
             "sent_at": now,
-            "expires_at": now + timedelta(days=1),
+            "expires_at": now + timedelta(hours=24),
         }
         if not doc["channel_id"] or not doc["message_id"]:
+            log.info("[welcome] tracking não salvo: channel/message vazio guild=%s member=%s channel=%s message=%s", guild_id, member_id, doc["channel_id"], doc["message_id"])
             return
         try:
             await db.coll.update_one(
@@ -5107,44 +5147,74 @@ class WelcomeCog(commands.Cog):
                 {"$set": doc},
                 upsert=True,
             )
-            await db.coll.delete_many({"type": WELCOME_DOC_SENT, "expires_at": {"$lt": now}})
+            log.info(
+                "[welcome] tracking salvo guild=%s member=%s channel=%s message=%s expires_at_utc=%s",
+                guild_id,
+                member_id,
+                doc["channel_id"],
+                doc["message_id"],
+                doc["expires_at"].isoformat(),
+            )
+            await self._cleanup_expired_welcome_tracking(now=now)
         except Exception as exc:
-            log.debug("não consegui salvar mensagem de boas-vindas para apagar depois: %r", exc)
+            log.warning("[welcome] não consegui salvar tracking da boas-vindas guild=%s member=%s: %r", guild_id, member_id, exc)
 
     async def _delete_tracked_welcome_message(self, member: discord.Member):
         db = self.db
         if db is None or not hasattr(db, "coll"):
+            log.debug("[welcome] delete-on-leave ignorado: settings_db indisponível guild=%s member=%s", member.guild.id, member.id)
             return
-        now = datetime.now(timezone.utc)
+        now = self._welcome_utc_now()
         query = {"type": WELCOME_DOC_SENT, "guild_id": int(member.guild.id), "member_id": int(member.id)}
         try:
             doc = await db.coll.find_one(query, {"_id": 0})
         except Exception as exc:
-            log.debug("não consegui buscar mensagem de boas-vindas para apagar: %r", exc)
+            log.warning("[welcome] não consegui buscar tracking para apagar guild=%s member=%s: %r", member.guild.id, member.id, exc)
             return
         if not doc:
+            log.info("[welcome] membro saiu sem tracking de boas-vindas guild=%s member=%s", member.guild.id, member.id)
+            await self._cleanup_expired_welcome_tracking(now=now)
             return
-        expires_at = doc.get("expires_at")
-        if isinstance(expires_at, datetime):
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-            if expires_at < now:
-                try:
-                    await db.coll.delete_one(query)
-                except Exception:
-                    pass
-                return
+        expires_at = self._welcome_as_utc(doc.get("expires_at"))
+        sent_at = self._welcome_as_utc(doc.get("sent_at"))
+        if expires_at is None and sent_at is not None:
+            expires_at = sent_at + timedelta(hours=24)
+        if expires_at is not None and expires_at < now:
+            log.info(
+                "[welcome] não apaguei boas-vindas: passou de 24h guild=%s member=%s message=%s expires_at_utc=%s now_utc=%s",
+                member.guild.id,
+                member.id,
+                doc.get("message_id"),
+                expires_at.isoformat(),
+                now.isoformat(),
+            )
+            try:
+                await db.coll.delete_one(query)
+            except Exception:
+                pass
+            await self._cleanup_expired_welcome_tracking(now=now)
+            return
         channel_id = int(doc.get("channel_id") or 0)
         message_id = int(doc.get("message_id") or 0)
+        if not channel_id or not message_id:
+            log.info("[welcome] tracking inválido ao sair guild=%s member=%s channel=%s message=%s", member.guild.id, member.id, channel_id, message_id)
+            with contextlib.suppress(Exception):
+                await db.coll.delete_one(query)
+            return
         try:
             channel = member.guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
-            if isinstance(channel, discord.abc.Messageable):
-                message = await channel.fetch_message(message_id)  # type: ignore[attr-defined]
-                await message.delete()
-        except (discord.NotFound, discord.Forbidden):
-            pass
+            if not isinstance(channel, discord.abc.Messageable):
+                log.info("[welcome] canal de tracking não é apagável guild=%s member=%s channel=%s", member.guild.id, member.id, channel_id)
+                return
+            message = await channel.fetch_message(message_id)  # type: ignore[attr-defined]
+            await message.delete()
+            log.info("[welcome] boas-vindas apagada porque membro saiu em até 24h guild=%s member=%s channel=%s message=%s", member.guild.id, member.id, channel_id, message_id)
+        except discord.NotFound:
+            log.info("[welcome] boas-vindas já não existia ao tentar apagar guild=%s member=%s channel=%s message=%s", member.guild.id, member.id, channel_id, message_id)
+        except discord.Forbidden:
+            log.info("[welcome] sem permissão para apagar boas-vindas guild=%s member=%s channel=%s message=%s", member.guild.id, member.id, channel_id, message_id)
         except discord.HTTPException as exc:
-            log.debug("não consegui apagar mensagem antiga de boas-vindas guild=%s member=%s: %r", member.guild.id, member.id, exc)
+            log.warning("[welcome] não consegui apagar boas-vindas guild=%s member=%s channel=%s message=%s: %r", member.guild.id, member.id, channel_id, message_id, exc)
         finally:
             try:
                 await db.coll.delete_one(query)
@@ -5396,7 +5466,9 @@ class WelcomeCog(commands.Cog):
     async def on_member_remove(self, member: discord.Member):
         cfg = await self._get_config(int(member.guild.id))
         if not bool(cfg.get("delete_on_leave_enabled", False)):
+            log.info("[welcome] membro saiu; apagar em até 24h desligado guild=%s member=%s", member.guild.id, member.id)
             return
+        log.info("[welcome] membro saiu; procurando boas-vindas para apagar guild=%s member=%s", member.guild.id, member.id)
         await self._delete_tracked_welcome_message(member)
 
     @commands.command(name="welcome", aliases=("boasvindas", "boas-vindas", "bv"))
