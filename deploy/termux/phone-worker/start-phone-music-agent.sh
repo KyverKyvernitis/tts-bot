@@ -290,7 +290,6 @@ ensure_deps() {
   safe_pip_install_module "discord.py" "discord" "discord.py>=2.7.1,<2.8" light || missing=1
   safe_pip_install_module "PyNaCl" "nacl" "PyNaCl" light || missing=1
   safe_pip_install_module "davey" "davey" "davey" light || missing=1
-  safe_pip_install_module "wavelink" "wavelink" "wavelink>=3.4,<3.6" light || missing=1
   safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp[default]" light || missing=1
   safe_pip_install_module "gTTS" "gtts" "gTTS" light || true
   safe_pip_install_module "edge-tts" "edge_tts" "edge-tts" light || true
@@ -299,7 +298,7 @@ ensure_deps() {
     safe_pip_install_module "google-cloud-texttospeech" "google.cloud.texttospeech_v1" "google-cloud-texttospeech" light || true
   fi
   if "$PYTHON_BIN" - <<'PYDEPS' >/dev/null 2>&1; then
-import aiohttp, discord, nacl, davey, wavelink, yt_dlp  # noqa: F401
+import aiohttp, discord, nacl, davey, yt_dlp  # noqa: F401
 PYDEPS
     return 0
   fi

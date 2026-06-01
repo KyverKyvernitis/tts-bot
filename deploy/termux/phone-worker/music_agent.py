@@ -2,7 +2,7 @@
 """Core Music Agent for the phone worker.
 
 Same-bot music plane: the VPS remains the UI/status plane while
-this process owns Discord voice/Lavalink/yt-dlp on the phone worker.
+this process owns Discord voice, yt-dlp and ffmpeg on the phone worker.
 
 The agent intentionally does not register Discord commands and does not handle
 message events. It exposes a small localhost HTTP API that phone_worker.py can
@@ -40,12 +40,7 @@ try:
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"discord.py ausente no Music Agent: {exc}")
 
-try:
-    import wavelink
-except Exception as exc:  # pragma: no cover
-    raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
-
-AGENT_VERSION = "0.3.26"
+AGENT_VERSION = "0.3.27"
 STARTED_AT = time.time()
 
 
@@ -99,7 +94,6 @@ bootstrap_env()
 
 
 _LOCAL_SEARCH_PREFIXES = ("ytsearch", "ytmsearch")
-_LAVALINK_PREFIXES = ("scsearch:", "spsearch:", "amsearch:", "dzsearch:")
 
 
 def truthy(value: object, default: bool = False) -> bool:
@@ -138,19 +132,6 @@ def safe_id(value: object) -> int:
         return int(str(value).strip())
     except Exception:
         return 0
-
-
-def read_lavalink_password_from_yaml() -> str:
-    path = Path(os.getenv("MUSIC_AGENT_LAVALINK_CONFIG") or Path.home() / "lavalink" / "application.yml").expanduser()
-    if not path.exists():
-        return ""
-    try:
-        for line in path.read_text(errors="ignore").splitlines():
-            if line.strip().lower().startswith("password:"):
-                return line.split(":", 1)[1].strip().strip('"\'')
-    except Exception:
-        return ""
-    return ""
 
 
 def _looks_like_url(value: str) -> bool:
@@ -509,9 +490,7 @@ class MusicAgent:
         self.port = env_int("MUSIC_AGENT_PORT", 8780)
         self.token = os.getenv("MUSIC_AGENT_TOKEN") or os.getenv("PHONE_WORKER_TOKEN") or ""
         self.discord_token = os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or ""
-        self.lavalink_uri = os.getenv("MUSIC_AGENT_LAVALINK_URI") or os.getenv("LAVALINK_URI") or "http://127.0.0.1:2333"
-        self.lavalink_password = os.getenv("MUSIC_AGENT_LAVALINK_PASSWORD") or os.getenv("LAVALINK_PASSWORD") or read_lavalink_password_from_yaml()
-        self.lavalink_node_name = os.getenv("MUSIC_AGENT_LAVALINK_NODE_NAME", "phone-agent")
+        self.music_backend = "direct-ytdlp"
         self.ytdlp_format = os.getenv("MUSIC_AGENT_YTDLP_FORMAT") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or "bestaudio[acodec=opus]/bestaudio/best"
         self.ytdlp_timeout = env_int("MUSIC_AGENT_YTDLP_TIMEOUT_SECONDS", 35)
         self.cookies_file = os.getenv("MUSIC_AGENT_YTDLP_COOKIES_FILE") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE") or str(Path.home() / "phone-worker" / "secrets" / "youtube-cookies.txt")
@@ -519,7 +498,6 @@ class MusicAgent:
         self.default_search = os.getenv("MUSIC_AGENT_YTDLP_DEFAULT_SEARCH") or "ytsearch5"
         self.direct_audio_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_AUDIO_ENABLED"), True)
         self.direct_youtube_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_YOUTUBE_ENABLED"), True)
-        self.lavalink_for_direct_streams = truthy(os.getenv("MUSIC_AGENT_LAVALINK_FOR_DIRECT_STREAMS"), False)
         self.ffmpeg_executable = os.getenv("MUSIC_AGENT_FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
         self.ffmpeg_before_options = os.getenv(
             "MUSIC_AGENT_FFMPEG_BEFORE_OPTIONS",
@@ -555,7 +533,6 @@ class MusicAgent:
         intents.voice_states = True
         self.client = discord.Client(intents=intents)
         self.states: dict[int, GuildMusicState] = {}
-        self._pool_connected = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._app = web.Application()
         self._app.add_routes([
@@ -572,40 +549,7 @@ class MusicAgent:
     def _wire_discord_events(self) -> None:
         @self.client.event
         async def on_ready() -> None:  # type: ignore[no-untyped-def]
-            self.log("discord_ready", user=str(self.client.user), version=AGENT_VERSION)
-            with contextlib.suppress(Exception):
-                await self.ensure_lavalink_pool()
-
-        @self.client.event
-        async def on_wavelink_track_start(payload: Any) -> None:  # type: ignore[no-untyped-def]
-            player = getattr(payload, "player", None)
-            guild_id = safe_id(getattr(getattr(player, "guild", None), "id", 0))
-            if guild_id:
-                st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
-                if st.transport == "lavalink":
-                    self._set_status(st, "playing", event="lavalink_track_start")
-                    self.log("play_started", guild_id=guild_id, transport="lavalink", title=getattr(st.current, "title", ""))
-                    self._schedule_next_queue_prefetch(guild_id, reason="lavalink_playing")
-
-        @self.client.event
-        async def on_wavelink_track_end(payload: Any) -> None:  # type: ignore[no-untyped-def]
-            player = getattr(payload, "player", None)
-            guild_id = safe_id(getattr(getattr(player, "guild", None), "id", 0))
-            if guild_id:
-                self.log("play_ended", guild_id=guild_id, transport="lavalink")
-                await self._finish_current(guild_id, error=None, event="lavalink_track_end")
-
-        @self.client.event
-        async def on_wavelink_track_exception(payload: Any) -> None:  # type: ignore[no-untyped-def]
-            player = getattr(payload, "player", None)
-            guild_id = safe_id(getattr(getattr(player, "guild", None), "id", 0))
-            if guild_id:
-                err = short_text(getattr(payload, "exception", "erro no Lavalink"), 260)
-                st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
-                self._set_status(st, "failed", event="lavalink_track_exception", error=err)
-                self.log("play_failed", guild_id=guild_id, transport="lavalink", error=err)
-                if st.queue:
-                    await self._play_next(guild_id)
+            self.log("discord_ready", user=str(self.client.user), version=AGENT_VERSION, backend=self.music_backend)
 
     def _resolve_cache_key(self, query: str, track_meta: dict[str, Any] | None = None) -> str:
         meta = track_meta or {}
@@ -815,12 +759,9 @@ class MusicAgent:
             st.paused = False
             self._set_status(st, "idle", event="idle_timeout_disconnect")
             with contextlib.suppress(Exception):
-                if isinstance(player, getattr(wavelink, "Player", ())):
-                    await player.disconnect()
-                else:
-                    if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
-                        player.stop()
-                    await player.disconnect(force=True)
+                if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
+                    player.stop()
+                await player.disconnect(force=True)
             self.log("idle_timeout_disconnect", guild_id=guild_id, delay=round(delay, 1))
         except asyncio.CancelledError:
             return
@@ -878,7 +819,6 @@ class MusicAgent:
             "PyNaCl": "nacl",
             "davey": "davey",
             "yt-dlp": "yt_dlp",
-            "wavelink": "wavelink",
             "aiohttp": "aiohttp",
             "gTTS": "gtts",
             "edge-tts": "edge_tts",
@@ -907,9 +847,7 @@ class MusicAgent:
             "uptime_seconds": round(time.time() - STARTED_AT, 1),
             "discord_ready": bool(self.client.is_ready()),
             "user": str(self.client.user) if self.client.user else "",
-            "lavalink_uri": self.lavalink_uri,
-            "lavalink_node": self.lavalink_node_name,
-            "pool_connected": self._pool_connected,
+            "backend": self.music_backend,
             "direct_audio_enabled": self.direct_audio_enabled,
             "idle_disconnect_seconds": self.idle_disconnect_seconds,
             "cache": {
@@ -923,21 +861,7 @@ class MusicAgent:
         }
 
     async def ensure_lavalink_pool(self) -> None:
-        if self._pool_connected:
-            return
-        if not self.lavalink_uri or not self.lavalink_password:
-            raise RuntimeError("Lavalink do worker não configurado para o Music Agent")
-        self.log("lavalink_pool_connecting", uri=self.lavalink_uri, node=self.lavalink_node_name)
-        node = wavelink.Node(uri=self.lavalink_uri, password=self.lavalink_password, identifier=self.lavalink_node_name)
-        try:
-            await wavelink.Pool.connect(nodes=[node], client=self.client, cache_capacity=100)
-        except TypeError:
-            await wavelink.Pool.connect(nodes=[node], client=self.client)
-        except Exception:
-            self._pool_connected = False
-            raise
-        self._pool_connected = True
-        self.log("lavalink_pool_ready", node=self.lavalink_node_name)
+        raise RuntimeError("Lavalink/NodeLink foi removido do Music Agent; use playback direto do worker.")
 
     async def dispatch(self, body: dict[str, Any]) -> dict[str, Any]:
         action = str(body.get("action") or body.get("command") or "status").strip().lower().replace("-", "_")
@@ -1176,9 +1100,7 @@ class MusicAgent:
         st = self.states.setdefault(safe_id(body.get("guild_id")), GuildMusicState(guild_id=safe_id(body.get("guild_id"))))
         player = st.player
         if player:
-            if isinstance(player, getattr(wavelink, "Player", ())):
-                await player.pause(True)
-            elif hasattr(player, "pause"):
+            if hasattr(player, "pause"):
                 player.pause()
             st.paused = True
             self._set_status(st, "paused", event="pause")
@@ -1188,9 +1110,7 @@ class MusicAgent:
         st = self.states.setdefault(safe_id(body.get("guild_id")), GuildMusicState(guild_id=safe_id(body.get("guild_id"))))
         player = st.player
         if player:
-            if isinstance(player, getattr(wavelink, "Player", ())):
-                await player.pause(False)
-            elif hasattr(player, "resume"):
+            if hasattr(player, "resume"):
                 player.resume()
             st.paused = False
             self._set_status(st, "playing", event="resume")
@@ -1238,15 +1158,10 @@ class MusicAgent:
         if not player:
             return
         with contextlib.suppress(Exception):
-            if isinstance(player, getattr(wavelink, "Player", ())):
-                await player.stop()
-                if disconnect:
-                    await player.disconnect()
-            else:
-                if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
-                    player.stop()
-                if disconnect:
-                    await player.disconnect(force=True)
+            if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
+                player.stop()
+            if disconnect:
+                await player.disconnect(force=True)
 
     async def _stop_current_player_for_transition(self, st: GuildMusicState, *, disconnect: bool = False) -> None:
         player = st.player
@@ -1383,17 +1298,6 @@ class MusicAgent:
                 pass
         st.last_action = "seek"
         player = st.player
-        if player is not None and isinstance(player, getattr(wavelink, "Player", ())) :
-            position_ms = max(0, int(target * 1000))
-            seeker = getattr(player, "seek", None)
-            if callable(seeker):
-                maybe = seeker(position_ms)
-                if asyncio.iscoroutine(maybe):
-                    await maybe
-                st.started_monotonic = time.monotonic() - target
-                self._set_status(st, "playing", event="seek")
-                return {"ok": True, "position_seconds": target, "state": st.public()}
-            return {"ok": False, "error": "backend atual não aceitou seek", "state": st.public()}
         if not track.stream_url:
             try:
                 track = await self.resolve_track(track.webpage_url or track.query or track.title, track_meta=track.public(), body=body)
@@ -1652,12 +1556,6 @@ class MusicAgent:
 
             guild, channel = await self._resolve_guild_and_channel(guild_id, voice_channel_id)
             existing = guild.voice_client
-            player_cls = getattr(wavelink, "Player", None)
-            if existing is not None and player_cls is not None and isinstance(existing, player_cls):
-                # Wavelink idle/old player should not block a standalone short TTS.
-                with contextlib.suppress(Exception):
-                    await existing.disconnect(force=True)
-                existing = None
             if existing is None or not getattr(existing, "is_connected", lambda: False)():
                 self.log("voice_direct_tts_connecting", guild_id=guild_id, channel=voice_channel_id)
                 voice_client = await channel.connect(self_deaf=True)
@@ -1833,27 +1731,18 @@ class MusicAgent:
             if int(getattr(st, "playback_token", 0) or 0) != request_token or st.current is not current_ref:
                 self.log("play_start_ignored", guild_id=guild_id, reason="stale_generation")
                 return
-            use_direct = self._should_use_direct_voice(st.current)
-            if use_direct:
-                await asyncio.wait_for(self._play_direct_voice(guild_id, st.current), timeout=max(5.0, self.prepare_timeout))
-            else:
-                await asyncio.wait_for(self._play_lavalink(guild_id, st.current), timeout=max(5.0, self.prepare_timeout))
+            if not self._should_use_direct_voice(st.current):
+                raise RuntimeError("track sem stream_url direto depois da resolução no worker")
+            await asyncio.wait_for(self._play_direct_voice(guild_id, st.current), timeout=max(5.0, self.prepare_timeout))
         except Exception as exc:
             self._invalidate_track_stream_cache(st.current)
             self._set_status(st, "failed", event="play_failed", error=f"{type(exc).__name__}: {short_text(exc, 260)}")
             self.log("play_failed", guild_id=guild_id, transport=st.transport or "unknown", error=st.last_error)
 
     def _should_use_direct_voice(self, track: AgentTrack) -> bool:
-        if not self.direct_audio_enabled or self.lavalink_for_direct_streams:
+        if not self.direct_audio_enabled:
             return False
-        stream_raw = " ".join([track.stream_url, track.transport_hint, track.source, track.query]).lower()
-        if track.stream_url and self.direct_youtube_enabled:
-            if track.transport_hint.startswith("direct") or any(marker in stream_raw for marker in ("googlevideo", "yt-dlp", "ytdlp", "music-agent-ytdlp", "worker-ytdlp", "youtube", "youtu.be", "soundcloud", "sndcdn", "cdn")):
-                return True
-        raw = " ".join([track.source, track.query, track.webpage_url, track.stream_url, track.transport_hint]).lower()
-        if raw.startswith(_LAVALINK_PREFIXES) or any(prefix in raw for prefix in ("spotify.com", "scsearch:", "spsearch:")):
-            return False
-        return False
+        return bool(str(track.stream_url or "").strip())
 
     async def _resolve_guild_and_channel(self, guild_id: int, voice_channel_id: int) -> tuple[Any, Any]:
         guild = self.client.get_guild(guild_id)
@@ -1871,10 +1760,6 @@ class MusicAgent:
         guild, channel = await self._resolve_guild_and_channel(guild_id, st.voice_channel_id)
         self.log("voice_connecting", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
         existing = guild.voice_client
-        if existing is not None and isinstance(existing, getattr(wavelink, "Player", ())):
-            with contextlib.suppress(Exception):
-                await existing.disconnect()
-            existing = None
         if existing is None or not getattr(existing, "is_connected", lambda: False)():
             voice_client = await channel.connect(self_deaf=True)
         else:
@@ -1976,91 +1861,10 @@ class MusicAgent:
         await self._finish_current(guild_id, error=None, event="direct_track_end")
 
     async def _play_lavalink(self, guild_id: int, track: AgentTrack) -> None:
-        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
-        await self.ensure_lavalink_pool()
-        guild, channel = await self._resolve_guild_and_channel(guild_id, st.voice_channel_id)
-        player_cls = getattr(wavelink, "Player", None)
-        if player_cls is None:
-            raise RuntimeError("Wavelink não expõe Player")
-        existing = guild.voice_client
-        if existing is not None and not isinstance(existing, player_cls):
-            with contextlib.suppress(Exception):
-                if getattr(existing, "is_playing", lambda: False)() or getattr(existing, "is_paused", lambda: False)():
-                    existing.stop()
-                await existing.disconnect(force=True)
-            existing = None
-        self.log("voice_connecting", guild_id=guild_id, channel=st.voice_channel_id, transport="lavalink")
-        player = existing
-        if player is None or not isinstance(player, player_cls) or not getattr(player, "connected", False):
-            player = await channel.connect(cls=player_cls, self_deaf=True)
-        elif getattr(getattr(player, "channel", None), "id", None) != st.voice_channel_id:
-            await player.move_to(channel)
-        st.player = player
-        st.transport = "lavalink"
-        with contextlib.suppress(Exception):
-            maybe = player.set_volume(max(0, min(150, int(st.volume_percent or self.default_volume_percent))))
-            if asyncio.iscoroutine(maybe):
-                await maybe
-        playable = await self._playable_for_track(track)
-        self.log("player_play_called", guild_id=guild_id, transport="lavalink", title=track.title)
-        self._set_status(st, "starting", event="lavalink_player_play_called")
-        await player.play(playable)
-        await asyncio.sleep(0.25)
-        # Não marque como tocando só porque o comando foi despachado.
-        # O estado definitivo vem do evento TrackStart do Wavelink/Lavalink.
-        self._set_status(st, "starting", event="lavalink_play_dispatched")
-        self.log("play_dispatched", guild_id=guild_id, transport="lavalink", title=track.title)
-
-    async def _finish_current(self, guild_id: int, *, error: str | None, event: str) -> None:
-        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
-        if error:
-            self._set_status(st, "failed", event=event, error=error)
-            return
-        finished = st.current
-        st.current = None
-        st.paused = False
-        loop_mode = str(getattr(st, "loop_mode", "off") or "off").strip().lower()
-        if finished is not None and loop_mode != "one":
-            self._push_history(st, finished)
-
-        if finished is not None and loop_mode == "one":
-            finished.start_offset_seconds = 0.0
-            st.queue.insert(0, finished)
-            self.log("loop_one_requeue", guild_id=guild_id, title=getattr(finished, "title", ""))
-            await self._play_next(guild_id)
-            return
-
-        if finished is not None and loop_mode == "all":
-            finished.start_offset_seconds = 0.0
-            st.queue.append(finished)
-            self.log("loop_all_requeue", guild_id=guild_id, title=getattr(finished, "title", ""), queue_size=len(st.queue))
-
-        if st.queue:
-            await self._play_next(guild_id)
-            return
-        self._set_status(st, "idle", event=event)
-        # Fim normal de fila não é desconexão externa: mantenha a sessão de voz
-        # viva e deixe o mesmo timeout AFK/idle decidir quando sair da call.
-        self._schedule_idle_disconnect(guild_id)
+        raise RuntimeError("Lavalink/NodeLink foi removido do worker; playback é direto via yt-dlp/ffmpeg.")
 
     async def _playable_for_track(self, track: AgentTrack) -> Any:
-        identifier = track.stream_url or track.webpage_url or track.query
-        if not identifier:
-            raise RuntimeError("track sem URL tocável")
-        self.log("track_loading", title=track.title, transport="lavalink", identifier=identifier[:80])
-        search = await wavelink.Playable.search(identifier)
-        if isinstance(search, list):
-            if not search:
-                raise RuntimeError("Lavalink não retornou playable")
-            return search[0]
-        tracks = getattr(search, "tracks", None)
-        if tracks:
-            return tracks[0]
-        if hasattr(search, "__iter__"):
-            items = list(search)
-            if items:
-                return items[0]
-        raise RuntimeError("Lavalink não retornou playable")
+        raise RuntimeError("Lavalink/NodeLink foi removido do worker; playable externo não é usado.")
 
     async def resolve_track(self, query: str, *, track_meta: dict[str, Any], body: dict[str, Any]) -> AgentTrack:
         direct = str(track_meta.get("stream_url") or body.get("stream_url") or "").strip()

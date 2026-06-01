@@ -16,7 +16,6 @@ from music_system.errors import MusicExtractionError
 from music_system.models import ExtractedBatch, MusicTrack
 from music_system.providers import describe_url
 from music_system.ui import SearchResultView, QueueView, VoiceStatusSettingsView, build_queue_embed, build_now_playing_embeds
-from music_system.musicnode_ui import MusicNodePanelView
 from music_system.worker_node import music_agent_command, music_agent_status, resolve_music_tracks_on_worker
 from music_system.loading_reaction import MusicLoadingReaction
 
@@ -1067,87 +1066,18 @@ class Music(commands.Cog):
 
 
 
-    async def _can_use_musicnode(self, ctx: commands.Context) -> bool:
-        with contextlib.suppress(Exception):
-            return bool(await self.bot.is_owner(ctx.author))
-        return False
-
     def _format_backend_status(self, health, *, runtime: dict | None = None) -> str:
         icon = "🟢" if getattr(health, "available", False) else ("🟡" if getattr(health, "configured", False) else "🔴")
-        enabled = "sim" if getattr(health, "enabled", False) else "não"
-        configured = "sim" if getattr(health, "configured", False) else "não"
-        mode = getattr(health, "mode", "off") or "off"
+        mode = getattr(health, "mode", "worker") or "worker"
+        message = getattr(health, "message", "") or ""
         lines = [
             f"{icon} **{getattr(health, 'name', 'backend')}**",
-            f"• ativado: `{enabled}` • configurado: `{configured}` • modo: `{mode}`",
+            f"• modo: `{mode}`",
         ]
-        version = getattr(health, "version", "") or ""
-        latency = getattr(health, "latency_ms", None)
-        if version:
-            lines.append(f"• versão: `{discord.utils.escape_markdown(str(version))}`")
-        if latency is not None:
-            lines.append(f"• latência: `{latency} ms`")
-        players = getattr(health, "players", None)
-        playing = getattr(health, "playing_players", None)
-        if players is not None:
-            lines.append(f"• players: `{players}` • tocando: `{playing if playing is not None else '?'}`")
-        extra = getattr(health, "extra", {}) or {}
-        if extra.get("provider"):
-            lines.append(f"• node: `{discord.utils.escape_markdown(str(extra.get('provider'))[:30])}`")
-        if extra.get("host"):
-            lines.append(f"• host: `{discord.utils.escape_markdown(str(extra.get('host'))[:80])}`")
-        if "wavelink_installed" in extra:
-            lines.append(f"• wavelink instalado: `{'sim' if extra.get('wavelink_installed') else 'não'}`")
-        message = getattr(health, "message", "") or ""
         if message:
             lines.append(f"• detalhe: {discord.utils.escape_markdown(str(message)[:220])}")
         return "\n".join(lines)
 
-    def _format_lavalink_test(self, result) -> str:
-        icon = "🟢" if getattr(result, "ok", False) else "🔴"
-        lines = [
-            f"{icon} **Teste do node de áudio**",
-            f"• query: `{discord.utils.escape_markdown(str(getattr(result, 'query', '') or '')[:160])}`",
-            f"• resultado: `{'OK' if getattr(result, 'ok', False) else 'falhou'}`",
-        ]
-        latency = getattr(result, "latency_ms", None)
-        if latency is not None:
-            lines.append(f"• latência: `{latency} ms`")
-        load_type = getattr(result, "load_type", "") or ""
-        if load_type:
-            lines.append(f"• loadType: `{discord.utils.escape_markdown(str(load_type))}`")
-        lines.append(f"• tracks encontradas: `{int(getattr(result, 'tracks_found', 0) or 0)}`")
-        playlist = getattr(result, "playlist_name", "") or ""
-        if playlist:
-            lines.append(f"• playlist: `{discord.utils.escape_markdown(str(playlist)[:120])}`")
-        title = getattr(result, "first_title", "") or ""
-        if title:
-            author = getattr(result, "first_author", "") or ""
-            source = getattr(result, "first_source", "") or ""
-            suffix = []
-            if author:
-                suffix.append(str(author)[:80])
-            if source:
-                suffix.append(str(source)[:40])
-            tail = f" • {' • '.join(discord.utils.escape_markdown(x) for x in suffix)}" if suffix else ""
-            lines.append(f"• primeira: **{discord.utils.escape_markdown(str(title)[:120])}**{tail}")
-        message = getattr(result, "message", "") or ""
-        if message:
-            lines.append(f"• detalhe: {discord.utils.escape_markdown(str(message)[:240])}")
-        return "\n".join(lines)
-
-    @commands.command(name="musicnode")
-    @commands.guild_only()
-    async def musicnode(self, ctx: commands.Context, *, _ignored: str = ""):
-        """Abre a central técnica do Lavalink com painel, botões e modals."""
-        if not await self._can_use_musicnode(ctx):
-            await self._reply(ctx, "Esse painel técnico do Lavalink é exclusivo do dono do bot.")
-            return
-
-        view = MusicNodePanelView(self.router, self.bot, owner_id=ctx.author.id, guild_id=ctx.guild.id)
-        await view.prepare()
-        message = await self._reply(ctx, view=view, allowed_mentions=discord.AllowedMentions.none())
-        view.message = message
 
 
     @commands.command(name="voicestatus", aliases=["voice_status", "vstatus", "statusvoz", "canalstatus", "setvoicestatus"])

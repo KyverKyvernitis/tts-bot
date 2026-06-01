@@ -182,6 +182,31 @@ WORKER_ACTION_CATEGORIES: tuple[dict[str, str], ...] = (
 )
 
 
+# A interface principal dos workers fica propositalmente enxuta.
+# Ações internas/diagnósticas continuam existindo no backend, mas não aparecem
+# no select normal para não lotar o painel com tarefas que raramente são usadas.
+WORKER_PANEL_ACTION_ORDER: tuple[str, ...] = (
+    "_worker_details",
+    "ping",
+    "worker_self_check",
+    "worker_logs",
+    "worker_update_quick",
+    "apk_build_debug_quick",
+    "apk_publish_last_quick",
+    "tailscale_status",
+    "boot_status",
+    "boot_repair",
+    "service_restart_worker",
+    "_show_last_result",
+    "_rename_worker",
+    "_pause_worker",
+    "_resume_worker",
+    "_delete_worker",
+)
+WORKER_PANEL_ACTION_ORDER_INDEX: dict[str, int] = {value: index for index, value in enumerate(WORKER_PANEL_ACTION_ORDER)}
+WORKER_PANEL_ACTION_VALUES: set[str] = set(WORKER_PANEL_ACTION_ORDER)
+
+
 _SECRET_PATTERNS = (
     re.compile(r"(Authorization:\s*Bearer\s+)[^\s]+", re.IGNORECASE),
     re.compile(r"(PHONE_WORKER_TOKEN\s*=\s*)[^\s]+", re.IGNORECASE),
@@ -2471,9 +2496,10 @@ class WorkersPanelView(discord.ui.LayoutView):
         self.owner_id = int(owner_id)
         self.snapshot = snapshot
         self.selected_worker_id = str(selected_worker_id or "")
-        self.selected_action_category = str(selected_action_category or "quick")
-        if self.selected_action_category not in {str(item.get("value")) for item in WORKER_ACTION_CATEGORIES}:
-            self.selected_action_category = "quick"
+        # O painel antigo tinha categorias demais. Mantemos o atributo só para
+        # compatibilidade com mensagens já abertas, mas o select visível agora
+        # mostra apenas as ações realmente úteis.
+        self.selected_action_category = "main"
         self.message: discord.Message | None = None
         self._ensure_selected_worker()
         self._rebuild_layout()
@@ -2718,15 +2744,20 @@ class WorkersPanelView(discord.ui.LayoutView):
 
     def _action_specs_for_selected(self, *, category: str | None = None) -> list[dict[str, Any]]:
         supported = self._selected_supported_tasks()
-        wanted_category = category or self.selected_action_category or "quick"
-        specs: list[dict[str, Any]] = []
+        specs_by_value: dict[str, dict[str, Any]] = {}
+
+        def add_if_visible(spec: dict[str, Any]) -> None:
+            value = str(spec.get("value") or "")
+            if value not in WORKER_PANEL_ACTION_VALUES:
+                return
+            specs_by_value.setdefault(value, dict(spec))
 
         for spec in self._panel_action_specs_for_selected():
-            if str(spec.get("category") or "quick") == wanted_category:
-                specs.append(dict(spec))
+            add_if_visible(spec)
 
         for spec in WORKER_ACTION_SPECS:
-            if str(spec.get("category") or "quick") != wanted_category:
+            value = str(spec.get("value") or "")
+            if value not in WORKER_PANEL_ACTION_VALUES:
                 continue
             job_type = _task_name(spec.get("job_type"))
             requires_declared = bool(spec.get("requires_declared"))
@@ -2734,28 +2765,23 @@ class WorkersPanelView(discord.ui.LayoutView):
                 continue
             if supported is not None and job_type not in supported:
                 continue
-            specs.append(dict(spec))
-        return specs
+            add_if_visible(spec)
+
+        return sorted(
+            specs_by_value.values(),
+            key=lambda item: WORKER_PANEL_ACTION_ORDER_INDEX.get(str(item.get("value") or ""), 999),
+        )
 
     def _category_select_options(self) -> list[discord.SelectOption]:
-        return [
-            discord.SelectOption(
-                label=str(category["label"])[:100],
-                value=str(category["value"])[:100],
-                description=_shorten(category.get("description"), limit=100),
-                emoji=str(category.get("emoji") or "📁"),
-                default=(str(category.get("value")) == self.selected_action_category),
-            )
-            for category in WORKER_ACTION_CATEGORIES
-        ]
+        return []
 
     def _action_select_options(self) -> list[discord.SelectOption]:
-        specs = self._action_specs_for_selected(category=self.selected_action_category)
+        specs = self._action_specs_for_selected()
         if not specs:
             return [discord.SelectOption(
-                label="Sem ações nessa categoria",
+                label="Sem ações disponíveis",
                 value="_unsupported",
-                description="Escolha outra categoria ou atualize o worker",
+                description="Atualize o worker ou escolha outro celular",
                 emoji="⚠️",
             )]
         return [
@@ -2813,14 +2839,13 @@ class WorkersPanelView(discord.ui.LayoutView):
             "# 📱 Core Workers\n"
             f"**Estado:** {snapshot.state_label}\n"
             f"**Celulares:** {workers_label}\n"
-            f"**Atualizações:** {automation_label}\n"
-            f"-# Fila: {queue_label}. Use detalhes técnicos só quando precisar depurar."
+            f"**Fila:** {queue_label}\n"
+            f"-# Atualizações: {automation_label}"
         )
 
 
         worker_options = self._worker_select_options()
         worker_select = None
-        category_select = None
         action_select = None
         if worker_options:
             worker_select = self._new_select(
@@ -2832,19 +2857,9 @@ class WorkersPanelView(discord.ui.LayoutView):
             )
             worker_select.callback = self._select_worker
 
-            category_select = self._new_select(
-                placeholder="Escolha uma categoria",
-                min_values=1,
-                max_values=1,
-                options=self._category_select_options(),
-                disabled=False,
-            )
-            category_select.callback = self._select_action_category
-
             action_options = self._action_select_options()
             action_disabled = bool(action_options and str(action_options[0].value) == "_unsupported")
-            action_label = next((str(item.get("label")) for item in WORKER_ACTION_CATEGORIES if str(item.get("value")) == self.selected_action_category), "Ações")
-            action_placeholder = f"{action_label}: escolha uma ação" if not action_disabled else "Sem ações nessa categoria"
+            action_placeholder = "Ações do celular" if not action_disabled else "Sem ações disponíveis"
             action_select = self._new_select(
                 placeholder=action_placeholder,
                 min_values=1,
@@ -2876,14 +2891,13 @@ class WorkersPanelView(discord.ui.LayoutView):
             discord.ui.Separator(),
             discord.ui.TextDisplay("\n".join(self._selected_worker_lines(snapshot))),
         ]
-        if worker_select is not None and category_select is not None and action_select is not None:
+        if worker_select is not None and action_select is not None:
             components.extend([
                 discord.ui.Separator(),
                 discord.ui.ActionRow(worker_select),
-                discord.ui.ActionRow(category_select),
                 discord.ui.ActionRow(action_select),
             ])
-            components.append(discord.ui.ActionRow(refresh))
+            components.append(discord.ui.ActionRow(refresh, pairing, cleanup_jobs))
         else:
             components.append(discord.ui.ActionRow(refresh, pairing, cleanup_jobs))
         if not _snapshot_has_online_worker(snapshot):
@@ -2920,28 +2934,26 @@ class WorkersPanelView(discord.ui.LayoutView):
             name = _shorten(worker.get("name") or worker.get("worker_id") or "Core Worker", limit=36)
             seen = _format_age(worker.get("last_seen_age_seconds"))
             version = _agent_version_label(worker.get("version"))
-            ready = "pronto" if worker.get("online") and not _worker_stale_note(worker) else ("sem resposta recente" if worker.get("online") else "offline")
+            ready = "online" if worker.get("online") and not _worker_stale_note(worker) else ("sem resposta recente" if worker.get("online") else "offline")
             lines.append(f"{icon} **{name}**")
             stale_note = _worker_stale_note(worker)
             if stale_note:
                 lines.append(f"-# {stale_note}")
-            push = _core_worker_push_status_text(str(worker.get("worker_id") or ""))
-            push_label = push.replace("Push: ", "push ") if push else "push ?"
-            lines.append(f"-# Termux worker: {ready} · visto {seen} · `{version}` · {_worker_runtime_label(worker)} · perfil {_worker_profile_label(worker)} · {_battery_text(worker)} · {_simple_network_text(worker)}")
-            lines.append(f"-# APK interno: {_core_worker_app_runtime_text(str(worker.get('worker_id') or ''))}")
-            if push_label:
-                lines.append(f"-# Push: {push_label.replace('push ', '')}")
+            lines.append(f"-# {ready} · visto {seen} · versão `{version}` · perfil {_worker_profile_label(worker)}")
+            lines.append(f"-# {_battery_text(worker)} · {_simple_network_text(worker)}")
             queue_text = _queue_status_text(worker)
             if queue_text:
                 lines.append(f"-# Fila: {queue_text}")
-            lines.append("-# Detalhes técnicos ficam no botão/ação **Detalhes do celular**.")
+            push = _core_worker_push_status_text(str(worker.get("worker_id") or ""))
+            if push:
+                lines.append(f"-# {push}")
+            lines.append("-# O restante fica em **Detalhes do celular** para não poluir o painel.")
         elif self._selected_is_legacy():
-            roles = _role_text(snapshot.roles, limit=6)
             version = _shorten((snapshot.status or {}).get("version") or "sem versão", limit=24)
-            lines.append(f"🟢 **{_shorten(snapshot.name or 'phone-worker direto', limit=36)}** · `direto`")
+            lines.append(f"🟢 **{_shorten(snapshot.name or 'phone-worker direto', limit=36)}**")
             status = snapshot.status if isinstance(snapshot.status, dict) else {}
-            lines.append(f"-# direto · v `{version}` · Termux atual · {_script_health_label({'status': status})}")
-            lines.append("-# Detalhes técnicos ficam no botão/ação **Detalhes do celular**.")
+            lines.append(f"-# direto online · versão `{version}` · {_script_health_label({'status': status})}")
+            lines.append("-# O restante fica em **Detalhes do celular** para não poluir o painel.")
         elif workers:
             lines.append("Selecione um worker.")
         elif snapshot.configured:
@@ -3040,7 +3052,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         if action == "_delete_worker":
             await self._delete_selected_worker(interaction)
             return
-        specs = {str(spec.get("value")): spec for spec in self._action_specs_for_selected(category=self.selected_action_category)}
+        specs = {str(spec.get("value")): spec for spec in self._action_specs_for_selected()}
         spec = specs.get(action)
         if spec is None:
             await interaction.response.send_message("Ação indisponível para esse worker.", ephemeral=True)
@@ -3619,7 +3631,7 @@ class WorkersCommandMixin:
 
     def _worker_base_config(self) -> tuple[bool, bool, str, str, str, str]:
         enabled = _env_bool("PHONE_WORKER_ENABLED", False)
-        host = str(os.getenv("PHONE_WORKER_HOST") or os.getenv("AUX_LAVALINK_HOST") or os.getenv("PHONE_LAVALINK_HOST") or "").strip()
+        host = str(os.getenv("PHONE_WORKER_HOST") or "").strip()
         port = str(os.getenv("PHONE_WORKER_PORT") or "8766").strip() or "8766"
         scheme = str(os.getenv("PHONE_WORKER_SCHEME") or "http").strip() or "http"
         name = str(os.getenv("PHONE_WORKER_NAME") or os.getenv("CORE_WORKER_NAME") or "Core Phone Worker").strip() or "Core Phone Worker"

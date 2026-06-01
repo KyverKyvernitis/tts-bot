@@ -282,7 +282,7 @@ PHONE_WORKER_LOG_SUMMARY_MAX_TOP=12
 ```
 ## Uso fora do `/vps`
 
-Além dos diagnósticos, a VPS pode usar o phone-worker para preparar áudio curto de TTS antes do Lavalink tocar. Isso é opcional e tem fallback local automático.
+Além dos diagnósticos, a VPS pode usar o phone-worker para preparar áudio curto de TTS e alimentar o fluxo direto do Music Agent/FFmpeg. Lavalink/NodeLink não fazem mais parte do worker. Isso é opcional e tem fallback local automático.
 
 ```env
 MUSIC_TTS_PHONE_WORKER_CONVERT_ENABLED=true

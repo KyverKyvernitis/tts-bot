@@ -2784,59 +2784,18 @@ deploy_cleanup_timer() {
 
 
 deploy_phone_lavalink_watch() {
+  # Lavalink/NodeLink foi removido do worker. Esta etapa não instala mais unit
+  # nova; ela só desativa qualquer timer/service antigo que ainda exista na VPS.
   if (( PHONE_LAVALINK_WATCH_CHANGED == 0 )); then
-    PHONE_LAVALINK_WATCH_STATUS="não alterado"
+    PHONE_LAVALINK_WATCH_STATUS="removido do fluxo"
     return 0
   fi
 
-  STAGE="configuração do watcher do Lavalink auxiliar"
-  local installed=0
-
-  local phone_lavalink_service_src="$REPO_DIR/deploy/systemd/vps/phone-lavalink-watch.service"
-  local phone_lavalink_timer_src="$REPO_DIR/deploy/systemd/vps/phone-lavalink-watch.timer"
-  [[ -f "$phone_lavalink_service_src" ]] || phone_lavalink_service_src="$REPO_DIR/deploy/systemd/phone-lavalink-watch.service"
-  [[ -f "$phone_lavalink_timer_src" ]] || phone_lavalink_timer_src="$REPO_DIR/deploy/systemd/phone-lavalink-watch.timer"
-
-  if [[ -f "$phone_lavalink_service_src" ]]; then
-    cp "$phone_lavalink_service_src" /etc/systemd/system/phone-lavalink-watch.service
-    installed=1
-  fi
-  if [[ -f "$phone_lavalink_timer_src" ]]; then
-    cp "$phone_lavalink_timer_src" /etc/systemd/system/phone-lavalink-watch.timer
-    installed=1
-  fi
-
-  if (( installed == 0 )); then
-    PHONE_LAVALINK_WATCH_STATUS="units não encontradas"
-    return 0
-  fi
-
-  systemctl daemon-reload
-
-  local watch_value=""
-  if [[ -f "$REPO_DIR/.env" ]]; then
-    watch_value="$(grep -E '^PHONE_LAVALINK_WATCH_ENABLED=' "$REPO_DIR/.env" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d ' "' || true)"
-    watch_value="${watch_value,,}"
-  fi
-
-  if [[ "$watch_value" == "0" || "$watch_value" == "false" || "$watch_value" == "no" || "$watch_value" == "off" || "$watch_value" == "nao" || "$watch_value" == "não" ]]; then
-    systemctl disable --now phone-lavalink-watch.timer >/dev/null 2>&1 || true
-    PHONE_LAVALINK_WATCH_STATUS="timer desativado por PHONE_LAVALINK_WATCH_ENABLED=false"
-    return 0
-  fi
-
-  if env_truthy AUX_LAVALINK_ENABLED; then
-    systemctl enable --now phone-lavalink-watch.timer >/dev/null 2>&1 || true
-    systemctl start phone-lavalink-watch.service >/dev/null 2>&1 || true
-    if systemctl is-active --quiet phone-lavalink-watch.timer; then
-      PHONE_LAVALINK_WATCH_STATUS="timer ativo"
-    else
-      PHONE_LAVALINK_WATCH_STATUS="timer instalado, mas não ativo"
-    fi
-  else
-    systemctl disable --now phone-lavalink-watch.timer >/dev/null 2>&1 || true
-    PHONE_LAVALINK_WATCH_STATUS="instalado; inativo porque AUX_LAVALINK_ENABLED=false"
-  fi
+  STAGE="desativando watcher legado do Lavalink"
+  systemctl disable --now phone-lavalink-watch.timer phone-lavalink-watch.service >/dev/null 2>&1 || true
+  systemctl reset-failed phone-lavalink-watch.timer phone-lavalink-watch.service >/dev/null 2>&1 || true
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  PHONE_LAVALINK_WATCH_STATUS="desativado/removido do fluxo"
 }
 
 

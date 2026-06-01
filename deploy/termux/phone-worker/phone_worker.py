@@ -292,7 +292,7 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "turbo": {
         "label": "Turbo",
         "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "voice-agent", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -1527,7 +1527,7 @@ def _flush_pending_core_worker_job_results(*, timeout: float = 8.0) -> int:
 
 def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     status = _safe_telemetry("system", _system_status, {"ok": False})
-    music_node = _safe_telemetry("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"})
+    music_node = _music_node_snapshot()
     music_agent = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
     worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
     name = _default_worker_name()
@@ -1546,12 +1546,12 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         capabilities.append("ffmpeg")
     if status.get("ffprobe") and "ffprobe" not in capabilities:
         capabilities.append("ffprobe")
-    music_ready = (not safe_mode) and bool(music_agent.get("available") or music_node.get("ok") or music_node.get("online") or profile == "turbo")
+    music_ready = (not safe_mode) and bool(music_agent.get("available") or profile == "turbo")
     if music_ready:
-        for role in ("music", "music-agent", "music-node", "music-lavalink", "music-ytdlp"):
+        for role in ("music", "music-agent", "music-ytdlp"):
             if role not in roles:
                 roles.append(role)
-        for capability in ("music", "music-agent", "music-voice", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve"):
+        for capability in ("music", "music-agent", "music-voice", "music-ytdlp", "music-ytdlp-resolve"):
             if capability not in capabilities:
                 capabilities.append(capability)
     return {
@@ -2048,241 +2048,38 @@ def _cache_dir_snapshot(path: Path, *, max_scan_files: int = 20000) -> dict[str,
 
 
 def _phone_lavalink_env_value(name: str, default: str = "") -> str:
-    value = str(os.getenv(name) or "").strip()
-    if value:
-        return value
-    env_file = Path(os.getenv("PHONE_LAVALINK_ENV") or str(Path.home() / ".phone-lavalink.env")).expanduser()
-    try:
-        if not env_file.exists():
-            return default
-        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-            raw = line.strip()
-            if not raw or raw.startswith("#") or "=" not in raw:
-                continue
-            key, raw_value = raw.split("=", 1)
-            if key.strip() != name:
-                continue
-            return raw_value.strip().strip('"').strip("'")
-    except Exception:
-        return default
+    # Compatibilidade para workers antigos. Lavalink/NodeLink foi removido do
+    # fluxo do worker; não lemos mais ~/.phone-lavalink.env nem acordamos Java.
     return default
 
 
-
-_LAVALINK_AUTOSTART_LOCK = threading.Lock()
-_LAVALINK_AUTOSTART_LAST_AT = 0.0
-
-
-def _truthy_env(name: str, default: bool = False) -> bool:
-    return _env_bool(name, default)
-
-
 def _phone_lavalink_port() -> int:
-    port_raw = _phone_lavalink_env_value("PHONE_LAVALINK_PORT", _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PORT", "2333")) or "2333"
-    try:
-        return max(1, min(65535, int(str(port_raw).strip())))
-    except Exception:
-        return 2333
-
-
-def _read_lavalink_application_password() -> str:
-    app_path = Path(_phone_lavalink_env_value("PHONE_LAVALINK_APPLICATION_YML", str(Path.home() / "lavalink" / "application.yml"))).expanduser()
-    try:
-        if not app_path.exists():
-            return ""
-        text = app_path.read_text(encoding="utf-8", errors="replace")
-        for line in text.splitlines():
-            raw = line.strip()
-            if not raw or raw.startswith("#") or ":" not in raw:
-                continue
-            key, value = raw.split(":", 1)
-            if key.strip().lower() != "password":
-                continue
-            value = value.strip().strip('"').strip("'")
-            if value.startswith("${") and value.endswith("}"):
-                env_key = value[2:-1].split(":", 1)[0].strip()
-                return str(os.getenv(env_key) or "").strip()
-            return value
-    except Exception:
-        return ""
-    return ""
+    return 0
 
 
 def _phone_lavalink_password() -> str:
-    return (
-        _phone_lavalink_env_value("PHONE_LAVALINK_PASSWORD", "")
-        or _phone_lavalink_env_value("AUX_LAVALINK_PASSWORD", "")
-        or _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PASSWORD", "")
-        or _read_lavalink_application_password()
-    )
+    return ""
 
 
 def _probe_local_lavalink_http(*, timeout: float = 2.5) -> tuple[bool, int, str]:
-    port = _phone_lavalink_port()
-    password = _phone_lavalink_password()
-    headers = {"Accept": "text/plain"}
-    if password:
-        headers["Authorization"] = password
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/version", headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=max(0.5, float(timeout))) as response:
-            body = response.read(512).decode("utf-8", errors="replace").strip()
-            status = int(getattr(response, "status", 0) or 0)
-        return (200 <= status < 300), status, body
-    except urllib.error.HTTPError as exc:
-        # 401 prova que existe Lavalink respondendo, mas a senha do probe não bateu
-        # ou não foi enviada. Para autostart isso é suficiente para não duplicar
-        # processos; para health completo, _music_node_snapshot usa a senha e marca
-        # saudável apenas quando der 2xx.
-        return (int(exc.code) == 401 and not password), int(exc.code), _short_text(exc.reason, limit=80)
-    except Exception as exc:
-        return False, 0, _short_text(f"{type(exc).__name__}: {exc}", limit=120)
-
-
-def _spawn_builtin_lavalink_proot_start() -> tuple[bool, str]:
-    if not shutil.which("tmux"):
-        return False, "tmux não encontrado"
-    if not shutil.which("proot-distro"):
-        return False, "proot-distro não encontrado"
-    host_dir = Path(_phone_lavalink_env_value("PHONE_LAVALINK_HOST_DIR", str(Path.home() / "lavalink"))).expanduser()
-    jar = host_dir / "Lavalink.jar"
-    if not jar.exists():
-        return False, f"Lavalink.jar não encontrado em {host_dir}"
-    session = _phone_lavalink_env_value("PHONE_LAVALINK_TMUX_SESSION", "lavalink-debian") or "lavalink-debian"
-    distro = _phone_lavalink_env_value("PHONE_LAVALINK_PROOT_DISTRO", "debian") or "debian"
-    proot_dir = _phone_lavalink_env_value("PHONE_LAVALINK_PROOT_DIR", "/root/lavalink") or "/root/lavalink"
-    java_xmx = _phone_lavalink_env_value("PHONE_LAVALINK_JAVA_XMX", "384m") or "768m"
-    log_name = _phone_lavalink_env_value("PHONE_LAVALINK_LOG_NAME", "lavalink-proot.log") or "lavalink-proot.log"
-    subprocess.run(["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
-    with contextlib.suppress(Exception):
-        subprocess.run(["pkill", "-f", "java.*Lavalink.jar"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
-    command = (
-        "cd " + shlex.quote(proot_dir) +
-        " && mkdir -p /tmp/lavalink" +
-        " && exec /usr/bin/java -Djava.io.tmpdir=/tmp/lavalink -Xmx" + shlex.quote(java_xmx) +
-        " -jar Lavalink.jar >> " + shlex.quote(log_name) + " 2>&1"
-    )
-    tmux_cmd = [
-        "tmux", "new-session", "-d", "-s", session,
-        "proot-distro", "login", distro,
-        "--bind", f"{host_dir}:{proot_dir}",
-        "--", "bash", "-lc", command,
-    ]
-    subprocess.Popen(tmux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return True, f"sessão {session} iniciada"
+    return False, 0, "lavalink_removed"
 
 
 def _ensure_phone_lavalink_started(reason: str = "health") -> dict[str, Any]:
-    global _LAVALINK_AUTOSTART_LAST_AT
-    if not _env_autostart_enabled("PHONE_LAVALINK_AUTO_START", "auto"):
-        return {"attempted": False, "reason": "auto_start_disabled_or_safe_mode", "safe_mode": _phone_worker_safe_mode_enabled()}
-    roles, capabilities = _current_core_worker_roles_and_capabilities()
-    caps = {str(x).strip().lower() for x in (roles + capabilities)}
-    if not ({"music", "music-node", "music-lavalink"} & caps) and _current_core_worker_profile() != "turbo":
-        return {"attempted": False, "reason": "worker_sem_capacidade_music"}
-    alive, status, body = _probe_local_lavalink_http(timeout=1.5)
-    if alive or status == 401:
-        return {"attempted": False, "reason": "already_online", "http_status": status}
-    now = time.time()
-    cooldown = max(5.0, _env_float("PHONE_LAVALINK_AUTO_START_COOLDOWN_SECONDS", 30.0))
-    if now - _LAVALINK_AUTOSTART_LAST_AT < cooldown:
-        return {"attempted": False, "reason": "cooldown", "last_error": body}
-    with _LAVALINK_AUTOSTART_LOCK:
-        now = time.time()
-        if now - _LAVALINK_AUTOSTART_LAST_AT < cooldown:
-            return {"attempted": False, "reason": "cooldown", "last_error": body}
-        _LAVALINK_AUTOSTART_LAST_AT = now
-        script = Path(_phone_lavalink_env_value("PHONE_LAVALINK_START_COMMAND", str(Path.home() / "start-phone-lavalink.sh"))).expanduser()
-        try:
-            if script.exists() and os.access(script, os.X_OK):
-                subprocess.Popen([str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                print(f"[phone-worker] lavalink auto-start solicitado via {script} ({reason})", flush=True)
-                return {"attempted": True, "method": "script", "script": str(script)}
-            ok, detail = _spawn_builtin_lavalink_proot_start()
-            if ok:
-                print(f"[phone-worker] lavalink auto-start solicitado via proot/tmux ({reason})", flush=True)
-            else:
-                print(f"[phone-worker] lavalink auto-start falhou: {detail}", flush=True)
-            return {"attempted": bool(ok), "method": "builtin-proot", "detail": detail}
-        except Exception as exc:
-            detail = _short_text(f"{type(exc).__name__}: {exc}", limit=160)
-            print(f"[phone-worker] lavalink auto-start erro: {detail}", flush=True)
-            return {"attempted": False, "error": detail}
+    return {"attempted": False, "reason": "lavalink_removed"}
+
 
 def _music_node_snapshot() -> dict[str, Any]:
-    autostart = _ensure_phone_lavalink_started(reason="music_node_snapshot")
-    port = _phone_lavalink_port()
-    password = _phone_lavalink_password()
-    bind_host = _phone_lavalink_env_value("PHONE_LAVALINK_BIND_HOST", "127.0.0.1") or "127.0.0.1"
-    public_host = (
-        _phone_lavalink_env_value("PHONE_LAVALINK_PUBLIC_HOST", "")
-        or _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_HOST", "")
-        or _phone_lavalink_env_value("PHONE_LAVALINK_HOST", "")
-    )
-    public_port_raw = _phone_lavalink_env_value("PHONE_LAVALINK_PUBLIC_PORT", _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PORT", ""))
-    try:
-        public_port = max(1, min(65535, int(str(public_port_raw).strip()))) if str(public_port_raw or "").strip() else port
-    except Exception:
-        public_port = port
-    url = f"http://127.0.0.1:{port}/version"
-    headers = {"Accept": "text/plain"}
-    if password:
-        headers["Authorization"] = password
-    result: dict[str, Any] = {
-        "kind": "lavalink",
-        "mode": "lavalink",
-        "host": bind_host,
-        "port": port,
-        "public_host": public_host,
-        "public_port": public_port,
-        "connect_host": public_host,
-        "connect_port": public_port,
+    return {
+        "kind": "removed",
+        "mode": "direct-ytdlp",
         "ok": False,
         "online": False,
-        "state": "offline",
-        "autostart": autostart,
+        "state": "removed",
+        "music_available": False,
+        "playback_modes": [],
+        "autostart": {"attempted": False, "reason": "lavalink_removed"},
     }
-    start = time.time()
-    try:
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=2.5) as response:
-            body = response.read(512).decode("utf-8", errors="replace").strip()
-            status = int(getattr(response, "status", 0) or 0)
-        healthy = 200 <= status < 300
-        result.update({
-            "ok": healthy,
-            "online": healthy,
-            "state": "healthy" if healthy else f"http_{status}",
-            "http_status": status,
-            "version": _short_text(body, limit=80),
-            "latency_ms": round((time.time() - start) * 1000.0, 1),
-            "music_available": healthy,
-            "playback_modes": ["lavalink"] if healthy else [],
-        })
-    except urllib.error.HTTPError as exc:
-        status = int(exc.code or 0)
-        # 401 ainda prova que o Lavalink está vivo; a VPS/bot pode ter a senha
-        # correta mesmo quando o worker não conseguiu ler application.yml/env.
-        alive = status == 401
-        result.update({
-            "ok": alive,
-            "online": alive,
-            "state": "auth_required" if alive else f"http_{status}",
-            "http_status": status,
-            "error": "authorization_required" if alive else _short_text(exc.reason, limit=100),
-            "latency_ms": round((time.time() - start) * 1000.0, 1),
-            "music_available": alive,
-            "playback_modes": ["lavalink"] if alive else [],
-        })
-    except Exception as exc:
-        result.update({
-            "error": _short_text(f"{type(exc).__name__}: {exc}", limit=120),
-            "latency_ms": round((time.time() - start) * 1000.0, 1),
-            "music_available": False,
-            "playback_modes": [],
-        })
-    return result
-
 
 def _worker_turbo_cache_snapshot() -> dict[str, Any]:
     tts_dir = Path(os.getenv("PHONE_WORKER_TTS_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / "tts")).expanduser()
@@ -2362,7 +2159,6 @@ def _music_voice_dependency_specs() -> dict[str, dict[str, Any]]:
         "PyNaCl": {"module": "nacl", "pip": "PyNaCl"},
         "davey": {"module": "davey", "pip": "davey"},
         "yt-dlp": {"module": "yt_dlp", "pip": "yt-dlp"},
-        "wavelink": {"module": "wavelink", "pip": "wavelink"},
         "aiohttp": {"module": "aiohttp", "pip": "aiohttp"},
         "gTTS": {"module": "gtts", "pip": "gTTS"},
         "edge-tts": {"module": "edge_tts", "pip": "edge-tts"},
@@ -2615,9 +2411,8 @@ def _music_agent_snapshot() -> dict[str, Any]:
             data = {}
         runtime_version = str(data.get("version") or "").strip()
         discord_ready = bool(data.get("discord_ready"))
-        # YouTube direto usa voz/ffmpeg do Music Agent e não precisa que o pool
-        # Lavalink esteja conectado. Pool conectado é detalhe técnico para
-        # playlists/Spotify/SoundCloud, não condição para o worker existir.
+        # Música agora usa voz direta/ffmpeg/yt-dlp no Music Agent; não depende
+        # mais de Lavalink/NodeLink/Java no worker.
         available = bool(data.get("available") or discord_ready)
         needs_restart = bool(runtime_version and file_version and _version_lt_loose(runtime_version, file_version))
         data.update({
@@ -5653,10 +5448,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "restart": r"restart|restarting|started|stopped|iniciando|parando",
             "syntax": r"syntaxerror|indentationerror|taberror",
             "import": r"importerror|modulenotfounderror|extensionfailed|extensionnotfound",
-            "lavalink": r"lavalink|lavasrc|trackexception|loadexception",
             "yt_dlp": r"yt[-_ ]?dlp|youtube|googlevideo",
             "rate_limit": r"rate.?limit|too many requests|429",
-            "phone_worker": r"phone-worker|phone_lavalink|phone-lavalink",
+            "phone_worker": r"phone-worker|music-agent|worker-voice",
         }
         compiled = {key: re.compile(pattern, re.IGNORECASE) for key, pattern in patterns.items()}
         counts = {key: 0 for key in compiled}
@@ -6545,7 +6339,7 @@ def _sshd_snapshot() -> dict[str, Any]:
     que a VPS tenta usar parece existir. Isso ajuda o painel a diferenciar
     "Tailscale ativo" de "SSHD/porta indisponível".
     """
-    configured_port = str(os.getenv("PHONE_WORKER_SSH_PORT") or os.getenv("PHONE_LAVALINK_SSH_PORT") or "8022").strip() or "8022"
+    configured_port = str(os.getenv("PHONE_WORKER_SSH_PORT") or "8022").strip() or "8022"
     result: dict[str, Any] = {
         "ok": False,
         "source": "termux-sshd",

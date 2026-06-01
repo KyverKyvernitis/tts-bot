@@ -35,11 +35,7 @@ SSHD_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
 # Serviços pesados do perfil turbo respeitam modo seguro explícito. Auto-install
 # agora é seguro/condicional: só tenta pacote ausente, com cooldown/timeout.
 # Para bloquear serviços, use PHONE_WORKER_SAFE_MODE=true ou START_* = off.
-MUSIC_LAVALINK_AUTO_START="${PHONE_WORKER_START_LAVALINK:-${PHONE_LAVALINK_AUTO_START:-auto}}"
-PHONE_LAVALINK_START_COMMAND="${PHONE_LAVALINK_START_COMMAND:-$HOME/start-phone-lavalink.sh}"
-if [[ ! -x "$PHONE_LAVALINK_START_COMMAND" && -x "$HOME/start-phone-lavalink.sh" ]]; then
-  PHONE_LAVALINK_START_COMMAND="$HOME/start-phone-lavalink.sh"
-fi
+# Lavalink/NodeLink não fazem mais parte do worker; música usa Music Agent + yt-dlp/ffmpeg.
 MUSIC_AGENT_AUTO_START="${PHONE_WORKER_START_MUSIC_AGENT:-${MUSIC_AGENT_ENABLED:-auto}}"
 MUSIC_AGENT_START_COMMAND="${MUSIC_AGENT_START_COMMAND:-$WORKER_DIR/start-phone-music-agent.sh}"
 MAINT_LOCK_DIR="${PHONE_WORKER_MAINT_LOCK_DIR:-$WORKER_DIR/.phone-worker-maintenance.lock}"
@@ -269,10 +265,10 @@ append_csv_env_value() {
 
 ensure_music_worker_env_if_needed() {
   is_turbo_profile || return 0
-  for role in music music-node music-lavalink music-ytdlp music-agent; do
+  for role in music music-ytdlp music-agent; do
     append_csv_env_value CORE_WORKER_ROLES "$role"
   done
-  for capability in music music-node music-lavalink music-ytdlp music-ytdlp-resolve music-agent music-agent-control; do
+  for capability in music music-ytdlp music-ytdlp-resolve music-agent music-agent-control music-voice; do
     append_csv_env_value CORE_WORKER_CAPABILITIES "$capability"
   done
   local cookies="${PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE:-${MUSIC_WORKER_YTDLP_COOKIES_FILE:-}}"
@@ -426,11 +422,6 @@ cleanup_heavy_services_for_safe_mode() {
   command -v pkill >/dev/null 2>&1 || return 0
   log "modo seguro ativo; encerrando serviços pesados opcionais do worker"
   pkill -f '[m]usic_agent.py' 2>/dev/null || true
-  pkill -f '[j]ava.*Lavalink.jar' 2>/dev/null || true
-  if command -v tmux >/dev/null 2>&1; then
-    tmux kill-session -t "${PHONE_LAVALINK_TMUX_SESSION:-lavalink-debian}" 2>/dev/null || true
-    tmux kill-session -t "${PHONE_LAVALINK_TMUX_SESSION:-lavalink}" 2>/dev/null || true
-  fi
 }
 
 
@@ -478,7 +469,6 @@ ensure_music_agent_deps_if_needed() {
   safe_pip_install_module "discord.py" "discord" "discord.py>=2.7.1,<2.8" light || true
   safe_pip_install_module "PyNaCl" "nacl" "PyNaCl" light || true
   safe_pip_install_module "davey" "davey" "davey" light || true
-  safe_pip_install_module "wavelink" "wavelink" "wavelink>=3.4,<3.6" light || true
   safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp[default]" light || true
   safe_pip_install_module "edge-tts" "edge_tts" "edge-tts" light || true
   safe_pip_install_module "gTTS" "gtts" "gTTS" light || true
@@ -487,7 +477,7 @@ ensure_music_agent_deps_if_needed() {
     safe_pip_install_module "google-cloud-texttospeech" "google.cloud.texttospeech_v1" "google-cloud-texttospeech" light || true
   fi
   "$PYTHON_BIN" - <<'PYMUSICAGENTCHECK' >/dev/null 2>&1 && log "perfil turbo: dependências do Music Agent prontas" || log "perfil turbo: Music Agent ainda possui dependências ausentes; será reportado no health"
-import aiohttp, discord, nacl, wavelink, yt_dlp, davey, edge_tts, gtts  # noqa: F401
+import aiohttp, discord, nacl, yt_dlp, davey, edge_tts, gtts  # noqa: F401
 PYMUSICAGENTCHECK
 }
 
@@ -601,18 +591,6 @@ PIPERWRAP
   log "perfil turbo: wrapper Piper criado em $wrapper"
 }
 
-ensure_lavalink_for_turbo_if_needed() {
-  is_turbo_profile || return 0
-  autostart_enabled "$MUSIC_LAVALINK_AUTO_START" || { log "perfil turbo: Lavalink não será iniciado automaticamente (modo seguro/auto-start off)"; return 0; }
-  if [[ ! -x "$PHONE_LAVALINK_START_COMMAND" ]]; then
-    log "perfil turbo: start do Lavalink não encontrado em $PHONE_LAVALINK_START_COMMAND"
-    return 0
-  fi
-  log "perfil turbo: garantindo Lavalink do worker"
-  "$PHONE_LAVALINK_START_COMMAND" >/dev/null 2>&1 || \
-    log "não consegui iniciar Lavalink automaticamente; música pode ficar indisponível"
-}
-
 
 ensure_music_agent_for_turbo_if_needed() {
   is_turbo_profile || return 0
@@ -656,7 +634,6 @@ run_post_start_maintenance_async() {
     cleanup_stale_heavy_dependency_builds
     cleanup_heavy_services_for_safe_mode
     ensure_turbo_deps_if_needed
-    ensure_lavalink_for_turbo_if_needed
     ensure_music_agent_for_turbo_if_needed
     log "manutenção pós-start finalizada"
   ) >> "$MAINT_LOG_FILE" 2>&1 &

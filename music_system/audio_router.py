@@ -815,11 +815,10 @@ class AudioRouter:
         return bool(extractor == "worker-ytdlp" and "/music/stream/" in stream_url)
 
     def _track_is_worker_ytdlp_candidate(self, track: MusicTrack | None) -> bool:
-        """Faixa comum resolvida pelo phone worker via yt-dlp.
+        """Faixa resolvida pelo phone worker via yt-dlp.
 
-        A busca leve retorna apenas metadados. Ao tocar, o worker resolve a URL
-        direta com cookies/EJS; o transporte de voz fica com o Lavalink do worker,
-        não com PCM worker→VPS nem com scsearch/SoundCloud.
+        A busca leve retorna metadados. Ao tocar, o worker resolve a URL/stream
+        direto; Lavalink/NodeLink não fazem mais parte do fluxo de worker.
         """
         if track is None:
             return False
@@ -3332,11 +3331,10 @@ class AudioRouter:
         direct_youtube_request = False if self.music_worker_only_enabled() else self._track_is_direct_youtube_request(track)
         worker_local_stream = self._track_uses_worker_local_stream(track)
         worker_ytdlp_candidate = bool(self._track_is_worker_ytdlp_candidate(track))
-        worker_lavalink_transport = bool(self.music_worker_only_enabled() and worker_ytdlp_candidate)
-        # Worker-ytdlp não deve mais tocar por PCM worker→VPS. O worker resolve
-        # YouTube com cookies/EJS, mas o transporte de voz fica com o Lavalink
-        # do próprio worker para evitar travadas no relé da VPS.
-        worker_local_candidate = bool(worker_local_stream and not worker_lavalink_transport)
+        worker_lavalink_transport = False
+        # Lavalink/NodeLink foram removidos do worker. Faixas worker-ytdlp seguem
+        # pelo caminho direto do worker/yt-dlp/FFmpeg, sem node Java intermediário.
+        worker_local_candidate = bool(worker_local_stream or (self.music_worker_only_enabled() and worker_ytdlp_candidate))
         # Link direto do YouTube prioriza áudio. Não bloqueie a resolução do
         # stream local aguardando painel/metadata bonitos; o painel é criado
         # depois, quando o stream já estiver pronto/iniciando.
@@ -3347,30 +3345,10 @@ class AudioRouter:
 
         use_lavalink_real = bool(self.backends.should_use_music_lavalink(guild.id) if self.music_worker_only_enabled() else self.backends.should_use_lavalink_real(guild.id)) and not direct_youtube_request and not worker_local_candidate
         if worker_lavalink_transport and use_lavalink_real:
-            # Pesquisa/link comum em worker-only: resolve no phone worker e toca
-            # pelo Lavalink do próprio worker. Não passe por FFmpeg/PCM local da
-            # VPS e não transforme a escolha em scsearch/SoundCloud.
-            try:
-                if not (str(getattr(track, "stream_url", "") or "").strip() or str(getattr(track, "lavalink_query", "") or "").strip()):
-                    started = time.monotonic()
-                    await self._resolve_current_track(state, track)
-                    logger.info(
-                        "[music/worker-lavalink] stream resolvido no worker | guild=%s track=%r elapsed=%.2fs",
-                        guild.id,
-                        getattr(track, "title", ""),
-                        time.monotonic() - started,
-                    )
-                if str(getattr(track, "stream_url", "") or "").strip() and not str(getattr(track, "lavalink_query", "") or "").strip():
-                    track.lavalink_query = str(track.stream_url or "")
-                    track.lavalink_resolved = True
-            except Exception as exc:
-                logger.warning(
-                    "[music/worker-lavalink] resolução no worker falhou | guild=%s track=%r erro=%s",
-                    guild.id,
-                    getattr(track, "title", ""),
-                    exc,
-                )
-                raise
+            # Compatibilidade defensiva: o manager atual desativa esse caminho.
+            # Se algum estado antigo tentar forçar node musical, interrompa antes
+            # de iniciar serviços removidos.
+            raise MusicWorkerEngineUnavailable("Lavalink/NodeLink foi removido do worker; use o fluxo direto do worker.")
         if self.music_worker_only_enabled() and not use_lavalink_real and not worker_local_candidate:
             # Worker-only não pode cair para yt-dlp/FFmpeg local na VPS. Se o
             # worker está online mas o engine musical dele não está pronto, falhe
@@ -3486,8 +3464,8 @@ class AudioRouter:
             raise MusicExtractionError("A música não retornou URL de stream.")
         worker_local_stream = self._track_uses_worker_local_stream(track)
         worker_ytdlp_candidate = bool(self._track_is_worker_ytdlp_candidate(track))
-        worker_lavalink_transport = bool(self.music_worker_only_enabled() and worker_ytdlp_candidate)
-        worker_local_candidate = bool(worker_local_stream and not worker_lavalink_transport)
+        worker_lavalink_transport = False
+        worker_local_candidate = bool(worker_local_stream or (self.music_worker_only_enabled() and worker_ytdlp_candidate))
 
         # Só entra/move para a call depois que existe stream válido. Antes disso
         # ficaríamos conectando/desconectando enquanto o yt-dlp falha por anti-bot,

@@ -341,8 +341,7 @@ install_units() {
     tts-bot-alert@.service \
     cleanup-audio-temp.service cleanup-audio-temp.timer \
     sinuca-activity-server.service \
-    phone-worker-watch.service phone-worker-watch.timer \
-    phone-lavalink-watch.service phone-lavalink-watch.timer; do
+    phone-worker-watch.service phone-worker-watch.timer; do
     install_file "$unit"
   done
   if [[ "${UPDATE_TOUCH_CALLKEEPER:-}" == "1" || "${CALLKEEPER_UPDATE_ALLOWED:-}" == "1" ]]; then
@@ -374,14 +373,8 @@ apply_service_policy() {
     action "phone-worker-watch instalado, mas inativo por padrão"
   fi
 
-  if truthy_env PHONE_LAVALINK_WATCH_ENABLED || truthy_env AUX_LAVALINK_ENABLED; then
-    systemctl enable --now phone-lavalink-watch.timer >/dev/null 2>&1 || true
-    systemctl start phone-lavalink-watch.service >/dev/null 2>&1 || true
-    action "phone-lavalink-watch ativo por env"
-  else
-    systemctl disable --now phone-lavalink-watch.timer phone-lavalink-watch.service >/dev/null 2>&1 || true
-    action "phone-lavalink-watch instalado, mas inativo por padrão"
-  fi
+  systemctl disable --now phone-lavalink-watch.timer phone-lavalink-watch.service >/dev/null 2>&1 || true
+  action "phone-lavalink-watch removido do fluxo: Lavalink/NodeLink não é mais usado"
 }
 
 write_status() {
@@ -433,8 +426,7 @@ audit_vps_systemd() {
     tts-bot-alert@.service \
     cleanup-audio-temp.service cleanup-audio-temp.timer \
     sinuca-activity-server.service \
-    phone-worker-watch.service phone-worker-watch.timer \
-    phone-lavalink-watch.service phone-lavalink-watch.timer; do
+    phone-worker-watch.service phone-worker-watch.timer; do
     audit_one_file "$unit"
   done
   if [[ -d "$TEMPLATE_DIR/tts-bot.service.d" ]]; then
@@ -448,7 +440,7 @@ audit_vps_systemd() {
     name="${live#$SYSTEMD_DIR/}"
     case "$name" in
       *.backup.*|*.disabled.*|*.disabled|*.tmp) continue ;;
-      tts-bot.service|tts-bot-updater.service|tts-bot-updater.timer|tts-bot-alert@.service|cleanup-audio-temp.service|cleanup-audio-temp.timer|sinuca-activity-server.service|phone-worker-watch.service|phone-worker-watch.timer|phone-lavalink-watch.service|phone-lavalink-watch.timer|tts-bot.service.d/*)
+      tts-bot.service|tts-bot-updater.service|tts-bot-updater.timer|tts-bot-alert@.service|cleanup-audio-temp.service|cleanup-audio-temp.timer|sinuca-activity-server.service|phone-worker-watch.service|phone-worker-watch.timer|tts-bot.service.d/*)
         [[ -f "$TEMPLATE_DIR/$name" ]] || warn "audit: existe só na VPS: $name"
         ;;
       callkeeper.service)
