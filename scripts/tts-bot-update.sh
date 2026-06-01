@@ -1203,6 +1203,7 @@ reject_local_candidate_safely() {
   trap - ERR
   set +e
   STAGE="candidato rejeitado"
+  normalize_changed_file_permissions "antes de restaurar candidato rejeitado" || true
   cleanup_local_candidate_new_files_after_reset
   sudo -u ubuntu -H git reset --hard "${PREVIOUS_COMMIT:-HEAD}" >/dev/null 2>&1 || true
   cleanup_local_candidate_new_files_after_reset
@@ -1229,8 +1230,24 @@ git_add_changed_files_or_reject() {
     rm -f "$errfile" 2>/dev/null || true
     return 0
   fi
+
   LAST_ERROR_STDERR="$(cat "$errfile" 2>/dev/null || true)"
   rm -f "$errfile" 2>/dev/null || true
+
+  # Arquivos/pastas novos podem ser criados pelo updater root antes do commit.
+  # O git add roda como ubuntu; se o path ficou root-owned, normalize e tente uma vez.
+  if printf '%s' "$LAST_ERROR_STDERR" | grep -qiE 'Permission denied|unable to index file|adding files failed'; then
+    normalize_changed_file_permissions "$context" || true
+    errfile="$(mktemp "${TMPDIR:-/tmp}/tts-bot-git-add-retry.XXXXXX")"
+    if git_add_changed_files 2>"$errfile"; then
+      rm -f "$errfile" 2>/dev/null || true
+      LAST_ERROR_STDERR=""
+      return 0
+    fi
+    LAST_ERROR_STDERR="$(cat "$errfile" 2>/dev/null || true)"
+    rm -f "$errfile" 2>/dev/null || true
+  fi
+
   reject_local_candidate_safely \
     "Falha ao aplicar update" \
     "Não consegui preparar os arquivos do ZIP. A VPS foi restaurada e o candidato foi arquivado." \
@@ -1933,6 +1950,100 @@ for raw in data.get('changed_files') or []:
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
 PYCOPY
+  normalize_changed_file_permissions "arquivos copiados do candidato"
+}
+
+normalize_changed_file_permissions() {
+  local context="${1:-permissões do candidato}"
+  [[ -n "${CHANGED_FILES_RAW//[[:space:]]/}" ]] || return 0
+  CHANGED_FILES_RAW="$CHANGED_FILES_RAW" REPO_DIR="$REPO_DIR" python3 - <<'PYPERM'
+import os, pathlib, pwd, grp, stat
+repo = pathlib.Path(os.environ.get('REPO_DIR', '/home/ubuntu/bot')).resolve()
+raw_items = os.environ.get('CHANGED_FILES_RAW', '').splitlines()
+try:
+    uid = pwd.getpwnam('ubuntu').pw_uid
+    gid = grp.getgrnam('ubuntu').gr_gid
+except KeyError:
+    raise SystemExit(0)
+
+def inside_repo(path: pathlib.Path) -> bool:
+    try:
+        resolved = path.resolve(strict=False)
+    except Exception:
+        return False
+    return resolved == repo or repo in resolved.parents
+
+def apply_owner_mode(path: pathlib.Path) -> None:
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    try:
+        os.chown(path, uid, gid, follow_symlinks=False)
+    except Exception:
+        pass
+    try:
+        mode = stat.S_IMODE(st.st_mode)
+        if stat.S_ISDIR(st.st_mode):
+            os.chmod(path, mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        elif stat.S_ISREG(st.st_mode):
+            os.chmod(path, mode | stat.S_IRUSR | stat.S_IWUSR)
+    except Exception:
+        pass
+
+for raw in raw_items:
+    raw = raw.strip()
+    if not raw:
+        continue
+    rel = pathlib.PurePosixPath(raw)
+    if rel.is_absolute() or '..' in rel.parts:
+        raise SystemExit(f'caminho inválido para permissões: {raw}')
+    dst = repo.joinpath(*rel.parts)
+    cur = repo
+    for part in rel.parts[:-1]:
+        cur = cur / part
+        if cur.exists() or cur.is_symlink():
+            if not inside_repo(cur):
+                raise SystemExit(f'parent fora do repo: {raw}')
+            apply_owner_mode(cur)
+    if dst.exists() or dst.is_symlink():
+        if not inside_repo(dst):
+            raise SystemExit(f'path fora do repo: {raw}')
+        apply_owner_mode(dst)
+PYPERM
+  logger -t "$LOG_TAG" "permissões normalizadas para paths do candidato: $context" 2>/dev/null || true
+}
+
+prune_empty_candidate_dirs_after_reset() {
+  [[ -n "${CHANGED_FILES_RAW//[[:space:]]/}" ]] || return 0
+  CHANGED_FILES_RAW="$CHANGED_FILES_RAW" REPO_DIR="$REPO_DIR" python3 - <<'PYPRUNE'
+import os, pathlib
+repo = pathlib.Path(os.environ.get('REPO_DIR', '/home/ubuntu/bot')).resolve()
+parents = []
+for raw in os.environ.get('CHANGED_FILES_RAW', '').splitlines():
+    raw = raw.strip()
+    if not raw:
+        continue
+    rel = pathlib.PurePosixPath(raw)
+    if rel.is_absolute() or '..' in rel.parts:
+        continue
+    path = repo.joinpath(*rel.parts)
+    parent = path.parent
+    while parent != repo:
+        try:
+            resolved = parent.resolve(strict=False)
+        except Exception:
+            break
+        if not (resolved == repo or repo in resolved.parents):
+            break
+        parents.append(parent)
+        parent = parent.parent
+for parent in sorted(set(parents), key=lambda p: len(p.parts), reverse=True):
+    try:
+        parent.rmdir()
+    except OSError:
+        pass
+PYPRUNE
 }
 
 cleanup_local_candidate_new_files_after_reset() {
@@ -1941,14 +2052,16 @@ cleanup_local_candidate_new_files_after_reset() {
   fi
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
-    if printf '%s\n' "$rel" | grep -Eq '(^|/)\.\.(\/|$)|^/'; then
+    if printf '%s
+' "$rel" | grep -Eq '(^|/)\.\.(\/|$)|^/'; then
       continue
     fi
     if sudo -u ubuntu -H git cat-file -e "$PREVIOUS_COMMIT:$rel" 2>/dev/null; then
       continue
     fi
-    rm -rf -- "$REPO_DIR/$rel" 2>/dev/null || true
+    sudo rm -rf -- "$REPO_DIR/$rel" 2>/dev/null || rm -rf -- "$REPO_DIR/$rel" 2>/dev/null || true
   done <<< "$CHANGED_FILES_RAW"
+  prune_empty_candidate_dirs_after_reset || true
 }
 
 git_add_changed_files() {
