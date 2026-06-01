@@ -1350,6 +1350,29 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             return False
         return True
 
+    def _record_tts_message_gate(self, message: discord.Message, reason: str, *, matched: bool = False) -> None:
+        try:
+            metrics = self._get_metrics_store()
+            metrics["message_gate_seen"] = int(metrics.get("message_gate_seen", 0) or 0) + 1
+            if matched:
+                metrics["message_gate_matched"] = int(metrics.get("message_gate_matched", 0) or 0) + 1
+            else:
+                metrics["message_gate_ignored"] = int(metrics.get("message_gate_ignored", 0) or 0) + 1
+            metrics["last_message_gate_reason"] = str(reason or "")[:80]
+            metrics["last_message_gate_guild_id"] = int(getattr(getattr(message, "guild", None), "id", 0) or 0)
+            metrics["last_message_gate_channel_id"] = int(getattr(getattr(message, "channel", None), "id", 0) or 0)
+            metrics["last_message_gate_author_id"] = int(getattr(getattr(message, "author", None), "id", 0) or 0)
+            metrics["last_message_gate_seen_at"] = time.time()
+        except Exception:
+            pass
+
+    async def handle_message_from_bot_on_message(self, message: discord.Message) -> None:
+        # Ponte explícita usada por bot.py. Mesmo que o dispatcher de listeners do
+        # discord.py mude/atrase, o TTS continua recebendo mensagens. O cache
+        # `_recent_tts_message_ids` evita enqueue duplicado quando o listener do
+        # Cog também roda normalmente.
+        await self.on_message(message)
+
     async def _load_edge_voices(self):
         try:
             import edge_tts
@@ -2225,6 +2248,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         gate = await analyze_message_for_tts(self, message)
 
         if gate.should_dispatch_prefix_command:
+            self._record_tts_message_gate(message, gate.reason or "prefix_command", matched=True)
             if self._was_tts_message_seen(message.id):
                 return
             self._mark_tts_message_seen(message.id)
@@ -2232,13 +2256,25 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 return
 
         if not gate.should_process_tts:
+            # Mensagem comum continua silenciosa, mas o health passa a mostrar
+            # o último motivo de gate. Isso evita outro caso de queue_enqueued=0
+            # sem pista nenhuma.
+            self._record_tts_message_gate(message, gate.reason or "ignored", matched=False)
             return
 
         guild_defaults = gate.guild_defaults
         forced_engine = str(gate.forced_engine or "")
         active_prefix = str(gate.active_prefix or "")
+        self._record_tts_message_gate(message, gate.reason or "tts_prefix_matched", matched=True)
 
         if isinstance(message.author, discord.Member) and self._member_has_ignored_tts_role(message.author, guild_defaults=guild_defaults):
+            self._record_tts_message_gate(message, "ignored_role", matched=False)
+            logger.info(
+                "[tts_voice] mensagem ignorada por cargo sem TTS | guild=%s channel=%s user=%s",
+                getattr(message.guild, "id", None),
+                getattr(message.channel, "id", None),
+                getattr(message.author, "id", None),
+            )
             return
 
         if self._was_tts_message_seen(message.id):
@@ -2248,7 +2284,25 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         author_voice = getattr(message.author, "voice", None)
         voice_channel = getattr(author_voice, "channel", None)
         if voice_channel is None:
+            self._record_tts_message_gate(message, "author_not_in_voice", matched=False)
+            logger.info(
+                "[tts_voice] mensagem TTS ignorada: autor não está em call | guild=%s channel=%s user=%s",
+                getattr(message.guild, "id", None),
+                getattr(message.channel, "id", None),
+                getattr(message.author, "id", None),
+            )
             return
+
+        logger.info(
+            "[tts_voice] mensagem TTS recebida | guild=%s text_channel=%s voice_channel=%s user=%s prefix=%r forced_engine=%s reason=%s",
+            getattr(message.guild, "id", None),
+            getattr(message.channel, "id", None),
+            getattr(voice_channel, "id", None),
+            getattr(message.author, "id", None),
+            active_prefix,
+            forced_engine or "default",
+            gate.reason,
+        )
 
         dispatch_result = await dispatch_message_tts(
             self,
@@ -2259,9 +2313,27 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         )
         payload = dispatch_result.payload
         if payload is None:
+            self._record_tts_message_gate(message, "payload_empty", matched=False)
+            logger.info(
+                "[tts_voice] mensagem TTS não virou payload | guild=%s channel=%s user=%s reason=%s",
+                getattr(message.guild, "id", None),
+                getattr(message.channel, "id", None),
+                getattr(message.author, "id", None),
+                gate.reason,
+            )
             return
 
         if dispatch_result.enqueued:
+            logger.info(
+                "[tts_voice] TTS enfileirado | guild=%s voice_channel=%s user=%s engine=%s dropped=%s deduplicated=%s dispatch_ms=%.1f",
+                getattr(message.guild, "id", None),
+                getattr(payload.queue_item, "channel_id", None),
+                getattr(message.author, "id", None),
+                getattr(payload.queue_item, "engine", None),
+                dispatch_result.dropped_count,
+                dispatch_result.deduplicated,
+                dispatch_result.dispatch_ms,
+            )
             try:
                 self._schedule_tts_turbo_benchmark_if_needed(
                     message,
@@ -2271,6 +2343,15 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
                 )
             except Exception:
                 logger.exception("[tts_benchmark] falha ao agendar benchmark turbo")
+        else:
+            logger.info(
+                "[tts_voice] payload criado mas nada foi enfileirado | guild=%s channel=%s user=%s deduplicated=%s dropped=%s",
+                getattr(message.guild, "id", None),
+                getattr(message.channel, "id", None),
+                getattr(message.author, "id", None),
+                dispatch_result.deduplicated,
+                dispatch_result.dropped_count,
+            )
 
         self._ensure_worker(message.guild.id)
 

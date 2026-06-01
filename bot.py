@@ -2080,6 +2080,28 @@ class BotLocal(commands.Bot):
         if self._event_loop_watchdog_task is None or self._event_loop_watchdog_task.done():
             self._event_loop_watchdog_task = asyncio.create_task(self._event_loop_watchdog_loop())
 
+    async def _dispatch_tts_message_bridge(self, message: discord.Message) -> None:
+        # Regressão defensiva: o TTS depende de on_message para transformar
+        # mensagens prefixadas em fila de síntese. Como bot.py também define
+        # on_message para o updater/comandos, chamamos o cog explicitamente aqui
+        # para não depender só do fan-out interno de listeners. O cog deduplica
+        # pelo ID da mensagem, então se o listener normal também rodar não há
+        # enqueue duplicado.
+        tts_cog = self.get_cog("TTSVoice")
+        handler = getattr(tts_cog, "handle_message_from_bot_on_message", None) if tts_cog is not None else None
+        if not callable(handler):
+            return
+        try:
+            await handler(message)
+        except Exception as exc:
+            logging.getLogger("tts.bridge").exception(
+                "[tts_bridge] falha ao encaminhar mensagem para TTS | guild=%s channel=%s user=%s erro=%r",
+                getattr(getattr(message, "guild", None), "id", None),
+                getattr(getattr(message, "channel", None), "id", None),
+                getattr(getattr(message, "author", None), "id", None),
+                exc,
+            )
+
     async def on_message(self, message: discord.Message):
         if getattr(message.author, "bot", False):
             return
@@ -2087,6 +2109,7 @@ class BotLocal(commands.Bot):
             if int(getattr(message.channel, "id", 0)) == self.ZIP_UPDATE_CHANNEL_ID:
                 await self._handle_zip_update_message(message)
                 return
+            await self._dispatch_tts_message_bridge(message)
             await self.process_commands(message)
         except Exception as e:
             print(f"[bot] falha ao processar comandos: {e!r}")
