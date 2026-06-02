@@ -92,6 +92,14 @@ final class LocalNativeTtsHttpServer {
                 writeJson(client.getOutputStream(), 200, result);
                 return;
             }
+            if ("POST".equals(request.method) && "/native-tts/synthesize.raw".equals(path)) {
+                JSONObject body = request.body == null || request.body.trim().isEmpty()
+                        ? new JSONObject()
+                        : new JSONObject(request.body);
+                NativeTtsManager.SynthesisResult result = ttsManager.synthesizeRaw(body);
+                writeAudio(client.getOutputStream(), 200, result);
+                return;
+            }
             JSONObject error = new JSONObject();
             error.put("ok", false);
             error.put("error", "rota não encontrada");
@@ -178,6 +186,34 @@ final class LocalNativeTtsHttpServer {
         String statusText = status >= 200 && status < 300 ? "OK" : "ERROR";
         String header = "HTTP/1.1 " + status + " " + statusText + "\r\n"
                 + "Content-Type: application/json; charset=utf-8\r\n"
+                + "Connection: close\r\n"
+                + "Content-Length: " + body.length + "\r\n\r\n";
+        output.write(header.getBytes(StandardCharsets.UTF_8));
+        output.write(body);
+        output.flush();
+    }
+
+    private static void writeAudio(OutputStream output, int status, NativeTtsManager.SynthesisResult result) throws Exception {
+        byte[] body = result == null || result.data == null ? new byte[0] : result.data;
+        String statusText = status >= 200 && status < 300 ? "OK" : "ERROR";
+        String contentType = "audio/wav";
+        if (result != null && "mp3".equalsIgnoreCase(result.audioFormat)) {
+            contentType = "audio/mpeg";
+        } else if (result != null && "ogg".equalsIgnoreCase(result.audioFormat)) {
+            contentType = "audio/ogg";
+        }
+        String audioFormat = result == null || result.audioFormat == null ? "wav" : result.audioFormat.replace("\r", "").replace("\n", "");
+        String safeVoice = result == null || result.voice == null ? "" : result.voice.replace("\r", "").replace("\n", "");
+        String safeLocale = result == null || result.localeTag == null ? "" : result.localeTag.replace("\r", "").replace("\n", "");
+        String safeHash = result == null || result.sha256 == null ? "" : result.sha256.replace("\r", "").replace("\n", "");
+        String header = "HTTP/1.1 " + status + " " + statusText + "\r\n"
+                + "Content-Type: " + contentType + "\r\n"
+                + "X-Core-Worker-Engine: android_native\r\n"
+                + "X-Core-Worker-Audio-Format: " + audioFormat + "\r\n"
+                + "X-Core-Worker-Android-Synth-Ms: " + (result == null ? 0L : result.synthMs) + "\r\n"
+                + "X-Core-Worker-Locale: " + safeLocale + "\r\n"
+                + "X-Core-Worker-Voice: " + safeVoice + "\r\n"
+                + "X-Core-Worker-Sha256: " + safeHash + "\r\n"
                 + "Connection: close\r\n"
                 + "Content-Length: " + body.length + "\r\n\r\n";
         output.write(header.getBytes(StandardCharsets.UTF_8));

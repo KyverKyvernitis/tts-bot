@@ -133,6 +133,17 @@ final class NativeTtsManager {
     }
 
     JSONObject synthesize(JSONObject request) throws Exception {
+        SynthesisResult synthesized = synthesizeInternal(request);
+        JSONObject result = synthesized.toJson();
+        result.put("data_b64", Base64.encodeToString(synthesized.data, Base64.NO_WRAP));
+        return result;
+    }
+
+    SynthesisResult synthesizeRaw(JSONObject request) throws Exception {
+        return synthesizeInternal(request);
+    }
+
+    private SynthesisResult synthesizeInternal(JSONObject request) throws Exception {
         ensureReady(Math.max(1200, request.optInt("init_timeout_ms", 2500)));
         String text = String.valueOf(request.optString("text", "")).trim();
         if (text.isEmpty()) {
@@ -150,6 +161,7 @@ final class NativeTtsManager {
                 "pt-BR"
         ));
         String requestedVoice = firstNonBlank(request.optString("voice", ""), prefs == null ? "" : prefs.getString("native_tts_voice", ""), "");
+        boolean preferLocalVoice = request.optBoolean("prefer_local_voice", true);
         float rate = normalizeRate(firstNonBlank(request.optString("rate", ""), prefs == null ? "" : prefs.getString("native_tts_rate", ""), "1.0"));
         float pitch = normalizePitch(firstNonBlank(request.optString("pitch", ""), prefs == null ? "" : prefs.getString("native_tts_pitch", ""), "1.0"));
         String utteranceId = "core-worker-tts-" + System.currentTimeMillis() + "-" + synthCounter.incrementAndGet();
@@ -160,6 +172,7 @@ final class NativeTtsManager {
         File outFile = new File(dir, utteranceId + ".wav");
         long started = System.nanoTime();
         final String[] callbackError = new String[]{""};
+        final String[] selectedVoice = new String[]{requestedVoice == null ? "" : requestedVoice};
         CountDownLatch latch = new CountDownLatch(1);
         synchronized (synthLock) {
             TextToSpeech current = tts;
@@ -204,8 +217,12 @@ final class NativeTtsManager {
                         return;
                     }
                     Voice voice = findVoice(current, requestedVoice);
+                    if (voice == null && preferLocalVoice) {
+                        voice = findBestLocalVoice(current, locale);
+                    }
                     if (voice != null) {
                         current.setVoice(voice);
+                        selectedVoice[0] = voice.getName() == null ? "" : voice.getName();
                     }
                     current.setSpeechRate(rate);
                     current.setPitch(pitch);
@@ -250,24 +267,9 @@ final class NativeTtsManager {
             lastOkAt = System.currentTimeMillis();
             lastSynthMs = elapsedMs;
             lastError = "";
-            JSONObject result = new JSONObject();
-            result.put("ok", true);
-            result.put("engine", "android_native");
-            result.put("selected_engine", "android_native");
-            result.put("audio_format", "wav");
-            result.put("size", data.length);
-            result.put("sha256", sha256);
-            result.put("worker_synth_ms", elapsedMs);
-            result.put("android_synth_ms", elapsedMs);
-            result.put("locale", localeTag);
-            result.put("voice", requestedVoice == null ? "" : requestedVoice);
-            result.put("rate", rate);
-            result.put("pitch", pitch);
-            result.put("data_b64", Base64.encodeToString(data, Base64.NO_WRAP));
             JSONArray logs = new JSONArray();
-            logs.put("android-native locale=" + localeTag + " rate=" + rate + " pitch=" + pitch + " bytes=" + data.length + " synth=" + elapsedMs + "ms");
-            result.put("logs", logs);
-            return result;
+            logs.put("android-native locale=" + localeTag + " voice=" + (selectedVoice[0] == null || selectedVoice[0].isEmpty() ? "auto" : selectedVoice[0]) + " rate=" + rate + " pitch=" + pitch + " bytes=" + data.length + " synth=" + elapsedMs + "ms");
+            return new SynthesisResult(data, "wav", sha256, elapsedMs, localeTag, selectedVoice[0], rate, pitch, logs);
         }
     }
 
@@ -332,6 +334,55 @@ final class NativeTtsManager {
         } catch (Throwable ignored) {
         }
         return null;
+    }
+
+
+    private Voice findBestLocalVoice(TextToSpeech current, Locale locale) {
+        if (current == null || locale == null) {
+            return null;
+        }
+        try {
+            Set<Voice> voices = current.getVoices();
+            if (voices == null) {
+                return null;
+            }
+            Voice best = null;
+            int bestScore = Integer.MIN_VALUE;
+            for (Voice voice : voices) {
+                if (voice == null || voice.getName() == null || voice.getLocale() == null) {
+                    continue;
+                }
+                Locale voiceLocale = voice.getLocale();
+                int score = 0;
+                if (voiceLocale.toLanguageTag().equalsIgnoreCase(locale.toLanguageTag())) {
+                    score += 100;
+                } else if (voiceLocale.getLanguage().equalsIgnoreCase(locale.getLanguage())) {
+                    score += 50;
+                    if (!locale.getCountry().isEmpty() && locale.getCountry().equalsIgnoreCase(voiceLocale.getCountry())) {
+                        score += 20;
+                    }
+                } else {
+                    continue;
+                }
+                String name = voice.getName().toLowerCase(Locale.US);
+                if (name.contains("-local")) {
+                    score += 30;
+                }
+                if (voice.isNetworkConnectionRequired()) {
+                    score -= 80;
+                }
+                if (voice.getQuality() >= Voice.QUALITY_HIGH) {
+                    score += 5;
+                }
+                if (best == null || score > bestScore) {
+                    best = voice;
+                    bestScore = score;
+                }
+            }
+            return bestScore >= 0 ? best : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static byte[] readAll(File file, int maxBytes) throws Exception {
@@ -425,6 +476,49 @@ final class NativeTtsManager {
 
     private static float clampFloat(float value, float min, float max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+
+    static final class SynthesisResult {
+        final byte[] data;
+        final String audioFormat;
+        final String sha256;
+        final long synthMs;
+        final String localeTag;
+        final String voice;
+        final float rate;
+        final float pitch;
+        final JSONArray logs;
+
+        SynthesisResult(byte[] data, String audioFormat, String sha256, long synthMs, String localeTag, String voice, float rate, float pitch, JSONArray logs) {
+            this.data = data == null ? new byte[0] : data;
+            this.audioFormat = audioFormat == null || audioFormat.trim().isEmpty() ? "wav" : audioFormat.trim();
+            this.sha256 = sha256 == null ? "" : sha256;
+            this.synthMs = synthMs;
+            this.localeTag = localeTag == null ? "" : localeTag;
+            this.voice = voice == null ? "" : voice;
+            this.rate = rate;
+            this.pitch = pitch;
+            this.logs = logs == null ? new JSONArray() : logs;
+        }
+
+        JSONObject toJson() throws Exception {
+            JSONObject result = new JSONObject();
+            result.put("ok", true);
+            result.put("engine", "android_native");
+            result.put("selected_engine", "android_native");
+            result.put("audio_format", audioFormat);
+            result.put("size", data.length);
+            result.put("sha256", sha256);
+            result.put("worker_synth_ms", synthMs);
+            result.put("android_synth_ms", synthMs);
+            result.put("locale", localeTag);
+            result.put("voice", voice);
+            result.put("rate", rate);
+            result.put("pitch", pitch);
+            result.put("logs", logs);
+            return result;
+        }
     }
 
     private static String shortText(Throwable exc) {

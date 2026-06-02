@@ -62,7 +62,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.24"
+PHONE_WORKER_VERSION = "1.10.25"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -1871,6 +1871,41 @@ def _android_tts_json_request(path: str, *, payload: dict[str, Any] | None = Non
     if not isinstance(parsed, dict):
         raise RuntimeError("Android TTS retornou JSON inválido")
     return parsed
+
+
+def _android_tts_raw_request(path: str, *, payload: dict[str, Any], timeout: float = 1.5, max_audio_bytes: int = 8 * 1024 * 1024) -> tuple[bytes, dict[str, Any]]:
+    url = _android_tts_base_url() + path
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Accept": "audio/wav,application/octet-stream,application/json;q=0.4,*/*;q=0.1",
+        "Content-Type": "application/json; charset=utf-8",
+        "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}",
+    }
+    request = urllib.request.Request(url, data=data, method="POST", headers=headers)
+    with urllib.request.urlopen(request, timeout=max(0.1, float(timeout))) as response:
+        content_type = str(response.headers.get("Content-Type") or "").lower()
+        raw = response.read(max(1024, max_audio_bytes) + 1)
+        if "application/json" in content_type:
+            try:
+                parsed = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+            except Exception as exc:
+                raise RuntimeError(f"Android TTS raw retornou JSON inválido: {_short_text(exc, limit=100)}") from exc
+            if isinstance(parsed, dict) and parsed.get("ok") is False:
+                raise RuntimeError(str(parsed.get("error") or "Android TTS raw retornou ok=false"))
+            raise RuntimeError("Android TTS raw retornou JSON sem áudio")
+        if len(raw) > max_audio_bytes:
+            raise RuntimeError(f"Android TTS raw grande demais: {len(raw)} bytes")
+        meta = {
+            "content_type": content_type,
+            "audio_format": str(response.headers.get("X-Core-Worker-Audio-Format") or "wav").strip().lower() or "wav",
+            "android_synth_ms": str(response.headers.get("X-Core-Worker-Android-Synth-Ms") or "").strip(),
+            "locale": str(response.headers.get("X-Core-Worker-Locale") or "").strip(),
+            "voice": str(response.headers.get("X-Core-Worker-Voice") or "").strip(),
+            "sha256": str(response.headers.get("X-Core-Worker-Sha256") or "").strip(),
+        }
+    if not raw:
+        raise RuntimeError("Android TTS raw não retornou áudio")
+    return raw, meta
 
 
 def _android_tts_status(*, use_cache: bool = True) -> dict[str, Any]:
@@ -4828,18 +4863,45 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 "timeout_ms": synth_timeout_ms,
                 "max_audio_bytes": max_audio_bytes,
             }
+            android_payload["prefer_local_voice"] = _env_bool("PHONE_WORKER_ANDROID_TTS_PREFER_LOCAL_VOICE", True)
             android_started = time.monotonic()
-            response = _android_tts_json_request(
-                "/native-tts/synthesize",
-                payload=android_payload,
-                timeout=max(1.0, min(timeout + 1.0, (synth_timeout_ms / 1000.0) + 1.0)),
-            )
-            if response.get("ok") is False:
-                raise RuntimeError(str(response.get("error") or "Android TTS retornou ok=false"))
-            data = _b64decode(str(response.get("data_b64") or ""), max_bytes=max_audio_bytes)
-            audio_format = self._normalize_tts_cache_format(response.get("audio_format") or "wav")
-            android_ms = (time.monotonic() - android_started) * 1000.0
-            logs.append(f"android-native locale={android_payload['locale']} format={audio_format} apk_ms={response.get('android_synth_ms') or response.get('worker_synth_ms') or 0} roundtrip={android_ms:.1f}ms")
+            raw_enabled = _env_bool("PHONE_WORKER_ANDROID_TTS_RAW_ENABLED", True)
+            raw_error = ""
+            response: dict[str, Any] = {}
+            if raw_enabled:
+                try:
+                    data, raw_meta = _android_tts_raw_request(
+                        "/native-tts/synthesize.raw",
+                        payload=android_payload,
+                        timeout=max(1.0, min(timeout + 1.0, (synth_timeout_ms / 1000.0) + 1.0)),
+                        max_audio_bytes=max_audio_bytes,
+                    )
+                    audio_format = self._normalize_tts_cache_format(raw_meta.get("audio_format") or "wav")
+                    android_ms = (time.monotonic() - android_started) * 1000.0
+                    apk_ms = raw_meta.get("android_synth_ms") or ""
+                    voice_used = raw_meta.get("voice") or "auto"
+                    if raw_meta.get("sha256"):
+                        response["sha256"] = raw_meta.get("sha256")
+                    response["android_synth_ms"] = apk_ms
+                    response["voice"] = voice_used
+                    response["locale"] = raw_meta.get("locale") or android_payload["locale"]
+                    logs.append(f"android-native raw locale={response['locale']} voice={voice_used} format={audio_format} apk_ms={apk_ms or 0} roundtrip={android_ms:.1f}ms bytes={len(data)}")
+                except Exception as exc:
+                    raw_error = f"{type(exc).__name__}: {_short_text(exc, limit=110)}"
+                    data = b""
+                    logs.append(f"android-native raw indisponível; fallback json: {raw_error}")
+            if not data:
+                response = _android_tts_json_request(
+                    "/native-tts/synthesize",
+                    payload=android_payload,
+                    timeout=max(1.0, min(timeout + 1.0, (synth_timeout_ms / 1000.0) + 1.0)),
+                )
+                if response.get("ok") is False:
+                    raise RuntimeError(str(response.get("error") or "Android TTS retornou ok=false"))
+                data = _b64decode(str(response.get("data_b64") or ""), max_bytes=max_audio_bytes)
+                audio_format = self._normalize_tts_cache_format(response.get("audio_format") or "wav")
+                android_ms = (time.monotonic() - android_started) * 1000.0
+                logs.append(f"android-native json locale={android_payload['locale']} format={audio_format} apk_ms={response.get('android_synth_ms') or response.get('worker_synth_ms') or 0} roundtrip={android_ms:.1f}ms")
         elif engine == "edge":
             try:
                 import edge_tts  # type: ignore
@@ -4928,6 +4990,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "audio_format": audio_format,
             "cache_hit": False,
             "cache_key": cache_key[:16] if cache_key else "",
+            "android_synth_ms": response.get("android_synth_ms") if engine == "android_native" and isinstance(response, dict) else None,
+            "android_voice": response.get("voice") if engine == "android_native" and isinstance(response, dict) else "",
+            "android_locale": response.get("locale") if engine == "android_native" and isinstance(response, dict) else "",
             "worker_profile": _current_core_worker_profile(),
             "worker_version": PHONE_WORKER_VERSION,
             "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
