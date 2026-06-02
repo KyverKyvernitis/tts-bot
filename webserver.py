@@ -107,6 +107,43 @@ def _safe_short_text(value, limit: int = 160) -> str:
     return text[:limit].rstrip() if len(text) > limit else text
 
 
+def _safe_string_list(value, *, limit: int = 80, item_limit: int = 96) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = [part.strip() for part in re.split(r"[,\n]", value) if part.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        raw = list(value)
+    else:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        text = _safe_short_text(item, item_limit)
+        if not text or text in seen:
+            continue
+        out.append(text)
+        seen.add(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _first_dict(*values) -> dict:
+    for value in values:
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _first_list(*values, limit: int = 80) -> list[str]:
+    for value in values:
+        items = _safe_string_list(value, limit=limit)
+        if items:
+            return items
+    return []
+
+
 def _atomic_write_json(path: str, data: dict, *, mode: int = 0o600) -> None:
     """Grava JSON de forma atômica e segura, com tmp único por chamada.
 
@@ -465,6 +502,10 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
     app_status = payload.get("app_status") if isinstance(payload.get("app_status"), dict) else status.get("app_status") if isinstance(status.get("app_status"), dict) else {}
     storage = payload.get("storage") if isinstance(payload.get("storage"), dict) else status.get("storage") if isinstance(status.get("storage"), dict) else {}
     permissions = payload.get("permissions") if isinstance(payload.get("permissions"), dict) else status.get("permissions") if isinstance(status.get("permissions"), dict) else {}
+    core_linux = _first_dict(payload.get("coreLinux"), payload.get("core_linux"), runtime.get("coreLinux"), runtime.get("core_linux"), status.get("coreLinux"), status.get("core_linux"))
+    native_runtime = _first_dict(payload.get("nativeRuntime"), payload.get("native_runtime"), runtime.get("nativeRuntime"), runtime.get("native_runtime"), status.get("nativeRuntime"), status.get("native_runtime"))
+    capabilities = _first_list(payload.get("capabilities"), runtime.get("capabilities"), status.get("capabilities"), limit=80)
+    supported_tasks = _first_list(payload.get("supported_tasks"), payload.get("supportedTasks"), payload.get("supportedJobs"), payload.get("app_jobs"), runtime.get("supported_tasks"), runtime.get("supportedTasks"), status.get("supported_tasks"), status.get("supportedTasks"), limit=120)
     record = {
         "receivedAt": now,
         "installId": install_id,
@@ -477,6 +518,13 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
         "appVersionCode": int(payload.get("appVersionCode") or payload.get("app_version_code") or 0),
         "profile": _safe_short_text(payload.get("profile") or payload.get("profileLabel") or payload.get("profile_label"), 48),
         "runtimeMode": _safe_short_text(payload.get("runtime_mode") or runtime.get("mode") or "hybrid", 40),
+        "capabilities": capabilities,
+        "supported_tasks": supported_tasks,
+        "supportedTasks": supported_tasks,
+        "appJobs": _first_list(payload.get("app_jobs"), payload.get("supportedJobs"), supported_tasks, limit=120),
+        "runtime": runtime if isinstance(runtime, dict) else {},
+        "coreLinux": core_linux,
+        "nativeRuntime": native_runtime,
         "internalRuntime": _safe_short_text(payload.get("internal_runtime") or runtime.get("internal_runtime") or "apk-heartbeat", 48),
         "internalRuntimeState": _safe_short_text(payload.get("internal_runtime_state") or runtime.get("internal_runtime_state"), 120),
         "termuxWorkerOnline": bool(payload.get("termuxWorkerOnline") or payload.get("localAgentOnline") or status.get("local_agent_online")),
@@ -500,9 +548,9 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
         "bridgeSummary": _safe_short_text(runtime.get("bridge_summary"), 120),
         "foregroundRuntimeActive": bool(runtime.get("foreground_runtime_active") or status.get("foreground_runtime_active")),
         "foregroundRuntimeSummary": _safe_short_text(runtime.get("foreground_runtime_summary") or status.get("foreground_runtime_summary"), 120),
-        "coreLinuxSummary": _safe_short_text(runtime.get("core_linux_summary") or status.get("core_linux_summary"), 160),
-        "coreLinuxState": _safe_short_text(runtime.get("core_linux_state") or status.get("core_linux_state"), 80),
-        "coreLinuxPrepared": bool(runtime.get("core_linux_prepared") or status.get("core_linux_prepared")),
+        "coreLinuxSummary": _safe_short_text(runtime.get("core_linux_summary") or status.get("core_linux_summary") or core_linux.get("summary"), 160),
+        "coreLinuxState": _safe_short_text(runtime.get("core_linux_state") or status.get("core_linux_state") or core_linux.get("state"), 80),
+        "coreLinuxPrepared": bool(runtime.get("core_linux_prepared") or status.get("core_linux_prepared") or core_linux.get("prepared")),
         "bedrockSummary": _safe_short_text(runtime.get("bedrock_summary") or status.get("bedrock_summary"), 160),
         "bedrockState": _safe_short_text(runtime.get("bedrock_state") or status.get("bedrock_state"), 80),
         "bedrockReady": bool(runtime.get("bedrock_ready") or status.get("bedrock_ready")),
@@ -543,6 +591,21 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
     return record
 
 
+def _newest_core_worker_app_heartbeat(data: dict) -> dict | None:
+    candidates: list[dict] = []
+    for bucket_name in ("latestByWorkerId", "latestByInstallId"):
+        bucket = data.get(bucket_name)
+        if isinstance(bucket, dict):
+            candidates.extend(value for value in bucket.values() if isinstance(value, dict))
+    events = data.get("events")
+    if isinstance(events, list):
+        candidates.extend(value for value in events if isinstance(value, dict))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: int(item.get("receivedAt") or item.get("updatedAt") or 0), reverse=True)
+    return candidates[0]
+
+
 def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str = "") -> dict:
     path = _core_worker_app_heartbeats_path()
     try:
@@ -557,15 +620,32 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
     if record is None and install_id and isinstance(data.get("latestByInstallId"), dict):
         record = data.get("latestByInstallId", {}).get(str(install_id))
     if not isinstance(record, dict):
+        record = _newest_core_worker_app_heartbeat(data)
+    if not isinstance(record, dict):
         return {"online": False, "lastSeenAt": 0, "state": "unknown"}
     seen = int(record.get("receivedAt") or 0)
     online = bool(seen and time.time() - seen <= 180)
+    effective_worker_id = _safe_short_text(worker_id or record.get("workerId"), 80)
+    effective_install_id = _safe_short_text(install_id or record.get("installId"), 80)
+    supported_tasks = _safe_string_list(record.get("supported_tasks") or record.get("supportedTasks") or record.get("appJobs"), limit=120)
+    capabilities = _safe_string_list(record.get("capabilities"), limit=80)
+    runtime = record.get("runtime") if isinstance(record.get("runtime"), dict) else {}
+    core_linux = _first_dict(record.get("coreLinux"), runtime.get("coreLinux"))
+    native_runtime = _first_dict(record.get("nativeRuntime"), runtime.get("nativeRuntime"))
+    light_jobs = _core_worker_app_jobs_public_summary(worker_id=effective_worker_id, install_id=effective_install_id)
     return {
         "online": online,
         "lastSeenAt": seen,
+        "ageSeconds": max(0, int(time.time()) - seen) if seen else 0,
+        "workerId": effective_worker_id,
+        "installId": effective_install_id,
         "state": _safe_short_text(record.get("state"), 48),
         "appVersion": _safe_short_text(record.get("appVersion"), 48),
+        "appVersionCode": int(record.get("appVersionCode") or 0),
         "runtimeMode": _safe_short_text(record.get("runtimeMode"), 40),
+        "capabilities": capabilities,
+        "supported_tasks": supported_tasks,
+        "supportedTasks": supported_tasks,
         "internalRuntime": _safe_short_text(record.get("internalRuntime"), 48),
         "internalRuntimeState": _safe_short_text(record.get("internalRuntimeState"), 120),
         "termuxWorkerOnline": bool(record.get("termuxWorkerOnline")),
@@ -584,9 +664,11 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
         "diagnosticsSummary": _safe_short_text(record.get("diagnosticsSummary"), 160),
         "storageSummary": _safe_short_text(record.get("storageSummary"), 120),
         "bridgeSummary": _safe_short_text(record.get("bridgeSummary"), 120),
-        "coreLinuxSummary": _safe_short_text(record.get("coreLinuxSummary"), 160),
-        "coreLinuxState": _safe_short_text(record.get("coreLinuxState"), 80),
-        "coreLinuxPrepared": bool(record.get("coreLinuxPrepared")),
+        "coreLinuxSummary": _safe_short_text(record.get("coreLinuxSummary") or core_linux.get("summary"), 160),
+        "coreLinuxState": _safe_short_text(record.get("coreLinuxState") or core_linux.get("state"), 80),
+        "coreLinuxPrepared": bool(record.get("coreLinuxPrepared") or core_linux.get("prepared")),
+        "coreLinux": core_linux,
+        "nativeRuntime": native_runtime,
         "bedrockSummary": _safe_short_text(record.get("bedrockSummary"), 160),
         "bedrockState": _safe_short_text(record.get("bedrockState"), 80),
         "bedrockReady": bool(record.get("bedrockReady")),
@@ -594,7 +676,8 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
         "internalJobsQueue": _safe_short_text(record.get("internalJobsQueue"), 120),
         "internalJobsRunning": int(record.get("internalJobsRunning") or 0),
         "internalJobsPending": int(record.get("internalJobsPending") or 0),
-        "lightJobs": _core_worker_app_jobs_public_summary(worker_id=worker_id, install_id=install_id),
+        "lightJobs": light_jobs,
+        "summary": _safe_short_text(record.get("coreLinuxSummary") or core_linux.get("summary") or record.get("diagnosticsSummary") or "APK interno aguardando diagnóstico", 180),
     }
 
 
@@ -1086,7 +1169,7 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
     key = _core_worker_app_jobs_key(payload)
     install_id = _safe_short_text(payload.get("installId") or payload.get("install_id"), 80)
     worker_id = _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80)
-    supported = payload.get("supportedJobs") if isinstance(payload.get("supportedJobs"), list) else []
+    supported = _first_list(payload.get("supportedJobs"), payload.get("supported_tasks"), payload.get("supportedTasks"), payload.get("app_jobs"), limit=160)
     supported_set = {
         _core_worker_app_normalize_job_type(item)
         for item in supported

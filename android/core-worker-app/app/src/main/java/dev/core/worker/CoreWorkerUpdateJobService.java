@@ -147,6 +147,66 @@ public class CoreWorkerUpdateJobService extends JobService {
     }
 
 
+    private org.json.JSONArray coreWorkerApkCapabilitiesArray() {
+        return new org.json.JSONArray()
+                .put("apk-native")
+                .put("android-status")
+                .put("native-boot")
+                .put("python-embedded")
+                .put("internal-jobs")
+                .put("core-linux-runtime")
+                .put("core-linux-rootfs-manager")
+                .put("core-linux-runtime-v1")
+                .put("minecraft-bedrock-manager-safe-plan");
+    }
+
+    private org.json.JSONArray supportedLightJobsArray() {
+        return new org.json.JSONArray()
+                .put("apk_ping")
+                .put("apk_status_refresh")
+                .put("apk_diagnostic")
+                .put("apk_check_update")
+                .put("apk_test_vps_connection")
+                .put("apk_sync_runtime_state")
+                .put("apk_job_history")
+                .put("apk_device_diagnostic")
+                .put("apk_push_diagnostic")
+                .put("apk_update_diagnostic")
+                .put("apk_runtime_diagnostic")
+                .put("apk_worker_bridge_status")
+                .put("apk_native_worker_status")
+                .put("apk_native_boot_status")
+                .put("apk_local_shell_probe")
+                .put("apk_core_linux_native_executor_probe")
+                .put("apk_core_linux_native_executor_test")
+                .put("apk_core_linux_native_runtime_status")
+                .put("apk_core_linux_rootfs_status")
+                .put("apk_core_linux_rootfs_prepare")
+                .put("apk_core_linux_rootfs_validate")
+                .put("apk_core_linux_rootfs_clean_staging")
+                .put("apk_core_linux_runtime_smoke_test");
+    }
+
+    private JSONObject backgroundCoreLinuxSnapshot() throws Exception {
+        JSONObject core = new JSONObject();
+        core.put("state", "background-safe-runtime");
+        core.put("summary", "Core Linux Runtime v1 disponível no APK; heartbeat em background não inicia Bedrock");
+        core.put("prepared", false);
+        core.put("termuxRequired", false);
+        core.put("bedrockStartAllowed", false);
+        core.put("supportedStage", "core-linux-runtime-v1-smoke");
+        core.put("supportedTasks", supportedLightJobsArray());
+        return core;
+    }
+
+    private JSONObject backgroundNativeRuntimeSnapshot() throws Exception {
+        JSONObject runtime = new JSONObject();
+        runtime.put("state", "background-heartbeat");
+        runtime.put("summary", "APK nativo em background; jobs internos seguros declarados");
+        runtime.put("supportedTasks", supportedLightJobsArray());
+        return runtime;
+    }
+
     private void reportRuntimeHeartbeat(String serverUrl, String reason) {
         try {
             JSONObject payload = baseRuntimePayload(reason);
@@ -165,9 +225,11 @@ public class CoreWorkerUpdateJobService extends JobService {
             payload.put("name", prefs().getString("device_name", "Core Worker APK"));
             payload.put("version", BuildConfig.VERSION_NAME);
             payload.put("source", "core-worker-apk-native-background");
-            payload.put("roles", new org.json.JSONArray().put("apk-native").put("diagnostics").put("internal-jobs").put("linux-runtime"));
-            payload.put("capabilities", new org.json.JSONArray().put("apk-native").put("android-status").put("native-boot").put("python-embedded").put("core-linux-runtime"));
-            payload.put("supported_tasks", new org.json.JSONArray());
+            payload.put("roles", new org.json.JSONArray().put("apk-native").put("diagnostics").put("internal-jobs").put("linux-runtime").put("rootfs-manager"));
+            payload.put("capabilities", coreWorkerApkCapabilitiesArray());
+            payload.put("supported_tasks", supportedLightJobsArray());
+            payload.put("supportedTasks", supportedLightJobsArray());
+            payload.put("app_jobs", supportedLightJobsArray());
             JSONObject status = new JSONObject();
             status.put("apk_native_worker", true);
             status.put("background", true);
@@ -176,6 +238,9 @@ public class CoreWorkerUpdateJobService extends JobService {
             status.put("native_heartbeat_reason", reason == null ? "scheduled" : reason);
             status.put("runtime_mode", "apk-native-python-linux-assisted-runtime");
             status.put("python_runtime", "embedded-background-linux-aware");
+            status.put("supported_tasks", supportedLightJobsArray());
+            status.put("coreLinux", backgroundCoreLinuxSnapshot());
+            status.put("nativeRuntime", backgroundNativeRuntimeSnapshot());
             payload.put("status", status);
             request("POST", serverUrl + "/core-worker/heartbeat", payload, token);
         } catch (Throwable ignored) {
@@ -192,6 +257,12 @@ public class CoreWorkerUpdateJobService extends JobService {
         payload.put("appVersionCode", BuildConfig.VERSION_CODE);
         payload.put("versionName", BuildConfig.VERSION_NAME);
         payload.put("versionCode", BuildConfig.VERSION_CODE);
+        payload.put("capabilities", coreWorkerApkCapabilitiesArray());
+        payload.put("supported_tasks", supportedLightJobsArray());
+        payload.put("supportedTasks", supportedLightJobsArray());
+        payload.put("app_jobs", supportedLightJobsArray());
+        payload.put("coreLinux", backgroundCoreLinuxSnapshot());
+        payload.put("nativeRuntime", backgroundNativeRuntimeSnapshot());
         payload.put("workerId", prefs().getString("worker_id", ""));
         payload.put("installId", installId());
         payload.put("deviceName", prefs().getString("device_name", ""));
@@ -204,6 +275,9 @@ public class CoreWorkerUpdateJobService extends JobService {
         status.put("android_sdk", Build.VERSION.SDK_INT);
         status.put("native_boot", true);
         status.put("python_runtime", "embedded-background-linux-aware");
+        status.put("supported_tasks", supportedLightJobsArray());
+        status.put("coreLinux", backgroundCoreLinuxSnapshot());
+        status.put("nativeRuntime", backgroundNativeRuntimeSnapshot());
         status.put("termux_required_now", false);
         status.put("termux_role", "fallback-temporario");
         status.put("notification_permission", hasNotificationPermission() ? "granted" : "missing");

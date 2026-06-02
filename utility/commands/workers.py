@@ -1038,7 +1038,10 @@ def _core_worker_app_runtime_detail_text(worker_id: str) -> str:
     bedrock = _shorten(record.get("bedrockSummary") or "Bedrock aguardando", limit=80)
     perm = _shorten(record.get("notificationPermission") or "notificação ?", limit=32)
     jobs = _core_worker_app_jobs_text(worker_id)
-    return f"APK interno: diagnóstico {diag} · {storage} · {bridge} · {linux} · {bedrock} · notif {perm} · {jobs}"
+    supported = record.get("supported_tasks") or record.get("supportedTasks") or record.get("appJobs") or []
+    supported_count = len(supported) if isinstance(supported, list) else 0
+    support_text = f" · ações {supported_count}" if supported_count else ""
+    return f"APK interno: diagnóstico {diag} · {storage} · {bridge} · {linux} · {bedrock} · notif {perm}{support_text} · {jobs}"
 
 
 def _core_worker_app_runtime_text(worker_id: str) -> str:
@@ -1799,7 +1802,7 @@ def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None
 
 def _worker_wake_tokens(worker: dict[str, Any]) -> set[str]:
     tokens: set[str] = set()
-    for key in ("roles", "capabilities", "supported_tasks"):
+    for key in ("roles", "capabilities", "supported_tasks", "supportedTasks", "appJobs"):
         raw = worker.get(key) if isinstance(worker, dict) else None
         if isinstance(raw, (list, tuple, set)):
             items = raw
@@ -2177,7 +2180,7 @@ def _worker_detail_text(worker: dict[str, Any] | None) -> str:
     version = _agent_version_label(worker.get("version"))
     roles = [str(role) for role in (worker.get("roles") or []) if role]
     caps = [str(role) for role in (worker.get("capabilities") or []) if role]
-    supported = [str(task) for task in (worker.get("supported_tasks") or []) if task]
+    supported = [str(task) for task in (worker.get("supported_tasks") or worker.get("supportedTasks") or worker.get("appJobs") or []) if task]
     lines = [
         f"## 📱 {name}",
         f"**Estado:** {online} · visto {seen}",
@@ -2649,11 +2652,17 @@ class WorkersPanelView(discord.ui.LayoutView):
         worker = self._selected_worker()
         if not worker:
             return set()
-        supported = _task_set(worker.get("supported_tasks"))
+        supported = _task_set(worker.get("supported_tasks")) or _task_set(worker.get("supportedTasks")) or _task_set(worker.get("appJobs"))
         if not supported:
             health = worker.get("health") if isinstance(worker.get("health"), dict) else {}
             status = worker.get("status") if isinstance(worker.get("status"), dict) else {}
-            supported = _task_set(health.get("supported_tasks")) or _task_set(status.get("supported_tasks"))
+            supported = (
+                _task_set(health.get("supported_tasks"))
+                or _task_set(health.get("supportedTasks"))
+                or _task_set(status.get("supported_tasks"))
+                or _task_set(status.get("supportedTasks"))
+                or _task_set(status.get("appJobs"))
+            )
         # None = worker registrado antigo/externo sem declarar suporte; manter ações visíveis.
         return supported or None
 

@@ -1,8 +1,5 @@
-PATCH_NOTES.md
-changed_files.txt
-android/core-worker-app/README.md
-android/core-worker-app/app/build.gradle
-android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java
-android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
-utility/commands/workers.py
 webserver.py
+utility/commands/workers.py
+android/core-worker-app/app/build.gradle
+android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java
+android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java

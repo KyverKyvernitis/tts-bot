@@ -214,6 +214,11 @@ public class MainActivity extends Activity {
     private volatile boolean startupFallbackVisible = false;
     private final AtomicBoolean completingStartup = new AtomicBoolean(false);
     private final AtomicBoolean backgroundStartupStarted = new AtomicBoolean(false);
+    private final AtomicBoolean internalRuntimeHeartbeatRunning = new AtomicBoolean(false);
+    private final AtomicBoolean nativeWorkerHeartbeatRunning = new AtomicBoolean(false);
+    private final AtomicBoolean internalLightJobsFetchRunning = new AtomicBoolean(false);
+    private static final long ACTIVITY_RESUME_SYNC_DEBOUNCE_MS = 15_000L;
+    private volatile long activityResumeSyncLastAt = 0L;
     private volatile boolean activityDestroyed = false;
 
     private volatile boolean localAgentOnline = false;
@@ -380,16 +385,30 @@ public class MainActivity extends Activity {
             startupLog("onResume:waiting-full-startup fallback=" + startupFallbackVisible);
             return;
         }
-        safeStartupTask(this::updatePermissionGate);
-        safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "activity_resume"));
-        safeStartupTask(this::autoVerifySavedPairing);
-        safeStartupTask(this::autoCheckForUpdate);
-        safeStartupTask(() -> cleanupUpdateArtifacts(false, "activity_resume"));
-        safeStartupTask(() -> sendInternalRuntimeHeartbeat(false, "activity_resume"));
-        safeStartupTask(() -> sendNativeWorkerHeartbeat(false, "activity_resume"));
-        safeStartupTask(this::readBedrockServiceState);
-        safeStartupTask(() -> fetchAndRunLightJobs(false, "activity_resume"));
+        safeStartupTask("resume:updatePermissionGate", this::updatePermissionGate);
+        if (!shouldRunActivityResumeSync()) {
+            startupLog("onResume:sync-debounced");
+            return;
+        }
+        safeStartupTask("resume:scheduleUpdateJob", () -> CoreWorkerUpdateJobService.schedule(this, "activity_resume"));
+        safeStartupTask("resume:autoVerifySavedPairing", this::autoVerifySavedPairing);
+        safeStartupTask("resume:autoCheckForUpdate", this::autoCheckForUpdate);
+        safeStartupTask("resume:cleanupUpdateArtifacts", () -> cleanupUpdateArtifacts(false, "activity_resume"));
+        safeStartupTask("resume:sendInternalRuntimeHeartbeat", () -> sendInternalRuntimeHeartbeat(false, "activity_resume"));
+        safeStartupTask("resume:sendNativeWorkerHeartbeat", () -> sendNativeWorkerHeartbeat(false, "activity_resume"));
+        safeStartupTask("resume:readBedrockServiceState", this::readBedrockServiceState);
+        safeStartupTask("resume:fetchAndRunLightJobs", () -> fetchAndRunLightJobs(false, "activity_resume"));
         scheduleFcmTokenRegistration("activity_resume");
+    }
+
+    private boolean shouldRunActivityResumeSync() {
+        long now = System.currentTimeMillis();
+        long last = activityResumeSyncLastAt;
+        if (last > 0L && now - last < ACTIVITY_RESUME_SYNC_DEBOUNCE_MS) {
+            return false;
+        }
+        activityResumeSyncLastAt = now;
+        return true;
     }
 
     @Override
@@ -412,12 +431,12 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        safeStartupTask(this::updatePermissionGate);
+        safeStartupTask("permission:updatePermissionGate", this::updatePermissionGate);
         refreshLocalStatus(requestCode == 4103 ? "Permissão de notificação atualizada. Verifique as demais permissões necessárias." : null);
         if (requestCode == 4103) {
-            safeStartupTask(() -> CoreWorkerUpdateJobService.schedule(this, "notification_permission_result"));
+            safeStartupTask("permission:scheduleUpdateJob", () -> CoreWorkerUpdateJobService.schedule(this, "notification_permission_result"));
             scheduleFcmTokenRegistration("notification_permission_result");
-            safeStartupTask(this::autoCheckForUpdate);
+            safeStartupTask("permission:autoCheckForUpdate", this::autoCheckForUpdate);
         }
     }
 
@@ -3832,9 +3851,12 @@ public class MainActivity extends Activity {
             payload.put("endpoint", "apk://" + installId());
             putProfilePayload(payload, profile);
             payload.put("roles", new JSONArray().put("apk-native").put("diagnostics").put("internal-jobs").put("linux-runtime").put("rootfs-manager").put("bedrock-manager"));
-            payload.put("capabilities", new JSONArray().put("apk-native").put("android-status").put("native-boot").put("safe-shell-probe").put("python-embedded").put("core-linux-runtime").put("core-linux-rootfs-manager").put("minecraft-bedrock-manager"));
+            payload.put("capabilities", coreWorkerApkCapabilitiesArray());
             payload.put("supported_tasks", supportedLightJobsArray());
+            payload.put("supportedTasks", supportedLightJobsArray());
             payload.put("app_jobs", supportedLightJobsArray());
+            safePutPayload(payload, "coreLinux", coreLinuxPublicSnapshot());
+            safePutPayload(payload, "nativeRuntime", nativeRuntimePublicSnapshot());
             JSONObject status = payload.optJSONObject("status");
             if (status == null) status = new JSONObject();
             status.put("apk_native_worker", true);
@@ -3873,7 +3895,17 @@ public class MainActivity extends Activity {
     }
 
     private void sendNativeWorkerHeartbeat(boolean showResult, String reason) {
-        new Thread(() -> sendNativeWorkerHeartbeatInternal(showResult, reason), "core-worker-native-heartbeat").start();
+        if (!nativeWorkerHeartbeatRunning.compareAndSet(false, true)) {
+            nativeWorkerState = "heartbeat nativo já em andamento";
+            return;
+        }
+        new Thread(() -> {
+            try {
+                sendNativeWorkerHeartbeatInternal(showResult, reason);
+            } finally {
+                nativeWorkerHeartbeatRunning.set(false);
+            }
+        }, "core-worker-native-heartbeat").start();
     }
 
     private void sendNativeWorkerHeartbeatInternal(boolean showResult, String reason) {
@@ -3893,9 +3925,12 @@ public class MainActivity extends Activity {
             payload.put("version", APP_VERSION);
             payload.put("source", "core-worker-apk-native");
             payload.put("roles", new JSONArray().put("apk-native").put("diagnostics").put("internal-jobs").put("linux-runtime").put("rootfs-manager").put("bedrock-manager"));
-            payload.put("capabilities", new JSONArray().put("apk-native").put("android-status").put("native-boot").put("safe-shell-probe").put("python-embedded").put("core-linux-runtime").put("core-linux-rootfs-manager").put("minecraft-bedrock-manager"));
+            payload.put("capabilities", coreWorkerApkCapabilitiesArray());
             payload.put("supported_tasks", supportedLightJobsArray());
+            payload.put("supportedTasks", supportedLightJobsArray());
             payload.put("app_jobs", supportedLightJobsArray());
+            safePutPayload(payload, "coreLinux", coreLinuxPublicSnapshot());
+            safePutPayload(payload, "nativeRuntime", nativeRuntimePublicSnapshot());
             safePutPayload(payload, "battery", batterySnapshot());
             safePutPayload(payload, "network", networkSnapshot(serverUrl));
             JSONObject status = statusSnapshot();
@@ -4220,11 +4255,54 @@ public class MainActivity extends Activity {
         out.close();
     }
 
+    private JSONArray coreWorkerApkCapabilitiesArray() {
+        return new JSONArray()
+                .put("apk-native")
+                .put("android-status")
+                .put("native-boot")
+                .put("safe-shell-probe")
+                .put("python-embedded")
+                .put("internal-jobs")
+                .put("core-linux-runtime")
+                .put("core-linux-rootfs-manager")
+                .put("core-linux-runtime-v1")
+                .put("minecraft-bedrock-manager-safe-plan");
+    }
+
+    private JSONObject coreLinuxPublicSnapshot() throws Exception {
+        JSONObject out = new JSONObject();
+        out.put("summary", coreLinuxSummary == null ? "" : coreLinuxSummary);
+        out.put("state", coreLinuxState == null ? "" : coreLinuxState);
+        out.put("prepared", coreLinuxPrepared);
+        out.put("lastCheckAt", coreLinuxLastCheckAt);
+        out.put("termuxRequired", false);
+        out.put("bedrockStartAllowed", false);
+        out.put("supportedStage", "core-linux-runtime-v1-smoke");
+        out.put("supportedTasks", supportedLightJobsArray());
+        return out;
+    }
+
+    private JSONObject nativeRuntimePublicSnapshot() throws Exception {
+        JSONObject out = new JSONObject();
+        out.put("summary", nativeShellSummary == null ? "" : nativeShellSummary);
+        out.put("workerOnline", nativeWorkerOnline);
+        out.put("workerState", nativeWorkerState == null ? "" : nativeWorkerState);
+        out.put("bootSummary", nativeBootSummary == null ? "" : nativeBootSummary);
+        out.put("pythonAvailable", nativePythonAvailable);
+        out.put("pythonSummary", nativePythonSummary == null ? "" : nativePythonSummary);
+        out.put("lastHeartbeatAt", nativeWorkerLastHeartbeatAt);
+        out.put("supportedTasks", supportedLightJobsArray());
+        return out;
+    }
+
     private JSONObject runtimeSnapshot() throws Exception {
         JSONObject runtime = new JSONObject();
         runtime.put("mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-bedrock-installer" : runtimeMode.trim());
         runtime.put("current_worker", nativeWorkerOnline ? "apk-native-worker" : (localAgentOnline ? "termux-fallback" : "apk-internal-heartbeat"));
         runtime.put("internal_runtime", "apk-native-runtime");
+        runtime.put("capabilities", coreWorkerApkCapabilitiesArray());
+        runtime.put("supported_tasks", supportedLightJobsArray());
+        runtime.put("supportedTasks", supportedLightJobsArray());
         runtime.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
         runtime.put("internal_runtime_online", internalRuntimeOnline);
         runtime.put("internal_runtime_heartbeat_state", internalRuntimeHeartbeatState == null ? "" : internalRuntimeHeartbeatState);
@@ -4274,7 +4352,9 @@ public class MainActivity extends Activity {
         runtime.put("bedrock_state", bedrockState == null ? "" : bedrockState);
         runtime.put("bedrock_ready", bedrockReady);
         runtime.put("bedrock_last_check_at", bedrockLastCheckAt);
-        runtime.put("summary", "APK assume status, boot, jobs internos, Python, shell controlado e gerência Linux/Bedrock; Termux fica como fallback legado.");
+        safePutPayload(runtime, "coreLinux", coreLinuxPublicSnapshot());
+        safePutPayload(runtime, "nativeRuntime", nativeRuntimePublicSnapshot());
+        runtime.put("summary", "APK assume status, boot, jobs internos e Core Linux Runtime v1; Termux fica como fallback legado.");
         return runtime;
     }
 
@@ -4285,7 +4365,17 @@ public class MainActivity extends Activity {
     }
 
     private void sendInternalRuntimeHeartbeat(boolean showResult, String reason) {
-        new Thread(() -> sendInternalRuntimeHeartbeatInternal(showResult, reason), "core-worker-apk-heartbeat").start();
+        if (!internalRuntimeHeartbeatRunning.compareAndSet(false, true)) {
+            internalRuntimeHeartbeatState = "heartbeat já em andamento";
+            return;
+        }
+        new Thread(() -> {
+            try {
+                sendInternalRuntimeHeartbeatInternal(showResult, reason);
+            } finally {
+                internalRuntimeHeartbeatRunning.set(false);
+            }
+        }, "core-worker-apk-heartbeat").start();
     }
 
     private void sendInternalRuntimeHeartbeatInternal(boolean showResult, String reason) {
@@ -4310,6 +4400,13 @@ public class MainActivity extends Activity {
             payload.put("deviceName", deviceNameInput == null ? defaultDeviceName() : deviceNameInput.getText().toString().trim());
             payload.put("appVersion", APP_VERSION);
             payload.put("appVersionCode", BuildConfig.VERSION_CODE);
+            payload.put("capabilities", coreWorkerApkCapabilitiesArray());
+            payload.put("supported_tasks", supportedLightJobsArray());
+            payload.put("supportedTasks", supportedLightJobsArray());
+            payload.put("app_jobs", supportedLightJobsArray());
+            safePutPayload(payload, "runtime", runtimeSnapshot());
+            safePutPayload(payload, "coreLinux", coreLinuxPublicSnapshot());
+            safePutPayload(payload, "nativeRuntime", nativeRuntimePublicSnapshot());
             payload.put("profile", appliedProfile());
             payload.put("profileLabel", profileLabel(appliedProfile()));
             payload.put("localAgentOnline", localAgentOnline);
@@ -4369,6 +4466,11 @@ public class MainActivity extends Activity {
             updateSystemChecklistText();
             return;
         }
+        if (!internalLightJobsFetchRunning.compareAndSet(false, true)) {
+            internalLightJobsState = "sincronização já em andamento";
+            updateSystemChecklistText();
+            return;
+        }
         new Thread(() -> {
             try {
                 JSONObject payload = statusSnapshot();
@@ -4376,6 +4478,10 @@ public class MainActivity extends Activity {
                 payload.put("workerId", effectiveWorkerId());
                 payload.put("reason", reason == null ? "background" : reason);
                 payload.put("supportedJobs", supportedLightJobsArray());
+                payload.put("supported_tasks", supportedLightJobsArray());
+                payload.put("supportedTasks", supportedLightJobsArray());
+                payload.put("capabilities", coreWorkerApkCapabilitiesArray());
+                safePutPayload(payload, "runtime", runtimeSnapshot());
                 HttpResult response = request("POST", serverUrl + "/core-worker/app/jobs/fetch", payload, null);
                 internalLightJobsLastCheckAt = System.currentTimeMillis();
                 if (!response.ok()) {
@@ -4464,6 +4570,8 @@ public class MainActivity extends Activity {
                 internalRuntimeLastError = shortThrowable(exc);
                 appStatusLastError = internalRuntimeLastError;
                 updateSystemChecklistText();
+            } finally {
+                internalLightJobsFetchRunning.set(false);
             }
         }, "core-worker-apk-light-jobs").start();
     }
@@ -6166,9 +6274,12 @@ public class MainActivity extends Activity {
         payload.put("profile", profile);
         payload.put("profile_label", profileLabel(profile));
         payload.put("roles", jsonArray(profileRoles(profile)));
-        payload.put("capabilities", jsonArray(profileRoles(profile)));
+        payload.put("capabilities", coreWorkerApkCapabilitiesArray());
         payload.put("supported_tasks", supportedLightJobsArray());
+        payload.put("supportedTasks", supportedLightJobsArray());
         payload.put("app_jobs", supportedLightJobsArray());
+        safePutPayload(payload, "coreLinux", coreLinuxPublicSnapshot());
+        safePutPayload(payload, "nativeRuntime", nativeRuntimePublicSnapshot());
         JSONObject profileStatus = payload.optJSONObject("status");
         if (profileStatus == null) {
             profileStatus = new JSONObject();
