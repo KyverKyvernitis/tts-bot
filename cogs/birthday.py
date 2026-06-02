@@ -25,6 +25,8 @@ DEFAULT_TIMEZONE = "America/Sao_Paulo"
 DEFAULT_DELETE_AFTER = 10
 DEFAULT_REACTION = "✅"
 MAX_TEXT_DISPLAY = 3900
+MAX_CALENDAR_NAME_DISPLAY = 40
+MAX_CALENDAR_DAY_LINE = 220
 PT_MONTHS = {
     1: "Janeiro",
     2: "Fevereiro",
@@ -113,8 +115,8 @@ VARIABLE_HELP: dict[str, str] = {
     "birthdayage": "idade, se o ano foi informado",
     "birthdaytimestamp": "timestamp Discord do aniversário deste ano",
     "birthdaycount": "quantidade de aniversários cadastrados/no dia",
-    "birthdaycalendarblock": "bloco do calendário, oculto quando não há aniversariantes",
-    "birthdaycalendar": "calendário completo ordenado pelos próximos aniversários",
+    "birthdaycalendarblock": "bloco público do calendário com resumo e meses, oculto quando não há aniversariantes",
+    "birthdaycalendar": "calendário completo por mês e dia",
     "birthdaycalendarcompact": "calendário em linhas curtas",
     "birthdaycalendarnext10": "próximos 10 aniversários",
     "birthdaycalendarnext20": "próximos 20 aniversários",
@@ -157,10 +159,23 @@ def _template_variable_hint(template_key: str) -> str:
 def _clean_public_calendar_body(text: str) -> str:
     lines = str(text or "").splitlines()
     kept: list[str] = []
+    skip_next_instruction_line = False
     for line in lines:
         stripped = line.strip()
         normalized = stripped.casefold()
+        if not stripped:
+            kept.append("")
+            continue
+        if skip_next_instruction_line and normalized.startswith("abaixo"):
+            skip_next_instruction_line = False
+            continue
+        skip_next_instruction_line = False
         if normalized == "mande seu aniversário na thread abaixo.":
+            continue
+        if "coloque sua data de aniversário" in normalized or "registrar seu aniversário" in normalized:
+            skip_next_instruction_line = True
+            continue
+        if re.fullmatch(r"[─━—_\-=\s]{5,}", stripped):
             continue
         if "calend" in normalized and (
             normalized.startswith("#")
@@ -207,6 +222,35 @@ def _member_display(member: discord.Member | None, user_id: int, fallback: str |
 
 def _display_sort_key(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+
+def _calendar_display_name(value: str, *, limit: int = MAX_CALENDAR_NAME_DISPLAY) -> str:
+    rendered = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not rendered:
+        return "sem nome"
+    if len(rendered) <= limit:
+        return rendered
+    return rendered[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _birthday_count_label(count: int) -> str:
+    total = int(count or 0)
+    suffix = "aniversariante" if total == 1 else "aniversariantes"
+    return f"{total} {suffix}"
+
+
+def _join_calendar_names(entries: Iterable["CalendarEntry"], *, max_chars: int = MAX_CALENDAR_DAY_LINE) -> str:
+    names = [_calendar_display_name(entry.display_name) for entry in entries]
+    if not names:
+        return "sem nome"
+    selected: list[str] = []
+    for name in names:
+        candidate = ", ".join([*selected, name])
+        if selected and len(candidate) > max_chars:
+            remaining = len(names) - len(selected)
+            return ", ".join(selected) + f" + {remaining}"
+        selected.append(name)
+    return ", ".join(selected)
 
 
 def _birthday_date(day: int, month: int) -> str:
@@ -1366,33 +1410,73 @@ class BirthdayCog(commands.Cog):
         result.sort(key=lambda e: (e.next_dt, _display_sort_key(e.display_name)))
         return result
 
-    async def _render_calendar(self, guild: discord.Guild, *, limit: int | None = None, compact: bool = False) -> str:
-        entries = await self._calendar_entries(guild, cleanup_missing=True)
+    def _calendar_summary_line(self, entries: list[CalendarEntry]) -> str:
+        if not entries:
+            return ""
+        upcoming = min(entries, key=lambda e: (e.next_dt, _display_sort_key(e.display_name)))
+        return (
+            f"-# {_birthday_count_label(len(entries))} · "
+            f"próximo: `{_birthday_date(upcoming.day, upcoming.month)}` — "
+            f"{_calendar_display_name(upcoming.display_name)}"
+        )
+
+    def _render_calendar_entries(
+        self,
+        entries: list[CalendarEntry],
+        *,
+        limit: int | None = None,
+        compact: bool = False,
+        include_summary: bool = False,
+    ) -> str:
         if not entries:
             return ""
 
-        ordered = sorted(entries, key=lambda e: (int(e.month), int(e.day), _display_sort_key(e.display_name)))
+        if limit is None:
+            ordered = sorted(entries, key=lambda e: (int(e.month), int(e.day), _display_sort_key(e.display_name)))
+        else:
+            ordered = sorted(entries, key=lambda e: (e.next_dt, _display_sort_key(e.display_name)))
         shown = ordered if limit is None else ordered[:max(0, int(limit))]
-        grouped: dict[int, list[CalendarEntry]] = {}
-        for entry in shown:
-            grouped.setdefault(int(entry.month), []).append(entry)
 
-        multiple_months = len(grouped) > 1
+        month_order: list[int] = []
+        month_groups: dict[int, list[CalendarEntry]] = {}
+        for entry in shown:
+            month = int(entry.month)
+            if month not in month_groups:
+                month_order.append(month)
+            month_groups.setdefault(month, []).append(entry)
+
         lines: list[str] = []
-        for idx, month in enumerate(sorted(grouped)):
-            if idx and multiple_months:
-                lines.extend(["", "────────────────", ""])
-            if multiple_months or not compact:
-                lines.append(f"🗓️ {PT_MONTHS.get(month, f'{month:02d}')}" )
+        if include_summary:
+            summary = self._calendar_summary_line(entries)
+            if summary:
+                lines.extend([summary, ""])
+
+        for month_index, month in enumerate(month_order):
+            month_entries = month_groups.get(month, [])
+            if month_index:
                 lines.append("")
-            for entry in sorted(grouped[month], key=lambda e: (int(e.day), _display_sort_key(e.display_name))):
-                prefix = "" if compact else "• "
-                lines.append(f"{prefix}{_birthday_date(entry.day, entry.month)} — {entry.display_name}")
+            if not compact:
+                lines.append(f"## 🗓️ {PT_MONTHS.get(month, f'{month:02d}')}")
+            day_order: list[tuple[int, int]] = []
+            day_groups: dict[tuple[int, int], list[CalendarEntry]] = {}
+            for entry in sorted(month_entries, key=lambda e: (int(e.day), _display_sort_key(e.display_name))):
+                key = (int(entry.day), int(entry.month))
+                if key not in day_groups:
+                    day_order.append(key)
+                day_groups.setdefault(key, []).append(entry)
+            for day, day_month in day_order:
+                day_entries = sorted(day_groups[(day, day_month)], key=lambda e: _display_sort_key(e.display_name))
+                bullet = "• " if not compact else ""
+                lines.append(f"{bullet}`{_birthday_date(day, day_month)}` — {_join_calendar_names(day_entries)}")
 
         hidden = len(ordered) - len(shown)
         if hidden > 0:
-            lines.extend(["", f"+ {hidden} aniversário(s) cadastrado(s)"])
+            lines.extend(["", f"-# + {_birthday_count_label(hidden)} fora desta prévia"])
         return "\n".join(line.rstrip() for line in lines).strip()
+
+    async def _render_calendar(self, guild: discord.Guild, *, limit: int | None = None, compact: bool = False) -> str:
+        entries = await self._calendar_entries(guild, cleanup_missing=False)
+        return self._render_calendar_entries(entries, limit=limit, compact=compact)
 
     def _base_values(self, guild: discord.Guild, cfg: dict[str, Any]) -> dict[str, Any]:
         now = _utcnow()
@@ -1408,16 +1492,17 @@ class BirthdayCog(commands.Cog):
         }
 
     async def _calendar_values(self, guild: discord.Guild, cfg: dict[str, Any]) -> dict[str, Any]:
-        entries = await self._calendar_entries(guild, cleanup_missing=True)
+        entries = await self._calendar_entries(guild, cleanup_missing=False)
         values = self._base_values(guild, cfg)
         values["birthdaycount"] = len(entries)
-        values["birthdaycalendar"] = await self._render_calendar(guild)
-        values["birthdaycalendarcompact"] = await self._render_calendar(guild, compact=True)
-        values["birthdaycalendarnext10"] = await self._render_calendar(guild, limit=10)
-        values["birthdaycalendarnext20"] = await self._render_calendar(guild, limit=20)
-        values["birthdaycalendarblock"] = f"\n\n{values['birthdaycalendar']}" if entries else ""
+        values["birthdaycalendar"] = self._render_calendar_entries(entries)
+        values["birthdaycalendarcompact"] = self._render_calendar_entries(entries, compact=True)
+        values["birthdaycalendarnext10"] = self._render_calendar_entries(entries, limit=10)
+        values["birthdaycalendarnext20"] = self._render_calendar_entries(entries, limit=20)
+        calendar_block = self._render_calendar_entries(entries, include_summary=True)
+        values["birthdaycalendarblock"] = f"\n\n{calendar_block}" if calendar_block else ""
         if entries:
-            first = entries[0]
+            first = min(entries, key=lambda e: (e.next_dt, _display_sort_key(e.display_name)))
             values.update({
                 "nextbirthdayname": first.display_name,
                 "nextbirthdaydate": _birthday_date(first.day, first.month),
