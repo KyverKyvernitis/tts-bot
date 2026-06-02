@@ -1,0 +1,14 @@
+[Unit]
+Description=Core Worker PC
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/core-worker/start-core-worker.sh
+WorkingDirectory=%h/core-worker
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,12 @@
+discord.py[voice]>=2.7.1,<2.8
+davey
+flask
+motor
+edge-tts
+gTTS
+psutil
+google-cloud-texttospeech
+pillow
+yt-dlp[default]
+google-auth>=2.0.0
+requests>=2.31.0
