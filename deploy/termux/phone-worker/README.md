@@ -1,11 +1,3 @@
-## Patch 85.11: Android TTS nativo no APK
-
-A versão `1.10.24` do phone worker e o APK `0.5.52` adicionam a primeira ponte prática para substituir o Piper pelo Android TTS nativo. O serviço persistente do APK mantém uma instância `TextToSpeech` aquecida e expõe somente em `127.0.0.1:8877` as rotas locais `GET /native-tts/status` e `POST /native-tts/synthesize`. O Termux/phone_worker consulta essa ponte pelo `TTS Agent`, anuncia a engine `android_native` quando o APK estiver pronto e usa cache normal do worker depois da primeira síntese.
-
-O prefixo experimental `%texto` continua existindo, mas agora usa `android_native` por padrão via `TTS_PIPER_EXPERIMENT_ENGINE=android_native`. Piper não foi removido: ele fica como fallback legado se a variável for alterada para `piper` ou se uma chamada antiga ainda pedir essa engine. A ordem automática do TTS Agent passa a preferir `android_native`, depois `gcloud`, `edge`, `gtts` e, por último, `piper` quando houver modelo local.
-
-Variáveis opcionais do worker: `PHONE_WORKER_ANDROID_TTS_ENABLED=true`, `PHONE_WORKER_ANDROID_TTS_URL=http://127.0.0.1:8877`, `PHONE_WORKER_ANDROID_TTS_STATUS_TIMEOUT_SECONDS=0.45`, `PHONE_WORKER_ANDROID_TTS_STATUS_CACHE_SECONDS=5` e `PHONE_WORKER_ANDROID_TTS_SYNTH_TIMEOUT_MS=4500`.
-
 ## Patch 85.10: Google Cloud OGG_OPUS + TTS direto controlado
 
 A versão `1.10.21` mantém a VPS como cérebro do bot, mas melhora o caminho de voz: Google Cloud TTS na VPS passa a preferir `OGG_OPUS` para reduzir trabalho de reencode quando o destino é voz/Opus, com fallback automático para `MP3` se o formato não estiver disponível. O playback local da VPS tenta usar `FFmpegOpusAudio` para arquivos OGG/Opus antes de cair para PCM.
