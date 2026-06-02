@@ -144,6 +144,77 @@ def _first_list(*values, limit: int = 80) -> list[str]:
     return []
 
 
+
+
+CORE_WORKER_APK_V1_CAPABILITIES = [
+    "apk-native",
+    "android-status",
+    "native-boot",
+    "safe-shell-probe",
+    "python-embedded",
+    "internal-jobs",
+    "core-linux-runtime",
+    "core-linux-rootfs-manager",
+    "core-linux-runtime-v1",
+    "minecraft-bedrock-manager-safe-plan",
+]
+
+CORE_WORKER_APK_V1_SUPPORTED_TASKS = [
+    "apk_ping",
+    "apk_status_refresh",
+    "apk_upload_app_logs",
+    "apk_diagnostic",
+    "apk_check_update",
+    "apk_test_vps_connection",
+    "apk_sync_runtime_state",
+    "apk_job_history",
+    "apk_device_diagnostic",
+    "apk_push_diagnostic",
+    "apk_update_diagnostic",
+    "apk_runtime_diagnostic",
+    "apk_worker_bridge_status",
+    "apk_test_notification",
+    "apk_repair_local_state",
+    "apk_reset_job_history",
+    "apk_trim_cache",
+    "apk_update_storage_cleanup",
+    "apk_sync_profile",
+    "apk_sync_profile_now",
+    "apk_verify_update_state",
+    "apk_native_worker_status",
+    "apk_native_boot_status",
+    "apk_local_shell_probe",
+    "apk_core_linux_native_executor_probe",
+    "apk_core_linux_native_executor_test",
+    "apk_core_linux_native_runtime_status",
+    "apk_core_linux_rootfs_status",
+    "apk_core_linux_rootfs_prepare",
+    "apk_core_linux_rootfs_validate",
+    "apk_core_linux_rootfs_preflight",
+    "apk_core_linux_rootfs_clean_staging",
+    "apk_core_linux_runtime_smoke_test",
+]
+
+
+def _looks_like_core_worker_apk_v1(record: dict | None) -> bool:
+    if not isinstance(record, dict):
+        return False
+    source = str(record.get("source") or "")
+    try:
+        version_code = int(record.get("appVersionCode") or record.get("versionCode") or 0)
+    except Exception:
+        version_code = 0
+    return source.startswith("core-worker-apk") or version_code >= 70
+
+
+def _apk_v1_supported_tasks(record: dict | None = None) -> list[str]:
+    return list(CORE_WORKER_APK_V1_SUPPORTED_TASKS) if _looks_like_core_worker_apk_v1(record or {"source": "core-worker-apk"}) else []
+
+
+def _apk_v1_capabilities(record: dict | None = None) -> list[str]:
+    return list(CORE_WORKER_APK_V1_CAPABILITIES) if _looks_like_core_worker_apk_v1(record or {"source": "core-worker-apk"}) else []
+
+
 def _atomic_write_json(path: str, data: dict, *, mode: int = 0o600) -> None:
     """Grava JSON de forma atômica e segura, com tmp único por chamada.
 
@@ -569,6 +640,22 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
         "permissions": permissions if isinstance(permissions, dict) else {},
         "remoteAddr": _safe_short_text(request.remote_addr or "", 64),
     }
+    if _looks_like_core_worker_apk_v1(record):
+        if not record.get("supported_tasks"):
+            record["supported_tasks"] = _apk_v1_supported_tasks(record)
+            record["supportedTasks"] = list(record["supported_tasks"])
+            record["appJobs"] = list(record["supported_tasks"])
+        if not record.get("capabilities"):
+            record["capabilities"] = _apk_v1_capabilities(record)
+        job_core_linux = _core_worker_app_latest_core_linux_state(worker_id=worker_id, install_id=install_id)
+        if (not record.get("coreLinux") or not isinstance(record.get("coreLinux"), dict) or not record.get("coreLinux")) and isinstance(job_core_linux.get("coreLinux"), dict):
+            record["coreLinux"] = job_core_linux.get("coreLinux")
+        if not record.get("coreLinuxSummary") and job_core_linux.get("coreLinuxSummary"):
+            record["coreLinuxSummary"] = job_core_linux.get("coreLinuxSummary")
+        if not record.get("coreLinuxState") and job_core_linux.get("coreLinuxState"):
+            record["coreLinuxState"] = job_core_linux.get("coreLinuxState")
+        if not record.get("coreLinuxPrepared") and job_core_linux.get("coreLinuxPrepared"):
+            record["coreLinuxPrepared"] = True
     path = _core_worker_app_heartbeats_path()
     key = install_id or worker_id or "unknown"
     with _core_worker_app_heartbeat_lock:
@@ -581,6 +668,10 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
         latest_by_install = data.get("latestByInstallId") if isinstance(data.get("latestByInstallId"), dict) else {}
         latest_by_worker = data.get("latestByWorkerId") if isinstance(data.get("latestByWorkerId"), dict) else {}
         events = data.get("events") if isinstance(data.get("events"), list) else []
+        previous = latest_by_install.get(install_id) if install_id else None
+        if not isinstance(previous, dict) and worker_id:
+            previous = latest_by_worker.get(worker_id)
+        record = _merge_core_worker_app_heartbeat_record(record, previous)
         latest_by_install[key] = record
         if worker_id:
             latest_by_worker[worker_id] = record
@@ -606,6 +697,81 @@ def _newest_core_worker_app_heartbeat(data: dict) -> dict | None:
     return candidates[0]
 
 
+
+
+def _merge_core_worker_app_heartbeat_record(record: dict, previous: dict | None) -> dict:
+    if not isinstance(record, dict):
+        return {}
+    if not isinstance(previous, dict):
+        previous = {}
+    merged = dict(record)
+    if _looks_like_core_worker_apk_v1(merged):
+        if not _safe_string_list(merged.get("supported_tasks") or merged.get("supportedTasks") or merged.get("appJobs"), limit=120):
+            fallback_supported = _safe_string_list(previous.get("supported_tasks") or previous.get("supportedTasks") or previous.get("appJobs"), limit=120) or _apk_v1_supported_tasks(merged)
+            merged["supported_tasks"] = fallback_supported
+            merged["supportedTasks"] = list(fallback_supported)
+            merged["appJobs"] = list(fallback_supported)
+        if not _safe_string_list(merged.get("capabilities"), limit=80):
+            merged["capabilities"] = _safe_string_list(previous.get("capabilities"), limit=80) or _apk_v1_capabilities(merged)
+    for key in ("coreLinux", "nativeRuntime"):
+        value = merged.get(key)
+        if (not isinstance(value, dict) or not value) and isinstance(previous.get(key), dict):
+            merged[key] = previous.get(key)
+    for key in ("coreLinuxSummary", "coreLinuxState", "internalRuntimeState"):
+        if not _safe_short_text(merged.get(key), 200) and _safe_short_text(previous.get(key), 200):
+            merged[key] = previous.get(key)
+    if not merged.get("coreLinuxPrepared") and previous.get("coreLinuxPrepared"):
+        merged["coreLinuxPrepared"] = True
+    return merged
+
+
+def _core_worker_app_latest_core_linux_state(worker_id: str = "", install_id: str = "") -> dict:
+    path = _core_worker_app_jobs_path()
+    try:
+        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        return {}
+    results = data.get("results") if isinstance(data.get("results"), list) else []
+    rows: list[dict] = []
+    for item in reversed(results[-240:]):
+        if not isinstance(item, dict):
+            continue
+        typ = str(item.get("type") or "")
+        if not ("core_linux" in typ or "rootfs" in typ or "native_executor" in typ):
+            continue
+        if install_id and str(item.get("installId") or "") not in ("", str(install_id)):
+            continue
+        if worker_id and str(item.get("workerId") or "") not in ("", str(worker_id)):
+            continue
+        rows.append(item)
+    if not rows:
+        return {}
+    latest_ok = next((row for row in rows if row.get("ok") and str(row.get("type") or "") == "apk_core_linux_runtime_smoke_test"), None)
+    if not isinstance(latest_ok, dict):
+        latest_ok = next((row for row in rows if row.get("ok") and "core_linux" in str(row.get("type") or "")), rows[0])
+    result = latest_ok.get("result") if isinstance(latest_ok.get("result"), dict) else {}
+    smoke = result.get("coreLinuxSmokeTest") if isinstance(result.get("coreLinuxSmokeTest"), dict) else {}
+    runtime = smoke.get("runtime") if isinstance(smoke.get("runtime"), dict) else result.get("runtime") if isinstance(result.get("runtime"), dict) else {}
+    rootfs = smoke.get("rootfs") if isinstance(smoke.get("rootfs"), dict) else result.get("rootfs") if isinstance(result.get("rootfs"), dict) else {}
+    prepared = bool(latest_ok.get("ok") and str(latest_ok.get("type") or "") in {"apk_core_linux_runtime_smoke_test", "apk_core_linux_rootfs_validate", "apk_core_linux_rootfs_prepare", "apk_core_linux_rootfs_status"})
+    prepared = prepared or bool(runtime.get("ok") or runtime.get("rootfsReady") or rootfs.get("rootfsReady") or smoke.get("ok"))
+    summary = _safe_short_text(runtime.get("summary") or smoke.get("summary") or result.get("message") or latest_ok.get("message") or latest_ok.get("error"), 180)
+    state = _safe_short_text(runtime.get("state") or smoke.get("state") or rootfs.get("state") or ("runtime_v1_ready" if prepared else "runtime_v1_pending"), 80)
+    core_linux = {
+        "summary": summary,
+        "state": state,
+        "prepared": prepared,
+        "rootfsReady": bool(runtime.get("rootfsReady") or rootfs.get("rootfsReady") or prepared),
+        "executorReady": bool(runtime.get("executorReady") or prepared),
+        "termuxRequired": False,
+        "bedrockStartAllowed": False,
+        "lastResultAt": int(latest_ok.get("receivedAt") or 0),
+        "sourceJobType": _safe_short_text(latest_ok.get("type"), 80),
+    }
+    return {"coreLinux": core_linux, "coreLinuxSummary": summary, "coreLinuxState": state, "coreLinuxPrepared": prepared}
+
 def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str = "") -> dict:
     path = _core_worker_app_heartbeats_path()
     try:
@@ -629,10 +795,24 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
     effective_install_id = _safe_short_text(install_id or record.get("installId"), 80)
     supported_tasks = _safe_string_list(record.get("supported_tasks") or record.get("supportedTasks") or record.get("appJobs"), limit=120)
     capabilities = _safe_string_list(record.get("capabilities"), limit=80)
+    if _looks_like_core_worker_apk_v1(record):
+        if not supported_tasks:
+            supported_tasks = _apk_v1_supported_tasks(record)
+        if not capabilities:
+            capabilities = _apk_v1_capabilities(record)
     runtime = record.get("runtime") if isinstance(record.get("runtime"), dict) else {}
     core_linux = _first_dict(record.get("coreLinux"), runtime.get("coreLinux"))
     native_runtime = _first_dict(record.get("nativeRuntime"), runtime.get("nativeRuntime"))
     light_jobs = _core_worker_app_jobs_public_summary(worker_id=effective_worker_id, install_id=effective_install_id)
+    job_core_linux = _core_worker_app_latest_core_linux_state(worker_id=effective_worker_id, install_id=effective_install_id)
+    if (not core_linux or not _safe_short_text(core_linux.get("summary"), 180)) and isinstance(job_core_linux.get("coreLinux"), dict):
+        core_linux = job_core_linux.get("coreLinux")
+    core_linux_summary = _safe_short_text(record.get("coreLinuxSummary") or core_linux.get("summary") or job_core_linux.get("coreLinuxSummary"), 160)
+    core_linux_state = _safe_short_text(record.get("coreLinuxState") or core_linux.get("state") or job_core_linux.get("coreLinuxState"), 80)
+    core_linux_prepared = bool(record.get("coreLinuxPrepared") or core_linux.get("prepared") or job_core_linux.get("coreLinuxPrepared"))
+    if core_linux and not core_linux.get("prepared") and core_linux_prepared:
+        core_linux = dict(core_linux)
+        core_linux["prepared"] = True
     return {
         "online": online,
         "lastSeenAt": seen,
@@ -664,9 +844,9 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
         "diagnosticsSummary": _safe_short_text(record.get("diagnosticsSummary"), 160),
         "storageSummary": _safe_short_text(record.get("storageSummary"), 120),
         "bridgeSummary": _safe_short_text(record.get("bridgeSummary"), 120),
-        "coreLinuxSummary": _safe_short_text(record.get("coreLinuxSummary") or core_linux.get("summary"), 160),
-        "coreLinuxState": _safe_short_text(record.get("coreLinuxState") or core_linux.get("state"), 80),
-        "coreLinuxPrepared": bool(record.get("coreLinuxPrepared") or core_linux.get("prepared")),
+        "coreLinuxSummary": core_linux_summary,
+        "coreLinuxState": core_linux_state,
+        "coreLinuxPrepared": core_linux_prepared,
         "coreLinux": core_linux,
         "nativeRuntime": native_runtime,
         "bedrockSummary": _safe_short_text(record.get("bedrockSummary"), 160),
@@ -677,7 +857,7 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
         "internalJobsRunning": int(record.get("internalJobsRunning") or 0),
         "internalJobsPending": int(record.get("internalJobsPending") or 0),
         "lightJobs": light_jobs,
-        "summary": _safe_short_text(record.get("coreLinuxSummary") or core_linux.get("summary") or record.get("diagnosticsSummary") or "APK interno aguardando diagnóstico", 180),
+        "summary": _safe_short_text(core_linux_summary or record.get("diagnosticsSummary") or "APK interno aguardando diagnóstico", 180),
     }
 
 

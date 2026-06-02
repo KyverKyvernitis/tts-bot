@@ -1,31 +1,37 @@
-# Patch: Core Linux reporting + startup stability
+# patch-core-linux-heartbeat-source-unification-20260602
 
-Base: repo-20260602-182047.zip
+Base: `repo-20260602-184425.zip`
 
 ## Objetivo
-Fechar a camada de contrato/relatório após o smoke test do Core Linux Runtime v1 passar sem Termux.
 
-## Mudanças principais
-- Bump APK para 0.5.56 / versionCode 71.
-- APK passa a enviar `supported_tasks`, `supportedTasks`, `app_jobs` e `capabilities` também no heartbeat direto `/core-worker/app/heartbeat`.
-- Heartbeat em background (`CoreWorkerUpdateJobService`) também declara as tarefas seguras reais do APK, em vez de mandar lista vazia.
-- VPS passa a persistir capacidades, tarefas suportadas, `runtime`, `coreLinux` e `nativeRuntime` no arquivo `data/core_worker_app_heartbeats.json`.
-- `/core-worker/app/runtime-summary` agora, quando chamado sem worker/install explícito, pega o heartbeat mais recente em vez de retornar `unknown`.
-- `/core-worker/app/jobs/fetch` aceita `supportedJobs`, `supported_tasks`, `supportedTasks` e `app_jobs`.
-- Painel workers passa a reconhecer `supportedTasks`/`appJobs` além de `supported_tasks`.
-- Startup/resume do APK recebeu debounce de 15s para evitar rajadas de `safeStartupTask` e requests simultâneos.
-- Heartbeat interno, heartbeat nativo e fetch de jobs agora têm guarda contra execução concorrente.
+Corrigir o estado cego do Core Linux quando o heartbeat mais recente vem do `CoreWorkerRuntimeService`/foreground service. O Core Linux v1 já passava no smoke test sem Termux, mas o foreground service publicava `supported_tasks`, `supportedTasks`, `capabilities` e `coreLinux*` vazios, fazendo a VPS/painel enxergarem o runtime como incompleto.
 
-## Segurança preservada
-- Não inicia Bedrock real.
-- Não libera shell livre.
-- Não baixa rootfs automaticamente.
-- Não remove Termux ainda; Termux segue como fallback legado.
-- Não toca CallKeeper.
+## Mudanças
 
-## Validação feita aqui
+- Bump do APK para `0.5.57` / `versionCode 72`.
+- `CoreWorkerRuntimeService` agora monta heartbeat rico com:
+  - `supported_tasks`, `supportedTasks` e `app_jobs`;
+  - `capabilities`;
+  - `runtime` com estado do foreground service;
+  - `coreLinux` lido dos snapshots persistidos em `files/core-linux/runtime`;
+  - `nativeRuntime` lido do snapshot do executor nativo.
+- `CoreWorkerRuntimeService` agora limita heartbeats concorrentes e aplica debounce leve para reduzir rajadas.
+- `webserver.py` agora tem fallback canônico para APK Core Linux v1 quando um heartbeat chega incompleto.
+- `webserver.py` preserva/mescla último estado Core Linux válido no heartbeat mais recente.
+- `/core-worker/app/runtime-summary` agora pode enriquecer o resumo usando o último resultado Core Linux válido dos jobs internos, evitando `Core Linux vazio` quando o heartbeat foreground-service for incompleto.
+- `MainActivity.safeStartupTask` parou de logar `start/ok` de todas as tarefas rápidas; agora loga falhas, tarefas lentas e alguns fluxos úteis, reduzindo spam de `safeStartupTask`.
+
+## Mantido bloqueado
+
+- Bedrock real não inicia.
+- Box64 real não inicia.
+- Shell livre remoto continua bloqueado.
+- Termux continua apenas como fallback legado; não foi removido neste patch.
+- CallKeeper não foi tocado.
+
+## Validação local
+
 - `python3 -m py_compile webserver.py utility/commands/workers.py`
-- Conferência de balanceamento de chaves Java em `MainActivity.java` e `CoreWorkerUpdateJobService.java`.
+- Checagem simples de balanceamento de chaves/parênteses nos arquivos Java alterados.
 
-## Observação
-Não rodei build Android real nesta sandbox porque a base não inclui `gradlew`; o build deve continuar sendo feito pelo phone worker/builder.
+O build Android real deve continuar sendo feito pelo phone worker/builder.

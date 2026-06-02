@@ -15,9 +15,12 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -25,6 +28,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class CoreWorkerRuntimeService extends Service {
     public static final String ACTION_START = "dev.core.worker.action.RUNTIME_START";
@@ -35,11 +39,14 @@ public class CoreWorkerRuntimeService extends Service {
     private static final String CHANNEL_ID = "core_worker_runtime";
     private static final int NOTIFICATION_ID = 4107;
     private static final long TICK_MS = 60L * 1000L;
+    private static final long HEARTBEAT_MIN_MS = 25L * 1000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean running = false;
     private NativeTtsManager nativeTtsManager;
     private LocalNativeTtsHttpServer nativeTtsServer;
+    private final AtomicBoolean heartbeatRunning = new AtomicBoolean(false);
+    private volatile long lastHeartbeatStartedAt = 0L;
 
     private final Runnable tickRunnable = new Runnable() {
         @Override
@@ -201,41 +208,217 @@ public class CoreWorkerRuntimeService extends Service {
     }
 
     private void reportHeartbeat(String reason) {
+        long now = System.currentTimeMillis();
+        String safeReason = reason == null || reason.trim().isEmpty() ? "foreground" : reason.trim();
+        if (heartbeatRunning.get()) {
+            return;
+        }
+        if (lastHeartbeatStartedAt > 0L && now - lastHeartbeatStartedAt < HEARTBEAT_MIN_MS && !safeReason.contains("start")) {
+            return;
+        }
+        lastHeartbeatStartedAt = now;
+        heartbeatRunning.set(true);
         new Thread(() -> {
-            String serverUrl = normalizedServerUrl();
-            if (serverUrl.isEmpty()) {
-                return;
-            }
             try {
-                JSONObject payload = new JSONObject();
-                payload.put("platform", "android");
-                payload.put("source", "core-worker-apk-foreground-service");
-                payload.put("state", "foreground_runtime");
-                payload.put("reason", reason == null || reason.trim().isEmpty() ? "foreground" : reason);
-                payload.put("appVersion", BuildConfig.VERSION_NAME);
-                payload.put("appVersionCode", BuildConfig.VERSION_CODE);
-                payload.put("versionName", BuildConfig.VERSION_NAME);
-                payload.put("versionCode", BuildConfig.VERSION_CODE);
-                payload.put("workerId", prefs().getString("worker_id", ""));
-                payload.put("installId", installId());
-                payload.put("deviceName", prefs().getString("device_name", ""));
-                payload.put("runtime_mode", "apk-native-python-linux-assisted-runtime");
-                payload.put("jobsRuntime", "foreground-service-visible-runtime");
-                JSONObject status = new JSONObject();
-                status.put("app", "foreground-service");
-                status.put("foreground_runtime_active", true);
-                status.put("notification_permission", hasNotificationPermission() ? "granted" : "missing");
-                status.put("termux_required_now", false);
-                status.put("bedrock_server_mode", "future-foreground-service");
-                status.put("native_tts_bridge_active", nativeTtsServer != null);
-                if (nativeTtsManager != null) {
-                    status.put("android_tts", nativeTtsManager.statusJson());
+                String serverUrl = normalizedServerUrl();
+                if (serverUrl.isEmpty()) {
+                    return;
                 }
-                payload.put("status", status);
+                JSONObject payload = buildForegroundHeartbeatPayload(safeReason);
                 request("POST", serverUrl + "/core-worker/app/heartbeat", payload);
             } catch (Throwable ignored) {
+            } finally {
+                heartbeatRunning.set(false);
             }
         }, "core-worker-foreground-heartbeat").start();
+    }
+
+    private JSONObject buildForegroundHeartbeatPayload(String reason) throws Exception {
+        JSONObject coreLinux = coreLinuxPublicSnapshot();
+        JSONObject nativeRuntime = nativeRuntimePublicSnapshot();
+        JSONArray supported = supportedLightJobsArray();
+        JSONArray capabilities = coreWorkerApkCapabilitiesArray();
+        JSONObject runtime = new JSONObject();
+        runtime.put("mode", "apk-native-python-linux-assisted-runtime");
+        runtime.put("internal_runtime", "apk-foreground-service");
+        runtime.put("internal_runtime_state", "foreground-service-visible-runtime");
+        runtime.put("jobs_runtime", "foreground-service-visible-runtime");
+        runtime.put("capabilities", capabilities);
+        runtime.put("supported_tasks", supported);
+        runtime.put("supportedTasks", supported);
+        runtime.put("foreground_runtime_active", true);
+        runtime.put("foreground_runtime_summary", "serviço persistente ativo");
+        runtime.put("core_linux_summary", coreLinux.optString("summary", ""));
+        runtime.put("core_linux_state", coreLinux.optString("state", ""));
+        runtime.put("core_linux_prepared", coreLinux.optBoolean("prepared", false));
+        runtime.put("termux_required_now", false);
+        runtime.put("termux_fallback_available", false);
+        runtime.put("advanced_jobs_require_termux", false);
+        runtime.put("coreLinux", coreLinux);
+        runtime.put("nativeRuntime", nativeRuntime);
+
+        JSONObject status = new JSONObject();
+        status.put("app", "foreground-service");
+        status.put("foreground_runtime_active", true);
+        status.put("foreground_runtime_summary", "serviço persistente ativo");
+        status.put("notification_permission", hasNotificationPermission() ? "granted" : "missing");
+        status.put("termux_required_now", false);
+        status.put("bedrock_server_mode", "future-foreground-service");
+        status.put("bedrock_start_allowed", false);
+        status.put("native_tts_bridge_active", nativeTtsServer != null);
+        status.put("capabilities", capabilities);
+        status.put("supported_tasks", supported);
+        status.put("supportedTasks", supported);
+        status.put("core_linux_summary", coreLinux.optString("summary", ""));
+        status.put("core_linux_state", coreLinux.optString("state", ""));
+        status.put("core_linux_prepared", coreLinux.optBoolean("prepared", false));
+        status.put("coreLinux", coreLinux);
+        status.put("nativeRuntime", nativeRuntime);
+        if (nativeTtsManager != null) {
+            status.put("android_tts", nativeTtsManager.statusJson());
+        }
+
+        JSONObject payload = new JSONObject();
+        payload.put("platform", "android");
+        payload.put("source", "core-worker-apk-foreground-service");
+        payload.put("state", "foreground_runtime");
+        payload.put("reason", reason == null || reason.trim().isEmpty() ? "foreground" : reason.trim());
+        payload.put("appVersion", BuildConfig.VERSION_NAME);
+        payload.put("appVersionCode", BuildConfig.VERSION_CODE);
+        payload.put("versionName", BuildConfig.VERSION_NAME);
+        payload.put("versionCode", BuildConfig.VERSION_CODE);
+        payload.put("workerId", prefs().getString("worker_id", ""));
+        payload.put("installId", installId());
+        payload.put("deviceName", prefs().getString("device_name", ""));
+        payload.put("runtime_mode", "apk-native-python-linux-assisted-runtime");
+        payload.put("jobsRuntime", "foreground-service-visible-runtime");
+        payload.put("internal_runtime", "apk-foreground-service");
+        payload.put("internal_runtime_state", "foreground-service-visible-runtime");
+        payload.put("capabilities", capabilities);
+        payload.put("supported_tasks", supported);
+        payload.put("supportedTasks", supported);
+        payload.put("app_jobs", supported);
+        payload.put("coreLinux", coreLinux);
+        payload.put("nativeRuntime", nativeRuntime);
+        payload.put("runtime", runtime);
+        payload.put("status", status);
+        return payload;
+    }
+
+    private JSONArray coreWorkerApkCapabilitiesArray() {
+        return new JSONArray()
+                .put("apk-native")
+                .put("android-status")
+                .put("native-boot")
+                .put("safe-shell-probe")
+                .put("python-embedded")
+                .put("internal-jobs")
+                .put("core-linux-runtime")
+                .put("core-linux-rootfs-manager")
+                .put("core-linux-runtime-v1")
+                .put("minecraft-bedrock-manager-safe-plan");
+    }
+
+    private JSONArray supportedLightJobsArray() {
+        return new JSONArray()
+                .put("apk_ping")
+                .put("apk_status_refresh")
+                .put("apk_upload_app_logs")
+                .put("apk_diagnostic")
+                .put("apk_check_update")
+                .put("apk_test_vps_connection")
+                .put("apk_sync_runtime_state")
+                .put("apk_job_history")
+                .put("apk_device_diagnostic")
+                .put("apk_push_diagnostic")
+                .put("apk_update_diagnostic")
+                .put("apk_runtime_diagnostic")
+                .put("apk_worker_bridge_status")
+                .put("apk_test_notification")
+                .put("apk_repair_local_state")
+                .put("apk_reset_job_history")
+                .put("apk_trim_cache")
+                .put("apk_update_storage_cleanup")
+                .put("apk_sync_profile")
+                .put("apk_sync_profile_now")
+                .put("apk_verify_update_state")
+                .put("apk_native_worker_status")
+                .put("apk_native_boot_status")
+                .put("apk_local_shell_probe")
+                .put("apk_core_linux_native_executor_probe")
+                .put("apk_core_linux_native_executor_test")
+                .put("apk_core_linux_native_runtime_status")
+                .put("apk_core_linux_rootfs_status")
+                .put("apk_core_linux_rootfs_prepare")
+                .put("apk_core_linux_rootfs_validate")
+                .put("apk_core_linux_rootfs_preflight")
+                .put("apk_core_linux_rootfs_clean_staging")
+                .put("apk_core_linux_runtime_smoke_test");
+    }
+
+    private JSONObject coreLinuxPublicSnapshot() {
+        JSONObject runtime = readJson(new File(new File(getFilesDir(), "core-linux/runtime"), "linux-runtime-state.json"));
+        JSONObject rootfs = readJson(new File(new File(getFilesDir(), "core-linux/runtime"), "rootfs-state.json"));
+        JSONObject smoke = readJson(new File(new File(getFilesDir(), "core-linux/runtime"), "core-linux-smoke-test.json"));
+        boolean prepared = runtime.optBoolean("ok", false) || runtime.optBoolean("rootfsReady", false) || rootfs.optBoolean("rootfsReady", false) || smoke.optBoolean("ok", false);
+        String summary = firstNonEmpty(runtime.optString("summary", ""), smoke.optString("summary", ""), rootfs.optString("summary", ""), prepared ? "Core Linux Runtime v1 pronto" : "Core Linux Runtime v1 aguardando preparo");
+        String state = firstNonEmpty(runtime.optString("state", ""), smoke.optString("state", ""), rootfs.optString("state", ""), prepared ? "runtime_v1_ready" : "runtime_v1_pending");
+        JSONObject out = new JSONObject();
+        try {
+            out.put("summary", summary);
+            out.put("state", state);
+            out.put("prepared", prepared);
+            out.put("rootfsReady", runtime.optBoolean("rootfsReady", rootfs.optBoolean("rootfsReady", false)) || smoke.optBoolean("ok", false));
+            out.put("executorReady", runtime.optBoolean("executorReady", false));
+            out.put("lastCheckAt", Math.max(runtime.optLong("updatedAt", 0L), Math.max(rootfs.optLong("updatedAt", 0L), smoke.optLong("updatedAt", 0L))));
+            out.put("termuxRequired", false);
+            out.put("bedrockStartAllowed", false);
+            out.put("supportedStage", "core-linux-runtime-v1-smoke");
+            out.put("supportedTasks", supportedLightJobsArray());
+            if (runtime.length() > 0) out.put("runtime", runtime);
+            if (rootfs.length() > 0) out.put("rootfs", rootfs);
+            if (smoke.length() > 0) out.put("smoke", smoke);
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    private JSONObject nativeRuntimePublicSnapshot() {
+        JSONObject executor = readJson(new File(new File(getFilesDir(), "core-linux/runtime"), "native-executor-state.json"));
+        JSONObject out = new JSONObject();
+        try {
+            out.put("summary", firstNonEmpty(executor.optString("summary", ""), executor.optBoolean("readyForRootfs", false) ? "executor nativo interno pronto para rootfs" : "executor nativo aguardando teste"));
+            out.put("workerOnline", true);
+            out.put("workerState", executor.optBoolean("readyForRootfs", false) ? "ready" : "pending");
+            out.put("pythonAvailable", false);
+            out.put("lastHeartbeatAt", executor.optLong("updatedAt", 0L));
+            out.put("supportedTasks", supportedLightJobsArray());
+            if (executor.length() > 0) out.put("executor", executor);
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    private JSONObject readJson(File file) {
+        try {
+            if (file == null || !file.isFile()) return new JSONObject();
+            FileInputStream input = new FileInputStream(file);
+            byte[] data = new byte[(int) Math.min(file.length(), 512L * 1024L)];
+            int read = input.read(data);
+            input.close();
+            if (read <= 0) return new JSONObject();
+            return new JSONObject(new String(data, 0, read, StandardCharsets.UTF_8));
+        } catch (Throwable ignored) {
+            return new JSONObject();
+        }
+    }
+
+    private String firstNonEmpty(String... values) {
+        if (values == null) return "";
+        for (String value : values) {
+            if (value != null && !value.trim().isEmpty()) return value.trim();
+        }
+        return "";
     }
 
     private boolean hasNotificationPermission() {

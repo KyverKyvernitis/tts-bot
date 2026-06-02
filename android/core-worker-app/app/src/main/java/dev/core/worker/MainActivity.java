@@ -450,10 +450,13 @@ public class MainActivity extends Activity {
 
     private void safeStartupTask(String label, SafeStartupRunnable runnable) {
         String cleanLabel = label == null || label.trim().isEmpty() ? "startup" : label.trim();
+        long started = System.currentTimeMillis();
         try {
-            startupLog("safeStartupTask:start " + cleanLabel);
             runnable.run();
-            startupLog("safeStartupTask:ok " + cleanLabel);
+            long duration = System.currentTimeMillis() - started;
+            if (duration >= 250L || cleanLabel.startsWith("resume:") || cleanLabel.contains("CoreLinux") || cleanLabel.contains("Heartbeat") || cleanLabel.contains("Jobs")) {
+                startupLog("safeStartupTask:ok " + cleanLabel + " " + duration + "ms");
+            }
         } catch (Throwable exc) {
             appStatusLastError = fallbackThrowable(exc);
             startupLog("safeStartupTask:fail " + cleanLabel + " " + appStatusLastError);
