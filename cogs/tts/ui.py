@@ -1321,7 +1321,8 @@ def _gcloud_voice_options_for_language(cog: "TTSVoice", *, language: str, curren
 def _top_gcloud_voice_options(cog: "TTSVoice", current: str = "", language: str = "pt-BR") -> list[discord.SelectOption]:
     return _gcloud_voice_options_for_language(cog, language=language, current=current)
 
-_ATTS_VOICE_CATALOG_CACHE: dict[str, object] = {"at": 0.0, "voices": []}
+_ATTS_VOICE_CATALOG_CACHE: dict[str, object] = {"by_locale": {}, "last_error": ""}
+ATTS_LOAD_ERROR_MESSAGE = "Não consegui carregar o ATTS agora. Tente novamente em alguns instantes."
 
 
 def _atts_locale_matches(voice_locale: str, language: str) -> bool:
@@ -1380,16 +1381,32 @@ def _atts_common_language_options(current: str = "pt-BR", voices: list[dict[str,
     return options or [discord.SelectOption(label="Português Brasil (pt-BR)", description="Idioma ATTS", value="pt-BR", default=True)]
 
 
-def _fetch_atts_voice_catalog_sync(locale: str = "", *, limit: int = 500, timeout: float = 1.2) -> list[dict[str, object]]:
+def _atts_voice_cache_key(locale: str = "") -> str:
+    normalized = _normalize_atts_locale(locale or "", "").strip()
+    return normalized.casefold() if normalized else "all"
+
+
+def _fetch_atts_voice_catalog_sync(locale: str = "", *, limit: int = 500, timeout: float = 2.2, use_cache: bool = True) -> list[dict[str, object]]:
+    """Busca o catálogo de vozes do ATTS antes de abrir o modal.
+
+    O modal do Discord não atualiza opções depois de aberto; por isso esta
+    função precisa retornar as vozes do idioma salvo atual antes do send_modal.
+    """
     now = time.monotonic()
-    cached = _ATTS_VOICE_CATALOG_CACHE.get("voices")
-    if isinstance(cached, list) and cached and now - float(_ATTS_VOICE_CATALOG_CACHE.get("at") or 0.0) <= 60.0:
-        return [v for v in cached if isinstance(v, dict)]
+    key = _atts_voice_cache_key(locale)
+    by_locale = _ATTS_VOICE_CATALOG_CACHE.setdefault("by_locale", {})
+    if isinstance(by_locale, dict) and use_cache:
+        cached = by_locale.get(key)
+        if isinstance(cached, dict) and now - float(cached.get("at") or 0.0) <= 180.0:
+            cached_voices = cached.get("voices")
+            if isinstance(cached_voices, list) and cached_voices:
+                return [v for v in cached_voices if isinstance(v, dict)]
     try:
         enabled = bool(getattr(config, "PHONE_WORKER_ENABLED", False))
         host = str(getattr(config, "PHONE_WORKER_HOST", "") or "").strip()
         token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
         if not enabled or not host or not token:
+            _ATTS_VOICE_CATALOG_CACHE["last_error"] = "worker_unavailable"
             return []
         scheme = str(getattr(config, "PHONE_WORKER_SCHEME", "http") or "http").strip().lower() or "http"
         if scheme not in {"http", "https"}:
@@ -1407,14 +1424,22 @@ def _fetch_atts_voice_catalog_sync(locale: str = "", *, limit: int = 500, timeou
         with urllib.request.urlopen(req, timeout=max(0.2, float(timeout))) as response:
             raw = response.read(1024 * 1024)
         parsed = json.loads(raw.decode("utf-8", errors="replace") or "{}")
-        voices = parsed.get("voices") if isinstance(parsed, dict) else []
+        if not isinstance(parsed, dict) or not bool(parsed.get("ok", True)):
+            _ATTS_VOICE_CATALOG_CACHE["last_error"] = str((parsed or {}).get("error") if isinstance(parsed, dict) else "invalid_response")[:180]
+            return []
+        voices = parsed.get("voices")
         if not isinstance(voices, list):
+            _ATTS_VOICE_CATALOG_CACHE["last_error"] = "missing_voices"
             return []
         normalized = [v for v in voices if isinstance(v, dict) and str(v.get("name") or "").strip()]
-        _ATTS_VOICE_CATALOG_CACHE["at"] = now
-        _ATTS_VOICE_CATALOG_CACHE["voices"] = normalized
+        if isinstance(by_locale, dict) and normalized:
+            by_locale[key] = {"at": now, "voices": normalized}
+            _ATTS_VOICE_CATALOG_CACHE["last_error"] = ""
+        elif not normalized:
+            _ATTS_VOICE_CATALOG_CACHE["last_error"] = "empty_voices"
         return normalized
     except Exception as e:
+        _ATTS_VOICE_CATALOG_CACHE["last_error"] = f"{type(e).__name__}: {_shorten(str(e), 160)}"
         print(f"[tts_modal] catálogo ATTS indisponível: {e!r}")
         return []
 
@@ -1443,24 +1468,33 @@ def _atts_voice_score(voice: dict[str, object], language: str) -> int:
     return score
 
 
-def _atts_voice_options_for_language(cog: "TTSVoice", *, language: str, current: str = "") -> list[discord.SelectOption]:
+def _atts_matching_voices_for_language(catalog: list[dict[str, object]] | None, language: str) -> list[dict[str, object]]:
     language = _normalize_atts_locale(language, "pt-BR")
-    current = str(current or "").strip()
-    catalog = _fetch_atts_voice_catalog_sync(language)
     matching: list[dict[str, object]] = []
-    for voice in catalog:
+    for voice in catalog or []:
+        if not isinstance(voice, dict):
+            continue
         name = str(voice.get("name") or "").strip()
         if not name:
             continue
         locale = str(voice.get("locale") or _atts_voice_locale_from_name(name) or "")
-        if _atts_locale_matches(locale, language):
+        # O Android às vezes coloca o idioma apenas no nome da voz.
+        if _atts_locale_matches(locale, language) or _atts_locale_matches(_atts_voice_locale_from_name(name), language):
             matching.append(voice)
-    if current and not any(str(v.get("name") or "") == current for v in matching):
-        matching.insert(0, {"name": current, "locale": _atts_voice_locale_from_name(current), "network_required": False, "quality": 0, "latency": 0})
     matching.sort(key=lambda v: (-_atts_voice_score(v, language), str(v.get("name") or "")))
+    return matching
+
+
+def _atts_voice_options_for_language(cog: "TTSVoice", *, language: str, current: str = "", catalog: list[dict[str, object]] | None = None) -> list[discord.SelectOption]:
+    language = _normalize_atts_locale(language, "pt-BR")
+    current = str(current or "").strip()
+    resolved_catalog = list(catalog) if catalog is not None else _fetch_atts_voice_catalog_sync(language)
+    matching = _atts_matching_voices_for_language(resolved_catalog, language)
+    if current and current.casefold() not in {"auto", "default", "padrao", "padrão"} and not any(str(v.get("name") or "") == current for v in matching):
+        matching.insert(0, {"name": current, "locale": _atts_voice_locale_from_name(current), "network_required": False, "quality": 0, "latency": 0})
     options: list[discord.SelectOption] = [
-        discord.SelectOption(label="Automática rápida", description="Prefere voz local do Android", value="auto", default=(not current or current.casefold() in {"auto", "automatica", "automática"})),
-        discord.SelectOption(label="Padrão do Android", description="Usa a voz padrão do sistema", value="default", default=(current.casefold() in {"default", "padrao", "padrão"})),
+        discord.SelectOption(label="Automática rápida", description="Prefere voz local", value="auto", default=(not current or current.casefold() in {"auto", "automatica", "automática"})),
+        discord.SelectOption(label="Padrão", description="Voz padrão do sistema", value="default", default=(current.casefold() in {"default", "padrao", "padrão"})),
     ]
     seen = {"auto", "default"}
     for voice in matching:
@@ -1474,7 +1508,7 @@ def _atts_voice_options_for_language(cog: "TTSVoice", *, language: str, current:
         desc_bits = [locale]
         desc_bits.append("local" if local else "online")
         if network:
-            desc_bits.append("pode usar internet")
+            desc_bits.append("usa internet")
         options.append(discord.SelectOption(label=_shorten(name, 100), description=_shorten(" · ".join(desc_bits), 100), value=name[:100], default=(name == current)))
         if len(options) >= 25:
             break
@@ -1499,6 +1533,72 @@ def _pick_atts_voice_for_language(cog: "TTSVoice", language: str, current: str =
         if value and value not in {"auto", "default"}:
             return value
     return ""
+
+
+def _atts_modal_current_language(cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None) -> str:
+    user_id = int(target_user_id or 0)
+    guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
+    return _normalize_atts_locale(_current_tts_value(cog, guild_id, user_id, "android_language", "pt-BR", server=server), "pt-BR")
+
+
+def _atts_catalog_ready_for_language(catalog: list[dict[str, object]] | None, language: str) -> bool:
+    return bool(_atts_matching_voices_for_language(catalog or [], language))
+
+
+async def _load_atts_voice_catalog_for_modal(language: str) -> list[dict[str, object]]:
+    language = _normalize_atts_locale(language, "pt-BR")
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_fetch_atts_voice_catalog_sync, language, limit=500, timeout=2.2, use_cache=True),
+            timeout=2.7,
+        )
+    except Exception as e:
+        _ATTS_VOICE_CATALOG_CACHE["last_error"] = f"{type(e).__name__}: {_shorten(str(e), 160)}"
+        print(f"[tts_modal] catálogo ATTS indisponível antes do modal: {e!r}")
+        return []
+
+
+async def _send_minimal_atts_unavailable(interaction: discord.Interaction) -> None:
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(ATTS_LOAD_ERROR_MESSAGE, ephemeral=True)
+        else:
+            await interaction.response.send_message(ATTS_LOAD_ERROR_MESSAGE, ephemeral=True)
+    except Exception:
+        pass
+
+
+async def _send_atts_settings_modal(
+    interaction: discord.Interaction,
+    cog: "TTSVoice",
+    panel_message: discord.Message | None,
+    *,
+    server: bool,
+    target_user_id: int | None = None,
+    target_user_name: str | None = None,
+    context: str = "atts",
+) -> None:
+    language = _atts_modal_current_language(cog, panel_message, server=server, target_user_id=target_user_id)
+    catalog = await _load_atts_voice_catalog_for_modal(language)
+    if not _atts_catalog_ready_for_language(catalog, language):
+        print(f"[tts_modal] ATTS indisponível em {context}: language={language} voices={len(catalog or [])} error={_ATTS_VOICE_CATALOG_CACHE.get('last_error')!r}")
+        await _send_minimal_atts_unavailable(interaction)
+        return
+    try:
+        await interaction.response.send_modal(
+            AndroidSettingsModal(
+                cog,
+                panel_message,
+                server=server,
+                target_user_id=target_user_id,
+                target_user_name=target_user_name,
+                voice_catalog=catalog,
+            )
+        )
+    except Exception as e:
+        print(f"[tts_modal] modal ATTS falhou em {context}: {e!r}")
+        traceback.print_exception(type(e), e, e.__traceback__)
+        await _send_minimal_atts_unavailable(interaction)
 
 
 async def _save_tts_modal_updates(
@@ -2162,7 +2262,7 @@ def _normalize_atts_factor(value: object, default: str = "1.0") -> str | None:
 
 
 class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
-    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None, force_text_fallback: bool = False):
+    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None, force_text_fallback: bool = False, voice_catalog: list[dict[str, object]] | None = None):
         super().__init__()
         self.cog = cog
         self.panel_message = panel_message
@@ -2170,6 +2270,7 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
         self.target_user_id = target_user_id
         self.target_user_name = target_user_name
         self.force_text_fallback = bool(force_text_fallback)
+        self.voice_catalog = list(voice_catalog or [])
         user_id = int(target_user_id or 0)
         guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
         self.current_language = _normalize_atts_locale(_current_tts_value(cog, guild_id, user_id, "android_language", "pt-BR", server=server), "pt-BR")
@@ -2183,7 +2284,9 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
         if not _modal_label_available():
             return False
         try:
-            catalog = _fetch_atts_voice_catalog_sync(self.current_language)
+            catalog = list(self.voice_catalog or [])
+            if not _atts_catalog_ready_for_language(catalog, self.current_language):
+                return False
             language_select = _make_modal_select(
                 "android_language",
                 placeholder="Idioma ATTS",
@@ -2192,7 +2295,7 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
             voice_select = _make_modal_select(
                 "android_voice",
                 placeholder="Voz ATTS",
-                options=_atts_voice_options_for_language(self.cog, language=self.current_language, current=self.current_voice),
+                options=_atts_voice_options_for_language(self.cog, language=self.current_language, current=self.current_voice, catalog=catalog),
             )
             ok = _add_modal_label_item(
                 self,
@@ -3508,10 +3611,13 @@ class TTSModeActionSelect(discord.ui.Select):
             return
         value = self.values[0]
         if value == "atts_settings":
-            await _send_settings_modal_with_fallback(
+            await _send_atts_settings_modal(
                 interaction,
-                lambda: AndroidSettingsModal(panel.cog, panel.source_panel_message, server=panel.server, target_user_id=panel.target_user_id, target_user_name=panel.target_user_name),
-                lambda: AndroidSettingsModal(panel.cog, panel.source_panel_message, server=panel.server, target_user_id=panel.target_user_id, target_user_name=panel.target_user_name, force_text_fallback=True),
+                panel.cog,
+                panel.source_panel_message,
+                server=panel.server,
+                target_user_id=panel.target_user_id,
+                target_user_name=panel.target_user_name,
                 context="mode-atts",
             )
         elif value == "edge_voice":
@@ -3624,10 +3730,13 @@ class TTSMainPanelView(_BaseTTSLayoutView):
             target_user_name = self.cog._member_panel_name(interaction.user)
 
         if mode == "atts" or mode == "android_native":
-            await _send_settings_modal_with_fallback(
+            await _send_atts_settings_modal(
                 interaction,
-                lambda: AndroidSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name),
-                lambda: AndroidSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name, force_text_fallback=True),
+                self.cog,
+                panel_message,
+                server=self.server,
+                target_user_id=target_user_id,
+                target_user_name=target_user_name,
                 context="panel-atts",
             )
         elif mode == "edge":
