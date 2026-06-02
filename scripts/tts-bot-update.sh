@@ -2066,10 +2066,46 @@ cleanup_local_candidate_new_files_after_reset() {
 
 git_add_changed_files() {
   [[ -n "${CHANGED_FILES_RAW//[[:space:]]/}" ]] || return 0
+
+  # Stage seguro para criação, alteração e remoção. Um `git add path` direto
+  # pode falhar com "pathspec did not match" quando o path não existe no
+  # worktree; `git add -A` stageia deleções, mas ainda falha para paths que
+  # nunca foram rastreados. Por isso só passamos paths existentes/symlinks ou
+  # paths que o Git já conhece.
+  local pathspec_file rel target tracked_any rc
+  pathspec_file="$(mktemp "${TMPDIR:-/tmp}/tts-bot-git-pathspec.XXXXXX")"
+  tracked_any=0
+
   while IFS= read -r rel; do
     [[ -n "$rel" ]] || continue
-    printf '%s\0' "$rel"
-  done <<< "$CHANGED_FILES_RAW" | sudo -u ubuntu -H git add --pathspec-from-file=- --pathspec-file-nul
+    if printf '%s\n' "$rel" | grep -Eq '(^|/)\.\.(\/|$)|^/'; then
+      rm -f "$pathspec_file" 2>/dev/null || true
+      LAST_ERROR_STDERR="path inválido para git add: $rel"
+      return 1
+    fi
+
+    target="$REPO_DIR/$rel"
+    if [[ -e "$target" || -L "$target" ]]; then
+      printf '%s\0' "$rel" >> "$pathspec_file"
+      tracked_any=1
+    elif sudo -u ubuntu -H git ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
+      # Arquivo removido pelo patch: stageia a deleção com `git add -A`.
+      printf '%s\0' "$rel" >> "$pathspec_file"
+      tracked_any=1
+    else
+      logger -t "$LOG_TAG" "ignorando path ausente/não rastreado no stage: $rel" 2>/dev/null || true
+    fi
+  done <<< "$CHANGED_FILES_RAW"
+
+  if (( tracked_any == 0 )) || [[ ! -s "$pathspec_file" ]]; then
+    rm -f "$pathspec_file" 2>/dev/null || true
+    return 0
+  fi
+
+  sudo -u ubuntu -H git add -A --pathspec-from-file="$pathspec_file" --pathspec-file-nul
+  rc=$?
+  rm -f "$pathspec_file" 2>/dev/null || true
+  return "$rc"
 }
 
 prepare_local_candidate_update() {
