@@ -1,3 +1,9 @@
+## Patch 86: Core Linux Runtime v1 sem Termux
+
+A versão `0.5.55` transforma o Core Linux interno em uma etapa validável de ponta a ponta sem Termux: o APK agora anuncia `supported_tasks` reais para a VPS, prepara/valida um rootfs scaffold controlado em `files/core-linux/rootfs/` e executa um smoke test seguro combinando executor JNI allowlist + rootfs + estado persistente.
+
+O escopo continua protegido: não baixa rootfs externo, não abre shell livre, não chama Python/Chaquopy para logs leves, não inicia Bedrock e não toca Termux. Jobs antigos de Linux/Bedrock/Python pesado seguem ocultos ou bloqueados até o runtime real ficar pronto.
+
 ## Patch 85.7: terminal interno e logs ao vivo
 
 A versão `0.5.50` transforma o terminal da aba Bedrock em um console técnico do Core Worker: ele agora guarda histórico em `files/core-linux/logs/bedrock-terminal.log`, acompanha eventos/status em tempo real, permite copiar logs direto pelo app e abre uma tela de terminal expandida com botão **Mínimo** para voltar.

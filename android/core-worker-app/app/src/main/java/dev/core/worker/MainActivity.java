@@ -2870,6 +2870,16 @@ public class MainActivity extends Activity {
         }
     }
 
+    private JSONObject readJsonFile(File file) {
+        try {
+            String text = readTextFileTail(file, 64 * 1024);
+            if (text == null || text.trim().isEmpty()) return new JSONObject();
+            return new JSONObject(text);
+        } catch (Throwable ignored) {
+            return new JSONObject();
+        }
+    }
+
     private String bedrockNextAction(boolean rootfsReady, boolean executorReady, boolean propertiesReady, boolean serverInstalled, boolean eulaAccepted, boolean box64Ready) {
         if (!executorReady) return "validar executor interno";
         if (!rootfsReady) return "preparar rootfs interno assistido";
@@ -3823,7 +3833,7 @@ public class MainActivity extends Activity {
             putProfilePayload(payload, profile);
             payload.put("roles", new JSONArray().put("apk-native").put("diagnostics").put("internal-jobs").put("linux-runtime").put("rootfs-manager").put("bedrock-manager"));
             payload.put("capabilities", new JSONArray().put("apk-native").put("android-status").put("native-boot").put("safe-shell-probe").put("python-embedded").put("core-linux-runtime").put("core-linux-rootfs-manager").put("minecraft-bedrock-manager"));
-            payload.put("supported_tasks", new JSONArray());
+            payload.put("supported_tasks", supportedLightJobsArray());
             payload.put("app_jobs", supportedLightJobsArray());
             JSONObject status = payload.optJSONObject("status");
             if (status == null) status = new JSONObject();
@@ -3884,7 +3894,7 @@ public class MainActivity extends Activity {
             payload.put("source", "core-worker-apk-native");
             payload.put("roles", new JSONArray().put("apk-native").put("diagnostics").put("internal-jobs").put("linux-runtime").put("rootfs-manager").put("bedrock-manager"));
             payload.put("capabilities", new JSONArray().put("apk-native").put("android-status").put("native-boot").put("safe-shell-probe").put("python-embedded").put("core-linux-runtime").put("core-linux-rootfs-manager").put("minecraft-bedrock-manager"));
-            payload.put("supported_tasks", new JSONArray());
+            payload.put("supported_tasks", supportedLightJobsArray());
             payload.put("app_jobs", supportedLightJobsArray());
             safePutPayload(payload, "battery", batterySnapshot());
             safePutPayload(payload, "network", networkSnapshot(serverUrl));
@@ -4459,12 +4469,13 @@ public class MainActivity extends Activity {
     }
 
     private JSONArray supportedLightJobsArray() {
-        // Patch 85.5: anuncie apenas jobs realmente leves. Jobs Python/rootfs/Bedrock
-        // continuam bloqueados até o runtime ficar validável sem derrubar a UI.
+        // Core Linux Runtime v1: anuncie apenas jobs que o APK realmente executa
+        // sem Termux, sem shell livre e sem iniciar Bedrock. O painel da VPS usa
+        // esta lista para esconder ações antigas/pesadas que ainda são futuro.
         return new JSONArray()
                 .put("apk_ping")
                 .put("apk_status_refresh")
-                .put("apk_report_logs")
+                .put("apk_upload_app_logs")
                 .put("apk_diagnostic")
                 .put("apk_check_update")
                 .put("apk_test_vps_connection")
@@ -4488,7 +4499,26 @@ public class MainActivity extends Activity {
                 .put("apk_local_shell_probe")
                 .put("apk_core_linux_native_executor_probe")
                 .put("apk_core_linux_native_executor_test")
-                .put("apk_core_linux_native_runtime_status");
+                .put("apk_core_linux_native_runtime_status")
+                .put("apk_core_linux_rootfs_status")
+                .put("apk_core_linux_rootfs_prepare")
+                .put("apk_core_linux_rootfs_validate")
+                .put("apk_core_linux_rootfs_preflight")
+                .put("apk_core_linux_rootfs_clean_staging")
+                .put("apk_core_linux_runtime_smoke_test");
+    }
+
+    private boolean isCoreLinuxRuntimeV1JobType(String type) {
+        String t = type == null ? "" : type.trim();
+        return "apk_core_linux_rootfs_status".equals(t)
+                || "apk_core_linux_rootfs_preflight".equals(t)
+                || "apk_core_linux_rootfs_prepare".equals(t)
+                || "apk_core_linux_rootfs_validate".equals(t)
+                || "apk_core_linux_rootfs_clean_staging".equals(t)
+                || "apk_core_linux_native_executor_probe".equals(t)
+                || "apk_core_linux_native_executor_test".equals(t)
+                || "apk_core_linux_native_runtime_status".equals(t)
+                || "apk_core_linux_runtime_smoke_test".equals(t);
     }
 
     private boolean isPausedRootfsBedrockJobType(String type) {
@@ -4496,10 +4526,10 @@ public class MainActivity extends Activity {
         if (t.isEmpty()) return false;
         if (t.startsWith("apk_python_")) return true;
         if (t.startsWith("apk_linux_")) return true;
+        if (isCoreLinuxRuntimeV1JobType(t)) return false;
         if (t.startsWith("apk_core_linux_rootfs")) return true;
         if (t.startsWith("apk_minecraft_bedrock_")) return true;
         if ("apk_storage_diagnostic".equals(t) || "apk_network_diagnostic".equals(t)) return true;
-        if ("apk_upload_app_logs".equals(t)) return true;
         if ("apk_collect_status_bundle".equals(t) || "apk_force_status_bundle".equals(t)) return true;
         if ("apk_linux_strategy_plan".equals(t) || "apk_linux_manifest_plan".equals(t) || "apk_minecraft_bedrock_assisted_install_plan".equals(t)) return true;
         if ("apk_core_linux_internal_probe".equals(t)
@@ -4681,13 +4711,12 @@ public class MainActivity extends Activity {
             logs.put("internalRuntimeLastError", internalRuntimeLastError == null ? "" : internalRuntimeLastError);
             logs.put("fcmState", fcmStatusLabel());
             logs.put("queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
+            logs.put("historyText", internalJobHistoryText());
             safePutPayload(logs, "history", internalJobHistoryJson());
             safePutPayload(logs, "status", statusSnapshot());
-            JSONObject python = pythonLogSummarySnapshot();
-            safePutPayload(logs, "pythonLogSummary", python);
-            result.put("reportKind", "app-internal-logs-python-first");
+            result.put("reportKind", "app-internal-logs-lightweight");
             safePutPayload(result, "logs", logs);
-            result.put("message", python.optBoolean("ok", false) ? "logs do APK resumidos pelo Python interno" : "logs do APK enviados; resumo Python indisponível");
+            result.put("message", "logs leves do APK enviados sem Python/Termux");
             return result;
         }
         if ("apk_diagnostic".equals(type)) {
@@ -5048,11 +5077,39 @@ public class MainActivity extends Activity {
             if ("apk_core_linux_rootfs_validate".equals(type)) action = "validate";
             if ("apk_core_linux_rootfs_repair".equals(type)) action = "repair";
             if ("apk_core_linux_rootfs_clean_staging".equals(type)) action = "clean_staging";
-            JSONObject rootfs = coreLinuxRootfsStaticSnapshot(action);
+            JSONObject rootfs = CoreLinuxRuntimeManager.rootfsSnapshot(this, coreLinuxDir(), action);
             safePutPayload(result, "rootfs", rootfs);
-            internalDiagnosticsSummary = rootfs.optString("summary", "rootfs interno em modo seguro");
+            JSONObject rootfsState = rootfs.optJSONObject("rootfs");
+            coreLinuxSummary = rootfs.optString("summary", "rootfs interno em modo seguro");
+            coreLinuxState = rootfs.optString("state", "rootfs");
+            coreLinuxPrepared = rootfs.optBoolean("rootfsReady", false);
+            coreLinuxLastCheckAt = System.currentTimeMillis();
+            internalDiagnosticsSummary = coreLinuxSummary;
             internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!rootfs.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", rootfs.optString("summary", "rootfs interno pendente"));
+            }
             result.put("message", rootfs.optString("summary", "rootfs interno verificado sem Python/Termux"));
+            if (rootfsState != null) safePutPayload(result, "rootfsState", rootfsState);
+            return result;
+        }
+
+        if ("apk_core_linux_runtime_smoke_test".equals(type)) {
+            JSONObject nativeExecutor = coreLinuxNativeExecutorSnapshot("test");
+            JSONObject smoke = CoreLinuxRuntimeManager.smokeTest(this, coreLinuxDir(), nativeExecutor);
+            safePutPayload(result, "coreLinuxSmokeTest", smoke);
+            coreLinuxSummary = smoke.optString("summary", "smoke test Core Linux executado");
+            coreLinuxState = smoke.optString("state", "smoke_test");
+            coreLinuxPrepared = smoke.optBoolean("ok", false);
+            coreLinuxLastCheckAt = System.currentTimeMillis();
+            internalDiagnosticsSummary = coreLinuxSummary;
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!smoke.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", smoke.optString("summary", "smoke test Core Linux pendente"));
+            }
+            result.put("message", smoke.optString("summary", "Core Linux smoke test executado sem Termux"));
             return result;
         }
 
@@ -5067,8 +5124,12 @@ public class MainActivity extends Activity {
             JSONObject nativeExecutor = coreLinuxNativeExecutorSnapshot(action);
             safePutPayload(result, "nativeExecutor", nativeExecutor);
             try {
-                prepareCoreLinuxRuntimeStateWithoutRecursiveProbe();
-                safePutPayload(result, "coreLinuxInternal", coreLinuxStaticSnapshot("executor"));
+                JSONObject runtime = CoreLinuxRuntimeManager.runtimeSnapshot(this, coreLinuxDir(), "executor", nativeExecutor);
+                safePutPayload(result, "coreLinuxInternal", runtime);
+                coreLinuxSummary = runtime.optString("summary", coreLinuxSummary);
+                coreLinuxState = runtime.optString("state", coreLinuxState);
+                coreLinuxPrepared = runtime.optBoolean("ok", coreLinuxPrepared);
+                coreLinuxLastCheckAt = System.currentTimeMillis();
             } catch (Throwable ignored) {
             }
             internalDiagnosticsSummary = nativeExecutor.optString("summary", "executor nativo interno atualizado");
@@ -5403,49 +5464,23 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject coreLinuxStaticSnapshot(String focus) throws Exception {
-        prepareCoreLinuxRuntimeStateWithoutRecursiveProbe();
         File base = coreLinuxDir();
-        File rootfs = new File(base, "rootfs");
-        File runtime = new File(base, "runtime");
-        File bin = new File(base, "bin");
-        File bedrock = new File(base, "bedrock");
-        File rootfsState = new File(runtime, "rootfs-state.json");
-        File rootfsReadyMarker = new File(rootfs, ".core-worker-rootfs-ready");
-        File nativeExecutorState = new File(runtime, "native-executor-state.json");
-        File appNativeExecutor = new File(getApplicationInfo() == null || getApplicationInfo().nativeLibraryDir == null ? "" : getApplicationInfo().nativeLibraryDir, "libcoreworker_executor.so");
-        JSONObject out = new JSONObject();
-        out.put("ok", true);
+        JSONObject nativeState = readJsonFile(new File(new File(base, "runtime"), "native-executor-state.json"));
+        JSONObject out = CoreLinuxRuntimeManager.runtimeSnapshot(this, base, focus == null ? "status" : focus, nativeState);
         out.put("focus", focus == null ? "status" : focus);
-        out.put("mode", "static-no-python");
-        out.put("summary", "Core Linux verificado em modo leve; rootfs/Bedrock pesado pausado para proteger a interface");
-        out.put("state", "static_safe_check");
-        out.put("coreLinuxDir", base.getAbsolutePath());
-        out.put("rootfs", safeFileStatus(rootfs));
-        out.put("rootfsReady", safeFileExists(rootfsReadyMarker) || safeTextContains(rootfsState, "\"rootfsReady\"", "true"));
-        out.put("rootfsState", safeFileStatus(rootfsState));
-        out.put("nativeExecutor", safeFileStatus(appNativeExecutor));
-        out.put("nativeExecutorState", safeFileStatus(nativeExecutorState));
-        out.put("bin", safeFileStatus(bin));
-        out.put("bedrockDir", safeFileStatus(bedrock));
+        out.put("mode", "core-linux-runtime-v1-no-termux");
         out.put("pythonTouched", false);
         out.put("nativeStarted", false);
+        out.put("bedrockStarted", false);
+        coreLinuxSummary = out.optString("summary", coreLinuxSummary);
+        coreLinuxState = out.optString("state", coreLinuxState);
+        coreLinuxPrepared = out.optBoolean("ok", coreLinuxPrepared);
+        coreLinuxLastCheckAt = System.currentTimeMillis();
         return out;
     }
 
     private JSONObject coreLinuxRootfsStaticSnapshot(String action) throws Exception {
-        JSONObject core = coreLinuxStaticSnapshot(action == null ? "rootfs" : action);
-        JSONObject out = new JSONObject();
-        out.put("ok", true);
-        out.put("action", action == null ? "status" : action);
-        out.put("mode", "static-no-python");
-        out.put("summary", "rootfs interno verificado em modo seguro; operação pesada pausada");
-        out.put("state", "rootfs_static_safe_check");
-        out.put("rootfsReady", core.optBoolean("rootfsReady", false));
-        safePutPayload(out, "coreLinux", core);
-        out.put("pythonTouched", false);
-        out.put("termuxTouched", false);
-        out.put("serviceStarted", false);
-        return out;
+        return CoreLinuxRuntimeManager.rootfsSnapshot(this, coreLinuxDir(), action == null ? "status" : action);
     }
 
     private JSONObject bedrockRuntimeStaticSnapshot(String focus) throws Exception {
@@ -6132,7 +6167,7 @@ public class MainActivity extends Activity {
         payload.put("profile_label", profileLabel(profile));
         payload.put("roles", jsonArray(profileRoles(profile)));
         payload.put("capabilities", jsonArray(profileRoles(profile)));
-        payload.put("supported_tasks", new JSONArray());
+        payload.put("supported_tasks", supportedLightJobsArray());
         payload.put("app_jobs", supportedLightJobsArray());
         JSONObject profileStatus = payload.optJSONObject("status");
         if (profileStatus == null) {
@@ -6217,7 +6252,8 @@ public class MainActivity extends Activity {
             safePutPayload(status, "core_linux_static", coreLinuxStaticSnapshot("status"));
         } catch (Throwable ignored) {
         }
-        status.put("core_linux_heavy_probe_paused", true);
+        status.put("core_linux_heavy_probe_paused", false);
+        status.put("core_linux_runtime_v1_enabled", true);
         status.put("bedrock_runtime_isolated", BEDROCK_RUNTIME_ISOLATED);
         status.put("bedrock_summary", bedrockSummary == null ? "" : bedrockSummary);
         status.put("bedrock_state", bedrockState == null ? "" : bedrockState);

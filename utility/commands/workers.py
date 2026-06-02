@@ -189,6 +189,7 @@ WORKER_PANEL_ACTION_ORDER: tuple[str, ...] = (
     "_worker_details",
     "ping",
     "worker_self_check",
+    "_apk_internal_test",
     "worker_logs",
     "worker_update_quick",
     "apk_build_debug_quick",
@@ -494,21 +495,21 @@ CORE_WORKER_APP_AUTO_JOB_TYPES = {
     "apk_upload_app_logs",
     "apk_runtime_diagnostic",
     "apk_worker_bridge_status",
-    "apk_storage_diagnostic",
-    "apk_collect_status_bundle",
     "apk_device_diagnostic",
-    "apk_network_diagnostic",
     "apk_push_diagnostic",
     "apk_update_diagnostic",
     "apk_job_history",
-    "apk_cache_cleanup",
     "apk_native_worker_status",
     "apk_native_boot_status",
     "apk_local_shell_probe",
-    "apk_python_runtime_probe",
-    "apk_linux_runtime_probe",
-    "apk_core_linux_internal_probe",
+    "apk_core_linux_native_executor_probe",
+    "apk_core_linux_native_executor_test",
+    "apk_core_linux_native_runtime_status",
+    "apk_core_linux_rootfs_status",
+    "apk_core_linux_rootfs_validate",
+    "apk_core_linux_runtime_smoke_test",
 }
+
 CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_download_small",
     "apk_verify_file",
@@ -648,6 +649,7 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_core_linux_native_executor_probe": "executor nativo interno",
     "apk_core_linux_native_executor_test": "teste executor nativo",
     "apk_core_linux_native_runtime_status": "runtime nativo interno",
+    "apk_core_linux_runtime_smoke_test": "smoke test Core Linux",
     "apk_core_linux_internal_repair": "reparar Core Linux interno",
     "apk_minecraft_bedrock_probe": "Bedrock diagnóstico",
     "apk_minecraft_bedrock_status": "Bedrock status",
@@ -2749,6 +2751,9 @@ class WorkersPanelView(discord.ui.LayoutView):
         def add_if_visible(spec: dict[str, Any]) -> None:
             value = str(spec.get("value") or "")
             if value not in WORKER_PANEL_ACTION_VALUES:
+                return
+            apk_job_type = _core_worker_app_normalize_job_type(spec.get("apk_job_type")) if spec.get("apk_job_type") else ""
+            if apk_job_type and supported is not None and apk_job_type not in supported:
                 return
             specs_by_value.setdefault(value, dict(spec))
 
