@@ -175,7 +175,6 @@ SUPPORTED_DIRECT_TASKS = (
     "tts_cache_lookup",
     "tts_cache_store",
     "tts_synthesize_benchmark",
-    "tts_synthesize_piper",
     "tts_agent_status",
     "tts_agent_synthesize",
     "voice_agent_status",
@@ -233,7 +232,6 @@ SUPPORTED_CORE_WORKER_JOB_TYPES = (
     "tts_cache_lookup",
     "tts_cache_store",
     "tts_synthesize_benchmark",
-    "tts_synthesize_piper",
     "tts_agent_status",
     "tts_agent_synthesize",
     "voice_agent_status",
@@ -292,8 +290,8 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     },
     "turbo": {
         "label": "Turbo",
-        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "voice-agent", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "tts-android-native", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "voice-agent", "apk-builder", "vps-assist", "cache-worker"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "tts-android-native", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -1992,8 +1990,7 @@ def _tts_agent_available_engines(deps: dict[str, Any] | None = None) -> list[str
         engines.append("android_native")
     if deps.get("gcloud_tts"):
         engines.append("gcloud")
-    if deps.get("piper_cli") and deps.get("piper_model") and deps.get("piper_config"):
-        engines.append("piper")
+    # Piper ficou legado. O fluxo normal anuncia ATTS/Google/Edge/gTTS.
     if deps.get("edge_tts"):
         engines.append("edge")
     if deps.get("gtts"):
@@ -2007,7 +2004,7 @@ def _tts_agent_preferred_engine(available: list[str]) -> str:
     requested = aliases.get(requested, requested)
     if requested != "auto" and requested in available:
         return requested
-    for candidate in ("android_native", "gcloud", "edge", "gtts", "piper"):
+    for candidate in ("android_native", "gcloud", "edge", "gtts"):
         if candidate in available:
             return candidate
     return ""
@@ -4675,11 +4672,11 @@ class WorkerHandler(BaseHTTPRequestHandler):
         order.append(requested)
         if fallback != requested:
             order.append(fallback)
-        for candidate in ("android_native", "gcloud", "edge", "gtts", "piper"):
+        for candidate in ("android_native", "gcloud", "edge", "gtts"):
             order.append(candidate)
         deduped: list[str] = []
         for engine in order:
-            if engine not in {"android_native", "piper", "edge", "gtts", "gcloud"}:
+            if engine not in {"android_native", "edge", "gtts", "gcloud"}:
                 continue
             if engine not in available:
                 continue
@@ -5361,7 +5358,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
     def _task_tts_synthesize_benchmark(self, body: dict[str, Any]) -> dict[str, Any]:
         roles, capabilities = self._ensure_tts_benchmark_turbo_allowed()
         engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_")
-        if engine not in {"android_native", "edge", "gtts", "gcloud", "piper"}:
+        if engine not in {"android_native", "edge", "gtts", "gcloud"}:
             raise ValueError("engine inválida para benchmark TTS")
         text = str(body.get("text") or "").strip()
         if not text:

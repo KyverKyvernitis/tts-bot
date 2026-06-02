@@ -156,6 +156,7 @@ class ModeSelect(discord.ui.Select):
         self.cog = cog
         self.server = server
         options = [
+            discord.SelectOption(label="ATTS", description="Android TTS nativo do worker", value="android_native", emoji="📱"),
             discord.SelectOption(label="gtts", description="Mais simples e compatível", value="gtts", emoji="🗣️"),
             discord.SelectOption(label="edge", description="Voz natural com voice, speed e pitch", value="edge", emoji="✨"),
             discord.SelectOption(label="gcloud", description="Google Cloud TTS com idioma, voz, velocidade e tom próprios", value="gcloud", emoji="☁️"),
@@ -541,6 +542,31 @@ class BotPrefixModal(discord.ui.Modal, title="Alterar prefixo do bot"):
         await self.cog._apply_server_prefix_from_modal(
             interaction,
             prefix_kind="bot",
+            prefix=str(self.new_prefix),
+            panel_message=self.panel_message,
+        )
+
+
+class ATTSPrefixModal(discord.ui.Modal, title="Alterar prefixo do ATTS"):
+    new_prefix = discord.ui.TextInput(
+        label="Novo prefixo do ATTS",
+        placeholder="Ex.: %",
+        required=True,
+        min_length=1,
+        max_length=8,
+    )
+
+    def __init__(self, cog: "TTSVoice", panel_message: discord.Message, owner_id: int, guild_id: int):
+        super().__init__()
+        self.cog = cog
+        self.panel_message = panel_message
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog._apply_server_prefix_from_modal(
+            interaction,
+            prefix_kind="atts",
             prefix=str(self.new_prefix),
             panel_message=self.panel_message,
         )
@@ -1932,8 +1958,145 @@ class GoogleSettingsModal(discord.ui.Modal, title="Editar Google"):
         )
 
 
+def _normalize_atts_locale(value: object, default: str = "pt-BR") -> str:
+    raw = str(value or default or "pt-BR").strip().replace("_", "-")
+    if not raw:
+        return default
+    parts = [p for p in raw.split("-") if p]
+    if len(parts) == 1:
+        return parts[0].lower()
+    return f"{parts[0].lower()}-{parts[1].upper()}"
+
+
+def _normalize_atts_factor(value: object, default: str = "1.0") -> str | None:
+    raw = str(value or default or "1.0").strip().lower().replace("x", "")
+    raw = raw.replace(",", ".")
+    try:
+        number = float(raw)
+    except Exception:
+        return None
+    number = max(0.5, min(2.0, number))
+    text = f"{number:.2f}".rstrip("0").rstrip(".")
+    return text if text else "1"
+
+
+class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
+    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None, force_text_fallback: bool = False):
+        super().__init__()
+        self.cog = cog
+        self.panel_message = panel_message
+        self.server = bool(server)
+        self.target_user_id = target_user_id
+        self.target_user_name = target_user_name
+        user_id = int(target_user_id or 0)
+        guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
+        self.current_language = _current_tts_value(cog, guild_id, user_id, "android_language", "pt-BR", server=server)
+        self.current_voice = _current_tts_value(cog, guild_id, user_id, "android_voice", "", server=server)
+        self.current_rate = _current_tts_value(cog, guild_id, user_id, "android_rate", "1.0", server=server)
+        self.current_pitch = _current_tts_value(cog, guild_id, user_id, "android_pitch", "1.0", server=server)
+        self._build_text_fallback()
+
+    def _build_text_fallback(self) -> None:
+        _add_modal_text_input(
+            self,
+            "language",
+            label="Idioma ATTS",
+            placeholder="Ex.: pt-BR, en-US, es-ES",
+            current=self.current_language or "pt-BR",
+            max_length=16,
+        )
+        _add_modal_text_input(
+            self,
+            "voice",
+            label="Voz ATTS",
+            placeholder="Vazio/auto usa a voz padrão do Android",
+            current=self.current_voice or "",
+            max_length=96,
+            required=False,
+        )
+        _add_modal_text_input(
+            self,
+            "rate",
+            label="Velocidade ATTS",
+            placeholder="1.0 normal, 0.8 lenta, 1.25 rápida",
+            current=self.current_rate or "1.0",
+            max_length=8,
+        )
+        _add_modal_text_input(
+            self,
+            "pitch",
+            label="Tom ATTS",
+            placeholder="1.0 normal, 0.8 grave, 1.2 agudo",
+            current=self.current_pitch or "1.0",
+            max_length=8,
+        )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        updates: dict[str, object] = {}
+        details: list[str] = []
+        history_bits: list[str] = []
+
+        language = _normalize_atts_locale(_single_component_value(getattr(self, "language", None), self.current_language), "pt-BR")
+        current_language = _normalize_atts_locale(self.current_language, "pt-BR")
+        if language != current_language:
+            updates["android_language"] = language
+            details.append(f"• Idioma: `{language}`")
+            history_bits.append(f"idioma {language}")
+
+        raw_voice = _single_component_value(getattr(self, "voice", None), self.current_voice).strip()
+        voice = "" if raw_voice.lower() in {"", "auto", "automatica", "automática", "padrao", "padrão"} else raw_voice[:96]
+        current_voice = "" if str(self.current_voice or "").strip().lower() in {"", "auto", "automatica", "automática", "padrao", "padrão"} else str(self.current_voice or "").strip()
+        if voice != current_voice:
+            updates["android_voice"] = voice
+            details.append(f"• Voz: `{voice or 'auto'}`")
+            history_bits.append(f"voz {voice or 'auto'}")
+
+        rate = _normalize_atts_factor(_single_component_value(getattr(self, "rate", None), self.current_rate), "1.0")
+        if rate is None:
+            await interaction.response.send_message(embed=self.cog._make_embed("Velocidade inválida", "Use um número entre `0.5` e `2.0`.", ok=False), ephemeral=True)
+            return
+        current_rate = _normalize_atts_factor(self.current_rate, "1.0") or "1"
+        if rate != current_rate:
+            updates["android_rate"] = rate
+            details.append(f"• Velocidade: `{rate}x`")
+            history_bits.append(f"velocidade {rate}x")
+
+        pitch = _normalize_atts_factor(_single_component_value(getattr(self, "pitch", None), self.current_pitch), "1.0")
+        if pitch is None:
+            await interaction.response.send_message(embed=self.cog._make_embed("Tom inválido", "Use um número entre `0.5` e `2.0`.", ok=False), ephemeral=True)
+            return
+        current_pitch = _normalize_atts_factor(self.current_pitch, "1.0") or "1"
+        if pitch != current_pitch:
+            updates["android_pitch"] = pitch
+            details.append(f"• Tom: `{pitch}x`")
+            history_bits.append(f"tom {pitch}x")
+
+        history_label = "o ATTS" if self.server else "o próprio ATTS"
+        if len(history_bits) == 1:
+            history_value = history_bits[0]
+        elif updates:
+            history_value = "configurações atualizadas"
+        else:
+            history_value = "sem alterações"
+
+        await _save_tts_modal_updates(
+            self.cog,
+            interaction,
+            source_panel_message=self.panel_message,
+            server=self.server,
+            updates=updates,
+            history_label=history_label,
+            history_value=history_value,
+            success_title="ATTS atualizado",
+            success_description="\n".join(details) if details else "Nada mudou.",
+            target_user_id=self.target_user_id,
+            target_user_name=self.target_user_name,
+        )
+
+
 class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
     bot_prefix = discord.ui.TextInput(label="Prefixo do bot", placeholder="Ex.: _", required=False, max_length=8)
+    atts_prefix = discord.ui.TextInput(label="Prefixo do ATTS", placeholder="Ex.: %", required=False, max_length=8)
     gtts_prefix = discord.ui.TextInput(label="Prefixo do gTTS", placeholder="Ex.: .", required=False, max_length=8)
     edge_prefix = discord.ui.TextInput(label="Prefixo do Edge", placeholder="Ex.: ,", required=False, max_length=8)
     google_prefix = discord.ui.TextInput(label="Prefixo do Google", placeholder="Ex.: '", required=False, max_length=8)
@@ -1949,6 +2112,7 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
         except Exception:
             defaults = {}
         self.bot_prefix.default = str((defaults or {}).get("bot_prefix") or getattr(config, "PREFIX", "_") or "_")[:8]
+        self.atts_prefix.default = str((defaults or {}).get("atts_prefix") or getattr(config, "TTS_ATTS_PREFIX", "%") or "%")[:8]
         self.gtts_prefix.default = str((defaults or {}).get("tts_prefix") or (defaults or {}).get("gtts_prefix") or getattr(config, "TTS_PREFIX", ".") or ".")[:8]
         self.edge_prefix.default = str((defaults or {}).get("edge_prefix") or getattr(config, "EDGE_TTS_PREFIX", ",") or ",")[:8]
         self.google_prefix.default = str((defaults or {}).get("gcloud_prefix") or getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'") or "'")[:8]
@@ -1958,6 +2122,7 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
         parts = []
         for field_name, label, keys in [
             ("bot_prefix", "bot", ("bot_prefix",)),
+            ("atts_prefix", "ATTS", ("atts_prefix",)),
             ("gtts_prefix", "gTTS", ("gtts_prefix", "tts_prefix")),
             ("edge_prefix", "Edge", ("edge_prefix",)),
             ("google_prefix", "Google", ("gcloud_prefix",)),
@@ -2291,6 +2456,7 @@ async def _reset_public_launcher_select(interaction: discord.Interaction, panel)
 class TTSPublicLauncherSelect(discord.ui.Select):
     def __init__(self):
         options = [
+            discord.SelectOption(label="ATTS", description="Idioma, voz, velocidade e tom do Android TTS", value="atts", emoji="📱"),
             discord.SelectOption(label="Edge", description="Idioma, voz, velocidade e tom do Edge", value="edge", emoji="🔊"),
             discord.SelectOption(label="gTTS", description="Idioma do gTTS", value="gtts", emoji="🔤"),
             discord.SelectOption(label="Google", description="Idioma, voz e leitura Google", value="gcloud", emoji="☁️"),
@@ -2314,7 +2480,14 @@ class TTSPublicLauncherSelect(discord.ui.Select):
         # Limpa a opção marcada sem consumir a resposta da interação;
         # a resposta principal continua sendo o modal.
         asyncio.create_task(_reset_public_launcher_select(interaction, panel))
-        if value == "edge":
+        if value == "atts":
+            await _send_settings_modal_with_fallback(
+                interaction,
+                lambda: AndroidSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name),
+                lambda: AndroidSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name, force_text_fallback=True),
+                context="public-atts",
+            )
+        elif value == "edge":
             await _send_settings_modal_with_fallback(
                 interaction,
                 lambda: EdgeSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name),
@@ -2456,6 +2629,9 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
             "### TTS",
             "**Como funciona**",
             "Cada prefixo escolhe um modo de voz.",
+            "",
+            "**ATTS**",
+            "Android nativo do celular. Use: `%texto`",
             "",
             "**Edge**",
             "Voz natural. Use: `,texto`",
@@ -2664,6 +2840,8 @@ class TTSModeActionsView(_BaseTTSView):
         # Texto curto de orientação. O painel principal mostra os prefixos reais
         # vindos do banco; aqui usamos os padrões para evitar consulta assíncrona
         # dentro de uma função de renderização simples.
+        if self.mode == "atts" or self.mode == "android_native":
+            return "%"
         if self.mode == "edge":
             return ","
         if self.mode == "gcloud":
@@ -2673,6 +2851,8 @@ class TTSModeActionsView(_BaseTTSView):
     def _mode_title_description(self) -> tuple[str, str]:
         prefix = self._prefix_for_mode()
         target = "do servidor" if self.server else "seus"
+        if self.mode == "atts" or self.mode == "android_native":
+            return "ATTS", f"Usado quando a mensagem começa com `{prefix}texto`. Escolha no menu o que quer mudar."
         if self.mode == "edge":
             return "Edge", f"Usado quando a mensagem começa com `{prefix}texto`. Escolha no menu o que quer mudar."
         if self.mode == "gtts":
@@ -2815,6 +2995,7 @@ class PrefixTargetSelect(discord.ui.Select):
         self.cog = cog
         options = [
             discord.SelectOption(label="Bot", description="Símbolo usado nos comandos do bot. Exemplo: _panel", value="bot", emoji="🤖"),
+            discord.SelectOption(label="ATTS", description="Símbolo antes da frase para usar ATTS. Exemplo: %bom dia", value="atts", emoji="📱"),
             discord.SelectOption(label="gTTS", description="Símbolo antes da frase para usar gTTS. Exemplo: .bom dia", value="gtts", emoji="🔤"),
             discord.SelectOption(label="Edge", description="Símbolo antes da frase para usar Edge. Exemplo: ,bom dia", value="edge", emoji="🔊"),
             discord.SelectOption(label="Google", description="Símbolo antes da frase para usar Google. Exemplo: 'bom dia", value="gcloud", emoji="☁️"),
@@ -2828,6 +3009,8 @@ class PrefixTargetSelect(discord.ui.Select):
         value = self.values[0]
         if value == "bot":
             await interaction.response.send_modal(BotPrefixModal(self.cog, source_panel_message, owner_id, guild_id))
+        elif value == "atts":
+            await interaction.response.send_modal(ATTSPrefixModal(self.cog, source_panel_message, owner_id, guild_id))
         elif value == "edge":
             await interaction.response.send_modal(EdgePrefixModal(self.cog, source_panel_message, owner_id, guild_id))
         elif value == "gcloud":
@@ -2953,7 +3136,7 @@ class TTSAdvancedActionsView(_BaseTTSView):
             self._target_owner(interaction),
             self.guild_id,
             "Modo de TTS",
-            "Escolhe o motor padrão usado por comandos antigos. Os prefixos Edge, gTTS e Google continuam escolhendo o motor por mensagem.",
+            "Escolhe o motor padrão usado por comandos antigos. Os prefixos ATTS, Edge, gTTS e Google continuam escolhendo o motor por mensagem.",
             ModeSelect(self.cog, server=self.server),
             source_panel_message=self.source_panel_message,
             target_user_id=self.target_user_id,
@@ -2981,7 +3164,8 @@ class TTSMainPanelSelect(discord.ui.Select):
         self.server = bool(server)
         if self.server:
             options = [
-                discord.SelectOption(label="Prefixos", description="Símbolos do bot, Edge, gTTS e Google", value="prefixes", emoji="⌨️"),
+                discord.SelectOption(label="Prefixos", description="Símbolos do bot, ATTS, Edge, gTTS e Google", value="prefixes", emoji="⌨️"),
+                discord.SelectOption(label="ATTS", description="Android TTS padrão do servidor", value="atts", emoji="📱"),
                 discord.SelectOption(label="Edge", description="Idioma, voz e leitura Edge padrão do servidor", value="edge", emoji="🔊"),
                 discord.SelectOption(label="gTTS", description="Idioma gTTS padrão do servidor", value="gtts", emoji="🔤"),
                 discord.SelectOption(label="Google", description="Idioma, voz e leitura Google padrão", value="gcloud", emoji="☁️"),
@@ -2990,6 +3174,7 @@ class TTSMainPanelSelect(discord.ui.Select):
             placeholder = "Escolha o ajuste do servidor"
         else:
             options = [
+                discord.SelectOption(label="ATTS", description="Android nativo: idioma, voz, velocidade e tom", value="atts", emoji="📱"),
                 discord.SelectOption(label="Edge", description="Voz natural: idioma, voz, velocidade e tom", value="edge", emoji="🔊"),
                 discord.SelectOption(label="gTTS", description="Voz simples: idioma usado no gTTS", value="gtts", emoji="🔤"),
                 discord.SelectOption(label="Google", description="Google Cloud: idioma, voz e leitura", value="gcloud", emoji="☁️"),
@@ -3004,7 +3189,9 @@ class TTSMainPanelSelect(discord.ui.Select):
             await interaction.response.send_message("Esse painel não está disponível agora.", ephemeral=True)
             return
         value = self.values[0]
-        if value == "edge":
+        if value == "atts":
+            await panel._open_atts_panel(interaction)
+        elif value == "edge":
             await panel._open_edge_panel(interaction)
         elif value == "gtts":
             await panel._open_gtts_panel(interaction)
@@ -3023,7 +3210,12 @@ class TTSMainPanelSelect(discord.ui.Select):
 class TTSModeActionSelect(discord.ui.Select):
     def __init__(self, mode: str):
         self.mode = str(mode or "edge")
-        if self.mode == "edge":
+        if self.mode == "atts" or self.mode == "android_native":
+            options = [
+                discord.SelectOption(label="Configurar ATTS", description="Idioma, voz, velocidade e tom", value="atts_settings", emoji="📱"),
+            ]
+            placeholder = "Editar ATTS"
+        elif self.mode == "edge":
             options = [
                 discord.SelectOption(label="Voz Edge", description="Escolhe a voz usada no prefixo Edge", value="edge_voice", emoji="🎙️"),
                 discord.SelectOption(label="Leitura Edge", description="Velocidade e tom do Edge", value="edge_reading", emoji="🎚️"),
@@ -3049,7 +3241,14 @@ class TTSModeActionSelect(discord.ui.Select):
             await interaction.response.send_message("Esse painel não está disponível agora.", ephemeral=True)
             return
         value = self.values[0]
-        if value == "edge_voice":
+        if value == "atts_settings":
+            await _send_settings_modal_with_fallback(
+                interaction,
+                lambda: AndroidSettingsModal(panel.cog, panel.source_panel_message, server=panel.server, target_user_id=panel.target_user_id, target_user_name=panel.target_user_name),
+                lambda: AndroidSettingsModal(panel.cog, panel.source_panel_message, server=panel.server, target_user_id=panel.target_user_id, target_user_name=panel.target_user_name, force_text_fallback=True),
+                context="mode-atts",
+            )
+        elif value == "edge_voice":
             await panel._open_edge_voice(interaction)
         elif value == "edge_reading":
             await panel._open_edge_reading(interaction)
@@ -3158,7 +3357,14 @@ class TTSMainPanelView(_BaseTTSLayoutView):
             target_user_id = interaction.user.id
             target_user_name = self.cog._member_panel_name(interaction.user)
 
-        if mode == "edge":
+        if mode == "atts" or mode == "android_native":
+            await _send_settings_modal_with_fallback(
+                interaction,
+                lambda: AndroidSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name),
+                lambda: AndroidSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name, force_text_fallback=True),
+                context="panel-atts",
+            )
+        elif mode == "edge":
             await _send_settings_modal_with_fallback(
                 interaction,
                 lambda: EdgeSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name),
@@ -3180,6 +3386,9 @@ class TTSMainPanelView(_BaseTTSLayoutView):
                 context="panel-google",
             )
 
+
+    async def _open_atts_panel(self, interaction: discord.Interaction):
+        await self._open_mode_panel(interaction, "atts")
 
     async def _open_edge_panel(self, interaction: discord.Interaction):
         await self._open_mode_panel(interaction, "edge")
@@ -3254,7 +3463,7 @@ class TTSMainPanelView(_BaseTTSLayoutView):
         await interaction.response.send_message(
             embed=self.cog._make_embed(
                 "Opção removida",
-                "Esse painel foi simplificado. Use Edge, gTTS, Google, Apelido ou o comando separado do TTS do servidor.",
+                "Esse painel foi simplificado. Use ATTS, Edge, gTTS, Google, Apelido ou o comando separado do TTS do servidor.",
                 ok=True,
             ),
             ephemeral=True,

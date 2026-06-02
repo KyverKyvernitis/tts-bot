@@ -44,6 +44,11 @@ async def _apply_server_prefix_from_modal(
         desc = f"O prefixo do bot do servidor agora é `{cleaned}`"
         history_entry = cog._server_history_text(interaction, "o prefixo dos comandos", cog._quote_value(cleaned))
         title = "Prefixo do bot atualizado"
+    elif prefix_kind == "atts":
+        await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, atts_prefix=cleaned))
+        desc = f"O prefixo do ATTS do servidor agora é `{cleaned}`"
+        history_entry = cog._server_history_text(interaction, "o prefixo do ATTS", cog._quote_value(cleaned))
+        title = "Prefixo do ATTS atualizado"
     elif prefix_kind == "edge":
         await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, edge_prefix=cleaned))
         desc = f"O prefixo do modo Edge do servidor agora é `{cleaned}`"
@@ -129,7 +134,7 @@ async def _apply_mode_from_panel(cog, interaction: discord.Interaction, mode: st
     effective_user_id, effective_user_name, is_public_user_panel = cog._resolve_panel_target_user(interaction, server=server, message_id=message_id, target_user_id=target_user_id, target_user_name=target_user_name)
     if server:
         await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, engine=value))
-        desc = f"O modo padrão do servidor agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos gTTS, Edge e Google Cloud continuam escolhendo o motor por mensagem."
+        desc = f"O modo padrão do servidor agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos ATTS, Edge, gTTS e Google continuam escolhendo o motor por mensagem."
         history_entry = cog._server_history_text(interaction, "o modo padrão do servidor", value)
         await cog._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
         cog._append_public_panel_history(message_id, history_entry)
@@ -137,7 +142,7 @@ async def _apply_mode_from_panel(cog, interaction: discord.Interaction, mode: st
     else:
         history_entry = cog._user_history_text(interaction, "o próprio modo" if effective_user_id == interaction.user.id else "o modo", value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
         await cog._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, engine=value, history_entry=history_entry)
-        desc = f"O modo de TTS de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"O seu modo de TTS agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos gTTS, Edge e Google Cloud continuam escolhendo o motor por mensagem."
+        desc = f"O modo de TTS de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"O seu modo de TTS agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos ATTS, Edge, gTTS e Google continuam escolhendo o motor por mensagem."
         cog._append_public_panel_history(message_id, history_entry)
         last_changes = list((await cog._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get("user_last_changes", []) or [])
 

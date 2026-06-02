@@ -468,14 +468,14 @@ TTS_TURBO_BENCHMARK_TRIGGER_TEXT = (os.getenv("TTS_TURBO_BENCHMARK_TRIGGER_TEXT"
 TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS = max(1.5, _parse_float(os.getenv("TTS_TURBO_BENCHMARK_TIMEOUT_SECONDS", "12.0"), 12.0))
 TTS_TURBO_BENCHMARK_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_TURBO_BENCHMARK_MAX_AUDIO_MB", "4"), 4))
 
-# Piper experimental: engine local/offline rodada apenas pelo phone-worker turbo.
-# Prefixo fixo por enquanto; sem painel/configuração pública. Guild 0 libera em todas.
-TTS_PIPER_EXPERIMENT_ENABLED = _parse_bool(os.getenv("TTS_PIPER_EXPERIMENT_ENABLED", "true"), True)
+# ATTS: Android TTS nativo do APK/phone-worker. O prefixo público oficial é %.
+# Mantemos os nomes antigos TTS_PIPER_EXPERIMENT_* apenas como alias de migração.
+TTS_ATTS_PREFIX = (os.getenv("TTS_ATTS_PREFIX") or os.getenv("TTS_PIPER_EXPERIMENT_PREFIX") or "%").strip() or "%"
+TTS_ATTS_ENABLED = _parse_bool(os.getenv("TTS_ATTS_ENABLED", os.getenv("TTS_PIPER_EXPERIMENT_ENABLED", "true")), True)
+TTS_PIPER_EXPERIMENT_ENABLED = TTS_ATTS_ENABLED
 TTS_PIPER_EXPERIMENT_GUILD_ID = _parse_int(os.getenv("TTS_PIPER_EXPERIMENT_GUILD_ID", "0"), 0)
-TTS_PIPER_EXPERIMENT_PREFIX = (os.getenv("TTS_PIPER_EXPERIMENT_PREFIX", "%") or "%").strip() or "%"
-# Mantém o prefixo experimental antigo, mas por padrão ele já testa a substituição do Piper
-# pelo Android TTS nativo do APK quando o worker estiver online. Use "piper" só para legado.
-TTS_PIPER_EXPERIMENT_ENGINE = (os.getenv("TTS_PIPER_EXPERIMENT_ENGINE", "android_native") or "android_native").strip().lower().replace("-", "_") or "android_native"
+TTS_PIPER_EXPERIMENT_PREFIX = TTS_ATTS_PREFIX
+TTS_PIPER_EXPERIMENT_ENGINE = "android_native"
 TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_PIPER_WORKER_TIMEOUT_SECONDS", "6.0"), 6.0))
 TTS_PIPER_MAX_TEXT_LENGTH = max(16, _parse_int(os.getenv("TTS_PIPER_MAX_TEXT_LENGTH", "600"), 600))
 TTS_PIPER_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_PIPER_MAX_AUDIO_MB", "8"), 8))

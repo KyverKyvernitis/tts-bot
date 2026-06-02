@@ -2481,10 +2481,10 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         value = validate_mode(mode)
         if server:
             await self._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, engine=value))
-            title, desc = "Modo padrão atualizado", f"O modo padrão do servidor agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos gTTS, Edge e Google Cloud continuam escolhendo o motor por mensagem."
+            title, desc = "Modo padrão atualizado", f"O modo padrão do servidor agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos ATTS, Edge, gTTS e Google continuam escolhendo o motor por mensagem."
         else:
             await self._set_user_tts_and_refresh(interaction.guild.id, interaction.user.id, engine=value)
-            title, desc = "Modo atualizado", f"O seu modo de TTS agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos gTTS, Edge e Google Cloud continuam escolhendo o motor por mensagem."
+            title, desc = "Modo atualizado", f"O seu modo de TTS agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos ATTS, Edge, gTTS e Google continuam escolhendo o motor por mensagem."
         await self._respond(interaction, embed=self._make_embed(title, desc, ok=True), ephemeral=True)
 
     async def _set_voice_common(self, interaction: discord.Interaction, *, voice: str, server: bool):

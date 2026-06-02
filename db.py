@@ -584,8 +584,13 @@ class SettingsDB:
             "gcloud_language": str(tts.get("gcloud_language", "") or ""),
             "gcloud_rate": str(tts.get("gcloud_rate", "") or ""),
             "gcloud_pitch": str(tts.get("gcloud_pitch", "") or ""),
+            "android_voice": str(tts.get("android_voice", "") or ""),
+            "android_language": str(tts.get("android_language", "") or ""),
+            "android_rate": str(tts.get("android_rate", "") or ""),
+            "android_pitch": str(tts.get("android_pitch", "") or ""),
             "bot_prefix": str(g.get("bot_prefix", "_") or "_"),
             "tts_prefix": str(g.get("tts_prefix", ",") or ","),
+            "atts_prefix": str(g.get("atts_prefix", getattr(config, "TTS_ATTS_PREFIX", "%")) or getattr(config, "TTS_ATTS_PREFIX", "%")),
             "gtts_prefix": str(g.get("gtts_prefix", g.get("tts_prefix", ".")) or "."),
             "edge_prefix": str(g.get("edge_prefix", ",") or ","),
             "gcloud_prefix": str(g.get("gcloud_prefix", getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'")) or getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'")),
@@ -612,8 +617,13 @@ class SettingsDB:
         gcloud_language: Optional[str] = None,
         gcloud_rate: Optional[str] = None,
         gcloud_pitch: Optional[str] = None,
+        android_voice: Optional[str] = None,
+        android_language: Optional[str] = None,
+        android_rate: Optional[str] = None,
+        android_pitch: Optional[str] = None,
         bot_prefix: Optional[str] = None,
         tts_prefix: Optional[str] = None,
+        atts_prefix: Optional[str] = None,
         gtts_prefix: Optional[str] = None,
         edge_prefix: Optional[str] = None,
         gcloud_prefix: Optional[str] = None,
@@ -644,10 +654,20 @@ class SettingsDB:
             tts["gcloud_rate"] = gcloud_rate
         if gcloud_pitch is not None:
             tts["gcloud_pitch"] = gcloud_pitch
+        if android_voice is not None:
+            tts["android_voice"] = android_voice
+        if android_language is not None:
+            tts["android_language"] = android_language
+        if android_rate is not None:
+            tts["android_rate"] = android_rate
+        if android_pitch is not None:
+            tts["android_pitch"] = android_pitch
         if bot_prefix is not None:
             doc["bot_prefix"] = str(bot_prefix or "_")[:8]
         if tts_prefix is not None:
             doc["tts_prefix"] = str(tts_prefix or ",")[:8]
+        if atts_prefix is not None:
+            doc["atts_prefix"] = str(atts_prefix or getattr(config, "TTS_ATTS_PREFIX", "%"))[:8]
         if gtts_prefix is not None:
             doc["gtts_prefix"] = str(gtts_prefix or ".")[:8]
         if edge_prefix is not None:
@@ -834,6 +854,10 @@ class SettingsDB:
             "gcloud_language": str(tts.get("gcloud_language", "") or ""),
             "gcloud_rate": str(tts.get("gcloud_rate", "") or ""),
             "gcloud_pitch": str(tts.get("gcloud_pitch", "") or ""),
+            "android_voice": str(tts.get("android_voice", "") or ""),
+            "android_language": str(tts.get("android_language", "") or ""),
+            "android_rate": str(tts.get("android_rate", "") or ""),
+            "android_pitch": str(tts.get("android_pitch", "") or ""),
             "speaker_name": str(tts.get("speaker_name", "") or ""),
         }
 
@@ -851,6 +875,10 @@ class SettingsDB:
         gcloud_language: Optional[str] = None,
         gcloud_rate: Optional[str] = None,
         gcloud_pitch: Optional[str] = None,
+        android_voice: Optional[str] = None,
+        android_language: Optional[str] = None,
+        android_rate: Optional[str] = None,
+        android_pitch: Optional[str] = None,
         speaker_name: Optional[str] = None,
     ):
         key = (guild_id, user_id)
@@ -875,6 +903,14 @@ class SettingsDB:
             tts["gcloud_rate"] = gcloud_rate
         if gcloud_pitch is not None:
             tts["gcloud_pitch"] = gcloud_pitch
+        if android_voice is not None:
+            tts["android_voice"] = android_voice
+        if android_language is not None:
+            tts["android_language"] = android_language
+        if android_rate is not None:
+            tts["android_rate"] = android_rate
+        if android_pitch is not None:
+            tts["android_pitch"] = android_pitch
         if speaker_name is not None:
             cleaned_speaker_name = str(speaker_name or "").strip()
             if cleaned_speaker_name:
@@ -947,8 +983,10 @@ class SettingsDB:
         def pick(key: str, fallback: str) -> str:
             return (user.get(key) or "").strip() or (guild.get(key) or "").strip() or fallback
 
-        engine = pick("engine", "gtts").lower()
-        if engine not in ("edge", "gtts", "gcloud"):
+        engine = pick("engine", "gtts").lower().replace("-", "_")
+        if engine in {"atts", "android", "android_tts", "native", "native_android"}:
+            engine = "android_native"
+        if engine not in ("android_native", "edge", "gtts", "gcloud"):
             engine = "gtts"
 
         resolved = {
@@ -961,9 +999,14 @@ class SettingsDB:
             "gcloud_language": pick("gcloud_language", "pt-BR"),
             "gcloud_rate": pick("gcloud_rate", "1.0"),
             "gcloud_pitch": pick("gcloud_pitch", "0.0"),
+            "android_voice": pick("android_voice", ""),
+            "android_language": pick("android_language", "pt-BR"),
+            "android_rate": pick("android_rate", "1.0"),
+            "android_pitch": pick("android_pitch", "1.0"),
             "speaker_name": str(user.get("speaker_name", "") or ""),
             "bot_prefix": str(guild.get("bot_prefix", "_") or "_"),
             "tts_prefix": str(guild.get("tts_prefix", ",") or ","),
+            "atts_prefix": str(guild.get("atts_prefix", getattr(config, "TTS_ATTS_PREFIX", "%")) or getattr(config, "TTS_ATTS_PREFIX", "%")),
             "gtts_prefix": str(guild.get("gtts_prefix", guild.get("tts_prefix", ".")) or "."),
             "edge_prefix": str(guild.get("edge_prefix", ",") or ","),
             "gcloud_prefix": str(guild.get("gcloud_prefix", "'") or "'"),

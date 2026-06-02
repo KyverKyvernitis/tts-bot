@@ -62,6 +62,7 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
     routing = build_prefix_routing_config(
         guild_defaults,
         bot_prefix_default=str(getattr(config, "BOT_PREFIX", "_") or "_"),
+        atts_prefix_default=str(getattr(config, "TTS_ATTS_PREFIX", "%") or "%"),
         gcloud_prefix_default=str(getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'") or "'"),
     )
 
@@ -77,24 +78,6 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
             reason="prefix_command",
         )
 
-    # Prefixo experimental legado (%): agora testa Android TTS nativo por padrão.
-    # Guild 0 libera o prefixo em todos os servidores; use TTS_PIPER_EXPERIMENT_GUILD_ID se quiser restringir.
-    piper_enabled = bool(getattr(config, "TTS_PIPER_EXPERIMENT_ENABLED", False))
-    piper_prefix = str(getattr(config, "TTS_PIPER_EXPERIMENT_PREFIX", "/") or "/")
-    piper_guild_id = int(getattr(config, "TTS_PIPER_EXPERIMENT_GUILD_ID", 0) or 0)
-    if piper_enabled and piper_prefix and message.content.startswith(piper_prefix):
-        guild_ok = piper_guild_id <= 0 or int(getattr(message.guild, "id", 0) or 0) == piper_guild_id
-        spoken = message.content[len(piper_prefix):].strip()
-        if guild_ok and spoken:
-            return MessageGateDecision(
-                should_process_tts=True,
-                should_dispatch_prefix_command=False,
-                guild_defaults=guild_defaults,
-                forced_engine=str(getattr(config, "TTS_PIPER_EXPERIMENT_ENGINE", "android_native") or "android_native").strip().lower().replace("-", "_"),
-                active_prefix=piper_prefix,
-                reason="native_tts_experimental_prefix_matched",
-            )
-
     # Compatibilidade com o prefixo antigo único. Servidores antigos podem ter
     # só `tts_prefix=,`; nesse caso o split novo cria gTTS=`,` e Edge=`,` ao
     # mesmo tempo, e a ordem antiga acabava forçando Edge silenciosamente.
@@ -109,8 +92,8 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
             legacy_prefix
             and legacy_prefix != routing.bot_prefix
             and message.content.startswith(legacy_prefix)
-            and legacy_prefix in {routing.gtts_prefix, routing.edge_prefix, routing.gcloud_prefix}
-            and len({routing.gtts_prefix, routing.edge_prefix, routing.gcloud_prefix}) < 3
+            and legacy_prefix in {routing.atts_prefix, routing.gtts_prefix, routing.edge_prefix, routing.gcloud_prefix}
+            and len({routing.atts_prefix, routing.gtts_prefix, routing.edge_prefix, routing.gcloud_prefix}) < 4
         ):
             return MessageGateDecision(
                 should_process_tts=True,
@@ -121,10 +104,11 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
                 reason="legacy_tts_prefix_matched",
             )
 
-    # Casa um dos três prefixos de fala (gTTS / Edge / gcloud). Se nenhum casar,
+    # Casa um dos prefixos de fala (ATTS / gTTS / Edge / Google). Se nenhum casar,
     # a mensagem é texto comum e o gate ignora.
     forced_engine, active_prefix = match_engine_prefix(
         message.content,
+        atts_prefix=routing.atts_prefix,
         edge_prefix=routing.edge_prefix,
         gtts_prefix=routing.gtts_prefix,
         gcloud_prefix=routing.gcloud_prefix,

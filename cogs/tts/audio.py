@@ -2799,10 +2799,10 @@ class TTSAudioMixin:
             rate = "+0%"
             pitch = "+0Hz"
         elif engine == "android_native":
-            voice = str(resolved.get("voice") or "")
-            language = str(resolved.get("language") or base_item.language or GOOGLE_CLOUD_TTS_LANGUAGE_CODE or "pt-BR")
-            rate = str(resolved.get("rate") or base_item.rate or "1.0")
-            pitch = str(resolved.get("pitch") or base_item.pitch or "1.0")
+            voice = str(resolved.get("android_voice") or "")
+            language = str(resolved.get("android_language") or base_item.language or GOOGLE_CLOUD_TTS_LANGUAGE_CODE or "pt-BR")
+            rate = str(resolved.get("android_rate") or base_item.rate or "1.0")
+            pitch = str(resolved.get("android_pitch") or base_item.pitch or "1.0")
         else:
             engine = "gtts"
             voice = ""
@@ -3091,7 +3091,8 @@ class TTSAudioMixin:
             winner = "só worker funcionou"
         else:
             winner = "ambos falharam"
-        lines = [f"**{engine}** — {winner}"]
+        display_engine = "ATTS" if engine == "android_native" else engine
+        lines = [f"**{display_engine}** — {winner}"]
         lines.append(
             f"VPS: {'ok' if local_ok else 'falhou'} · {self._format_tts_benchmark_ms(local_ms)}"
             + (f" · {int(local.get('size') or 0)} B" if local_ok else f" · {local.get('error') or 'erro sem detalhe'}")
@@ -3111,7 +3112,7 @@ class TTSAudioMixin:
 
     async def _send_tts_turbo_benchmark_report(self, channel: Any, base_item: QueueItem, resolved: dict[str, Any] | None) -> None:
         benchmark_text = TTS_TURBO_BENCHMARK_TRIGGER_TEXT
-        engines = ("android_native", "edge", "gtts", "gcloud", "piper")
+        engines = ("android_native", "edge", "gtts", "gcloud")
         started = time.monotonic()
         results: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
         worker_meta: dict[str, Any] = {}
@@ -3145,16 +3146,6 @@ class TTSAudioMixin:
         piper_miss_ms = None
         piper_hit_real = False
         piper_cache_error = ""
-        for engine, _, worker in results:
-            if engine == "piper" and (worker.get("ok") or worker.get("piper_cache_miss") or worker.get("piper_cache_hit")):
-                hit = worker.get("piper_cache_hit") if isinstance(worker.get("piper_cache_hit"), dict) else None
-                miss = worker.get("piper_cache_miss") if isinstance(worker.get("piper_cache_miss"), dict) else None
-                piper_hit_real = bool(worker.get("piper_cache_hit_real")) or (bool(hit and hit.get("ok")) and bool(hit and hit.get("cache_hit")))
-                piper_hit_ms = hit.get("total_ms") if hit else None
-                piper_miss_ms = miss.get("total_ms") if miss else worker.get("worker_synth_ms")
-                if hit and not piper_hit_real:
-                    piper_cache_error = str(hit.get("error") or "cache_hit não confirmado")
-                break
 
         if good_comparisons <= 0:
             verdict = "não deu para comparar com segurança: nenhuma engine teve os dois lados ok."
@@ -3163,7 +3154,7 @@ class TTSAudioMixin:
         elif worker_wins == 1:
             verdict = "worker turbo ganhou só em uma engine; ainda não dá para usar em TTS real."
         else:
-            verdict = "VPS foi igual ou melhor em edge/gtts; worker deve continuar opcional."
+            verdict = "VPS foi igual ou melhor em Edge/gTTS; ATTS deve ser usado quando o worker/APK estiver pronto."
         if piper_miss_ms is not None:
             if piper_hit_real and piper_hit_ms is not None:
                 verdict += f" Piper: miss {self._format_tts_benchmark_ms(piper_miss_ms)}; cache hit real {self._format_tts_benchmark_ms(piper_hit_ms)} — recomendado quando cacheado."

@@ -225,6 +225,6 @@ def build_gtts_language_aliases(languages: dict[str, str]) -> dict[str, str]:
 
 def validate_mode(mode: str) -> str:
     value = str(mode or "").strip().lower()
-    if value in {"edge", "gtts", "gcloud"}:
-        return value
+    if value in {"android_native", "atts", "android", "android_tts", "native", "edge", "gtts", "gcloud"}:
+        return "android_native" if value in {"atts", "android", "android_tts", "native"} else value
     return "gtts"

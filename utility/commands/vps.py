@@ -500,10 +500,10 @@ class VpsCommandMixin:
             return "Google"
         if key in {"gtts", "google_translate", "google_translate_tts"}:
             return "gTTS"
-        if key in {"android_native", "android", "android_tts", "native_android"}:
-            return "Android nativo"
+        if key in {"android_native", "android", "android_tts", "native_android", "atts"}:
+            return "ATTS"
         if key in {"piper", "piper_tts"}:
-            return "Piper"
+            return "Piper legado"
         if key.startswith("tts_agent:"):
             requested = key.split(":", 1)[1] or "auto"
             return f"TTS Agent → {VpsCommandMixin._vps_engine_label(requested)}"
@@ -512,7 +512,7 @@ class VpsCommandMixin:
     @staticmethod
     def _vps_engine_key(engine: object) -> str:
         label = VpsCommandMixin._vps_engine_label(engine)
-        return {"Android nativo": "android_native", "Edge": "edge", "Google": "google", "gTTS": "gtts", "Piper": "piper"}.get(label, label.casefold())
+        return {"ATTS": "android_native", "Android nativo": "android_native", "Edge": "edge", "Google": "google", "gTTS": "gtts", "Piper legado": "piper"}.get(label, label.casefold())
 
     def _vps_format_ms(self, value: Any) -> str:
         formatter = getattr(self, "_format_ms", None)
@@ -639,7 +639,7 @@ class VpsCommandMixin:
                 elif avg_ms > 0:
                     target["avg_synth_ms"] = max(float(target.get("avg_synth_ms", 0.0) or 0.0), avg_ms)
 
-            engine_order = {"android_native": 0, "edge": 1, "google": 2, "gtts": 3, "piper": 4, "auto": 5}
+            engine_order = {"android_native": 0, "edge": 1, "google": 2, "gtts": 3, "piper": 9, "auto": 5}
             lines: list[str] = []
             total = 0
             for key, data in sorted(combined.items(), key=lambda item: (engine_order.get(item[0], 99), item[0])):

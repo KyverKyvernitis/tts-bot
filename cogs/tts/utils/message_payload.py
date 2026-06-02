@@ -68,17 +68,13 @@ async def build_message_tts_payload(
         resolved["rate"] = resolved.get("gcloud_rate") or str(getattr(config, "GOOGLE_CLOUD_TTS_SPEAKING_RATE", 1.0) or 1.0)
         resolved["pitch"] = resolved.get("gcloud_pitch") or str(getattr(config, "GOOGLE_CLOUD_TTS_PITCH", 0.0) or 0.0)
     elif forced_engine == "android_native":
-        # Android TTS nativo roda pelo APK/phone-worker. Guardamos a engine
+        # ATTS usa o Android TTS nativo do APK/phone-worker. Guardamos a engine
         # efetiva antiga para fallback local se o celular estiver offline/lento.
         resolved["engine"] = "android_native"
-        resolved["language"] = resolved.get("language") or str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR")
-        resolved["voice"] = resolved.get("voice") or ""
-        resolved["rate"] = resolved.get("rate") or "1.0"
-        resolved["pitch"] = resolved.get("pitch") or "1.0"
-    elif forced_engine == "piper":
-        # Piper fica como fallback legado explícito.
-        resolved["engine"] = "piper"
-        resolved["piper_model"] = str(getattr(config, "TTS_PIPER_MODEL_NAME", "turbo-default") or "turbo-default")
+        resolved["language"] = resolved.get("android_language") or str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR")
+        resolved["voice"] = resolved.get("android_voice") or ""
+        resolved["rate"] = resolved.get("android_rate") or "1.0"
+        resolved["pitch"] = resolved.get("android_pitch") or "1.0"
 
     # Texto final: tira o prefixo de fala, limpa marcadores e prepende o
     # nome falado do autor quando o servidor tem essa opção ligada.
