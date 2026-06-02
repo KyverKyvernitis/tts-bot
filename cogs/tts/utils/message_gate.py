@@ -77,7 +77,7 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
             reason="prefix_command",
         )
 
-    # Piper experimental: prefixo experimental % por enquanto, sem painel.
+    # Prefixo experimental legado (%): agora testa Android TTS nativo por padrão.
     # Guild 0 libera o prefixo em todos os servidores; use TTS_PIPER_EXPERIMENT_GUILD_ID se quiser restringir.
     piper_enabled = bool(getattr(config, "TTS_PIPER_EXPERIMENT_ENABLED", False))
     piper_prefix = str(getattr(config, "TTS_PIPER_EXPERIMENT_PREFIX", "/") or "/")
@@ -90,9 +90,9 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
                 should_process_tts=True,
                 should_dispatch_prefix_command=False,
                 guild_defaults=guild_defaults,
-                forced_engine="piper",
+                forced_engine=str(getattr(config, "TTS_PIPER_EXPERIMENT_ENGINE", "android_native") or "android_native").strip().lower().replace("-", "_"),
                 active_prefix=piper_prefix,
-                reason="piper_experimental_prefix_matched",
+                reason="native_tts_experimental_prefix_matched",
             )
 
     # Compatibilidade com o prefixo antigo único. Servidores antigos podem ter

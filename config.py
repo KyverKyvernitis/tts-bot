@@ -473,6 +473,9 @@ TTS_TURBO_BENCHMARK_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_TURBO_BENCHM
 TTS_PIPER_EXPERIMENT_ENABLED = _parse_bool(os.getenv("TTS_PIPER_EXPERIMENT_ENABLED", "true"), True)
 TTS_PIPER_EXPERIMENT_GUILD_ID = _parse_int(os.getenv("TTS_PIPER_EXPERIMENT_GUILD_ID", "0"), 0)
 TTS_PIPER_EXPERIMENT_PREFIX = (os.getenv("TTS_PIPER_EXPERIMENT_PREFIX", "%") or "%").strip() or "%"
+# Mantém o prefixo experimental antigo, mas por padrão ele já testa a substituição do Piper
+# pelo Android TTS nativo do APK quando o worker estiver online. Use "piper" só para legado.
+TTS_PIPER_EXPERIMENT_ENGINE = (os.getenv("TTS_PIPER_EXPERIMENT_ENGINE", "android_native") or "android_native").strip().lower().replace("-", "_") or "android_native"
 TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("TTS_PIPER_WORKER_TIMEOUT_SECONDS", "6.0"), 6.0))
 TTS_PIPER_MAX_TEXT_LENGTH = max(16, _parse_int(os.getenv("TTS_PIPER_MAX_TEXT_LENGTH", "600"), 600))
 TTS_PIPER_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_PIPER_MAX_AUDIO_MB", "8"), 8))

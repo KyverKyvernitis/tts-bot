@@ -44,6 +44,7 @@ START_TIME = time.time()
 JOBS_STARTED = 0
 JOBS_FAILED = 0
 _PING_CACHE: dict[str, Any] = {}
+_ANDROID_TTS_STATUS_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
 _CORE_WORKER_NETWORK_STATE: dict[str, Any] = {"last_ok_at": 0.0, "last_error_at": 0.0, "last_error": "", "last_error_kind": ""}
 _CORE_JOB_LOCK = threading.RLock()
 _CORE_JOB_ACTIVE: dict[str, Any] = {}
@@ -61,7 +62,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.23"
+PHONE_WORKER_VERSION = "1.10.24"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -292,7 +293,7 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "turbo": {
         "label": "Turbo",
         "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "voice-agent", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "tts-android-native", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -1841,6 +1842,79 @@ def _gcloud_tts_status() -> dict[str, Any]:
     return status
 
 
+
+
+def _android_tts_enabled() -> bool:
+    return _env_bool("PHONE_WORKER_ANDROID_TTS_ENABLED", True)
+
+
+def _android_tts_base_url() -> str:
+    value = str(os.getenv("PHONE_WORKER_ANDROID_TTS_URL") or "http://127.0.0.1:8877").strip()
+    return value.rstrip("/") or "http://127.0.0.1:8877"
+
+
+def _android_tts_timeout_seconds(default: float = 0.45) -> float:
+    return max(0.08, min(5.0, _env_float("PHONE_WORKER_ANDROID_TTS_STATUS_TIMEOUT_SECONDS", default)))
+
+
+def _android_tts_json_request(path: str, *, payload: dict[str, Any] | None = None, timeout: float = 1.5) -> dict[str, Any]:
+    url = _android_tts_base_url() + path
+    data: bytes | None = None
+    method = "GET"
+    headers = {"Accept": "application/json", "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}"}
+    if payload is not None:
+        method = "POST"
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json; charset=utf-8"
+    request = urllib.request.Request(url, data=data, method=method, headers=headers)
+    with urllib.request.urlopen(request, timeout=max(0.1, float(timeout))) as response:
+        raw = response.read(16 * 1024 * 1024)
+    parsed = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Android TTS retornou JSON inválido")
+    return parsed
+
+
+def _android_tts_status(*, use_cache: bool = True) -> dict[str, Any]:
+    if not _android_tts_enabled():
+        return {"ok": False, "available": False, "ready": False, "enabled": False, "engine": "android_native", "last_error": "PHONE_WORKER_ANDROID_TTS_ENABLED=false"}
+    now = time.monotonic()
+    max_age = max(0.2, min(60.0, _env_float("PHONE_WORKER_ANDROID_TTS_STATUS_CACHE_SECONDS", 5.0)))
+    cached = _ANDROID_TTS_STATUS_CACHE.get("data") if isinstance(_ANDROID_TTS_STATUS_CACHE, dict) else {}
+    if use_cache and isinstance(cached, dict) and cached and now - float(_ANDROID_TTS_STATUS_CACHE.get("at") or 0.0) <= max_age:
+        return dict(cached)
+    try:
+        timeout = _android_tts_timeout_seconds()
+        data = _android_tts_json_request("/native-tts/status", timeout=timeout)
+        ready = bool(data.get("ok") or data.get("ready") or data.get("available"))
+        result = dict(data)
+        result.update({
+            "ok": ready,
+            "available": ready,
+            "ready": ready,
+            "enabled": True,
+            "engine": "android_native",
+            "url": _android_tts_base_url(),
+        })
+    except Exception as exc:
+        result = {
+            "ok": False,
+            "available": False,
+            "ready": False,
+            "enabled": True,
+            "engine": "android_native",
+            "url": _android_tts_base_url(),
+            "last_error": f"{type(exc).__name__}: {_short_text(exc, limit=120)}",
+        }
+    _ANDROID_TTS_STATUS_CACHE["at"] = now
+    _ANDROID_TTS_STATUS_CACHE["data"] = dict(result)
+    return result
+
+
+def _android_tts_ready() -> bool:
+    status = _android_tts_status(use_cache=True)
+    return bool(status.get("ok") or status.get("ready") or status.get("available"))
+
 def _safe_name(name: Any, fallback: str = "file.bin") -> str:
     text = str(name or fallback).replace("\\", "/").strip().lstrip("/")
     parts = []
@@ -1870,6 +1944,7 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
         "gcloud_tts": False,
         "gcloud_credentials": False,
         "gcloud_encoding": _gcloud_audio_encoding_name(),
+        "android_native_tts": False,
     }
     model = str(os.getenv("PHONE_WORKER_PIPER_MODEL", "") or "").strip()
     config = str(os.getenv("PHONE_WORKER_PIPER_CONFIG", "") or "").strip()
@@ -1889,6 +1964,12 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
         deps["gtts"] = True
     except Exception as exc:
         deps["gtts_error"] = _short_text(exc, limit=80)
+    android_status = _android_tts_status(use_cache=True)
+    deps["android_native_tts"] = bool(android_status.get("ok") or android_status.get("ready") or android_status.get("available"))
+    deps["android_native_enabled"] = bool(android_status.get("enabled", True))
+    deps["android_native_url"] = str(android_status.get("url") or _android_tts_base_url())
+    if android_status.get("last_error"):
+        deps["android_native_error"] = _short_text(android_status.get("last_error"), limit=100)
     gcloud_status = _gcloud_tts_status()
     deps["gcloud_tts"] = bool(gcloud_status.get("ready"))
     deps["gcloud_library"] = bool(gcloud_status.get("library"))
@@ -1897,7 +1978,7 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
     deps["gcloud_encoding"] = str(gcloud_status.get("encoding") or "OGG_OPUS")
     if gcloud_status.get("last_error"):
         deps["gcloud_error"] = _short_text(gcloud_status.get("last_error"), limit=100)
-    missing = [key for key in ("ffmpeg", "ffprobe", "edge_tts", "gtts", "piper_cli", "piper_model", "piper_config") if not deps.get(key)]
+    missing = [key for key in ("ffmpeg", "ffprobe", "edge_tts", "gtts") if not deps.get(key)]
     deps["ok"] = not missing
     deps["missing"] = missing
     return deps
@@ -1907,6 +1988,8 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
 def _tts_agent_available_engines(deps: dict[str, Any] | None = None) -> list[str]:
     deps = deps if isinstance(deps, dict) else _turbo_dependency_snapshot()
     engines: list[str] = []
+    if deps.get("android_native_tts"):
+        engines.append("android_native")
     if deps.get("gcloud_tts"):
         engines.append("gcloud")
     if deps.get("piper_cli") and deps.get("piper_model") and deps.get("piper_config"):
@@ -1920,11 +2003,11 @@ def _tts_agent_available_engines(deps: dict[str, Any] | None = None) -> list[str
 
 def _tts_agent_preferred_engine(available: list[str]) -> str:
     requested = str(os.getenv("PHONE_WORKER_TTS_AGENT_ENGINE") or "auto").strip().lower().replace("-", "_") or "auto"
-    aliases = {"google": "gcloud", "google_cloud": "gcloud", "googlecloud": "gcloud", "edge_tts": "edge"}
+    aliases = {"google": "gcloud", "google_cloud": "gcloud", "googlecloud": "gcloud", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native"}
     requested = aliases.get(requested, requested)
     if requested != "auto" and requested in available:
         return requested
-    for candidate in ("gcloud", "piper", "edge", "gtts"):
+    for candidate in ("android_native", "gcloud", "edge", "gtts", "piper"):
         if candidate in available:
             return candidate
     return ""
@@ -4582,7 +4665,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         requested = str(body.get("engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
         preferred = str(body.get("preferred_engine") or os.getenv("PHONE_WORKER_TTS_AGENT_ENGINE") or "auto").strip().lower().replace("-", "_") or "auto"
         fallback = str(body.get("fallback_engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
-        aliases = {"google": "gcloud", "google_cloud": "gcloud", "googlecloud": "gcloud", "edge_tts": "edge"}
+        aliases = {"google": "gcloud", "google_cloud": "gcloud", "googlecloud": "gcloud", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native"}
         requested = aliases.get(requested, requested)
         preferred = aliases.get(preferred, preferred)
         fallback = aliases.get(fallback, fallback)
@@ -4592,11 +4675,11 @@ class WorkerHandler(BaseHTTPRequestHandler):
         order.append(requested)
         if fallback != requested:
             order.append(fallback)
-        for candidate in ("gcloud", "piper", "edge", "gtts"):
+        for candidate in ("android_native", "gcloud", "edge", "gtts", "piper"):
             order.append(candidate)
         deduped: list[str] = []
         for engine in order:
-            if engine not in {"piper", "edge", "gtts", "gcloud"}:
+            if engine not in {"android_native", "piper", "edge", "gtts", "gcloud"}:
                 continue
             if engine not in available:
                 continue
@@ -4616,7 +4699,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
     def _tts_agent_standard_cache_key(self, body: dict[str, Any], *, engine: str) -> str:
         normalized_engine = str(engine or body.get("engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
-        aliases = {"google": "gcloud", "google_tts": "gcloud", "googlecloud": "gcloud", "google_cloud": "gcloud", "edge_tts": "edge"}
+        aliases = {"google": "gcloud", "google_tts": "gcloud", "googlecloud": "gcloud", "google_cloud": "gcloud", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native"}
         normalized_engine = aliases.get(normalized_engine, normalized_engine)
         requested_engine = str(body.get("engine") or normalized_engine).strip().lower().replace("-", "_") or normalized_engine
         requested_engine = aliases.get(requested_engine, requested_engine)
@@ -4626,7 +4709,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 return self._sanitize_tts_cache_key(provided)
         text = " ".join(str(body.get("text") or "").strip().split()).lower()
         text = text.replace("!!", "!").replace("??", "?").replace("..", ".")
-        if normalized_engine == "edge":
+        if normalized_engine == "android_native":
+            language = self._normalize_tts_gcloud_language(body.get("language") or body.get("fallback_language") or "pt-BR")
+            voice = str(body.get("voice") or "auto").strip() or "auto"
+            rate = str(body.get("rate") or "1.0").strip() or "1.0"
+            pitch = str(body.get("pitch") or "1.0").strip() or "1.0"
+            payload = f"android_native|{language}|{voice}|{rate}|{pitch}|{text}"
+        elif normalized_engine == "edge":
             voice = str(body.get("voice") or body.get("fallback_voice") or "pt-BR-FranciscaNeural").strip() or "pt-BR-FranciscaNeural"
             rate = self._normalize_tts_edge_rate(body.get("rate"))
             pitch = self._normalize_tts_edge_pitch(body.get("pitch"))
@@ -4730,7 +4819,31 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     return hit
         audio_format = "mp3"
         data = b""
-        if engine == "edge":
+        if engine == "android_native":
+            synth_timeout_ms = max(1000, min(timeout * 1000, int(float(body.get("android_timeout_ms") or os.getenv("PHONE_WORKER_ANDROID_TTS_SYNTH_TIMEOUT_MS") or timeout * 1000))))
+            android_payload = {
+                "text": text,
+                "language": str(body.get("language") or body.get("fallback_language") or "pt-BR"),
+                "locale": str(body.get("locale") or body.get("language") or body.get("fallback_language") or "pt-BR"),
+                "voice": str(body.get("voice") or ""),
+                "rate": str(body.get("rate") or "1.0"),
+                "pitch": str(body.get("pitch") or "1.0"),
+                "timeout_ms": synth_timeout_ms,
+                "max_audio_bytes": max_audio_bytes,
+            }
+            android_started = time.monotonic()
+            response = _android_tts_json_request(
+                "/native-tts/synthesize",
+                payload=android_payload,
+                timeout=max(1.0, min(timeout + 1.0, (synth_timeout_ms / 1000.0) + 1.0)),
+            )
+            if response.get("ok") is False:
+                raise RuntimeError(str(response.get("error") or "Android TTS retornou ok=false"))
+            data = _b64decode(str(response.get("data_b64") or ""), max_bytes=max_audio_bytes)
+            audio_format = self._normalize_tts_cache_format(response.get("audio_format") or "wav")
+            android_ms = (time.monotonic() - android_started) * 1000.0
+            logs.append(f"android-native locale={android_payload['locale']} format={audio_format} apk_ms={response.get('android_synth_ms') or response.get('worker_synth_ms') or 0} roundtrip={android_ms:.1f}ms")
+        elif engine == "edge":
             try:
                 import edge_tts  # type: ignore
             except Exception as exc:
@@ -5248,7 +5361,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
     def _task_tts_synthesize_benchmark(self, body: dict[str, Any]) -> dict[str, Any]:
         roles, capabilities = self._ensure_tts_benchmark_turbo_allowed()
         engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_")
-        if engine not in {"edge", "gtts", "gcloud", "piper"}:
+        if engine not in {"android_native", "edge", "gtts", "gcloud", "piper"}:
             raise ValueError("engine inválida para benchmark TTS")
         text = str(body.get("text") or "").strip()
         if not text:
@@ -5267,6 +5380,20 @@ class WorkerHandler(BaseHTTPRequestHandler):
             audio_format = "mp3"
             out_path = tmp_dir / "speech.mp3"
             try:
+                if engine == "android_native":
+                    result = self._synthesize_standard_tts_bytes(
+                        body,
+                        engine="android_native",
+                        roles=roles,
+                        capabilities=capabilities,
+                        logs=list(logs),
+                        started=started,
+                        max_audio_bytes=max_audio_bytes,
+                        timeout=timeout,
+                    )
+                    result["engine"] = "android_native"
+                    result["logs"] = (logs + list(result.get("logs") or []))[:10]
+                    return result
                 if engine == "edge":
                     try:
                         import edge_tts  # type: ignore

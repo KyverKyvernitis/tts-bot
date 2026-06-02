@@ -77,6 +77,7 @@ TTS_TURBO_BENCHMARK_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_TURBO_BENCHMA
 TTS_PIPER_EXPERIMENT_ENABLED = bool(getattr(config, "TTS_PIPER_EXPERIMENT_ENABLED", True))
 TTS_PIPER_EXPERIMENT_GUILD_ID = int(getattr(config, "TTS_PIPER_EXPERIMENT_GUILD_ID", 0) or 0)
 TTS_PIPER_EXPERIMENT_PREFIX = str(getattr(config, "TTS_PIPER_EXPERIMENT_PREFIX", "%") or "%").strip() or "%"
+TTS_PIPER_EXPERIMENT_ENGINE = str(getattr(config, "TTS_PIPER_EXPERIMENT_ENGINE", "android_native") or "android_native").strip().lower().replace("-", "_") or "android_native"
 TTS_PIPER_WORKER_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_PIPER_WORKER_TIMEOUT_SECONDS", 6.0) or 6.0))
 TTS_PIPER_MAX_TEXT_LENGTH = max(16, int(getattr(config, "TTS_PIPER_MAX_TEXT_LENGTH", 600) or 600))
 TTS_PIPER_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_PIPER_MAX_AUDIO_MB", 8) or 8))
@@ -1470,13 +1471,17 @@ class TTSAudioMixin:
         elif engine == "piper":
             model = str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME).strip() or TTS_PIPER_MODEL_NAME
             payload = f"piper|worker|{model}|{text}"
+        elif engine == "android_native":
+            language = (item.language or GOOGLE_CLOUD_TTS_LANGUAGE_CODE or "pt-BR").strip().lower().replace('_', '-')
+            voice = str(item.voice or "auto").strip() or "auto"
+            payload = f"android_native|worker|{language}|{voice}|{item.rate or '1.0'}|{item.pitch or '1.0'}|{text}"
         else:
             language = (item.language or GTTS_DEFAULT_LANGUAGE).strip().lower().replace('_', '-')
             if language == 'pt-br':
                 language = 'pt'
             payload = f"gtts|{language}|{text}"
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        cached_key = f"piper_{digest}" if engine == "piper" else digest
+        cached_key = f"piper_{digest}" if engine == "piper" else f"android_{digest}" if engine == "android_native" else digest
         item._cache_key_value = cached_key
         return cached_key
 
@@ -1498,7 +1503,7 @@ class TTSAudioMixin:
         if engine == "gcloud":
             candidates.append(self._google_cloud_audio_suffix(self._normalize_gcloud_audio_encoding(GOOGLE_CLOUD_TTS_AUDIO_ENCODING)))
             candidates.append(self._google_cloud_audio_suffix(self._normalize_gcloud_audio_encoding(GOOGLE_CLOUD_TTS_FALLBACK_AUDIO_ENCODING)))
-        elif engine == "piper":
+        elif engine in {"piper", "android_native"}:
             candidates.extend([".wav", ".mp3", ".ogg"])
         else:
             candidates.append(".mp3")
@@ -2793,6 +2798,11 @@ class TTSAudioMixin:
             language = str(resolved.get("language") or base_item.language or GTTS_DEFAULT_LANGUAGE)
             rate = "+0%"
             pitch = "+0Hz"
+        elif engine == "android_native":
+            voice = str(resolved.get("voice") or "")
+            language = str(resolved.get("language") or base_item.language or GOOGLE_CLOUD_TTS_LANGUAGE_CODE or "pt-BR")
+            rate = str(resolved.get("rate") or base_item.rate or "1.0")
+            pitch = str(resolved.get("pitch") or base_item.pitch or "1.0")
         else:
             engine = "gtts"
             voice = ""
@@ -2819,6 +2829,8 @@ class TTSAudioMixin:
         try:
             if engine == "piper":
                 raise RuntimeError("Piper experimental roda apenas no phone-worker turbo")
+            if engine == "android_native":
+                raise RuntimeError("Android TTS nativo roda apenas no APK/phone-worker")
             if engine == "edge":
                 path = await self._generate_edge_file(item.text, item.voice, item.rate, item.pitch)
             elif engine == "gcloud":
@@ -3099,7 +3111,7 @@ class TTSAudioMixin:
 
     async def _send_tts_turbo_benchmark_report(self, channel: Any, base_item: QueueItem, resolved: dict[str, Any] | None) -> None:
         benchmark_text = TTS_TURBO_BENCHMARK_TRIGGER_TEXT
-        engines = ("edge", "gtts", "gcloud", "piper")
+        engines = ("android_native", "edge", "gtts", "gcloud", "piper")
         started = time.monotonic()
         results: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
         worker_meta: dict[str, Any] = {}
@@ -3362,6 +3374,10 @@ class TTSAudioMixin:
                 )
             except Exception as e:
                 logger.warning("[tts_agent] TTS no worker falhou; usando fallback local/VPS | guild=%s engine=%s erro=%s", item.guild_id, item.engine, e)
+
+        if item.engine == "android_native" and not agent_available:
+            logger.warning("[tts_android_native] Android TTS nativo indisponível; usando fallback local | guild=%s", item.guild_id)
+            return await self._generate_piper_fallback_file(item)
 
         if item.engine == "piper":
             try:

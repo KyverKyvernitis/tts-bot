@@ -38,6 +38,8 @@ public class CoreWorkerRuntimeService extends Service {
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean running = false;
+    private NativeTtsManager nativeTtsManager;
+    private LocalNativeTtsHttpServer nativeTtsServer;
 
     private final Runnable tickRunnable = new Runnable() {
         @Override
@@ -55,6 +57,7 @@ public class CoreWorkerRuntimeService extends Service {
     public void onCreate() {
         super.onCreate();
         createChannel();
+        startNativeTtsBridge();
     }
 
     @Override
@@ -90,6 +93,7 @@ public class CoreWorkerRuntimeService extends Service {
     public void onDestroy() {
         running = false;
         handler.removeCallbacks(tickRunnable);
+        stopNativeTtsBridge();
         prefs().edit()
                 .putBoolean("foreground_runtime_active", false)
                 .putString("foreground_runtime_state", "serviço persistente encerrado")
@@ -101,6 +105,54 @@ public class CoreWorkerRuntimeService extends Service {
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+
+    private void startNativeTtsBridge() {
+        try {
+            if (nativeTtsManager == null) {
+                nativeTtsManager = new NativeTtsManager(getApplicationContext(), prefs());
+                nativeTtsManager.warmUp();
+            }
+            if (nativeTtsServer == null) {
+                nativeTtsServer = new LocalNativeTtsHttpServer(nativeTtsManager);
+                nativeTtsServer.start();
+            }
+            prefs().edit()
+                    .putBoolean("native_tts_bridge_active", true)
+                    .putLong("native_tts_bridge_started_at", System.currentTimeMillis())
+                    .apply();
+        } catch (Throwable exc) {
+            prefs().edit()
+                    .putBoolean("native_tts_bridge_active", false)
+                    .putString("native_tts_bridge_error", String.valueOf(exc.getMessage()))
+                    .putLong("native_tts_bridge_started_at", System.currentTimeMillis())
+                    .apply();
+        }
+    }
+
+    private void stopNativeTtsBridge() {
+        try {
+            if (nativeTtsServer != null) {
+                nativeTtsServer.stop();
+                nativeTtsServer = null;
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (nativeTtsManager != null) {
+                nativeTtsManager.shutdown();
+                nativeTtsManager = null;
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            prefs().edit()
+                    .putBoolean("native_tts_bridge_active", false)
+                    .putLong("native_tts_bridge_stopped_at", System.currentTimeMillis())
+                    .apply();
+        } catch (Throwable ignored) {
+        }
     }
 
     private void markTick(String state) {
@@ -175,6 +227,10 @@ public class CoreWorkerRuntimeService extends Service {
                 status.put("notification_permission", hasNotificationPermission() ? "granted" : "missing");
                 status.put("termux_required_now", false);
                 status.put("bedrock_server_mode", "future-foreground-service");
+                status.put("native_tts_bridge_active", nativeTtsServer != null);
+                if (nativeTtsManager != null) {
+                    status.put("android_tts", nativeTtsManager.statusJson());
+                }
                 payload.put("status", status);
                 request("POST", serverUrl + "/core-worker/app/heartbeat", payload);
             } catch (Throwable ignored) {
