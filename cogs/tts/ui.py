@@ -2261,6 +2261,41 @@ def _normalize_atts_factor(value: object, default: str = "1.0") -> str | None:
     return text if text else "1"
 
 
+def _normalize_atts_custom_factor(value: object) -> str | None:
+    raw = str(value or "").strip().lower().replace("x", "").replace(",", ".")
+    if not raw:
+        return None
+    try:
+        number = float(raw)
+    except Exception:
+        return None
+    if number < 0.5 or number > 2.0:
+        return None
+    text = f"{number:.2f}".rstrip("0").rstrip(".")
+    return text if text else "1"
+
+
+def _atts_modal_radio_default(current: str, presets: set[str]) -> str:
+    normalized = _normalize_atts_factor(current, "1.0") or "1"
+    return normalized if normalized in presets else "custom"
+
+
+def _parse_atts_custom_values(value: object, *, default_rate: str = "1.0", default_pitch: str = "1.0") -> tuple[str, str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return str(default_rate or "1.0"), str(default_pitch or "1.0")
+    if "/" in raw:
+        parts = raw.split("/", 1)
+    elif ";" in raw:
+        parts = raw.split(";", 1)
+    else:
+        parts = raw.split(None, 1)
+    if len(parts) == 1:
+        first = parts[0].strip()
+        return first, first
+    return parts[0].strip(), parts[1].strip()
+
+
 class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
     def __init__(
         self,
@@ -2335,17 +2370,20 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
                 description="",
                 component=voice_select,
             )
+            rate_presets = {"0.75", "1.0", "1.25", "1.5"}
+            pitch_presets = {"0.8", "1.0", "1.2", "1.4"}
             ok = ok and _add_modal_radio(
                 self,
                 "rate",
                 text="Velocidade ATTS",
                 description="",
-                current=self.current_rate,
+                current=_atts_modal_radio_default(self.current_rate, rate_presets),
                 options=[
                     ("Mais lenta", "0.75", ""),
                     ("Normal", "1.0", ""),
                     ("Mais rápida", "1.25", ""),
                     ("Bem mais rápida", "1.5", ""),
+                    ("Custom", "custom", "Usa o valor custom abaixo"),
                 ],
             )
             ok = ok and _add_modal_radio(
@@ -2353,13 +2391,28 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
                 "pitch",
                 text="Tom ATTS",
                 description="",
-                current=self.current_pitch,
+                current=_atts_modal_radio_default(self.current_pitch, pitch_presets),
                 options=[
                     ("Mais grave", "0.8", ""),
                     ("Normal", "1.0", ""),
                     ("Mais agudo", "1.2", ""),
                     ("Bem mais agudo", "1.4", ""),
+                    ("Custom", "custom", "Usa o valor custom abaixo"),
                 ],
+            )
+            custom_values = _make_modal_text_input(
+                label="Valores custom",
+                placeholder="Velocidade / tom — ex.: 1.0 / 1.0",
+                current=f"{self.current_rate or '1.0'} / {self.current_pitch or '1.0'}",
+                max_length=32,
+                required=False,
+            )
+            ok = ok and _add_modal_label_item(
+                self,
+                "custom_values",
+                text="Valores custom",
+                description="Use quando escolher Custom em velocidade ou tom.",
+                component=custom_values,
             )
             return bool(ok)
         except Exception as e:
@@ -2444,20 +2497,40 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
             details.append(f"• Voz: `{voice_label}`")
             history_bits.append(f"voz {voice_label}")
 
-        rate = _normalize_atts_factor(_single_component_value(getattr(self, "rate", None), self.current_rate), "1.0")
-        if rate is None:
-            await interaction.response.send_message(embed=self.cog._make_embed("Velocidade inválida", "Use uma opção de velocidade do ATTS.", ok=False), ephemeral=True)
-            return
+        rate_choice = _single_component_value(getattr(self, "rate", None), self.current_rate)
+        pitch_choice = _single_component_value(getattr(self, "pitch", None), self.current_pitch)
+        custom_rate_raw, custom_pitch_raw = _parse_atts_custom_values(
+            _single_component_value(getattr(self, "custom_values", None), f"{self.current_rate or '1.0'} / {self.current_pitch or '1.0'}"),
+            default_rate=self.current_rate or "1.0",
+            default_pitch=self.current_pitch or "1.0",
+        )
+
+        if str(rate_choice or "").strip().casefold() == "custom":
+            rate = _normalize_atts_custom_factor(custom_rate_raw)
+            if rate is None:
+                await interaction.response.send_message(embed=self.cog._make_embed("Velocidade inválida", "Use um número entre 0.5 e 2.0.", ok=False), ephemeral=True)
+                return
+        else:
+            rate = _normalize_atts_factor(rate_choice, "1.0")
+            if rate is None:
+                await interaction.response.send_message(embed=self.cog._make_embed("Velocidade inválida", "Use uma opção de velocidade do ATTS.", ok=False), ephemeral=True)
+                return
         current_rate = _normalize_atts_factor(self.current_rate, "1.0") or "1"
         if rate != current_rate:
             updates["android_rate"] = rate
             details.append(f"• Velocidade: `{rate}x`")
             history_bits.append(f"velocidade {rate}x")
 
-        pitch = _normalize_atts_factor(_single_component_value(getattr(self, "pitch", None), self.current_pitch), "1.0")
-        if pitch is None:
-            await interaction.response.send_message(embed=self.cog._make_embed("Tom inválido", "Use uma opção de tom do ATTS.", ok=False), ephemeral=True)
-            return
+        if str(pitch_choice or "").strip().casefold() == "custom":
+            pitch = _normalize_atts_custom_factor(custom_pitch_raw)
+            if pitch is None:
+                await interaction.response.send_message(embed=self.cog._make_embed("Tom inválido", "Use um número entre 0.5 e 2.0.", ok=False), ephemeral=True)
+                return
+        else:
+            pitch = _normalize_atts_factor(pitch_choice, "1.0")
+            if pitch is None:
+                await interaction.response.send_message(embed=self.cog._make_embed("Tom inválido", "Use uma opção de tom do ATTS.", ok=False), ephemeral=True)
+                return
         current_pitch = _normalize_atts_factor(self.current_pitch, "1.0") or "1"
         if pitch != current_pitch:
             updates["android_pitch"] = pitch
