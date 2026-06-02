@@ -1975,11 +1975,15 @@ class BotLocal(commands.Bot):
         total_zips = len(zip_attachments)
         for index, zip_attachment in enumerate(zip_attachments, start=1):
             prefix = f"ZIP {index}/{total_zips} · " if total_zips > 1 else ""
+            zip_hint = f"\n-# {prefix.rstrip(' · ')}" if prefix else ""
             status_message: discord.Message | None = await self._send_zip_update_message(
                 message,
-                "📦 ZIP recebido",
-                f"{prefix}Aguardando preparação para entrar no queue.",
-                discord.Color.orange(),
+                "<a:areia:1496606578395189473> Aplicando update...",
+                (
+                    "<a:loading:1510065277868445796> **Aguardando preparação**\n"
+                    "O update vai entrar no queue." + zip_hint
+                ),
+                discord.Color.blurple(),
             )
 
             async with self._zip_update_lock:
@@ -1992,10 +1996,10 @@ class BotLocal(commands.Bot):
                     await self._edit_zip_update_message(
                         message,
                         status_message,
-                        "<a:areia:1496606578395189473> Preparando update...",
+                        "<a:areia:1496606578395189473> Aplicando update...",
                         (
-                            f"{prefix}<a:loading:1510065277868445796> **Preparando candidato**\n"
-                            "Lendo anexo e colocando no queue de updates."
+                            "<a:loading:1510065277868445796> **Preparando update**\n"
+                            "Lendo anexo e preparando candidato." + zip_hint
                         ),
                         discord.Color.blurple(),
                     )
@@ -2047,31 +2051,32 @@ class BotLocal(commands.Bot):
 
                     queue_position = int(result.get("queue_position") or 0)
                     candidate_id = str(result.get("candidate_id") or "").strip()
-                    trigger_detail = str(result.get("trigger_detail") or "").strip()
                     if queue_position <= 1:
-                        queue_line = "Entrou no queue e será aplicado agora."
+                        stage_label = "Aguardando updater"
+                        queue_detail = "Update preparado e colocado no queue."
                     else:
                         before = queue_position - 1
-                        queue_line = f"Entrou no queue na posição {queue_position}. Há {before} update(s) antes dele."
-                    if not triggered_update and trigger_detail:
-                        queue_line += f"\n-# {trigger_detail}"
+                        stage_label = "Aguardando no queue"
+                        queue_detail = f"Posição {queue_position} · {before} update(s) antes deste."
+                    if not triggered_update:
+                        queue_detail += "\nO timer do updater vai continuar o fluxo."
 
-                    desc = (
-                        f"{prefix}{queue_line}\n\n"
-                        f"Branch: `{branch}`\n"
-                        f"{len(changed_files)} arquivo(s) alterado(s) · {diff_summary}"
-                    )
+                    details = [queue_detail]
+                    if prefix:
+                        details.append(f"-# {prefix.rstrip(' · ')}")
+                    details.append(f"-# Branch: `{branch}` · {len(changed_files)} arquivo(s) · {diff_summary}")
                     if candidate_id:
-                        desc += f"\n-# Candidato `{candidate_id}`"
+                        details.append(f"-# Candidato `{candidate_id}`")
                     if preview_files:
-                        desc += f"\n\n**Arquivos no update**\n{preview_files}"
+                        details.append(f"\n**Arquivos no update**\n{preview_files}")
+                    desc = f"<a:loading:1510065277868445796> **{stage_label}**\n" + "\n".join(details)
 
                     await self._edit_zip_update_message(
                         message,
                         status_message,
-                        "📦 Update na fila",
+                        "<a:areia:1496606578395189473> Aplicando update...",
                         desc,
-                        discord.Color.orange() if queue_position > 1 else discord.Color.blurple(),
+                        discord.Color.blurple(),
                     )
                 except zipfile.BadZipFile:
                     await self._edit_zip_update_message(
