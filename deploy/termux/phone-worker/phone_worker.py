@@ -61,7 +61,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.22"
+PHONE_WORKER_VERSION = "1.10.23"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -292,7 +292,7 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "turbo": {
         "label": "Turbo",
         "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "voice-agent", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-piper", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -1527,7 +1527,7 @@ def _flush_pending_core_worker_job_results(*, timeout: float = 8.0) -> int:
 
 def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     status = _safe_telemetry("system", _system_status, {"ok": False})
-    music_node = _music_node_snapshot()
+    music_node = _safe_telemetry("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"})
     music_agent = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
     worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
     name = _default_worker_name()
@@ -1546,12 +1546,12 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         capabilities.append("ffmpeg")
     if status.get("ffprobe") and "ffprobe" not in capabilities:
         capabilities.append("ffprobe")
-    music_ready = (not safe_mode) and bool(music_agent.get("available") or profile == "turbo")
+    music_ready = (not safe_mode) and bool(music_agent.get("available") or music_node.get("ok") or music_node.get("online") or profile == "turbo")
     if music_ready:
-        for role in ("music", "music-agent", "music-ytdlp"):
+        for role in ("music", "music-agent", "music-node", "music-lavalink", "music-ytdlp"):
             if role not in roles:
                 roles.append(role)
-        for capability in ("music", "music-agent", "music-voice", "music-ytdlp", "music-ytdlp-resolve"):
+        for capability in ("music", "music-agent", "music-voice", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve"):
             if capability not in capabilities:
                 capabilities.append(capability)
     return {
@@ -2048,38 +2048,241 @@ def _cache_dir_snapshot(path: Path, *, max_scan_files: int = 20000) -> dict[str,
 
 
 def _phone_lavalink_env_value(name: str, default: str = "") -> str:
-    # Compatibilidade para workers antigos. Lavalink/NodeLink foi removido do
-    # fluxo do worker; não lemos mais ~/.phone-lavalink.env nem acordamos Java.
+    value = str(os.getenv(name) or "").strip()
+    if value:
+        return value
+    env_file = Path(os.getenv("PHONE_LAVALINK_ENV") or str(Path.home() / ".phone-lavalink.env")).expanduser()
+    try:
+        if not env_file.exists():
+            return default
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith("#") or "=" not in raw:
+                continue
+            key, raw_value = raw.split("=", 1)
+            if key.strip() != name:
+                continue
+            return raw_value.strip().strip('"').strip("'")
+    except Exception:
+        return default
     return default
 
 
+
+_LAVALINK_AUTOSTART_LOCK = threading.Lock()
+_LAVALINK_AUTOSTART_LAST_AT = 0.0
+
+
+def _truthy_env(name: str, default: bool = False) -> bool:
+    return _env_bool(name, default)
+
+
 def _phone_lavalink_port() -> int:
-    return 0
+    port_raw = _phone_lavalink_env_value("PHONE_LAVALINK_PORT", _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PORT", "2333")) or "2333"
+    try:
+        return max(1, min(65535, int(str(port_raw).strip())))
+    except Exception:
+        return 2333
 
 
-def _phone_lavalink_password() -> str:
+def _read_lavalink_application_password() -> str:
+    app_path = Path(_phone_lavalink_env_value("PHONE_LAVALINK_APPLICATION_YML", str(Path.home() / "lavalink" / "application.yml"))).expanduser()
+    try:
+        if not app_path.exists():
+            return ""
+        text = app_path.read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith("#") or ":" not in raw:
+                continue
+            key, value = raw.split(":", 1)
+            if key.strip().lower() != "password":
+                continue
+            value = value.strip().strip('"').strip("'")
+            if value.startswith("${") and value.endswith("}"):
+                env_key = value[2:-1].split(":", 1)[0].strip()
+                return str(os.getenv(env_key) or "").strip()
+            return value
+    except Exception:
+        return ""
     return ""
 
 
+def _phone_lavalink_password() -> str:
+    return (
+        _phone_lavalink_env_value("PHONE_LAVALINK_PASSWORD", "")
+        or _phone_lavalink_env_value("AUX_LAVALINK_PASSWORD", "")
+        or _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PASSWORD", "")
+        or _read_lavalink_application_password()
+    )
+
+
 def _probe_local_lavalink_http(*, timeout: float = 2.5) -> tuple[bool, int, str]:
-    return False, 0, "lavalink_removed"
+    port = _phone_lavalink_port()
+    password = _phone_lavalink_password()
+    headers = {"Accept": "text/plain"}
+    if password:
+        headers["Authorization"] = password
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/version", headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=max(0.5, float(timeout))) as response:
+            body = response.read(512).decode("utf-8", errors="replace").strip()
+            status = int(getattr(response, "status", 0) or 0)
+        return (200 <= status < 300), status, body
+    except urllib.error.HTTPError as exc:
+        # 401 prova que existe Lavalink respondendo, mas a senha do probe não bateu
+        # ou não foi enviada. Para autostart isso é suficiente para não duplicar
+        # processos; para health completo, _music_node_snapshot usa a senha e marca
+        # saudável apenas quando der 2xx.
+        return (int(exc.code) == 401 and not password), int(exc.code), _short_text(exc.reason, limit=80)
+    except Exception as exc:
+        return False, 0, _short_text(f"{type(exc).__name__}: {exc}", limit=120)
+
+
+def _spawn_builtin_lavalink_proot_start() -> tuple[bool, str]:
+    if not shutil.which("tmux"):
+        return False, "tmux não encontrado"
+    if not shutil.which("proot-distro"):
+        return False, "proot-distro não encontrado"
+    host_dir = Path(_phone_lavalink_env_value("PHONE_LAVALINK_HOST_DIR", str(Path.home() / "lavalink"))).expanduser()
+    jar = host_dir / "Lavalink.jar"
+    if not jar.exists():
+        return False, f"Lavalink.jar não encontrado em {host_dir}"
+    session = _phone_lavalink_env_value("PHONE_LAVALINK_TMUX_SESSION", "lavalink-debian") or "lavalink-debian"
+    distro = _phone_lavalink_env_value("PHONE_LAVALINK_PROOT_DISTRO", "debian") or "debian"
+    proot_dir = _phone_lavalink_env_value("PHONE_LAVALINK_PROOT_DIR", "/root/lavalink") or "/root/lavalink"
+    java_xmx = _phone_lavalink_env_value("PHONE_LAVALINK_JAVA_XMX", "384m") or "768m"
+    log_name = _phone_lavalink_env_value("PHONE_LAVALINK_LOG_NAME", "lavalink-proot.log") or "lavalink-proot.log"
+    subprocess.run(["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+    with contextlib.suppress(Exception):
+        subprocess.run(["pkill", "-f", "java.*Lavalink.jar"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+    command = (
+        "cd " + shlex.quote(proot_dir) +
+        " && mkdir -p /tmp/lavalink" +
+        " && exec /usr/bin/java -Djava.io.tmpdir=/tmp/lavalink -Xmx" + shlex.quote(java_xmx) +
+        " -jar Lavalink.jar >> " + shlex.quote(log_name) + " 2>&1"
+    )
+    tmux_cmd = [
+        "tmux", "new-session", "-d", "-s", session,
+        "proot-distro", "login", distro,
+        "--bind", f"{host_dir}:{proot_dir}",
+        "--", "bash", "-lc", command,
+    ]
+    subprocess.Popen(tmux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True, f"sessão {session} iniciada"
 
 
 def _ensure_phone_lavalink_started(reason: str = "health") -> dict[str, Any]:
-    return {"attempted": False, "reason": "lavalink_removed"}
-
+    global _LAVALINK_AUTOSTART_LAST_AT
+    if not _env_autostart_enabled("PHONE_LAVALINK_AUTO_START", "auto"):
+        return {"attempted": False, "reason": "auto_start_disabled_or_safe_mode", "safe_mode": _phone_worker_safe_mode_enabled()}
+    roles, capabilities = _current_core_worker_roles_and_capabilities()
+    caps = {str(x).strip().lower() for x in (roles + capabilities)}
+    if not ({"music", "music-node", "music-lavalink"} & caps) and _current_core_worker_profile() != "turbo":
+        return {"attempted": False, "reason": "worker_sem_capacidade_music"}
+    alive, status, body = _probe_local_lavalink_http(timeout=1.5)
+    if alive or status == 401:
+        return {"attempted": False, "reason": "already_online", "http_status": status}
+    now = time.time()
+    cooldown = max(5.0, _env_float("PHONE_LAVALINK_AUTO_START_COOLDOWN_SECONDS", 30.0))
+    if now - _LAVALINK_AUTOSTART_LAST_AT < cooldown:
+        return {"attempted": False, "reason": "cooldown", "last_error": body}
+    with _LAVALINK_AUTOSTART_LOCK:
+        now = time.time()
+        if now - _LAVALINK_AUTOSTART_LAST_AT < cooldown:
+            return {"attempted": False, "reason": "cooldown", "last_error": body}
+        _LAVALINK_AUTOSTART_LAST_AT = now
+        script = Path(_phone_lavalink_env_value("PHONE_LAVALINK_START_COMMAND", str(Path.home() / "start-phone-lavalink.sh"))).expanduser()
+        try:
+            if script.exists() and os.access(script, os.X_OK):
+                subprocess.Popen([str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                print(f"[phone-worker] lavalink auto-start solicitado via {script} ({reason})", flush=True)
+                return {"attempted": True, "method": "script", "script": str(script)}
+            ok, detail = _spawn_builtin_lavalink_proot_start()
+            if ok:
+                print(f"[phone-worker] lavalink auto-start solicitado via proot/tmux ({reason})", flush=True)
+            else:
+                print(f"[phone-worker] lavalink auto-start falhou: {detail}", flush=True)
+            return {"attempted": bool(ok), "method": "builtin-proot", "detail": detail}
+        except Exception as exc:
+            detail = _short_text(f"{type(exc).__name__}: {exc}", limit=160)
+            print(f"[phone-worker] lavalink auto-start erro: {detail}", flush=True)
+            return {"attempted": False, "error": detail}
 
 def _music_node_snapshot() -> dict[str, Any]:
-    return {
-        "kind": "removed",
-        "mode": "direct-ytdlp",
+    autostart = _ensure_phone_lavalink_started(reason="music_node_snapshot")
+    port = _phone_lavalink_port()
+    password = _phone_lavalink_password()
+    bind_host = _phone_lavalink_env_value("PHONE_LAVALINK_BIND_HOST", "127.0.0.1") or "127.0.0.1"
+    public_host = (
+        _phone_lavalink_env_value("PHONE_LAVALINK_PUBLIC_HOST", "")
+        or _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_HOST", "")
+        or _phone_lavalink_env_value("PHONE_LAVALINK_HOST", "")
+    )
+    public_port_raw = _phone_lavalink_env_value("PHONE_LAVALINK_PUBLIC_PORT", _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PORT", ""))
+    try:
+        public_port = max(1, min(65535, int(str(public_port_raw).strip()))) if str(public_port_raw or "").strip() else port
+    except Exception:
+        public_port = port
+    url = f"http://127.0.0.1:{port}/version"
+    headers = {"Accept": "text/plain"}
+    if password:
+        headers["Authorization"] = password
+    result: dict[str, Any] = {
+        "kind": "lavalink",
+        "mode": "lavalink",
+        "host": bind_host,
+        "port": port,
+        "public_host": public_host,
+        "public_port": public_port,
+        "connect_host": public_host,
+        "connect_port": public_port,
         "ok": False,
         "online": False,
-        "state": "removed",
-        "music_available": False,
-        "playback_modes": [],
-        "autostart": {"attempted": False, "reason": "lavalink_removed"},
+        "state": "offline",
+        "autostart": autostart,
     }
+    start = time.time()
+    try:
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=2.5) as response:
+            body = response.read(512).decode("utf-8", errors="replace").strip()
+            status = int(getattr(response, "status", 0) or 0)
+        healthy = 200 <= status < 300
+        result.update({
+            "ok": healthy,
+            "online": healthy,
+            "state": "healthy" if healthy else f"http_{status}",
+            "http_status": status,
+            "version": _short_text(body, limit=80),
+            "latency_ms": round((time.time() - start) * 1000.0, 1),
+            "music_available": healthy,
+            "playback_modes": ["lavalink"] if healthy else [],
+        })
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code or 0)
+        # 401 ainda prova que o Lavalink está vivo; a VPS/bot pode ter a senha
+        # correta mesmo quando o worker não conseguiu ler application.yml/env.
+        alive = status == 401
+        result.update({
+            "ok": alive,
+            "online": alive,
+            "state": "auth_required" if alive else f"http_{status}",
+            "http_status": status,
+            "error": "authorization_required" if alive else _short_text(exc.reason, limit=100),
+            "latency_ms": round((time.time() - start) * 1000.0, 1),
+            "music_available": alive,
+            "playback_modes": ["lavalink"] if alive else [],
+        })
+    except Exception as exc:
+        result.update({
+            "error": _short_text(f"{type(exc).__name__}: {exc}", limit=120),
+            "latency_ms": round((time.time() - start) * 1000.0, 1),
+            "music_available": False,
+            "playback_modes": [],
+        })
+    return result
+
 
 def _worker_turbo_cache_snapshot() -> dict[str, Any]:
     tts_dir = Path(os.getenv("PHONE_WORKER_TTS_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / "tts")).expanduser()
@@ -2159,6 +2362,7 @@ def _music_voice_dependency_specs() -> dict[str, dict[str, Any]]:
         "PyNaCl": {"module": "nacl", "pip": "PyNaCl"},
         "davey": {"module": "davey", "pip": "davey"},
         "yt-dlp": {"module": "yt_dlp", "pip": "yt-dlp"},
+        "wavelink": {"module": "wavelink", "pip": "wavelink"},
         "aiohttp": {"module": "aiohttp", "pip": "aiohttp"},
         "gTTS": {"module": "gtts", "pip": "gTTS"},
         "edge-tts": {"module": "edge_tts", "pip": "edge-tts"},
@@ -2411,8 +2615,9 @@ def _music_agent_snapshot() -> dict[str, Any]:
             data = {}
         runtime_version = str(data.get("version") or "").strip()
         discord_ready = bool(data.get("discord_ready"))
-        # Música agora usa voz direta/ffmpeg/yt-dlp no Music Agent; não depende
-        # mais de Lavalink/NodeLink/Java no worker.
+        # YouTube direto usa voz/ffmpeg do Music Agent e não precisa que o pool
+        # Lavalink esteja conectado. Pool conectado é detalhe técnico para
+        # playlists/Spotify/SoundCloud, não condição para o worker existir.
         available = bool(data.get("available") or discord_ready)
         needs_restart = bool(runtime_version and file_version and _version_lt_loose(runtime_version, file_version))
         data.update({
@@ -4281,6 +4486,32 @@ class WorkerHandler(BaseHTTPRequestHandler):
         proxy_body["channel_id"] = channel_id
         proxy_body["text"] = text or str(body.get("text") or body.get("content") or "")
         proxy_body["timeout_seconds"] = max(3.0, min(90.0, float(body.get("timeout_seconds") or _env_float("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS", 30.0))))
+        if (
+            proxy_body.get("text")
+            and not (proxy_body.get("audio_b64") or proxy_body.get("audio_url") or proxy_body.get("url"))
+            and _env_bool("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_WITH_TTS_AGENT", True)
+        ):
+            try:
+                synth_body = dict(proxy_body)
+                synth_body["task"] = "tts_agent_synthesize"
+                synth_body.setdefault("cache_mode", "prefer")
+                synth_body["timeout_seconds"] = max(3, min(int(proxy_body["timeout_seconds"]), _env_int("PHONE_WORKER_TTS_AGENT_DIRECT_PREBUILD_TIMEOUT_SECONDS", 18)))
+                synth_body["max_audio_bytes"] = max(1024, min(self.max_output_bytes, _env_int("PHONE_WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_BYTES", 12 * 1024 * 1024)))
+                synth_result = self._task_tts_agent_synthesize(synth_body)
+                if isinstance(synth_result, dict) and synth_result.get("ok") and synth_result.get("data_b64"):
+                    proxy_body["audio_b64"] = str(synth_result.get("data_b64") or "")
+                    proxy_body["audio_format"] = str(synth_result.get("audio_format") or "mp3")
+                    proxy_body["engine"] = str(synth_result.get("selected_engine") or synth_result.get("engine") or proxy_body.get("engine") or "tts-agent")
+                    proxy_body["selected_engine"] = proxy_body["engine"]
+                    proxy_body["prebuilt_audio"] = True
+                    proxy_body["prebuilt_audio_source"] = "phone_worker_tts_agent"
+                    proxy_body["tts_agent_cache_hit"] = bool(synth_result.get("cache_hit"))
+                    proxy_body["tts_agent_synth_ms"] = synth_result.get("worker_synth_ms")
+                    proxy_body["tts_agent_total_ms"] = synth_result.get("worker_total_ms") or synth_result.get("total_ms")
+            except Exception as exc:
+                # A falha de prebuild não deve quebrar o TTS direto: o Music Agent ainda
+                # pode sintetizar no caminho antigo. Guardamos o motivo só para diagnóstico.
+                proxy_body["tts_agent_prebuild_error"] = f"{type(exc).__name__}: {_short_text(exc, limit=140)}"
         result = self._task_music_agent_proxy(proxy_body)
         ok = bool(isinstance(result, dict) and result.get("ok", False))
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
@@ -4373,42 +4604,176 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 deduped.append(engine)
         return deduped
 
+    def _tts_agent_standard_cache_enabled(self, roles: list[str], capabilities: list[str]) -> bool:
+        if not _env_bool("PHONE_WORKER_TTS_AGENT_CACHE_ENABLED", True):
+            return False
+        if not _env_bool("PHONE_WORKER_TTS_AGENT_STANDARD_CACHE_ENABLED", True):
+            return False
+        profile = _current_core_worker_profile()
+        if profile != "turbo" and not _env_bool("PHONE_WORKER_TTS_AGENT_CACHE_ALLOW_NON_TURBO", False):
+            return False
+        return True
+
+    def _tts_agent_standard_cache_key(self, body: dict[str, Any], *, engine: str) -> str:
+        normalized_engine = str(engine or body.get("engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
+        aliases = {"google": "gcloud", "google_tts": "gcloud", "googlecloud": "gcloud", "google_cloud": "gcloud", "edge_tts": "edge"}
+        normalized_engine = aliases.get(normalized_engine, normalized_engine)
+        requested_engine = str(body.get("engine") or normalized_engine).strip().lower().replace("-", "_") or normalized_engine
+        requested_engine = aliases.get(requested_engine, requested_engine)
+        provided = str(body.get("cache_key") or "").strip()
+        if provided and requested_engine == normalized_engine:
+            with contextlib.suppress(Exception):
+                return self._sanitize_tts_cache_key(provided)
+        text = " ".join(str(body.get("text") or "").strip().split()).lower()
+        text = text.replace("!!", "!").replace("??", "?").replace("..", ".")
+        if normalized_engine == "edge":
+            voice = str(body.get("voice") or body.get("fallback_voice") or "pt-BR-FranciscaNeural").strip() or "pt-BR-FranciscaNeural"
+            rate = self._normalize_tts_edge_rate(body.get("rate"))
+            pitch = self._normalize_tts_edge_pitch(body.get("pitch"))
+            payload = f"edge|{voice}|{rate}|{pitch}|{text}"
+        elif normalized_engine == "gcloud":
+            language = self._normalize_tts_gcloud_language(body.get("language") or os.getenv("PHONE_WORKER_GOOGLE_TTS_LANGUAGE"))
+            voice_name = str(body.get("voice") or os.getenv("PHONE_WORKER_GOOGLE_TTS_VOICE") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
+            rate = self._normalize_tts_gcloud_rate(body.get("rate") or os.getenv("PHONE_WORKER_GOOGLE_TTS_SPEAKING_RATE"))
+            pitch = self._normalize_tts_gcloud_pitch(body.get("pitch") or os.getenv("PHONE_WORKER_GOOGLE_TTS_PITCH"))
+            encoding_name = _gcloud_audio_encoding_name(body.get("audio_encoding") or body.get("audio_format"))
+            payload = f"gcloud|{language}|{voice_name}|{rate}|{pitch}|{encoding_name}|{text}"
+        else:
+            language = self._normalize_tts_gtts_language(body.get("language") or body.get("fallback_language"))
+            payload = f"gtts|{language}|{text}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _tts_agent_cache_mode_allows_read(self, body: dict[str, Any]) -> bool:
+        mode = str(body.get("cache_mode") or "prefer").strip().lower()
+        return mode not in {"0", "false", "off", "disabled", "none", "bypass", "refresh"}
+
+    def _tts_agent_cache_mode_allows_store(self, body: dict[str, Any]) -> bool:
+        mode = str(body.get("cache_mode") or "prefer").strip().lower()
+        return mode not in {"0", "false", "off", "disabled", "none", "bypass", "no_store"}
+
+    def _tts_agent_standard_cache_hit(self, *, key: str, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int) -> dict[str, Any] | None:
+        path, audio_format = self._find_tts_cache_file(key)
+        if path is None:
+            return None
+        read_started = time.monotonic()
+        data = path.read_bytes()
+        read_ms = (time.monotonic() - read_started) * 1000.0
+        if not data:
+            return None
+        if len(data) > max_audio_bytes:
+            raise RuntimeError(f"cache TTS grande demais: {len(data)} bytes")
+        self._touch_tts_cache_file(path)
+        total_ms = (time.monotonic() - started) * 1000.0
+        digest = hashlib.sha256(data).hexdigest()
+        logs.append(f"standard-cache hit engine={engine} file={path.name} read={read_ms:.1f}ms")
+        return {
+            "ok": True,
+            "engine": engine,
+            "selected_engine": engine,
+            "audio_format": audio_format,
+            "cache_hit": True,
+            "cache_key": key[:16],
+            "cache_file": path.name,
+            "cache_read_ms": round(read_ms, 2),
+            "worker_profile": _current_core_worker_profile(),
+            "worker_version": PHONE_WORKER_VERSION,
+            "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
+            "roles": roles[:16],
+            "capabilities": capabilities[:24],
+            "available_engines": _tts_agent_available_engines(),
+            "worker_synth_ms": 0.0,
+            "worker_total_ms": round(total_ms, 2),
+            "total_ms": round(total_ms, 2),
+            "size": len(data),
+            "sha256": digest,
+            "logs": logs[:10],
+            "data_b64": _b64encode(data, max_bytes=max_audio_bytes),
+        }
+
+    def _store_tts_agent_standard_cache(self, *, key: str, data: bytes, audio_format: str, logs: list[str]) -> None:
+        if not key or not data:
+            return
+        path = self._tts_cache_path(key, audio_format)
+        tmp = path.with_suffix(path.suffix + f".tmp-{os.getpid()}-{threading.get_ident()}")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+            self._touch_tts_cache_file(path)
+            self._prune_tts_cache(protected=path)
+            logs.append(f"standard-cache store {path.name} {len(data)}B")
+        except Exception as exc:
+            logs.append(f"standard-cache store falhou: {type(exc).__name__}: {_short_text(exc, limit=90)}")
+        finally:
+            with contextlib.suppress(Exception):
+                tmp.unlink()
+
     def _synthesize_standard_tts_bytes(self, body: dict[str, Any], *, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, timeout: int) -> dict[str, Any]:
         text = str(body.get("text") or "").strip()
         if not text:
             raise ValueError("texto vazio")
-        with tempfile.TemporaryDirectory(prefix="phone-worker-tts-agent-") as tmp:
-            tmp_dir = Path(tmp)
-            audio_format = "mp3"
-            out_path = tmp_dir / "speech.mp3"
-            if engine == "edge":
-                try:
-                    import edge_tts  # type: ignore
-                except Exception as exc:
-                    raise RuntimeError(f"edge-tts não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
-                voice = str(body.get("voice") or body.get("fallback_voice") or "pt-BR-FranciscaNeural").strip() or "pt-BR-FranciscaNeural"
-                rate = self._normalize_tts_edge_rate(body.get("rate"))
-                pitch = self._normalize_tts_edge_pitch(body.get("pitch"))
+        cache_key = ""
+        if self._tts_agent_standard_cache_enabled(roles, capabilities):
+            with contextlib.suppress(Exception):
+                cache_key = self._tts_agent_standard_cache_key(body, engine=engine)
+            if cache_key and self._tts_agent_cache_mode_allows_read(body):
+                hit = self._tts_agent_standard_cache_hit(
+                    key=cache_key,
+                    engine=engine,
+                    roles=roles,
+                    capabilities=capabilities,
+                    logs=logs,
+                    started=started,
+                    max_audio_bytes=max_audio_bytes,
+                )
+                if hit is not None:
+                    return hit
+        audio_format = "mp3"
+        data = b""
+        if engine == "edge":
+            try:
+                import edge_tts  # type: ignore
+            except Exception as exc:
+                raise RuntimeError(f"edge-tts não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
+            voice = str(body.get("voice") or body.get("fallback_voice") or "pt-BR-FranciscaNeural").strip() or "pt-BR-FranciscaNeural"
+            rate = self._normalize_tts_edge_rate(body.get("rate"))
+            pitch = self._normalize_tts_edge_pitch(body.get("pitch"))
 
-                async def _save_edge() -> None:
-                    communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
-                    await communicate.save(str(out_path))
+            async def _edge_bytes() -> bytes:
+                communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
+                chunks: list[bytes] = []
+                async for chunk in communicate.stream():
+                    if chunk.get("type") == "audio" and chunk.get("data"):
+                        chunks.append(bytes(chunk["data"]))
+                return b"".join(chunks)
 
-                asyncio.run(asyncio.wait_for(_save_edge(), timeout=timeout))
-                logs.append(f"edge voice={voice} rate={rate} pitch={pitch}")
-            elif engine == "gcloud":
-                try:
-                    from google.cloud import texttospeech_v1 as google_texttospeech  # type: ignore
-                except Exception as exc:
-                    raise RuntimeError(f"google-cloud-texttospeech não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
-                self._ensure_worker_google_credentials_file(tmp_dir)
+            try:
+                data = asyncio.run(asyncio.wait_for(_edge_bytes(), timeout=timeout))
+            except Exception:
+                # Compatibilidade com versões antigas do edge-tts que podem não expor stream().
+                with tempfile.TemporaryDirectory(prefix="phone-worker-edge-tts-") as tmp:
+                    out_path = Path(tmp) / "speech.mp3"
+
+                    async def _save_edge() -> None:
+                        communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
+                        await communicate.save(str(out_path))
+
+                    asyncio.run(asyncio.wait_for(_save_edge(), timeout=timeout))
+                    data = out_path.read_bytes() if out_path.exists() else b""
+            logs.append(f"edge voice={voice} rate={rate} pitch={pitch}")
+        elif engine == "gcloud":
+            try:
+                from google.cloud import texttospeech_v1 as google_texttospeech  # type: ignore
+            except Exception as exc:
+                raise RuntimeError(f"google-cloud-texttospeech não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
+            with tempfile.TemporaryDirectory(prefix="phone-worker-gcloud-credentials-") as tmp:
+                self._ensure_worker_google_credentials_file(Path(tmp))
                 language = self._normalize_tts_gcloud_language(body.get("language") or os.getenv("PHONE_WORKER_GOOGLE_TTS_LANGUAGE"))
                 voice_name = str(body.get("voice") or os.getenv("PHONE_WORKER_GOOGLE_TTS_VOICE") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
                 rate = self._normalize_tts_gcloud_rate(body.get("rate") or os.getenv("PHONE_WORKER_GOOGLE_TTS_SPEAKING_RATE"))
                 pitch = self._normalize_tts_gcloud_pitch(body.get("pitch") or os.getenv("PHONE_WORKER_GOOGLE_TTS_PITCH"))
                 encoding_name = _gcloud_audio_encoding_name(body.get("audio_encoding") or body.get("audio_format"))
                 audio_format = _gcloud_audio_suffix(encoding_name)
-                out_path = tmp_dir / f"speech.{audio_format}"
                 if voice_name and not voice_name.lower().startswith(language.lower() + "-"):
                     voice_name = ""
                 client = google_texttospeech.TextToSpeechClient()
@@ -4425,23 +4790,25 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     ),
                 )
                 response = client.synthesize_speech(request=request)
-                out_path.write_bytes(response.audio_content)
+                data = bytes(response.audio_content or b"")
                 logs.append(f"gcloud language={language} voice={voice_name or 'auto'} encoding={encoding_name} rate={rate} pitch={pitch}")
-            else:
-                try:
-                    from gtts import gTTS  # type: ignore
-                except Exception as exc:
-                    raise RuntimeError(f"gTTS não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
-                language = self._normalize_tts_gtts_language(body.get("language") or body.get("fallback_language"))
-                tts = gTTS(text=text, lang=language)
-                with open(out_path, "wb") as handle:
-                    tts.write_to_fp(handle)
-                logs.append(f"gtts language={language}")
-            if not out_path.exists() or out_path.stat().st_size <= 0:
-                raise RuntimeError("engine não gerou arquivo de áudio")
-            data = out_path.read_bytes()
+        else:
+            try:
+                from gtts import gTTS  # type: ignore
+            except Exception as exc:
+                raise RuntimeError(f"gTTS não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
+            language = self._normalize_tts_gtts_language(body.get("language") or body.get("fallback_language"))
+            buffer = io.BytesIO()
+            tts = gTTS(text=text, lang=language)
+            tts.write_to_fp(buffer)
+            data = buffer.getvalue()
+            logs.append(f"gtts language={language}")
+        if not data:
+            raise RuntimeError("engine não gerou áudio")
         if len(data) > max_audio_bytes:
             raise RuntimeError(f"áudio grande demais: {len(data)} bytes")
+        if cache_key and self._tts_agent_cache_mode_allows_store(body):
+            self._store_tts_agent_standard_cache(key=cache_key, data=data, audio_format=audio_format, logs=logs)
         synth_ms = (time.monotonic() - started) * 1000.0
         digest = hashlib.sha256(data).hexdigest()
         return {
@@ -4450,6 +4817,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "selected_engine": engine,
             "audio_format": audio_format,
             "cache_hit": False,
+            "cache_key": cache_key[:16] if cache_key else "",
             "worker_profile": _current_core_worker_profile(),
             "worker_version": PHONE_WORKER_VERSION,
             "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
@@ -5448,9 +5816,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "restart": r"restart|restarting|started|stopped|iniciando|parando",
             "syntax": r"syntaxerror|indentationerror|taberror",
             "import": r"importerror|modulenotfounderror|extensionfailed|extensionnotfound",
+            "lavalink": r"lavalink|lavasrc|trackexception|loadexception",
             "yt_dlp": r"yt[-_ ]?dlp|youtube|googlevideo",
             "rate_limit": r"rate.?limit|too many requests|429",
-            "phone_worker": r"phone-worker|music-agent|worker-voice",
+            "phone_worker": r"phone-worker|phone_lavalink|phone-lavalink",
         }
         compiled = {key: re.compile(pattern, re.IGNORECASE) for key, pattern in patterns.items()}
         counts = {key: 0 for key in compiled}
@@ -6339,7 +6708,7 @@ def _sshd_snapshot() -> dict[str, Any]:
     que a VPS tenta usar parece existir. Isso ajuda o painel a diferenciar
     "Tailscale ativo" de "SSHD/porta indisponível".
     """
-    configured_port = str(os.getenv("PHONE_WORKER_SSH_PORT") or "8022").strip() or "8022"
+    configured_port = str(os.getenv("PHONE_WORKER_SSH_PORT") or os.getenv("PHONE_LAVALINK_SSH_PORT") or "8022").strip() or "8022"
     result: dict[str, Any] = {
         "ok": False,
         "source": "termux-sshd",

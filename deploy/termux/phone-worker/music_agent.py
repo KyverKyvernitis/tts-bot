@@ -2,7 +2,7 @@
 """Core Music Agent for the phone worker.
 
 Same-bot music plane: the VPS remains the UI/status plane while
-this process owns Discord voice, yt-dlp and ffmpeg on the phone worker.
+this process owns Discord voice/Lavalink/yt-dlp on the phone worker.
 
 The agent intentionally does not register Discord commands and does not handle
 message events. It exposes a small localhost HTTP API that phone_worker.py can
@@ -15,6 +15,8 @@ import contextlib
 import json
 import importlib
 import base64
+import hashlib
+import io
 import os
 import re
 import shutil
@@ -39,6 +41,11 @@ try:
     import discord
 except Exception as exc:  # pragma: no cover
     raise SystemExit(f"discord.py ausente no Music Agent: {exc}")
+
+try:
+    import wavelink
+except Exception as exc:  # pragma: no cover
+    raise SystemExit(f"wavelink ausente no Music Agent: {exc}")
 
 AGENT_VERSION = "0.3.27"
 STARTED_AT = time.time()
@@ -94,6 +101,7 @@ bootstrap_env()
 
 
 _LOCAL_SEARCH_PREFIXES = ("ytsearch", "ytmsearch")
+_LAVALINK_PREFIXES = ("scsearch:", "spsearch:", "amsearch:", "dzsearch:")
 
 
 def truthy(value: object, default: bool = False) -> bool:
@@ -132,6 +140,19 @@ def safe_id(value: object) -> int:
         return int(str(value).strip())
     except Exception:
         return 0
+
+
+def read_lavalink_password_from_yaml() -> str:
+    path = Path(os.getenv("MUSIC_AGENT_LAVALINK_CONFIG") or Path.home() / "lavalink" / "application.yml").expanduser()
+    if not path.exists():
+        return ""
+    try:
+        for line in path.read_text(errors="ignore").splitlines():
+            if line.strip().lower().startswith("password:"):
+                return line.split(":", 1)[1].strip().strip('"\'')
+    except Exception:
+        return ""
+    return ""
 
 
 def _looks_like_url(value: str) -> bool:
@@ -490,7 +511,9 @@ class MusicAgent:
         self.port = env_int("MUSIC_AGENT_PORT", 8780)
         self.token = os.getenv("MUSIC_AGENT_TOKEN") or os.getenv("PHONE_WORKER_TOKEN") or ""
         self.discord_token = os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or ""
-        self.music_backend = "direct-ytdlp"
+        self.lavalink_uri = os.getenv("MUSIC_AGENT_LAVALINK_URI") or os.getenv("LAVALINK_URI") or "http://127.0.0.1:2333"
+        self.lavalink_password = os.getenv("MUSIC_AGENT_LAVALINK_PASSWORD") or os.getenv("LAVALINK_PASSWORD") or read_lavalink_password_from_yaml()
+        self.lavalink_node_name = os.getenv("MUSIC_AGENT_LAVALINK_NODE_NAME", "phone-agent")
         self.ytdlp_format = os.getenv("MUSIC_AGENT_YTDLP_FORMAT") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or "bestaudio[acodec=opus]/bestaudio/best"
         self.ytdlp_timeout = env_int("MUSIC_AGENT_YTDLP_TIMEOUT_SECONDS", 35)
         self.cookies_file = os.getenv("MUSIC_AGENT_YTDLP_COOKIES_FILE") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE") or str(Path.home() / "phone-worker" / "secrets" / "youtube-cookies.txt")
@@ -498,6 +521,7 @@ class MusicAgent:
         self.default_search = os.getenv("MUSIC_AGENT_YTDLP_DEFAULT_SEARCH") or "ytsearch5"
         self.direct_audio_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_AUDIO_ENABLED"), True)
         self.direct_youtube_enabled = truthy(os.getenv("MUSIC_AGENT_DIRECT_YOUTUBE_ENABLED"), True)
+        self.lavalink_for_direct_streams = truthy(os.getenv("MUSIC_AGENT_LAVALINK_FOR_DIRECT_STREAMS"), False)
         self.ffmpeg_executable = os.getenv("MUSIC_AGENT_FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
         self.ffmpeg_before_options = os.getenv(
             "MUSIC_AGENT_FFMPEG_BEFORE_OPTIONS",
@@ -533,6 +557,7 @@ class MusicAgent:
         intents.voice_states = True
         self.client = discord.Client(intents=intents)
         self.states: dict[int, GuildMusicState] = {}
+        self._pool_connected = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._app = web.Application()
         self._app.add_routes([
@@ -549,7 +574,40 @@ class MusicAgent:
     def _wire_discord_events(self) -> None:
         @self.client.event
         async def on_ready() -> None:  # type: ignore[no-untyped-def]
-            self.log("discord_ready", user=str(self.client.user), version=AGENT_VERSION, backend=self.music_backend)
+            self.log("discord_ready", user=str(self.client.user), version=AGENT_VERSION)
+            with contextlib.suppress(Exception):
+                await self.ensure_lavalink_pool()
+
+        @self.client.event
+        async def on_wavelink_track_start(payload: Any) -> None:  # type: ignore[no-untyped-def]
+            player = getattr(payload, "player", None)
+            guild_id = safe_id(getattr(getattr(player, "guild", None), "id", 0))
+            if guild_id:
+                st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+                if st.transport == "lavalink":
+                    self._set_status(st, "playing", event="lavalink_track_start")
+                    self.log("play_started", guild_id=guild_id, transport="lavalink", title=getattr(st.current, "title", ""))
+                    self._schedule_next_queue_prefetch(guild_id, reason="lavalink_playing")
+
+        @self.client.event
+        async def on_wavelink_track_end(payload: Any) -> None:  # type: ignore[no-untyped-def]
+            player = getattr(payload, "player", None)
+            guild_id = safe_id(getattr(getattr(player, "guild", None), "id", 0))
+            if guild_id:
+                self.log("play_ended", guild_id=guild_id, transport="lavalink")
+                await self._finish_current(guild_id, error=None, event="lavalink_track_end")
+
+        @self.client.event
+        async def on_wavelink_track_exception(payload: Any) -> None:  # type: ignore[no-untyped-def]
+            player = getattr(payload, "player", None)
+            guild_id = safe_id(getattr(getattr(player, "guild", None), "id", 0))
+            if guild_id:
+                err = short_text(getattr(payload, "exception", "erro no Lavalink"), 260)
+                st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+                self._set_status(st, "failed", event="lavalink_track_exception", error=err)
+                self.log("play_failed", guild_id=guild_id, transport="lavalink", error=err)
+                if st.queue:
+                    await self._play_next(guild_id)
 
     def _resolve_cache_key(self, query: str, track_meta: dict[str, Any] | None = None) -> str:
         meta = track_meta or {}
@@ -759,9 +817,12 @@ class MusicAgent:
             st.paused = False
             self._set_status(st, "idle", event="idle_timeout_disconnect")
             with contextlib.suppress(Exception):
-                if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
-                    player.stop()
-                await player.disconnect(force=True)
+                if isinstance(player, getattr(wavelink, "Player", ())):
+                    await player.disconnect()
+                else:
+                    if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
+                        player.stop()
+                    await player.disconnect(force=True)
             self.log("idle_timeout_disconnect", guild_id=guild_id, delay=round(delay, 1))
         except asyncio.CancelledError:
             return
@@ -819,6 +880,7 @@ class MusicAgent:
             "PyNaCl": "nacl",
             "davey": "davey",
             "yt-dlp": "yt_dlp",
+            "wavelink": "wavelink",
             "aiohttp": "aiohttp",
             "gTTS": "gtts",
             "edge-tts": "edge_tts",
@@ -847,7 +909,9 @@ class MusicAgent:
             "uptime_seconds": round(time.time() - STARTED_AT, 1),
             "discord_ready": bool(self.client.is_ready()),
             "user": str(self.client.user) if self.client.user else "",
-            "backend": self.music_backend,
+            "lavalink_uri": self.lavalink_uri,
+            "lavalink_node": self.lavalink_node_name,
+            "pool_connected": self._pool_connected,
             "direct_audio_enabled": self.direct_audio_enabled,
             "idle_disconnect_seconds": self.idle_disconnect_seconds,
             "cache": {
@@ -861,7 +925,21 @@ class MusicAgent:
         }
 
     async def ensure_lavalink_pool(self) -> None:
-        raise RuntimeError("Lavalink/NodeLink foi removido do Music Agent; use playback direto do worker.")
+        if self._pool_connected:
+            return
+        if not self.lavalink_uri or not self.lavalink_password:
+            raise RuntimeError("Lavalink do worker não configurado para o Music Agent")
+        self.log("lavalink_pool_connecting", uri=self.lavalink_uri, node=self.lavalink_node_name)
+        node = wavelink.Node(uri=self.lavalink_uri, password=self.lavalink_password, identifier=self.lavalink_node_name)
+        try:
+            await wavelink.Pool.connect(nodes=[node], client=self.client, cache_capacity=100)
+        except TypeError:
+            await wavelink.Pool.connect(nodes=[node], client=self.client)
+        except Exception:
+            self._pool_connected = False
+            raise
+        self._pool_connected = True
+        self.log("lavalink_pool_ready", node=self.lavalink_node_name)
 
     async def dispatch(self, body: dict[str, Any]) -> dict[str, Any]:
         action = str(body.get("action") or body.get("command") or "status").strip().lower().replace("-", "_")
@@ -1100,7 +1178,9 @@ class MusicAgent:
         st = self.states.setdefault(safe_id(body.get("guild_id")), GuildMusicState(guild_id=safe_id(body.get("guild_id"))))
         player = st.player
         if player:
-            if hasattr(player, "pause"):
+            if isinstance(player, getattr(wavelink, "Player", ())):
+                await player.pause(True)
+            elif hasattr(player, "pause"):
                 player.pause()
             st.paused = True
             self._set_status(st, "paused", event="pause")
@@ -1110,7 +1190,9 @@ class MusicAgent:
         st = self.states.setdefault(safe_id(body.get("guild_id")), GuildMusicState(guild_id=safe_id(body.get("guild_id"))))
         player = st.player
         if player:
-            if hasattr(player, "resume"):
+            if isinstance(player, getattr(wavelink, "Player", ())):
+                await player.pause(False)
+            elif hasattr(player, "resume"):
                 player.resume()
             st.paused = False
             self._set_status(st, "playing", event="resume")
@@ -1158,10 +1240,15 @@ class MusicAgent:
         if not player:
             return
         with contextlib.suppress(Exception):
-            if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
-                player.stop()
-            if disconnect:
-                await player.disconnect(force=True)
+            if isinstance(player, getattr(wavelink, "Player", ())):
+                await player.stop()
+                if disconnect:
+                    await player.disconnect()
+            else:
+                if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
+                    player.stop()
+                if disconnect:
+                    await player.disconnect(force=True)
 
     async def _stop_current_player_for_transition(self, st: GuildMusicState, *, disconnect: bool = False) -> None:
         player = st.player
@@ -1298,6 +1385,17 @@ class MusicAgent:
                 pass
         st.last_action = "seek"
         player = st.player
+        if player is not None and isinstance(player, getattr(wavelink, "Player", ())) :
+            position_ms = max(0, int(target * 1000))
+            seeker = getattr(player, "seek", None)
+            if callable(seeker):
+                maybe = seeker(position_ms)
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+                st.started_monotonic = time.monotonic() - target
+                self._set_status(st, "playing", event="seek")
+                return {"ok": True, "position_seconds": target, "state": st.public()}
+            return {"ok": False, "error": "backend atual não aceitou seek", "state": st.public()}
         if not track.stream_url:
             try:
                 track = await self.resolve_track(track.webpage_url or track.query or track.title, track_meta=track.public(), body=body)
@@ -1415,6 +1513,151 @@ class MusicAgent:
             return ".wav"
         return ".mp3"
 
+    def _tts_cache_enabled(self) -> bool:
+        return truthy(os.getenv("MUSIC_AGENT_TTS_CACHE_ENABLED"), truthy(os.getenv("PHONE_WORKER_TTS_AGENT_CACHE_ENABLED"), True))
+
+    def _tts_cache_root(self) -> Path:
+        configured = str(os.getenv("MUSIC_AGENT_TTS_CACHE_DIR") or os.getenv("PHONE_WORKER_TTS_CACHE_DIR") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        return Path.home() / "phone-worker" / "cache" / "tts"
+
+    def _tts_cache_limits(self) -> tuple[int, int]:
+        max_mb = max(16, min(32768, env_int("MUSIC_AGENT_TTS_CACHE_MAX_MB", env_int("PHONE_WORKER_TTS_CACHE_MAX_MB", 4096))))
+        max_files = max(64, min(100000, env_int("MUSIC_AGENT_TTS_CACHE_MAX_FILES", env_int("PHONE_WORKER_TTS_CACHE_MAX_FILES", 20000))))
+        return max_mb * 1024 * 1024, max_files
+
+    def _sanitize_tts_cache_key(self, raw: Any) -> str:
+        key = re.sub(r"[^a-z0-9_\-]", "", str(raw or "").strip().lower())
+        if len(key) < 16:
+            raise ValueError("cache_key curta")
+        return key[:96]
+
+    def _tts_cache_path(self, key: str, audio_format: str) -> Path:
+        fmt = str(audio_format or "mp3").strip().lower().replace(".", "")
+        if fmt in {"wave", "wav"}:
+            fmt = "wav"
+        elif fmt in {"ogg", "opus"}:
+            fmt = "ogg"
+        else:
+            fmt = "mp3"
+        return self._tts_cache_root() / f"{key}.{fmt}"
+
+    def _find_tts_cache_file(self, key: str) -> tuple[Path | None, str]:
+        root = self._tts_cache_root()
+        for fmt in ("mp3", "wav", "ogg"):
+            path = root / f"{key}.{fmt}"
+            try:
+                if path.exists() and path.stat().st_size > 0:
+                    return path, fmt
+            except Exception:
+                continue
+        return None, ""
+
+    def _touch_tts_cache_file(self, path: Path) -> None:
+        now = time.time()
+        with contextlib.suppress(Exception):
+            os.utime(path, (now, now))
+
+    def _prune_tts_cache(self, protected: Path | None = None) -> None:
+        root = self._tts_cache_root()
+        max_bytes, max_files = self._tts_cache_limits()
+        try:
+            files = [p for p in root.iterdir() if p.is_file() and p.suffix.lower() in {".mp3", ".wav", ".ogg"}]
+        except FileNotFoundError:
+            return
+        stats: list[tuple[float, int, Path]] = []
+        total = 0
+        for path in files:
+            with contextlib.suppress(Exception):
+                st = path.stat()
+                size = int(st.st_size or 0)
+                total += size
+                stats.append((float(st.st_mtime), size, path))
+        if len(stats) <= max_files and total <= max_bytes:
+            return
+        protected_resolved = None
+        if protected is not None:
+            with contextlib.suppress(Exception):
+                protected_resolved = protected.resolve()
+        for _, size, path in sorted(stats, key=lambda item: item[0]):
+            if len(stats) <= max_files and total <= max_bytes:
+                break
+            if protected_resolved is not None:
+                with contextlib.suppress(Exception):
+                    if path.resolve() == protected_resolved:
+                        continue
+            with contextlib.suppress(Exception):
+                path.unlink()
+            total = max(0, total - size)
+            stats = [item for item in stats if item[2] != path]
+
+    def _tts_cache_key_for_body(self, body: dict[str, Any], *, engine: str, text: str) -> str:
+        requested_engine = str(body.get("engine") or engine or "gtts").strip().lower().replace("-", "_") or "gtts"
+        aliases = {"google": "gcloud", "google_tts": "gcloud", "googlecloud": "gcloud", "google_cloud": "gcloud", "edge_tts": "edge"}
+        requested_engine = aliases.get(requested_engine, requested_engine)
+        normalized_engine = aliases.get(str(engine or requested_engine).strip().lower().replace("-", "_"), str(engine or requested_engine).strip().lower().replace("-", "_"))
+        provided = str(body.get("cache_key") or "").strip()
+        if provided and requested_engine == normalized_engine:
+            with contextlib.suppress(Exception):
+                return self._sanitize_tts_cache_key(provided)
+        normalized_text = " ".join(str(text or "").strip().split()).lower().replace("!!", "!").replace("??", "?").replace("..", ".")
+        if engine == "edge":
+            voice = str(body.get("voice") or "pt-BR-FranciscaNeural").strip() or "pt-BR-FranciscaNeural"
+            payload = f"edge|{voice}|{self._normalize_edge_rate(body.get('rate'))}|{self._normalize_edge_pitch(body.get('pitch'))}|{normalized_text}"
+        elif engine == "gcloud":
+            language = self._normalize_tts_language(body.get("language") or os.getenv("PHONE_WORKER_GOOGLE_TTS_LANGUAGE") or "pt-BR").replace("pt-br", "pt-BR")
+            voice = str(body.get("voice") or os.getenv("PHONE_WORKER_GOOGLE_TTS_VOICE") or "pt-BR-Standard-A").strip()
+            encoding = self._gcloud_audio_encoding_name(body.get("audio_encoding") or body.get("audio_format"))
+            payload = f"gcloud|{language}|{voice}|{encoding}|{normalized_text}"
+        else:
+            language = self._normalize_tts_language(body.get("language"))
+            payload = f"gtts|{language}|{normalized_text}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _tts_cache_mode_allows_read(self, body: dict[str, Any]) -> bool:
+        mode = str(body.get("cache_mode") or "prefer").strip().lower()
+        return mode not in {"0", "false", "off", "disabled", "none", "bypass", "refresh"}
+
+    def _tts_cache_mode_allows_store(self, body: dict[str, Any]) -> bool:
+        mode = str(body.get("cache_mode") or "prefer").strip().lower()
+        return mode not in {"0", "false", "off", "disabled", "none", "bypass", "no_store"}
+
+    def _try_read_tts_cache_to_target(self, *, key: str, target: Path, body: dict[str, Any]) -> bool:
+        path, audio_format = self._find_tts_cache_file(key)
+        if path is None:
+            return False
+        data = path.read_bytes()
+        if not data:
+            return False
+        max_bytes = max(1024, int(env_float("MUSIC_AGENT_TTS_MAX_B64_BYTES", 8 * 1024 * 1024)))
+        if len(data) > max_bytes:
+            return False
+        target.write_bytes(data)
+        body["audio_format"] = audio_format
+        body["tts_cache_hit"] = True
+        self._touch_tts_cache_file(path)
+        self.log("tts_cache_hit", engine=str(body.get("engine") or ""), file=path.name, bytes=len(data))
+        return True
+
+    def _store_tts_cache_bytes(self, *, key: str, data: bytes, audio_format: str, engine: str) -> None:
+        if not key or not data:
+            return
+        path = self._tts_cache_path(key, audio_format)
+        tmp = path.with_suffix(path.suffix + f".tmp-{os.getpid()}-{threading.get_ident()}")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+            self._touch_tts_cache_file(path)
+            self._prune_tts_cache(protected=path)
+            self.log("tts_cache_store", engine=engine, file=path.name, bytes=len(data))
+        except Exception as exc:
+            self.log("tts_cache_store_failed", engine=engine, error=f"{type(exc).__name__}: {short_text(exc, 120)}")
+        finally:
+            with contextlib.suppress(Exception):
+                tmp.unlink()
+
     async def _synthesize_tts_file(self, body: dict[str, Any], target: Path) -> str:
         text = short_text(body.get("text") or body.get("content") or "", 1600)
         if not text:
@@ -1422,6 +1665,14 @@ class MusicAgent:
         engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_")
         if engine in {"google", "google_tts", "googlecloud", "google_cloud"}:
             engine = "gcloud"
+        cache_key = ""
+        if self._tts_cache_enabled():
+            with contextlib.suppress(Exception):
+                cache_key = self._tts_cache_key_for_body(body, engine=engine, text=text)
+            if cache_key and self._tts_cache_mode_allows_read(body) and self._try_read_tts_cache_to_target(key=cache_key, target=target, body=body):
+                return f"{engine}-cache"
+        audio_format = "mp3"
+        data = b""
         if engine == "edge":
             try:
                 import edge_tts  # type: ignore
@@ -1431,17 +1682,26 @@ class MusicAgent:
             rate = self._normalize_edge_rate(body.get("rate"))
             pitch = self._normalize_edge_pitch(body.get("pitch"))
             communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
-            await communicate.save(str(target))
-            return "edge"
+            try:
+                chunks: list[bytes] = []
+                async for chunk in communicate.stream():
+                    if chunk.get("type") == "audio" and chunk.get("data"):
+                        chunks.append(bytes(chunk["data"]))
+                data = b"".join(chunks)
+            except Exception:
+                # Compatibilidade com versões antigas do edge-tts que só expõem save().
+                with tempfile.TemporaryDirectory(prefix="music-agent-edge-tts-") as tmp:
+                    tmp_path = Path(tmp) / "speech.mp3"
+                    communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
+                    await communicate.save(str(tmp_path))
+                    data = tmp_path.read_bytes() if tmp_path.exists() else b""
         if engine == "gcloud":
             try:
                 from google.cloud import texttospeech_v1 as google_texttospeech  # type: ignore
                 language = self._normalize_tts_language(body.get("language") or os.getenv("PHONE_WORKER_GOOGLE_TTS_LANGUAGE") or "pt-BR").replace("pt-br", "pt-BR")
                 voice_name = str(body.get("voice") or os.getenv("PHONE_WORKER_GOOGLE_TTS_VOICE") or "pt-BR-Standard-A").strip()
                 encoding_name = self._gcloud_audio_encoding_name(body.get("audio_encoding") or body.get("audio_format"))
-                desired_suffix = self._gcloud_audio_suffix(encoding_name)
-                if target.suffix.lower() != desired_suffix:
-                    target = target.with_suffix(desired_suffix)
+                audio_format = self._gcloud_audio_suffix(encoding_name).lstrip(".")
                 client = google_texttospeech.TextToSpeechClient()
                 voice_kwargs = {"language_code": language}
                 if voice_name and voice_name.lower().startswith(language.lower() + "-"):
@@ -1453,21 +1713,33 @@ class MusicAgent:
                         audio_config=google_texttospeech.AudioConfig(audio_encoding=getattr(google_texttospeech.AudioEncoding, encoding_name, google_texttospeech.AudioEncoding.OGG_OPUS)),
                     )
                 )
-                target.write_bytes(response.audio_content)
-                body["audio_format"] = desired_suffix.lstrip(".")
-                return "gcloud"
+                data = bytes(response.audio_content or b"")
+                body["audio_format"] = audio_format
             except Exception as exc:
                 self.log("tts_gcloud_fallback_gtts", error=f"{type(exc).__name__}: {short_text(exc, 120)}")
                 engine = "gtts"
-        try:
-            from gtts import gTTS  # type: ignore
-        except Exception as exc:
-            raise RuntimeError(f"gTTS ausente no worker: {type(exc).__name__}") from exc
-        language = self._normalize_tts_language(body.get("language"))
-        tts = gTTS(text=text, lang=language)
-        with open(target, "wb") as handle:
-            await asyncio.to_thread(tts.write_to_fp, handle)
-        return "gtts"
+                cache_key = ""
+        if engine == "gtts":
+            try:
+                from gtts import gTTS  # type: ignore
+            except Exception as exc:
+                raise RuntimeError(f"gTTS ausente no worker: {type(exc).__name__}") from exc
+            language = self._normalize_tts_language(body.get("language"))
+            audio_format = "mp3"
+
+            def _make_gtts_bytes() -> bytes:
+                buffer = io.BytesIO()
+                gTTS(text=text, lang=language).write_to_fp(buffer)
+                return buffer.getvalue()
+
+            data = await asyncio.to_thread(_make_gtts_bytes)
+        if not data:
+            raise RuntimeError("TTS não gerou áudio")
+        target.write_bytes(data)
+        body.setdefault("audio_format", audio_format)
+        if cache_key and self._tts_cache_enabled() and self._tts_cache_mode_allows_store(body):
+            self._store_tts_cache_bytes(key=cache_key, data=data, audio_format=str(body.get("audio_format") or audio_format), engine=engine)
+        return engine
 
     async def cmd_tts(self, body: dict[str, Any]) -> dict[str, Any]:
         guild_id = safe_id(body.get("guild_id"))
@@ -1556,6 +1828,12 @@ class MusicAgent:
 
             guild, channel = await self._resolve_guild_and_channel(guild_id, voice_channel_id)
             existing = guild.voice_client
+            player_cls = getattr(wavelink, "Player", None)
+            if existing is not None and player_cls is not None and isinstance(existing, player_cls):
+                # Wavelink idle/old player should not block a standalone short TTS.
+                with contextlib.suppress(Exception):
+                    await existing.disconnect(force=True)
+                existing = None
             if existing is None or not getattr(existing, "is_connected", lambda: False)():
                 self.log("voice_direct_tts_connecting", guild_id=guild_id, channel=voice_channel_id)
                 voice_client = await channel.connect(self_deaf=True)
@@ -1731,18 +2009,27 @@ class MusicAgent:
             if int(getattr(st, "playback_token", 0) or 0) != request_token or st.current is not current_ref:
                 self.log("play_start_ignored", guild_id=guild_id, reason="stale_generation")
                 return
-            if not self._should_use_direct_voice(st.current):
-                raise RuntimeError("track sem stream_url direto depois da resolução no worker")
-            await asyncio.wait_for(self._play_direct_voice(guild_id, st.current), timeout=max(5.0, self.prepare_timeout))
+            use_direct = self._should_use_direct_voice(st.current)
+            if use_direct:
+                await asyncio.wait_for(self._play_direct_voice(guild_id, st.current), timeout=max(5.0, self.prepare_timeout))
+            else:
+                await asyncio.wait_for(self._play_lavalink(guild_id, st.current), timeout=max(5.0, self.prepare_timeout))
         except Exception as exc:
             self._invalidate_track_stream_cache(st.current)
             self._set_status(st, "failed", event="play_failed", error=f"{type(exc).__name__}: {short_text(exc, 260)}")
             self.log("play_failed", guild_id=guild_id, transport=st.transport or "unknown", error=st.last_error)
 
     def _should_use_direct_voice(self, track: AgentTrack) -> bool:
-        if not self.direct_audio_enabled:
+        if not self.direct_audio_enabled or self.lavalink_for_direct_streams:
             return False
-        return bool(str(track.stream_url or "").strip())
+        stream_raw = " ".join([track.stream_url, track.transport_hint, track.source, track.query]).lower()
+        if track.stream_url and self.direct_youtube_enabled:
+            if track.transport_hint.startswith("direct") or any(marker in stream_raw for marker in ("googlevideo", "yt-dlp", "ytdlp", "music-agent-ytdlp", "worker-ytdlp", "youtube", "youtu.be", "soundcloud", "sndcdn", "cdn")):
+                return True
+        raw = " ".join([track.source, track.query, track.webpage_url, track.stream_url, track.transport_hint]).lower()
+        if raw.startswith(_LAVALINK_PREFIXES) or any(prefix in raw for prefix in ("spotify.com", "scsearch:", "spsearch:")):
+            return False
+        return False
 
     async def _resolve_guild_and_channel(self, guild_id: int, voice_channel_id: int) -> tuple[Any, Any]:
         guild = self.client.get_guild(guild_id)
@@ -1760,6 +2047,10 @@ class MusicAgent:
         guild, channel = await self._resolve_guild_and_channel(guild_id, st.voice_channel_id)
         self.log("voice_connecting", guild_id=guild_id, channel=st.voice_channel_id, transport="direct")
         existing = guild.voice_client
+        if existing is not None and isinstance(existing, getattr(wavelink, "Player", ())):
+            with contextlib.suppress(Exception):
+                await existing.disconnect()
+            existing = None
         if existing is None or not getattr(existing, "is_connected", lambda: False)():
             voice_client = await channel.connect(self_deaf=True)
         else:
@@ -1861,10 +2152,91 @@ class MusicAgent:
         await self._finish_current(guild_id, error=None, event="direct_track_end")
 
     async def _play_lavalink(self, guild_id: int, track: AgentTrack) -> None:
-        raise RuntimeError("Lavalink/NodeLink foi removido do worker; playback é direto via yt-dlp/ffmpeg.")
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        await self.ensure_lavalink_pool()
+        guild, channel = await self._resolve_guild_and_channel(guild_id, st.voice_channel_id)
+        player_cls = getattr(wavelink, "Player", None)
+        if player_cls is None:
+            raise RuntimeError("Wavelink não expõe Player")
+        existing = guild.voice_client
+        if existing is not None and not isinstance(existing, player_cls):
+            with contextlib.suppress(Exception):
+                if getattr(existing, "is_playing", lambda: False)() or getattr(existing, "is_paused", lambda: False)():
+                    existing.stop()
+                await existing.disconnect(force=True)
+            existing = None
+        self.log("voice_connecting", guild_id=guild_id, channel=st.voice_channel_id, transport="lavalink")
+        player = existing
+        if player is None or not isinstance(player, player_cls) or not getattr(player, "connected", False):
+            player = await channel.connect(cls=player_cls, self_deaf=True)
+        elif getattr(getattr(player, "channel", None), "id", None) != st.voice_channel_id:
+            await player.move_to(channel)
+        st.player = player
+        st.transport = "lavalink"
+        with contextlib.suppress(Exception):
+            maybe = player.set_volume(max(0, min(150, int(st.volume_percent or self.default_volume_percent))))
+            if asyncio.iscoroutine(maybe):
+                await maybe
+        playable = await self._playable_for_track(track)
+        self.log("player_play_called", guild_id=guild_id, transport="lavalink", title=track.title)
+        self._set_status(st, "starting", event="lavalink_player_play_called")
+        await player.play(playable)
+        await asyncio.sleep(0.25)
+        # Não marque como tocando só porque o comando foi despachado.
+        # O estado definitivo vem do evento TrackStart do Wavelink/Lavalink.
+        self._set_status(st, "starting", event="lavalink_play_dispatched")
+        self.log("play_dispatched", guild_id=guild_id, transport="lavalink", title=track.title)
+
+    async def _finish_current(self, guild_id: int, *, error: str | None, event: str) -> None:
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
+        if error:
+            self._set_status(st, "failed", event=event, error=error)
+            return
+        finished = st.current
+        st.current = None
+        st.paused = False
+        loop_mode = str(getattr(st, "loop_mode", "off") or "off").strip().lower()
+        if finished is not None and loop_mode != "one":
+            self._push_history(st, finished)
+
+        if finished is not None and loop_mode == "one":
+            finished.start_offset_seconds = 0.0
+            st.queue.insert(0, finished)
+            self.log("loop_one_requeue", guild_id=guild_id, title=getattr(finished, "title", ""))
+            await self._play_next(guild_id)
+            return
+
+        if finished is not None and loop_mode == "all":
+            finished.start_offset_seconds = 0.0
+            st.queue.append(finished)
+            self.log("loop_all_requeue", guild_id=guild_id, title=getattr(finished, "title", ""), queue_size=len(st.queue))
+
+        if st.queue:
+            await self._play_next(guild_id)
+            return
+        self._set_status(st, "idle", event=event)
+        # Fim normal de fila não é desconexão externa: mantenha a sessão de voz
+        # viva e deixe o mesmo timeout AFK/idle decidir quando sair da call.
+        self._schedule_idle_disconnect(guild_id)
 
     async def _playable_for_track(self, track: AgentTrack) -> Any:
-        raise RuntimeError("Lavalink/NodeLink foi removido do worker; playable externo não é usado.")
+        identifier = track.stream_url or track.webpage_url or track.query
+        if not identifier:
+            raise RuntimeError("track sem URL tocável")
+        self.log("track_loading", title=track.title, transport="lavalink", identifier=identifier[:80])
+        search = await wavelink.Playable.search(identifier)
+        if isinstance(search, list):
+            if not search:
+                raise RuntimeError("Lavalink não retornou playable")
+            return search[0]
+        tracks = getattr(search, "tracks", None)
+        if tracks:
+            return tracks[0]
+        if hasattr(search, "__iter__"):
+            items = list(search)
+            if items:
+                return items[0]
+        raise RuntimeError("Lavalink não retornou playable")
 
     async def resolve_track(self, query: str, *, track_meta: dict[str, Any], body: dict[str, Any]) -> AgentTrack:
         direct = str(track_meta.get("stream_url") or body.get("stream_url") or "").strip()

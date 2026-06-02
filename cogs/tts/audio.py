@@ -2316,6 +2316,8 @@ class TTSAudioMixin:
             "language": str(item.language or "pt-br"),
             "rate": str(item.rate or "+0%"),
             "pitch": str(item.pitch or "+0Hz"),
+            "cache_key": self._cache_key(item),
+            "cache_mode": "prefer",
             "timeout_seconds": max(3.0, min(WORKER_VOICE_AGENT_DIRECT_TTS_TIMEOUT_SECONDS, self._estimate_playback_timeout(item))),
             "confirm_transfer": True,
             "direct_tts": True,
@@ -2554,8 +2556,15 @@ class TTSAudioMixin:
             return None
         if not PHONE_WORKER_ENABLED or not PHONE_WORKER_HOST or not PHONE_WORKER_TOKEN:
             return None
-        # Quando o TTS Agent está ativo, a disponibilidade do worker deve vir do
-        # health loop cacheado, não de uma tentativa HTTP por frase.
+        # Quando o TTS Agent está ativo e saudável, o cache remoto é consultado
+        # dentro do próprio pedido de síntese. Evita uma ida HTTP extra
+        # cache_lookup -> miss -> synthesize antes de toda primeira fala.
+        if TTS_WORKER_AGENT_ENABLED and self._tts_agent_route_available():
+            self._record_worker_cache_lookup("skip")
+            self._log_debug(
+                f"[tts_worker_cache] lookup separado pulado; TTS Agent fará cache inline | guild={item.guild_id} engine={item.engine}"
+            )
+            return None
         if TTS_WORKER_AGENT_ENABLED and not self._tts_agent_route_available():
             self._record_worker_cache_lookup("skip")
             return None
@@ -3246,6 +3255,7 @@ class TTSAudioMixin:
             "fallback_rate": str(getattr(item, "piper_fallback_rate", "") or item.rate or "+0%"),
             "fallback_pitch": str(getattr(item, "piper_fallback_pitch", "") or item.pitch or "+0Hz"),
             "model_name": str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME),
+            "cache_key": self._cache_key(item),
             "cache_mode": "prefer",
             "timeout_seconds": TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
             "max_audio_bytes": TTS_WORKER_AGENT_MAX_AUDIO_MB * 1024 * 1024,
