@@ -2109,6 +2109,10 @@ git_add_changed_files() {
   chown ubuntu:ubuntu "$pathspec_file" 2>/dev/null || true
   chmod 0644 "$pathspec_file" 2>/dev/null || true
 
+  # O script roda como root, mas o git add roda como ubuntu.
+  # mktemp cria o pathspec como root/0600; deixe legível para o usuário do git.
+  chown ubuntu:ubuntu "$pathspec_file" 2>/dev/null || true
+  chmod 0644 "$pathspec_file" 2>/dev/null || true
   sudo -u ubuntu -H git add -A --pathspec-from-file="$pathspec_file" --pathspec-file-nul
   rc=$?
   rm -f "$pathspec_file" 2>/dev/null || true
