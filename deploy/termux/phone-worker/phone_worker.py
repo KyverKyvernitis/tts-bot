@@ -62,7 +62,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.26"
+PHONE_WORKER_VERSION = "1.10.27"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -4824,6 +4824,11 @@ class WorkerHandler(BaseHTTPRequestHandler):
         total_ms = (time.monotonic() - started) * 1000.0
         digest = hashlib.sha256(data).hexdigest()
         logs.append(f"standard-cache hit engine={engine} file={path.name} read={read_ms:.1f}ms")
+        timing_ms = {
+            "cache_read": round(read_ms, 2),
+            "worker_total": round(total_ms, 2),
+            "worker_synth": 0.0,
+        }
         return {
             "ok": True,
             "engine": engine,
@@ -4833,6 +4838,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "cache_key": key[:16],
             "cache_file": path.name,
             "cache_read_ms": round(read_ms, 2),
+            "timing_ms": timing_ms,
             "worker_profile": _current_core_worker_profile(),
             "worker_version": PHONE_WORKER_VERSION,
             "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
@@ -4870,6 +4876,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         text = str(body.get("text") or "").strip()
         if not text:
             raise ValueError("texto vazio")
+        stage_ms: dict[str, float] = {}
         cache_key = ""
         if self._tts_agent_standard_cache_enabled(roles, capabilities):
             with contextlib.suppress(Exception):
@@ -4915,7 +4922,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     )
                     audio_format = self._normalize_tts_cache_format(raw_meta.get("audio_format") or "wav")
                     android_ms = (time.monotonic() - android_started) * 1000.0
+                    stage_ms["android_roundtrip"] = round(android_ms, 2)
                     apk_ms = raw_meta.get("android_synth_ms") or ""
+                    with contextlib.suppress(Exception):
+                        stage_ms["android_synth"] = round(float(apk_ms), 2)
                     voice_used = raw_meta.get("voice") or "auto"
                     if raw_meta.get("sha256"):
                         response["sha256"] = raw_meta.get("sha256")
@@ -4938,6 +4948,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 data = _b64decode(str(response.get("data_b64") or ""), max_bytes=max_audio_bytes)
                 audio_format = self._normalize_tts_cache_format(response.get("audio_format") or "wav")
                 android_ms = (time.monotonic() - android_started) * 1000.0
+                stage_ms["android_roundtrip"] = round(android_ms, 2)
+                with contextlib.suppress(Exception):
+                    stage_ms["android_synth"] = round(float(response.get("android_synth_ms") or response.get("worker_synth_ms") or 0), 2)
                 logs.append(f"android-native json locale={android_payload['locale']} format={audio_format} apk_ms={response.get('android_synth_ms') or response.get('worker_synth_ms') or 0} roundtrip={android_ms:.1f}ms")
         elif engine == "edge":
             try:
@@ -5017,8 +5030,12 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if len(data) > max_audio_bytes:
             raise RuntimeError(f"áudio grande demais: {len(data)} bytes")
         if cache_key and self._tts_agent_cache_mode_allows_store(body):
+            store_started = time.monotonic()
             self._store_tts_agent_standard_cache(key=cache_key, data=data, audio_format=audio_format, logs=logs)
+            stage_ms["cache_store"] = round((time.monotonic() - store_started) * 1000.0, 2)
         synth_ms = (time.monotonic() - started) * 1000.0
+        stage_ms["worker_synth"] = round(synth_ms, 2)
+        stage_ms["worker_total"] = round(synth_ms, 2)
         digest = hashlib.sha256(data).hexdigest()
         return {
             "ok": True,
@@ -5027,6 +5044,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "audio_format": audio_format,
             "cache_hit": False,
             "cache_key": cache_key[:16] if cache_key else "",
+            "timing_ms": stage_ms,
             "android_synth_ms": response.get("android_synth_ms") if engine == "android_native" and isinstance(response, dict) else None,
             "android_voice": response.get("voice") if engine == "android_native" and isinstance(response, dict) else "",
             "android_locale": response.get("locale") if engine == "android_native" and isinstance(response, dict) else "",

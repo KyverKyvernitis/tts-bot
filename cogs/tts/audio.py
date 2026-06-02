@@ -1226,6 +1226,7 @@ class TTSAudioMixin:
             "tts_agent_last_audio_bytes": int(metrics.get("tts_agent_last_audio_bytes", 0) or 0),
             "tts_agent_last_cache_hit": bool(metrics.get("tts_agent_last_cache_hit")),
             "tts_agent_last_synth_ms": float(metrics.get("tts_agent_last_synth_ms", 0.0) or 0.0),
+            "tts_agent_last_timing_ms": dict(metrics.get("tts_agent_last_timing_ms") or {}),
             "tts_agent_route_worker_samples": int(metrics.get("tts_agent_route_worker_samples", 0) or 0),
             "tts_agent_route_vps_samples": int(metrics.get("tts_agent_route_vps_samples", 0) or 0),
             "worker_voice_agent": dict(metrics.get("worker_voice_agent") or self._tts_agent_route_state().get("voice_agent") or {}),
@@ -1819,10 +1820,16 @@ class TTSAudioMixin:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(f"{base}/task", headers=headers, json=request_payload) as response:
                 response_text = await response.text()
+                response_ms = (time.monotonic() - started) * 1000.0
                 if response.status < 200 or response.status >= 300:
                     raise RuntimeError(f"HTTP {response.status}: {response_text[:260]}")
+                parse_started = time.monotonic()
                 data = json.loads(response_text or "{}")
+                parse_ms = (time.monotonic() - parse_started) * 1000.0
         data["total_ms"] = round((time.monotonic() - started) * 1000.0, 2)
+        data["_vps_worker_request_ms"] = round(response_ms, 2)
+        data["_vps_worker_json_parse_ms"] = round(parse_ms, 2)
+        data["_vps_worker_response_bytes"] = len(response_text.encode("utf-8", errors="ignore"))
         data["audio_format"] = self._normalize_worker_audio_format(data.get("audio_format"))
         if raise_on_worker_error and data.get("ok") is False:
             raise RuntimeError(str(data.get("error") or "worker retornou ok=false"))
@@ -1833,7 +1840,9 @@ class TTSAudioMixin:
         out_b64 = str(data.get("data_b64") or "")
         if not out_b64:
             raise RuntimeError("worker não retornou data_b64")
+        decode_started = time.monotonic()
         raw = base64.b64decode(out_b64.encode("ascii"), validate=True)
+        decode_ms = (time.monotonic() - decode_started) * 1000.0
         if not raw:
             raise RuntimeError("worker retornou áudio vazio")
         if len(raw) > max_audio_bytes:
@@ -1845,6 +1854,7 @@ class TTSAudioMixin:
         data["raw_audio"] = raw
         data["sha256"] = actual_hash
         data["audio_format"] = self._normalize_worker_audio_format(data.get("audio_format"))
+        data["_vps_audio_decode_ms"] = round(decode_ms, 2)
         return data
 
     async def _request_phone_worker_tts_audio(self, *, task: str, payload: dict[str, Any], timeout_seconds: float, max_audio_mb: int) -> dict[str, Any]:
@@ -3210,14 +3220,14 @@ class TTSAudioMixin:
                 if worker_cached:
                     if store_in_cache:
                         cached_path = await self._store_in_cache(state, item, worker_cached)
-                        self._schedule_worker_turbo_cache_store(item, cached_path)
                         return cached_path, False
                     return worker_cached, False
 
             generated = await self._generate_audio_file(item)
             if store_in_cache:
                 cached_path = await self._store_in_cache(state, item, generated)
-                self._schedule_worker_turbo_cache_store(item, cached_path)
+                if not bool(getattr(item, "_tts_agent_inline_cache", False)):
+                    self._schedule_worker_turbo_cache_store(item, cached_path)
                 if cached_path != generated:
                     return cached_path, False
             return generated, False
@@ -3296,12 +3306,14 @@ class TTSAudioMixin:
         max_attempts = max(1, int(TTS_WORKER_AGENT_BUSY_RETRY_ATTEMPTS or 0) + 1)
         for attempt in range(max_attempts):
             try:
+                request_started = time.monotonic()
                 data = await self._request_phone_worker_tts_audio(
                     task="tts_agent_synthesize",
                     payload=self._tts_agent_payload_for_item(item),
                     timeout_seconds=TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
                     max_audio_mb=TTS_WORKER_AGENT_MAX_AUDIO_MB,
                 )
+                request_ms = (time.monotonic() - request_started) * 1000.0
                 raw = data.get("raw_audio") or data.get("audio_bytes")
                 if not isinstance(raw, (bytes, bytearray)) or not raw:
                     raise RuntimeError("TTS Agent não retornou áudio")
@@ -3316,12 +3328,34 @@ class TTSAudioMixin:
                     with open(target, "wb") as handle:
                         handle.write(content)
 
+                write_started = time.monotonic()
                 await asyncio.to_thread(_write_audio, path, bytes(raw))
+                write_ms = (time.monotonic() - write_started) * 1000.0
                 total_ms = (time.monotonic() - started) * 1000.0
                 self._record_tts_agent_synth_success(total_ms=total_ms, data=data)
                 selected_engine = str(data.get("selected_engine") or data.get("engine") or "").strip().lower()
+                worker_timing = data.get("timing_ms") if isinstance(data.get("timing_ms"), dict) else {}
+                timing_bits = [
+                    f"worker_http={float(data.get('_vps_worker_request_ms') or request_ms):.1f}ms",
+                    f"decode={float(data.get('_vps_audio_decode_ms') or 0.0):.1f}ms",
+                    f"write={write_ms:.1f}ms",
+                ]
+                if worker_timing:
+                    for key in ("cache_read", "android_roundtrip", "android_synth", "cache_store", "worker_total"):
+                        value = worker_timing.get(key)
+                        if value not in (None, ""):
+                            with contextlib.suppress(Exception):
+                                timing_bits.append(f"{key}={float(value):.1f}ms")
+                metrics["tts_agent_last_timing_ms"] = {
+                    "worker_http": round(float(data.get("_vps_worker_request_ms") or request_ms), 2),
+                    "json_parse": round(float(data.get("_vps_worker_json_parse_ms") or 0.0), 2),
+                    "decode": round(float(data.get("_vps_audio_decode_ms") or 0.0), 2),
+                    "write": round(write_ms, 2),
+                    "total": round(total_ms, 2),
+                    **{str(k): v for k, v in worker_timing.items()},
+                }
                 logger.info(
-                    "[tts_agent] synth ok | guild=%s route=worker requested=%s selected=%s format=%s bytes=%s cache_hit=%s total=%.1fms",
+                    "[tts_agent] synth ok | guild=%s route=worker requested=%s selected=%s format=%s bytes=%s cache_hit=%s total=%.1fms stages=%s",
                     item.guild_id,
                     item.engine,
                     selected_engine or "unknown",
@@ -3329,7 +3363,10 @@ class TTSAudioMixin:
                     len(raw),
                     bool(data.get("cache_hit")),
                     total_ms,
+                    " ".join(timing_bits),
                 )
+                if bool(data.get("cache_hit")) or worker_timing:
+                    setattr(item, "_tts_agent_inline_cache", True)
                 return path
             except Exception as exc:
                 last_error = exc
