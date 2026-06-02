@@ -31,6 +31,30 @@ _core_worker_pending_automation_processes = {}
 _core_worker_pending_automation_last_started = {}
 _core_worker_pending_automation_last_log = {}
 
+# Cache local para telemetria do APK/Core Worker. A VPS pequena não deve
+# reler/regravar JSONs de MB a cada heartbeat/fetch; o cache é invalidado por
+# mtime/tamanho e atualizado em toda escrita atômica.
+_json_file_cache_lock = threading.RLock()
+_json_file_cache: dict[str, dict] = {}
+_core_worker_app_fetch_throttle_lock = threading.RLock()
+_core_worker_app_fetch_last_served: dict[str, float] = {}
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0, maximum: int = 1_000_000) -> int:
+    try:
+        raw = int(os.getenv(name, str(default)) or default)
+    except Exception:
+        raw = default
+    return max(minimum, min(raw, maximum))
+
+
+CORE_WORKER_APP_HEARTBEAT_EVENT_LIMIT = _env_int("CORE_WORKER_APP_HEARTBEAT_EVENT_LIMIT", 60, minimum=20, maximum=240)
+CORE_WORKER_APP_NOTIFICATION_EVENT_LIMIT = _env_int("CORE_WORKER_APP_NOTIFICATION_EVENT_LIMIT", 60, minimum=20, maximum=200)
+CORE_WORKER_APP_PENDING_LIMIT = _env_int("CORE_WORKER_APP_PENDING_LIMIT", 80, minimum=20, maximum=200)
+CORE_WORKER_APP_FETCH_THROTTLE_SECONDS = _env_int("CORE_WORKER_APP_FETCH_THROTTLE_SECONDS", 12, minimum=0, maximum=120)
+CORE_WORKER_APP_FETCH_THROTTLE_WHEN_IDLE_SECONDS = _env_int("CORE_WORKER_APP_FETCH_THROTTLE_WHEN_IDLE_SECONDS", 25, minimum=0, maximum=180)
+CORE_WORKER_APP_HEARTBEAT_STORE_MIN_SECONDS = _env_int("CORE_WORKER_APP_HEARTBEAT_STORE_MIN_SECONDS", 10, minimum=0, maximum=90)
+
 
 def _core_worker_apk_dir() -> str:
     """Diretório local usado para publicar atualizações privadas do Core Worker APK.
@@ -215,25 +239,56 @@ def _apk_v1_capabilities(record: dict | None = None) -> list[str]:
     return list(CORE_WORKER_APK_V1_CAPABILITIES) if _looks_like_core_worker_apk_v1(record or {"source": "core-worker-apk"}) else []
 
 
-def _atomic_write_json(path: str, data: dict, *, mode: int = 0o600) -> None:
-    """Grava JSON de forma atômica e segura, com tmp único por chamada.
+def _load_json_cached(path: str, default=None):
+    """Carrega JSON com cache por mtime/tamanho para evitar I/O síncrono repetido."""
+    if default is None:
+        default = {}
+    path = os.path.abspath(path)
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return default.copy() if isinstance(default, dict) else default
+    except Exception:
+        return default.copy() if isinstance(default, dict) else default
+    cache_key = path
+    with _json_file_cache_lock:
+        cached = _json_file_cache.get(cache_key)
+        if cached and cached.get("mtime_ns") == stat.st_mtime_ns and cached.get("size") == stat.st_size:
+            return cached.get("data")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        data = default.copy() if isinstance(default, dict) else default
+    with _json_file_cache_lock:
+        _json_file_cache[cache_key] = {"mtime_ns": stat.st_mtime_ns, "size": stat.st_size, "data": data, "loadedAt": time.time()}
+    return data
 
-    O Patch 51 usava sempre o mesmo ``.tmp``. Quando o APK reportava vários
-    eventos ao mesmo tempo, uma requisição podia renomear o tmp da outra e o
-    endpoint /core-worker/app/notification caía com FileNotFoundError.
+
+def _atomic_write_json(path: str, data: dict, *, mode: int = 0o600) -> None:
+    """Grava JSON de forma atômica e barata para a VPS.
+
+    O caminho anterior usava indentação, sort_keys e fsync em toda escrita. Em
+    heartbeat/jobs do APK isso bloqueava o processo do bot por segundos quando
+    havia rajada. Agora o arquivo é compacto e o fsync fica opt-in via env.
     """
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
     tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=2, sort_keys=True)
+            json.dump(data, fh, ensure_ascii=False, separators=(",", ":"))
             fh.flush()
-            with contextlib.suppress(Exception):
-                os.fsync(fh.fileno())
+            if str(os.getenv("CORE_WORKER_JSON_FSYNC", "0")).lower() in {"1", "true", "yes", "on"}:
+                with contextlib.suppress(Exception):
+                    os.fsync(fh.fileno())
         os.replace(tmp, path)
         with contextlib.suppress(Exception):
             os.chmod(path, mode)
+        with contextlib.suppress(Exception):
+            stat = os.stat(path)
+            with _json_file_cache_lock:
+                _json_file_cache[os.path.abspath(path)] = {"mtime_ns": stat.st_mtime_ns, "size": stat.st_size, "data": data, "loadedAt": time.time()}
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)
@@ -271,14 +326,14 @@ def _append_core_worker_notification_event(event: dict) -> dict:
     }
     with _core_worker_notification_lock:
         try:
-            data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+            data = _load_json_cached(path, {})
         except Exception:
             data = {}
         if not isinstance(data, dict):
             data = {}
         events = data.get("events") if isinstance(data.get("events"), list) else []
         events.append(clean)
-        events = events[-120:]
+        events = events[-CORE_WORKER_APP_NOTIFICATION_EVENT_LIMIT:]
         latest_by_id = data.get("latestById") if isinstance(data.get("latestById"), dict) else {}
         nid = clean.get("notificationId") or "unknown"
         latest_by_id[nid] = clean
@@ -289,7 +344,7 @@ def _append_core_worker_notification_event(event: dict) -> dict:
 def _latest_core_worker_notification_summary(notification_id: str) -> dict:
     path = _core_worker_notification_log_path()
     try:
-        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+        data = _load_json_cached(path, {})
     except Exception:
         data = {}
     latest = data.get("latestById") if isinstance(data, dict) and isinstance(data.get("latestById"), dict) else {}
@@ -328,7 +383,7 @@ def _fcm_unregistered_public_error() -> str:
 def _load_core_worker_fcm_tokens() -> dict:
     path = _core_worker_fcm_tokens_path()
     try:
-        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+        data = _load_json_cached(path, {})
     except Exception:
         data = {}
     if not isinstance(data, dict):
@@ -442,7 +497,7 @@ def _active_core_worker_fcm_records(*, max_age_days: int = 45) -> list[dict]:
 def _core_worker_app_latest_runtime_records() -> list[dict]:
     path = _core_worker_app_heartbeats_path()
     try:
-        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+        data = _load_json_cached(path, {})
     except Exception:
         data = {}
     if not isinstance(data, dict):
@@ -647,7 +702,14 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
             record["appJobs"] = list(record["supported_tasks"])
         if not record.get("capabilities"):
             record["capabilities"] = _apk_v1_capabilities(record)
-        job_core_linux = _core_worker_app_latest_core_linux_state(worker_id=worker_id, install_id=install_id)
+        needs_core_fallback = (
+            not isinstance(record.get("coreLinux"), dict)
+            or not record.get("coreLinux")
+            or not record.get("coreLinuxSummary")
+            or not record.get("coreLinuxState")
+            or not record.get("coreLinuxPrepared")
+        )
+        job_core_linux = _core_worker_app_latest_core_linux_state(worker_id=worker_id, install_id=install_id) if needs_core_fallback else {}
         if (not record.get("coreLinux") or not isinstance(record.get("coreLinux"), dict) or not record.get("coreLinux")) and isinstance(job_core_linux.get("coreLinux"), dict):
             record["coreLinux"] = job_core_linux.get("coreLinux")
         if not record.get("coreLinuxSummary") and job_core_linux.get("coreLinuxSummary"):
@@ -660,7 +722,7 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
     key = install_id or worker_id or "unknown"
     with _core_worker_app_heartbeat_lock:
         try:
-            data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+            data = _load_json_cached(path, {})
         except Exception:
             data = {}
         if not isinstance(data, dict):
@@ -672,11 +734,18 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
         if not isinstance(previous, dict) and worker_id:
             previous = latest_by_worker.get(worker_id)
         record = _merge_core_worker_app_heartbeat_record(record, previous)
+        if isinstance(previous, dict) and CORE_WORKER_APP_HEARTBEAT_STORE_MIN_SECONDS > 0:
+            prev_seen = int(previous.get("receivedAt") or 0)
+            reason_lower = str(record.get("reason") or "").lower()
+            source_same = str(previous.get("source") or "") == str(record.get("source") or "")
+            manual_or_start = any(token in reason_lower for token in ("manual", "start", "opened", "ready", "install"))
+            if source_same and prev_seen and now - prev_seen < CORE_WORKER_APP_HEARTBEAT_STORE_MIN_SECONDS and not manual_or_start:
+                return previous
         latest_by_install[key] = record
         if worker_id:
             latest_by_worker[worker_id] = record
         events.append(record)
-        events = events[-160:]
+        events = events[-CORE_WORKER_APP_HEARTBEAT_EVENT_LIMIT:]
         data = {"ok": True, "updatedAt": now, "latestByInstallId": latest_by_install, "latestByWorkerId": latest_by_worker, "events": events}
         _atomic_write_json(path, data, mode=0o600)
     return record
@@ -728,7 +797,7 @@ def _merge_core_worker_app_heartbeat_record(record: dict, previous: dict | None)
 def _core_worker_app_latest_core_linux_state(worker_id: str = "", install_id: str = "") -> dict:
     path = _core_worker_app_jobs_path()
     try:
-        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+        data = _load_json_cached(path, {})
     except Exception:
         data = {}
     if not isinstance(data, dict):
@@ -775,7 +844,7 @@ def _core_worker_app_latest_core_linux_state(worker_id: str = "", install_id: st
 def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str = "") -> dict:
     path = _core_worker_app_heartbeats_path()
     try:
-        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+        data = _load_json_cached(path, {})
     except Exception:
         data = {}
     if not isinstance(data, dict):
@@ -813,9 +882,13 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
     if core_linux and not core_linux.get("prepared") and core_linux_prepared:
         core_linux = dict(core_linux)
         core_linux["prepared"] = True
+    jobs_runtime = _safe_short_text(record.get("jobsRuntime"), 40)
+    if "bedrock-installe" in jobs_runtime:
+        jobs_runtime = "apk-native-runtime"
     return {
         "online": online,
         "lastSeenAt": seen,
+        "source": _safe_short_text(record.get("source"), 64),
         "ageSeconds": max(0, int(time.time()) - seen) if seen else 0,
         "workerId": effective_worker_id,
         "installId": effective_install_id,
@@ -829,7 +902,7 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
         "internalRuntime": _safe_short_text(record.get("internalRuntime"), 48),
         "internalRuntimeState": _safe_short_text(record.get("internalRuntimeState"), 120),
         "termuxWorkerOnline": bool(record.get("termuxWorkerOnline")),
-        "jobsRuntime": _safe_short_text(record.get("jobsRuntime"), 40),
+        "jobsRuntime": jobs_runtime,
         "fcmState": _safe_short_text(record.get("fcmState"), 80),
         "batteryPercent": int(record.get("batteryPercent") or -1),
         "batteryTemperatureC": float(record.get("batteryTemperatureC") or -1),
@@ -1108,10 +1181,10 @@ def _core_worker_app_job_class(job_type: object) -> str:
     return "unknown"
 
 
-CORE_WORKER_APP_JOB_MAX_DELIVER = 6
+CORE_WORKER_APP_JOB_MAX_DELIVER = _env_int("CORE_WORKER_APP_JOB_MAX_DELIVER", 2, minimum=1, maximum=6)
 CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS = 45
 CORE_WORKER_APP_JOB_DEFAULT_MAX_RETRIES = 1
-CORE_WORKER_APP_JOB_RESULT_LIMIT = 300
+CORE_WORKER_APP_JOB_RESULT_LIMIT = _env_int("CORE_WORKER_APP_JOB_RESULT_LIMIT", 120, minimum=40, maximum=300)
 
 
 def _core_worker_app_safe_job_payload(job: dict) -> dict:
@@ -1298,7 +1371,7 @@ def _core_worker_app_queue_internal_jobs_for_worker(worker_id: str = "", install
     path = _core_worker_app_jobs_path()
     with _core_worker_app_jobs_lock:
         try:
-            data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+            data = _load_json_cached(path, {})
         except Exception:
             data = {}
         if not isinstance(data, dict):
@@ -1360,7 +1433,7 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
     path = _core_worker_app_jobs_path()
     with _core_worker_app_jobs_lock:
         try:
-            data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+            data = _load_json_cached(path, {})
         except Exception:
             data = {}
         if not isinstance(data, dict):
@@ -1372,6 +1445,29 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
         stats = data.get("statsByInstallId") if isinstance(data.get("statsByInstallId"), dict) else {}
         last_fetch = data.get("lastFetchByInstallId") if isinstance(data.get("lastFetchByInstallId"), dict) else {}
         auto_ping = data.get("lastAutoPingByInstallId") if isinstance(data.get("lastAutoPingByInstallId"), dict) else {}
+
+        reason_lower = str(payload.get("reason") or "").lower()
+        force_fetch = bool(payload.get("force")) or "manual" in reason_lower or "smoke" in reason_lower
+        matching_pending_exists = any(isinstance(item, dict) and _core_worker_app_job_matches(item, install_id, worker_id) for item in pending)
+        throttle_seconds = CORE_WORKER_APP_FETCH_THROTTLE_SECONDS
+        if not matching_pending_exists and not running:
+            throttle_seconds = max(throttle_seconds, CORE_WORKER_APP_FETCH_THROTTLE_WHEN_IDLE_SECONDS)
+        if not force_fetch and throttle_seconds > 0:
+            with _core_worker_app_fetch_throttle_lock:
+                last_served = float(_core_worker_app_fetch_last_served.get(key) or 0.0)
+                elapsed = time.time() - last_served if last_served else 999999.0
+                if elapsed < throttle_seconds and not matching_pending_exists:
+                    return {
+                        "ok": True,
+                        "jobs": [],
+                        "count": 0,
+                        "throttled": True,
+                        "retryAfterSeconds": max(1, int(throttle_seconds - elapsed)),
+                        "jobsRuntime": "apk-safe-internal-queue",
+                        "queue": {"pending": len(pending), "running": len(running)},
+                        "supported": sorted(CORE_WORKER_APP_SAFE_JOB_TYPES),
+                    }
+                _core_worker_app_fetch_last_served[key] = time.time()
 
         # Recoloca jobs expirados na fila, com retry limitado. Se estourar, registra timeout claro.
         refreshed_running: dict = {}
@@ -1484,7 +1580,7 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
         queue_stats["running"] = len(running)
         stats[key] = queue_stats
         last_fetch[key] = {"at": now, "installId": install_id, "workerId": worker_id, "appVersion": _safe_short_text(payload.get("appVersion") or payload.get("app_version"), 48), "jobsReturned": len(deliver), "pending": len(remaining), "running": len(running)}
-        data["pending"] = remaining[-120:]
+        data["pending"] = remaining[-CORE_WORKER_APP_PENDING_LIMIT:]
         data["runningByJobId"] = running
         data["results"] = results[-CORE_WORKER_APP_JOB_RESULT_LIMIT:]
         data["historyByInstallId"] = history
@@ -1513,7 +1609,7 @@ def _core_worker_app_jobs_result(payload: dict) -> dict:
     path = _core_worker_app_jobs_path()
     with _core_worker_app_jobs_lock:
         try:
-            data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+            data = _load_json_cached(path, {})
         except Exception:
             data = {}
         if not isinstance(data, dict):
@@ -1556,7 +1652,7 @@ def _core_worker_app_jobs_result(payload: dict) -> dict:
 def _core_worker_app_jobs_public_summary(worker_id: str = "", install_id: str = "") -> dict:
     path = _core_worker_app_jobs_path()
     try:
-        data = json.loads(open(path, "r", encoding="utf-8").read()) if os.path.isfile(path) else {}
+        data = _load_json_cached(path, {})
     except Exception:
         data = {}
     if not isinstance(data, dict):

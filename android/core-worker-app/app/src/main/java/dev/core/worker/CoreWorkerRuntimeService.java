@@ -38,8 +38,8 @@ public class CoreWorkerRuntimeService extends Service {
     private static final String PREFS = "core_worker_private";
     private static final String CHANNEL_ID = "core_worker_runtime";
     private static final int NOTIFICATION_ID = 4107;
-    private static final long TICK_MS = 60L * 1000L;
-    private static final long HEARTBEAT_MIN_MS = 25L * 1000L;
+    private static final long TICK_MS = 120L * 1000L;
+    private static final long HEARTBEAT_MIN_MS = 60L * 1000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean running = false;
@@ -213,7 +213,7 @@ public class CoreWorkerRuntimeService extends Service {
         if (heartbeatRunning.get()) {
             return;
         }
-        if (lastHeartbeatStartedAt > 0L && now - lastHeartbeatStartedAt < HEARTBEAT_MIN_MS && !safeReason.contains("start")) {
+        if (lastHeartbeatStartedAt > 0L && now - lastHeartbeatStartedAt < HEARTBEAT_MIN_MS && !safeReason.contains("manual")) {
             return;
         }
         lastHeartbeatStartedAt = now;

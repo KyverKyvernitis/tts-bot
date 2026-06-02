@@ -1,37 +1,52 @@
-# patch-core-linux-heartbeat-source-unification-20260602
+# patch-vps-core-worker-backpressure-json-io-20260602
 
-Base: `repo-20260602-184425.zip`
+Base: `repo-20260602-191433.zip`
 
 ## Objetivo
 
-Corrigir o estado cego do Core Linux quando o heartbeat mais recente vem do `CoreWorkerRuntimeService`/foreground service. O Core Linux v1 já passava no smoke test sem Termux, mas o foreground service publicava `supported_tasks`, `supportedTasks`, `capabilities` e `coreLinux*` vazios, fazendo a VPS/painel enxergarem o runtime como incompleto.
+Reduzir travamentos da VPS durante rajadas do APK/Core Worker antes de avançar para rootfs real. O Core Linux Runtime v1 já estava funcional; este patch estabiliza o caminho de telemetria/jobs para evitar `event loop atrasado`, `heartbeat blocked` e filas Waitress causadas por I/O JSON síncrono repetitivo.
 
-## Mudanças
+## Alterações principais
 
-- Bump do APK para `0.5.57` / `versionCode 72`.
-- `CoreWorkerRuntimeService` agora monta heartbeat rico com:
-  - `supported_tasks`, `supportedTasks` e `app_jobs`;
-  - `capabilities`;
-  - `runtime` com estado do foreground service;
-  - `coreLinux` lido dos snapshots persistidos em `files/core-linux/runtime`;
-  - `nativeRuntime` lido do snapshot do executor nativo.
-- `CoreWorkerRuntimeService` agora limita heartbeats concorrentes e aplica debounce leve para reduzir rajadas.
-- `webserver.py` agora tem fallback canônico para APK Core Linux v1 quando um heartbeat chega incompleto.
-- `webserver.py` preserva/mescla último estado Core Linux válido no heartbeat mais recente.
-- `/core-worker/app/runtime-summary` agora pode enriquecer o resumo usando o último resultado Core Linux válido dos jobs internos, evitando `Core Linux vazio` quando o heartbeat foreground-service for incompleto.
-- `MainActivity.safeStartupTask` parou de logar `start/ok` de todas as tarefas rápidas; agora loga falhas, tarefas lentas e alguns fluxos úteis, reduzindo spam de `safeStartupTask`.
+- `webserver.py`
+  - adiciona cache local por mtime/tamanho para JSONs de telemetria do APK;
+  - grava JSON compacto, sem `indent/sort_keys` e sem `fsync` obrigatório;
+  - mantém `fsync` opt-in via `CORE_WORKER_JSON_FSYNC=1`;
+  - reduz limites padrão de histórico:
+    - heartbeats: 60 eventos;
+    - notifications: 60 eventos;
+    - jobs results: 120 resultados;
+    - pending jobs: 80;
+  - reduz `CORE_WORKER_APP_JOB_MAX_DELIVER` padrão de 6 para 2;
+  - adiciona throttle em `/core-worker/app/jobs/fetch` para evitar rajadas vazias;
+  - evita consultar o histórico de jobs em todo heartbeat quando o APK já envia estado Core Linux completo;
+  - evita armazenar heartbeats repetidos do mesmo source em janela curta;
+  - expõe `source` no runtime-summary;
+  - normaliza `jobsRuntime` legado com `bedrock-installe` para texto neutro `apk-native-runtime` no summary.
 
-## Mantido bloqueado
+- `CoreWorkerRuntimeService.java`
+  - heartbeat foreground passa de 25s mínimo para 60s;
+  - tick do serviço persistente passa de 60s para 120s;
+  - start repetido do foreground service não fura mais o debounce, exceto ação manual.
 
-- Bedrock real não inicia.
-- Box64 real não inicia.
-- Shell livre remoto continua bloqueado.
-- Termux continua apenas como fallback legado; não foi removido neste patch.
-- CallKeeper não foi tocado.
+- `MainActivity.java`
+  - debounce de `onResume` passa de 15s para 60s;
+  - fetch de jobs internos não manual recebe debounce local de 25s;
+  - APK trata resposta `throttled` da VPS sem considerar falha.
+
+- APK bump: `0.5.58` / `versionCode 73`.
+
+## Segurança/escopo
+
+- Não toca CallKeeper.
+- Não inicia Bedrock real.
+- Não adiciona rootfs real ainda.
+- Não libera shell livre.
+- Não remove Termux de uma vez; Termux continua fallback legado enquanto a migração prossegue.
 
 ## Validação local
 
 - `python3 -m py_compile webserver.py utility/commands/workers.py`
-- Checagem simples de balanceamento de chaves/parênteses nos arquivos Java alterados.
+- checagem simples de balanceamento de chaves/parênteses Java em `MainActivity.java` e `CoreWorkerRuntimeService.java`.
 
-O build Android real deve continuar sendo feito pelo phone worker/builder.
+Build Android real não foi executado aqui porque continua sendo feito pelo phone worker/builder.

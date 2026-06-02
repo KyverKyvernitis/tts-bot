@@ -217,7 +217,7 @@ public class MainActivity extends Activity {
     private final AtomicBoolean internalRuntimeHeartbeatRunning = new AtomicBoolean(false);
     private final AtomicBoolean nativeWorkerHeartbeatRunning = new AtomicBoolean(false);
     private final AtomicBoolean internalLightJobsFetchRunning = new AtomicBoolean(false);
-    private static final long ACTIVITY_RESUME_SYNC_DEBOUNCE_MS = 15_000L;
+    private static final long ACTIVITY_RESUME_SYNC_DEBOUNCE_MS = 60_000L;
     private volatile long activityResumeSyncLastAt = 0L;
     private volatile boolean activityDestroyed = false;
 
@@ -252,6 +252,7 @@ public class MainActivity extends Activity {
     private volatile long appStatusLastSentAt = 0L;
     private volatile String internalLightJobsState = "aguardando primeira verificação";
     private volatile long internalLightJobsLastCheckAt = 0L;
+    private volatile long internalLightJobsLastFetchStartedAt = 0L;
     private volatile int internalLightJobsLastCount = 0;
     private volatile String internalLightJobsLastSummary = "nenhum job executado ainda";
     private volatile int internalLightJobsRunningCount = 0;
@@ -4469,11 +4470,20 @@ public class MainActivity extends Activity {
             updateSystemChecklistText();
             return;
         }
+        long now = System.currentTimeMillis();
+        long minInterval = showResult ? 0L : 25_000L;
+        if (minInterval > 0L && internalLightJobsLastFetchStartedAt > 0L && now - internalLightJobsLastFetchStartedAt < minInterval) {
+            internalLightJobsState = "sincronização recente";
+            internalLightJobsLastSummary = "aguardando próximo lote";
+            updateSystemChecklistText();
+            return;
+        }
         if (!internalLightJobsFetchRunning.compareAndSet(false, true)) {
             internalLightJobsState = "sincronização já em andamento";
             updateSystemChecklistText();
             return;
         }
+        internalLightJobsLastFetchStartedAt = now;
         new Thread(() -> {
             try {
                 JSONObject payload = statusSnapshot();
@@ -4494,6 +4504,19 @@ public class MainActivity extends Activity {
                     return;
                 }
                 JSONObject body = new JSONObject(response.body);
+                if (body.optBoolean("throttled", false)) {
+                    int retryAfter = Math.max(1, body.optInt("retryAfterSeconds", 10));
+                    internalLightJobsState = "fila em cooldown";
+                    internalLightJobsLastSummary = "VPS pediu nova checagem em " + retryAfter + "s";
+                    JSONObject queue = body.optJSONObject("queue");
+                    if (queue != null) {
+                        internalLightJobsPendingCount = queue.optInt("pending", 0);
+                        internalLightJobsRunningCount = queue.optInt("running", 0);
+                        internalLightJobsQueueSummary = internalLightJobsRunningCount + " rodando · " + internalLightJobsPendingCount + " pendentes";
+                    }
+                    updateSystemChecklistText();
+                    return;
+                }
                 JSONArray jobs = body.optJSONArray("jobs");
                 int count = jobs == null ? 0 : jobs.length();
                 internalLightJobsLastCount = count;
