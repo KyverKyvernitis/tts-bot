@@ -2102,6 +2102,13 @@ git_add_changed_files() {
     return 0
   fi
 
+  # mktemp roda no usuário do updater (normalmente root). O git add roda como
+  # ubuntu; se o arquivo temporário ficar 0600/root, o Git não consegue ler a
+  # lista e falha com: could not open /tmp/tts-bot-git-pathspec.* Permission denied.
+  # Deixe o pathspec legível antes de entregar para o git executado como ubuntu.
+  chown ubuntu:ubuntu "$pathspec_file" 2>/dev/null || true
+  chmod 0644 "$pathspec_file" 2>/dev/null || true
+
   sudo -u ubuntu -H git add -A --pathspec-from-file="$pathspec_file" --pathspec-file-nul
   rc=$?
   rm -f "$pathspec_file" 2>/dev/null || true
