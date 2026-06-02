@@ -10,7 +10,15 @@ LOG_TAG="tts-bot-updater"
 DIRTY_MARKER_FILE="$REPO_DIR/.fatal-update-dirty"
 LOCAL_CHANGES_MARKER_FILE="$REPO_DIR/.fatal-update-local-changes"
 CANDIDATE_ROOT="${DISCORD_AUTO_UPDATE_STAGING_DIR:-$(dirname "$REPO_DIR")/bot-update-staging}/candidates"
+# Formato antigo: um único pending.json. Mantemos leitura por compatibilidade,
+# mas novos ZIPs entram em queue/pending/*.json para não sobrescrever candidatos.
 CANDIDATE_PENDING_FILE="$CANDIDATE_ROOT/pending.json"
+CANDIDATE_QUEUE_ROOT="${DISCORD_AUTO_UPDATE_QUEUE_DIR:-$CANDIDATE_ROOT/queue}"
+CANDIDATE_QUEUE_PENDING_DIR="$CANDIDATE_QUEUE_ROOT/pending"
+CANDIDATE_QUEUE_ACTIVE_DIR="$CANDIDATE_QUEUE_ROOT/active"
+CANDIDATE_QUEUE_DONE_DIR="$CANDIDATE_QUEUE_ROOT/done"
+CANDIDATE_QUEUE_FAILED_DIR="$CANDIDATE_QUEUE_ROOT/failed"
+UPDATER_LOCK_FILE="${DISCORD_AUTO_UPDATE_LOCK_FILE:-/run/lock/tts-bot-updater.lock}"
 REMOTE_REJECTED_FILE="${DISCORD_AUTO_UPDATE_REJECTED_REMOTE_FILE:-$REPO_DIR/data/updater/rejected_remote_commits.json}"
 ROLLBACK_REQUEST_DEFAULT_ROOT="$CANDIDATE_ROOT/rollback"
 ROLLBACK_REQUEST_DATA_ROOT="${DISCORD_AUTO_UPDATE_ROLLBACK_REQUEST_DIR:-$REPO_DIR/data/runtime/update-rollback}"
@@ -33,6 +41,13 @@ if [[ "${TTS_BOT_UPDATER_RUNNING_COPY:-0}" != "1" ]]; then
   exec /usr/bin/env bash "$UPDATER_RUNTIME_COPY" "$@"
 fi
 UPDATER_RUNTIME_COPY="${TTS_BOT_UPDATER_RUNTIME_COPY:-}"
+
+mkdir -p "$(dirname "$UPDATER_LOCK_FILE")" 2>/dev/null || true
+exec 9>"$UPDATER_LOCK_FILE"
+if ! flock -n 9; then
+  logger -t "$LOG_TAG" "updater já está em execução; mantendo fila para o próximo ciclo" 2>/dev/null || true
+  exit 0
+fi
 
 FRONT_DIR="$REPO_DIR/activity /sinuca"
 BACK_DIR="$REPO_DIR/activity /sinuca-server"
@@ -59,6 +74,8 @@ LOCAL_CANDIDATE_COMMIT_MESSAGE=""
 LOCAL_CANDIDATE_ZIP_NAME=""
 LOCAL_CANDIDATE_PENDING_FILE=""
 LOCAL_CANDIDATE_FILES_DIR=""
+LOCAL_CANDIDATE_PATCH_FILE=""
+LOCAL_CANDIDATE_USE_PATCH=0
 LOCAL_CANDIDATE_PUBLISHED=0
 REMOTE_CANDIDATE_MODE=0
 REMOTE_STATUS_CHANNEL_ID=""
@@ -1071,32 +1088,65 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 }
 
 load_pending_local_candidate() {
-  local manifest active_file
+  local manifest active_file pending_file legacy_active legacy_pending active_payload
   LOCAL_CANDIDATE_PENDING_FILE=""
   LOCAL_CANDIDATE_DIR=""
 
-  if [[ -f "$CANDIDATE_PENDING_FILE" ]]; then
-    LOCAL_CANDIDATE_PENDING_FILE="$CANDIDATE_PENDING_FILE"
-    LOCAL_CANDIDATE_DIR="$(json_field_from_file "$CANDIDATE_PENDING_FILE" candidate_dir 2>/dev/null || true)"
-    if [[ -z "${LOCAL_CANDIDATE_DIR//[[:space:]]/}" || ! -d "$LOCAL_CANDIDATE_DIR" ]]; then
-      rm -f "$CANDIDATE_PENDING_FILE" 2>/dev/null || true
-      return 1
-    fi
-    # O pending é consumido logo no início. Assim, um ZIP novo pode criar outro
-    # pending sem risco do updater antigo apagar a fila nova ao arquivar o candidato.
-    LOCAL_CANDIDATE_PENDING_FILE="$LOCAL_CANDIDATE_DIR/active.json"
-    mv "$CANDIDATE_PENDING_FILE" "$LOCAL_CANDIDATE_PENDING_FILE" 2>/dev/null || true
-  else
-    # Recuperação: se o updater anterior caiu depois de mover pending.json para
-    # active.json, o timer não pode fingir "Sem mudanças em main". Ele precisa
-    # retomar ou reverter o candidato ativo.
-    active_file="$(find "$CANDIDATE_ROOT" -mindepth 2 -maxdepth 2 -type f -name active.json 2>/dev/null | sort | head -n 1 || true)"
-    if [[ -z "${active_file//[[:space:]]/}" ]]; then
-      return 1
-    fi
+  mkdir -p "$CANDIDATE_QUEUE_PENDING_DIR" "$CANDIDATE_QUEUE_ACTIVE_DIR" "$CANDIDATE_QUEUE_DONE_DIR" "$CANDIDATE_QUEUE_FAILED_DIR" 2>/dev/null || true
+  chown -R ubuntu:ubuntu "$CANDIDATE_QUEUE_ROOT" 2>/dev/null || true
+  chmod 0775 "$CANDIDATE_QUEUE_ROOT" "$CANDIDATE_QUEUE_PENDING_DIR" "$CANDIDATE_QUEUE_ACTIVE_DIR" "$CANDIDATE_QUEUE_DONE_DIR" "$CANDIDATE_QUEUE_FAILED_DIR" 2>/dev/null || true
+
+  # Recuperação primeiro: se uma execução caiu com item ativo, retome esse item
+  # antes de pegar outro pending. Isso evita aplicar fora de ordem.
+  active_file="$(find "$CANDIDATE_QUEUE_ACTIVE_DIR" -maxdepth 1 -type f -name '*.json' 2>/dev/null | sort | head -n 1 || true)"
+  if [[ -n "${active_file//[[:space:]]/}" ]]; then
     LOCAL_CANDIDATE_PENDING_FILE="$active_file"
-    LOCAL_CANDIDATE_DIR="$(dirname "$active_file")"
-    logger -t "$LOG_TAG" "Retomando candidato local ativo: $(basename "$LOCAL_CANDIDATE_DIR")"
+    LOCAL_CANDIDATE_DIR="$(json_field_from_file "$active_file" candidate_dir 2>/dev/null || true)"
+    if [[ -z "${LOCAL_CANDIDATE_DIR//[[:space:]]/}" || ! -d "$LOCAL_CANDIDATE_DIR" ]]; then
+      mv "$active_file" "$CANDIDATE_QUEUE_FAILED_DIR/$(basename "$active_file").missing.$(date +%Y%m%d%H%M%S)" 2>/dev/null || rm -f "$active_file" 2>/dev/null || true
+      LOCAL_CANDIDATE_PENDING_FILE=""
+      LOCAL_CANDIDATE_DIR=""
+      return 1
+    fi
+    logger -t "$LOG_TAG" "Retomando item ativo do queue: $(basename "$active_file")"
+  else
+    # Compatibilidade com o formato antigo candidates/*/active.json.
+    legacy_active="$(find "$CANDIDATE_ROOT" -mindepth 2 -maxdepth 2 -type f -name active.json 2>/dev/null | grep -v '/queue/' | sort | head -n 1 || true)"
+    if [[ -n "${legacy_active//[[:space:]]/}" ]]; then
+      LOCAL_CANDIDATE_PENDING_FILE="$legacy_active"
+      LOCAL_CANDIDATE_DIR="$(dirname "$legacy_active")"
+      logger -t "$LOG_TAG" "Retomando candidato local ativo legado: $(basename "$LOCAL_CANDIDATE_DIR")"
+    else
+      pending_file="$(find "$CANDIDATE_QUEUE_PENDING_DIR" -maxdepth 1 -type f -name '*.json' 2>/dev/null | sort | head -n 1 || true)"
+
+      # Migração/compatibilidade: se o bot antigo ainda criou candidates/pending.json,
+      # trate como um item de fila sem sobrescrever os novos pendentes.
+      if [[ -z "${pending_file//[[:space:]]/}" && -f "$CANDIDATE_PENDING_FILE" ]]; then
+        legacy_pending="$CANDIDATE_QUEUE_PENDING_DIR/legacy-$(date +%Y%m%d%H%M%S)-$(basename "$CANDIDATE_PENDING_FILE")"
+        mv "$CANDIDATE_PENDING_FILE" "$legacy_pending" 2>/dev/null || true
+        pending_file="$legacy_pending"
+      fi
+
+      if [[ -z "${pending_file//[[:space:]]/}" ]]; then
+        return 1
+      fi
+
+      active_payload="$CANDIDATE_QUEUE_ACTIVE_DIR/$(basename "$pending_file")"
+      if ! mv "$pending_file" "$active_payload" 2>/dev/null; then
+        # Outro processo pode ter pego no mesmo instante. O flock torna isso raro,
+        # mas falhar limpo evita duplicar aplicação.
+        return 1
+      fi
+      LOCAL_CANDIDATE_PENDING_FILE="$active_payload"
+      LOCAL_CANDIDATE_DIR="$(json_field_from_file "$active_payload" candidate_dir 2>/dev/null || true)"
+      if [[ -z "${LOCAL_CANDIDATE_DIR//[[:space:]]/}" || ! -d "$LOCAL_CANDIDATE_DIR" ]]; then
+        mv "$active_payload" "$CANDIDATE_QUEUE_FAILED_DIR/$(basename "$active_payload").missing.$(date +%Y%m%d%H%M%S)" 2>/dev/null || rm -f "$active_payload" 2>/dev/null || true
+        LOCAL_CANDIDATE_PENDING_FILE=""
+        LOCAL_CANDIDATE_DIR=""
+        return 1
+      fi
+      logger -t "$LOG_TAG" "Candidato local recebido do queue: $(basename "$LOCAL_CANDIDATE_DIR")"
+    fi
   fi
 
   manifest="$LOCAL_CANDIDATE_DIR/manifest.json"
@@ -1107,6 +1157,8 @@ load_pending_local_candidate() {
   LOCAL_CANDIDATE_COMMIT_MESSAGE="$(json_field_from_file "$manifest" commit_message 2>/dev/null || true)"
   LOCAL_CANDIDATE_ZIP_NAME="$(json_field_from_file "$manifest" zip_name 2>/dev/null || true)"
   LOCAL_CANDIDATE_FILES_DIR="$LOCAL_CANDIDATE_DIR/files"
+  LOCAL_CANDIDATE_PATCH_FILE="$LOCAL_CANDIDATE_DIR/patch.diff"
+  LOCAL_CANDIDATE_USE_PATCH=0
   BRANCH="$(json_field_from_file "$manifest" branch 2>/dev/null || true)"
   [[ -n "${BRANCH//[[:space:]]/}" ]] || BRANCH="main"
   [[ -n "${LOCAL_CANDIDATE_ID//[[:space:]]/}" ]] || LOCAL_CANDIDATE_ID="$(basename "$LOCAL_CANDIDATE_DIR")"
@@ -1219,6 +1271,46 @@ $(format_changed_files)
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   logger -t "$LOG_TAG" "Candidato local ${LOCAL_CANDIDATE_ID:-desconhecido} rejeitado: $reason"
   exit 0
+}
+
+local_candidate_base_conflict_reason() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 1
+  [[ -n "${LOCAL_CANDIDATE_BASE_COMMIT//[[:space:]]/}" ]] || return 1
+  [[ -n "${REMOTE_COMMIT//[[:space:]]/}" ]] || return 1
+  [[ "$LOCAL_CANDIDATE_BASE_COMMIT" != "$REMOTE_COMMIT" ]] || return 1
+
+  if ! sudo -u ubuntu -H git cat-file -e "$LOCAL_CANDIDATE_BASE_COMMIT^{commit}" 2>/dev/null; then
+    printf 'base original do ZIP não existe mais no repositório local'
+    return 0
+  fi
+  if ! sudo -u ubuntu -H git merge-base --is-ancestor "$LOCAL_CANDIDATE_BASE_COMMIT" "$REMOTE_COMMIT" 2>/dev/null; then
+    printf 'base original do ZIP não é ancestral do GitHub atual'
+    return 0
+  fi
+
+  local remote_changed
+  remote_changed="$(sudo -u ubuntu -H git diff --name-only "$LOCAL_CANDIDATE_BASE_COMMIT" "$REMOTE_COMMIT" -- 2>/dev/null || true)"
+  CANDIDATE_CHANGED="$CHANGED_FILES_RAW" REMOTE_CHANGED="$remote_changed" python3 - <<'PYBASE'
+import os
+candidate = {line.strip() for line in os.environ.get('CANDIDATE_CHANGED', '').splitlines() if line.strip()}
+remote = {line.strip() for line in os.environ.get('REMOTE_CHANGED', '').splitlines() if line.strip()}
+conflicts = sorted(candidate & remote)
+if conflicts:
+    shown = ', '.join(conflicts[:8])
+    if len(conflicts) > 8:
+        shown += f', +{len(conflicts)-8} arquivo(s)'
+    print(f'conflito com update anterior em: {shown}')
+PYBASE
+}
+
+local_candidate_queue_has_pending() {
+  find "$CANDIDATE_QUEUE_PENDING_DIR" -maxdepth 1 -type f -name '*.json' 2>/dev/null | grep -q .
+}
+
+trigger_updater_if_queue_pending() {
+  if local_candidate_queue_has_pending; then
+    (sleep 2; systemctl start --no-block "$UPDATER_UNIT" >/dev/null 2>&1 || true) &
+  fi
 }
 
 git_add_changed_files_or_reject() {
@@ -1928,6 +2020,20 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   exit 0
 }
 
+apply_local_candidate_patch_diff() {
+  [[ -f "${LOCAL_CANDIDATE_PATCH_FILE:-}" ]] || return 1
+  local errfile
+  errfile="$(mktemp "${TMPDIR:-/tmp}/tts-bot-git-apply.XXXXXX")"
+  if sudo -u ubuntu -H git apply --3way --index "$LOCAL_CANDIDATE_PATCH_FILE" 2>"$errfile"; then
+    rm -f "$errfile" 2>/dev/null || true
+    normalize_changed_file_permissions "patch 3-way do candidato"
+    return 0
+  fi
+  LAST_ERROR_STDERR="$(cat "$errfile" 2>/dev/null || true)"
+  rm -f "$errfile" 2>/dev/null || true
+  return 1
+}
+
 copy_local_candidate_files() {
   [[ -d "$LOCAL_CANDIDATE_FILES_DIR" ]] || return 1
   MANIFEST_PATH="$LOCAL_CANDIDATE_DIR/manifest.json" REPO_DIR="$REPO_DIR" FILES_DIR="$LOCAL_CANDIDATE_FILES_DIR" python3 - <<'PYCOPY'
@@ -2145,15 +2251,31 @@ prepare_local_candidate_update() {
   zip_progress_done_and_publish "Segurança conferida" "Validando estado local"
 
   if [[ -n "$LOCAL_CANDIDATE_BASE_COMMIT" && "$LOCAL_CANDIDATE_BASE_COMMIT" != "$REMOTE_COMMIT" ]]; then
-    MANUAL_FAILURE_ALERT_SENT=1
-    archive_local_candidate "failed"
-    send_error "Update bloqueado: base mudou" "Resumo: O ZIP foi preparado sobre outro commit. Nada foi aplicado e nada foi enviado ao GitHub.
+    if [[ -f "${LOCAL_CANDIDATE_PATCH_FILE:-}" ]]; then
+      LOCAL_CANDIDATE_USE_PATCH=1
+      logger -t "$LOG_TAG" "Candidato $LOCAL_CANDIDATE_ID preparado sobre $(short_commit "$LOCAL_CANDIDATE_BASE_COMMIT"); tentará rebase 3-way sobre $(short_commit "$REMOTE_COMMIT")."
+    else
+      base_conflict_reason="$(local_candidate_base_conflict_reason 2>/dev/null || true)"
+      if [[ -n "${base_conflict_reason//[[:space:]]/}" ]]; then
+        MANUAL_FAILURE_ALERT_SENT=1
+        notify_zip_status_message "error" "Update com conflito" "Esse update ficou incompatível com outro update aplicado antes dele. Nada foi aplicado para este item; os próximos continuam no queue." || true
+        archive_local_candidate "failed"
+        send_error "Update com conflito na fila" "Resumo: O ZIP foi preparado sobre outro commit e conflitou com mudanças já aplicadas. Nada foi aplicado e nada foi enviado ao GitHub para este item.
 Branch: $BRANCH
 Base do ZIP: $(short_commit "$LOCAL_CANDIDATE_BASE_COMMIT")
 GitHub atual: $(short_commit "$REMOTE_COMMIT")
-Ação sugerida: envie o ZIP novamente usando a base atual.
+Motivo: $base_conflict_reason
+Candidato: ${LOCAL_CANDIDATE_ID:-desconhecido}
+ZIP: ${LOCAL_CANDIDATE_ZIP_NAME:-desconhecido}
+Arquivos:
+$(format_changed_files)
+Ação sugerida: gere esse patch novamente usando a base atual.
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
-    exit 1
+        trigger_updater_if_queue_pending
+        exit 0
+      fi
+      logger -t "$LOG_TAG" "Candidato $LOCAL_CANDIDATE_ID preparado sobre $(short_commit "$LOCAL_CANDIDATE_BASE_COMMIT"), aplicando sobre $(short_commit "$REMOTE_COMMIT") sem conflito de arquivos."
+    fi
   fi
 
   STAGE="verificação de alterações locais"
@@ -2200,8 +2322,33 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
   STAGE="aplicação local do candidato"
   UPDATE_APPLIED=1
-  copy_local_candidate_files
-  git_add_changed_files_or_reject "git add do candidato local"
+  if (( LOCAL_CANDIDATE_USE_PATCH == 1 )); then
+    if ! apply_local_candidate_patch_diff; then
+      MANUAL_FAILURE_ALERT_SENT=1
+      normalize_changed_file_permissions "falha no patch 3-way" || true
+      sudo -u ubuntu -H git reset --hard "${PREVIOUS_COMMIT:-HEAD}" >/dev/null 2>&1 || true
+      cleanup_local_candidate_new_files_after_reset
+      notify_zip_status_message "error" "Update com conflito" "Esse update não conseguiu ser mesclado com os updates anteriores. Nada foi aplicado para este item; os próximos continuam no queue." || true
+      archive_local_candidate "failed"
+      send_error "Update com conflito na fila" "Resumo: O updater tentou mesclar esse ZIP sobre a base atual usando 3-way, mas encontrou conflito. Nada foi aplicado e nada foi enviado ao GitHub para este item.
+Branch: $BRANCH
+Base do ZIP: $(short_commit "$LOCAL_CANDIDATE_BASE_COMMIT")
+GitHub atual: $(short_commit "$REMOTE_COMMIT")
+Candidato: ${LOCAL_CANDIDATE_ID:-desconhecido}
+ZIP: ${LOCAL_CANDIDATE_ZIP_NAME:-desconhecido}
+Erro:
+${LAST_ERROR_STDERR:-git apply falhou}
+Arquivos:
+$(format_changed_files)
+Ação sugerida: gere esse patch novamente usando a base atual.
+Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+      trigger_updater_if_queue_pending
+      exit 0
+    fi
+  else
+    copy_local_candidate_files
+    git_add_changed_files_or_reject "git add do candidato local"
+  fi
   CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only || true)"
   CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --cached --numstat || true)"
   if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
@@ -3712,6 +3859,7 @@ notify_zip_status_message "$ALERT_TYPE" "$ALERT_TITLE" "$ZIP_STATUS_DESCRIPTION"
 if (( LOCAL_CANDIDATE_MODE == 1 )); then
   write_local_candidate_state "notified" "$REMOTE_COMMIT"
   archive_local_candidate "done"
+  trigger_updater_if_queue_pending
 fi
 logger -t "$LOG_TAG" "$ALERT_TITLE"
 

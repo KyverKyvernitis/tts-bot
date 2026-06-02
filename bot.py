@@ -1199,6 +1199,7 @@ class BotLocal(commands.Bot):
         diff_stats: dict[str, object],
         extracted_files: list[tuple[Path, Path]],
         zip_name: str,
+        patch_diff_text: str = "",
         status_context: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """Grava um candidato local para o updater testar na VPS antes do push.
@@ -1249,12 +1250,45 @@ class BotLocal(commands.Bot):
                 "source_author_id": str(status_context.get("source_author_id") or ""),
             }
         (candidate_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        if patch_diff_text.strip():
+            (candidate_dir / "patch.diff").write_text(patch_diff_text, encoding="utf-8")
 
-        pending_path = candidate_root / "pending.json"
-        tmp_pending = candidate_root / f"pending.{candidate_id}.tmp"
-        tmp_pending.write_text(json.dumps({"candidate_dir": str(candidate_dir), "id": candidate_id}, ensure_ascii=False), encoding="utf-8")
+        queue_root = candidate_root / "queue"
+        pending_dir = queue_root / "pending"
+        active_dir = queue_root / "active"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        active_dir.mkdir(parents=True, exist_ok=True)
+        for path in (queue_root, pending_dir, active_dir):
+            with contextlib.suppress(Exception):
+                path.chmod(0o775)
+
+        active_count = len([p for p in active_dir.glob("*.json") if p.is_file()])
+        pending_count = len([p for p in pending_dir.glob("*.json") if p.is_file()])
+        # Compatibilidade: versões antigas do bot/updater usavam um único
+        # candidates/pending.json. Conte-o para não prometer uma posição errada
+        # durante uma transição de patch.
+        if (candidate_root / "pending.json").exists():
+            pending_count += 1
+        queue_position = active_count + pending_count + 1
+
+        queue_name = f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}-{candidate_id}.json"
+        pending_path = pending_dir / queue_name
+        tmp_pending = pending_dir / f".{queue_name}.tmp"
+        queue_payload = {
+            "candidate_dir": str(candidate_dir),
+            "id": candidate_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "queue_position_at_enqueue": queue_position,
+        }
+        tmp_pending.write_text(json.dumps(queue_payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp_pending, pending_path)
-        return {"candidate_id": candidate_id, "candidate_dir": str(candidate_dir), "pending_path": str(pending_path)}
+        return {
+            "candidate_id": candidate_id,
+            "candidate_dir": str(candidate_dir),
+            "pending_path": str(pending_path),
+            "queue_position": queue_position,
+            "queue_pending_count": pending_count + 1,
+        }
 
     def _trigger_updater_service_sync(self) -> tuple[bool, str]:
         service = Path("/etc/systemd/system/tts-bot-updater.service")
@@ -1540,6 +1574,11 @@ class BotLocal(commands.Bot):
                 }
 
             diff_stats = self._git_diff_numstat_sync(clone_dir, env)
+            patch_result = self._run_cmd(["git", "diff", "--cached", "--binary"], clone_dir, env=env)
+            if patch_result.returncode != 0:
+                err = (patch_result.stderr or patch_result.stdout or "").strip()
+                raise RuntimeError(f"Falha ao gerar patch de fila. {err}")
+            patch_diff_text = patch_result.stdout or ""
             changed_files = [str(item.get("path")) for item in diff_stats.get("entries", []) if item.get("path")] or changed_files
             protected_changed = [path for path in changed_files if self._zip_update_is_callkeeper_protected_path(path)]
             if protected_changed:
@@ -1556,6 +1595,7 @@ class BotLocal(commands.Bot):
                 diff_stats=diff_stats,
                 extracted_files=extracted_files,
                 zip_name=zip_path.name,
+                patch_diff_text=patch_diff_text,
                 status_context=status_context,
             )
             mark("candidate_write_ms")
@@ -1570,6 +1610,8 @@ class BotLocal(commands.Bot):
                 "commit_hash": None,
                 "candidate_id": candidate.get("candidate_id"),
                 "candidate_dir": candidate.get("candidate_dir"),
+                "queue_position": candidate.get("queue_position"),
+                "queue_pending_count": candidate.get("queue_pending_count"),
                 "triggered_update": triggered_update,
                 "trigger_detail": trigger_detail,
                 "branch": branch_name,
@@ -1915,13 +1957,13 @@ class BotLocal(commands.Bot):
 
 
     async def _handle_zip_update_message(self, message: discord.Message):
-        zip_attachment = None
-        for attachment in message.attachments:
-            if attachment.filename.lower().endswith(".zip"):
-                zip_attachment = attachment
-                break
+        zip_attachments = [
+            attachment
+            for attachment in message.attachments
+            if str(getattr(attachment, "filename", "")).lower().endswith(".zip")
+        ]
 
-        if zip_attachment is None:
+        if not zip_attachments:
             await self._send_zip_update_message(
                 message,
                 "❌ Arquivo inválido",
@@ -1930,109 +1972,131 @@ class BotLocal(commands.Bot):
             )
             return
 
-        status_message: discord.Message | None = None
-        if self._zip_update_lock.locked():
-            status_message = await self._send_zip_update_message(
+        total_zips = len(zip_attachments)
+        for index, zip_attachment in enumerate(zip_attachments, start=1):
+            prefix = f"ZIP {index}/{total_zips} · " if total_zips > 1 else ""
+            status_message: discord.Message | None = await self._send_zip_update_message(
                 message,
                 "📦 ZIP recebido",
-                "Na fila. Vou editar esta mensagem quando terminar.",
+                f"{prefix}Aguardando preparação para entrar no queue.",
                 discord.Color.orange(),
             )
 
-        async with self._zip_update_lock:
-            self._update_temp_root.mkdir(parents=True, exist_ok=True)
-            work_dir = Path(tempfile.mkdtemp(prefix="discord-auto-update-msg-", dir=str(self._update_temp_root)))
-            zip_path = work_dir / zip_attachment.filename
-            try:
-                await zip_attachment.save(zip_path)
-                if status_message is None:
-                    status_message = await self._send_zip_update_message(
-                        message,
-                        "<a:areia:1496606578395189473> Aplicando update...",
-                        "<a:loading:1510065277868445796> **Preparando update**\nLendo anexo e preparando candidato.",
-                        discord.Color.blurple(),
-                    )
-
-                status_context = {
-                    "guild_id": getattr(message.guild, "id", None),
-                    "channel_id": getattr(status_message.channel, "id", None) if status_message else getattr(message.channel, "id", None),
-                    "message_id": getattr(status_message, "id", None),
-                    "source_message_id": getattr(message, "id", None),
-                    "source_author_id": getattr(message.author, "id", None),
-                }
-                result = await asyncio.to_thread(self._process_zip_update_sync, zip_path, status_context)
-                changed_files = list(result.get("changed_files") or [])
-                commit_hash = result.get("commit_hash")
-                branch = result.get("branch") or "main"
-                triggered_update = bool(result.get("triggered_update"))
-
-                if not changed_files:
+            async with self._zip_update_lock:
+                self._update_temp_root.mkdir(parents=True, exist_ok=True)
+                work_dir = Path(tempfile.mkdtemp(prefix="discord-auto-update-msg-", dir=str(self._update_temp_root)))
+                safe_zip_name = Path(str(zip_attachment.filename or "update.zip")).name or "update.zip"
+                zip_path = work_dir / safe_zip_name
+                try:
+                    await zip_attachment.save(zip_path)
                     await self._edit_zip_update_message(
                         message,
                         status_message,
-                        "ℹ️ Nenhuma alteração",
-                        "ZIP válido. Nenhuma mudança no repositório.",
-                        discord.Color.gold(),
+                        "<a:areia:1496606578395189473> Preparando update...",
+                        (
+                            f"{prefix}<a:loading:1510065277868445796> **Preparando candidato**\n"
+                            "Lendo anexo e colocando no queue de updates."
+                        ),
+                        discord.Color.blurple(),
                     )
-                    return
 
-                diff_stats = result.get("diff_stats") if isinstance(result.get("diff_stats"), dict) else {}
-                entries = list(diff_stats.get("entries") or []) if isinstance(diff_stats, dict) else []
-                diff_summary = str(diff_stats.get("summary") or "").strip() if isinstance(diff_stats, dict) else ""
-                if not diff_summary:
-                    diff_summary = "diff indisponível"
+                    status_context = {
+                        "guild_id": getattr(message.guild, "id", None),
+                        "channel_id": getattr(status_message.channel, "id", None) if status_message else getattr(message.channel, "id", None),
+                        "message_id": getattr(status_message, "id", None),
+                        "source_message_id": getattr(message, "id", None),
+                        "source_author_id": getattr(message.author, "id", None),
+                    }
+                    result = await asyncio.to_thread(self._process_zip_update_sync, zip_path, status_context)
+                    changed_files = list(result.get("changed_files") or [])
+                    branch = result.get("branch") or "main"
+                    triggered_update = bool(result.get("triggered_update"))
 
-                def fmt_entry(entry: object) -> str:
-                    if isinstance(entry, dict):
-                        path = str(entry.get("path") or "")
-                        if bool(entry.get("binary")):
-                            return f"• `{path}`  binário"
-                        return f"• `{path}`  +{int(entry.get('added') or 0)} -{int(entry.get('removed') or 0)}"
-                    return f"• `{entry}`"
+                    if not changed_files:
+                        await self._edit_zip_update_message(
+                            message,
+                            status_message,
+                            "ℹ️ Nenhuma alteração",
+                            f"{prefix}ZIP válido. Nenhuma mudança no repositório.",
+                            discord.Color.gold(),
+                        )
+                        continue
 
-                if entries:
-                    preview_files = "\n".join(fmt_entry(entry) for entry in entries[:20])
-                    remaining = max(0, len(entries) - 20)
-                else:
-                    preview_files = "\n".join(f"• `{path}`" for path in changed_files[:20])
-                    remaining = max(0, len(changed_files) - 20)
-                if remaining:
-                    preview_files += f"\n+{remaining} arquivo(s) restante(s)"
+                    diff_stats = result.get("diff_stats") if isinstance(result.get("diff_stats"), dict) else {}
+                    entries = list(diff_stats.get("entries") or []) if isinstance(diff_stats, dict) else []
+                    diff_summary = str(diff_stats.get("summary") or "").strip() if isinstance(diff_stats, dict) else ""
+                    if not diff_summary:
+                        diff_summary = "diff indisponível"
 
-                await self._edit_zip_update_message(
-                    message,
-                    status_message,
-                    "<a:areia:1496606578395189473> Aplicando update...",
-                    (
-                        "<a:loading:1510065277868445796> **Conferindo ZIP**\n"
-                        "Checando arquivo recebido e base local."
-                    ),
-                    discord.Color.blurple(),
-                )
-            except zipfile.BadZipFile:
-                await self._edit_zip_update_message(
-                    message,
-                    status_message,
-                    "❌ ZIP inválido",
-                    "O arquivo não pôde ser aberto como ZIP válido.",
-                    discord.Color.red(),
-                )
-            except Exception as e:
-                logging.getLogger("zip_update").exception(
-                    "Falha no auto-update via ZIP do Discord"
-                )
-                reason = str(e).strip() or type(e).__name__
-                if len(reason) > 600:
-                    reason = reason[:597].rstrip() + "..."
-                await self._edit_zip_update_message(
-                    message,
-                    status_message,
-                    "❌ Falha no update",
-                    f"Nada foi aplicado. Motivo: **{reason}**",
-                    discord.Color.red(),
-                )
-            finally:
-                shutil.rmtree(work_dir, ignore_errors=True)
+                    def fmt_entry(entry: object) -> str:
+                        if isinstance(entry, dict):
+                            path = str(entry.get("path") or "")
+                            if bool(entry.get("binary")):
+                                return f"• `{path}`  binário"
+                            return f"• `{path}`  +{int(entry.get('added') or 0)} -{int(entry.get('removed') or 0)}"
+                        return f"• `{entry}`"
+
+                    if entries:
+                        preview_files = "\n".join(fmt_entry(entry) for entry in entries[:10])
+                        remaining = max(0, len(entries) - 10)
+                    else:
+                        preview_files = "\n".join(f"• `{path}`" for path in changed_files[:10])
+                        remaining = max(0, len(changed_files) - 10)
+                    if remaining:
+                        preview_files += f"\n+{remaining} arquivo(s) restante(s)"
+
+                    queue_position = int(result.get("queue_position") or 0)
+                    candidate_id = str(result.get("candidate_id") or "").strip()
+                    trigger_detail = str(result.get("trigger_detail") or "").strip()
+                    if queue_position <= 1:
+                        queue_line = "Entrou no queue e será aplicado agora."
+                    else:
+                        before = queue_position - 1
+                        queue_line = f"Entrou no queue na posição {queue_position}. Há {before} update(s) antes dele."
+                    if not triggered_update and trigger_detail:
+                        queue_line += f"\n-# {trigger_detail}"
+
+                    desc = (
+                        f"{prefix}{queue_line}\n\n"
+                        f"Branch: `{branch}`\n"
+                        f"{len(changed_files)} arquivo(s) alterado(s) · {diff_summary}"
+                    )
+                    if candidate_id:
+                        desc += f"\n-# Candidato `{candidate_id}`"
+                    if preview_files:
+                        desc += f"\n\n**Arquivos no update**\n{preview_files}"
+
+                    await self._edit_zip_update_message(
+                        message,
+                        status_message,
+                        "📦 Update na fila",
+                        desc,
+                        discord.Color.orange() if queue_position > 1 else discord.Color.blurple(),
+                    )
+                except zipfile.BadZipFile:
+                    await self._edit_zip_update_message(
+                        message,
+                        status_message,
+                        "❌ ZIP inválido",
+                        f"{prefix}O arquivo não pôde ser aberto como ZIP válido.",
+                        discord.Color.red(),
+                    )
+                except Exception as e:
+                    logging.getLogger("zip_update").exception(
+                        "Falha no auto-update via ZIP do Discord"
+                    )
+                    reason = str(e).strip() or type(e).__name__
+                    if len(reason) > 600:
+                        reason = reason[:597].rstrip() + "..."
+                    await self._edit_zip_update_message(
+                        message,
+                        status_message,
+                        "❌ Falha no update",
+                        f"{prefix}Nada foi aplicado. Motivo: **{reason}**",
+                        discord.Color.red(),
+                    )
+                finally:
+                    shutil.rmtree(work_dir, ignore_errors=True)
 
     async def close(self):
         if self._event_loop_watchdog_task is not None:
