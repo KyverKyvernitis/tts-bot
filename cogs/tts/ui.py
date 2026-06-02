@@ -2262,7 +2262,18 @@ def _normalize_atts_factor(value: object, default: str = "1.0") -> str | None:
 
 
 class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
-    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None, force_text_fallback: bool = False, voice_catalog: list[dict[str, object]] | None = None):
+    def __init__(
+        self,
+        cog: "TTSVoice",
+        panel_message: discord.Message | None,
+        *,
+        server: bool,
+        target_user_id: int | None = None,
+        target_user_name: str | None = None,
+        force_text_fallback: bool = False,
+        voice_catalog: list[dict[str, object]] | None = None,
+        allow_text_fallback: bool = False,
+    ):
         super().__init__()
         self.cog = cog
         self.panel_message = panel_message
@@ -2270,6 +2281,7 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
         self.target_user_id = target_user_id
         self.target_user_name = target_user_name
         self.force_text_fallback = bool(force_text_fallback)
+        self.allow_text_fallback = bool(allow_text_fallback)
         self.voice_catalog = list(voice_catalog or [])
         user_id = int(target_user_id or 0)
         guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
@@ -2277,8 +2289,20 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
         self.current_voice = str(_current_tts_value(cog, guild_id, user_id, "android_voice", "", server=server) or "").strip()
         self.current_rate = _normalize_atts_factor(_current_tts_value(cog, guild_id, user_id, "android_rate", "1.0", server=server), "1.0") or "1.0"
         self.current_pitch = _normalize_atts_factor(_current_tts_value(cog, guild_id, user_id, "android_pitch", "1.0", server=server), "1.0") or "1.0"
-        if self.force_text_fallback or not self._build_guided_modal():
+
+        guided_ok = False if self.force_text_fallback else self._build_guided_modal()
+        if guided_ok:
+            return
+
+        # O ATTS depende do catálogo do worker para abrir igual ao Google Cloud.
+        # Se o modal guiado não puder ser montado, não abrimos o formulário antigo
+        # de campos livres para o usuário comum; mostramos a mensagem mínima no
+        # chamador. O fallback textual fica só para chamadas legadas explícitas.
+        if self.force_text_fallback or self.allow_text_fallback:
             self._build_text_fallback()
+            return
+
+        raise RuntimeError("atts_guided_modal_unavailable")
 
     def _build_guided_modal(self) -> bool:
         if not _modal_label_available():
@@ -2850,10 +2874,13 @@ class TTSPublicLauncherSelect(discord.ui.Select):
         # a resposta principal continua sendo o modal.
         asyncio.create_task(_reset_public_launcher_select(interaction, panel))
         if value == "atts":
-            await _send_settings_modal_with_fallback(
+            await _send_atts_settings_modal(
                 interaction,
-                lambda: AndroidSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name),
-                lambda: AndroidSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name, force_text_fallback=True),
+                panel.cog,
+                getattr(interaction, "message", None),
+                server=False,
+                target_user_id=interaction.user.id,
+                target_user_name=target_name,
                 context="public-atts",
             )
         elif value == "edge":
