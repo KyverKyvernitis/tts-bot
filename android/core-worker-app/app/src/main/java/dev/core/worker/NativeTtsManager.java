@@ -16,6 +16,8 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileInputStream;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
@@ -129,6 +131,56 @@ final class NativeTtsManager {
             } catch (Throwable ignored) {
             }
         }
+        return out;
+    }
+
+    JSONObject voicesJson(JSONObject request) throws Exception {
+        ensureReady(Math.max(1200, request == null ? 2500 : request.optInt("init_timeout_ms", 2500)));
+        String localeFilter = normalizeLocaleTag(request == null ? "" : request.optString("locale", ""));
+        int limit = Math.max(1, Math.min(600, request == null ? 300 : request.optInt("limit", 300)));
+        JSONObject out = new JSONObject();
+        JSONArray voices = new JSONArray();
+        TextToSpeech current = tts;
+        int total = 0;
+        if (current != null) {
+            Set<Voice> availableVoices = current.getVoices();
+            if (availableVoices != null) {
+                List<Voice> sorted = new ArrayList<>();
+                for (Voice voice : availableVoices) {
+                    if (voice != null && voice.getName() != null) {
+                        sorted.add(voice);
+                    }
+                }
+                sorted.sort((a, b) -> voiceSortKey(a, localeFilter).compareTo(voiceSortKey(b, localeFilter)));
+                for (Voice voice : sorted) {
+                    if (voice == null || voice.getName() == null) {
+                        continue;
+                    }
+                    Locale locale = voice.getLocale();
+                    String tag = locale == null ? "" : locale.toLanguageTag();
+                    if (!localeFilter.isEmpty() && !localeMatches(tag, localeFilter)) {
+                        continue;
+                    }
+                    total++;
+                    if (voices.length() >= limit) {
+                        continue;
+                    }
+                    JSONObject item = new JSONObject();
+                    item.put("name", voice.getName());
+                    item.put("locale", tag);
+                    item.put("network_required", voice.isNetworkConnectionRequired());
+                    item.put("quality", voice.getQuality());
+                    item.put("latency", voice.getLatency());
+                    voices.put(item);
+                }
+            }
+        }
+        out.put("ok", true);
+        out.put("engine", "android_native");
+        out.put("locale", localeFilter);
+        out.put("total", total);
+        out.put("returned", voices.length());
+        out.put("voices", voices);
         return out;
     }
 
@@ -442,6 +494,52 @@ final class NativeTtsManager {
             return "pt-BR";
         }
         return Locale.forLanguageTag(cleaned).toLanguageTag();
+    }
+
+    private static boolean localeMatches(String voiceTag, String requestedTag) {
+        String voice = normalizeLocaleTag(voiceTag == null ? "" : voiceTag);
+        String requested = normalizeLocaleTag(requestedTag == null ? "" : requestedTag);
+        if (voice.isEmpty() || requested.isEmpty()) {
+            return false;
+        }
+        if (voice.equalsIgnoreCase(requested)) {
+            return true;
+        }
+        try {
+            Locale voiceLocale = Locale.forLanguageTag(voice);
+            Locale requestedLocale = Locale.forLanguageTag(requested);
+            return voiceLocale.getLanguage().equalsIgnoreCase(requestedLocale.getLanguage());
+        } catch (Throwable ignored) {
+            int voiceDash = voice.indexOf('-');
+            int requestedDash = requested.indexOf('-');
+            String voiceLang = voiceDash > 0 ? voice.substring(0, voiceDash) : voice;
+            String requestedLang = requestedDash > 0 ? requested.substring(0, requestedDash) : requested;
+            return voiceLang.equalsIgnoreCase(requestedLang);
+        }
+    }
+
+    private static String voiceSortKey(Voice voice, String requestedTag) {
+        if (voice == null || voice.getName() == null) {
+            return "9999";
+        }
+        String name = voice.getName();
+        String tag = voice.getLocale() == null ? "" : voice.getLocale().toLanguageTag();
+        int score = 500;
+        if (tag.equalsIgnoreCase(requestedTag)) {
+            score -= 200;
+        } else if (localeMatches(tag, requestedTag)) {
+            score -= 100;
+        }
+        String lower = name.toLowerCase(Locale.US);
+        if (lower.contains("-local")) {
+            score -= 50;
+        }
+        if (voice.isNetworkConnectionRequired()) {
+            score += 80;
+        }
+        score -= Math.max(0, voice.getQuality()) / 100;
+        score += Math.max(0, voice.getLatency()) / 100;
+        return String.format(Locale.US, "%04d-%s", score, name);
     }
 
     private static float normalizeRate(String raw) {

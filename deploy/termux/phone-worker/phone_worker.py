@@ -62,7 +62,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.25"
+PHONE_WORKER_VERSION = "1.10.26"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -1947,6 +1947,26 @@ def _android_tts_status(*, use_cache: bool = True) -> dict[str, Any]:
 def _android_tts_ready() -> bool:
     status = _android_tts_status(use_cache=True)
     return bool(status.get("ok") or status.get("ready") or status.get("available"))
+
+def _android_tts_voices(*, locale: str = "", limit: int = 500) -> dict[str, Any]:
+    if not _android_tts_enabled():
+        return {"ok": False, "engine": "android_native", "voices": [], "error": "PHONE_WORKER_ANDROID_TTS_ENABLED=false"}
+    payload = {"locale": str(locale or ""), "limit": max(1, min(600, int(limit or 500)))}
+    try:
+        data = _android_tts_json_request("/native-tts/voices", payload=payload, timeout=max(0.6, _android_tts_timeout_seconds(1.2)))
+        voices = data.get("voices") if isinstance(data, dict) else []
+        if not isinstance(voices, list):
+            voices = []
+        return {
+            "ok": bool(data.get("ok", True)),
+            "engine": "android_native",
+            "locale": data.get("locale") or locale,
+            "total": data.get("total", len(voices)),
+            "returned": data.get("returned", len(voices)),
+            "voices": voices,
+        }
+    except Exception as exc:
+        return {"ok": False, "engine": "android_native", "locale": locale, "voices": [], "error": f"{type(exc).__name__}: {_short_text(exc, limit=140)}"}
 
 def _safe_name(name: Any, fallback: str = "file.bin") -> str:
     text = str(name or fallback).replace("\\", "/").strip().lstrip("/")
@@ -4102,6 +4122,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 payload = self._task_tts_synthesize_piper(body)
             elif task == "tts_agent_status":
                 payload = self._task_tts_agent_status(body)
+            elif task in {"tts_android_voices", "tts_atts_voices", "android_tts_voices"}:
+                payload = self._task_tts_android_voices(body)
             elif task == "tts_agent_synthesize":
                 payload = self._task_tts_agent_synthesize(body)
             elif task == "voice_agent_status":
@@ -4692,6 +4714,21 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "logs": [f"tts agent {snapshot.get('state')} engines={','.join(snapshot.get('available_engines') or [])}"],
         })
         return snapshot
+
+    def _task_tts_android_voices(self, body: dict[str, Any]) -> dict[str, Any]:
+        locale = str(body.get("locale") or body.get("language") or "").strip()
+        try:
+            limit = int(body.get("limit") or 500)
+        except Exception:
+            limit = 500
+        result = _android_tts_voices(locale=locale, limit=limit)
+        result.update({
+            "worker_profile": _current_core_worker_profile(),
+            "worker_version": PHONE_WORKER_VERSION,
+            "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
+            "logs": [f"android tts voices locale={locale or 'all'} total={result.get('total', 0)} returned={len(result.get('voices') or [])}"],
+        })
+        return result
 
     def _tts_agent_engine_order(self, body: dict[str, Any], available: list[str]) -> list[str]:
         requested = str(body.get("engine") or "gtts").strip().lower().replace("-", "_") or "gtts"

@@ -6,6 +6,8 @@ import re
 import weakref
 import unicodedata
 import traceback
+import json
+import urllib.request
 from urllib.parse import urlparse
 from typing import Optional, Callable
 
@@ -1319,6 +1321,185 @@ def _gcloud_voice_options_for_language(cog: "TTSVoice", *, language: str, curren
 def _top_gcloud_voice_options(cog: "TTSVoice", current: str = "", language: str = "pt-BR") -> list[discord.SelectOption]:
     return _gcloud_voice_options_for_language(cog, language=language, current=current)
 
+_ATTS_VOICE_CATALOG_CACHE: dict[str, object] = {"at": 0.0, "voices": []}
+
+
+def _atts_locale_matches(voice_locale: str, language: str) -> bool:
+    voice_locale = _normalize_atts_locale(voice_locale or "", "").strip()
+    language = _normalize_atts_locale(language or "pt-BR", "pt-BR").strip()
+    if not voice_locale or not language:
+        return False
+    if voice_locale.casefold() == language.casefold():
+        return True
+    return voice_locale.split("-", 1)[0].casefold() == language.split("-", 1)[0].casefold()
+
+
+def _atts_voice_locale_from_name(name: str) -> str:
+    raw = str(name or "").strip()
+    match = re.match(r"^([a-z]{2})[-_]([A-Za-z]{2})", raw)
+    if match:
+        return _normalize_atts_locale(f"{match.group(1)}-{match.group(2)}", "")
+    match = re.match(r"^([a-z]{2})[-_]", raw)
+    if match:
+        return match.group(1).lower()
+    return ""
+
+
+def _atts_common_language_options(current: str = "pt-BR", voices: list[dict[str, object]] | None = None) -> list[discord.SelectOption]:
+    current = _normalize_atts_locale(current, "pt-BR")
+    labels = {
+        "pt-BR": "Português Brasil",
+        "pt-PT": "Português Portugal",
+        "en-US": "Inglês EUA",
+        "en-GB": "Inglês Reino Unido",
+        "es-ES": "Espanhol Espanha",
+        "es-US": "Espanhol EUA",
+        "fr-FR": "Francês",
+        "de-DE": "Alemão",
+        "it-IT": "Italiano",
+        "ja-JP": "Japonês",
+        "ko-KR": "Coreano",
+        "zh-CN": "Chinês",
+    }
+    ordered: list[str] = [current, "pt-BR", "pt-PT", "en-US", "en-GB", "es-ES", "es-US", "fr-FR", "de-DE", "it-IT", "ja-JP", "ko-KR", "zh-CN"]
+    for voice in voices or []:
+        locale = _normalize_atts_locale(str((voice or {}).get("locale") or _atts_voice_locale_from_name(str((voice or {}).get("name") or "")) or ""), "")
+        if locale and locale not in ordered:
+            ordered.append(locale)
+    seen: set[str] = set()
+    options: list[discord.SelectOption] = []
+    for code in ordered:
+        code = _normalize_atts_locale(code, "")
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        label = labels.get(code) or code
+        options.append(discord.SelectOption(label=_shorten(f"{label} ({code})", 100), description="Idioma ATTS", value=code, default=(code == current)))
+        if len(options) >= 25:
+            break
+    return options or [discord.SelectOption(label="Português Brasil (pt-BR)", description="Idioma ATTS", value="pt-BR", default=True)]
+
+
+def _fetch_atts_voice_catalog_sync(locale: str = "", *, limit: int = 500, timeout: float = 1.2) -> list[dict[str, object]]:
+    now = time.monotonic()
+    cached = _ATTS_VOICE_CATALOG_CACHE.get("voices")
+    if isinstance(cached, list) and cached and now - float(_ATTS_VOICE_CATALOG_CACHE.get("at") or 0.0) <= 60.0:
+        return [v for v in cached if isinstance(v, dict)]
+    try:
+        enabled = bool(getattr(config, "PHONE_WORKER_ENABLED", False))
+        host = str(getattr(config, "PHONE_WORKER_HOST", "") or "").strip()
+        token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
+        if not enabled or not host or not token:
+            return []
+        scheme = str(getattr(config, "PHONE_WORKER_SCHEME", "http") or "http").strip().lower() or "http"
+        if scheme not in {"http", "https"}:
+            scheme = "http"
+        port = int(getattr(config, "PHONE_WORKER_PORT", 8766) or 8766)
+        url = f"{scheme}://{host}:{port}/task"
+        payload = {"task": "tts_android_voices", "locale": str(locale or ""), "limit": int(limit or 500)}
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST", headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+            "Accept": "application/json",
+            "User-Agent": "CoreBot/ATTSModal",
+        })
+        with urllib.request.urlopen(req, timeout=max(0.2, float(timeout))) as response:
+            raw = response.read(1024 * 1024)
+        parsed = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+        voices = parsed.get("voices") if isinstance(parsed, dict) else []
+        if not isinstance(voices, list):
+            return []
+        normalized = [v for v in voices if isinstance(v, dict) and str(v.get("name") or "").strip()]
+        _ATTS_VOICE_CATALOG_CACHE["at"] = now
+        _ATTS_VOICE_CATALOG_CACHE["voices"] = normalized
+        return normalized
+    except Exception as e:
+        print(f"[tts_modal] catálogo ATTS indisponível: {e!r}")
+        return []
+
+
+def _atts_voice_score(voice: dict[str, object], language: str) -> int:
+    name = str(voice.get("name") or "")
+    locale = str(voice.get("locale") or _atts_voice_locale_from_name(name) or "")
+    score = 0
+    if _normalize_atts_locale(locale, "").casefold() == _normalize_atts_locale(language, "pt-BR").casefold():
+        score += 100
+    elif _atts_locale_matches(locale, language):
+        score += 50
+    lowered = name.casefold()
+    if "local" in lowered:
+        score += 25
+    if bool(voice.get("network_required")):
+        score -= 40
+    try:
+        score += int(voice.get("quality") or 0) // 100
+    except Exception:
+        pass
+    try:
+        score -= int(voice.get("latency") or 0) // 100
+    except Exception:
+        pass
+    return score
+
+
+def _atts_voice_options_for_language(cog: "TTSVoice", *, language: str, current: str = "") -> list[discord.SelectOption]:
+    language = _normalize_atts_locale(language, "pt-BR")
+    current = str(current or "").strip()
+    catalog = _fetch_atts_voice_catalog_sync(language)
+    matching: list[dict[str, object]] = []
+    for voice in catalog:
+        name = str(voice.get("name") or "").strip()
+        if not name:
+            continue
+        locale = str(voice.get("locale") or _atts_voice_locale_from_name(name) or "")
+        if _atts_locale_matches(locale, language):
+            matching.append(voice)
+    if current and not any(str(v.get("name") or "") == current for v in matching):
+        matching.insert(0, {"name": current, "locale": _atts_voice_locale_from_name(current), "network_required": False, "quality": 0, "latency": 0})
+    matching.sort(key=lambda v: (-_atts_voice_score(v, language), str(v.get("name") or "")))
+    options: list[discord.SelectOption] = [
+        discord.SelectOption(label="Automática rápida", description="Prefere voz local do Android", value="auto", default=(not current or current.casefold() in {"auto", "automatica", "automática"})),
+        discord.SelectOption(label="Padrão do Android", description="Usa a voz padrão do sistema", value="default", default=(current.casefold() in {"default", "padrao", "padrão"})),
+    ]
+    seen = {"auto", "default"}
+    for voice in matching:
+        name = str(voice.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        locale = _normalize_atts_locale(str(voice.get("locale") or _atts_voice_locale_from_name(name) or language), language)
+        network = bool(voice.get("network_required")) or "network" in name.casefold()
+        local = "local" in name.casefold() or not network
+        desc_bits = [locale]
+        desc_bits.append("local" if local else "online")
+        if network:
+            desc_bits.append("pode usar internet")
+        options.append(discord.SelectOption(label=_shorten(name, 100), description=_shorten(" · ".join(desc_bits), 100), value=name[:100], default=(name == current)))
+        if len(options) >= 25:
+            break
+    return _with_default_option(options, current if current else "auto")
+
+
+def _atts_voice_matches_language(voice: str, language: str) -> bool:
+    voice = str(voice or "").strip()
+    if not voice or voice.casefold() in {"auto", "default", "padrao", "padrão", "automatica", "automática"}:
+        return True
+    catalog = _fetch_atts_voice_catalog_sync(language)
+    for item in catalog:
+        if str(item.get("name") or "") == voice:
+            return _atts_locale_matches(str(item.get("locale") or _atts_voice_locale_from_name(voice) or ""), language)
+    return _atts_locale_matches(_atts_voice_locale_from_name(voice), language)
+
+
+def _pick_atts_voice_for_language(cog: "TTSVoice", language: str, current: str = "") -> str:
+    options = _atts_voice_options_for_language(cog, language=language, current=current)
+    for option in options:
+        value = str(getattr(option, "value", "") or "").strip()
+        if value and value not in {"auto", "default"}:
+            return value
+    return ""
+
 
 async def _save_tts_modal_updates(
     cog: "TTSVoice",
@@ -1959,9 +2140,9 @@ class GoogleSettingsModal(discord.ui.Modal, title="Editar Google"):
 
 
 def _normalize_atts_locale(value: object, default: str = "pt-BR") -> str:
-    raw = str(value or default or "pt-BR").strip().replace("_", "-")
+    raw = str(value or default or "").strip().replace("_", "-")
     if not raw:
-        return default
+        return str(default or "").strip()
     parts = [p for p in raw.split("-") if p]
     if len(parts) == 1:
         return parts[0].lower()
@@ -1988,13 +2169,80 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
         self.server = bool(server)
         self.target_user_id = target_user_id
         self.target_user_name = target_user_name
+        self.force_text_fallback = bool(force_text_fallback)
         user_id = int(target_user_id or 0)
         guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
-        self.current_language = _current_tts_value(cog, guild_id, user_id, "android_language", "pt-BR", server=server)
-        self.current_voice = _current_tts_value(cog, guild_id, user_id, "android_voice", "", server=server)
-        self.current_rate = _current_tts_value(cog, guild_id, user_id, "android_rate", "1.0", server=server)
-        self.current_pitch = _current_tts_value(cog, guild_id, user_id, "android_pitch", "1.0", server=server)
-        self._build_text_fallback()
+        self.current_language = _normalize_atts_locale(_current_tts_value(cog, guild_id, user_id, "android_language", "pt-BR", server=server), "pt-BR")
+        self.current_voice = str(_current_tts_value(cog, guild_id, user_id, "android_voice", "", server=server) or "").strip()
+        self.current_rate = _normalize_atts_factor(_current_tts_value(cog, guild_id, user_id, "android_rate", "1.0", server=server), "1.0") or "1.0"
+        self.current_pitch = _normalize_atts_factor(_current_tts_value(cog, guild_id, user_id, "android_pitch", "1.0", server=server), "1.0") or "1.0"
+        if self.force_text_fallback or not self._build_guided_modal():
+            self._build_text_fallback()
+
+    def _build_guided_modal(self) -> bool:
+        if not _modal_label_available():
+            return False
+        try:
+            catalog = _fetch_atts_voice_catalog_sync(self.current_language)
+            language_select = _make_modal_select(
+                "android_language",
+                placeholder="Idioma ATTS",
+                options=_with_default_option(_atts_common_language_options(self.current_language, catalog), self.current_language),
+            )
+            voice_select = _make_modal_select(
+                "android_voice",
+                placeholder="Voz ATTS",
+                options=_atts_voice_options_for_language(self.cog, language=self.current_language, current=self.current_voice),
+            )
+            ok = _add_modal_label_item(
+                self,
+                "language",
+                text="Idioma ATTS",
+                description="",
+                component=language_select,
+            )
+            ok = ok and _add_modal_label_item(
+                self,
+                "voice",
+                text="Voz ATTS",
+                description="",
+                component=voice_select,
+            )
+            ok = ok and _add_modal_radio(
+                self,
+                "rate",
+                text="Velocidade ATTS",
+                description="",
+                current=self.current_rate,
+                options=[
+                    ("Mais lenta", "0.75", ""),
+                    ("Normal", "1.0", ""),
+                    ("Mais rápida", "1.25", ""),
+                    ("Bem mais rápida", "1.5", ""),
+                ],
+            )
+            ok = ok and _add_modal_radio(
+                self,
+                "pitch",
+                text="Tom ATTS",
+                description="",
+                current=self.current_pitch,
+                options=[
+                    ("Mais grave", "0.8", ""),
+                    ("Normal", "1.0", ""),
+                    ("Mais agudo", "1.2", ""),
+                    ("Bem mais agudo", "1.4", ""),
+                ],
+            )
+            return bool(ok)
+        except Exception as e:
+            print(f"[tts_modal] ATTS guiado falhou: {e!r}")
+            traceback.print_exception(type(e), e, e.__traceback__)
+            try:
+                self.clear_items()
+            except Exception:
+                pass
+            return False
 
     def _build_text_fallback(self) -> None:
         _add_modal_text_input(
@@ -2044,16 +2292,34 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
             history_bits.append(f"idioma {language}")
 
         raw_voice = _single_component_value(getattr(self, "voice", None), self.current_voice).strip()
-        voice = "" if raw_voice.lower() in {"", "auto", "automatica", "automática", "padrao", "padrão"} else raw_voice[:96]
-        current_voice = "" if str(self.current_voice or "").strip().lower() in {"", "auto", "automatica", "automática", "padrao", "padrão"} else str(self.current_voice or "").strip()
-        if voice != current_voice:
+        raw_lower = raw_voice.casefold()
+        if raw_lower in {"", "auto", "automatica", "automática", "rapida", "rápida", "automatica rapida", "automática rápida"}:
+            voice = ""
+            voice_label = "Automática rápida"
+        elif raw_lower in {"default", "padrao", "padrão", "voz padrao", "voz padrão"}:
+            voice = "default"
+            voice_label = "Padrão do Android"
+        else:
+            voice = raw_voice[:96]
+            voice_label = voice
+
+        # Se o usuário trocou o idioma no mesmo modal, o Discord ainda mostra
+        # as vozes do idioma anterior até o próximo modal. Evitamos salvar uma
+        # voz incompatível e voltamos para automática rápida.
+        if voice and voice != "default" and not _atts_voice_matches_language(voice, language):
+            voice = ""
+            voice_label = "Automática rápida"
+
+        current_voice = str(self.current_voice or "").strip()
+        current_norm = "" if current_voice.casefold() in {"", "auto", "automatica", "automática"} else current_voice
+        if voice != current_norm:
             updates["android_voice"] = voice
-            details.append(f"• Voz: `{voice or 'auto'}`")
-            history_bits.append(f"voz {voice or 'auto'}")
+            details.append(f"• Voz: `{voice_label}`")
+            history_bits.append(f"voz {voice_label}")
 
         rate = _normalize_atts_factor(_single_component_value(getattr(self, "rate", None), self.current_rate), "1.0")
         if rate is None:
-            await interaction.response.send_message(embed=self.cog._make_embed("Velocidade inválida", "Use um número entre `0.5` e `2.0`.", ok=False), ephemeral=True)
+            await interaction.response.send_message(embed=self.cog._make_embed("Velocidade inválida", "Use uma opção de velocidade do ATTS.", ok=False), ephemeral=True)
             return
         current_rate = _normalize_atts_factor(self.current_rate, "1.0") or "1"
         if rate != current_rate:
@@ -2063,7 +2329,7 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
 
         pitch = _normalize_atts_factor(_single_component_value(getattr(self, "pitch", None), self.current_pitch), "1.0")
         if pitch is None:
-            await interaction.response.send_message(embed=self.cog._make_embed("Tom inválido", "Use um número entre `0.5` e `2.0`.", ok=False), ephemeral=True)
+            await interaction.response.send_message(embed=self.cog._make_embed("Tom inválido", "Use uma opção de tom do ATTS.", ok=False), ephemeral=True)
             return
         current_pitch = _normalize_atts_factor(self.current_pitch, "1.0") or "1"
         if pitch != current_pitch:

@@ -92,6 +92,15 @@ final class LocalNativeTtsHttpServer {
                 writeJson(client.getOutputStream(), 200, result);
                 return;
             }
+            if (("GET".equals(request.method) || "POST".equals(request.method)) && "/native-tts/voices".equals(path)) {
+                JSONObject body = request.body == null || request.body.trim().isEmpty()
+                        ? new JSONObject()
+                        : new JSONObject(request.body);
+                JSONObject result = ttsManager.voicesJson(body);
+                result.put("http_port", port);
+                writeJson(client.getOutputStream(), 200, result);
+                return;
+            }
             if ("POST".equals(request.method) && "/native-tts/synthesize.raw".equals(path)) {
                 JSONObject body = request.body == null || request.body.trim().isEmpty()
                         ? new JSONObject()
