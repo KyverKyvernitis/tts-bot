@@ -3,6 +3,17 @@ from __future__ import annotations
 import discord
 
 
+class _BackButton(discord.ui.Button):
+    def __init__(self, panel: "BirthdayAdminView"):
+        self.panel = panel
+        super().__init__(label="Voltar", emoji="↩️", style=discord.ButtonStyle.secondary)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.panel.go_back()
+        self.panel._rebuild()
+        await interaction.response.edit_message(view=self.panel)
+
+
 class _EntriesPageButton(discord.ui.Button):
     def __init__(self, panel: "BirthdayAdminView", *, direction: str):
         self.panel = panel
