@@ -2041,7 +2041,6 @@ class BotLocal(commands.Bot):
                     }
                     result = await asyncio.to_thread(self._process_zip_update_sync, zip_path, status_context)
                     changed_files = list(result.get("changed_files") or [])
-                    branch = result.get("branch") or "main"
                     triggered_update = bool(result.get("triggered_update"))
 
                     if not changed_files:
@@ -2055,30 +2054,9 @@ class BotLocal(commands.Bot):
                         continue
 
                     diff_stats = result.get("diff_stats") if isinstance(result.get("diff_stats"), dict) else {}
-                    entries = list(diff_stats.get("entries") or []) if isinstance(diff_stats, dict) else []
                     diff_summary = str(diff_stats.get("summary") or "").strip() if isinstance(diff_stats, dict) else ""
-                    if not diff_summary:
-                        diff_summary = "diff indisponível"
-
-                    def fmt_entry(entry: object) -> str:
-                        if isinstance(entry, dict):
-                            path = str(entry.get("path") or "")
-                            if bool(entry.get("binary")):
-                                return f"• `{path}`  binário"
-                            return f"• `{path}`  +{int(entry.get('added') or 0)} -{int(entry.get('removed') or 0)}"
-                        return f"• `{entry}`"
-
-                    if entries:
-                        preview_files = "\n".join(fmt_entry(entry) for entry in entries[:10])
-                        remaining = max(0, len(entries) - 10)
-                    else:
-                        preview_files = "\n".join(f"• `{path}`" for path in changed_files[:10])
-                        remaining = max(0, len(changed_files) - 10)
-                    if remaining:
-                        preview_files += f"\n+{remaining} arquivo(s) restante(s)"
 
                     queue_position = int(result.get("queue_position") or 0)
-                    candidate_id = str(result.get("candidate_id") or "").strip()
                     if queue_position <= 1:
                         stage_label = "Aguardando updater"
                         queue_detail = "Update preparado e colocado no queue."
@@ -2087,16 +2065,15 @@ class BotLocal(commands.Bot):
                         stage_label = "Aguardando no queue"
                         queue_detail = f"Posição {queue_position} · {before} update(s) antes deste."
                     if not triggered_update:
-                        queue_detail += "\nO timer do updater vai continuar o fluxo."
+                        queue_detail += "\nVai continuar automaticamente."
 
                     details = [queue_detail]
                     if prefix:
                         details.append(f"-# {prefix.rstrip(' · ')}")
-                    details.append(f"-# Branch: `{branch}` · {len(changed_files)} arquivo(s) · {diff_summary}")
-                    if candidate_id:
-                        details.append(f"-# Candidato `{candidate_id}`")
-                    if preview_files:
-                        details.append(f"\n**Arquivos no update**\n{preview_files}")
+                    if diff_summary:
+                        details.append(f"-# {len(changed_files)} arquivo(s) preparado(s) · {diff_summary}")
+                    else:
+                        details.append(f"-# {len(changed_files)} arquivo(s) preparado(s)")
                     desc = f"<a:loading:1510065277868445796> **{stage_label}**\n" + "\n".join(details)
 
                     await self._edit_zip_update_message(

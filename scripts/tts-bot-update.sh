@@ -1998,10 +1998,7 @@ finalize_rollback_request_success() {
 ${SHORT_FROM} → ${SHORT_TO}
 $(printf '%s\n' "$CHANGED_FILES_RAW" | awk 'NF {c++} END {print c+0}') arquivo(s) alterado(s) · $diff_summary
 Aplicação: $apply_mode
-Tempo total: $duration
-
-## Arquivos alterados
-$changed_files"
+Tempo total: $duration"
   post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "success" "$title" "$desc" "$control_json"
   local body
   body="Resumo: $summary
@@ -3826,10 +3823,10 @@ ZIP_STATUS_DESCRIPTION="$ALERT_SUMMARY
 ${SHORT_FROM} → ${SHORT_TO}
 ${CHANGED_FILES_COUNT} arquivo(s) alterado(s) · ${DIFF_TOTAL_SUMMARY}
 Aplicação: ${APPLY_MODE}
-Tempo total: ${DURATION}
-
-## Arquivos alterados
-${CHANGED_FILES}"
+Tempo total: ${DURATION}"
+if (( UPDATE_HAS_WARNINGS == 1 || OVERALL_FATAL == 1 )); then
+  ZIP_STATUS_DESCRIPTION+=$'\n\nDetalhes enviados no logs.'
+fi
 ZIP_STATUS_CONTROL_JSON=""
 if (( (LOCAL_CANDIDATE_MODE == 1 || REMOTE_CANDIDATE_MODE == 1) && OVERALL_FATAL == 0 )); then
   source_author_id=""
