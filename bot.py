@@ -214,6 +214,8 @@ class BotLocal(commands.Bot):
         self._event_loop_lag_warnings: int = 0
         self._event_loop_last_warning_at: float = 0.0
         self._zip_update_lock = asyncio.Lock()
+        self._phone_worker_unavailable_until_by_task: dict[str, float] = {}
+        self._phone_worker_unavailable_last_log_by_task: dict[str, float] = {}
         self._repo_root = Path(__file__).resolve().parent
         self._update_temp_root = Path("/tmp/discord-auto-update")
         self._update_staging_root = Path(os.getenv("DISCORD_AUTO_UPDATE_STAGING_DIR", str(self._repo_root.parent / "bot-update-staging")))
@@ -1374,6 +1376,20 @@ class BotLocal(commands.Bot):
         base_url = self._phone_worker_base_url()
         if not base_url:
             return None
+        task = str(task or "").strip()
+        now = time.monotonic()
+        cooldown_default = 900.0 if task == "zip_validate" else 120.0
+        cooldown = float(_cfg("PHONE_WORKER_UNAVAILABLE_COOLDOWN_SECONDS", default=cooldown_default) or cooldown_default)
+        until = float(self._phone_worker_unavailable_until_by_task.get(task) or 0.0)
+        if until and now < until:
+            last_log = float(self._phone_worker_unavailable_last_log_by_task.get(task) or 0.0)
+            if now - last_log >= 300.0:
+                self._phone_worker_unavailable_last_log_by_task[task] = now
+                logging.getLogger("zip_update").info(
+                    "phone-worker indisponível para %s: pulando por cooldown %.0fs",
+                    task, max(0.0, until - now),
+                )
+            return None
         token = str(_cfg("PHONE_WORKER_TOKEN", default="") or "").strip()
         payload = dict(payload)
         payload["task"] = task
@@ -1386,9 +1402,16 @@ class BotLocal(commands.Bot):
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
             parsed = json.loads(raw.decode("utf-8"))
-            return parsed if isinstance(parsed, dict) else None
+            if isinstance(parsed, dict):
+                self._phone_worker_unavailable_until_by_task.pop(task, None)
+                return parsed
+            return None
         except Exception as exc:
-            logging.getLogger("zip_update").info("phone-worker indisponível para %s: %r", task, exc)
+            self._phone_worker_unavailable_until_by_task[task] = now + max(30.0, cooldown)
+            last_log = float(self._phone_worker_unavailable_last_log_by_task.get(task) or 0.0)
+            if now - last_log >= 300.0:
+                self._phone_worker_unavailable_last_log_by_task[task] = now
+                logging.getLogger("zip_update").info("phone-worker indisponível para %s: %r", task, exc)
             return None
 
     def _phone_worker_validate_zip_sync(self, zip_path: Path) -> dict[str, object] | None:
@@ -1399,7 +1422,12 @@ class BotLocal(commands.Bot):
             if zip_path.stat().st_size > max_mb * 1024 * 1024:
                 logging.getLogger("zip_update").info("zip grande demais para validação phone-worker: %.2f MB", zip_path.stat().st_size / 1048576)
                 return None
-            timeout = float(_cfg("PHONE_WORKER_ZIP_VALIDATE_TIMEOUT_SECONDS", default=5.0) or 5.0)
+            now = time.monotonic()
+            until = float(self._phone_worker_unavailable_until_by_task.get("zip_validate") or 0.0)
+            if until and now < until:
+                return None
+            timeout = float(_cfg("PHONE_WORKER_ZIP_VALIDATE_TIMEOUT_SECONDS", default=1.5) or 1.5)
+            timeout = max(0.5, min(timeout, 5.0))
             result = self._phone_worker_request_sync(
                 "zip_validate",
                 {

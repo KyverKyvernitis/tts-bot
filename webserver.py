@@ -614,6 +614,85 @@ def _core_worker_app_heartbeats_path() -> str:
     return os.path.join(_repo_data_dir(), "core_worker_app_heartbeats.json")
 
 
+def _core_worker_app_runtime_snapshot_path() -> str:
+    return os.path.join(_repo_data_dir(), "core_worker_app_runtime_snapshot.json")
+
+
+def _compact_core_worker_public_nested(value: dict | None) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    keep = (
+        "summary", "state", "prepared", "ok", "rootfsReady", "executorReady",
+        "termuxRequired", "bedrockStartAllowed", "readyForBox64Install",
+        "readyForBedrockStart", "lastResultAt", "sourceJobType", "nativeOk",
+        "allowlist", "androidSdk", "blockers",
+    )
+    out = {}
+    for key in keep:
+        if key in value:
+            raw = value.get(key)
+            if isinstance(raw, str):
+                out[key] = _safe_short_text(raw, 180)
+            elif isinstance(raw, (bool, int, float)) or raw is None:
+                out[key] = raw
+            elif isinstance(raw, list):
+                out[key] = [_safe_short_text(item, 80) for item in raw[:16]]
+    return out
+
+
+def _compact_core_worker_app_heartbeat_record(record: dict) -> dict:
+    """Mantém apenas o status público necessário no heartbeat persistido.
+
+    Antes o latestByInstallId/latestByWorkerId guardava runtime/status inteiros
+    do APK. Com poucos heartbeats isso crescia para MBs e cada rota passava a
+    ler/escrever payload grande dentro do processo do bot. O APK já envia tudo
+    de novo periodicamente; persistimos só o snapshot de decisão/painel.
+    """
+    if not isinstance(record, dict):
+        return {}
+    keep_keys = (
+        "receivedAt", "installId", "workerId", "deviceName", "source", "state",
+        "reason", "appVersion", "appVersionCode", "profile", "runtimeMode",
+        "capabilities", "supported_tasks", "supportedTasks", "appJobs",
+        "internalRuntime", "internalRuntimeState", "termuxWorkerOnline",
+        "jobsRuntime", "internalJobsQueue", "internalJobsRunning",
+        "internalJobsPending", "fcmState", "batteryPercent",
+        "batteryTemperatureC", "batteryCharging", "networkType", "networkVpn",
+        "vpsPingMs", "updateState", "updateAvailable", "lastAppError",
+        "ready", "diagnosticsSummary", "storageSummary", "bridgeSummary",
+        "foregroundRuntimeActive", "foregroundRuntimeSummary",
+        "coreLinuxSummary", "coreLinuxState", "coreLinuxPrepared",
+        "bedrockSummary", "bedrockState", "bedrockReady",
+        "bedrockRuntimeSummary", "bedrockRuntimeState",
+        "bedrockRuntimeServiceActive", "bedrockInstallerSummary",
+        "bedrockInstallerState", "bedrockInstallerNextAction",
+        "notificationPermission", "remoteAddr",
+    )
+    out = {key: record.get(key) for key in keep_keys if key in record}
+    out["capabilities"] = _safe_string_list(out.get("capabilities"), limit=80)
+    supported = _safe_string_list(out.get("supported_tasks") or out.get("supportedTasks") or out.get("appJobs"), limit=120)
+    out["supported_tasks"] = supported
+    out["supportedTasks"] = list(supported)
+    out["appJobs"] = list(supported)
+    out["coreLinux"] = _compact_core_worker_public_nested(record.get("coreLinux") if isinstance(record.get("coreLinux"), dict) else {})
+    out["nativeRuntime"] = _compact_core_worker_public_nested(record.get("nativeRuntime") if isinstance(record.get("nativeRuntime"), dict) else {})
+    return out
+
+
+def _write_core_worker_app_runtime_snapshot(record: dict) -> None:
+    if not isinstance(record, dict) or not (record.get("installId") or record.get("workerId")):
+        return
+    try:
+        snapshot = {
+            "ok": True,
+            "updatedAt": int(record.get("receivedAt") or time.time()),
+            "latest": record,
+        }
+        _atomic_write_json(_core_worker_app_runtime_snapshot_path(), snapshot, mode=0o600)
+    except Exception:
+        pass
+
+
 def _append_core_worker_app_heartbeat(payload: dict) -> dict:
     now = int(time.time())
     install_id = _safe_short_text(payload.get("installId") or payload.get("install_id"), 80)
@@ -733,7 +812,7 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
         previous = latest_by_install.get(install_id) if install_id else None
         if not isinstance(previous, dict) and worker_id:
             previous = latest_by_worker.get(worker_id)
-        record = _merge_core_worker_app_heartbeat_record(record, previous)
+        record = _compact_core_worker_app_heartbeat_record(_merge_core_worker_app_heartbeat_record(record, previous))
         if isinstance(previous, dict) and CORE_WORKER_APP_HEARTBEAT_STORE_MIN_SECONDS > 0:
             prev_seen = int(previous.get("receivedAt") or 0)
             reason_lower = str(record.get("reason") or "").lower()
@@ -748,6 +827,7 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
         events = events[-CORE_WORKER_APP_HEARTBEAT_EVENT_LIMIT:]
         data = {"ok": True, "updatedAt": now, "latestByInstallId": latest_by_install, "latestByWorkerId": latest_by_worker, "events": events}
         _atomic_write_json(path, data, mode=0o600)
+        _write_core_worker_app_runtime_snapshot(record)
     return record
 
 
@@ -854,6 +934,14 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
         record = data.get("latestByWorkerId", {}).get(str(worker_id))
     if record is None and install_id and isinstance(data.get("latestByInstallId"), dict):
         record = data.get("latestByInstallId", {}).get(str(install_id))
+    if not isinstance(record, dict) and not worker_id and not install_id:
+        try:
+            snap = _load_json_cached(_core_worker_app_runtime_snapshot_path(), {})
+            latest = snap.get("latest") if isinstance(snap, dict) else None
+            if isinstance(latest, dict):
+                record = latest
+        except Exception:
+            pass
     if not isinstance(record, dict):
         record = _newest_core_worker_app_heartbeat(data)
     if not isinstance(record, dict):
@@ -2518,11 +2606,44 @@ def _reap_pending_automation_process(key: str, process: subprocess.Popen, *, max
 def _log_pending_automation_skip(key: str, message: str) -> None:
     now = time.time()
     last = float(_core_worker_pending_automation_last_log.get(key) or 0.0)
-    if now - last < 30.0:
+    if now - last < 300.0:
         return
     _core_worker_pending_automation_last_log[key] = now
     with contextlib.suppress(Exception):
         app.logger.info("core-worker automation skipped | worker=%s reason=%s", key, message)
+
+
+def _core_worker_automation_status_path() -> str:
+    return os.path.join(_repo_data_dir(), "core_worker_automation_status.json")
+
+
+def _core_worker_automation_pending_path() -> str:
+    return os.path.join(_repo_data_dir(), "core_worker_automation_pending.json")
+
+
+def _core_worker_automation_has_explicit_pending() -> bool:
+    try:
+        data = _load_json_cached(_core_worker_automation_pending_path(), {})
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        return False
+    for key in ("agent_update", "apk_build"):
+        item = data.get(key)
+        if isinstance(item, dict) and (item.get("pending") or item.get("queued") or item.get("job")):
+            return True
+    return False
+
+
+def _core_worker_automation_recently_finished(cooldown: float) -> bool:
+    try:
+        data = _load_json_cached(_core_worker_automation_status_path(), {})
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        return False
+    finished = float(data.get("finished_at") or 0.0)
+    return bool(finished and time.time() - finished < max(60.0, float(cooldown)))
 
 
 def _kick_core_worker_pending_automation(worker_id: str = "") -> None:
@@ -2544,6 +2665,14 @@ def _kick_core_worker_pending_automation(worker_id: str = "") -> None:
 
     script = os.path.join(os.getcwd(), "scripts", "core-worker-automation.py")
     if not os.path.isfile(script):
+        return
+
+    # Evita spawn pesado em todo restart/heartbeat quando não há pendência real.
+    # Se houver agent_update/apk_build pendente, o processo ainda roda; se o último
+    # scan acabou agora e não há pendência explícita, o próximo scan fica para o
+    # cooldown persistido em disco.
+    if not _core_worker_automation_has_explicit_pending() and _core_worker_automation_recently_finished(cooldown):
+        _log_pending_automation_skip(key, f"recent_scan_no_pending cooldown<{cooldown:.0f}s")
         return
 
     with _core_worker_pending_automation_lock:

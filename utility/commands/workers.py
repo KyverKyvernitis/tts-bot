@@ -42,7 +42,7 @@ WORKERS_DEFAULT_ROLES = (
     "ffprobe",
     "tts-convert",
 )
-CORE_WORKER_AUTO_WAKE_DEFAULT_INTERVAL_SECONDS = 60.0
+CORE_WORKER_AUTO_WAKE_DEFAULT_INTERVAL_SECONDS = 180.0
 CORE_WORKER_IMPORTANT_WAKE_ROLES = {
     "diagnostics",
     "log-summary",
@@ -476,6 +476,40 @@ def _core_worker_app_runtime_record(worker_id: str) -> dict[str, Any] | None:
     latest = data.get("latestByWorkerId") if isinstance(data, dict) and isinstance(data.get("latestByWorkerId"), dict) else {}
     record = latest.get(worker_id) if isinstance(latest, dict) else None
     return record if isinstance(record, dict) else None
+
+
+def _core_worker_any_apk_runtime_online(max_age_seconds: int = 240) -> bool:
+    """Retorna True quando o APK interno atual está online.
+
+    O auto-wake legado serve para acordar Termux/phone-worker. Quando o Core
+    Worker APK interno já está online e pronto, ficar tentando acordar Termux a
+    cada minuto só gera SSH/timeout/log e lag na VPS pequena.
+    """
+    path = _repo_root() / "data" / "core_worker_app_heartbeats.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        return False
+    records: list[dict[str, Any]] = []
+    if isinstance(data, dict):
+        for bucket_name in ("latestByInstallId", "latestByWorkerId"):
+            bucket = data.get(bucket_name)
+            if isinstance(bucket, dict):
+                records.extend(item for item in bucket.values() if isinstance(item, dict))
+    now = time.time()
+    for record in records:
+        try:
+            seen = int(record.get("receivedAt") or record.get("updatedAt") or 0)
+        except Exception:
+            seen = 0
+        if not seen or now - seen > max_age_seconds:
+            continue
+        source = str(record.get("source") or "").lower()
+        version_code = int(record.get("appVersionCode") or 0)
+        prepared = bool(record.get("coreLinuxPrepared"))
+        if source.startswith("core-worker-apk") and (prepared or version_code >= 70):
+            return True
+    return False
 
 
 CORE_WORKER_APP_JOB_ALIASES = {
@@ -4270,6 +4304,8 @@ class WorkersCommandMixin:
         if not _env_bool("CORE_WORKER_AUTO_WAKE_ENABLED", True):
             return False
         if not snapshot.enabled or not snapshot.configured:
+            return False
+        if _env_bool("CORE_WORKER_AUTO_WAKE_SKIP_WHEN_APK_ONLINE", True) and _core_worker_any_apk_runtime_online():
             return False
         if _snapshot_has_online_worker(snapshot):
             return False

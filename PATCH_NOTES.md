@@ -1,52 +1,37 @@
-# patch-vps-core-worker-backpressure-json-io-20260602
+# Patch: VPS worker automation / zip_validate lag fix
 
-Base: `repo-20260602-191433.zip`
+Base: `repo-20260603-123310.zip`
 
-## Objetivo
+Objetivo: reduzir as fontes de lag que sobraram depois do Core Linux Runtime v1 estar pronto, sem mexer em CallKeeper, música, TTS, Bedrock real ou rootfs real.
 
-Reduzir travamentos da VPS durante rajadas do APK/Core Worker antes de avançar para rootfs real. O Core Linux Runtime v1 já estava funcional; este patch estabiliza o caminho de telemetria/jobs para evitar `event loop atrasado`, `heartbeat blocked` e filas Waitress causadas por I/O JSON síncrono repetitivo.
+## Mudanças
 
-## Alterações principais
-
-- `webserver.py`
-  - adiciona cache local por mtime/tamanho para JSONs de telemetria do APK;
-  - grava JSON compacto, sem `indent/sort_keys` e sem `fsync` obrigatório;
-  - mantém `fsync` opt-in via `CORE_WORKER_JSON_FSYNC=1`;
-  - reduz limites padrão de histórico:
-    - heartbeats: 60 eventos;
-    - notifications: 60 eventos;
-    - jobs results: 120 resultados;
-    - pending jobs: 80;
-  - reduz `CORE_WORKER_APP_JOB_MAX_DELIVER` padrão de 6 para 2;
-  - adiciona throttle em `/core-worker/app/jobs/fetch` para evitar rajadas vazias;
-  - evita consultar o histórico de jobs em todo heartbeat quando o APK já envia estado Core Linux completo;
-  - evita armazenar heartbeats repetidos do mesmo source em janela curta;
-  - expõe `source` no runtime-summary;
-  - normaliza `jobsRuntime` legado com `bedrock-installe` para texto neutro `apk-native-runtime` no summary.
-
-- `CoreWorkerRuntimeService.java`
-  - heartbeat foreground passa de 25s mínimo para 60s;
-  - tick do serviço persistente passa de 60s para 120s;
-  - start repetido do foreground service não fura mais o debounce, exceto ação manual.
-
-- `MainActivity.java`
-  - debounce de `onResume` passa de 15s para 60s;
-  - fetch de jobs internos não manual recebe debounce local de 25s;
-  - APK trata resposta `throttled` da VPS sem considerar falha.
-
-- APK bump: `0.5.58` / `versionCode 73`.
-
-## Segurança/escopo
-
-- Não toca CallKeeper.
-- Não inicia Bedrock real.
-- Não adiciona rootfs real ainda.
-- Não libera shell livre.
-- Não remove Termux de uma vez; Termux continua fallback legado enquanto a migração prossegue.
+- APK: bump para `0.5.59` / `versionCode 74`.
+- `webserver.py`:
+  - adiciona snapshot compacto `data/core_worker_app_runtime_snapshot.json`;
+  - passa a persistir heartbeats do APK em formato compacto, sem guardar runtime/status inteiro em `latestByInstallId/latestByWorkerId/events`;
+  - mantém `supported_tasks`, `capabilities`, `coreLinuxState`, `coreLinuxSummary` e campos usados pelo painel/runtime-summary;
+  - `/core-worker/app/runtime-summary` passa a preferir o snapshot compacto quando nenhum worker/install específico é pedido;
+  - logs repetidos de `core-worker automation skipped` agora têm janela maior de silenciamento;
+  - `process-pending` não é spawnado de novo se não há pendência explícita e o último scan terminou dentro do cooldown persistido.
+- `bot.py`:
+  - `zip_validate` via phone-worker passa a falhar rápido quando o phone-worker está indisponível;
+  - adiciona cooldown por task para não repetir timeout a cada ZIP;
+  - timeout padrão de `zip_validate` cai para 1.5s, com limite máximo de 5s.
+- `utility/commands/workers.py`:
+  - auto-wake legado agora usa intervalo padrão maior;
+  - auto-wake pula tentativa de acordar Termux quando o APK interno/Core Linux já está online e recente.
+- `CoreWorkerRuntimeService.java`:
+  - reduz frequência do heartbeat/tick do foreground service.
 
 ## Validação local
 
-- `python3 -m py_compile webserver.py utility/commands/workers.py`
-- checagem simples de balanceamento de chaves/parênteses Java em `MainActivity.java` e `CoreWorkerRuntimeService.java`.
+- `python3 -m py_compile webserver.py bot.py utility/commands/workers.py`
+- checagem simples de balanceamento de `{}` e `()` em `CoreWorkerRuntimeService.java` e `MainActivity.java`
 
-Build Android real não foi executado aqui porque continua sendo feito pelo phone worker/builder.
+## Fora do escopo
+
+- Não altera CallKeeper.
+- Não inicia Bedrock real.
+- Não implementa rootfs real ainda.
+- Não altera o smoke test Core Linux já aprovado.
