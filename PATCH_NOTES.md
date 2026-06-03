@@ -1,37 +1,30 @@
-# Patch: VPS worker automation / zip_validate lag fix
+# Patch: core-worker autowake APK online final
 
-Base: `repo-20260603-123310.zip`
+Base: `repo-20260603-130337.zip`
 
-Objetivo: reduzir as fontes de lag que sobraram depois do Core Linux Runtime v1 estar pronto, sem mexer em CallKeeper, música, TTS, Bedrock real ou rootfs real.
+## Objetivo
 
-## Mudanças
+Parar o auto-wake legado do Termux/phone-worker quando o APK/Core Linux interno já está online e pronto.
 
-- APK: bump para `0.5.59` / `versionCode 74`.
-- `webserver.py`:
-  - adiciona snapshot compacto `data/core_worker_app_runtime_snapshot.json`;
-  - passa a persistir heartbeats do APK em formato compacto, sem guardar runtime/status inteiro em `latestByInstallId/latestByWorkerId/events`;
-  - mantém `supported_tasks`, `capabilities`, `coreLinuxState`, `coreLinuxSummary` e campos usados pelo painel/runtime-summary;
-  - `/core-worker/app/runtime-summary` passa a preferir o snapshot compacto quando nenhum worker/install específico é pedido;
-  - logs repetidos de `core-worker automation skipped` agora têm janela maior de silenciamento;
-  - `process-pending` não é spawnado de novo se não há pendência explícita e o último scan terminou dentro do cooldown persistido.
-- `bot.py`:
-  - `zip_validate` via phone-worker passa a falhar rápido quando o phone-worker está indisponível;
-  - adiciona cooldown por task para não repetir timeout a cada ZIP;
-  - timeout padrão de `zip_validate` cai para 1.5s, com limite máximo de 5s.
-- `utility/commands/workers.py`:
-  - auto-wake legado agora usa intervalo padrão maior;
-  - auto-wake pula tentativa de acordar Termux quando o APK interno/Core Linux já está online e recente.
-- `CoreWorkerRuntimeService.java`:
-  - reduz frequência do heartbeat/tick do foreground service.
+## Alterações
 
-## Validação local
+- `utility/commands/workers.py`
+  - `_core_worker_app_runtime_record()` passa a preferir `data/core_worker_app_runtime_snapshot.json` antes do heartbeat grande.
+  - `_core_worker_any_apk_runtime_online()` agora lê o snapshot compacto e usa o heartbeat só como fallback.
+  - A checagem de APK online valida idade, versão mínima, origem APK, `coreLinuxPrepared`, capabilities e estado `runtime_v1_ready`.
+  - O loop `_core_worker_auto_wake_loop()` faz um caminho rápido antes de coletar snapshot pesado.
+  - Quando o APK/Core Linux está online, o loop pula o wake e só registra um log resumido em intervalo controlado.
 
-- `python3 -m py_compile webserver.py bot.py utility/commands/workers.py`
-- checagem simples de balanceamento de `{}` e `()` em `CoreWorkerRuntimeService.java` e `MainActivity.java`
+## Variáveis opcionais
 
-## Fora do escopo
+- `CORE_WORKER_AUTO_WAKE_APK_ONLINE_MAX_AGE_SECONDS` padrão: `300`
+- `CORE_WORKER_AUTO_WAKE_APK_MIN_VERSION_CODE` padrão: `74`
+- `CORE_WORKER_AUTO_WAKE_APK_SKIP_LOG_INTERVAL_SECONDS` padrão: `900`
 
+## Segurança/escopo
+
+- Não altera Core Linux funcional.
+- Não altera APK.
 - Não altera CallKeeper.
-- Não inicia Bedrock real.
-- Não implementa rootfs real ainda.
-- Não altera o smoke test Core Linux já aprovado.
+- Não altera música/TTS.
+- Não inicia rootfs real, Box64 ou Bedrock.

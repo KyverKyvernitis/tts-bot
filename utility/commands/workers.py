@@ -43,6 +43,9 @@ WORKERS_DEFAULT_ROLES = (
     "tts-convert",
 )
 CORE_WORKER_AUTO_WAKE_DEFAULT_INTERVAL_SECONDS = 180.0
+CORE_WORKER_AUTO_WAKE_APK_ONLINE_MAX_AGE_SECONDS = 300
+CORE_WORKER_AUTO_WAKE_APK_MIN_VERSION_CODE = 74
+CORE_WORKER_AUTO_WAKE_APK_SKIP_LOG_INTERVAL_SECONDS = 900.0
 CORE_WORKER_IMPORTANT_WAKE_ROLES = {
     "diagnostics",
     "log-summary",
@@ -468,6 +471,18 @@ def _core_worker_app_runtime_record(worker_id: str) -> dict[str, Any] | None:
     worker_id = str(worker_id or "").strip()
     if not worker_id:
         return None
+
+    # Preferir o snapshot compacto criado pelo webserver. Ele evita carregar o
+    # heartbeat grande em caminhos frequentes do painel/auto-wake.
+    snapshot_path = _repo_root() / "data" / "core_worker_app_runtime_snapshot.json"
+    try:
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8")) if snapshot_path.exists() else {}
+    except Exception:
+        snapshot = {}
+    latest_snapshot = snapshot.get("latest") if isinstance(snapshot, dict) else None
+    if isinstance(latest_snapshot, dict) and str(latest_snapshot.get("workerId") or "").strip() == worker_id:
+        return latest_snapshot
+
     path = _repo_root() / "data" / "core_worker_app_heartbeats.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -478,36 +493,140 @@ def _core_worker_app_runtime_record(worker_id: str) -> dict[str, Any] | None:
     return record if isinstance(record, dict) else None
 
 
-def _core_worker_any_apk_runtime_online(max_age_seconds: int = 240) -> bool:
-    """Retorna True quando o APK interno atual está online.
+def _core_worker_record_age_seconds(record: dict[str, Any], *, now: float | None = None) -> float | None:
+    if not isinstance(record, dict):
+        return None
+    if now is None:
+        now = time.time()
+    candidates = (
+        record.get("receivedAt"),
+        record.get("updatedAt"),
+        record.get("lastSeenAt"),
+    )
+    for candidate in candidates:
+        try:
+            seen = float(candidate or 0)
+        except Exception:
+            seen = 0
+        if seen > 0:
+            return max(0.0, now - seen)
+    return None
 
-    O auto-wake legado serve para acordar Termux/phone-worker. Quando o Core
-    Worker APK interno já está online e pronto, ficar tentando acordar Termux a
-    cada minuto só gera SSH/timeout/log e lag na VPS pequena.
-    """
-    path = _repo_root() / "data" / "core_worker_app_heartbeats.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except Exception:
+
+def _core_worker_apk_runtime_record_is_online(
+    record: dict[str, Any],
+    *,
+    now: float | None = None,
+    max_age_seconds: int | float | None = None,
+    min_version_code: int | None = None,
+) -> bool:
+    if not isinstance(record, dict):
         return False
+    if now is None:
+        now = time.time()
+    if max_age_seconds is None:
+        max_age_seconds = int(_env_float("CORE_WORKER_AUTO_WAKE_APK_ONLINE_MAX_AGE_SECONDS", CORE_WORKER_AUTO_WAKE_APK_ONLINE_MAX_AGE_SECONDS))
+    if min_version_code is None:
+        min_version_code = int(_env_float("CORE_WORKER_AUTO_WAKE_APK_MIN_VERSION_CODE", CORE_WORKER_AUTO_WAKE_APK_MIN_VERSION_CODE))
+
+    age = _core_worker_record_age_seconds(record, now=now)
+    if age is None or age > float(max_age_seconds):
+        return False
+
+    source = str(record.get("source") or "").strip().lower()
+    internal_runtime = str(record.get("internalRuntime") or record.get("internal_runtime") or "").strip().lower()
+    runtime_mode = str(record.get("runtimeMode") or record.get("runtime_mode") or "").strip().lower()
+    looks_like_apk = (
+        source.startswith("core-worker-apk")
+        or internal_runtime.startswith("apk-")
+        or "apk-native" in runtime_mode
+    )
+    if not looks_like_apk:
+        return False
+
+    try:
+        version_code = int(record.get("appVersionCode") or 0)
+    except Exception:
+        version_code = 0
+    if version_code < int(min_version_code):
+        return False
+
+    capabilities = {str(item) for item in (record.get("capabilities") or [])}
+    supported = {str(item) for item in (record.get("supported_tasks") or record.get("supportedTasks") or record.get("appJobs") or [])}
+    core_linux = record.get("coreLinux") if isinstance(record.get("coreLinux"), dict) else {}
+    prepared = bool(record.get("coreLinuxPrepared") or core_linux.get("prepared"))
+    state = str(record.get("coreLinuxState") or core_linux.get("state") or "").strip().lower()
+    summary = str(record.get("coreLinuxSummary") or core_linux.get("summary") or "").strip().lower()
+
+    has_runtime_v1 = "core-linux-runtime-v1" in capabilities
+    has_smoke_job = "apk_core_linux_runtime_smoke_test" in supported
+    state_ready = state in {"runtime_v1_ready", "ready", "ok", "rootfs_ready", "executor_ready"}
+    summary_ready = "runtime v1" in summary and "pronto" in summary
+
+    return bool(prepared and (has_runtime_v1 or has_smoke_job or state_ready or summary_ready))
+
+
+def _core_worker_iter_apk_runtime_records() -> list[dict[str, Any]]:
+    """Lê registros compactos do APK sem depender do payload grande de heartbeat.
+
+    O snapshot compacto é a fonte preferida. O heartbeat fica como fallback para
+    bases antigas/primeiro ciclo depois de restart.
+    """
+    root = _repo_root()
     records: list[dict[str, Any]] = []
+
+    snapshot_path = root / "data" / "core_worker_app_runtime_snapshot.json"
+    try:
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8")) if snapshot_path.exists() else {}
+    except Exception:
+        snapshot = {}
+    if isinstance(snapshot, dict):
+        latest = snapshot.get("latest")
+        if isinstance(latest, dict):
+            if not latest.get("updatedAt") and snapshot.get("updatedAt"):
+                latest = dict(latest)
+                latest.setdefault("updatedAt", snapshot.get("updatedAt"))
+            records.append(latest)
+
+    heartbeat_path = root / "data" / "core_worker_app_heartbeats.json"
+    try:
+        data = json.loads(heartbeat_path.read_text(encoding="utf-8")) if heartbeat_path.exists() else {}
+    except Exception:
+        data = {}
     if isinstance(data, dict):
         for bucket_name in ("latestByInstallId", "latestByWorkerId"):
             bucket = data.get(bucket_name)
             if isinstance(bucket, dict):
                 records.extend(item for item in bucket.values() if isinstance(item, dict))
-    now = time.time()
+
+    # Dedupe simples preservando prioridade snapshot -> latest heartbeat.
+    seen: set[tuple[str, str, str]] = set()
+    unique: list[dict[str, Any]] = []
     for record in records:
-        try:
-            seen = int(record.get("receivedAt") or record.get("updatedAt") or 0)
-        except Exception:
-            seen = 0
-        if not seen or now - seen > max_age_seconds:
+        key = (
+            str(record.get("installId") or ""),
+            str(record.get("workerId") or ""),
+            str(record.get("receivedAt") or record.get("updatedAt") or ""),
+        )
+        if key in seen:
             continue
-        source = str(record.get("source") or "").lower()
-        version_code = int(record.get("appVersionCode") or 0)
-        prepared = bool(record.get("coreLinuxPrepared"))
-        if source.startswith("core-worker-apk") and (prepared or version_code >= 70):
+        seen.add(key)
+        unique.append(record)
+    return unique
+
+
+def _core_worker_any_apk_runtime_online(max_age_seconds: int | float | None = None) -> bool:
+    """Retorna True quando o APK/Core Linux interno atual está online.
+
+    O auto-wake legado serve para acordar Termux/phone-worker. Quando o Core
+    Worker APK interno já está online e pronto, tentar acordar Termux só gera
+    SSH/timeout/log e lag na VPS pequena.
+    """
+    if max_age_seconds is None:
+        max_age_seconds = int(_env_float("CORE_WORKER_AUTO_WAKE_APK_ONLINE_MAX_AGE_SECONDS", CORE_WORKER_AUTO_WAKE_APK_ONLINE_MAX_AGE_SECONDS))
+    now = time.time()
+    for record in _core_worker_iter_apk_runtime_records():
+        if _core_worker_apk_runtime_record_is_online(record, now=now, max_age_seconds=max_age_seconds):
             return True
     return False
 
@@ -4320,9 +4439,21 @@ class WorkersCommandMixin:
     async def _core_worker_auto_wake_loop(self) -> None:
         with contextlib.suppress(Exception):
             await self.bot.wait_until_ready()
+        last_apk_skip_log = 0.0
         while not getattr(self.bot, "is_closed", lambda: False)():
             interval = max(30.0, _env_float("CORE_WORKER_AUTO_WAKE_INTERVAL_SECONDS", CORE_WORKER_AUTO_WAKE_DEFAULT_INTERVAL_SECONDS))
             try:
+                # Caminho rápido: se o APK/Core Linux interno já está online, não
+                # coleta snapshot pesado e não tenta acordar o Termux legado.
+                if _env_bool("CORE_WORKER_AUTO_WAKE_SKIP_WHEN_APK_ONLINE", True) and _core_worker_any_apk_runtime_online():
+                    now = time.monotonic()
+                    log_interval = max(60.0, _env_float("CORE_WORKER_AUTO_WAKE_APK_SKIP_LOG_INTERVAL_SECONDS", CORE_WORKER_AUTO_WAKE_APK_SKIP_LOG_INTERVAL_SECONDS))
+                    if now - last_apk_skip_log >= log_interval:
+                        print("[core-worker-auto-wake] ignorado: APK/Core Linux interno online", flush=True)
+                        last_apk_skip_log = now
+                    await asyncio.sleep(interval)
+                    continue
+
                 snapshot = await self._collect_workers_snapshot()
                 if self._snapshot_needs_auto_wake(snapshot):
                     labels = _offline_important_worker_labels(snapshot)

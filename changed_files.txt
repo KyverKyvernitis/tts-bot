@@ -1,7 +1,3 @@
-webserver.py
-bot.py
 utility/commands/workers.py
-android/core-worker-app/app/build.gradle
-android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
 PATCH_NOTES.md
 changed_files.txt
