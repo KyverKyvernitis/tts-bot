@@ -315,6 +315,7 @@ public class CoreWorkerRuntimeService extends Service {
                 .put("internal-jobs")
                 .put("core-linux-runtime")
                 .put("core-linux-rootfs-manager")
+                .put("core-linux-rootfs-import-v1")
                 .put("core-linux-runtime-v1")
                 .put("minecraft-bedrock-manager-safe-plan");
     }
@@ -353,6 +354,10 @@ public class CoreWorkerRuntimeService extends Service {
                 .put("apk_core_linux_rootfs_validate")
                 .put("apk_core_linux_rootfs_preflight")
                 .put("apk_core_linux_rootfs_clean_staging")
+                .put("apk_core_linux_rootfs_import_status")
+                .put("apk_core_linux_rootfs_import_validate")
+                .put("apk_core_linux_rootfs_import_abort")
+                .put("apk_core_linux_rootfs_real_status")
                 .put("apk_core_linux_runtime_smoke_test");
     }
 
@@ -360,9 +365,10 @@ public class CoreWorkerRuntimeService extends Service {
         JSONObject runtime = readJson(new File(new File(getFilesDir(), "core-linux/runtime"), "linux-runtime-state.json"));
         JSONObject rootfs = readJson(new File(new File(getFilesDir(), "core-linux/runtime"), "rootfs-state.json"));
         JSONObject smoke = readJson(new File(new File(getFilesDir(), "core-linux/runtime"), "core-linux-smoke-test.json"));
+        JSONObject rootfsImport = readJson(new File(new File(getFilesDir(), "core-linux/runtime"), "rootfs-import-state.json"));
         boolean prepared = runtime.optBoolean("ok", false) || runtime.optBoolean("rootfsReady", false) || rootfs.optBoolean("rootfsReady", false) || smoke.optBoolean("ok", false);
-        String summary = firstNonEmpty(runtime.optString("summary", ""), smoke.optString("summary", ""), rootfs.optString("summary", ""), prepared ? "Core Linux Runtime v1 pronto" : "Core Linux Runtime v1 aguardando preparo");
-        String state = firstNonEmpty(runtime.optString("state", ""), smoke.optString("state", ""), rootfs.optString("state", ""), prepared ? "runtime_v1_ready" : "runtime_v1_pending");
+        String summary = firstNonEmpty(runtime.optString("summary", ""), rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), smoke.optString("summary", ""), prepared ? "Core Linux Runtime v1 pronto" : "Core Linux Runtime v1 aguardando preparo");
+        String state = firstNonEmpty(runtime.optString("state", ""), rootfs.optString("state", ""), rootfsImport.optString("state", ""), smoke.optString("state", ""), prepared ? "runtime_v1_ready" : "runtime_v1_pending");
         JSONObject out = new JSONObject();
         try {
             out.put("summary", summary);
@@ -373,10 +379,15 @@ public class CoreWorkerRuntimeService extends Service {
             out.put("lastCheckAt", Math.max(runtime.optLong("updatedAt", 0L), Math.max(rootfs.optLong("updatedAt", 0L), smoke.optLong("updatedAt", 0L))));
             out.put("termuxRequired", false);
             out.put("bedrockStartAllowed", false);
-            out.put("supportedStage", "core-linux-runtime-v1-smoke");
+            out.put("rootfsValidationLevel", rootfs.optString("validationLevel", ""));
+            out.put("rootfsDistributionReady", rootfs.optBoolean("distributionReady", false));
+            out.put("rootfsImportState", rootfsImport.optString("state", ""));
+            out.put("rootfsImportSummary", rootfsImport.optString("summary", ""));
+            out.put("supportedStage", rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke");
             out.put("supportedTasks", supportedLightJobsArray());
             if (runtime.length() > 0) out.put("runtime", runtime);
             if (rootfs.length() > 0) out.put("rootfs", rootfs);
+            if (rootfsImport.length() > 0) out.put("rootfsImport", rootfsImport);
             if (smoke.length() > 0) out.put("smoke", smoke);
         } catch (Throwable ignored) {
         }

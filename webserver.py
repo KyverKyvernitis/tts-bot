@@ -179,6 +179,7 @@ CORE_WORKER_APK_V1_CAPABILITIES = [
     "internal-jobs",
     "core-linux-runtime",
     "core-linux-rootfs-manager",
+    "core-linux-rootfs-import-v1",
     "core-linux-runtime-v1",
     "minecraft-bedrock-manager-safe-plan",
 ]
@@ -216,6 +217,10 @@ CORE_WORKER_APK_V1_SUPPORTED_TASKS = [
     "apk_core_linux_rootfs_validate",
     "apk_core_linux_rootfs_preflight",
     "apk_core_linux_rootfs_clean_staging",
+    "apk_core_linux_rootfs_import_status",
+    "apk_core_linux_rootfs_import_validate",
+    "apk_core_linux_rootfs_import_abort",
+    "apk_core_linux_rootfs_real_status",
     "apk_core_linux_runtime_smoke_test",
 ]
 
@@ -624,7 +629,10 @@ def _compact_core_worker_public_nested(value: dict | None) -> dict:
     keep = (
         "summary", "state", "prepared", "ok", "rootfsReady", "executorReady",
         "termuxRequired", "bedrockStartAllowed", "readyForBox64Install",
-        "readyForBedrockStart", "lastResultAt", "sourceJobType", "nativeOk",
+        "readyForBedrockStart", "distributionReady", "validationLevel",
+        "rootfsDistributionReady", "rootfsValidationLevel",
+        "rootfsSummary", "rootfsState", "rootfsImportState", "rootfsImportSummary",
+        "lastResultAt", "sourceJobType", "nativeOk",
         "allowlist", "androidSdk", "blockers",
     )
     out = {}
@@ -662,6 +670,8 @@ def _compact_core_worker_app_heartbeat_record(record: dict) -> dict:
         "ready", "diagnosticsSummary", "storageSummary", "bridgeSummary",
         "foregroundRuntimeActive", "foregroundRuntimeSummary",
         "coreLinuxSummary", "coreLinuxState", "coreLinuxPrepared",
+        "rootfsValidationLevel", "rootfsDistributionReady", "rootfsSummary",
+        "rootfsState", "rootfsImportState", "rootfsImportSummary",
         "bedrockSummary", "bedrockState", "bedrockReady",
         "bedrockRuntimeSummary", "bedrockRuntimeState",
         "bedrockRuntimeServiceActive", "bedrockInstallerSummary",
@@ -1101,6 +1111,10 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_core_linux_rootfs_validate",
     "apk_core_linux_rootfs_repair",
     "apk_core_linux_rootfs_clean_staging",
+    "apk_core_linux_rootfs_import_status",
+    "apk_core_linux_rootfs_import_validate",
+    "apk_core_linux_rootfs_import_abort",
+    "apk_core_linux_rootfs_real_status",
     "apk_linux_box64_probe",
     "apk_linux_provisioner_probe",
     "apk_linux_prepare_directories",
@@ -1205,6 +1219,10 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_core_linux_rootfs_validate": "validar rootfs",
     "apk_core_linux_rootfs_repair": "reparar rootfs",
     "apk_core_linux_rootfs_clean_staging": "limpar staging rootfs",
+    "apk_core_linux_rootfs_import_status": "status import rootfs",
+    "apk_core_linux_rootfs_import_validate": "validar rootfs real",
+    "apk_core_linux_rootfs_import_abort": "cancelar import rootfs",
+    "apk_core_linux_rootfs_real_status": "rootfs real",
     "apk_linux_box64_probe": "Box64",
     "apk_linux_provisioner_probe": "Linux provisioner",
     "apk_linux_prepare_directories": "preparar diretórios Linux",

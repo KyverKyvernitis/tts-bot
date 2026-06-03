@@ -25,6 +25,7 @@ import java.util.List;
 public final class CoreLinuxRuntimeManager {
     private static final String ROOTFS_MANIFEST_SCHEMA = "core-worker-rootfs-manifest-v1";
     private static final String ROOTFS_KIND = "core-worker-rootfs-scaffold";
+    private static final String ROOTFS_REAL_KIND = "core-worker-rootfs-real";
     private static final long MIN_RECOMMENDED_FREE_BYTES = 512L * 1024L * 1024L;
     private static final int TEXT_LIMIT = 12 * 1024;
 
@@ -158,6 +159,16 @@ public final class CoreLinuxRuntimeManager {
     }
 
     private static JSONObject prepare(Layout layout, boolean repair) throws Exception {
+        if (hasRealExistingRootfs(layout.rootfs)) {
+            JSONObject state = status(layout, repair ? "repair_blocked_real_rootfs" : "prepare_blocked_real_rootfs");
+            state.put("ok", true);
+            state.put("state", "rootfs_real_validated");
+            state.put("summary", "Rootfs real já importado; scaffold não sobrescrito");
+            state.put("blockers", new JSONArray());
+            writeState(layout, state);
+            appendLog(layout.rootfsLog, state.optString("summary"));
+            return state;
+        }
         if (hasUnknownExistingRootfs(layout.rootfs)) {
             JSONObject state = status(layout, repair ? "repair_blocked_unknown_rootfs" : "prepare_blocked_unknown_rootfs");
             state.put("ok", false);
@@ -211,8 +222,10 @@ public final class CoreLinuxRuntimeManager {
         state.put("action", action == null ? "status" : action);
         state.put("state", layout.rootfs.exists() ? validation.optString("state", "rootfs_validation_failed") : "rootfs_missing");
         state.put("rootfsReady", ok);
-        state.put("validationLevel", "scaffold");
-        state.put("distributionReady", false);
+        String level = validation.optString("validationLevel", "scaffold");
+        boolean distributionReady = validation.optBoolean("distributionReady", false);
+        state.put("validationLevel", level);
+        state.put("distributionReady", distributionReady);
         state.put("readyForBox64Install", ok);
         state.put("readyForBedrockStart", false);
         state.put("rootfsDir", path(layout.rootfs));
@@ -222,10 +235,14 @@ public final class CoreLinuxRuntimeManager {
         state.put("recommendedFreeBytes", MIN_RECOMMENDED_FREE_BYTES);
         state.put("manifest", validation.optJSONObject("manifest") == null ? new JSONObject() : validation.optJSONObject("manifest"));
         state.put("validation", validation);
-        state.put("blockers", ok ? new JSONArray() : new JSONArray().put("rootfs scaffold pendente/invalidado"));
-        state.put("warnings", new JSONArray().put("rootfs atual é scaffold controlado; Ubuntu/Box64/Bedrock ficam para etapas futuras"));
+        state.put("blockers", ok ? new JSONArray() : new JSONArray().put("real".equals(level) ? "rootfs real pendente/invalidado" : "rootfs scaffold pendente/invalidado"));
+        state.put("warnings", "real".equals(level)
+                ? new JSONArray().put("rootfs real validado; execução de binários importados segue bloqueada nesta etapa").put("Bedrock/Box64/shell livre continuam bloqueados")
+                : new JSONArray().put("rootfs atual é scaffold controlado; Ubuntu/Box64/Bedrock ficam para etapas futuras"));
         state.put("updatedAt", now());
-        state.put("summary", ok ? "Rootfs scaffold validado" : "Rootfs scaffold pendente · preparar/validar no APK");
+        state.put("summary", ok
+                ? ("real".equals(level) ? "Rootfs real validado · runner real ainda bloqueado" : "Rootfs scaffold validado")
+                : ("real".equals(level) ? "Rootfs real pendente · importar/validar no APK" : "Rootfs scaffold pendente · preparar/validar no APK"));
         return state;
     }
 
@@ -237,11 +254,18 @@ public final class CoreLinuxRuntimeManager {
         checks.put("readyMarker", new File(rootfs, ".core-worker-rootfs-ready").exists());
         checks.put("manifest", manifest.length() > 0);
         checks.put("manifestSchema", ROOTFS_MANIFEST_SCHEMA.equals(manifest.optString("schema", "")));
-        checks.put("manifestKind", ROOTFS_KIND.equals(manifest.optString("kind", "")));
+        String kind = manifest.optString("kind", "");
+        boolean realRootfs = ROOTFS_REAL_KIND.equals(kind);
+        boolean scaffoldRootfs = ROOTFS_KIND.equals(kind);
+        checks.put("manifestKind", scaffoldRootfs || realRootfs);
         checks.put("etcOsRelease", new File(rootfs, "etc/os-release").exists());
-        checks.put("binDir", new File(rootfs, "bin").isDirectory());
-        checks.put("binShMarker", new File(rootfs, "bin/sh").exists());
-        checks.put("usrBinDir", new File(rootfs, "usr/bin").isDirectory());
+        if (realRootfs) {
+            checks.put("binOrUsrBin", new File(rootfs, "bin").exists() || new File(rootfs, "usr/bin").isDirectory());
+        } else {
+            checks.put("binDir", new File(rootfs, "bin").isDirectory());
+            checks.put("binShMarker", new File(rootfs, "bin/sh").exists());
+            checks.put("usrBinDir", new File(rootfs, "usr/bin").isDirectory());
+        }
         checks.put("tmpDir", new File(rootfs, "tmp").isDirectory());
         checks.put("homeCoreDir", new File(rootfs, "home/core").isDirectory());
         checks.put("varLogDir", new File(rootfs, "var/log").isDirectory());
@@ -259,8 +283,9 @@ public final class CoreLinuxRuntimeManager {
         out.put("ok", ok);
         out.put("rootfsReady", ok);
         out.put("state", ok ? "rootfs_validated" : "rootfs_validation_failed");
-        out.put("validationLevel", "scaffold");
-        out.put("distributionReady", false);
+        String level = ROOTFS_REAL_KIND.equals(manifest.optString("kind", "")) ? "real" : "scaffold";
+        out.put("validationLevel", level);
+        out.put("distributionReady", ok && "real".equals(level));
         out.put("readyForBox64Install", ok);
         out.put("readyForBedrockStart", false);
         out.put("checks", checks);
@@ -339,7 +364,9 @@ public final class CoreLinuxRuntimeManager {
         out.put("manifestPath", path(new File(layout.manifests, "rootfs-manifest.json")));
         out.put("logs", new JSONObject().put("install", path(layout.rootfsLog)).put("validate", path(layout.validateLog)));
         out.put("size", dirSize(layout.core, 900));
-        out.put("safety", "rootfs scaffold app-specific; sem download automático, sem shell livre, sem iniciar Bedrock");
+        out.put("validationLevel", state.optString("validationLevel", ""));
+        out.put("distributionReady", state.optBoolean("distributionReady", false));
+        out.put("safety", "rootfs app-specific; sem shell livre, sem executar binários importados, sem iniciar Bedrock");
         return out;
     }
 
@@ -354,12 +381,18 @@ public final class CoreLinuxRuntimeManager {
         writeJson(new File(layout.manifests, "rootfs-manifest.json"), manifest);
     }
 
+    private static boolean hasRealExistingRootfs(File rootfs) {
+        if (rootfs == null || !rootfs.exists()) return false;
+        JSONObject manifest = readJson(new File(rootfs, ".core-worker-rootfs-manifest.json"));
+        return manifest != null && ROOTFS_REAL_KIND.equals(manifest.optString("kind", ""));
+    }
+
     private static boolean hasUnknownExistingRootfs(File rootfs) {
         if (!rootfs.exists()) return false;
         File[] files = rootfs.listFiles();
         if (files == null || files.length == 0) return false;
         JSONObject manifest = readJson(new File(rootfs, ".core-worker-rootfs-manifest.json"));
-        if (manifest != null && ROOTFS_KIND.equals(manifest.optString("kind", ""))) return false;
+        if (manifest != null && (ROOTFS_KIND.equals(manifest.optString("kind", "")) || ROOTFS_REAL_KIND.equals(manifest.optString("kind", "")))) return false;
         return !(new File(rootfs, ".core-worker-rootfs-ready").exists()
                 && new File(rootfs, "README.core-worker-rootfs.txt").exists());
     }
