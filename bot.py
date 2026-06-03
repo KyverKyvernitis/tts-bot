@@ -226,6 +226,7 @@ class BotLocal(commands.Bot):
         self.audio_router = AudioRouter(self)
         self._music_bitrate_reconciled = False
         self._music_voice_status_reconciled = False
+        self._music_startup_reconcile_task: asyncio.Task | None = None
 
         self.loaded_extensions: list[str] = []
         self.failed_extensions: dict[str, dict[str, object]] = {}
@@ -2113,6 +2114,8 @@ class BotLocal(commands.Bot):
             self._event_loop_watchdog_task.cancel()
         if self._health_task is not None:
             self._health_task.cancel()
+        if self._music_startup_reconcile_task is not None:
+            self._music_startup_reconcile_task.cancel()
         router = getattr(self, "audio_router", None)
         if router is not None:
             try:
@@ -2120,6 +2123,49 @@ class BotLocal(commands.Bot):
             except Exception as e:
                 print(f"[bot] falha ao fechar audio_router: {e!r}")
         await super().close()
+
+
+    def _schedule_music_startup_reconcile(self) -> None:
+        """Agenda restaurações de música fora do caminho crítico do on_ready.
+
+        Restore de bitrate/status pode fazer I/O/REST por guild. Rodar isso
+        diretamente no on_ready atrasava o heartbeat do Discord em restart
+        comum. O reconciler abaixo é idempotente e roda em background.
+        """
+        task = getattr(self, "_music_startup_reconcile_task", None)
+        if task is not None and not task.done():
+            return
+        if self._music_bitrate_reconciled and self._music_voice_status_reconciled:
+            return
+        self._music_startup_reconcile_task = asyncio.create_task(self._run_music_startup_reconcile())
+
+    async def _run_music_startup_reconcile(self) -> None:
+        try:
+            # Dá tempo para o gateway estabilizar e para o bot responder
+            # heartbeat antes de qualquer REST/DB extra pós-restart.
+            await asyncio.sleep(max(1.0, float(getattr(config, "MUSIC_STARTUP_RESTORE_DELAY_SECONDS", 12.0) or 12.0)))
+            router = getattr(self, "audio_router", None)
+            if router is None:
+                return
+            if not self._music_bitrate_reconciled and hasattr(router, "reconcile_auto_bitrate_records"):
+                self._music_bitrate_reconciled = True
+                try:
+                    await router.reconcile_auto_bitrate_records()
+                except Exception as e:
+                    logging.getLogger("music").debug("reconciliação de bitrate automático falhou: %r", e, exc_info=True)
+            # Pequeno intervalo entre categorias para não concentrar chamadas REST
+            # num único tick de startup.
+            await asyncio.sleep(max(0.0, float(getattr(config, "MUSIC_STARTUP_RESTORE_STEP_DELAY_SECONDS", 0.75) or 0.75)))
+            if not self._music_voice_status_reconciled and hasattr(router, "reconcile_voice_status_records"):
+                self._music_voice_status_reconciled = True
+                try:
+                    await router.reconcile_voice_status_records()
+                except Exception as e:
+                    logging.getLogger("music").debug("reconciliação de status de canal falhou: %r", e, exc_info=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger("music").debug("reconciliação pós-startup de música falhou", exc_info=True)
 
     async def on_ready(self):
         print(f"Logado como {self.user} (id: {self.user.id})")
@@ -2133,22 +2179,7 @@ class BotLocal(commands.Bot):
             )
         except Exception as e:
             print(f"[bot] falha ao aplicar presence: {e!r}")
-        if not self._music_bitrate_reconciled:
-            self._music_bitrate_reconciled = True
-            router = getattr(self, "audio_router", None)
-            if router is not None and hasattr(router, "reconcile_auto_bitrate_records"):
-                try:
-                    await router.reconcile_auto_bitrate_records()
-                except Exception as e:
-                    logging.getLogger("music").debug("reconciliação de bitrate automático falhou: %r", e, exc_info=True)
-        if not self._music_voice_status_reconciled:
-            self._music_voice_status_reconciled = True
-            router = getattr(self, "audio_router", None)
-            if router is not None and hasattr(router, "reconcile_voice_status_records"):
-                try:
-                    await router.reconcile_voice_status_records()
-                except Exception as e:
-                    logging.getLogger("music").debug("reconciliação de status de canal falhou: %r", e, exc_info=True)
+        self._schedule_music_startup_reconcile()
         if self._health_task is None or self._health_task.done():
             self._health_task = asyncio.create_task(self._health_monitor_loop())
         if self._event_loop_watchdog_task is None or self._event_loop_watchdog_task.done():

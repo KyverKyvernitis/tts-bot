@@ -1,3 +1,4 @@
-utility/commands/workers.py
+bot.py
+music_system/audio_router.py
 PATCH_NOTES.md
 changed_files.txt

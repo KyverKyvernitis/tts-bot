@@ -1,30 +1,23 @@
-# Patch: core-worker autowake APK online final
+# patch-startup-lag-music-restore-idempotent-20260603
 
-Base: `repo-20260603-130337.zip`
-
-## Objetivo
-
-Parar o auto-wake legado do Termux/phone-worker quando o APK/Core Linux interno já está online e pronto.
+Escopo: reduzir lag no startup causado pelo restore de música e impedir edições desnecessárias de canal no restart.
 
 ## Alterações
 
-- `utility/commands/workers.py`
-  - `_core_worker_app_runtime_record()` passa a preferir `data/core_worker_app_runtime_snapshot.json` antes do heartbeat grande.
-  - `_core_worker_any_apk_runtime_online()` agora lê o snapshot compacto e usa o heartbeat só como fallback.
-  - A checagem de APK online valida idade, versão mínima, origem APK, `coreLinuxPrepared`, capabilities e estado `runtime_v1_ready`.
-  - O loop `_core_worker_auto_wake_loop()` faz um caminho rápido antes de coletar snapshot pesado.
-  - Quando o APK/Core Linux está online, o loop pula o wake e só registra um log resumido em intervalo controlado.
+- Move o restore de bitrate/status de música para uma task pós-ready em background.
+- Adiciona atraso inicial antes do restore de música, para o gateway estabilizar primeiro.
+- Adiciona pequeno intervalo entre restore de bitrate e restore de status.
+- Adiciona pequeno intervalo entre guilds durante reconciliação de startup.
+- O restore de bitrate só edita canal se ele ainda estiver exatamente no bitrate temporário marcado pelo bot.
+- Se o bitrate já está normal, foi alterado por staff, canal sumiu ou falta permissão, a marcação persistida é limpa sem insistir em todo restart.
+- O restore de status do canal só chama o endpoint se ainda houver alteração real a fazer.
+- Se o status atual já é o desejado, ou se staff alterou manualmente, a marcação persistida é limpa sem editar.
+- Logs de restore de status ficam menos barulhentos: só loga `INFO` quando realmente restaurou algo ou quando um batch de pendências foi resolvido.
 
-## Variáveis opcionais
+## Não alterado
 
-- `CORE_WORKER_AUTO_WAKE_APK_ONLINE_MAX_AGE_SECONDS` padrão: `300`
-- `CORE_WORKER_AUTO_WAKE_APK_MIN_VERSION_CODE` padrão: `74`
-- `CORE_WORKER_AUTO_WAKE_APK_SKIP_LOG_INTERVAL_SECONDS` padrão: `900`
-
-## Segurança/escopo
-
-- Não altera Core Linux funcional.
-- Não altera APK.
-- Não altera CallKeeper.
-- Não altera música/TTS.
-- Não inicia rootfs real, Box64 ou Bedrock.
+- Updater/ZIP update/GitHub/rollback/redo não foram tocados.
+- CallKeeper não foi tocado.
+- Core Linux/rootfs/Bedrock não foram tocados.
+- TTS runtime não foi tocado.
+- Player/runtime de música não foi alterado, só o restore pós-startup de status/bitrate.

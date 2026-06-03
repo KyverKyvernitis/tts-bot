@@ -1189,14 +1189,18 @@ class AudioRouter:
             await self._clear_auto_bitrate_record(guild.id)
         else:
             current = int(getattr(channel, "bitrate", 0) or 0)
-            # Não briga com staff: se alguém alterou manualmente, só limpa a marcação.
-            if current == boosted:
+            # Idempotência: só restaura se o canal ainda está exatamente no
+            # bitrate que o bot marcou como temporário. Se staff já mexeu ou o
+            # canal já está normal, limpa a marcação e não edita nada.
+            if current == boosted and original != current:
                 if not self._bot_can_manage_voice_channel(guild, channel):
+                    await self._clear_auto_bitrate_record(guild.id)
                     return
                 try:
                     await channel.edit(bitrate=original, reason=f"Restaurar bitrate após música ({reason})")
                 except (discord.Forbidden, discord.HTTPException):
-                    logger.debug("[music] não consegui restaurar bitrate | guild=%s channel=%s", guild.id, channel_id, exc_info=True)
+                    await self._clear_auto_bitrate_record(guild.id)
+                    logger.debug("[music] auto bitrate skip sem permissão | guild=%s channel=%s", guild.id, channel_id, exc_info=True)
                     return
                 except Exception:
                     logger.debug("[music] restauração de bitrate falhou", exc_info=True)
@@ -1208,21 +1212,40 @@ class AudioRouter:
         state.auto_bitrate_boosted = None
 
     async def reconcile_auto_bitrate_records(self) -> None:
-        """Restaura bitrates temporários pendentes após restart do bot."""
+        """Restaura apenas bitrates temporários realmente pendentes.
+
+        Startup não deve editar canal só porque existe config antiga. Cada item
+        passa por validações idempotentes em _restore_auto_bitrate_for_state().
+        """
         if not MUSIC_AUTO_BITRATE_ENABLED:
             return
         settings_db = getattr(self.bot, "settings_db", None)
         docs = getattr(settings_db, "guild_cache", {}) if settings_db is not None else {}
-        for guild_id, doc in list(docs.items()):
-            if not isinstance(doc, dict) or not isinstance(doc.get("music_auto_bitrate"), dict):
-                continue
+        pending = [
+            (int(guild_id), doc)
+            for guild_id, doc in list(docs.items())
+            if isinstance(doc, dict) and isinstance(doc.get("music_auto_bitrate"), dict)
+        ]
+        if not pending:
+            return
+        restored = 0
+        cleared = 0
+        for guild_id, doc in pending:
             guild = self.bot.get_guild(int(guild_id))
             if guild is None:
                 await self._clear_auto_bitrate_record(int(guild_id))
+                cleared += 1
                 continue
             state = self.get_state(int(guild_id))
             self._load_auto_bitrate_record_into_state(int(guild_id), state)
+            before = self._auto_bitrate_record_from_doc(int(guild_id))
             await self._restore_auto_bitrate_for_state(guild, state, reason="restart")
+            after = self._auto_bitrate_record_from_doc(int(guild_id))
+            if before and not after:
+                restored += 1
+            await asyncio.sleep(max(0.0, float(getattr(config, "MUSIC_STARTUP_RESTORE_GUILD_DELAY_SECONDS", 0.35) or 0.35)))
+        if restored or cleared:
+            logger.info("[music] restore bitrate startup concluído | pendentes=%s resolvidos=%s limpos=%s", len(pending), restored, cleared)
 
     def _voice_status_record_from_doc(self, guild_id: int) -> dict | None:
         settings_db = getattr(self.bot, "settings_db", None)
@@ -1884,14 +1907,26 @@ class AudioRouter:
             await self._clear_voice_status_record(guild.id)
         else:
             known, current_status = await self._fetch_voice_channel_status(channel)
+            target_status = original_status if had_original else str(self._voice_status_settings_from_doc(guild.id).get("idle") or "")
+            target_status = self._trim_voice_status(target_status)
+            current_status = self._trim_voice_status(current_status)
+            last_bot_status = self._trim_voice_status(last_bot_status)
+
             if known and last_bot_status and current_status != last_bot_status:
                 # Staff mudou manualmente; respeita a alteração e só limpa a marcação.
                 await self._clear_voice_status_record(guild.id)
+            elif known and current_status == target_status:
+                # Já está restaurado. Não faz PUT no startup só para confirmar.
+                await self._clear_voice_status_record(guild.id)
+            elif not known and not target_status:
+                # Não sabemos ler o status atual, mas o alvo é vazio/idle vazio;
+                # não vale chamar endpoint em restart só para limpar algo invisível.
+                await self._clear_voice_status_record(guild.id)
             else:
                 if not self._bot_can_set_voice_status(guild, channel):
-                    logger.warning("[music] não consegui restaurar status do canal: permissão ausente")
+                    await self._clear_voice_status_record(guild.id)
+                    logger.debug("[music] restore status skip sem permissão | guild=%s channel=%s", guild.id, channel_id)
                     return
-                target_status = original_status if had_original else str(self._voice_status_settings_from_doc(guild.id).get("idle") or "")
                 restore_key = f"{channel_id}:{target_status}:{reason}"
                 now = time.monotonic()
                 if (
@@ -1901,10 +1936,11 @@ class AudioRouter:
                     return
                 state.voice_status_last_restore_key = restore_key
                 state.voice_status_last_restore_at = now
-                logger.info("[music] restaurando status do canal | guild=%s channel=%s reason=%s", guild.id, channel_id, reason)
                 ok = await self._set_voice_channel_status(channel, target_status, reason=f"Restaurar status do canal após música ({reason})")
                 if not ok:
+                    await self._clear_voice_status_record(guild.id)
                     return
+                logger.info("[music] status do canal restaurado | guild=%s channel=%s reason=%s", guild.id, channel_id, reason)
                 await self._clear_voice_status_record(guild.id)
         state.voice_status_channel_id = None
         state.voice_status_had_original = False
@@ -1917,19 +1953,34 @@ class AudioRouter:
         state.voice_status_last_update_at = 0.0
 
     async def reconcile_voice_status_records(self) -> None:
-        """Restaura status temporários de canal pendentes após restart do bot."""
+        """Restaura apenas status de canal temporário realmente pendente."""
         settings_db = getattr(self.bot, "settings_db", None)
         docs = getattr(settings_db, "guild_cache", {}) if settings_db is not None else {}
-        for guild_id, doc in list(docs.items()):
-            if not isinstance(doc, dict) or not isinstance(doc.get("music_voice_status_restore"), dict):
-                continue
+        pending = [
+            (int(guild_id), doc)
+            for guild_id, doc in list(docs.items())
+            if isinstance(doc, dict) and isinstance(doc.get("music_voice_status_restore"), dict)
+        ]
+        if not pending:
+            return
+        restored = 0
+        cleared = 0
+        for guild_id, doc in pending:
             guild = self.bot.get_guild(int(guild_id))
             if guild is None:
                 await self._clear_voice_status_record(int(guild_id))
+                cleared += 1
                 continue
             state = self.get_state(int(guild_id))
             self._load_voice_status_record_into_state(int(guild_id), state)
+            before = self._voice_status_record_from_doc(int(guild_id))
             await self._restore_voice_status_for_state(guild, state, reason="restart")
+            after = self._voice_status_record_from_doc(int(guild_id))
+            if before and not after:
+                restored += 1
+            await asyncio.sleep(max(0.0, float(getattr(config, "MUSIC_STARTUP_RESTORE_GUILD_DELAY_SECONDS", 0.35) or 0.35)))
+        if restored or cleared:
+            logger.info("[music] restore status startup concluído | pendentes=%s resolvidos=%s limpos=%s", len(pending), restored, cleared)
 
     def _clear_idle_reason(self, state: MusicGuildState) -> None:
         state.idle_reason = "idle"
