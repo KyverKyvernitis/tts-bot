@@ -42,6 +42,8 @@ TARGETS = {
         "aliases": ["libcoreworker_runner.so", "coreworker_runner", "core-runner", "runner"],
         "source": str(RUNNER_SOURCE.relative_to(ROOT)),
         "origin": "local-core-worker",
+        "sourceKind": "project-source",
+        "licenseStatus": "internal-project",
         "minBytes": 1024,
         "requiredAtBuild": True,
     },
@@ -49,21 +51,27 @@ TARGETS = {
         "official": "libcoreworker_busybox.so",
         "aliases": ["libcoreworker_busybox.so", "libbusybox.so", "busybox"],
         "origin": "manual-build-from-upstream-source",
+        "sourceKind": "external-source",
         "upstream": "https://busybox.net/downloads/",
+        "licenseStatus": "verify-before-bundling",
         "minBytes": 32768,
     },
     "proot": {
         "official": "libcoreworker_proot.so",
         "aliases": ["libcoreworker_proot.so", "libproot.so", "proot"],
         "origin": "manual-build-or-audited-import",
+        "sourceKind": "external-source",
         "upstream": "https://github.com/proot-me/proot",
+        "licenseStatus": "verify-before-bundling",
         "minBytes": 32768,
     },
     "box64": {
         "official": "libcoreworker_box64.so",
         "aliases": ["libcoreworker_box64.so", "libbox64.so", "box64"],
         "origin": "manual-build-from-upstream-source",
+        "sourceKind": "external-source",
         "upstream": "https://github.com/ptitSeb/box64",
+        "licenseStatus": "verify-before-bundling",
         "minBytes": 131072,
     },
 }
@@ -131,7 +139,7 @@ def write_source_manifest() -> Path:
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     SOURCE_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema": "core-worker-embedded-binaries-source-plan-v2",
+        "schema": "core-worker-embedded-binaries-source-plan-v3",
         "generatedAt": int(time.time()),
         "abi": "arm64-v8a",
         "androidMinSdk": 26,
@@ -142,6 +150,8 @@ def write_source_manifest() -> Path:
             "noExecutionDuringBuild": True,
             "jniLibsOnlyForFutureExecution": True,
             "runnerRequiredAtBuild": True,
+            "metadataRequiredBeforeBundling": True,
+            "sizeAndSha256Required": True,
         },
         "targets": TARGETS,
     }
@@ -168,7 +178,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     manifest = write_source_manifest()
     payload = {
         "ok": True,
-        "stage": "core-linux-embedded-binaries-build-pipeline-v1",
+        "stage": "core-linux-embedded-binaries-build-pipeline-v2",
         "sourceManifest": rel(manifest),
         "jniDir": rel(JNI_DIR),
         "runnerSource": rel(RUNNER_SOURCE),
@@ -182,6 +192,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "notes": [
             "O script não baixa binários automaticamente.",
             "BusyBox, PRoot e Box64 devem vir de build/import auditado e depois passar pelo intake.",
+            "Cada asset precisa de tamanho, SHA-256 e metadados de origem/licença antes de ser aceito.",
             "Bedrock não entra no APK e não é iniciado neste estágio.",
         ],
     }

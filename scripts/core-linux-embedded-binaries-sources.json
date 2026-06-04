@@ -1,6 +1,6 @@
 {
-  "schema": "core-worker-embedded-binaries-source-plan-v2",
-  "generatedAt": 1780614000,
+  "schema": "core-worker-embedded-binaries-source-plan-v3",
+  "generatedAt": 1780615448,
   "abi": "arm64-v8a",
   "androidMinSdk": 26,
   "policy": {
@@ -9,7 +9,9 @@
     "noBedrockBundledInApk": true,
     "noExecutionDuringBuild": true,
     "jniLibsOnlyForFutureExecution": true,
-    "runnerRequiredAtBuild": true
+    "runnerRequiredAtBuild": true,
+    "metadataRequiredBeforeBundling": true,
+    "sizeAndSha256Required": true
   },
   "targets": {
     "runner": {
@@ -22,7 +24,10 @@
       ],
       "source": "android/core-worker-app/app/src/main/cpp/coreworker_runner.c",
       "origin": "local-core-worker",
-      "minBytes": 1024
+      "sourceKind": "project-source",
+      "licenseStatus": "internal-project",
+      "minBytes": 1024,
+      "requiredAtBuild": true
     },
     "busybox": {
       "official": "libcoreworker_busybox.so",
@@ -32,7 +37,9 @@
         "busybox"
       ],
       "origin": "manual-build-from-upstream-source",
+      "sourceKind": "external-source",
       "upstream": "https://busybox.net/downloads/",
+      "licenseStatus": "verify-before-bundling",
       "minBytes": 32768
     },
     "proot": {
@@ -43,7 +50,9 @@
         "proot"
       ],
       "origin": "manual-build-or-audited-import",
+      "sourceKind": "external-source",
       "upstream": "https://github.com/proot-me/proot",
+      "licenseStatus": "verify-before-bundling",
       "minBytes": 32768
     },
     "box64": {
@@ -54,7 +63,9 @@
         "box64"
       ],
       "origin": "manual-build-from-upstream-source",
+      "sourceKind": "external-source",
       "upstream": "https://github.com/ptitSeb/box64",
+      "licenseStatus": "verify-before-bundling",
       "minBytes": 131072
     }
   }

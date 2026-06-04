@@ -11,10 +11,13 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 /**
  * Preflight v3 do runner Core Linux.
@@ -59,18 +62,29 @@ public final class CoreLinuxRunnerPreflightManager {
             File embeddedProot = firstExisting(nativeDir, prootNames);
             File embeddedBusybox = firstExisting(nativeDir, busyboxNames);
             File embeddedBox64 = firstExisting(nativeDir, box64Names);
+            JSONObject apkExecutor = apkNativeInfo(context, executorNames);
+            JSONObject apkRunner = apkNativeInfo(context, runnerNames);
+            JSONObject apkProot = apkNativeInfo(context, prootNames);
+            JSONObject apkBusybox = apkNativeInfo(context, busyboxNames);
+            JSONObject apkBox64 = apkNativeInfo(context, box64Names);
             File writableBox64 = firstExisting(new File(base, "bin/box64"), new File(base, "box64/box64"));
             boolean writableBox64Blocked = writableBox64 != null && Build.VERSION.SDK_INT >= 29 && isInside(writableBox64, dataDir);
 
             boolean rootfsReal = isRootfsRealValidated(rootfsState, importState, rootfsDir);
+            boolean executorApkReady = apkExecutor.optBoolean("present", false) && apkExecutor.optLong("size", 0L) > 0L;
+            boolean runnerApkReady = apkRunner.optBoolean("present", false) && apkRunner.optLong("size", 0L) > 0L;
+            boolean prootApkReady = apkProot.optBoolean("present", false) && apkProot.optLong("size", 0L) > 0L;
+            boolean busyboxApkReady = apkBusybox.optBoolean("present", false) && apkBusybox.optLong("size", 0L) > 0L;
+            boolean box64ApkReady = apkBox64.optBoolean("present", false) && apkBox64.optLong("size", 0L) > 0L;
             boolean nativeExecutorReady = nativeExecutor.optBoolean("readyForRootfs", false)
                     || nativeExecutor.optBoolean("embeddedExecutorPresent", false)
-                    || embeddedExecutor != null;
+                    || embeddedExecutor != null
+                    || executorApkReady;
             boolean runnerLoadedByJni = runnerGuard.optBoolean("loaded", false);
-            boolean runnerAssetReady = embeddedRunner != null || runnerLoadedByJni;
-            boolean prootReady = embeddedProot != null;
-            boolean busyboxReady = embeddedBusybox != null;
-            boolean box64Ready = embeddedBox64 != null;
+            boolean runnerAssetReady = embeddedRunner != null || runnerApkReady || runnerLoadedByJni;
+            boolean prootReady = embeddedProot != null || prootApkReady;
+            boolean busyboxReady = embeddedBusybox != null || busyboxApkReady;
+            boolean box64Ready = embeddedBox64 != null || box64ApkReady;
             boolean bedrockServerReady = bedrockServer != null && bedrockServer.exists();
             boolean propertiesReady = properties != null && properties.exists();
 
@@ -158,7 +172,7 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, busyboxNames, box64Names));
             boolean executorLoadedByJni = nativeExecutor.optJSONObject("nativeBridge") != null
                     && nativeExecutor.optJSONObject("nativeBridge").optBoolean("loaded", false);
-            out.put("embedded", embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedBusybox, embeddedBox64, executorNames, runnerNames, prootNames, busyboxNames, box64Names, executorLoadedByJni, runnerLoadedByJni));
+            out.put("embedded", embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedBusybox, embeddedBox64, executorNames, runnerNames, prootNames, busyboxNames, box64Names, executorLoadedByJni, runnerLoadedByJni, apkExecutor, apkRunner, apkProot, apkBusybox, apkBox64));
             out.put("writableCandidates", writableSnapshot(writableBox64, dataDir));
             out.put("bedrockFiles", bedrockFilesSnapshot(bedrockServer, properties));
             out.put("safety", "preflight apenas detecta requisitos; sem start real, sem shell livre, sem comando remoto, sem executar binários importados");
@@ -240,7 +254,7 @@ public final class CoreLinuxRunnerPreflightManager {
 
     private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] busybox, String[] box64) throws Exception {
         return new JSONObject()
-                .put("stage", "core-linux-embedded-binaries-intake-v2")
+                .put("stage", "core-linux-embedded-binaries-intake-v3")
                 .put("abi", "arm64-v8a")
                 .put("executor", new JSONArray(executor))
                 .put("runner", new JSONArray(runner))
@@ -252,14 +266,15 @@ public final class CoreLinuxRunnerPreflightManager {
 
     private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File executor, File runner, File proot, File busybox, File box64,
                                                String[] executorNames, String[] runnerNames, String[] prootNames, String[] busyboxNames, String[] box64Names,
-                                               boolean executorLoadedByJni, boolean runnerLoadedByJni) throws Exception {
+                                               boolean executorLoadedByJni, boolean runnerLoadedByJni,
+                                               JSONObject apkExecutor, JSONObject apkRunner, JSONObject apkProot, JSONObject apkBusybox, JSONObject apkBox64) throws Exception {
         return new JSONObject()
                 .put("nativeLibraryDir", path(nativeDir))
-                .put("executor", assetInfo("executor", executor, executorNames, nativeDir, dataDir, executorLoadedByJni, "jni-loaded:coreworker_executor"))
-                .put("runner", assetInfo("runner", runner, runnerNames, nativeDir, dataDir, runnerLoadedByJni, "jni-loaded:coreworker_runner"))
-                .put("proot", assetInfo("proot", proot, prootNames, nativeDir, dataDir, false, ""))
-                .put("busybox", assetInfo("busybox", busybox, busyboxNames, nativeDir, dataDir, false, ""))
-                .put("box64", assetInfo("box64", box64, box64Names, nativeDir, dataDir, false, ""));
+                .put("executor", assetInfo("executor", executor, executorNames, nativeDir, dataDir, executorLoadedByJni, "jni-loaded:coreworker_executor", apkExecutor))
+                .put("runner", assetInfo("runner", runner, runnerNames, nativeDir, dataDir, runnerLoadedByJni, "jni-loaded:coreworker_runner", apkRunner))
+                .put("proot", assetInfo("proot", proot, prootNames, nativeDir, dataDir, false, "", apkProot))
+                .put("busybox", assetInfo("busybox", busybox, busyboxNames, nativeDir, dataDir, false, "", apkBusybox))
+                .put("box64", assetInfo("box64", box64, box64Names, nativeDir, dataDir, false, "", apkBox64));
     }
 
     private static JSONObject writableSnapshot(File box64, File dataDir) throws Exception {
@@ -273,11 +288,25 @@ public final class CoreLinuxRunnerPreflightManager {
     }
 
     private static JSONObject assetInfo(String kind, File file, String[] expectedNames, File nativeDir, File dataDir,
-                                        boolean jniLoadedFallback, String detectedByFallback) throws Exception {
+                                        boolean jniLoadedFallback, String detectedByFallback, JSONObject apkEntryInfo) throws Exception {
         JSONObject out = fileInfo(file, dataDir);
         boolean fileEmbedded = file != null && file.exists() && nativeDir != null && isInside(file, nativeDir);
         boolean validPhysicalFile = out.optBoolean("present", false) && out.optLong("size", 0L) > 0L;
-        if (!validPhysicalFile && jniLoadedFallback) {
+        JSONObject apkInfo = apkEntryInfo == null ? new JSONObject() : apkEntryInfo;
+        boolean apkEmbedded = apkInfo.optBoolean("present", false) && apkInfo.optLong("size", 0L) > 0L;
+        if (!validPhysicalFile && apkEmbedded) {
+            out.put("present", true);
+            out.put("path", apkInfo.optString("path", ""));
+            out.put("name", apkInfo.optString("name", expectedNames != null && expectedNames.length > 0 ? expectedNames[0] : ""));
+            out.put("size", apkInfo.optLong("size", 0L));
+            out.put("canExecute", true);
+            out.put("blockedByWritableAppHome", false);
+            out.put("sha256", apkInfo.optString("sha256", ""));
+            out.put("detectedBy", jniLoadedFallback && detectedByFallback != null && !detectedByFallback.isEmpty() ? detectedByFallback + "+apk-entry" : apkInfo.optString("detectedBy", "apk-native-lib-entry"));
+            out.put("sourceApk", apkInfo.optString("sourceApk", ""));
+            out.put("zipEntry", apkInfo.optString("zipEntry", ""));
+            out.put("compressionMethod", apkInfo.optString("compressionMethod", ""));
+        } else if (!validPhysicalFile && jniLoadedFallback) {
             out.put("present", true);
             out.put("path", path(nativeDir));
             out.put("name", expectedNames != null && expectedNames.length > 0 ? expectedNames[expectedNames.length - 1] : "");
@@ -292,9 +321,77 @@ public final class CoreLinuxRunnerPreflightManager {
         out.put("abi", "arm64-v8a");
         out.put("expectedNames", new JSONArray(expectedNames));
         boolean placeholder = out.optBoolean("present", false) && out.optLong("size", 0L) <= 0L && !jniLoadedFallback;
-        out.put("embeddedInApk", fileEmbedded || jniLoadedFallback);
-        out.put("allowedForFutureExecution", out.optBoolean("embeddedInApk", false) && !out.optBoolean("blockedByWritableAppHome", false) && !placeholder);
+        boolean embedded = fileEmbedded || apkEmbedded || jniLoadedFallback;
+        out.put("embeddedInApk", embedded);
+        out.put("allowedForFutureExecution", embedded && !out.optBoolean("blockedByWritableAppHome", false) && !placeholder && (out.optLong("size", 0L) > 0L || jniLoadedFallback));
         out.put("placeholder", placeholder);
+        return out;
+    }
+
+    private static JSONObject apkNativeInfo(Context context, String[] expectedNames) {
+        JSONObject out = new JSONObject();
+        try {
+            out.put("present", false);
+            out.put("path", "");
+            out.put("name", "");
+            out.put("size", 0L);
+            out.put("canExecute", false);
+            out.put("blockedByWritableAppHome", false);
+            out.put("sha256", "");
+            out.put("detectedBy", "missing");
+            out.put("sourceApk", "");
+            out.put("zipEntry", "");
+            out.put("compressionMethod", "");
+            ApplicationInfo app = context == null ? null : context.getApplicationInfo();
+            if (app == null || expectedNames == null) return out;
+            String[] apkPaths = mergeApkPaths(app.sourceDir, app.splitSourceDirs);
+            for (String apkPath : apkPaths) {
+                if (apkPath == null || apkPath.trim().isEmpty()) continue;
+                File apk = new File(apkPath);
+                if (!apk.exists() || !apk.isFile()) continue;
+                ZipFile zip = null;
+                try {
+                    zip = new ZipFile(apk);
+                    for (String expectedName : expectedNames) {
+                        if (expectedName == null || expectedName.trim().isEmpty()) continue;
+                        String entryName = "lib/arm64-v8a/" + expectedName;
+                        ZipEntry entry = zip.getEntry(entryName);
+                        if (entry == null || entry.isDirectory()) continue;
+                        long size = Math.max(0L, entry.getSize());
+                        String digest = "";
+                        if (size > 0L && size <= 64L * 1024L * 1024L) {
+                            InputStream in = zip.getInputStream(entry);
+                            digest = sha256(in);
+                        }
+                        out.put("present", size > 0L);
+                        out.put("path", path(apk) + "!/" + entryName);
+                        out.put("name", expectedName);
+                        out.put("size", size);
+                        out.put("canExecute", size > 0L);
+                        out.put("blockedByWritableAppHome", false);
+                        out.put("sha256", digest);
+                        out.put("detectedBy", "apk-native-lib-entry");
+                        out.put("sourceApk", path(apk));
+                        out.put("zipEntry", entryName);
+                        out.put("compressionMethod", entry.getMethod() == ZipEntry.STORED ? "stored" : "deflated");
+                        return out;
+                    }
+                } catch (Throwable ignored) {
+                } finally {
+                    try { if (zip != null) zip.close(); } catch (Throwable ignored) {}
+                }
+            }
+        } catch (Throwable ignored) {}
+        return out;
+    }
+
+    private static String[] mergeApkPaths(String sourceDir, String[] splitSourceDirs) {
+        int splitCount = splitSourceDirs == null ? 0 : splitSourceDirs.length;
+        String[] out = new String[1 + splitCount];
+        out[0] = sourceDir == null ? "" : sourceDir;
+        for (int i = 0; i < splitCount; i++) {
+            out[i + 1] = splitSourceDirs[i];
+        }
         return out;
     }
 
@@ -330,8 +427,15 @@ public final class CoreLinuxRunnerPreflightManager {
 
     private static String sha256(File file) {
         try {
+            return sha256(new FileInputStream(file));
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static String sha256(InputStream in) {
+        try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            FileInputStream in = new FileInputStream(file);
             byte[] buffer = new byte[64 * 1024];
             int read;
             while ((read = in.read(buffer)) > 0) {
@@ -345,6 +449,7 @@ public final class CoreLinuxRunnerPreflightManager {
             }
             return hex.toString();
         } catch (Throwable ignored) {
+            try { if (in != null) in.close(); } catch (Throwable ignored2) {}
             return "";
         }
     }

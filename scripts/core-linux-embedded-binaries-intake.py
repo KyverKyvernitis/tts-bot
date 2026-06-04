@@ -34,6 +34,36 @@ MIN_BYTES_BY_TARGET = {
     "busybox": 32768,
     "box64": 131072,
 }
+
+TARGET_METADATA = {
+    "runner": {
+        "origin": "local-core-worker",
+        "sourceKind": "project-source",
+        "licenseStatus": "internal-project",
+        "notes": "core-runner seguro próprio; preflight only",
+    },
+    "proot": {
+        "origin": "manual-build-or-audited-import",
+        "sourceKind": "external-source",
+        "upstream": "https://github.com/proot-me/proot",
+        "licenseStatus": "verify-before-bundling",
+        "notes": "não baixar em runtime; importar somente build arm64 auditado",
+    },
+    "busybox": {
+        "origin": "manual-build-from-upstream-source",
+        "sourceKind": "external-source",
+        "upstream": "https://busybox.net/downloads/",
+        "licenseStatus": "verify-before-bundling",
+        "notes": "não baixar em runtime; importar somente build arm64 auditado",
+    },
+    "box64": {
+        "origin": "manual-build-from-upstream-source",
+        "sourceKind": "external-source",
+        "upstream": "https://github.com/ptitSeb/box64",
+        "licenseStatus": "verify-before-bundling",
+        "notes": "não baixar em runtime; importar somente build arm64 auditado",
+    },
+}
 EM_AARCH64 = 183
 
 
@@ -90,7 +120,7 @@ def main(argv: list[str]) -> int:
 
     JNI_DIR.mkdir(parents=True, exist_ok=True)
     manifest = {
-        "schema": "core-worker-embedded-binaries-local-v1",
+        "schema": "core-worker-embedded-binaries-local-v2",
         "generatedAt": int(time.time()),
         "dryRun": bool(args.dry_run),
         "targets": {},
@@ -98,6 +128,9 @@ def main(argv: list[str]) -> int:
             "downloadedByScript": False,
             "executedByScript": False,
             "bedrockBundled": False,
+            "noPlaceholder": True,
+            "sizeAndSha256Required": True,
+            "licenseMetadataRequiredBeforeBundling": True,
         },
     }
 
@@ -115,14 +148,18 @@ def main(argv: list[str]) -> int:
             "source": str(source),
             "dest": str(dest),
             "copied": copied,
+            "metadata": dict(TARGET_METADATA.get(key, {})),
             **info,
         }
         print(f"{key}: ok size={info['size']} sha256={info['sha256']} -> {dest.name}")
 
     if not args.dry_run:
         OUT_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
-        OUT_MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+        OUT_MANIFEST.write_text(text, encoding="utf-8")
+        ASSET_MANIFEST.write_text(text, encoding="utf-8")
         print(f"manifest escrito: {OUT_MANIFEST}")
+        print(f"manifest de assets escrito: {ASSET_MANIFEST}")
     else:
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
     return 0
