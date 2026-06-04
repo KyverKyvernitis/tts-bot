@@ -857,6 +857,13 @@ def _core_worker_app_normalize_job_type(value: Any) -> str:
     return CORE_WORKER_APP_JOB_ALIASES.get(raw, raw)
 
 
+def _core_worker_scrub_eula_public_text(value: Any) -> str:
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    if "eula" in text.lower():
+        return ""
+    return text
+
+
 def _core_worker_app_job_key_from_record(record: dict[str, Any]) -> str:
     return str(record.get("installId") or record.get("workerId") or "unknown")
 
@@ -894,7 +901,7 @@ def _core_worker_app_jobs_summary_for_worker(worker_id: str) -> dict[str, Any]:
     auto_ok = sum(1 for typ in CORE_WORKER_APP_AUTO_JOB_TYPES if bool((latest_by_type.get(typ) or {}).get("ok")))
     auto_failed = sum(1 for typ in CORE_WORKER_APP_AUTO_JOB_TYPES if isinstance(latest_by_type.get(typ), dict) and not bool((latest_by_type.get(typ) or {}).get("ok")))
     auto_missing = [typ for typ in sorted(CORE_WORKER_APP_AUTO_JOB_TYPES) if typ not in latest_by_type]
-    return _core_worker_app_refine_jobs_summary({"autoTotal": len(CORE_WORKER_APP_AUTO_JOB_TYPES), "autoOk": auto_ok, "autoFailed": auto_failed, "autoMissing": auto_missing, "manualTotal": len(CORE_WORKER_APP_MANUAL_JOB_TYPES), "pending": len(data.get("pending") or []), "running": len(data.get("runningByJobId") or {}), "latestByType": {k: {"ok": bool(v.get("ok")), "message": str(v.get("message") or v.get("error") or ""), "receivedAt": int(v.get("receivedAt") or 0)} for k, v in latest_by_type.items()}})
+    return _core_worker_app_refine_jobs_summary({"autoTotal": len(CORE_WORKER_APP_AUTO_JOB_TYPES), "autoOk": auto_ok, "autoFailed": auto_failed, "autoMissing": auto_missing, "manualTotal": len(CORE_WORKER_APP_MANUAL_JOB_TYPES), "pending": len(data.get("pending") or []), "running": len(data.get("runningByJobId") or {}), "latestByType": {k: {"ok": bool(v.get("ok")), "message": _core_worker_scrub_eula_public_text(v.get("message") or v.get("error") or ""), "receivedAt": int(v.get("receivedAt") or 0)} for k, v in latest_by_type.items()}})
 
 
 

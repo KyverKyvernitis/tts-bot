@@ -58,8 +58,8 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 79
-        versionName "0.5.64"
+        versionCode 80
+        versionName "0.5.65"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -88,6 +88,17 @@ android {
             if (coreWorkerSigningEnabled) {
                 signingConfig signingConfigs.coreWorkerCompat
             }
+        }
+    }
+
+
+    sourceSets {
+        main {
+            // Scaffold explícito para assets nativos futuros do Core Linux.
+            // Os binários reais entram apenas como .so em jniLibs/arm64-v8a;
+            // manifestos e documentação ficam em assets para não simular executável pronto.
+            jniLibs.srcDirs = ["src/main/jniLibs"]
+            assets.srcDirs = ["src/main/assets"]
         }
     }
 

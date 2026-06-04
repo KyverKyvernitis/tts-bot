@@ -1,35 +1,37 @@
-# Patch: Core Linux runner assets preflight v2
+# Patch: core-linux embedded runner assets v1 + preflight cleanup
 
-## Objetivo
-Evolui o preflight do runner sem iniciar Bedrock, sem abrir shell livre e sem executar binários importados. A EULA deixa de aparecer como pendência/status visível para o usuário e fica fora do fluxo de runner/assets.
+## Resumo
 
-## Mudanças
-- APK 0.5.64 / versionCode 79.
-- Runner preflight passa para `core-linux-runner-preflight-v2`.
-- Preflight persiste estado em `runner-preflight-state.json` / `runner-state.json`.
-- Background heartbeat/foreground service agora reporta capability e jobs do runner preflight.
-- Background snapshot também carrega estado do runner e rootfs real validado.
-- Detector de assets nativos embutidos no APK:
+- APK 0.5.65 / versionCode 80.
+- Junta cleanup do runner preflight v2 com scaffold/detector de assets embutidos.
+- Mantém tudo em modo seguro: sem iniciar Bedrock, Box64, runner real ou shell livre.
+
+## Incluído
+
+- Corrige texto legado `preflight v1` para `preflight v2` nos bloqueios atuais.
+- Sanitiza resultados antigos de runner para não expor EULA em status/painel/histórico regravado.
+- Remove EULA de bloqueios visíveis do preflight/Bedrock service; confirmação fica interna para etapa futura de start real.
+- Adiciona scaffold de manifest dos assets nativos esperados:
   - `libcoreworker_runner.so` / `libcoreworker_executor.so`
   - `libcoreworker_proot.so` / `libproot.so`
   - `libcoreworker_busybox.so` / `libbusybox.so`
   - `libcoreworker_box64.so` / `libbox64.so`
-- Asset snapshot mostra nomes esperados, ABI, tamanho, hash quando aplicável e bloqueio em diretório gravável.
-- EULA removida das pendências/checks/missing/nextActions do runner preflight.
-- EULA removida dos jobs/labels visíveis da VPS/painel workers.
-- Bedrock continua detectando apenas arquivos técnicos sem iniciar nada: `bedrock_server` e `server.properties`.
+- Detector agora considera o executor JNI carregado como runner embutido quando o Android não expõe arquivo em `nativeLibraryDir`.
+- Mantém componentes ausentes como pendência real; não cria `.so` placeholder.
 
 ## Mantido bloqueado
+
 - Bedrock start real.
 - Box64 start.
 - Runner real.
 - Shell livre.
 - Comando remoto arbitrário.
-- Execução de binários importados/baixados.
+- Execução de binários baixados/importados.
 
-## Fora de escopo
-- Updater/ZIP/GitHub/rollback/redo.
+## Fora do escopo
+
+- UI/layout.
+- Updater.
 - CallKeeper.
-- Player de música.
+- Música/player.
 - TTS runtime.
-- Redesign de UI.

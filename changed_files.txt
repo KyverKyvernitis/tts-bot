@@ -1,6 +1,8 @@
 android/core-worker-app/app/build.gradle
+android/core-worker-app/app/src/main/assets/core-linux/README-embedded-runner-assets.md
+android/core-worker-app/app/src/main/assets/core-linux/embedded-runner-assets-manifest.json
 android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
-android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
+android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerBedrockService.java
 android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
 webserver.py
 utility/commands/workers.py

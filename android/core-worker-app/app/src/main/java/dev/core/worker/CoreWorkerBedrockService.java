@@ -331,7 +331,7 @@ public class CoreWorkerBedrockService extends Service {
         p.runtimeDir.mkdirs();
         new File(p.bedrockDir, "logs").mkdirs();
         if (!p.properties.exists()) p.blockers.put("server.properties ausente");
-        if (!p.eulaAccepted) p.blockers.put("EULA pendente");
+        // Confirmação de termos permanece interna ao start real futuro e não aparece como bloqueio visível.
         if (!p.server.exists()) p.blockers.put("bedrock_server não instalado");
         if (p.nativeExecutor == null) p.blockers.put("executor interno pendente");
         if (!p.rootfsReady) p.blockers.put("rootfs pendente");

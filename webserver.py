@@ -169,6 +169,112 @@ def _first_list(*values, limit: int = 80) -> list[str]:
 
 
 
+def _core_worker_scrub_eula_from_public(value):
+    """Remove legado de EULA de estruturas que podem ir para painel/status público.
+
+    O histórico bruto antigo do APK 0.5.63 podia conter eula/eulaAccepted em
+    runner preflight v1. A etapa atual mantém termos fora das pendências visíveis;
+    esta função evita que resultados antigos poluam status e comandos.
+    """
+    changed = False
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            key_text = str(key or "")
+            if "eula" in key_text.lower():
+                changed = True
+                continue
+            scrubbed, item_changed = _core_worker_scrub_eula_from_public(item)
+            if item_changed:
+                changed = True
+            out[key] = scrubbed
+        state_text = str(out.get("state") or out.get("stage") or out.get("component") or "").lower()
+        if "runner_preflight" in state_text or str(out.get("component") or "") == "core_linux_runner_preflight":
+            missing = out.get("missing") if isinstance(out.get("missing"), list) else None
+            if missing is not None:
+                count = len(missing)
+                summary = str(out.get("summary") or "")
+                if "Runner preflight conclu" in summary:
+                    out["summary"] = f"Runner preflight concluído · {count} pendência(s)"
+                    changed = True
+        return out, changed
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            if "eula" in str(item or "").lower():
+                changed = True
+                continue
+            scrubbed, item_changed = _core_worker_scrub_eula_from_public(item)
+            if item_changed:
+                changed = True
+            out.append(scrubbed)
+        return out, changed
+    if isinstance(value, str):
+        if "eula" in value.lower():
+            return "", True
+    return value, changed
+
+
+def _core_worker_app_sanitize_legacy_runner_record(record: dict) -> tuple[dict, bool]:
+    if not isinstance(record, dict):
+        return record, False
+    typ = _core_worker_app_normalize_job_type(record.get("type")) if "_core_worker_app_normalize_job_type" in globals() else str(record.get("type") or "")
+    if "runner" not in typ and "runner" not in json.dumps(record, ensure_ascii=False).lower():
+        return record, False
+    scrubbed, changed = _core_worker_scrub_eula_from_public(record)
+    if not isinstance(scrubbed, dict):
+        return record, False
+    # Corrige mensagem visível de preflight antigo após remover EULA.
+    result = scrubbed.get("result") if isinstance(scrubbed.get("result"), dict) else {}
+    runner = result.get("coreLinuxRunner") if isinstance(result.get("coreLinuxRunner"), dict) else {}
+    missing = runner.get("missing") if isinstance(runner.get("missing"), list) else None
+    if typ == "apk_core_linux_runner_preflight" and missing is not None:
+        msg = f"Runner preflight concluído · {len(missing)} pendência(s)"
+        if scrubbed.get("message") != msg:
+            scrubbed["message"] = msg
+            changed = True
+    return scrubbed, changed
+
+
+def _core_worker_app_sanitize_legacy_runner_results(data: dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+    changed = False
+    for key in ("results",):
+        arr = data.get(key)
+        if not isinstance(arr, list):
+            continue
+        new_arr = []
+        for item in arr:
+            if isinstance(item, dict):
+                item, item_changed = _core_worker_app_sanitize_legacy_runner_record(item)
+                changed = changed or item_changed
+            new_arr.append(item)
+        data[key] = new_arr
+    latest = data.get("latestResultByInstallId") if isinstance(data.get("latestResultByInstallId"), dict) else {}
+    for key, item in list(latest.items()):
+        if isinstance(item, dict):
+            clean_item, item_changed = _core_worker_app_sanitize_legacy_runner_record(item)
+            if item_changed:
+                latest[key] = clean_item
+                changed = True
+    history = data.get("historyByInstallId") if isinstance(data.get("historyByInstallId"), dict) else {}
+    for key, items in list(history.items()):
+        if not isinstance(items, list):
+            continue
+        clean_items = []
+        for item in items:
+            if isinstance(item, dict):
+                clean_item, item_changed = _core_worker_app_sanitize_legacy_runner_record(item)
+                changed = changed or item_changed
+                clean_items.append(clean_item)
+            else:
+                clean_items.append(item)
+        history[key] = clean_items
+    return changed
+
+
+
 
 CORE_WORKER_APK_V1_CAPABILITIES = [
     "apk-native",
@@ -1543,6 +1649,7 @@ def _core_worker_app_queue_internal_jobs_for_worker(worker_id: str = "", install
             data = {}
         if not isinstance(data, dict):
             data = {}
+        legacy_sanitized = _core_worker_app_sanitize_legacy_runner_results(data)
         pending = data.get("pending") if isinstance(data.get("pending"), list) else []
         running = data.get("runningByJobId") if isinstance(data.get("runningByJobId"), dict) else {}
         existing_types = set()
@@ -1605,6 +1712,7 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
             data = {}
         if not isinstance(data, dict):
             data = {}
+        legacy_sanitized = _core_worker_app_sanitize_legacy_runner_results(data)
         pending = data.get("pending") if isinstance(data.get("pending"), list) else []
         results = data.get("results") if isinstance(data.get("results"), list) else []
         running = data.get("runningByJobId") if isinstance(data.get("runningByJobId"), dict) else {}
@@ -1624,6 +1732,9 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
                 last_served = float(_core_worker_app_fetch_last_served.get(key) or 0.0)
                 elapsed = time.time() - last_served if last_served else 999999.0
                 if elapsed < throttle_seconds and not matching_pending_exists:
+                    if legacy_sanitized:
+                        data["summaryByInstallId"] = _core_worker_app_jobs_build_summaries(data, now)
+                        _atomic_write_json(path, data, mode=0o600)
                     return {
                         "ok": True,
                         "jobs": [],
@@ -1781,6 +1892,7 @@ def _core_worker_app_jobs_result(payload: dict) -> dict:
             data = {}
         if not isinstance(data, dict):
             data = {}
+        _core_worker_app_sanitize_legacy_runner_results(data)
         results = data.get("results") if isinstance(data.get("results"), list) else []
         latest = data.get("latestResultByInstallId") if isinstance(data.get("latestResultByInstallId"), dict) else {}
         running = data.get("runningByJobId") if isinstance(data.get("runningByJobId"), dict) else {}
@@ -1824,6 +1936,10 @@ def _core_worker_app_jobs_public_summary(worker_id: str = "", install_id: str = 
         data = {}
     if not isinstance(data, dict):
         data = {}
+    if _core_worker_app_sanitize_legacy_runner_results(data):
+        data["summaryByInstallId"] = _core_worker_app_jobs_build_summaries(data, int(time.time()))
+        with contextlib.suppress(Exception):
+            _atomic_write_json(path, data, mode=0o600)
     latest = data.get("latestResultByInstallId") if isinstance(data.get("latestResultByInstallId"), dict) else {}
     stats = data.get("statsByInstallId") if isinstance(data.get("statsByInstallId"), dict) else {}
     history = data.get("historyByInstallId") if isinstance(data.get("historyByInstallId"), dict) else {}

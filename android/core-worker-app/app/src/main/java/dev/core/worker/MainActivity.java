@@ -3953,8 +3953,7 @@ public class MainActivity extends Activity {
             marker.put("bedrockBundled", false);
             marker.put("provisionerReady", true);
             marker.put("autoDownload", false);
-            marker.put("eulaAccepted", false);
-            marker.put("arbitraryShell", false);
+                        marker.put("arbitraryShell", false);
             marker.put("androidWritableExecBlocked", Build.VERSION.SDK_INT >= 29);
             marker.put("requiresEmbeddedExecutor", true);
             marker.put("summary", "base do Core Linux interno preparada; Termux fica só como fallback legado");
@@ -4026,7 +4025,6 @@ public class MainActivity extends Activity {
         bedrockPlan.put("target", "Minecraft Bedrock Dedicated Server oficial para Ubuntu");
         bedrockPlan.put("status", "planned");
         bedrockPlan.put("autoDownload", false);
-        bedrockPlan.put("eulaAccepted", false);
         bedrockPlan.put("requiresExplicitUserAction", true);
         bedrockPlan.put("port", 19132);
         bedrockPlan.put("steps", new JSONArray()
@@ -4034,7 +4032,6 @@ public class MainActivity extends Activity {
                 .put("preparar rootfs Linux")
                 .put("preparar Box64 quando necessário")
                 .put("baixar Bedrock oficial somente após ação explícita")
-                .put("manter confirmação de termos como etapa interna futura")
                 .put("iniciar servidor apenas em Foreground Service futuro"));
         writeTextFile(new File(provision, "bedrock-install-plan.json"), bedrockPlan.toString());
 
@@ -4051,7 +4048,6 @@ public class MainActivity extends Activity {
                 + "player-idle-timeout=30\n"
                 + "level-name=Bedrock level\n";
         writeTextFile(new File(bedrock, "server.properties.template"), propertiesTemplate);
-        writeTextFile(new File(bedrock, "EULA_NOT_ACCEPTED.txt"), "Termos não são etapa visível nesta versão. Confirmação permanece interna antes de start real futuro.\n");
         writeTextFile(new File(scripts, "bedrock-start.template.sh"), "#!/bin/sh\n# Template futuro. Não executado automaticamente.\n# cd $CORE_BEDROCK_DIR && LD_LIBRARY_PATH=. ./bedrock_server\n");
         writeTextFile(new File(logs, "README.txt"), "Logs do Core Linux Runtime/Bedrock ficarão aqui em patches futuros.\n");
     }

@@ -63,6 +63,8 @@ public final class CoreLinuxRunnerPreflightManager {
             boolean nativeExecutorReady = nativeExecutor.optBoolean("readyForRootfs", false)
                     || nativeExecutor.optBoolean("embeddedExecutorPresent", false)
                     || embeddedRunner != null;
+            boolean runnerLoadedByJni = nativeExecutor.optJSONObject("nativeBridge") != null
+                    && nativeExecutor.optJSONObject("nativeBridge").optBoolean("loaded", false);
             boolean prootReady = embeddedProot != null;
             boolean busyboxReady = embeddedBusybox != null;
             boolean box64Ready = embeddedBox64 != null;
@@ -89,7 +91,7 @@ public final class CoreLinuxRunnerPreflightManager {
             if (Build.VERSION.SDK_INT >= 29) {
                 warnings.put("execução futura deve usar componentes embutidos no APK/native libs; binários importados não são executados");
             }
-            blockers.put("runner real permanece bloqueado no preflight v1");
+            blockers.put("runner real permanece bloqueado no preflight v2");
             blockers.put("Bedrock start real permanece bloqueado");
             blockers.put("shell livre permanece bloqueado");
             blockers.put("comando remoto arbitrário permanece bloqueado");
@@ -148,7 +150,7 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("rootfs", compactRootfs(rootfsState, importState));
             out.put("nativeExecutor", compactNative(nativeExecutor));
             out.put("assetManifest", assetManifest(runnerNames, prootNames, busyboxNames, box64Names));
-            out.put("embedded", embeddedSnapshot(nativeDir, dataDir, embeddedRunner, embeddedProot, embeddedBusybox, embeddedBox64, runnerNames, prootNames, busyboxNames, box64Names));
+            out.put("embedded", embeddedSnapshot(nativeDir, dataDir, embeddedRunner, embeddedProot, embeddedBusybox, embeddedBox64, runnerNames, prootNames, busyboxNames, box64Names, runnerLoadedByJni));
             out.put("writableCandidates", writableSnapshot(writableBox64, dataDir));
             out.put("bedrockFiles", bedrockFilesSnapshot(bedrockServer, properties));
             out.put("safety", "preflight apenas detecta requisitos; sem start real, sem shell livre, sem comando remoto, sem executar binários importados");
@@ -238,13 +240,14 @@ public final class CoreLinuxRunnerPreflightManager {
     }
 
     private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File runner, File proot, File busybox, File box64,
-                                               String[] runnerNames, String[] prootNames, String[] busyboxNames, String[] box64Names) throws Exception {
+                                               String[] runnerNames, String[] prootNames, String[] busyboxNames, String[] box64Names,
+                                               boolean runnerLoadedByJni) throws Exception {
         return new JSONObject()
                 .put("nativeLibraryDir", path(nativeDir))
-                .put("runner", assetInfo("runner", runner, runnerNames, nativeDir, dataDir))
-                .put("proot", assetInfo("proot", proot, prootNames, nativeDir, dataDir))
-                .put("busybox", assetInfo("busybox", busybox, busyboxNames, nativeDir, dataDir))
-                .put("box64", assetInfo("box64", box64, box64Names, nativeDir, dataDir));
+                .put("runner", assetInfo("runner", runner, runnerNames, nativeDir, dataDir, runnerLoadedByJni, "jni-loaded:coreworker_executor"))
+                .put("proot", assetInfo("proot", proot, prootNames, nativeDir, dataDir, false, ""))
+                .put("busybox", assetInfo("busybox", busybox, busyboxNames, nativeDir, dataDir, false, ""))
+                .put("box64", assetInfo("box64", box64, box64Names, nativeDir, dataDir, false, ""));
     }
 
     private static JSONObject writableSnapshot(File box64, File dataDir) throws Exception {
@@ -257,13 +260,27 @@ public final class CoreLinuxRunnerPreflightManager {
                 .put("properties", fileInfo(properties, null));
     }
 
-    private static JSONObject assetInfo(String kind, File file, String[] expectedNames, File nativeDir, File dataDir) throws Exception {
+    private static JSONObject assetInfo(String kind, File file, String[] expectedNames, File nativeDir, File dataDir,
+                                        boolean jniLoadedFallback, String detectedByFallback) throws Exception {
         JSONObject out = fileInfo(file, dataDir);
+        boolean fileEmbedded = file != null && file.exists() && nativeDir != null && isInside(file, nativeDir);
+        if (!out.optBoolean("present", false) && jniLoadedFallback) {
+            out.put("present", true);
+            out.put("path", path(nativeDir));
+            out.put("name", expectedNames != null && expectedNames.length > 0 ? expectedNames[expectedNames.length - 1] : "");
+            out.put("size", 0L);
+            out.put("canExecute", true);
+            out.put("sha256", "");
+            out.put("detectedBy", detectedByFallback == null ? "jni-loaded" : detectedByFallback);
+        } else {
+            out.put("detectedBy", fileEmbedded ? "native-library-dir" : "missing");
+        }
         out.put("kind", kind == null ? "" : kind);
         out.put("abi", "arm64-v8a");
         out.put("expectedNames", new JSONArray(expectedNames));
-        out.put("embeddedInApk", file != null && file.exists() && nativeDir != null && isInside(file, nativeDir));
+        out.put("embeddedInApk", fileEmbedded || jniLoadedFallback);
         out.put("allowedForFutureExecution", out.optBoolean("embeddedInApk", false) && !out.optBoolean("blockedByWritableAppHome", false));
+        out.put("placeholder", false);
         return out;
     }
 

@@ -1,0 +1,27 @@
+{
+  "schema": "core-worker-embedded-runner-assets-v1",
+  "abi": "arm64-v8a",
+  "policy": "Only real native libraries packaged in APK nativeLibraryDir/jniLibs may be accepted for future execution. No downloaded/imported executable is considered ready.",
+  "expectedNativeLibraries": {
+    "runner": [
+      "libcoreworker_runner.so",
+      "libcoreworker_executor.so"
+    ],
+    "proot": [
+      "libcoreworker_proot.so",
+      "libproot.so"
+    ],
+    "busybox": [
+      "libcoreworker_busybox.so",
+      "libbusybox.so"
+    ],
+    "box64": [
+      "libcoreworker_box64.so",
+      "libbox64.so"
+    ]
+  },
+  "currentPatch": "scaffold-detector-only",
+  "startsProcesses": false,
+  "opensShell": false,
+  "bedrockStartAllowed": false
+}
