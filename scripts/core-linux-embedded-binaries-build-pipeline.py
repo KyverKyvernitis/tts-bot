@@ -104,12 +104,13 @@ def find_cc(explicit: str | None = None) -> str | None:
     system_clang = shutil.which("aarch64-linux-android26-clang") or shutil.which("aarch64-linux-android24-clang")
     if system_clang:
         return system_clang
-    # Termux clang targets Android/Bionic on arm64. Do not use a random host
-    # clang on the x86_64 VPS, because intake would reject the output anyway.
-    machine = platform.machine().lower()
-    termux_like = bool(os.environ.get("TERMUX_VERSION") or (os.environ.get("PREFIX") or "").startswith("/data/data/com.termux"))
-    if machine in ("aarch64", "arm64") or termux_like:
-        return shutil.which("clang")
+    # O runner próprio não usa libc. Em ambiente de auditoria/VPS, um clang
+    # moderno com lld consegue gerar ELF AArch64 Android via --target sem NDK
+    # completo. Isso só vale para o runner local seguro; busybox/proot/box64
+    # continuam exigindo build/import auditado separado.
+    generic_clang = shutil.which("clang")
+    if generic_clang:
+        return generic_clang
     return None
 
 
@@ -186,6 +187,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cc_is_android_target(cc: str) -> bool:
+    name = Path(str(cc)).name
+    return "aarch64-linux-android" in name
+
+
 def cmd_build_runner(args: argparse.Namespace) -> int:
     cc = find_cc(args.cc)
     if not cc:
@@ -194,18 +200,23 @@ def cmd_build_runner(args: argparse.Namespace) -> int:
         raise SystemExit(f"fonte do runner ausente: {RUNNER_SOURCE}")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out = OUT_DIR / TARGETS["runner"]["official"]
-    cmd = [
-        cc,
+    cmd = [cc]
+    if not cc_is_android_target(cc):
+        cmd.append("--target=aarch64-linux-android26")
+    cmd.extend([
         "-O2",
-        "-fPIE",
-        "-pie",
+        "-fPIC",
+        "-shared",
+        "-nostdlib",
         "-Wall",
         "-Wextra",
+        "-Werror",
         "-DCORE_WORKER_RUNNER_SAFE_PREFLIGHT_ONLY=1",
+        "-Wl,-soname,libcoreworker_runner.so",
         "-o",
         str(out),
         str(RUNNER_SOURCE),
-    ]
+    ])
     sh(cmd)
     print(f"runner compilado: {rel(out)}")
     if args.stage:

@@ -4,7 +4,7 @@ Esta pasta é o único local oficial para binários nativos `arm64-v8a` do Core 
 
 Arquivos esperados:
 
-- `libcoreworker_runner.so` — runner próprio, seguro e allowlist-only.
+- `libcoreworker_runner.so` — runner próprio, seguro e allowlist-only. Já pode ser gerado pelo pipeline local e embutido no APK.
 - `libcoreworker_proot.so` — PRoot arm64 validado.
 - `libcoreworker_busybox.so` — BusyBox arm64 validado.
 - `libcoreworker_box64.so` — Box64 arm64 validado.
@@ -22,6 +22,7 @@ Comandos úteis:
 
 ```bash
 python3 scripts/core-linux-embedded-binaries-build-pipeline.py plan
+# gera e embute o runner próprio, sem baixar terceiros
 python3 scripts/core-linux-embedded-binaries-build-pipeline.py build-runner --stage
 python3 scripts/core-linux-embedded-binaries-build-pipeline.py stage --input-dir /caminho/dos/binarios
 python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify

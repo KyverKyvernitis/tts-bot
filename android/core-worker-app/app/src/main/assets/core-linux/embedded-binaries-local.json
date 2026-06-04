@@ -1,0 +1,24 @@
+{
+  "schema": "core-worker-embedded-binaries-local-v1",
+  "generatedAt": 1780612031,
+  "dryRun": false,
+  "targets": {
+    "runner": {
+      "source": "/mnt/data/work_patch/tts-bot-main/build/core-linux-embedded-binaries/out/libcoreworker_runner.so",
+      "dest": "/mnt/data/work_patch/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_runner.so",
+      "copied": true,
+      "isElf": true,
+      "elfClass": 2,
+      "machine": 183,
+      "isElf64": true,
+      "isAarch64": true,
+      "size": 3480,
+      "sha256": "19da21d6d2ffd399f2e85cd8833f5a0c8534adae332b9e69ef3cb0329ac40600"
+    }
+  },
+  "policy": {
+    "downloadedByScript": false,
+    "executedByScript": false,
+    "bedrockBundled": false
+  }
+}

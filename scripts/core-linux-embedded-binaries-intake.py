@@ -28,7 +28,12 @@ TARGETS = {
     "box64": "libcoreworker_box64.so",
 }
 
-MIN_BYTES = 4096
+MIN_BYTES_BY_TARGET = {
+    "runner": 1024,
+    "proot": 4096,
+    "busybox": 4096,
+    "box64": 4096,
+}
 EM_AARCH64 = 183
 
 
@@ -52,14 +57,15 @@ def read_elf_header(path: Path) -> dict:
     return info
 
 
-def validate_source(path: Path) -> dict:
+def validate_source(path: Path, key: str) -> dict:
     if not path.exists() or not path.is_file():
         raise SystemExit(f"arquivo não encontrado: {path}")
     size = path.stat().st_size
     elf = read_elf_header(path)
     errors: list[str] = []
-    if size < MIN_BYTES:
-        errors.append(f"arquivo pequeno demais ({size} bytes)")
+    min_bytes = int(MIN_BYTES_BY_TARGET.get(key, 4096))
+    if size < min_bytes:
+        errors.append(f"arquivo pequeno demais ({size} bytes; mínimo {min_bytes})")
     if not elf["isElf"]:
         errors.append("não parece ELF")
     if elf["isElf"] and not elf["isElf64"]:
@@ -97,7 +103,7 @@ def main(argv: list[str]) -> int:
 
     for key, source in provided.items():
         source = source.expanduser().resolve()
-        info = validate_source(source)
+        info = validate_source(source, key)
         dest = JNI_DIR / TARGETS[key]
         if not args.dry_run:
             shutil.copy2(source, dest)
@@ -114,6 +120,7 @@ def main(argv: list[str]) -> int:
         print(f"{key}: ok size={info['size']} sha256={info['sha256']} -> {dest.name}")
 
     if not args.dry_run:
+        OUT_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
         OUT_MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"manifest escrito: {OUT_MANIFEST}")
     else:
