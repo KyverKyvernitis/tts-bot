@@ -1050,9 +1050,9 @@ public class MainActivity extends Activity {
         openConsoleButton.setOnClickListener(v -> toggleBedrockTerminalCard());
         bedrockAdvancedContent.addView(openConsoleButton);
 
-        bedrockEulaButton = dangerButton("Confirmar EULA Bedrock");
+        bedrockEulaButton = dangerButton("Confirmar termos");
+        bedrockEulaButton.setVisibility(View.GONE);
         bedrockEulaButton.setOnClickListener(v -> confirmBedrockEulaFromUi());
-        bedrockAdvancedContent.addView(bedrockEulaButton);
 
         bedrockTerminalCard = cardWithTopMargin(bedrockContent);
         bedrockTerminalCard.setVisibility(View.GONE);
@@ -2887,7 +2887,7 @@ public class MainActivity extends Activity {
         out.put("summary", foregroundRuntimeSummary == null ? "serviço persistente aguardando" : foregroundRuntimeSummary);
         out.put("mode", "foreground-service-visible-runtime");
         out.put("androidModel", Build.MANUFACTURER + " " + Build.MODEL);
-        out.put("safety", "Foreground Service visível; sem instalar rootfs, sem baixar Bedrock, sem EULA automática e sem shell livre");
+        out.put("safety", "Foreground Service visível; sem instalar rootfs, sem baixar Bedrock, sem confirmação automática de termos e sem shell livre");
         return out;
     }
 
@@ -3005,7 +3005,7 @@ public class MainActivity extends Activity {
     private void showBedrockPrepareDialog() {
         new AlertDialog.Builder(this)
                 .setTitle("Servidor ainda não está pronto")
-                .setMessage("Antes de ligar, o Core Worker precisa preparar ambiente, arquivos, EULA e preflight. Use Preparar servidor ou Testar servidor para ver pendências.")
+                .setMessage("Antes de ligar, o Core Worker precisa preparar ambiente, arquivos e preflight. Use Preparar servidor ou Testar servidor para ver pendências.")
                 .setPositiveButton("Preparar servidor", (dialog, which) -> prepareBedrockServerFromUi())
                 .setNegativeButton("Agora não", null)
                 .show();
@@ -3087,7 +3087,6 @@ public class MainActivity extends Activity {
         File logs = new File(core, "logs");
         File serverProperties = new File(bedrock, "server.properties");
         File serverPropertiesTemplate = new File(bedrock, "server.properties.template");
-        File eula = new File(bedrock, "eula.txt");
         File server = new File(bedrock, "bedrock_server");
         File box64A = new File(core, "bin/box64");
         File box64B = new File(core, "box64/box64");
@@ -3101,7 +3100,6 @@ public class MainActivity extends Activity {
         boolean executorBundled = safeFileExists(appNativeExecutor);
         boolean executorStateOk = safeTextContains(nativeExecutorState, "\"ok\"", "true") || safeTextContains(nativeExecutorState, "readyForRootfs", "true");
         boolean serverPropertiesReady = safeFileExists(serverProperties) || safeFileExists(serverPropertiesTemplate);
-        boolean eulaAccepted = safeTextContains(eula, "eula=true");
         boolean serverInstalled = safeFileExists(server);
         boolean box64Ready = safeFileExists(box64A) || safeFileExists(box64B);
 
@@ -3111,7 +3109,6 @@ public class MainActivity extends Activity {
         if (!executorBundled && !executorStateOk) blockers.put("executor interno ainda não confirmado");
         if (!serverPropertiesReady) blockers.put("server.properties ainda não preparado");
         if (!serverInstalled) blockers.put("bedrock_server não instalado");
-        if (!eulaAccepted) blockers.put("EULA pendente");
         if (!box64Ready) blockers.put("Box64 pendente");
         if (BEDROCK_RUNTIME_ISOLATED) blockers.put("runtime Bedrock isolado nesta versão para evitar crash/ANR");
 
@@ -3121,7 +3118,7 @@ public class MainActivity extends Activity {
         String bedrockStateLabel = ready ? "bedrock_ready" : "bedrock_runtime_isolated";
         String nextAction = BEDROCK_RUNTIME_ISOLATED
                 ? "corrigir estabilidade antes de reativar runtime Bedrock"
-                : (ready ? "ativar runtime Bedrock" : bedrockNextAction(rootfsReady, executorBundled || executorStateOk, serverPropertiesReady, serverInstalled, eulaAccepted, box64Ready));
+                : (ready ? "ativar runtime Bedrock" : bedrockNextAction(rootfsReady, executorBundled || executorStateOk, serverPropertiesReady, serverInstalled, box64Ready));
         String summary = BEDROCK_RUNTIME_ISOLATED
                 ? "Diagnóstico parcial concluído. Runtime Bedrock ainda não está pronto."
                 : (ready ? "Bedrock pronto para preflight do runner." : "Diagnóstico parcial concluído. Runtime Bedrock ainda não está pronto.");
@@ -3148,7 +3145,6 @@ public class MainActivity extends Activity {
         bedrockJson.put("dir", bedrock.getAbsolutePath());
         bedrockJson.put("properties", safeFileStatus(serverProperties));
         bedrockJson.put("propertiesTemplate", safeFileStatus(serverPropertiesTemplate));
-        bedrockJson.put("eula", safeFileStatus(eula));
         bedrockJson.put("server", safeFileStatus(server));
         bedrockJson.put("box64", safeFileExists(box64A) ? safeFileStatus(box64A) : safeFileStatus(box64B));
         bedrockJson.put("ready", ready);
@@ -3265,12 +3261,11 @@ public class MainActivity extends Activity {
         }
     }
 
-    private String bedrockNextAction(boolean rootfsReady, boolean executorReady, boolean propertiesReady, boolean serverInstalled, boolean eulaAccepted, boolean box64Ready) {
+    private String bedrockNextAction(boolean rootfsReady, boolean executorReady, boolean propertiesReady, boolean serverInstalled, boolean box64Ready) {
         if (!executorReady) return "validar executor interno";
         if (!rootfsReady) return "preparar rootfs interno assistido";
         if (!propertiesReady) return "preparar server.properties";
         if (!serverInstalled) return "instalar Bedrock oficial com confirmação";
-        if (!eulaAccepted) return "confirmar EULA Bedrock";
         if (!box64Ready) return "preparar Box64";
         return "ativar runtime Bedrock";
     }
@@ -3447,9 +3442,9 @@ public class MainActivity extends Activity {
     private void showBedrockFilesFromUi() {
         File bedrockDir = new File(coreLinuxDir(), "bedrock");
         String message = "Arquivos do servidor\n"
-                + "server.properties · eula.txt · logs · worlds · backups\n"
+                + "server.properties · logs · worlds · backups\n"
                 + bedrockDir.getAbsolutePath();
-        appendBedrockTerminal("files", "área de arquivos controlada: server.properties, eula.txt, logs, worlds, backups");
+        appendBedrockTerminal("files", "área de arquivos controlada: server.properties, logs, worlds, backups");
         new AlertDialog.Builder(this)
                 .setTitle("Arquivos Bedrock")
                 .setMessage(message)
@@ -3697,14 +3692,14 @@ public class MainActivity extends Activity {
 
     private void confirmBedrockEulaFromUi() {
         new AlertDialog.Builder(this)
-                .setTitle("Confirmar EULA do Bedrock?")
-                .setMessage("Isso grava eula=true apenas no ambiente local do Core Worker. O runtime Bedrock continua isolado e não será iniciado automaticamente.")
-                .setPositiveButton("Aceito e gravar", (dialog, which) -> runBusy("Gravando confirmação local da EULA...", () -> {
+                .setTitle("Confirmar termos do servidor?")
+                .setMessage("Isso registra a confirmação local antes de um start real futuro. O runtime continua isolado e não será iniciado automaticamente.")
+                .setPositiveButton("Confirmar", (dialog, which) -> runBusy("Gravando confirmação local...", () -> {
                     File bedrockDir = new File(coreLinuxDir(), "bedrock");
                     if (!bedrockDir.exists()) bedrockDir.mkdirs();
                     writeTextFile(new File(bedrockDir, "eula.txt"), "# Aceito manualmente pelo usuário no Core Worker\neula=true\n");
                     JSONObject snapshot = bedrockServerLightweightTestSnapshot();
-                    String summary = "EULA Bedrock confirmada localmente. Runtime continua isolado por segurança.";
+                    String summary = "Confirmação local registrada. Runtime continua isolado por segurança.";
                     appendBedrockTerminal("eula", summary);
                     refreshLocalStatus(summary);
                     exportBedrockDebugSnapshot("eula-safe", snapshot);
@@ -3759,7 +3754,7 @@ public class MainActivity extends Activity {
     private void confirmStartBedrockRuntimeFromUi() {
         new AlertDialog.Builder(this)
                 .setTitle("Iniciar runtime Bedrock?")
-                .setMessage("Isso ativa o serviço visível do Bedrock Manager. O servidor real só fica liberado depois de ambiente, Bedrock server, EULA e preflight estarem prontos. Nada é baixado automaticamente.")
+                .setMessage("Isso ativa o serviço visível do Bedrock Manager. O servidor real só fica liberado depois de ambiente, Bedrock server e preflight estarem prontos. Nada é baixado automaticamente.")
                 .setPositiveButton("Ativar runtime", (dialog, which) -> startBedrockRuntimeFromUi())
                 .setNegativeButton("Cancelar", null)
                 .show();
@@ -4039,7 +4034,7 @@ public class MainActivity extends Activity {
                 .put("preparar rootfs Linux")
                 .put("preparar Box64 quando necessário")
                 .put("baixar Bedrock oficial somente após ação explícita")
-                .put("exigir confirmação explícita antes de aceitar EULA")
+                .put("manter confirmação de termos como etapa interna futura")
                 .put("iniciar servidor apenas em Foreground Service futuro"));
         writeTextFile(new File(provision, "bedrock-install-plan.json"), bedrockPlan.toString());
 
@@ -4056,7 +4051,7 @@ public class MainActivity extends Activity {
                 + "player-idle-timeout=30\n"
                 + "level-name=Bedrock level\n";
         writeTextFile(new File(bedrock, "server.properties.template"), propertiesTemplate);
-        writeTextFile(new File(bedrock, "EULA_NOT_ACCEPTED.txt"), "O Core Worker não aceita EULA automaticamente. Confirme manualmente em patch/fluxo futuro antes de iniciar Bedrock.\n");
+        writeTextFile(new File(bedrock, "EULA_NOT_ACCEPTED.txt"), "Termos não são etapa visível nesta versão. Confirmação permanece interna antes de start real futuro.\n");
         writeTextFile(new File(scripts, "bedrock-start.template.sh"), "#!/bin/sh\n# Template futuro. Não executado automaticamente.\n# cd $CORE_BEDROCK_DIR && LD_LIBRARY_PATH=. ./bedrock_server\n");
         writeTextFile(new File(logs, "README.txt"), "Logs do Core Linux Runtime/Bedrock ficarão aqui em patches futuros.\n");
     }
@@ -4633,6 +4628,7 @@ public class MainActivity extends Activity {
                 .put("core-linux-rootfs-manager")
                 .put("core-linux-rootfs-import-v1")
                 .put("core-linux-runner-preflight-v1")
+                .put("core-linux-runner-preflight-v2")
                 .put("core-linux-runtime-v1")
                 .put("minecraft-bedrock-manager-safe-plan");
     }
@@ -5813,7 +5809,7 @@ public class MainActivity extends Activity {
                 result.put("ok", false);
                 result.put("error", plan.optString("error", "plano Bedrock pendente"));
             }
-            result.put("message", plan.optBoolean("ok", false) ? "plano Bedrock gerado sem baixar/aceitar EULA" : "plano Bedrock pendente");
+            result.put("message", plan.optBoolean("ok", false) ? "plano Bedrock gerado sem iniciar servidor" : "plano Bedrock pendente");
             return result;
         }
         if ("apk_minecraft_bedrock_requirements".equals(type)) {
@@ -5841,13 +5837,11 @@ public class MainActivity extends Activity {
             return result;
         }
         if ("apk_minecraft_bedrock_prepare_files".equals(type)
-                || "apk_minecraft_bedrock_eula_status".equals(type)
                 || "apk_minecraft_bedrock_start_plan".equals(type)
                 || "apk_minecraft_bedrock_stop_plan".equals(type)
                 || "apk_minecraft_bedrock_logs_status".equals(type)) {
             String focus = "status";
             if ("apk_minecraft_bedrock_prepare_files".equals(type)) focus = "prepare_properties";
-            if ("apk_minecraft_bedrock_eula_status".equals(type)) focus = "eula_status";
             if ("apk_minecraft_bedrock_start_plan".equals(type)) focus = "start_plan";
             if ("apk_minecraft_bedrock_stop_plan".equals(type)) focus = "stop_plan";
             if ("apk_minecraft_bedrock_logs_status".equals(type)) focus = "logs_status";
@@ -7560,7 +7554,6 @@ public class MainActivity extends Activity {
                 + checkLine("Próxima ação", emptyFallback(bedrockInstallerNextAction, "validar requisitos")) + "\n"
                 + checkLine("Pronto", bedrockReady ? "sim · aguardando runner" : "não · ambiente/servidor pendente") + "\n"
                 + checkLine("Propriedades", "server.properties preparado pelo APK") + "\n"
-                + checkLine("EULA", bedrockSummary != null && bedrockSummary.toLowerCase(Locale.ROOT).contains("eula") ? "verificar no status" : "não aceita automaticamente") + "\n"
                 + checkLine("Runtime Bedrock", emptyFallback(bedrockRuntimeSummary, "parado · aguardando preflight")) + "\n"
                 + checkLine("Execução", bedrockRuntimeServiceActive ? "serviço visível ativo · start real protegido" : "start/stop/logs preparados · serviço parado") + "\n"
                 + checkLine("Segurança", "sem download automático · sem shell livre");

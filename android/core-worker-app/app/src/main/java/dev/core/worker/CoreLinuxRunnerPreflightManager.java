@@ -12,11 +12,12 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
+import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
 /**
- * Preflight v1 do runner Core Linux.
+ * Preflight v2 do runner Core Linux.
  *
  * Esta etapa apenas detecta requisitos e escreve estado. Ela não inicia Bedrock,
  * não executa Box64/proot/busybox, não abre shell livre e não aceita comando remoto.
@@ -45,30 +46,27 @@ public final class CoreLinuxRunnerPreflightManager {
             File bedrockDir = new File(new File(base, "bedrock"), "server");
             File bedrockAltDir = new File(base, "bedrock");
             File bedrockServer = firstExisting(new File(bedrockDir, "bedrock_server"), new File(bedrockAltDir, "bedrock_server"));
-            File eula = firstExisting(new File(bedrockDir, "eula.txt"), new File(bedrockAltDir, "eula.txt"));
             File properties = firstExisting(new File(bedrockDir, "server.properties"), new File(bedrockAltDir, "server.properties"));
 
-            File embeddedExecutor = firstExisting(nativeDir,
-                    "libcoreworker_executor.so",
-                    "libcoreworker_proot.so",
-                    "libcoreworker_busybox.so",
-                    "libproot.so",
-                    "libbusybox.so");
-            File embeddedProot = firstExisting(nativeDir, "libcoreworker_proot.so", "libproot.so");
-            File embeddedBusybox = firstExisting(nativeDir, "libcoreworker_busybox.so", "libbusybox.so");
-            File embeddedBox64 = firstExisting(nativeDir, "libcoreworker_box64.so", "libbox64.so");
+            String[] runnerNames = new String[]{"libcoreworker_runner.so", "libcoreworker_executor.so"};
+            String[] prootNames = new String[]{"libcoreworker_proot.so", "libproot.so"};
+            String[] busyboxNames = new String[]{"libcoreworker_busybox.so", "libbusybox.so"};
+            String[] box64Names = new String[]{"libcoreworker_box64.so", "libbox64.so"};
+            File embeddedRunner = firstExisting(nativeDir, runnerNames);
+            File embeddedProot = firstExisting(nativeDir, prootNames);
+            File embeddedBusybox = firstExisting(nativeDir, busyboxNames);
+            File embeddedBox64 = firstExisting(nativeDir, box64Names);
             File writableBox64 = firstExisting(new File(base, "bin/box64"), new File(base, "box64/box64"));
             boolean writableBox64Blocked = writableBox64 != null && Build.VERSION.SDK_INT >= 29 && isInside(writableBox64, dataDir);
 
             boolean rootfsReal = isRootfsRealValidated(rootfsState, importState, rootfsDir);
             boolean nativeExecutorReady = nativeExecutor.optBoolean("readyForRootfs", false)
                     || nativeExecutor.optBoolean("embeddedExecutorPresent", false)
-                    || embeddedExecutor != null;
+                    || embeddedRunner != null;
             boolean prootReady = embeddedProot != null;
             boolean busyboxReady = embeddedBusybox != null;
             boolean box64Ready = embeddedBox64 != null;
             boolean bedrockServerReady = bedrockServer != null && bedrockServer.exists();
-            boolean eulaReady = eulaAccepted(eula);
             boolean propertiesReady = properties != null && properties.exists();
 
             JSONArray checks = new JSONArray();
@@ -83,7 +81,6 @@ public final class CoreLinuxRunnerPreflightManager {
             addCheck(checks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox como biblioteca/runner nativo do APK");
             addCheck(checks, missing, "box64_embedded", "Box64 embutido no APK", box64Ready, "embutir Box64 nativo no APK; não usar binário baixado executável");
             addCheck(checks, missing, "bedrock_server", "bedrock_server presente", bedrockServerReady, "preparar arquivos do servidor Bedrock");
-            addCheck(checks, missing, "eula", "EULA aceita", eulaReady, "confirmar EULA explicitamente");
             addCheck(checks, missing, "server_properties", "server.properties presente", propertiesReady, "gerar ou revisar server.properties");
 
             if (writableBox64Blocked) {
@@ -106,7 +103,7 @@ public final class CoreLinuxRunnerPreflightManager {
             }
 
             boolean requirementsReady = rootfsReal && nativeExecutorReady && prootReady && busyboxReady && box64Ready
-                    && bedrockServerReady && eulaReady && propertiesReady && !writableBox64Blocked;
+                    && bedrockServerReady && propertiesReady && !writableBox64Blocked;
             boolean runnerReady = false;
             String state = requirementsReady ? "runner_preflight_ready_but_blocked" : "runner_preflight_blocked";
             String summary = requirementsReady
@@ -117,7 +114,8 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("ok", true);
             out.put("component", "core_linux_runner_preflight");
             out.put("action", safeAction);
-            out.put("stage", "core-linux-runner-preflight-v1");
+            out.put("stage", "core-linux-runner-preflight-v2");
+            out.put("preflightVersion", 2);
             out.put("state", state);
             out.put("summary", summary);
             out.put("coreLinuxDir", path(base));
@@ -141,7 +139,6 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("box64Embedded", box64Ready);
             out.put("writableBox64Blocked", writableBox64Blocked);
             out.put("bedrockServerPresent", bedrockServerReady);
-            out.put("eulaAccepted", eulaReady);
             out.put("serverPropertiesPresent", propertiesReady);
             out.put("checks", checks);
             out.put("missing", missing);
@@ -150,9 +147,10 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("nextActions", nextActions);
             out.put("rootfs", compactRootfs(rootfsState, importState));
             out.put("nativeExecutor", compactNative(nativeExecutor));
-            out.put("embedded", embeddedSnapshot(embeddedExecutor, embeddedProot, embeddedBusybox, embeddedBox64));
-            out.put("writableCandidates", writableSnapshot(writableBox64));
-            out.put("bedrockFiles", bedrockFilesSnapshot(bedrockServer, eula, properties));
+            out.put("assetManifest", assetManifest(runnerNames, prootNames, busyboxNames, box64Names));
+            out.put("embedded", embeddedSnapshot(nativeDir, dataDir, embeddedRunner, embeddedProot, embeddedBusybox, embeddedBox64, runnerNames, prootNames, busyboxNames, box64Names));
+            out.put("writableCandidates", writableSnapshot(writableBox64, dataDir));
+            out.put("bedrockFiles", bedrockFilesSnapshot(bedrockServer, properties));
             out.put("safety", "preflight apenas detecta requisitos; sem start real, sem shell livre, sem comando remoto, sem executar binários importados");
             out.put("updatedAt", System.currentTimeMillis());
 
@@ -229,32 +227,56 @@ public final class CoreLinuxRunnerPreflightManager {
         return out;
     }
 
-    private static JSONObject embeddedSnapshot(File executor, File proot, File busybox, File box64) throws Exception {
+    private static JSONObject assetManifest(String[] runner, String[] proot, String[] busybox, String[] box64) throws Exception {
         return new JSONObject()
-                .put("executor", fileInfo(executor))
-                .put("proot", fileInfo(proot))
-                .put("busybox", fileInfo(busybox))
-                .put("box64", fileInfo(box64));
+                .put("abi", "arm64-v8a")
+                .put("runner", new JSONArray(runner))
+                .put("proot", new JSONArray(proot))
+                .put("busybox", new JSONArray(busybox))
+                .put("box64", new JSONArray(box64))
+                .put("policy", "somente componentes embutidos no APK/native libs podem virar executáveis futuros");
     }
 
-    private static JSONObject writableSnapshot(File box64) throws Exception {
-        return new JSONObject().put("box64", fileInfo(box64));
-    }
-
-    private static JSONObject bedrockFilesSnapshot(File server, File eula, File properties) throws Exception {
+    private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File runner, File proot, File busybox, File box64,
+                                               String[] runnerNames, String[] prootNames, String[] busyboxNames, String[] box64Names) throws Exception {
         return new JSONObject()
-                .put("server", fileInfo(server))
-                .put("eula", fileInfo(eula))
-                .put("properties", fileInfo(properties));
+                .put("nativeLibraryDir", path(nativeDir))
+                .put("runner", assetInfo("runner", runner, runnerNames, nativeDir, dataDir))
+                .put("proot", assetInfo("proot", proot, prootNames, nativeDir, dataDir))
+                .put("busybox", assetInfo("busybox", busybox, busyboxNames, nativeDir, dataDir))
+                .put("box64", assetInfo("box64", box64, box64Names, nativeDir, dataDir));
     }
 
-    private static JSONObject fileInfo(File file) throws Exception {
+    private static JSONObject writableSnapshot(File box64, File dataDir) throws Exception {
+        return new JSONObject().put("box64", fileInfo(box64, dataDir));
+    }
+
+    private static JSONObject bedrockFilesSnapshot(File server, File properties) throws Exception {
+        return new JSONObject()
+                .put("server", fileInfo(server, null))
+                .put("properties", fileInfo(properties, null));
+    }
+
+    private static JSONObject assetInfo(String kind, File file, String[] expectedNames, File nativeDir, File dataDir) throws Exception {
+        JSONObject out = fileInfo(file, dataDir);
+        out.put("kind", kind == null ? "" : kind);
+        out.put("abi", "arm64-v8a");
+        out.put("expectedNames", new JSONArray(expectedNames));
+        out.put("embeddedInApk", file != null && file.exists() && nativeDir != null && isInside(file, nativeDir));
+        out.put("allowedForFutureExecution", out.optBoolean("embeddedInApk", false) && !out.optBoolean("blockedByWritableAppHome", false));
+        return out;
+    }
+
+    private static JSONObject fileInfo(File file, File dataDir) throws Exception {
         JSONObject out = new JSONObject();
-        out.put("present", file != null && file.exists());
+        boolean present = file != null && file.exists();
+        out.put("present", present);
         out.put("path", file == null ? "" : path(file));
         out.put("name", file == null ? "" : file.getName());
-        out.put("size", file != null && file.exists() ? file.length() : 0L);
-        out.put("canExecute", file != null && file.exists() && file.canExecute());
+        out.put("size", present ? file.length() : 0L);
+        out.put("canExecute", present && file.canExecute());
+        out.put("blockedByWritableAppHome", present && dataDir != null && Build.VERSION.SDK_INT >= 29 && isInside(file, dataDir));
+        out.put("sha256", present && file.isFile() && file.length() <= 64L * 1024L * 1024L ? sha256(file) : "");
         return out;
     }
 
@@ -275,20 +297,25 @@ public final class CoreLinuxRunnerPreflightManager {
         return null;
     }
 
-    private static boolean eulaAccepted(File eula) {
-        if (eula == null || !eula.exists()) return false;
+    private static String sha256(File file) {
         try {
-            BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(eula), StandardCharsets.UTF_8));
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.toLowerCase(Locale.ROOT).replace(" ", "").contains("eula=true")) {
-                    reader.close();
-                    return true;
-                }
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            FileInputStream in = new FileInputStream(file);
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = in.read(buffer)) > 0) {
+                digest.update(buffer, 0, read);
             }
-            reader.close();
-        } catch (Throwable ignored) {}
-        return false;
+            in.close();
+            byte[] bytes = digest.digest();
+            StringBuilder hex = new StringBuilder(bytes.length * 2);
+            for (byte b : bytes) {
+                hex.append(String.format(Locale.ROOT, "%02x", b & 0xff));
+            }
+            return hex.toString();
+        } catch (Throwable ignored) {
+            return "";
+        }
     }
 
     private static boolean isInside(File child, File parent) {

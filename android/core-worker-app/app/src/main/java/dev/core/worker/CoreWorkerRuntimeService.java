@@ -316,6 +316,8 @@ public class CoreWorkerRuntimeService extends Service {
                 .put("core-linux-runtime")
                 .put("core-linux-rootfs-manager")
                 .put("core-linux-rootfs-import-v1")
+                .put("core-linux-runner-preflight-v1")
+                .put("core-linux-runner-preflight-v2")
                 .put("core-linux-runtime-v1")
                 .put("minecraft-bedrock-manager-safe-plan");
     }
@@ -358,32 +360,57 @@ public class CoreWorkerRuntimeService extends Service {
                 .put("apk_core_linux_rootfs_import_validate")
                 .put("apk_core_linux_rootfs_import_abort")
                 .put("apk_core_linux_rootfs_real_status")
+                .put("apk_core_linux_runner_status")
+                .put("apk_core_linux_runner_preflight")
+                .put("apk_core_linux_runner_requirements")
                 .put("apk_core_linux_runtime_smoke_test");
     }
 
     private JSONObject coreLinuxPublicSnapshot() {
-        JSONObject runtime = readJson(new File(new File(getFilesDir(), "core-linux/runtime"), "linux-runtime-state.json"));
-        JSONObject rootfs = readJson(new File(new File(getFilesDir(), "core-linux/runtime"), "rootfs-state.json"));
-        JSONObject smoke = readJson(new File(new File(getFilesDir(), "core-linux/runtime"), "core-linux-smoke-test.json"));
-        JSONObject rootfsImport = readJson(new File(new File(getFilesDir(), "core-linux/runtime"), "rootfs-import-state.json"));
-        boolean prepared = runtime.optBoolean("ok", false) || runtime.optBoolean("rootfsReady", false) || rootfs.optBoolean("rootfsReady", false) || smoke.optBoolean("ok", false);
-        String summary = firstNonEmpty(runtime.optString("summary", ""), rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), smoke.optString("summary", ""), prepared ? "Core Linux Runtime v1 pronto" : "Core Linux Runtime v1 aguardando preparo");
-        String state = firstNonEmpty(runtime.optString("state", ""), rootfs.optString("state", ""), rootfsImport.optString("state", ""), smoke.optString("state", ""), prepared ? "runtime_v1_ready" : "runtime_v1_pending");
+        File runtimeDir = new File(getFilesDir(), "core-linux/runtime");
+        JSONObject runtime = readJson(new File(runtimeDir, "linux-runtime-state.json"));
+        JSONObject rootfs = readJson(new File(runtimeDir, "rootfs-state.json"));
+        JSONObject smoke = readJson(new File(runtimeDir, "core-linux-smoke-test.json"));
+        JSONObject rootfsImport = readJson(new File(runtimeDir, "rootfs-import-state.json"));
+        JSONObject runner = readJson(new File(runtimeDir, "runner-preflight-state.json"));
+        String rawState = firstNonEmpty(rootfs.optString("state", ""), rootfsImport.optString("state", ""), runtime.optString("state", ""), smoke.optString("state", ""));
+        String level = firstNonEmpty(rootfs.optString("validationLevel", ""), rootfs.optString("rootfsValidationLevel", ""), rootfsImport.optString("validationLevel", ""));
+        boolean realValidated = rawState.toLowerCase().contains("rootfs_real_validated") || "real".equalsIgnoreCase(level);
+        boolean prepared = realValidated || runtime.optBoolean("ok", false) || runtime.optBoolean("rootfsReady", false) || rootfs.optBoolean("rootfsReady", false) || smoke.optBoolean("ok", false);
+        String summary = firstNonEmpty(rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), runtime.optString("summary", ""), smoke.optString("summary", ""), prepared ? "Core Linux Runtime v1 pronto" : "Core Linux Runtime v1 aguardando preparo");
+        String state = firstNonEmpty(rawState, prepared ? "runtime_v1_ready" : "runtime_v1_pending");
+        if (realValidated) {
+            state = "rootfs_real_validated";
+            summary = firstNonEmpty(rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), "Rootfs real validado · runner real ainda bloqueado");
+        }
         JSONObject out = new JSONObject();
         try {
             out.put("summary", summary);
             out.put("state", state);
             out.put("prepared", prepared);
-            out.put("rootfsReady", runtime.optBoolean("rootfsReady", rootfs.optBoolean("rootfsReady", false)) || smoke.optBoolean("ok", false));
+            out.put("rootfsReady", realValidated || runtime.optBoolean("rootfsReady", rootfs.optBoolean("rootfsReady", false)) || smoke.optBoolean("ok", false));
             out.put("executorReady", runtime.optBoolean("executorReady", false));
-            out.put("lastCheckAt", Math.max(runtime.optLong("updatedAt", 0L), Math.max(rootfs.optLong("updatedAt", 0L), smoke.optLong("updatedAt", 0L))));
+            out.put("lastCheckAt", Math.max(Math.max(runtime.optLong("updatedAt", 0L), runner.optLong("updatedAt", 0L)), Math.max(rootfs.optLong("updatedAt", 0L), smoke.optLong("updatedAt", 0L))));
             out.put("termuxRequired", false);
             out.put("bedrockStartAllowed", false);
-            out.put("rootfsValidationLevel", rootfs.optString("validationLevel", ""));
-            out.put("rootfsDistributionReady", rootfs.optBoolean("distributionReady", false));
+            out.put("rootfsValidationLevel", realValidated ? "real" : rootfs.optString("validationLevel", ""));
+            out.put("rootfsDistributionReady", realValidated || rootfs.optBoolean("distributionReady", false));
+            out.put("rootfsState", rootfs.optString("state", state));
+            out.put("rootfsSummary", rootfs.optString("summary", summary));
             out.put("rootfsImportState", rootfsImport.optString("state", ""));
             out.put("rootfsImportSummary", rootfsImport.optString("summary", ""));
-            out.put("supportedStage", rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke");
+            if (runner.length() > 0) {
+                out.put("runnerPreflightState", runner.optString("state", ""));
+                out.put("runnerPreflightSummary", runner.optString("summary", ""));
+                out.put("runnerPreflightVersion", runner.optInt("preflightVersion", 1));
+                out.put("runnerReady", runner.optBoolean("runnerReady", false));
+                out.put("runnerBlocked", runner.optBoolean("runnerBlocked", true));
+                out.put("runnerExecutionAllowed", runner.optBoolean("runnerExecutionAllowed", false));
+                out.put("runnerRequirementsReady", runner.optBoolean("runnerRequirementsReady", false));
+                out.put("runnerMissing", runner.optJSONArray("missing") == null ? new JSONArray() : runner.optJSONArray("missing"));
+                out.put("runnerPreflight", runner);
+            }
+            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v2" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
             out.put("supportedTasks", supportedLightJobsArray());
             if (runtime.length() > 0) out.put("runtime", runtime);
             if (rootfs.length() > 0) out.put("rootfs", rootfs);
