@@ -4632,6 +4632,7 @@ public class MainActivity extends Activity {
                 .put("core-linux-runtime")
                 .put("core-linux-rootfs-manager")
                 .put("core-linux-rootfs-import-v1")
+                .put("core-linux-runner-preflight-v1")
                 .put("core-linux-runtime-v1")
                 .put("minecraft-bedrock-manager-safe-plan");
     }
@@ -4674,6 +4675,16 @@ public class MainActivity extends Activity {
         out.put("rootfsState", rootfsState.optString("state", ""));
         out.put("rootfsImportState", importState.optString("state", ""));
         out.put("rootfsImportSummary", importState.optString("summary", ""));
+        JSONObject runnerPreflight = readJsonFile(new File(new File(coreLinuxDir(), "runtime"), "runner-preflight-state.json"));
+        if (runnerPreflight.length() > 0) {
+            out.put("runnerPreflightState", runnerPreflight.optString("state", ""));
+            out.put("runnerPreflightSummary", runnerPreflight.optString("summary", ""));
+            out.put("runnerReady", runnerPreflight.optBoolean("runnerReady", false));
+            out.put("runnerBlocked", runnerPreflight.optBoolean("runnerBlocked", true));
+            out.put("runnerExecutionAllowed", runnerPreflight.optBoolean("runnerExecutionAllowed", false));
+            out.put("runnerRequirementsReady", runnerPreflight.optBoolean("runnerRequirementsReady", false));
+            safePutPayload(out, "runnerPreflight", runnerPreflight);
+        }
         out.put("supportedStage", rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke");
         out.put("supportedTasks", supportedLightJobsArray());
         if (rootfsState.length() > 0) safePutPayload(out, "rootfs", rootfsState);
@@ -5039,6 +5050,9 @@ public class MainActivity extends Activity {
                 .put("apk_core_linux_rootfs_import_validate")
                 .put("apk_core_linux_rootfs_import_abort")
                 .put("apk_core_linux_rootfs_real_status")
+                .put("apk_core_linux_runner_status")
+                .put("apk_core_linux_runner_preflight")
+                .put("apk_core_linux_runner_requirements")
                 .put("apk_core_linux_runtime_smoke_test");
     }
 
@@ -5053,6 +5067,9 @@ public class MainActivity extends Activity {
                 || "apk_core_linux_rootfs_import_validate".equals(t)
                 || "apk_core_linux_rootfs_import_abort".equals(t)
                 || "apk_core_linux_rootfs_real_status".equals(t)
+                || "apk_core_linux_runner_status".equals(t)
+                || "apk_core_linux_runner_preflight".equals(t)
+                || "apk_core_linux_runner_requirements".equals(t)
                 || "apk_core_linux_native_executor_probe".equals(t)
                 || "apk_core_linux_native_executor_test".equals(t)
                 || "apk_core_linux_native_runtime_status".equals(t)
@@ -5659,6 +5676,32 @@ public class MainActivity extends Activity {
             }
             result.put("message", rootfs.optString("summary", "rootfs interno verificado sem Python/Termux"));
             if (rootfsState != null) safePutPayload(result, "rootfsState", rootfsState);
+            return result;
+        }
+
+        if ("apk_core_linux_runner_status".equals(type)
+                || "apk_core_linux_runner_preflight".equals(type)
+                || "apk_core_linux_runner_requirements".equals(type)) {
+            String action = "status";
+            if ("apk_core_linux_runner_preflight".equals(type)) action = "preflight";
+            if ("apk_core_linux_runner_requirements".equals(type)) action = "requirements";
+            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(this, coreLinuxDir(), action);
+            safePutPayload(result, "coreLinuxRunner", runner);
+            try {
+                JSONObject core = coreLinuxPublicSnapshot();
+                safePutPayload(result, "coreLinux", core);
+                coreLinuxSummary = firstNonEmpty(core.optString("summary", ""), coreLinuxSummary);
+                coreLinuxState = firstNonEmpty(core.optString("state", ""), coreLinuxState);
+                coreLinuxPrepared = core.optBoolean("prepared", coreLinuxPrepared);
+            } catch (Throwable ignored) {
+            }
+            internalDiagnosticsSummary = runner.optString("summary", "runner preflight verificado");
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            result.put("message", runner.optString("summary", "Runner preflight verificado sem iniciar Bedrock"));
+            result.put("runnerReady", runner.optBoolean("runnerReady", false));
+            result.put("runnerBlocked", runner.optBoolean("runnerBlocked", true));
+            result.put("bedrockStarted", false);
+            result.put("shellOpened", false);
             return result;
         }
 

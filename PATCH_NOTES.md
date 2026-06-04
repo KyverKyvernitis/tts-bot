@@ -1,41 +1,60 @@
-# patch-core-worker-app-polish-rootfs-reporting-and-bedrock-prep-20260603
+# patch-core-linux-runner-preflight-v1-20260604
 
-Patch grande de polimento do Core Worker APK + reporting do rootfs real.
+Base: `repo-20260604-100017.zip`
 
-## Incluído
+## Objetivo
 
-- APK bump para `0.5.62` / `versionCode 77`.
-- Tela Core passa a destacar o estado principal do rootfs real.
-- Tela Bedrock mostra rootfs e runner em linguagem mais limpa.
-- Avançado do servidor recebe status detalhado do rootfs real.
-- Botões novos no avançado:
-  - Validar rootfs ativo.
-  - Cancelar importação pendente.
-- Importação rootfs ganha estados intermediários persistidos:
-  - lendo/calculando SHA-256;
-  - hash pronto;
-  - validando layout;
-  - promovendo staging;
-  - concluído.
-- Status do rootfs mostra estatísticas compactas quando disponíveis.
-- `coreLinuxState`/`coreLinuxSummary` passam a promover `rootfs_real_validated` para o resumo principal.
-- `runtime-summary` da VPS também promove rootfs real validado para o top-level do Core Linux.
-- Painel workers passa a mostrar `Rootfs real validado` e `runner bloqueado` quando aplicável.
-- Importador tar aceita melhor PAX/GNU long path (`L`, `K`, `x`) sem abrir execução de binários.
+Adicionar o primeiro preflight seguro do runner Core Linux depois do rootfs real validado.
 
-## Mantido bloqueado
+Este patch apenas detecta requisitos e registra estado. Ele não inicia Bedrock, não inicia Box64, não executa runner real, não abre shell livre e não aceita comando remoto arbitrário.
 
-- Bedrock start real.
-- Box64 start.
-- Runner real.
-- Shell livre.
-- Comando remoto arbitrário.
-- Execução de binários importados no rootfs.
+## Alterações
 
-## Não alterado
+- APK bump para `0.5.63` / `versionCode 78`.
+- Novo `CoreLinuxRunnerPreflightManager.java`.
+- Novos jobs leves:
+  - `apk_core_linux_runner_status`
+  - `apk_core_linux_runner_preflight`
+  - `apk_core_linux_runner_requirements`
+- Nova capability pública:
+  - `core-linux-runner-preflight-v1`
+- Heartbeat/Core Linux snapshot passa a expor:
+  - `runnerPreflightState`
+  - `runnerPreflightSummary`
+  - `runnerReady`
+  - `runnerBlocked`
+  - `runnerExecutionAllowed`
+  - `runnerRequirementsReady`
+- Preflight detecta, sem executar:
+  - rootfs real validado;
+  - executor nativo do APK;
+  - proot embutido;
+  - busybox embutido;
+  - Box64 embutido;
+  - bedrock_server presente;
+  - EULA aceita;
+  - server.properties presente;
+  - candidato Box64 em diretório gravável bloqueado pelo Android 10+.
+- Estado persistido em:
+  - `files/core-linux/runtime/runner-preflight-state.json`
+  - `files/core-linux/runtime/runner-state.json`
+  - `files/core-linux/logs/runner-preflight.log`
+- VPS/painel reconhecem os novos jobs/capabilities.
 
-- Updater / ZIP update / GitHub / rollback / redo.
-- CallKeeper.
-- Player de música em execução.
-- TTS runtime.
-- Core Linux funcional já validado.
+## Segurança mantida
+
+- Bedrock start real: bloqueado.
+- Box64 start: bloqueado.
+- Runner real: bloqueado.
+- Shell livre: bloqueado.
+- Comando remoto arbitrário: bloqueado.
+- Binários importados/baixados no app home: não executados.
+
+## Fora do patch
+
+- Não toca updater.
+- Não toca CallKeeper.
+- Não mexe na UI do APK.
+- Não mexe em player de música.
+- Não mexe em TTS runtime.
+- Não remove Termux ainda.
