@@ -1,11 +1,13 @@
 # Core Linux embedded binaries
 
-Coloque aqui apenas binários reais `arm64-v8a` aprovados para o APK privado:
+Esta pasta é o único local oficial para binários nativos `arm64-v8a` do Core Linux no APK privado.
 
-- `libcoreworker_runner.so`
-- `libcoreworker_proot.so`
-- `libcoreworker_busybox.so`
-- `libcoreworker_box64.so`
+Arquivos esperados:
+
+- `libcoreworker_runner.so` — runner próprio, seguro e allowlist-only.
+- `libcoreworker_proot.so` — PRoot arm64 validado.
+- `libcoreworker_busybox.so` — BusyBox arm64 validado.
+- `libcoreworker_box64.so` — Box64 arm64 validado.
 
 Regras:
 
@@ -13,4 +15,14 @@ Regras:
 - não baixar em runtime;
 - não executar neste estágio;
 - não embutir `bedrock_server` no APK;
-- validar com `scripts/core-linux-embedded-binaries-intake.py` antes de buildar.
+- validar com `scripts/core-linux-embedded-binaries-intake.py` antes de buildar;
+- preparar/buildar com `scripts/core-linux-embedded-binaries-build-pipeline.py`.
+
+Comandos úteis:
+
+```bash
+python3 scripts/core-linux-embedded-binaries-build-pipeline.py plan
+python3 scripts/core-linux-embedded-binaries-build-pipeline.py build-runner --stage
+python3 scripts/core-linux-embedded-binaries-build-pipeline.py stage --input-dir /caminho/dos/binarios
+python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify
+```

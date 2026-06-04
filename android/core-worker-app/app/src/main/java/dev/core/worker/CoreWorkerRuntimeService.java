@@ -319,6 +319,7 @@ public class CoreWorkerRuntimeService extends Service {
                 .put("core-linux-runner-preflight-v1")
                 .put("core-linux-runner-preflight-v2")
                 .put("core-linux-embedded-binaries-intake-v1")
+                .put("core-linux-embedded-binaries-build-pipeline-v1")
                 .put("core-linux-runtime-v1")
                 .put("minecraft-bedrock-manager-safe-plan");
     }

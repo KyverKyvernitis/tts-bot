@@ -1,24 +1,35 @@
 {
-  "schema": "core-worker-embedded-binaries-intake-v1",
-  "stage": "core-linux-embedded-binaries-intake-v1",
+  "schema": "core-worker-embedded-binaries-manifest-v2",
+  "stage": "core-linux-embedded-binaries-build-pipeline-v1",
   "abi": "arm64-v8a",
+  "androidMinSdk": 26,
   "policy": {
-    "noAutoDownload": true,
-    "noRuntimeExecution": true,
-    "noRemoteArbitraryCommand": true,
-    "onlyNativeLibraryDirMayBecomeExecutable": true,
-    "rejectWritableAppHomeExecutables": true
+    "noRuntimeDownload": true,
+    "noPlaceholder": true,
+    "noBedrockBundledInApk": true,
+    "noExecutionDuringBuild": true,
+    "allowOnlyNativeLibraryDirForFutureExecution": true
   },
-  "expected": {
-    "executor": ["libcoreworker_executor.so"],
-    "runner": ["libcoreworker_runner.so"],
-    "proot": ["libcoreworker_proot.so", "libproot.so"],
-    "busybox": ["libcoreworker_busybox.so", "libbusybox.so"],
-    "box64": ["libcoreworker_box64.so", "libbox64.so"]
-  },
-  "notes": [
-    "Este manifesto não contém binários reais.",
-    "O APK só deve marcar um componente como pronto quando o arquivo ELF arm64 real existir em jniLibs/arm64-v8a.",
-    "Bedrock server não entra no APK; será preparado por import controlado em etapa futura."
-  ]
+  "targets": {
+    "runner": {
+      "officialName": "libcoreworker_runner.so",
+      "source": "android/core-worker-app/app/src/main/cpp/coreworker_runner.c",
+      "origin": "local-core-worker-safe-preflight-runner"
+    },
+    "proot": {
+      "officialName": "libcoreworker_proot.so",
+      "origin": "manual-build-or-audited-import",
+      "upstream": "https://github.com/proot-me/proot"
+    },
+    "busybox": {
+      "officialName": "libcoreworker_busybox.so",
+      "origin": "manual-build-from-upstream-source",
+      "upstream": "https://busybox.net/downloads/"
+    },
+    "box64": {
+      "officialName": "libcoreworker_box64.so",
+      "origin": "manual-build-from-upstream-source",
+      "upstream": "https://github.com/ptitSeb/box64"
+    }
+  }
 }
