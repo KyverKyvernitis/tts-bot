@@ -43,6 +43,7 @@ TARGETS = {
         "source": str(RUNNER_SOURCE.relative_to(ROOT)),
         "origin": "local-core-worker",
         "minBytes": 1024,
+        "requiredAtBuild": True,
     },
     "busybox": {
         "official": "libcoreworker_busybox.so",
@@ -130,7 +131,7 @@ def write_source_manifest() -> Path:
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     SOURCE_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema": "core-worker-embedded-binaries-source-plan-v1",
+        "schema": "core-worker-embedded-binaries-source-plan-v2",
         "generatedAt": int(time.time()),
         "abi": "arm64-v8a",
         "androidMinSdk": 26,
@@ -140,6 +141,7 @@ def write_source_manifest() -> Path:
             "noBedrockBundledInApk": True,
             "noExecutionDuringBuild": True,
             "jniLibsOnlyForFutureExecution": True,
+            "runnerRequiredAtBuild": True,
         },
         "targets": TARGETS,
     }

@@ -58,8 +58,8 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 83
-        versionName "0.5.68"
+        versionCode 84
+        versionName "0.5.69"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -134,10 +134,10 @@ android {
 // forem adicionados em src/main/jniLibs/arm64-v8a, este task valida tamanho,
 // assinatura ELF mínima e impede placeholders antes do APK privado ser gerado.
 def coreLinuxEmbeddedBinaries = [
-        [key: "runner",  file: "libcoreworker_runner.so",  minBytes: 1024L],
-        [key: "proot",   file: "libcoreworker_proot.so",   minBytes: 4096L],
-        [key: "busybox", file: "libcoreworker_busybox.so", minBytes: 4096L],
-        [key: "box64",   file: "libcoreworker_box64.so",   minBytes: 4096L],
+        [key: "runner",  file: "libcoreworker_runner.so",  minBytes: 1024L,  required: true],
+        [key: "proot",   file: "libcoreworker_proot.so",   minBytes: 32768L, required: false],
+        [key: "busybox", file: "libcoreworker_busybox.so", minBytes: 32768L, required: false],
+        [key: "box64",   file: "libcoreworker_box64.so",   minBytes: 131072L, required: false],
 ]
 
 tasks.register("verifyCoreLinuxEmbeddedBinaries") {
@@ -151,6 +151,9 @@ tasks.register("verifyCoreLinuxEmbeddedBinaries") {
             def f = file("${dir}/${item.file}")
             if (!f.exists()) {
                 missing << item.file
+                if (item.required) {
+                    invalid << "${item.file} (ausente, obrigatório neste estágio)"
+                }
                 return
             }
             byte[] head = new byte[Math.min(64, Math.max(0, f.length() as int))]
@@ -171,7 +174,7 @@ tasks.register("verifyCoreLinuxEmbeddedBinaries") {
         if (strict && !missing.isEmpty()) {
             throw new GradleException("Core Linux embedded binaries ausentes: ${missing.join(', ')}")
         }
-        println("Core Linux embedded binaries: missing=${missing.size()} invalid=${invalid.size()} strict=${strict}")
+        println("Core Linux embedded binaries: missing=${missing.size()} invalid=${invalid.size()} strict=${strict}; runner obrigatório, terceiros opcionais até import auditado")
     }
 }
 

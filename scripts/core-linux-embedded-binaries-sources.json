@@ -1,6 +1,6 @@
 {
-  "schema": "core-worker-embedded-binaries-source-plan-v1",
-  "generatedAt": 1780611252,
+  "schema": "core-worker-embedded-binaries-source-plan-v2",
+  "generatedAt": 1780614000,
   "abi": "arm64-v8a",
   "androidMinSdk": 26,
   "policy": {
@@ -8,7 +8,8 @@
     "noPlaceholder": true,
     "noBedrockBundledInApk": true,
     "noExecutionDuringBuild": true,
-    "jniLibsOnlyForFutureExecution": true
+    "jniLibsOnlyForFutureExecution": true,
+    "runnerRequiredAtBuild": true
   },
   "targets": {
     "runner": {

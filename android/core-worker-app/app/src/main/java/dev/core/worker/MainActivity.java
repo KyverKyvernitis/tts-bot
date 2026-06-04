@@ -4625,7 +4625,9 @@ public class MainActivity extends Activity {
                 .put("core-linux-rootfs-import-v1")
                 .put("core-linux-runner-preflight-v1")
                 .put("core-linux-runner-preflight-v2")
+                .put("core-linux-runner-preflight-v3")
                 .put("core-linux-embedded-binaries-intake-v1")
+                .put("core-linux-embedded-binaries-intake-v2")
                 .put("core-linux-embedded-binaries-build-pipeline-v1")
                 .put("core-linux-runtime-v1")
                 .put("minecraft-bedrock-manager-safe-plan");
@@ -4673,13 +4675,14 @@ public class MainActivity extends Activity {
         if (runnerPreflight.length() > 0) {
             out.put("runnerPreflightState", runnerPreflight.optString("state", ""));
             out.put("runnerPreflightSummary", runnerPreflight.optString("summary", ""));
+            out.put("runnerPreflightVersion", runnerPreflight.optInt("preflightVersion", 1));
             out.put("runnerReady", runnerPreflight.optBoolean("runnerReady", false));
             out.put("runnerBlocked", runnerPreflight.optBoolean("runnerBlocked", true));
             out.put("runnerExecutionAllowed", runnerPreflight.optBoolean("runnerExecutionAllowed", false));
             out.put("runnerRequirementsReady", runnerPreflight.optBoolean("runnerRequirementsReady", false));
             safePutPayload(out, "runnerPreflight", runnerPreflight);
         }
-        out.put("supportedStage", rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke");
+        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v3" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
         out.put("supportedTasks", supportedLightJobsArray());
         if (rootfsState.length() > 0) safePutPayload(out, "rootfs", rootfsState);
         if (importState.length() > 0) safePutPayload(out, "rootfsImport", importState);

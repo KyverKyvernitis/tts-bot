@@ -288,7 +288,9 @@ CORE_WORKER_APK_V1_CAPABILITIES = [
     "core-linux-rootfs-import-v1",
     "core-linux-runner-preflight-v1",
     "core-linux-runner-preflight-v2",
+    "core-linux-runner-preflight-v3",
     "core-linux-embedded-binaries-intake-v1",
+    "core-linux-embedded-binaries-intake-v2",
     "core-linux-embedded-binaries-build-pipeline-v1",
     "core-linux-runtime-v1",
     "minecraft-bedrock-manager-safe-plan",
@@ -745,8 +747,10 @@ def _compact_core_worker_public_nested(value: dict | None) -> dict:
         "readyForBedrockStart", "distributionReady", "validationLevel",
         "rootfsDistributionReady", "rootfsValidationLevel",
         "rootfsSummary", "rootfsState", "rootfsImportState", "rootfsImportSummary",
-        "lastResultAt", "sourceJobType", "nativeOk",
-        "allowlist", "androidSdk", "blockers",
+        "runnerPreflightState", "runnerPreflightSummary", "runnerPreflightVersion",
+        "runnerReady", "runnerBlocked", "runnerExecutionAllowed", "runnerRequirementsReady",
+        "runnerMissing", "lastResultAt", "sourceJobType", "nativeOk",
+        "allowlist", "androidSdk", "blockers", "missing", "nextActions",
     )
     out = {}
     for key in keep:
@@ -982,6 +986,26 @@ def _newest_core_worker_app_heartbeat(data: dict) -> dict | None:
 
 
 
+def _core_worker_core_linux_is_background_only(value: dict | None) -> bool:
+    if not isinstance(value, dict) or not value:
+        return True
+    state = str(value.get("state") or "").lower()
+    summary = str(value.get("summary") or "").lower()
+    return "background-safe-runtime" in state or "heartbeat em background" in summary
+
+
+def _core_worker_core_linux_is_richer(value: dict | None) -> bool:
+    if not isinstance(value, dict) or not value:
+        return False
+    return bool(
+        value.get("rootfsReady")
+        or value.get("rootfsValidationLevel") == "real"
+        or value.get("runnerPreflightState")
+        or value.get("runnerPreflightSummary")
+        or isinstance(value.get("runnerPreflight"), dict)
+    )
+
+
 def _merge_core_worker_app_heartbeat_record(record: dict, previous: dict | None) -> dict:
     if not isinstance(record, dict):
         return {}
@@ -1000,6 +1024,17 @@ def _merge_core_worker_app_heartbeat_record(record: dict, previous: dict | None)
         value = merged.get(key)
         if (not isinstance(value, dict) or not value) and isinstance(previous.get(key), dict):
             merged[key] = previous.get(key)
+    if _core_worker_core_linux_is_background_only(merged.get("coreLinux")) and _core_worker_core_linux_is_richer(previous.get("coreLinux")):
+        merged_core = dict(previous.get("coreLinux") or {})
+        merged_core["bedrockStartAllowed"] = False
+        merged_core["termuxRequired"] = False
+        merged["coreLinux"] = merged_core
+        if _safe_short_text(previous.get("coreLinuxSummary"), 200):
+            merged["coreLinuxSummary"] = previous.get("coreLinuxSummary")
+        if _safe_short_text(previous.get("coreLinuxState"), 200):
+            merged["coreLinuxState"] = previous.get("coreLinuxState")
+        if previous.get("coreLinuxPrepared"):
+            merged["coreLinuxPrepared"] = True
     for key in ("coreLinuxSummary", "coreLinuxState", "internalRuntimeState"):
         if not _safe_short_text(merged.get(key), 200) and _safe_short_text(previous.get(key), 200):
             merged[key] = previous.get(key)
@@ -1022,7 +1057,7 @@ def _core_worker_app_latest_core_linux_state(worker_id: str = "", install_id: st
         if not isinstance(item, dict):
             continue
         typ = str(item.get("type") or "")
-        if not ("core_linux" in typ or "rootfs" in typ or "native_executor" in typ):
+        if not ("core_linux" in typ or "rootfs" in typ or "native_executor" in typ or "runner" in typ):
             continue
         if install_id and str(item.get("installId") or "") not in ("", str(install_id)):
             continue
@@ -1031,28 +1066,111 @@ def _core_worker_app_latest_core_linux_state(worker_id: str = "", install_id: st
         rows.append(item)
     if not rows:
         return {}
-    latest_ok = next((row for row in rows if row.get("ok") and str(row.get("type") or "") == "apk_core_linux_runtime_smoke_test"), None)
-    if not isinstance(latest_ok, dict):
-        latest_ok = next((row for row in rows if row.get("ok") and "core_linux" in str(row.get("type") or "")), rows[0])
+
+    def row_score(row: dict) -> tuple[int, int]:
+        typ = str(row.get("type") or "")
+        received = int(row.get("receivedAt") or 0)
+        if row.get("ok") and typ == "apk_core_linux_runner_preflight":
+            return (100, received)
+        if row.get("ok") and "rootfs_import" in typ:
+            return (90, received)
+        if row.get("ok") and typ in {"apk_core_linux_rootfs_validate", "apk_core_linux_rootfs_real_status", "apk_core_linux_rootfs_status"}:
+            return (80, received)
+        if row.get("ok") and typ == "apk_core_linux_runtime_smoke_test":
+            return (70, received)
+        if row.get("ok") and "core_linux" in typ:
+            return (60, received)
+        return (10, received)
+
+    latest_ok = max(rows, key=row_score)
     result = latest_ok.get("result") if isinstance(latest_ok.get("result"), dict) else {}
+    runner = result.get("coreLinuxRunner") if isinstance(result.get("coreLinuxRunner"), dict) else {}
+    core_payload = result.get("coreLinux") if isinstance(result.get("coreLinux"), dict) else {}
     smoke = result.get("coreLinuxSmokeTest") if isinstance(result.get("coreLinuxSmokeTest"), dict) else {}
     runtime = smoke.get("runtime") if isinstance(smoke.get("runtime"), dict) else result.get("runtime") if isinstance(result.get("runtime"), dict) else {}
-    rootfs = smoke.get("rootfs") if isinstance(smoke.get("rootfs"), dict) else result.get("rootfs") if isinstance(result.get("rootfs"), dict) else {}
-    prepared = bool(latest_ok.get("ok") and str(latest_ok.get("type") or "") in {"apk_core_linux_runtime_smoke_test", "apk_core_linux_rootfs_validate", "apk_core_linux_rootfs_prepare", "apk_core_linux_rootfs_status"})
-    prepared = prepared or bool(runtime.get("ok") or runtime.get("rootfsReady") or rootfs.get("rootfsReady") or smoke.get("ok"))
-    summary = _safe_short_text(runtime.get("summary") or smoke.get("summary") or result.get("message") or latest_ok.get("message") or latest_ok.get("error"), 180)
-    state = _safe_short_text(runtime.get("state") or smoke.get("state") or rootfs.get("state") or ("runtime_v1_ready" if prepared else "runtime_v1_pending"), 80)
-    core_linux = {
+    rootfs = core_payload.get("rootfs") if isinstance(core_payload.get("rootfs"), dict) else smoke.get("rootfs") if isinstance(smoke.get("rootfs"), dict) else result.get("rootfs") if isinstance(result.get("rootfs"), dict) else runner.get("rootfs") if isinstance(runner.get("rootfs"), dict) else {}
+    rootfs_import = core_payload.get("rootfsImport") if isinstance(core_payload.get("rootfsImport"), dict) else {}
+    real = False
+    for candidate in (core_payload, rootfs, rootfs_import, runner.get("rootfs") if isinstance(runner.get("rootfs"), dict) else {}):
+        state_text = str(candidate.get("state") or candidate.get("rootfsState") or candidate.get("rootfsImportState") or "").lower()
+        level = str(candidate.get("validationLevel") or candidate.get("rootfsValidationLevel") or "").lower()
+        if "rootfs_real_validated" in state_text or level == "real":
+            real = True
+            break
+    prepared = bool(
+        real
+        or runtime.get("ok")
+        or runtime.get("rootfsReady")
+        or rootfs.get("rootfsReady")
+        or smoke.get("ok")
+        or core_payload.get("prepared")
+        or core_payload.get("rootfsReady")
+    )
+    summary = _safe_short_text(
+        core_payload.get("summary")
+        or rootfs.get("summary")
+        or runner.get("rootfsSummary")
+        or runtime.get("summary")
+        or smoke.get("summary")
+        or result.get("message")
+        or latest_ok.get("message")
+        or latest_ok.get("error"),
+        180,
+    )
+    state = _safe_short_text(
+        core_payload.get("state")
+        or rootfs.get("state")
+        or runtime.get("state")
+        or smoke.get("state")
+        or ("rootfs_real_validated" if real else "runtime_v1_ready" if prepared else "runtime_v1_pending"),
+        80,
+    )
+    if real:
+        state = "rootfs_real_validated"
+        summary = summary or "Rootfs real validado · runner real ainda bloqueado"
+    core_linux = dict(core_payload) if isinstance(core_payload, dict) else {}
+    core_linux.update({
         "summary": summary,
         "state": state,
         "prepared": prepared,
-        "rootfsReady": bool(runtime.get("rootfsReady") or rootfs.get("rootfsReady") or prepared),
-        "executorReady": bool(runtime.get("executorReady") or prepared),
+        "rootfsReady": bool(real or runtime.get("rootfsReady") or rootfs.get("rootfsReady") or prepared),
+        "executorReady": bool(runtime.get("executorReady") or prepared or runner.get("nativeExecutorReady")),
         "termuxRequired": False,
         "bedrockStartAllowed": False,
         "lastResultAt": int(latest_ok.get("receivedAt") or 0),
         "sourceJobType": _safe_short_text(latest_ok.get("type"), 80),
-    }
+    })
+    if real:
+        core_linux["rootfsValidationLevel"] = "real"
+        core_linux["rootfsState"] = "rootfs_real_validated"
+        core_linux["rootfsSummary"] = _safe_short_text(rootfs.get("summary") or summary, 180)
+    if runner:
+        core_linux["runnerPreflightState"] = _safe_short_text(runner.get("state"), 80)
+        core_linux["runnerPreflightSummary"] = _safe_short_text(runner.get("summary"), 180)
+        core_linux["runnerPreflightVersion"] = int(runner.get("preflightVersion") or 1)
+        core_linux["runnerReady"] = bool(runner.get("runnerReady"))
+        core_linux["runnerBlocked"] = bool(runner.get("runnerBlocked", True))
+        core_linux["runnerExecutionAllowed"] = bool(runner.get("runnerExecutionAllowed"))
+        core_linux["runnerRequirementsReady"] = bool(runner.get("runnerRequirementsReady"))
+        if isinstance(runner.get("missing"), list):
+            core_linux["runnerMissing"] = [_safe_short_text(x, 120) for x in runner.get("missing", [])[:16]]
+        compact_runner = dict(runner)
+        if isinstance(compact_runner.get("embedded"), dict):
+            # Mantém só o resumo dos assets para não inflar o runtime-summary.
+            compact_embedded = {}
+            for key, value in compact_runner.get("embedded", {}).items():
+                if isinstance(value, dict):
+                    compact_embedded[key] = {
+                        "present": bool(value.get("present")),
+                        "embeddedInApk": bool(value.get("embeddedInApk")),
+                        "allowedForFutureExecution": bool(value.get("allowedForFutureExecution")),
+                        "name": _safe_short_text(value.get("name"), 80),
+                        "size": int(value.get("size") or 0),
+                        "sha256": _safe_short_text(value.get("sha256"), 96),
+                        "detectedBy": _safe_short_text(value.get("detectedBy"), 80),
+                    }
+            compact_runner["embedded"] = compact_embedded
+        core_linux["runnerPreflight"] = compact_runner
     return {"coreLinux": core_linux, "coreLinuxSummary": summary, "coreLinuxState": state, "coreLinuxPrepared": prepared}
 
 def _core_worker_promote_rootfs_real_state(core_linux: dict, summary: str = "", state: str = "") -> tuple[dict, str, str, bool]:

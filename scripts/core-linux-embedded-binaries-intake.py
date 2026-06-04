@@ -30,9 +30,9 @@ TARGETS = {
 
 MIN_BYTES_BY_TARGET = {
     "runner": 1024,
-    "proot": 4096,
-    "busybox": 4096,
-    "box64": 4096,
+    "proot": 32768,
+    "busybox": 32768,
+    "box64": 131072,
 }
 EM_AARCH64 = 183
 

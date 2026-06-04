@@ -20,6 +20,8 @@ import android.os.PersistableBundle;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -156,6 +158,11 @@ public class CoreWorkerUpdateJobService extends JobService {
                 .put("internal-jobs")
                 .put("core-linux-runtime")
                 .put("core-linux-rootfs-manager")
+                .put("core-linux-rootfs-import-v1")
+                .put("core-linux-runner-preflight-v1")
+                .put("core-linux-runner-preflight-v2")
+                .put("core-linux-runner-preflight-v3")
+                .put("core-linux-embedded-binaries-intake-v2")
                 .put("core-linux-runtime-v1")
                 .put("minecraft-bedrock-manager-safe-plan");
     }
@@ -184,27 +191,98 @@ public class CoreWorkerUpdateJobService extends JobService {
                 .put("apk_core_linux_rootfs_prepare")
                 .put("apk_core_linux_rootfs_validate")
                 .put("apk_core_linux_rootfs_clean_staging")
+                .put("apk_core_linux_rootfs_import_status")
+                .put("apk_core_linux_rootfs_import_validate")
+                .put("apk_core_linux_rootfs_import_abort")
+                .put("apk_core_linux_rootfs_real_status")
+                .put("apk_core_linux_runner_status")
+                .put("apk_core_linux_runner_preflight")
+                .put("apk_core_linux_runner_requirements")
                 .put("apk_core_linux_runtime_smoke_test");
     }
 
     private JSONObject backgroundCoreLinuxSnapshot() throws Exception {
+        File runtimeDir = new File(getFilesDir(), "core-linux/runtime");
+        JSONObject rootfs = readJsonFile(new File(runtimeDir, "rootfs-state.json"));
+        JSONObject rootfsImport = readJsonFile(new File(runtimeDir, "rootfs-import-state.json"));
+        JSONObject smoke = readJsonFile(new File(runtimeDir, "core-linux-smoke-test.json"));
+        JSONObject runner = readJsonFile(new File(runtimeDir, "runner-preflight-state.json"));
         JSONObject core = new JSONObject();
-        core.put("state", "background-safe-runtime");
-        core.put("summary", "Core Linux Runtime v1 disponível no APK; heartbeat em background não inicia Bedrock");
-        core.put("prepared", false);
+
+        String rawState = firstNonEmpty(rootfs.optString("state", ""), rootfsImport.optString("state", ""), smoke.optString("state", ""));
+        String level = firstNonEmpty(rootfs.optString("validationLevel", ""), rootfs.optString("rootfsValidationLevel", ""), rootfsImport.optString("validationLevel", ""));
+        boolean realValidated = rawState.toLowerCase().contains("rootfs_real_validated") || "real".equalsIgnoreCase(level);
+        boolean prepared = realValidated || rootfs.optBoolean("rootfsReady", false) || rootfsImport.optBoolean("rootfsReady", false) || smoke.optBoolean("ok", false);
+        String summary = firstNonEmpty(rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), smoke.optString("summary", ""), prepared ? "Core Linux Runtime v1 pronto" : "Core Linux Runtime v1 disponível no APK; heartbeat em background não inicia Bedrock");
+        String state = firstNonEmpty(rawState, prepared ? "runtime_v1_ready" : "background-safe-runtime");
+        if (realValidated) {
+            state = "rootfs_real_validated";
+            summary = firstNonEmpty(rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), "Rootfs real validado · runner real ainda bloqueado");
+        }
+
+        core.put("state", state);
+        core.put("summary", summary);
+        core.put("prepared", prepared);
+        core.put("rootfsReady", realValidated || rootfs.optBoolean("rootfsReady", prepared));
+        core.put("rootfsValidationLevel", realValidated ? "real" : level);
+        core.put("rootfsDistributionReady", realValidated || rootfs.optBoolean("distributionReady", rootfsImport.optBoolean("distributionReady", false)));
+        core.put("rootfsState", rootfs.optString("state", state));
+        core.put("rootfsSummary", rootfs.optString("summary", summary));
+        core.put("rootfsImportState", rootfsImport.optString("state", ""));
+        core.put("rootfsImportSummary", rootfsImport.optString("summary", ""));
+        if (runner.length() > 0) {
+            core.put("runnerPreflightState", runner.optString("state", ""));
+            core.put("runnerPreflightSummary", runner.optString("summary", ""));
+            core.put("runnerPreflightVersion", runner.optInt("preflightVersion", 1));
+            core.put("runnerReady", runner.optBoolean("runnerReady", false));
+            core.put("runnerBlocked", runner.optBoolean("runnerBlocked", true));
+            core.put("runnerExecutionAllowed", runner.optBoolean("runnerExecutionAllowed", false));
+            core.put("runnerRequirementsReady", runner.optBoolean("runnerRequirementsReady", false));
+            core.put("runnerMissing", runner.optJSONArray("missing") == null ? new org.json.JSONArray() : runner.optJSONArray("missing"));
+            core.put("runnerPreflight", runner);
+        }
         core.put("termuxRequired", false);
         core.put("bedrockStartAllowed", false);
-        core.put("supportedStage", "core-linux-runtime-v1-smoke");
+        core.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v3" : (prepared ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
         core.put("supportedTasks", supportedLightJobsArray());
         return core;
     }
 
     private JSONObject backgroundNativeRuntimeSnapshot() throws Exception {
+        JSONObject executor = readJsonFile(new File(new File(getFilesDir(), "core-linux/runtime"), "native-executor-state.json"));
         JSONObject runtime = new JSONObject();
-        runtime.put("state", "background-heartbeat");
-        runtime.put("summary", "APK nativo em background; jobs internos seguros declarados");
+        runtime.put("state", executor.optString("state", "background-heartbeat"));
+        runtime.put("summary", firstNonEmpty(executor.optString("summary", ""), "APK nativo em background; jobs internos seguros declarados"));
+        runtime.put("workerOnline", true);
+        runtime.put("workerState", executor.optBoolean("readyForRootfs", false) ? "ready" : "pending");
+        runtime.put("pythonAvailable", false);
+        runtime.put("lastHeartbeatAt", executor.optLong("updatedAt", 0L));
         runtime.put("supportedTasks", supportedLightJobsArray());
+        if (executor.length() > 0) runtime.put("executor", executor);
         return runtime;
+    }
+
+
+    private JSONObject readJsonFile(File file) {
+        try {
+            if (file == null || !file.isFile()) return new JSONObject();
+            FileInputStream input = new FileInputStream(file);
+            byte[] data = new byte[(int) Math.min(file.length(), 512L * 1024L)];
+            int read = input.read(data);
+            input.close();
+            if (read <= 0) return new JSONObject();
+            return new JSONObject(new String(data, 0, read, StandardCharsets.UTF_8));
+        } catch (Throwable ignored) {
+            return new JSONObject();
+        }
+    }
+
+    private String firstNonEmpty(String... values) {
+        if (values == null) return "";
+        for (String value : values) {
+            if (value != null && !value.trim().isEmpty()) return value.trim();
+        }
+        return "";
     }
 
     private void reportRuntimeHeartbeat(String serverUrl, String reason) {
