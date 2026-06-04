@@ -807,6 +807,17 @@ def _append_core_worker_app_heartbeat(payload: dict) -> dict:
             record["coreLinuxState"] = job_core_linux.get("coreLinuxState")
         if not record.get("coreLinuxPrepared") and job_core_linux.get("coreLinuxPrepared"):
             record["coreLinuxPrepared"] = True
+    if isinstance(record.get("coreLinux"), dict):
+        promoted_core, promoted_summary, promoted_state, promoted_prepared = _core_worker_promote_rootfs_real_state(
+            record.get("coreLinux"),
+            _safe_short_text(record.get("coreLinuxSummary"), 160),
+            _safe_short_text(record.get("coreLinuxState"), 80),
+        )
+        record["coreLinux"] = promoted_core
+        if promoted_state:
+            record["coreLinuxSummary"] = promoted_summary
+            record["coreLinuxState"] = promoted_state
+            record["coreLinuxPrepared"] = bool(record.get("coreLinuxPrepared") or promoted_prepared)
     path = _core_worker_app_heartbeats_path()
     key = install_id or worker_id or "unknown"
     with _core_worker_app_heartbeat_lock:
@@ -931,6 +942,43 @@ def _core_worker_app_latest_core_linux_state(worker_id: str = "", install_id: st
     }
     return {"coreLinux": core_linux, "coreLinuxSummary": summary, "coreLinuxState": state, "coreLinuxPrepared": prepared}
 
+def _core_worker_promote_rootfs_real_state(core_linux: dict, summary: str = "", state: str = "") -> tuple[dict, str, str, bool]:
+    if not isinstance(core_linux, dict):
+        core_linux = {}
+    nested_rootfs = core_linux.get("rootfs") if isinstance(core_linux.get("rootfs"), dict) else {}
+    nested_import = core_linux.get("rootfsImport") if isinstance(core_linux.get("rootfsImport"), dict) else {}
+    candidates = [core_linux, nested_rootfs, nested_import]
+    real = False
+    for item in candidates:
+        st = str(item.get("state") or item.get("rootfsState") or item.get("rootfsImportState") or "").lower()
+        level = str(item.get("validationLevel") or item.get("rootfsValidationLevel") or "").lower()
+        if "rootfs_real_validated" in st or level == "real":
+            real = True
+            break
+    if real:
+        root_summary = (
+            core_linux.get("rootfsSummary")
+            or nested_rootfs.get("summary")
+            or core_linux.get("rootfsImportSummary")
+            or nested_import.get("summary")
+            or core_linux.get("summary")
+            or summary
+            or "Rootfs real validado · runner real ainda bloqueado"
+        )
+        core_linux = dict(core_linux)
+        core_linux["state"] = "rootfs_real_validated"
+        core_linux["summary"] = _safe_short_text(root_summary, 180)
+        core_linux["prepared"] = True
+        core_linux["rootfsReady"] = True
+        core_linux["rootfsState"] = "rootfs_real_validated"
+        core_linux["rootfsSummary"] = _safe_short_text(root_summary, 180)
+        core_linux["rootfsValidationLevel"] = "real"
+        core_linux["termuxRequired"] = False
+        core_linux["bedrockStartAllowed"] = False
+        return core_linux, _safe_short_text(root_summary, 160), "rootfs_real_validated", True
+    return core_linux, summary, state, bool(core_linux.get("prepared"))
+
+
 def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str = "") -> dict:
     path = _core_worker_app_heartbeats_path()
     try:
@@ -977,6 +1025,11 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
     core_linux_summary = _safe_short_text(record.get("coreLinuxSummary") or core_linux.get("summary") or job_core_linux.get("coreLinuxSummary"), 160)
     core_linux_state = _safe_short_text(record.get("coreLinuxState") or core_linux.get("state") or job_core_linux.get("coreLinuxState"), 80)
     core_linux_prepared = bool(record.get("coreLinuxPrepared") or core_linux.get("prepared") or job_core_linux.get("coreLinuxPrepared"))
+    core_linux, promoted_summary, promoted_state, promoted_prepared = _core_worker_promote_rootfs_real_state(core_linux, core_linux_summary, core_linux_state)
+    if promoted_state:
+        core_linux_summary = promoted_summary or core_linux_summary
+        core_linux_state = promoted_state or core_linux_state
+        core_linux_prepared = core_linux_prepared or promoted_prepared
     if core_linux and not core_linux.get("prepared") and core_linux_prepared:
         core_linux = dict(core_linux)
         core_linux["prepared"] = True

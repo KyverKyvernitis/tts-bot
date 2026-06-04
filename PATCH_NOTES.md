@@ -1,24 +1,41 @@
-# Patch: Core Worker app UI profissional + micro animações
+# patch-core-worker-app-polish-rootfs-reporting-and-bedrock-prep-20260603
 
-Escopo: repaginação leve do APK Core Worker para reduzir poluição visual e deixar o uso normal mais profissional.
+Patch grande de polimento do Core Worker APK + reporting do rootfs real.
 
-Alterações:
-- APK bump para 0.5.61 / versionCode 76.
-- Tela Core com textos mais curtos e foco em visão geral.
-- Detalhes técnicos renomeados para Avançado.
-- Bedrock mantém a ação principal visível e recolhe recursos técnicos em "Avançado do servidor".
-- Importação/status rootfs, arquivos, logs, EULA e console ficam escondidos por padrão.
-- Console do servidor só aparece quando o usuário toca em Abrir console.
-- Botões ganharam micro animação de pressionamento.
-- Troca Core ↔ Bedrock tem fade/slide leve.
-- Expansão/recolhimento de Avançado usa animação curta.
-- Limpeza segura de updates fica escondida no fluxo normal.
+## Incluído
 
-Não alterado:
-- updater/ZIP/GitHub/rollback/redo;
-- CallKeeper;
-- Core Linux funcional;
-- importação rootfs já validada;
-- Bedrock start real;
-- TTS runtime;
-- player de música em execução.
+- APK bump para `0.5.62` / `versionCode 77`.
+- Tela Core passa a destacar o estado principal do rootfs real.
+- Tela Bedrock mostra rootfs e runner em linguagem mais limpa.
+- Avançado do servidor recebe status detalhado do rootfs real.
+- Botões novos no avançado:
+  - Validar rootfs ativo.
+  - Cancelar importação pendente.
+- Importação rootfs ganha estados intermediários persistidos:
+  - lendo/calculando SHA-256;
+  - hash pronto;
+  - validando layout;
+  - promovendo staging;
+  - concluído.
+- Status do rootfs mostra estatísticas compactas quando disponíveis.
+- `coreLinuxState`/`coreLinuxSummary` passam a promover `rootfs_real_validated` para o resumo principal.
+- `runtime-summary` da VPS também promove rootfs real validado para o top-level do Core Linux.
+- Painel workers passa a mostrar `Rootfs real validado` e `runner bloqueado` quando aplicável.
+- Importador tar aceita melhor PAX/GNU long path (`L`, `K`, `x`) sem abrir execução de binários.
+
+## Mantido bloqueado
+
+- Bedrock start real.
+- Box64 start.
+- Runner real.
+- Shell livre.
+- Comando remoto arbitrário.
+- Execução de binários importados no rootfs.
+
+## Não alterado
+
+- Updater / ZIP update / GitHub / rollback / redo.
+- CallKeeper.
+- Player de música em execução.
+- TTS runtime.
+- Core Linux funcional já validado.

@@ -161,6 +161,11 @@ public class MainActivity extends Activity {
     private Switch bedrockServerSwitch;
     private TextView bedrockHeroStatusText;
     private TextView bedrockReadinessText;
+    private TextView coreHeroHeadlineText;
+    private TextView rootfsHeroText;
+    private TextView runnerHeroText;
+    private TextView rootfsImportProgressText;
+    private TextView rootfsAdvancedStatusText;
     private TextView bedrockTerminalText;
     private EditText bedrockCommandInput;
     private Button bedrockTestAllButton;
@@ -287,6 +292,14 @@ public class MainActivity extends Activity {
     private volatile boolean coreLinuxPrepared = false;
     private volatile long coreLinuxLastCheckAt = 0L;
     private volatile String pendingRootfsImportExpectedSha256 = "";
+    private volatile boolean rootfsImportBusy = false;
+    private volatile String rootfsState = "rootfs aguardando";
+    private volatile String rootfsSummary = "Rootfs aguardando validação";
+    private volatile String rootfsValidationLevel = "";
+    private volatile boolean rootfsDistributionReady = false;
+    private volatile String rootfsLastSha256 = "";
+    private volatile long rootfsLastUpdatedAt = 0L;
+    private volatile String rootfsLastStatsSummary = "";
     private volatile String bedrockSummary = "Bedrock aguardando diagnóstico";
     private volatile String bedrockState = "não configurado";
     private volatile boolean bedrockReady = false;
@@ -757,6 +770,20 @@ public class MainActivity extends Activity {
         localAgentText.setPadding(dp(12), dp(10), dp(12), dp(10));
         prepareCard.addView(localAgentText);
 
+        coreHeroHeadlineText = largeStatusText("Pronto para trabalhar");
+        prepareCard.addView(coreHeroHeadlineText);
+
+        rootfsHeroText = smallText("Rootfs: aguardando status");
+        rootfsHeroText.setTextColor(TEXT);
+        rootfsHeroText.setBackground(cardBackground(CARD_SOFT));
+        rootfsHeroText.setPadding(dp(12), dp(10), dp(12), dp(10));
+        prepareCard.addView(rootfsHeroText);
+
+        runnerHeroText = smallText("Runner: bloqueado com segurança");
+        runnerHeroText.setTextColor(MUTED);
+        runnerHeroText.setPadding(0, dp(8), 0, dp(4));
+        prepareCard.addView(runnerHeroText);
+
         prepareButton = primaryButton("Verificar status");
         prepareButton.setOnClickListener(v -> checkLocalAgent(true));
         prepareCard.addView(prepareButton);
@@ -966,6 +993,12 @@ public class MainActivity extends Activity {
         bedrockReadinessText.setPadding(dp(12), dp(10), dp(12), dp(10));
         readinessCard.addView(bedrockReadinessText);
 
+        rootfsImportProgressText = smallText("Rootfs real: aguardando status");
+        rootfsImportProgressText.setTextColor(TEXT);
+        rootfsImportProgressText.setBackground(cardBackground(Color.rgb(18, 34, 50)));
+        rootfsImportProgressText.setPadding(dp(12), dp(10), dp(12), dp(10));
+        readinessCard.addView(rootfsImportProgressText);
+
         bedrockTestAllButton = primaryButton("Verificar servidor");
         bedrockTestAllButton.setOnClickListener(v -> testBedrockServerFromUi());
         readinessCard.addView(bedrockTestAllButton);
@@ -990,6 +1023,16 @@ public class MainActivity extends Activity {
         Button rootfsImportStatusButton = secondaryButton("Status rootfs real");
         rootfsImportStatusButton.setOnClickListener(v -> showCoreLinuxRootfsImportStatusFromUi());
         bedrockAdvancedContent.addView(rootfsImportStatusButton);
+
+        Button rootfsValidateButton = secondaryButton("Validar rootfs ativo");
+        rootfsValidateButton.setOnClickListener(v -> validateCoreLinuxRootfsFromUi());
+        bedrockAdvancedContent.addView(rootfsValidateButton);
+
+        Button rootfsAbortButton = secondaryButton("Cancelar importação pendente");
+        rootfsAbortButton.setOnClickListener(v -> abortCoreLinuxRootfsImportFromUi());
+        bedrockAdvancedContent.addView(rootfsAbortButton);
+
+        rootfsAdvancedStatusText = technicalInfoBlock(bedrockAdvancedContent, "Rootfs real");
 
         LinearLayout bedrockActionRow = new LinearLayout(this);
         bedrockActionRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -1062,7 +1105,7 @@ public class MainActivity extends Activity {
         shaInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         new AlertDialog.Builder(this)
                 .setTitle("Importar rootfs real")
-                .setMessage("Escolha um .tar, .tar.gz ou .tgz. O APK vai calcular SHA-256, extrair em staging, validar e só então promover. Bedrock, Box64 e shell livre continuam bloqueados.")
+                .setMessage("Escolha um .tar, .tar.gz ou .tgz. O APK calcula o SHA-256, extrai em staging, valida e só promove se passar. Runner, Bedrock, Box64 e shell livre continuam bloqueados.")
                 .setView(shaInput)
                 .setPositiveButton("Escolher arquivo", (dialog, which) -> {
                     pendingRootfsImportExpectedSha256 = shaInput.getText() == null ? "" : shaInput.getText().toString().trim();
@@ -1103,17 +1146,16 @@ public class MainActivity extends Activity {
     }
 
     private void importCoreLinuxRootfsFromUri(Uri uri, String expectedSha256) {
+        rootfsImportBusy = true;
+        rootfsState = "rootfs_import_starting";
+        rootfsSummary = "Importação rootfs iniciada";
         refreshLocalStatus("Importando rootfs real em staging. Não feche o app.");
-        appendBedrockTerminal("rootfs", "importação rootfs iniciada em staging; Bedrock/Box64 seguem bloqueados");
+        appendBedrockTerminal("rootfs", "importação rootfs iniciada em staging; runner/Bedrock/Box64 seguem bloqueados");
+        updateRootfsUi();
         new Thread(() -> {
             JSONObject result = CoreLinuxRootfsImportManager.importFromUri(this, coreLinuxDir(), uri, expectedSha256);
-            coreLinuxSummary = result.optString("summary", "rootfs import finalizado");
-            coreLinuxState = result.optString("state", "rootfs_import");
-            JSONObject rootfs = result.optJSONObject("rootfs");
-            coreLinuxPrepared = result.optBoolean("ok", false) || (rootfs != null && rootfs.optBoolean("rootfsReady", false));
-            coreLinuxLastCheckAt = System.currentTimeMillis();
-            internalDiagnosticsSummary = coreLinuxSummary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
+            applyCoreLinuxRootfsState(result);
+            rootfsImportBusy = false;
             mainHandler.post(() -> {
                 refreshLocalStatus(coreLinuxSummary);
                 appendBedrockTerminal("rootfs", coreLinuxSummary);
@@ -1125,13 +1167,152 @@ public class MainActivity extends Activity {
 
     private void showCoreLinuxRootfsImportStatusFromUi() {
         JSONObject status = CoreLinuxRootfsImportManager.status(this, coreLinuxDir());
-        coreLinuxSummary = status.optString("summary", coreLinuxSummary);
-        coreLinuxState = status.optString("state", coreLinuxState);
-        coreLinuxPrepared = status.optBoolean("rootfsReady", coreLinuxPrepared);
-        coreLinuxLastCheckAt = System.currentTimeMillis();
+        applyCoreLinuxRootfsState(status);
         appendBedrockTerminal("rootfs", status.optString("summary", "rootfs import aguardando"));
         refreshLocalStatus(status.optString("summary", "rootfs import aguardando"));
         refreshBedrockVisualState();
+        showRootfsStatusDialog(status);
+    }
+
+    private void validateCoreLinuxRootfsFromUi() {
+        runBusy("Validando rootfs ativo...", () -> {
+            JSONObject status = CoreLinuxRootfsImportManager.validateActive(this, coreLinuxDir());
+            applyCoreLinuxRootfsState(status);
+            mainHandler.post(() -> {
+                appendBedrockTerminal("rootfs", status.optString("summary", "rootfs validado"));
+                refreshLocalStatus(status.optString("summary", "rootfs validado"));
+                refreshBedrockVisualState();
+                sendInternalRuntimeHeartbeat(false, "rootfs_validate");
+            });
+        });
+    }
+
+    private void abortCoreLinuxRootfsImportFromUi() {
+        JSONObject status = CoreLinuxRootfsImportManager.abort(this, coreLinuxDir());
+        applyCoreLinuxRootfsState(status);
+        appendBedrockTerminal("rootfs", status.optString("summary", "importação cancelada"));
+        refreshLocalStatus(status.optString("summary", "importação cancelada"));
+        refreshBedrockVisualState();
+    }
+
+    private void showRootfsStatusDialog(JSONObject status) {
+        try {
+            JSONObject rootfs = status.optJSONObject("rootfs");
+            JSONObject stats = rootfs == null ? null : rootfs.optJSONObject("stats");
+            StringBuilder builder = new StringBuilder();
+            builder.append(status.optString("summary", rootfsSummary)).append("\n\n");
+            builder.append("Estado: ").append(firstNonEmpty(status.optString("state", ""), rootfsState)).append("\n");
+            if (rootfs != null) {
+                builder.append("Validação: ").append(rootfs.optString("validationLevel", rootfsValidationLevel)).append("\n");
+                builder.append("Distribuição: ").append(rootfs.optString("distribution", "rootfs importado")).append("\n");
+                String sha = rootfs.optString("sha256", rootfsLastSha256);
+                if (!sha.isEmpty()) builder.append("SHA-256: ").append(sha.substring(0, Math.min(12, sha.length()))).append("…\n");
+                if (stats != null) builder.append("Conteúdo: ").append(statsSummary(stats)).append("\n");
+            }
+            builder.append("\nRunner, Bedrock, Box64 e shell livre continuam bloqueados.");
+            new AlertDialog.Builder(this)
+                    .setTitle("Rootfs real")
+                    .setMessage(builder.toString())
+                    .setPositiveButton("OK", null)
+                    .show();
+        } catch (Throwable ignored) {
+        }
+    }
+
+
+    private void applyCoreLinuxRootfsState(JSONObject status) {
+        if (status == null) return;
+        JSONObject rootfs = status.optJSONObject("rootfs");
+        if (rootfs == null) rootfs = status.optJSONObject("rootfsState");
+        String statusState = status.optString("state", "");
+        String statusSummary = status.optString("summary", "");
+        String rootState = rootfs == null ? "" : rootfs.optString("state", "");
+        String rootSummary = rootfs == null ? "" : rootfs.optString("summary", "");
+        rootfsState = firstNonEmpty(rootState, statusState, rootfsState);
+        rootfsSummary = firstNonEmpty(rootSummary, statusSummary, rootfsSummary);
+        rootfsValidationLevel = rootfs == null ? rootfsValidationLevel : firstNonEmpty(rootfs.optString("validationLevel", ""), rootfs.optString("rootfsValidationLevel", ""), rootfsValidationLevel);
+        rootfsDistributionReady = (rootfs != null && rootfs.optBoolean("distributionReady", rootfsDistributionReady)) || status.optBoolean("distributionReady", false);
+        rootfsLastSha256 = rootfs == null ? firstNonEmpty(status.optString("sha256", ""), rootfsLastSha256) : firstNonEmpty(rootfs.optString("sha256", ""), status.optString("sha256", ""), rootfsLastSha256);
+        rootfsLastUpdatedAt = Math.max(rootfsLastUpdatedAt, Math.max(status.optLong("updatedAt", 0L), rootfs == null ? 0L : rootfs.optLong("updatedAt", 0L)));
+        JSONObject stats = status.optJSONObject("stats");
+        if (stats == null && rootfs != null) stats = rootfs.optJSONObject("stats");
+        rootfsLastStatsSummary = stats == null ? rootfsLastStatsSummary : statsSummary(stats);
+        boolean realValidated = isRootfsRealValidated(status) || (rootfs != null && isRootfsRealValidated(rootfs));
+        if (realValidated) {
+            coreLinuxPrepared = true;
+            coreLinuxState = "rootfs_real_validated";
+            coreLinuxSummary = firstNonEmpty(rootfsSummary, "Rootfs real validado · runner real ainda bloqueado");
+        } else {
+            coreLinuxSummary = firstNonEmpty(statusSummary, rootSummary, coreLinuxSummary);
+            coreLinuxState = firstNonEmpty(statusState, rootState, coreLinuxState);
+            coreLinuxPrepared = status.optBoolean("rootfsReady", coreLinuxPrepared) || (rootfs != null && rootfs.optBoolean("rootfsReady", false));
+        }
+        coreLinuxLastCheckAt = System.currentTimeMillis();
+        internalDiagnosticsSummary = coreLinuxSummary;
+        internalDiagnosticsLastAt = System.currentTimeMillis();
+        updateRootfsUi();
+    }
+
+    private boolean isRootfsRealValidated(JSONObject value) {
+        if (value == null) return false;
+        String state = value.optString("state", "").toLowerCase(Locale.ROOT);
+        String importState = value.optString("rootfsImportState", "").toLowerCase(Locale.ROOT);
+        String level = value.optString("validationLevel", value.optString("rootfsValidationLevel", "")).toLowerCase(Locale.ROOT);
+        return state.contains("rootfs_real_validated") || importState.contains("rootfs_real_validated") || "real".equals(level);
+    }
+
+    private String statsSummary(JSONObject stats) {
+        if (stats == null) return "";
+        long files = stats.optLong("files", -1L);
+        long dirs = stats.optLong("dirs", -1L);
+        long symlinks = stats.optLong("symlinks", -1L);
+        long bytes = stats.optLong("bytes", -1L);
+        StringBuilder builder = new StringBuilder();
+        if (files >= 0) builder.append(files).append(" arquivos");
+        if (dirs >= 0) builder.append(builder.length() == 0 ? "" : " · ").append(dirs).append(" diretórios");
+        if (symlinks > 0) builder.append(" · ").append(symlinks).append(" links");
+        if (bytes >= 0) builder.append(" · ").append(formatBytes(bytes));
+        return builder.toString();
+    }
+
+    private void refreshRootfsStateFromDisk() {
+        try {
+            JSONObject rootfsStateJson = readJsonFile(new File(new File(coreLinuxDir(), "runtime"), "rootfs-state.json"));
+            JSONObject importStateJson = readJsonFile(new File(new File(coreLinuxDir(), "runtime"), "rootfs-import-state.json"));
+            JSONObject merged = new JSONObject();
+            if (rootfsStateJson.length() > 0) safePutPayload(merged, "rootfs", rootfsStateJson);
+            if (importStateJson.length() > 0) safePutPayload(merged, "import", importStateJson);
+            String state = firstNonEmpty(rootfsStateJson.optString("state", ""), importStateJson.optString("state", ""));
+            String summary = firstNonEmpty(rootfsStateJson.optString("summary", ""), importStateJson.optString("summary", ""));
+            if (!state.isEmpty()) merged.put("state", state);
+            if (!summary.isEmpty()) merged.put("summary", summary);
+            if (rootfsStateJson.optBoolean("rootfsReady", false)) merged.put("rootfsReady", true);
+            if (rootfsStateJson.length() > 0 || importStateJson.length() > 0) applyCoreLinuxRootfsState(merged);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void updateRootfsUi() {
+        runOnUiThread(() -> {
+            String state = firstNonEmpty(rootfsState, coreLinuxState).toLowerCase(Locale.ROOT);
+            String summary = firstNonEmpty(rootfsSummary, coreLinuxSummary, "Rootfs aguardando status");
+            boolean real = state.contains("rootfs_real_validated") || "real".equalsIgnoreCase(rootfsValidationLevel);
+            boolean importing = rootfsImportBusy || state.contains("import");
+            String shortState = real ? "Rootfs real validado" : (importing ? "Importando rootfs" : "Rootfs em preparação");
+            String runner = real ? "Runner bloqueado · próximo estágio seguro" : "Runner bloqueado · aguarde rootfs real";
+            String detail = shortState + "\n" + summary;
+            if (!rootfsLastStatsSummary.isEmpty()) detail += "\n" + rootfsLastStatsSummary;
+            if (!rootfsLastSha256.isEmpty()) detail += "\nSHA-256: " + rootfsLastSha256.substring(0, Math.min(12, rootfsLastSha256.length())) + "…";
+            if (coreHeroHeadlineText != null) {
+                coreHeroHeadlineText.setText(real ? "Pronto · rootfs real validado" : (coreLinuxPrepared ? "Runtime APK pronto" : "Preparando runtime"));
+            }
+            if (rootfsHeroText != null) rootfsHeroText.setText(detail);
+            if (runnerHeroText != null) runnerHeroText.setText(runner);
+            if (rootfsImportProgressText != null) rootfsImportProgressText.setText((importing ? "⏳ " : (real ? "✅ " : "• ")) + detail);
+            if (rootfsAdvancedStatusText != null) {
+                rootfsAdvancedStatusText.setText("Rootfs real\n" + detail + "\nValidação: " + firstNonEmpty(rootfsValidationLevel, real ? "real" : "pendente") + "\nExecução: bloqueada nesta etapa");
+            }
+        });
     }
 
     private ScrollView pageScroll() {
@@ -2748,8 +2929,19 @@ public class MainActivity extends Activity {
         return out;
     }
 
+
+    private JSONObject coreLinuxPublicSnapshotSafe() {
+        try {
+            return coreLinuxPublicSnapshot();
+        } catch (Throwable ignored) {
+            return new JSONObject();
+        }
+    }
+
     private void refreshBedrockVisualState() {
+        refreshRootfsStateFromDisk();
         runOnUiThread(() -> {
+            updateRootfsUi();
             boolean running = bedrockRuntimeServiceActive || (bedrockRuntimeState != null && bedrockRuntimeState.toLowerCase(Locale.ROOT).contains("ativo"));
             boolean ready = bedrockReady || (bedrockSummary != null && bedrockSummary.toLowerCase(Locale.ROOT).contains("pronto"));
             String status;
@@ -2767,11 +2959,14 @@ public class MainActivity extends Activity {
             }
             if (bedrockReadinessText != null) {
                 StringBuilder builder = new StringBuilder();
-                builder.append(running ? "Servidor ativo. Use o terminal para comandos do console." : (ready ? "Servidor pronto. Use o switch para ligar." : "Servidor ainda precisa ser preparado."));
+                boolean rootfsReal = rootfsState != null && rootfsState.toLowerCase(Locale.ROOT).contains("rootfs_real_validated");
+                builder.append(running ? "Servidor ativo. Console disponível em Avançado." : (ready ? "Servidor pronto. Use o switch para ligar." : "Servidor ainda bloqueado para segurança."));
                 builder.append("\n");
-                builder.append("Estado: ").append(emptyFallback(bedrockSummary, "aguardando teste"));
+                builder.append("Rootfs: ").append(rootfsReal ? "real validado" : emptyFallback(rootfsSummary, "em preparação"));
                 builder.append("\n");
-                builder.append("Próxima ação: ").append(emptyFallback(bedrockInstallerNextAction, ready ? "ligar servidor" : "preparar servidor"));
+                builder.append("Runner: bloqueado nesta etapa");
+                builder.append("\n");
+                builder.append("Próxima ação: ").append(rootfsReal ? "runner preflight futuro" : emptyFallback(bedrockInstallerNextAction, "validar rootfs"));
                 bedrockReadinessText.setText(builder.toString());
             }
             if (bedrockServerSwitch != null) {
@@ -4454,7 +4649,17 @@ public class MainActivity extends Activity {
                 importState.optString("state", ""),
                 coreLinuxState
         );
-        boolean prepared = coreLinuxPrepared || rootfsState.optBoolean("rootfsReady", false);
+        boolean realValidated = state.toLowerCase(Locale.ROOT).contains("rootfs_real_validated")
+                || "real".equalsIgnoreCase(rootfsState.optString("validationLevel", ""));
+        if (realValidated) {
+            state = "rootfs_real_validated";
+            summary = firstNonEmpty(summary, "Rootfs real validado · runner real ainda bloqueado");
+            coreLinuxState = state;
+            coreLinuxSummary = summary;
+            rootfsState = rootfsState.length() > 0 ? rootfsState : importState.optJSONObject("rootfs");
+        }
+        boolean prepared = coreLinuxPrepared || realValidated || (rootfsState != null && rootfsState.optBoolean("rootfsReady", false));
+        if (rootfsState == null) rootfsState = new JSONObject();
         JSONObject out = new JSONObject();
         out.put("summary", summary == null ? "" : summary);
         out.put("state", state == null ? "" : state);
@@ -4538,15 +4743,16 @@ public class MainActivity extends Activity {
         runtime.put("native_python_last_script", nativePythonLastScript == null ? "" : nativePythonLastScript);
         runtime.put("native_python_last_error", nativePythonLastError == null ? "" : nativePythonLastError);
         runtime.put("native_python_last_run_at", nativePythonLastRunAt);
-        runtime.put("core_linux_summary", coreLinuxSummary == null ? "" : coreLinuxSummary);
-        runtime.put("core_linux_state", coreLinuxState == null ? "" : coreLinuxState);
-        runtime.put("core_linux_prepared", coreLinuxPrepared);
+        JSONObject corePublicForRuntime = coreLinuxPublicSnapshot();
+        runtime.put("core_linux_summary", corePublicForRuntime.optString("summary", coreLinuxSummary == null ? "" : coreLinuxSummary));
+        runtime.put("core_linux_state", corePublicForRuntime.optString("state", coreLinuxState == null ? "" : coreLinuxState));
+        runtime.put("core_linux_prepared", coreLinuxPrepared || corePublicForRuntime.optBoolean("prepared", false));
         runtime.put("core_linux_last_check_at", coreLinuxLastCheckAt);
         runtime.put("bedrock_summary", bedrockSummary == null ? "" : bedrockSummary);
         runtime.put("bedrock_state", bedrockState == null ? "" : bedrockState);
         runtime.put("bedrock_ready", bedrockReady);
         runtime.put("bedrock_last_check_at", bedrockLastCheckAt);
-        safePutPayload(runtime, "coreLinux", coreLinuxPublicSnapshot());
+        safePutPayload(runtime, "coreLinux", corePublicForRuntime);
         safePutPayload(runtime, "nativeRuntime", nativeRuntimePublicSnapshot());
         runtime.put("summary", "APK assume status, boot, jobs internos e Core Linux Runtime v1; Termux fica como fallback legado.");
         return runtime;

@@ -155,6 +155,7 @@ public final class CoreLinuxRootfsImportManager {
             writeJson(layout.importStateFile, start);
             appendLog(layout.importLog, "iniciando import rootfs: " + displayName);
 
+            writeImportProgress(layout, "rootfs_import_reading", "Lendo arquivo e calculando SHA-256", displayName, null);
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             TarStats stats;
             try (InputStream raw = context.getContentResolver().openInputStream(uri)) {
@@ -167,12 +168,14 @@ public final class CoreLinuxRootfsImportManager {
                 drain(digestInput);
             }
             String actualSha = hex(digest.digest());
+            writeImportProgress(layout, "rootfs_import_hash_ready", "SHA-256 calculado; validando arquivo", displayName, actualSha);
             boolean shaVerified = !expected.isEmpty() && expected.equalsIgnoreCase(actualSha);
             if (!expected.isEmpty() && !shaVerified) {
                 JSONObject details = new JSONObject().put("expectedSha256", expected).put("actualSha256", actualSha);
                 return failure(layout, "rootfs_import_sha256_mismatch", "SHA-256 diferente do esperado; rootfs ativa preservada", details);
             }
 
+            writeImportProgress(layout, "rootfs_import_validating", "Extração concluída; validando layout do rootfs", displayName, actualSha);
             postProcessImportedRootfs(layout.importStaging, displayName, actualSha, !expected.isEmpty(), shaVerified, stats, started);
             JSONObject validation = validateReal(layout.importStaging);
             if (!validation.optBoolean("ok", false)) {
@@ -183,6 +186,7 @@ public final class CoreLinuxRootfsImportManager {
                 return out;
             }
 
+            writeImportProgress(layout, "rootfs_import_promoting", "Rootfs validado; promovendo staging para ativo", displayName, actualSha);
             promote(layout);
             JSONObject manifest = readJson(new File(layout.rootfs, ".core-worker-rootfs-manifest.json"));
             JSONObject active = activeState(layout, validation, manifest);
@@ -380,6 +384,8 @@ public final class CoreLinuxRootfsImportManager {
         TarStats stats = new TarStats();
         byte[] header = new byte[512];
         String base = staging.getCanonicalPath();
+        String pendingLongName = null;
+        String pendingLongLink = null;
         while (true) {
             int read = readBlock(input, header);
             if (read == 0) break;
@@ -388,10 +394,44 @@ public final class CoreLinuxRootfsImportManager {
             String name = tarString(header, 0, 100);
             String prefix = tarString(header, 345, 155);
             if (!prefix.isEmpty()) name = prefix + "/" + name;
-            name = cleanTarPath(name);
             long size = tarOctal(header, 124, 12);
             char type = (char) header[156];
             String linkName = tarString(header, 157, 100);
+
+            if (type == 'L') {
+                pendingLongName = readEntryText(input, size, 8192);
+                stats.meta += 1;
+                continue;
+            }
+            if (type == 'K') {
+                pendingLongLink = readEntryText(input, size, 8192);
+                stats.meta += 1;
+                continue;
+            }
+            if (type == 'x') {
+                String pax = readEntryText(input, size, 64 * 1024);
+                String paxPath = parsePaxValue(pax, "path");
+                String paxLink = parsePaxValue(pax, "linkpath");
+                if (!paxPath.isEmpty()) pendingLongName = paxPath;
+                if (!paxLink.isEmpty()) pendingLongLink = paxLink;
+                stats.meta += 1;
+                continue;
+            }
+            if (type == 'g') {
+                skipEntry(input, size);
+                stats.meta += 1;
+                continue;
+            }
+
+            if (pendingLongName != null && !pendingLongName.trim().isEmpty()) {
+                name = pendingLongName.trim();
+                pendingLongName = null;
+            }
+            if (pendingLongLink != null && !pendingLongLink.trim().isEmpty()) {
+                linkName = pendingLongLink.trim();
+                pendingLongLink = null;
+            }
+            name = cleanTarPath(name);
             if (name.isEmpty()) {
                 skipEntry(input, size);
                 continue;
@@ -418,9 +458,6 @@ public final class CoreLinuxRootfsImportManager {
                 createSafeSymlink(staging, base, target, linkName);
                 skipEntry(input, size);
                 stats.symlinks += 1;
-            } else if (type == 'x' || type == 'g' || type == 'L' || type == 'K') {
-                skipEntry(input, size);
-                stats.meta += 1;
             } else if (type == '1') {
                 throw new IOException("hardlink não suportado no import v1: " + name);
             } else {
@@ -428,6 +465,34 @@ public final class CoreLinuxRootfsImportManager {
             }
         }
         return stats;
+    }
+
+    private static String readEntryText(InputStream input, long size, int limit) throws Exception {
+        int max = (int) Math.max(0L, Math.min(size, Math.max(1, limit)));
+        byte[] data = new byte[max];
+        int off = 0;
+        while (off < max) {
+            int n = input.read(data, off, max - off);
+            if (n < 0) break;
+            off += n;
+        }
+        if (size > max) skipFully(input, size - max);
+        skipPadding(input, size);
+        String text = new String(data, 0, off, StandardCharsets.UTF_8);
+        int zero = text.indexOf('\0');
+        return zero >= 0 ? text.substring(0, zero) : text.trim();
+    }
+
+    private static String parsePaxValue(String pax, String key) {
+        if (pax == null || key == null) return "";
+        String needle = key + "=";
+        for (String line : pax.split("\n")) {
+            int idx = line.indexOf(needle);
+            if (idx >= 0) {
+                return line.substring(idx + needle.length()).trim();
+            }
+        }
+        return "";
     }
 
     private static void createSafeSymlink(File staging, String base, File target, String linkName) throws Exception {
@@ -496,6 +561,24 @@ public final class CoreLinuxRootfsImportManager {
         } catch (Throwable ignored) {
         }
         return fallback == null || fallback.trim().isEmpty() ? "rootfs.tar" : fallback.trim();
+    }
+
+    private static void writeImportProgress(Layout layout, String state, String summary, String fileName, String sha256) {
+        try {
+            JSONObject out = new JSONObject();
+            out.put("ok", true);
+            out.put("component", "core_linux_rootfs_import");
+            out.put("action", "progress");
+            out.put("state", state == null ? "rootfs_import_progress" : state);
+            out.put("summary", summary == null ? "Importação rootfs em andamento" : summary);
+            out.put("fileName", clean(fileName, 240));
+            out.put("sha256", sha256 == null ? "" : clean(sha256, 80));
+            out.put("updatedAt", now());
+            out.put("safety", safetySummary());
+            writeJson(layout.importStateFile, out);
+            appendLog(layout.importLog, out.optString("summary"));
+        } catch (Throwable ignored) {
+        }
     }
 
     private static JSONObject failure(Layout layout, String state, String summary, JSONObject details) throws Exception {

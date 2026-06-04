@@ -560,7 +560,7 @@ def _core_worker_apk_runtime_record_is_online(
 
     has_runtime_v1 = "core-linux-runtime-v1" in capabilities
     has_smoke_job = "apk_core_linux_runtime_smoke_test" in supported
-    state_ready = state in {"runtime_v1_ready", "ready", "ok", "rootfs_ready", "executor_ready"}
+    state_ready = state in {"runtime_v1_ready", "ready", "ok", "rootfs_ready", "executor_ready", "rootfs_real_validated"}
     summary_ready = "runtime v1" in summary and "pronto" in summary
 
     return bool(prepared and (has_runtime_v1 or has_smoke_job or state_ready or summary_ready))
@@ -1241,9 +1241,15 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
     elif fg:
         parts.append("runtime persistente parado")
 
-    linux_state = str(record.get("coreLinuxState") or "").lower()
-    linux_summary = str(record.get("coreLinuxSummary") or "").lower()
-    if record.get("coreLinuxPrepared") or "pronto" in linux_summary or "plan" in linux_state:
+    core_linux = record.get("coreLinux") if isinstance(record.get("coreLinux"), dict) else {}
+    linux_state = str(record.get("coreLinuxState") or core_linux.get("state") or "").lower()
+    linux_summary = str(record.get("coreLinuxSummary") or core_linux.get("summary") or "").lower()
+    rootfs_state = str(core_linux.get("rootfsState") or core_linux.get("rootfsImportState") or "").lower()
+    rootfs_level = str(core_linux.get("rootfsValidationLevel") or "").lower()
+    if "rootfs_real_validated" in linux_state or "rootfs_real_validated" in rootfs_state or rootfs_level == "real":
+        parts.append("Rootfs real validado")
+        parts.append("runner bloqueado")
+    elif record.get("coreLinuxPrepared") or "pronto" in linux_summary or "plan" in linux_state:
         parts.append("Linux pronto")
     elif linux_summary:
         parts.append("Linux preparando")
