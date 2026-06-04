@@ -34,6 +34,7 @@ import android.os.PowerManager;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -170,6 +171,10 @@ public class MainActivity extends Activity {
     private Button bedrockSendCommandButton;
     private Button bedrockExpandTerminalButton;
     private Button bedrockCopyTerminalButton;
+    private LinearLayout bedrockAdvancedContent;
+    private Button bedrockAdvancedToggleButton;
+    private boolean bedrockAdvancedExpanded = false;
+    private LinearLayout bedrockTerminalCard;
     private Dialog bedrockFullTerminalDialog;
     private TextView bedrockFullTerminalText;
     private final Runnable bedrockFullTerminalRefreshRunnable = new Runnable() {
@@ -646,7 +651,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Use os ícones embaixo ou deslize para trocar de página.");
+        subtitle.setText("Painel limpo do worker local. Detalhes ficam em Avançado.");
         subtitle.setTextColor(MUTED);
         subtitle.setTextSize(14);
         subtitle.setPadding(0, dp(5), 0, dp(12));
@@ -682,6 +687,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageSelected(int position) {
                 updatePageTabs(position);
+                animateContentIn(position == 0 ? coreScroll : bedrockScroll);
             }
         });
         pageHost.addView(pagePager, new LinearLayout.LayoutParams(
@@ -742,23 +748,23 @@ public class MainActivity extends Activity {
 
         LinearLayout prepareCard = card();
         mainContent.addView(prepareCard);
-        prepareCard.addView(sectionTitle("Status"));
-        prepareCard.addView(smallText("Resumo do APK interno e do worker local."));
+        prepareCard.addView(sectionTitle("Visão geral"));
+        prepareCard.addView(smallText("Estado essencial do worker. O resto fica em Avançado."));
 
         localAgentText = smallText("Este celular ainda não foi verificado.");
         localAgentText.setTextColor(TEXT);
-        localAgentText.setBackground(cardBackground(CARD_SOFT));
+        localAgentText.setBackground(cardBackground(CARD_HIGHLIGHT));
         localAgentText.setPadding(dp(12), dp(10), dp(12), dp(10));
         prepareCard.addView(localAgentText);
 
-        prepareButton = primaryButton("Verificar agora");
+        prepareButton = primaryButton("Verificar status");
         prepareButton.setOnClickListener(v -> checkLocalAgent(true));
         prepareCard.addView(prepareButton);
 
         connectCard = cardWithTopMargin(mainContent);
         connectTitleText = sectionTitle("Conexão");
         connectCard.addView(connectTitleText);
-        connectHintText = smallText("Pareie uma vez. Depois o app lembra a VPS principal.");
+        connectHintText = smallText("Conexão salva com a VPS principal.");
         connectCard.addView(connectHintText);
 
         pairingStatusText = smallText("");
@@ -845,7 +851,7 @@ public class MainActivity extends Activity {
 
         LinearLayout updateCard = cardWithTopMargin(mainContent);
         updateCard.addView(sectionTitle("Atualizações"));
-        updateCard.addView(smallText("APK publicado, push e fallback local."));
+        updateCard.addView(smallText("Versão instalada e publicação na VPS."));
         updateText = smallText("APK " + APP_VERSION + " · ainda não verificado.");
         updateText.setTextColor(TEXT);
         updateText.setBackground(cardBackground(CARD_SOFT));
@@ -858,12 +864,13 @@ public class MainActivity extends Activity {
 
         updateCleanupButton = secondaryButton("Limpeza segura de updates");
         updateCleanupButton.setOnClickListener(v -> runManualUpdateCleanup());
+        updateCleanupButton.setVisibility(View.GONE);
         updateCard.addView(updateCleanupButton);
 
         LinearLayout technicalCard = cardWithTopMargin(mainContent);
-        technicalCard.addView(sectionTitle("Detalhes técnicos"));
-        technicalCard.addView(smallText("Status avançado do worker fica recolhido aqui. A parte de servidor está na página Bedrock."));
-        technicalToggleButton = secondaryButton("Abrir detalhes técnicos");
+        technicalCard.addView(sectionTitle("Avançado"));
+        technicalCard.addView(smallText("Diagnósticos, logs e fallback legado ficam escondidos aqui."));
+        technicalToggleButton = secondaryButton("Abrir avançado");
         technicalToggleButton.setOnClickListener(v -> toggleTechnicalDetails());
         technicalCard.addView(technicalToggleButton);
 
@@ -916,7 +923,7 @@ public class MainActivity extends Activity {
         LinearLayout bedrockHeroCard = card();
         bedrockContent.addView(bedrockHeroCard);
         bedrockHeroCard.addView(sectionTitle("Minecraft Bedrock"));
-        bedrockHeroCard.addView(smallText("Servidor em página própria. Ações técnicas ficam escondidas; o uso principal é ligar, preparar e acompanhar."));
+        bedrockHeroCard.addView(smallText("Prepare, acompanhe e ligue o servidor sem expor detalhes técnicos."));
         bedrockHeroStatusText = largeStatusText("Servidor não instalado");
         bedrockHeroCard.addView(bedrockHeroStatusText);
 
@@ -953,13 +960,13 @@ public class MainActivity extends Activity {
 
         LinearLayout readinessCard = cardWithTopMargin(bedrockContent);
         readinessCard.addView(sectionTitle("Configuração"));
-        bedrockReadinessText = smallText("Toque em Testar servidor para ver pendências e próxima ação.");
+        bedrockReadinessText = smallText("Próxima ação aparece aqui. Recursos técnicos ficam em Avançado.");
         bedrockReadinessText.setTextColor(TEXT);
         bedrockReadinessText.setBackground(cardBackground(CARD_SOFT));
         bedrockReadinessText.setPadding(dp(12), dp(10), dp(12), dp(10));
         readinessCard.addView(bedrockReadinessText);
 
-        bedrockTestAllButton = primaryButton("Testar servidor");
+        bedrockTestAllButton = primaryButton("Verificar servidor");
         bedrockTestAllButton.setOnClickListener(v -> testBedrockServerFromUi());
         readinessCard.addView(bedrockTestAllButton);
 
@@ -967,17 +974,26 @@ public class MainActivity extends Activity {
         bedrockPrepareServerButton.setOnClickListener(v -> prepareBedrockServerFromUi());
         readinessCard.addView(bedrockPrepareServerButton);
 
+        bedrockAdvancedToggleButton = secondaryButton("Abrir avançado do servidor");
+        bedrockAdvancedToggleButton.setOnClickListener(v -> toggleBedrockAdvanced());
+        readinessCard.addView(bedrockAdvancedToggleButton);
+
+        bedrockAdvancedContent = new LinearLayout(this);
+        bedrockAdvancedContent.setOrientation(LinearLayout.VERTICAL);
+        bedrockAdvancedContent.setVisibility(View.GONE);
+        readinessCard.addView(bedrockAdvancedContent);
+
         Button rootfsImportButton = secondaryButton("Importar rootfs real");
         rootfsImportButton.setOnClickListener(v -> showCoreLinuxRootfsImportDialog());
-        readinessCard.addView(rootfsImportButton);
+        bedrockAdvancedContent.addView(rootfsImportButton);
 
         Button rootfsImportStatusButton = secondaryButton("Status rootfs real");
         rootfsImportStatusButton.setOnClickListener(v -> showCoreLinuxRootfsImportStatusFromUi());
-        readinessCard.addView(rootfsImportStatusButton);
+        bedrockAdvancedContent.addView(rootfsImportStatusButton);
 
         LinearLayout bedrockActionRow = new LinearLayout(this);
         bedrockActionRow.setOrientation(LinearLayout.HORIZONTAL);
-        readinessCard.addView(bedrockActionRow);
+        bedrockAdvancedContent.addView(bedrockActionRow);
         bedrockFilesButton = compactButton("Arquivos");
         bedrockFilesButton.setOnClickListener(v -> showBedrockFilesFromUi());
         bedrockLogsButton = compactButton("Logs");
@@ -987,11 +1003,17 @@ public class MainActivity extends Activity {
         logsParams.setMargins(dp(8), 0, 0, 0);
         bedrockActionRow.addView(bedrockLogsButton, logsParams);
 
+        Button openConsoleButton = secondaryButton("Abrir console");
+        openConsoleButton.setOnClickListener(v -> toggleBedrockTerminalCard());
+        bedrockAdvancedContent.addView(openConsoleButton);
+
         bedrockEulaButton = dangerButton("Confirmar EULA Bedrock");
         bedrockEulaButton.setOnClickListener(v -> confirmBedrockEulaFromUi());
-        readinessCard.addView(bedrockEulaButton);
+        bedrockAdvancedContent.addView(bedrockEulaButton);
 
-        LinearLayout terminalCard = cardWithTopMargin(bedrockContent);
+        bedrockTerminalCard = cardWithTopMargin(bedrockContent);
+        bedrockTerminalCard.setVisibility(View.GONE);
+        LinearLayout terminalCard = bedrockTerminalCard;
         LinearLayout terminalHeader = new LinearLayout(this);
         terminalHeader.setOrientation(LinearLayout.HORIZONTAL);
         terminalHeader.setGravity(Gravity.CENTER_VERTICAL);
@@ -1186,7 +1208,21 @@ public class MainActivity extends Activity {
         );
         params.setMargins(0, 0, 0, 0);
         button.setLayoutParams(params);
+        attachButtonMicroAnimation(button);
         return button;
+    }
+
+    private void attachButtonMicroAnimation(Button button) {
+        if (button == null) return;
+        button.setOnTouchListener((view, event) -> {
+            if (!view.isEnabled()) return false;
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                view.animate().scaleX(0.985f).scaleY(0.985f).setDuration(70L).start();
+            } else if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
+                view.animate().scaleX(1f).scaleY(1f).setDuration(90L).start();
+            }
+            return false;
+        });
     }
 
     private void updatePageTabs(int position) {
@@ -1558,6 +1594,7 @@ public class MainActivity extends Activity {
         );
         params.setMargins(0, dp(7), 0, 0);
         button.setLayoutParams(params);
+        attachButtonMicroAnimation(button);
         return button;
     }
 
@@ -1613,12 +1650,54 @@ public class MainActivity extends Activity {
     private void toggleTechnicalDetails() {
         technicalExpanded = !technicalExpanded;
         if (technicalDetailsContent != null) {
-            technicalDetailsContent.setVisibility(technicalExpanded ? View.VISIBLE : View.GONE);
+            setAnimatedVisibility(technicalDetailsContent, technicalExpanded);
         }
         if (technicalToggleButton != null) {
-            technicalToggleButton.setText(technicalExpanded ? "Fechar detalhes" : "Abrir detalhes técnicos");
+            technicalToggleButton.setText(technicalExpanded ? "Fechar avançado" : "Abrir avançado");
         }
         refreshLocalStatus(null);
+    }
+
+    private void toggleBedrockAdvanced() {
+        bedrockAdvancedExpanded = !bedrockAdvancedExpanded;
+        if (bedrockAdvancedContent != null) {
+            setAnimatedVisibility(bedrockAdvancedContent, bedrockAdvancedExpanded);
+        }
+        if (bedrockAdvancedToggleButton != null) {
+            bedrockAdvancedToggleButton.setText(bedrockAdvancedExpanded ? "Fechar avançado" : "Abrir avançado do servidor");
+        }
+    }
+
+    private void toggleBedrockTerminalCard() {
+        if (bedrockTerminalCard == null) return;
+        boolean show = bedrockTerminalCard.getVisibility() != View.VISIBLE;
+        setAnimatedVisibility(bedrockTerminalCard, show);
+        if (show) {
+            refreshBedrockTerminalViews();
+        }
+    }
+
+    private void setAnimatedVisibility(View view, boolean visible) {
+        if (view == null) return;
+        if (visible) {
+            view.setAlpha(0f);
+            view.setTranslationY(dp(6));
+            view.setVisibility(View.VISIBLE);
+            view.animate().alpha(1f).translationY(0f).setDuration(180L).start();
+        } else {
+            view.animate().alpha(0f).translationY(dp(4)).setDuration(140L).withEndAction(() -> {
+                view.setVisibility(View.GONE);
+                view.setAlpha(1f);
+                view.setTranslationY(0f);
+            }).start();
+        }
+    }
+
+    private void animateContentIn(View view) {
+        if (view == null) return;
+        view.setAlpha(0.96f);
+        view.setTranslationY(dp(4));
+        view.animate().alpha(1f).translationY(0f).setDuration(160L).start();
     }
 
     private void toggleProfileDetails() {
