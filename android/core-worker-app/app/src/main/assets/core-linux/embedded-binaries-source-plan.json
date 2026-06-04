@@ -1,6 +1,6 @@
 {
-  "schema": "core-worker-embedded-binaries-source-plan-v3",
-  "generatedAt": 1780615448,
+  "schema": "core-worker-embedded-binaries-source-plan-v4",
+  "generatedAt": 1780617009,
   "abi": "arm64-v8a",
   "androidMinSdk": 26,
   "policy": {
@@ -11,7 +11,13 @@
     "jniLibsOnlyForFutureExecution": true,
     "runnerRequiredAtBuild": true,
     "metadataRequiredBeforeBundling": true,
-    "sizeAndSha256Required": true
+    "sizeAndSha256Required": true,
+    "externalTargetsRequireApprovedMetadata": true,
+    "approvedExternalLicenseStatuses": [
+      "redistributable-verified",
+      "source-built",
+      "verified-audited"
+    ]
   },
   "targets": {
     "runner": {
@@ -25,9 +31,29 @@
       "source": "android/core-worker-app/app/src/main/cpp/coreworker_runner.c",
       "origin": "local-core-worker",
       "sourceKind": "project-source",
+      "license": "private-internal",
       "licenseStatus": "internal-project",
       "minBytes": 1024,
       "requiredAtBuild": true
+    },
+    "proot": {
+      "official": "libcoreworker_proot.so",
+      "aliases": [
+        "libcoreworker_proot.so",
+        "libproot.so",
+        "proot"
+      ],
+      "origin": "manual-build-from-upstream-source",
+      "sourceKind": "external-source",
+      "upstream": "https://github.com/proot-me/proot",
+      "termuxCompatibilityReference": "https://github.com/termux/proot-distro",
+      "license": "GPL-2.0-or-later",
+      "licenseStatus": "verify-before-bundling",
+      "minBytes": 32768,
+      "buildNotes": [
+        "usar build arm64/aarch64 auditado; não baixar em runtime",
+        "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner"
+      ]
     },
     "busybox": {
       "official": "libcoreworker_busybox.so",
@@ -39,21 +65,13 @@
       "origin": "manual-build-from-upstream-source",
       "sourceKind": "external-source",
       "upstream": "https://busybox.net/downloads/",
+      "license": "GPL-2.0-only",
       "licenseStatus": "verify-before-bundling",
-      "minBytes": 32768
-    },
-    "proot": {
-      "official": "libcoreworker_proot.so",
-      "aliases": [
-        "libcoreworker_proot.so",
-        "libproot.so",
-        "proot"
-      ],
-      "origin": "manual-build-or-audited-import",
-      "sourceKind": "external-source",
-      "upstream": "https://github.com/proot-me/proot",
-      "licenseStatus": "verify-before-bundling",
-      "minBytes": 32768
+      "minBytes": 32768,
+      "buildNotes": [
+        "preferir build próprio/auditado estático para arm64",
+        "não usar binário aleatório sem versão, sha256 e licença verificados"
+      ]
     },
     "box64": {
       "official": "libcoreworker_box64.so",
@@ -65,8 +83,13 @@
       "origin": "manual-build-from-upstream-source",
       "sourceKind": "external-source",
       "upstream": "https://github.com/ptitSeb/box64",
+      "license": "MIT",
       "licenseStatus": "verify-before-bundling",
-      "minBytes": 131072
+      "minBytes": 131072,
+      "buildNotes": [
+        "Box64 é userspace Linux x86_64 emulator para hosts ARM64; validar dentro do rootfs Linux/proot",
+        "não executar em Android puro; runner real continua bloqueado até preflight completo"
+      ]
     }
   }
 }

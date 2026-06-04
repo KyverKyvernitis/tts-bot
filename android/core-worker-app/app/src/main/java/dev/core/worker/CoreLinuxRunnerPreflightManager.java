@@ -20,7 +20,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * Preflight v3 do runner Core Linux.
+ * Preflight v4 do runner Core Linux.
  *
  * Esta etapa apenas detecta requisitos e escreve estado. Ela não inicia Bedrock,
  * não executa Box64/proot/busybox, não abre shell livre e não aceita comando remoto.
@@ -70,21 +70,30 @@ public final class CoreLinuxRunnerPreflightManager {
             File writableBox64 = firstExisting(new File(base, "bin/box64"), new File(base, "box64/box64"));
             boolean writableBox64Blocked = writableBox64 != null && Build.VERSION.SDK_INT >= 29 && isInside(writableBox64, dataDir);
 
+            JSONObject sourcePlan = readAssetJson(context, "core-linux/embedded-binaries-source-plan.json");
+            JSONObject localManifest = readAssetJson(context, "core-linux/embedded-binaries-manifest.json");
+
             boolean rootfsReal = isRootfsRealValidated(rootfsState, importState, rootfsDir);
             boolean executorApkReady = apkExecutor.optBoolean("present", false) && apkExecutor.optLong("size", 0L) > 0L;
-            boolean runnerApkReady = apkRunner.optBoolean("present", false) && apkRunner.optLong("size", 0L) > 0L;
-            boolean prootApkReady = apkProot.optBoolean("present", false) && apkProot.optLong("size", 0L) > 0L;
-            boolean busyboxApkReady = apkBusybox.optBoolean("present", false) && apkBusybox.optLong("size", 0L) > 0L;
-            boolean box64ApkReady = apkBox64.optBoolean("present", false) && apkBox64.optLong("size", 0L) > 0L;
             boolean nativeExecutorReady = nativeExecutor.optBoolean("readyForRootfs", false)
                     || nativeExecutor.optBoolean("embeddedExecutorPresent", false)
                     || embeddedExecutor != null
                     || executorApkReady;
             boolean runnerLoadedByJni = runnerGuard.optBoolean("loaded", false);
-            boolean runnerAssetReady = embeddedRunner != null || runnerApkReady || runnerLoadedByJni;
-            boolean prootReady = embeddedProot != null || prootApkReady;
-            boolean busyboxReady = embeddedBusybox != null || busyboxApkReady;
-            boolean box64Ready = embeddedBox64 != null || box64ApkReady;
+            boolean executorLoadedByJni = nativeExecutor.optJSONObject("nativeBridge") != null
+                    && nativeExecutor.optJSONObject("nativeBridge").optBoolean("loaded", false);
+            JSONObject embeddedAssets = embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedBusybox, embeddedBox64,
+                    executorNames, runnerNames, prootNames, busyboxNames, box64Names,
+                    executorLoadedByJni, runnerLoadedByJni, apkExecutor, apkRunner, apkProot, apkBusybox, apkBox64,
+                    localManifest, sourcePlan);
+            JSONObject runnerInfo = embeddedAssets.optJSONObject("runner") == null ? new JSONObject() : embeddedAssets.optJSONObject("runner");
+            JSONObject prootInfo = embeddedAssets.optJSONObject("proot") == null ? new JSONObject() : embeddedAssets.optJSONObject("proot");
+            JSONObject busyboxInfo = embeddedAssets.optJSONObject("busybox") == null ? new JSONObject() : embeddedAssets.optJSONObject("busybox");
+            JSONObject box64Info = embeddedAssets.optJSONObject("box64") == null ? new JSONObject() : embeddedAssets.optJSONObject("box64");
+            boolean runnerAssetReady = runnerInfo.optBoolean("allowedForFutureExecution", false);
+            boolean prootReady = prootInfo.optBoolean("allowedForFutureExecution", false);
+            boolean busyboxReady = busyboxInfo.optBoolean("allowedForFutureExecution", false);
+            boolean box64Ready = box64Info.optBoolean("allowedForFutureExecution", false);
             boolean bedrockServerReady = bedrockServer != null && bedrockServer.exists();
             boolean propertiesReady = properties != null && properties.exists();
 
@@ -97,19 +106,22 @@ public final class CoreLinuxRunnerPreflightManager {
             addCheck(checks, missing, "rootfs_real", "Rootfs real validado", rootfsReal, "importe/valide um rootfs real antes do runner");
             addCheck(checks, missing, "native_executor", "Executor nativo do APK", nativeExecutorReady, "embutir/testar executor nativo allowlist");
             addCheck(checks, missing, "core_runner_asset", "core-runner embutido no APK", runnerAssetReady, "embutir core-runner arm64 como libcoreworker_runner.so");
-            addCheck(checks, missing, "proot_embedded", "proot embutido no APK", prootReady, "embutir proot como biblioteca/runner nativo do APK");
-            addCheck(checks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox como biblioteca/runner nativo do APK");
-            addCheck(checks, missing, "box64_embedded", "Box64 embutido no APK", box64Ready, "embutir Box64 nativo no APK; não usar binário baixado executável");
+            addCheck(checks, missing, "proot_embedded", "proot embutido no APK", prootReady, "embutir proot arm64 auditado com metadata aprovada");
+            addCheck(checks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox arm64 auditado com metadata aprovada");
+            addCheck(checks, missing, "box64_embedded", "Box64 embutido no APK", box64Ready, "embutir Box64 arm64 auditado com metadata aprovada; não usar binário baixado executável");
             addCheck(checks, missing, "bedrock_server", "bedrock_server presente", bedrockServerReady, "preparar arquivos do servidor Bedrock");
             addCheck(checks, missing, "server_properties", "server.properties presente", propertiesReady, "gerar ou revisar server.properties");
 
             if (writableBox64Blocked) {
                 warnings.put("Box64 detectado em diretório gravável do app; Android 10+ bloqueia execução segura desse caminho");
             }
+            addMetadataWarning(warnings, "proot", prootInfo);
+            addMetadataWarning(warnings, "busybox", busyboxInfo);
+            addMetadataWarning(warnings, "box64", box64Info);
             if (Build.VERSION.SDK_INT >= 29) {
                 warnings.put("execução futura deve usar componentes embutidos no APK/native libs; binários importados não são executados");
             }
-            blockers.put("runner real permanece bloqueado no preflight v3");
+            blockers.put("runner real permanece bloqueado no preflight v4");
             blockers.put("Bedrock start real permanece bloqueado");
             blockers.put("shell livre permanece bloqueado");
             blockers.put("comando remoto arbitrário permanece bloqueado");
@@ -134,8 +146,8 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("ok", true);
             out.put("component", "core_linux_runner_preflight");
             out.put("action", safeAction);
-            out.put("stage", "core-linux-runner-preflight-v3");
-            out.put("preflightVersion", 3);
+            out.put("stage", "core-linux-runner-preflight-v4");
+            out.put("preflightVersion", 4);
             out.put("state", state);
             out.put("summary", summary);
             out.put("coreLinuxDir", path(base));
@@ -169,10 +181,8 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("rootfs", compactRootfs(rootfsState, importState));
             out.put("nativeExecutor", compactNative(nativeExecutor));
             out.put("coreRunnerNativeBridge", runnerGuard);
-            out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, busyboxNames, box64Names));
-            boolean executorLoadedByJni = nativeExecutor.optJSONObject("nativeBridge") != null
-                    && nativeExecutor.optJSONObject("nativeBridge").optBoolean("loaded", false);
-            out.put("embedded", embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedBusybox, embeddedBox64, executorNames, runnerNames, prootNames, busyboxNames, box64Names, executorLoadedByJni, runnerLoadedByJni, apkExecutor, apkRunner, apkProot, apkBusybox, apkBox64));
+            out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, busyboxNames, box64Names, localManifest, sourcePlan));
+            out.put("embedded", embeddedAssets);
             out.put("writableCandidates", writableSnapshot(writableBox64, dataDir));
             out.put("bedrockFiles", bedrockFilesSnapshot(bedrockServer, properties));
             out.put("safety", "preflight apenas detecta requisitos; sem start real, sem shell livre, sem comando remoto, sem executar binários importados");
@@ -193,7 +203,7 @@ public final class CoreLinuxRunnerPreflightManager {
                 err.put("runnerBlocked", true);
                 err.put("runnerExecutionAllowed", false);
                 err.put("bedrockStartAllowed", false);
-                err.put("preflightVersion", 3);
+                err.put("preflightVersion", 4);
                 err.put("updatedAt", System.currentTimeMillis());
             } catch (Throwable ignored) {}
             return err;
@@ -252,29 +262,40 @@ public final class CoreLinuxRunnerPreflightManager {
         return out;
     }
 
-    private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] busybox, String[] box64) throws Exception {
+    private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] busybox, String[] box64,
+                                            JSONObject localManifest, JSONObject sourcePlan) throws Exception {
         return new JSONObject()
-                .put("stage", "core-linux-embedded-binaries-intake-v3")
+                .put("stage", "core-linux-embedded-binaries-intake-v4")
                 .put("abi", "arm64-v8a")
                 .put("executor", new JSONArray(executor))
                 .put("runner", new JSONArray(runner))
                 .put("proot", new JSONArray(proot))
                 .put("busybox", new JSONArray(busybox))
                 .put("box64", new JSONArray(box64))
-                .put("policy", "somente componentes embutidos no APK/native libs ou JNI carregado pelo APK podem virar executáveis futuros");
+                .put("localManifestSchema", localManifest == null ? "" : localManifest.optString("schema", ""))
+                .put("sourcePlanSchema", sourcePlan == null ? "" : sourcePlan.optString("schema", ""))
+                .put("policy", "somente componentes embutidos no APK/native libs ou JNI carregado pelo APK podem virar executáveis futuros; assets externos exigem metadata aprovada");
     }
 
     private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File executor, File runner, File proot, File busybox, File box64,
                                                String[] executorNames, String[] runnerNames, String[] prootNames, String[] busyboxNames, String[] box64Names,
                                                boolean executorLoadedByJni, boolean runnerLoadedByJni,
-                                               JSONObject apkExecutor, JSONObject apkRunner, JSONObject apkProot, JSONObject apkBusybox, JSONObject apkBox64) throws Exception {
+                                               JSONObject apkExecutor, JSONObject apkRunner, JSONObject apkProot, JSONObject apkBusybox, JSONObject apkBox64,
+                                               JSONObject localManifest, JSONObject sourcePlan) throws Exception {
         return new JSONObject()
                 .put("nativeLibraryDir", path(nativeDir))
-                .put("executor", assetInfo("executor", executor, executorNames, nativeDir, dataDir, executorLoadedByJni, "jni-loaded:coreworker_executor", apkExecutor))
-                .put("runner", assetInfo("runner", runner, runnerNames, nativeDir, dataDir, runnerLoadedByJni, "jni-loaded:coreworker_runner", apkRunner))
-                .put("proot", assetInfo("proot", proot, prootNames, nativeDir, dataDir, false, "", apkProot))
-                .put("busybox", assetInfo("busybox", busybox, busyboxNames, nativeDir, dataDir, false, "", apkBusybox))
-                .put("box64", assetInfo("box64", box64, box64Names, nativeDir, dataDir, false, "", apkBox64));
+                .put("executor", assetInfo("executor", executor, executorNames, nativeDir, dataDir, executorLoadedByJni, "jni-loaded:coreworker_executor", apkExecutor, localManifest, sourcePlan))
+                .put("runner", assetInfo("runner", runner, runnerNames, nativeDir, dataDir, runnerLoadedByJni, "jni-loaded:coreworker_runner", apkRunner, localManifest, sourcePlan))
+                .put("proot", assetInfo("proot", proot, prootNames, nativeDir, dataDir, false, "", apkProot, localManifest, sourcePlan))
+                .put("busybox", assetInfo("busybox", busybox, busyboxNames, nativeDir, dataDir, false, "", apkBusybox, localManifest, sourcePlan))
+                .put("box64", assetInfo("box64", box64, box64Names, nativeDir, dataDir, false, "", apkBox64, localManifest, sourcePlan));
+    }
+
+    private static void addMetadataWarning(JSONArray warnings, String kind, JSONObject info) throws Exception {
+        if (info == null) return;
+        if (!info.optBoolean("present", false)) return;
+        if (info.optBoolean("metadataApproved", false)) return;
+        warnings.put(kind + " detectado, mas metadata de origem/licença ainda não está aprovada; asset não será liberado para execução futura");
     }
 
     private static JSONObject writableSnapshot(File box64, File dataDir) throws Exception {
@@ -288,7 +309,8 @@ public final class CoreLinuxRunnerPreflightManager {
     }
 
     private static JSONObject assetInfo(String kind, File file, String[] expectedNames, File nativeDir, File dataDir,
-                                        boolean jniLoadedFallback, String detectedByFallback, JSONObject apkEntryInfo) throws Exception {
+                                        boolean jniLoadedFallback, String detectedByFallback, JSONObject apkEntryInfo,
+                                        JSONObject localManifest, JSONObject sourcePlan) throws Exception {
         JSONObject out = fileInfo(file, dataDir);
         boolean fileEmbedded = file != null && file.exists() && nativeDir != null && isInside(file, nativeDir);
         boolean validPhysicalFile = out.optBoolean("present", false) && out.optLong("size", 0L) > 0L;
@@ -320,12 +342,66 @@ public final class CoreLinuxRunnerPreflightManager {
         out.put("kind", kind == null ? "" : kind);
         out.put("abi", "arm64-v8a");
         out.put("expectedNames", new JSONArray(expectedNames));
+        JSONObject metadata = metadataFor(kind, localManifest, sourcePlan);
+        out.put("metadata", metadata);
         boolean placeholder = out.optBoolean("present", false) && out.optLong("size", 0L) <= 0L && !jniLoadedFallback;
         boolean embedded = fileEmbedded || apkEmbedded || jniLoadedFallback;
+        boolean metadataApproved = metadataApproved(kind, metadata);
+        boolean basicAllowed = embedded
+                && !out.optBoolean("blockedByWritableAppHome", false)
+                && !placeholder
+                && (out.optLong("size", 0L) > 0L || jniLoadedFallback);
         out.put("embeddedInApk", embedded);
-        out.put("allowedForFutureExecution", embedded && !out.optBoolean("blockedByWritableAppHome", false) && !placeholder && (out.optLong("size", 0L) > 0L || jniLoadedFallback));
+        out.put("metadataApproved", metadataApproved);
+        out.put("approvalReason", approvalReason(kind, metadata, metadataApproved));
+        out.put("allowedForFutureExecution", basicAllowed && metadataApproved);
+        if (basicAllowed && !metadataApproved) {
+            out.put("approvalBlocker", "metadata de origem/licença pendente para asset externo");
+        }
         out.put("placeholder", placeholder);
         return out;
+    }
+
+    private static JSONObject metadataFor(String kind, JSONObject localManifest, JSONObject sourcePlan) throws Exception {
+        JSONObject out = new JSONObject();
+        mergeMetadata(out, sourcePlan, kind);
+        mergeMetadata(out, localManifest, kind);
+        return out;
+    }
+
+    private static void mergeMetadata(JSONObject out, JSONObject payload, String kind) throws Exception {
+        if (out == null || payload == null || kind == null) return;
+        JSONObject targets = payload.optJSONObject("targets");
+        if (targets == null) return;
+        JSONObject target = targets.optJSONObject(kind);
+        if (target == null) return;
+        JSONObject metadata = target.optJSONObject("metadata");
+        JSONObject source = metadata == null ? target : metadata;
+        JSONArray names = source.names();
+        if (names == null) return;
+        for (int i = 0; i < names.length(); i++) {
+            String name = names.optString(i, "");
+            if (name == null || name.isEmpty() || "metadata".equals(name)) continue;
+            Object value = source.opt(name);
+            if (value != null) out.put(name, value);
+        }
+    }
+
+    private static boolean metadataApproved(String kind, JSONObject metadata) {
+        String safeKind = kind == null ? "" : kind;
+        if ("runner".equals(safeKind) || "executor".equals(safeKind)) return true;
+        if (metadata == null) return false;
+        String status = lower(metadata.optString("licenseStatus", ""));
+        return "verified-audited".equals(status)
+                || "source-built".equals(status)
+                || "redistributable-verified".equals(status);
+    }
+
+    private static String approvalReason(String kind, JSONObject metadata, boolean ok) {
+        String safeKind = kind == null ? "" : kind;
+        if ("runner".equals(safeKind) || "executor".equals(safeKind)) return "asset interno do projeto";
+        if (ok) return "metadata externa aprovada: " + (metadata == null ? "" : metadata.optString("licenseStatus", ""));
+        return "metadata externa pendente: licenseStatus precisa ser verified-audited, source-built ou redistributable-verified";
     }
 
     private static JSONObject apkNativeInfo(Context context, String[] expectedNames) {
@@ -471,6 +547,24 @@ public final class CoreLinuxRunnerPreflightManager {
         layout.rootfs.mkdirs();
         new File(layout.core, "bedrock/runtime").mkdirs();
         new File(layout.core, "bedrock/logs").mkdirs();
+    }
+
+    private static JSONObject readAssetJson(Context context, String name) {
+        try {
+            if (context == null || name == null || name.trim().isEmpty()) return new JSONObject();
+            InputStream in = context.getAssets().open(name);
+            StringBuilder builder = new StringBuilder();
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = in.read(buffer)) > 0 && builder.length() < TEXT_LIMIT) {
+                builder.append(new String(buffer, 0, read, StandardCharsets.UTF_8));
+            }
+            in.close();
+            if (builder.length() == 0) return new JSONObject();
+            return new JSONObject(builder.toString());
+        } catch (Throwable ignored) {
+            return new JSONObject();
+        }
     }
 
     private static JSONObject readJson(File file) {

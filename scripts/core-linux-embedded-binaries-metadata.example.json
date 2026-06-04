@@ -1,0 +1,44 @@
+{
+  "schema": "core-worker-embedded-binaries-metadata-v1",
+  "targets": {
+    "proot": {
+      "origin": "manual-build-from-upstream-source",
+      "sourceKind": "external-source",
+      "upstream": "https://github.com/proot-me/proot",
+      "license": "GPL-2.0-or-later",
+      "licenseStatus": "verified-audited",
+      "sourceVersion": "",
+      "sourceCommit": "",
+      "packageVersion": "",
+      "sourceSha256": "",
+      "buildRecipe": "descrever como o proot arm64 foi produzido e auditado",
+      "auditedBy": ""
+    },
+    "busybox": {
+      "origin": "manual-build-from-upstream-source",
+      "sourceKind": "external-source",
+      "upstream": "https://busybox.net/downloads/",
+      "license": "GPL-2.0-only",
+      "licenseStatus": "verified-audited",
+      "sourceVersion": "",
+      "sourceCommit": "",
+      "packageVersion": "",
+      "sourceSha256": "",
+      "buildRecipe": "descrever como o busybox arm64 foi produzido e auditado",
+      "auditedBy": ""
+    },
+    "box64": {
+      "origin": "manual-build-from-upstream-source",
+      "sourceKind": "external-source",
+      "upstream": "https://github.com/ptitSeb/box64",
+      "license": "MIT",
+      "licenseStatus": "verified-audited",
+      "sourceVersion": "",
+      "sourceCommit": "",
+      "packageVersion": "",
+      "sourceSha256": "",
+      "buildRecipe": "descrever como o box64 arm64 foi produzido e auditado",
+      "auditedBy": ""
+    }
+  }
+}

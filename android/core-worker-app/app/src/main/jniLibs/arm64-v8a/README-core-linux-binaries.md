@@ -24,6 +24,15 @@ Comandos úteis:
 python3 scripts/core-linux-embedded-binaries-build-pipeline.py plan
 # gera e embute o runner próprio, sem baixar terceiros
 python3 scripts/core-linux-embedded-binaries-build-pipeline.py build-runner --stage
-python3 scripts/core-linux-embedded-binaries-build-pipeline.py stage --input-dir /caminho/dos/binarios
-python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify
+python3 scripts/core-linux-embedded-binaries-build-pipeline.py metadata-template > /tmp/core-linux-binaries-metadata.json
+# audita sem copiar
+python3 scripts/core-linux-embedded-binaries-build-pipeline.py audit-input --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
+# só copia se os metadados externos estiverem aprovados
+python3 scripts/core-linux-embedded-binaries-build-pipeline.py stage --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
+python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --metadata-file /tmp/core-linux-binaries-metadata.json
 ```
+
+
+## Política de assets externos
+
+`proot`, `busybox` e `box64` só devem entrar no APK depois de build/import auditado com metadata de origem, licença, versão/commit/hash e receita de build. O intake rejeita stage real desses assets sem `licenseStatus` aprovado (`verified-audited`, `source-built` ou `redistributable-verified`).

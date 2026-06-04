@@ -12,7 +12,8 @@ Fluxo esperado:
   1. python3 scripts/core-linux-embedded-binaries-build-pipeline.py plan
   2. python3 scripts/core-linux-embedded-binaries-build-pipeline.py build-runner --stage
   3. compilar/importar busybox/proot/box64 fora do APK
-  4. python3 scripts/core-linux-embedded-binaries-build-pipeline.py stage --input-dir <dir>
+  4. criar metadata JSON com origem/licença/versão/hash/revisão auditados
+  5. python3 scripts/core-linux-embedded-binaries-build-pipeline.py stage --input-dir <dir> --metadata-file <json>
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = ROOT / "android/core-worker-app/app"
@@ -36,16 +38,32 @@ OUT_DIR = BUILD_DIR / "out"
 INTAKE = ROOT / "scripts/core-linux-embedded-binaries-intake.py"
 SOURCE_MANIFEST = ROOT / "scripts/core-linux-embedded-binaries-sources.json"
 
-TARGETS = {
+TARGETS: dict[str, dict[str, Any]] = {
     "runner": {
         "official": "libcoreworker_runner.so",
         "aliases": ["libcoreworker_runner.so", "coreworker_runner", "core-runner", "runner"],
         "source": str(RUNNER_SOURCE.relative_to(ROOT)),
         "origin": "local-core-worker",
         "sourceKind": "project-source",
+        "license": "private-internal",
         "licenseStatus": "internal-project",
         "minBytes": 1024,
         "requiredAtBuild": True,
+    },
+    "proot": {
+        "official": "libcoreworker_proot.so",
+        "aliases": ["libcoreworker_proot.so", "libproot.so", "proot"],
+        "origin": "manual-build-from-upstream-source",
+        "sourceKind": "external-source",
+        "upstream": "https://github.com/proot-me/proot",
+        "termuxCompatibilityReference": "https://github.com/termux/proot-distro",
+        "license": "GPL-2.0-or-later",
+        "licenseStatus": "verify-before-bundling",
+        "minBytes": 32768,
+        "buildNotes": [
+            "usar build arm64/aarch64 auditado; não baixar em runtime",
+            "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner",
+        ],
     },
     "busybox": {
         "official": "libcoreworker_busybox.so",
@@ -53,17 +71,13 @@ TARGETS = {
         "origin": "manual-build-from-upstream-source",
         "sourceKind": "external-source",
         "upstream": "https://busybox.net/downloads/",
+        "license": "GPL-2.0-only",
         "licenseStatus": "verify-before-bundling",
         "minBytes": 32768,
-    },
-    "proot": {
-        "official": "libcoreworker_proot.so",
-        "aliases": ["libcoreworker_proot.so", "libproot.so", "proot"],
-        "origin": "manual-build-or-audited-import",
-        "sourceKind": "external-source",
-        "upstream": "https://github.com/proot-me/proot",
-        "licenseStatus": "verify-before-bundling",
-        "minBytes": 32768,
+        "buildNotes": [
+            "preferir build próprio/auditado estático para arm64",
+            "não usar binário aleatório sem versão, sha256 e licença verificados",
+        ],
     },
     "box64": {
         "official": "libcoreworker_box64.so",
@@ -71,10 +85,17 @@ TARGETS = {
         "origin": "manual-build-from-upstream-source",
         "sourceKind": "external-source",
         "upstream": "https://github.com/ptitSeb/box64",
+        "license": "MIT",
         "licenseStatus": "verify-before-bundling",
         "minBytes": 131072,
+        "buildNotes": [
+            "Box64 é userspace Linux x86_64 emulator para hosts ARM64; validar dentro do rootfs Linux/proot",
+            "não executar em Android puro; runner real continua bloqueado até preflight completo",
+        ],
     },
 }
+
+APPROVED_EXTERNAL_LICENSE_STATUSES = ["redistributable-verified", "source-built", "verified-audited"]
 
 
 def rel(path: Path) -> str:
@@ -87,6 +108,18 @@ def rel(path: Path) -> str:
 def sh(cmd: list[str], *, cwd: Path | None = None) -> None:
     print("$", " ".join(cmd))
     subprocess.run(cmd, cwd=str(cwd or ROOT), check=True)
+
+
+def find_ndk_clang(ndk: Path) -> Path | None:
+    prebuilt = ndk / "toolchains/llvm/prebuilt"
+    if not prebuilt.exists():
+        return None
+    for host in sorted(prebuilt.iterdir()):
+        for api in ("26", "24", "23"):
+            candidate = host / "bin" / f"aarch64-linux-android{api}-clang"
+            if candidate.exists():
+                return candidate
+    return None
 
 
 def find_cc(explicit: str | None = None) -> str | None:
@@ -113,25 +146,9 @@ def find_cc(explicit: str | None = None) -> str | None:
     system_clang = shutil.which("aarch64-linux-android26-clang") or shutil.which("aarch64-linux-android24-clang")
     if system_clang:
         return system_clang
-    # O runner próprio não usa libc. Em ambiente de auditoria/VPS, um clang
-    # moderno com lld consegue gerar ELF AArch64 Android via --target sem NDK
-    # completo. Isso só vale para o runner local seguro; busybox/proot/box64
-    # continuam exigindo build/import auditado separado.
     generic_clang = shutil.which("clang")
     if generic_clang:
         return generic_clang
-    return None
-
-
-def find_ndk_clang(ndk: Path) -> Path | None:
-    prebuilt = ndk / "toolchains/llvm/prebuilt"
-    if not prebuilt.exists():
-        return None
-    for host in sorted(prebuilt.iterdir()):
-        for api in ("26", "24", "23"):
-            candidate = host / "bin" / f"aarch64-linux-android{api}-clang"
-            if candidate.exists():
-                return candidate
     return None
 
 
@@ -139,7 +156,7 @@ def write_source_manifest() -> Path:
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     SOURCE_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema": "core-worker-embedded-binaries-source-plan-v3",
+        "schema": "core-worker-embedded-binaries-source-plan-v4",
         "generatedAt": int(time.time()),
         "abi": "arm64-v8a",
         "androidMinSdk": 26,
@@ -152,6 +169,8 @@ def write_source_manifest() -> Path:
             "runnerRequiredAtBuild": True,
             "metadataRequiredBeforeBundling": True,
             "sizeAndSha256Required": True,
+            "externalTargetsRequireApprovedMetadata": True,
+            "approvedExternalLicenseStatuses": APPROVED_EXTERNAL_LICENSE_STATUSES,
         },
         "targets": TARGETS,
     }
@@ -161,10 +180,10 @@ def write_source_manifest() -> Path:
     return SOURCE_MANIFEST
 
 
-def status() -> dict:
-    rows = {}
+def status() -> dict[str, Any]:
+    rows: dict[str, Any] = {}
     for key, meta in TARGETS.items():
-        path = JNI_DIR / meta["official"]
+        path = JNI_DIR / str(meta["official"])
         rows[key] = {
             "official": meta["official"],
             "present": path.exists(),
@@ -174,12 +193,38 @@ def status() -> dict:
     return rows
 
 
+def metadata_template() -> dict[str, Any]:
+    return {
+        "schema": "core-worker-embedded-binaries-metadata-v1",
+        "generatedAt": int(time.time()),
+        "targets": {
+            key: {
+                "origin": meta.get("origin", ""),
+                "sourceKind": meta.get("sourceKind", ""),
+                "upstream": meta.get("upstream", ""),
+                "license": meta.get("license", ""),
+                "licenseStatus": "verified-audited" if key != "runner" else meta.get("licenseStatus", ""),
+                "sourceVersion": "",
+                "sourceCommit": "",
+                "packageVersion": "",
+                "sourceSha256": "",
+                "buildRecipe": "preencha como o binário arm64 foi produzido/auditado",
+                "auditedBy": "",
+                "notes": meta.get("notes", ""),
+            }
+            for key, meta in TARGETS.items()
+            if key != "runner"
+        },
+    }
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     manifest = write_source_manifest()
     payload = {
         "ok": True,
-        "stage": "core-linux-embedded-binaries-build-pipeline-v2",
+        "stage": "core-linux-embedded-binaries-build-pipeline-v3",
         "sourceManifest": rel(manifest),
+        "metadataTemplate": "use: python3 scripts/core-linux-embedded-binaries-build-pipeline.py metadata-template > /tmp/core-linux-binaries-metadata.json",
         "jniDir": rel(JNI_DIR),
         "runnerSource": rel(RUNNER_SOURCE),
         "targets": TARGETS,
@@ -187,16 +232,23 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "tools": {
             "cc": find_cc(args.cc),
             "python": sys.executable,
+            "platform": platform.platform(),
             "intake": rel(INTAKE),
         },
         "notes": [
             "O script não baixa binários automaticamente.",
             "BusyBox, PRoot e Box64 devem vir de build/import auditado e depois passar pelo intake.",
-            "Cada asset precisa de tamanho, SHA-256 e metadados de origem/licença antes de ser aceito.",
+            "Cada asset externo precisa de tamanho, SHA-256 e metadados aprovados de origem/licença antes de ser aceito no stage real.",
             "Bedrock não entra no APK e não é iniciado neste estágio.",
         ],
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_metadata_template(args: argparse.Namespace) -> int:
+    write_source_manifest()
+    print(json.dumps(metadata_template(), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -212,7 +264,7 @@ def cmd_build_runner(args: argparse.Namespace) -> int:
     if not RUNNER_SOURCE.exists():
         raise SystemExit(f"fonte do runner ausente: {RUNNER_SOURCE}")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = OUT_DIR / TARGETS["runner"]["official"]
+    out = OUT_DIR / str(TARGETS["runner"]["official"])
     cmd = [cc]
     if not cc_is_android_target(cc):
         cmd.append("--target=aarch64-linux-android26")
@@ -240,18 +292,15 @@ def cmd_build_runner(args: argparse.Namespace) -> int:
 def find_alias(input_dir: Path, key: str) -> Path | None:
     meta = TARGETS[key]
     for name in meta["aliases"]:
-        p = input_dir / name
+        p = input_dir / str(name)
         if p.exists() and p.is_file():
             return p
     return None
 
 
-def cmd_stage(args: argparse.Namespace) -> int:
-    input_dir = args.input_dir.resolve()
-    if not input_dir.exists() or not input_dir.is_dir():
-        raise SystemExit(f"input-dir inválido: {input_dir}")
+def build_intake_command(input_dir: Path, *, dry_run: bool, metadata_file: Path | None, allow_unverified_external: bool = False) -> list[str]:
     command = [sys.executable, str(INTAKE)]
-    found = []
+    found: list[str] = []
     for key in TARGETS:
         p = find_alias(input_dir, key)
         if p:
@@ -259,8 +308,34 @@ def cmd_stage(args: argparse.Namespace) -> int:
             found.append(key)
     if not found:
         raise SystemExit("nenhum binário conhecido encontrado no input-dir")
-    if args.dry_run:
+    if metadata_file:
+        command.extend(["--metadata-file", str(metadata_file.resolve())])
+    if allow_unverified_external:
+        command.append("--allow-unverified-external")
+    if dry_run:
         command.append("--dry-run")
+    return command
+
+
+def cmd_stage(args: argparse.Namespace) -> int:
+    write_source_manifest()
+    input_dir = args.input_dir.resolve()
+    if not input_dir.exists() or not input_dir.is_dir():
+        raise SystemExit(f"input-dir inválido: {input_dir}")
+    command = build_intake_command(
+        input_dir,
+        dry_run=args.dry_run,
+        metadata_file=args.metadata_file,
+        allow_unverified_external=args.allow_unverified_external,
+    )
+    sh(command)
+    return 0
+
+
+def cmd_audit_input(args: argparse.Namespace) -> int:
+    write_source_manifest()
+    input_dir = args.input_dir.resolve()
+    command = build_intake_command(input_dir, dry_run=True, metadata_file=args.metadata_file)
     sh(command)
     return 0
 
@@ -268,9 +343,11 @@ def cmd_stage(args: argparse.Namespace) -> int:
 def cmd_verify(args: argparse.Namespace) -> int:
     write_source_manifest()
     command = [sys.executable, str(INTAKE), "--dry-run"]
+    if args.metadata_file:
+        command.extend(["--metadata-file", str(args.metadata_file.resolve())])
     any_present = False
     for key, meta in TARGETS.items():
-        p = JNI_DIR / meta["official"]
+        p = JNI_DIR / str(meta["official"])
         if p.exists():
             command.extend([f"--{key}", str(p)])
             any_present = True
@@ -289,16 +366,27 @@ def main(argv: list[str]) -> int:
     p_plan = sub.add_parser("plan", help="mostra plano e fontes sem baixar nada")
     p_plan.set_defaults(func=cmd_plan)
 
+    p_template = sub.add_parser("metadata-template", help="gera template de metadados auditáveis para assets externos")
+    p_template.set_defaults(func=cmd_metadata_template)
+
     p_runner = sub.add_parser("build-runner", help="compila o core-runner próprio seguro")
     p_runner.add_argument("--stage", action="store_true", help="copiar para jniLibs via intake após compilar")
     p_runner.set_defaults(func=cmd_build_runner)
 
     p_stage = sub.add_parser("stage", help="importa binários já compilados de um diretório")
     p_stage.add_argument("--input-dir", type=Path, required=True)
+    p_stage.add_argument("--metadata-file", type=Path, help="JSON com origem/licença/versão/hash auditados")
     p_stage.add_argument("--dry-run", action="store_true")
+    p_stage.add_argument("--allow-unverified-external", action="store_true", help="laboratório apenas; não usar em APK final")
     p_stage.set_defaults(func=cmd_stage)
 
+    p_audit = sub.add_parser("audit-input", help="valida input-dir em dry-run com metadados")
+    p_audit.add_argument("--input-dir", type=Path, required=True)
+    p_audit.add_argument("--metadata-file", type=Path, help="JSON com origem/licença/versão/hash auditados")
+    p_audit.set_defaults(func=cmd_audit_input)
+
     p_verify = sub.add_parser("verify", help="valida os binários presentes em jniLibs")
+    p_verify.add_argument("--metadata-file", type=Path, help="JSON com origem/licença/versão/hash auditados")
     p_verify.add_argument("--strict", action="store_true", help="falha se nenhum binário estiver presente")
     p_verify.set_defaults(func=cmd_verify)
 

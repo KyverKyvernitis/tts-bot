@@ -4626,9 +4626,14 @@ public class MainActivity extends Activity {
                 .put("core-linux-runner-preflight-v1")
                 .put("core-linux-runner-preflight-v2")
                 .put("core-linux-runner-preflight-v3")
+                .put("core-linux-runner-preflight-v4")
                 .put("core-linux-embedded-binaries-intake-v1")
                 .put("core-linux-embedded-binaries-intake-v2")
+                .put("core-linux-embedded-binaries-intake-v3")
+                .put("core-linux-embedded-binaries-intake-v4")
                 .put("core-linux-embedded-binaries-build-pipeline-v1")
+                .put("core-linux-embedded-binaries-build-pipeline-v2")
+                .put("core-linux-embedded-binaries-build-pipeline-v3")
                 .put("core-linux-runtime-v1")
                 .put("minecraft-bedrock-manager-safe-plan");
     }
