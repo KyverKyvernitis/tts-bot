@@ -48,10 +48,12 @@ public final class CoreLinuxRunnerPreflightManager {
             File bedrockServer = firstExisting(new File(bedrockDir, "bedrock_server"), new File(bedrockAltDir, "bedrock_server"));
             File properties = firstExisting(new File(bedrockDir, "server.properties"), new File(bedrockAltDir, "server.properties"));
 
-            String[] runnerNames = new String[]{"libcoreworker_runner.so", "libcoreworker_executor.so"};
+            String[] executorNames = new String[]{"libcoreworker_executor.so"};
+            String[] runnerNames = new String[]{"libcoreworker_runner.so"};
             String[] prootNames = new String[]{"libcoreworker_proot.so", "libproot.so"};
             String[] busyboxNames = new String[]{"libcoreworker_busybox.so", "libbusybox.so"};
             String[] box64Names = new String[]{"libcoreworker_box64.so", "libbox64.so"};
+            File embeddedExecutor = firstExisting(nativeDir, executorNames);
             File embeddedRunner = firstExisting(nativeDir, runnerNames);
             File embeddedProot = firstExisting(nativeDir, prootNames);
             File embeddedBusybox = firstExisting(nativeDir, busyboxNames);
@@ -62,9 +64,10 @@ public final class CoreLinuxRunnerPreflightManager {
             boolean rootfsReal = isRootfsRealValidated(rootfsState, importState, rootfsDir);
             boolean nativeExecutorReady = nativeExecutor.optBoolean("readyForRootfs", false)
                     || nativeExecutor.optBoolean("embeddedExecutorPresent", false)
-                    || embeddedRunner != null;
+                    || embeddedExecutor != null;
             boolean runnerLoadedByJni = nativeExecutor.optJSONObject("nativeBridge") != null
                     && nativeExecutor.optJSONObject("nativeBridge").optBoolean("loaded", false);
+            boolean runnerAssetReady = embeddedRunner != null;
             boolean prootReady = embeddedProot != null;
             boolean busyboxReady = embeddedBusybox != null;
             boolean box64Ready = embeddedBox64 != null;
@@ -79,6 +82,7 @@ public final class CoreLinuxRunnerPreflightManager {
 
             addCheck(checks, missing, "rootfs_real", "Rootfs real validado", rootfsReal, "importe/valide um rootfs real antes do runner");
             addCheck(checks, missing, "native_executor", "Executor nativo do APK", nativeExecutorReady, "embutir/testar executor nativo allowlist");
+            addCheck(checks, missing, "core_runner_asset", "core-runner embutido no APK", runnerAssetReady, "embutir core-runner arm64 como libcoreworker_runner.so");
             addCheck(checks, missing, "proot_embedded", "proot embutido no APK", prootReady, "embutir proot como biblioteca/runner nativo do APK");
             addCheck(checks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox como biblioteca/runner nativo do APK");
             addCheck(checks, missing, "box64_embedded", "Box64 embutido no APK", box64Ready, "embutir Box64 nativo no APK; não usar binário baixado executável");
@@ -104,7 +108,7 @@ public final class CoreLinuxRunnerPreflightManager {
                 nextActions.put("aguardar patch do runner nativo controlado; execução real ainda não liberada");
             }
 
-            boolean requirementsReady = rootfsReal && nativeExecutorReady && prootReady && busyboxReady && box64Ready
+            boolean requirementsReady = rootfsReal && nativeExecutorReady && runnerAssetReady && prootReady && busyboxReady && box64Ready
                     && bedrockServerReady && propertiesReady && !writableBox64Blocked;
             boolean runnerReady = false;
             String state = requirementsReady ? "runner_preflight_ready_but_blocked" : "runner_preflight_blocked";
@@ -136,6 +140,7 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("bedrockStartAllowed", false);
             out.put("rootfsRealValidated", rootfsReal);
             out.put("nativeExecutorReady", nativeExecutorReady);
+            out.put("coreRunnerEmbedded", runnerAssetReady);
             out.put("prootEmbedded", prootReady);
             out.put("busyboxEmbedded", busyboxReady);
             out.put("box64Embedded", box64Ready);
@@ -149,8 +154,8 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("nextActions", nextActions);
             out.put("rootfs", compactRootfs(rootfsState, importState));
             out.put("nativeExecutor", compactNative(nativeExecutor));
-            out.put("assetManifest", assetManifest(runnerNames, prootNames, busyboxNames, box64Names));
-            out.put("embedded", embeddedSnapshot(nativeDir, dataDir, embeddedRunner, embeddedProot, embeddedBusybox, embeddedBox64, runnerNames, prootNames, busyboxNames, box64Names, runnerLoadedByJni));
+            out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, busyboxNames, box64Names));
+            out.put("embedded", embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedBusybox, embeddedBox64, executorNames, runnerNames, prootNames, busyboxNames, box64Names, runnerLoadedByJni));
             out.put("writableCandidates", writableSnapshot(writableBox64, dataDir));
             out.put("bedrockFiles", bedrockFilesSnapshot(bedrockServer, properties));
             out.put("safety", "preflight apenas detecta requisitos; sem start real, sem shell livre, sem comando remoto, sem executar binários importados");
@@ -229,9 +234,11 @@ public final class CoreLinuxRunnerPreflightManager {
         return out;
     }
 
-    private static JSONObject assetManifest(String[] runner, String[] proot, String[] busybox, String[] box64) throws Exception {
+    private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] busybox, String[] box64) throws Exception {
         return new JSONObject()
+                .put("stage", "core-linux-embedded-binaries-intake-v1")
                 .put("abi", "arm64-v8a")
+                .put("executor", new JSONArray(executor))
                 .put("runner", new JSONArray(runner))
                 .put("proot", new JSONArray(proot))
                 .put("busybox", new JSONArray(busybox))
@@ -239,12 +246,13 @@ public final class CoreLinuxRunnerPreflightManager {
                 .put("policy", "somente componentes embutidos no APK/native libs podem virar executáveis futuros");
     }
 
-    private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File runner, File proot, File busybox, File box64,
-                                               String[] runnerNames, String[] prootNames, String[] busyboxNames, String[] box64Names,
-                                               boolean runnerLoadedByJni) throws Exception {
+    private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File executor, File runner, File proot, File busybox, File box64,
+                                               String[] executorNames, String[] runnerNames, String[] prootNames, String[] busyboxNames, String[] box64Names,
+                                               boolean executorLoadedByJni) throws Exception {
         return new JSONObject()
                 .put("nativeLibraryDir", path(nativeDir))
-                .put("runner", assetInfo("runner", runner, runnerNames, nativeDir, dataDir, runnerLoadedByJni, "jni-loaded:coreworker_executor"))
+                .put("executor", assetInfo("executor", executor, executorNames, nativeDir, dataDir, executorLoadedByJni, "jni-loaded:coreworker_executor"))
+                .put("runner", assetInfo("runner", runner, runnerNames, nativeDir, dataDir, false, ""))
                 .put("proot", assetInfo("proot", proot, prootNames, nativeDir, dataDir, false, ""))
                 .put("busybox", assetInfo("busybox", busybox, busyboxNames, nativeDir, dataDir, false, ""))
                 .put("box64", assetInfo("box64", box64, box64Names, nativeDir, dataDir, false, ""));

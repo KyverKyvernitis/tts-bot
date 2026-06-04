@@ -1,37 +1,40 @@
-# Patch: core-linux embedded runner assets v1 + preflight cleanup
+# Patch: core-linux-embedded-binaries-intake-v1
 
-## Resumo
+Base: `repo-20260604-185848.zip`
 
-- APK 0.5.65 / versionCode 80.
-- Junta cleanup do runner preflight v2 com scaffold/detector de assets embutidos.
-- Mantém tudo em modo seguro: sem iniciar Bedrock, Box64, runner real ou shell livre.
+## Inclui
 
-## Incluído
+- APK `0.5.66` / `versionCode 81`.
+- Capacidade nova: `core-linux-embedded-binaries-intake-v1`.
+- Pipeline local de intake para binários reais arm64-v8a, sem download e sem execução.
+- Gradle task `verifyCoreLinuxEmbeddedBinaries`:
+  - valida arquivos reais quando existirem;
+  - rejeita placeholder/arquivo pequeno;
+  - valida ELF64 AArch64 mínimo;
+  - não exige presença por padrão;
+  - pode exigir todos com `CORE_WORKER_REQUIRE_EMBEDDED_BINARIES=true`.
+- Script `scripts/core-linux-embedded-binaries-intake.py` para copiar binários reais fornecidos manualmente para nomes oficiais.
+- Manifesto `assets/core-linux/embedded-binaries-manifest.json`.
+- Preflight separa:
+  - executor JNI do APK;
+  - core-runner asset real;
+  - proot;
+  - busybox;
+  - box64.
 
-- Corrige texto legado `preflight v1` para `preflight v2` nos bloqueios atuais.
-- Sanitiza resultados antigos de runner para não expor EULA em status/painel/histórico regravado.
-- Remove EULA de bloqueios visíveis do preflight/Bedrock service; confirmação fica interna para etapa futura de start real.
-- Adiciona scaffold de manifest dos assets nativos esperados:
-  - `libcoreworker_runner.so` / `libcoreworker_executor.so`
-  - `libcoreworker_proot.so` / `libproot.so`
-  - `libcoreworker_busybox.so` / `libbusybox.so`
-  - `libcoreworker_box64.so` / `libbox64.so`
-- Detector agora considera o executor JNI carregado como runner embutido quando o Android não expõe arquivo em `nativeLibraryDir`.
-- Mantém componentes ausentes como pendência real; não cria `.so` placeholder.
-
-## Mantido bloqueado
+## Continua bloqueado
 
 - Bedrock start real.
 - Box64 start.
 - Runner real.
 - Shell livre.
 - Comando remoto arbitrário.
-- Execução de binários baixados/importados.
+- Download automático de binários no APK.
 
-## Fora do escopo
+## Não tocado
 
 - UI/layout.
-- Updater.
+- updater.
 - CallKeeper.
-- Música/player.
+- música/player.
 - TTS runtime.

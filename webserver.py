@@ -288,6 +288,7 @@ CORE_WORKER_APK_V1_CAPABILITIES = [
     "core-linux-rootfs-import-v1",
     "core-linux-runner-preflight-v1",
     "core-linux-runner-preflight-v2",
+    "core-linux-embedded-binaries-intake-v1",
     "core-linux-runtime-v1",
     "minecraft-bedrock-manager-safe-plan",
 ]

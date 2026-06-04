@@ -4625,6 +4625,7 @@ public class MainActivity extends Activity {
                 .put("core-linux-rootfs-import-v1")
                 .put("core-linux-runner-preflight-v1")
                 .put("core-linux-runner-preflight-v2")
+                .put("core-linux-embedded-binaries-intake-v1")
                 .put("core-linux-runtime-v1")
                 .put("minecraft-bedrock-manager-safe-plan");
     }
