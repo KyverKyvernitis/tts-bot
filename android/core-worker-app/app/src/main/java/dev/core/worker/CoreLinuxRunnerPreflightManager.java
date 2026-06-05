@@ -20,7 +20,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * Preflight v5 do runner Core Linux.
+ * Preflight v6 do runner Core Linux.
  *
  * Esta etapa apenas detecta requisitos e escreve estado. Ela não inicia Bedrock,
  * não executa Box64/proot/busybox, não abre shell livre e não aceita comando remoto.
@@ -106,22 +106,34 @@ public final class CoreLinuxRunnerPreflightManager {
             boolean baseToolsReady = prootReady && busyboxReady && prootDependencyReady;
 
             JSONArray checks = new JSONArray();
+            JSONArray baseChecks = new JSONArray();
+            JSONArray futureChecks = new JSONArray();
             JSONArray missing = new JSONArray();
+            JSONArray futureMissing = new JSONArray();
             JSONArray blockers = new JSONArray();
             JSONArray warnings = new JSONArray();
             JSONArray nextActions = new JSONArray();
 
-            addCheck(checks, missing, "rootfs_real", "Rootfs real validado", rootfsReal, "importe/valide um rootfs real antes do runner");
-            addCheck(checks, missing, "native_executor", "Executor nativo do APK", nativeExecutorReady, "embutir/testar executor nativo allowlist");
-            addCheck(checks, missing, "core_runner_asset", "core-runner embutido no APK", runnerAssetReady, "embutir core-runner arm64 como libcoreworker_runner.so");
-            addCheck(checks, missing, "proot_embedded", "proot embutido no APK", prootReady, "embutir proot arm64 auditado com metadata aprovada");
-            addCheck(checks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox arm64 auditado com metadata aprovada");
+            // Fase atual para substituir o Termux: rootfs + runner + PRoot + BusyBox.
+            // Box64/Bedrock continuam aparecendo no diagnóstico, mas não contam como
+            // pendência do runner base. Isso evita o painel parecer travado em Bedrock
+            // quando o objetivo imediato ainda é só entrar no rootfs sem Termux.
+            addCheck(baseChecks, missing, "rootfs_real", "Rootfs real validado", rootfsReal, "importe/valide um rootfs real antes do runner");
+            addCheck(baseChecks, missing, "native_executor", "Executor nativo do APK", nativeExecutorReady, "embutir/testar executor nativo allowlist");
+            addCheck(baseChecks, missing, "core_runner_asset", "core-runner embutido no APK", runnerAssetReady, "embutir core-runner arm64 como libcoreworker_runner.so");
+            addCheck(baseChecks, missing, "proot_embedded", "proot embutido no APK", prootReady, "embutir proot arm64 auditado com metadata aprovada");
+            addCheck(baseChecks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox arm64 auditado com metadata aprovada");
             if (prootNeedsLibtalloc) {
-                addCheck(checks, missing, "libtalloc_embedded", "libtalloc embutido no APK", libtallocReady, "embutir libtalloc arm64 auditado junto com proot dinâmico");
+                addCheck(baseChecks, missing, "libtalloc_embedded", "libtalloc embutido no APK", libtallocReady, "embutir libtalloc arm64 auditado junto com proot dinâmico");
             }
-            addCheck(checks, missing, "box64_embedded", "Box64 embutido no APK", box64Ready, "embutir Box64 arm64 auditado com metadata aprovada; não usar binário baixado executável");
-            addCheck(checks, missing, "bedrock_server", "bedrock_server presente", bedrockServerReady, "preparar arquivos do servidor Bedrock");
-            addCheck(checks, missing, "server_properties", "server.properties presente", propertiesReady, "gerar ou revisar server.properties");
+
+            // Fase futura: necessária para Bedrock, mas não para o primeiro smoke test
+            // real do Core Linux. Mantemos separada para o próximo patch não pular etapa.
+            addCheck(futureChecks, futureMissing, "box64_embedded", "Box64 embutido no APK", box64Ready, "embutir Box64 arm64 auditado com metadata aprovada; não usar binário baixado executável");
+            addCheck(futureChecks, futureMissing, "bedrock_server", "bedrock_server presente", bedrockServerReady, "preparar arquivos do servidor Bedrock");
+            addCheck(futureChecks, futureMissing, "server_properties", "server.properties presente", propertiesReady, "gerar ou revisar server.properties");
+            copyChecks(checks, baseChecks);
+            copyChecks(checks, futureChecks);
 
             if (writableBox64Blocked) {
                 warnings.put("Box64 detectado em diretório gravável do app; Android 10+ bloqueia execução segura desse caminho");
@@ -136,7 +148,7 @@ public final class CoreLinuxRunnerPreflightManager {
             if (Build.VERSION.SDK_INT >= 29) {
                 warnings.put("execução futura deve usar componentes embutidos no APK/native libs; binários importados não são executados");
             }
-            blockers.put("runner real permanece bloqueado no preflight v5");
+            blockers.put("runner real permanece bloqueado no preflight v6");
             blockers.put("Bedrock start real permanece bloqueado");
             blockers.put("shell livre permanece bloqueado");
             blockers.put("comando remoto arbitrário permanece bloqueado");
@@ -146,25 +158,35 @@ public final class CoreLinuxRunnerPreflightManager {
                 if (!item.isEmpty()) nextActions.put(item);
             }
             if (nextActions.length() == 0) {
-                nextActions.put("aguardar patch do runner nativo controlado; execução real ainda não liberada");
+                nextActions.put("executar smoke test real allowlist: APK → runner → proot → rootfs");
+                if (futureMissing.length() > 0) {
+                    nextActions.put("depois do smoke test, preparar Box64/Bedrock em etapa separada");
+                }
             }
 
-            boolean requirementsReady = rootfsReal && nativeExecutorReady && runnerAssetReady && prootReady && busyboxReady && prootDependencyReady && box64Ready
-                    && bedrockServerReady && propertiesReady && !writableBox64Blocked;
+            boolean runnerBaseRequirementsReady = rootfsReal && nativeExecutorReady && runnerAssetReady && baseToolsReady && !writableBox64Blocked;
+            boolean bedrockRequirementsReady = runnerBaseRequirementsReady && box64Ready && bedrockServerReady && propertiesReady;
+            boolean requirementsReady = runnerBaseRequirementsReady;
             boolean runnerReady = false;
-            String state = requirementsReady ? "runner_preflight_ready_but_blocked" : "runner_preflight_blocked";
-            String summary = requirementsReady
-                    ? "Runner preflight pronto · execução real ainda bloqueada"
-                    : "Runner preflight concluído · " + missing.length() + " pendência(s)";
+            String phase = runnerBaseRequirementsReady ? "rootfs_smoke_next" : "base_tools";
+            String state = runnerBaseRequirementsReady ? "runner_base_tools_ready_but_blocked" : "runner_preflight_blocked";
+            String summary = runnerBaseRequirementsReady
+                    ? "Core Linux base pronto · smoke test real é o próximo passo"
+                    : "Runner preflight concluído · " + missing.length() + " pendência(s) base";
+            String phaseSummary = runnerBaseRequirementsReady
+                    ? "Rootfs + executor + runner + PRoot + BusyBox prontos; execução real segue bloqueada até smoke test allowlist"
+                    : "Preparando base para substituir Termux: falta validar/importar ferramentas base";
 
             JSONObject out = new JSONObject();
             out.put("ok", true);
             out.put("component", "core_linux_runner_preflight");
             out.put("action", safeAction);
-            out.put("stage", "core-linux-runner-preflight-v5");
-            out.put("preflightVersion", 5);
+            out.put("stage", "core-linux-runner-preflight-v6");
+            out.put("preflightVersion", 6);
             out.put("state", state);
             out.put("summary", summary);
+            out.put("phase", phase);
+            out.put("phaseSummary", phaseSummary);
             out.put("coreLinuxDir", path(base));
             out.put("nativeLibraryDir", path(nativeDir));
             out.put("androidSdk", Build.VERSION.SDK_INT);
@@ -178,6 +200,9 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("runnerBlocked", true);
             out.put("runnerExecutionAllowed", false);
             out.put("runnerRequirementsReady", requirementsReady);
+            out.put("runnerBaseRequirementsReady", runnerBaseRequirementsReady);
+            out.put("bedrockRequirementsReady", bedrockRequirementsReady);
+            out.put("termuxReductionReady", runnerBaseRequirementsReady);
             out.put("bedrockStartAllowed", false);
             out.put("rootfsRealValidated", rootfsReal);
             out.put("nativeExecutorReady", nativeExecutorReady);
@@ -193,7 +218,12 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("bedrockServerPresent", bedrockServerReady);
             out.put("serverPropertiesPresent", propertiesReady);
             out.put("checks", checks);
+            out.put("baseChecks", baseChecks);
+            out.put("futureChecks", futureChecks);
             out.put("missing", missing);
+            out.put("baseToolsMissing", missing);
+            out.put("currentMissing", missing);
+            out.put("futureMissing", futureMissing);
             out.put("blockers", blockers);
             out.put("warnings", warnings);
             out.put("nextActions", nextActions);
@@ -222,7 +252,7 @@ public final class CoreLinuxRunnerPreflightManager {
                 err.put("runnerBlocked", true);
                 err.put("runnerExecutionAllowed", false);
                 err.put("bedrockStartAllowed", false);
-                err.put("preflightVersion", 5);
+                err.put("preflightVersion", 6);
                 err.put("updatedAt", System.currentTimeMillis());
             } catch (Throwable ignored) {}
             return err;
@@ -240,6 +270,14 @@ public final class CoreLinuxRunnerPreflightManager {
                 .put("ok", ok)
                 .put("nextAction", ok ? "" : nextAction));
         if (!ok) missing.put(label);
+    }
+
+    private static void copyChecks(JSONArray dest, JSONArray source) throws Exception {
+        if (dest == null || source == null) return;
+        for (int i = 0; i < source.length(); i++) {
+            Object item = source.opt(i);
+            if (item != null) dest.put(item);
+        }
     }
 
     private static boolean isRootfsRealValidated(JSONObject rootfsState, JSONObject importState, File rootfsDir) {
@@ -284,7 +322,7 @@ public final class CoreLinuxRunnerPreflightManager {
     private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] busybox, String[] libtalloc, String[] box64,
                                             JSONObject localManifest, JSONObject sourcePlan) throws Exception {
         return new JSONObject()
-                .put("stage", "core-linux-embedded-binaries-intake-v5")
+                .put("stage", "core-linux-embedded-binaries-intake-v6")
                 .put("abi", "arm64-v8a")
                 .put("executor", new JSONArray(executor))
                 .put("runner", new JSONArray(runner))

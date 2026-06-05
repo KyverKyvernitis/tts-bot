@@ -1206,7 +1206,8 @@ def _core_worker_app_runtime_detail_text(worker_id: str) -> str:
     diag = _shorten(record.get("diagnosticsSummary") or "diagnóstico aguardando", limit=90)
     storage = _shorten(record.get("storageSummary") or "armazenamento aguardando", limit=80)
     bridge = _shorten(record.get("bridgeSummary") or "ponte aguardando", limit=80)
-    linux = _shorten(record.get("coreLinuxSummary") or "Linux runtime aguardando", limit=80)
+    core_linux = record.get("coreLinux") if isinstance(record.get("coreLinux"), dict) else {}
+    linux = _shorten(core_linux.get("runnerPhaseSummary") or record.get("coreLinuxSummary") or "Linux runtime aguardando", limit=90)
     bedrock = _shorten(record.get("bedrockSummary") or "Bedrock aguardando", limit=80)
     perm = _shorten(record.get("notificationPermission") or "notificação ?", limit=32)
     jobs = _core_worker_app_jobs_text(worker_id)
@@ -1259,7 +1260,14 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
     rootfs_level = str(core_linux.get("rootfsValidationLevel") or "").lower()
     if "rootfs_real_validated" in linux_state or "rootfs_real_validated" in rootfs_state or rootfs_level == "real":
         parts.append("Rootfs real validado")
-        parts.append("runner bloqueado")
+        if core_linux.get("termuxReductionReady") or core_linux.get("runnerBaseRequirementsReady"):
+            parts.append("base sem Termux pronta")
+            parts.append("smoke test pendente")
+        elif core_linux.get("baseToolsReady"):
+            parts.append("base tools pronta")
+            parts.append("runner bloqueado")
+        else:
+            parts.append("runner bloqueado")
     elif record.get("coreLinuxPrepared") or "pronto" in linux_summary or "plan" in linux_state:
         parts.append("Linux pronto")
     elif linux_summary:

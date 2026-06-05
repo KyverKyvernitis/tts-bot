@@ -1,29 +1,40 @@
-# Patch: event-loop-anti-lag-updater-priority
+# Patch: core-linux-base-tools-phase
 
-Base: `repo-20260605-004304.zip`
+Base: `repo-20260605-005354.zip`
 
 ## Corrige / melhora
 
-- Reduz travadas causadas por logging síncrono:
-  - logs do bot agora entram em fila (`QueueHandler`) e são gravados por uma thread de logging;
-  - formatação pesada de traceback/exception fica fora do event loop;
-  - mantém arquivo `logs/bot.log` e saída no journal, sem mudar formato público.
-- Diminui spam de traceback do `discord.gateway` quando heartbeat trava:
-  - primeiro alerta continua aparecendo;
-  - alertas repetidos de heartbeat/`Loop thread traceback` entram em cooldown configurável;
-  - evita que o próprio diagnóstico gere mais I/O durante lag.
-- Watchdog do event loop ficou mais útil e menos agressivo:
-  - cooldown configurável dos avisos;
-  - guarda os últimos atrasos em `/health`;
-  - em travas severas registra um resumo leve das tasks pendentes, sem dump gigante de stack.
-- Updater passa a rodar em baixa prioridade:
-  - aplica `renice` e `ionice` no processo do updater;
-  - filhos como `git fetch`, validações Python e scripts auxiliares herdam prioridade menor;
-  - reduz disputa com heartbeat/voz do Discord na VPS pequena.
+- Separa o preflight do Core Linux em duas fases reais:
+  - **fase atual:** rootfs real + executor + runner + PRoot + BusyBox;
+  - **fase futura:** Box64 + Bedrock + `server.properties`.
+- O painel/runtime não vai mais tratar Box64/Bedrock como pendência da fase base para substituir o Termux.
+- Quando PRoot + BusyBox estiverem auditados e embutidos, o estado passa a indicar claramente:
+  - `runnerBaseRequirementsReady=true`;
+  - `termuxReductionReady=true`;
+  - próximo passo: smoke test real allowlist (`APK → runner → proot → rootfs`).
+- Mantém o bloqueio de segurança:
+  - sem shell livre;
+  - sem comando remoto arbitrário;
+  - sem iniciar Bedrock;
+  - sem executar Box64/proot/busybox durante o preflight.
+- O `runtime-summary` e o painel `_worker` passam a expor melhor:
+  - `baseToolsReady`;
+  - `runnerBaseRequirementsReady`;
+  - `termuxReductionReady`;
+  - `bedrockRequirementsReady`;
+  - `currentMissing` e `futureMissing` separados.
+- Atualiza o APK para `0.5.75` (`versionCode 90`) para forçar build/publicação do próximo APK.
+
+## Próximo passo depois deste patch
+
+- Importar PRoot + BusyBox auditados com:
+  - `scripts/core-linux-embedded-binaries-build-pipeline.py audit-base-tools ...`
+  - depois `stage-base-tools ...`
+- Só depois liberar o smoke test real allowlist do rootfs.
 
 ## Não muda
 
 - Não toca CallKeeper.
-- Não muda assinatura/publicação de APK.
 - Não builda APK na VPS.
-- Não remove nem refatora módulos grandes neste patch.
+- Não adiciona binários externos falsos/placeholders.
+- Não inicia Bedrock e não libera runner real ainda.

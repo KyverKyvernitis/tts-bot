@@ -190,12 +190,18 @@ def _core_worker_scrub_eula_from_public(value):
             out[key] = scrubbed
         state_text = str(out.get("state") or out.get("stage") or out.get("component") or "").lower()
         if "runner_preflight" in state_text or str(out.get("component") or "") == "core_linux_runner_preflight":
-            missing = out.get("missing") if isinstance(out.get("missing"), list) else None
+            missing = out.get("currentMissing") if isinstance(out.get("currentMissing"), list) else out.get("missing") if isinstance(out.get("missing"), list) else None
+            future = out.get("futureMissing") if isinstance(out.get("futureMissing"), list) else []
             if missing is not None:
                 count = len(missing)
                 summary = str(out.get("summary") or "")
-                if "Runner preflight conclu" in summary:
-                    out["summary"] = f"Runner preflight concluído · {count} pendência(s)"
+                # Mantém compatibilidade com preflight antigo, mas sem voltar a
+                # contar Box64/Bedrock como pendência da fase base.
+                if "Runner preflight conclu" in summary and "base" not in summary.lower():
+                    out["summary"] = f"Runner preflight concluído · {count} pendência(s) base"
+                    changed = True
+                if future and "futureMissing" not in out:
+                    out["futureMissing"] = future
                     changed = True
         return out, changed
     if isinstance(value, list):
@@ -227,9 +233,10 @@ def _core_worker_app_sanitize_legacy_runner_record(record: dict) -> tuple[dict, 
     # Corrige mensagem visível de preflight antigo após remover EULA.
     result = scrubbed.get("result") if isinstance(scrubbed.get("result"), dict) else {}
     runner = result.get("coreLinuxRunner") if isinstance(result.get("coreLinuxRunner"), dict) else {}
-    missing = runner.get("missing") if isinstance(runner.get("missing"), list) else None
+    missing = runner.get("currentMissing") if isinstance(runner.get("currentMissing"), list) else runner.get("missing") if isinstance(runner.get("missing"), list) else None
     if typ == "apk_core_linux_runner_preflight" and missing is not None:
-        msg = f"Runner preflight concluído · {len(missing)} pendência(s)"
+        ready = bool(runner.get("runnerBaseRequirementsReady") or runner.get("termuxReductionReady"))
+        msg = "Core Linux base pronto · smoke test real é o próximo passo" if ready else f"Runner preflight concluído · {len(missing)} pendência(s) base"
         if scrubbed.get("message") != msg:
             scrubbed["message"] = msg
             changed = True
@@ -1277,8 +1284,20 @@ def _core_worker_app_latest_core_linux_state(worker_id: str = "", install_id: st
         core_linux["runnerBlocked"] = bool(runner.get("runnerBlocked", True))
         core_linux["runnerExecutionAllowed"] = bool(runner.get("runnerExecutionAllowed"))
         core_linux["runnerRequirementsReady"] = bool(runner.get("runnerRequirementsReady"))
-        if isinstance(runner.get("missing"), list):
-            core_linux["runnerMissing"] = [_safe_short_text(x, 120) for x in runner.get("missing", [])[:16]]
+        core_linux["runnerBaseRequirementsReady"] = bool(runner.get("runnerBaseRequirementsReady") or runner.get("termuxReductionReady"))
+        core_linux["baseToolsReady"] = bool(runner.get("baseToolsReady"))
+        core_linux["termuxReductionReady"] = bool(runner.get("termuxReductionReady"))
+        core_linux["bedrockRequirementsReady"] = bool(runner.get("bedrockRequirementsReady"))
+        if runner.get("phase"):
+            core_linux["runnerPhase"] = _safe_short_text(runner.get("phase"), 80)
+        if runner.get("phaseSummary"):
+            core_linux["runnerPhaseSummary"] = _safe_short_text(runner.get("phaseSummary"), 180)
+        current_missing = runner.get("currentMissing") if isinstance(runner.get("currentMissing"), list) else runner.get("missing") if isinstance(runner.get("missing"), list) else []
+        future_missing = runner.get("futureMissing") if isinstance(runner.get("futureMissing"), list) else []
+        if current_missing:
+            core_linux["runnerMissing"] = [_safe_short_text(x, 120) for x in current_missing[:16]]
+        if future_missing:
+            core_linux["runnerFutureMissing"] = [_safe_short_text(x, 120) for x in future_missing[:16]]
         compact_runner = dict(runner)
         if isinstance(compact_runner.get("embedded"), dict):
             # Mantém um resumo estável dos assets no runtime-summary.

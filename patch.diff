@@ -1,331 +1,348 @@
---- a/bot.py	2026-06-05 03:48:03.409304181 +0000
-+++ b/bot.py	2026-06-05 03:48:26.283107824 +0000
-@@ -1,11 +1,14 @@
- import asyncio
-+import atexit
- import base64
-+from collections import deque
- import contextlib
- import hashlib
- import json
- import logging
- import logging.handlers
- import os
-+import queue
- import re
- import shutil
- import stat
-@@ -33,8 +36,10 @@
- class _LowValueNoiseFilter(logging.Filter):
-     """Remove ruído conhecido sem esconder erro real do bot.
+diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/PATCH_NOTES.md patch_repo/PATCH_NOTES.md
+--- orig_repo/PATCH_NOTES.md	2026-06-05 00:50:34.000000000 +0000
++++ patch_repo/PATCH_NOTES.md	2026-06-05 04:00:34.568654665 +0000
+@@ -1,29 +1,40 @@
+-# Patch: event-loop-anti-lag-updater-priority
++# Patch: core-linux-base-tools-phase
  
--    - voice WebSocket 1006 do discord.py costuma ser reconexão rotineira;
--    - cancelamentos esperados do player não devem virar traceback do asyncio.
-+    O bot roda em VPS pequena. Logs de heartbeat do discord.py podem trazer stack
-+    inteira e repetir várias vezes durante a mesma travada; isso aumenta I/O no
-+    journald justamente quando o event loop já está atrasado. Mantemos o primeiro
-+    aviso e aplicamos cooldown nos repetidos.
-     """
+-Base: `repo-20260605-004304.zip`
++Base: `repo-20260605-005354.zip`
  
-     _VOICE_LOGGERS = ("discord.voice", "discord.gateway", "discord.player")
-@@ -43,12 +48,33 @@
-         "MusicPlaybackError: Playback cancelado.",
-     )
+ ## Corrige / melhora
  
-+    def __init__(self) -> None:
-+        super().__init__()
-+        self._last_by_key: dict[str, float] = {}
-+        self._lock = threading.Lock()
+-- Reduz travadas causadas por logging síncrono:
+-  - logs do bot agora entram em fila (`QueueHandler`) e são gravados por uma thread de logging;
+-  - formatação pesada de traceback/exception fica fora do event loop;
+-  - mantém arquivo `logs/bot.log` e saída no journal, sem mudar formato público.
+-- Diminui spam de traceback do `discord.gateway` quando heartbeat trava:
+-  - primeiro alerta continua aparecendo;
+-  - alertas repetidos de heartbeat/`Loop thread traceback` entram em cooldown configurável;
+-  - evita que o próprio diagnóstico gere mais I/O durante lag.
+-- Watchdog do event loop ficou mais útil e menos agressivo:
+-  - cooldown configurável dos avisos;
+-  - guarda os últimos atrasos em `/health`;
+-  - em travas severas registra um resumo leve das tasks pendentes, sem dump gigante de stack.
+-- Updater passa a rodar em baixa prioridade:
+-  - aplica `renice` e `ionice` no processo do updater;
+-  - filhos como `git fetch`, validações Python e scripts auxiliares herdam prioridade menor;
+-  - reduz disputa com heartbeat/voz do Discord na VPS pequena.
++- Separa o preflight do Core Linux em duas fases reais:
++  - **fase atual:** rootfs real + executor + runner + PRoot + BusyBox;
++  - **fase futura:** Box64 + Bedrock + `server.properties`.
++- O painel/runtime não vai mais tratar Box64/Bedrock como pendência da fase base para substituir o Termux.
++- Quando PRoot + BusyBox estiverem auditados e embutidos, o estado passa a indicar claramente:
++  - `runnerBaseRequirementsReady=true`;
++  - `termuxReductionReady=true`;
++  - próximo passo: smoke test real allowlist (`APK → runner → proot → rootfs`).
++- Mantém o bloqueio de segurança:
++  - sem shell livre;
++  - sem comando remoto arbitrário;
++  - sem iniciar Bedrock;
++  - sem executar Box64/proot/busybox durante o preflight.
++- O `runtime-summary` e o painel `_worker` passam a expor melhor:
++  - `baseToolsReady`;
++  - `runnerBaseRequirementsReady`;
++  - `termuxReductionReady`;
++  - `bedrockRequirementsReady`;
++  - `currentMissing` e `futureMissing` separados.
++- Atualiza o APK para `0.5.75` (`versionCode 90`) para forçar build/publicação do próximo APK.
 +
-+    def _allow_every(self, key: str, seconds: float) -> bool:
-+        now = time.monotonic()
-+        with self._lock:
-+            last = self._last_by_key.get(key, 0.0)
-+            if now - last < seconds:
-+                return False
-+            self._last_by_key[key] = now
-+            return True
++## Próximo passo depois deste patch
 +
-     def filter(self, record: logging.LogRecord) -> bool:
-         try:
-             logger_name = str(record.name or "")
-             message = record.getMessage()
-             lowered = message.lower()
- 
-+            if logger_name.startswith("discord.gateway") and (
-+                "heartbeat blocked" in lowered or "loop thread traceback" in lowered
-+            ):
-+                cooldown = max(15.0, float(os.getenv("DISCORD_GATEWAY_HEARTBEAT_LOG_COOLDOWN_SECONDS", "60") or 60))
-+                if not self._allow_every("discord.gateway.heartbeat_blocked", cooldown):
-+                    return False
-+
-             if logger_name.startswith(self._VOICE_LOGGERS):
-                 exc_text = ""
-                 if record.exc_info:
-@@ -68,23 +94,50 @@
-         return True
- 
- 
--logging.basicConfig(
--    level=logging.INFO,
--    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
--    datefmt="%H:%M:%S",
--    handlers=[
--        logging.StreamHandler(),
--        logging.handlers.RotatingFileHandler(
--            _LOG_DIR / "bot.log",
--            maxBytes=2_000_000,
--            backupCount=3,
--            encoding="utf-8",
--        ),
--    ],
--)
--_noise_filter = _LowValueNoiseFilter()
--for _handler in logging.getLogger().handlers:
--    _handler.addFilter(_noise_filter)
-+class _FastQueueHandler(logging.handlers.QueueHandler):
-+    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
-+        # QueueHandler padrão formata exc_info/stack antes de enfileirar. Como o
-+        # listener roda no mesmo processo, podemos atrasar essa formatação para a
-+        # thread de logging e manter o event loop leve.
-+        return record
-+
-+
-+def _configure_async_logging() -> logging.handlers.QueueListener:
-+    formatter = logging.Formatter(
-+        "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-+        datefmt="%H:%M:%S",
-+    )
-+    stream_handler = logging.StreamHandler()
-+    stream_handler.setFormatter(formatter)
-+    file_handler = logging.handlers.RotatingFileHandler(
-+        _LOG_DIR / "bot.log",
-+        maxBytes=2_000_000,
-+        backupCount=3,
-+        encoding="utf-8",
-+    )
-+    file_handler.setFormatter(formatter)
-+
-+    log_queue: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
-+    queue_handler = _FastQueueHandler(log_queue)
-+    queue_handler.addFilter(_LowValueNoiseFilter())
-+
-+    root = logging.getLogger()
-+    root.handlers.clear()
-+    root.setLevel(logging.INFO)
-+    root.addHandler(queue_handler)
-+
-+    listener = logging.handlers.QueueListener(
-+        log_queue,
-+        stream_handler,
-+        file_handler,
-+        respect_handler_level=True,
-+    )
-+    listener.start()
-+    atexit.register(listener.stop)
-+    return listener
-+
-+
-+_LOG_LISTENER = _configure_async_logging()
- logging.getLogger("discord.gateway").setLevel(logging.WARNING)
- logging.getLogger("discord.voice_client").setLevel(logging.WARNING)
- logging.getLogger("discord.player").setLevel(logging.WARNING)
-@@ -213,6 +266,9 @@
-         self._event_loop_max_lag_ms: float = 0.0
-         self._event_loop_lag_warnings: int = 0
-         self._event_loop_last_warning_at: float = 0.0
-+        self._event_loop_last_diagnostic_at: float = 0.0
-+        self._event_loop_last_task_summary: str = ""
-+        self._event_loop_recent_lags_ms: deque[float] = deque(maxlen=12)
-         self._zip_update_lock = asyncio.Lock()
-         self._phone_worker_unavailable_until_by_task: dict[str, float] = {}
-         self._phone_worker_unavailable_last_log_by_task: dict[str, float] = {}
-@@ -766,6 +822,8 @@
-         snapshot["event_loop_last_lag_ms"] = round(float(getattr(self, "_event_loop_last_lag_ms", 0.0) or 0.0), 1)
-         snapshot["event_loop_max_lag_ms"] = round(float(getattr(self, "_event_loop_max_lag_ms", 0.0) or 0.0), 1)
-         snapshot["event_loop_lag_warnings"] = int(getattr(self, "_event_loop_lag_warnings", 0) or 0)
-+        snapshot["event_loop_recent_lags_ms"] = [round(float(v), 1) for v in list(getattr(self, "_event_loop_recent_lags_ms", []) or [])[-12:]]
-+        snapshot["event_loop_last_task_summary"] = str(getattr(self, "_event_loop_last_task_summary", "") or "")[:500]
- 
-         tts_cog = self.get_cog("TTSVoice")
-         if tts_cog is not None and hasattr(tts_cog, "get_tts_metrics_snapshot"):
-@@ -805,9 +863,32 @@
-             })
-             await asyncio.sleep(15)
- 
-+    def _event_loop_task_summary(self, *, limit: int = 8) -> str:
-+        try:
-+            current = asyncio.current_task()
-+            counts: dict[str, int] = {}
-+            for task in asyncio.all_tasks():
-+                if task is current or task.done():
-+                    continue
-+                coro = task.get_coro()
-+                qualname = getattr(coro, "__qualname__", "") or getattr(coro, "__name__", "")
-+                label = str(qualname or type(coro).__name__).replace("<", "").replace(">", "")
-+                if "await" in label and hasattr(coro, "cr_code"):
-+                    label = getattr(coro.cr_code, "co_name", label)
-+                counts[label[:90]] = counts.get(label[:90], 0) + 1
-+            if not counts:
-+                return "sem tasks pendentes do bot"
-+            rows = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[: max(1, limit)]
-+            return ", ".join(f"{name}={count}" for name, count in rows)[:500]
-+        except Exception as exc:
-+            return f"indisponível: {type(exc).__name__}"
-+
-     async def _event_loop_watchdog_loop(self):
-         interval = max(0.5, float(getattr(config, "BOT_EVENT_LOOP_WATCHDOG_INTERVAL_SECONDS", 1.0) or 1.0))
-         warn_after = max(0.25, float(getattr(config, "BOT_EVENT_LOOP_LAG_WARNING_SECONDS", 1.5) or 1.5))
-+        warning_cooldown = max(10.0, float(getattr(config, "BOT_EVENT_LOOP_LAG_WARNING_COOLDOWN_SECONDS", 30.0) or 30.0))
-+        severe_after = max(warn_after * 2.0, float(getattr(config, "BOT_EVENT_LOOP_LAG_SEVERE_SECONDS", 8.0) or 8.0))
-+        diagnostic_cooldown = max(warning_cooldown, float(getattr(config, "BOT_EVENT_LOOP_LAG_DIAGNOSTIC_COOLDOWN_SECONDS", 90.0) or 90.0))
-         loop = asyncio.get_running_loop()
-         expected = loop.time() + interval
-         while not self.is_closed():
-@@ -821,15 +902,30 @@
-                 self._event_loop_max_lag_ms = lag_ms
-             if lag >= warn_after:
-                 self._event_loop_lag_warnings += 1
-+                self._event_loop_recent_lags_ms.append(round(lag_ms, 1))
-                 # Evita logar a cada segundo durante uma trava longa; o contador no
-                 # health snapshot continua registrando todos os atrasos detectados.
-+                now_mono = time.monotonic()
-                 last = float(getattr(self, "_event_loop_last_warning_at", 0.0) or 0.0)
--                if time.monotonic() - last >= 10.0:
--                    self._event_loop_last_warning_at = time.monotonic()
--                    ASYNCIO_LOG.warning(
--                        "event loop atrasado %.0f ms; possível I/O síncrono ou CPU em callback async",
--                        lag_ms,
--                    )
-+                if now_mono - last >= warning_cooldown:
-+                    self._event_loop_last_warning_at = now_mono
-+                    task_summary = ""
-+                    last_diag = float(getattr(self, "_event_loop_last_diagnostic_at", 0.0) or 0.0)
-+                    if lag >= severe_after and now_mono - last_diag >= diagnostic_cooldown:
-+                        self._event_loop_last_diagnostic_at = now_mono
-+                        task_summary = self._event_loop_task_summary()
-+                        self._event_loop_last_task_summary = task_summary
-+                    if task_summary:
-+                        ASYNCIO_LOG.warning(
-+                            "event loop atrasado %.0f ms; diagnóstico leve: %s",
-+                            lag_ms,
-+                            task_summary,
-+                        )
-+                    else:
-+                        ASYNCIO_LOG.warning(
-+                            "event loop atrasado %.0f ms; possível I/O síncrono ou CPU em callback async",
-+                            lag_ms,
-+                        )
- 
-     def _make_zip_update_view(
-         self,
-
---- a/config.py	2026-06-05 03:48:03.563917037 +0000
-+++ b/config.py	2026-06-05 03:47:35.707450376 +0000
-@@ -74,6 +74,15 @@
- GUILD_IDS = _parse_guild_ids(os.getenv("GUILD_IDS", ""))
- 
- # -----------------------------------------------------------------------------
-+# Event loop / logging — defaults seguros para VPS pequena
-+# -----------------------------------------------------------------------------
-+BOT_EVENT_LOOP_WATCHDOG_INTERVAL_SECONDS = _parse_float(os.getenv("BOT_EVENT_LOOP_WATCHDOG_INTERVAL_SECONDS", "1.0"), 1.0)
-+BOT_EVENT_LOOP_LAG_WARNING_SECONDS = _parse_float(os.getenv("BOT_EVENT_LOOP_LAG_WARNING_SECONDS", "1.5"), 1.5)
-+BOT_EVENT_LOOP_LAG_WARNING_COOLDOWN_SECONDS = _parse_float(os.getenv("BOT_EVENT_LOOP_LAG_WARNING_COOLDOWN_SECONDS", "30.0"), 30.0)
-+BOT_EVENT_LOOP_LAG_SEVERE_SECONDS = _parse_float(os.getenv("BOT_EVENT_LOOP_LAG_SEVERE_SECONDS", "8.0"), 8.0)
-+BOT_EVENT_LOOP_LAG_DIAGNOSTIC_COOLDOWN_SECONDS = _parse_float(os.getenv("BOT_EVENT_LOOP_LAG_DIAGNOSTIC_COOLDOWN_SECONDS", "90.0"), 90.0)
-+
-+# -----------------------------------------------------------------------------
- # CallKeeper — bots auxiliares que mantêm uma call ocupada em 1 servidor
- # -----------------------------------------------------------------------------
- CALLKEEPER_GUILD_ID = _parse_int(os.getenv("CALLKEEPER_GUILD_ID", "0"), 0)
-
---- a/scripts/tts-bot-update.sh	2026-06-05 03:48:03.643405844 +0000
-+++ b/scripts/tts-bot-update.sh	2026-06-05 03:47:35.709936220 +0000
-@@ -42,6 +42,17 @@
- fi
- UPDATER_RUNTIME_COPY="${TTS_BOT_UPDATER_RUNTIME_COPY:-}"
- 
-+# Mantém o updater em baixa prioridade para não competir com heartbeat/voz do bot
-+# na VPS pequena. Filhos como git, python de validação e scripts auxiliares herdam
-+# essa prioridade sem mudar a lógica do update.
-+UPDATER_NICE_LEVEL="${TTS_BOT_UPDATER_NICE_LEVEL:-10}"
-+UPDATER_IONICE_CLASS="${TTS_BOT_UPDATER_IONICE_CLASS:-2}"
-+UPDATER_IONICE_LEVEL="${TTS_BOT_UPDATER_IONICE_LEVEL:-7}"
-+renice -n "$UPDATER_NICE_LEVEL" -p "$$" >/dev/null 2>&1 || true
-+if command -v ionice >/dev/null 2>&1; then
-+  ionice -c "$UPDATER_IONICE_CLASS" -n "$UPDATER_IONICE_LEVEL" -p "$$" >/dev/null 2>&1 || true
-+fi
-+
- mkdir -p "$(dirname "$UPDATER_LOCK_FILE")" 2>/dev/null || true
- exec 9>"$UPDATER_LOCK_FILE"
- if ! flock -n 9; then
-
---- a/PATCH_NOTES.md	2026-06-05 03:48:03.276748965 +0000
-+++ b/PATCH_NOTES.md	2026-06-05 03:48:54.338461632 +0000
-@@ -1,29 +1,29 @@
--# Patch: updater-worker-apk-publish-hardening-v2
-+# Patch: event-loop-anti-lag-updater-priority
- 
--Base: `repo-20260604-231706.zip`
-+Base: `repo-20260605-004304.zip`
- 
--## Corrige
-+## Corrige / melhora
- 
--- Updater não cai mais com código `141` durante a verificação de alterações locais:
--  - `trim_alert_text` agora lê o pipe corretamente usando `python -c`;
--  - `collect_local_tracked_changes` não depende mais de pipeline frágil com `git status`;
--  - `collect_local_tracked_files` não usa `head` em pipeline com `pipefail`.
--- `core-linux-embedded-binaries-build-pipeline.py verify` fica read-only:
--  - o comando de diagnóstico não regrava `embedded-binaries-source-plan.json`;
--  - evita sujar arquivos rastreados e bloquear o próximo update.
--- Painel `_worker` fica mais resistente:
--  - status de notificação/push não derruba a renderização do painel se algum resumo auxiliar falhar.
--- Publicação do APK fica mais confiável:
--  - Core Worker APK sobe para `0.5.74` / `versionCode 89`;
--  - phone worker sobe para `1.10.31`;
--  - `apk_build_debug` valida se o APK foi persistido em `artifacts/` logo após o Gradle;
--  - falha de upload/publicação não perde o build: deixa artifact salvo e `publish_pending` para republicar;
--  - `apk_publish_last` tenta republicar com erro controlado, sem estourar o job por timeout/rede;
--  - recuperação de APK órfão agora procura mais workdirs antigos;
--  - automação da VPS detecta build APK `running` antigo e enfileira `apk_publish_last` antes de rebuildar.
-+- Reduz travadas causadas por logging síncrono:
-+  - logs do bot agora entram em fila (`QueueHandler`) e são gravados por uma thread de logging;
-+  - formatação pesada de traceback/exception fica fora do event loop;
-+  - mantém arquivo `logs/bot.log` e saída no journal, sem mudar formato público.
-+- Diminui spam de traceback do `discord.gateway` quando heartbeat trava:
-+  - primeiro alerta continua aparecendo;
-+  - alertas repetidos de heartbeat/`Loop thread traceback` entram em cooldown configurável;
-+  - evita que o próprio diagnóstico gere mais I/O durante lag.
-+- Watchdog do event loop ficou mais útil e menos agressivo:
-+  - cooldown configurável dos avisos;
-+  - guarda os últimos atrasos em `/health`;
-+  - em travas severas registra um resumo leve das tasks pendentes, sem dump gigante de stack.
-+- Updater passa a rodar em baixa prioridade:
-+  - aplica `renice` e `ionice` no processo do updater;
-+  - filhos como `git fetch`, validações Python e scripts auxiliares herdam prioridade menor;
-+  - reduz disputa com heartbeat/voz do Discord na VPS pequena.
++- Importar PRoot + BusyBox auditados com:
++  - `scripts/core-linux-embedded-binaries-build-pipeline.py audit-base-tools ...`
++  - depois `stage-base-tools ...`
++- Só depois liberar o smoke test real allowlist do rootfs.
  
  ## Não muda
  
--- Não builda APK na VPS.
  - Não toca CallKeeper.
--- Não libera Bedrock real, shell livre ou execução arbitrária.
-+- Não muda assinatura/publicação de APK.
-+- Não builda APK na VPS.
-+- Não remove nem refatora módulos grandes neste patch.
-
---- a/changed_files.txt	2026-06-05 03:48:03.412975036 +0000
-+++ b/changed_files.txt	2026-06-05 03:48:54.357098230 +0000
-@@ -1,9 +1,6 @@
--android/core-worker-app/app/build.gradle
--deploy/termux/phone-worker/phone_worker.py
--scripts/core-linux-embedded-binaries-build-pipeline.py
--scripts/core-worker-automation.py
-+bot.py
-+config.py
- scripts/tts-bot-update.sh
--utility/commands/workers.py
+-- Não muda assinatura/publicação de APK.
+ - Não builda APK na VPS.
+-- Não remove nem refatora módulos grandes neste patch.
++- Não adiciona binários externos falsos/placeholders.
++- Não inicia Bedrock e não libera runner real ainda.
+diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/android/core-worker-app/app/build.gradle patch_repo/android/core-worker-app/app/build.gradle
+--- orig_repo/android/core-worker-app/app/build.gradle	2026-06-04 23:31:48.000000000 +0000
++++ patch_repo/android/core-worker-app/app/build.gradle	2026-06-05 03:59:22.122622319 +0000
+@@ -58,8 +58,8 @@
+         applicationId "dev.core.worker"
+         minSdk 26
+         targetSdk 34
+-        versionCode 89
+-        versionName "0.5.74"
++        versionCode 90
++        versionName "0.5.75"
+ 
+         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
+         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
+diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java patch_repo/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
+--- orig_repo/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-04 22:16:06.000000000 +0000
++++ patch_repo/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 03:58:19.286213699 +0000
+@@ -20,7 +20,7 @@
+ import java.util.zip.ZipFile;
+ 
+ /**
+- * Preflight v5 do runner Core Linux.
++ * Preflight v6 do runner Core Linux.
+  *
+  * Esta etapa apenas detecta requisitos e escreve estado. Ela não inicia Bedrock,
+  * não executa Box64/proot/busybox, não abre shell livre e não aceita comando remoto.
+@@ -106,22 +106,34 @@
+             boolean baseToolsReady = prootReady && busyboxReady && prootDependencyReady;
+ 
+             JSONArray checks = new JSONArray();
++            JSONArray baseChecks = new JSONArray();
++            JSONArray futureChecks = new JSONArray();
+             JSONArray missing = new JSONArray();
++            JSONArray futureMissing = new JSONArray();
+             JSONArray blockers = new JSONArray();
+             JSONArray warnings = new JSONArray();
+             JSONArray nextActions = new JSONArray();
+ 
+-            addCheck(checks, missing, "rootfs_real", "Rootfs real validado", rootfsReal, "importe/valide um rootfs real antes do runner");
+-            addCheck(checks, missing, "native_executor", "Executor nativo do APK", nativeExecutorReady, "embutir/testar executor nativo allowlist");
+-            addCheck(checks, missing, "core_runner_asset", "core-runner embutido no APK", runnerAssetReady, "embutir core-runner arm64 como libcoreworker_runner.so");
+-            addCheck(checks, missing, "proot_embedded", "proot embutido no APK", prootReady, "embutir proot arm64 auditado com metadata aprovada");
+-            addCheck(checks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox arm64 auditado com metadata aprovada");
++            // Fase atual para substituir o Termux: rootfs + runner + PRoot + BusyBox.
++            // Box64/Bedrock continuam aparecendo no diagnóstico, mas não contam como
++            // pendência do runner base. Isso evita o painel parecer travado em Bedrock
++            // quando o objetivo imediato ainda é só entrar no rootfs sem Termux.
++            addCheck(baseChecks, missing, "rootfs_real", "Rootfs real validado", rootfsReal, "importe/valide um rootfs real antes do runner");
++            addCheck(baseChecks, missing, "native_executor", "Executor nativo do APK", nativeExecutorReady, "embutir/testar executor nativo allowlist");
++            addCheck(baseChecks, missing, "core_runner_asset", "core-runner embutido no APK", runnerAssetReady, "embutir core-runner arm64 como libcoreworker_runner.so");
++            addCheck(baseChecks, missing, "proot_embedded", "proot embutido no APK", prootReady, "embutir proot arm64 auditado com metadata aprovada");
++            addCheck(baseChecks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox arm64 auditado com metadata aprovada");
+             if (prootNeedsLibtalloc) {
+-                addCheck(checks, missing, "libtalloc_embedded", "libtalloc embutido no APK", libtallocReady, "embutir libtalloc arm64 auditado junto com proot dinâmico");
++                addCheck(baseChecks, missing, "libtalloc_embedded", "libtalloc embutido no APK", libtallocReady, "embutir libtalloc arm64 auditado junto com proot dinâmico");
+             }
+-            addCheck(checks, missing, "box64_embedded", "Box64 embutido no APK", box64Ready, "embutir Box64 arm64 auditado com metadata aprovada; não usar binário baixado executável");
+-            addCheck(checks, missing, "bedrock_server", "bedrock_server presente", bedrockServerReady, "preparar arquivos do servidor Bedrock");
+-            addCheck(checks, missing, "server_properties", "server.properties presente", propertiesReady, "gerar ou revisar server.properties");
++
++            // Fase futura: necessária para Bedrock, mas não para o primeiro smoke test
++            // real do Core Linux. Mantemos separada para o próximo patch não pular etapa.
++            addCheck(futureChecks, futureMissing, "box64_embedded", "Box64 embutido no APK", box64Ready, "embutir Box64 arm64 auditado com metadata aprovada; não usar binário baixado executável");
++            addCheck(futureChecks, futureMissing, "bedrock_server", "bedrock_server presente", bedrockServerReady, "preparar arquivos do servidor Bedrock");
++            addCheck(futureChecks, futureMissing, "server_properties", "server.properties presente", propertiesReady, "gerar ou revisar server.properties");
++            copyChecks(checks, baseChecks);
++            copyChecks(checks, futureChecks);
+ 
+             if (writableBox64Blocked) {
+                 warnings.put("Box64 detectado em diretório gravável do app; Android 10+ bloqueia execução segura desse caminho");
+@@ -136,7 +148,7 @@
+             if (Build.VERSION.SDK_INT >= 29) {
+                 warnings.put("execução futura deve usar componentes embutidos no APK/native libs; binários importados não são executados");
+             }
+-            blockers.put("runner real permanece bloqueado no preflight v5");
++            blockers.put("runner real permanece bloqueado no preflight v6");
+             blockers.put("Bedrock start real permanece bloqueado");
+             blockers.put("shell livre permanece bloqueado");
+             blockers.put("comando remoto arbitrário permanece bloqueado");
+@@ -146,25 +158,35 @@
+                 if (!item.isEmpty()) nextActions.put(item);
+             }
+             if (nextActions.length() == 0) {
+-                nextActions.put("aguardar patch do runner nativo controlado; execução real ainda não liberada");
++                nextActions.put("executar smoke test real allowlist: APK → runner → proot → rootfs");
++                if (futureMissing.length() > 0) {
++                    nextActions.put("depois do smoke test, preparar Box64/Bedrock em etapa separada");
++                }
+             }
+ 
+-            boolean requirementsReady = rootfsReal && nativeExecutorReady && runnerAssetReady && prootReady && busyboxReady && prootDependencyReady && box64Ready
+-                    && bedrockServerReady && propertiesReady && !writableBox64Blocked;
++            boolean runnerBaseRequirementsReady = rootfsReal && nativeExecutorReady && runnerAssetReady && baseToolsReady && !writableBox64Blocked;
++            boolean bedrockRequirementsReady = runnerBaseRequirementsReady && box64Ready && bedrockServerReady && propertiesReady;
++            boolean requirementsReady = runnerBaseRequirementsReady;
+             boolean runnerReady = false;
+-            String state = requirementsReady ? "runner_preflight_ready_but_blocked" : "runner_preflight_blocked";
+-            String summary = requirementsReady
+-                    ? "Runner preflight pronto · execução real ainda bloqueada"
+-                    : "Runner preflight concluído · " + missing.length() + " pendência(s)";
++            String phase = runnerBaseRequirementsReady ? "rootfs_smoke_next" : "base_tools";
++            String state = runnerBaseRequirementsReady ? "runner_base_tools_ready_but_blocked" : "runner_preflight_blocked";
++            String summary = runnerBaseRequirementsReady
++                    ? "Core Linux base pronto · smoke test real é o próximo passo"
++                    : "Runner preflight concluído · " + missing.length() + " pendência(s) base";
++            String phaseSummary = runnerBaseRequirementsReady
++                    ? "Rootfs + executor + runner + PRoot + BusyBox prontos; execução real segue bloqueada até smoke test allowlist"
++                    : "Preparando base para substituir Termux: falta validar/importar ferramentas base";
+ 
+             JSONObject out = new JSONObject();
+             out.put("ok", true);
+             out.put("component", "core_linux_runner_preflight");
+             out.put("action", safeAction);
+-            out.put("stage", "core-linux-runner-preflight-v5");
+-            out.put("preflightVersion", 5);
++            out.put("stage", "core-linux-runner-preflight-v6");
++            out.put("preflightVersion", 6);
+             out.put("state", state);
+             out.put("summary", summary);
++            out.put("phase", phase);
++            out.put("phaseSummary", phaseSummary);
+             out.put("coreLinuxDir", path(base));
+             out.put("nativeLibraryDir", path(nativeDir));
+             out.put("androidSdk", Build.VERSION.SDK_INT);
+@@ -178,6 +200,9 @@
+             out.put("runnerBlocked", true);
+             out.put("runnerExecutionAllowed", false);
+             out.put("runnerRequirementsReady", requirementsReady);
++            out.put("runnerBaseRequirementsReady", runnerBaseRequirementsReady);
++            out.put("bedrockRequirementsReady", bedrockRequirementsReady);
++            out.put("termuxReductionReady", runnerBaseRequirementsReady);
+             out.put("bedrockStartAllowed", false);
+             out.put("rootfsRealValidated", rootfsReal);
+             out.put("nativeExecutorReady", nativeExecutorReady);
+@@ -193,7 +218,12 @@
+             out.put("bedrockServerPresent", bedrockServerReady);
+             out.put("serverPropertiesPresent", propertiesReady);
+             out.put("checks", checks);
++            out.put("baseChecks", baseChecks);
++            out.put("futureChecks", futureChecks);
+             out.put("missing", missing);
++            out.put("baseToolsMissing", missing);
++            out.put("currentMissing", missing);
++            out.put("futureMissing", futureMissing);
+             out.put("blockers", blockers);
+             out.put("warnings", warnings);
+             out.put("nextActions", nextActions);
+@@ -222,7 +252,7 @@
+                 err.put("runnerBlocked", true);
+                 err.put("runnerExecutionAllowed", false);
+                 err.put("bedrockStartAllowed", false);
+-                err.put("preflightVersion", 5);
++                err.put("preflightVersion", 6);
+                 err.put("updatedAt", System.currentTimeMillis());
+             } catch (Throwable ignored) {}
+             return err;
+@@ -242,6 +272,14 @@
+         if (!ok) missing.put(label);
+     }
+ 
++    private static void copyChecks(JSONArray dest, JSONArray source) throws Exception {
++        if (dest == null || source == null) return;
++        for (int i = 0; i < source.length(); i++) {
++            Object item = source.opt(i);
++            if (item != null) dest.put(item);
++        }
++    }
++
+     private static boolean isRootfsRealValidated(JSONObject rootfsState, JSONObject importState, File rootfsDir) {
+         String state = lower(firstNonEmpty(
+                 rootfsState.optString("state", ""),
+@@ -284,7 +322,7 @@
+     private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] busybox, String[] libtalloc, String[] box64,
+                                             JSONObject localManifest, JSONObject sourcePlan) throws Exception {
+         return new JSONObject()
+-                .put("stage", "core-linux-embedded-binaries-intake-v5")
++                .put("stage", "core-linux-embedded-binaries-intake-v6")
+                 .put("abi", "arm64-v8a")
+                 .put("executor", new JSONArray(executor))
+                 .put("runner", new JSONArray(runner))
+diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/changed_files.txt patch_repo/changed_files.txt
+--- orig_repo/changed_files.txt	2026-06-05 00:50:34.000000000 +0000
++++ patch_repo/changed_files.txt	2026-06-05 04:00:34.590013255 +0000
+@@ -1,6 +1,7 @@
+-bot.py
+-config.py
+-scripts/tts-bot-update.sh
++android/core-worker-app/app/build.gradle
++android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
++utility/commands/workers.py
++webserver.py
  PATCH_NOTES.md
  changed_files.txt
  patch.diff
+diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/utility/commands/workers.py patch_repo/utility/commands/workers.py
+--- orig_repo/utility/commands/workers.py	2026-06-04 23:31:48.000000000 +0000
++++ patch_repo/utility/commands/workers.py	2026-06-05 03:58:59.861610156 +0000
+@@ -1206,7 +1206,8 @@
+     diag = _shorten(record.get("diagnosticsSummary") or "diagnóstico aguardando", limit=90)
+     storage = _shorten(record.get("storageSummary") or "armazenamento aguardando", limit=80)
+     bridge = _shorten(record.get("bridgeSummary") or "ponte aguardando", limit=80)
+-    linux = _shorten(record.get("coreLinuxSummary") or "Linux runtime aguardando", limit=80)
++    core_linux = record.get("coreLinux") if isinstance(record.get("coreLinux"), dict) else {}
++    linux = _shorten(core_linux.get("runnerPhaseSummary") or record.get("coreLinuxSummary") or "Linux runtime aguardando", limit=90)
+     bedrock = _shorten(record.get("bedrockSummary") or "Bedrock aguardando", limit=80)
+     perm = _shorten(record.get("notificationPermission") or "notificação ?", limit=32)
+     jobs = _core_worker_app_jobs_text(worker_id)
+@@ -1259,7 +1260,14 @@
+     rootfs_level = str(core_linux.get("rootfsValidationLevel") or "").lower()
+     if "rootfs_real_validated" in linux_state or "rootfs_real_validated" in rootfs_state or rootfs_level == "real":
+         parts.append("Rootfs real validado")
+-        parts.append("runner bloqueado")
++        if core_linux.get("termuxReductionReady") or core_linux.get("runnerBaseRequirementsReady"):
++            parts.append("base sem Termux pronta")
++            parts.append("smoke test pendente")
++        elif core_linux.get("baseToolsReady"):
++            parts.append("base tools pronta")
++            parts.append("runner bloqueado")
++        else:
++            parts.append("runner bloqueado")
+     elif record.get("coreLinuxPrepared") or "pronto" in linux_summary or "plan" in linux_state:
+         parts.append("Linux pronto")
+     elif linux_summary:
+diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/webserver.py patch_repo/webserver.py
+--- orig_repo/webserver.py	2026-06-04 22:16:06.000000000 +0000
++++ patch_repo/webserver.py	2026-06-05 03:58:39.846069448 +0000
+@@ -190,12 +190,18 @@
+             out[key] = scrubbed
+         state_text = str(out.get("state") or out.get("stage") or out.get("component") or "").lower()
+         if "runner_preflight" in state_text or str(out.get("component") or "") == "core_linux_runner_preflight":
+-            missing = out.get("missing") if isinstance(out.get("missing"), list) else None
++            missing = out.get("currentMissing") if isinstance(out.get("currentMissing"), list) else out.get("missing") if isinstance(out.get("missing"), list) else None
++            future = out.get("futureMissing") if isinstance(out.get("futureMissing"), list) else []
+             if missing is not None:
+                 count = len(missing)
+                 summary = str(out.get("summary") or "")
+-                if "Runner preflight conclu" in summary:
+-                    out["summary"] = f"Runner preflight concluído · {count} pendência(s)"
++                # Mantém compatibilidade com preflight antigo, mas sem voltar a
++                # contar Box64/Bedrock como pendência da fase base.
++                if "Runner preflight conclu" in summary and "base" not in summary.lower():
++                    out["summary"] = f"Runner preflight concluído · {count} pendência(s) base"
++                    changed = True
++                if future and "futureMissing" not in out:
++                    out["futureMissing"] = future
+                     changed = True
+         return out, changed
+     if isinstance(value, list):
+@@ -227,9 +233,10 @@
+     # Corrige mensagem visível de preflight antigo após remover EULA.
+     result = scrubbed.get("result") if isinstance(scrubbed.get("result"), dict) else {}
+     runner = result.get("coreLinuxRunner") if isinstance(result.get("coreLinuxRunner"), dict) else {}
+-    missing = runner.get("missing") if isinstance(runner.get("missing"), list) else None
++    missing = runner.get("currentMissing") if isinstance(runner.get("currentMissing"), list) else runner.get("missing") if isinstance(runner.get("missing"), list) else None
+     if typ == "apk_core_linux_runner_preflight" and missing is not None:
+-        msg = f"Runner preflight concluído · {len(missing)} pendência(s)"
++        ready = bool(runner.get("runnerBaseRequirementsReady") or runner.get("termuxReductionReady"))
++        msg = "Core Linux base pronto · smoke test real é o próximo passo" if ready else f"Runner preflight concluído · {len(missing)} pendência(s) base"
+         if scrubbed.get("message") != msg:
+             scrubbed["message"] = msg
+             changed = True
+@@ -1277,8 +1284,20 @@
+         core_linux["runnerBlocked"] = bool(runner.get("runnerBlocked", True))
+         core_linux["runnerExecutionAllowed"] = bool(runner.get("runnerExecutionAllowed"))
+         core_linux["runnerRequirementsReady"] = bool(runner.get("runnerRequirementsReady"))
+-        if isinstance(runner.get("missing"), list):
+-            core_linux["runnerMissing"] = [_safe_short_text(x, 120) for x in runner.get("missing", [])[:16]]
++        core_linux["runnerBaseRequirementsReady"] = bool(runner.get("runnerBaseRequirementsReady") or runner.get("termuxReductionReady"))
++        core_linux["baseToolsReady"] = bool(runner.get("baseToolsReady"))
++        core_linux["termuxReductionReady"] = bool(runner.get("termuxReductionReady"))
++        core_linux["bedrockRequirementsReady"] = bool(runner.get("bedrockRequirementsReady"))
++        if runner.get("phase"):
++            core_linux["runnerPhase"] = _safe_short_text(runner.get("phase"), 80)
++        if runner.get("phaseSummary"):
++            core_linux["runnerPhaseSummary"] = _safe_short_text(runner.get("phaseSummary"), 180)
++        current_missing = runner.get("currentMissing") if isinstance(runner.get("currentMissing"), list) else runner.get("missing") if isinstance(runner.get("missing"), list) else []
++        future_missing = runner.get("futureMissing") if isinstance(runner.get("futureMissing"), list) else []
++        if current_missing:
++            core_linux["runnerMissing"] = [_safe_short_text(x, 120) for x in current_missing[:16]]
++        if future_missing:
++            core_linux["runnerFutureMissing"] = [_safe_short_text(x, 120) for x in future_missing[:16]]
+         compact_runner = dict(runner)
+         if isinstance(compact_runner.get("embedded"), dict):
+             # Mantém um resumo estável dos assets no runtime-summary.

@@ -1,6 +1,7 @@
-bot.py
-config.py
-scripts/tts-bot-update.sh
+android/core-worker-app/app/build.gradle
+android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
+utility/commands/workers.py
+webserver.py
 PATCH_NOTES.md
 changed_files.txt
 patch.diff
