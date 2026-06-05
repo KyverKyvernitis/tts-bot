@@ -1,421 +1,331 @@
-diff --git a/PATCH_NOTES.md b/PATCH_NOTES.md
-index 8e0afc0..617e53c 100644
---- a/PATCH_NOTES.md
-+++ b/PATCH_NOTES.md
-@@ -1,27 +1,29 @@
--# Patch: worker-panel-apk-publish-recovery-v1
-+# Patch: updater-worker-apk-publish-hardening-v2
+--- a/bot.py	2026-06-05 03:48:03.409304181 +0000
++++ b/bot.py	2026-06-05 03:48:26.283107824 +0000
+@@ -1,11 +1,14 @@
+ import asyncio
++import atexit
+ import base64
++from collections import deque
+ import contextlib
+ import hashlib
+ import json
+ import logging
+ import logging.handlers
+ import os
++import queue
+ import re
+ import shutil
+ import stat
+@@ -33,8 +36,10 @@
+ class _LowValueNoiseFilter(logging.Filter):
+     """Remove ruído conhecido sem esconder erro real do bot.
  
--Base: `repo-20260604-223619.zip`
-+Base: `repo-20260604-231706.zip`
+-    - voice WebSocket 1006 do discord.py costuma ser reconexão rotineira;
+-    - cancelamentos esperados do player não devem virar traceback do asyncio.
++    O bot roda em VPS pequena. Logs de heartbeat do discord.py podem trazer stack
++    inteira e repetir várias vezes durante a mesma travada; isso aumenta I/O no
++    journald justamente quando o event loop já está atrasado. Mantemos o primeiro
++    aviso e aplicamos cooldown nos repetidos.
+     """
  
- ## Corrige
+     _VOICE_LOGGERS = ("discord.voice", "discord.gateway", "discord.player")
+@@ -43,12 +48,33 @@
+         "MusicPlaybackError: Playback cancelado.",
+     )
  
--- `_worker` / `_workers` voltam a abrir o painel:
--  - restaura `_core_worker_push_status_text()`;
--  - mantém o resumo de Push sem quebrar o layout quando não existe token FCM.
--- Publicação do APK gerado pelo worker builder:
--  - phone worker sobe para `1.10.30`;
--  - `apk_build_debug` agora procura APK órfão em `core-worker-apk-builds/build-*` quando o Gradle já terminou com `BUILD SUCCESSFUL`, mas o processo caiu antes de copiar/publicar;
--  - se encontrar `app-debug.apk` válido, promove para `artifacts/latest-artifact.json` e publica sem rebuild;
--  - `apk_publish_last` também tenta essa recuperação antes de dizer que não existe artifact;
--  - publicação passa a usar o APK persistido em `artifacts/`, não o arquivo temporário do workdir;
--  - falha de upload/publicação não marca o build Gradle como perdido: deixa `publish_pending=True` para republicar depois.
--- Automação da VPS:
--  - ignora build APK `running` obviamente velho para não travar por horas;
--  - limpa leases expirados antes de decidir se já existe job ativo;
--  - quando um APK já foi compilado mas não publicado, enfileira `apk_publish_last` antes de rebuildar.
-+- Updater não cai mais com código `141` durante a verificação de alterações locais:
-+  - `trim_alert_text` agora lê o pipe corretamente usando `python -c`;
-+  - `collect_local_tracked_changes` não depende mais de pipeline frágil com `git status`;
-+  - `collect_local_tracked_files` não usa `head` em pipeline com `pipefail`.
-+- `core-linux-embedded-binaries-build-pipeline.py verify` fica read-only:
-+  - o comando de diagnóstico não regrava `embedded-binaries-source-plan.json`;
-+  - evita sujar arquivos rastreados e bloquear o próximo update.
-+- Painel `_worker` fica mais resistente:
-+  - status de notificação/push não derruba a renderização do painel se algum resumo auxiliar falhar.
-+- Publicação do APK fica mais confiável:
-+  - Core Worker APK sobe para `0.5.74` / `versionCode 89`;
-+  - phone worker sobe para `1.10.31`;
-+  - `apk_build_debug` valida se o APK foi persistido em `artifacts/` logo após o Gradle;
-+  - falha de upload/publicação não perde o build: deixa artifact salvo e `publish_pending` para republicar;
-+  - `apk_publish_last` tenta republicar com erro controlado, sem estourar o job por timeout/rede;
-+  - recuperação de APK órfão agora procura mais workdirs antigos;
-+  - automação da VPS detecta build APK `running` antigo e enfileira `apk_publish_last` antes de rebuildar.
++    def __init__(self) -> None:
++        super().__init__()
++        self._last_by_key: dict[str, float] = {}
++        self._lock = threading.Lock()
++
++    def _allow_every(self, key: str, seconds: float) -> bool:
++        now = time.monotonic()
++        with self._lock:
++            last = self._last_by_key.get(key, 0.0)
++            if now - last < seconds:
++                return False
++            self._last_by_key[key] = now
++            return True
++
+     def filter(self, record: logging.LogRecord) -> bool:
+         try:
+             logger_name = str(record.name or "")
+             message = record.getMessage()
+             lowered = message.lower()
+ 
++            if logger_name.startswith("discord.gateway") and (
++                "heartbeat blocked" in lowered or "loop thread traceback" in lowered
++            ):
++                cooldown = max(15.0, float(os.getenv("DISCORD_GATEWAY_HEARTBEAT_LOG_COOLDOWN_SECONDS", "60") or 60))
++                if not self._allow_every("discord.gateway.heartbeat_blocked", cooldown):
++                    return False
++
+             if logger_name.startswith(self._VOICE_LOGGERS):
+                 exc_text = ""
+                 if record.exc_info:
+@@ -68,23 +94,50 @@
+         return True
+ 
+ 
+-logging.basicConfig(
+-    level=logging.INFO,
+-    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+-    datefmt="%H:%M:%S",
+-    handlers=[
+-        logging.StreamHandler(),
+-        logging.handlers.RotatingFileHandler(
+-            _LOG_DIR / "bot.log",
+-            maxBytes=2_000_000,
+-            backupCount=3,
+-            encoding="utf-8",
+-        ),
+-    ],
+-)
+-_noise_filter = _LowValueNoiseFilter()
+-for _handler in logging.getLogger().handlers:
+-    _handler.addFilter(_noise_filter)
++class _FastQueueHandler(logging.handlers.QueueHandler):
++    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
++        # QueueHandler padrão formata exc_info/stack antes de enfileirar. Como o
++        # listener roda no mesmo processo, podemos atrasar essa formatação para a
++        # thread de logging e manter o event loop leve.
++        return record
++
++
++def _configure_async_logging() -> logging.handlers.QueueListener:
++    formatter = logging.Formatter(
++        "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
++        datefmt="%H:%M:%S",
++    )
++    stream_handler = logging.StreamHandler()
++    stream_handler.setFormatter(formatter)
++    file_handler = logging.handlers.RotatingFileHandler(
++        _LOG_DIR / "bot.log",
++        maxBytes=2_000_000,
++        backupCount=3,
++        encoding="utf-8",
++    )
++    file_handler.setFormatter(formatter)
++
++    log_queue: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
++    queue_handler = _FastQueueHandler(log_queue)
++    queue_handler.addFilter(_LowValueNoiseFilter())
++
++    root = logging.getLogger()
++    root.handlers.clear()
++    root.setLevel(logging.INFO)
++    root.addHandler(queue_handler)
++
++    listener = logging.handlers.QueueListener(
++        log_queue,
++        stream_handler,
++        file_handler,
++        respect_handler_level=True,
++    )
++    listener.start()
++    atexit.register(listener.stop)
++    return listener
++
++
++_LOG_LISTENER = _configure_async_logging()
+ logging.getLogger("discord.gateway").setLevel(logging.WARNING)
+ logging.getLogger("discord.voice_client").setLevel(logging.WARNING)
+ logging.getLogger("discord.player").setLevel(logging.WARNING)
+@@ -213,6 +266,9 @@
+         self._event_loop_max_lag_ms: float = 0.0
+         self._event_loop_lag_warnings: int = 0
+         self._event_loop_last_warning_at: float = 0.0
++        self._event_loop_last_diagnostic_at: float = 0.0
++        self._event_loop_last_task_summary: str = ""
++        self._event_loop_recent_lags_ms: deque[float] = deque(maxlen=12)
+         self._zip_update_lock = asyncio.Lock()
+         self._phone_worker_unavailable_until_by_task: dict[str, float] = {}
+         self._phone_worker_unavailable_last_log_by_task: dict[str, float] = {}
+@@ -766,6 +822,8 @@
+         snapshot["event_loop_last_lag_ms"] = round(float(getattr(self, "_event_loop_last_lag_ms", 0.0) or 0.0), 1)
+         snapshot["event_loop_max_lag_ms"] = round(float(getattr(self, "_event_loop_max_lag_ms", 0.0) or 0.0), 1)
+         snapshot["event_loop_lag_warnings"] = int(getattr(self, "_event_loop_lag_warnings", 0) or 0)
++        snapshot["event_loop_recent_lags_ms"] = [round(float(v), 1) for v in list(getattr(self, "_event_loop_recent_lags_ms", []) or [])[-12:]]
++        snapshot["event_loop_last_task_summary"] = str(getattr(self, "_event_loop_last_task_summary", "") or "")[:500]
+ 
+         tts_cog = self.get_cog("TTSVoice")
+         if tts_cog is not None and hasattr(tts_cog, "get_tts_metrics_snapshot"):
+@@ -805,9 +863,32 @@
+             })
+             await asyncio.sleep(15)
+ 
++    def _event_loop_task_summary(self, *, limit: int = 8) -> str:
++        try:
++            current = asyncio.current_task()
++            counts: dict[str, int] = {}
++            for task in asyncio.all_tasks():
++                if task is current or task.done():
++                    continue
++                coro = task.get_coro()
++                qualname = getattr(coro, "__qualname__", "") or getattr(coro, "__name__", "")
++                label = str(qualname or type(coro).__name__).replace("<", "").replace(">", "")
++                if "await" in label and hasattr(coro, "cr_code"):
++                    label = getattr(coro.cr_code, "co_name", label)
++                counts[label[:90]] = counts.get(label[:90], 0) + 1
++            if not counts:
++                return "sem tasks pendentes do bot"
++            rows = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[: max(1, limit)]
++            return ", ".join(f"{name}={count}" for name, count in rows)[:500]
++        except Exception as exc:
++            return f"indisponível: {type(exc).__name__}"
++
+     async def _event_loop_watchdog_loop(self):
+         interval = max(0.5, float(getattr(config, "BOT_EVENT_LOOP_WATCHDOG_INTERVAL_SECONDS", 1.0) or 1.0))
+         warn_after = max(0.25, float(getattr(config, "BOT_EVENT_LOOP_LAG_WARNING_SECONDS", 1.5) or 1.5))
++        warning_cooldown = max(10.0, float(getattr(config, "BOT_EVENT_LOOP_LAG_WARNING_COOLDOWN_SECONDS", 30.0) or 30.0))
++        severe_after = max(warn_after * 2.0, float(getattr(config, "BOT_EVENT_LOOP_LAG_SEVERE_SECONDS", 8.0) or 8.0))
++        diagnostic_cooldown = max(warning_cooldown, float(getattr(config, "BOT_EVENT_LOOP_LAG_DIAGNOSTIC_COOLDOWN_SECONDS", 90.0) or 90.0))
+         loop = asyncio.get_running_loop()
+         expected = loop.time() + interval
+         while not self.is_closed():
+@@ -821,15 +902,30 @@
+                 self._event_loop_max_lag_ms = lag_ms
+             if lag >= warn_after:
+                 self._event_loop_lag_warnings += 1
++                self._event_loop_recent_lags_ms.append(round(lag_ms, 1))
+                 # Evita logar a cada segundo durante uma trava longa; o contador no
+                 # health snapshot continua registrando todos os atrasos detectados.
++                now_mono = time.monotonic()
+                 last = float(getattr(self, "_event_loop_last_warning_at", 0.0) or 0.0)
+-                if time.monotonic() - last >= 10.0:
+-                    self._event_loop_last_warning_at = time.monotonic()
+-                    ASYNCIO_LOG.warning(
+-                        "event loop atrasado %.0f ms; possível I/O síncrono ou CPU em callback async",
+-                        lag_ms,
+-                    )
++                if now_mono - last >= warning_cooldown:
++                    self._event_loop_last_warning_at = now_mono
++                    task_summary = ""
++                    last_diag = float(getattr(self, "_event_loop_last_diagnostic_at", 0.0) or 0.0)
++                    if lag >= severe_after and now_mono - last_diag >= diagnostic_cooldown:
++                        self._event_loop_last_diagnostic_at = now_mono
++                        task_summary = self._event_loop_task_summary()
++                        self._event_loop_last_task_summary = task_summary
++                    if task_summary:
++                        ASYNCIO_LOG.warning(
++                            "event loop atrasado %.0f ms; diagnóstico leve: %s",
++                            lag_ms,
++                            task_summary,
++                        )
++                    else:
++                        ASYNCIO_LOG.warning(
++                            "event loop atrasado %.0f ms; possível I/O síncrono ou CPU em callback async",
++                            lag_ms,
++                        )
+ 
+     def _make_zip_update_view(
+         self,
+
+--- a/config.py	2026-06-05 03:48:03.563917037 +0000
++++ b/config.py	2026-06-05 03:47:35.707450376 +0000
+@@ -74,6 +74,15 @@
+ GUILD_IDS = _parse_guild_ids(os.getenv("GUILD_IDS", ""))
+ 
+ # -----------------------------------------------------------------------------
++# Event loop / logging — defaults seguros para VPS pequena
++# -----------------------------------------------------------------------------
++BOT_EVENT_LOOP_WATCHDOG_INTERVAL_SECONDS = _parse_float(os.getenv("BOT_EVENT_LOOP_WATCHDOG_INTERVAL_SECONDS", "1.0"), 1.0)
++BOT_EVENT_LOOP_LAG_WARNING_SECONDS = _parse_float(os.getenv("BOT_EVENT_LOOP_LAG_WARNING_SECONDS", "1.5"), 1.5)
++BOT_EVENT_LOOP_LAG_WARNING_COOLDOWN_SECONDS = _parse_float(os.getenv("BOT_EVENT_LOOP_LAG_WARNING_COOLDOWN_SECONDS", "30.0"), 30.0)
++BOT_EVENT_LOOP_LAG_SEVERE_SECONDS = _parse_float(os.getenv("BOT_EVENT_LOOP_LAG_SEVERE_SECONDS", "8.0"), 8.0)
++BOT_EVENT_LOOP_LAG_DIAGNOSTIC_COOLDOWN_SECONDS = _parse_float(os.getenv("BOT_EVENT_LOOP_LAG_DIAGNOSTIC_COOLDOWN_SECONDS", "90.0"), 90.0)
++
++# -----------------------------------------------------------------------------
+ # CallKeeper — bots auxiliares que mantêm uma call ocupada em 1 servidor
+ # -----------------------------------------------------------------------------
+ CALLKEEPER_GUILD_ID = _parse_int(os.getenv("CALLKEEPER_GUILD_ID", "0"), 0)
+
+--- a/scripts/tts-bot-update.sh	2026-06-05 03:48:03.643405844 +0000
++++ b/scripts/tts-bot-update.sh	2026-06-05 03:47:35.709936220 +0000
+@@ -42,6 +42,17 @@
+ fi
+ UPDATER_RUNTIME_COPY="${TTS_BOT_UPDATER_RUNTIME_COPY:-}"
+ 
++# Mantém o updater em baixa prioridade para não competir com heartbeat/voz do bot
++# na VPS pequena. Filhos como git, python de validação e scripts auxiliares herdam
++# essa prioridade sem mudar a lógica do update.
++UPDATER_NICE_LEVEL="${TTS_BOT_UPDATER_NICE_LEVEL:-10}"
++UPDATER_IONICE_CLASS="${TTS_BOT_UPDATER_IONICE_CLASS:-2}"
++UPDATER_IONICE_LEVEL="${TTS_BOT_UPDATER_IONICE_LEVEL:-7}"
++renice -n "$UPDATER_NICE_LEVEL" -p "$$" >/dev/null 2>&1 || true
++if command -v ionice >/dev/null 2>&1; then
++  ionice -c "$UPDATER_IONICE_CLASS" -n "$UPDATER_IONICE_LEVEL" -p "$$" >/dev/null 2>&1 || true
++fi
++
+ mkdir -p "$(dirname "$UPDATER_LOCK_FILE")" 2>/dev/null || true
+ exec 9>"$UPDATER_LOCK_FILE"
+ if ! flock -n 9; then
+
+--- a/PATCH_NOTES.md	2026-06-05 03:48:03.276748965 +0000
++++ b/PATCH_NOTES.md	2026-06-05 03:48:54.338461632 +0000
+@@ -1,29 +1,29 @@
+-# Patch: updater-worker-apk-publish-hardening-v2
++# Patch: event-loop-anti-lag-updater-priority
+ 
+-Base: `repo-20260604-231706.zip`
++Base: `repo-20260605-004304.zip`
+ 
+-## Corrige
++## Corrige / melhora
+ 
+-- Updater não cai mais com código `141` durante a verificação de alterações locais:
+-  - `trim_alert_text` agora lê o pipe corretamente usando `python -c`;
+-  - `collect_local_tracked_changes` não depende mais de pipeline frágil com `git status`;
+-  - `collect_local_tracked_files` não usa `head` em pipeline com `pipefail`.
+-- `core-linux-embedded-binaries-build-pipeline.py verify` fica read-only:
+-  - o comando de diagnóstico não regrava `embedded-binaries-source-plan.json`;
+-  - evita sujar arquivos rastreados e bloquear o próximo update.
+-- Painel `_worker` fica mais resistente:
+-  - status de notificação/push não derruba a renderização do painel se algum resumo auxiliar falhar.
+-- Publicação do APK fica mais confiável:
+-  - Core Worker APK sobe para `0.5.74` / `versionCode 89`;
+-  - phone worker sobe para `1.10.31`;
+-  - `apk_build_debug` valida se o APK foi persistido em `artifacts/` logo após o Gradle;
+-  - falha de upload/publicação não perde o build: deixa artifact salvo e `publish_pending` para republicar;
+-  - `apk_publish_last` tenta republicar com erro controlado, sem estourar o job por timeout/rede;
+-  - recuperação de APK órfão agora procura mais workdirs antigos;
+-  - automação da VPS detecta build APK `running` antigo e enfileira `apk_publish_last` antes de rebuildar.
++- Reduz travadas causadas por logging síncrono:
++  - logs do bot agora entram em fila (`QueueHandler`) e são gravados por uma thread de logging;
++  - formatação pesada de traceback/exception fica fora do event loop;
++  - mantém arquivo `logs/bot.log` e saída no journal, sem mudar formato público.
++- Diminui spam de traceback do `discord.gateway` quando heartbeat trava:
++  - primeiro alerta continua aparecendo;
++  - alertas repetidos de heartbeat/`Loop thread traceback` entram em cooldown configurável;
++  - evita que o próprio diagnóstico gere mais I/O durante lag.
++- Watchdog do event loop ficou mais útil e menos agressivo:
++  - cooldown configurável dos avisos;
++  - guarda os últimos atrasos em `/health`;
++  - em travas severas registra um resumo leve das tasks pendentes, sem dump gigante de stack.
++- Updater passa a rodar em baixa prioridade:
++  - aplica `renice` e `ionice` no processo do updater;
++  - filhos como `git fetch`, validações Python e scripts auxiliares herdam prioridade menor;
++  - reduz disputa com heartbeat/voz do Discord na VPS pequena.
  
  ## Não muda
  
- - Não builda APK na VPS.
--- Não muda o APK Android/versionCode nesta correção.
+-- Não builda APK na VPS.
  - Não toca CallKeeper.
- - Não libera Bedrock real, shell livre ou execução arbitrária.
-diff --git a/android/core-worker-app/app/build.gradle b/android/core-worker-app/app/build.gradle
-index 5a4d83d..c800791 100644
---- a/android/core-worker-app/app/build.gradle
-+++ b/android/core-worker-app/app/build.gradle
-@@ -58,8 +58,8 @@ android {
-         applicationId "dev.core.worker"
-         minSdk 26
-         targetSdk 34
--        versionCode 88
--        versionName "0.5.73"
-+        versionCode 89
-+        versionName "0.5.74"
- 
-         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
-         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
-diff --git a/changed_files.txt b/changed_files.txt
-index 0149443..8b62dd7 100644
---- a/changed_files.txt
-+++ b/changed_files.txt
-@@ -1,5 +1,9 @@
--PATCH_NOTES.md
--changed_files.txt
-+android/core-worker-app/app/build.gradle
- deploy/termux/phone-worker/phone_worker.py
-+scripts/core-linux-embedded-binaries-build-pipeline.py
- scripts/core-worker-automation.py
-+scripts/tts-bot-update.sh
- utility/commands/workers.py
-+PATCH_NOTES.md
-+changed_files.txt
-+patch.diff
-diff --git a/deploy/termux/phone-worker/phone_worker.py b/deploy/termux/phone-worker/phone_worker.py
-index c326261..74b4f2f 100644
---- a/deploy/termux/phone-worker/phone_worker.py
-+++ b/deploy/termux/phone-worker/phone_worker.py
-@@ -62,7 +62,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES *
- DEFAULT_MAX_BODY_MB = 32
- DEFAULT_MAX_OUTPUT_MB = 32
- DEFAULT_TIMEOUT_SECONDS = 45
--PHONE_WORKER_VERSION = "1.10.30"
-+PHONE_WORKER_VERSION = "1.10.31"
- CORE_WORKER_RUNTIME_MODE = "termux"
- CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
- DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
-@@ -8123,7 +8123,7 @@ def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str,
-         return {"ok": False, "status": int(exc.code), "error": _short_text(raw or exc, limit=240)}
-     except Exception as exc:
-         _remember_core_worker_network_error(exc)
--        raise
-+        return {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}", "exception": type(exc).__name__}
- 
- 
- 
-@@ -8260,7 +8260,7 @@ def _recover_orphaned_apk_build_outputs(
-         return {}
-     wanted_fp = str(source_fingerprint or source_sha256 or "").strip()
-     workdirs = sorted([p for p in build_root.glob("build-*") if p.is_dir()], key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
--    for work_dir in workdirs[:12]:
-+    for work_dir in workdirs[:40]:
-         project_dir = work_dir / "src" / "android" / "core-worker-app"
-         if not project_dir.is_dir():
-             alt = work_dir / "src" / "core-worker-app"
-@@ -8389,20 +8389,23 @@ def _apply_apk_publish_last(payload: dict[str, Any]) -> dict[str, Any]:
-     filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(payload.get("filename") or meta.get("filename") or apk_path.name)).strip("-._")
-     publish_url = str(payload.get("publish_url") or "").strip()
-     base_url, _token, _worker_id = _core_worker_auth_parts()
--    publish = _upload_core_worker_apk(
--        apk_path,
--        filename=filename,
--        version_name=version_name,
--        version_code=version_code,
--        sha256=str(meta.get("sha256") or hashlib.sha256(apk_path.read_bytes()).hexdigest()),
--        publish_url=publish_url or f"{base_url}/core-worker/app/publish",
--        changelog=list(payload.get("changelog") or ["APK republicado por worker builder"]),
--        source_sha256=str(payload.get("sourceSha256") or payload.get("source_sha256") or meta.get("sourceSha256") or ""),
--        source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or meta.get("sourceFingerprint") or ""),
--        notification_id=str(payload.get("notificationId") or payload.get("notification_id") or meta.get("notificationId") or f"apk-republish-{int(time.time())}"),
--        apk_signing_mode=str(payload.get("apkSigningMode") or meta.get("apkSigningMode") or "compat-vps-debug-keystore"),
--        apk_signing_keystore_sha256=str(payload.get("apkSigningKeystoreSha256") or meta.get("apkSigningKeystoreSha256") or ""),
--    )
-+    try:
-+        publish = _upload_core_worker_apk(
-+            apk_path,
-+            filename=filename,
-+            version_name=version_name,
-+            version_code=version_code,
-+            sha256=str(meta.get("sha256") or hashlib.sha256(apk_path.read_bytes()).hexdigest()),
-+            publish_url=publish_url or f"{base_url}/core-worker/app/publish",
-+            changelog=list(payload.get("changelog") or ["APK republicado por worker builder"]),
-+            source_sha256=str(payload.get("sourceSha256") or payload.get("source_sha256") or meta.get("sourceSha256") or ""),
-+            source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or meta.get("sourceFingerprint") or ""),
-+            notification_id=str(payload.get("notificationId") or payload.get("notification_id") or meta.get("notificationId") or f"apk-republish-{int(time.time())}"),
-+            apk_signing_mode=str(payload.get("apkSigningMode") or meta.get("apkSigningMode") or "compat-vps-debug-keystore"),
-+            apk_signing_keystore_sha256=str(payload.get("apkSigningKeystoreSha256") or meta.get("apkSigningKeystoreSha256") or ""),
-+        )
-+    except Exception as exc:
-+        publish = {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}", "exception": type(exc).__name__}
-     return {
-         "ok": bool(publish.get("ok")),
-         "summary": "APK republicado na VPS" if publish.get("ok") else "APK persistente encontrado, mas publicação falhou",
-@@ -8712,9 +8715,33 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
-             "phoneWorkerVersion": PHONE_WORKER_VERSION,
-             "created_at": time.time(),
-         }
--        with contextlib.suppress(Exception):
--            _write_json_file_atomic(artifact_path.with_suffix(artifact_path.suffix + ".json"), artifact_meta)
--            _write_json_file_atomic(artifact_dir / "latest-artifact.json", artifact_meta)
-+        # A etapa pós-Gradle é tão importante quanto o build: se o APK foi
-+        # gerado, ele precisa virar artifact persistente antes de qualquer publish.
-+        # Não esconda falhas aqui, senão o painel mostra build pendente mesmo com
-+        # `BUILD SUCCESSFUL` no log.
-+        if not artifact_path.is_file():
-+            artifact_path.write_bytes(raw)
-+        persisted_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
-+        if persisted_sha != apk_sha:
-+            artifact_path.write_bytes(raw)
-+            persisted_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
-+        if persisted_sha != apk_sha:
-+            preserve_workdir = True
-+            return _apk_build_failure_result(
-+                summary="build terminou mas falhou persistindo artifact APK",
-+                version_name=version_name,
-+                version_code=version_code,
-+                source_fingerprint=source_fingerprint,
-+                source_sha256=str(download.get("sha256") or expected_source_sha or ""),
-+                notification_id=notification_id,
-+                work_dir=work_dir,
-+                gradle_log=gradle_log,
-+                builder_environment=builder_environment,
-+                native_environment=native_environment,
-+                extra={"artifact_path": str(artifact_path), "expected_sha256": apk_sha, "actual_sha256": persisted_sha},
-+            )
-+        _write_json_file_atomic(artifact_path.with_suffix(artifact_path.suffix + ".json"), artifact_meta)
-+        _write_json_file_atomic(artifact_dir / "latest-artifact.json", artifact_meta)
-         artifact_cleanup = _cleanup_old_apk_build_artifacts(build_root)
-         result: dict[str, Any] = {
-             "ok": True,
-@@ -8746,20 +8773,23 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
-         if bool(payload.get("publish", True)):
-             publish_url = str(payload.get("publish_url") or "").strip()
-             base_url, _token, _worker_id = _core_worker_auth_parts()
--            publish = _upload_core_worker_apk(
--                artifact_path,
--                filename=filename,
--                version_name=version_name,
--                version_code=version_code,
--                sha256=apk_sha,
--                publish_url=publish_url or f"{base_url}/core-worker/app/publish",
--                changelog=list(payload.get("changelog") or ["APK compilado por worker builder"]),
--                source_sha256=str(download.get("sha256") or expected_source_sha or ""),
--                source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or download.get("sha256") or expected_source_sha or ""),
--                notification_id=notification_id,
--                apk_signing_mode=str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
--                apk_signing_keystore_sha256=str(apk_signing.get("keystore_sha256") or ""),
--            )
-+            try:
-+                publish = _upload_core_worker_apk(
-+                    artifact_path,
-+                    filename=filename,
-+                    version_name=version_name,
-+                    version_code=version_code,
-+                    sha256=apk_sha,
-+                    publish_url=publish_url or f"{base_url}/core-worker/app/publish",
-+                    changelog=list(payload.get("changelog") or ["APK compilado por worker builder"]),
-+                    source_sha256=str(download.get("sha256") or expected_source_sha or ""),
-+                    source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or download.get("sha256") or expected_source_sha or ""),
-+                    notification_id=notification_id,
-+                    apk_signing_mode=str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
-+                    apk_signing_keystore_sha256=str(apk_signing.get("keystore_sha256") or ""),
-+                )
-+            except Exception as exc:
-+                publish = {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}", "exception": type(exc).__name__}
-             result["publish"] = publish
-             result["publish_ok"] = bool(publish.get("ok", False))
-             if not bool(publish.get("ok", False)):
-diff --git a/scripts/core-linux-embedded-binaries-build-pipeline.py b/scripts/core-linux-embedded-binaries-build-pipeline.py
-index 62fed06..3642a70 100644
---- a/scripts/core-linux-embedded-binaries-build-pipeline.py
-+++ b/scripts/core-linux-embedded-binaries-build-pipeline.py
-@@ -189,10 +189,8 @@ def find_cc(explicit: str | None = None) -> str | None:
-     return None
- 
- 
--def write_source_manifest() -> Path:
--    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
--    SOURCE_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
--    payload = {
-+def source_manifest_payload() -> dict[str, Any]:
-+    return {
-         "schema": "core-worker-embedded-binaries-source-plan-v6",
-         "generatedAt": int(time.time()),
-         "abi": "arm64-v8a",
-@@ -211,7 +209,12 @@ def write_source_manifest() -> Path:
-         },
-         "targets": TARGETS,
-     }
--    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-+
-+
-+def write_source_manifest() -> Path:
-+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-+    SOURCE_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
-+    text = json.dumps(source_manifest_payload(), ensure_ascii=False, indent=2) + "\n"
-     SOURCE_MANIFEST.write_text(text, encoding="utf-8")
-     (ASSETS_DIR / "embedded-binaries-source-plan.json").write_text(text, encoding="utf-8")
-     return SOURCE_MANIFEST
-@@ -453,7 +456,9 @@ def cmd_stage_base_tools(args: argparse.Namespace) -> int:
-     return 0
- 
- def cmd_verify(args: argparse.Namespace) -> int:
--    write_source_manifest()
-+    # Verificação local precisa ser read-only. O updater e os diagnósticos rodam
-+    # este comando com frequência; gerar `embedded-binaries-source-plan.json` aqui
-+    # sujava arquivos rastreados e bloqueava os próximos updates.
-     command = [sys.executable, str(INTAKE), "--dry-run"]
-     if args.metadata_file:
-         command.extend(["--metadata-file", str(args.metadata_file.resolve())])
-diff --git a/scripts/core-worker-automation.py b/scripts/core-worker-automation.py
-index 85dc07d..bf5950f 100644
---- a/scripts/core-worker-automation.py
-+++ b/scripts/core-worker-automation.py
-@@ -929,6 +929,45 @@ def _recent_built_unpublished_apk(version_name: str, source_fingerprint: str) ->
-     }
- 
- 
-+def _stale_running_apk_build_for_source(version_name: str, source_fingerprint: str) -> dict[str, Any]:
-+    """Detecta build que provavelmente terminou o Gradle mas não reportou/persistiu.
-+
-+    Se o processo do phone worker caiu entre `assembleDebug` e a publicação, o
-+    registry pode ficar só com um job `running`. Nesse caso enfileiramos
-+    `apk_publish_last`; o worker novo recupera o app-debug.apk direto do workdir.
-+    """
-+    data = _registry_raw()
-+    jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
-+    now = time.time()
-+    grace = max(300, int(os.getenv("CORE_WORKER_APK_BUILD_STALE_RUNNING_SECONDS", "900") or 900))
-+    rows: list[tuple[float, dict[str, Any]]] = []
-+    for job in jobs.values():
-+        if not isinstance(job, dict):
-+            continue
-+        if str(job.get("type") or "").replace("-", "_") != "apk_build_debug":
-+            continue
-+        if str(job.get("status") or "").lower() != "running":
-+            continue
-+        if not _apk_build_job_matches_source(job, version_name, source_fingerprint):
-+            continue
-+        updated = float(job.get("updated_at") or job.get("started_at") or job.get("created_at") or 0.0)
-+        if updated and now - updated < grace:
-+            continue
-+        rows.append((updated, job))
-+    rows.sort(key=lambda item: item[0], reverse=True)
-+    if not rows:
-+        return {}
-+    job = rows[0][1]
-+    return {
-+        "job": job,
-+        "result": {},
-+        "worker_id": str(job.get("worker_id") or job.get("target_worker_id") or ""),
-+        "artifact_path": "",
-+        "filename": f"CoreWorker-v{version_name}-debug.apk",
-+        "stale_running_build": True,
-+    }
-+
-+
- def _queue_apk_publish_last_from_build(found: dict[str, Any], *, version_name: str, version_code: int, source_fingerprint: str, source_sha256: str, notification_id: str) -> dict[str, Any]:
-     registry = get_core_workers_registry()
-     worker_id = str(found.get("worker_id") or "")
-@@ -1076,6 +1115,8 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
-         _save_pending(pending)
-         return {"ok": True, "versionName": version_name, "versionCode": version_code, "already_published": True, "sourceSha256": source.get("sha256"), "sourceFingerprint": source_fingerprint, "message": "latest.json já está publicado nessa versão/source"}
-     built_unpublished = _recent_built_unpublished_apk(version_name, source_fingerprint)
-+    if not built_unpublished:
-+        built_unpublished = _stale_running_apk_build_for_source(version_name, source_fingerprint)
-     if built_unpublished:
-         try:
-             return _queue_apk_publish_last_from_build(
-diff --git a/scripts/tts-bot-update.sh b/scripts/tts-bot-update.sh
-index b4ac665..a92d9c1 100644
---- a/scripts/tts-bot-update.sh
-+++ b/scripts/tts-bot-update.sh
-@@ -200,17 +200,19 @@ cleanup_runtime_artifacts() {
- 
- trim_alert_text() {
-   local limit="${1:-4000}"
--  python3 - "$limit" <<'PY'
--import sys
-+  # Importante: a versão anterior passava o script Python por heredoc em
-+  # `python3 -`, então o Python consumia o heredoc como stdin e NÃO lia o pipe.
-+  # Com `set -o pipefail`, o produtor do pipe recebia SIGPIPE e o updater caía
-+  # com código 141 durante `git status | trim_alert_text`. Usar `-c` preserva
-+  # stdin para o texto real e torna o helper seguro para pipelines.
-+  python3 -c 'import sys
- limit = int(sys.argv[1])
- text = sys.stdin.read().replace("\r\n", "\n").replace("\r", "\n").strip()
--if not text:
--    print("")
--    raise SystemExit
--if len(text) > limit:
--    text = text[: limit - 1].rstrip() + "…"
--print(text)
--PY
-+if text and len(text) > limit:
-+    text = text[: max(0, limit - 1)].rstrip() + "…"
-+if text:
-+    sys.stdout.write(text + "\n")
-+' "$limit" || true
- }
- 
- collect_run_log_excerpt() {
-@@ -2622,14 +2624,34 @@ clear_local_changes_marker_if_clean() {
- collect_local_tracked_changes() {
-   # Untracked locais como data/, cookies e healthcheck não bloqueiam o merge.
-   # O que bloqueia o git pull são mudanças em arquivos rastreados.
--  sudo -u ubuntu -H git status --short --untracked-files=no 2>/dev/null | trim_alert_text 1800
-+  local status_text
-+  status_text="$(sudo -u ubuntu -H git status --short --untracked-files=no 2>/dev/null || true)"
-+  printf '%s' "$status_text" | trim_alert_text 1800
- }
- 
- collect_local_tracked_files() {
-+  # Evita `head` em pipeline com pipefail: se houver muitos arquivos, o produtor
-+  # pode receber SIGPIPE e virar erro 141. A deduplicação/limite fica no Python.
-   {
-     sudo -u ubuntu -H git diff --name-only 2>/dev/null || true
-     sudo -u ubuntu -H git diff --name-only --cached 2>/dev/null || true
--  } | awk 'NF && !seen[$0]++' | head -n 40 | sed 's/^/• /' | trim_alert_text 1500
-+  } | python3 -c 'import sys
-+seen = set()
-+rows = []
-+for raw in sys.stdin:
-+    item = raw.strip()
-+    if not item or item in seen:
-+        continue
-+    seen.add(item)
-+    if len(rows) < 40:
-+        rows.append("• " + item)
-+text = "\n".join(rows).strip()
-+limit = 1500
-+if text and len(text) > limit:
-+    text = text[: limit - 1].rstrip() + "…"
-+if text:
-+    sys.stdout.write(text + "\n")
-+' || true
- }
- 
- candidate_local_changes_are_expected() {
-diff --git a/utility/commands/workers.py b/utility/commands/workers.py
-index a47c404..f5204d4 100644
---- a/utility/commands/workers.py
-+++ b/utility/commands/workers.py
-@@ -2026,10 +2026,17 @@ def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None
-                     parts.append(f"APK: build em andamento ({apk.get('versionName') or '?'})")
-                 else:
-                     parts.append(f"APK: build pendente ({apk.get('versionName') or '?'})")
--    notif = _core_worker_notification_status_text()
-+    try:
-+        notif = _core_worker_notification_status_text()
-+    except Exception:
-+        notif = ""
-     if notif:
-         parts.append(notif)
--    push = _core_worker_push_status_text()
-+    try:
-+        push = _core_worker_push_status_text()
-+    except Exception:
-+        # O painel não pode cair inteiro por causa de um resumo auxiliar.
-+        push = ""
-     if push and "aguardando APK" not in push:
-         parts.append(push)
-     return " · ".join(parts[:5]) if parts else "tudo em dia"
+-- Não libera Bedrock real, shell livre ou execução arbitrária.
++- Não muda assinatura/publicação de APK.
++- Não builda APK na VPS.
++- Não remove nem refatora módulos grandes neste patch.
+
+--- a/changed_files.txt	2026-06-05 03:48:03.412975036 +0000
++++ b/changed_files.txt	2026-06-05 03:48:54.357098230 +0000
+@@ -1,9 +1,6 @@
+-android/core-worker-app/app/build.gradle
+-deploy/termux/phone-worker/phone_worker.py
+-scripts/core-linux-embedded-binaries-build-pipeline.py
+-scripts/core-worker-automation.py
++bot.py
++config.py
+ scripts/tts-bot-update.sh
+-utility/commands/workers.py
+ PATCH_NOTES.md
+ changed_files.txt
+ patch.diff

@@ -1,11 +1,14 @@
 import asyncio
+import atexit
 import base64
+from collections import deque
 import contextlib
 import hashlib
 import json
 import logging
 import logging.handlers
 import os
+import queue
 import re
 import shutil
 import stat
@@ -33,8 +36,10 @@ _LOG_DIR.mkdir(parents=True, exist_ok=True)
 class _LowValueNoiseFilter(logging.Filter):
     """Remove ruído conhecido sem esconder erro real do bot.
 
-    - voice WebSocket 1006 do discord.py costuma ser reconexão rotineira;
-    - cancelamentos esperados do player não devem virar traceback do asyncio.
+    O bot roda em VPS pequena. Logs de heartbeat do discord.py podem trazer stack
+    inteira e repetir várias vezes durante a mesma travada; isso aumenta I/O no
+    journald justamente quando o event loop já está atrasado. Mantemos o primeiro
+    aviso e aplicamos cooldown nos repetidos.
     """
 
     _VOICE_LOGGERS = ("discord.voice", "discord.gateway", "discord.player")
@@ -43,11 +48,32 @@ class _LowValueNoiseFilter(logging.Filter):
         "MusicPlaybackError: Playback cancelado.",
     )
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_by_key: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def _allow_every(self, key: str, seconds: float) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            last = self._last_by_key.get(key, 0.0)
+            if now - last < seconds:
+                return False
+            self._last_by_key[key] = now
+            return True
+
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             logger_name = str(record.name or "")
             message = record.getMessage()
             lowered = message.lower()
+
+            if logger_name.startswith("discord.gateway") and (
+                "heartbeat blocked" in lowered or "loop thread traceback" in lowered
+            ):
+                cooldown = max(15.0, float(os.getenv("DISCORD_GATEWAY_HEARTBEAT_LOG_COOLDOWN_SECONDS", "60") or 60))
+                if not self._allow_every("discord.gateway.heartbeat_blocked", cooldown):
+                    return False
 
             if logger_name.startswith(self._VOICE_LOGGERS):
                 exc_text = ""
@@ -68,23 +94,50 @@ class _LowValueNoiseFilter(logging.Filter):
         return True
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-    handlers=[
-        logging.StreamHandler(),
-        logging.handlers.RotatingFileHandler(
-            _LOG_DIR / "bot.log",
-            maxBytes=2_000_000,
-            backupCount=3,
-            encoding="utf-8",
-        ),
-    ],
-)
-_noise_filter = _LowValueNoiseFilter()
-for _handler in logging.getLogger().handlers:
-    _handler.addFilter(_noise_filter)
+class _FastQueueHandler(logging.handlers.QueueHandler):
+    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
+        # QueueHandler padrão formata exc_info/stack antes de enfileirar. Como o
+        # listener roda no mesmo processo, podemos atrasar essa formatação para a
+        # thread de logging e manter o event loop leve.
+        return record
+
+
+def _configure_async_logging() -> logging.handlers.QueueListener:
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    file_handler = logging.handlers.RotatingFileHandler(
+        _LOG_DIR / "bot.log",
+        maxBytes=2_000_000,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+
+    log_queue: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
+    queue_handler = _FastQueueHandler(log_queue)
+    queue_handler.addFilter(_LowValueNoiseFilter())
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.INFO)
+    root.addHandler(queue_handler)
+
+    listener = logging.handlers.QueueListener(
+        log_queue,
+        stream_handler,
+        file_handler,
+        respect_handler_level=True,
+    )
+    listener.start()
+    atexit.register(listener.stop)
+    return listener
+
+
+_LOG_LISTENER = _configure_async_logging()
 logging.getLogger("discord.gateway").setLevel(logging.WARNING)
 logging.getLogger("discord.voice_client").setLevel(logging.WARNING)
 logging.getLogger("discord.player").setLevel(logging.WARNING)
@@ -213,6 +266,9 @@ class BotLocal(commands.Bot):
         self._event_loop_max_lag_ms: float = 0.0
         self._event_loop_lag_warnings: int = 0
         self._event_loop_last_warning_at: float = 0.0
+        self._event_loop_last_diagnostic_at: float = 0.0
+        self._event_loop_last_task_summary: str = ""
+        self._event_loop_recent_lags_ms: deque[float] = deque(maxlen=12)
         self._zip_update_lock = asyncio.Lock()
         self._phone_worker_unavailable_until_by_task: dict[str, float] = {}
         self._phone_worker_unavailable_last_log_by_task: dict[str, float] = {}
@@ -766,6 +822,8 @@ class BotLocal(commands.Bot):
         snapshot["event_loop_last_lag_ms"] = round(float(getattr(self, "_event_loop_last_lag_ms", 0.0) or 0.0), 1)
         snapshot["event_loop_max_lag_ms"] = round(float(getattr(self, "_event_loop_max_lag_ms", 0.0) or 0.0), 1)
         snapshot["event_loop_lag_warnings"] = int(getattr(self, "_event_loop_lag_warnings", 0) or 0)
+        snapshot["event_loop_recent_lags_ms"] = [round(float(v), 1) for v in list(getattr(self, "_event_loop_recent_lags_ms", []) or [])[-12:]]
+        snapshot["event_loop_last_task_summary"] = str(getattr(self, "_event_loop_last_task_summary", "") or "")[:500]
 
         tts_cog = self.get_cog("TTSVoice")
         if tts_cog is not None and hasattr(tts_cog, "get_tts_metrics_snapshot"):
@@ -805,9 +863,32 @@ class BotLocal(commands.Bot):
             })
             await asyncio.sleep(15)
 
+    def _event_loop_task_summary(self, *, limit: int = 8) -> str:
+        try:
+            current = asyncio.current_task()
+            counts: dict[str, int] = {}
+            for task in asyncio.all_tasks():
+                if task is current or task.done():
+                    continue
+                coro = task.get_coro()
+                qualname = getattr(coro, "__qualname__", "") or getattr(coro, "__name__", "")
+                label = str(qualname or type(coro).__name__).replace("<", "").replace(">", "")
+                if "await" in label and hasattr(coro, "cr_code"):
+                    label = getattr(coro.cr_code, "co_name", label)
+                counts[label[:90]] = counts.get(label[:90], 0) + 1
+            if not counts:
+                return "sem tasks pendentes do bot"
+            rows = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[: max(1, limit)]
+            return ", ".join(f"{name}={count}" for name, count in rows)[:500]
+        except Exception as exc:
+            return f"indisponível: {type(exc).__name__}"
+
     async def _event_loop_watchdog_loop(self):
         interval = max(0.5, float(getattr(config, "BOT_EVENT_LOOP_WATCHDOG_INTERVAL_SECONDS", 1.0) or 1.0))
         warn_after = max(0.25, float(getattr(config, "BOT_EVENT_LOOP_LAG_WARNING_SECONDS", 1.5) or 1.5))
+        warning_cooldown = max(10.0, float(getattr(config, "BOT_EVENT_LOOP_LAG_WARNING_COOLDOWN_SECONDS", 30.0) or 30.0))
+        severe_after = max(warn_after * 2.0, float(getattr(config, "BOT_EVENT_LOOP_LAG_SEVERE_SECONDS", 8.0) or 8.0))
+        diagnostic_cooldown = max(warning_cooldown, float(getattr(config, "BOT_EVENT_LOOP_LAG_DIAGNOSTIC_COOLDOWN_SECONDS", 90.0) or 90.0))
         loop = asyncio.get_running_loop()
         expected = loop.time() + interval
         while not self.is_closed():
@@ -821,15 +902,30 @@ class BotLocal(commands.Bot):
                 self._event_loop_max_lag_ms = lag_ms
             if lag >= warn_after:
                 self._event_loop_lag_warnings += 1
+                self._event_loop_recent_lags_ms.append(round(lag_ms, 1))
                 # Evita logar a cada segundo durante uma trava longa; o contador no
                 # health snapshot continua registrando todos os atrasos detectados.
+                now_mono = time.monotonic()
                 last = float(getattr(self, "_event_loop_last_warning_at", 0.0) or 0.0)
-                if time.monotonic() - last >= 10.0:
-                    self._event_loop_last_warning_at = time.monotonic()
-                    ASYNCIO_LOG.warning(
-                        "event loop atrasado %.0f ms; possível I/O síncrono ou CPU em callback async",
-                        lag_ms,
-                    )
+                if now_mono - last >= warning_cooldown:
+                    self._event_loop_last_warning_at = now_mono
+                    task_summary = ""
+                    last_diag = float(getattr(self, "_event_loop_last_diagnostic_at", 0.0) or 0.0)
+                    if lag >= severe_after and now_mono - last_diag >= diagnostic_cooldown:
+                        self._event_loop_last_diagnostic_at = now_mono
+                        task_summary = self._event_loop_task_summary()
+                        self._event_loop_last_task_summary = task_summary
+                    if task_summary:
+                        ASYNCIO_LOG.warning(
+                            "event loop atrasado %.0f ms; diagnóstico leve: %s",
+                            lag_ms,
+                            task_summary,
+                        )
+                    else:
+                        ASYNCIO_LOG.warning(
+                            "event loop atrasado %.0f ms; possível I/O síncrono ou CPU em callback async",
+                            lag_ms,
+                        )
 
     def _make_zip_update_view(
         self,

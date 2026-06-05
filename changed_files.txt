@@ -1,9 +1,6 @@
-android/core-worker-app/app/build.gradle
-deploy/termux/phone-worker/phone_worker.py
-scripts/core-linux-embedded-binaries-build-pipeline.py
-scripts/core-worker-automation.py
+bot.py
+config.py
 scripts/tts-bot-update.sh
-utility/commands/workers.py
 PATCH_NOTES.md
 changed_files.txt
 patch.diff

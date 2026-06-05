@@ -42,6 +42,17 @@ if [[ "${TTS_BOT_UPDATER_RUNNING_COPY:-0}" != "1" ]]; then
 fi
 UPDATER_RUNTIME_COPY="${TTS_BOT_UPDATER_RUNTIME_COPY:-}"
 
+# Mantém o updater em baixa prioridade para não competir com heartbeat/voz do bot
+# na VPS pequena. Filhos como git, python de validação e scripts auxiliares herdam
+# essa prioridade sem mudar a lógica do update.
+UPDATER_NICE_LEVEL="${TTS_BOT_UPDATER_NICE_LEVEL:-10}"
+UPDATER_IONICE_CLASS="${TTS_BOT_UPDATER_IONICE_CLASS:-2}"
+UPDATER_IONICE_LEVEL="${TTS_BOT_UPDATER_IONICE_LEVEL:-7}"
+renice -n "$UPDATER_NICE_LEVEL" -p "$$" >/dev/null 2>&1 || true
+if command -v ionice >/dev/null 2>&1; then
+  ionice -c "$UPDATER_IONICE_CLASS" -n "$UPDATER_IONICE_LEVEL" -p "$$" >/dev/null 2>&1 || true
+fi
+
 mkdir -p "$(dirname "$UPDATER_LOCK_FILE")" 2>/dev/null || true
 exec 9>"$UPDATER_LOCK_FILE"
 if ! flock -n 9; then

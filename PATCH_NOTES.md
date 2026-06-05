@@ -1,29 +1,29 @@
-# Patch: updater-worker-apk-publish-hardening-v2
+# Patch: event-loop-anti-lag-updater-priority
 
-Base: `repo-20260604-231706.zip`
+Base: `repo-20260605-004304.zip`
 
-## Corrige
+## Corrige / melhora
 
-- Updater não cai mais com código `141` durante a verificação de alterações locais:
-  - `trim_alert_text` agora lê o pipe corretamente usando `python -c`;
-  - `collect_local_tracked_changes` não depende mais de pipeline frágil com `git status`;
-  - `collect_local_tracked_files` não usa `head` em pipeline com `pipefail`.
-- `core-linux-embedded-binaries-build-pipeline.py verify` fica read-only:
-  - o comando de diagnóstico não regrava `embedded-binaries-source-plan.json`;
-  - evita sujar arquivos rastreados e bloquear o próximo update.
-- Painel `_worker` fica mais resistente:
-  - status de notificação/push não derruba a renderização do painel se algum resumo auxiliar falhar.
-- Publicação do APK fica mais confiável:
-  - Core Worker APK sobe para `0.5.74` / `versionCode 89`;
-  - phone worker sobe para `1.10.31`;
-  - `apk_build_debug` valida se o APK foi persistido em `artifacts/` logo após o Gradle;
-  - falha de upload/publicação não perde o build: deixa artifact salvo e `publish_pending` para republicar;
-  - `apk_publish_last` tenta republicar com erro controlado, sem estourar o job por timeout/rede;
-  - recuperação de APK órfão agora procura mais workdirs antigos;
-  - automação da VPS detecta build APK `running` antigo e enfileira `apk_publish_last` antes de rebuildar.
+- Reduz travadas causadas por logging síncrono:
+  - logs do bot agora entram em fila (`QueueHandler`) e são gravados por uma thread de logging;
+  - formatação pesada de traceback/exception fica fora do event loop;
+  - mantém arquivo `logs/bot.log` e saída no journal, sem mudar formato público.
+- Diminui spam de traceback do `discord.gateway` quando heartbeat trava:
+  - primeiro alerta continua aparecendo;
+  - alertas repetidos de heartbeat/`Loop thread traceback` entram em cooldown configurável;
+  - evita que o próprio diagnóstico gere mais I/O durante lag.
+- Watchdog do event loop ficou mais útil e menos agressivo:
+  - cooldown configurável dos avisos;
+  - guarda os últimos atrasos em `/health`;
+  - em travas severas registra um resumo leve das tasks pendentes, sem dump gigante de stack.
+- Updater passa a rodar em baixa prioridade:
+  - aplica `renice` e `ionice` no processo do updater;
+  - filhos como `git fetch`, validações Python e scripts auxiliares herdam prioridade menor;
+  - reduz disputa com heartbeat/voz do Discord na VPS pequena.
 
 ## Não muda
 
-- Não builda APK na VPS.
 - Não toca CallKeeper.
-- Não libera Bedrock real, shell livre ou execução arbitrária.
+- Não muda assinatura/publicação de APK.
+- Não builda APK na VPS.
+- Não remove nem refatora módulos grandes neste patch.
