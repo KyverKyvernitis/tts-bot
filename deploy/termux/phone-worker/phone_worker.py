@@ -62,7 +62,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.30"
+PHONE_WORKER_VERSION = "1.10.31"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -8123,7 +8123,7 @@ def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str,
         return {"ok": False, "status": int(exc.code), "error": _short_text(raw or exc, limit=240)}
     except Exception as exc:
         _remember_core_worker_network_error(exc)
-        raise
+        return {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}", "exception": type(exc).__name__}
 
 
 
@@ -8260,7 +8260,7 @@ def _recover_orphaned_apk_build_outputs(
         return {}
     wanted_fp = str(source_fingerprint or source_sha256 or "").strip()
     workdirs = sorted([p for p in build_root.glob("build-*") if p.is_dir()], key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
-    for work_dir in workdirs[:12]:
+    for work_dir in workdirs[:40]:
         project_dir = work_dir / "src" / "android" / "core-worker-app"
         if not project_dir.is_dir():
             alt = work_dir / "src" / "core-worker-app"
@@ -8389,20 +8389,23 @@ def _apply_apk_publish_last(payload: dict[str, Any]) -> dict[str, Any]:
     filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(payload.get("filename") or meta.get("filename") or apk_path.name)).strip("-._")
     publish_url = str(payload.get("publish_url") or "").strip()
     base_url, _token, _worker_id = _core_worker_auth_parts()
-    publish = _upload_core_worker_apk(
-        apk_path,
-        filename=filename,
-        version_name=version_name,
-        version_code=version_code,
-        sha256=str(meta.get("sha256") or hashlib.sha256(apk_path.read_bytes()).hexdigest()),
-        publish_url=publish_url or f"{base_url}/core-worker/app/publish",
-        changelog=list(payload.get("changelog") or ["APK republicado por worker builder"]),
-        source_sha256=str(payload.get("sourceSha256") or payload.get("source_sha256") or meta.get("sourceSha256") or ""),
-        source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or meta.get("sourceFingerprint") or ""),
-        notification_id=str(payload.get("notificationId") or payload.get("notification_id") or meta.get("notificationId") or f"apk-republish-{int(time.time())}"),
-        apk_signing_mode=str(payload.get("apkSigningMode") or meta.get("apkSigningMode") or "compat-vps-debug-keystore"),
-        apk_signing_keystore_sha256=str(payload.get("apkSigningKeystoreSha256") or meta.get("apkSigningKeystoreSha256") or ""),
-    )
+    try:
+        publish = _upload_core_worker_apk(
+            apk_path,
+            filename=filename,
+            version_name=version_name,
+            version_code=version_code,
+            sha256=str(meta.get("sha256") or hashlib.sha256(apk_path.read_bytes()).hexdigest()),
+            publish_url=publish_url or f"{base_url}/core-worker/app/publish",
+            changelog=list(payload.get("changelog") or ["APK republicado por worker builder"]),
+            source_sha256=str(payload.get("sourceSha256") or payload.get("source_sha256") or meta.get("sourceSha256") or ""),
+            source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or meta.get("sourceFingerprint") or ""),
+            notification_id=str(payload.get("notificationId") or payload.get("notification_id") or meta.get("notificationId") or f"apk-republish-{int(time.time())}"),
+            apk_signing_mode=str(payload.get("apkSigningMode") or meta.get("apkSigningMode") or "compat-vps-debug-keystore"),
+            apk_signing_keystore_sha256=str(payload.get("apkSigningKeystoreSha256") or meta.get("apkSigningKeystoreSha256") or ""),
+        )
+    except Exception as exc:
+        publish = {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}", "exception": type(exc).__name__}
     return {
         "ok": bool(publish.get("ok")),
         "summary": "APK republicado na VPS" if publish.get("ok") else "APK persistente encontrado, mas publicação falhou",
@@ -8712,9 +8715,33 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             "phoneWorkerVersion": PHONE_WORKER_VERSION,
             "created_at": time.time(),
         }
-        with contextlib.suppress(Exception):
-            _write_json_file_atomic(artifact_path.with_suffix(artifact_path.suffix + ".json"), artifact_meta)
-            _write_json_file_atomic(artifact_dir / "latest-artifact.json", artifact_meta)
+        # A etapa pós-Gradle é tão importante quanto o build: se o APK foi
+        # gerado, ele precisa virar artifact persistente antes de qualquer publish.
+        # Não esconda falhas aqui, senão o painel mostra build pendente mesmo com
+        # `BUILD SUCCESSFUL` no log.
+        if not artifact_path.is_file():
+            artifact_path.write_bytes(raw)
+        persisted_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        if persisted_sha != apk_sha:
+            artifact_path.write_bytes(raw)
+            persisted_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        if persisted_sha != apk_sha:
+            preserve_workdir = True
+            return _apk_build_failure_result(
+                summary="build terminou mas falhou persistindo artifact APK",
+                version_name=version_name,
+                version_code=version_code,
+                source_fingerprint=source_fingerprint,
+                source_sha256=str(download.get("sha256") or expected_source_sha or ""),
+                notification_id=notification_id,
+                work_dir=work_dir,
+                gradle_log=gradle_log,
+                builder_environment=builder_environment,
+                native_environment=native_environment,
+                extra={"artifact_path": str(artifact_path), "expected_sha256": apk_sha, "actual_sha256": persisted_sha},
+            )
+        _write_json_file_atomic(artifact_path.with_suffix(artifact_path.suffix + ".json"), artifact_meta)
+        _write_json_file_atomic(artifact_dir / "latest-artifact.json", artifact_meta)
         artifact_cleanup = _cleanup_old_apk_build_artifacts(build_root)
         result: dict[str, Any] = {
             "ok": True,
@@ -8746,20 +8773,23 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
         if bool(payload.get("publish", True)):
             publish_url = str(payload.get("publish_url") or "").strip()
             base_url, _token, _worker_id = _core_worker_auth_parts()
-            publish = _upload_core_worker_apk(
-                artifact_path,
-                filename=filename,
-                version_name=version_name,
-                version_code=version_code,
-                sha256=apk_sha,
-                publish_url=publish_url or f"{base_url}/core-worker/app/publish",
-                changelog=list(payload.get("changelog") or ["APK compilado por worker builder"]),
-                source_sha256=str(download.get("sha256") or expected_source_sha or ""),
-                source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or download.get("sha256") or expected_source_sha or ""),
-                notification_id=notification_id,
-                apk_signing_mode=str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
-                apk_signing_keystore_sha256=str(apk_signing.get("keystore_sha256") or ""),
-            )
+            try:
+                publish = _upload_core_worker_apk(
+                    artifact_path,
+                    filename=filename,
+                    version_name=version_name,
+                    version_code=version_code,
+                    sha256=apk_sha,
+                    publish_url=publish_url or f"{base_url}/core-worker/app/publish",
+                    changelog=list(payload.get("changelog") or ["APK compilado por worker builder"]),
+                    source_sha256=str(download.get("sha256") or expected_source_sha or ""),
+                    source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or download.get("sha256") or expected_source_sha or ""),
+                    notification_id=notification_id,
+                    apk_signing_mode=str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
+                    apk_signing_keystore_sha256=str(apk_signing.get("keystore_sha256") or ""),
+                )
+            except Exception as exc:
+                publish = {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}", "exception": type(exc).__name__}
             result["publish"] = publish
             result["publish_ok"] = bool(publish.get("ok", False))
             if not bool(publish.get("ok", False)):

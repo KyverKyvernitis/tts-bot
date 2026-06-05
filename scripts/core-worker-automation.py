@@ -929,6 +929,45 @@ def _recent_built_unpublished_apk(version_name: str, source_fingerprint: str) ->
     }
 
 
+def _stale_running_apk_build_for_source(version_name: str, source_fingerprint: str) -> dict[str, Any]:
+    """Detecta build que provavelmente terminou o Gradle mas não reportou/persistiu.
+
+    Se o processo do phone worker caiu entre `assembleDebug` e a publicação, o
+    registry pode ficar só com um job `running`. Nesse caso enfileiramos
+    `apk_publish_last`; o worker novo recupera o app-debug.apk direto do workdir.
+    """
+    data = _registry_raw()
+    jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+    now = time.time()
+    grace = max(300, int(os.getenv("CORE_WORKER_APK_BUILD_STALE_RUNNING_SECONDS", "900") or 900))
+    rows: list[tuple[float, dict[str, Any]]] = []
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("type") or "").replace("-", "_") != "apk_build_debug":
+            continue
+        if str(job.get("status") or "").lower() != "running":
+            continue
+        if not _apk_build_job_matches_source(job, version_name, source_fingerprint):
+            continue
+        updated = float(job.get("updated_at") or job.get("started_at") or job.get("created_at") or 0.0)
+        if updated and now - updated < grace:
+            continue
+        rows.append((updated, job))
+    rows.sort(key=lambda item: item[0], reverse=True)
+    if not rows:
+        return {}
+    job = rows[0][1]
+    return {
+        "job": job,
+        "result": {},
+        "worker_id": str(job.get("worker_id") or job.get("target_worker_id") or ""),
+        "artifact_path": "",
+        "filename": f"CoreWorker-v{version_name}-debug.apk",
+        "stale_running_build": True,
+    }
+
+
 def _queue_apk_publish_last_from_build(found: dict[str, Any], *, version_name: str, version_code: int, source_fingerprint: str, source_sha256: str, notification_id: str) -> dict[str, Any]:
     registry = get_core_workers_registry()
     worker_id = str(found.get("worker_id") or "")
@@ -1076,6 +1115,8 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
         _save_pending(pending)
         return {"ok": True, "versionName": version_name, "versionCode": version_code, "already_published": True, "sourceSha256": source.get("sha256"), "sourceFingerprint": source_fingerprint, "message": "latest.json já está publicado nessa versão/source"}
     built_unpublished = _recent_built_unpublished_apk(version_name, source_fingerprint)
+    if not built_unpublished:
+        built_unpublished = _stale_running_apk_build_for_source(version_name, source_fingerprint)
     if built_unpublished:
         try:
             return _queue_apk_publish_last_from_build(

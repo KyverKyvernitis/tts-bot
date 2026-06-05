@@ -2026,10 +2026,17 @@ def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None
                     parts.append(f"APK: build em andamento ({apk.get('versionName') or '?'})")
                 else:
                     parts.append(f"APK: build pendente ({apk.get('versionName') or '?'})")
-    notif = _core_worker_notification_status_text()
+    try:
+        notif = _core_worker_notification_status_text()
+    except Exception:
+        notif = ""
     if notif:
         parts.append(notif)
-    push = _core_worker_push_status_text()
+    try:
+        push = _core_worker_push_status_text()
+    except Exception:
+        # O painel não pode cair inteiro por causa de um resumo auxiliar.
+        push = ""
     if push and "aguardando APK" not in push:
         parts.append(push)
     return " · ".join(parts[:5]) if parts else "tudo em dia"

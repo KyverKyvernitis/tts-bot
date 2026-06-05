@@ -189,10 +189,8 @@ def find_cc(explicit: str | None = None) -> str | None:
     return None
 
 
-def write_source_manifest() -> Path:
-    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-    SOURCE_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+def source_manifest_payload() -> dict[str, Any]:
+    return {
         "schema": "core-worker-embedded-binaries-source-plan-v6",
         "generatedAt": int(time.time()),
         "abi": "arm64-v8a",
@@ -211,7 +209,12 @@ def write_source_manifest() -> Path:
         },
         "targets": TARGETS,
     }
-    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def write_source_manifest() -> Path:
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    SOURCE_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(source_manifest_payload(), ensure_ascii=False, indent=2) + "\n"
     SOURCE_MANIFEST.write_text(text, encoding="utf-8")
     (ASSETS_DIR / "embedded-binaries-source-plan.json").write_text(text, encoding="utf-8")
     return SOURCE_MANIFEST
@@ -453,7 +456,9 @@ def cmd_stage_base_tools(args: argparse.Namespace) -> int:
     return 0
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    write_source_manifest()
+    # Verificação local precisa ser read-only. O updater e os diagnósticos rodam
+    # este comando com frequência; gerar `embedded-binaries-source-plan.json` aqui
+    # sujava arquivos rastreados e bloqueava os próximos updates.
     command = [sys.executable, str(INTAKE), "--dry-run"]
     if args.metadata_file:
         command.extend(["--metadata-file", str(args.metadata_file.resolve())])

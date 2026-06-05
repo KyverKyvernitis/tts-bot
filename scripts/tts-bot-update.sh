@@ -200,17 +200,19 @@ cleanup_runtime_artifacts() {
 
 trim_alert_text() {
   local limit="${1:-4000}"
-  python3 - "$limit" <<'PY'
-import sys
+  # Importante: a versão anterior passava o script Python por heredoc em
+  # `python3 -`, então o Python consumia o heredoc como stdin e NÃO lia o pipe.
+  # Com `set -o pipefail`, o produtor do pipe recebia SIGPIPE e o updater caía
+  # com código 141 durante `git status | trim_alert_text`. Usar `-c` preserva
+  # stdin para o texto real e torna o helper seguro para pipelines.
+  python3 -c 'import sys
 limit = int(sys.argv[1])
 text = sys.stdin.read().replace("\r\n", "\n").replace("\r", "\n").strip()
-if not text:
-    print("")
-    raise SystemExit
-if len(text) > limit:
-    text = text[: limit - 1].rstrip() + "…"
-print(text)
-PY
+if text and len(text) > limit:
+    text = text[: max(0, limit - 1)].rstrip() + "…"
+if text:
+    sys.stdout.write(text + "\n")
+' "$limit" || true
 }
 
 collect_run_log_excerpt() {
@@ -2622,14 +2624,34 @@ clear_local_changes_marker_if_clean() {
 collect_local_tracked_changes() {
   # Untracked locais como data/, cookies e healthcheck não bloqueiam o merge.
   # O que bloqueia o git pull são mudanças em arquivos rastreados.
-  sudo -u ubuntu -H git status --short --untracked-files=no 2>/dev/null | trim_alert_text 1800
+  local status_text
+  status_text="$(sudo -u ubuntu -H git status --short --untracked-files=no 2>/dev/null || true)"
+  printf '%s' "$status_text" | trim_alert_text 1800
 }
 
 collect_local_tracked_files() {
+  # Evita `head` em pipeline com pipefail: se houver muitos arquivos, o produtor
+  # pode receber SIGPIPE e virar erro 141. A deduplicação/limite fica no Python.
   {
     sudo -u ubuntu -H git diff --name-only 2>/dev/null || true
     sudo -u ubuntu -H git diff --name-only --cached 2>/dev/null || true
-  } | awk 'NF && !seen[$0]++' | head -n 40 | sed 's/^/• /' | trim_alert_text 1500
+  } | python3 -c 'import sys
+seen = set()
+rows = []
+for raw in sys.stdin:
+    item = raw.strip()
+    if not item or item in seen:
+        continue
+    seen.add(item)
+    if len(rows) < 40:
+        rows.append("• " + item)
+text = "\n".join(rows).strip()
+limit = 1500
+if text and len(text) > limit:
+    text = text[: limit - 1].rstrip() + "…"
+if text:
+    sys.stdout.write(text + "\n")
+' || true
 }
 
 candidate_local_changes_are_expected() {

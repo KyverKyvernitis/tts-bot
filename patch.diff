@@ -1,1894 +1,421 @@
 diff --git a/PATCH_NOTES.md b/PATCH_NOTES.md
-index 74d2014..8e0afc0 100644
+index 8e0afc0..617e53c 100644
 --- a/PATCH_NOTES.md
 +++ b/PATCH_NOTES.md
-@@ -1,51 +1,27 @@
--# Patch: core-worker-base-tools-audit-v1
-+# Patch: worker-panel-apk-publish-recovery-v1
+@@ -1,27 +1,29 @@
+-# Patch: worker-panel-apk-publish-recovery-v1
++# Patch: updater-worker-apk-publish-hardening-v2
  
--Base: `repo-20260604-215859.zip`
-+Base: `repo-20260604-223619.zip`
+-Base: `repo-20260604-223619.zip`
++Base: `repo-20260604-231706.zip`
  
--## Inclui
-+## Corrige
+ ## Corrige
  
--- APK `0.5.73` / `versionCode 88`.
--- Phone worker `1.10.29`.
--- Source plan sobe para `core-worker-embedded-binaries-source-plan-v6`.
--- Pipeline sobe para `core-linux-embedded-binaries-build-pipeline-v4`.
--- Intake local sobe para `core-worker-embedded-binaries-local-v4`.
--- Preflight do runner sobe para `core-linux-runner-preflight-v5`.
--- Registro auditável das fontes pesquisadas:
--  - `proot` Termux `5.1.107.76`, `GPL-2.0`, SHA-256 do source oficial do recipe Termux.
--  - `libtalloc` `2.4.3`, `GPL-3.0`, SHA-256 do source oficial do recipe Termux.
--  - `busybox` Termux `1.37.0-r3`, `GPL-2.0`, SHA-256 do source oficial do recipe Termux.
--- Novo alvo opcional `libcoreworker_libtalloc.so` para permitir PRoot dinâmico auditado sem esconder dependência.
--- `audit-base-tools` e `stage-base-tools` agora tratam `proot + busybox` como obrigatórios e `libtalloc` como dependência auditada quando necessária.
--- Intake agora valida:
--  - ELF arm64 e tamanho mínimo;
--  - metadata de origem/licença;
--  - `sourceSha256` esperado do recipe;
--  - `binarySha256` quando informado;
--  - compliance de GPL (`completeCorrespondingSourceReady`, `licenseTextIncluded`, `sourceUrl`);
--  - `linkMode` (`static`, `self-contained` ou `dynamic-with-bundled-dependencies`);
--  - rejeição de build inseguro em prefixo vivo do worker quando declarado.
--- Preflight/runtime-summary passam a expor:
--  - `libtallocEmbedded`;
--  - `prootNeedsLibtalloc`;
--  - `prootDependencyReady`;
--  - `baseToolsReady`;
--  - asset `embedded.libtalloc`.
--- README dos binários nativos atualizado com a política de GPL/source e dependências.
-+- `_worker` / `_workers` voltam a abrir o painel:
-+  - restaura `_core_worker_push_status_text()`;
-+  - mantém o resumo de Push sem quebrar o layout quando não existe token FCM.
-+- Publicação do APK gerado pelo worker builder:
-+  - phone worker sobe para `1.10.30`;
-+  - `apk_build_debug` agora procura APK órfão em `core-worker-apk-builds/build-*` quando o Gradle já terminou com `BUILD SUCCESSFUL`, mas o processo caiu antes de copiar/publicar;
-+  - se encontrar `app-debug.apk` válido, promove para `artifacts/latest-artifact.json` e publica sem rebuild;
-+  - `apk_publish_last` também tenta essa recuperação antes de dizer que não existe artifact;
-+  - publicação passa a usar o APK persistido em `artifacts/`, não o arquivo temporário do workdir;
-+  - falha de upload/publicação não marca o build Gradle como perdido: deixa `publish_pending=True` para republicar depois.
-+- Automação da VPS:
-+  - ignora build APK `running` obviamente velho para não travar por horas;
-+  - limpa leases expirados antes de decidir se já existe job ativo;
-+  - quando um APK já foi compilado mas não publicado, enfileira `apk_publish_last` antes de rebuildar.
+-- `_worker` / `_workers` voltam a abrir o painel:
+-  - restaura `_core_worker_push_status_text()`;
+-  - mantém o resumo de Push sem quebrar o layout quando não existe token FCM.
+-- Publicação do APK gerado pelo worker builder:
+-  - phone worker sobe para `1.10.30`;
+-  - `apk_build_debug` agora procura APK órfão em `core-worker-apk-builds/build-*` quando o Gradle já terminou com `BUILD SUCCESSFUL`, mas o processo caiu antes de copiar/publicar;
+-  - se encontrar `app-debug.apk` válido, promove para `artifacts/latest-artifact.json` e publica sem rebuild;
+-  - `apk_publish_last` também tenta essa recuperação antes de dizer que não existe artifact;
+-  - publicação passa a usar o APK persistido em `artifacts/`, não o arquivo temporário do workdir;
+-  - falha de upload/publicação não marca o build Gradle como perdido: deixa `publish_pending=True` para republicar depois.
+-- Automação da VPS:
+-  - ignora build APK `running` obviamente velho para não travar por horas;
+-  - limpa leases expirados antes de decidir se já existe job ativo;
+-  - quando um APK já foi compilado mas não publicado, enfileira `apk_publish_last` antes de rebuildar.
++- Updater não cai mais com código `141` durante a verificação de alterações locais:
++  - `trim_alert_text` agora lê o pipe corretamente usando `python -c`;
++  - `collect_local_tracked_changes` não depende mais de pipeline frágil com `git status`;
++  - `collect_local_tracked_files` não usa `head` em pipeline com `pipefail`.
++- `core-linux-embedded-binaries-build-pipeline.py verify` fica read-only:
++  - o comando de diagnóstico não regrava `embedded-binaries-source-plan.json`;
++  - evita sujar arquivos rastreados e bloquear o próximo update.
++- Painel `_worker` fica mais resistente:
++  - status de notificação/push não derruba a renderização do painel se algum resumo auxiliar falhar.
++- Publicação do APK fica mais confiável:
++  - Core Worker APK sobe para `0.5.74` / `versionCode 89`;
++  - phone worker sobe para `1.10.31`;
++  - `apk_build_debug` valida se o APK foi persistido em `artifacts/` logo após o Gradle;
++  - falha de upload/publicação não perde o build: deixa artifact salvo e `publish_pending` para republicar;
++  - `apk_publish_last` tenta republicar com erro controlado, sem estourar o job por timeout/rede;
++  - recuperação de APK órfão agora procura mais workdirs antigos;
++  - automação da VPS detecta build APK `running` antigo e enfileira `apk_publish_last` antes de rebuildar.
  
--## Continua bloqueado
-+## Não muda
+ ## Não muda
  
--- Bedrock start real.
--- Box64 start.
--- Shell livre.
--- Comando remoto arbitrário.
--- Download automático de binários no APK.
--- Execução de binários importados do app-home.
--
--## Não tocado
--
--- Updater.
--- UI do app.
--- CallKeeper.
--- Música/player.
--- TTS runtime.
--- Build na VPS.
-+- Não builda APK na VPS.
-+- Não muda o APK Android/versionCode nesta correção.
-+- Não toca CallKeeper.
-+- Não libera Bedrock real, shell livre ou execução arbitrária.
+ - Não builda APK na VPS.
+-- Não muda o APK Android/versionCode nesta correção.
+ - Não toca CallKeeper.
+ - Não libera Bedrock real, shell livre ou execução arbitrária.
+diff --git a/android/core-worker-app/app/build.gradle b/android/core-worker-app/app/build.gradle
+index 5a4d83d..c800791 100644
+--- a/android/core-worker-app/app/build.gradle
++++ b/android/core-worker-app/app/build.gradle
+@@ -58,8 +58,8 @@ android {
+         applicationId "dev.core.worker"
+         minSdk 26
+         targetSdk 34
+-        versionCode 88
+-        versionName "0.5.73"
++        versionCode 89
++        versionName "0.5.74"
+ 
+         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
+         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
 diff --git a/changed_files.txt b/changed_files.txt
-index 97882bd..0149443 100644
+index 0149443..8b62dd7 100644
 --- a/changed_files.txt
 +++ b/changed_files.txt
-@@ -1,13 +1,5 @@
- PATCH_NOTES.md
- changed_files.txt
--android/core-worker-app/app/build.gradle
--android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json
--android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
--android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
--android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md
+@@ -1,5 +1,9 @@
+-PATCH_NOTES.md
+-changed_files.txt
++android/core-worker-app/app/build.gradle
  deploy/termux/phone-worker/phone_worker.py
--scripts/core-linux-embedded-binaries-build-pipeline.py
--scripts/core-linux-embedded-binaries-intake.py
--scripts/core-linux-embedded-binaries-metadata.example.json
--scripts/core-linux-embedded-binaries-sources.json
--webserver.py
-+scripts/core-worker-automation.py
-+utility/commands/workers.py
++scripts/core-linux-embedded-binaries-build-pipeline.py
+ scripts/core-worker-automation.py
++scripts/tts-bot-update.sh
+ utility/commands/workers.py
++PATCH_NOTES.md
++changed_files.txt
++patch.diff
 diff --git a/deploy/termux/phone-worker/phone_worker.py b/deploy/termux/phone-worker/phone_worker.py
-index f1aaa8e..c326261 100644
+index c326261..74b4f2f 100644
 --- a/deploy/termux/phone-worker/phone_worker.py
 +++ b/deploy/termux/phone-worker/phone_worker.py
 @@ -62,7 +62,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES *
  DEFAULT_MAX_BODY_MB = 32
  DEFAULT_MAX_OUTPUT_MB = 32
  DEFAULT_TIMEOUT_SECONDS = 45
--PHONE_WORKER_VERSION = "1.10.29"
-+PHONE_WORKER_VERSION = "1.10.30"
+-PHONE_WORKER_VERSION = "1.10.30"
++PHONE_WORKER_VERSION = "1.10.31"
  CORE_WORKER_RUNTIME_MODE = "termux"
  CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
  DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
-@@ -8126,6 +8126,181 @@ def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str,
-         raise
+@@ -8123,7 +8123,7 @@ def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str,
+         return {"ok": False, "status": int(exc.code), "error": _short_text(raw or exc, limit=240)}
+     except Exception as exc:
+         _remember_core_worker_network_error(exc)
+-        raise
++        return {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}", "exception": type(exc).__name__}
  
  
-+
-+def _apk_build_log_has_success(log_path: Path | None) -> bool:
-+    if log_path is None or not log_path.is_file():
-+        return False
-+    try:
-+        text = log_path.read_text(encoding="utf-8", errors="replace")[-20000:]
-+    except Exception:
-+        return False
-+    lowered = text.lower()
-+    if "build successful" not in lowered:
-+        return False
-+    fatal_markers = ("failure: build failed", "execution failed for task", "compilation failed")
-+    return not any(marker in lowered for marker in fatal_markers)
-+
-+
-+def _apk_build_log_value(log_path: Path | None, key: str, default: str = "") -> str:
-+    if log_path is None or not log_path.is_file():
-+        return default
-+    try:
-+        text = log_path.read_text(encoding="utf-8", errors="replace")[:12000]
-+    except Exception:
-+        return default
-+    match = re.search(rf"(?m)^\s*{re.escape(key)}\s*=\s*(.+?)\s*$", text)
-+    if not match:
-+        return default
-+    return str(match.group(1) or "").strip()
-+
-+
-+def _find_gradle_log_for_work_dir(build_root: Path, work_dir: Path) -> Path | None:
-+    logs_dir = build_root / "logs"
-+    if not logs_dir.is_dir():
-+        return None
-+    wanted = str(work_dir)
-+    logs = sorted(logs_dir.glob("*.log"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
-+    for log_path in logs[:60]:
-+        try:
-+            head = log_path.read_text(encoding="utf-8", errors="replace")[:6000]
-+        except Exception:
-+            continue
-+        if wanted in head:
-+            return log_path
-+    return None
-+
-+
-+def _persist_recovered_apk_artifact(
-+    build_root: Path,
-+    *,
-+    apk_path: Path,
-+    project_dir: Path,
-+    gradle_log: Path | None,
-+    version_name: str = "",
-+    version_code: int = 0,
-+    source_sha256: str = "",
-+    source_fingerprint: str = "",
-+    notification_id: str = "",
-+    reason: str = "recovered-orphaned-gradle-output",
-+) -> dict[str, Any]:
-+    if not apk_path.is_file():
-+        return {}
-+    detected_name, detected_code = _read_android_version(project_dir)
-+    version_name = str(version_name or detected_name or "0.0.0")
-+    try:
-+        version_code = int(version_code or detected_code or 0)
-+    except Exception:
-+        version_code = int(detected_code or 0)
-+    if gradle_log is not None:
-+        source_sha256 = source_sha256 or _apk_build_log_value(gradle_log, "source_sha256")
-+        source_fingerprint = source_fingerprint or _apk_build_log_value(gradle_log, "source_fingerprint")
-+    source_fingerprint = str(source_fingerprint or source_sha256 or "").strip()
-+    notification_id = str(notification_id or f"apk-{version_code}-{source_fingerprint[:12] or int(time.time())}").strip()
-+    raw = apk_path.read_bytes()
-+    apk_sha = hashlib.sha256(raw).hexdigest()
-+    filename = f"CoreWorker-v{version_name}-debug.apk"
-+    artifact_dir = build_root / "artifacts"
-+    artifact_dir.mkdir(parents=True, exist_ok=True)
-+    artifact_path = artifact_dir / filename
-+    if artifact_path.exists():
-+        try:
-+            existing_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
-+        except Exception:
-+            existing_sha = ""
-+        if existing_sha != apk_sha:
-+            artifact_path = artifact_dir / f"{Path(filename).stem}-{notification_id[:16] or int(time.time())}.apk"
-+    try:
-+        shutil.copy2(apk_path, artifact_path)
-+    except Exception:
-+        artifact_path.write_bytes(raw)
-+    artifact_meta = {
-+        "filename": filename,
-+        "versionName": version_name,
-+        "versionCode": version_code,
-+        "sha256": apk_sha,
-+        "bytes": len(raw),
-+        "artifact_path": str(artifact_path),
-+        "sourceFingerprint": source_fingerprint,
-+        "sourceSha256": str(source_sha256 or ""),
-+        "notificationId": notification_id,
-+        "apkSigningMode": "compat-vps-debug-keystore",
-+        "apkSigningKeystoreSha256": "",
-+        "gradle_log_path": str(gradle_log) if gradle_log is not None else "",
-+        "gradle_log_exists": bool(gradle_log and gradle_log.exists()),
-+        "gradle_log_bytes": gradle_log.stat().st_size if gradle_log is not None and gradle_log.exists() else 0,
-+        "build_successful": True,
-+        "build_result": "success",
-+        "phoneWorkerVersion": PHONE_WORKER_VERSION,
-+        "created_at": time.time(),
-+        "recovered": True,
-+        "recoveryReason": reason,
-+    }
-+    with contextlib.suppress(Exception):
-+        _write_json_file_atomic(artifact_path.with_suffix(artifact_path.suffix + ".json"), artifact_meta)
-+        _write_json_file_atomic(artifact_dir / "latest-artifact.json", artifact_meta)
-+    return artifact_meta
-+
-+
-+def _recover_orphaned_apk_build_outputs(
-+    build_root: Path,
-+    *,
-+    version_name: str = "",
-+    version_code: int = 0,
-+    source_fingerprint: str = "",
-+    source_sha256: str = "",
-+    notification_id: str = "",
-+) -> dict[str, Any]:
-+    """Recupera APK gerado quando o processo caiu depois do Gradle.
-+
-+    Em Android/Termux o processo pode ser morto depois de `assembleDebug` e antes
-+    da cópia para artifacts/latest. O Gradle já deixou `app-debug.apk` no workdir;
-+    esse helper promove esse APK para artifacts e permite republicar sem rebuild.
-+    """
-+    if not build_root.is_dir():
-+        return {}
-+    wanted_fp = str(source_fingerprint or source_sha256 or "").strip()
-+    workdirs = sorted([p for p in build_root.glob("build-*") if p.is_dir()], key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
-+    for work_dir in workdirs[:12]:
-+        project_dir = work_dir / "src" / "android" / "core-worker-app"
-+        if not project_dir.is_dir():
-+            alt = work_dir / "src" / "core-worker-app"
-+            if alt.is_dir():
-+                project_dir = alt
-+        if not project_dir.is_dir():
-+            continue
-+        detected_name, detected_code = _read_android_version(project_dir)
-+        if version_name and detected_name and str(detected_name) != str(version_name):
-+            continue
-+        if int(version_code or 0) and int(detected_code or 0) and int(detected_code or 0) != int(version_code or 0):
-+            continue
-+        gradle_log = _find_gradle_log_for_work_dir(build_root, work_dir)
-+        if not _apk_build_log_has_success(gradle_log):
-+            continue
-+        log_fp = _apk_build_log_value(gradle_log, "source_fingerprint")
-+        log_sha = _apk_build_log_value(gradle_log, "source_sha256")
-+        if wanted_fp:
-+            hay = {str(log_fp or "").strip(), str(log_sha or "").strip()}
-+            short = wanted_fp[:12]
-+            if wanted_fp not in hay and short and not any(short and short in value for value in hay if value):
-+                continue
-+        apk_dir = project_dir / "app" / "build" / "outputs" / "apk" / "debug"
-+        apk_candidates = sorted(apk_dir.glob("*.apk"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True) if apk_dir.is_dir() else []
-+        for apk_path in apk_candidates:
-+            if not apk_path.is_file() or apk_path.stat().st_size < 1024 * 1024:
-+                continue
-+            return _persist_recovered_apk_artifact(
-+                build_root,
-+                apk_path=apk_path,
-+                project_dir=project_dir,
-+                gradle_log=gradle_log,
-+                version_name=version_name or detected_name,
-+                version_code=int(version_code or detected_code or 0),
-+                source_sha256=source_sha256 or log_sha,
-+                source_fingerprint=source_fingerprint or log_fp or source_sha256,
-+                notification_id=notification_id,
-+            )
-+    return {}
-+
- def _latest_apk_artifact_metadata(build_root: Path) -> dict[str, Any]:
-     artifact_dir = build_root / "artifacts"
-     candidates: list[Path] = []
-@@ -8190,6 +8365,15 @@ def _apply_apk_publish_last(payload: dict[str, Any]) -> dict[str, Any]:
-                 "sourceSha256": str(payload.get("sourceSha256") or payload.get("source_sha256") or ""),
-                 "notificationId": str(payload.get("notificationId") or payload.get("notification_id") or f"apk-republish-{int(time.time())}"),
-             }
-+    if not meta:
-+        meta = _recover_orphaned_apk_build_outputs(
-+            build_root,
-+            version_name=str(payload.get("versionName") or payload.get("version_name") or ""),
-+            version_code=int(payload.get("versionCode") or payload.get("version_code") or 0),
-+            source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or ""),
-+            source_sha256=str(payload.get("sourceSha256") or payload.get("source_sha256") or ""),
-+            notification_id=str(payload.get("notificationId") or payload.get("notification_id") or ""),
-+        )
-     if not meta:
-         meta = _latest_apk_artifact_metadata(build_root)
-     if not meta:
-@@ -8283,6 +8467,43 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
-         )
  
-     try:
-+        recovered_meta = _recover_orphaned_apk_build_outputs(
-+            build_root,
+@@ -8260,7 +8260,7 @@ def _recover_orphaned_apk_build_outputs(
+         return {}
+     wanted_fp = str(source_fingerprint or source_sha256 or "").strip()
+     workdirs = sorted([p for p in build_root.glob("build-*") if p.is_dir()], key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
+-    for work_dir in workdirs[:12]:
++    for work_dir in workdirs[:40]:
+         project_dir = work_dir / "src" / "android" / "core-worker-app"
+         if not project_dir.is_dir():
+             alt = work_dir / "src" / "core-worker-app"
+@@ -8389,20 +8389,23 @@ def _apply_apk_publish_last(payload: dict[str, Any]) -> dict[str, Any]:
+     filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(payload.get("filename") or meta.get("filename") or apk_path.name)).strip("-._")
+     publish_url = str(payload.get("publish_url") or "").strip()
+     base_url, _token, _worker_id = _core_worker_auth_parts()
+-    publish = _upload_core_worker_apk(
+-        apk_path,
+-        filename=filename,
+-        version_name=version_name,
+-        version_code=version_code,
+-        sha256=str(meta.get("sha256") or hashlib.sha256(apk_path.read_bytes()).hexdigest()),
+-        publish_url=publish_url or f"{base_url}/core-worker/app/publish",
+-        changelog=list(payload.get("changelog") or ["APK republicado por worker builder"]),
+-        source_sha256=str(payload.get("sourceSha256") or payload.get("source_sha256") or meta.get("sourceSha256") or ""),
+-        source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or meta.get("sourceFingerprint") or ""),
+-        notification_id=str(payload.get("notificationId") or payload.get("notification_id") or meta.get("notificationId") or f"apk-republish-{int(time.time())}"),
+-        apk_signing_mode=str(payload.get("apkSigningMode") or meta.get("apkSigningMode") or "compat-vps-debug-keystore"),
+-        apk_signing_keystore_sha256=str(payload.get("apkSigningKeystoreSha256") or meta.get("apkSigningKeystoreSha256") or ""),
+-    )
++    try:
++        publish = _upload_core_worker_apk(
++            apk_path,
++            filename=filename,
 +            version_name=version_name,
 +            version_code=version_code,
-+            source_fingerprint=source_fingerprint,
-+            source_sha256=expected_source_sha,
-+            notification_id=notification_id,
++            sha256=str(meta.get("sha256") or hashlib.sha256(apk_path.read_bytes()).hexdigest()),
++            publish_url=publish_url or f"{base_url}/core-worker/app/publish",
++            changelog=list(payload.get("changelog") or ["APK republicado por worker builder"]),
++            source_sha256=str(payload.get("sourceSha256") or payload.get("source_sha256") or meta.get("sourceSha256") or ""),
++            source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or meta.get("sourceFingerprint") or ""),
++            notification_id=str(payload.get("notificationId") or payload.get("notification_id") or meta.get("notificationId") or f"apk-republish-{int(time.time())}"),
++            apk_signing_mode=str(payload.get("apkSigningMode") or meta.get("apkSigningMode") or "compat-vps-debug-keystore"),
++            apk_signing_keystore_sha256=str(payload.get("apkSigningKeystoreSha256") or meta.get("apkSigningKeystoreSha256") or ""),
 +        )
-+        if recovered_meta and bool(payload.get("publish", True)):
-+            publish_result = _apply_apk_publish_last({
-+                **payload,
-+                "artifact_path": recovered_meta.get("artifact_path"),
-+                "filename": recovered_meta.get("filename"),
-+                "versionName": recovered_meta.get("versionName") or version_name,
-+                "versionCode": recovered_meta.get("versionCode") or version_code,
-+                "sourceFingerprint": recovered_meta.get("sourceFingerprint") or source_fingerprint,
-+                "sourceSha256": recovered_meta.get("sourceSha256") or expected_source_sha,
-+                "notificationId": recovered_meta.get("notificationId") or notification_id,
-+                "changelog": payload.get("changelog") or ["APK recuperado de build anterior e publicado pelo worker builder"],
-+            })
-+            publish_result["recovered_from_orphaned_output"] = True
-+            publish_result["artifact_meta"] = recovered_meta
-+            return publish_result
-+        elif recovered_meta:
-+            return {
-+                "ok": True,
-+                "build_gradle_ok": True,
-+                "artifact_found": True,
-+                "recovered_from_orphaned_output": True,
-+                "summary": f"APK {recovered_meta.get('versionName') or version_name} recuperado de build anterior",
-+                "versionName": recovered_meta.get("versionName") or version_name,
-+                "versionCode": recovered_meta.get("versionCode") or version_code,
-+                "artifact_path": recovered_meta.get("artifact_path"),
-+                "apk": {"filename": recovered_meta.get("filename"), "bytes": recovered_meta.get("bytes"), "sha256": recovered_meta.get("sha256"), "artifact_path": recovered_meta.get("artifact_path")},
-+                "artifact_meta": recovered_meta,
-+            }
-+
-         lock_handle, lock_info = _try_acquire_apk_build_file_lock(build_root)
-         if lock_handle is None:
-             return _apk_build_failure_result(
-@@ -8526,7 +8747,7 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
++    except Exception as exc:
++        publish = {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}", "exception": type(exc).__name__}
+     return {
+         "ok": bool(publish.get("ok")),
+         "summary": "APK republicado na VPS" if publish.get("ok") else "APK persistente encontrado, mas publicação falhou",
+@@ -8712,9 +8715,33 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
+             "phoneWorkerVersion": PHONE_WORKER_VERSION,
+             "created_at": time.time(),
+         }
+-        with contextlib.suppress(Exception):
+-            _write_json_file_atomic(artifact_path.with_suffix(artifact_path.suffix + ".json"), artifact_meta)
+-            _write_json_file_atomic(artifact_dir / "latest-artifact.json", artifact_meta)
++        # A etapa pós-Gradle é tão importante quanto o build: se o APK foi
++        # gerado, ele precisa virar artifact persistente antes de qualquer publish.
++        # Não esconda falhas aqui, senão o painel mostra build pendente mesmo com
++        # `BUILD SUCCESSFUL` no log.
++        if not artifact_path.is_file():
++            artifact_path.write_bytes(raw)
++        persisted_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
++        if persisted_sha != apk_sha:
++            artifact_path.write_bytes(raw)
++            persisted_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
++        if persisted_sha != apk_sha:
++            preserve_workdir = True
++            return _apk_build_failure_result(
++                summary="build terminou mas falhou persistindo artifact APK",
++                version_name=version_name,
++                version_code=version_code,
++                source_fingerprint=source_fingerprint,
++                source_sha256=str(download.get("sha256") or expected_source_sha or ""),
++                notification_id=notification_id,
++                work_dir=work_dir,
++                gradle_log=gradle_log,
++                builder_environment=builder_environment,
++                native_environment=native_environment,
++                extra={"artifact_path": str(artifact_path), "expected_sha256": apk_sha, "actual_sha256": persisted_sha},
++            )
++        _write_json_file_atomic(artifact_path.with_suffix(artifact_path.suffix + ".json"), artifact_meta)
++        _write_json_file_atomic(artifact_dir / "latest-artifact.json", artifact_meta)
+         artifact_cleanup = _cleanup_old_apk_build_artifacts(build_root)
+         result: dict[str, Any] = {
+             "ok": True,
+@@ -8746,20 +8773,23 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
+         if bool(payload.get("publish", True)):
              publish_url = str(payload.get("publish_url") or "").strip()
              base_url, _token, _worker_id = _core_worker_auth_parts()
-             publish = _upload_core_worker_apk(
--                apk_path,
-+                artifact_path,
-                 filename=filename,
-                 version_name=version_name,
-                 version_code=version_code,
-@@ -8542,8 +8763,9 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
+-            publish = _upload_core_worker_apk(
+-                artifact_path,
+-                filename=filename,
+-                version_name=version_name,
+-                version_code=version_code,
+-                sha256=apk_sha,
+-                publish_url=publish_url or f"{base_url}/core-worker/app/publish",
+-                changelog=list(payload.get("changelog") or ["APK compilado por worker builder"]),
+-                source_sha256=str(download.get("sha256") or expected_source_sha or ""),
+-                source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or download.get("sha256") or expected_source_sha or ""),
+-                notification_id=notification_id,
+-                apk_signing_mode=str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
+-                apk_signing_keystore_sha256=str(apk_signing.get("keystore_sha256") or ""),
+-            )
++            try:
++                publish = _upload_core_worker_apk(
++                    artifact_path,
++                    filename=filename,
++                    version_name=version_name,
++                    version_code=version_code,
++                    sha256=apk_sha,
++                    publish_url=publish_url or f"{base_url}/core-worker/app/publish",
++                    changelog=list(payload.get("changelog") or ["APK compilado por worker builder"]),
++                    source_sha256=str(download.get("sha256") or expected_source_sha or ""),
++                    source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or download.get("sha256") or expected_source_sha or ""),
++                    notification_id=notification_id,
++                    apk_signing_mode=str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
++                    apk_signing_keystore_sha256=str(apk_signing.get("keystore_sha256") or ""),
++                )
++            except Exception as exc:
++                publish = {"ok": False, "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}", "exception": type(exc).__name__}
              result["publish"] = publish
              result["publish_ok"] = bool(publish.get("ok", False))
              if not bool(publish.get("ok", False)):
--                result["ok"] = False
--                result["summary"] = "APK compilado, mas publicação na VPS falhou"
-+                result["ok"] = True
-+                result["summary"] = "APK compilado; publicação na VPS ficou pendente"
-+                result["publish_pending"] = True
-                 if publish.get("error"):
-                     result["publish_error"] = str(publish.get("error"))[:240]
-         else:
-diff --git a/patch.diff b/patch.diff
-index 6ef85a0..104618a 100644
---- a/patch.diff
-+++ b/patch.diff
-@@ -1,1303 +0,0 @@
--diff -ruN orig_patch/tts-bot-main/PATCH_NOTES.md work_patch/tts-bot-main/PATCH_NOTES.md
----- orig_patch/tts-bot-main/PATCH_NOTES.md	2026-06-04 21:51:22.000000000 +0000
--+++ work_patch/tts-bot-main/PATCH_NOTES.md	2026-06-05 01:12:09.236441045 +0000
--@@ -1,26 +1,36 @@
---# Patch: core-worker-build-tracking-runtime-summary-base-tools-v1
--+# Patch: core-worker-base-tools-audit-v1
-- 
---Base: `repo-20260604-213007.zip`
--+Base: `repo-20260604-215859.zip`
-- 
-- ## Inclui
-- 
---- APK `0.5.72` / `versionCode 87`.
---- Phone worker `1.10.28`.
---- `runtime-summary` agora enriquece o heartbeat compacto com o último preflight Core Linux válido.
---- `coreLinux.runnerPreflight.embedded` e `coreLinux.embedded` passam a expor, de forma estável:
---  - `executor`, `runner`, `proot`, `busybox`, `box64`;
---  - `present`, `embeddedInApk`, `allowedForFutureExecution`, `canExecute`, `placeholder`, `size`, `sha256`, `detectedBy`.
---- Corrige o caso onde o painel/comando lia `runner_* = null` mesmo depois do preflight real confirmar `runner` embutido no APK.
---- Corrige falso estado de build falho quando já existe `latest.json` publicado para a mesma versão/source.
---- Automação de APK ignora falha antiga se houver build/publicação mais nova bem-sucedida para a mesma versão/source.
---- Builder do phone worker passa a salvar no `.apk.json` e `latest-artifact.json`:
---  - `gradle_log_path`, `gradle_log_exists`, `gradle_log_bytes`;
---  - `build_successful`, `build_result`, `phoneWorkerVersion`.
---- Limpeza segura de artifacts antigos no builder (`PHONE_WORKER_APK_BUILD_KEEP_ARTIFACTS`, padrão 12), sem tocar no último APK nem no `latest-artifact.json`.
---- Reintroduz o asset `assets/core-linux/embedded-binaries-source-plan.json` no source do APK.
---- Pipeline de binários sobe para source plan `v5` e adiciona comandos seguros:
---  - `audit-base-tools`: valida apenas `proot` + `busybox` em dry-run;
---  - `stage-base-tools`: importa apenas `proot` + `busybox` auditados; `box64` continua para etapa separada.
--+- APK `0.5.73` / `versionCode 88`.
--+- Phone worker `1.10.29`.
--+- Source plan sobe para `core-worker-embedded-binaries-source-plan-v6`.
--+- Pipeline sobe para `core-linux-embedded-binaries-build-pipeline-v4`.
--+- Intake local sobe para `core-worker-embedded-binaries-local-v4`.
--+- Preflight do runner sobe para `core-linux-runner-preflight-v5`.
--+- Registro auditável das fontes pesquisadas:
--+  - `proot` Termux `5.1.107.76`, `GPL-2.0`, SHA-256 do source oficial do recipe Termux.
--+  - `libtalloc` `2.4.3`, `GPL-3.0`, SHA-256 do source oficial do recipe Termux.
--+  - `busybox` Termux `1.37.0-r3`, `GPL-2.0`, SHA-256 do source oficial do recipe Termux.
--+- Novo alvo opcional `libcoreworker_libtalloc.so` para permitir PRoot dinâmico auditado sem esconder dependência.
--+- `audit-base-tools` e `stage-base-tools` agora tratam `proot + busybox` como obrigatórios e `libtalloc` como dependência auditada quando necessária.
--+- Intake agora valida:
--+  - ELF arm64 e tamanho mínimo;
--+  - metadata de origem/licença;
--+  - `sourceSha256` esperado do recipe;
--+  - `binarySha256` quando informado;
--+  - compliance de GPL (`completeCorrespondingSourceReady`, `licenseTextIncluded`, `sourceUrl`);
--+  - `linkMode` (`static`, `self-contained` ou `dynamic-with-bundled-dependencies`);
--+  - rejeição de build inseguro em prefixo vivo do worker quando declarado.
--+- Preflight/runtime-summary passam a expor:
--+  - `libtallocEmbedded`;
--+  - `prootNeedsLibtalloc`;
--+  - `prootDependencyReady`;
--+  - `baseToolsReady`;
--+  - asset `embedded.libtalloc`.
--+- README dos binários nativos atualizado com a política de GPL/source e dependências.
-- 
-- ## Continua bloqueado
-- 
--diff -ruN orig_patch/tts-bot-main/android/core-worker-app/app/build.gradle work_patch/tts-bot-main/android/core-worker-app/app/build.gradle
----- orig_patch/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-04 21:51:22.000000000 +0000
--+++ work_patch/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 01:09:43.712020331 +0000
--@@ -58,8 +58,8 @@
--         applicationId "dev.core.worker"
--         minSdk 26
--         targetSdk 34
---        versionCode 87
---        versionName "0.5.72"
--+        versionCode 88
--+        versionName "0.5.73"
-- 
--         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
--         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
--@@ -137,6 +137,7 @@
--         [key: "runner",  file: "libcoreworker_runner.so",  minBytes: 1024L,  required: true],
--         [key: "proot",   file: "libcoreworker_proot.so",   minBytes: 32768L, required: false],
--         [key: "busybox", file: "libcoreworker_busybox.so", minBytes: 32768L, required: false],
--+        [key: "libtalloc", file: "libcoreworker_libtalloc.so", minBytes: 8192L, required: false],
--         [key: "box64",   file: "libcoreworker_box64.so",   minBytes: 131072L, required: false],
-- ]
-- 
--@@ -187,7 +188,7 @@
-- tasks.register("coreLinuxEmbeddedBinariesPlan") {
--     description = "Mostra o plano local de build/import dos binários Core Linux sem baixar ou executar nada."
--     doLast {
---        println("Core Linux embedded binaries pipeline v1")
--+        println("Core Linux embedded binaries pipeline v2")
--         println("  oficiais em: src/main/jniLibs/arm64-v8a")
--         println("  manifesto:   src/main/assets/core-linux/embedded-binaries-manifest.json")
--         println("  script:      scripts/core-linux-embedded-binaries-build-pipeline.py")
--diff -ruN orig_patch/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json work_patch/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json
----- orig_patch/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json	1970-01-01 00:00:00.000000000 +0000
--+++ work_patch/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json	2026-06-05 01:13:02.664786331 +0000
--@@ -0,0 +1,142 @@
--+{
--+  "schema": "core-worker-embedded-binaries-source-plan-v6",
--+  "generatedAt": 1780621982,
--+  "abi": "arm64-v8a",
--+  "androidMinSdk": 26,
--+  "policy": {
--+    "noRuntimeDownload": true,
--+    "noPlaceholder": true,
--+    "noBedrockBundledInApk": true,
--+    "noExecutionDuringBuild": true,
--+    "jniLibsOnlyForFutureExecution": true,
--+    "runnerRequiredAtBuild": true,
--+    "metadataRequiredBeforeBundling": true,
--+    "sizeAndSha256Required": true,
--+    "externalTargetsRequireApprovedMetadata": true,
--+    "approvedExternalLicenseStatuses": [
--+      "redistributable-verified",
--+      "source-built",
--+      "verified-audited"
--+    ]
--+  },
--+  "targets": {
--+    "runner": {
--+      "official": "libcoreworker_runner.so",
--+      "aliases": [
--+        "libcoreworker_runner.so",
--+        "coreworker_runner",
--+        "core-runner",
--+        "runner"
--+      ],
--+      "source": "android/core-worker-app/app/src/main/cpp/coreworker_runner.c",
--+      "origin": "local-core-worker",
--+      "sourceKind": "project-source",
--+      "license": "private-internal",
--+      "licenseStatus": "internal-project",
--+      "minBytes": 1024,
--+      "requiredAtBuild": true
--+    },
--+    "proot": {
--+      "official": "libcoreworker_proot.so",
--+      "aliases": [
--+        "libcoreworker_proot.so",
--+        "libproot.so",
--+        "proot"
--+      ],
--+      "origin": "termux-package-source-reference",
--+      "sourceKind": "external-source",
--+      "upstream": "https://github.com/termux/proot",
--+      "homepage": "https://proot-me.github.io/",
--+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
--+      "packageVersion": "5.1.107.76",
--+      "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
--+      "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
--+      "license": "GPL-2.0",
--+      "licenseStatus": "verify-before-bundling",
--+      "minBytes": 32768,
--+      "runtimeDependencies": [
--+        "libtalloc"
--+      ],
--+      "dependencyPolicy": "se o binário não for estático, libtalloc precisa ser auditado/embutido junto",
--+      "buildNotes": [
--+        "usar build arm64/aarch64 auditado; não baixar em runtime",
--+        "Termux proot depende de libtalloc; não marcar pronto sem dependência estática ou libtalloc embutido",
--+        "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner"
--+      ]
--+    },
--+    "libtalloc": {
--+      "official": "libcoreworker_libtalloc.so",
--+      "aliases": [
--+        "libcoreworker_libtalloc.so",
--+        "libtalloc.so",
--+        "libtalloc.so.2",
--+        "libtalloc"
--+      ],
--+      "origin": "termux-package-source-reference",
--+      "sourceKind": "external-source-dependency",
--+      "upstream": "https://www.samba.org/ftp/talloc/",
--+      "homepage": "https://talloc.samba.org/talloc/doc/html/index.html",
--+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libtalloc/build.sh",
--+      "packageVersion": "2.4.3",
--+      "sourceArchive": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
--+      "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
--+      "license": "GPL-3.0",
--+      "licenseStatus": "verify-before-bundling",
--+      "minBytes": 8192,
--+      "onDeviceBuildSafe": false,
--+      "buildNotes": [
--+        "dependência do recipe Termux do proot",
--+        "recipe Termux remove/reescreve arquivos do prefixo; não buildar no Termux vivo do worker",
--+        "preferir build isolado/offline e empacotar apenas artefato auditado"
--+      ]
--+    },
--+    "busybox": {
--+      "official": "libcoreworker_busybox.so",
--+      "aliases": [
--+        "libcoreworker_busybox.so",
--+        "libbusybox.so",
--+        "busybox"
--+      ],
--+      "origin": "termux-package-source-reference",
--+      "sourceKind": "external-source",
--+      "upstream": "https://busybox.net/downloads/",
--+      "homepage": "https://busybox.net/",
--+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
--+      "packageVersion": "1.37.0-r3",
--+      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
--+      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
--+      "license": "GPL-2.0",
--+      "licenseStatus": "verify-before-bundling",
--+      "minBytes": 32768,
--+      "runtimeDependencies": [
--+        "libandroid-selinux"
--+      ],
--+      "dependencyPolicy": "usar build estático/self-contained ou registrar/bundlar dependências dinâmicas auditadas",
--+      "onDeviceBuildSafe": false,
--+      "buildNotes": [
--+        "o recipe Termux marca BusyBox como não seguro para build on-device",
--+        "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
--+        "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
--+      ]
--+    },
--+    "box64": {
--+      "official": "libcoreworker_box64.so",
--+      "aliases": [
--+        "libcoreworker_box64.so",
--+        "libbox64.so",
--+        "box64"
--+      ],
--+      "origin": "manual-build-from-upstream-source",
--+      "sourceKind": "external-source",
--+      "upstream": "https://github.com/ptitSeb/box64",
--+      "license": "MIT",
--+      "licenseStatus": "verify-before-bundling",
--+      "minBytes": 131072,
--+      "blockedUntil": "proot-busybox-rootfs-ready",
--+      "buildNotes": [
--+        "Box64 é userspace Linux x86_64 emulator para hosts ARM64; validar dentro do rootfs Linux/proot",
--+        "não executar em Android puro; runner real continua bloqueado até preflight completo"
--+      ]
--+    }
--+  }
--+}
--diff -ruN orig_patch/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java work_patch/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
----- orig_patch/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-04 20:57:36.000000000 +0000
--+++ work_patch/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 01:08:26.436414210 +0000
--@@ -20,7 +20,7 @@
-- import java.util.zip.ZipFile;
-- 
-- /**
--- * Preflight v4 do runner Core Linux.
--+ * Preflight v5 do runner Core Linux.
--  *
--  * Esta etapa apenas detecta requisitos e escreve estado. Ela não inicia Bedrock,
--  * não executa Box64/proot/busybox, não abre shell livre e não aceita comando remoto.
--@@ -56,16 +56,19 @@
--             String[] runnerNames = new String[]{"libcoreworker_runner.so"};
--             String[] prootNames = new String[]{"libcoreworker_proot.so", "libproot.so"};
--             String[] busyboxNames = new String[]{"libcoreworker_busybox.so", "libbusybox.so"};
--+            String[] libtallocNames = new String[]{"libcoreworker_libtalloc.so", "libtalloc.so", "libtalloc.so.2"};
--             String[] box64Names = new String[]{"libcoreworker_box64.so", "libbox64.so"};
--             File embeddedExecutor = firstExisting(nativeDir, executorNames);
--             File embeddedRunner = firstExisting(nativeDir, runnerNames);
--             File embeddedProot = firstExisting(nativeDir, prootNames);
--             File embeddedBusybox = firstExisting(nativeDir, busyboxNames);
--+            File embeddedLibtalloc = firstExisting(nativeDir, libtallocNames);
--             File embeddedBox64 = firstExisting(nativeDir, box64Names);
--             JSONObject apkExecutor = apkNativeInfo(context, executorNames);
--             JSONObject apkRunner = apkNativeInfo(context, runnerNames);
--             JSONObject apkProot = apkNativeInfo(context, prootNames);
--             JSONObject apkBusybox = apkNativeInfo(context, busyboxNames);
--+            JSONObject apkLibtalloc = apkNativeInfo(context, libtallocNames);
--             JSONObject apkBox64 = apkNativeInfo(context, box64Names);
--             File writableBox64 = firstExisting(new File(base, "bin/box64"), new File(base, "box64/box64"));
--             boolean writableBox64Blocked = writableBox64 != null && Build.VERSION.SDK_INT >= 29 && isInside(writableBox64, dataDir);
--@@ -82,20 +85,25 @@
--             boolean runnerLoadedByJni = runnerGuard.optBoolean("loaded", false);
--             boolean executorLoadedByJni = nativeExecutor.optJSONObject("nativeBridge") != null
--                     && nativeExecutor.optJSONObject("nativeBridge").optBoolean("loaded", false);
---            JSONObject embeddedAssets = embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedBusybox, embeddedBox64,
---                    executorNames, runnerNames, prootNames, busyboxNames, box64Names,
---                    executorLoadedByJni, runnerLoadedByJni, apkExecutor, apkRunner, apkProot, apkBusybox, apkBox64,
--+            JSONObject embeddedAssets = embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedBusybox, embeddedLibtalloc, embeddedBox64,
--+                    executorNames, runnerNames, prootNames, busyboxNames, libtallocNames, box64Names,
--+                    executorLoadedByJni, runnerLoadedByJni, apkExecutor, apkRunner, apkProot, apkBusybox, apkLibtalloc, apkBox64,
--                     localManifest, sourcePlan);
--             JSONObject runnerInfo = embeddedAssets.optJSONObject("runner") == null ? new JSONObject() : embeddedAssets.optJSONObject("runner");
--             JSONObject prootInfo = embeddedAssets.optJSONObject("proot") == null ? new JSONObject() : embeddedAssets.optJSONObject("proot");
--             JSONObject busyboxInfo = embeddedAssets.optJSONObject("busybox") == null ? new JSONObject() : embeddedAssets.optJSONObject("busybox");
--+            JSONObject libtallocInfo = embeddedAssets.optJSONObject("libtalloc") == null ? new JSONObject() : embeddedAssets.optJSONObject("libtalloc");
--             JSONObject box64Info = embeddedAssets.optJSONObject("box64") == null ? new JSONObject() : embeddedAssets.optJSONObject("box64");
--             boolean runnerAssetReady = runnerInfo.optBoolean("allowedForFutureExecution", false);
--             boolean prootReady = prootInfo.optBoolean("allowedForFutureExecution", false);
--             boolean busyboxReady = busyboxInfo.optBoolean("allowedForFutureExecution", false);
--+            boolean libtallocReady = libtallocInfo.optBoolean("allowedForFutureExecution", false);
--             boolean box64Ready = box64Info.optBoolean("allowedForFutureExecution", false);
--             boolean bedrockServerReady = bedrockServer != null && bedrockServer.exists();
--             boolean propertiesReady = properties != null && properties.exists();
--+            boolean prootNeedsLibtalloc = prootReady && metadataNeedsDependency(prootInfo, "libtalloc");
--+            boolean prootDependencyReady = !prootNeedsLibtalloc || libtallocReady;
--+            boolean baseToolsReady = prootReady && busyboxReady && prootDependencyReady;
-- 
--             JSONArray checks = new JSONArray();
--             JSONArray missing = new JSONArray();
--@@ -108,6 +116,9 @@
--             addCheck(checks, missing, "core_runner_asset", "core-runner embutido no APK", runnerAssetReady, "embutir core-runner arm64 como libcoreworker_runner.so");
--             addCheck(checks, missing, "proot_embedded", "proot embutido no APK", prootReady, "embutir proot arm64 auditado com metadata aprovada");
--             addCheck(checks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox arm64 auditado com metadata aprovada");
--+            if (prootNeedsLibtalloc) {
--+                addCheck(checks, missing, "libtalloc_embedded", "libtalloc embutido no APK", libtallocReady, "embutir libtalloc arm64 auditado junto com proot dinâmico");
--+            }
--             addCheck(checks, missing, "box64_embedded", "Box64 embutido no APK", box64Ready, "embutir Box64 arm64 auditado com metadata aprovada; não usar binário baixado executável");
--             addCheck(checks, missing, "bedrock_server", "bedrock_server presente", bedrockServerReady, "preparar arquivos do servidor Bedrock");
--             addCheck(checks, missing, "server_properties", "server.properties presente", propertiesReady, "gerar ou revisar server.properties");
--@@ -117,11 +128,15 @@
--             }
--             addMetadataWarning(warnings, "proot", prootInfo);
--             addMetadataWarning(warnings, "busybox", busyboxInfo);
--+            addMetadataWarning(warnings, "libtalloc", libtallocInfo);
--             addMetadataWarning(warnings, "box64", box64Info);
--+            if (prootReady && prootNeedsLibtalloc && !libtallocReady) {
--+                warnings.put("proot parece depender de libtalloc; execução futura segue bloqueada até libtalloc auditado estar embutido");
--+            }
--             if (Build.VERSION.SDK_INT >= 29) {
--                 warnings.put("execução futura deve usar componentes embutidos no APK/native libs; binários importados não são executados");
--             }
---            blockers.put("runner real permanece bloqueado no preflight v4");
--+            blockers.put("runner real permanece bloqueado no preflight v5");
--             blockers.put("Bedrock start real permanece bloqueado");
--             blockers.put("shell livre permanece bloqueado");
--             blockers.put("comando remoto arbitrário permanece bloqueado");
--@@ -134,7 +149,7 @@
--                 nextActions.put("aguardar patch do runner nativo controlado; execução real ainda não liberada");
--             }
-- 
---            boolean requirementsReady = rootfsReal && nativeExecutorReady && runnerAssetReady && prootReady && busyboxReady && box64Ready
--+            boolean requirementsReady = rootfsReal && nativeExecutorReady && runnerAssetReady && prootReady && busyboxReady && prootDependencyReady && box64Ready
--                     && bedrockServerReady && propertiesReady && !writableBox64Blocked;
--             boolean runnerReady = false;
--             String state = requirementsReady ? "runner_preflight_ready_but_blocked" : "runner_preflight_blocked";
--@@ -146,8 +161,8 @@
--             out.put("ok", true);
--             out.put("component", "core_linux_runner_preflight");
--             out.put("action", safeAction);
---            out.put("stage", "core-linux-runner-preflight-v4");
---            out.put("preflightVersion", 4);
--+            out.put("stage", "core-linux-runner-preflight-v5");
--+            out.put("preflightVersion", 5);
--             out.put("state", state);
--             out.put("summary", summary);
--             out.put("coreLinuxDir", path(base));
--@@ -169,6 +184,10 @@
--             out.put("coreRunnerEmbedded", runnerAssetReady);
--             out.put("prootEmbedded", prootReady);
--             out.put("busyboxEmbedded", busyboxReady);
--+            out.put("libtallocEmbedded", libtallocReady);
--+            out.put("prootNeedsLibtalloc", prootNeedsLibtalloc);
--+            out.put("prootDependencyReady", prootDependencyReady);
--+            out.put("baseToolsReady", baseToolsReady);
--             out.put("box64Embedded", box64Ready);
--             out.put("writableBox64Blocked", writableBox64Blocked);
--             out.put("bedrockServerPresent", bedrockServerReady);
--@@ -181,7 +200,7 @@
--             out.put("rootfs", compactRootfs(rootfsState, importState));
--             out.put("nativeExecutor", compactNative(nativeExecutor));
--             out.put("coreRunnerNativeBridge", runnerGuard);
---            out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, busyboxNames, box64Names, localManifest, sourcePlan));
--+            out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, busyboxNames, libtallocNames, box64Names, localManifest, sourcePlan));
--             out.put("embedded", embeddedAssets);
--             out.put("writableCandidates", writableSnapshot(writableBox64, dataDir));
--             out.put("bedrockFiles", bedrockFilesSnapshot(bedrockServer, properties));
--@@ -203,7 +222,7 @@
--                 err.put("runnerBlocked", true);
--                 err.put("runnerExecutionAllowed", false);
--                 err.put("bedrockStartAllowed", false);
---                err.put("preflightVersion", 4);
--+                err.put("preflightVersion", 5);
--                 err.put("updatedAt", System.currentTimeMillis());
--             } catch (Throwable ignored) {}
--             return err;
--@@ -262,25 +281,26 @@
--         return out;
--     }
-- 
---    private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] busybox, String[] box64,
--+    private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] busybox, String[] libtalloc, String[] box64,
--                                             JSONObject localManifest, JSONObject sourcePlan) throws Exception {
--         return new JSONObject()
---                .put("stage", "core-linux-embedded-binaries-intake-v4")
--+                .put("stage", "core-linux-embedded-binaries-intake-v5")
--                 .put("abi", "arm64-v8a")
--                 .put("executor", new JSONArray(executor))
--                 .put("runner", new JSONArray(runner))
--                 .put("proot", new JSONArray(proot))
--                 .put("busybox", new JSONArray(busybox))
--+                .put("libtalloc", new JSONArray(libtalloc))
--                 .put("box64", new JSONArray(box64))
--                 .put("localManifestSchema", localManifest == null ? "" : localManifest.optString("schema", ""))
--                 .put("sourcePlanSchema", sourcePlan == null ? "" : sourcePlan.optString("schema", ""))
--                 .put("policy", "somente componentes embutidos no APK/native libs ou JNI carregado pelo APK podem virar executáveis futuros; assets externos exigem metadata aprovada");
--     }
-- 
---    private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File executor, File runner, File proot, File busybox, File box64,
---                                               String[] executorNames, String[] runnerNames, String[] prootNames, String[] busyboxNames, String[] box64Names,
--+    private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File executor, File runner, File proot, File busybox, File libtalloc, File box64,
--+                                               String[] executorNames, String[] runnerNames, String[] prootNames, String[] busyboxNames, String[] libtallocNames, String[] box64Names,
--                                                boolean executorLoadedByJni, boolean runnerLoadedByJni,
---                                               JSONObject apkExecutor, JSONObject apkRunner, JSONObject apkProot, JSONObject apkBusybox, JSONObject apkBox64,
--+                                               JSONObject apkExecutor, JSONObject apkRunner, JSONObject apkProot, JSONObject apkBusybox, JSONObject apkLibtalloc, JSONObject apkBox64,
--                                                JSONObject localManifest, JSONObject sourcePlan) throws Exception {
--         return new JSONObject()
--                 .put("nativeLibraryDir", path(nativeDir))
--@@ -288,6 +308,7 @@
--                 .put("runner", assetInfo("runner", runner, runnerNames, nativeDir, dataDir, runnerLoadedByJni, "jni-loaded:coreworker_runner", apkRunner, localManifest, sourcePlan))
--                 .put("proot", assetInfo("proot", proot, prootNames, nativeDir, dataDir, false, "", apkProot, localManifest, sourcePlan))
--                 .put("busybox", assetInfo("busybox", busybox, busyboxNames, nativeDir, dataDir, false, "", apkBusybox, localManifest, sourcePlan))
--+                .put("libtalloc", assetInfo("libtalloc", libtalloc, libtallocNames, nativeDir, dataDir, false, "", apkLibtalloc, localManifest, sourcePlan))
--                 .put("box64", assetInfo("box64", box64, box64Names, nativeDir, dataDir, false, "", apkBox64, localManifest, sourcePlan));
--     }
-- 
--@@ -387,6 +408,22 @@
--         }
--     }
-- 
--+    private static boolean metadataNeedsDependency(JSONObject info, String dependency) {
--+        if (info == null || dependency == null || dependency.trim().isEmpty()) return false;
--+        JSONObject metadata = info.optJSONObject("metadata");
--+        if (metadata == null) return false;
--+        JSONArray deps = metadata.optJSONArray("runtimeDependencies");
--+        if (deps != null) {
--+            for (int i = 0; i < deps.length(); i++) {
--+                if (dependency.equalsIgnoreCase(deps.optString(i, ""))) return true;
--+            }
--+        }
--+        String linkMode = lower(metadata.optString("linkMode", ""));
--+        if ("static".equals(linkMode) || "self-contained".equals(linkMode)) return false;
--+        String depPolicy = lower(metadata.optString("dependencyPolicy", ""));
--+        return depPolicy.contains(dependency.toLowerCase(Locale.ROOT));
--+    }
--+
--     private static boolean metadataApproved(String kind, JSONObject metadata) {
--         String safeKind = kind == null ? "" : kind;
--         if ("runner".equals(safeKind) || "executor".equals(safeKind)) return true;
--diff -ruN orig_patch/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java work_patch/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
----- orig_patch/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-04 20:57:36.000000000 +0000
--+++ work_patch/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 01:08:58.366652373 +0000
--@@ -320,13 +320,16 @@
--                 .put("core-linux-runner-preflight-v2")
--                 .put("core-linux-runner-preflight-v3")
--                 .put("core-linux-runner-preflight-v4")
--+                .put("core-linux-runner-preflight-v5")
--                 .put("core-linux-embedded-binaries-intake-v1")
--                 .put("core-linux-embedded-binaries-intake-v2")
--                 .put("core-linux-embedded-binaries-intake-v3")
--                 .put("core-linux-embedded-binaries-intake-v4")
--+                .put("core-linux-embedded-binaries-intake-v5")
--                 .put("core-linux-embedded-binaries-build-pipeline-v1")
--                 .put("core-linux-embedded-binaries-build-pipeline-v2")
--                 .put("core-linux-embedded-binaries-build-pipeline-v3")
--+                .put("core-linux-embedded-binaries-build-pipeline-v4")
--                 .put("core-linux-runtime-v1")
--                 .put("minecraft-bedrock-manager-safe-plan");
--     }
--@@ -419,7 +422,7 @@
--                 out.put("runnerMissing", runner.optJSONArray("missing") == null ? new JSONArray() : runner.optJSONArray("missing"));
--                 out.put("runnerPreflight", runner);
--             }
---            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v3" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
--+            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v5" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
--             out.put("supportedTasks", supportedLightJobsArray());
--             if (runtime.length() > 0) out.put("runtime", runtime);
--             if (rootfs.length() > 0) out.put("rootfs", rootfs);
--diff -ruN orig_patch/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md work_patch/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md
----- orig_patch/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md	2026-06-04 20:57:36.000000000 +0000
--+++ work_patch/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md	2026-06-05 01:10:31.178267173 +0000
--@@ -6,8 +6,9 @@
-- 
-- - `libcoreworker_runner.so` — runner próprio, seguro e allowlist-only. Já pode ser gerado pelo pipeline local e embutido no APK.
-- - `libcoreworker_proot.so` — PRoot arm64 validado.
--+- `libcoreworker_libtalloc.so` — dependência auditada do PRoot quando o build não for estático/self-contained.
-- - `libcoreworker_busybox.so` — BusyBox arm64 validado.
---- `libcoreworker_box64.so` — Box64 arm64 validado.
--+- `libcoreworker_box64.so` — Box64 arm64 validado, somente depois da base PRoot + BusyBox.
-- 
-- Regras:
-- 
--@@ -15,6 +16,7 @@
-- - não baixar em runtime;
-- - não executar neste estágio;
-- - não embutir `bedrock_server` no APK;
--+- não rodar build inseguro dentro do prefixo vivo do Termux/worker;
-- - validar com `scripts/core-linux-embedded-binaries-intake.py` antes de buildar;
-- - preparar/buildar com `scripts/core-linux-embedded-binaries-build-pipeline.py`.
-- 
--@@ -25,14 +27,15 @@
-- # gera e embute o runner próprio, sem baixar terceiros
-- python3 scripts/core-linux-embedded-binaries-build-pipeline.py build-runner --stage
-- python3 scripts/core-linux-embedded-binaries-build-pipeline.py metadata-template > /tmp/core-linux-binaries-metadata.json
---# audita sem copiar
---python3 scripts/core-linux-embedded-binaries-build-pipeline.py audit-input --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
---# só copia se os metadados externos estiverem aprovados
---python3 scripts/core-linux-embedded-binaries-build-pipeline.py stage --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
--+# audita só a base PRoot + BusyBox; libtalloc é aceito junto quando o PRoot for dinâmico
--+python3 scripts/core-linux-embedded-binaries-build-pipeline.py audit-base-tools --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
--+# copia só se os metadados externos estiverem aprovados e coerentes
--+python3 scripts/core-linux-embedded-binaries-build-pipeline.py stage-base-tools --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
-- python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --metadata-file /tmp/core-linux-binaries-metadata.json
-- ```
-- 
---
-- ## Política de assets externos
-- 
---`proot`, `busybox` e `box64` só devem entrar no APK depois de build/import auditado com metadata de origem, licença, versão/commit/hash e receita de build. O intake rejeita stage real desses assets sem `licenseStatus` aprovado (`verified-audited`, `source-built` ou `redistributable-verified`).
--+`proot`, `libtalloc`, `busybox` e `box64` só devem entrar no APK depois de build/import auditado com metadata de origem, licença, versão/commit/hash e receita de build. O intake rejeita stage real desses assets sem `licenseStatus` aprovado (`verified-audited`, `source-built` ou `redistributable-verified`).
--+
--+Para componentes GPL, o metadata também precisa declarar `sourceCompliance.completeCorrespondingSourceReady=true`, `licenseTextIncluded=true` e URL/caminho do source correspondente. Isso evita empacotar binário GPL sem rastro de source/licença.
--diff -ruN orig_patch/tts-bot-main/changed_files.txt work_patch/tts-bot-main/changed_files.txt
----- orig_patch/tts-bot-main/changed_files.txt	2026-06-04 21:51:22.000000000 +0000
--+++ work_patch/tts-bot-main/changed_files.txt	2026-06-05 01:12:09.259220475 +0000
--@@ -1,11 +1,13 @@
--+PATCH_NOTES.md
--+changed_files.txt
-- android/core-worker-app/app/build.gradle
-- android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json
---deploy/termux/phone-worker/README.md
--+android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
--+android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
--+android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md
-- deploy/termux/phone-worker/phone_worker.py
-- scripts/core-linux-embedded-binaries-build-pipeline.py
--+scripts/core-linux-embedded-binaries-intake.py
--+scripts/core-linux-embedded-binaries-metadata.example.json
-- scripts/core-linux-embedded-binaries-sources.json
---scripts/core-worker-automation.py
---utility/commands/workers.py
-- webserver.py
---PATCH_NOTES.md
---changed_files.txt
--diff -ruN orig_patch/tts-bot-main/deploy/termux/phone-worker/phone_worker.py work_patch/tts-bot-main/deploy/termux/phone-worker/phone_worker.py
----- orig_patch/tts-bot-main/deploy/termux/phone-worker/phone_worker.py	2026-06-04 21:51:22.000000000 +0000
--+++ work_patch/tts-bot-main/deploy/termux/phone-worker/phone_worker.py	2026-06-05 01:04:15.490425438 +0000
--@@ -62,7 +62,7 @@
-- DEFAULT_MAX_BODY_MB = 32
-- DEFAULT_MAX_OUTPUT_MB = 32
-- DEFAULT_TIMEOUT_SECONDS = 45
---PHONE_WORKER_VERSION = "1.10.28"
--+PHONE_WORKER_VERSION = "1.10.29"
-- CORE_WORKER_RUNTIME_MODE = "termux"
-- CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
-- DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
--diff -ruN orig_patch/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py work_patch/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py
----- orig_patch/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-04 21:51:22.000000000 +0000
--+++ work_patch/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-05 01:05:39.833403691 +0000
--@@ -53,30 +53,67 @@
--     "proot": {
--         "official": "libcoreworker_proot.so",
--         "aliases": ["libcoreworker_proot.so", "libproot.so", "proot"],
---        "origin": "manual-build-from-upstream-source",
--+        "origin": "termux-package-source-reference",
--         "sourceKind": "external-source",
---        "upstream": "https://github.com/proot-me/proot",
---        "termuxCompatibilityReference": "https://github.com/termux/proot-distro",
---        "license": "GPL-2.0-or-later",
--+        "upstream": "https://github.com/termux/proot",
--+        "homepage": "https://proot-me.github.io/",
--+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
--+        "packageVersion": "5.1.107.76",
--+        "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
--+        "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
--+        "license": "GPL-2.0",
--         "licenseStatus": "verify-before-bundling",
--         "minBytes": 32768,
--+        "runtimeDependencies": ["libtalloc"],
--+        "dependencyPolicy": "se o binário não for estático, libtalloc precisa ser auditado/embutido junto",
--         "buildNotes": [
--             "usar build arm64/aarch64 auditado; não baixar em runtime",
--+            "Termux proot depende de libtalloc; não marcar pronto sem dependência estática ou libtalloc embutido",
--             "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner",
--         ],
--     },
--+    "libtalloc": {
--+        "official": "libcoreworker_libtalloc.so",
--+        "aliases": ["libcoreworker_libtalloc.so", "libtalloc.so", "libtalloc.so.2", "libtalloc"],
--+        "origin": "termux-package-source-reference",
--+        "sourceKind": "external-source-dependency",
--+        "upstream": "https://www.samba.org/ftp/talloc/",
--+        "homepage": "https://talloc.samba.org/talloc/doc/html/index.html",
--+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libtalloc/build.sh",
--+        "packageVersion": "2.4.3",
--+        "sourceArchive": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
--+        "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
--+        "license": "GPL-3.0",
--+        "licenseStatus": "verify-before-bundling",
--+        "minBytes": 8192,
--+        "onDeviceBuildSafe": False,
--+        "buildNotes": [
--+            "dependência do recipe Termux do proot",
--+            "recipe Termux remove/reescreve arquivos do prefixo; não buildar no Termux vivo do worker",
--+            "preferir build isolado/offline e empacotar apenas artefato auditado",
--+        ],
--+    },
--     "busybox": {
--         "official": "libcoreworker_busybox.so",
--         "aliases": ["libcoreworker_busybox.so", "libbusybox.so", "busybox"],
---        "origin": "manual-build-from-upstream-source",
--+        "origin": "termux-package-source-reference",
--         "sourceKind": "external-source",
--         "upstream": "https://busybox.net/downloads/",
---        "license": "GPL-2.0-only",
--+        "homepage": "https://busybox.net/",
--+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
--+        "packageVersion": "1.37.0-r3",
--+        "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
--+        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
--+        "license": "GPL-2.0",
--         "licenseStatus": "verify-before-bundling",
--         "minBytes": 32768,
--+        "runtimeDependencies": ["libandroid-selinux"],
--+        "dependencyPolicy": "usar build estático/self-contained ou registrar/bundlar dependências dinâmicas auditadas",
--+        "onDeviceBuildSafe": False,
--         "buildNotes": [
---            "preferir build próprio/auditado estático para arm64",
---            "não usar binário aleatório sem versão, sha256 e licença verificados",
--+            "o recipe Termux marca BusyBox como não seguro para build on-device",
--+            "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
--+            "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário",
--         ],
--     },
--     "box64": {
--@@ -88,13 +125,13 @@
--         "license": "MIT",
--         "licenseStatus": "verify-before-bundling",
--         "minBytes": 131072,
--+        "blockedUntil": "proot-busybox-rootfs-ready",
--         "buildNotes": [
--             "Box64 é userspace Linux x86_64 emulator para hosts ARM64; validar dentro do rootfs Linux/proot",
--             "não executar em Android puro; runner real continua bloqueado até preflight completo",
--         ],
--     },
-- }
---
-- APPROVED_EXTERNAL_LICENSE_STATUSES = ["redistributable-verified", "source-built", "verified-audited"]
-- 
-- 
--@@ -156,7 +193,7 @@
--     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
--     SOURCE_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
--     payload = {
---        "schema": "core-worker-embedded-binaries-source-plan-v5",
--+        "schema": "core-worker-embedded-binaries-source-plan-v6",
--         "generatedAt": int(time.time()),
--         "abi": "arm64-v8a",
--         "androidMinSdk": 26,
--@@ -194,35 +231,59 @@
-- 
-- 
-- def metadata_template() -> dict[str, Any]:
--+    targets: dict[str, Any] = {}
--+    for key, meta in TARGETS.items():
--+        if key == "runner":
--+            continue
--+        license_name = str(meta.get("license", ""))
--+        is_gpl = license_name.startswith("GPL")
--+        targets[key] = {
--+            "origin": meta.get("origin", ""),
--+            "sourceKind": meta.get("sourceKind", ""),
--+            "upstream": meta.get("upstream", ""),
--+            "homepage": meta.get("homepage", ""),
--+            "termuxBuildRecipe": meta.get("termuxBuildRecipe", ""),
--+            "license": license_name,
--+            "licenseStatus": "verified-audited",
--+            "packageVersion": meta.get("packageVersion", ""),
--+            "sourceArchive": meta.get("sourceArchive", ""),
--+            "sourceSha256": meta.get("sourceSha256", ""),
--+            "binarySha256": "preencha com o sha256 do binário arm64 final",
--+            "binarySize": "preencha com o tamanho em bytes do binário arm64 final",
--+            "linkMode": "static|self-contained|dynamic-with-bundled-dependencies",
--+            "runtimeDependencies": meta.get("runtimeDependencies", []),
--+            "dependencyPolicy": meta.get("dependencyPolicy", ""),
--+            "buildRecipe": "descreva ambiente isolado/toolchain/config usado; não usar build no Termux vivo se onDeviceBuildSafe=false",
--+            "onDeviceBuildSafe": meta.get("onDeviceBuildSafe", True),
--+            "auditedBy": "",
--+            "notes": meta.get("buildNotes", []),
--+            "sourceCompliance": {
--+                "required": is_gpl,
--+                "completeCorrespondingSourceReady": False if is_gpl else True,
--+                "licenseTextIncluded": False if is_gpl else True,
--+                "sourceUrl": meta.get("sourceArchive", ""),
--+                "configUrlOrPath": "preencha .config/patches/build scripts quando GPL exigir",
--+                "modifications": "none|descrever patches",
--+            },
--+        }
--     return {
---        "schema": "core-worker-embedded-binaries-metadata-v1",
--+        "schema": "core-worker-embedded-binaries-metadata-v2",
--         "generatedAt": int(time.time()),
---        "targets": {
---            key: {
---                "origin": meta.get("origin", ""),
---                "sourceKind": meta.get("sourceKind", ""),
---                "upstream": meta.get("upstream", ""),
---                "license": meta.get("license", ""),
---                "licenseStatus": "verified-audited" if key != "runner" else meta.get("licenseStatus", ""),
---                "sourceVersion": "",
---                "sourceCommit": "",
---                "packageVersion": "",
---                "sourceSha256": "",
---                "buildRecipe": "preencha como o binário arm64 foi produzido/auditado",
---                "auditedBy": "",
---                "notes": meta.get("notes", ""),
---            }
---            for key, meta in TARGETS.items()
---            if key != "runner"
--+        "policy": {
--+            "noRuntimeDownload": True,
--+            "noExecutionDuringAudit": True,
--+            "noOnDeviceUnsafeBuild": True,
--+            "gplSourceComplianceRequired": True,
--+            "dynamicDependenciesMustBeBundledOrStatic": True,
--         },
--+        "targets": targets,
--     }
-- 
---
-- def cmd_plan(args: argparse.Namespace) -> int:
--     manifest = write_source_manifest()
--     payload = {
--         "ok": True,
---        "stage": "core-linux-embedded-binaries-build-pipeline-v3",
--+        "stage": "core-linux-embedded-binaries-build-pipeline-v4",
--         "sourceManifest": rel(manifest),
--         "metadataTemplate": "use: python3 scripts/core-linux-embedded-binaries-build-pipeline.py metadata-template > /tmp/core-linux-binaries-metadata.json",
--         "jniDir": rel(JNI_DIR),
--@@ -237,7 +298,7 @@
--         },
--         "notes": [
--             "O script não baixa binários automaticamente.",
---            "BusyBox, PRoot e Box64 devem vir de build/import auditado e depois passar pelo intake.",
--+            "BusyBox, PRoot, libtalloc e Box64 devem vir de build/import auditado e depois passar pelo intake.",
--             "Cada asset externo precisa de tamanho, SHA-256 e metadados aprovados de origem/licença antes de ser aceito no stage real.",
--             "Bedrock não entra no APK e não é iniciado neste estágio.",
--         ],
--@@ -305,6 +366,7 @@
--     metadata_file: Path | None,
--     allow_unverified_external: bool = False,
--     include_keys: set[str] | None = None,
--+    require_keys: set[str] | None = None,
-- ) -> list[str]:
--     command = [sys.executable, str(INTAKE)]
--     found: list[str] = []
--@@ -316,6 +378,10 @@
--         if p:
--             command.extend([f"--{key}", str(p)])
--             found.append(key)
--+    required = require_keys or set()
--+    missing_required = sorted(required.difference(found))
--+    if missing_required:
--+        raise SystemExit("binário obrigatório ausente no input-dir: " + ", ".join(missing_required))
--     if not found:
--         wanted = ", ".join(sorted(allowed))
--         raise SystemExit(f"nenhum binário conhecido encontrado no input-dir para: {wanted}")
--@@ -365,7 +431,8 @@
--         input_dir,
--         dry_run=True,
--         metadata_file=args.metadata_file,
---        include_keys={"proot", "busybox"},
--+        include_keys={"proot", "busybox", "libtalloc"},
--+        require_keys={"proot", "busybox"},
--     )
--     sh(command)
--     return 0
--@@ -379,7 +446,8 @@
--         input_dir,
--         dry_run=args.dry_run,
--         metadata_file=args.metadata_file,
---        include_keys={"proot", "busybox"},
--+        include_keys={"proot", "busybox", "libtalloc"},
--+        require_keys={"proot", "busybox"},
--     )
--     sh(command)
--     return 0
--diff -ruN orig_patch/tts-bot-main/scripts/core-linux-embedded-binaries-intake.py work_patch/tts-bot-main/scripts/core-linux-embedded-binaries-intake.py
----- orig_patch/tts-bot-main/scripts/core-linux-embedded-binaries-intake.py	2026-06-04 20:57:36.000000000 +0000
--+++ work_patch/tts-bot-main/scripts/core-linux-embedded-binaries-intake.py	2026-06-05 01:07:33.234248080 +0000
--@@ -32,6 +32,7 @@
--     "runner": "libcoreworker_runner.so",
--     "proot": "libcoreworker_proot.so",
--     "busybox": "libcoreworker_busybox.so",
--+    "libtalloc": "libcoreworker_libtalloc.so",
--     "box64": "libcoreworker_box64.so",
-- }
-- 
--@@ -39,6 +40,7 @@
--     "runner": 1024,
--     "proot": 32768,
--     "busybox": 32768,
--+    "libtalloc": 8192,
--     "box64": 131072,
-- }
-- 
--@@ -51,20 +53,36 @@
--         "notes": "core-runner seguro próprio; preflight only",
--     },
--     "proot": {
---        "origin": "manual-build-from-upstream-source",
--+        "origin": "termux-package-source-reference",
--         "sourceKind": "external-source",
---        "upstream": "https://github.com/proot-me/proot",
---        "license": "GPL-2.0-or-later",
--+        "upstream": "https://github.com/termux/proot",
--+        "license": "GPL-2.0",
--+        "licenseStatus": "verify-before-bundling",
--+        "packageVersion": "5.1.107.76",
--+        "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
--+        "runtimeDependencies": ["libtalloc"],
--+        "notes": "não baixar em runtime; importar somente build arm64 auditado; Termux proot depende de libtalloc quando não for estático",
--+    },
--+    "libtalloc": {
--+        "origin": "termux-package-source-reference",
--+        "sourceKind": "external-source-dependency",
--+        "upstream": "https://www.samba.org/ftp/talloc/",
--+        "license": "GPL-3.0",
--         "licenseStatus": "verify-before-bundling",
---        "notes": "não baixar em runtime; importar somente build arm64 auditado",
--+        "packageVersion": "2.4.3",
--+        "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
--+        "notes": "dependência de proot; build Termux não deve rodar no prefixo vivo do worker",
--     },
--     "busybox": {
---        "origin": "manual-build-from-upstream-source",
--+        "origin": "termux-package-source-reference",
--         "sourceKind": "external-source",
--         "upstream": "https://busybox.net/downloads/",
---        "license": "GPL-2.0-only",
--+        "license": "GPL-2.0",
--         "licenseStatus": "verify-before-bundling",
---        "notes": "não baixar em runtime; importar somente build arm64 auditado",
--+        "packageVersion": "1.37.0-r3",
--+        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
--+        "runtimeDependencies": ["libandroid-selinux"],
--+        "notes": "não baixar em runtime; importar somente build arm64 auditado; recipe Termux não é seguro para build on-device",
--     },
--     "box64": {
--         "origin": "manual-build-from-upstream-source",
--@@ -160,7 +178,34 @@
--     return merged
-- 
-- 
---def metadata_errors(key: str, metadata: dict[str, Any]) -> list[str]:
--+def _as_bool(value: Any) -> bool:
--+    if isinstance(value, bool):
--+        return value
--+    if isinstance(value, (int, float)):
--+        return bool(value)
--+    if isinstance(value, str):
--+        return value.strip().lower() in {"1", "true", "yes", "on", "sim", "ok"}
--+    return False
--+
--+
--+def _license_is_gpl(metadata: dict[str, Any]) -> bool:
--+    return str(metadata.get("license") or "").strip().upper().startswith("GPL")
--+
--+
--+def _source_compliance_ok(metadata: dict[str, Any]) -> bool:
--+    if not _license_is_gpl(metadata):
--+        return True
--+    comp = metadata.get("sourceCompliance")
--+    if not isinstance(comp, dict):
--+        return False
--+    return bool(
--+        _as_bool(comp.get("completeCorrespondingSourceReady"))
--+        and _as_bool(comp.get("licenseTextIncluded"))
--+        and str(comp.get("sourceUrl") or metadata.get("sourceArchive") or metadata.get("upstream") or "").strip()
--+    )
--+
--+
--+def metadata_errors(key: str, metadata: dict[str, Any], info: dict[str, Any] | None = None) -> list[str]:
--     if key == "runner":
--         return []
--     errors: list[str] = []
--@@ -176,9 +221,48 @@
--             errors.append(f"metadata.{required} obrigatório")
--     if not any(str(metadata.get(k) or "").strip() for k in ("sourceVersion", "sourceCommit", "packageVersion", "buildRecipe", "sourceSha256")):
--         errors.append("informe ao menos sourceVersion/sourceCommit/packageVersion/buildRecipe/sourceSha256")
--+    expected_source_sha = str(TARGET_METADATA.get(key, {}).get("sourceSha256") or "").strip().lower()
--+    provided_source_sha = str(metadata.get("sourceSha256") or "").strip().lower()
--+    if expected_source_sha and provided_source_sha and provided_source_sha != expected_source_sha:
--+        errors.append(f"sourceSha256 diferente do recipe auditado: esperado={expected_source_sha} atual={provided_source_sha}")
--+    expected_version = str(TARGET_METADATA.get(key, {}).get("packageVersion") or "").strip()
--+    provided_version = str(metadata.get("packageVersion") or metadata.get("sourceVersion") or "").strip()
--+    if expected_version and provided_version and provided_version != expected_version:
--+        errors.append(f"versão diferente do recipe auditado: esperado={expected_version} atual={provided_version}")
--+    expected_binary_sha = str(metadata.get("binarySha256") or metadata.get("expectedBinarySha256") or "").strip().lower()
--+    actual_binary_sha = str((info or {}).get("sha256") or "").strip().lower()
--+    if expected_binary_sha and actual_binary_sha and expected_binary_sha != actual_binary_sha:
--+        errors.append(f"binarySha256 não confere: esperado={expected_binary_sha} atual={actual_binary_sha}")
--+    if _license_is_gpl(metadata) and not _source_compliance_ok(metadata):
--+        errors.append("licença GPL exige sourceCompliance.completeCorrespondingSourceReady=true, licenseTextIncluded=true e sourceUrl válido")
--+    link_mode = str(metadata.get("linkMode") or "").strip().lower()
--+    if key in {"proot", "busybox", "libtalloc"} and link_mode not in {"static", "self-contained", "dynamic-with-bundled-dependencies"}:
--+        errors.append("metadata.linkMode precisa ser static, self-contained ou dynamic-with-bundled-dependencies")
--+    if key in {"busybox", "libtalloc"} and TARGET_METADATA.get(key, {}).get("notes", "").find("não deve") >= 0:
--+        if _as_bool(metadata.get("builtOnLiveWorkerPrefix")):
--+            errors.append("build no prefixo vivo do worker não é aceito para este pacote")
--     return errors
-- 
-- 
--+def cross_target_errors(provided: dict[str, Path], target_manifests: dict[str, dict[str, Any]]) -> list[str]:
--+    errors: list[str] = []
--+    if "proot" in provided:
--+        meta = target_manifests.get("proot", {})
--+        link_mode = str(meta.get("linkMode") or "").strip().lower()
--+        deps = meta.get("runtimeDependencies")
--+        dep_names = {str(x).strip().lower() for x in deps} if isinstance(deps, list) else set()
--+        needs_libtalloc = "libtalloc" in dep_names or link_mode == "dynamic-with-bundled-dependencies"
--+        if needs_libtalloc and link_mode != "static" and "libtalloc" not in provided:
--+            errors.append("proot dinâmico exige --libtalloc auditado/embutido ou metadata.linkMode=static")
--+    if "busybox" in provided:
--+        meta = target_manifests.get("busybox", {})
--+        link_mode = str(meta.get("linkMode") or "").strip().lower()
--+        deps = meta.get("runtimeDependencies")
--+        dep_names = {str(x).strip().lower() for x in deps} if isinstance(deps, list) else set()
--+        if dep_names and link_mode not in {"static", "self-contained"}:
--+            errors.append("busybox com dependências dinâmicas exige build static/self-contained ou bundle explícito das dependências auditadas")
--+    return errors
--+
-- def main(argv: list[str]) -> int:
--     parser = argparse.ArgumentParser(description="Core Linux embedded binaries intake")
--     for key in TARGETS:
--@@ -190,14 +274,14 @@
-- 
--     provided = {key: getattr(args, key) for key in TARGETS if getattr(args, key) is not None}
--     if not provided:
---        parser.error("informe pelo menos um binário: --runner, --proot, --busybox ou --box64")
--+        parser.error("informe pelo menos um binário: --runner, --proot, --libtalloc, --busybox ou --box64")
-- 
--     metadata_override = load_json(args.metadata_file) if args.metadata_file else {}
--     source_manifest = load_json(SOURCE_MANIFEST)
-- 
--     JNI_DIR.mkdir(parents=True, exist_ok=True)
--     manifest: dict[str, Any] = {
---        "schema": "core-worker-embedded-binaries-local-v3",
--+        "schema": "core-worker-embedded-binaries-local-v4",
--         "generatedAt": int(time.time()),
--         "dryRun": bool(args.dry_run),
--         "targets": {},
--@@ -215,11 +299,12 @@
--     }
-- 
--     all_errors: list[str] = []
--+    target_metadatas: dict[str, dict[str, Any]] = {}
--     for key, source in provided.items():
--         source = source.expanduser().resolve()
--         info = validate_source(source, key)
--         metadata = metadata_for(key, metadata_override, source_manifest)
---        errors = metadata_errors(key, metadata)
--+        errors = metadata_errors(key, metadata, info)
--         metadata_ok = not errors
--         if errors and key != "runner":
--             all_errors.extend(f"{key}: {e}" for e in errors)
--@@ -233,6 +318,7 @@
--                 shutil.copy2(source, dest)
--                 os.chmod(dest, 0o644)
--                 copied = True
--+        target_metadatas[key] = metadata
--         manifest["targets"][key] = {
--             "source": str(source),
--             "dest": str(dest),
--@@ -244,6 +330,11 @@
--         }
--         print(f"{key}: ok size={info['size']} sha256={info['sha256']} metadata={'ok' if metadata_ok else 'pendente'} -> {dest.name}")
-- 
--+    all_errors.extend(cross_target_errors(provided, target_metadatas))
--+
--+    if all_errors:
--+        manifest["errors"] = all_errors
--+
--     if all_errors and not args.dry_run and not args.allow_unverified_external:
--         print(json.dumps(manifest, ensure_ascii=False, indent=2), file=sys.stderr)
--         raise SystemExit("metadados externos insuficientes; ajuste --metadata-file ou use dry-run")
--@@ -257,7 +348,7 @@
--         print(f"manifest de assets escrito: {ASSET_MANIFEST}")
--     else:
--         print(json.dumps(manifest, ensure_ascii=False, indent=2))
---    return 0 if not all_errors or args.dry_run or args.allow_unverified_external else 2
--+    return 0 if not all_errors or args.allow_unverified_external else 2
-- 
-- 
-- if __name__ == "__main__":
--diff -ruN orig_patch/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.example.json work_patch/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.example.json
----- orig_patch/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.example.json	2026-06-04 20:57:36.000000000 +0000
--+++ work_patch/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.example.json	2026-06-05 01:10:50.963191769 +0000
--@@ -1,44 +1,148 @@
-- {
---  "schema": "core-worker-embedded-binaries-metadata-v1",
--+  "schema": "core-worker-embedded-binaries-metadata-v2",
--+  "generatedAt": 1780621850,
--+  "policy": {
--+    "noRuntimeDownload": true,
--+    "noExecutionDuringAudit": true,
--+    "noOnDeviceUnsafeBuild": true,
--+    "gplSourceComplianceRequired": true,
--+    "dynamicDependenciesMustBeBundledOrStatic": true
--+  },
--   "targets": {
--     "proot": {
---      "origin": "manual-build-from-upstream-source",
--+      "origin": "termux-package-source-reference",
--       "sourceKind": "external-source",
---      "upstream": "https://github.com/proot-me/proot",
---      "license": "GPL-2.0-or-later",
--+      "upstream": "https://github.com/termux/proot",
--+      "homepage": "https://proot-me.github.io/",
--+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
--+      "license": "GPL-2.0",
--       "licenseStatus": "verified-audited",
---      "sourceVersion": "",
---      "sourceCommit": "",
---      "packageVersion": "",
---      "sourceSha256": "",
---      "buildRecipe": "descrever como o proot arm64 foi produzido e auditado",
---      "auditedBy": ""
--+      "packageVersion": "5.1.107.76",
--+      "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
--+      "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
--+      "binarySha256": "preencha com o sha256 do binário arm64 final",
--+      "binarySize": "preencha com o tamanho em bytes do binário arm64 final",
--+      "linkMode": "static|self-contained|dynamic-with-bundled-dependencies",
--+      "runtimeDependencies": [
--+        "libtalloc"
--+      ],
--+      "dependencyPolicy": "se o binário não for estático, libtalloc precisa ser auditado/embutido junto",
--+      "buildRecipe": "descreva ambiente isolado/toolchain/config usado; não usar build no Termux vivo se onDeviceBuildSafe=false",
--+      "onDeviceBuildSafe": true,
--+      "auditedBy": "",
--+      "notes": [
--+        "usar build arm64/aarch64 auditado; não baixar em runtime",
--+        "Termux proot depende de libtalloc; não marcar pronto sem dependência estática ou libtalloc embutido",
--+        "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner"
--+      ],
--+      "sourceCompliance": {
--+        "required": true,
--+        "completeCorrespondingSourceReady": false,
--+        "licenseTextIncluded": false,
--+        "sourceUrl": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
--+        "configUrlOrPath": "preencha .config/patches/build scripts quando GPL exigir",
--+        "modifications": "none|descrever patches"
--+      }
--+    },
--+    "libtalloc": {
--+      "origin": "termux-package-source-reference",
--+      "sourceKind": "external-source-dependency",
--+      "upstream": "https://www.samba.org/ftp/talloc/",
--+      "homepage": "https://talloc.samba.org/talloc/doc/html/index.html",
--+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libtalloc/build.sh",
--+      "license": "GPL-3.0",
--+      "licenseStatus": "verified-audited",
--+      "packageVersion": "2.4.3",
--+      "sourceArchive": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
--+      "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
--+      "binarySha256": "preencha com o sha256 do binário arm64 final",
--+      "binarySize": "preencha com o tamanho em bytes do binário arm64 final",
--+      "linkMode": "static|self-contained|dynamic-with-bundled-dependencies",
--+      "runtimeDependencies": [],
--+      "dependencyPolicy": "",
--+      "buildRecipe": "descreva ambiente isolado/toolchain/config usado; não usar build no Termux vivo se onDeviceBuildSafe=false",
--+      "onDeviceBuildSafe": false,
--+      "auditedBy": "",
--+      "notes": [
--+        "dependência do recipe Termux do proot",
--+        "recipe Termux remove/reescreve arquivos do prefixo; não buildar no Termux vivo do worker",
--+        "preferir build isolado/offline e empacotar apenas artefato auditado"
--+      ],
--+      "sourceCompliance": {
--+        "required": true,
--+        "completeCorrespondingSourceReady": false,
--+        "licenseTextIncluded": false,
--+        "sourceUrl": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
--+        "configUrlOrPath": "preencha .config/patches/build scripts quando GPL exigir",
--+        "modifications": "none|descrever patches"
--+      }
--     },
--     "busybox": {
---      "origin": "manual-build-from-upstream-source",
--+      "origin": "termux-package-source-reference",
--       "sourceKind": "external-source",
--       "upstream": "https://busybox.net/downloads/",
---      "license": "GPL-2.0-only",
--+      "homepage": "https://busybox.net/",
--+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
--+      "license": "GPL-2.0",
--       "licenseStatus": "verified-audited",
---      "sourceVersion": "",
---      "sourceCommit": "",
---      "packageVersion": "",
---      "sourceSha256": "",
---      "buildRecipe": "descrever como o busybox arm64 foi produzido e auditado",
---      "auditedBy": ""
--+      "packageVersion": "1.37.0-r3",
--+      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
--+      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
--+      "binarySha256": "preencha com o sha256 do binário arm64 final",
--+      "binarySize": "preencha com o tamanho em bytes do binário arm64 final",
--+      "linkMode": "static|self-contained|dynamic-with-bundled-dependencies",
--+      "runtimeDependencies": [
--+        "libandroid-selinux"
--+      ],
--+      "dependencyPolicy": "usar build estático/self-contained ou registrar/bundlar dependências dinâmicas auditadas",
--+      "buildRecipe": "descreva ambiente isolado/toolchain/config usado; não usar build no Termux vivo se onDeviceBuildSafe=false",
--+      "onDeviceBuildSafe": false,
--+      "auditedBy": "",
--+      "notes": [
--+        "o recipe Termux marca BusyBox como não seguro para build on-device",
--+        "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
--+        "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
--+      ],
--+      "sourceCompliance": {
--+        "required": true,
--+        "completeCorrespondingSourceReady": false,
--+        "licenseTextIncluded": false,
--+        "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
--+        "configUrlOrPath": "preencha .config/patches/build scripts quando GPL exigir",
--+        "modifications": "none|descrever patches"
--+      }
--     },
--     "box64": {
--       "origin": "manual-build-from-upstream-source",
--       "sourceKind": "external-source",
--       "upstream": "https://github.com/ptitSeb/box64",
--+      "homepage": "",
--+      "termuxBuildRecipe": "",
--       "license": "MIT",
--       "licenseStatus": "verified-audited",
---      "sourceVersion": "",
---      "sourceCommit": "",
--       "packageVersion": "",
--+      "sourceArchive": "",
--       "sourceSha256": "",
---      "buildRecipe": "descrever como o box64 arm64 foi produzido e auditado",
---      "auditedBy": ""
--+      "binarySha256": "preencha com o sha256 do binário arm64 final",
--+      "binarySize": "preencha com o tamanho em bytes do binário arm64 final",
--+      "linkMode": "static|self-contained|dynamic-with-bundled-dependencies",
--+      "runtimeDependencies": [],
--+      "dependencyPolicy": "",
--+      "buildRecipe": "descreva ambiente isolado/toolchain/config usado; não usar build no Termux vivo se onDeviceBuildSafe=false",
--+      "onDeviceBuildSafe": true,
--+      "auditedBy": "",
--+      "notes": [
--+        "Box64 é userspace Linux x86_64 emulator para hosts ARM64; validar dentro do rootfs Linux/proot",
--+        "não executar em Android puro; runner real continua bloqueado até preflight completo"
--+      ],
--+      "sourceCompliance": {
--+        "required": false,
--+        "completeCorrespondingSourceReady": true,
--+        "licenseTextIncluded": true,
--+        "sourceUrl": "",
--+        "configUrlOrPath": "preencha .config/patches/build scripts quando GPL exigir",
--+        "modifications": "none|descrever patches"
--+      }
--     }
--   }
-- }
--diff -ruN orig_patch/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json work_patch/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json
----- orig_patch/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json	2026-06-04 21:56:22.000000000 +0000
--+++ work_patch/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json	2026-06-05 01:13:02.664246419 +0000
--@@ -1,6 +1,6 @@
-- {
---  "schema": "core-worker-embedded-binaries-source-plan-v5",
---  "generatedAt": 1780620982,
--+  "schema": "core-worker-embedded-binaries-source-plan-v6",
--+  "generatedAt": 1780621982,
--   "abi": "arm64-v8a",
--   "androidMinSdk": 26,
--   "policy": {
--@@ -43,18 +43,53 @@
--         "libproot.so",
--         "proot"
--       ],
---      "origin": "manual-build-from-upstream-source",
--+      "origin": "termux-package-source-reference",
--       "sourceKind": "external-source",
---      "upstream": "https://github.com/proot-me/proot",
---      "termuxCompatibilityReference": "https://github.com/termux/proot-distro",
---      "license": "GPL-2.0-or-later",
--+      "upstream": "https://github.com/termux/proot",
--+      "homepage": "https://proot-me.github.io/",
--+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
--+      "packageVersion": "5.1.107.76",
--+      "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
--+      "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
--+      "license": "GPL-2.0",
--       "licenseStatus": "verify-before-bundling",
--       "minBytes": 32768,
--+      "runtimeDependencies": [
--+        "libtalloc"
--+      ],
--+      "dependencyPolicy": "se o binário não for estático, libtalloc precisa ser auditado/embutido junto",
--       "buildNotes": [
--         "usar build arm64/aarch64 auditado; não baixar em runtime",
--+        "Termux proot depende de libtalloc; não marcar pronto sem dependência estática ou libtalloc embutido",
--         "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner"
--       ]
--     },
--+    "libtalloc": {
--+      "official": "libcoreworker_libtalloc.so",
--+      "aliases": [
--+        "libcoreworker_libtalloc.so",
--+        "libtalloc.so",
--+        "libtalloc.so.2",
--+        "libtalloc"
--+      ],
--+      "origin": "termux-package-source-reference",
--+      "sourceKind": "external-source-dependency",
--+      "upstream": "https://www.samba.org/ftp/talloc/",
--+      "homepage": "https://talloc.samba.org/talloc/doc/html/index.html",
--+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libtalloc/build.sh",
--+      "packageVersion": "2.4.3",
--+      "sourceArchive": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
--+      "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
--+      "license": "GPL-3.0",
--+      "licenseStatus": "verify-before-bundling",
--+      "minBytes": 8192,
--+      "onDeviceBuildSafe": false,
--+      "buildNotes": [
--+        "dependência do recipe Termux do proot",
--+        "recipe Termux remove/reescreve arquivos do prefixo; não buildar no Termux vivo do worker",
--+        "preferir build isolado/offline e empacotar apenas artefato auditado"
--+      ]
--+    },
--     "busybox": {
--       "official": "libcoreworker_busybox.so",
--       "aliases": [
--@@ -62,15 +97,26 @@
--         "libbusybox.so",
--         "busybox"
--       ],
---      "origin": "manual-build-from-upstream-source",
--+      "origin": "termux-package-source-reference",
--       "sourceKind": "external-source",
--       "upstream": "https://busybox.net/downloads/",
---      "license": "GPL-2.0-only",
--+      "homepage": "https://busybox.net/",
--+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
--+      "packageVersion": "1.37.0-r3",
--+      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
--+      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
--+      "license": "GPL-2.0",
--       "licenseStatus": "verify-before-bundling",
--       "minBytes": 32768,
--+      "runtimeDependencies": [
--+        "libandroid-selinux"
--+      ],
--+      "dependencyPolicy": "usar build estático/self-contained ou registrar/bundlar dependências dinâmicas auditadas",
--+      "onDeviceBuildSafe": false,
--       "buildNotes": [
---        "preferir build próprio/auditado estático para arm64",
---        "não usar binário aleatório sem versão, sha256 e licença verificados"
--+        "o recipe Termux marca BusyBox como não seguro para build on-device",
--+        "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
--+        "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
--       ]
--     },
--     "box64": {
--@@ -86,6 +132,7 @@
--       "license": "MIT",
--       "licenseStatus": "verify-before-bundling",
--       "minBytes": 131072,
--+      "blockedUntil": "proot-busybox-rootfs-ready",
--       "buildNotes": [
--         "Box64 é userspace Linux x86_64 emulator para hosts ARM64; validar dentro do rootfs Linux/proot",
--         "não executar em Android puro; runner real continua bloqueado até preflight completo"
--diff -ruN orig_patch/tts-bot-main/webserver.py work_patch/tts-bot-main/webserver.py
----- orig_patch/tts-bot-main/webserver.py	2026-06-04 21:51:22.000000000 +0000
--+++ work_patch/tts-bot-main/webserver.py	2026-06-05 01:09:28.547202037 +0000
--@@ -290,13 +290,16 @@
--     "core-linux-runner-preflight-v2",
--     "core-linux-runner-preflight-v3",
--     "core-linux-runner-preflight-v4",
--+    "core-linux-runner-preflight-v5",
--     "core-linux-embedded-binaries-intake-v1",
--     "core-linux-embedded-binaries-intake-v2",
--     "core-linux-embedded-binaries-intake-v3",
--     "core-linux-embedded-binaries-intake-v4",
--+    "core-linux-embedded-binaries-intake-v5",
--     "core-linux-embedded-binaries-build-pipeline-v1",
--     "core-linux-embedded-binaries-build-pipeline-v2",
--     "core-linux-embedded-binaries-build-pipeline-v3",
--+    "core-linux-embedded-binaries-build-pipeline-v4",
--     "core-linux-runtime-v1",
--     "minecraft-bedrock-manager-safe-plan",
-- ]
--@@ -754,6 +757,7 @@
--         "rootfsSummary", "rootfsState", "rootfsImportState", "rootfsImportSummary",
--         "runnerPreflightState", "runnerPreflightSummary", "runnerPreflightVersion",
--         "runnerReady", "runnerBlocked", "runnerExecutionAllowed", "runnerRequirementsReady",
--+        "baseToolsReady", "prootNeedsLibtalloc", "prootDependencyReady",
--         "runnerMissing", "lastResultAt", "sourceJobType", "nativeOk",
--         "allowlist", "androidSdk", "blockers", "missing", "nextActions",
--     )
--@@ -794,6 +798,9 @@
--         "coreLinuxSummary", "coreLinuxState", "coreLinuxPrepared",
--         "rootfsValidationLevel", "rootfsDistributionReady", "rootfsSummary",
--         "rootfsState", "rootfsImportState", "rootfsImportSummary",
--+        "runnerPreflightState", "runnerPreflightSummary", "runnerPreflightVersion",
--+        "runnerReady", "runnerBlocked", "runnerExecutionAllowed", "runnerRequirementsReady",
--+        "baseToolsReady", "prootNeedsLibtalloc", "prootDependencyReady",
--         "bedrockSummary", "bedrockState", "bedrockReady",
--         "bedrockRuntimeSummary", "bedrockRuntimeState",
--         "bedrockRuntimeServiceActive", "bedrockInstallerSummary",
+diff --git a/scripts/core-linux-embedded-binaries-build-pipeline.py b/scripts/core-linux-embedded-binaries-build-pipeline.py
+index 62fed06..3642a70 100644
+--- a/scripts/core-linux-embedded-binaries-build-pipeline.py
++++ b/scripts/core-linux-embedded-binaries-build-pipeline.py
+@@ -189,10 +189,8 @@ def find_cc(explicit: str | None = None) -> str | None:
+     return None
+ 
+ 
+-def write_source_manifest() -> Path:
+-    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+-    SOURCE_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+-    payload = {
++def source_manifest_payload() -> dict[str, Any]:
++    return {
+         "schema": "core-worker-embedded-binaries-source-plan-v6",
+         "generatedAt": int(time.time()),
+         "abi": "arm64-v8a",
+@@ -211,7 +209,12 @@ def write_source_manifest() -> Path:
+         },
+         "targets": TARGETS,
+     }
+-    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
++
++
++def write_source_manifest() -> Path:
++    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
++    SOURCE_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
++    text = json.dumps(source_manifest_payload(), ensure_ascii=False, indent=2) + "\n"
+     SOURCE_MANIFEST.write_text(text, encoding="utf-8")
+     (ASSETS_DIR / "embedded-binaries-source-plan.json").write_text(text, encoding="utf-8")
+     return SOURCE_MANIFEST
+@@ -453,7 +456,9 @@ def cmd_stage_base_tools(args: argparse.Namespace) -> int:
+     return 0
+ 
+ def cmd_verify(args: argparse.Namespace) -> int:
+-    write_source_manifest()
++    # Verificação local precisa ser read-only. O updater e os diagnósticos rodam
++    # este comando com frequência; gerar `embedded-binaries-source-plan.json` aqui
++    # sujava arquivos rastreados e bloqueava os próximos updates.
+     command = [sys.executable, str(INTAKE), "--dry-run"]
+     if args.metadata_file:
+         command.extend(["--metadata-file", str(args.metadata_file.resolve())])
 diff --git a/scripts/core-worker-automation.py b/scripts/core-worker-automation.py
-index 4e71089..85dc07d 100644
+index 85dc07d..bf5950f 100644
 --- a/scripts/core-worker-automation.py
 +++ b/scripts/core-worker-automation.py
-@@ -532,17 +532,35 @@ def _registry_raw() -> dict[str, Any]:
+@@ -929,6 +929,45 @@ def _recent_built_unpublished_apk(version_name: str, source_fingerprint: str) ->
+     }
  
  
- def _active_job_exists(*, job_type: str, target_worker_id: str = "", summary_contains: str = "") -> bool:
-+    # snapshot() limpa leases expirados antes da leitura. Se o lock estiver ocupado,
-+    # caímos no JSON cru, mas ainda ignoramos jobs obviamente velhos. Isso evita
-+    # build APK ficar travado por horas quando o phone worker caiu depois do Gradle.
-+    with contextlib.suppress(Exception):
-+        get_core_workers_registry().snapshot(lock_timeout_seconds=0.4)
-     data = _registry_raw()
-     jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
-     wanted = str(job_type or "").replace("-", "_")
-     target_worker_id = str(target_worker_id or "")
-     summary_contains = str(summary_contains or "")
-+    now = time.time()
-+    apk_running_grace = max(300, int(os.getenv("CORE_WORKER_APK_BUILD_STALE_RUNNING_SECONDS", "1500") or 1500))
-     for job in jobs.values():
-         if not isinstance(job, dict):
-             continue
--        if str(job.get("status") or "queued") not in {"queued", "running"}:
-+        status = str(job.get("status") or "queued")
-+        if status not in {"queued", "running"}:
-+            continue
-+        kind = str(job.get("type") or "").replace("-", "_")
-+        if kind != wanted:
-+            continue
-+        expires_at = float(job.get("expires_at") or 0.0)
-+        lease_until = float(job.get("lease_until") or 0.0)
-+        updated_at = float(job.get("updated_at") or job.get("started_at") or job.get("created_at") or 0.0)
-+        if expires_at and expires_at <= now:
-+            continue
-+        if status == "running" and lease_until and lease_until <= now:
-             continue
--        if str(job.get("type") or "").replace("-", "_") != wanted:
-+        if kind == "apk_build_debug" and status == "running" and updated_at and now - updated_at > apk_running_grace:
-             continue
-         if target_worker_id and str(job.get("target_worker_id") or job.get("worker_id") or "") not in {target_worker_id, ""}:
-             continue
-@@ -865,6 +883,101 @@ def _recent_failed_apk_build(version_name: str, source_fingerprint: str, *, cool
-     return {}
- 
- 
++def _stale_running_apk_build_for_source(version_name: str, source_fingerprint: str) -> dict[str, Any]:
++    """Detecta build que provavelmente terminou o Gradle mas não reportou/persistiu.
 +
-+
-+def _recent_built_unpublished_apk(version_name: str, source_fingerprint: str) -> dict[str, Any]:
-+    """Retorna build recente que gerou APK mas não conseguiu publicar.
-+
-+    Usado para preferir `apk_publish_last` em vez de rebuildar, especialmente
-+    quando a rede caiu depois do Gradle ou quando o processo foi interrompido
-+    antes de reportar publicação.
++    Se o processo do phone worker caiu entre `assembleDebug` e a publicação, o
++    registry pode ficar só com um job `running`. Nesse caso enfileiramos
++    `apk_publish_last`; o worker novo recupera o app-debug.apk direto do workdir.
 +    """
 +    data = _registry_raw()
 +    jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
-+    rows: list[tuple[float, dict[str, Any]]] = []
 +    now = time.time()
++    grace = max(300, int(os.getenv("CORE_WORKER_APK_BUILD_STALE_RUNNING_SECONDS", "900") or 900))
++    rows: list[tuple[float, dict[str, Any]]] = []
 +    for job in jobs.values():
 +        if not isinstance(job, dict):
 +            continue
 +        if str(job.get("type") or "").replace("-", "_") != "apk_build_debug":
 +            continue
++        if str(job.get("status") or "").lower() != "running":
++            continue
 +        if not _apk_build_job_matches_source(job, version_name, source_fingerprint):
 +            continue
-+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
-+        if not result:
-+            continue
-+        if not result.get("artifact_found") and not result.get("artifact_path"):
-+            continue
-+        if result.get("publish_ok") is True and _latest_apk_matches(_read_android_version()[1], source_fingerprint):
-+            return {}
-+        updated = float(job.get("updated_at") or job.get("finished_at") or job.get("created_at") or 0.0)
-+        if updated and now - updated > 6 * 3600:
++        updated = float(job.get("updated_at") or job.get("started_at") or job.get("created_at") or 0.0)
++        if updated and now - updated < grace:
 +            continue
 +        rows.append((updated, job))
 +    rows.sort(key=lambda item: item[0], reverse=True)
 +    if not rows:
 +        return {}
 +    job = rows[0][1]
-+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
-+    apk = result.get("apk") if isinstance(result.get("apk"), dict) else {}
 +    return {
 +        "job": job,
-+        "result": result,
++        "result": {},
 +        "worker_id": str(job.get("worker_id") or job.get("target_worker_id") or ""),
-+        "artifact_path": str(result.get("artifact_path") or apk.get("artifact_path") or ""),
-+        "filename": str((apk.get("filename") if isinstance(apk, dict) else "") or result.get("filename") or f"CoreWorker-v{version_name}-debug.apk"),
++        "artifact_path": "",
++        "filename": f"CoreWorker-v{version_name}-debug.apk",
++        "stale_running_build": True,
 +    }
 +
 +
-+def _queue_apk_publish_last_from_build(found: dict[str, Any], *, version_name: str, version_code: int, source_fingerprint: str, source_sha256: str, notification_id: str) -> dict[str, Any]:
-+    registry = get_core_workers_registry()
-+    worker_id = str(found.get("worker_id") or "")
-+    if _active_job_exists(job_type="apk_publish_last", target_worker_id=worker_id, summary_contains=version_name):
-+        return {"ok": True, "pending": True, "message": "republicação do APK já está na fila", "versionName": version_name, "versionCode": version_code}
-+    payload = {
-+        "artifact_path": found.get("artifact_path") or "",
-+        "versionName": version_name,
-+        "versionCode": version_code,
-+        "filename": found.get("filename") or f"CoreWorker-v{version_name}-debug.apk",
-+        "sourceFingerprint": source_fingerprint,
-+        "sourceSha256": source_sha256,
-+        "notificationId": notification_id,
-+        "notifyUsers": True,
-+        "notificationRequested": True,
-+        "changelog": [
-+            "APK já compilado pelo worker builder",
-+            "Republicação automática sem rebuild",
-+            "O app mostra Atualizar no topo quando estiver disponível",
-+        ],
-+    }
-+    result = registry.create_job(
-+        job_type="apk_publish_last",
-+        payload=payload,
-+        created_by_id=0,
-+        created_by_name="VPS updater",
-+        target_worker_id=worker_id,
-+        required_capabilities=["apk-builder"],
-+        ttl_seconds=1800,
-+        lease_seconds=600,
-+        max_attempts=2,
-+        summary=f"republicar APK {version_name} {source_fingerprint[:12]}",
-+    )
-+    pending = _load_pending()
-+    pending["apk_build"] = {
-+        "ok": True,
-+        "pending": True,
-+        "type": "apk_publish_last",
-+        "versionName": version_name,
-+        "versionCode": version_code,
-+        "sourceFingerprint": source_fingerprint,
-+        "sourceSha256": source_sha256,
-+        "last_job_id": (result.get("job") or {}).get("job_id") if isinstance(result, dict) else None,
-+        "updated_at": time.time(),
-+        "message": "APK já compilado; republicação enfileirada sem rebuild",
-+    }
-+    _save_pending(pending)
-+    return {"ok": True, "pending": True, "versionName": version_name, "versionCode": version_code, "job": result.get("job"), "message": "republicação do APK enfileirada"}
-+
- def _pending_apk_build_recently_queued(pending: dict[str, Any], version_code: int, source_fingerprint: str, *, cooldown_seconds: int | None = None) -> dict[str, Any]:
-     item = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
-     if not item:
-@@ -962,6 +1075,24 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
-         pending.pop("apk_build", None)
+ def _queue_apk_publish_last_from_build(found: dict[str, Any], *, version_name: str, version_code: int, source_fingerprint: str, source_sha256: str, notification_id: str) -> dict[str, Any]:
+     registry = get_core_workers_registry()
+     worker_id = str(found.get("worker_id") or "")
+@@ -1076,6 +1115,8 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
          _save_pending(pending)
          return {"ok": True, "versionName": version_name, "versionCode": version_code, "already_published": True, "sourceSha256": source.get("sha256"), "sourceFingerprint": source_fingerprint, "message": "latest.json já está publicado nessa versão/source"}
-+    built_unpublished = _recent_built_unpublished_apk(version_name, source_fingerprint)
-+    if built_unpublished:
-+        try:
-+            return _queue_apk_publish_last_from_build(
-+                built_unpublished,
-+                version_name=version_name,
-+                version_code=version_code,
-+                source_fingerprint=source_fingerprint,
-+                source_sha256=source.get("sha256") or "",
-+                notification_id=notification_id,
-+            )
-+        except Exception as exc:
-+            # Se a republicação não pôde ser enfileirada, seguimos para o build normal.
-+            item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
-+            item.update({"publish_retry_error": f"{type(exc).__name__}: {_short(exc, 160)}", "updated_at": time.time()})
-+            pending["apk_build"] = item
-+            _save_pending(pending)
-+
-     recent_queue = {} if manual else _pending_apk_build_recently_queued(pending, version_code, source_fingerprint)
-     if recent_queue:
-         item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
+     built_unpublished = _recent_built_unpublished_apk(version_name, source_fingerprint)
++    if not built_unpublished:
++        built_unpublished = _stale_running_apk_build_for_source(version_name, source_fingerprint)
+     if built_unpublished:
+         try:
+             return _queue_apk_publish_last_from_build(
+diff --git a/scripts/tts-bot-update.sh b/scripts/tts-bot-update.sh
+index b4ac665..a92d9c1 100644
+--- a/scripts/tts-bot-update.sh
++++ b/scripts/tts-bot-update.sh
+@@ -200,17 +200,19 @@ cleanup_runtime_artifacts() {
+ 
+ trim_alert_text() {
+   local limit="${1:-4000}"
+-  python3 - "$limit" <<'PY'
+-import sys
++  # Importante: a versão anterior passava o script Python por heredoc em
++  # `python3 -`, então o Python consumia o heredoc como stdin e NÃO lia o pipe.
++  # Com `set -o pipefail`, o produtor do pipe recebia SIGPIPE e o updater caía
++  # com código 141 durante `git status | trim_alert_text`. Usar `-c` preserva
++  # stdin para o texto real e torna o helper seguro para pipelines.
++  python3 -c 'import sys
+ limit = int(sys.argv[1])
+ text = sys.stdin.read().replace("\r\n", "\n").replace("\r", "\n").strip()
+-if not text:
+-    print("")
+-    raise SystemExit
+-if len(text) > limit:
+-    text = text[: limit - 1].rstrip() + "…"
+-print(text)
+-PY
++if text and len(text) > limit:
++    text = text[: max(0, limit - 1)].rstrip() + "…"
++if text:
++    sys.stdout.write(text + "\n")
++' "$limit" || true
+ }
+ 
+ collect_run_log_excerpt() {
+@@ -2622,14 +2624,34 @@ clear_local_changes_marker_if_clean() {
+ collect_local_tracked_changes() {
+   # Untracked locais como data/, cookies e healthcheck não bloqueiam o merge.
+   # O que bloqueia o git pull são mudanças em arquivos rastreados.
+-  sudo -u ubuntu -H git status --short --untracked-files=no 2>/dev/null | trim_alert_text 1800
++  local status_text
++  status_text="$(sudo -u ubuntu -H git status --short --untracked-files=no 2>/dev/null || true)"
++  printf '%s' "$status_text" | trim_alert_text 1800
+ }
+ 
+ collect_local_tracked_files() {
++  # Evita `head` em pipeline com pipefail: se houver muitos arquivos, o produtor
++  # pode receber SIGPIPE e virar erro 141. A deduplicação/limite fica no Python.
+   {
+     sudo -u ubuntu -H git diff --name-only 2>/dev/null || true
+     sudo -u ubuntu -H git diff --name-only --cached 2>/dev/null || true
+-  } | awk 'NF && !seen[$0]++' | head -n 40 | sed 's/^/• /' | trim_alert_text 1500
++  } | python3 -c 'import sys
++seen = set()
++rows = []
++for raw in sys.stdin:
++    item = raw.strip()
++    if not item or item in seen:
++        continue
++    seen.add(item)
++    if len(rows) < 40:
++        rows.append("• " + item)
++text = "\n".join(rows).strip()
++limit = 1500
++if text and len(text) > limit:
++    text = text[: limit - 1].rstrip() + "…"
++if text:
++    sys.stdout.write(text + "\n")
++' || true
+ }
+ 
+ candidate_local_changes_are_expected() {
 diff --git a/utility/commands/workers.py b/utility/commands/workers.py
-index 81a9b71..a47c404 100644
+index a47c404..f5204d4 100644
 --- a/utility/commands/workers.py
 +++ b/utility/commands/workers.py
-@@ -1882,6 +1882,38 @@ def _core_worker_fcm_status_summary(worker_id: str = "") -> dict[str, Any]:
-     }
- 
- 
-+
-+def _core_worker_push_status_text(worker_id: str = "") -> str:
-+    summary = _core_worker_fcm_status_summary(worker_id)
-+    active = int(summary.get("active") or 0)
-+    if active <= 0:
-+        if summary.get("needsRefresh"):
-+            return "Push: token expirado · aguardando renovação pelo APK"
-+        if int(summary.get("stale") or 0):
-+            return "Push: token antigo · aguardando renovação pelo APK"
-+        if int(summary.get("incomplete") or 0):
-+            return "Push: token incompleto · aguardando confirmação do APK"
-+        return "Push: aguardando APK registrar FCM"
-+    permission = str(summary.get("permission") or "").lower()
-+    suffix = ""
-+    last_push = summary.get("lastPushAt")
-+    if last_push:
-+        try:
-+            suffix = f" · último push {_format_age(max(0, time.time() - float(last_push)))}"
-+        except Exception:
-+            suffix = ""
-+    status = str(summary.get("lastPushStatus") or "")
-+    if status == "unregistered" or str(summary.get("lastErrorCode") or "").upper() == "UNREGISTERED":
-+        return "Push: token expirado · aguardando renovação"
-+    if status == "failed":
-+        detail = str(summary.get("lastError") or "").strip()
-+        return "Push: falhou no último envio" + (f" · {_shorten(detail, limit=80)}" if detail else " · detalhes no celular")
-+    if permission == "missing":
-+        return f"Push: token ativo · sem permissão visível{suffix}"
-+    if status == "sent":
-+        return f"Push: ativo · enviado{suffix}"
-+    return f"Push: ativo ({active}){suffix}"
-+
- def _apk_build_effectively_published(apk: dict[str, Any]) -> tuple[bool, str]:
-     if not isinstance(apk, dict) or not apk:
-         return False, ""
+@@ -2026,10 +2026,17 @@ def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None
+                     parts.append(f"APK: build em andamento ({apk.get('versionName') or '?'})")
+                 else:
+                     parts.append(f"APK: build pendente ({apk.get('versionName') or '?'})")
+-    notif = _core_worker_notification_status_text()
++    try:
++        notif = _core_worker_notification_status_text()
++    except Exception:
++        notif = ""
+     if notif:
+         parts.append(notif)
+-    push = _core_worker_push_status_text()
++    try:
++        push = _core_worker_push_status_text()
++    except Exception:
++        # O painel não pode cair inteiro por causa de um resumo auxiliar.
++        push = ""
+     if push and "aguardando APK" not in push:
+         parts.append(push)
+     return " · ".join(parts[:5]) if parts else "tudo em dia"
