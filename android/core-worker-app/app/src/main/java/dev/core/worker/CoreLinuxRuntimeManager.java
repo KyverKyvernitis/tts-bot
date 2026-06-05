@@ -262,6 +262,151 @@ public final class CoreLinuxRuntimeManager {
     }
 
 
+    public static JSONObject rootfsProotSmokeTest(Context context, File coreLinuxDir, JSONObject nativeExecutor) {
+        try {
+            Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
+            ensureBase(layout);
+
+            // V13: smoke real do rootfs via PRoot, ainda com allowlist fixa.
+            // Esta etapa prova entrada no rootfs e execução de comandos mínimos
+            // pré-definidos. Continua sem shell livre, sem comando remoto arbitrário,
+            // sem Box64, sem Bedrock e sem processo persistente.
+            JSONObject executor = nativeExecutor;
+            if (executor == null || !executor.optBoolean("readyForRootfs", false)) {
+                executor = CoreWorkerNativeExecutor.snapshot(context, layout.core, "test");
+            }
+            JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
+            JSONObject rootfsState = rootfs.optJSONObject("rootfs");
+            if (rootfsState == null) rootfsState = rootfs;
+            JSONObject runtime = runtimeSnapshot(context, layout.core, "rootfs_smoke_v13", executor);
+            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "rootfs_smoke_v13");
+            JSONObject baseSmoke = readJson(new File(layout.runtime, "core-linux-smoke-test.json"));
+            if (baseSmoke == null) baseSmoke = new JSONObject();
+
+            boolean rootfsReal = runner.optBoolean("rootfsRealValidated", false)
+                    || "real".equals(rootfsState.optString("validationLevel", ""))
+                    || "rootfs_real_validated".equals(rootfsState.optString("state", ""));
+            boolean baseToolsOk = baseSmoke.optBoolean("ok", false)
+                    && "base_tools_smoke_ok".equals(baseSmoke.optString("state", ""));
+            boolean executorReady = executor.optBoolean("readyForRootfs", false);
+            boolean runtimeOk = runtime.optBoolean("ok", false);
+
+            JSONArray checks = new JSONArray()
+                    .put(check("base tools smoke V12.3", baseToolsOk, baseSmoke.optString("summary", "execute o smoke BusyBox/PRoot antes do rootfs")))
+                    .put(check("rootfs real", rootfsReal, rootfsState.optString("summary", "rootfs real precisa estar validado")))
+                    .put(check("executor JNI allowlist", executorReady, executor.optString("summary", "")))
+                    .put(check("runtime state", runtimeOk, runtime.optString("summary", "")))
+                    .put(check("PRoot embutido", runner.optBoolean("prootEmbedded", false), runner.optString("summary", "")))
+                    .put(check("shell livre bloqueado", true, "somente /bin/sh -c com comandos fixos allowlist"))
+                    .put(check("Box64 bloqueado", true, "Box64 fica para etapa posterior"))
+                    .put(check("Bedrock bloqueado", true, "nenhum servidor é iniciado nesta etapa"));
+
+            boolean prerequisitesOk = true;
+            for (int i = 0; i < checks.length(); i++) {
+                JSONObject row = checks.optJSONObject(i);
+                if (row != null && !row.optBoolean("ok", false)) prerequisitesOk = false;
+            }
+
+            File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir == null ? "" : context.getApplicationInfo().nativeLibraryDir);
+            File proot = new File(nativeDir, "libcoreworker_proot.so");
+            JSONObject rootfsSmoke = new JSONObject();
+            JSONArray smokeChecks = new JSONArray();
+            boolean echoOk = false;
+            boolean osReleaseOk = false;
+            boolean busyboxOk = false;
+
+            if (prerequisitesOk) {
+                JSONObject echo = runNativeTool(
+                        "proot rootfs echo ok",
+                        proot,
+                        nativeDir,
+                        layout.runtime,
+                        10000L,
+                        "-r", path(layout.rootfs), "-w", "/", "/bin/sh", "-c", "echo ok"
+                );
+                JSONObject osRelease = runNativeTool(
+                        "proot rootfs cat /etc/os-release",
+                        proot,
+                        nativeDir,
+                        layout.runtime,
+                        10000L,
+                        "-r", path(layout.rootfs), "-w", "/", "/bin/sh", "-c", "cat /etc/os-release"
+                );
+                JSONObject busybox = runNativeTool(
+                        "proot rootfs /bin/busybox true",
+                        proot,
+                        nativeDir,
+                        layout.runtime,
+                        10000L,
+                        "-r", path(layout.rootfs), "-w", "/", "/bin/busybox", "true"
+                );
+                echoOk = echo.optBoolean("ok", false) && "ok".equals(echo.optString("stdout", "").trim());
+                osReleaseOk = osRelease.optBoolean("ok", false) && osRelease.optString("stdout", "").contains("NAME=");
+                busyboxOk = busybox.optBoolean("ok", false);
+                rootfsSmoke.put("echo", echo);
+                rootfsSmoke.put("osRelease", osRelease);
+                rootfsSmoke.put("busyboxTrue", busybox);
+                rootfsSmoke.put("nativeLibraryDir", path(nativeDir));
+                rootfsSmoke.put("rootfsDir", path(layout.rootfs));
+                rootfsSmoke.put("workDir", path(layout.runtime));
+                rootfsSmoke.put("env", new JSONObject()
+                        .put("LD_LIBRARY_PATH", path(nativeDir))
+                        .put("PROOT_LOADER", path(new File(nativeDir, "libcoreworker_proot_loader.so")))
+                        .put("PROOT_LOADER_32", path(new File(nativeDir, "libcoreworker_proot_loader32.so"))));
+                smokeChecks.put(check("rootfs echo", echoOk, echoOk ? "proot entrou no rootfs e /bin/sh executou echo ok" : "falha em /bin/sh -c echo ok; ver stdout/stderr"));
+                smokeChecks.put(check("rootfs os-release", osReleaseOk, osReleaseOk ? "/etc/os-release lido dentro do rootfs" : "falha ao ler /etc/os-release dentro do rootfs"));
+                smokeChecks.put(check("rootfs busybox", busyboxOk, busyboxOk ? "/bin/busybox true executou dentro do rootfs" : "falha em /bin/busybox true; ver stdout/stderr"));
+            } else {
+                rootfsSmoke.put("skipped", true);
+                rootfsSmoke.put("reason", "base/rootfs ainda não está pronto para smoke V13");
+                smokeChecks.put(check("rootfs echo", false, "não executado: pré-requisitos pendentes"));
+                smokeChecks.put(check("rootfs os-release", false, "não executado: pré-requisitos pendentes"));
+                smokeChecks.put(check("rootfs busybox", false, "não executado: pré-requisitos pendentes"));
+            }
+
+            boolean ok = prerequisitesOk && echoOk && osReleaseOk && busyboxOk;
+            JSONObject out = new JSONObject();
+            out.put("ok", ok);
+            out.put("type", "core_linux_rootfs_proot_smoke_test");
+            out.put("state", ok ? "rootfs_proot_smoke_ok" : (prerequisitesOk ? "rootfs_proot_smoke_failed" : "rootfs_proot_smoke_blocked"));
+            out.put("stage", "core-linux-rootfs-proot-smoke-v13");
+            out.put("termuxTouched", false);
+            out.put("pythonTouched", false);
+            out.put("serviceStarted", false);
+            out.put("bedrockStarted", false);
+            out.put("box64Started", false);
+            out.put("shellOpened", false);
+            out.put("remoteCommandAllowed", false);
+            out.put("runnerExecutionAllowed", false);
+            out.put("commandsAllowlisted", true);
+            out.put("commands", new JSONArray()
+                    .put("proot -r <rootfs> /bin/sh -c 'echo ok'")
+                    .put("proot -r <rootfs> /bin/sh -c 'cat /etc/os-release'")
+                    .put("proot -r <rootfs> /bin/busybox true"));
+            out.put("checks", checks);
+            out.put("smokeChecks", smokeChecks);
+            out.put("rootfsSmoke", rootfsSmoke);
+            out.put("baseToolsSmoke", baseSmoke);
+            out.put("nativeExecutor", executor);
+            out.put("rootfs", rootfsState);
+            out.put("runtime", runtime);
+            out.put("runnerPreflight", runner);
+            out.put("nextStep", ok ? "box64-intake" : "corrigir rootfs/PRoot antes de Box64");
+            out.put("updatedAt", now());
+            out.put("summary", ok
+                    ? "Smoke rootfs V13 ok · PRoot entrou no rootfs e executou allowlist sem Termux"
+                    : (prerequisitesOk
+                        ? "Smoke rootfs V13 falhou · ver stdout/stderr por etapa"
+                        : "Smoke rootfs V13 bloqueado · falta base/rootfs validado"));
+            writeJson(new File(layout.runtime, "core-linux-rootfs-smoke-test.json"), out);
+            appendLog(new File(layout.logs, "core-linux-rootfs-smoke-test.log"), out.optString("summary"));
+            return out;
+        } catch (Throwable exc) {
+            return error("core_linux_rootfs_smoke_test", exc);
+        }
+    }
+
+
     private static JSONObject prepareBusyboxArgv0Launcher(File runtimeDir, File busyboxReal) {
         JSONObject out = new JSONObject();
         try {

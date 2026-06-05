@@ -4640,6 +4640,7 @@ public class MainActivity extends Activity {
                 .put("core-linux-runner-preflight-v10")
                 .put("core-linux-runner-preflight-v11")
                 .put("core-linux-base-tools-smoke-v12")
+                .put("core-linux-rootfs-proot-smoke-v13")
                 .put("core-linux-embedded-binaries-intake-v1")
                 .put("core-linux-embedded-binaries-intake-v2")
                 .put("core-linux-embedded-binaries-intake-v3")
@@ -5110,7 +5111,8 @@ public class MainActivity extends Activity {
                 .put("apk_core_linux_runner_status")
                 .put("apk_core_linux_runner_preflight")
                 .put("apk_core_linux_runner_requirements")
-                .put("apk_core_linux_runtime_smoke_test");
+                .put("apk_core_linux_runtime_smoke_test")
+                .put("apk_core_linux_rootfs_smoke_test");
     }
 
     private boolean isCoreLinuxRuntimeV1JobType(String type) {
@@ -5130,7 +5132,8 @@ public class MainActivity extends Activity {
                 || "apk_core_linux_native_executor_probe".equals(t)
                 || "apk_core_linux_native_executor_test".equals(t)
                 || "apk_core_linux_native_runtime_status".equals(t)
-                || "apk_core_linux_runtime_smoke_test".equals(t);
+                || "apk_core_linux_runtime_smoke_test".equals(t)
+                || "apk_core_linux_rootfs_smoke_test".equals(t);
     }
 
     private boolean isPausedRootfsBedrockJobType(String type) {
@@ -5777,6 +5780,26 @@ public class MainActivity extends Activity {
                 result.put("error", smoke.optString("summary", "smoke test Core Linux pendente"));
             }
             result.put("message", smoke.optString("summary", "Core Linux smoke test executado sem Termux"));
+            return result;
+        }
+
+
+
+        if ("apk_core_linux_rootfs_smoke_test".equals(type)) {
+            JSONObject nativeExecutor = coreLinuxNativeExecutorSnapshot("test");
+            JSONObject smoke = CoreLinuxRuntimeManager.rootfsProotSmokeTest(this, coreLinuxDir(), nativeExecutor);
+            safePutPayload(result, "coreLinuxRootfsSmokeTest", smoke);
+            coreLinuxSummary = smoke.optString("summary", "smoke rootfs Core Linux executado");
+            coreLinuxState = smoke.optString("state", "rootfs_smoke_test");
+            coreLinuxPrepared = smoke.optBoolean("ok", false);
+            coreLinuxLastCheckAt = System.currentTimeMillis();
+            internalDiagnosticsSummary = coreLinuxSummary;
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!smoke.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", smoke.optString("summary", "smoke rootfs Core Linux pendente"));
+            }
+            result.put("message", smoke.optString("summary", "Core Linux rootfs smoke executado sem Termux"));
             return result;
         }
 

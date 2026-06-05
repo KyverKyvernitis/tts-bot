@@ -167,6 +167,8 @@ public class CoreWorkerUpdateJobService extends JobService {
                 .put("core-linux-embedded-binaries-intake-v3")
                 .put("core-linux-embedded-binaries-intake-v4")
                 .put("core-linux-runtime-v1")
+                .put("core-linux-base-tools-smoke-v12")
+                .put("core-linux-rootfs-proot-smoke-v13")
                 .put("minecraft-bedrock-manager-safe-plan");
     }
 
@@ -201,7 +203,8 @@ public class CoreWorkerUpdateJobService extends JobService {
                 .put("apk_core_linux_runner_status")
                 .put("apk_core_linux_runner_preflight")
                 .put("apk_core_linux_runner_requirements")
-                .put("apk_core_linux_runtime_smoke_test");
+                .put("apk_core_linux_runtime_smoke_test")
+                .put("apk_core_linux_rootfs_smoke_test");
     }
 
     private JSONObject backgroundCoreLinuxSnapshot() throws Exception {
