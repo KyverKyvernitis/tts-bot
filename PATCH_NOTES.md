@@ -1,37 +1,32 @@
-# Patch: core-linux-smoke-gate-v2
+# Patch — Core Linux native extraction gate v7
 
-Base: `repo-20260605-133937(2).zip`
+Objetivo: preparar o APK para a etapa real de substituição do Termux sem marcar PRoot/BusyBox como executáveis só por estarem dentro do APK.
 
-## Corrige / melhora
+## O que muda
 
-- Fecha o falso positivo do `apk_core_linux_runtime_smoke_test`:
-  - antes ele podia preparar/validar scaffold e retornar OK sem PRoot/BusyBox/rootfs real;
-  - agora ele vira um **smoke gate**: só fica OK quando a base real para substituir Termux estiver pronta.
-- O smoke gate passa a exigir:
-  - executor JNI allowlist pronto;
-  - rootfs real validado;
-  - `runnerBaseRequirementsReady`/`termuxReductionReady`;
-  - runner + PRoot + BusyBox auditados pelo preflight.
-- Remove `apk_core_linux_runtime_smoke_test` da fila automática da VPS enquanto essa etapa ainda depende de binários externos.
-  - o job continua disponível manualmente;
-  - evita painel “com erro” por uma etapa que ainda não deve rodar toda hora.
-- Atualiza capacidades visíveis para `core-linux-runner-preflight-v6` e `core-linux-embedded-binaries-intake-v6`.
-- Atualiza o APK para `0.5.76` (`versionCode 91`) para forçar publicação do próximo APK.
+- Sobe o APK para `0.5.77` / `versionCode 92`.
+- Força extração de native libs no APK:
+  - `android:extractNativeLibs="true"` no `AndroidManifest.xml`.
+  - `packaging.jniLibs.useLegacyPackaging=true` no Gradle.
+- Atualiza o preflight do Core Linux para v7.
+- O preflight agora diferencia:
+  - asset físico em `nativeLibraryDir` = candidato futuro válido;
+  - `ZipEntry` dentro do APK = apenas diagnóstico, não caminho executável.
+- PRoot/BusyBox/libtalloc/Box64 só ficam `allowedForFutureExecution=true` quando:
+  - estão extraídos como native lib física;
+  - têm metadata externa aprovada;
+  - não estão em diretório gravável bloqueado pelo Android 10+.
+- Atualiza manifestos/capacidades para `core-linux-runner-preflight-v7` e `core-linux-embedded-binaries-intake-v7`.
+- Adiciona o source plan `embedded-binaries-source-plan.json` aos assets do APK.
 
 ## Próximo passo depois deste patch
 
-- Trazer os binários auditados `libcoreworker_proot.so` + `libcoreworker_busybox.so` e, se o PRoot não for estático, `libcoreworker_libtalloc.so`.
-- Rodar:
+Importar os binários reais auditados:
 
 ```bash
+python3 scripts/core-linux-embedded-binaries-build-pipeline.py metadata-template > /tmp/core-linux-binaries-metadata.json
 python3 scripts/core-linux-embedded-binaries-build-pipeline.py audit-base-tools --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
 python3 scripts/core-linux-embedded-binaries-build-pipeline.py stage-base-tools --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
-python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --metadata-file /tmp/core-linux-binaries-metadata.json --strict
 ```
 
-## Não muda
-
-- Não toca CallKeeper.
-- Não builda APK na VPS.
-- Não adiciona placeholders de PRoot/BusyBox.
-- Não inicia Bedrock, não abre shell livre e não executa comando remoto arbitrário.
+Ainda não inclui PRoot/BusyBox reais, porque eles não foram enviados na base e não devem ser inventados/baixados pelo patch.

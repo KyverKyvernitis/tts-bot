@@ -20,7 +20,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * Preflight v6 do runner Core Linux.
+ * Preflight v7 do runner Core Linux.
  *
  * Esta etapa apenas detecta requisitos e escreve estado. Ela não inicia Bedrock,
  * não executa Box64/proot/busybox, não abre shell livre e não aceita comando remoto.
@@ -181,8 +181,8 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("ok", true);
             out.put("component", "core_linux_runner_preflight");
             out.put("action", safeAction);
-            out.put("stage", "core-linux-runner-preflight-v6");
-            out.put("preflightVersion", 6);
+            out.put("stage", "core-linux-runner-preflight-v7");
+            out.put("preflightVersion", 7);
             out.put("state", state);
             out.put("summary", summary);
             out.put("phase", phase);
@@ -252,7 +252,7 @@ public final class CoreLinuxRunnerPreflightManager {
                 err.put("runnerBlocked", true);
                 err.put("runnerExecutionAllowed", false);
                 err.put("bedrockStartAllowed", false);
-                err.put("preflightVersion", 6);
+                err.put("preflightVersion", 7);
                 err.put("updatedAt", System.currentTimeMillis());
             } catch (Throwable ignored) {}
             return err;
@@ -322,7 +322,7 @@ public final class CoreLinuxRunnerPreflightManager {
     private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] busybox, String[] libtalloc, String[] box64,
                                             JSONObject localManifest, JSONObject sourcePlan) throws Exception {
         return new JSONObject()
-                .put("stage", "core-linux-embedded-binaries-intake-v6")
+                .put("stage", "core-linux-embedded-binaries-intake-v7")
                 .put("abi", "arm64-v8a")
                 .put("executor", new JSONArray(executor))
                 .put("runner", new JSONArray(runner))
@@ -380,7 +380,9 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("path", apkInfo.optString("path", ""));
             out.put("name", apkInfo.optString("name", expectedNames != null && expectedNames.length > 0 ? expectedNames[0] : ""));
             out.put("size", apkInfo.optLong("size", 0L));
-            out.put("canExecute", true);
+            // ZipEntry dentro do APK não é um caminho executável. Ele só vira candidato
+            // de execução futura quando o Android o extrai para nativeLibraryDir.
+            out.put("canExecute", false);
             out.put("blockedByWritableAppHome", false);
             out.put("sha256", apkInfo.optString("sha256", ""));
             out.put("detectedBy", jniLoadedFallback && detectedByFallback != null && !detectedByFallback.isEmpty() ? detectedByFallback + "+apk-entry" : apkInfo.optString("detectedBy", "apk-native-lib-entry"));
@@ -405,16 +407,26 @@ public final class CoreLinuxRunnerPreflightManager {
         out.put("metadata", metadata);
         boolean placeholder = out.optBoolean("present", false) && out.optLong("size", 0L) <= 0L && !jniLoadedFallback;
         boolean embedded = fileEmbedded || apkEmbedded || jniLoadedFallback;
+        boolean internalJniAsset = "runner".equals(kind) || "executor".equals(kind);
+        boolean apkEntryOnly = apkEmbedded && !fileEmbedded && !jniLoadedFallback;
+        boolean extractedNativeLibrary = validPhysicalFile && fileEmbedded;
+        boolean executionPathReady = extractedNativeLibrary || (internalJniAsset && jniLoadedFallback);
         boolean metadataApproved = metadataApproved(kind, metadata);
-        boolean basicAllowed = embedded
+        boolean basicAllowed = executionPathReady
                 && !out.optBoolean("blockedByWritableAppHome", false)
                 && !placeholder
                 && (out.optLong("size", 0L) > 0L || jniLoadedFallback);
         out.put("embeddedInApk", embedded);
+        out.put("apkEntryOnly", apkEntryOnly);
+        out.put("extractedNativeLibrary", extractedNativeLibrary);
+        out.put("executionPathReady", executionPathReady);
+        out.put("requiresExtractedNativeLibrary", !internalJniAsset);
         out.put("metadataApproved", metadataApproved);
         out.put("approvalReason", approvalReason(kind, metadata, metadataApproved));
         out.put("allowedForFutureExecution", basicAllowed && metadataApproved);
-        if (basicAllowed && !metadataApproved) {
+        if (apkEntryOnly && !executionPathReady) {
+            out.put("approvalBlocker", "asset detectado dentro do APK, mas não extraído em nativeLibraryDir; confirme android:extractNativeLibs/useLegacyPackaging no APK instalado");
+        } else if (basicAllowed && !metadataApproved) {
             out.put("approvalBlocker", "metadata de origem/licença pendente para asset externo");
         }
         out.put("placeholder", placeholder);

@@ -58,8 +58,8 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 91
-        versionName "0.5.76"
+        versionCode 92
+        versionName "0.5.77"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -109,6 +109,12 @@ android {
             // strip nesse ambiente. As libs são privadas/debug e podem ser empacotadas
             // sem strip para manter o build confiável no phone worker.
             keepDebugSymbols += ["**/*.so"]
+
+            // Patch 88: PRoot/BusyBox entram como native libs do APK para ficarem em
+            // nativeLibraryDir, que é o caminho não gravável usado no smoke real. Se
+            // ficarem só comprimidos dentro do APK, o preflight detecta o arquivo mas
+            // não libera execução futura.
+            useLegacyPackaging = true
         }
     }
 

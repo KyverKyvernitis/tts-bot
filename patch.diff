@@ -1,223 +1,377 @@
-diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/tts-bot-main/PATCH_NOTES.md work_repo/tts-bot-main/PATCH_NOTES.md
---- orig_repo/tts-bot-main/PATCH_NOTES.md	2026-06-05 01:11:40.000000000 +0000
-+++ work_repo/tts-bot-main/PATCH_NOTES.md	2026-06-05 18:07:09.791147077 +0000
-@@ -1,40 +1,37 @@
--# Patch: core-linux-base-tools-phase
-+# Patch: core-linux-smoke-gate-v2
- 
--Base: `repo-20260605-005354.zip`
-+Base: `repo-20260605-133937(2).zip`
- 
- ## Corrige / melhora
- 
--- Separa o preflight do Core Linux em duas fases reais:
--  - **fase atual:** rootfs real + executor + runner + PRoot + BusyBox;
--  - **fase futura:** Box64 + Bedrock + `server.properties`.
--- O painel/runtime não vai mais tratar Box64/Bedrock como pendência da fase base para substituir o Termux.
--- Quando PRoot + BusyBox estiverem auditados e embutidos, o estado passa a indicar claramente:
--  - `runnerBaseRequirementsReady=true`;
--  - `termuxReductionReady=true`;
--  - próximo passo: smoke test real allowlist (`APK → runner → proot → rootfs`).
--- Mantém o bloqueio de segurança:
--  - sem shell livre;
--  - sem comando remoto arbitrário;
--  - sem iniciar Bedrock;
--  - sem executar Box64/proot/busybox durante o preflight.
--- O `runtime-summary` e o painel `_worker` passam a expor melhor:
--  - `baseToolsReady`;
--  - `runnerBaseRequirementsReady`;
--  - `termuxReductionReady`;
--  - `bedrockRequirementsReady`;
--  - `currentMissing` e `futureMissing` separados.
--- Atualiza o APK para `0.5.75` (`versionCode 90`) para forçar build/publicação do próximo APK.
-+- Fecha o falso positivo do `apk_core_linux_runtime_smoke_test`:
-+  - antes ele podia preparar/validar scaffold e retornar OK sem PRoot/BusyBox/rootfs real;
-+  - agora ele vira um **smoke gate**: só fica OK quando a base real para substituir Termux estiver pronta.
-+- O smoke gate passa a exigir:
-+  - executor JNI allowlist pronto;
-+  - rootfs real validado;
-+  - `runnerBaseRequirementsReady`/`termuxReductionReady`;
-+  - runner + PRoot + BusyBox auditados pelo preflight.
-+- Remove `apk_core_linux_runtime_smoke_test` da fila automática da VPS enquanto essa etapa ainda depende de binários externos.
-+  - o job continua disponível manualmente;
-+  - evita painel “com erro” por uma etapa que ainda não deve rodar toda hora.
-+- Atualiza capacidades visíveis para `core-linux-runner-preflight-v6` e `core-linux-embedded-binaries-intake-v6`.
-+- Atualiza o APK para `0.5.76` (`versionCode 91`) para forçar publicação do próximo APK.
- 
- ## Próximo passo depois deste patch
- 
--- Importar PRoot + BusyBox auditados com:
--  - `scripts/core-linux-embedded-binaries-build-pipeline.py audit-base-tools ...`
--  - depois `stage-base-tools ...`
--- Só depois liberar o smoke test real allowlist do rootfs.
-+- Trazer os binários auditados `libcoreworker_proot.so` + `libcoreworker_busybox.so` e, se o PRoot não for estático, `libcoreworker_libtalloc.so`.
-+- Rodar:
-+
-+```bash
-+python3 scripts/core-linux-embedded-binaries-build-pipeline.py audit-base-tools --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
-+python3 scripts/core-linux-embedded-binaries-build-pipeline.py stage-base-tools --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
-+python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --metadata-file /tmp/core-linux-binaries-metadata.json --strict
-+```
- 
- ## Não muda
- 
- - Não toca CallKeeper.
- - Não builda APK na VPS.
--- Não adiciona binários externos falsos/placeholders.
--- Não inicia Bedrock e não libera runner real ainda.
-+- Não adiciona placeholders de PRoot/BusyBox.
-+- Não inicia Bedrock, não abre shell livre e não executa comando remoto arbitrário.
-diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/tts-bot-main/android/core-worker-app/app/build.gradle work_repo/tts-bot-main/android/core-worker-app/app/build.gradle
---- orig_repo/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 01:11:40.000000000 +0000
-+++ work_repo/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 18:07:09.789280776 +0000
+diff -ruN tts-bot-main.orig/android/core-worker-app/app/build.gradle tts-bot-main/android/core-worker-app/app/build.gradle
+--- tts-bot-main.orig/android/core-worker-app/app/build.gradle	2026-06-05 18:11:25.261391760 +0000
++++ tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 18:13:00.633604073 +0000
 @@ -58,8 +58,8 @@
          applicationId "dev.core.worker"
          minSdk 26
          targetSdk 34
--        versionCode 90
--        versionName "0.5.75"
-+        versionCode 91
-+        versionName "0.5.76"
+-        versionCode 91
+-        versionName "0.5.76"
++        versionCode 92
++        versionName "0.5.77"
  
          buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
          buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
-diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java work_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java
---- orig_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-03 14:41:58.000000000 +0000
-+++ work_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-05 18:07:09.788803218 +0000
-@@ -114,20 +114,39 @@
-         try {
-             Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
-             ensureBase(layout);
+@@ -109,6 +109,12 @@
+             // strip nesse ambiente. As libs são privadas/debug e podem ser empacotadas
+             // sem strip para manter o build confiável no phone worker.
+             keepDebugSymbols += ["**/*.so"]
 +
-+            // Patch 87: o smoke test não pode mais criar scaffold automaticamente
-+            // nem dar OK só porque o executor JNI e uma rootfs fake existem. A fase
-+            // atual para substituir Termux exige rootfs real + runner + PRoot +
-+            // BusyBox auditados. Enquanto isso não estiver pronto, este job vira um
-+            // gate seguro e explícito, sem executar proot/busybox/box64/Bedrock.
-             JSONObject executor = nativeExecutor;
-             if (executor == null || !executor.optBoolean("readyForRootfs", false)) {
-                 executor = CoreWorkerNativeExecutor.snapshot(context, layout.core, "test");
-             }
--            JSONObject rootfs = rootfsSnapshot(context, layout.core, "prepare");
-+            JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
-             JSONObject rootfsState = rootfs.optJSONObject("rootfs");
-             if (rootfsState == null) rootfsState = rootfs;
--            JSONObject runtime = runtimeSnapshot(context, layout.core, "smoke_test", executor);
-+            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "smoke_gate");
-+            JSONObject runtime = runtimeSnapshot(context, layout.core, "smoke_gate", executor);
-+
-+            boolean rootfsReal = runner.optBoolean("rootfsRealValidated", false)
-+                    || "real".equals(rootfsState.optString("validationLevel", ""))
-+                    || "rootfs_real_validated".equals(rootfsState.optString("state", ""));
-+            boolean baseReady = runner.optBoolean("runnerBaseRequirementsReady", false)
-+                    || runner.optBoolean("termuxReductionReady", false);
-+            JSONArray missing = runner.optJSONArray("currentMissing");
-+            if (missing == null) missing = runner.optJSONArray("missing");
-+            if (missing == null) missing = new JSONArray();
-+
-             JSONArray checks = new JSONArray()
-                     .put(check("core-linux dir", layout.core.isDirectory(), path(layout.core)))
-                     .put(check("executor JNI allowlist", executor.optBoolean("readyForRootfs", false), executor.optString("summary", "")))
--                    .put(check("rootfs scaffold", rootfsState.optBoolean("rootfsReady", false), rootfsState.optString("summary", "")))
-+                    .put(check("rootfs real", rootfsReal, rootfsState.optString("summary", "importe/valide rootfs real no APK")))
-+                    .put(check("runner/proot/busybox base", baseReady, runner.optString("summary", "base Core Linux ainda pendente")))
-                     .put(check("runtime state", runtime.optBoolean("ok", false), runtime.optString("summary", "")))
--                    .put(check("Bedrock bloqueado", true, "nenhum start real é feito nesta etapa"));
-+                    .put(check("Bedrock bloqueado", true, "nenhum start real é feito nesta etapa"))
-+                    .put(check("shell livre bloqueado", true, "somente allowlist futura; sem comando remoto arbitrário"));
-             boolean ok = true;
-             for (int i = 0; i < checks.length(); i++) {
-                 JSONObject row = checks.optJSONObject(i);
-@@ -136,20 +155,25 @@
-             JSONObject out = new JSONObject();
-             out.put("ok", ok);
-             out.put("type", "core_linux_runtime_smoke_test");
--            out.put("state", ok ? "smoke_test_ok" : "smoke_test_pending");
--            out.put("stage", "core-linux-runtime-v1");
-+            out.put("state", ok ? "smoke_gate_ready" : "smoke_gate_blocked");
-+            out.put("stage", "core-linux-runtime-smoke-gate-v2");
-             out.put("termuxTouched", false);
-             out.put("pythonTouched", false);
-             out.put("serviceStarted", false);
-             out.put("bedrockStarted", false);
-+            out.put("runnerExecuted", false);
-+            out.put("prootExecuted", false);
-+            out.put("busyboxExecuted", false);
-             out.put("checks", checks);
-+            out.put("missing", missing);
-             out.put("nativeExecutor", executor);
-             out.put("rootfs", rootfsState);
-             out.put("runtime", runtime);
-+            out.put("runnerPreflight", runner);
-             out.put("updatedAt", now());
-             out.put("summary", ok
--                    ? "Smoke test Core Linux v1 ok · executor + rootfs sem Termux"
--                    : "Smoke test Core Linux v1 pendente · revise executor/rootfs");
-+                    ? "Smoke gate Core Linux ok · base pronta para liberar runner allowlist"
-+                    : "Smoke gate Core Linux bloqueado · falta base real para substituir Termux");
-             writeJson(new File(layout.runtime, "core-linux-smoke-test.json"), out);
-             appendLog(new File(layout.logs, "core-linux-smoke-test.log"), out.optString("summary"));
-             return out;
-diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java work_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
---- orig_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-04 22:16:06.000000000 +0000
-+++ work_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 18:07:09.790822539 +0000
-@@ -321,11 +321,13 @@
-                 .put("core-linux-runner-preflight-v3")
++            // Patch 88: PRoot/BusyBox entram como native libs do APK para ficarem em
++            // nativeLibraryDir, que é o caminho não gravável usado no smoke real. Se
++            // ficarem só comprimidos dentro do APK, o preflight detecta o arquivo mas
++            // não libera execução futura.
++            useLegacyPackaging = true
+         }
+     }
+ 
+diff -ruN tts-bot-main.orig/android/core-worker-app/app/src/main/AndroidManifest.xml tts-bot-main/android/core-worker-app/app/src/main/AndroidManifest.xml
+--- tts-bot-main.orig/android/core-worker-app/app/src/main/AndroidManifest.xml	2026-06-05 18:11:25.261615122 +0000
++++ tts-bot-main/android/core-worker-app/app/src/main/AndroidManifest.xml	2026-06-05 18:13:00.633875164 +0000
+@@ -22,6 +22,7 @@
+ 
+     <application
+         android:allowBackup="false"
++        android:extractNativeLibs="true"
+         android:icon="@mipmap/ic_launcher"
+         android:label="@string/app_name"
+         android:networkSecurityConfig="@xml/network_security_config"
+diff -ruN tts-bot-main.orig/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json
+--- tts-bot-main.orig/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json	1970-01-01 00:00:00.000000000 +0000
++++ tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json	2026-06-05 18:13:54.842500134 +0000
+@@ -0,0 +1,144 @@
++{
++  "schema": "core-worker-embedded-binaries-source-plan-v7",
++  "generatedAt": 1780683234,
++  "abi": "arm64-v8a",
++  "androidMinSdk": 26,
++  "policy": {
++    "noRuntimeDownload": true,
++    "noPlaceholder": true,
++    "noBedrockBundledInApk": true,
++    "noExecutionDuringBuild": true,
++    "jniLibsOnlyForFutureExecution": true,
++    "nativeLibExtractionRequiredForExternalTools": true,
++    "apkZipEntryOnlyNotExecutable": true,
++    "runnerRequiredAtBuild": true,
++    "metadataRequiredBeforeBundling": true,
++    "sizeAndSha256Required": true,
++    "externalTargetsRequireApprovedMetadata": true,
++    "approvedExternalLicenseStatuses": [
++      "redistributable-verified",
++      "source-built",
++      "verified-audited"
++    ]
++  },
++  "targets": {
++    "runner": {
++      "official": "libcoreworker_runner.so",
++      "aliases": [
++        "libcoreworker_runner.so",
++        "coreworker_runner",
++        "core-runner",
++        "runner"
++      ],
++      "source": "android/core-worker-app/app/src/main/cpp/coreworker_runner.c",
++      "origin": "local-core-worker",
++      "sourceKind": "project-source",
++      "license": "private-internal",
++      "licenseStatus": "internal-project",
++      "minBytes": 1024,
++      "requiredAtBuild": true
++    },
++    "proot": {
++      "official": "libcoreworker_proot.so",
++      "aliases": [
++        "libcoreworker_proot.so",
++        "libproot.so",
++        "proot"
++      ],
++      "origin": "termux-package-source-reference",
++      "sourceKind": "external-source",
++      "upstream": "https://github.com/termux/proot",
++      "homepage": "https://proot-me.github.io/",
++      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
++      "packageVersion": "5.1.107.76",
++      "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
++      "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
++      "license": "GPL-2.0",
++      "licenseStatus": "verify-before-bundling",
++      "minBytes": 32768,
++      "runtimeDependencies": [
++        "libtalloc"
++      ],
++      "dependencyPolicy": "se o binário não for estático, libtalloc precisa ser auditado/embutido junto",
++      "buildNotes": [
++        "usar build arm64/aarch64 auditado; não baixar em runtime",
++        "Termux proot depende de libtalloc; não marcar pronto sem dependência estática ou libtalloc embutido",
++        "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner"
++      ]
++    },
++    "libtalloc": {
++      "official": "libcoreworker_libtalloc.so",
++      "aliases": [
++        "libcoreworker_libtalloc.so",
++        "libtalloc.so",
++        "libtalloc.so.2",
++        "libtalloc"
++      ],
++      "origin": "termux-package-source-reference",
++      "sourceKind": "external-source-dependency",
++      "upstream": "https://www.samba.org/ftp/talloc/",
++      "homepage": "https://talloc.samba.org/talloc/doc/html/index.html",
++      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libtalloc/build.sh",
++      "packageVersion": "2.4.3",
++      "sourceArchive": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
++      "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
++      "license": "GPL-3.0",
++      "licenseStatus": "verify-before-bundling",
++      "minBytes": 8192,
++      "onDeviceBuildSafe": false,
++      "buildNotes": [
++        "dependência do recipe Termux do proot",
++        "recipe Termux remove/reescreve arquivos do prefixo; não buildar no Termux vivo do worker",
++        "preferir build isolado/offline e empacotar apenas artefato auditado"
++      ]
++    },
++    "busybox": {
++      "official": "libcoreworker_busybox.so",
++      "aliases": [
++        "libcoreworker_busybox.so",
++        "libbusybox.so",
++        "busybox"
++      ],
++      "origin": "termux-package-source-reference",
++      "sourceKind": "external-source",
++      "upstream": "https://busybox.net/downloads/",
++      "homepage": "https://busybox.net/",
++      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
++      "packageVersion": "1.37.0-r3",
++      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
++      "license": "GPL-2.0",
++      "licenseStatus": "verify-before-bundling",
++      "minBytes": 32768,
++      "runtimeDependencies": [
++        "libandroid-selinux"
++      ],
++      "dependencyPolicy": "usar build estático/self-contained ou registrar/bundlar dependências dinâmicas auditadas",
++      "onDeviceBuildSafe": false,
++      "buildNotes": [
++        "o recipe Termux marca BusyBox como não seguro para build on-device",
++        "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
++        "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
++      ]
++    },
++    "box64": {
++      "official": "libcoreworker_box64.so",
++      "aliases": [
++        "libcoreworker_box64.so",
++        "libbox64.so",
++        "box64"
++      ],
++      "origin": "manual-build-from-upstream-source",
++      "sourceKind": "external-source",
++      "upstream": "https://github.com/ptitSeb/box64",
++      "license": "MIT",
++      "licenseStatus": "verify-before-bundling",
++      "minBytes": 131072,
++      "blockedUntil": "proot-busybox-rootfs-ready",
++      "buildNotes": [
++        "Box64 é userspace Linux x86_64 emulator para hosts ARM64; validar dentro do rootfs Linux/proot",
++        "não executar em Android puro; runner real continua bloqueado até preflight completo"
++      ]
++    }
++  }
++}
+diff -ruN tts-bot-main.orig/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
+--- tts-bot-main.orig/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 18:11:25.263064671 +0000
++++ tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 18:13:20.841912977 +0000
+@@ -20,7 +20,7 @@
+ import java.util.zip.ZipFile;
+ 
+ /**
+- * Preflight v6 do runner Core Linux.
++ * Preflight v7 do runner Core Linux.
+  *
+  * Esta etapa apenas detecta requisitos e escreve estado. Ela não inicia Bedrock,
+  * não executa Box64/proot/busybox, não abre shell livre e não aceita comando remoto.
+@@ -181,8 +181,8 @@
+             out.put("ok", true);
+             out.put("component", "core_linux_runner_preflight");
+             out.put("action", safeAction);
+-            out.put("stage", "core-linux-runner-preflight-v6");
+-            out.put("preflightVersion", 6);
++            out.put("stage", "core-linux-runner-preflight-v7");
++            out.put("preflightVersion", 7);
+             out.put("state", state);
+             out.put("summary", summary);
+             out.put("phase", phase);
+@@ -252,7 +252,7 @@
+                 err.put("runnerBlocked", true);
+                 err.put("runnerExecutionAllowed", false);
+                 err.put("bedrockStartAllowed", false);
+-                err.put("preflightVersion", 6);
++                err.put("preflightVersion", 7);
+                 err.put("updatedAt", System.currentTimeMillis());
+             } catch (Throwable ignored) {}
+             return err;
+@@ -322,7 +322,7 @@
+     private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] busybox, String[] libtalloc, String[] box64,
+                                             JSONObject localManifest, JSONObject sourcePlan) throws Exception {
+         return new JSONObject()
+-                .put("stage", "core-linux-embedded-binaries-intake-v6")
++                .put("stage", "core-linux-embedded-binaries-intake-v7")
+                 .put("abi", "arm64-v8a")
+                 .put("executor", new JSONArray(executor))
+                 .put("runner", new JSONArray(runner))
+@@ -380,7 +380,9 @@
+             out.put("path", apkInfo.optString("path", ""));
+             out.put("name", apkInfo.optString("name", expectedNames != null && expectedNames.length > 0 ? expectedNames[0] : ""));
+             out.put("size", apkInfo.optLong("size", 0L));
+-            out.put("canExecute", true);
++            // ZipEntry dentro do APK não é um caminho executável. Ele só vira candidato
++            // de execução futura quando o Android o extrai para nativeLibraryDir.
++            out.put("canExecute", false);
+             out.put("blockedByWritableAppHome", false);
+             out.put("sha256", apkInfo.optString("sha256", ""));
+             out.put("detectedBy", jniLoadedFallback && detectedByFallback != null && !detectedByFallback.isEmpty() ? detectedByFallback + "+apk-entry" : apkInfo.optString("detectedBy", "apk-native-lib-entry"));
+@@ -405,16 +407,26 @@
+         out.put("metadata", metadata);
+         boolean placeholder = out.optBoolean("present", false) && out.optLong("size", 0L) <= 0L && !jniLoadedFallback;
+         boolean embedded = fileEmbedded || apkEmbedded || jniLoadedFallback;
++        boolean internalJniAsset = "runner".equals(kind) || "executor".equals(kind);
++        boolean apkEntryOnly = apkEmbedded && !fileEmbedded && !jniLoadedFallback;
++        boolean extractedNativeLibrary = validPhysicalFile && fileEmbedded;
++        boolean executionPathReady = extractedNativeLibrary || (internalJniAsset && jniLoadedFallback);
+         boolean metadataApproved = metadataApproved(kind, metadata);
+-        boolean basicAllowed = embedded
++        boolean basicAllowed = executionPathReady
+                 && !out.optBoolean("blockedByWritableAppHome", false)
+                 && !placeholder
+                 && (out.optLong("size", 0L) > 0L || jniLoadedFallback);
+         out.put("embeddedInApk", embedded);
++        out.put("apkEntryOnly", apkEntryOnly);
++        out.put("extractedNativeLibrary", extractedNativeLibrary);
++        out.put("executionPathReady", executionPathReady);
++        out.put("requiresExtractedNativeLibrary", !internalJniAsset);
+         out.put("metadataApproved", metadataApproved);
+         out.put("approvalReason", approvalReason(kind, metadata, metadataApproved));
+         out.put("allowedForFutureExecution", basicAllowed && metadataApproved);
+-        if (basicAllowed && !metadataApproved) {
++        if (apkEntryOnly && !executionPathReady) {
++            out.put("approvalBlocker", "asset detectado dentro do APK, mas não extraído em nativeLibraryDir; confirme android:extractNativeLibs/useLegacyPackaging no APK instalado");
++        } else if (basicAllowed && !metadataApproved) {
+             out.put("approvalBlocker", "metadata de origem/licença pendente para asset externo");
+         }
+         out.put("placeholder", placeholder);
+diff -ruN tts-bot-main.orig/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
+--- tts-bot-main.orig/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 18:11:25.265773037 +0000
++++ tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 18:13:27.482890010 +0000
+@@ -322,12 +322,14 @@
                  .put("core-linux-runner-preflight-v4")
                  .put("core-linux-runner-preflight-v5")
-+                .put("core-linux-runner-preflight-v6")
+                 .put("core-linux-runner-preflight-v6")
++                .put("core-linux-runner-preflight-v7")
                  .put("core-linux-embedded-binaries-intake-v1")
                  .put("core-linux-embedded-binaries-intake-v2")
                  .put("core-linux-embedded-binaries-intake-v3")
                  .put("core-linux-embedded-binaries-intake-v4")
                  .put("core-linux-embedded-binaries-intake-v5")
-+                .put("core-linux-embedded-binaries-intake-v6")
+                 .put("core-linux-embedded-binaries-intake-v6")
++                .put("core-linux-embedded-binaries-intake-v7")
                  .put("core-linux-embedded-binaries-build-pipeline-v1")
                  .put("core-linux-embedded-binaries-build-pipeline-v2")
                  .put("core-linux-embedded-binaries-build-pipeline-v3")
-@@ -422,7 +424,7 @@
+@@ -424,7 +426,7 @@
                  out.put("runnerMissing", runner.optJSONArray("missing") == null ? new JSONArray() : runner.optJSONArray("missing"));
                  out.put("runnerPreflight", runner);
              }
--            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v5" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
-+            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v6" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
+-            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v6" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
++            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v7" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
              out.put("supportedTasks", supportedLightJobsArray());
              if (runtime.length() > 0) out.put("runtime", runtime);
              if (rootfs.length() > 0) out.put("rootfs", rootfs);
-diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/tts-bot-main/changed_files.txt work_repo/tts-bot-main/changed_files.txt
---- orig_repo/tts-bot-main/changed_files.txt	2026-06-05 01:11:40.000000000 +0000
-+++ work_repo/tts-bot-main/changed_files.txt	2026-06-05 18:07:42.796210615 +0000
+diff -ruN tts-bot-main.orig/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md
+--- tts-bot-main.orig/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md	2026-06-05 18:11:25.275584767 +0000
++++ tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md	2026-06-05 18:13:53.450732366 +0000
+@@ -34,6 +34,11 @@
+ python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --metadata-file /tmp/core-linux-binaries-metadata.json
+ ```
+ 
++
++## Extração pelo Android
++
++O APK privado força `android:extractNativeLibs="true"` e `packaging.jniLibs.useLegacyPackaging=true`. Isso é obrigatório porque `proot`, `busybox`, `libtalloc` e `box64` só podem virar candidatos de execução futura quando aparecerem como arquivos reais em `nativeLibraryDir`. Se o APK só mostrar uma `ZipEntry` em `lib/arm64-v8a/*.so`, o preflight v7 detecta o asset para diagnóstico, mas mantém `allowedForFutureExecution=false`.
++
+ ## Política de assets externos
+ 
+ `proot`, `libtalloc`, `busybox` e `box64` só devem entrar no APK depois de build/import auditado com metadata de origem, licença, versão/commit/hash e receita de build. O intake rejeita stage real desses assets sem `licenseStatus` aprovado (`verified-audited`, `source-built` ou `redistributable-verified`).
+diff -ruN tts-bot-main.orig/scripts/core-linux-embedded-binaries-build-pipeline.py tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py
+--- tts-bot-main.orig/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-05 18:11:25.368703132 +0000
++++ tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-05 18:13:53.450199090 +0000
+@@ -191,7 +191,7 @@
+ 
+ def source_manifest_payload() -> dict[str, Any]:
+     return {
+-        "schema": "core-worker-embedded-binaries-source-plan-v6",
++        "schema": "core-worker-embedded-binaries-source-plan-v7",
+         "generatedAt": int(time.time()),
+         "abi": "arm64-v8a",
+         "androidMinSdk": 26,
+@@ -201,6 +201,8 @@
+             "noBedrockBundledInApk": True,
+             "noExecutionDuringBuild": True,
+             "jniLibsOnlyForFutureExecution": True,
++            "nativeLibExtractionRequiredForExternalTools": True,
++            "apkZipEntryOnlyNotExecutable": True,
+             "runnerRequiredAtBuild": True,
+             "metadataRequiredBeforeBundling": True,
+             "sizeAndSha256Required": True,
+@@ -303,6 +305,7 @@
+             "O script não baixa binários automaticamente.",
+             "BusyBox, PRoot, libtalloc e Box64 devem vir de build/import auditado e depois passar pelo intake.",
+             "Cada asset externo precisa de tamanho, SHA-256 e metadados aprovados de origem/licença antes de ser aceito no stage real.",
++            "PRoot/BusyBox precisam estar extraídos em nativeLibraryDir; ZipEntry dentro do APK é diagnóstico, não caminho executável.",
+             "Bedrock não entra no APK e não é iniciado neste estágio.",
+         ],
+     }
+diff -ruN tts-bot-main.orig/scripts/core-linux-embedded-binaries-sources.json tts-bot-main/scripts/core-linux-embedded-binaries-sources.json
+--- tts-bot-main.orig/scripts/core-linux-embedded-binaries-sources.json	2026-06-05 18:11:25.369117867 +0000
++++ tts-bot-main/scripts/core-linux-embedded-binaries-sources.json	2026-06-05 18:13:54.842267131 +0000
 @@ -1,6 +1,6 @@
- android/core-worker-app/app/build.gradle
--android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
--utility/commands/workers.py
-+android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java
-+android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
- webserver.py
- PATCH_NOTES.md
- changed_files.txt
-diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/tts-bot-main/webserver.py work_repo/tts-bot-main/webserver.py
---- orig_repo/tts-bot-main/webserver.py	2026-06-05 01:11:40.000000000 +0000
-+++ work_repo/tts-bot-main/webserver.py	2026-06-05 18:07:09.790337888 +0000
-@@ -298,11 +298,13 @@
-     "core-linux-runner-preflight-v3",
+ {
+-  "schema": "core-worker-embedded-binaries-source-plan-v6",
+-  "generatedAt": 1780621982,
++  "schema": "core-worker-embedded-binaries-source-plan-v7",
++  "generatedAt": 1780683234,
+   "abi": "arm64-v8a",
+   "androidMinSdk": 26,
+   "policy": {
+@@ -9,6 +9,8 @@
+     "noBedrockBundledInApk": true,
+     "noExecutionDuringBuild": true,
+     "jniLibsOnlyForFutureExecution": true,
++    "nativeLibExtractionRequiredForExternalTools": true,
++    "apkZipEntryOnlyNotExecutable": true,
+     "runnerRequiredAtBuild": true,
+     "metadataRequiredBeforeBundling": true,
+     "sizeAndSha256Required": true,
+diff -ruN tts-bot-main.orig/webserver.py tts-bot-main/webserver.py
+--- tts-bot-main.orig/webserver.py	2026-06-05 18:11:25.393760394 +0000
++++ tts-bot-main/webserver.py	2026-06-05 18:13:35.131998722 +0000
+@@ -299,12 +299,14 @@
      "core-linux-runner-preflight-v4",
      "core-linux-runner-preflight-v5",
-+    "core-linux-runner-preflight-v6",
+     "core-linux-runner-preflight-v6",
++    "core-linux-runner-preflight-v7",
      "core-linux-embedded-binaries-intake-v1",
      "core-linux-embedded-binaries-intake-v2",
      "core-linux-embedded-binaries-intake-v3",
      "core-linux-embedded-binaries-intake-v4",
      "core-linux-embedded-binaries-intake-v5",
-+    "core-linux-embedded-binaries-intake-v6",
+     "core-linux-embedded-binaries-intake-v6",
++    "core-linux-embedded-binaries-intake-v7",
      "core-linux-embedded-binaries-build-pipeline-v1",
      "core-linux-embedded-binaries-build-pipeline-v2",
      "core-linux-embedded-binaries-build-pipeline-v3",
-@@ -1504,7 +1506,6 @@
-     "apk_core_linux_native_runtime_status",
-     "apk_core_linux_rootfs_status",
-     "apk_core_linux_rootfs_validate",
--    "apk_core_linux_runtime_smoke_test",
- }
- 
- CORE_WORKER_APP_MANUAL_JOB_TYPES = {

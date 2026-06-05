@@ -34,6 +34,11 @@ python3 scripts/core-linux-embedded-binaries-build-pipeline.py stage-base-tools 
 python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --metadata-file /tmp/core-linux-binaries-metadata.json
 ```
 
+
+## Extração pelo Android
+
+O APK privado força `android:extractNativeLibs="true"` e `packaging.jniLibs.useLegacyPackaging=true`. Isso é obrigatório porque `proot`, `busybox`, `libtalloc` e `box64` só podem virar candidatos de execução futura quando aparecerem como arquivos reais em `nativeLibraryDir`. Se o APK só mostrar uma `ZipEntry` em `lib/arm64-v8a/*.so`, o preflight v7 detecta o asset para diagnóstico, mas mantém `allowedForFutureExecution=false`.
+
 ## Política de assets externos
 
 `proot`, `libtalloc`, `busybox` e `box64` só devem entrar no APK depois de build/import auditado com metadata de origem, licença, versão/commit/hash e receita de build. O intake rejeita stage real desses assets sem `licenseStatus` aprovado (`verified-audited`, `source-built` ou `redistributable-verified`).

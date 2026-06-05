@@ -1,6 +1,6 @@
 {
-  "schema": "core-worker-embedded-binaries-source-plan-v6",
-  "generatedAt": 1780621982,
+  "schema": "core-worker-embedded-binaries-source-plan-v7",
+  "generatedAt": 1780683234,
   "abi": "arm64-v8a",
   "androidMinSdk": 26,
   "policy": {
@@ -9,6 +9,8 @@
     "noBedrockBundledInApk": true,
     "noExecutionDuringBuild": true,
     "jniLibsOnlyForFutureExecution": true,
+    "nativeLibExtractionRequiredForExternalTools": true,
+    "apkZipEntryOnlyNotExecutable": true,
     "runnerRequiredAtBuild": true,
     "metadataRequiredBeforeBundling": true,
     "sizeAndSha256Required": true,

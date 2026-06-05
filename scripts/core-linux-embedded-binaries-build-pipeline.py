@@ -191,7 +191,7 @@ def find_cc(explicit: str | None = None) -> str | None:
 
 def source_manifest_payload() -> dict[str, Any]:
     return {
-        "schema": "core-worker-embedded-binaries-source-plan-v6",
+        "schema": "core-worker-embedded-binaries-source-plan-v7",
         "generatedAt": int(time.time()),
         "abi": "arm64-v8a",
         "androidMinSdk": 26,
@@ -201,6 +201,8 @@ def source_manifest_payload() -> dict[str, Any]:
             "noBedrockBundledInApk": True,
             "noExecutionDuringBuild": True,
             "jniLibsOnlyForFutureExecution": True,
+            "nativeLibExtractionRequiredForExternalTools": True,
+            "apkZipEntryOnlyNotExecutable": True,
             "runnerRequiredAtBuild": True,
             "metadataRequiredBeforeBundling": True,
             "sizeAndSha256Required": True,
@@ -303,6 +305,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
             "O script não baixa binários automaticamente.",
             "BusyBox, PRoot, libtalloc e Box64 devem vir de build/import auditado e depois passar pelo intake.",
             "Cada asset externo precisa de tamanho, SHA-256 e metadados aprovados de origem/licença antes de ser aceito no stage real.",
+            "PRoot/BusyBox precisam estar extraídos em nativeLibraryDir; ZipEntry dentro do APK é diagnóstico, não caminho executável.",
             "Bedrock não entra no APK e não é iniciado neste estágio.",
         ],
     }
