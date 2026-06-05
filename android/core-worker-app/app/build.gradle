@@ -58,8 +58,8 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 94
-        versionName "0.5.79"
+        versionCode 95
+        versionName "0.5.80"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -135,34 +135,49 @@ android {
     }
 }
 
-// Core Linux embedded binaries build/intake pipeline v1.
-// Não baixa, não executa e não exige binários por padrão. Quando os arquivos reais
-// forem adicionados em src/main/jniLibs/arm64-v8a, este task valida tamanho,
-// assinatura ELF mínima e impede placeholders antes do APK privado ser gerado.
+// Core Linux embedded binaries build/intake pipeline v10.
+// Não baixa e não executa binários. Este gate valida apenas os arquivos que
+// já foram embutidos em jniLibs para evitar APK quebrado. O BusyBox do Termux
+// é dinâmico: libcoreworker_busybox.so é só um wrapper pequeno, e o payload real
+// fica em libbusybox.so com dependências libandroid-selinux.so + libpcre2-8.so.
 def coreLinuxEmbeddedBinaries = [
         [key: "runner",  file: "libcoreworker_runner.so",  minBytes: 1024L,  required: true],
-        [key: "proot",   file: "libcoreworker_proot.so",   minBytes: 32768L, required: false],
-        [key: "busybox", file: "libcoreworker_busybox.so", minBytes: 32768L, required: false],
-        [key: "libtalloc", file: "libcoreworker_libtalloc.so", minBytes: 8192L, required: false],
+        [key: "proot",   file: "libcoreworker_proot.so",   minBytes: 32768L, required: false,
+         requires: ["libtalloc.so", "libcoreworker_proot_loader.so"]],
+        [key: "proot_loader", file: "libcoreworker_proot_loader.so", minBytes: 4096L, required: false],
+        [key: "proot_loader32", file: "libcoreworker_proot_loader32.so", minBytes: 4096L, required: false],
+        [key: "busybox_wrapper", file: "libcoreworker_busybox.so", minBytes: 4096L, required: false,
+         requires: ["libbusybox.so", "libandroid-selinux.so", "libpcre2-8.so"]],
+        [key: "libbusybox", file: "libbusybox.so", minBytes: 32768L, required: false,
+         requires: ["libandroid-selinux.so", "libpcre2-8.so"]],
+        [key: "libandroid_selinux", file: "libandroid-selinux.so", minBytes: 32768L, required: false,
+         requires: ["libpcre2-8.so"]],
+        [key: "libpcre2_8", file: "libpcre2-8.so", minBytes: 32768L, required: false],
+        [key: "libtalloc", file: "libtalloc.so", minBytes: 8192L, required: false],
         [key: "box64",   file: "libcoreworker_box64.so",   minBytes: 131072L, required: false],
 ]
 
 tasks.register("verifyCoreLinuxEmbeddedBinaries") {
-    description = "Valida binários Core Linux embutidos quando existirem, sem exigir presença por padrão."
+    description = "Valida binários Core Linux embutidos quando existirem, sem executar terceiros."
     doLast {
         def strict = ((project.findProperty("CORE_WORKER_REQUIRE_EMBEDDED_BINARIES") ?: System.getenv("CORE_WORKER_REQUIRE_EMBEDDED_BINARIES") ?: "false").toString().toLowerCase() in ["1", "true", "yes", "on", "sim"])
         def dir = file("${projectDir}/src/main/jniLibs/arm64-v8a")
         def missing = []
         def invalid = []
-        coreLinuxEmbeddedBinaries.each { item ->
+        def presentFiles = [] as Set
+        def byFile = [:]
+        coreLinuxEmbeddedBinaries.each { item -> byFile[item.file] = item }
+
+        def validateElf = { item ->
             def f = file("${dir}/${item.file}")
             if (!f.exists()) {
                 missing << item.file
                 if (item.required) {
-                    invalid << "${item.file} (ausente, obrigatório neste estágio)"
+                    invalid << "${item.file} (${item.key}: ausente, obrigatório neste estágio)"
                 }
                 return
             }
+            presentFiles << item.file
             byte[] head = new byte[Math.min(64, Math.max(0, f.length() as int))]
             if (head.length > 0) {
                 f.withInputStream { it.read(head) }
@@ -171,19 +186,57 @@ tasks.register("verifyCoreLinuxEmbeddedBinaries") {
             def is64 = head.length >= 5 && head[4] == 2
             def isAarch64 = head.length >= 20 && (head[18] & 0xff) == 183 && (head[19] & 0xff) == 0
             def tooSmall = f.length() < (item.minBytes as long)
-            if (!isElf || !is64 || !isAarch64 || tooSmall) {
-                invalid << "${item.file} (elf=${isElf}, elf64=${is64}, aarch64=${isAarch64}, size=${f.length()})"
+            def reasons = []
+            if (!isElf) reasons << "not_elf"
+            if (isElf && !is64) reasons << "not_elf64"
+            if (isElf && !isAarch64) reasons << "not_aarch64"
+            if (tooSmall) reasons << "size ${f.length()} < ${item.minBytes}"
+            if (!reasons.isEmpty()) {
+                invalid << "${item.file} (${item.key}: ${reasons.join('; ')})"
             }
         }
+
+        coreLinuxEmbeddedBinaries.each { item -> validateElf(item) }
+
+        coreLinuxEmbeddedBinaries.each { item ->
+            if (presentFiles.contains(item.file) && item.requires instanceof List) {
+                item.requires.each { dep ->
+                    if (!file("${dir}/${dep}").exists()) {
+                        invalid << "${item.file} (${item.key}: dependência ausente ${dep})"
+                    }
+                }
+            }
+        }
+
+        def forbiddenRunpath = "/data/data/com.termux/files/usr/lib".getBytes("UTF-8")
+        ["libtalloc.so", "libcoreworker_libtalloc.so"].each { name ->
+            def f = file("${dir}/${name}")
+            if (f.exists() && f.bytes.findIndexOf { it == forbiddenRunpath[0] } >= 0) {
+                def bytes = f.bytes
+                def found = false
+                for (int i = 0; i <= bytes.length - forbiddenRunpath.length; i++) {
+                    boolean match = true
+                    for (int j = 0; j < forbiddenRunpath.length; j++) {
+                        if (bytes[i + j] != forbiddenRunpath[j]) { match = false; break }
+                    }
+                    if (match) { found = true; break }
+                }
+                if (found) {
+                    invalid << "${name} (RUNPATH/caminho de lib ainda aponta para Termux; esperado \$ORIGIN)"
+                }
+            }
+        }
+
         if (!invalid.isEmpty()) {
             throw new GradleException("Core Linux embedded binaries inválidos: ${invalid.join(', ')}")
         }
         if (strict && !missing.isEmpty()) {
             throw new GradleException("Core Linux embedded binaries ausentes: ${missing.join(', ')}")
         }
-        println("Core Linux embedded binaries: missing=${missing.size()} invalid=${invalid.size()} strict=${strict}; runner obrigatório, terceiros opcionais até import auditado")
+        println("Core Linux embedded binaries v10: present=${presentFiles.size()} missing=${missing.size()} invalid=${invalid.size()} strict=${strict}; busybox wrapper pequeno permitido quando libbusybox/deps estão presentes")
     }
 }
+
 
 
 tasks.named("preBuild").configure {

@@ -1,5 +1,5 @@
 {
-  "schema": "core-worker-embedded-binaries-metadata-v9-v10-compatible",
+  "schema": "core-worker-embedded-binaries-metadata-v10",
   "generatedAt": 1780688415,
   "policy": {
     "noRuntimeDownload": true,

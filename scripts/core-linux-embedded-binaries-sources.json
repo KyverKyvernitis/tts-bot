@@ -1,5 +1,5 @@
 {
-  "schema": "core-worker-embedded-binaries-source-plan-v9",
+  "schema": "core-worker-embedded-binaries-source-plan-v10",
   "generatedAt": 1780686535,
   "abi": "arm64-v8a",
   "androidMinSdk": 26,
@@ -108,17 +108,18 @@
       "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
       "license": "GPL-2.0",
       "licenseStatus": "verify-before-bundling",
-      "minBytes": 32768,
+      "minBytes": 4096,
       "runtimeDependencies": [
         "libbusybox",
         "libandroid_selinux",
         "libpcre2_8"
       ],
-      "dependencyPolicy": "binário Termux é dinâmico; bundle obrigatório: libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
+      "dependencyPolicy": "binário Termux é dinâmico; libcoreworker_busybox.so é wrapper pequeno; payload real obrigatório em libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
       "onDeviceBuildSafe": false,
       "buildNotes": [
         "o recipe Termux marca BusyBox como não seguro para build on-device",
         "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
+        "wrapper pode ser pequeno; o tamanho forte fica em libbusybox.so",
         "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
       ]
     },

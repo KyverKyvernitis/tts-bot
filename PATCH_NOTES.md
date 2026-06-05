@@ -1,41 +1,45 @@
-# Patch V9 — Core Linux BusyBox dependency chain
+# Patch V10 — Core Linux BusyBox wrapper gate + libtalloc RUNPATH
 
-Este patch fecha a cadeia base que faltava para substituir o Termux no APK, ainda sem liberar execução real.
+Este patch corrige o bloqueio que impedia o APK `0.5.79/94` de buildar no phone worker.
 
-## Importado/ajustado
+## Correções principais
 
-- BusyBox `1.37.0-3` do pacote Termux aarch64.
-- `libbusybox.so` do mesmo pacote.
-- `libandroid-selinux.so` do pacote Termux aarch64.
-- `libpcre2-8.so` do pacote Termux aarch64.
-- PRoot já importado no V8 recebeu correção extra de RUNPATH para `$ORIGIN`.
-- BusyBox recebeu correção de `NEEDED libbusybox.so.1.37.0 -> libbusybox.so`.
-- BusyBox/libbusybox/libandroid-selinux/libpcre2 receberam RUNPATH `$ORIGIN` para resolver dependências no `nativeLibraryDir` do APK.
+- APK sobe para `0.5.80` / `versionCode 95`.
+- `verifyCoreLinuxEmbeddedBinaries` passa a entender que:
+  - `libcoreworker_busybox.so` é um wrapper ELF pequeno do BusyBox Termux;
+  - `libbusybox.so` é o payload real que precisa carregar o peso/tamanho forte;
+  - `libandroid-selinux.so` e `libpcre2-8.so` são dependências obrigatórias quando BusyBox está presente.
+- `libtalloc.so` e `libcoreworker_libtalloc.so` tiveram RUNPATH higienizado de:
+  - `/data/data/com.termux/files/usr/lib`
+  - para `$ORIGIN`
+- Metadata V10 registra os novos hashes e a regra de wrapper pequeno.
+- A metadata V9 também foi atualizada como compatível para não quebrar comandos antigos de validação.
 
-## Segurança/gate
+## Segurança mantida
 
-- APK sobe para `0.5.79` / `versionCode 94`.
-- Preflight sobe para `core-linux-runner-preflight-v9`.
-- Intake sobe para `core-linux-embedded-binaries-intake-v9`.
-- `baseToolsReady` agora exige:
-  - runner;
-  - PRoot;
-  - loader do PRoot;
-  - `libtalloc.so` real;
-  - BusyBox;
-  - `libbusybox.so`;
-  - `libandroid-selinux.so`;
-  - `libpcre2-8.so`.
-- Runner real continua bloqueado até rootfs real + smoke allowlist no APK instalado.
+- Nenhum binário externo é executado durante build/intake.
+- Runner real segue bloqueado.
+- Box64 e Bedrock continuam fora desta etapa.
+- PRoot/BusyBox ainda precisam passar pelo smoke real no APK instalado antes de reduzir Termux.
 
-## Validação feita
+## Validação recomendada
 
 ```bash
 python3 -m py_compile webserver.py scripts/core-linux-embedded-binaries-build-pipeline.py scripts/core-linux-embedded-binaries-intake.py
-python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --strict --metadata-file scripts/core-linux-embedded-binaries-metadata.v9.json
-readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so
-readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so
-readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so
-readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so
-readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so
+python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --strict --metadata-file scripts/core-linux-embedded-binaries-metadata.v10.json
+
+for f in \
+  libcoreworker_proot.so \
+  libcoreworker_busybox.so \
+  libbusybox.so \
+  libandroid-selinux.so \
+  libpcre2-8.so \
+  libtalloc.so \
+  libcoreworker_libtalloc.so
+ do
+  echo "----- $f -----"
+  readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/$f | grep -E 'NEEDED|RUNPATH|RPATH' || true
+ done
 ```
+
+Resultado esperado: `libtalloc.so` e `libcoreworker_libtalloc.so` também devem mostrar `RUNPATH [$ORIGIN]`.
