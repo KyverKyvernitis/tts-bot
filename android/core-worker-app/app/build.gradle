@@ -58,8 +58,8 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 87
-        versionName "0.5.72"
+        versionCode 88
+        versionName "0.5.73"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -137,6 +137,7 @@ def coreLinuxEmbeddedBinaries = [
         [key: "runner",  file: "libcoreworker_runner.so",  minBytes: 1024L,  required: true],
         [key: "proot",   file: "libcoreworker_proot.so",   minBytes: 32768L, required: false],
         [key: "busybox", file: "libcoreworker_busybox.so", minBytes: 32768L, required: false],
+        [key: "libtalloc", file: "libcoreworker_libtalloc.so", minBytes: 8192L, required: false],
         [key: "box64",   file: "libcoreworker_box64.so",   minBytes: 131072L, required: false],
 ]
 
@@ -187,7 +188,7 @@ tasks.named("preBuild").configure {
 tasks.register("coreLinuxEmbeddedBinariesPlan") {
     description = "Mostra o plano local de build/import dos binários Core Linux sem baixar ou executar nada."
     doLast {
-        println("Core Linux embedded binaries pipeline v1")
+        println("Core Linux embedded binaries pipeline v2")
         println("  oficiais em: src/main/jniLibs/arm64-v8a")
         println("  manifesto:   src/main/assets/core-linux/embedded-binaries-manifest.json")
         println("  script:      scripts/core-linux-embedded-binaries-build-pipeline.py")

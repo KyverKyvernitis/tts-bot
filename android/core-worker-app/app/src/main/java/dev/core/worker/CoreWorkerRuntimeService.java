@@ -320,13 +320,16 @@ public class CoreWorkerRuntimeService extends Service {
                 .put("core-linux-runner-preflight-v2")
                 .put("core-linux-runner-preflight-v3")
                 .put("core-linux-runner-preflight-v4")
+                .put("core-linux-runner-preflight-v5")
                 .put("core-linux-embedded-binaries-intake-v1")
                 .put("core-linux-embedded-binaries-intake-v2")
                 .put("core-linux-embedded-binaries-intake-v3")
                 .put("core-linux-embedded-binaries-intake-v4")
+                .put("core-linux-embedded-binaries-intake-v5")
                 .put("core-linux-embedded-binaries-build-pipeline-v1")
                 .put("core-linux-embedded-binaries-build-pipeline-v2")
                 .put("core-linux-embedded-binaries-build-pipeline-v3")
+                .put("core-linux-embedded-binaries-build-pipeline-v4")
                 .put("core-linux-runtime-v1")
                 .put("minecraft-bedrock-manager-safe-plan");
     }
@@ -419,7 +422,7 @@ public class CoreWorkerRuntimeService extends Service {
                 out.put("runnerMissing", runner.optJSONArray("missing") == null ? new JSONArray() : runner.optJSONArray("missing"));
                 out.put("runnerPreflight", runner);
             }
-            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v3" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
+            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v5" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
             out.put("supportedTasks", supportedLightJobsArray());
             if (runtime.length() > 0) out.put("runtime", runtime);
             if (rootfs.length() > 0) out.put("rootfs", rootfs);

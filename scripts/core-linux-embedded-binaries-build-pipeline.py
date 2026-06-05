@@ -53,30 +53,67 @@ TARGETS: dict[str, dict[str, Any]] = {
     "proot": {
         "official": "libcoreworker_proot.so",
         "aliases": ["libcoreworker_proot.so", "libproot.so", "proot"],
-        "origin": "manual-build-from-upstream-source",
+        "origin": "termux-package-source-reference",
         "sourceKind": "external-source",
-        "upstream": "https://github.com/proot-me/proot",
-        "termuxCompatibilityReference": "https://github.com/termux/proot-distro",
-        "license": "GPL-2.0-or-later",
+        "upstream": "https://github.com/termux/proot",
+        "homepage": "https://proot-me.github.io/",
+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
+        "packageVersion": "5.1.107.76",
+        "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
+        "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
+        "license": "GPL-2.0",
         "licenseStatus": "verify-before-bundling",
         "minBytes": 32768,
+        "runtimeDependencies": ["libtalloc"],
+        "dependencyPolicy": "se o binário não for estático, libtalloc precisa ser auditado/embutido junto",
         "buildNotes": [
             "usar build arm64/aarch64 auditado; não baixar em runtime",
+            "Termux proot depende de libtalloc; não marcar pronto sem dependência estática ou libtalloc embutido",
             "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner",
+        ],
+    },
+    "libtalloc": {
+        "official": "libcoreworker_libtalloc.so",
+        "aliases": ["libcoreworker_libtalloc.so", "libtalloc.so", "libtalloc.so.2", "libtalloc"],
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source-dependency",
+        "upstream": "https://www.samba.org/ftp/talloc/",
+        "homepage": "https://talloc.samba.org/talloc/doc/html/index.html",
+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libtalloc/build.sh",
+        "packageVersion": "2.4.3",
+        "sourceArchive": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
+        "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
+        "license": "GPL-3.0",
+        "licenseStatus": "verify-before-bundling",
+        "minBytes": 8192,
+        "onDeviceBuildSafe": False,
+        "buildNotes": [
+            "dependência do recipe Termux do proot",
+            "recipe Termux remove/reescreve arquivos do prefixo; não buildar no Termux vivo do worker",
+            "preferir build isolado/offline e empacotar apenas artefato auditado",
         ],
     },
     "busybox": {
         "official": "libcoreworker_busybox.so",
         "aliases": ["libcoreworker_busybox.so", "libbusybox.so", "busybox"],
-        "origin": "manual-build-from-upstream-source",
+        "origin": "termux-package-source-reference",
         "sourceKind": "external-source",
         "upstream": "https://busybox.net/downloads/",
-        "license": "GPL-2.0-only",
+        "homepage": "https://busybox.net/",
+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
+        "packageVersion": "1.37.0-r3",
+        "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+        "license": "GPL-2.0",
         "licenseStatus": "verify-before-bundling",
         "minBytes": 32768,
+        "runtimeDependencies": ["libandroid-selinux"],
+        "dependencyPolicy": "usar build estático/self-contained ou registrar/bundlar dependências dinâmicas auditadas",
+        "onDeviceBuildSafe": False,
         "buildNotes": [
-            "preferir build próprio/auditado estático para arm64",
-            "não usar binário aleatório sem versão, sha256 e licença verificados",
+            "o recipe Termux marca BusyBox como não seguro para build on-device",
+            "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
+            "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário",
         ],
     },
     "box64": {
@@ -88,13 +125,13 @@ TARGETS: dict[str, dict[str, Any]] = {
         "license": "MIT",
         "licenseStatus": "verify-before-bundling",
         "minBytes": 131072,
+        "blockedUntil": "proot-busybox-rootfs-ready",
         "buildNotes": [
             "Box64 é userspace Linux x86_64 emulator para hosts ARM64; validar dentro do rootfs Linux/proot",
             "não executar em Android puro; runner real continua bloqueado até preflight completo",
         ],
     },
 }
-
 APPROVED_EXTERNAL_LICENSE_STATUSES = ["redistributable-verified", "source-built", "verified-audited"]
 
 
@@ -156,7 +193,7 @@ def write_source_manifest() -> Path:
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     SOURCE_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema": "core-worker-embedded-binaries-source-plan-v5",
+        "schema": "core-worker-embedded-binaries-source-plan-v6",
         "generatedAt": int(time.time()),
         "abi": "arm64-v8a",
         "androidMinSdk": 26,
@@ -194,35 +231,59 @@ def status() -> dict[str, Any]:
 
 
 def metadata_template() -> dict[str, Any]:
+    targets: dict[str, Any] = {}
+    for key, meta in TARGETS.items():
+        if key == "runner":
+            continue
+        license_name = str(meta.get("license", ""))
+        is_gpl = license_name.startswith("GPL")
+        targets[key] = {
+            "origin": meta.get("origin", ""),
+            "sourceKind": meta.get("sourceKind", ""),
+            "upstream": meta.get("upstream", ""),
+            "homepage": meta.get("homepage", ""),
+            "termuxBuildRecipe": meta.get("termuxBuildRecipe", ""),
+            "license": license_name,
+            "licenseStatus": "verified-audited",
+            "packageVersion": meta.get("packageVersion", ""),
+            "sourceArchive": meta.get("sourceArchive", ""),
+            "sourceSha256": meta.get("sourceSha256", ""),
+            "binarySha256": "preencha com o sha256 do binário arm64 final",
+            "binarySize": "preencha com o tamanho em bytes do binário arm64 final",
+            "linkMode": "static|self-contained|dynamic-with-bundled-dependencies",
+            "runtimeDependencies": meta.get("runtimeDependencies", []),
+            "dependencyPolicy": meta.get("dependencyPolicy", ""),
+            "buildRecipe": "descreva ambiente isolado/toolchain/config usado; não usar build no Termux vivo se onDeviceBuildSafe=false",
+            "onDeviceBuildSafe": meta.get("onDeviceBuildSafe", True),
+            "auditedBy": "",
+            "notes": meta.get("buildNotes", []),
+            "sourceCompliance": {
+                "required": is_gpl,
+                "completeCorrespondingSourceReady": False if is_gpl else True,
+                "licenseTextIncluded": False if is_gpl else True,
+                "sourceUrl": meta.get("sourceArchive", ""),
+                "configUrlOrPath": "preencha .config/patches/build scripts quando GPL exigir",
+                "modifications": "none|descrever patches",
+            },
+        }
     return {
-        "schema": "core-worker-embedded-binaries-metadata-v1",
+        "schema": "core-worker-embedded-binaries-metadata-v2",
         "generatedAt": int(time.time()),
-        "targets": {
-            key: {
-                "origin": meta.get("origin", ""),
-                "sourceKind": meta.get("sourceKind", ""),
-                "upstream": meta.get("upstream", ""),
-                "license": meta.get("license", ""),
-                "licenseStatus": "verified-audited" if key != "runner" else meta.get("licenseStatus", ""),
-                "sourceVersion": "",
-                "sourceCommit": "",
-                "packageVersion": "",
-                "sourceSha256": "",
-                "buildRecipe": "preencha como o binário arm64 foi produzido/auditado",
-                "auditedBy": "",
-                "notes": meta.get("notes", ""),
-            }
-            for key, meta in TARGETS.items()
-            if key != "runner"
+        "policy": {
+            "noRuntimeDownload": True,
+            "noExecutionDuringAudit": True,
+            "noOnDeviceUnsafeBuild": True,
+            "gplSourceComplianceRequired": True,
+            "dynamicDependenciesMustBeBundledOrStatic": True,
         },
+        "targets": targets,
     }
-
 
 def cmd_plan(args: argparse.Namespace) -> int:
     manifest = write_source_manifest()
     payload = {
         "ok": True,
-        "stage": "core-linux-embedded-binaries-build-pipeline-v3",
+        "stage": "core-linux-embedded-binaries-build-pipeline-v4",
         "sourceManifest": rel(manifest),
         "metadataTemplate": "use: python3 scripts/core-linux-embedded-binaries-build-pipeline.py metadata-template > /tmp/core-linux-binaries-metadata.json",
         "jniDir": rel(JNI_DIR),
@@ -237,7 +298,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         },
         "notes": [
             "O script não baixa binários automaticamente.",
-            "BusyBox, PRoot e Box64 devem vir de build/import auditado e depois passar pelo intake.",
+            "BusyBox, PRoot, libtalloc e Box64 devem vir de build/import auditado e depois passar pelo intake.",
             "Cada asset externo precisa de tamanho, SHA-256 e metadados aprovados de origem/licença antes de ser aceito no stage real.",
             "Bedrock não entra no APK e não é iniciado neste estágio.",
         ],
@@ -305,6 +366,7 @@ def build_intake_command(
     metadata_file: Path | None,
     allow_unverified_external: bool = False,
     include_keys: set[str] | None = None,
+    require_keys: set[str] | None = None,
 ) -> list[str]:
     command = [sys.executable, str(INTAKE)]
     found: list[str] = []
@@ -316,6 +378,10 @@ def build_intake_command(
         if p:
             command.extend([f"--{key}", str(p)])
             found.append(key)
+    required = require_keys or set()
+    missing_required = sorted(required.difference(found))
+    if missing_required:
+        raise SystemExit("binário obrigatório ausente no input-dir: " + ", ".join(missing_required))
     if not found:
         wanted = ", ".join(sorted(allowed))
         raise SystemExit(f"nenhum binário conhecido encontrado no input-dir para: {wanted}")
@@ -365,7 +431,8 @@ def cmd_audit_base_tools(args: argparse.Namespace) -> int:
         input_dir,
         dry_run=True,
         metadata_file=args.metadata_file,
-        include_keys={"proot", "busybox"},
+        include_keys={"proot", "busybox", "libtalloc"},
+        require_keys={"proot", "busybox"},
     )
     sh(command)
     return 0
@@ -379,7 +446,8 @@ def cmd_stage_base_tools(args: argparse.Namespace) -> int:
         input_dir,
         dry_run=args.dry_run,
         metadata_file=args.metadata_file,
-        include_keys={"proot", "busybox"},
+        include_keys={"proot", "busybox", "libtalloc"},
+        require_keys={"proot", "busybox"},
     )
     sh(command)
     return 0

@@ -1,26 +1,36 @@
-# Patch: core-worker-build-tracking-runtime-summary-base-tools-v1
+# Patch: core-worker-base-tools-audit-v1
 
-Base: `repo-20260604-213007.zip`
+Base: `repo-20260604-215859.zip`
 
 ## Inclui
 
-- APK `0.5.72` / `versionCode 87`.
-- Phone worker `1.10.28`.
-- `runtime-summary` agora enriquece o heartbeat compacto com o último preflight Core Linux válido.
-- `coreLinux.runnerPreflight.embedded` e `coreLinux.embedded` passam a expor, de forma estável:
-  - `executor`, `runner`, `proot`, `busybox`, `box64`;
-  - `present`, `embeddedInApk`, `allowedForFutureExecution`, `canExecute`, `placeholder`, `size`, `sha256`, `detectedBy`.
-- Corrige o caso onde o painel/comando lia `runner_* = null` mesmo depois do preflight real confirmar `runner` embutido no APK.
-- Corrige falso estado de build falho quando já existe `latest.json` publicado para a mesma versão/source.
-- Automação de APK ignora falha antiga se houver build/publicação mais nova bem-sucedida para a mesma versão/source.
-- Builder do phone worker passa a salvar no `.apk.json` e `latest-artifact.json`:
-  - `gradle_log_path`, `gradle_log_exists`, `gradle_log_bytes`;
-  - `build_successful`, `build_result`, `phoneWorkerVersion`.
-- Limpeza segura de artifacts antigos no builder (`PHONE_WORKER_APK_BUILD_KEEP_ARTIFACTS`, padrão 12), sem tocar no último APK nem no `latest-artifact.json`.
-- Reintroduz o asset `assets/core-linux/embedded-binaries-source-plan.json` no source do APK.
-- Pipeline de binários sobe para source plan `v5` e adiciona comandos seguros:
-  - `audit-base-tools`: valida apenas `proot` + `busybox` em dry-run;
-  - `stage-base-tools`: importa apenas `proot` + `busybox` auditados; `box64` continua para etapa separada.
+- APK `0.5.73` / `versionCode 88`.
+- Phone worker `1.10.29`.
+- Source plan sobe para `core-worker-embedded-binaries-source-plan-v6`.
+- Pipeline sobe para `core-linux-embedded-binaries-build-pipeline-v4`.
+- Intake local sobe para `core-worker-embedded-binaries-local-v4`.
+- Preflight do runner sobe para `core-linux-runner-preflight-v5`.
+- Registro auditável das fontes pesquisadas:
+  - `proot` Termux `5.1.107.76`, `GPL-2.0`, SHA-256 do source oficial do recipe Termux.
+  - `libtalloc` `2.4.3`, `GPL-3.0`, SHA-256 do source oficial do recipe Termux.
+  - `busybox` Termux `1.37.0-r3`, `GPL-2.0`, SHA-256 do source oficial do recipe Termux.
+- Novo alvo opcional `libcoreworker_libtalloc.so` para permitir PRoot dinâmico auditado sem esconder dependência.
+- `audit-base-tools` e `stage-base-tools` agora tratam `proot + busybox` como obrigatórios e `libtalloc` como dependência auditada quando necessária.
+- Intake agora valida:
+  - ELF arm64 e tamanho mínimo;
+  - metadata de origem/licença;
+  - `sourceSha256` esperado do recipe;
+  - `binarySha256` quando informado;
+  - compliance de GPL (`completeCorrespondingSourceReady`, `licenseTextIncluded`, `sourceUrl`);
+  - `linkMode` (`static`, `self-contained` ou `dynamic-with-bundled-dependencies`);
+  - rejeição de build inseguro em prefixo vivo do worker quando declarado.
+- Preflight/runtime-summary passam a expor:
+  - `libtallocEmbedded`;
+  - `prootNeedsLibtalloc`;
+  - `prootDependencyReady`;
+  - `baseToolsReady`;
+  - asset `embedded.libtalloc`.
+- README dos binários nativos atualizado com a política de GPL/source e dependências.
 
 ## Continua bloqueado
 

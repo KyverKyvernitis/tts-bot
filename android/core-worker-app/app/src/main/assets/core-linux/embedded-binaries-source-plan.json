@@ -1,6 +1,6 @@
 {
-  "schema": "core-worker-embedded-binaries-source-plan-v5",
-  "generatedAt": 1780619979,
+  "schema": "core-worker-embedded-binaries-source-plan-v6",
+  "generatedAt": 1780621982,
   "abi": "arm64-v8a",
   "androidMinSdk": 26,
   "policy": {
@@ -43,16 +43,51 @@
         "libproot.so",
         "proot"
       ],
-      "origin": "manual-build-from-upstream-source",
+      "origin": "termux-package-source-reference",
       "sourceKind": "external-source",
-      "upstream": "https://github.com/proot-me/proot",
-      "termuxCompatibilityReference": "https://github.com/termux/proot-distro",
-      "license": "GPL-2.0-or-later",
+      "upstream": "https://github.com/termux/proot",
+      "homepage": "https://proot-me.github.io/",
+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
+      "packageVersion": "5.1.107.76",
+      "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
+      "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
+      "license": "GPL-2.0",
       "licenseStatus": "verify-before-bundling",
       "minBytes": 32768,
+      "runtimeDependencies": [
+        "libtalloc"
+      ],
+      "dependencyPolicy": "se o binário não for estático, libtalloc precisa ser auditado/embutido junto",
       "buildNotes": [
         "usar build arm64/aarch64 auditado; não baixar em runtime",
+        "Termux proot depende de libtalloc; não marcar pronto sem dependência estática ou libtalloc embutido",
         "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner"
+      ]
+    },
+    "libtalloc": {
+      "official": "libcoreworker_libtalloc.so",
+      "aliases": [
+        "libcoreworker_libtalloc.so",
+        "libtalloc.so",
+        "libtalloc.so.2",
+        "libtalloc"
+      ],
+      "origin": "termux-package-source-reference",
+      "sourceKind": "external-source-dependency",
+      "upstream": "https://www.samba.org/ftp/talloc/",
+      "homepage": "https://talloc.samba.org/talloc/doc/html/index.html",
+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libtalloc/build.sh",
+      "packageVersion": "2.4.3",
+      "sourceArchive": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
+      "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
+      "license": "GPL-3.0",
+      "licenseStatus": "verify-before-bundling",
+      "minBytes": 8192,
+      "onDeviceBuildSafe": false,
+      "buildNotes": [
+        "dependência do recipe Termux do proot",
+        "recipe Termux remove/reescreve arquivos do prefixo; não buildar no Termux vivo do worker",
+        "preferir build isolado/offline e empacotar apenas artefato auditado"
       ]
     },
     "busybox": {
@@ -62,15 +97,26 @@
         "libbusybox.so",
         "busybox"
       ],
-      "origin": "manual-build-from-upstream-source",
+      "origin": "termux-package-source-reference",
       "sourceKind": "external-source",
       "upstream": "https://busybox.net/downloads/",
-      "license": "GPL-2.0-only",
+      "homepage": "https://busybox.net/",
+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
+      "packageVersion": "1.37.0-r3",
+      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+      "license": "GPL-2.0",
       "licenseStatus": "verify-before-bundling",
       "minBytes": 32768,
+      "runtimeDependencies": [
+        "libandroid-selinux"
+      ],
+      "dependencyPolicy": "usar build estático/self-contained ou registrar/bundlar dependências dinâmicas auditadas",
+      "onDeviceBuildSafe": false,
       "buildNotes": [
-        "preferir build próprio/auditado estático para arm64",
-        "não usar binário aleatório sem versão, sha256 e licença verificados"
+        "o recipe Termux marca BusyBox como não seguro para build on-device",
+        "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
+        "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
       ]
     },
     "box64": {
@@ -86,6 +132,7 @@
       "license": "MIT",
       "licenseStatus": "verify-before-bundling",
       "minBytes": 131072,
+      "blockedUntil": "proot-busybox-rootfs-ready",
       "buildNotes": [
         "Box64 é userspace Linux x86_64 emulator para hosts ARM64; validar dentro do rootfs Linux/proot",
         "não executar em Android puro; runner real continua bloqueado até preflight completo"

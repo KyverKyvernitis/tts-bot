@@ -32,6 +32,7 @@ TARGETS = {
     "runner": "libcoreworker_runner.so",
     "proot": "libcoreworker_proot.so",
     "busybox": "libcoreworker_busybox.so",
+    "libtalloc": "libcoreworker_libtalloc.so",
     "box64": "libcoreworker_box64.so",
 }
 
@@ -39,6 +40,7 @@ MIN_BYTES_BY_TARGET = {
     "runner": 1024,
     "proot": 32768,
     "busybox": 32768,
+    "libtalloc": 8192,
     "box64": 131072,
 }
 
@@ -51,20 +53,36 @@ TARGET_METADATA = {
         "notes": "core-runner seguro próprio; preflight only",
     },
     "proot": {
-        "origin": "manual-build-from-upstream-source",
+        "origin": "termux-package-source-reference",
         "sourceKind": "external-source",
-        "upstream": "https://github.com/proot-me/proot",
-        "license": "GPL-2.0-or-later",
+        "upstream": "https://github.com/termux/proot",
+        "license": "GPL-2.0",
         "licenseStatus": "verify-before-bundling",
-        "notes": "não baixar em runtime; importar somente build arm64 auditado",
+        "packageVersion": "5.1.107.76",
+        "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
+        "runtimeDependencies": ["libtalloc"],
+        "notes": "não baixar em runtime; importar somente build arm64 auditado; Termux proot depende de libtalloc quando não for estático",
+    },
+    "libtalloc": {
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source-dependency",
+        "upstream": "https://www.samba.org/ftp/talloc/",
+        "license": "GPL-3.0",
+        "licenseStatus": "verify-before-bundling",
+        "packageVersion": "2.4.3",
+        "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
+        "notes": "dependência de proot; build Termux não deve rodar no prefixo vivo do worker",
     },
     "busybox": {
-        "origin": "manual-build-from-upstream-source",
+        "origin": "termux-package-source-reference",
         "sourceKind": "external-source",
         "upstream": "https://busybox.net/downloads/",
-        "license": "GPL-2.0-only",
+        "license": "GPL-2.0",
         "licenseStatus": "verify-before-bundling",
-        "notes": "não baixar em runtime; importar somente build arm64 auditado",
+        "packageVersion": "1.37.0-r3",
+        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+        "runtimeDependencies": ["libandroid-selinux"],
+        "notes": "não baixar em runtime; importar somente build arm64 auditado; recipe Termux não é seguro para build on-device",
     },
     "box64": {
         "origin": "manual-build-from-upstream-source",
@@ -160,7 +178,34 @@ def metadata_for(key: str, override: dict[str, Any], sources: dict[str, Any]) ->
     return merged
 
 
-def metadata_errors(key: str, metadata: dict[str, Any]) -> list[str]:
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "sim", "ok"}
+    return False
+
+
+def _license_is_gpl(metadata: dict[str, Any]) -> bool:
+    return str(metadata.get("license") or "").strip().upper().startswith("GPL")
+
+
+def _source_compliance_ok(metadata: dict[str, Any]) -> bool:
+    if not _license_is_gpl(metadata):
+        return True
+    comp = metadata.get("sourceCompliance")
+    if not isinstance(comp, dict):
+        return False
+    return bool(
+        _as_bool(comp.get("completeCorrespondingSourceReady"))
+        and _as_bool(comp.get("licenseTextIncluded"))
+        and str(comp.get("sourceUrl") or metadata.get("sourceArchive") or metadata.get("upstream") or "").strip()
+    )
+
+
+def metadata_errors(key: str, metadata: dict[str, Any], info: dict[str, Any] | None = None) -> list[str]:
     if key == "runner":
         return []
     errors: list[str] = []
@@ -176,8 +221,47 @@ def metadata_errors(key: str, metadata: dict[str, Any]) -> list[str]:
             errors.append(f"metadata.{required} obrigatório")
     if not any(str(metadata.get(k) or "").strip() for k in ("sourceVersion", "sourceCommit", "packageVersion", "buildRecipe", "sourceSha256")):
         errors.append("informe ao menos sourceVersion/sourceCommit/packageVersion/buildRecipe/sourceSha256")
+    expected_source_sha = str(TARGET_METADATA.get(key, {}).get("sourceSha256") or "").strip().lower()
+    provided_source_sha = str(metadata.get("sourceSha256") or "").strip().lower()
+    if expected_source_sha and provided_source_sha and provided_source_sha != expected_source_sha:
+        errors.append(f"sourceSha256 diferente do recipe auditado: esperado={expected_source_sha} atual={provided_source_sha}")
+    expected_version = str(TARGET_METADATA.get(key, {}).get("packageVersion") or "").strip()
+    provided_version = str(metadata.get("packageVersion") or metadata.get("sourceVersion") or "").strip()
+    if expected_version and provided_version and provided_version != expected_version:
+        errors.append(f"versão diferente do recipe auditado: esperado={expected_version} atual={provided_version}")
+    expected_binary_sha = str(metadata.get("binarySha256") or metadata.get("expectedBinarySha256") or "").strip().lower()
+    actual_binary_sha = str((info or {}).get("sha256") or "").strip().lower()
+    if expected_binary_sha and actual_binary_sha and expected_binary_sha != actual_binary_sha:
+        errors.append(f"binarySha256 não confere: esperado={expected_binary_sha} atual={actual_binary_sha}")
+    if _license_is_gpl(metadata) and not _source_compliance_ok(metadata):
+        errors.append("licença GPL exige sourceCompliance.completeCorrespondingSourceReady=true, licenseTextIncluded=true e sourceUrl válido")
+    link_mode = str(metadata.get("linkMode") or "").strip().lower()
+    if key in {"proot", "busybox", "libtalloc"} and link_mode not in {"static", "self-contained", "dynamic-with-bundled-dependencies"}:
+        errors.append("metadata.linkMode precisa ser static, self-contained ou dynamic-with-bundled-dependencies")
+    if key in {"busybox", "libtalloc"} and TARGET_METADATA.get(key, {}).get("notes", "").find("não deve") >= 0:
+        if _as_bool(metadata.get("builtOnLiveWorkerPrefix")):
+            errors.append("build no prefixo vivo do worker não é aceito para este pacote")
     return errors
 
+
+def cross_target_errors(provided: dict[str, Path], target_manifests: dict[str, dict[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    if "proot" in provided:
+        meta = target_manifests.get("proot", {})
+        link_mode = str(meta.get("linkMode") or "").strip().lower()
+        deps = meta.get("runtimeDependencies")
+        dep_names = {str(x).strip().lower() for x in deps} if isinstance(deps, list) else set()
+        needs_libtalloc = "libtalloc" in dep_names or link_mode == "dynamic-with-bundled-dependencies"
+        if needs_libtalloc and link_mode != "static" and "libtalloc" not in provided:
+            errors.append("proot dinâmico exige --libtalloc auditado/embutido ou metadata.linkMode=static")
+    if "busybox" in provided:
+        meta = target_manifests.get("busybox", {})
+        link_mode = str(meta.get("linkMode") or "").strip().lower()
+        deps = meta.get("runtimeDependencies")
+        dep_names = {str(x).strip().lower() for x in deps} if isinstance(deps, list) else set()
+        if dep_names and link_mode not in {"static", "self-contained"}:
+            errors.append("busybox com dependências dinâmicas exige build static/self-contained ou bundle explícito das dependências auditadas")
+    return errors
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Core Linux embedded binaries intake")
@@ -190,14 +274,14 @@ def main(argv: list[str]) -> int:
 
     provided = {key: getattr(args, key) for key in TARGETS if getattr(args, key) is not None}
     if not provided:
-        parser.error("informe pelo menos um binário: --runner, --proot, --busybox ou --box64")
+        parser.error("informe pelo menos um binário: --runner, --proot, --libtalloc, --busybox ou --box64")
 
     metadata_override = load_json(args.metadata_file) if args.metadata_file else {}
     source_manifest = load_json(SOURCE_MANIFEST)
 
     JNI_DIR.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, Any] = {
-        "schema": "core-worker-embedded-binaries-local-v3",
+        "schema": "core-worker-embedded-binaries-local-v4",
         "generatedAt": int(time.time()),
         "dryRun": bool(args.dry_run),
         "targets": {},
@@ -215,11 +299,12 @@ def main(argv: list[str]) -> int:
     }
 
     all_errors: list[str] = []
+    target_metadatas: dict[str, dict[str, Any]] = {}
     for key, source in provided.items():
         source = source.expanduser().resolve()
         info = validate_source(source, key)
         metadata = metadata_for(key, metadata_override, source_manifest)
-        errors = metadata_errors(key, metadata)
+        errors = metadata_errors(key, metadata, info)
         metadata_ok = not errors
         if errors and key != "runner":
             all_errors.extend(f"{key}: {e}" for e in errors)
@@ -233,6 +318,7 @@ def main(argv: list[str]) -> int:
                 shutil.copy2(source, dest)
                 os.chmod(dest, 0o644)
                 copied = True
+        target_metadatas[key] = metadata
         manifest["targets"][key] = {
             "source": str(source),
             "dest": str(dest),
@@ -243,6 +329,11 @@ def main(argv: list[str]) -> int:
             **info,
         }
         print(f"{key}: ok size={info['size']} sha256={info['sha256']} metadata={'ok' if metadata_ok else 'pendente'} -> {dest.name}")
+
+    all_errors.extend(cross_target_errors(provided, target_metadatas))
+
+    if all_errors:
+        manifest["errors"] = all_errors
 
     if all_errors and not args.dry_run and not args.allow_unverified_external:
         print(json.dumps(manifest, ensure_ascii=False, indent=2), file=sys.stderr)
@@ -257,7 +348,7 @@ def main(argv: list[str]) -> int:
         print(f"manifest de assets escrito: {ASSET_MANIFEST}")
     else:
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
-    return 0 if not all_errors or args.dry_run or args.allow_unverified_external else 2
+    return 0 if not all_errors or args.allow_unverified_external else 2
 
 
 if __name__ == "__main__":

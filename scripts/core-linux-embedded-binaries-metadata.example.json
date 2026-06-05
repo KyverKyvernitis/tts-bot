@@ -1,44 +1,148 @@
 {
-  "schema": "core-worker-embedded-binaries-metadata-v1",
+  "schema": "core-worker-embedded-binaries-metadata-v2",
+  "generatedAt": 1780621850,
+  "policy": {
+    "noRuntimeDownload": true,
+    "noExecutionDuringAudit": true,
+    "noOnDeviceUnsafeBuild": true,
+    "gplSourceComplianceRequired": true,
+    "dynamicDependenciesMustBeBundledOrStatic": true
+  },
   "targets": {
     "proot": {
-      "origin": "manual-build-from-upstream-source",
+      "origin": "termux-package-source-reference",
       "sourceKind": "external-source",
-      "upstream": "https://github.com/proot-me/proot",
-      "license": "GPL-2.0-or-later",
+      "upstream": "https://github.com/termux/proot",
+      "homepage": "https://proot-me.github.io/",
+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
+      "license": "GPL-2.0",
       "licenseStatus": "verified-audited",
-      "sourceVersion": "",
-      "sourceCommit": "",
-      "packageVersion": "",
-      "sourceSha256": "",
-      "buildRecipe": "descrever como o proot arm64 foi produzido e auditado",
-      "auditedBy": ""
+      "packageVersion": "5.1.107.76",
+      "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
+      "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
+      "binarySha256": "preencha com o sha256 do binário arm64 final",
+      "binarySize": "preencha com o tamanho em bytes do binário arm64 final",
+      "linkMode": "static|self-contained|dynamic-with-bundled-dependencies",
+      "runtimeDependencies": [
+        "libtalloc"
+      ],
+      "dependencyPolicy": "se o binário não for estático, libtalloc precisa ser auditado/embutido junto",
+      "buildRecipe": "descreva ambiente isolado/toolchain/config usado; não usar build no Termux vivo se onDeviceBuildSafe=false",
+      "onDeviceBuildSafe": true,
+      "auditedBy": "",
+      "notes": [
+        "usar build arm64/aarch64 auditado; não baixar em runtime",
+        "Termux proot depende de libtalloc; não marcar pronto sem dependência estática ou libtalloc embutido",
+        "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner"
+      ],
+      "sourceCompliance": {
+        "required": true,
+        "completeCorrespondingSourceReady": false,
+        "licenseTextIncluded": false,
+        "sourceUrl": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
+        "configUrlOrPath": "preencha .config/patches/build scripts quando GPL exigir",
+        "modifications": "none|descrever patches"
+      }
+    },
+    "libtalloc": {
+      "origin": "termux-package-source-reference",
+      "sourceKind": "external-source-dependency",
+      "upstream": "https://www.samba.org/ftp/talloc/",
+      "homepage": "https://talloc.samba.org/talloc/doc/html/index.html",
+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libtalloc/build.sh",
+      "license": "GPL-3.0",
+      "licenseStatus": "verified-audited",
+      "packageVersion": "2.4.3",
+      "sourceArchive": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
+      "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
+      "binarySha256": "preencha com o sha256 do binário arm64 final",
+      "binarySize": "preencha com o tamanho em bytes do binário arm64 final",
+      "linkMode": "static|self-contained|dynamic-with-bundled-dependencies",
+      "runtimeDependencies": [],
+      "dependencyPolicy": "",
+      "buildRecipe": "descreva ambiente isolado/toolchain/config usado; não usar build no Termux vivo se onDeviceBuildSafe=false",
+      "onDeviceBuildSafe": false,
+      "auditedBy": "",
+      "notes": [
+        "dependência do recipe Termux do proot",
+        "recipe Termux remove/reescreve arquivos do prefixo; não buildar no Termux vivo do worker",
+        "preferir build isolado/offline e empacotar apenas artefato auditado"
+      ],
+      "sourceCompliance": {
+        "required": true,
+        "completeCorrespondingSourceReady": false,
+        "licenseTextIncluded": false,
+        "sourceUrl": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
+        "configUrlOrPath": "preencha .config/patches/build scripts quando GPL exigir",
+        "modifications": "none|descrever patches"
+      }
     },
     "busybox": {
-      "origin": "manual-build-from-upstream-source",
+      "origin": "termux-package-source-reference",
       "sourceKind": "external-source",
       "upstream": "https://busybox.net/downloads/",
-      "license": "GPL-2.0-only",
+      "homepage": "https://busybox.net/",
+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
+      "license": "GPL-2.0",
       "licenseStatus": "verified-audited",
-      "sourceVersion": "",
-      "sourceCommit": "",
-      "packageVersion": "",
-      "sourceSha256": "",
-      "buildRecipe": "descrever como o busybox arm64 foi produzido e auditado",
-      "auditedBy": ""
+      "packageVersion": "1.37.0-r3",
+      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+      "binarySha256": "preencha com o sha256 do binário arm64 final",
+      "binarySize": "preencha com o tamanho em bytes do binário arm64 final",
+      "linkMode": "static|self-contained|dynamic-with-bundled-dependencies",
+      "runtimeDependencies": [
+        "libandroid-selinux"
+      ],
+      "dependencyPolicy": "usar build estático/self-contained ou registrar/bundlar dependências dinâmicas auditadas",
+      "buildRecipe": "descreva ambiente isolado/toolchain/config usado; não usar build no Termux vivo se onDeviceBuildSafe=false",
+      "onDeviceBuildSafe": false,
+      "auditedBy": "",
+      "notes": [
+        "o recipe Termux marca BusyBox como não seguro para build on-device",
+        "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
+        "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
+      ],
+      "sourceCompliance": {
+        "required": true,
+        "completeCorrespondingSourceReady": false,
+        "licenseTextIncluded": false,
+        "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+        "configUrlOrPath": "preencha .config/patches/build scripts quando GPL exigir",
+        "modifications": "none|descrever patches"
+      }
     },
     "box64": {
       "origin": "manual-build-from-upstream-source",
       "sourceKind": "external-source",
       "upstream": "https://github.com/ptitSeb/box64",
+      "homepage": "",
+      "termuxBuildRecipe": "",
       "license": "MIT",
       "licenseStatus": "verified-audited",
-      "sourceVersion": "",
-      "sourceCommit": "",
       "packageVersion": "",
+      "sourceArchive": "",
       "sourceSha256": "",
-      "buildRecipe": "descrever como o box64 arm64 foi produzido e auditado",
-      "auditedBy": ""
+      "binarySha256": "preencha com o sha256 do binário arm64 final",
+      "binarySize": "preencha com o tamanho em bytes do binário arm64 final",
+      "linkMode": "static|self-contained|dynamic-with-bundled-dependencies",
+      "runtimeDependencies": [],
+      "dependencyPolicy": "",
+      "buildRecipe": "descreva ambiente isolado/toolchain/config usado; não usar build no Termux vivo se onDeviceBuildSafe=false",
+      "onDeviceBuildSafe": true,
+      "auditedBy": "",
+      "notes": [
+        "Box64 é userspace Linux x86_64 emulator para hosts ARM64; validar dentro do rootfs Linux/proot",
+        "não executar em Android puro; runner real continua bloqueado até preflight completo"
+      ],
+      "sourceCompliance": {
+        "required": false,
+        "completeCorrespondingSourceReady": true,
+        "licenseTextIncluded": true,
+        "sourceUrl": "",
+        "configUrlOrPath": "preencha .config/patches/build scripts quando GPL exigir",
+        "modifications": "none|descrever patches"
+      }
     }
   }
 }
