@@ -1,195 +1,318 @@
-diff -ruN orig_v11/tts-bot-main/android/core-worker-app/app/build.gradle work_v11/tts-bot-main/android/core-worker-app/app/build.gradle
---- orig_v11/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 16:44:02.000000000 +0000
-+++ work_v11/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 20:03:38.609570809 +0000
+diff -ruN /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/build.gradle ./android/core-worker-app/app/build.gradle
+--- /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 17:08:10.000000000 +0000
++++ ./android/core-worker-app/app/build.gradle	2026-06-05 20:35:44.955717769 +0000
 @@ -58,8 +58,8 @@
          applicationId "dev.core.worker"
          minSdk 26
          targetSdk 34
--        versionCode 95
--        versionName "0.5.80"
-+        versionCode 96
-+        versionName "0.5.81"
+-        versionCode 96
+-        versionName "0.5.81"
++        versionCode 97
++        versionName "0.5.82"
  
          buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
          buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
-@@ -135,17 +135,18 @@
-     }
- }
+diff -ruN /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java ./android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java
+--- /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-05 15:08:52.000000000 +0000
++++ ./android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-05 20:35:33.950719293 +0000
+@@ -7,12 +7,16 @@
+ import org.json.JSONObject;
  
--// Core Linux embedded binaries build/intake pipeline v10.
-+// Core Linux embedded binaries build/intake pipeline v11.
- // Não baixa e não executa binários. Este gate valida apenas os arquivos que
- // já foram embutidos em jniLibs para evitar APK quebrado. O BusyBox do Termux
- // é dinâmico: libcoreworker_busybox.so é só um wrapper pequeno, e o payload real
- // fica em libbusybox.so com dependências libandroid-selinux.so + libpcre2-8.so.
-+// O loader32 do PRoot é multiarch futuro: pode ser ELF32/ARM e não bloqueia o APK ARM64.
- def coreLinuxEmbeddedBinaries = [
-         [key: "runner",  file: "libcoreworker_runner.so",  minBytes: 1024L,  required: true],
-         [key: "proot",   file: "libcoreworker_proot.so",   minBytes: 32768L, required: false,
-          requires: ["libtalloc.so", "libcoreworker_proot_loader.so"]],
-         [key: "proot_loader", file: "libcoreworker_proot_loader.so", minBytes: 4096L, required: false],
--        [key: "proot_loader32", file: "libcoreworker_proot_loader32.so", minBytes: 4096L, required: false],
-+        [key: "proot_loader32", file: "libcoreworker_proot_loader32.so", minBytes: 4096L, required: false, optionalArm32: true],
-         [key: "busybox_wrapper", file: "libcoreworker_busybox.so", minBytes: 4096L, required: false,
-          requires: ["libbusybox.so", "libandroid-selinux.so", "libpcre2-8.so"]],
-         [key: "libbusybox", file: "libbusybox.so", minBytes: 32768L, required: false,
-@@ -184,12 +185,21 @@
-             }
-             def isElf = head.length >= 4 && head[0] == 0x7f && (head[1] & 0xff) == 69 && (head[2] & 0xff) == 76 && (head[3] & 0xff) == 70
-             def is64 = head.length >= 5 && head[4] == 2
-+            def is32 = head.length >= 5 && head[4] == 1
-             def isAarch64 = head.length >= 20 && (head[18] & 0xff) == 183 && (head[19] & 0xff) == 0
-+            def isArm32 = head.length >= 20 && (head[18] & 0xff) == 40 && (head[19] & 0xff) == 0
-+            def optionalArm32 = (item.optionalArm32 == true)
-             def tooSmall = f.length() < (item.minBytes as long)
-             def reasons = []
-             if (!isElf) reasons << "not_elf"
--            if (isElf && !is64) reasons << "not_elf64"
--            if (isElf && !isAarch64) reasons << "not_aarch64"
-+            if (isElf && optionalArm32) {
-+                if (!(is64 && isAarch64) && !(is32 && isArm32)) {
-+                    reasons << "expected_arm64_or_optional_arm32"
-+                }
-+            } else {
-+                if (isElf && !is64) reasons << "not_elf64"
-+                if (isElf && !isAarch64) reasons << "not_aarch64"
-+            }
-             if (tooSmall) reasons << "size ${f.length()} < ${item.minBytes}"
-             if (!reasons.isEmpty()) {
-                 invalid << "${item.file} (${item.key}: ${reasons.join('; ')})"
-@@ -233,7 +243,7 @@
-         if (strict && !missing.isEmpty()) {
-             throw new GradleException("Core Linux embedded binaries ausentes: ${missing.join(', ')}")
-         }
--        println("Core Linux embedded binaries v10: present=${presentFiles.size()} missing=${missing.size()} invalid=${invalid.size()} strict=${strict}; busybox wrapper pequeno permitido quando libbusybox/deps estão presentes")
-+        println("Core Linux embedded binaries v11: present=${presentFiles.size()} missing=${missing.size()} invalid=${invalid.size()} strict=${strict}; busybox wrapper pequeno permitido; proot_loader32 é opcional/multiarch futuro")
-     }
- }
- 
-diff -ruN orig_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java work_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
---- orig_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 16:44:02.000000000 +0000
-+++ work_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 20:03:38.616108287 +0000
-@@ -20,7 +20,7 @@
- import java.util.zip.ZipFile;
+ import java.io.File;
++import java.io.ByteArrayOutputStream;
++import java.io.InputStream;
+ import java.io.FileInputStream;
+ import java.io.FileOutputStream;
+ import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Comparator;
+ import java.util.List;
++import java.util.concurrent.TimeUnit;
  
  /**
-- * Preflight v8 do runner Core Linux.
-+ * Preflight v11 do runner Core Linux.
-  *
-  * Esta etapa apenas detecta requisitos e escreve estado. Ela não inicia Bedrock,
-  * não executa Box64/proot/busybox, não abre shell livre e não aceita comando remoto.
-@@ -182,7 +182,7 @@
-             if (Build.VERSION.SDK_INT >= 29) {
-                 warnings.put("execução futura deve usar componentes embutidos no APK/native libs; binários importados não são executados");
+  * Runtime mínimo do Core Linux sem Termux.
+@@ -115,11 +119,10 @@
+             Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
+             ensureBase(layout);
+ 
+-            // Patch 87: o smoke test não pode mais criar scaffold automaticamente
+-            // nem dar OK só porque o executor JNI e uma rootfs fake existem. A fase
+-            // atual para substituir Termux exige rootfs real + runner + PRoot +
+-            // BusyBox auditados. Enquanto isso não estiver pronto, este job vira um
+-            // gate seguro e explícito, sem executar proot/busybox/box64/Bedrock.
++            // V12: primeiro smoke real controlado das ferramentas base. Continua sem
++            // shell livre, sem comando remoto arbitrário, sem Box64 e sem Bedrock. A
++            // única execução permitida aqui é uma allowlist fixa de PRoot/BusyBox
++            // embutidos no APK e já aprovados pelo preflight v11.
+             JSONObject executor = nativeExecutor;
+             if (executor == null || !executor.optBoolean("readyForRootfs", false)) {
+                 executor = CoreWorkerNativeExecutor.snapshot(context, layout.core, "test");
+@@ -127,8 +130,8 @@
+             JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
+             JSONObject rootfsState = rootfs.optJSONObject("rootfs");
+             if (rootfsState == null) rootfsState = rootfs;
+-            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "smoke_gate");
+-            JSONObject runtime = runtimeSnapshot(context, layout.core, "smoke_gate", executor);
++            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "smoke_v12");
++            JSONObject runtime = runtimeSnapshot(context, layout.core, "smoke_v12", executor);
+ 
+             boolean rootfsReal = runner.optBoolean("rootfsRealValidated", false)
+                     || "real".equals(rootfsState.optString("validationLevel", ""))
+@@ -146,34 +149,99 @@
+                     .put(check("runner/proot/busybox base", baseReady, runner.optString("summary", "base Core Linux ainda pendente")))
+                     .put(check("runtime state", runtime.optBoolean("ok", false), runtime.optString("summary", "")))
+                     .put(check("Bedrock bloqueado", true, "nenhum start real é feito nesta etapa"))
+-                    .put(check("shell livre bloqueado", true, "somente allowlist futura; sem comando remoto arbitrário"));
+-            boolean ok = true;
++                    .put(check("Box64 bloqueado", true, "Box64 fica para etapa posterior ao smoke rootfs"))
++                    .put(check("shell livre bloqueado", true, "somente allowlist fixa; sem comando remoto arbitrário"));
++
++            boolean prerequisitesOk = true;
+             for (int i = 0; i < checks.length(); i++) {
+                 JSONObject row = checks.optJSONObject(i);
+-                if (row != null && !row.optBoolean("ok", false)) ok = false;
++                if (row != null && !row.optBoolean("ok", false)) prerequisitesOk = false;
++            }
++
++            File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir == null ? "" : context.getApplicationInfo().nativeLibraryDir);
++            File busybox = new File(nativeDir, "libcoreworker_busybox.so");
++            File proot = new File(nativeDir, "libcoreworker_proot.so");
++            JSONObject smoke = new JSONObject();
++            JSONArray smokeChecks = new JSONArray();
++            boolean busyboxOk = false;
++            boolean prootOk = false;
++
++            if (prerequisitesOk) {
++                JSONObject busyboxSmoke = new JSONObject();
++                JSONObject busyboxHelp = runNativeTool("busybox --help", busybox, nativeDir, layout.runtime, 8000L, "--help");
++                JSONObject busyboxTrue = runNativeTool("busybox true", busybox, nativeDir, layout.runtime, 5000L, "true");
++                JSONObject busyboxEcho = runNativeTool("busybox echo ok", busybox, nativeDir, layout.runtime, 5000L, "echo", "ok");
++                busyboxSmoke.put("help", busyboxHelp);
++                busyboxSmoke.put("true", busyboxTrue);
++                busyboxSmoke.put("echo", busyboxEcho);
++                busyboxOk = busyboxHelp.optBoolean("ok", false)
++                        && busyboxTrue.optBoolean("ok", false)
++                        && busyboxEcho.optBoolean("ok", false)
++                        && "ok".equals(busyboxEcho.optString("stdout", "").trim());
++
++                JSONObject prootSmoke = new JSONObject();
++                JSONObject prootHelp = runNativeTool("proot --help", proot, nativeDir, layout.runtime, 8000L, "--help");
++                JSONObject prootVersion = runNativeTool("proot --version", proot, nativeDir, layout.runtime, 8000L, "--version");
++                prootSmoke.put("help", prootHelp);
++                prootSmoke.put("version", prootVersion);
++                prootOk = prootHelp.optBoolean("ok", false) && prootVersion.optBoolean("ok", false);
++
++                smoke.put("busybox", busyboxSmoke);
++                smoke.put("proot", prootSmoke);
++                smoke.put("nativeLibraryDir", path(nativeDir));
++                smoke.put("workDir", path(layout.runtime));
++                smoke.put("env", new JSONObject()
++                        .put("LD_LIBRARY_PATH", path(nativeDir))
++                        .put("PROOT_LOADER", path(new File(nativeDir, "libcoreworker_proot_loader.so")))
++                        .put("PROOT_LOADER_32", path(new File(nativeDir, "libcoreworker_proot_loader32.so"))));
++                smokeChecks.put(check("busybox allowlist", busyboxOk, busyboxOk ? "busybox --help/true/echo ok" : "falha em uma etapa BusyBox; ver stdout/stderr"));
++                smokeChecks.put(check("proot allowlist", prootOk, prootOk ? "proot --help/--version" : "falha em uma etapa PRoot; ver stdout/stderr/linker"));
++            } else {
++                smoke.put("skipped", true);
++                smoke.put("reason", "preflight/base Core Linux ainda não está pronto");
++                smokeChecks.put(check("busybox allowlist", false, "não executado: preflight/base pendente"));
++                smokeChecks.put(check("proot allowlist", false, "não executado: preflight/base pendente"));
              }
--            blockers.put("runner real permanece bloqueado no preflight v10");
-+            blockers.put("runner real permanece bloqueado no preflight v11");
-             blockers.put("Bedrock start real permanece bloqueado");
-             blockers.put("shell livre permanece bloqueado");
-             blockers.put("comando remoto arbitrário permanece bloqueado");
-@@ -215,8 +215,8 @@
-             out.put("ok", true);
-             out.put("component", "core_linux_runner_preflight");
-             out.put("action", safeAction);
--            out.put("stage", "core-linux-runner-preflight-v10");
--            out.put("preflightVersion", 9);
-+            out.put("stage", "core-linux-runner-preflight-v11");
-+            out.put("preflightVersion", 11);
-             out.put("state", state);
-             out.put("summary", summary);
-             out.put("phase", phase);
-@@ -364,7 +364,7 @@
-                                             String[] libBusybox, String[] libAndroidSelinux, String[] libPcre2, String[] box64,
-                                             JSONObject localManifest, JSONObject sourcePlan) throws Exception {
-         return new JSONObject()
--                .put("stage", "core-linux-embedded-binaries-intake-v10")
-+                .put("stage", "core-linux-embedded-binaries-intake-v11")
-                 .put("abi", "arm64-v8a")
-                 .put("executor", new JSONArray(executor))
-                 .put("runner", new JSONArray(runner))
-diff -ruN orig_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java work_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
---- orig_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 16:44:02.000000000 +0000
-+++ work_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 20:03:54.765816761 +0000
-@@ -325,6 +325,7 @@
-                 .put("core-linux-runner-preflight-v7")
-                 .put("core-linux-runner-preflight-v8")
-                 .put("core-linux-runner-preflight-v10")
-+                .put("core-linux-runner-preflight-v11")
-                 .put("core-linux-embedded-binaries-intake-v1")
-                 .put("core-linux-embedded-binaries-intake-v2")
-                 .put("core-linux-embedded-binaries-intake-v3")
-@@ -334,6 +335,7 @@
-                 .put("core-linux-embedded-binaries-intake-v7")
-                 .put("core-linux-embedded-binaries-intake-v8")
-                 .put("core-linux-embedded-binaries-intake-v10")
-+                .put("core-linux-embedded-binaries-intake-v11")
-                 .put("core-linux-embedded-binaries-build-pipeline-v1")
-                 .put("core-linux-embedded-binaries-build-pipeline-v2")
-                 .put("core-linux-embedded-binaries-build-pipeline-v3")
-@@ -432,7 +434,7 @@
-                 out.put("runnerMissing", runner.optJSONArray("missing") == null ? new JSONArray() : runner.optJSONArray("missing"));
-                 out.put("runnerPreflight", runner);
-             }
--            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v10" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
-+            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v11" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
-             out.put("supportedTasks", supportedLightJobsArray());
-             if (runtime.length() > 0) out.put("runtime", runtime);
-             if (rootfs.length() > 0) out.put("rootfs", rootfs);
-diff -ruN orig_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java work_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
---- orig_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-05 16:44:02.000000000 +0000
-+++ work_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-05 20:03:54.769015766 +0000
-@@ -4632,6 +4632,7 @@
-                 .put("core-linux-runner-preflight-v7")
-                 .put("core-linux-runner-preflight-v8")
-                 .put("core-linux-runner-preflight-v10")
-+                .put("core-linux-runner-preflight-v11")
-                 .put("core-linux-embedded-binaries-intake-v1")
-                 .put("core-linux-embedded-binaries-intake-v2")
-                 .put("core-linux-embedded-binaries-intake-v3")
-@@ -4641,6 +4642,7 @@
-                 .put("core-linux-embedded-binaries-intake-v7")
-                 .put("core-linux-embedded-binaries-intake-v8")
-                 .put("core-linux-embedded-binaries-intake-v10")
-+                .put("core-linux-embedded-binaries-intake-v11")
-                 .put("core-linux-embedded-binaries-build-pipeline-v1")
-                 .put("core-linux-embedded-binaries-build-pipeline-v2")
-                 .put("core-linux-embedded-binaries-build-pipeline-v3")
-@@ -4700,7 +4702,7 @@
-             out.put("runnerRequirementsReady", runnerPreflight.optBoolean("runnerRequirementsReady", false));
-             safePutPayload(out, "runnerPreflight", runnerPreflight);
++
++            boolean ok = prerequisitesOk && busyboxOk && prootOk;
+             JSONObject out = new JSONObject();
+             out.put("ok", ok);
+             out.put("type", "core_linux_runtime_smoke_test");
+-            out.put("state", ok ? "smoke_gate_ready" : "smoke_gate_blocked");
+-            out.put("stage", "core-linux-runtime-smoke-gate-v2");
++            out.put("state", ok ? "base_tools_smoke_ok" : (prerequisitesOk ? "base_tools_smoke_failed" : "smoke_gate_blocked"));
++            out.put("stage", "core-linux-base-tools-smoke-v12");
+             out.put("termuxTouched", false);
+             out.put("pythonTouched", false);
+             out.put("serviceStarted", false);
+             out.put("bedrockStarted", false);
++            out.put("box64Started", false);
++            out.put("shellOpened", false);
++            out.put("remoteCommandAllowed", false);
+             out.put("runnerExecuted", false);
+-            out.put("prootExecuted", false);
+-            out.put("busyboxExecuted", false);
++            out.put("runnerExecutionAllowed", false);
++            out.put("prootExecuted", prerequisitesOk);
++            out.put("busyboxExecuted", prerequisitesOk);
++            out.put("commandsAllowlisted", true);
++            out.put("commands", new JSONArray()
++                    .put("busybox --help")
++                    .put("busybox true")
++                    .put("busybox echo ok")
++                    .put("proot --help")
++                    .put("proot --version"));
+             out.put("checks", checks);
++            out.put("smokeChecks", smokeChecks);
+             out.put("missing", missing);
+             out.put("nativeExecutor", executor);
+             out.put("rootfs", rootfsState);
+             out.put("runtime", runtime);
+             out.put("runnerPreflight", runner);
++            out.put("baseToolsSmoke", smoke);
++            out.put("nextStep", ok ? "rootfs-proot-smoke" : "corrigir erro de linker/permissão antes do rootfs smoke");
+             out.put("updatedAt", now());
+             out.put("summary", ok
+-                    ? "Smoke gate Core Linux ok · base pronta para liberar runner allowlist"
+-                    : "Smoke gate Core Linux bloqueado · falta base real para substituir Termux");
++                    ? "Smoke real Core Linux V12 ok · BusyBox/PRoot executaram allowlist sem Termux"
++                    : (prerequisitesOk
++                        ? "Smoke real Core Linux V12 falhou · ver erro de linker/permissão em stdout/stderr"
++                        : "Smoke real Core Linux V12 bloqueado · falta base real para substituir Termux"));
+             writeJson(new File(layout.runtime, "core-linux-smoke-test.json"), out);
+             appendLog(new File(layout.logs, "core-linux-smoke-test.log"), out.optString("summary"));
+             return out;
+@@ -182,6 +250,80 @@
          }
--        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v10" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
-+        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v11" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
-         out.put("supportedTasks", supportedLightJobsArray());
-         if (rootfsState.length() > 0) safePutPayload(out, "rootfs", rootfsState);
-         if (importState.length() > 0) safePutPayload(out, "rootfsImport", importState);
-diff -ruN orig_v11/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md work_v11/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md
---- orig_v11/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md	2026-06-05 16:12:18.000000000 +0000
-+++ work_v11/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md	2026-06-05 20:03:38.617272416 +0000
-@@ -69,3 +69,8 @@
- - `libpcre2-8.so` with `RUNPATH=$ORIGIN`.
+     }
  
- The preflight must still keep real execution blocked until Android extracts these native libs into `nativeLibraryDir` and the rootfs real validation passes.
++    private static JSONObject runNativeTool(String label, File executable, File nativeDir, File workDir, long timeoutMs, String... args) {
++        JSONObject out = new JSONObject();
++        long started = now();
++        try {
++            File tmpDir = new File(workDir, "tmp");
++            File prootTmp = new File(workDir, "proot-tmp");
++            tmpDir.mkdirs();
++            prootTmp.mkdirs();
 +
++            ArrayList<String> command = new ArrayList<>();
++            command.add(path(executable));
++            if (args != null) command.addAll(Arrays.asList(args));
 +
-+## V11 loader32
++            out.put("label", label);
++            out.put("attempted", true);
++            out.put("executablePath", path(executable));
++            out.put("exists", executable != null && executable.exists());
++            out.put("size", executable != null && executable.exists() ? executable.length() : 0L);
++            out.put("canExecute", executable != null && executable.canExecute());
++            out.put("nativeLibraryDir", path(nativeDir));
++            out.put("timeoutMs", timeoutMs);
++            out.put("command", new JSONArray(command));
 +
-+`libcoreworker_proot_loader32.so` vem do pacote PRoot como loader 32-bit opcional. Ele não é requisito para o smoke ARM64 atual (`proot + busybox + rootfs`) e não deve bloquear o build arm64. Suporte real a binários 32-bit fica para uma etapa multiarch futura.
-diff -ruN orig_v11/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py work_v11/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py
---- orig_v11/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-05 16:44:02.000000000 +0000
-+++ work_v11/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-05 20:03:38.616408016 +0000
-@@ -248,7 +248,7 @@
++            if (executable == null || !executable.exists()) {
++                out.put("ok", false);
++                out.put("exitCode", -1);
++                out.put("error", "executable missing");
++                out.put("durationMs", now() - started);
++                return out;
++            }
++
++            ProcessBuilder pb = new ProcessBuilder(command);
++            pb.directory(workDir);
++            String existingLd = pb.environment().get("LD_LIBRARY_PATH");
++            String ld = path(nativeDir);
++            if (existingLd != null && !existingLd.trim().isEmpty()) ld = ld + ":" + existingLd.trim();
++            pb.environment().put("LD_LIBRARY_PATH", ld);
++            pb.environment().put("TMPDIR", path(tmpDir));
++            pb.environment().put("PROOT_TMP_DIR", path(prootTmp));
++            pb.environment().put("PROOT_LOADER", path(new File(nativeDir, "libcoreworker_proot_loader.so")));
++            pb.environment().put("PROOT_LOADER_32", path(new File(nativeDir, "libcoreworker_proot_loader32.so")));
++
++            Process process = pb.start();
++            StreamCollector stdout = new StreamCollector(process.getInputStream(), TEXT_LIMIT);
++            StreamCollector stderr = new StreamCollector(process.getErrorStream(), TEXT_LIMIT);
++            stdout.start();
++            stderr.start();
++            boolean finished = process.waitFor(Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
++            if (!finished) {
++                process.destroyForcibly();
++            }
++            stdout.join(1500L);
++            stderr.join(1500L);
++            int exitCode = finished ? process.exitValue() : -1;
++            out.put("ok", finished && exitCode == 0);
++            out.put("timedOut", !finished);
++            out.put("exitCode", exitCode);
++            out.put("stdout", clean(stdout.text(), TEXT_LIMIT));
++            out.put("stderr", clean(stderr.text(), TEXT_LIMIT));
++            if (stdout.error != null) out.put("stdoutReadError", shortThrowable(stdout.error));
++            if (stderr.error != null) out.put("stderrReadError", shortThrowable(stderr.error));
++            out.put("durationMs", now() - started);
++            return out;
++        } catch (Throwable exc) {
++            try {
++                out.put("ok", false);
++                out.put("exitCode", -1);
++                out.put("error", shortThrowable(exc));
++                out.put("durationMs", now() - started);
++            } catch (Throwable ignored) {}
++            return out;
++        }
++    }
++
+     private static JSONObject prepare(Layout layout, boolean repair) throws Exception {
+         if (hasRealExistingRootfs(layout.rootfs)) {
+             JSONObject state = status(layout, repair ? "repair_blocked_real_rootfs" : "prepare_blocked_real_rootfs");
+@@ -582,6 +724,38 @@
+         }
+     }
  
- def source_manifest_payload() -> dict[str, Any]:
-     return {
--        "schema": "core-worker-embedded-binaries-source-plan-v10",
-+        "schema": "core-worker-embedded-binaries-source-plan-v11",
-         "generatedAt": int(time.time()),
-         "abi": "arm64-v8a",
-         "androidMinSdk": 26,
-diff -ruN orig_v11/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v11.json work_v11/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v11.json
---- orig_v11/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v11.json	1970-01-01 00:00:00.000000000 +0000
-+++ work_v11/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v11.json	2026-06-05 20:03:38.617082323 +0000
++    private static final class StreamCollector extends Thread {
++        private final InputStream in;
++        private final int limit;
++        private final ByteArrayOutputStream out = new ByteArrayOutputStream();
++        volatile Throwable error;
++
++        StreamCollector(InputStream in, int limit) {
++            this.in = in;
++            this.limit = Math.max(1024, limit);
++        }
++
++        @Override
++        public void run() {
++            byte[] buffer = new byte[4096];
++            try {
++                int n;
++                while ((n = in.read(buffer)) >= 0) {
++                    int remaining = limit - out.size();
++                    if (remaining > 0) {
++                        out.write(buffer, 0, Math.min(n, remaining));
++                    }
++                }
++            } catch (Throwable exc) {
++                error = exc;
++            }
++        }
++
++        String text() {
++            return new String(out.toByteArray(), StandardCharsets.UTF_8);
++        }
++    }
++
+     private static final class Layout {
+         final File core;
+         final File rootfs;
+diff -ruN /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java ./android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
+--- /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 17:08:10.000000000 +0000
++++ ./android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 20:35:44.956170155 +0000
+@@ -326,6 +326,7 @@
+                 .put("core-linux-runner-preflight-v8")
+                 .put("core-linux-runner-preflight-v10")
+                 .put("core-linux-runner-preflight-v11")
++                .put("core-linux-base-tools-smoke-v12")
+                 .put("core-linux-embedded-binaries-intake-v1")
+                 .put("core-linux-embedded-binaries-intake-v2")
+                 .put("core-linux-embedded-binaries-intake-v3")
+diff -ruN /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java ./android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
+--- /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-05 17:08:10.000000000 +0000
++++ ./android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-05 20:35:44.958840009 +0000
+@@ -4633,6 +4633,7 @@
+                 .put("core-linux-runner-preflight-v8")
+                 .put("core-linux-runner-preflight-v10")
+                 .put("core-linux-runner-preflight-v11")
++                .put("core-linux-base-tools-smoke-v12")
+                 .put("core-linux-embedded-binaries-intake-v1")
+                 .put("core-linux-embedded-binaries-intake-v2")
+                 .put("core-linux-embedded-binaries-intake-v3")
+diff -ruN /mnt/data/orig_v12/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v12.json ./scripts/core-linux-embedded-binaries-metadata.v12.json
+--- /mnt/data/orig_v12/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v12.json	1970-01-01 00:00:00.000000000 +0000
++++ ./scripts/core-linux-embedded-binaries-metadata.v12.json	2026-06-05 20:35:44.959684601 +0000
 @@ -0,0 +1,189 @@
 +{
 +  "schema": "core-worker-embedded-binaries-metadata-v11",
@@ -380,32 +503,14 @@ diff -ruN orig_v11/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v1
 +  },
 +  "notes": "V11: proot_loader32 é opcional/multiarch futuro; o caminho atual ARM64 valida apenas proot_loader ARM64."
 +}
-diff -ruN orig_v11/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json work_v11/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json
---- orig_v11/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json	2026-06-05 16:44:02.000000000 +0000
-+++ work_v11/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json	2026-06-05 20:03:38.616683343 +0000
-@@ -1,5 +1,5 @@
- {
--  "schema": "core-worker-embedded-binaries-source-plan-v10",
-+  "schema": "core-worker-embedded-binaries-source-plan-v11",
-   "generatedAt": 1780686535,
-   "abi": "arm64-v8a",
-   "androidMinSdk": 26,
-diff -ruN orig_v11/tts-bot-main/webserver.py work_v11/tts-bot-main/webserver.py
---- orig_v11/tts-bot-main/webserver.py	2026-06-05 16:44:02.000000000 +0000
-+++ work_v11/tts-bot-main/webserver.py	2026-06-05 20:03:38.610939756 +0000
-@@ -302,6 +302,7 @@
-     "core-linux-runner-preflight-v7",
+diff -ruN /mnt/data/orig_v12/tts-bot-main/webserver.py ./webserver.py
+--- /mnt/data/orig_v12/tts-bot-main/webserver.py	2026-06-05 17:08:10.000000000 +0000
++++ ./webserver.py	2026-06-05 20:35:44.959424853 +0000
+@@ -303,6 +303,7 @@
      "core-linux-runner-preflight-v8",
      "core-linux-runner-preflight-v10",
-+    "core-linux-runner-preflight-v11",
+     "core-linux-runner-preflight-v11",
++    "core-linux-base-tools-smoke-v12",
      "core-linux-embedded-binaries-intake-v1",
      "core-linux-embedded-binaries-intake-v2",
      "core-linux-embedded-binaries-intake-v3",
-@@ -311,6 +312,7 @@
-     "core-linux-embedded-binaries-intake-v7",
-     "core-linux-embedded-binaries-intake-v8",
-     "core-linux-embedded-binaries-intake-v10",
-+    "core-linux-embedded-binaries-intake-v11",
-     "core-linux-embedded-binaries-build-pipeline-v1",
-     "core-linux-embedded-binaries-build-pipeline-v2",
-     "core-linux-embedded-binaries-build-pipeline-v3",

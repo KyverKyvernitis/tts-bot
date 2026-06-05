@@ -303,6 +303,7 @@ CORE_WORKER_APK_V1_CAPABILITIES = [
     "core-linux-runner-preflight-v8",
     "core-linux-runner-preflight-v10",
     "core-linux-runner-preflight-v11",
+    "core-linux-base-tools-smoke-v12",
     "core-linux-embedded-binaries-intake-v1",
     "core-linux-embedded-binaries-intake-v2",
     "core-linux-embedded-binaries-intake-v3",

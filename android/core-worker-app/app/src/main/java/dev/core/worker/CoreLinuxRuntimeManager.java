@@ -7,12 +7,16 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Runtime mínimo do Core Linux sem Termux.
@@ -115,11 +119,10 @@ public final class CoreLinuxRuntimeManager {
             Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
             ensureBase(layout);
 
-            // Patch 87: o smoke test não pode mais criar scaffold automaticamente
-            // nem dar OK só porque o executor JNI e uma rootfs fake existem. A fase
-            // atual para substituir Termux exige rootfs real + runner + PRoot +
-            // BusyBox auditados. Enquanto isso não estiver pronto, este job vira um
-            // gate seguro e explícito, sem executar proot/busybox/box64/Bedrock.
+            // V12: primeiro smoke real controlado das ferramentas base. Continua sem
+            // shell livre, sem comando remoto arbitrário, sem Box64 e sem Bedrock. A
+            // única execução permitida aqui é uma allowlist fixa de PRoot/BusyBox
+            // embutidos no APK e já aprovados pelo preflight v11.
             JSONObject executor = nativeExecutor;
             if (executor == null || !executor.optBoolean("readyForRootfs", false)) {
                 executor = CoreWorkerNativeExecutor.snapshot(context, layout.core, "test");
@@ -127,8 +130,8 @@ public final class CoreLinuxRuntimeManager {
             JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
             JSONObject rootfsState = rootfs.optJSONObject("rootfs");
             if (rootfsState == null) rootfsState = rootfs;
-            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "smoke_gate");
-            JSONObject runtime = runtimeSnapshot(context, layout.core, "smoke_gate", executor);
+            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "smoke_v12");
+            JSONObject runtime = runtimeSnapshot(context, layout.core, "smoke_v12", executor);
 
             boolean rootfsReal = runner.optBoolean("rootfsRealValidated", false)
                     || "real".equals(rootfsState.optString("validationLevel", ""))
@@ -146,39 +149,178 @@ public final class CoreLinuxRuntimeManager {
                     .put(check("runner/proot/busybox base", baseReady, runner.optString("summary", "base Core Linux ainda pendente")))
                     .put(check("runtime state", runtime.optBoolean("ok", false), runtime.optString("summary", "")))
                     .put(check("Bedrock bloqueado", true, "nenhum start real é feito nesta etapa"))
-                    .put(check("shell livre bloqueado", true, "somente allowlist futura; sem comando remoto arbitrário"));
-            boolean ok = true;
+                    .put(check("Box64 bloqueado", true, "Box64 fica para etapa posterior ao smoke rootfs"))
+                    .put(check("shell livre bloqueado", true, "somente allowlist fixa; sem comando remoto arbitrário"));
+
+            boolean prerequisitesOk = true;
             for (int i = 0; i < checks.length(); i++) {
                 JSONObject row = checks.optJSONObject(i);
-                if (row != null && !row.optBoolean("ok", false)) ok = false;
+                if (row != null && !row.optBoolean("ok", false)) prerequisitesOk = false;
             }
+
+            File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir == null ? "" : context.getApplicationInfo().nativeLibraryDir);
+            File busybox = new File(nativeDir, "libcoreworker_busybox.so");
+            File proot = new File(nativeDir, "libcoreworker_proot.so");
+            JSONObject smoke = new JSONObject();
+            JSONArray smokeChecks = new JSONArray();
+            boolean busyboxOk = false;
+            boolean prootOk = false;
+
+            if (prerequisitesOk) {
+                JSONObject busyboxSmoke = new JSONObject();
+                JSONObject busyboxHelp = runNativeTool("busybox --help", busybox, nativeDir, layout.runtime, 8000L, "--help");
+                JSONObject busyboxTrue = runNativeTool("busybox true", busybox, nativeDir, layout.runtime, 5000L, "true");
+                JSONObject busyboxEcho = runNativeTool("busybox echo ok", busybox, nativeDir, layout.runtime, 5000L, "echo", "ok");
+                busyboxSmoke.put("help", busyboxHelp);
+                busyboxSmoke.put("true", busyboxTrue);
+                busyboxSmoke.put("echo", busyboxEcho);
+                busyboxOk = busyboxHelp.optBoolean("ok", false)
+                        && busyboxTrue.optBoolean("ok", false)
+                        && busyboxEcho.optBoolean("ok", false)
+                        && "ok".equals(busyboxEcho.optString("stdout", "").trim());
+
+                JSONObject prootSmoke = new JSONObject();
+                JSONObject prootHelp = runNativeTool("proot --help", proot, nativeDir, layout.runtime, 8000L, "--help");
+                JSONObject prootVersion = runNativeTool("proot --version", proot, nativeDir, layout.runtime, 8000L, "--version");
+                prootSmoke.put("help", prootHelp);
+                prootSmoke.put("version", prootVersion);
+                prootOk = prootHelp.optBoolean("ok", false) && prootVersion.optBoolean("ok", false);
+
+                smoke.put("busybox", busyboxSmoke);
+                smoke.put("proot", prootSmoke);
+                smoke.put("nativeLibraryDir", path(nativeDir));
+                smoke.put("workDir", path(layout.runtime));
+                smoke.put("env", new JSONObject()
+                        .put("LD_LIBRARY_PATH", path(nativeDir))
+                        .put("PROOT_LOADER", path(new File(nativeDir, "libcoreworker_proot_loader.so")))
+                        .put("PROOT_LOADER_32", path(new File(nativeDir, "libcoreworker_proot_loader32.so"))));
+                smokeChecks.put(check("busybox allowlist", busyboxOk, busyboxOk ? "busybox --help/true/echo ok" : "falha em uma etapa BusyBox; ver stdout/stderr"));
+                smokeChecks.put(check("proot allowlist", prootOk, prootOk ? "proot --help/--version" : "falha em uma etapa PRoot; ver stdout/stderr/linker"));
+            } else {
+                smoke.put("skipped", true);
+                smoke.put("reason", "preflight/base Core Linux ainda não está pronto");
+                smokeChecks.put(check("busybox allowlist", false, "não executado: preflight/base pendente"));
+                smokeChecks.put(check("proot allowlist", false, "não executado: preflight/base pendente"));
+            }
+
+            boolean ok = prerequisitesOk && busyboxOk && prootOk;
             JSONObject out = new JSONObject();
             out.put("ok", ok);
             out.put("type", "core_linux_runtime_smoke_test");
-            out.put("state", ok ? "smoke_gate_ready" : "smoke_gate_blocked");
-            out.put("stage", "core-linux-runtime-smoke-gate-v2");
+            out.put("state", ok ? "base_tools_smoke_ok" : (prerequisitesOk ? "base_tools_smoke_failed" : "smoke_gate_blocked"));
+            out.put("stage", "core-linux-base-tools-smoke-v12");
             out.put("termuxTouched", false);
             out.put("pythonTouched", false);
             out.put("serviceStarted", false);
             out.put("bedrockStarted", false);
+            out.put("box64Started", false);
+            out.put("shellOpened", false);
+            out.put("remoteCommandAllowed", false);
             out.put("runnerExecuted", false);
-            out.put("prootExecuted", false);
-            out.put("busyboxExecuted", false);
+            out.put("runnerExecutionAllowed", false);
+            out.put("prootExecuted", prerequisitesOk);
+            out.put("busyboxExecuted", prerequisitesOk);
+            out.put("commandsAllowlisted", true);
+            out.put("commands", new JSONArray()
+                    .put("busybox --help")
+                    .put("busybox true")
+                    .put("busybox echo ok")
+                    .put("proot --help")
+                    .put("proot --version"));
             out.put("checks", checks);
+            out.put("smokeChecks", smokeChecks);
             out.put("missing", missing);
             out.put("nativeExecutor", executor);
             out.put("rootfs", rootfsState);
             out.put("runtime", runtime);
             out.put("runnerPreflight", runner);
+            out.put("baseToolsSmoke", smoke);
+            out.put("nextStep", ok ? "rootfs-proot-smoke" : "corrigir erro de linker/permissão antes do rootfs smoke");
             out.put("updatedAt", now());
             out.put("summary", ok
-                    ? "Smoke gate Core Linux ok · base pronta para liberar runner allowlist"
-                    : "Smoke gate Core Linux bloqueado · falta base real para substituir Termux");
+                    ? "Smoke real Core Linux V12 ok · BusyBox/PRoot executaram allowlist sem Termux"
+                    : (prerequisitesOk
+                        ? "Smoke real Core Linux V12 falhou · ver erro de linker/permissão em stdout/stderr"
+                        : "Smoke real Core Linux V12 bloqueado · falta base real para substituir Termux"));
             writeJson(new File(layout.runtime, "core-linux-smoke-test.json"), out);
             appendLog(new File(layout.logs, "core-linux-smoke-test.log"), out.optString("summary"));
             return out;
         } catch (Throwable exc) {
             return error("core_linux_smoke_test", exc);
+        }
+    }
+
+    private static JSONObject runNativeTool(String label, File executable, File nativeDir, File workDir, long timeoutMs, String... args) {
+        JSONObject out = new JSONObject();
+        long started = now();
+        try {
+            File tmpDir = new File(workDir, "tmp");
+            File prootTmp = new File(workDir, "proot-tmp");
+            tmpDir.mkdirs();
+            prootTmp.mkdirs();
+
+            ArrayList<String> command = new ArrayList<>();
+            command.add(path(executable));
+            if (args != null) command.addAll(Arrays.asList(args));
+
+            out.put("label", label);
+            out.put("attempted", true);
+            out.put("executablePath", path(executable));
+            out.put("exists", executable != null && executable.exists());
+            out.put("size", executable != null && executable.exists() ? executable.length() : 0L);
+            out.put("canExecute", executable != null && executable.canExecute());
+            out.put("nativeLibraryDir", path(nativeDir));
+            out.put("timeoutMs", timeoutMs);
+            out.put("command", new JSONArray(command));
+
+            if (executable == null || !executable.exists()) {
+                out.put("ok", false);
+                out.put("exitCode", -1);
+                out.put("error", "executable missing");
+                out.put("durationMs", now() - started);
+                return out;
+            }
+
+            ProcessBuilder pb = new ProcessBuilder(command);
+            pb.directory(workDir);
+            String existingLd = pb.environment().get("LD_LIBRARY_PATH");
+            String ld = path(nativeDir);
+            if (existingLd != null && !existingLd.trim().isEmpty()) ld = ld + ":" + existingLd.trim();
+            pb.environment().put("LD_LIBRARY_PATH", ld);
+            pb.environment().put("TMPDIR", path(tmpDir));
+            pb.environment().put("PROOT_TMP_DIR", path(prootTmp));
+            pb.environment().put("PROOT_LOADER", path(new File(nativeDir, "libcoreworker_proot_loader.so")));
+            pb.environment().put("PROOT_LOADER_32", path(new File(nativeDir, "libcoreworker_proot_loader32.so")));
+
+            Process process = pb.start();
+            StreamCollector stdout = new StreamCollector(process.getInputStream(), TEXT_LIMIT);
+            StreamCollector stderr = new StreamCollector(process.getErrorStream(), TEXT_LIMIT);
+            stdout.start();
+            stderr.start();
+            boolean finished = process.waitFor(Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+            }
+            stdout.join(1500L);
+            stderr.join(1500L);
+            int exitCode = finished ? process.exitValue() : -1;
+            out.put("ok", finished && exitCode == 0);
+            out.put("timedOut", !finished);
+            out.put("exitCode", exitCode);
+            out.put("stdout", clean(stdout.text(), TEXT_LIMIT));
+            out.put("stderr", clean(stderr.text(), TEXT_LIMIT));
+            if (stdout.error != null) out.put("stdoutReadError", shortThrowable(stdout.error));
+            if (stderr.error != null) out.put("stderrReadError", shortThrowable(stderr.error));
+            out.put("durationMs", now() - started);
+            return out;
+        } catch (Throwable exc) {
+            try {
+                out.put("ok", false);
+                out.put("exitCode", -1);
+                out.put("error", shortThrowable(exc));
+                out.put("durationMs", now() - started);
+            } catch (Throwable ignored) {}
+            return out;
         }
     }
 
@@ -579,6 +721,38 @@ public final class CoreLinuxRuntimeManager {
             return file == null ? "" : file.getAbsolutePath();
         } catch (Throwable ignored) {
             return "";
+        }
+    }
+
+    private static final class StreamCollector extends Thread {
+        private final InputStream in;
+        private final int limit;
+        private final ByteArrayOutputStream out = new ByteArrayOutputStream();
+        volatile Throwable error;
+
+        StreamCollector(InputStream in, int limit) {
+            this.in = in;
+            this.limit = Math.max(1024, limit);
+        }
+
+        @Override
+        public void run() {
+            byte[] buffer = new byte[4096];
+            try {
+                int n;
+                while ((n = in.read(buffer)) >= 0) {
+                    int remaining = limit - out.size();
+                    if (remaining > 0) {
+                        out.write(buffer, 0, Math.min(n, remaining));
+                    }
+                }
+            } catch (Throwable exc) {
+                error = exc;
+            }
+        }
+
+        String text() {
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
         }
     }
 
