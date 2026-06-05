@@ -532,17 +532,35 @@ def _registry_raw() -> dict[str, Any]:
 
 
 def _active_job_exists(*, job_type: str, target_worker_id: str = "", summary_contains: str = "") -> bool:
+    # snapshot() limpa leases expirados antes da leitura. Se o lock estiver ocupado,
+    # caímos no JSON cru, mas ainda ignoramos jobs obviamente velhos. Isso evita
+    # build APK ficar travado por horas quando o phone worker caiu depois do Gradle.
+    with contextlib.suppress(Exception):
+        get_core_workers_registry().snapshot(lock_timeout_seconds=0.4)
     data = _registry_raw()
     jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
     wanted = str(job_type or "").replace("-", "_")
     target_worker_id = str(target_worker_id or "")
     summary_contains = str(summary_contains or "")
+    now = time.time()
+    apk_running_grace = max(300, int(os.getenv("CORE_WORKER_APK_BUILD_STALE_RUNNING_SECONDS", "1500") or 1500))
     for job in jobs.values():
         if not isinstance(job, dict):
             continue
-        if str(job.get("status") or "queued") not in {"queued", "running"}:
+        status = str(job.get("status") or "queued")
+        if status not in {"queued", "running"}:
             continue
-        if str(job.get("type") or "").replace("-", "_") != wanted:
+        kind = str(job.get("type") or "").replace("-", "_")
+        if kind != wanted:
+            continue
+        expires_at = float(job.get("expires_at") or 0.0)
+        lease_until = float(job.get("lease_until") or 0.0)
+        updated_at = float(job.get("updated_at") or job.get("started_at") or job.get("created_at") or 0.0)
+        if expires_at and expires_at <= now:
+            continue
+        if status == "running" and lease_until and lease_until <= now:
+            continue
+        if kind == "apk_build_debug" and status == "running" and updated_at and now - updated_at > apk_running_grace:
             continue
         if target_worker_id and str(job.get("target_worker_id") or job.get("worker_id") or "") not in {target_worker_id, ""}:
             continue
@@ -865,6 +883,101 @@ def _recent_failed_apk_build(version_name: str, source_fingerprint: str, *, cool
     return {}
 
 
+
+
+def _recent_built_unpublished_apk(version_name: str, source_fingerprint: str) -> dict[str, Any]:
+    """Retorna build recente que gerou APK mas não conseguiu publicar.
+
+    Usado para preferir `apk_publish_last` em vez de rebuildar, especialmente
+    quando a rede caiu depois do Gradle ou quando o processo foi interrompido
+    antes de reportar publicação.
+    """
+    data = _registry_raw()
+    jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
+    rows: list[tuple[float, dict[str, Any]]] = []
+    now = time.time()
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        if str(job.get("type") or "").replace("-", "_") != "apk_build_debug":
+            continue
+        if not _apk_build_job_matches_source(job, version_name, source_fingerprint):
+            continue
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        if not result:
+            continue
+        if not result.get("artifact_found") and not result.get("artifact_path"):
+            continue
+        if result.get("publish_ok") is True and _latest_apk_matches(_read_android_version()[1], source_fingerprint):
+            return {}
+        updated = float(job.get("updated_at") or job.get("finished_at") or job.get("created_at") or 0.0)
+        if updated and now - updated > 6 * 3600:
+            continue
+        rows.append((updated, job))
+    rows.sort(key=lambda item: item[0], reverse=True)
+    if not rows:
+        return {}
+    job = rows[0][1]
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    apk = result.get("apk") if isinstance(result.get("apk"), dict) else {}
+    return {
+        "job": job,
+        "result": result,
+        "worker_id": str(job.get("worker_id") or job.get("target_worker_id") or ""),
+        "artifact_path": str(result.get("artifact_path") or apk.get("artifact_path") or ""),
+        "filename": str((apk.get("filename") if isinstance(apk, dict) else "") or result.get("filename") or f"CoreWorker-v{version_name}-debug.apk"),
+    }
+
+
+def _queue_apk_publish_last_from_build(found: dict[str, Any], *, version_name: str, version_code: int, source_fingerprint: str, source_sha256: str, notification_id: str) -> dict[str, Any]:
+    registry = get_core_workers_registry()
+    worker_id = str(found.get("worker_id") or "")
+    if _active_job_exists(job_type="apk_publish_last", target_worker_id=worker_id, summary_contains=version_name):
+        return {"ok": True, "pending": True, "message": "republicação do APK já está na fila", "versionName": version_name, "versionCode": version_code}
+    payload = {
+        "artifact_path": found.get("artifact_path") or "",
+        "versionName": version_name,
+        "versionCode": version_code,
+        "filename": found.get("filename") or f"CoreWorker-v{version_name}-debug.apk",
+        "sourceFingerprint": source_fingerprint,
+        "sourceSha256": source_sha256,
+        "notificationId": notification_id,
+        "notifyUsers": True,
+        "notificationRequested": True,
+        "changelog": [
+            "APK já compilado pelo worker builder",
+            "Republicação automática sem rebuild",
+            "O app mostra Atualizar no topo quando estiver disponível",
+        ],
+    }
+    result = registry.create_job(
+        job_type="apk_publish_last",
+        payload=payload,
+        created_by_id=0,
+        created_by_name="VPS updater",
+        target_worker_id=worker_id,
+        required_capabilities=["apk-builder"],
+        ttl_seconds=1800,
+        lease_seconds=600,
+        max_attempts=2,
+        summary=f"republicar APK {version_name} {source_fingerprint[:12]}",
+    )
+    pending = _load_pending()
+    pending["apk_build"] = {
+        "ok": True,
+        "pending": True,
+        "type": "apk_publish_last",
+        "versionName": version_name,
+        "versionCode": version_code,
+        "sourceFingerprint": source_fingerprint,
+        "sourceSha256": source_sha256,
+        "last_job_id": (result.get("job") or {}).get("job_id") if isinstance(result, dict) else None,
+        "updated_at": time.time(),
+        "message": "APK já compilado; republicação enfileirada sem rebuild",
+    }
+    _save_pending(pending)
+    return {"ok": True, "pending": True, "versionName": version_name, "versionCode": version_code, "job": result.get("job"), "message": "republicação do APK enfileirada"}
+
 def _pending_apk_build_recently_queued(pending: dict[str, Any], version_code: int, source_fingerprint: str, *, cooldown_seconds: int | None = None) -> dict[str, Any]:
     item = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
     if not item:
@@ -962,6 +1075,24 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
         pending.pop("apk_build", None)
         _save_pending(pending)
         return {"ok": True, "versionName": version_name, "versionCode": version_code, "already_published": True, "sourceSha256": source.get("sha256"), "sourceFingerprint": source_fingerprint, "message": "latest.json já está publicado nessa versão/source"}
+    built_unpublished = _recent_built_unpublished_apk(version_name, source_fingerprint)
+    if built_unpublished:
+        try:
+            return _queue_apk_publish_last_from_build(
+                built_unpublished,
+                version_name=version_name,
+                version_code=version_code,
+                source_fingerprint=source_fingerprint,
+                source_sha256=source.get("sha256") or "",
+                notification_id=notification_id,
+            )
+        except Exception as exc:
+            # Se a republicação não pôde ser enfileirada, seguimos para o build normal.
+            item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
+            item.update({"publish_retry_error": f"{type(exc).__name__}: {_short(exc, 160)}", "updated_at": time.time()})
+            pending["apk_build"] = item
+            _save_pending(pending)
+
     recent_queue = {} if manual else _pending_apk_build_recently_queued(pending, version_code, source_fingerprint)
     if recent_queue:
         item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})

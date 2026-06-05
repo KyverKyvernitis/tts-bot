@@ -62,7 +62,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.29"
+PHONE_WORKER_VERSION = "1.10.30"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -8126,6 +8126,181 @@ def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str,
         raise
 
 
+
+def _apk_build_log_has_success(log_path: Path | None) -> bool:
+    if log_path is None or not log_path.is_file():
+        return False
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")[-20000:]
+    except Exception:
+        return False
+    lowered = text.lower()
+    if "build successful" not in lowered:
+        return False
+    fatal_markers = ("failure: build failed", "execution failed for task", "compilation failed")
+    return not any(marker in lowered for marker in fatal_markers)
+
+
+def _apk_build_log_value(log_path: Path | None, key: str, default: str = "") -> str:
+    if log_path is None or not log_path.is_file():
+        return default
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")[:12000]
+    except Exception:
+        return default
+    match = re.search(rf"(?m)^\s*{re.escape(key)}\s*=\s*(.+?)\s*$", text)
+    if not match:
+        return default
+    return str(match.group(1) or "").strip()
+
+
+def _find_gradle_log_for_work_dir(build_root: Path, work_dir: Path) -> Path | None:
+    logs_dir = build_root / "logs"
+    if not logs_dir.is_dir():
+        return None
+    wanted = str(work_dir)
+    logs = sorted(logs_dir.glob("*.log"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
+    for log_path in logs[:60]:
+        try:
+            head = log_path.read_text(encoding="utf-8", errors="replace")[:6000]
+        except Exception:
+            continue
+        if wanted in head:
+            return log_path
+    return None
+
+
+def _persist_recovered_apk_artifact(
+    build_root: Path,
+    *,
+    apk_path: Path,
+    project_dir: Path,
+    gradle_log: Path | None,
+    version_name: str = "",
+    version_code: int = 0,
+    source_sha256: str = "",
+    source_fingerprint: str = "",
+    notification_id: str = "",
+    reason: str = "recovered-orphaned-gradle-output",
+) -> dict[str, Any]:
+    if not apk_path.is_file():
+        return {}
+    detected_name, detected_code = _read_android_version(project_dir)
+    version_name = str(version_name or detected_name or "0.0.0")
+    try:
+        version_code = int(version_code or detected_code or 0)
+    except Exception:
+        version_code = int(detected_code or 0)
+    if gradle_log is not None:
+        source_sha256 = source_sha256 or _apk_build_log_value(gradle_log, "source_sha256")
+        source_fingerprint = source_fingerprint or _apk_build_log_value(gradle_log, "source_fingerprint")
+    source_fingerprint = str(source_fingerprint or source_sha256 or "").strip()
+    notification_id = str(notification_id or f"apk-{version_code}-{source_fingerprint[:12] or int(time.time())}").strip()
+    raw = apk_path.read_bytes()
+    apk_sha = hashlib.sha256(raw).hexdigest()
+    filename = f"CoreWorker-v{version_name}-debug.apk"
+    artifact_dir = build_root / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = artifact_dir / filename
+    if artifact_path.exists():
+        try:
+            existing_sha = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        except Exception:
+            existing_sha = ""
+        if existing_sha != apk_sha:
+            artifact_path = artifact_dir / f"{Path(filename).stem}-{notification_id[:16] or int(time.time())}.apk"
+    try:
+        shutil.copy2(apk_path, artifact_path)
+    except Exception:
+        artifact_path.write_bytes(raw)
+    artifact_meta = {
+        "filename": filename,
+        "versionName": version_name,
+        "versionCode": version_code,
+        "sha256": apk_sha,
+        "bytes": len(raw),
+        "artifact_path": str(artifact_path),
+        "sourceFingerprint": source_fingerprint,
+        "sourceSha256": str(source_sha256 or ""),
+        "notificationId": notification_id,
+        "apkSigningMode": "compat-vps-debug-keystore",
+        "apkSigningKeystoreSha256": "",
+        "gradle_log_path": str(gradle_log) if gradle_log is not None else "",
+        "gradle_log_exists": bool(gradle_log and gradle_log.exists()),
+        "gradle_log_bytes": gradle_log.stat().st_size if gradle_log is not None and gradle_log.exists() else 0,
+        "build_successful": True,
+        "build_result": "success",
+        "phoneWorkerVersion": PHONE_WORKER_VERSION,
+        "created_at": time.time(),
+        "recovered": True,
+        "recoveryReason": reason,
+    }
+    with contextlib.suppress(Exception):
+        _write_json_file_atomic(artifact_path.with_suffix(artifact_path.suffix + ".json"), artifact_meta)
+        _write_json_file_atomic(artifact_dir / "latest-artifact.json", artifact_meta)
+    return artifact_meta
+
+
+def _recover_orphaned_apk_build_outputs(
+    build_root: Path,
+    *,
+    version_name: str = "",
+    version_code: int = 0,
+    source_fingerprint: str = "",
+    source_sha256: str = "",
+    notification_id: str = "",
+) -> dict[str, Any]:
+    """Recupera APK gerado quando o processo caiu depois do Gradle.
+
+    Em Android/Termux o processo pode ser morto depois de `assembleDebug` e antes
+    da cópia para artifacts/latest. O Gradle já deixou `app-debug.apk` no workdir;
+    esse helper promove esse APK para artifacts e permite republicar sem rebuild.
+    """
+    if not build_root.is_dir():
+        return {}
+    wanted_fp = str(source_fingerprint or source_sha256 or "").strip()
+    workdirs = sorted([p for p in build_root.glob("build-*") if p.is_dir()], key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
+    for work_dir in workdirs[:12]:
+        project_dir = work_dir / "src" / "android" / "core-worker-app"
+        if not project_dir.is_dir():
+            alt = work_dir / "src" / "core-worker-app"
+            if alt.is_dir():
+                project_dir = alt
+        if not project_dir.is_dir():
+            continue
+        detected_name, detected_code = _read_android_version(project_dir)
+        if version_name and detected_name and str(detected_name) != str(version_name):
+            continue
+        if int(version_code or 0) and int(detected_code or 0) and int(detected_code or 0) != int(version_code or 0):
+            continue
+        gradle_log = _find_gradle_log_for_work_dir(build_root, work_dir)
+        if not _apk_build_log_has_success(gradle_log):
+            continue
+        log_fp = _apk_build_log_value(gradle_log, "source_fingerprint")
+        log_sha = _apk_build_log_value(gradle_log, "source_sha256")
+        if wanted_fp:
+            hay = {str(log_fp or "").strip(), str(log_sha or "").strip()}
+            short = wanted_fp[:12]
+            if wanted_fp not in hay and short and not any(short and short in value for value in hay if value):
+                continue
+        apk_dir = project_dir / "app" / "build" / "outputs" / "apk" / "debug"
+        apk_candidates = sorted(apk_dir.glob("*.apk"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True) if apk_dir.is_dir() else []
+        for apk_path in apk_candidates:
+            if not apk_path.is_file() or apk_path.stat().st_size < 1024 * 1024:
+                continue
+            return _persist_recovered_apk_artifact(
+                build_root,
+                apk_path=apk_path,
+                project_dir=project_dir,
+                gradle_log=gradle_log,
+                version_name=version_name or detected_name,
+                version_code=int(version_code or detected_code or 0),
+                source_sha256=source_sha256 or log_sha,
+                source_fingerprint=source_fingerprint or log_fp or source_sha256,
+                notification_id=notification_id,
+            )
+    return {}
+
 def _latest_apk_artifact_metadata(build_root: Path) -> dict[str, Any]:
     artifact_dir = build_root / "artifacts"
     candidates: list[Path] = []
@@ -8190,6 +8365,15 @@ def _apply_apk_publish_last(payload: dict[str, Any]) -> dict[str, Any]:
                 "sourceSha256": str(payload.get("sourceSha256") or payload.get("source_sha256") or ""),
                 "notificationId": str(payload.get("notificationId") or payload.get("notification_id") or f"apk-republish-{int(time.time())}"),
             }
+    if not meta:
+        meta = _recover_orphaned_apk_build_outputs(
+            build_root,
+            version_name=str(payload.get("versionName") or payload.get("version_name") or ""),
+            version_code=int(payload.get("versionCode") or payload.get("version_code") or 0),
+            source_fingerprint=str(payload.get("sourceFingerprint") or payload.get("source_fingerprint") or ""),
+            source_sha256=str(payload.get("sourceSha256") or payload.get("source_sha256") or ""),
+            notification_id=str(payload.get("notificationId") or payload.get("notification_id") or ""),
+        )
     if not meta:
         meta = _latest_apk_artifact_metadata(build_root)
     if not meta:
@@ -8283,6 +8467,43 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     try:
+        recovered_meta = _recover_orphaned_apk_build_outputs(
+            build_root,
+            version_name=version_name,
+            version_code=version_code,
+            source_fingerprint=source_fingerprint,
+            source_sha256=expected_source_sha,
+            notification_id=notification_id,
+        )
+        if recovered_meta and bool(payload.get("publish", True)):
+            publish_result = _apply_apk_publish_last({
+                **payload,
+                "artifact_path": recovered_meta.get("artifact_path"),
+                "filename": recovered_meta.get("filename"),
+                "versionName": recovered_meta.get("versionName") or version_name,
+                "versionCode": recovered_meta.get("versionCode") or version_code,
+                "sourceFingerprint": recovered_meta.get("sourceFingerprint") or source_fingerprint,
+                "sourceSha256": recovered_meta.get("sourceSha256") or expected_source_sha,
+                "notificationId": recovered_meta.get("notificationId") or notification_id,
+                "changelog": payload.get("changelog") or ["APK recuperado de build anterior e publicado pelo worker builder"],
+            })
+            publish_result["recovered_from_orphaned_output"] = True
+            publish_result["artifact_meta"] = recovered_meta
+            return publish_result
+        elif recovered_meta:
+            return {
+                "ok": True,
+                "build_gradle_ok": True,
+                "artifact_found": True,
+                "recovered_from_orphaned_output": True,
+                "summary": f"APK {recovered_meta.get('versionName') or version_name} recuperado de build anterior",
+                "versionName": recovered_meta.get("versionName") or version_name,
+                "versionCode": recovered_meta.get("versionCode") or version_code,
+                "artifact_path": recovered_meta.get("artifact_path"),
+                "apk": {"filename": recovered_meta.get("filename"), "bytes": recovered_meta.get("bytes"), "sha256": recovered_meta.get("sha256"), "artifact_path": recovered_meta.get("artifact_path")},
+                "artifact_meta": recovered_meta,
+            }
+
         lock_handle, lock_info = _try_acquire_apk_build_file_lock(build_root)
         if lock_handle is None:
             return _apk_build_failure_result(
@@ -8526,7 +8747,7 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             publish_url = str(payload.get("publish_url") or "").strip()
             base_url, _token, _worker_id = _core_worker_auth_parts()
             publish = _upload_core_worker_apk(
-                apk_path,
+                artifact_path,
                 filename=filename,
                 version_name=version_name,
                 version_code=version_code,
@@ -8542,8 +8763,9 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             result["publish"] = publish
             result["publish_ok"] = bool(publish.get("ok", False))
             if not bool(publish.get("ok", False)):
-                result["ok"] = False
-                result["summary"] = "APK compilado, mas publicação na VPS falhou"
+                result["ok"] = True
+                result["summary"] = "APK compilado; publicação na VPS ficou pendente"
+                result["publish_pending"] = True
                 if publish.get("error"):
                     result["publish_error"] = str(publish.get("error"))[:240]
         else:

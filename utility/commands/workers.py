@@ -1882,6 +1882,38 @@ def _core_worker_fcm_status_summary(worker_id: str = "") -> dict[str, Any]:
     }
 
 
+
+def _core_worker_push_status_text(worker_id: str = "") -> str:
+    summary = _core_worker_fcm_status_summary(worker_id)
+    active = int(summary.get("active") or 0)
+    if active <= 0:
+        if summary.get("needsRefresh"):
+            return "Push: token expirado · aguardando renovação pelo APK"
+        if int(summary.get("stale") or 0):
+            return "Push: token antigo · aguardando renovação pelo APK"
+        if int(summary.get("incomplete") or 0):
+            return "Push: token incompleto · aguardando confirmação do APK"
+        return "Push: aguardando APK registrar FCM"
+    permission = str(summary.get("permission") or "").lower()
+    suffix = ""
+    last_push = summary.get("lastPushAt")
+    if last_push:
+        try:
+            suffix = f" · último push {_format_age(max(0, time.time() - float(last_push)))}"
+        except Exception:
+            suffix = ""
+    status = str(summary.get("lastPushStatus") or "")
+    if status == "unregistered" or str(summary.get("lastErrorCode") or "").upper() == "UNREGISTERED":
+        return "Push: token expirado · aguardando renovação"
+    if status == "failed":
+        detail = str(summary.get("lastError") or "").strip()
+        return "Push: falhou no último envio" + (f" · {_shorten(detail, limit=80)}" if detail else " · detalhes no celular")
+    if permission == "missing":
+        return f"Push: token ativo · sem permissão visível{suffix}"
+    if status == "sent":
+        return f"Push: ativo · enviado{suffix}"
+    return f"Push: ativo ({active}){suffix}"
+
 def _apk_build_effectively_published(apk: dict[str, Any]) -> tuple[bool, str]:
     if not isinstance(apk, dict) or not apk:
         return False, ""

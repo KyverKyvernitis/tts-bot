@@ -1,51 +1,27 @@
-# Patch: core-worker-base-tools-audit-v1
+# Patch: worker-panel-apk-publish-recovery-v1
 
-Base: `repo-20260604-215859.zip`
+Base: `repo-20260604-223619.zip`
 
-## Inclui
+## Corrige
 
-- APK `0.5.73` / `versionCode 88`.
-- Phone worker `1.10.29`.
-- Source plan sobe para `core-worker-embedded-binaries-source-plan-v6`.
-- Pipeline sobe para `core-linux-embedded-binaries-build-pipeline-v4`.
-- Intake local sobe para `core-worker-embedded-binaries-local-v4`.
-- Preflight do runner sobe para `core-linux-runner-preflight-v5`.
-- Registro auditável das fontes pesquisadas:
-  - `proot` Termux `5.1.107.76`, `GPL-2.0`, SHA-256 do source oficial do recipe Termux.
-  - `libtalloc` `2.4.3`, `GPL-3.0`, SHA-256 do source oficial do recipe Termux.
-  - `busybox` Termux `1.37.0-r3`, `GPL-2.0`, SHA-256 do source oficial do recipe Termux.
-- Novo alvo opcional `libcoreworker_libtalloc.so` para permitir PRoot dinâmico auditado sem esconder dependência.
-- `audit-base-tools` e `stage-base-tools` agora tratam `proot + busybox` como obrigatórios e `libtalloc` como dependência auditada quando necessária.
-- Intake agora valida:
-  - ELF arm64 e tamanho mínimo;
-  - metadata de origem/licença;
-  - `sourceSha256` esperado do recipe;
-  - `binarySha256` quando informado;
-  - compliance de GPL (`completeCorrespondingSourceReady`, `licenseTextIncluded`, `sourceUrl`);
-  - `linkMode` (`static`, `self-contained` ou `dynamic-with-bundled-dependencies`);
-  - rejeição de build inseguro em prefixo vivo do worker quando declarado.
-- Preflight/runtime-summary passam a expor:
-  - `libtallocEmbedded`;
-  - `prootNeedsLibtalloc`;
-  - `prootDependencyReady`;
-  - `baseToolsReady`;
-  - asset `embedded.libtalloc`.
-- README dos binários nativos atualizado com a política de GPL/source e dependências.
+- `_worker` / `_workers` voltam a abrir o painel:
+  - restaura `_core_worker_push_status_text()`;
+  - mantém o resumo de Push sem quebrar o layout quando não existe token FCM.
+- Publicação do APK gerado pelo worker builder:
+  - phone worker sobe para `1.10.30`;
+  - `apk_build_debug` agora procura APK órfão em `core-worker-apk-builds/build-*` quando o Gradle já terminou com `BUILD SUCCESSFUL`, mas o processo caiu antes de copiar/publicar;
+  - se encontrar `app-debug.apk` válido, promove para `artifacts/latest-artifact.json` e publica sem rebuild;
+  - `apk_publish_last` também tenta essa recuperação antes de dizer que não existe artifact;
+  - publicação passa a usar o APK persistido em `artifacts/`, não o arquivo temporário do workdir;
+  - falha de upload/publicação não marca o build Gradle como perdido: deixa `publish_pending=True` para republicar depois.
+- Automação da VPS:
+  - ignora build APK `running` obviamente velho para não travar por horas;
+  - limpa leases expirados antes de decidir se já existe job ativo;
+  - quando um APK já foi compilado mas não publicado, enfileira `apk_publish_last` antes de rebuildar.
 
-## Continua bloqueado
+## Não muda
 
-- Bedrock start real.
-- Box64 start.
-- Shell livre.
-- Comando remoto arbitrário.
-- Download automático de binários no APK.
-- Execução de binários importados do app-home.
-
-## Não tocado
-
-- Updater.
-- UI do app.
-- CallKeeper.
-- Música/player.
-- TTS runtime.
-- Build na VPS.
+- Não builda APK na VPS.
+- Não muda o APK Android/versionCode nesta correção.
+- Não toca CallKeeper.
+- Não libera Bedrock real, shell livre ou execução arbitrária.

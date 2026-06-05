@@ -1,13 +1,5 @@
 PATCH_NOTES.md
 changed_files.txt
-android/core-worker-app/app/build.gradle
-android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json
-android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
-android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
-android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md
 deploy/termux/phone-worker/phone_worker.py
-scripts/core-linux-embedded-binaries-build-pipeline.py
-scripts/core-linux-embedded-binaries-intake.py
-scripts/core-linux-embedded-binaries-metadata.example.json
-scripts/core-linux-embedded-binaries-sources.json
-webserver.py
+scripts/core-worker-automation.py
+utility/commands/workers.py
