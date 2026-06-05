@@ -12,6 +12,7 @@ import java.io.InputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -159,7 +160,14 @@ public final class CoreLinuxRuntimeManager {
             }
 
             File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir == null ? "" : context.getApplicationInfo().nativeLibraryDir);
-            File busybox = new File(nativeDir, "libcoreworker_busybox.so");
+            File busyboxReal = new File(nativeDir, "libcoreworker_busybox.so");
+            // V12.3: BusyBox é multi-call e decide o applet pelo basename de argv[0].
+            // Executar diretamente libcoreworker_busybox.so faz o wrapper procurar um
+            // applet chamado "libcoreworker_busybox.so" e retornar 127. Criamos um
+            // symlink privado chamado "busybox" apontando para a native lib extraída,
+            // mantendo a execução real no nativeLibraryDir e sem baixar/copiar binário.
+            JSONObject busyboxLaunch = prepareBusyboxArgv0Launcher(layout.runtime, busyboxReal);
+            File busybox = new File(busyboxLaunch.optString("path", path(busyboxReal)));
             File proot = new File(nativeDir, "libcoreworker_proot.so");
             JSONObject smoke = new JSONObject();
             JSONArray smokeChecks = new JSONArray();
@@ -168,6 +176,7 @@ public final class CoreLinuxRuntimeManager {
 
             if (prerequisitesOk) {
                 JSONObject busyboxSmoke = new JSONObject();
+                busyboxSmoke.put("launcher", busyboxLaunch);
                 JSONObject busyboxHelp = runNativeTool("busybox --help", busybox, nativeDir, layout.runtime, 8000L, "--help");
                 JSONObject busyboxTrue = runNativeTool("busybox true", busybox, nativeDir, layout.runtime, 5000L, "true");
                 JSONObject busyboxEcho = runNativeTool("busybox echo ok", busybox, nativeDir, layout.runtime, 5000L, "echo", "ok");
@@ -190,6 +199,8 @@ public final class CoreLinuxRuntimeManager {
                 smoke.put("proot", prootSmoke);
                 smoke.put("nativeLibraryDir", path(nativeDir));
                 smoke.put("workDir", path(layout.runtime));
+                smoke.put("busyboxArgv0Mode", busyboxLaunch.optString("mode", "symlink"));
+                smoke.put("busyboxExecutablePath", path(busybox));
                 smoke.put("env", new JSONObject()
                         .put("LD_LIBRARY_PATH", path(nativeDir))
                         .put("PROOT_LOADER", path(new File(nativeDir, "libcoreworker_proot_loader.so")))
@@ -235,18 +246,49 @@ public final class CoreLinuxRuntimeManager {
             out.put("runtime", runtime);
             out.put("runnerPreflight", runner);
             out.put("baseToolsSmoke", smoke);
-            out.put("nextStep", ok ? "rootfs-proot-smoke" : "corrigir erro de linker/permissão antes do rootfs smoke");
+            out.put("nextStep", ok ? "rootfs-proot-smoke" : "corrigir erro BusyBox/PRoot antes do rootfs smoke");
             out.put("updatedAt", now());
             out.put("summary", ok
-                    ? "Smoke real Core Linux V12 ok · BusyBox/PRoot executaram allowlist sem Termux"
+                    ? "Smoke real Core Linux V12.3 ok · BusyBox/PRoot executaram allowlist sem Termux"
                     : (prerequisitesOk
-                        ? "Smoke real Core Linux V12 falhou · ver erro de linker/permissão em stdout/stderr"
-                        : "Smoke real Core Linux V12 bloqueado · falta base real para substituir Termux"));
+                        ? "Smoke real Core Linux V12.3 falhou · ver stdout/stderr por etapa"
+                        : "Smoke real Core Linux V12.3 bloqueado · falta base real para substituir Termux"));
             writeJson(new File(layout.runtime, "core-linux-smoke-test.json"), out);
             appendLog(new File(layout.logs, "core-linux-smoke-test.log"), out.optString("summary"));
             return out;
         } catch (Throwable exc) {
             return error("core_linux_smoke_test", exc);
+        }
+    }
+
+
+    private static JSONObject prepareBusyboxArgv0Launcher(File runtimeDir, File busyboxReal) {
+        JSONObject out = new JSONObject();
+        try {
+            File linksDir = new File(runtimeDir, "tool-links");
+            linksDir.mkdirs();
+            File link = new File(linksDir, "busybox");
+            Files.deleteIfExists(link.toPath());
+            Files.createSymbolicLink(link.toPath(), busyboxReal.toPath());
+            //noinspection ResultOfMethodCallIgnored
+            link.setExecutable(true, true);
+            out.put("ok", true);
+            out.put("mode", "argv0-symlink");
+            out.put("path", path(link));
+            out.put("target", path(busyboxReal));
+            out.put("basename", link.getName());
+            out.put("note", "BusyBox multi-call precisa argv0=busybox; symlink aponta para nativeLibraryDir");
+            return out;
+        } catch (Throwable exc) {
+            try {
+                out.put("ok", false);
+                out.put("mode", "direct-fallback");
+                out.put("path", path(busyboxReal));
+                out.put("target", path(busyboxReal));
+                out.put("error", shortThrowable(exc));
+                out.put("note", "fallback direto pode falhar com applet not found se argv0 não for busybox");
+            } catch (Throwable ignored) {}
+            return out;
         }
     }
 
