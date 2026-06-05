@@ -281,7 +281,7 @@ def main(argv: list[str]) -> int:
 
     JNI_DIR.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, Any] = {
-        "schema": "core-worker-embedded-binaries-local-v4",
+        "schema": "core-worker-embedded-binaries-local-v5",
         "generatedAt": int(time.time()),
         "dryRun": bool(args.dry_run),
         "targets": {},
@@ -315,9 +315,12 @@ def main(argv: list[str]) -> int:
                 # Continue collecting every target error before exiting below.
                 pass
             else:
-                shutil.copy2(source, dest)
+                if source != dest:
+                    shutil.copy2(source, dest)
+                    copied = True
+                else:
+                    copied = False
                 os.chmod(dest, 0o644)
-                copied = True
         target_metadatas[key] = metadata
         manifest["targets"][key] = {
             "source": str(source),

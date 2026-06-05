@@ -44,3 +44,15 @@ O APK privado força `android:extractNativeLibs="true"` e `packaging.jniLibs.use
 `proot`, `libtalloc`, `busybox` e `box64` só devem entrar no APK depois de build/import auditado com metadata de origem, licença, versão/commit/hash e receita de build. O intake rejeita stage real desses assets sem `licenseStatus` aprovado (`verified-audited`, `source-built` ou `redistributable-verified`).
 
 Para componentes GPL, o metadata também precisa declarar `sourceCompliance.completeCorrespondingSourceReady=true`, `licenseTextIncluded=true` e URL/caminho do source correspondente. Isso evita empacotar binário GPL sem rastro de source/licença.
+
+## V8 — PRoot Termux deb intake parcial
+
+Arquivos importados de `proot_5.1.107.76_aarch64.deb` e `libtalloc_2.4.3_aarch64.deb`:
+
+- `libcoreworker_proot.so`: executável PRoot arm64 empacotado como native lib.
+- `libcoreworker_proot_loader.so`: loader arm64 exigido pelo PRoot.
+- `libcoreworker_proot_loader32.so`: loader 32-bit preservado para diagnóstico/futuro.
+- `libcoreworker_libtalloc.so`: libtalloc auditada para validação do intake.
+- `libtalloc.so`: duplicata com nome resolvível pelo linker depois do patch `NEEDED libtalloc.so.2 -> libtalloc.so` no PRoot.
+
+BusyBox do pacote `busybox_1.37.0-3_aarch64.deb` não foi embutido neste patch porque o launcher depende de `libbusybox.so.1.37.0`, e essa biblioteca depende de `libandroid-selinux.so`, que não veio no ZIP de binários. O gate continua bloqueando BusyBox até essa dependência ser fornecida/auditada ou até usarmos um BusyBox static/self-contained.

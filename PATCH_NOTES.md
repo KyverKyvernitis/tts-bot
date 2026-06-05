@@ -1,32 +1,33 @@
-# Patch — Core Linux native extraction gate v7
+# Patch V8 — Core Linux Termux .deb intake parcial
 
-Objetivo: preparar o APK para a etapa real de substituição do Termux sem marcar PRoot/BusyBox como executáveis só por estarem dentro do APK.
+Este patch importa os binários reais enviados em `binarios.zip` para o APK, mas mantém o gate seguro.
 
-## O que muda
+## Importado
 
-- Sobe o APK para `0.5.77` / `versionCode 92`.
-- Força extração de native libs no APK:
-  - `android:extractNativeLibs="true"` no `AndroidManifest.xml`.
-  - `packaging.jniLibs.useLegacyPackaging=true` no Gradle.
-- Atualiza o preflight do Core Linux para v7.
-- O preflight agora diferencia:
-  - asset físico em `nativeLibraryDir` = candidato futuro válido;
-  - `ZipEntry` dentro do APK = apenas diagnóstico, não caminho executável.
-- PRoot/BusyBox/libtalloc/Box64 só ficam `allowedForFutureExecution=true` quando:
-  - estão extraídos como native lib física;
-  - têm metadata externa aprovada;
-  - não estão em diretório gravável bloqueado pelo Android 10+.
-- Atualiza manifestos/capacidades para `core-linux-runner-preflight-v7` e `core-linux-embedded-binaries-intake-v7`.
-- Adiciona o source plan `embedded-binaries-source-plan.json` aos assets do APK.
+- PRoot `5.1.107.76` arm64 do pacote Termux.
+- Loader arm64 do PRoot.
+- Loader32 do PRoot preservado para diagnóstico/futuro.
+- libtalloc `2.4.3` arm64.
+- Duplicata `libtalloc.so` para resolução do `NEEDED` do PRoot patchado.
+- Metadata V8 com SHA256, origem, versão, licença e compliance GPL.
+- Textos GPL-2.0/GPL-3.0 em assets do APK.
 
-## Próximo passo depois deste patch
+## Bloqueado de propósito
 
-Importar os binários reais auditados:
+BusyBox `1.37.0-3` não foi embutido porque o pacote Termux recebido é dinâmico:
+
+- `/usr/bin/busybox` depende de `libbusybox.so.1.37.0`;
+- `libbusybox.so.1.37.0` depende de `libandroid-selinux.so`;
+- `libandroid-selinux.so` não veio em `binarios.zip`.
+
+O preflight V8 agora exige também o loader do PRoot. O runner real continua bloqueado até BusyBox + dependências + rootfs passarem no smoke allowlist.
+
+## Validação feita
 
 ```bash
-python3 scripts/core-linux-embedded-binaries-build-pipeline.py metadata-template > /tmp/core-linux-binaries-metadata.json
-python3 scripts/core-linux-embedded-binaries-build-pipeline.py audit-base-tools --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
-python3 scripts/core-linux-embedded-binaries-build-pipeline.py stage-base-tools --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
+python3 -m py_compile webserver.py scripts/core-linux-embedded-binaries-build-pipeline.py scripts/core-linux-embedded-binaries-intake.py
+python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --strict --metadata-file scripts/core-linux-embedded-binaries-metadata.v8.json
+readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so
 ```
 
-Ainda não inclui PRoot/BusyBox reais, porque eles não foram enviados na base e não devem ser inventados/baixados pelo patch.
+Resultado importante: o PRoot foi ajustado para depender de `libtalloc.so` em vez de `libtalloc.so.2`, e o BusyBox ficou bloqueado por falta de `libandroid-selinux.so`.

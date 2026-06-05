@@ -20,7 +20,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * Preflight v7 do runner Core Linux.
+ * Preflight v8 do runner Core Linux.
  *
  * Esta etapa apenas detecta requisitos e escreve estado. Ela não inicia Bedrock,
  * não executa Box64/proot/busybox, não abre shell livre e não aceita comando remoto.
@@ -55,18 +55,21 @@ public final class CoreLinuxRunnerPreflightManager {
             String[] executorNames = new String[]{"libcoreworker_executor.so"};
             String[] runnerNames = new String[]{"libcoreworker_runner.so"};
             String[] prootNames = new String[]{"libcoreworker_proot.so", "libproot.so"};
+            String[] prootLoaderNames = new String[]{"libcoreworker_proot_loader.so"};
             String[] busyboxNames = new String[]{"libcoreworker_busybox.so", "libbusybox.so"};
             String[] libtallocNames = new String[]{"libcoreworker_libtalloc.so", "libtalloc.so", "libtalloc.so.2"};
             String[] box64Names = new String[]{"libcoreworker_box64.so", "libbox64.so"};
             File embeddedExecutor = firstExisting(nativeDir, executorNames);
             File embeddedRunner = firstExisting(nativeDir, runnerNames);
             File embeddedProot = firstExisting(nativeDir, prootNames);
+            File embeddedProotLoader = firstExisting(nativeDir, prootLoaderNames);
             File embeddedBusybox = firstExisting(nativeDir, busyboxNames);
             File embeddedLibtalloc = firstExisting(nativeDir, libtallocNames);
             File embeddedBox64 = firstExisting(nativeDir, box64Names);
             JSONObject apkExecutor = apkNativeInfo(context, executorNames);
             JSONObject apkRunner = apkNativeInfo(context, runnerNames);
             JSONObject apkProot = apkNativeInfo(context, prootNames);
+            JSONObject apkProotLoader = apkNativeInfo(context, prootLoaderNames);
             JSONObject apkBusybox = apkNativeInfo(context, busyboxNames);
             JSONObject apkLibtalloc = apkNativeInfo(context, libtallocNames);
             JSONObject apkBox64 = apkNativeInfo(context, box64Names);
@@ -85,17 +88,20 @@ public final class CoreLinuxRunnerPreflightManager {
             boolean runnerLoadedByJni = runnerGuard.optBoolean("loaded", false);
             boolean executorLoadedByJni = nativeExecutor.optJSONObject("nativeBridge") != null
                     && nativeExecutor.optJSONObject("nativeBridge").optBoolean("loaded", false);
-            JSONObject embeddedAssets = embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedBusybox, embeddedLibtalloc, embeddedBox64,
-                    executorNames, runnerNames, prootNames, busyboxNames, libtallocNames, box64Names,
-                    executorLoadedByJni, runnerLoadedByJni, apkExecutor, apkRunner, apkProot, apkBusybox, apkLibtalloc, apkBox64,
+            JSONObject embeddedAssets = embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedProotLoader, embeddedBusybox, embeddedLibtalloc, embeddedBox64,
+                    executorNames, runnerNames, prootNames, prootLoaderNames, busyboxNames, libtallocNames, box64Names,
+                    executorLoadedByJni, runnerLoadedByJni, apkExecutor, apkRunner, apkProot, apkProotLoader, apkBusybox, apkLibtalloc, apkBox64,
                     localManifest, sourcePlan);
             JSONObject runnerInfo = embeddedAssets.optJSONObject("runner") == null ? new JSONObject() : embeddedAssets.optJSONObject("runner");
             JSONObject prootInfo = embeddedAssets.optJSONObject("proot") == null ? new JSONObject() : embeddedAssets.optJSONObject("proot");
+            JSONObject prootLoaderInfo = embeddedAssets.optJSONObject("prootLoader") == null ? new JSONObject() : embeddedAssets.optJSONObject("prootLoader");
             JSONObject busyboxInfo = embeddedAssets.optJSONObject("busybox") == null ? new JSONObject() : embeddedAssets.optJSONObject("busybox");
             JSONObject libtallocInfo = embeddedAssets.optJSONObject("libtalloc") == null ? new JSONObject() : embeddedAssets.optJSONObject("libtalloc");
             JSONObject box64Info = embeddedAssets.optJSONObject("box64") == null ? new JSONObject() : embeddedAssets.optJSONObject("box64");
             boolean runnerAssetReady = runnerInfo.optBoolean("allowedForFutureExecution", false);
-            boolean prootReady = prootInfo.optBoolean("allowedForFutureExecution", false);
+            boolean prootBinaryReady = prootInfo.optBoolean("allowedForFutureExecution", false);
+            boolean prootLoaderReady = prootLoaderInfo.optBoolean("allowedForFutureExecution", false);
+            boolean prootReady = prootBinaryReady && prootLoaderReady;
             boolean busyboxReady = busyboxInfo.optBoolean("allowedForFutureExecution", false);
             boolean libtallocReady = libtallocInfo.optBoolean("allowedForFutureExecution", false);
             boolean box64Ready = box64Info.optBoolean("allowedForFutureExecution", false);
@@ -121,7 +127,8 @@ public final class CoreLinuxRunnerPreflightManager {
             addCheck(baseChecks, missing, "rootfs_real", "Rootfs real validado", rootfsReal, "importe/valide um rootfs real antes do runner");
             addCheck(baseChecks, missing, "native_executor", "Executor nativo do APK", nativeExecutorReady, "embutir/testar executor nativo allowlist");
             addCheck(baseChecks, missing, "core_runner_asset", "core-runner embutido no APK", runnerAssetReady, "embutir core-runner arm64 como libcoreworker_runner.so");
-            addCheck(baseChecks, missing, "proot_embedded", "proot embutido no APK", prootReady, "embutir proot arm64 auditado com metadata aprovada");
+            addCheck(baseChecks, missing, "proot_embedded", "proot embutido no APK", prootBinaryReady, "embutir proot arm64 auditado com metadata aprovada");
+            addCheck(baseChecks, missing, "proot_loader_embedded", "loader do proot embutido no APK", prootLoaderReady, "embutir loader do proot extraído do pacote auditado");
             addCheck(baseChecks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox arm64 auditado com metadata aprovada");
             if (prootNeedsLibtalloc) {
                 addCheck(baseChecks, missing, "libtalloc_embedded", "libtalloc embutido no APK", libtallocReady, "embutir libtalloc arm64 auditado junto com proot dinâmico");
@@ -148,7 +155,7 @@ public final class CoreLinuxRunnerPreflightManager {
             if (Build.VERSION.SDK_INT >= 29) {
                 warnings.put("execução futura deve usar componentes embutidos no APK/native libs; binários importados não são executados");
             }
-            blockers.put("runner real permanece bloqueado no preflight v6");
+            blockers.put("runner real permanece bloqueado no preflight v8");
             blockers.put("Bedrock start real permanece bloqueado");
             blockers.put("shell livre permanece bloqueado");
             blockers.put("comando remoto arbitrário permanece bloqueado");
@@ -181,8 +188,8 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("ok", true);
             out.put("component", "core_linux_runner_preflight");
             out.put("action", safeAction);
-            out.put("stage", "core-linux-runner-preflight-v7");
-            out.put("preflightVersion", 7);
+            out.put("stage", "core-linux-runner-preflight-v8");
+            out.put("preflightVersion", 8);
             out.put("state", state);
             out.put("summary", summary);
             out.put("phase", phase);
@@ -208,6 +215,8 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("nativeExecutorReady", nativeExecutorReady);
             out.put("coreRunnerEmbedded", runnerAssetReady);
             out.put("prootEmbedded", prootReady);
+            out.put("prootBinaryEmbedded", prootBinaryReady);
+            out.put("prootLoaderEmbedded", prootLoaderReady);
             out.put("busyboxEmbedded", busyboxReady);
             out.put("libtallocEmbedded", libtallocReady);
             out.put("prootNeedsLibtalloc", prootNeedsLibtalloc);
@@ -230,7 +239,7 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("rootfs", compactRootfs(rootfsState, importState));
             out.put("nativeExecutor", compactNative(nativeExecutor));
             out.put("coreRunnerNativeBridge", runnerGuard);
-            out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, busyboxNames, libtallocNames, box64Names, localManifest, sourcePlan));
+            out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, prootLoaderNames, busyboxNames, libtallocNames, box64Names, localManifest, sourcePlan));
             out.put("embedded", embeddedAssets);
             out.put("writableCandidates", writableSnapshot(writableBox64, dataDir));
             out.put("bedrockFiles", bedrockFilesSnapshot(bedrockServer, properties));
@@ -252,7 +261,7 @@ public final class CoreLinuxRunnerPreflightManager {
                 err.put("runnerBlocked", true);
                 err.put("runnerExecutionAllowed", false);
                 err.put("bedrockStartAllowed", false);
-                err.put("preflightVersion", 7);
+                err.put("preflightVersion", 8);
                 err.put("updatedAt", System.currentTimeMillis());
             } catch (Throwable ignored) {}
             return err;
@@ -319,14 +328,15 @@ public final class CoreLinuxRunnerPreflightManager {
         return out;
     }
 
-    private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] busybox, String[] libtalloc, String[] box64,
+    private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] prootLoader, String[] busybox, String[] libtalloc, String[] box64,
                                             JSONObject localManifest, JSONObject sourcePlan) throws Exception {
         return new JSONObject()
-                .put("stage", "core-linux-embedded-binaries-intake-v7")
+                .put("stage", "core-linux-embedded-binaries-intake-v8")
                 .put("abi", "arm64-v8a")
                 .put("executor", new JSONArray(executor))
                 .put("runner", new JSONArray(runner))
                 .put("proot", new JSONArray(proot))
+                .put("prootLoader", new JSONArray(prootLoader))
                 .put("busybox", new JSONArray(busybox))
                 .put("libtalloc", new JSONArray(libtalloc))
                 .put("box64", new JSONArray(box64))
@@ -335,16 +345,17 @@ public final class CoreLinuxRunnerPreflightManager {
                 .put("policy", "somente componentes embutidos no APK/native libs ou JNI carregado pelo APK podem virar executáveis futuros; assets externos exigem metadata aprovada");
     }
 
-    private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File executor, File runner, File proot, File busybox, File libtalloc, File box64,
-                                               String[] executorNames, String[] runnerNames, String[] prootNames, String[] busyboxNames, String[] libtallocNames, String[] box64Names,
+    private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File executor, File runner, File proot, File prootLoader, File busybox, File libtalloc, File box64,
+                                               String[] executorNames, String[] runnerNames, String[] prootNames, String[] prootLoaderNames, String[] busyboxNames, String[] libtallocNames, String[] box64Names,
                                                boolean executorLoadedByJni, boolean runnerLoadedByJni,
-                                               JSONObject apkExecutor, JSONObject apkRunner, JSONObject apkProot, JSONObject apkBusybox, JSONObject apkLibtalloc, JSONObject apkBox64,
+                                               JSONObject apkExecutor, JSONObject apkRunner, JSONObject apkProot, JSONObject apkProotLoader, JSONObject apkBusybox, JSONObject apkLibtalloc, JSONObject apkBox64,
                                                JSONObject localManifest, JSONObject sourcePlan) throws Exception {
         return new JSONObject()
                 .put("nativeLibraryDir", path(nativeDir))
                 .put("executor", assetInfo("executor", executor, executorNames, nativeDir, dataDir, executorLoadedByJni, "jni-loaded:coreworker_executor", apkExecutor, localManifest, sourcePlan))
                 .put("runner", assetInfo("runner", runner, runnerNames, nativeDir, dataDir, runnerLoadedByJni, "jni-loaded:coreworker_runner", apkRunner, localManifest, sourcePlan))
                 .put("proot", assetInfo("proot", proot, prootNames, nativeDir, dataDir, false, "", apkProot, localManifest, sourcePlan))
+                .put("prootLoader", assetInfo("proot", prootLoader, prootLoaderNames, nativeDir, dataDir, false, "", apkProotLoader, localManifest, sourcePlan))
                 .put("busybox", assetInfo("busybox", busybox, busyboxNames, nativeDir, dataDir, false, "", apkBusybox, localManifest, sourcePlan))
                 .put("libtalloc", assetInfo("libtalloc", libtalloc, libtallocNames, nativeDir, dataDir, false, "", apkLibtalloc, localManifest, sourcePlan))
                 .put("box64", assetInfo("box64", box64, box64Names, nativeDir, dataDir, false, "", apkBox64, localManifest, sourcePlan));

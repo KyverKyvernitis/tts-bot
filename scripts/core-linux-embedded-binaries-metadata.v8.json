@@ -1,0 +1,99 @@
+{
+  "schema": "core-worker-embedded-binaries-metadata-v8",
+  "generatedAt": 1780685300,
+  "policy": {
+    "noRuntimeDownload": true,
+    "noExecutionDuringAudit": true,
+    "noOnDeviceUnsafeBuild": true,
+    "gplSourceComplianceRequired": true,
+    "dynamicDependenciesMustBeBundledOrStatic": true,
+    "prootLoaderRequired": true,
+    "busyboxBlockedUntilLibandroidSelinux": true
+  },
+  "targets": {
+    "proot": {
+      "origin": "termux-package-source-reference",
+      "sourceKind": "external-source",
+      "upstream": "https://github.com/termux/proot",
+      "homepage": "https://proot-me.github.io/",
+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
+      "license": "GPL-2.0",
+      "licenseStatus": "verified-audited",
+      "packageVersion": "5.1.107.76",
+      "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
+      "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
+      "binarySha256": "0cf48f1bede941054dda89e9e18db1f8f1928abcff41c5919857dcfd5674fa32",
+      "binarySize": 231808,
+      "linkMode": "dynamic-with-bundled-dependencies",
+      "runtimeDependencies": [
+        "libtalloc"
+      ],
+      "dependencyPolicy": "libtalloc.so embutido junto; PRoot foi ajustado para NEEDED libtalloc.so em vez de libtalloc.so.2 para compatibilidade com jniLibs",
+      "androidPatchNotes": [
+        "substituído NEEDED libtalloc.so.2 -> libtalloc.so mantendo o mesmo pacote Termux auditado",
+        "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no nativeLibraryDir durante o smoke test allowlist"
+      ],
+      "sourceCompliance": {
+        "required": true,
+        "completeCorrespondingSourceReady": true,
+        "licenseTextIncluded": true,
+        "sourceUrl": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
+        "configUrlOrPath": "Termux recipe packages/proot/build.sh",
+        "modifications": "binary string patch: NEEDED libtalloc.so.2 -> libtalloc.so; no source-code modification bundled here"
+      }
+    },
+    "libtalloc": {
+      "origin": "termux-package-source-reference",
+      "sourceKind": "external-source-dependency",
+      "upstream": "https://www.samba.org/ftp/talloc/",
+      "homepage": "https://talloc.samba.org/talloc/doc/html/index.html",
+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libtalloc/build.sh",
+      "license": "GPL-3.0",
+      "licenseStatus": "verified-audited",
+      "packageVersion": "2.4.3",
+      "sourceArchive": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
+      "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
+      "binarySha256": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb",
+      "binarySize": 31440,
+      "linkMode": "self-contained",
+      "runtimeDependencies": [
+        "libc"
+      ],
+      "dependencyPolicy": "depende apenas de libc Android; duplicado como libtalloc.so para resolver NEEDED do proot patchado",
+      "sourceCompliance": {
+        "required": true,
+        "completeCorrespondingSourceReady": true,
+        "licenseTextIncluded": true,
+        "sourceUrl": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
+        "configUrlOrPath": "Termux recipe packages/libtalloc/build.sh",
+        "modifications": "none"
+      }
+    },
+    "busybox": {
+      "origin": "termux-package-source-reference",
+      "sourceKind": "external-source",
+      "upstream": "https://busybox.net/downloads/",
+      "homepage": "https://busybox.net/",
+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
+      "license": "GPL-2.0",
+      "licenseStatus": "verify-before-bundling",
+      "packageVersion": "1.37.0-r3",
+      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+      "linkMode": "dynamic-with-bundled-dependencies",
+      "runtimeDependencies": [
+        "libbusybox.so.1.37.0",
+        "libandroid-selinux.so"
+      ],
+      "dependencyPolicy": "bloqueado até libandroid-selinux_*_aarch64.deb ser fornecido; não marcar BusyBox pronto sem a dependência",
+      "sourceCompliance": {
+        "required": true,
+        "completeCorrespondingSourceReady": false,
+        "licenseTextIncluded": true,
+        "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+        "configUrlOrPath": "pendente: .config/recipe Termux do pacote exato",
+        "modifications": "pending"
+      }
+    }
+  }
+}

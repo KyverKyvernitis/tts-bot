@@ -191,7 +191,7 @@ def find_cc(explicit: str | None = None) -> str | None:
 
 def source_manifest_payload() -> dict[str, Any]:
     return {
-        "schema": "core-worker-embedded-binaries-source-plan-v7",
+        "schema": "core-worker-embedded-binaries-source-plan-v8",
         "generatedAt": int(time.time()),
         "abi": "arm64-v8a",
         "androidMinSdk": 26,
@@ -288,7 +288,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     manifest = write_source_manifest()
     payload = {
         "ok": True,
-        "stage": "core-linux-embedded-binaries-build-pipeline-v4",
+        "stage": "core-linux-embedded-binaries-build-pipeline-v5",
         "sourceManifest": rel(manifest),
         "metadataTemplate": "use: python3 scripts/core-linux-embedded-binaries-build-pipeline.py metadata-template > /tmp/core-linux-binaries-metadata.json",
         "jniDir": rel(JNI_DIR),

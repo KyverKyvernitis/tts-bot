@@ -1,0 +1,61 @@
+{
+  "schema": "core-worker-termux-deb-import-report-v8",
+  "generatedAt": 1780685281,
+  "abi": "arm64-v8a",
+  "imported": {
+    "proot": {
+      "path": "android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
+      "size": 231808,
+      "sha256": "0cf48f1bede941054dda89e9e18db1f8f1928abcff41c5919857dcfd5674fa32",
+      "patches": [
+        "libtalloc.so.2->libtalloc.so (1)"
+      ]
+    },
+    "proot_loader": {
+      "path": "android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot_loader.so",
+      "size": 18136,
+      "sha256": "44ef39c1e1a18c09f6e4c4b5d6f8bba82d30596598bd155ec162d05c5122ff04",
+      "patches": []
+    },
+    "proot_loader32": {
+      "path": "android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot_loader32.so",
+      "size": 6244,
+      "sha256": "25f6bd90bc5a3d3088026289a0d3eaf3e502bd2b00e5cb74fadd9791132efa34",
+      "patches": []
+    },
+    "libtalloc": {
+      "path": "android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so",
+      "size": 31440,
+      "sha256": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb",
+      "patches": []
+    },
+    "libtalloc_runtime_name": {
+      "path": "android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
+      "size": 31440,
+      "sha256": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb",
+      "patches": []
+    }
+  },
+  "blocked": {
+    "busybox_launcher_blocked": {
+      "source": "busybox_1.37.0-3_aarch64.deb:/data/data/com.termux/files/usr/bin/busybox",
+      "size": 4320,
+      "sha256": "61e50ba9f8dadc4fb9500631a70c6bec1342b044567921715a9abf64b9b12b91",
+      "blockedReason": "launcher depende de libbusybox.so.1.37.0"
+    },
+    "busybox_library_blocked": {
+      "source": "busybox_1.37.0-3_aarch64.deb:/data/data/com.termux/files/usr/lib/libbusybox.so.1.37.0",
+      "size": 864096,
+      "sha256": "1acedc5fd667e6c887348ce01b7fad3b1c5c03f248af6ea81690897a7a03ba91",
+      "blockedReason": "libbusybox.so.1.37.0 depende de libandroid-selinux.so, que não veio em binarios.zip"
+    }
+  },
+  "policy": {
+    "termuxRequired": false,
+    "noRuntimeDownload": true,
+    "noExecutionDuringBuild": true,
+    "busyboxNotStagedUntilLibandroidSelinuxProvided": true,
+    "prootLoaderRequired": true
+  },
+  "nextRequiredPackage": "libandroid-selinux_*_aarch64.deb"
+}

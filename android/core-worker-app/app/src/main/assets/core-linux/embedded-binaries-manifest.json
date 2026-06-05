@@ -1,35 +1,136 @@
 {
-  "schema": "core-worker-embedded-binaries-manifest-v2",
-  "stage": "core-linux-embedded-binaries-build-pipeline-v1",
-  "abi": "arm64-v8a",
-  "androidMinSdk": 26,
-  "policy": {
-    "noRuntimeDownload": true,
-    "noPlaceholder": true,
-    "noBedrockBundledInApk": true,
-    "noExecutionDuringBuild": true,
-    "allowOnlyNativeLibraryDirForFutureExecution": true
-  },
+  "schema": "core-worker-embedded-binaries-local-v5",
+  "generatedAt": 1780685369,
+  "dryRun": false,
   "targets": {
-    "runner": {
-      "officialName": "libcoreworker_runner.so",
-      "source": "android/core-worker-app/app/src/main/cpp/coreworker_runner.c",
-      "origin": "local-core-worker-safe-preflight-runner"
-    },
     "proot": {
-      "officialName": "libcoreworker_proot.so",
-      "origin": "manual-build-or-audited-import",
-      "upstream": "https://github.com/proot-me/proot"
+      "source": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
+      "dest": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
+      "copied": false,
+      "metadata": {
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source",
+        "upstream": "https://github.com/termux/proot",
+        "license": "GPL-2.0",
+        "licenseStatus": "verified-audited",
+        "packageVersion": "5.1.107.76",
+        "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
+        "runtimeDependencies": [
+          "libtalloc"
+        ],
+        "notes": "não baixar em runtime; importar somente build arm64 auditado; Termux proot depende de libtalloc quando não for estático",
+        "official": "libcoreworker_proot.so",
+        "aliases": [
+          "libcoreworker_proot.so",
+          "libproot.so",
+          "proot"
+        ],
+        "homepage": "https://proot-me.github.io/",
+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
+        "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
+        "minBytes": 32768,
+        "dependencyPolicy": "libtalloc.so embutido junto; PRoot foi ajustado para NEEDED libtalloc.so em vez de libtalloc.so.2 para compatibilidade com jniLibs",
+        "buildNotes": [
+          "usar build arm64/aarch64 auditado; não baixar em runtime",
+          "Termux proot depende de libtalloc; não marcar pronto sem dependência estática ou libtalloc embutido",
+          "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner"
+        ],
+        "binarySha256": "0cf48f1bede941054dda89e9e18db1f8f1928abcff41c5919857dcfd5674fa32",
+        "binarySize": 231808,
+        "linkMode": "dynamic-with-bundled-dependencies",
+        "androidPatchNotes": [
+          "substituído NEEDED libtalloc.so.2 -> libtalloc.so mantendo o mesmo pacote Termux auditado",
+          "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no nativeLibraryDir durante o smoke test allowlist"
+        ],
+        "sourceCompliance": {
+          "required": true,
+          "completeCorrespondingSourceReady": true,
+          "licenseTextIncluded": true,
+          "sourceUrl": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
+          "configUrlOrPath": "Termux recipe packages/proot/build.sh",
+          "modifications": "binary string patch: NEEDED libtalloc.so.2 -> libtalloc.so; no source-code modification bundled here"
+        }
+      },
+      "metadataOk": true,
+      "metadataErrors": [],
+      "isElf": true,
+      "elfClass": 2,
+      "machine": 183,
+      "isElf64": true,
+      "isAarch64": true,
+      "size": 231808,
+      "sha256": "0cf48f1bede941054dda89e9e18db1f8f1928abcff41c5919857dcfd5674fa32"
     },
-    "busybox": {
-      "officialName": "libcoreworker_busybox.so",
-      "origin": "manual-build-from-upstream-source",
-      "upstream": "https://busybox.net/downloads/"
-    },
-    "box64": {
-      "officialName": "libcoreworker_box64.so",
-      "origin": "manual-build-from-upstream-source",
-      "upstream": "https://github.com/ptitSeb/box64"
+    "libtalloc": {
+      "source": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so",
+      "dest": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so",
+      "copied": false,
+      "metadata": {
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source-dependency",
+        "upstream": "https://www.samba.org/ftp/talloc/",
+        "license": "GPL-3.0",
+        "licenseStatus": "verified-audited",
+        "packageVersion": "2.4.3",
+        "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
+        "notes": "dependência de proot; build Termux não deve rodar no prefixo vivo do worker",
+        "official": "libcoreworker_libtalloc.so",
+        "aliases": [
+          "libcoreworker_libtalloc.so",
+          "libtalloc.so",
+          "libtalloc.so.2",
+          "libtalloc"
+        ],
+        "homepage": "https://talloc.samba.org/talloc/doc/html/index.html",
+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libtalloc/build.sh",
+        "sourceArchive": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
+        "minBytes": 8192,
+        "onDeviceBuildSafe": false,
+        "buildNotes": [
+          "dependência do recipe Termux do proot",
+          "recipe Termux remove/reescreve arquivos do prefixo; não buildar no Termux vivo do worker",
+          "preferir build isolado/offline e empacotar apenas artefato auditado"
+        ],
+        "binarySha256": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb",
+        "binarySize": 31440,
+        "linkMode": "self-contained",
+        "runtimeDependencies": [
+          "libc"
+        ],
+        "dependencyPolicy": "depende apenas de libc Android; duplicado como libtalloc.so para resolver NEEDED do proot patchado",
+        "sourceCompliance": {
+          "required": true,
+          "completeCorrespondingSourceReady": true,
+          "licenseTextIncluded": true,
+          "sourceUrl": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
+          "configUrlOrPath": "Termux recipe packages/libtalloc/build.sh",
+          "modifications": "none"
+        }
+      },
+      "metadataOk": true,
+      "metadataErrors": [],
+      "isElf": true,
+      "elfClass": 2,
+      "machine": 183,
+      "isElf64": true,
+      "isAarch64": true,
+      "size": 31440,
+      "sha256": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb"
     }
+  },
+  "policy": {
+    "downloadedByScript": false,
+    "executedByScript": false,
+    "bedrockBundled": false,
+    "noPlaceholder": true,
+    "sizeAndSha256Required": true,
+    "licenseMetadataRequiredBeforeBundling": true,
+    "externalTargetsRequireApprovedMetadata": true,
+    "approvedExternalLicenseStatuses": [
+      "redistributable-verified",
+      "source-built",
+      "verified-audited"
+    ],
+    "allowUnverifiedExternal": false
   }
 }

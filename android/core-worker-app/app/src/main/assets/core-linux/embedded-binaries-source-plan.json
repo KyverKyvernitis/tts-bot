@@ -1,6 +1,6 @@
 {
-  "schema": "core-worker-embedded-binaries-source-plan-v7",
-  "generatedAt": 1780683234,
+  "schema": "core-worker-embedded-binaries-source-plan-v8",
+  "generatedAt": 1780685371,
   "abi": "arm64-v8a",
   "androidMinSdk": 26,
   "policy": {
