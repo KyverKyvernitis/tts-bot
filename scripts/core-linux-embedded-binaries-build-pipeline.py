@@ -248,7 +248,7 @@ def find_cc(explicit: str | None = None) -> str | None:
 
 def source_manifest_payload() -> dict[str, Any]:
     return {
-        "schema": "core-worker-embedded-binaries-source-plan-v10",
+        "schema": "core-worker-embedded-binaries-source-plan-v11",
         "generatedAt": int(time.time()),
         "abi": "arm64-v8a",
         "androidMinSdk": 26,

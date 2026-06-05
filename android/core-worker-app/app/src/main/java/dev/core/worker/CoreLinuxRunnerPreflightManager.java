@@ -20,7 +20,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * Preflight v8 do runner Core Linux.
+ * Preflight v11 do runner Core Linux.
  *
  * Esta etapa apenas detecta requisitos e escreve estado. Ela não inicia Bedrock,
  * não executa Box64/proot/busybox, não abre shell livre e não aceita comando remoto.
@@ -182,7 +182,7 @@ public final class CoreLinuxRunnerPreflightManager {
             if (Build.VERSION.SDK_INT >= 29) {
                 warnings.put("execução futura deve usar componentes embutidos no APK/native libs; binários importados não são executados");
             }
-            blockers.put("runner real permanece bloqueado no preflight v10");
+            blockers.put("runner real permanece bloqueado no preflight v11");
             blockers.put("Bedrock start real permanece bloqueado");
             blockers.put("shell livre permanece bloqueado");
             blockers.put("comando remoto arbitrário permanece bloqueado");
@@ -215,8 +215,8 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("ok", true);
             out.put("component", "core_linux_runner_preflight");
             out.put("action", safeAction);
-            out.put("stage", "core-linux-runner-preflight-v10");
-            out.put("preflightVersion", 9);
+            out.put("stage", "core-linux-runner-preflight-v11");
+            out.put("preflightVersion", 11);
             out.put("state", state);
             out.put("summary", summary);
             out.put("phase", phase);
@@ -364,7 +364,7 @@ public final class CoreLinuxRunnerPreflightManager {
                                             String[] libBusybox, String[] libAndroidSelinux, String[] libPcre2, String[] box64,
                                             JSONObject localManifest, JSONObject sourcePlan) throws Exception {
         return new JSONObject()
-                .put("stage", "core-linux-embedded-binaries-intake-v10")
+                .put("stage", "core-linux-embedded-binaries-intake-v11")
                 .put("abi", "arm64-v8a")
                 .put("executor", new JSONArray(executor))
                 .put("runner", new JSONArray(runner))

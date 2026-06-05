@@ -1,349 +1,198 @@
-diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' orig_v10/tts-bot-main/PATCH_NOTES.md work_v10/tts-bot-main/PATCH_NOTES.md
---- orig_v10/tts-bot-main/PATCH_NOTES.md	2026-06-05 19:41:27.789427585 +0000
-+++ work_v10/tts-bot-main/PATCH_NOTES.md	2026-06-05 19:40:31.294329241 +0000
-@@ -1,41 +1,45 @@
--# Patch V9 — Core Linux BusyBox dependency chain
-+# Patch V10 — Core Linux BusyBox wrapper gate + libtalloc RUNPATH
- 
--Este patch fecha a cadeia base que faltava para substituir o Termux no APK, ainda sem liberar execução real.
-+Este patch corrige o bloqueio que impedia o APK `0.5.79/94` de buildar no phone worker.
- 
--## Importado/ajustado
-+## Correções principais
- 
--- BusyBox `1.37.0-3` do pacote Termux aarch64.
--- `libbusybox.so` do mesmo pacote.
--- `libandroid-selinux.so` do pacote Termux aarch64.
--- `libpcre2-8.so` do pacote Termux aarch64.
--- PRoot já importado no V8 recebeu correção extra de RUNPATH para `$ORIGIN`.
--- BusyBox recebeu correção de `NEEDED libbusybox.so.1.37.0 -> libbusybox.so`.
--- BusyBox/libbusybox/libandroid-selinux/libpcre2 receberam RUNPATH `$ORIGIN` para resolver dependências no `nativeLibraryDir` do APK.
--
--## Segurança/gate
--
--- APK sobe para `0.5.79` / `versionCode 94`.
--- Preflight sobe para `core-linux-runner-preflight-v9`.
--- Intake sobe para `core-linux-embedded-binaries-intake-v9`.
--- `baseToolsReady` agora exige:
--  - runner;
--  - PRoot;
--  - loader do PRoot;
--  - `libtalloc.so` real;
--  - BusyBox;
--  - `libbusybox.so`;
--  - `libandroid-selinux.so`;
--  - `libpcre2-8.so`.
--- Runner real continua bloqueado até rootfs real + smoke allowlist no APK instalado.
-+- APK sobe para `0.5.80` / `versionCode 95`.
-+- `verifyCoreLinuxEmbeddedBinaries` passa a entender que:
-+  - `libcoreworker_busybox.so` é um wrapper ELF pequeno do BusyBox Termux;
-+  - `libbusybox.so` é o payload real que precisa carregar o peso/tamanho forte;
-+  - `libandroid-selinux.so` e `libpcre2-8.so` são dependências obrigatórias quando BusyBox está presente.
-+- `libtalloc.so` e `libcoreworker_libtalloc.so` tiveram RUNPATH higienizado de:
-+  - `/data/data/com.termux/files/usr/lib`
-+  - para `$ORIGIN`
-+- Metadata V10 registra os novos hashes e a regra de wrapper pequeno.
-+- A metadata V9 também foi atualizada como compatível para não quebrar comandos antigos de validação.
-+
-+## Segurança mantida
-+
-+- Nenhum binário externo é executado durante build/intake.
-+- Runner real segue bloqueado.
-+- Box64 e Bedrock continuam fora desta etapa.
-+- PRoot/BusyBox ainda precisam passar pelo smoke real no APK instalado antes de reduzir Termux.
- 
--## Validação feita
-+## Validação recomendada
- 
- ```bash
- python3 -m py_compile webserver.py scripts/core-linux-embedded-binaries-build-pipeline.py scripts/core-linux-embedded-binaries-intake.py
--python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --strict --metadata-file scripts/core-linux-embedded-binaries-metadata.v9.json
--readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so
--readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so
--readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so
--readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so
--readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so
-+python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --strict --metadata-file scripts/core-linux-embedded-binaries-metadata.v10.json
-+
-+for f in \
-+  libcoreworker_proot.so \
-+  libcoreworker_busybox.so \
-+  libbusybox.so \
-+  libandroid-selinux.so \
-+  libpcre2-8.so \
-+  libtalloc.so \
-+  libcoreworker_libtalloc.so
-+ do
-+  echo "----- $f -----"
-+  readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/$f | grep -E 'NEEDED|RUNPATH|RPATH' || true
-+ done
- ```
-+
-+Resultado esperado: `libtalloc.so` e `libcoreworker_libtalloc.so` também devem mostrar `RUNPATH [$ORIGIN]`.
-diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' orig_v10/tts-bot-main/android/core-worker-app/app/build.gradle work_v10/tts-bot-main/android/core-worker-app/app/build.gradle
---- orig_v10/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 19:41:27.803416268 +0000
-+++ work_v10/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 19:39:07.169873443 +0000
+diff -ruN orig_v11/tts-bot-main/android/core-worker-app/app/build.gradle work_v11/tts-bot-main/android/core-worker-app/app/build.gradle
+--- orig_v11/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 16:44:02.000000000 +0000
++++ work_v11/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 20:03:38.609570809 +0000
 @@ -58,8 +58,8 @@
          applicationId "dev.core.worker"
          minSdk 26
          targetSdk 34
--        versionCode 94
--        versionName "0.5.79"
-+        versionCode 95
-+        versionName "0.5.80"
+-        versionCode 95
+-        versionName "0.5.80"
++        versionCode 96
++        versionName "0.5.81"
  
          buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
          buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
-@@ -135,34 +135,49 @@
+@@ -135,17 +135,18 @@
      }
  }
  
--// Core Linux embedded binaries build/intake pipeline v1.
--// Não baixa, não executa e não exige binários por padrão. Quando os arquivos reais
--// forem adicionados em src/main/jniLibs/arm64-v8a, este task valida tamanho,
--// assinatura ELF mínima e impede placeholders antes do APK privado ser gerado.
-+// Core Linux embedded binaries build/intake pipeline v10.
-+// Não baixa e não executa binários. Este gate valida apenas os arquivos que
-+// já foram embutidos em jniLibs para evitar APK quebrado. O BusyBox do Termux
-+// é dinâmico: libcoreworker_busybox.so é só um wrapper pequeno, e o payload real
-+// fica em libbusybox.so com dependências libandroid-selinux.so + libpcre2-8.so.
+-// Core Linux embedded binaries build/intake pipeline v10.
++// Core Linux embedded binaries build/intake pipeline v11.
+ // Não baixa e não executa binários. Este gate valida apenas os arquivos que
+ // já foram embutidos em jniLibs para evitar APK quebrado. O BusyBox do Termux
+ // é dinâmico: libcoreworker_busybox.so é só um wrapper pequeno, e o payload real
+ // fica em libbusybox.so com dependências libandroid-selinux.so + libpcre2-8.so.
++// O loader32 do PRoot é multiarch futuro: pode ser ELF32/ARM e não bloqueia o APK ARM64.
  def coreLinuxEmbeddedBinaries = [
          [key: "runner",  file: "libcoreworker_runner.so",  minBytes: 1024L,  required: true],
--        [key: "proot",   file: "libcoreworker_proot.so",   minBytes: 32768L, required: false],
--        [key: "busybox", file: "libcoreworker_busybox.so", minBytes: 32768L, required: false],
--        [key: "libtalloc", file: "libcoreworker_libtalloc.so", minBytes: 8192L, required: false],
-+        [key: "proot",   file: "libcoreworker_proot.so",   minBytes: 32768L, required: false,
-+         requires: ["libtalloc.so", "libcoreworker_proot_loader.so"]],
-+        [key: "proot_loader", file: "libcoreworker_proot_loader.so", minBytes: 4096L, required: false],
-+        [key: "proot_loader32", file: "libcoreworker_proot_loader32.so", minBytes: 4096L, required: false],
-+        [key: "busybox_wrapper", file: "libcoreworker_busybox.so", minBytes: 4096L, required: false,
-+         requires: ["libbusybox.so", "libandroid-selinux.so", "libpcre2-8.so"]],
-+        [key: "libbusybox", file: "libbusybox.so", minBytes: 32768L, required: false,
-+         requires: ["libandroid-selinux.so", "libpcre2-8.so"]],
-+        [key: "libandroid_selinux", file: "libandroid-selinux.so", minBytes: 32768L, required: false,
-+         requires: ["libpcre2-8.so"]],
-+        [key: "libpcre2_8", file: "libpcre2-8.so", minBytes: 32768L, required: false],
-+        [key: "libtalloc", file: "libtalloc.so", minBytes: 8192L, required: false],
-         [key: "box64",   file: "libcoreworker_box64.so",   minBytes: 131072L, required: false],
- ]
- 
- tasks.register("verifyCoreLinuxEmbeddedBinaries") {
--    description = "Valida binários Core Linux embutidos quando existirem, sem exigir presença por padrão."
-+    description = "Valida binários Core Linux embutidos quando existirem, sem executar terceiros."
-     doLast {
-         def strict = ((project.findProperty("CORE_WORKER_REQUIRE_EMBEDDED_BINARIES") ?: System.getenv("CORE_WORKER_REQUIRE_EMBEDDED_BINARIES") ?: "false").toString().toLowerCase() in ["1", "true", "yes", "on", "sim"])
-         def dir = file("${projectDir}/src/main/jniLibs/arm64-v8a")
-         def missing = []
-         def invalid = []
--        coreLinuxEmbeddedBinaries.each { item ->
-+        def presentFiles = [] as Set
-+        def byFile = [:]
-+        coreLinuxEmbeddedBinaries.each { item -> byFile[item.file] = item }
-+
-+        def validateElf = { item ->
-             def f = file("${dir}/${item.file}")
-             if (!f.exists()) {
-                 missing << item.file
-                 if (item.required) {
--                    invalid << "${item.file} (ausente, obrigatório neste estágio)"
-+                    invalid << "${item.file} (${item.key}: ausente, obrigatório neste estágio)"
-                 }
-                 return
+         [key: "proot",   file: "libcoreworker_proot.so",   minBytes: 32768L, required: false,
+          requires: ["libtalloc.so", "libcoreworker_proot_loader.so"]],
+         [key: "proot_loader", file: "libcoreworker_proot_loader.so", minBytes: 4096L, required: false],
+-        [key: "proot_loader32", file: "libcoreworker_proot_loader32.so", minBytes: 4096L, required: false],
++        [key: "proot_loader32", file: "libcoreworker_proot_loader32.so", minBytes: 4096L, required: false, optionalArm32: true],
+         [key: "busybox_wrapper", file: "libcoreworker_busybox.so", minBytes: 4096L, required: false,
+          requires: ["libbusybox.so", "libandroid-selinux.so", "libpcre2-8.so"]],
+         [key: "libbusybox", file: "libbusybox.so", minBytes: 32768L, required: false,
+@@ -184,12 +185,21 @@
              }
-+            presentFiles << item.file
-             byte[] head = new byte[Math.min(64, Math.max(0, f.length() as int))]
-             if (head.length > 0) {
-                 f.withInputStream { it.read(head) }
-@@ -171,21 +186,59 @@
+             def isElf = head.length >= 4 && head[0] == 0x7f && (head[1] & 0xff) == 69 && (head[2] & 0xff) == 76 && (head[3] & 0xff) == 70
              def is64 = head.length >= 5 && head[4] == 2
++            def is32 = head.length >= 5 && head[4] == 1
              def isAarch64 = head.length >= 20 && (head[18] & 0xff) == 183 && (head[19] & 0xff) == 0
++            def isArm32 = head.length >= 20 && (head[18] & 0xff) == 40 && (head[19] & 0xff) == 0
++            def optionalArm32 = (item.optionalArm32 == true)
              def tooSmall = f.length() < (item.minBytes as long)
--            if (!isElf || !is64 || !isAarch64 || tooSmall) {
--                invalid << "${item.file} (elf=${isElf}, elf64=${is64}, aarch64=${isAarch64}, size=${f.length()})"
-+            def reasons = []
-+            if (!isElf) reasons << "not_elf"
-+            if (isElf && !is64) reasons << "not_elf64"
-+            if (isElf && !isAarch64) reasons << "not_aarch64"
-+            if (tooSmall) reasons << "size ${f.length()} < ${item.minBytes}"
-+            if (!reasons.isEmpty()) {
-+                invalid << "${item.file} (${item.key}: ${reasons.join('; ')})"
+             def reasons = []
+             if (!isElf) reasons << "not_elf"
+-            if (isElf && !is64) reasons << "not_elf64"
+-            if (isElf && !isAarch64) reasons << "not_aarch64"
++            if (isElf && optionalArm32) {
++                if (!(is64 && isAarch64) && !(is32 && isArm32)) {
++                    reasons << "expected_arm64_or_optional_arm32"
++                }
++            } else {
++                if (isElf && !is64) reasons << "not_elf64"
++                if (isElf && !isAarch64) reasons << "not_aarch64"
 +            }
-+        }
-+
-+        coreLinuxEmbeddedBinaries.each { item -> validateElf(item) }
-+
-+        coreLinuxEmbeddedBinaries.each { item ->
-+            if (presentFiles.contains(item.file) && item.requires instanceof List) {
-+                item.requires.each { dep ->
-+                    if (!file("${dir}/${dep}").exists()) {
-+                        invalid << "${item.file} (${item.key}: dependência ausente ${dep})"
-+                    }
-+                }
-             }
-         }
-+
-+        def forbiddenRunpath = "/data/data/com.termux/files/usr/lib".getBytes("UTF-8")
-+        ["libtalloc.so", "libcoreworker_libtalloc.so"].each { name ->
-+            def f = file("${dir}/${name}")
-+            if (f.exists() && f.bytes.findIndexOf { it == forbiddenRunpath[0] } >= 0) {
-+                def bytes = f.bytes
-+                def found = false
-+                for (int i = 0; i <= bytes.length - forbiddenRunpath.length; i++) {
-+                    boolean match = true
-+                    for (int j = 0; j < forbiddenRunpath.length; j++) {
-+                        if (bytes[i + j] != forbiddenRunpath[j]) { match = false; break }
-+                    }
-+                    if (match) { found = true; break }
-+                }
-+                if (found) {
-+                    invalid << "${name} (RUNPATH/caminho de lib ainda aponta para Termux; esperado \$ORIGIN)"
-+                }
-+            }
-+        }
-+
-         if (!invalid.isEmpty()) {
-             throw new GradleException("Core Linux embedded binaries inválidos: ${invalid.join(', ')}")
-         }
+             if (tooSmall) reasons << "size ${f.length()} < ${item.minBytes}"
+             if (!reasons.isEmpty()) {
+                 invalid << "${item.file} (${item.key}: ${reasons.join('; ')})"
+@@ -233,7 +243,7 @@
          if (strict && !missing.isEmpty()) {
              throw new GradleException("Core Linux embedded binaries ausentes: ${missing.join(', ')}")
          }
--        println("Core Linux embedded binaries: missing=${missing.size()} invalid=${invalid.size()} strict=${strict}; runner obrigatório, terceiros opcionais até import auditado")
-+        println("Core Linux embedded binaries v10: present=${presentFiles.size()} missing=${missing.size()} invalid=${invalid.size()} strict=${strict}; busybox wrapper pequeno permitido quando libbusybox/deps estão presentes")
+-        println("Core Linux embedded binaries v10: present=${presentFiles.size()} missing=${missing.size()} invalid=${invalid.size()} strict=${strict}; busybox wrapper pequeno permitido quando libbusybox/deps estão presentes")
++        println("Core Linux embedded binaries v11: present=${presentFiles.size()} missing=${missing.size()} invalid=${invalid.size()} strict=${strict}; busybox wrapper pequeno permitido; proot_loader32 é opcional/multiarch futuro")
      }
  }
  
+diff -ruN orig_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java work_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
+--- orig_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 16:44:02.000000000 +0000
++++ work_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 20:03:38.616108287 +0000
+@@ -20,7 +20,7 @@
+ import java.util.zip.ZipFile;
  
-+
- tasks.named("preBuild").configure {
-     dependsOn("verifyCoreLinuxEmbeddedBinaries")
- }
-diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' orig_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java work_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
---- orig_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 19:41:27.805308591 +0000
-+++ work_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 19:41:01.639976185 +0000
+ /**
+- * Preflight v8 do runner Core Linux.
++ * Preflight v11 do runner Core Linux.
+  *
+  * Esta etapa apenas detecta requisitos e escreve estado. Ela não inicia Bedrock,
+  * não executa Box64/proot/busybox, não abre shell livre e não aceita comando remoto.
 @@ -182,7 +182,7 @@
              if (Build.VERSION.SDK_INT >= 29) {
                  warnings.put("execução futura deve usar componentes embutidos no APK/native libs; binários importados não são executados");
              }
--            blockers.put("runner real permanece bloqueado no preflight v9");
-+            blockers.put("runner real permanece bloqueado no preflight v10");
+-            blockers.put("runner real permanece bloqueado no preflight v10");
++            blockers.put("runner real permanece bloqueado no preflight v11");
              blockers.put("Bedrock start real permanece bloqueado");
              blockers.put("shell livre permanece bloqueado");
              blockers.put("comando remoto arbitrário permanece bloqueado");
-@@ -215,7 +215,7 @@
+@@ -215,8 +215,8 @@
              out.put("ok", true);
              out.put("component", "core_linux_runner_preflight");
              out.put("action", safeAction);
--            out.put("stage", "core-linux-runner-preflight-v9");
-+            out.put("stage", "core-linux-runner-preflight-v10");
-             out.put("preflightVersion", 9);
+-            out.put("stage", "core-linux-runner-preflight-v10");
+-            out.put("preflightVersion", 9);
++            out.put("stage", "core-linux-runner-preflight-v11");
++            out.put("preflightVersion", 11);
              out.put("state", state);
              out.put("summary", summary);
+             out.put("phase", phase);
 @@ -364,7 +364,7 @@
                                              String[] libBusybox, String[] libAndroidSelinux, String[] libPcre2, String[] box64,
                                              JSONObject localManifest, JSONObject sourcePlan) throws Exception {
          return new JSONObject()
--                .put("stage", "core-linux-embedded-binaries-intake-v9")
-+                .put("stage", "core-linux-embedded-binaries-intake-v10")
+-                .put("stage", "core-linux-embedded-binaries-intake-v10")
++                .put("stage", "core-linux-embedded-binaries-intake-v11")
                  .put("abi", "arm64-v8a")
                  .put("executor", new JSONArray(executor))
                  .put("runner", new JSONArray(runner))
-diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' orig_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java work_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
---- orig_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 19:41:27.806657614 +0000
-+++ work_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 19:41:01.641343348 +0000
-@@ -324,7 +324,7 @@
-                 .put("core-linux-runner-preflight-v6")
+diff -ruN orig_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java work_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
+--- orig_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 16:44:02.000000000 +0000
++++ work_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 20:03:54.765816761 +0000
+@@ -325,6 +325,7 @@
                  .put("core-linux-runner-preflight-v7")
                  .put("core-linux-runner-preflight-v8")
--                .put("core-linux-runner-preflight-v9")
-+                .put("core-linux-runner-preflight-v10")
+                 .put("core-linux-runner-preflight-v10")
++                .put("core-linux-runner-preflight-v11")
                  .put("core-linux-embedded-binaries-intake-v1")
                  .put("core-linux-embedded-binaries-intake-v2")
                  .put("core-linux-embedded-binaries-intake-v3")
-@@ -333,7 +333,7 @@
-                 .put("core-linux-embedded-binaries-intake-v6")
+@@ -334,6 +335,7 @@
                  .put("core-linux-embedded-binaries-intake-v7")
                  .put("core-linux-embedded-binaries-intake-v8")
--                .put("core-linux-embedded-binaries-intake-v9")
-+                .put("core-linux-embedded-binaries-intake-v10")
+                 .put("core-linux-embedded-binaries-intake-v10")
++                .put("core-linux-embedded-binaries-intake-v11")
                  .put("core-linux-embedded-binaries-build-pipeline-v1")
                  .put("core-linux-embedded-binaries-build-pipeline-v2")
                  .put("core-linux-embedded-binaries-build-pipeline-v3")
-@@ -432,7 +432,7 @@
+@@ -432,7 +434,7 @@
                  out.put("runnerMissing", runner.optJSONArray("missing") == null ? new JSONArray() : runner.optJSONArray("missing"));
                  out.put("runnerPreflight", runner);
              }
--            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v9" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
-+            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v10" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
+-            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v10" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
++            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v11" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
              out.put("supportedTasks", supportedLightJobsArray());
              if (runtime.length() > 0) out.put("runtime", runtime);
              if (rootfs.length() > 0) out.put("rootfs", rootfs);
-diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' orig_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java work_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
---- orig_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-05 19:41:27.818152337 +0000
-+++ work_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-05 19:41:01.648107585 +0000
-@@ -4631,7 +4631,7 @@
-                 .put("core-linux-runner-preflight-v6")
+diff -ruN orig_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java work_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
+--- orig_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-05 16:44:02.000000000 +0000
++++ work_v11/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-05 20:03:54.769015766 +0000
+@@ -4632,6 +4632,7 @@
                  .put("core-linux-runner-preflight-v7")
                  .put("core-linux-runner-preflight-v8")
--                .put("core-linux-runner-preflight-v9")
-+                .put("core-linux-runner-preflight-v10")
+                 .put("core-linux-runner-preflight-v10")
++                .put("core-linux-runner-preflight-v11")
                  .put("core-linux-embedded-binaries-intake-v1")
                  .put("core-linux-embedded-binaries-intake-v2")
                  .put("core-linux-embedded-binaries-intake-v3")
-@@ -4640,7 +4640,7 @@
-                 .put("core-linux-embedded-binaries-intake-v6")
+@@ -4641,6 +4642,7 @@
                  .put("core-linux-embedded-binaries-intake-v7")
                  .put("core-linux-embedded-binaries-intake-v8")
--                .put("core-linux-embedded-binaries-intake-v9")
-+                .put("core-linux-embedded-binaries-intake-v10")
+                 .put("core-linux-embedded-binaries-intake-v10")
++                .put("core-linux-embedded-binaries-intake-v11")
                  .put("core-linux-embedded-binaries-build-pipeline-v1")
                  .put("core-linux-embedded-binaries-build-pipeline-v2")
                  .put("core-linux-embedded-binaries-build-pipeline-v3")
-@@ -4700,7 +4700,7 @@
+@@ -4700,7 +4702,7 @@
              out.put("runnerRequirementsReady", runnerPreflight.optBoolean("runnerRequirementsReady", false));
              safePutPayload(out, "runnerPreflight", runnerPreflight);
          }
--        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v9" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
-+        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v10" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
+-        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v10" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
++        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v11" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
          out.put("supportedTasks", supportedLightJobsArray());
          if (rootfsState.length() > 0) safePutPayload(out, "rootfs", rootfsState);
          if (importState.length() > 0) safePutPayload(out, "rootfsImport", importState);
-Binary files orig_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so and work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so differ
-Binary files orig_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so and work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so differ
-diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py
---- orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-05 19:41:27.896546505 +0000
-+++ work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-05 19:41:01.648783580 +0000
-@@ -106,13 +106,14 @@
-         "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
-         "license": "GPL-2.0",
-         "licenseStatus": "verify-before-bundling",
--        "minBytes": 32768,
-+        "minBytes": 4096,
-         "runtimeDependencies": ["libbusybox", "libandroid_selinux", "libpcre2_8"],
--        "dependencyPolicy": "binário Termux é dinâmico; bundle obrigatório: libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
-+        "dependencyPolicy": "binário Termux é dinâmico; libcoreworker_busybox.so é wrapper pequeno; payload real obrigatório em libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
-         "onDeviceBuildSafe": False,
-         "buildNotes": [
-             "o recipe Termux marca BusyBox como não seguro para build on-device",
-             "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
-+            "wrapper pode ser pequeno; o tamanho forte fica em libbusybox.so",
-             "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário",
-         ],
-     },
-@@ -247,7 +248,7 @@
+diff -ruN orig_v11/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md work_v11/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md
+--- orig_v11/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md	2026-06-05 16:12:18.000000000 +0000
++++ work_v11/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md	2026-06-05 20:03:38.617272416 +0000
+@@ -69,3 +69,8 @@
+ - `libpcre2-8.so` with `RUNPATH=$ORIGIN`.
+ 
+ The preflight must still keep real execution blocked until Android extracts these native libs into `nativeLibraryDir` and the rootfs real validation passes.
++
++
++## V11 loader32
++
++`libcoreworker_proot_loader32.so` vem do pacote PRoot como loader 32-bit opcional. Ele não é requisito para o smoke ARM64 atual (`proot + busybox + rootfs`) e não deve bloquear o build arm64. Suporte real a binários 32-bit fica para uma etapa multiarch futura.
+diff -ruN orig_v11/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py work_v11/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py
+--- orig_v11/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-05 16:44:02.000000000 +0000
++++ work_v11/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-05 20:03:38.616408016 +0000
+@@ -248,7 +248,7 @@
  
  def source_manifest_payload() -> dict[str, Any]:
      return {
--        "schema": "core-worker-embedded-binaries-source-plan-v9",
-+        "schema": "core-worker-embedded-binaries-source-plan-v10",
+-        "schema": "core-worker-embedded-binaries-source-plan-v10",
++        "schema": "core-worker-embedded-binaries-source-plan-v11",
          "generatedAt": int(time.time()),
          "abi": "arm64-v8a",
          "androidMinSdk": 26,
-diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v10.json work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v10.json
---- orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v10.json	1970-01-01 00:00:00.000000000 +0000
-+++ work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v10.json	2026-06-05 19:40:15.742533245 +0000
-@@ -0,0 +1,187 @@
+diff -ruN orig_v11/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v11.json work_v11/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v11.json
+--- orig_v11/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v11.json	1970-01-01 00:00:00.000000000 +0000
++++ work_v11/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v11.json	2026-06-05 20:03:38.617082323 +0000
+@@ -0,0 +1,189 @@
 +{
-+  "schema": "core-worker-embedded-binaries-metadata-v10",
++  "schema": "core-worker-embedded-binaries-metadata-v11",
 +  "generatedAt": 1780688415,
 +  "policy": {
 +    "noRuntimeDownload": true,
@@ -379,7 +228,8 @@ diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' orig_v10/tts-bot-main/script
 +      "androidPatchNotes": [
 +        "NEEDED libtalloc.so.2 -> libtalloc.so",
 +        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN",
-+        "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no nativeLibraryDir durante o smoke test allowlist"
++        "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no nativeLibraryDir durante o smoke test allowlist",
++        "loader32 não bloqueia APK ARM64; suporte 32-bit fica para etapa multiarch futura"
 +      ],
 +      "sourceCompliance": {
 +        "required": true,
@@ -527,136 +377,35 @@ diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' orig_v10/tts-bot-main/script
 +        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
 +      ]
 +    }
-+  }
++  },
++  "notes": "V11: proot_loader32 é opcional/multiarch futuro; o caminho atual ARM64 valida apenas proot_loader ARM64."
 +}
-diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v9.json work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v9.json
---- orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v9.json	2026-06-05 19:41:27.897230554 +0000
-+++ work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v9.json	2026-06-05 19:40:15.742824330 +0000
-@@ -1,6 +1,6 @@
- {
--  "schema": "core-worker-embedded-binaries-metadata-v9",
--  "generatedAt": 1780686523,
-+  "schema": "core-worker-embedded-binaries-metadata-v9-v10-compatible",
-+  "generatedAt": 1780688415,
-   "policy": {
-     "noRuntimeDownload": true,
-     "noExecutionDuringAudit": true,
-@@ -9,7 +9,9 @@
-     "dynamicDependenciesMustBeBundledOrStatic": true,
-     "prootLoaderRequired": true,
-     "busyboxDynamicDependencyChainRequired": true,
--    "patchedRunpathMustBeOrigin": true
-+    "patchedRunpathMustBeOrigin": true,
-+    "busyboxWrapperAllowed": true,
-+    "busyboxPayloadMustBeBundled": true
-   },
-   "targets": {
-     "proot": {
-@@ -55,21 +57,24 @@
-       "packageVersion": "2.4.3",
-       "sourceArchive": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
-       "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
--      "binarySha256": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb",
-+      "binarySha256": "61305220323c6f3f556c7a9df03c002d1b5f714f9b600f58acd0b97dfdbce342",
-       "binarySize": 31440,
-       "linkMode": "self-contained",
-       "runtimeDependencies": [
-         "libc"
-       ],
--      "dependencyPolicy": "depende apenas de libc Android; empacotado como libtalloc.so porque é o NEEDED do proot patchado",
-+      "dependencyPolicy": "depende apenas de libc Android; RUNPATH ajustado para $ORIGIN; empacotado como libtalloc.so porque é o NEEDED do proot patchado",
-       "sourceCompliance": {
-         "required": true,
-         "completeCorrespondingSourceReady": true,
-         "licenseTextIncluded": true,
-         "sourceUrl": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
-         "configUrlOrPath": "Termux recipe packages/libtalloc/build.sh",
--        "modifications": "none"
--      }
-+        "modifications": "binary string patch: RUNPATH Termux -> $ORIGIN"
-+      },
-+      "androidPatchNotes": [
-+        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
-+      ]
-     },
-     "busybox": {
-       "origin": "termux-package-source-reference",
-@@ -90,10 +95,12 @@
-         "libandroid_selinux",
-         "libpcre2_8"
-       ],
--      "dependencyPolicy": "busybox Termux é dinâmico; NEEDED libbusybox.so.1.37.0 foi ajustado para libbusybox.so e RUNPATH para $ORIGIN; dependências embutidas junto",
-+      "dependencyPolicy": "libcoreworker_busybox.so é wrapper ELF pequeno; payload real obrigatório em libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
-       "androidPatchNotes": [
-         "NEEDED libbusybox.so.1.37.0 -> libbusybox.so",
--        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
-+        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN",
-+        "wrapper pequeno aceito no gate v10",
-+        "tamanho forte validado em libbusybox.so"
-       ],
-       "sourceCompliance": {
-         "required": true,
-@@ -101,8 +108,9 @@
-         "licenseTextIncluded": true,
-         "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
-         "configUrlOrPath": "Termux recipe packages/busybox/build.sh plus binary-string patch notes in this metadata",
--        "modifications": "binary string patch: NEEDED libbusybox.so.1.37.0 -> libbusybox.so; RUNPATH Termux -> $ORIGIN"
--      }
-+        "modifications": "binary string patch: NEEDED libbusybox.so.1.37.0 -> libbusybox.so; RUNPATH Termux -> $ORIGIN; gate v10 aceita wrapper pequeno e valida payload em libbusybox.so"
-+      },
-+      "minBytes": 4096
-     },
-     "libbusybox": {
-       "origin": "termux-package-source-reference",
-diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json
---- orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json	2026-06-05 19:41:27.897396164 +0000
-+++ work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json	2026-06-05 19:41:01.649116200 +0000
+diff -ruN orig_v11/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json work_v11/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json
+--- orig_v11/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json	2026-06-05 16:44:02.000000000 +0000
++++ work_v11/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json	2026-06-05 20:03:38.616683343 +0000
 @@ -1,5 +1,5 @@
  {
--  "schema": "core-worker-embedded-binaries-source-plan-v9",
-+  "schema": "core-worker-embedded-binaries-source-plan-v10",
+-  "schema": "core-worker-embedded-binaries-source-plan-v10",
++  "schema": "core-worker-embedded-binaries-source-plan-v11",
    "generatedAt": 1780686535,
    "abi": "arm64-v8a",
    "androidMinSdk": 26,
-@@ -108,17 +108,18 @@
-       "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
-       "license": "GPL-2.0",
-       "licenseStatus": "verify-before-bundling",
--      "minBytes": 32768,
-+      "minBytes": 4096,
-       "runtimeDependencies": [
-         "libbusybox",
-         "libandroid_selinux",
-         "libpcre2_8"
-       ],
--      "dependencyPolicy": "binário Termux é dinâmico; bundle obrigatório: libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
-+      "dependencyPolicy": "binário Termux é dinâmico; libcoreworker_busybox.so é wrapper pequeno; payload real obrigatório em libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
-       "onDeviceBuildSafe": false,
-       "buildNotes": [
-         "o recipe Termux marca BusyBox como não seguro para build on-device",
-         "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
-+        "wrapper pode ser pequeno; o tamanho forte fica em libbusybox.so",
-         "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
-       ]
-     },
-diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' orig_v10/tts-bot-main/webserver.py work_v10/tts-bot-main/webserver.py
---- orig_v10/tts-bot-main/webserver.py	2026-06-05 19:41:27.917126585 +0000
-+++ work_v10/tts-bot-main/webserver.py	2026-06-05 19:41:01.638681130 +0000
-@@ -301,7 +301,7 @@
-     "core-linux-runner-preflight-v6",
+diff -ruN orig_v11/tts-bot-main/webserver.py work_v11/tts-bot-main/webserver.py
+--- orig_v11/tts-bot-main/webserver.py	2026-06-05 16:44:02.000000000 +0000
++++ work_v11/tts-bot-main/webserver.py	2026-06-05 20:03:38.610939756 +0000
+@@ -302,6 +302,7 @@
      "core-linux-runner-preflight-v7",
      "core-linux-runner-preflight-v8",
--    "core-linux-runner-preflight-v9",
-+    "core-linux-runner-preflight-v10",
+     "core-linux-runner-preflight-v10",
++    "core-linux-runner-preflight-v11",
      "core-linux-embedded-binaries-intake-v1",
      "core-linux-embedded-binaries-intake-v2",
      "core-linux-embedded-binaries-intake-v3",
-@@ -310,7 +310,7 @@
-     "core-linux-embedded-binaries-intake-v6",
+@@ -311,6 +312,7 @@
      "core-linux-embedded-binaries-intake-v7",
      "core-linux-embedded-binaries-intake-v8",
--    "core-linux-embedded-binaries-intake-v9",
-+    "core-linux-embedded-binaries-intake-v10",
+     "core-linux-embedded-binaries-intake-v10",
++    "core-linux-embedded-binaries-intake-v11",
      "core-linux-embedded-binaries-build-pipeline-v1",
      "core-linux-embedded-binaries-build-pipeline-v2",
      "core-linux-embedded-binaries-build-pipeline-v3",

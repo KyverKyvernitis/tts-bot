@@ -58,8 +58,8 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 95
-        versionName "0.5.80"
+        versionCode 96
+        versionName "0.5.81"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -135,17 +135,18 @@ android {
     }
 }
 
-// Core Linux embedded binaries build/intake pipeline v10.
+// Core Linux embedded binaries build/intake pipeline v11.
 // Não baixa e não executa binários. Este gate valida apenas os arquivos que
 // já foram embutidos em jniLibs para evitar APK quebrado. O BusyBox do Termux
 // é dinâmico: libcoreworker_busybox.so é só um wrapper pequeno, e o payload real
 // fica em libbusybox.so com dependências libandroid-selinux.so + libpcre2-8.so.
+// O loader32 do PRoot é multiarch futuro: pode ser ELF32/ARM e não bloqueia o APK ARM64.
 def coreLinuxEmbeddedBinaries = [
         [key: "runner",  file: "libcoreworker_runner.so",  minBytes: 1024L,  required: true],
         [key: "proot",   file: "libcoreworker_proot.so",   minBytes: 32768L, required: false,
          requires: ["libtalloc.so", "libcoreworker_proot_loader.so"]],
         [key: "proot_loader", file: "libcoreworker_proot_loader.so", minBytes: 4096L, required: false],
-        [key: "proot_loader32", file: "libcoreworker_proot_loader32.so", minBytes: 4096L, required: false],
+        [key: "proot_loader32", file: "libcoreworker_proot_loader32.so", minBytes: 4096L, required: false, optionalArm32: true],
         [key: "busybox_wrapper", file: "libcoreworker_busybox.so", minBytes: 4096L, required: false,
          requires: ["libbusybox.so", "libandroid-selinux.so", "libpcre2-8.so"]],
         [key: "libbusybox", file: "libbusybox.so", minBytes: 32768L, required: false,
@@ -184,12 +185,21 @@ tasks.register("verifyCoreLinuxEmbeddedBinaries") {
             }
             def isElf = head.length >= 4 && head[0] == 0x7f && (head[1] & 0xff) == 69 && (head[2] & 0xff) == 76 && (head[3] & 0xff) == 70
             def is64 = head.length >= 5 && head[4] == 2
+            def is32 = head.length >= 5 && head[4] == 1
             def isAarch64 = head.length >= 20 && (head[18] & 0xff) == 183 && (head[19] & 0xff) == 0
+            def isArm32 = head.length >= 20 && (head[18] & 0xff) == 40 && (head[19] & 0xff) == 0
+            def optionalArm32 = (item.optionalArm32 == true)
             def tooSmall = f.length() < (item.minBytes as long)
             def reasons = []
             if (!isElf) reasons << "not_elf"
-            if (isElf && !is64) reasons << "not_elf64"
-            if (isElf && !isAarch64) reasons << "not_aarch64"
+            if (isElf && optionalArm32) {
+                if (!(is64 && isAarch64) && !(is32 && isArm32)) {
+                    reasons << "expected_arm64_or_optional_arm32"
+                }
+            } else {
+                if (isElf && !is64) reasons << "not_elf64"
+                if (isElf && !isAarch64) reasons << "not_aarch64"
+            }
             if (tooSmall) reasons << "size ${f.length()} < ${item.minBytes}"
             if (!reasons.isEmpty()) {
                 invalid << "${item.file} (${item.key}: ${reasons.join('; ')})"
@@ -233,7 +243,7 @@ tasks.register("verifyCoreLinuxEmbeddedBinaries") {
         if (strict && !missing.isEmpty()) {
             throw new GradleException("Core Linux embedded binaries ausentes: ${missing.join(', ')}")
         }
-        println("Core Linux embedded binaries v10: present=${presentFiles.size()} missing=${missing.size()} invalid=${invalid.size()} strict=${strict}; busybox wrapper pequeno permitido quando libbusybox/deps estão presentes")
+        println("Core Linux embedded binaries v11: present=${presentFiles.size()} missing=${missing.size()} invalid=${invalid.size()} strict=${strict}; busybox wrapper pequeno permitido; proot_loader32 é opcional/multiarch futuro")
     }
 }
 

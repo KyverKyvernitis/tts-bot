@@ -1,45 +1,38 @@
-# Patch V10 — Core Linux BusyBox wrapper gate + libtalloc RUNPATH
+# Patch V11 — PRoot loader32 optional gate
 
-Este patch corrige o bloqueio que impedia o APK `0.5.79/94` de buildar no phone worker.
+Objetivo: corrigir o build do APK depois do V10. O V10 corrigiu o BusyBox wrapper, mas o Gradle passou a reprovar `libcoreworker_proot_loader32.so` porque ele é ELF32/ARM. Esse loader é multiarch futuro e não deve bloquear o APK ARM64 atual.
 
-## Correções principais
+## O que muda
 
-- APK sobe para `0.5.80` / `versionCode 95`.
-- `verifyCoreLinuxEmbeddedBinaries` passa a entender que:
-  - `libcoreworker_busybox.so` é um wrapper ELF pequeno do BusyBox Termux;
-  - `libbusybox.so` é o payload real que precisa carregar o peso/tamanho forte;
-  - `libandroid-selinux.so` e `libpcre2-8.so` são dependências obrigatórias quando BusyBox está presente.
-- `libtalloc.so` e `libcoreworker_libtalloc.so` tiveram RUNPATH higienizado de:
-  - `/data/data/com.termux/files/usr/lib`
-  - para `$ORIGIN`
-- Metadata V10 registra os novos hashes e a regra de wrapper pequeno.
-- A metadata V9 também foi atualizada como compatível para não quebrar comandos antigos de validação.
+- APK sobe para `0.5.81` / `versionCode 96`.
+- `verifyCoreLinuxEmbeddedBinaries` passa a aceitar `proot_loader32` como opcional ARM32.
+- O gate continua rígido para a cadeia ARM64 necessária agora:
+  - `libcoreworker_proot.so`
+  - `libcoreworker_proot_loader.so`
+  - `libtalloc.so`
+  - `libcoreworker_busybox.so`
+  - `libbusybox.so`
+  - `libandroid-selinux.so`
+  - `libpcre2-8.so`
+- Stages expostos:
+  - `core-linux-runner-preflight-v11`
+  - `core-linux-embedded-binaries-intake-v11`
+- Adiciona `scripts/core-linux-embedded-binaries-metadata.v11.json`.
+- Documenta que `loader32` não é requisito do smoke ARM64 atual.
 
-## Segurança mantida
+## Segurança
 
-- Nenhum binário externo é executado durante build/intake.
-- Runner real segue bloqueado.
-- Box64 e Bedrock continuam fora desta etapa.
-- PRoot/BusyBox ainda precisam passar pelo smoke real no APK instalado antes de reduzir Termux.
+- Não baixa nada.
+- Não executa PRoot/BusyBox.
+- Não libera runner real.
+- Não libera Bedrock/Box64.
+- Apenas corrige validação/diagnóstico para permitir o build do APK ARM64.
 
-## Validação recomendada
+## Validação feita
 
 ```bash
 python3 -m py_compile webserver.py scripts/core-linux-embedded-binaries-build-pipeline.py scripts/core-linux-embedded-binaries-intake.py
-python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --strict --metadata-file scripts/core-linux-embedded-binaries-metadata.v10.json
-
-for f in \
-  libcoreworker_proot.so \
-  libcoreworker_busybox.so \
-  libbusybox.so \
-  libandroid-selinux.so \
-  libpcre2-8.so \
-  libtalloc.so \
-  libcoreworker_libtalloc.so
- do
-  echo "----- $f -----"
-  readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/$f | grep -E 'NEEDED|RUNPATH|RPATH' || true
- done
+python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --strict --metadata-file scripts/core-linux-embedded-binaries-metadata.v11.json
 ```
 
-Resultado esperado: `libtalloc.so` e `libcoreworker_libtalloc.so` também devem mostrar `RUNPATH [$ORIGIN]`.
+Resultado: runner, proot, busybox wrapper, libbusybox, libandroid-selinux, libpcre2-8 e libtalloc validaram. `proot_loader32` foi tratado como opcional/multiarch no gate Gradle.

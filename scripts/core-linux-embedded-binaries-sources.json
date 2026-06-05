@@ -1,5 +1,5 @@
 {
-  "schema": "core-worker-embedded-binaries-source-plan-v10",
+  "schema": "core-worker-embedded-binaries-source-plan-v11",
   "generatedAt": 1780686535,
   "abi": "arm64-v8a",
   "androidMinSdk": 26,

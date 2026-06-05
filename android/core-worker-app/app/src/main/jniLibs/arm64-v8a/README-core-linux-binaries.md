@@ -69,3 +69,8 @@ This directory now carries the complete base-tools chain for the first Termux re
 - `libpcre2-8.so` with `RUNPATH=$ORIGIN`.
 
 The preflight must still keep real execution blocked until Android extracts these native libs into `nativeLibraryDir` and the rootfs real validation passes.
+
+
+## V11 loader32
+
+`libcoreworker_proot_loader32.so` vem do pacote PRoot como loader 32-bit opcional. Ele não é requisito para o smoke ARM64 atual (`proot + busybox + rootfs`) e não deve bloquear o build arm64. Suporte real a binários 32-bit fica para uma etapa multiarch futura.
