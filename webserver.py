@@ -1561,6 +1561,8 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_core_linux_runner_status",
     "apk_core_linux_runner_preflight",
     "apk_core_linux_runner_requirements",
+    # V12.1: smoke real controlado é manual/seguro, nunca automático.
+    "apk_core_linux_runtime_smoke_test",
     "apk_linux_box64_probe",
     "apk_linux_provisioner_probe",
     "apk_linux_prepare_directories",
@@ -1771,6 +1773,15 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
         detail = _safe_short_text(payload.get("detail") or payload.get("reason"), 80)
         if detail:
             clean["detail"] = detail
+    elif job_type == "apk_core_linux_runtime_smoke_test":
+        # V12.1: entregar ao APK somente o smoke allowlist fixo de ferramentas base.
+        # Nada aqui vira comando livre; o APK também valida a allowlist localmente.
+        stage = _safe_short_text(payload.get("stage") or payload.get("smokeStage"), 80)
+        if stage == "core-linux-base-tools-smoke-v12":
+            clean["stage"] = stage
+            clean["smokeStage"] = stage
+            clean["allowlistOnly"] = True
+            clean["forceFresh"] = True
     return clean
 
 
@@ -1788,6 +1799,31 @@ def _core_worker_app_job_max_retries(job: dict) -> int:
     except Exception:
         raw = CORE_WORKER_APP_JOB_DEFAULT_MAX_RETRIES
     return max(0, min(raw, 3))
+
+
+CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB = "apk_core_linux_runtime_smoke_test"
+CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_STAGE = "core-linux-base-tools-smoke-v12"
+CORE_WORKER_APP_LOCAL_MANUAL_QUEUE_TYPES = {CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB}
+
+
+def _core_worker_app_payload_version_code(payload: dict) -> int:
+    try:
+        return int(payload.get("appVersionCode") or payload.get("app_version_code") or 0)
+    except Exception:
+        return 0
+
+
+def _core_worker_app_job_fetch_blocker(job: dict, fetch_payload: dict) -> str:
+    job_type = _core_worker_app_normalize_job_type(job.get("type"))
+    if job_type != CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB:
+        return ""
+    if _core_worker_app_payload_version_code(fetch_payload) < 97:
+        return "smoke V12 exige APK appVersionCode >= 97"
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    stage = _safe_short_text(payload.get("stage") or payload.get("smokeStage"), 80)
+    if stage != CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_STAGE:
+        return "smoke V12 exige payload.stage core-linux-base-tools-smoke-v12"
+    return ""
 
 
 def _core_worker_app_job_matches(job: dict, install_id: str, worker_id: str) -> bool:
@@ -1913,13 +1949,17 @@ def _core_worker_app_jobs_build_summaries(data: dict, now: int | None = None) ->
     return summaries
 
 
-def _core_worker_app_queue_internal_jobs_for_worker(worker_id: str = "", install_id: str = "", *, kinds: list[str] | None = None, reason: str = "manual-runtime-test") -> dict:
+def _core_worker_app_queue_internal_jobs_for_worker(worker_id: str = "", install_id: str = "", *, kinds: list[str] | None = None, reason: str = "manual-runtime-test", allow_manual: bool = False) -> dict:
     now = int(time.time())
     worker_id = _safe_short_text(worker_id, 80)
     install_id = _safe_short_text(install_id, 80)
     key = install_id or worker_id or "unknown"
+    allowed_types = set(CORE_WORKER_APP_AUTO_JOB_TYPES)
+    if allow_manual:
+        # V12.1: fila manual local só aceita jobs explicitamente allowlistados.
+        allowed_types |= set(CORE_WORKER_APP_LOCAL_MANUAL_QUEUE_TYPES)
     job_types = [_core_worker_app_normalize_job_type(k) for k in (kinds or sorted(CORE_WORKER_APP_AUTO_JOB_TYPES))]
-    job_types = [k for k in dict.fromkeys(job_types) if k in CORE_WORKER_APP_AUTO_JOB_TYPES]
+    job_types = [k for k in dict.fromkeys(job_types) if k in allowed_types]
     path = _core_worker_app_jobs_path()
     with _core_worker_app_jobs_lock:
         try:
@@ -1946,16 +1986,18 @@ def _core_worker_app_queue_internal_jobs_for_worker(worker_id: str = "", install
             job = {
                 "id": job_id,
                 "type": typ,
-                "jobClass": "automatic",
+                "jobClass": _core_worker_app_job_class(typ),
                 "reason": reason,
                 "issuedAt": now,
                 "title": CORE_WORKER_APP_JOB_LABELS.get(typ, typ),
                 "status": "pending",
-                "timeoutSec": CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS,
+                "timeoutSec": 240 if typ == CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB else CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS,
                 "maxRetries": 1,
                 "installId": install_id,
                 "workerId": worker_id,
             }
+            if typ == CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB:
+                job["payload"] = {"stage": CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_STAGE, "allowlistOnly": True, "forceFresh": True}
             pending.append(job)
             created.append(job)
         data["pending"] = pending[-160:]
@@ -1966,6 +2008,66 @@ def _core_worker_app_queue_internal_jobs_for_worker(worker_id: str = "", install
         data["ok"] = True
         _atomic_write_json(path, data, mode=0o600)
     return {"ok": True, "created": len(created), "requested": len(job_types), "workerId": worker_id, "installId": install_id, "types": [j.get("type") for j in created]}
+
+
+def _core_worker_app_archive_pending_jobs(data: dict, *, job_type: str, install_id: str = "", worker_id: str = "", reason: str = "replaced") -> int:
+    if not isinstance(data, dict):
+        return 0
+    now = int(time.time())
+    normalized = _core_worker_app_normalize_job_type(job_type)
+    pending = data.get("pending") if isinstance(data.get("pending"), list) else []
+    archived = data.get("archived") if isinstance(data.get("archived"), list) else []
+    kept = []
+    count = 0
+    for item in pending:
+        if (
+            isinstance(item, dict)
+            and _core_worker_app_normalize_job_type(item.get("type")) == normalized
+            and _core_worker_app_job_matches(item, install_id, worker_id)
+        ):
+            old = dict(item)
+            old["status"] = "archived_stale_pending"
+            old["archivedAt"] = now
+            old["archiveReason"] = reason
+            archived.append(old)
+            count += 1
+        else:
+            kept.append(item)
+    data["pending"] = kept[-CORE_WORKER_APP_PENDING_LIMIT:]
+    data["archived"] = archived[-200:]
+    return count
+
+
+def _core_worker_app_queue_core_linux_smoke_v12(worker_id: str = "", install_id: str = "", *, reason: str = "manual-v12-base-tools-smoke") -> dict:
+    path = _core_worker_app_jobs_path()
+    worker_id = _safe_short_text(worker_id, 80)
+    install_id = _safe_short_text(install_id, 80)
+    with _core_worker_app_jobs_lock:
+        try:
+            data = _load_json_cached(path, {})
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        archived = _core_worker_app_archive_pending_jobs(
+            data,
+            job_type=CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB,
+            install_id=install_id,
+            worker_id=worker_id,
+            reason="replace-with-single-v12-smoke",
+        )
+        _atomic_write_json(path, data, mode=0o600)
+    queued = _core_worker_app_queue_internal_jobs_for_worker(
+        worker_id=worker_id,
+        install_id=install_id,
+        kinds=[CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB],
+        reason=reason,
+        allow_manual=True,
+    )
+    queued["archivedPending"] = archived
+    queued["stage"] = CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_STAGE
+    queued["safety"] = "manual allowlist; sem shell livre; sem comando arbitrário; sem Box64/Bedrock"
+    return queued
 
 
 def _core_worker_app_jobs_fetch(payload: dict) -> dict:
@@ -2056,6 +2158,13 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
                 continue
             if not _core_worker_app_job_matches(job, install_id, worker_id):
                 remaining.append(job)
+                continue
+            blocker = _core_worker_app_job_fetch_blocker(job, payload)
+            if blocker:
+                blocked_job = dict(job)
+                blocked_job["lastFetchBlockReason"] = blocker
+                blocked_job["lastFetchBlockAt"] = now
+                remaining.append(blocked_job)
                 continue
             job_id = _safe_short_text(job.get("id") or f"job-{uuid.uuid4().hex[:12]}", 64)
             if job_id in running or job_id in delivered_keys:
@@ -2921,6 +3030,34 @@ def core_worker_app_jobs_fetch():
     except Exception as exc:
         app.logger.warning("core-worker app light jobs fetch ignored: %s", exc)
         return jsonify({"ok": False, "jobs": [], "error": _safe_short_text(f"{type(exc).__name__}: {exc}", 180)}), 200
+
+
+@app.post("/core-worker/app/jobs/enqueue")
+def core_worker_app_jobs_enqueue():
+    """Enfileira jobs manuais seguros para o runtime interno do APK.
+
+    V12.1 expõe apenas o smoke allowlist de PRoot/BusyBox e restringe a chamada
+    ao localhost da VPS para evitar que clientes externos empurrem jobs manuais.
+    """
+    remote = str(request.remote_addr or "")
+    if remote not in {"127.0.0.1", "::1", "localhost"}:
+        return jsonify({"ok": False, "error": "endpoint local-only"}), 403
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    job_type = _core_worker_app_normalize_job_type(payload.get("type") or payload.get("jobType") or payload.get("kind"))
+    if job_type != CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB:
+        return jsonify({"ok": False, "error": "job manual não permitido neste endpoint", "allowed": sorted(CORE_WORKER_APP_LOCAL_MANUAL_QUEUE_TYPES)}), 400
+    worker_id = _safe_short_text(payload.get("workerId") or payload.get("worker_id"), 80)
+    install_id = _safe_short_text(payload.get("installId") or payload.get("install_id"), 80)
+    if not worker_id and not install_id:
+        return jsonify({"ok": False, "error": "workerId ou installId obrigatório"}), 400
+    result = _core_worker_app_queue_core_linux_smoke_v12(
+        worker_id=worker_id,
+        install_id=install_id,
+        reason=_safe_short_text(payload.get("reason") or "manual-v12-base-tools-smoke", 80),
+    )
+    return jsonify(result), 200
 
 
 @app.post("/core-worker/app/jobs/result")
