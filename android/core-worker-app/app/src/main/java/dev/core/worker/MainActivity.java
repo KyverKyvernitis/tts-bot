@@ -272,6 +272,12 @@ public class MainActivity extends Activity {
     private volatile int internalLightJobsAutoTotal = 0;
     private volatile int internalLightJobsManualTotal = 0;
     private volatile String internalLightJobsCatalogSummary = "catálogo aguardando";
+    private volatile String internalLightJobsLastFetchReason = "";
+    private volatile String internalLightJobsLastFetchAppVersion = "";
+    private volatile int internalLightJobsLastFetchAppVersionCode = 0;
+    private volatile int internalLightJobsLastFetchHttpStatus = 0;
+    private volatile int internalLightJobsLastReturnedCount = 0;
+    private volatile String internalLightJobsLastFetchError = "";
     private volatile String internalDiagnosticsSummary = "diagnósticos aguardando";
     private volatile String internalStorageSummary = "cache aguardando";
     private volatile String internalBridgeSummary = "ponte aguardando";
@@ -4753,6 +4759,12 @@ public class MainActivity extends Activity {
         runtime.put("light_jobs_last_check_at", internalLightJobsLastCheckAt);
         runtime.put("light_jobs_last_count", internalLightJobsLastCount);
         runtime.put("light_jobs_last_summary", internalLightJobsLastSummary == null ? "" : internalLightJobsLastSummary);
+        runtime.put("light_jobs_last_fetch_reason", internalLightJobsLastFetchReason == null ? "" : internalLightJobsLastFetchReason);
+        runtime.put("light_jobs_last_fetch_app_version", internalLightJobsLastFetchAppVersion == null ? "" : internalLightJobsLastFetchAppVersion);
+        runtime.put("light_jobs_last_fetch_app_version_code", internalLightJobsLastFetchAppVersionCode);
+        runtime.put("light_jobs_last_fetch_http_status", internalLightJobsLastFetchHttpStatus);
+        runtime.put("light_jobs_last_returned_count", internalLightJobsLastReturnedCount);
+        runtime.put("light_jobs_last_fetch_error", internalLightJobsLastFetchError == null ? "" : internalLightJobsLastFetchError);
         runtime.put("internal_jobs_queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
         runtime.put("internal_jobs_running", internalLightJobsRunningCount);
         runtime.put("internal_jobs_pending", internalLightJobsPendingCount);
@@ -4914,17 +4926,30 @@ public class MainActivity extends Activity {
                 JSONObject payload = statusSnapshot();
                 payload.put("installId", installId());
                 payload.put("workerId", effectiveWorkerId());
+                payload.put("appVersion", APP_VERSION);
+                payload.put("appVersionCode", BuildConfig.VERSION_CODE);
+                payload.put("versionName", APP_VERSION);
+                payload.put("versionCode", BuildConfig.VERSION_CODE);
+                payload.put("source", "core-worker-apk-foreground-fetch-v12-2");
                 payload.put("reason", reason == null ? "background" : reason);
+                payload.put("fetchStage", "core-linux-job-fetch-v12.2");
+                payload.put("force", shouldForceLightJobFetch(reason, showResult));
                 payload.put("supportedJobs", supportedLightJobsArray());
                 payload.put("supported_tasks", supportedLightJobsArray());
                 payload.put("supportedTasks", supportedLightJobsArray());
                 payload.put("capabilities", coreWorkerApkCapabilitiesArray());
                 safePutPayload(payload, "runtime", runtimeSnapshot());
+                internalLightJobsLastFetchReason = reason == null ? "background" : reason;
+                internalLightJobsLastFetchAppVersion = APP_VERSION;
+                internalLightJobsLastFetchAppVersionCode = BuildConfig.VERSION_CODE;
+                internalLightJobsLastFetchError = "";
                 HttpResult response = request("POST", serverUrl + "/core-worker/app/jobs/fetch", payload, null);
                 internalLightJobsLastCheckAt = System.currentTimeMillis();
+                internalLightJobsLastFetchHttpStatus = response.status;
                 if (!response.ok()) {
                     internalLightJobsState = "falha HTTP " + response.status;
                     internalRuntimeLastError = compactResultBody(response.body);
+                    internalLightJobsLastFetchError = internalRuntimeLastError;
                     updateSystemChecklistText();
                     return;
                 }
@@ -4945,6 +4970,7 @@ public class MainActivity extends Activity {
                 JSONArray jobs = body.optJSONArray("jobs");
                 int count = jobs == null ? 0 : jobs.length();
                 internalLightJobsLastCount = count;
+                internalLightJobsLastReturnedCount = count;
                 JSONObject queue = body.optJSONObject("queue");
                 if (queue != null) {
                     internalLightJobsPendingCount = queue.optInt("pending", 0);
@@ -5019,12 +5045,25 @@ public class MainActivity extends Activity {
                 internalLightJobsState = "falha · " + shortThrowable(exc);
                 internalLightJobsLastSummary = "falha: " + shortThrowable(exc);
                 internalRuntimeLastError = shortThrowable(exc);
+                internalLightJobsLastFetchError = internalRuntimeLastError;
                 appStatusLastError = internalRuntimeLastError;
                 updateSystemChecklistText();
             } finally {
                 internalLightJobsFetchRunning.set(false);
             }
         }, "core-worker-apk-light-jobs").start();
+    }
+
+    private boolean shouldForceLightJobFetch(String reason, boolean showResult) {
+        if (showResult) return true;
+        String r = reason == null ? "" : reason.toLowerCase(Locale.ROOT);
+        return r.contains("manual")
+                || r.contains("smoke")
+                || r.contains("status")
+                || r.contains("diagnostic")
+                || r.contains("sync")
+                || r.contains("app_opened")
+                || r.contains("activity_resume");
     }
 
     private JSONArray supportedLightJobsArray() {
@@ -6153,6 +6192,13 @@ public class MainActivity extends Activity {
         diagnostic.put("lightJobs", internalLightJobsState == null ? "" : internalLightJobsState);
         diagnostic.put("lastLightJob", internalLightJobsLastSummary == null ? "" : internalLightJobsLastSummary);
         diagnostic.put("queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
+        diagnostic.put("lastJobFetchAt", internalLightJobsLastCheckAt);
+        diagnostic.put("lastJobFetchReason", internalLightJobsLastFetchReason == null ? "" : internalLightJobsLastFetchReason);
+        diagnostic.put("lastJobFetchAppVersion", internalLightJobsLastFetchAppVersion == null ? "" : internalLightJobsLastFetchAppVersion);
+        diagnostic.put("lastJobFetchAppVersionCode", internalLightJobsLastFetchAppVersionCode);
+        diagnostic.put("lastJobFetchHttpStatus", internalLightJobsLastFetchHttpStatus);
+        diagnostic.put("jobsReturned", internalLightJobsLastReturnedCount);
+        diagnostic.put("lastJobFetchError", internalLightJobsLastFetchError == null ? "" : internalLightJobsLastFetchError);
         safePutPayload(diagnostic, "jobHistory", internalJobHistoryJson());
         diagnostic.put("termuxWorkerOnline", localAgentOnline);
         diagnostic.put("localAgentVersion", localAgentVersion == null ? "" : localAgentVersion);
@@ -6912,6 +6958,12 @@ public class MainActivity extends Activity {
         status.put("internal_light_jobs_last_check_at", internalLightJobsLastCheckAt);
         status.put("internal_light_jobs_last_count", internalLightJobsLastCount);
         status.put("internal_light_jobs_last_summary", internalLightJobsLastSummary == null ? "" : internalLightJobsLastSummary);
+        status.put("internal_light_jobs_last_fetch_reason", internalLightJobsLastFetchReason == null ? "" : internalLightJobsLastFetchReason);
+        status.put("internal_light_jobs_last_fetch_app_version", internalLightJobsLastFetchAppVersion == null ? "" : internalLightJobsLastFetchAppVersion);
+        status.put("internal_light_jobs_last_fetch_app_version_code", internalLightJobsLastFetchAppVersionCode);
+        status.put("internal_light_jobs_last_fetch_http_status", internalLightJobsLastFetchHttpStatus);
+        status.put("internal_light_jobs_last_returned_count", internalLightJobsLastReturnedCount);
+        status.put("internal_light_jobs_last_fetch_error", internalLightJobsLastFetchError == null ? "" : internalLightJobsLastFetchError);
         status.put("internal_jobs_queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
         status.put("internal_jobs_running", internalLightJobsRunningCount);
         status.put("internal_jobs_pending", internalLightJobsPendingCount);
