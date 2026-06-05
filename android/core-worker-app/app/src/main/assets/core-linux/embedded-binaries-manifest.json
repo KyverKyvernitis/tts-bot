@@ -1,11 +1,11 @@
 {
-  "schema": "core-worker-embedded-binaries-local-v5",
-  "generatedAt": 1780685369,
+  "schema": "core-worker-embedded-binaries-local-v6",
+  "generatedAt": 1780686537,
   "dryRun": false,
   "targets": {
     "proot": {
-      "source": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
-      "dest": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
+      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
+      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -29,17 +29,18 @@
         "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
         "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
         "minBytes": 32768,
-        "dependencyPolicy": "libtalloc.so embutido junto; PRoot foi ajustado para NEEDED libtalloc.so em vez de libtalloc.so.2 para compatibilidade com jniLibs",
+        "dependencyPolicy": "libtalloc.so embutido junto; PRoot ajustado para NEEDED libtalloc.so e RUNPATH $ORIGIN para compatibilidade com jniLibs",
         "buildNotes": [
           "usar build arm64/aarch64 auditado; não baixar em runtime",
           "Termux proot depende de libtalloc; não marcar pronto sem dependência estática ou libtalloc embutido",
           "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner"
         ],
-        "binarySha256": "0cf48f1bede941054dda89e9e18db1f8f1928abcff41c5919857dcfd5674fa32",
+        "binarySha256": "4b5fdefbfc52ea9af38cf6151480b337e3b8a2c0f9a55ad850c0c19e499a1493",
         "binarySize": 231808,
         "linkMode": "dynamic-with-bundled-dependencies",
         "androidPatchNotes": [
-          "substituído NEEDED libtalloc.so.2 -> libtalloc.so mantendo o mesmo pacote Termux auditado",
+          "NEEDED libtalloc.so.2 -> libtalloc.so",
+          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN",
           "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no nativeLibraryDir durante o smoke test allowlist"
         ],
         "sourceCompliance": {
@@ -48,7 +49,7 @@
           "licenseTextIncluded": true,
           "sourceUrl": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
           "configUrlOrPath": "Termux recipe packages/proot/build.sh",
-          "modifications": "binary string patch: NEEDED libtalloc.so.2 -> libtalloc.so; no source-code modification bundled here"
+          "modifications": "binary string patch: NEEDED libtalloc.so.2 -> libtalloc.so; RUNPATH Termux -> $ORIGIN; no source-code modification bundled here"
         }
       },
       "metadataOk": true,
@@ -59,11 +60,71 @@
       "isElf64": true,
       "isAarch64": true,
       "size": 231808,
-      "sha256": "0cf48f1bede941054dda89e9e18db1f8f1928abcff41c5919857dcfd5674fa32"
+      "sha256": "4b5fdefbfc52ea9af38cf6151480b337e3b8a2c0f9a55ad850c0c19e499a1493"
+    },
+    "busybox": {
+      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
+      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
+      "copied": false,
+      "metadata": {
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source",
+        "upstream": "https://busybox.net/downloads/",
+        "license": "GPL-2.0",
+        "licenseStatus": "verified-audited",
+        "packageVersion": "1.37.0-r3",
+        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+        "runtimeDependencies": [
+          "libbusybox",
+          "libandroid_selinux",
+          "libpcre2_8"
+        ],
+        "notes": "não baixar em runtime; importar somente build arm64 auditado; recipe Termux não é seguro para build on-device; NEEDED/RUNPATH ajustados para jniLibs",
+        "official": "libcoreworker_busybox.so",
+        "aliases": [
+          "libcoreworker_busybox.so",
+          "busybox"
+        ],
+        "homepage": "https://busybox.net/",
+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
+        "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+        "minBytes": 32768,
+        "dependencyPolicy": "busybox Termux é dinâmico; NEEDED libbusybox.so.1.37.0 foi ajustado para libbusybox.so e RUNPATH para $ORIGIN; dependências embutidas junto",
+        "onDeviceBuildSafe": false,
+        "buildNotes": [
+          "o recipe Termux marca BusyBox como não seguro para build on-device",
+          "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
+          "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
+        ],
+        "binarySha256": "58e3718246338da1a3edefcba09b789a6e487aa0306956203eb08220daa69f5f",
+        "binarySize": 4320,
+        "linkMode": "dynamic-with-bundled-dependencies",
+        "androidPatchNotes": [
+          "NEEDED libbusybox.so.1.37.0 -> libbusybox.so",
+          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
+        ],
+        "sourceCompliance": {
+          "required": true,
+          "completeCorrespondingSourceReady": true,
+          "licenseTextIncluded": true,
+          "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+          "configUrlOrPath": "Termux recipe packages/busybox/build.sh plus binary-string patch notes in this metadata",
+          "modifications": "binary string patch: NEEDED libbusybox.so.1.37.0 -> libbusybox.so; RUNPATH Termux -> $ORIGIN"
+        }
+      },
+      "metadataOk": true,
+      "metadataErrors": [],
+      "isElf": true,
+      "elfClass": 2,
+      "machine": 183,
+      "isElf64": true,
+      "isAarch64": true,
+      "size": 4320,
+      "sha256": "58e3718246338da1a3edefcba09b789a6e487aa0306956203eb08220daa69f5f"
     },
     "libtalloc": {
-      "source": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so",
-      "dest": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so",
+      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
+      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -74,10 +135,10 @@
         "packageVersion": "2.4.3",
         "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
         "notes": "dependência de proot; build Termux não deve rodar no prefixo vivo do worker",
-        "official": "libcoreworker_libtalloc.so",
+        "official": "libtalloc.so",
         "aliases": [
-          "libcoreworker_libtalloc.so",
           "libtalloc.so",
+          "libcoreworker_libtalloc.so",
           "libtalloc.so.2",
           "libtalloc"
         ],
@@ -97,7 +158,7 @@
         "runtimeDependencies": [
           "libc"
         ],
-        "dependencyPolicy": "depende apenas de libc Android; duplicado como libtalloc.so para resolver NEEDED do proot patchado",
+        "dependencyPolicy": "depende apenas de libc Android; empacotado como libtalloc.so porque é o NEEDED do proot patchado",
         "sourceCompliance": {
           "required": true,
           "completeCorrespondingSourceReady": true,
@@ -116,6 +177,153 @@
       "isAarch64": true,
       "size": 31440,
       "sha256": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb"
+    },
+    "libbusybox": {
+      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
+      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
+      "copied": false,
+      "metadata": {
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source-dependency",
+        "upstream": "https://busybox.net/downloads/",
+        "license": "GPL-2.0",
+        "licenseStatus": "verified-audited",
+        "packageVersion": "1.37.0-r3",
+        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+        "runtimeDependencies": [
+          "libandroid_selinux",
+          "libpcre2_8"
+        ],
+        "notes": "lib interna do BusyBox; RUNPATH ajustado para $ORIGIN",
+        "official": "libbusybox.so",
+        "aliases": [
+          "libbusybox.so",
+          "libbusybox.so.1.37.0"
+        ],
+        "homepage": "https://busybox.net/",
+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
+        "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+        "minBytes": 32768,
+        "dependencyPolicy": "lib interna do BusyBox; RUNPATH ajustado para $ORIGIN",
+        "onDeviceBuildSafe": false,
+        "buildNotes": [
+          "extraído do mesmo pacote Termux do BusyBox",
+          "empacotar como libbusybox.so para ser extraído pelo Android como native lib"
+        ],
+        "binarySha256": "a2d1a3c55b95da56af0758883ba46b2903f5b39907205a489936cca8a7c45c7a",
+        "binarySize": 864096,
+        "linkMode": "dynamic-with-bundled-dependencies",
+        "androidPatchNotes": [
+          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
+        ],
+        "sourceCompliance": {
+          "required": true,
+          "completeCorrespondingSourceReady": true,
+          "licenseTextIncluded": true,
+          "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+          "configUrlOrPath": "Termux recipe packages/busybox/build.sh",
+          "modifications": "binary string patch: RUNPATH Termux -> $ORIGIN"
+        }
+      },
+      "metadataOk": true,
+      "metadataErrors": [],
+      "isElf": true,
+      "elfClass": 2,
+      "machine": 183,
+      "isElf64": true,
+      "isAarch64": true,
+      "size": 864096,
+      "sha256": "a2d1a3c55b95da56af0758883ba46b2903f5b39907205a489936cca8a7c45c7a"
+    },
+    "libandroid_selinux": {
+      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
+      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
+      "copied": false,
+      "metadata": {
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source-dependency",
+        "upstream": "https://android.googlesource.com/platform/external/selinux/",
+        "license": "public-domain|BSD-style-android-platform",
+        "licenseStatus": "verified-audited",
+        "packageVersion": "14.0.0.11-1",
+        "runtimeDependencies": [
+          "libpcre2_8"
+        ],
+        "notes": "dependência de libbusybox.so; RUNPATH ajustado para $ORIGIN",
+        "official": "libandroid-selinux.so",
+        "aliases": [
+          "libandroid-selinux.so",
+          "libandroid_selinux.so"
+        ],
+        "homepage": "https://selinuxproject.org/",
+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libandroid-selinux/build.sh",
+        "minBytes": 32768,
+        "dependencyPolicy": "dependência de libbusybox.so; RUNPATH ajustado para $ORIGIN",
+        "onDeviceBuildSafe": false,
+        "buildNotes": [
+          "necessário para libbusybox.so do pacote Termux"
+        ],
+        "binarySha256": "372dfaa1a6712c013e734d99f04ff51a0b501744bd81e21b84d02d40f3f0aa60",
+        "binarySize": 179056,
+        "linkMode": "dynamic-with-bundled-dependencies",
+        "androidPatchNotes": [
+          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
+        ]
+      },
+      "metadataOk": true,
+      "metadataErrors": [],
+      "isElf": true,
+      "elfClass": 2,
+      "machine": 183,
+      "isElf64": true,
+      "isAarch64": true,
+      "size": 179056,
+      "sha256": "372dfaa1a6712c013e734d99f04ff51a0b501744bd81e21b84d02d40f3f0aa60"
+    },
+    "libpcre2_8": {
+      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
+      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
+      "copied": false,
+      "metadata": {
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source-dependency",
+        "upstream": "https://github.com/PCRE2Project/pcre2",
+        "license": "BSD-3-Clause",
+        "licenseStatus": "verified-audited",
+        "packageVersion": "10.47",
+        "notes": "dependência de libandroid-selinux.so; RUNPATH ajustado para $ORIGIN",
+        "official": "libpcre2-8.so",
+        "aliases": [
+          "libpcre2-8.so",
+          "pcre2-8.so"
+        ],
+        "homepage": "https://pcre2project.github.io/pcre2/",
+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/pcre2/build.sh",
+        "minBytes": 32768,
+        "runtimeDependencies": [
+          "libc"
+        ],
+        "dependencyPolicy": "dependência de libandroid-selinux.so; RUNPATH ajustado para $ORIGIN",
+        "onDeviceBuildSafe": false,
+        "buildNotes": [
+          "necessário para libandroid-selinux.so"
+        ],
+        "binarySha256": "db37a14ca7365815d0b0323f419cc457c2c20c209876ea64fbdb9d0676e64263",
+        "binarySize": 489384,
+        "linkMode": "self-contained",
+        "androidPatchNotes": [
+          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
+        ]
+      },
+      "metadataOk": true,
+      "metadataErrors": [],
+      "isElf": true,
+      "elfClass": 2,
+      "machine": 183,
+      "isElf64": true,
+      "isAarch64": true,
+      "size": 489384,
+      "sha256": "db37a14ca7365815d0b0323f419cc457c2c20c209876ea64fbdb9d0676e64263"
     }
   },
   "policy": {

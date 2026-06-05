@@ -324,6 +324,7 @@ public class CoreWorkerRuntimeService extends Service {
                 .put("core-linux-runner-preflight-v6")
                 .put("core-linux-runner-preflight-v7")
                 .put("core-linux-runner-preflight-v8")
+                .put("core-linux-runner-preflight-v9")
                 .put("core-linux-embedded-binaries-intake-v1")
                 .put("core-linux-embedded-binaries-intake-v2")
                 .put("core-linux-embedded-binaries-intake-v3")
@@ -332,10 +333,13 @@ public class CoreWorkerRuntimeService extends Service {
                 .put("core-linux-embedded-binaries-intake-v6")
                 .put("core-linux-embedded-binaries-intake-v7")
                 .put("core-linux-embedded-binaries-intake-v8")
+                .put("core-linux-embedded-binaries-intake-v9")
                 .put("core-linux-embedded-binaries-build-pipeline-v1")
                 .put("core-linux-embedded-binaries-build-pipeline-v2")
                 .put("core-linux-embedded-binaries-build-pipeline-v3")
                 .put("core-linux-embedded-binaries-build-pipeline-v4")
+                .put("core-linux-embedded-binaries-build-pipeline-v5")
+                .put("core-linux-embedded-binaries-build-pipeline-v6")
                 .put("core-linux-runtime-v1")
                 .put("minecraft-bedrock-manager-safe-plan");
     }
@@ -428,7 +432,7 @@ public class CoreWorkerRuntimeService extends Service {
                 out.put("runnerMissing", runner.optJSONArray("missing") == null ? new JSONArray() : runner.optJSONArray("missing"));
                 out.put("runnerPreflight", runner);
             }
-            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v8" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
+            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v9" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
             out.put("supportedTasks", supportedLightJobsArray());
             if (runtime.length() > 0) out.put("runtime", runtime);
             if (rootfs.length() > 0) out.put("rootfs", rootfs);

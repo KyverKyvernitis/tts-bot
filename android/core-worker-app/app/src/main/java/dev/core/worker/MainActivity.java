@@ -4631,6 +4631,7 @@ public class MainActivity extends Activity {
                 .put("core-linux-runner-preflight-v6")
                 .put("core-linux-runner-preflight-v7")
                 .put("core-linux-runner-preflight-v8")
+                .put("core-linux-runner-preflight-v9")
                 .put("core-linux-embedded-binaries-intake-v1")
                 .put("core-linux-embedded-binaries-intake-v2")
                 .put("core-linux-embedded-binaries-intake-v3")
@@ -4639,9 +4640,13 @@ public class MainActivity extends Activity {
                 .put("core-linux-embedded-binaries-intake-v6")
                 .put("core-linux-embedded-binaries-intake-v7")
                 .put("core-linux-embedded-binaries-intake-v8")
+                .put("core-linux-embedded-binaries-intake-v9")
                 .put("core-linux-embedded-binaries-build-pipeline-v1")
                 .put("core-linux-embedded-binaries-build-pipeline-v2")
                 .put("core-linux-embedded-binaries-build-pipeline-v3")
+                .put("core-linux-embedded-binaries-build-pipeline-v4")
+                .put("core-linux-embedded-binaries-build-pipeline-v5")
+                .put("core-linux-embedded-binaries-build-pipeline-v6")
                 .put("core-linux-runtime-v1")
                 .put("minecraft-bedrock-manager-safe-plan");
     }
@@ -4695,7 +4700,7 @@ public class MainActivity extends Activity {
             out.put("runnerRequirementsReady", runnerPreflight.optBoolean("runnerRequirementsReady", false));
             safePutPayload(out, "runnerPreflight", runnerPreflight);
         }
-        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v8" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
+        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v9" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
         out.put("supportedTasks", supportedLightJobsArray());
         if (rootfsState.length() > 0) safePutPayload(out, "rootfs", rootfsState);
         if (importState.length() > 0) safePutPayload(out, "rootfsImport", importState);

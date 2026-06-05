@@ -73,8 +73,8 @@ TARGETS: dict[str, dict[str, Any]] = {
         ],
     },
     "libtalloc": {
-        "official": "libcoreworker_libtalloc.so",
-        "aliases": ["libcoreworker_libtalloc.so", "libtalloc.so", "libtalloc.so.2", "libtalloc"],
+        "official": "libtalloc.so",
+        "aliases": ["libtalloc.so", "libcoreworker_libtalloc.so", "libtalloc.so.2", "libtalloc"],
         "origin": "termux-package-source-reference",
         "sourceKind": "external-source-dependency",
         "upstream": "https://www.samba.org/ftp/talloc/",
@@ -95,7 +95,7 @@ TARGETS: dict[str, dict[str, Any]] = {
     },
     "busybox": {
         "official": "libcoreworker_busybox.so",
-        "aliases": ["libcoreworker_busybox.so", "libbusybox.so", "busybox"],
+        "aliases": ["libcoreworker_busybox.so", "busybox"],
         "origin": "termux-package-source-reference",
         "sourceKind": "external-source",
         "upstream": "https://busybox.net/downloads/",
@@ -107,14 +107,70 @@ TARGETS: dict[str, dict[str, Any]] = {
         "license": "GPL-2.0",
         "licenseStatus": "verify-before-bundling",
         "minBytes": 32768,
-        "runtimeDependencies": ["libandroid-selinux"],
-        "dependencyPolicy": "usar build estático/self-contained ou registrar/bundlar dependências dinâmicas auditadas",
+        "runtimeDependencies": ["libbusybox", "libandroid_selinux", "libpcre2_8"],
+        "dependencyPolicy": "binário Termux é dinâmico; bundle obrigatório: libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
         "onDeviceBuildSafe": False,
         "buildNotes": [
             "o recipe Termux marca BusyBox como não seguro para build on-device",
             "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
             "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário",
         ],
+    },
+    "libbusybox": {
+        "official": "libbusybox.so",
+        "aliases": ["libbusybox.so", "libbusybox.so.1.37.0"],
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source-dependency",
+        "upstream": "https://busybox.net/downloads/",
+        "homepage": "https://busybox.net/",
+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
+        "packageVersion": "1.37.0-r3",
+        "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+        "license": "GPL-2.0",
+        "licenseStatus": "verify-before-bundling",
+        "minBytes": 32768,
+        "runtimeDependencies": ["libandroid_selinux", "libpcre2_8"],
+        "dependencyPolicy": "dependência dinâmica do busybox; RUNPATH ajustado para $ORIGIN",
+        "onDeviceBuildSafe": False,
+        "buildNotes": [
+            "extraído do mesmo pacote Termux do BusyBox",
+            "empacotar como libbusybox.so para ser extraído pelo Android como native lib",
+        ],
+    },
+    "libandroid_selinux": {
+        "official": "libandroid-selinux.so",
+        "aliases": ["libandroid-selinux.so", "libandroid_selinux.so"],
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source-dependency",
+        "upstream": "https://android.googlesource.com/platform/external/selinux/",
+        "homepage": "https://selinuxproject.org/",
+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libandroid-selinux/build.sh",
+        "packageVersion": "14.0.0.11-1",
+        "license": "public-domain|BSD-style-android-platform",
+        "licenseStatus": "verify-before-bundling",
+        "minBytes": 32768,
+        "runtimeDependencies": ["libpcre2_8"],
+        "dependencyPolicy": "dependência dinâmica de libbusybox; RUNPATH ajustado para $ORIGIN",
+        "onDeviceBuildSafe": False,
+        "buildNotes": ["necessário para libbusybox.so do pacote Termux"],
+    },
+    "libpcre2_8": {
+        "official": "libpcre2-8.so",
+        "aliases": ["libpcre2-8.so", "pcre2-8.so"],
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source-dependency",
+        "upstream": "https://github.com/PCRE2Project/pcre2",
+        "homepage": "https://pcre2project.github.io/pcre2/",
+        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/pcre2/build.sh",
+        "packageVersion": "10.47",
+        "license": "BSD-3-Clause",
+        "licenseStatus": "verify-before-bundling",
+        "minBytes": 32768,
+        "runtimeDependencies": [],
+        "dependencyPolicy": "dependência dinâmica de libandroid-selinux; RUNPATH ajustado para $ORIGIN",
+        "onDeviceBuildSafe": False,
+        "buildNotes": ["necessário para libandroid-selinux.so"],
     },
     "box64": {
         "official": "libcoreworker_box64.so",
@@ -191,7 +247,7 @@ def find_cc(explicit: str | None = None) -> str | None:
 
 def source_manifest_payload() -> dict[str, Any]:
     return {
-        "schema": "core-worker-embedded-binaries-source-plan-v8",
+        "schema": "core-worker-embedded-binaries-source-plan-v9",
         "generatedAt": int(time.time()),
         "abi": "arm64-v8a",
         "androidMinSdk": 26,
@@ -288,7 +344,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     manifest = write_source_manifest()
     payload = {
         "ok": True,
-        "stage": "core-linux-embedded-binaries-build-pipeline-v5",
+        "stage": "core-linux-embedded-binaries-build-pipeline-v6",
         "sourceManifest": rel(manifest),
         "metadataTemplate": "use: python3 scripts/core-linux-embedded-binaries-build-pipeline.py metadata-template > /tmp/core-linux-binaries-metadata.json",
         "jniDir": rel(JNI_DIR),
@@ -303,7 +359,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         },
         "notes": [
             "O script não baixa binários automaticamente.",
-            "BusyBox, PRoot, libtalloc e Box64 devem vir de build/import auditado e depois passar pelo intake.",
+            "BusyBox, PRoot, libtalloc, libbusybox, libandroid-selinux, libpcre2-8 e Box64 devem vir de build/import auditado e depois passar pelo intake.",
             "Cada asset externo precisa de tamanho, SHA-256 e metadados aprovados de origem/licença antes de ser aceito no stage real.",
             "PRoot/BusyBox precisam estar extraídos em nativeLibraryDir; ZipEntry dentro do APK é diagnóstico, não caminho executável.",
             "Bedrock não entra no APK e não é iniciado neste estágio.",
@@ -437,8 +493,8 @@ def cmd_audit_base_tools(args: argparse.Namespace) -> int:
         input_dir,
         dry_run=True,
         metadata_file=args.metadata_file,
-        include_keys={"proot", "busybox", "libtalloc"},
-        require_keys={"proot", "busybox"},
+        include_keys={"proot", "busybox", "libtalloc", "libbusybox", "libandroid_selinux", "libpcre2_8"},
+        require_keys={"proot", "busybox", "libtalloc", "libbusybox", "libandroid_selinux", "libpcre2_8"},
     )
     sh(command)
     return 0
@@ -452,8 +508,8 @@ def cmd_stage_base_tools(args: argparse.Namespace) -> int:
         input_dir,
         dry_run=args.dry_run,
         metadata_file=args.metadata_file,
-        include_keys={"proot", "busybox", "libtalloc"},
-        require_keys={"proot", "busybox"},
+        include_keys={"proot", "busybox", "libtalloc", "libbusybox", "libandroid_selinux", "libpcre2_8"},
+        require_keys={"proot", "busybox", "libtalloc", "libbusybox", "libandroid_selinux", "libpcre2_8"},
     )
     sh(command)
     return 0

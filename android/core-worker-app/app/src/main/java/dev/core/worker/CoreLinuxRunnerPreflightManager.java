@@ -56,8 +56,11 @@ public final class CoreLinuxRunnerPreflightManager {
             String[] runnerNames = new String[]{"libcoreworker_runner.so"};
             String[] prootNames = new String[]{"libcoreworker_proot.so", "libproot.so"};
             String[] prootLoaderNames = new String[]{"libcoreworker_proot_loader.so"};
-            String[] busyboxNames = new String[]{"libcoreworker_busybox.so", "libbusybox.so"};
-            String[] libtallocNames = new String[]{"libcoreworker_libtalloc.so", "libtalloc.so", "libtalloc.so.2"};
+            String[] busyboxNames = new String[]{"libcoreworker_busybox.so"};
+            String[] libtallocNames = new String[]{"libtalloc.so"};
+            String[] libBusyboxNames = new String[]{"libbusybox.so"};
+            String[] libAndroidSelinuxNames = new String[]{"libandroid-selinux.so"};
+            String[] libPcre2Names = new String[]{"libpcre2-8.so"};
             String[] box64Names = new String[]{"libcoreworker_box64.so", "libbox64.so"};
             File embeddedExecutor = firstExisting(nativeDir, executorNames);
             File embeddedRunner = firstExisting(nativeDir, runnerNames);
@@ -65,6 +68,9 @@ public final class CoreLinuxRunnerPreflightManager {
             File embeddedProotLoader = firstExisting(nativeDir, prootLoaderNames);
             File embeddedBusybox = firstExisting(nativeDir, busyboxNames);
             File embeddedLibtalloc = firstExisting(nativeDir, libtallocNames);
+            File embeddedLibBusybox = firstExisting(nativeDir, libBusyboxNames);
+            File embeddedLibAndroidSelinux = firstExisting(nativeDir, libAndroidSelinuxNames);
+            File embeddedLibPcre2 = firstExisting(nativeDir, libPcre2Names);
             File embeddedBox64 = firstExisting(nativeDir, box64Names);
             JSONObject apkExecutor = apkNativeInfo(context, executorNames);
             JSONObject apkRunner = apkNativeInfo(context, runnerNames);
@@ -72,6 +78,9 @@ public final class CoreLinuxRunnerPreflightManager {
             JSONObject apkProotLoader = apkNativeInfo(context, prootLoaderNames);
             JSONObject apkBusybox = apkNativeInfo(context, busyboxNames);
             JSONObject apkLibtalloc = apkNativeInfo(context, libtallocNames);
+            JSONObject apkLibBusybox = apkNativeInfo(context, libBusyboxNames);
+            JSONObject apkLibAndroidSelinux = apkNativeInfo(context, libAndroidSelinuxNames);
+            JSONObject apkLibPcre2 = apkNativeInfo(context, libPcre2Names);
             JSONObject apkBox64 = apkNativeInfo(context, box64Names);
             File writableBox64 = firstExisting(new File(base, "bin/box64"), new File(base, "box64/box64"));
             boolean writableBox64Blocked = writableBox64 != null && Build.VERSION.SDK_INT >= 29 && isInside(writableBox64, dataDir);
@@ -88,22 +97,31 @@ public final class CoreLinuxRunnerPreflightManager {
             boolean runnerLoadedByJni = runnerGuard.optBoolean("loaded", false);
             boolean executorLoadedByJni = nativeExecutor.optJSONObject("nativeBridge") != null
                     && nativeExecutor.optJSONObject("nativeBridge").optBoolean("loaded", false);
-            JSONObject embeddedAssets = embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedProotLoader, embeddedBusybox, embeddedLibtalloc, embeddedBox64,
-                    executorNames, runnerNames, prootNames, prootLoaderNames, busyboxNames, libtallocNames, box64Names,
-                    executorLoadedByJni, runnerLoadedByJni, apkExecutor, apkRunner, apkProot, apkProotLoader, apkBusybox, apkLibtalloc, apkBox64,
+            JSONObject embeddedAssets = embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedProotLoader,
+                    embeddedBusybox, embeddedLibtalloc, embeddedLibBusybox, embeddedLibAndroidSelinux, embeddedLibPcre2, embeddedBox64,
+                    executorNames, runnerNames, prootNames, prootLoaderNames, busyboxNames, libtallocNames, libBusyboxNames, libAndroidSelinuxNames, libPcre2Names, box64Names,
+                    executorLoadedByJni, runnerLoadedByJni, apkExecutor, apkRunner, apkProot, apkProotLoader, apkBusybox, apkLibtalloc, apkLibBusybox, apkLibAndroidSelinux, apkLibPcre2, apkBox64,
                     localManifest, sourcePlan);
             JSONObject runnerInfo = embeddedAssets.optJSONObject("runner") == null ? new JSONObject() : embeddedAssets.optJSONObject("runner");
             JSONObject prootInfo = embeddedAssets.optJSONObject("proot") == null ? new JSONObject() : embeddedAssets.optJSONObject("proot");
             JSONObject prootLoaderInfo = embeddedAssets.optJSONObject("prootLoader") == null ? new JSONObject() : embeddedAssets.optJSONObject("prootLoader");
             JSONObject busyboxInfo = embeddedAssets.optJSONObject("busybox") == null ? new JSONObject() : embeddedAssets.optJSONObject("busybox");
             JSONObject libtallocInfo = embeddedAssets.optJSONObject("libtalloc") == null ? new JSONObject() : embeddedAssets.optJSONObject("libtalloc");
+            JSONObject libBusyboxInfo = embeddedAssets.optJSONObject("libbusybox") == null ? new JSONObject() : embeddedAssets.optJSONObject("libbusybox");
+            JSONObject libAndroidSelinuxInfo = embeddedAssets.optJSONObject("libandroid_selinux") == null ? new JSONObject() : embeddedAssets.optJSONObject("libandroid_selinux");
+            JSONObject libPcre2Info = embeddedAssets.optJSONObject("libpcre2_8") == null ? new JSONObject() : embeddedAssets.optJSONObject("libpcre2_8");
             JSONObject box64Info = embeddedAssets.optJSONObject("box64") == null ? new JSONObject() : embeddedAssets.optJSONObject("box64");
             boolean runnerAssetReady = runnerInfo.optBoolean("allowedForFutureExecution", false);
             boolean prootBinaryReady = prootInfo.optBoolean("allowedForFutureExecution", false);
             boolean prootLoaderReady = prootLoaderInfo.optBoolean("allowedForFutureExecution", false);
             boolean prootReady = prootBinaryReady && prootLoaderReady;
-            boolean busyboxReady = busyboxInfo.optBoolean("allowedForFutureExecution", false);
+            boolean busyboxBinaryReady = busyboxInfo.optBoolean("allowedForFutureExecution", false);
             boolean libtallocReady = libtallocInfo.optBoolean("allowedForFutureExecution", false);
+            boolean libBusyboxReady = libBusyboxInfo.optBoolean("allowedForFutureExecution", false);
+            boolean libAndroidSelinuxReady = libAndroidSelinuxInfo.optBoolean("allowedForFutureExecution", false);
+            boolean libPcre2Ready = libPcre2Info.optBoolean("allowedForFutureExecution", false);
+            boolean busyboxDependencyReady = libBusyboxReady && libAndroidSelinuxReady && libPcre2Ready;
+            boolean busyboxReady = busyboxBinaryReady && busyboxDependencyReady;
             boolean box64Ready = box64Info.optBoolean("allowedForFutureExecution", false);
             boolean bedrockServerReady = bedrockServer != null && bedrockServer.exists();
             boolean propertiesReady = properties != null && properties.exists();
@@ -129,7 +147,10 @@ public final class CoreLinuxRunnerPreflightManager {
             addCheck(baseChecks, missing, "core_runner_asset", "core-runner embutido no APK", runnerAssetReady, "embutir core-runner arm64 como libcoreworker_runner.so");
             addCheck(baseChecks, missing, "proot_embedded", "proot embutido no APK", prootBinaryReady, "embutir proot arm64 auditado com metadata aprovada");
             addCheck(baseChecks, missing, "proot_loader_embedded", "loader do proot embutido no APK", prootLoaderReady, "embutir loader do proot extraído do pacote auditado");
-            addCheck(baseChecks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox arm64 auditado com metadata aprovada");
+            addCheck(baseChecks, missing, "busybox_embedded", "busybox embutido no APK", busyboxBinaryReady, "embutir busybox arm64 auditado com metadata aprovada");
+            addCheck(baseChecks, missing, "libbusybox_embedded", "libbusybox embutido no APK", libBusyboxReady, "embutir libbusybox.so junto do busybox dinâmico");
+            addCheck(baseChecks, missing, "libandroid_selinux_embedded", "libandroid-selinux embutido no APK", libAndroidSelinuxReady, "embutir libandroid-selinux.so junto do busybox dinâmico");
+            addCheck(baseChecks, missing, "libpcre2_8_embedded", "libpcre2-8 embutido no APK", libPcre2Ready, "embutir libpcre2-8.so junto do busybox dinâmico");
             if (prootNeedsLibtalloc) {
                 addCheck(baseChecks, missing, "libtalloc_embedded", "libtalloc embutido no APK", libtallocReady, "embutir libtalloc arm64 auditado junto com proot dinâmico");
             }
@@ -148,14 +169,20 @@ public final class CoreLinuxRunnerPreflightManager {
             addMetadataWarning(warnings, "proot", prootInfo);
             addMetadataWarning(warnings, "busybox", busyboxInfo);
             addMetadataWarning(warnings, "libtalloc", libtallocInfo);
+            addMetadataWarning(warnings, "libbusybox", libBusyboxInfo);
+            addMetadataWarning(warnings, "libandroid-selinux", libAndroidSelinuxInfo);
+            addMetadataWarning(warnings, "libpcre2-8", libPcre2Info);
             addMetadataWarning(warnings, "box64", box64Info);
             if (prootReady && prootNeedsLibtalloc && !libtallocReady) {
                 warnings.put("proot parece depender de libtalloc; execução futura segue bloqueada até libtalloc auditado estar embutido");
             }
+            if (busyboxBinaryReady && !busyboxDependencyReady) {
+                warnings.put("busybox é dinâmico; execução futura segue bloqueada até libbusybox + libandroid-selinux + libpcre2-8 estarem extraídos e aprovados");
+            }
             if (Build.VERSION.SDK_INT >= 29) {
                 warnings.put("execução futura deve usar componentes embutidos no APK/native libs; binários importados não são executados");
             }
-            blockers.put("runner real permanece bloqueado no preflight v8");
+            blockers.put("runner real permanece bloqueado no preflight v9");
             blockers.put("Bedrock start real permanece bloqueado");
             blockers.put("shell livre permanece bloqueado");
             blockers.put("comando remoto arbitrário permanece bloqueado");
@@ -188,8 +215,8 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("ok", true);
             out.put("component", "core_linux_runner_preflight");
             out.put("action", safeAction);
-            out.put("stage", "core-linux-runner-preflight-v8");
-            out.put("preflightVersion", 8);
+            out.put("stage", "core-linux-runner-preflight-v9");
+            out.put("preflightVersion", 9);
             out.put("state", state);
             out.put("summary", summary);
             out.put("phase", phase);
@@ -218,7 +245,12 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("prootBinaryEmbedded", prootBinaryReady);
             out.put("prootLoaderEmbedded", prootLoaderReady);
             out.put("busyboxEmbedded", busyboxReady);
+            out.put("busyboxBinaryEmbedded", busyboxBinaryReady);
+            out.put("busyboxDependencyReady", busyboxDependencyReady);
             out.put("libtallocEmbedded", libtallocReady);
+            out.put("libbusyboxEmbedded", libBusyboxReady);
+            out.put("libandroidSelinuxEmbedded", libAndroidSelinuxReady);
+            out.put("libpcre2Embedded", libPcre2Ready);
             out.put("prootNeedsLibtalloc", prootNeedsLibtalloc);
             out.put("prootDependencyReady", prootDependencyReady);
             out.put("baseToolsReady", baseToolsReady);
@@ -239,7 +271,7 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("rootfs", compactRootfs(rootfsState, importState));
             out.put("nativeExecutor", compactNative(nativeExecutor));
             out.put("coreRunnerNativeBridge", runnerGuard);
-            out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, prootLoaderNames, busyboxNames, libtallocNames, box64Names, localManifest, sourcePlan));
+            out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, prootLoaderNames, busyboxNames, libtallocNames, libBusyboxNames, libAndroidSelinuxNames, libPcre2Names, box64Names, localManifest, sourcePlan));
             out.put("embedded", embeddedAssets);
             out.put("writableCandidates", writableSnapshot(writableBox64, dataDir));
             out.put("bedrockFiles", bedrockFilesSnapshot(bedrockServer, properties));
@@ -261,7 +293,7 @@ public final class CoreLinuxRunnerPreflightManager {
                 err.put("runnerBlocked", true);
                 err.put("runnerExecutionAllowed", false);
                 err.put("bedrockStartAllowed", false);
-                err.put("preflightVersion", 8);
+                err.put("preflightVersion", 9);
                 err.put("updatedAt", System.currentTimeMillis());
             } catch (Throwable ignored) {}
             return err;
@@ -328,10 +360,11 @@ public final class CoreLinuxRunnerPreflightManager {
         return out;
     }
 
-    private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] prootLoader, String[] busybox, String[] libtalloc, String[] box64,
+    private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] prootLoader, String[] busybox, String[] libtalloc,
+                                            String[] libBusybox, String[] libAndroidSelinux, String[] libPcre2, String[] box64,
                                             JSONObject localManifest, JSONObject sourcePlan) throws Exception {
         return new JSONObject()
-                .put("stage", "core-linux-embedded-binaries-intake-v8")
+                .put("stage", "core-linux-embedded-binaries-intake-v9")
                 .put("abi", "arm64-v8a")
                 .put("executor", new JSONArray(executor))
                 .put("runner", new JSONArray(runner))
@@ -339,16 +372,22 @@ public final class CoreLinuxRunnerPreflightManager {
                 .put("prootLoader", new JSONArray(prootLoader))
                 .put("busybox", new JSONArray(busybox))
                 .put("libtalloc", new JSONArray(libtalloc))
+                .put("libbusybox", new JSONArray(libBusybox))
+                .put("libandroid_selinux", new JSONArray(libAndroidSelinux))
+                .put("libpcre2_8", new JSONArray(libPcre2))
                 .put("box64", new JSONArray(box64))
                 .put("localManifestSchema", localManifest == null ? "" : localManifest.optString("schema", ""))
                 .put("sourcePlanSchema", sourcePlan == null ? "" : sourcePlan.optString("schema", ""))
                 .put("policy", "somente componentes embutidos no APK/native libs ou JNI carregado pelo APK podem virar executáveis futuros; assets externos exigem metadata aprovada");
     }
 
-    private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File executor, File runner, File proot, File prootLoader, File busybox, File libtalloc, File box64,
-                                               String[] executorNames, String[] runnerNames, String[] prootNames, String[] prootLoaderNames, String[] busyboxNames, String[] libtallocNames, String[] box64Names,
+    private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File executor, File runner, File proot, File prootLoader,
+                                               File busybox, File libtalloc, File libBusybox, File libAndroidSelinux, File libPcre2, File box64,
+                                               String[] executorNames, String[] runnerNames, String[] prootNames, String[] prootLoaderNames, String[] busyboxNames, String[] libtallocNames,
+                                               String[] libBusyboxNames, String[] libAndroidSelinuxNames, String[] libPcre2Names, String[] box64Names,
                                                boolean executorLoadedByJni, boolean runnerLoadedByJni,
-                                               JSONObject apkExecutor, JSONObject apkRunner, JSONObject apkProot, JSONObject apkProotLoader, JSONObject apkBusybox, JSONObject apkLibtalloc, JSONObject apkBox64,
+                                               JSONObject apkExecutor, JSONObject apkRunner, JSONObject apkProot, JSONObject apkProotLoader, JSONObject apkBusybox, JSONObject apkLibtalloc,
+                                               JSONObject apkLibBusybox, JSONObject apkLibAndroidSelinux, JSONObject apkLibPcre2, JSONObject apkBox64,
                                                JSONObject localManifest, JSONObject sourcePlan) throws Exception {
         return new JSONObject()
                 .put("nativeLibraryDir", path(nativeDir))
@@ -358,6 +397,9 @@ public final class CoreLinuxRunnerPreflightManager {
                 .put("prootLoader", assetInfo("proot", prootLoader, prootLoaderNames, nativeDir, dataDir, false, "", apkProotLoader, localManifest, sourcePlan))
                 .put("busybox", assetInfo("busybox", busybox, busyboxNames, nativeDir, dataDir, false, "", apkBusybox, localManifest, sourcePlan))
                 .put("libtalloc", assetInfo("libtalloc", libtalloc, libtallocNames, nativeDir, dataDir, false, "", apkLibtalloc, localManifest, sourcePlan))
+                .put("libbusybox", assetInfo("libbusybox", libBusybox, libBusyboxNames, nativeDir, dataDir, false, "", apkLibBusybox, localManifest, sourcePlan))
+                .put("libandroid_selinux", assetInfo("libandroid_selinux", libAndroidSelinux, libAndroidSelinuxNames, nativeDir, dataDir, false, "", apkLibAndroidSelinux, localManifest, sourcePlan))
+                .put("libpcre2_8", assetInfo("libpcre2_8", libPcre2, libPcre2Names, nativeDir, dataDir, false, "", apkLibPcre2, localManifest, sourcePlan))
                 .put("box64", assetInfo("box64", box64, box64Names, nativeDir, dataDir, false, "", apkBox64, localManifest, sourcePlan));
     }
 

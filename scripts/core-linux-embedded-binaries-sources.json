@@ -1,6 +1,6 @@
 {
-  "schema": "core-worker-embedded-binaries-source-plan-v8",
-  "generatedAt": 1780685371,
+  "schema": "core-worker-embedded-binaries-source-plan-v9",
+  "generatedAt": 1780686535,
   "abi": "arm64-v8a",
   "androidMinSdk": 26,
   "policy": {
@@ -67,10 +67,10 @@
       ]
     },
     "libtalloc": {
-      "official": "libcoreworker_libtalloc.so",
+      "official": "libtalloc.so",
       "aliases": [
-        "libcoreworker_libtalloc.so",
         "libtalloc.so",
+        "libcoreworker_libtalloc.so",
         "libtalloc.so.2",
         "libtalloc"
       ],
@@ -96,7 +96,6 @@
       "official": "libcoreworker_busybox.so",
       "aliases": [
         "libcoreworker_busybox.so",
-        "libbusybox.so",
         "busybox"
       ],
       "origin": "termux-package-source-reference",
@@ -111,14 +110,90 @@
       "licenseStatus": "verify-before-bundling",
       "minBytes": 32768,
       "runtimeDependencies": [
-        "libandroid-selinux"
+        "libbusybox",
+        "libandroid_selinux",
+        "libpcre2_8"
       ],
-      "dependencyPolicy": "usar build estático/self-contained ou registrar/bundlar dependências dinâmicas auditadas",
+      "dependencyPolicy": "binário Termux é dinâmico; bundle obrigatório: libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
       "onDeviceBuildSafe": false,
       "buildNotes": [
         "o recipe Termux marca BusyBox como não seguro para build on-device",
         "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
         "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
+      ]
+    },
+    "libbusybox": {
+      "official": "libbusybox.so",
+      "aliases": [
+        "libbusybox.so",
+        "libbusybox.so.1.37.0"
+      ],
+      "origin": "termux-package-source-reference",
+      "sourceKind": "external-source-dependency",
+      "upstream": "https://busybox.net/downloads/",
+      "homepage": "https://busybox.net/",
+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
+      "packageVersion": "1.37.0-r3",
+      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
+      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+      "license": "GPL-2.0",
+      "licenseStatus": "verify-before-bundling",
+      "minBytes": 32768,
+      "runtimeDependencies": [
+        "libandroid_selinux",
+        "libpcre2_8"
+      ],
+      "dependencyPolicy": "dependência dinâmica do busybox; RUNPATH ajustado para $ORIGIN",
+      "onDeviceBuildSafe": false,
+      "buildNotes": [
+        "extraído do mesmo pacote Termux do BusyBox",
+        "empacotar como libbusybox.so para ser extraído pelo Android como native lib"
+      ]
+    },
+    "libandroid_selinux": {
+      "official": "libandroid-selinux.so",
+      "aliases": [
+        "libandroid-selinux.so",
+        "libandroid_selinux.so"
+      ],
+      "origin": "termux-package-source-reference",
+      "sourceKind": "external-source-dependency",
+      "upstream": "https://android.googlesource.com/platform/external/selinux/",
+      "homepage": "https://selinuxproject.org/",
+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libandroid-selinux/build.sh",
+      "packageVersion": "14.0.0.11-1",
+      "license": "public-domain|BSD-style-android-platform",
+      "licenseStatus": "verify-before-bundling",
+      "minBytes": 32768,
+      "runtimeDependencies": [
+        "libpcre2_8"
+      ],
+      "dependencyPolicy": "dependência dinâmica de libbusybox; RUNPATH ajustado para $ORIGIN",
+      "onDeviceBuildSafe": false,
+      "buildNotes": [
+        "necessário para libbusybox.so do pacote Termux"
+      ]
+    },
+    "libpcre2_8": {
+      "official": "libpcre2-8.so",
+      "aliases": [
+        "libpcre2-8.so",
+        "pcre2-8.so"
+      ],
+      "origin": "termux-package-source-reference",
+      "sourceKind": "external-source-dependency",
+      "upstream": "https://github.com/PCRE2Project/pcre2",
+      "homepage": "https://pcre2project.github.io/pcre2/",
+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/pcre2/build.sh",
+      "packageVersion": "10.47",
+      "license": "BSD-3-Clause",
+      "licenseStatus": "verify-before-bundling",
+      "minBytes": 32768,
+      "runtimeDependencies": [],
+      "dependencyPolicy": "dependência dinâmica de libandroid-selinux; RUNPATH ajustado para $ORIGIN",
+      "onDeviceBuildSafe": false,
+      "buildNotes": [
+        "necessário para libandroid-selinux.so"
       ]
     },
     "box64": {

@@ -56,3 +56,16 @@ Arquivos importados de `proot_5.1.107.76_aarch64.deb` e `libtalloc_2.4.3_aarch64
 - `libtalloc.so`: duplicata com nome resolvível pelo linker depois do patch `NEEDED libtalloc.so.2 -> libtalloc.so` no PRoot.
 
 BusyBox do pacote `busybox_1.37.0-3_aarch64.deb` não foi embutido neste patch porque o launcher depende de `libbusybox.so.1.37.0`, e essa biblioteca depende de `libandroid-selinux.so`, que não veio no ZIP de binários. O gate continua bloqueando BusyBox até essa dependência ser fornecida/auditada ou até usarmos um BusyBox static/self-contained.
+
+## Patch V9 — BusyBox dynamic chain
+
+This directory now carries the complete base-tools chain for the first Termux replacement smoke gate:
+
+- `libcoreworker_proot.so` with `RUNPATH=$ORIGIN` and `NEEDED libtalloc.so`.
+- `libtalloc.so` as the runtime dependency used by PRoot.
+- `libcoreworker_busybox.so` with `RUNPATH=$ORIGIN` and `NEEDED libbusybox.so`.
+- `libbusybox.so` with `RUNPATH=$ORIGIN`.
+- `libandroid-selinux.so` with `RUNPATH=$ORIGIN`.
+- `libpcre2-8.so` with `RUNPATH=$ORIGIN`.
+
+The preflight must still keep real execution blocked until Android extracts these native libs into `nativeLibraryDir` and the rootfs real validation passes.

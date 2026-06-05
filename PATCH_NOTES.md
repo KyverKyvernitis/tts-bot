@@ -1,33 +1,41 @@
-# Patch V8 — Core Linux Termux .deb intake parcial
+# Patch V9 — Core Linux BusyBox dependency chain
 
-Este patch importa os binários reais enviados em `binarios.zip` para o APK, mas mantém o gate seguro.
+Este patch fecha a cadeia base que faltava para substituir o Termux no APK, ainda sem liberar execução real.
 
-## Importado
+## Importado/ajustado
 
-- PRoot `5.1.107.76` arm64 do pacote Termux.
-- Loader arm64 do PRoot.
-- Loader32 do PRoot preservado para diagnóstico/futuro.
-- libtalloc `2.4.3` arm64.
-- Duplicata `libtalloc.so` para resolução do `NEEDED` do PRoot patchado.
-- Metadata V8 com SHA256, origem, versão, licença e compliance GPL.
-- Textos GPL-2.0/GPL-3.0 em assets do APK.
+- BusyBox `1.37.0-3` do pacote Termux aarch64.
+- `libbusybox.so` do mesmo pacote.
+- `libandroid-selinux.so` do pacote Termux aarch64.
+- `libpcre2-8.so` do pacote Termux aarch64.
+- PRoot já importado no V8 recebeu correção extra de RUNPATH para `$ORIGIN`.
+- BusyBox recebeu correção de `NEEDED libbusybox.so.1.37.0 -> libbusybox.so`.
+- BusyBox/libbusybox/libandroid-selinux/libpcre2 receberam RUNPATH `$ORIGIN` para resolver dependências no `nativeLibraryDir` do APK.
 
-## Bloqueado de propósito
+## Segurança/gate
 
-BusyBox `1.37.0-3` não foi embutido porque o pacote Termux recebido é dinâmico:
-
-- `/usr/bin/busybox` depende de `libbusybox.so.1.37.0`;
-- `libbusybox.so.1.37.0` depende de `libandroid-selinux.so`;
-- `libandroid-selinux.so` não veio em `binarios.zip`.
-
-O preflight V8 agora exige também o loader do PRoot. O runner real continua bloqueado até BusyBox + dependências + rootfs passarem no smoke allowlist.
+- APK sobe para `0.5.79` / `versionCode 94`.
+- Preflight sobe para `core-linux-runner-preflight-v9`.
+- Intake sobe para `core-linux-embedded-binaries-intake-v9`.
+- `baseToolsReady` agora exige:
+  - runner;
+  - PRoot;
+  - loader do PRoot;
+  - `libtalloc.so` real;
+  - BusyBox;
+  - `libbusybox.so`;
+  - `libandroid-selinux.so`;
+  - `libpcre2-8.so`.
+- Runner real continua bloqueado até rootfs real + smoke allowlist no APK instalado.
 
 ## Validação feita
 
 ```bash
 python3 -m py_compile webserver.py scripts/core-linux-embedded-binaries-build-pipeline.py scripts/core-linux-embedded-binaries-intake.py
-python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --strict --metadata-file scripts/core-linux-embedded-binaries-metadata.v8.json
+python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --strict --metadata-file scripts/core-linux-embedded-binaries-metadata.v9.json
 readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so
+readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so
+readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so
+readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so
+readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so
 ```
-
-Resultado importante: o PRoot foi ajustado para depender de `libtalloc.so` em vez de `libtalloc.so.2`, e o BusyBox ficou bloqueado por falta de `libandroid-selinux.so`.

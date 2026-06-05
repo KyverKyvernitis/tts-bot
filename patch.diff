@@ -1,29 +1,97 @@
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/build.gradle /mnt/data/work_v8/repo/android/core-worker-app/app/build.gradle
---- /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 15:19:30.000000000 +0000
-+++ /mnt/data/work_v8/repo/android/core-worker-app/app/build.gradle	2026-06-05 18:49:12.343560058 +0000
+diff -ruN /mnt/data/orig_v10/tts-bot-main/PATCH_NOTES.md /mnt/data/work_v10/tts-bot-main/PATCH_NOTES.md
+--- /mnt/data/orig_v10/tts-bot-main/PATCH_NOTES.md	2026-06-05 15:52:50.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/PATCH_NOTES.md	2026-06-05 19:09:42.858233282 +0000
+@@ -1,33 +1,41 @@
+-# Patch V8 — Core Linux Termux .deb intake parcial
++# Patch V9 — Core Linux BusyBox dependency chain
+ 
+-Este patch importa os binários reais enviados em `binarios.zip` para o APK, mas mantém o gate seguro.
++Este patch fecha a cadeia base que faltava para substituir o Termux no APK, ainda sem liberar execução real.
+ 
+-## Importado
++## Importado/ajustado
+ 
+-- PRoot `5.1.107.76` arm64 do pacote Termux.
+-- Loader arm64 do PRoot.
+-- Loader32 do PRoot preservado para diagnóstico/futuro.
+-- libtalloc `2.4.3` arm64.
+-- Duplicata `libtalloc.so` para resolução do `NEEDED` do PRoot patchado.
+-- Metadata V8 com SHA256, origem, versão, licença e compliance GPL.
+-- Textos GPL-2.0/GPL-3.0 em assets do APK.
+-
+-## Bloqueado de propósito
+-
+-BusyBox `1.37.0-3` não foi embutido porque o pacote Termux recebido é dinâmico:
+-
+-- `/usr/bin/busybox` depende de `libbusybox.so.1.37.0`;
+-- `libbusybox.so.1.37.0` depende de `libandroid-selinux.so`;
+-- `libandroid-selinux.so` não veio em `binarios.zip`.
+-
+-O preflight V8 agora exige também o loader do PRoot. O runner real continua bloqueado até BusyBox + dependências + rootfs passarem no smoke allowlist.
++- BusyBox `1.37.0-3` do pacote Termux aarch64.
++- `libbusybox.so` do mesmo pacote.
++- `libandroid-selinux.so` do pacote Termux aarch64.
++- `libpcre2-8.so` do pacote Termux aarch64.
++- PRoot já importado no V8 recebeu correção extra de RUNPATH para `$ORIGIN`.
++- BusyBox recebeu correção de `NEEDED libbusybox.so.1.37.0 -> libbusybox.so`.
++- BusyBox/libbusybox/libandroid-selinux/libpcre2 receberam RUNPATH `$ORIGIN` para resolver dependências no `nativeLibraryDir` do APK.
++
++## Segurança/gate
++
++- APK sobe para `0.5.79` / `versionCode 94`.
++- Preflight sobe para `core-linux-runner-preflight-v9`.
++- Intake sobe para `core-linux-embedded-binaries-intake-v9`.
++- `baseToolsReady` agora exige:
++  - runner;
++  - PRoot;
++  - loader do PRoot;
++  - `libtalloc.so` real;
++  - BusyBox;
++  - `libbusybox.so`;
++  - `libandroid-selinux.so`;
++  - `libpcre2-8.so`.
++- Runner real continua bloqueado até rootfs real + smoke allowlist no APK instalado.
+ 
+ ## Validação feita
+ 
+ ```bash
+ python3 -m py_compile webserver.py scripts/core-linux-embedded-binaries-build-pipeline.py scripts/core-linux-embedded-binaries-intake.py
+-python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --strict --metadata-file scripts/core-linux-embedded-binaries-metadata.v8.json
++python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --strict --metadata-file scripts/core-linux-embedded-binaries-metadata.v9.json
+ readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so
++readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so
++readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so
++readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so
++readelf -d android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so
+ ```
+-
+-Resultado importante: o PRoot foi ajustado para depender de `libtalloc.so` em vez de `libtalloc.so.2`, e o BusyBox ficou bloqueado por falta de `libandroid-selinux.so`.
+diff -ruN /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/build.gradle /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/build.gradle
+--- /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 15:52:50.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 19:06:20.528261817 +0000
 @@ -58,8 +58,8 @@
          applicationId "dev.core.worker"
          minSdk 26
          targetSdk 34
--        versionCode 92
--        versionName "0.5.77"
-+        versionCode 93
-+        versionName "0.5.78"
+-        versionCode 93
+-        versionName "0.5.78"
++        versionCode 94
++        versionName "0.5.79"
  
          buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
          buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-local.json /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-local.json
---- /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-local.json	1970-01-01 00:00:00.000000000 +0000
-+++ /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-local.json	2026-06-05 18:49:29.914852580 +0000
-@@ -0,0 +1,136 @@
+diff -ruN /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-local.json /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-local.json
+--- /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-local.json	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-local.json	2026-06-05 19:08:57.064497804 +0000
+@@ -0,0 +1,344 @@
 +{
-+  "schema": "core-worker-embedded-binaries-local-v5",
-+  "generatedAt": 1780685369,
++  "schema": "core-worker-embedded-binaries-local-v6",
++  "generatedAt": 1780686537,
 +  "dryRun": false,
 +  "targets": {
 +    "proot": {
-+      "source": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
-+      "dest": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
++      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
++      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
 +      "copied": false,
 +      "metadata": {
 +        "origin": "termux-package-source-reference",
@@ -47,17 +115,18 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
 +        "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
 +        "minBytes": 32768,
-+        "dependencyPolicy": "libtalloc.so embutido junto; PRoot foi ajustado para NEEDED libtalloc.so em vez de libtalloc.so.2 para compatibilidade com jniLibs",
++        "dependencyPolicy": "libtalloc.so embutido junto; PRoot ajustado para NEEDED libtalloc.so e RUNPATH $ORIGIN para compatibilidade com jniLibs",
 +        "buildNotes": [
 +          "usar build arm64/aarch64 auditado; não baixar em runtime",
 +          "Termux proot depende de libtalloc; não marcar pronto sem dependência estática ou libtalloc embutido",
 +          "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner"
 +        ],
-+        "binarySha256": "0cf48f1bede941054dda89e9e18db1f8f1928abcff41c5919857dcfd5674fa32",
++        "binarySha256": "4b5fdefbfc52ea9af38cf6151480b337e3b8a2c0f9a55ad850c0c19e499a1493",
 +        "binarySize": 231808,
 +        "linkMode": "dynamic-with-bundled-dependencies",
 +        "androidPatchNotes": [
-+          "substituído NEEDED libtalloc.so.2 -> libtalloc.so mantendo o mesmo pacote Termux auditado",
++          "NEEDED libtalloc.so.2 -> libtalloc.so",
++          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN",
 +          "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no nativeLibraryDir durante o smoke test allowlist"
 +        ],
 +        "sourceCompliance": {
@@ -66,7 +135,7 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +          "licenseTextIncluded": true,
 +          "sourceUrl": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
 +          "configUrlOrPath": "Termux recipe packages/proot/build.sh",
-+          "modifications": "binary string patch: NEEDED libtalloc.so.2 -> libtalloc.so; no source-code modification bundled here"
++          "modifications": "binary string patch: NEEDED libtalloc.so.2 -> libtalloc.so; RUNPATH Termux -> $ORIGIN; no source-code modification bundled here"
 +        }
 +      },
 +      "metadataOk": true,
@@ -77,11 +146,71 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +      "isElf64": true,
 +      "isAarch64": true,
 +      "size": 231808,
-+      "sha256": "0cf48f1bede941054dda89e9e18db1f8f1928abcff41c5919857dcfd5674fa32"
++      "sha256": "4b5fdefbfc52ea9af38cf6151480b337e3b8a2c0f9a55ad850c0c19e499a1493"
++    },
++    "busybox": {
++      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
++      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
++      "copied": false,
++      "metadata": {
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source",
++        "upstream": "https://busybox.net/downloads/",
++        "license": "GPL-2.0",
++        "licenseStatus": "verified-audited",
++        "packageVersion": "1.37.0-r3",
++        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
++        "runtimeDependencies": [
++          "libbusybox",
++          "libandroid_selinux",
++          "libpcre2_8"
++        ],
++        "notes": "não baixar em runtime; importar somente build arm64 auditado; recipe Termux não é seguro para build on-device; NEEDED/RUNPATH ajustados para jniLibs",
++        "official": "libcoreworker_busybox.so",
++        "aliases": [
++          "libcoreworker_busybox.so",
++          "busybox"
++        ],
++        "homepage": "https://busybox.net/",
++        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
++        "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++        "minBytes": 32768,
++        "dependencyPolicy": "busybox Termux é dinâmico; NEEDED libbusybox.so.1.37.0 foi ajustado para libbusybox.so e RUNPATH para $ORIGIN; dependências embutidas junto",
++        "onDeviceBuildSafe": false,
++        "buildNotes": [
++          "o recipe Termux marca BusyBox como não seguro para build on-device",
++          "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
++          "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
++        ],
++        "binarySha256": "58e3718246338da1a3edefcba09b789a6e487aa0306956203eb08220daa69f5f",
++        "binarySize": 4320,
++        "linkMode": "dynamic-with-bundled-dependencies",
++        "androidPatchNotes": [
++          "NEEDED libbusybox.so.1.37.0 -> libbusybox.so",
++          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++        ],
++        "sourceCompliance": {
++          "required": true,
++          "completeCorrespondingSourceReady": true,
++          "licenseTextIncluded": true,
++          "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++          "configUrlOrPath": "Termux recipe packages/busybox/build.sh plus binary-string patch notes in this metadata",
++          "modifications": "binary string patch: NEEDED libbusybox.so.1.37.0 -> libbusybox.so; RUNPATH Termux -> $ORIGIN"
++        }
++      },
++      "metadataOk": true,
++      "metadataErrors": [],
++      "isElf": true,
++      "elfClass": 2,
++      "machine": 183,
++      "isElf64": true,
++      "isAarch64": true,
++      "size": 4320,
++      "sha256": "58e3718246338da1a3edefcba09b789a6e487aa0306956203eb08220daa69f5f"
 +    },
 +    "libtalloc": {
-+      "source": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so",
-+      "dest": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so",
++      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
++      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
 +      "copied": false,
 +      "metadata": {
 +        "origin": "termux-package-source-reference",
@@ -92,10 +221,10 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +        "packageVersion": "2.4.3",
 +        "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
 +        "notes": "dependência de proot; build Termux não deve rodar no prefixo vivo do worker",
-+        "official": "libcoreworker_libtalloc.so",
++        "official": "libtalloc.so",
 +        "aliases": [
-+          "libcoreworker_libtalloc.so",
 +          "libtalloc.so",
++          "libcoreworker_libtalloc.so",
 +          "libtalloc.so.2",
 +          "libtalloc"
 +        ],
@@ -115,7 +244,7 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +        "runtimeDependencies": [
 +          "libc"
 +        ],
-+        "dependencyPolicy": "depende apenas de libc Android; duplicado como libtalloc.so para resolver NEEDED do proot patchado",
++        "dependencyPolicy": "depende apenas de libc Android; empacotado como libtalloc.so porque é o NEEDED do proot patchado",
 +        "sourceCompliance": {
 +          "required": true,
 +          "completeCorrespondingSourceReady": true,
@@ -134,6 +263,153 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +      "isAarch64": true,
 +      "size": 31440,
 +      "sha256": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb"
++    },
++    "libbusybox": {
++      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
++      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
++      "copied": false,
++      "metadata": {
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source-dependency",
++        "upstream": "https://busybox.net/downloads/",
++        "license": "GPL-2.0",
++        "licenseStatus": "verified-audited",
++        "packageVersion": "1.37.0-r3",
++        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
++        "runtimeDependencies": [
++          "libandroid_selinux",
++          "libpcre2_8"
++        ],
++        "notes": "lib interna do BusyBox; RUNPATH ajustado para $ORIGIN",
++        "official": "libbusybox.so",
++        "aliases": [
++          "libbusybox.so",
++          "libbusybox.so.1.37.0"
++        ],
++        "homepage": "https://busybox.net/",
++        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
++        "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++        "minBytes": 32768,
++        "dependencyPolicy": "lib interna do BusyBox; RUNPATH ajustado para $ORIGIN",
++        "onDeviceBuildSafe": false,
++        "buildNotes": [
++          "extraído do mesmo pacote Termux do BusyBox",
++          "empacotar como libbusybox.so para ser extraído pelo Android como native lib"
++        ],
++        "binarySha256": "a2d1a3c55b95da56af0758883ba46b2903f5b39907205a489936cca8a7c45c7a",
++        "binarySize": 864096,
++        "linkMode": "dynamic-with-bundled-dependencies",
++        "androidPatchNotes": [
++          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++        ],
++        "sourceCompliance": {
++          "required": true,
++          "completeCorrespondingSourceReady": true,
++          "licenseTextIncluded": true,
++          "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++          "configUrlOrPath": "Termux recipe packages/busybox/build.sh",
++          "modifications": "binary string patch: RUNPATH Termux -> $ORIGIN"
++        }
++      },
++      "metadataOk": true,
++      "metadataErrors": [],
++      "isElf": true,
++      "elfClass": 2,
++      "machine": 183,
++      "isElf64": true,
++      "isAarch64": true,
++      "size": 864096,
++      "sha256": "a2d1a3c55b95da56af0758883ba46b2903f5b39907205a489936cca8a7c45c7a"
++    },
++    "libandroid_selinux": {
++      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
++      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
++      "copied": false,
++      "metadata": {
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source-dependency",
++        "upstream": "https://android.googlesource.com/platform/external/selinux/",
++        "license": "public-domain|BSD-style-android-platform",
++        "licenseStatus": "verified-audited",
++        "packageVersion": "14.0.0.11-1",
++        "runtimeDependencies": [
++          "libpcre2_8"
++        ],
++        "notes": "dependência de libbusybox.so; RUNPATH ajustado para $ORIGIN",
++        "official": "libandroid-selinux.so",
++        "aliases": [
++          "libandroid-selinux.so",
++          "libandroid_selinux.so"
++        ],
++        "homepage": "https://selinuxproject.org/",
++        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libandroid-selinux/build.sh",
++        "minBytes": 32768,
++        "dependencyPolicy": "dependência de libbusybox.so; RUNPATH ajustado para $ORIGIN",
++        "onDeviceBuildSafe": false,
++        "buildNotes": [
++          "necessário para libbusybox.so do pacote Termux"
++        ],
++        "binarySha256": "372dfaa1a6712c013e734d99f04ff51a0b501744bd81e21b84d02d40f3f0aa60",
++        "binarySize": 179056,
++        "linkMode": "dynamic-with-bundled-dependencies",
++        "androidPatchNotes": [
++          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++        ]
++      },
++      "metadataOk": true,
++      "metadataErrors": [],
++      "isElf": true,
++      "elfClass": 2,
++      "machine": 183,
++      "isElf64": true,
++      "isAarch64": true,
++      "size": 179056,
++      "sha256": "372dfaa1a6712c013e734d99f04ff51a0b501744bd81e21b84d02d40f3f0aa60"
++    },
++    "libpcre2_8": {
++      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
++      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
++      "copied": false,
++      "metadata": {
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source-dependency",
++        "upstream": "https://github.com/PCRE2Project/pcre2",
++        "license": "BSD-3-Clause",
++        "licenseStatus": "verified-audited",
++        "packageVersion": "10.47",
++        "notes": "dependência de libandroid-selinux.so; RUNPATH ajustado para $ORIGIN",
++        "official": "libpcre2-8.so",
++        "aliases": [
++          "libpcre2-8.so",
++          "pcre2-8.so"
++        ],
++        "homepage": "https://pcre2project.github.io/pcre2/",
++        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/pcre2/build.sh",
++        "minBytes": 32768,
++        "runtimeDependencies": [
++          "libc"
++        ],
++        "dependencyPolicy": "dependência de libandroid-selinux.so; RUNPATH ajustado para $ORIGIN",
++        "onDeviceBuildSafe": false,
++        "buildNotes": [
++          "necessário para libandroid-selinux.so"
++        ],
++        "binarySha256": "db37a14ca7365815d0b0323f419cc457c2c20c209876ea64fbdb9d0676e64263",
++        "binarySize": 489384,
++        "linkMode": "self-contained",
++        "androidPatchNotes": [
++          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++        ]
++      },
++      "metadataOk": true,
++      "metadataErrors": [],
++      "isElf": true,
++      "elfClass": 2,
++      "machine": 183,
++      "isElf64": true,
++      "isAarch64": true,
++      "size": 489384,
++      "sha256": "db37a14ca7365815d0b0323f419cc457c2c20c209876ea64fbdb9d0676e64263"
 +    }
 +  },
 +  "policy": {
@@ -152,18 +428,18 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +    "allowUnverifiedExternal": false
 +  }
 +}
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-manifest.json /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-manifest.json
---- /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-manifest.json	1970-01-01 00:00:00.000000000 +0000
-+++ /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-manifest.json	2026-06-05 18:49:29.915104677 +0000
-@@ -0,0 +1,136 @@
+diff -ruN /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-manifest.json /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-manifest.json
+--- /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-manifest.json	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-manifest.json	2026-06-05 19:08:57.064666042 +0000
+@@ -0,0 +1,344 @@
 +{
-+  "schema": "core-worker-embedded-binaries-local-v5",
-+  "generatedAt": 1780685369,
++  "schema": "core-worker-embedded-binaries-local-v6",
++  "generatedAt": 1780686537,
 +  "dryRun": false,
 +  "targets": {
 +    "proot": {
-+      "source": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
-+      "dest": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
++      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
++      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
 +      "copied": false,
 +      "metadata": {
 +        "origin": "termux-package-source-reference",
@@ -187,17 +463,18 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
 +        "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
 +        "minBytes": 32768,
-+        "dependencyPolicy": "libtalloc.so embutido junto; PRoot foi ajustado para NEEDED libtalloc.so em vez de libtalloc.so.2 para compatibilidade com jniLibs",
++        "dependencyPolicy": "libtalloc.so embutido junto; PRoot ajustado para NEEDED libtalloc.so e RUNPATH $ORIGIN para compatibilidade com jniLibs",
 +        "buildNotes": [
 +          "usar build arm64/aarch64 auditado; não baixar em runtime",
 +          "Termux proot depende de libtalloc; não marcar pronto sem dependência estática ou libtalloc embutido",
 +          "PRoot usa ptrace/chroot-like sem root; testar dentro do rootfs real antes de liberar runner"
 +        ],
-+        "binarySha256": "0cf48f1bede941054dda89e9e18db1f8f1928abcff41c5919857dcfd5674fa32",
++        "binarySha256": "4b5fdefbfc52ea9af38cf6151480b337e3b8a2c0f9a55ad850c0c19e499a1493",
 +        "binarySize": 231808,
 +        "linkMode": "dynamic-with-bundled-dependencies",
 +        "androidPatchNotes": [
-+          "substituído NEEDED libtalloc.so.2 -> libtalloc.so mantendo o mesmo pacote Termux auditado",
++          "NEEDED libtalloc.so.2 -> libtalloc.so",
++          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN",
 +          "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no nativeLibraryDir durante o smoke test allowlist"
 +        ],
 +        "sourceCompliance": {
@@ -206,7 +483,7 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +          "licenseTextIncluded": true,
 +          "sourceUrl": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
 +          "configUrlOrPath": "Termux recipe packages/proot/build.sh",
-+          "modifications": "binary string patch: NEEDED libtalloc.so.2 -> libtalloc.so; no source-code modification bundled here"
++          "modifications": "binary string patch: NEEDED libtalloc.so.2 -> libtalloc.so; RUNPATH Termux -> $ORIGIN; no source-code modification bundled here"
 +        }
 +      },
 +      "metadataOk": true,
@@ -217,11 +494,71 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +      "isElf64": true,
 +      "isAarch64": true,
 +      "size": 231808,
-+      "sha256": "0cf48f1bede941054dda89e9e18db1f8f1928abcff41c5919857dcfd5674fa32"
++      "sha256": "4b5fdefbfc52ea9af38cf6151480b337e3b8a2c0f9a55ad850c0c19e499a1493"
++    },
++    "busybox": {
++      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
++      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
++      "copied": false,
++      "metadata": {
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source",
++        "upstream": "https://busybox.net/downloads/",
++        "license": "GPL-2.0",
++        "licenseStatus": "verified-audited",
++        "packageVersion": "1.37.0-r3",
++        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
++        "runtimeDependencies": [
++          "libbusybox",
++          "libandroid_selinux",
++          "libpcre2_8"
++        ],
++        "notes": "não baixar em runtime; importar somente build arm64 auditado; recipe Termux não é seguro para build on-device; NEEDED/RUNPATH ajustados para jniLibs",
++        "official": "libcoreworker_busybox.so",
++        "aliases": [
++          "libcoreworker_busybox.so",
++          "busybox"
++        ],
++        "homepage": "https://busybox.net/",
++        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
++        "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++        "minBytes": 32768,
++        "dependencyPolicy": "busybox Termux é dinâmico; NEEDED libbusybox.so.1.37.0 foi ajustado para libbusybox.so e RUNPATH para $ORIGIN; dependências embutidas junto",
++        "onDeviceBuildSafe": false,
++        "buildNotes": [
++          "o recipe Termux marca BusyBox como não seguro para build on-device",
++          "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
++          "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
++        ],
++        "binarySha256": "58e3718246338da1a3edefcba09b789a6e487aa0306956203eb08220daa69f5f",
++        "binarySize": 4320,
++        "linkMode": "dynamic-with-bundled-dependencies",
++        "androidPatchNotes": [
++          "NEEDED libbusybox.so.1.37.0 -> libbusybox.so",
++          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++        ],
++        "sourceCompliance": {
++          "required": true,
++          "completeCorrespondingSourceReady": true,
++          "licenseTextIncluded": true,
++          "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++          "configUrlOrPath": "Termux recipe packages/busybox/build.sh plus binary-string patch notes in this metadata",
++          "modifications": "binary string patch: NEEDED libbusybox.so.1.37.0 -> libbusybox.so; RUNPATH Termux -> $ORIGIN"
++        }
++      },
++      "metadataOk": true,
++      "metadataErrors": [],
++      "isElf": true,
++      "elfClass": 2,
++      "machine": 183,
++      "isElf64": true,
++      "isAarch64": true,
++      "size": 4320,
++      "sha256": "58e3718246338da1a3edefcba09b789a6e487aa0306956203eb08220daa69f5f"
 +    },
 +    "libtalloc": {
-+      "source": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so",
-+      "dest": "/mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so",
++      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
++      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
 +      "copied": false,
 +      "metadata": {
 +        "origin": "termux-package-source-reference",
@@ -232,10 +569,10 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +        "packageVersion": "2.4.3",
 +        "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
 +        "notes": "dependência de proot; build Termux não deve rodar no prefixo vivo do worker",
-+        "official": "libcoreworker_libtalloc.so",
++        "official": "libtalloc.so",
 +        "aliases": [
-+          "libcoreworker_libtalloc.so",
 +          "libtalloc.so",
++          "libcoreworker_libtalloc.so",
 +          "libtalloc.so.2",
 +          "libtalloc"
 +        ],
@@ -255,7 +592,7 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +        "runtimeDependencies": [
 +          "libc"
 +        ],
-+        "dependencyPolicy": "depende apenas de libc Android; duplicado como libtalloc.so para resolver NEEDED do proot patchado",
++        "dependencyPolicy": "depende apenas de libc Android; empacotado como libtalloc.so porque é o NEEDED do proot patchado",
 +        "sourceCompliance": {
 +          "required": true,
 +          "completeCorrespondingSourceReady": true,
@@ -274,6 +611,153 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +      "isAarch64": true,
 +      "size": 31440,
 +      "sha256": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb"
++    },
++    "libbusybox": {
++      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
++      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
++      "copied": false,
++      "metadata": {
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source-dependency",
++        "upstream": "https://busybox.net/downloads/",
++        "license": "GPL-2.0",
++        "licenseStatus": "verified-audited",
++        "packageVersion": "1.37.0-r3",
++        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
++        "runtimeDependencies": [
++          "libandroid_selinux",
++          "libpcre2_8"
++        ],
++        "notes": "lib interna do BusyBox; RUNPATH ajustado para $ORIGIN",
++        "official": "libbusybox.so",
++        "aliases": [
++          "libbusybox.so",
++          "libbusybox.so.1.37.0"
++        ],
++        "homepage": "https://busybox.net/",
++        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
++        "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++        "minBytes": 32768,
++        "dependencyPolicy": "lib interna do BusyBox; RUNPATH ajustado para $ORIGIN",
++        "onDeviceBuildSafe": false,
++        "buildNotes": [
++          "extraído do mesmo pacote Termux do BusyBox",
++          "empacotar como libbusybox.so para ser extraído pelo Android como native lib"
++        ],
++        "binarySha256": "a2d1a3c55b95da56af0758883ba46b2903f5b39907205a489936cca8a7c45c7a",
++        "binarySize": 864096,
++        "linkMode": "dynamic-with-bundled-dependencies",
++        "androidPatchNotes": [
++          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++        ],
++        "sourceCompliance": {
++          "required": true,
++          "completeCorrespondingSourceReady": true,
++          "licenseTextIncluded": true,
++          "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++          "configUrlOrPath": "Termux recipe packages/busybox/build.sh",
++          "modifications": "binary string patch: RUNPATH Termux -> $ORIGIN"
++        }
++      },
++      "metadataOk": true,
++      "metadataErrors": [],
++      "isElf": true,
++      "elfClass": 2,
++      "machine": 183,
++      "isElf64": true,
++      "isAarch64": true,
++      "size": 864096,
++      "sha256": "a2d1a3c55b95da56af0758883ba46b2903f5b39907205a489936cca8a7c45c7a"
++    },
++    "libandroid_selinux": {
++      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
++      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
++      "copied": false,
++      "metadata": {
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source-dependency",
++        "upstream": "https://android.googlesource.com/platform/external/selinux/",
++        "license": "public-domain|BSD-style-android-platform",
++        "licenseStatus": "verified-audited",
++        "packageVersion": "14.0.0.11-1",
++        "runtimeDependencies": [
++          "libpcre2_8"
++        ],
++        "notes": "dependência de libbusybox.so; RUNPATH ajustado para $ORIGIN",
++        "official": "libandroid-selinux.so",
++        "aliases": [
++          "libandroid-selinux.so",
++          "libandroid_selinux.so"
++        ],
++        "homepage": "https://selinuxproject.org/",
++        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libandroid-selinux/build.sh",
++        "minBytes": 32768,
++        "dependencyPolicy": "dependência de libbusybox.so; RUNPATH ajustado para $ORIGIN",
++        "onDeviceBuildSafe": false,
++        "buildNotes": [
++          "necessário para libbusybox.so do pacote Termux"
++        ],
++        "binarySha256": "372dfaa1a6712c013e734d99f04ff51a0b501744bd81e21b84d02d40f3f0aa60",
++        "binarySize": 179056,
++        "linkMode": "dynamic-with-bundled-dependencies",
++        "androidPatchNotes": [
++          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++        ]
++      },
++      "metadataOk": true,
++      "metadataErrors": [],
++      "isElf": true,
++      "elfClass": 2,
++      "machine": 183,
++      "isElf64": true,
++      "isAarch64": true,
++      "size": 179056,
++      "sha256": "372dfaa1a6712c013e734d99f04ff51a0b501744bd81e21b84d02d40f3f0aa60"
++    },
++    "libpcre2_8": {
++      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
++      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
++      "copied": false,
++      "metadata": {
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source-dependency",
++        "upstream": "https://github.com/PCRE2Project/pcre2",
++        "license": "BSD-3-Clause",
++        "licenseStatus": "verified-audited",
++        "packageVersion": "10.47",
++        "notes": "dependência de libandroid-selinux.so; RUNPATH ajustado para $ORIGIN",
++        "official": "libpcre2-8.so",
++        "aliases": [
++          "libpcre2-8.so",
++          "pcre2-8.so"
++        ],
++        "homepage": "https://pcre2project.github.io/pcre2/",
++        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/pcre2/build.sh",
++        "minBytes": 32768,
++        "runtimeDependencies": [
++          "libc"
++        ],
++        "dependencyPolicy": "dependência de libandroid-selinux.so; RUNPATH ajustado para $ORIGIN",
++        "onDeviceBuildSafe": false,
++        "buildNotes": [
++          "necessário para libandroid-selinux.so"
++        ],
++        "binarySha256": "db37a14ca7365815d0b0323f419cc457c2c20c209876ea64fbdb9d0676e64263",
++        "binarySize": 489384,
++        "linkMode": "self-contained",
++        "androidPatchNotes": [
++          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++        ]
++      },
++      "metadataOk": true,
++      "metadataErrors": [],
++      "isElf": true,
++      "elfClass": 2,
++      "machine": 183,
++      "isElf64": true,
++      "isAarch64": true,
++      "size": 489384,
++      "sha256": "db37a14ca7365815d0b0323f419cc457c2c20c209876ea64fbdb9d0676e64263"
 +    }
 +  },
 +  "policy": {
@@ -292,13 +776,13 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +    "allowUnverifiedExternal": false
 +  }
 +}
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json
---- /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json	1970-01-01 00:00:00.000000000 +0000
-+++ /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json	2026-06-05 18:49:31.235285381 +0000
-@@ -0,0 +1,144 @@
+diff -ruN /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json
+--- /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-source-plan.json	2026-06-05 19:08:55.945571359 +0000
+@@ -0,0 +1,219 @@
 +{
-+  "schema": "core-worker-embedded-binaries-source-plan-v8",
-+  "generatedAt": 1780685371,
++  "schema": "core-worker-embedded-binaries-source-plan-v9",
++  "generatedAt": 1780686535,
 +  "abi": "arm64-v8a",
 +  "androidMinSdk": 26,
 +  "policy": {
@@ -365,10 +849,10 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +      ]
 +    },
 +    "libtalloc": {
-+      "official": "libcoreworker_libtalloc.so",
++      "official": "libtalloc.so",
 +      "aliases": [
-+        "libcoreworker_libtalloc.so",
 +        "libtalloc.so",
++        "libcoreworker_libtalloc.so",
 +        "libtalloc.so.2",
 +        "libtalloc"
 +      ],
@@ -394,7 +878,6 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +      "official": "libcoreworker_busybox.so",
 +      "aliases": [
 +        "libcoreworker_busybox.so",
-+        "libbusybox.so",
 +        "busybox"
 +      ],
 +      "origin": "termux-package-source-reference",
@@ -409,14 +892,90 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +      "licenseStatus": "verify-before-bundling",
 +      "minBytes": 32768,
 +      "runtimeDependencies": [
-+        "libandroid-selinux"
++        "libbusybox",
++        "libandroid_selinux",
++        "libpcre2_8"
 +      ],
-+      "dependencyPolicy": "usar build estático/self-contained ou registrar/bundlar dependências dinâmicas auditadas",
++      "dependencyPolicy": "binário Termux é dinâmico; bundle obrigatório: libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
 +      "onDeviceBuildSafe": false,
 +      "buildNotes": [
 +        "o recipe Termux marca BusyBox como não seguro para build on-device",
 +        "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
 +        "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
++      ]
++    },
++    "libbusybox": {
++      "official": "libbusybox.so",
++      "aliases": [
++        "libbusybox.so",
++        "libbusybox.so.1.37.0"
++      ],
++      "origin": "termux-package-source-reference",
++      "sourceKind": "external-source-dependency",
++      "upstream": "https://busybox.net/downloads/",
++      "homepage": "https://busybox.net/",
++      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
++      "packageVersion": "1.37.0-r3",
++      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
++      "license": "GPL-2.0",
++      "licenseStatus": "verify-before-bundling",
++      "minBytes": 32768,
++      "runtimeDependencies": [
++        "libandroid_selinux",
++        "libpcre2_8"
++      ],
++      "dependencyPolicy": "dependência dinâmica do busybox; RUNPATH ajustado para $ORIGIN",
++      "onDeviceBuildSafe": false,
++      "buildNotes": [
++        "extraído do mesmo pacote Termux do BusyBox",
++        "empacotar como libbusybox.so para ser extraído pelo Android como native lib"
++      ]
++    },
++    "libandroid_selinux": {
++      "official": "libandroid-selinux.so",
++      "aliases": [
++        "libandroid-selinux.so",
++        "libandroid_selinux.so"
++      ],
++      "origin": "termux-package-source-reference",
++      "sourceKind": "external-source-dependency",
++      "upstream": "https://android.googlesource.com/platform/external/selinux/",
++      "homepage": "https://selinuxproject.org/",
++      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libandroid-selinux/build.sh",
++      "packageVersion": "14.0.0.11-1",
++      "license": "public-domain|BSD-style-android-platform",
++      "licenseStatus": "verify-before-bundling",
++      "minBytes": 32768,
++      "runtimeDependencies": [
++        "libpcre2_8"
++      ],
++      "dependencyPolicy": "dependência dinâmica de libbusybox; RUNPATH ajustado para $ORIGIN",
++      "onDeviceBuildSafe": false,
++      "buildNotes": [
++        "necessário para libbusybox.so do pacote Termux"
++      ]
++    },
++    "libpcre2_8": {
++      "official": "libpcre2-8.so",
++      "aliases": [
++        "libpcre2-8.so",
++        "pcre2-8.so"
++      ],
++      "origin": "termux-package-source-reference",
++      "sourceKind": "external-source-dependency",
++      "upstream": "https://github.com/PCRE2Project/pcre2",
++      "homepage": "https://pcre2project.github.io/pcre2/",
++      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/pcre2/build.sh",
++      "packageVersion": "10.47",
++      "license": "BSD-3-Clause",
++      "licenseStatus": "verify-before-bundling",
++      "minBytes": 32768,
++      "runtimeDependencies": [],
++      "dependencyPolicy": "dependência dinâmica de libandroid-selinux; RUNPATH ajustado para $ORIGIN",
++      "onDeviceBuildSafe": false,
++      "buildNotes": [
++        "necessário para libandroid-selinux.so"
 +      ]
 +    },
 +    "box64": {
@@ -440,9 +999,26 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +    }
 +  }
 +}
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-2.0.txt /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-2.0.txt
---- /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-2.0.txt	1970-01-01 00:00:00.000000000 +0000
-+++ /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-2.0.txt	2026-06-05 18:48:01.953136900 +0000
+diff -ruN /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/CORE-LINUX-BINARIES-NOTICE.md /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/CORE-LINUX-BINARIES-NOTICE.md
+--- /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/CORE-LINUX-BINARIES-NOTICE.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/CORE-LINUX-BINARIES-NOTICE.md	2026-06-05 19:09:42.849304944 +0000
+@@ -0,0 +1,13 @@
++# Core Linux embedded binaries notice
++
++This APK stage bundles audited aarch64 artifacts imported from Termux packages for private/internal Core Worker testing. Runtime downloads are disabled.
++
++Bundled components:
++
++- PRoot 5.1.107.76 — GPL-2.0 — source: https://github.com/termux/proot/archive/v5.1.107.76.zip
++- BusyBox 1.37.0-r3 — GPL-2.0 — source: https://busybox.net/downloads/busybox-1.37.0.tar.bz2
++- talloc 2.4.3 — GPL-3.0 — source: https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz
++- libandroid-selinux 14.0.0.11-1 — Android/SELinux platform package — source via Termux package recipe
++- PCRE2 10.47 — BSD-3-Clause — source via PCRE2 upstream/Termux package recipe
++
++Public redistribution needs a full corresponding-source bundle, license texts, Termux build recipes/configs, and patch notes matching the exact binary hashes in `embedded-binaries-manifest.json`.
+diff -ruN /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-2.0.txt /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-2.0.txt
+--- /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-2.0.txt	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-2.0.txt	2026-06-05 19:10:08.530245709 +0000
 @@ -0,0 +1,338 @@
 +                    GNU GENERAL PUBLIC LICENSE
 +                       Version 2, June 1991
@@ -782,9 +1358,9 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +consider it more useful to permit linking proprietary applications with the
 +library.  If this is what you want to do, use the GNU Lesser General
 +Public License instead of this License.
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-3.0.txt /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-3.0.txt
---- /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-3.0.txt	1970-01-01 00:00:00.000000000 +0000
-+++ /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-3.0.txt	2026-06-05 18:48:01.953742229 +0000
+diff -ruN /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-3.0.txt /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-3.0.txt
+--- /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-3.0.txt	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/licenses/GPL-3.0.txt	2026-06-05 19:10:08.546627130 +0000
 @@ -0,0 +1,674 @@
 +                    GNU GENERAL PUBLIC LICENSE
 +                       Version 3, 29 June 2007
@@ -1460,364 +2036,685 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +the library.  If this is what you want to do, use the GNU Lesser General
 +Public License instead of this License.  But first, please read
 +<https://www.gnu.org/licenses/why-not-lgpl.html>.
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/termux-deb-import-report.json /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/assets/core-linux/termux-deb-import-report.json
---- /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/termux-deb-import-report.json	1970-01-01 00:00:00.000000000 +0000
-+++ /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/assets/core-linux/termux-deb-import-report.json	2026-06-05 18:48:01.952643988 +0000
-@@ -0,0 +1,61 @@
+diff -ruN /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/termux-deb-import-report-v9.json /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/termux-deb-import-report-v9.json
+--- /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/termux-deb-import-report-v9.json	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/termux-deb-import-report-v9.json	2026-06-05 19:09:42.832414237 +0000
+@@ -0,0 +1,58 @@
 +{
-+  "schema": "core-worker-termux-deb-import-report-v8",
-+  "generatedAt": 1780685281,
-+  "abi": "arm64-v8a",
-+  "imported": {
-+    "proot": {
-+      "path": "android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
-+      "size": 231808,
-+      "sha256": "0cf48f1bede941054dda89e9e18db1f8f1928abcff41c5919857dcfd5674fa32",
-+      "patches": [
-+        "libtalloc.so.2->libtalloc.so (1)"
++  "schema": "core-worker-termux-deb-import-report-v9",
++  "stage": "core-linux-embedded-binaries-intake-v9",
++  "summary": "PRoot + BusyBox + cadeia dinâmica do BusyBox importados de pacotes Termux aarch64 auditados; execução real segue bloqueada até rootfs real + smoke allowlist no APK instalado.",
++  "sourceZip": "binarios_atualizado.zip",
++  "imported": [
++    "libcoreworker_proot.so",
++    "libcoreworker_proot_loader.so",
++    "libcoreworker_proot_loader32.so",
++    "libtalloc.so",
++    "libcoreworker_libtalloc.so",
++    "libcoreworker_busybox.so",
++    "libbusybox.so",
++    "libandroid-selinux.so",
++    "libpcre2-8.so"
++  ],
++  "binaryPatches": [
++    {
++      "file": "libcoreworker_proot.so",
++      "changes": [
++        "NEEDED libtalloc.so.2 -> libtalloc.so",
++        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
 +      ]
 +    },
-+    "proot_loader": {
-+      "path": "android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot_loader.so",
-+      "size": 18136,
-+      "sha256": "44ef39c1e1a18c09f6e4c4b5d6f8bba82d30596598bd155ec162d05c5122ff04",
-+      "patches": []
++    {
++      "file": "libcoreworker_busybox.so",
++      "changes": [
++        "NEEDED libbusybox.so.1.37.0 -> libbusybox.so",
++        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++      ]
 +    },
-+    "proot_loader32": {
-+      "path": "android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot_loader32.so",
-+      "size": 6244,
-+      "sha256": "25f6bd90bc5a3d3088026289a0d3eaf3e502bd2b00e5cb74fadd9791132efa34",
-+      "patches": []
++    {
++      "file": "libbusybox.so",
++      "changes": ["RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"]
 +    },
-+    "libtalloc": {
-+      "path": "android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so",
-+      "size": 31440,
-+      "sha256": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb",
-+      "patches": []
++    {
++      "file": "libandroid-selinux.so",
++      "changes": ["RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"]
 +    },
-+    "libtalloc_runtime_name": {
-+      "path": "android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
-+      "size": 31440,
-+      "sha256": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb",
-+      "patches": []
++    {
++      "file": "libpcre2-8.so",
++      "changes": ["RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"]
 +    }
-+  },
-+  "blocked": {
-+    "busybox_launcher_blocked": {
-+      "source": "busybox_1.37.0-3_aarch64.deb:/data/data/com.termux/files/usr/bin/busybox",
-+      "size": 4320,
-+      "sha256": "61e50ba9f8dadc4fb9500631a70c6bec1342b044567921715a9abf64b9b12b91",
-+      "blockedReason": "launcher depende de libbusybox.so.1.37.0"
-+    },
-+    "busybox_library_blocked": {
-+      "source": "busybox_1.37.0-3_aarch64.deb:/data/data/com.termux/files/usr/lib/libbusybox.so.1.37.0",
-+      "size": 864096,
-+      "sha256": "1acedc5fd667e6c887348ce01b7fad3b1c5c03f248af6ea81690897a7a03ba91",
-+      "blockedReason": "libbusybox.so.1.37.0 depende de libandroid-selinux.so, que não veio em binarios.zip"
-+    }
-+  },
-+  "policy": {
-+    "termuxRequired": false,
-+    "noRuntimeDownload": true,
-+    "noExecutionDuringBuild": true,
-+    "busyboxNotStagedUntilLibandroidSelinuxProvided": true,
-+    "prootLoaderRequired": true
-+  },
-+  "nextRequiredPackage": "libandroid-selinux_*_aarch64.deb"
++  ],
++  "blocked": [
++    "runner real permanece bloqueado no preflight v9",
++    "sem shell livre",
++    "sem comando remoto arbitrario",
++    "Bedrock/Box64 continuam fora desta etapa"
++  ],
++  "next": [
++    "aplicar patch e gerar APK 0.5.79",
++    "instalar no celular",
++    "rodar preflight v9 e confirmar nativeLibraryDir extraído",
++    "importar/validar rootfs real",
++    "executar smoke allowlist APK -> runner -> proot -> busybox -> rootfs"
++  ]
 +}
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
---- /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 15:19:30.000000000 +0000
-+++ /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 18:49:00.882643997 +0000
-@@ -20,7 +20,7 @@
- import java.util.zip.ZipFile;
- 
- /**
-- * Preflight v7 do runner Core Linux.
-+ * Preflight v8 do runner Core Linux.
-  *
-  * Esta etapa apenas detecta requisitos e escreve estado. Ela não inicia Bedrock,
-  * não executa Box64/proot/busybox, não abre shell livre e não aceita comando remoto.
-@@ -55,18 +55,21 @@
-             String[] executorNames = new String[]{"libcoreworker_executor.so"};
+diff -ruN /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/termux-deb-import-report.json /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/termux-deb-import-report.json
+--- /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/termux-deb-import-report.json	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/termux-deb-import-report.json	2026-06-05 19:10:13.855997486 +0000
+@@ -0,0 +1,58 @@
++{
++  "schema": "core-worker-termux-deb-import-report-v9",
++  "stage": "core-linux-embedded-binaries-intake-v9",
++  "summary": "PRoot + BusyBox + cadeia dinâmica do BusyBox importados de pacotes Termux aarch64 auditados; execução real segue bloqueada até rootfs real + smoke allowlist no APK instalado.",
++  "sourceZip": "binarios_atualizado.zip",
++  "imported": [
++    "libcoreworker_proot.so",
++    "libcoreworker_proot_loader.so",
++    "libcoreworker_proot_loader32.so",
++    "libtalloc.so",
++    "libcoreworker_libtalloc.so",
++    "libcoreworker_busybox.so",
++    "libbusybox.so",
++    "libandroid-selinux.so",
++    "libpcre2-8.so"
++  ],
++  "binaryPatches": [
++    {
++      "file": "libcoreworker_proot.so",
++      "changes": [
++        "NEEDED libtalloc.so.2 -> libtalloc.so",
++        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++      ]
++    },
++    {
++      "file": "libcoreworker_busybox.so",
++      "changes": [
++        "NEEDED libbusybox.so.1.37.0 -> libbusybox.so",
++        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++      ]
++    },
++    {
++      "file": "libbusybox.so",
++      "changes": ["RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"]
++    },
++    {
++      "file": "libandroid-selinux.so",
++      "changes": ["RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"]
++    },
++    {
++      "file": "libpcre2-8.so",
++      "changes": ["RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"]
++    }
++  ],
++  "blocked": [
++    "runner real permanece bloqueado no preflight v9",
++    "sem shell livre",
++    "sem comando remoto arbitrario",
++    "Bedrock/Box64 continuam fora desta etapa"
++  ],
++  "next": [
++    "aplicar patch e gerar APK 0.5.79",
++    "instalar no celular",
++    "rodar preflight v9 e confirmar nativeLibraryDir extraído",
++    "importar/validar rootfs real",
++    "executar smoke allowlist APK -> runner -> proot -> busybox -> rootfs"
++  ]
++}
+diff -ruN /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
+--- /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 15:52:50.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 19:08:12.632177106 +0000
+@@ -56,8 +56,11 @@
              String[] runnerNames = new String[]{"libcoreworker_runner.so"};
              String[] prootNames = new String[]{"libcoreworker_proot.so", "libproot.so"};
-+            String[] prootLoaderNames = new String[]{"libcoreworker_proot_loader.so"};
-             String[] busyboxNames = new String[]{"libcoreworker_busybox.so", "libbusybox.so"};
-             String[] libtallocNames = new String[]{"libcoreworker_libtalloc.so", "libtalloc.so", "libtalloc.so.2"};
+             String[] prootLoaderNames = new String[]{"libcoreworker_proot_loader.so"};
+-            String[] busyboxNames = new String[]{"libcoreworker_busybox.so", "libbusybox.so"};
+-            String[] libtallocNames = new String[]{"libcoreworker_libtalloc.so", "libtalloc.so", "libtalloc.so.2"};
++            String[] busyboxNames = new String[]{"libcoreworker_busybox.so"};
++            String[] libtallocNames = new String[]{"libtalloc.so"};
++            String[] libBusyboxNames = new String[]{"libbusybox.so"};
++            String[] libAndroidSelinuxNames = new String[]{"libandroid-selinux.so"};
++            String[] libPcre2Names = new String[]{"libpcre2-8.so"};
              String[] box64Names = new String[]{"libcoreworker_box64.so", "libbox64.so"};
              File embeddedExecutor = firstExisting(nativeDir, executorNames);
              File embeddedRunner = firstExisting(nativeDir, runnerNames);
-             File embeddedProot = firstExisting(nativeDir, prootNames);
-+            File embeddedProotLoader = firstExisting(nativeDir, prootLoaderNames);
+@@ -65,6 +68,9 @@
+             File embeddedProotLoader = firstExisting(nativeDir, prootLoaderNames);
              File embeddedBusybox = firstExisting(nativeDir, busyboxNames);
              File embeddedLibtalloc = firstExisting(nativeDir, libtallocNames);
++            File embeddedLibBusybox = firstExisting(nativeDir, libBusyboxNames);
++            File embeddedLibAndroidSelinux = firstExisting(nativeDir, libAndroidSelinuxNames);
++            File embeddedLibPcre2 = firstExisting(nativeDir, libPcre2Names);
              File embeddedBox64 = firstExisting(nativeDir, box64Names);
              JSONObject apkExecutor = apkNativeInfo(context, executorNames);
              JSONObject apkRunner = apkNativeInfo(context, runnerNames);
-             JSONObject apkProot = apkNativeInfo(context, prootNames);
-+            JSONObject apkProotLoader = apkNativeInfo(context, prootLoaderNames);
+@@ -72,6 +78,9 @@
+             JSONObject apkProotLoader = apkNativeInfo(context, prootLoaderNames);
              JSONObject apkBusybox = apkNativeInfo(context, busyboxNames);
              JSONObject apkLibtalloc = apkNativeInfo(context, libtallocNames);
++            JSONObject apkLibBusybox = apkNativeInfo(context, libBusyboxNames);
++            JSONObject apkLibAndroidSelinux = apkNativeInfo(context, libAndroidSelinuxNames);
++            JSONObject apkLibPcre2 = apkNativeInfo(context, libPcre2Names);
              JSONObject apkBox64 = apkNativeInfo(context, box64Names);
-@@ -85,17 +88,20 @@
+             File writableBox64 = firstExisting(new File(base, "bin/box64"), new File(base, "box64/box64"));
+             boolean writableBox64Blocked = writableBox64 != null && Build.VERSION.SDK_INT >= 29 && isInside(writableBox64, dataDir);
+@@ -88,22 +97,31 @@
              boolean runnerLoadedByJni = runnerGuard.optBoolean("loaded", false);
              boolean executorLoadedByJni = nativeExecutor.optJSONObject("nativeBridge") != null
                      && nativeExecutor.optJSONObject("nativeBridge").optBoolean("loaded", false);
--            JSONObject embeddedAssets = embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedBusybox, embeddedLibtalloc, embeddedBox64,
--                    executorNames, runnerNames, prootNames, busyboxNames, libtallocNames, box64Names,
--                    executorLoadedByJni, runnerLoadedByJni, apkExecutor, apkRunner, apkProot, apkBusybox, apkLibtalloc, apkBox64,
-+            JSONObject embeddedAssets = embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedProotLoader, embeddedBusybox, embeddedLibtalloc, embeddedBox64,
-+                    executorNames, runnerNames, prootNames, prootLoaderNames, busyboxNames, libtallocNames, box64Names,
-+                    executorLoadedByJni, runnerLoadedByJni, apkExecutor, apkRunner, apkProot, apkProotLoader, apkBusybox, apkLibtalloc, apkBox64,
+-            JSONObject embeddedAssets = embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedProotLoader, embeddedBusybox, embeddedLibtalloc, embeddedBox64,
+-                    executorNames, runnerNames, prootNames, prootLoaderNames, busyboxNames, libtallocNames, box64Names,
+-                    executorLoadedByJni, runnerLoadedByJni, apkExecutor, apkRunner, apkProot, apkProotLoader, apkBusybox, apkLibtalloc, apkBox64,
++            JSONObject embeddedAssets = embeddedSnapshot(nativeDir, dataDir, embeddedExecutor, embeddedRunner, embeddedProot, embeddedProotLoader,
++                    embeddedBusybox, embeddedLibtalloc, embeddedLibBusybox, embeddedLibAndroidSelinux, embeddedLibPcre2, embeddedBox64,
++                    executorNames, runnerNames, prootNames, prootLoaderNames, busyboxNames, libtallocNames, libBusyboxNames, libAndroidSelinuxNames, libPcre2Names, box64Names,
++                    executorLoadedByJni, runnerLoadedByJni, apkExecutor, apkRunner, apkProot, apkProotLoader, apkBusybox, apkLibtalloc, apkLibBusybox, apkLibAndroidSelinux, apkLibPcre2, apkBox64,
                      localManifest, sourcePlan);
              JSONObject runnerInfo = embeddedAssets.optJSONObject("runner") == null ? new JSONObject() : embeddedAssets.optJSONObject("runner");
              JSONObject prootInfo = embeddedAssets.optJSONObject("proot") == null ? new JSONObject() : embeddedAssets.optJSONObject("proot");
-+            JSONObject prootLoaderInfo = embeddedAssets.optJSONObject("prootLoader") == null ? new JSONObject() : embeddedAssets.optJSONObject("prootLoader");
+             JSONObject prootLoaderInfo = embeddedAssets.optJSONObject("prootLoader") == null ? new JSONObject() : embeddedAssets.optJSONObject("prootLoader");
              JSONObject busyboxInfo = embeddedAssets.optJSONObject("busybox") == null ? new JSONObject() : embeddedAssets.optJSONObject("busybox");
              JSONObject libtallocInfo = embeddedAssets.optJSONObject("libtalloc") == null ? new JSONObject() : embeddedAssets.optJSONObject("libtalloc");
++            JSONObject libBusyboxInfo = embeddedAssets.optJSONObject("libbusybox") == null ? new JSONObject() : embeddedAssets.optJSONObject("libbusybox");
++            JSONObject libAndroidSelinuxInfo = embeddedAssets.optJSONObject("libandroid_selinux") == null ? new JSONObject() : embeddedAssets.optJSONObject("libandroid_selinux");
++            JSONObject libPcre2Info = embeddedAssets.optJSONObject("libpcre2_8") == null ? new JSONObject() : embeddedAssets.optJSONObject("libpcre2_8");
              JSONObject box64Info = embeddedAssets.optJSONObject("box64") == null ? new JSONObject() : embeddedAssets.optJSONObject("box64");
              boolean runnerAssetReady = runnerInfo.optBoolean("allowedForFutureExecution", false);
--            boolean prootReady = prootInfo.optBoolean("allowedForFutureExecution", false);
-+            boolean prootBinaryReady = prootInfo.optBoolean("allowedForFutureExecution", false);
-+            boolean prootLoaderReady = prootLoaderInfo.optBoolean("allowedForFutureExecution", false);
-+            boolean prootReady = prootBinaryReady && prootLoaderReady;
-             boolean busyboxReady = busyboxInfo.optBoolean("allowedForFutureExecution", false);
+             boolean prootBinaryReady = prootInfo.optBoolean("allowedForFutureExecution", false);
+             boolean prootLoaderReady = prootLoaderInfo.optBoolean("allowedForFutureExecution", false);
+             boolean prootReady = prootBinaryReady && prootLoaderReady;
+-            boolean busyboxReady = busyboxInfo.optBoolean("allowedForFutureExecution", false);
++            boolean busyboxBinaryReady = busyboxInfo.optBoolean("allowedForFutureExecution", false);
              boolean libtallocReady = libtallocInfo.optBoolean("allowedForFutureExecution", false);
++            boolean libBusyboxReady = libBusyboxInfo.optBoolean("allowedForFutureExecution", false);
++            boolean libAndroidSelinuxReady = libAndroidSelinuxInfo.optBoolean("allowedForFutureExecution", false);
++            boolean libPcre2Ready = libPcre2Info.optBoolean("allowedForFutureExecution", false);
++            boolean busyboxDependencyReady = libBusyboxReady && libAndroidSelinuxReady && libPcre2Ready;
++            boolean busyboxReady = busyboxBinaryReady && busyboxDependencyReady;
              boolean box64Ready = box64Info.optBoolean("allowedForFutureExecution", false);
-@@ -121,7 +127,8 @@
-             addCheck(baseChecks, missing, "rootfs_real", "Rootfs real validado", rootfsReal, "importe/valide um rootfs real antes do runner");
-             addCheck(baseChecks, missing, "native_executor", "Executor nativo do APK", nativeExecutorReady, "embutir/testar executor nativo allowlist");
+             boolean bedrockServerReady = bedrockServer != null && bedrockServer.exists();
+             boolean propertiesReady = properties != null && properties.exists();
+@@ -129,7 +147,10 @@
              addCheck(baseChecks, missing, "core_runner_asset", "core-runner embutido no APK", runnerAssetReady, "embutir core-runner arm64 como libcoreworker_runner.so");
--            addCheck(baseChecks, missing, "proot_embedded", "proot embutido no APK", prootReady, "embutir proot arm64 auditado com metadata aprovada");
-+            addCheck(baseChecks, missing, "proot_embedded", "proot embutido no APK", prootBinaryReady, "embutir proot arm64 auditado com metadata aprovada");
-+            addCheck(baseChecks, missing, "proot_loader_embedded", "loader do proot embutido no APK", prootLoaderReady, "embutir loader do proot extraído do pacote auditado");
-             addCheck(baseChecks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox arm64 auditado com metadata aprovada");
+             addCheck(baseChecks, missing, "proot_embedded", "proot embutido no APK", prootBinaryReady, "embutir proot arm64 auditado com metadata aprovada");
+             addCheck(baseChecks, missing, "proot_loader_embedded", "loader do proot embutido no APK", prootLoaderReady, "embutir loader do proot extraído do pacote auditado");
+-            addCheck(baseChecks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox arm64 auditado com metadata aprovada");
++            addCheck(baseChecks, missing, "busybox_embedded", "busybox embutido no APK", busyboxBinaryReady, "embutir busybox arm64 auditado com metadata aprovada");
++            addCheck(baseChecks, missing, "libbusybox_embedded", "libbusybox embutido no APK", libBusyboxReady, "embutir libbusybox.so junto do busybox dinâmico");
++            addCheck(baseChecks, missing, "libandroid_selinux_embedded", "libandroid-selinux embutido no APK", libAndroidSelinuxReady, "embutir libandroid-selinux.so junto do busybox dinâmico");
++            addCheck(baseChecks, missing, "libpcre2_8_embedded", "libpcre2-8 embutido no APK", libPcre2Ready, "embutir libpcre2-8.so junto do busybox dinâmico");
              if (prootNeedsLibtalloc) {
                  addCheck(baseChecks, missing, "libtalloc_embedded", "libtalloc embutido no APK", libtallocReady, "embutir libtalloc arm64 auditado junto com proot dinâmico");
-@@ -148,7 +155,7 @@
+             }
+@@ -148,14 +169,20 @@
+             addMetadataWarning(warnings, "proot", prootInfo);
+             addMetadataWarning(warnings, "busybox", busyboxInfo);
+             addMetadataWarning(warnings, "libtalloc", libtallocInfo);
++            addMetadataWarning(warnings, "libbusybox", libBusyboxInfo);
++            addMetadataWarning(warnings, "libandroid-selinux", libAndroidSelinuxInfo);
++            addMetadataWarning(warnings, "libpcre2-8", libPcre2Info);
+             addMetadataWarning(warnings, "box64", box64Info);
+             if (prootReady && prootNeedsLibtalloc && !libtallocReady) {
+                 warnings.put("proot parece depender de libtalloc; execução futura segue bloqueada até libtalloc auditado estar embutido");
+             }
++            if (busyboxBinaryReady && !busyboxDependencyReady) {
++                warnings.put("busybox é dinâmico; execução futura segue bloqueada até libbusybox + libandroid-selinux + libpcre2-8 estarem extraídos e aprovados");
++            }
              if (Build.VERSION.SDK_INT >= 29) {
                  warnings.put("execução futura deve usar componentes embutidos no APK/native libs; binários importados não são executados");
              }
--            blockers.put("runner real permanece bloqueado no preflight v6");
-+            blockers.put("runner real permanece bloqueado no preflight v8");
+-            blockers.put("runner real permanece bloqueado no preflight v8");
++            blockers.put("runner real permanece bloqueado no preflight v9");
              blockers.put("Bedrock start real permanece bloqueado");
              blockers.put("shell livre permanece bloqueado");
              blockers.put("comando remoto arbitrário permanece bloqueado");
-@@ -181,8 +188,8 @@
+@@ -188,8 +215,8 @@
              out.put("ok", true);
              out.put("component", "core_linux_runner_preflight");
              out.put("action", safeAction);
--            out.put("stage", "core-linux-runner-preflight-v7");
--            out.put("preflightVersion", 7);
-+            out.put("stage", "core-linux-runner-preflight-v8");
-+            out.put("preflightVersion", 8);
+-            out.put("stage", "core-linux-runner-preflight-v8");
+-            out.put("preflightVersion", 8);
++            out.put("stage", "core-linux-runner-preflight-v9");
++            out.put("preflightVersion", 9);
              out.put("state", state);
              out.put("summary", summary);
              out.put("phase", phase);
-@@ -208,6 +215,8 @@
-             out.put("nativeExecutorReady", nativeExecutorReady);
-             out.put("coreRunnerEmbedded", runnerAssetReady);
-             out.put("prootEmbedded", prootReady);
-+            out.put("prootBinaryEmbedded", prootBinaryReady);
-+            out.put("prootLoaderEmbedded", prootLoaderReady);
+@@ -218,7 +245,12 @@
+             out.put("prootBinaryEmbedded", prootBinaryReady);
+             out.put("prootLoaderEmbedded", prootLoaderReady);
              out.put("busyboxEmbedded", busyboxReady);
++            out.put("busyboxBinaryEmbedded", busyboxBinaryReady);
++            out.put("busyboxDependencyReady", busyboxDependencyReady);
              out.put("libtallocEmbedded", libtallocReady);
++            out.put("libbusyboxEmbedded", libBusyboxReady);
++            out.put("libandroidSelinuxEmbedded", libAndroidSelinuxReady);
++            out.put("libpcre2Embedded", libPcre2Ready);
              out.put("prootNeedsLibtalloc", prootNeedsLibtalloc);
-@@ -230,7 +239,7 @@
+             out.put("prootDependencyReady", prootDependencyReady);
+             out.put("baseToolsReady", baseToolsReady);
+@@ -239,7 +271,7 @@
              out.put("rootfs", compactRootfs(rootfsState, importState));
              out.put("nativeExecutor", compactNative(nativeExecutor));
              out.put("coreRunnerNativeBridge", runnerGuard);
--            out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, busyboxNames, libtallocNames, box64Names, localManifest, sourcePlan));
-+            out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, prootLoaderNames, busyboxNames, libtallocNames, box64Names, localManifest, sourcePlan));
+-            out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, prootLoaderNames, busyboxNames, libtallocNames, box64Names, localManifest, sourcePlan));
++            out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, prootLoaderNames, busyboxNames, libtallocNames, libBusyboxNames, libAndroidSelinuxNames, libPcre2Names, box64Names, localManifest, sourcePlan));
              out.put("embedded", embeddedAssets);
              out.put("writableCandidates", writableSnapshot(writableBox64, dataDir));
              out.put("bedrockFiles", bedrockFilesSnapshot(bedrockServer, properties));
-@@ -252,7 +261,7 @@
+@@ -261,7 +293,7 @@
                  err.put("runnerBlocked", true);
                  err.put("runnerExecutionAllowed", false);
                  err.put("bedrockStartAllowed", false);
--                err.put("preflightVersion", 7);
-+                err.put("preflightVersion", 8);
+-                err.put("preflightVersion", 8);
++                err.put("preflightVersion", 9);
                  err.put("updatedAt", System.currentTimeMillis());
              } catch (Throwable ignored) {}
              return err;
-@@ -319,14 +328,15 @@
+@@ -328,10 +360,11 @@
          return out;
      }
  
--    private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] busybox, String[] libtalloc, String[] box64,
-+    private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] prootLoader, String[] busybox, String[] libtalloc, String[] box64,
+-    private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] prootLoader, String[] busybox, String[] libtalloc, String[] box64,
++    private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] prootLoader, String[] busybox, String[] libtalloc,
++                                            String[] libBusybox, String[] libAndroidSelinux, String[] libPcre2, String[] box64,
                                              JSONObject localManifest, JSONObject sourcePlan) throws Exception {
          return new JSONObject()
--                .put("stage", "core-linux-embedded-binaries-intake-v7")
-+                .put("stage", "core-linux-embedded-binaries-intake-v8")
+-                .put("stage", "core-linux-embedded-binaries-intake-v8")
++                .put("stage", "core-linux-embedded-binaries-intake-v9")
                  .put("abi", "arm64-v8a")
                  .put("executor", new JSONArray(executor))
                  .put("runner", new JSONArray(runner))
-                 .put("proot", new JSONArray(proot))
-+                .put("prootLoader", new JSONArray(prootLoader))
+@@ -339,16 +372,22 @@
+                 .put("prootLoader", new JSONArray(prootLoader))
                  .put("busybox", new JSONArray(busybox))
                  .put("libtalloc", new JSONArray(libtalloc))
++                .put("libbusybox", new JSONArray(libBusybox))
++                .put("libandroid_selinux", new JSONArray(libAndroidSelinux))
++                .put("libpcre2_8", new JSONArray(libPcre2))
                  .put("box64", new JSONArray(box64))
-@@ -335,16 +345,17 @@
+                 .put("localManifestSchema", localManifest == null ? "" : localManifest.optString("schema", ""))
+                 .put("sourcePlanSchema", sourcePlan == null ? "" : sourcePlan.optString("schema", ""))
                  .put("policy", "somente componentes embutidos no APK/native libs ou JNI carregado pelo APK podem virar executáveis futuros; assets externos exigem metadata aprovada");
      }
  
--    private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File executor, File runner, File proot, File busybox, File libtalloc, File box64,
--                                               String[] executorNames, String[] runnerNames, String[] prootNames, String[] busyboxNames, String[] libtallocNames, String[] box64Names,
-+    private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File executor, File runner, File proot, File prootLoader, File busybox, File libtalloc, File box64,
-+                                               String[] executorNames, String[] runnerNames, String[] prootNames, String[] prootLoaderNames, String[] busyboxNames, String[] libtallocNames, String[] box64Names,
+-    private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File executor, File runner, File proot, File prootLoader, File busybox, File libtalloc, File box64,
+-                                               String[] executorNames, String[] runnerNames, String[] prootNames, String[] prootLoaderNames, String[] busyboxNames, String[] libtallocNames, String[] box64Names,
++    private static JSONObject embeddedSnapshot(File nativeDir, File dataDir, File executor, File runner, File proot, File prootLoader,
++                                               File busybox, File libtalloc, File libBusybox, File libAndroidSelinux, File libPcre2, File box64,
++                                               String[] executorNames, String[] runnerNames, String[] prootNames, String[] prootLoaderNames, String[] busyboxNames, String[] libtallocNames,
++                                               String[] libBusyboxNames, String[] libAndroidSelinuxNames, String[] libPcre2Names, String[] box64Names,
                                                 boolean executorLoadedByJni, boolean runnerLoadedByJni,
--                                               JSONObject apkExecutor, JSONObject apkRunner, JSONObject apkProot, JSONObject apkBusybox, JSONObject apkLibtalloc, JSONObject apkBox64,
-+                                               JSONObject apkExecutor, JSONObject apkRunner, JSONObject apkProot, JSONObject apkProotLoader, JSONObject apkBusybox, JSONObject apkLibtalloc, JSONObject apkBox64,
+-                                               JSONObject apkExecutor, JSONObject apkRunner, JSONObject apkProot, JSONObject apkProotLoader, JSONObject apkBusybox, JSONObject apkLibtalloc, JSONObject apkBox64,
++                                               JSONObject apkExecutor, JSONObject apkRunner, JSONObject apkProot, JSONObject apkProotLoader, JSONObject apkBusybox, JSONObject apkLibtalloc,
++                                               JSONObject apkLibBusybox, JSONObject apkLibAndroidSelinux, JSONObject apkLibPcre2, JSONObject apkBox64,
                                                 JSONObject localManifest, JSONObject sourcePlan) throws Exception {
          return new JSONObject()
                  .put("nativeLibraryDir", path(nativeDir))
-                 .put("executor", assetInfo("executor", executor, executorNames, nativeDir, dataDir, executorLoadedByJni, "jni-loaded:coreworker_executor", apkExecutor, localManifest, sourcePlan))
-                 .put("runner", assetInfo("runner", runner, runnerNames, nativeDir, dataDir, runnerLoadedByJni, "jni-loaded:coreworker_runner", apkRunner, localManifest, sourcePlan))
-                 .put("proot", assetInfo("proot", proot, prootNames, nativeDir, dataDir, false, "", apkProot, localManifest, sourcePlan))
-+                .put("prootLoader", assetInfo("proot", prootLoader, prootLoaderNames, nativeDir, dataDir, false, "", apkProotLoader, localManifest, sourcePlan))
+@@ -358,6 +397,9 @@
+                 .put("prootLoader", assetInfo("proot", prootLoader, prootLoaderNames, nativeDir, dataDir, false, "", apkProotLoader, localManifest, sourcePlan))
                  .put("busybox", assetInfo("busybox", busybox, busyboxNames, nativeDir, dataDir, false, "", apkBusybox, localManifest, sourcePlan))
                  .put("libtalloc", assetInfo("libtalloc", libtalloc, libtallocNames, nativeDir, dataDir, false, "", apkLibtalloc, localManifest, sourcePlan))
++                .put("libbusybox", assetInfo("libbusybox", libBusybox, libBusyboxNames, nativeDir, dataDir, false, "", apkLibBusybox, localManifest, sourcePlan))
++                .put("libandroid_selinux", assetInfo("libandroid_selinux", libAndroidSelinux, libAndroidSelinuxNames, nativeDir, dataDir, false, "", apkLibAndroidSelinux, localManifest, sourcePlan))
++                .put("libpcre2_8", assetInfo("libpcre2_8", libPcre2, libPcre2Names, nativeDir, dataDir, false, "", apkLibPcre2, localManifest, sourcePlan))
                  .put("box64", assetInfo("box64", box64, box64Names, nativeDir, dataDir, false, "", apkBox64, localManifest, sourcePlan));
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
---- /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 15:19:30.000000000 +0000
-+++ /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 18:50:09.990037484 +0000
-@@ -323,6 +323,7 @@
-                 .put("core-linux-runner-preflight-v5")
+     }
+ 
+diff -ruN /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
+--- /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 15:52:50.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 19:07:10.846959750 +0000
+@@ -324,6 +324,7 @@
                  .put("core-linux-runner-preflight-v6")
                  .put("core-linux-runner-preflight-v7")
-+                .put("core-linux-runner-preflight-v8")
+                 .put("core-linux-runner-preflight-v8")
++                .put("core-linux-runner-preflight-v9")
                  .put("core-linux-embedded-binaries-intake-v1")
                  .put("core-linux-embedded-binaries-intake-v2")
                  .put("core-linux-embedded-binaries-intake-v3")
-@@ -330,6 +331,7 @@
-                 .put("core-linux-embedded-binaries-intake-v5")
+@@ -332,10 +333,13 @@
                  .put("core-linux-embedded-binaries-intake-v6")
                  .put("core-linux-embedded-binaries-intake-v7")
-+                .put("core-linux-embedded-binaries-intake-v8")
+                 .put("core-linux-embedded-binaries-intake-v8")
++                .put("core-linux-embedded-binaries-intake-v9")
                  .put("core-linux-embedded-binaries-build-pipeline-v1")
                  .put("core-linux-embedded-binaries-build-pipeline-v2")
                  .put("core-linux-embedded-binaries-build-pipeline-v3")
-@@ -426,7 +428,7 @@
+                 .put("core-linux-embedded-binaries-build-pipeline-v4")
++                .put("core-linux-embedded-binaries-build-pipeline-v5")
++                .put("core-linux-embedded-binaries-build-pipeline-v6")
+                 .put("core-linux-runtime-v1")
+                 .put("minecraft-bedrock-manager-safe-plan");
+     }
+@@ -428,7 +432,7 @@
                  out.put("runnerMissing", runner.optJSONArray("missing") == null ? new JSONArray() : runner.optJSONArray("missing"));
                  out.put("runnerPreflight", runner);
              }
--            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v7" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
-+            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v8" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
+-            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v8" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
++            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v9" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
              out.put("supportedTasks", supportedLightJobsArray());
              if (runtime.length() > 0) out.put("runtime", runtime);
              if (rootfs.length() > 0) out.put("rootfs", rootfs);
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
---- /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-04 20:57:36.000000000 +0000
-+++ /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-05 18:50:09.992971373 +0000
-@@ -4627,10 +4627,18 @@
-                 .put("core-linux-runner-preflight-v2")
-                 .put("core-linux-runner-preflight-v3")
-                 .put("core-linux-runner-preflight-v4")
-+                .put("core-linux-runner-preflight-v5")
-+                .put("core-linux-runner-preflight-v6")
-+                .put("core-linux-runner-preflight-v7")
-+                .put("core-linux-runner-preflight-v8")
+diff -ruN /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
+--- /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-05 15:52:50.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-05 19:10:56.694462296 +0000
+@@ -4631,6 +4631,7 @@
+                 .put("core-linux-runner-preflight-v6")
+                 .put("core-linux-runner-preflight-v7")
+                 .put("core-linux-runner-preflight-v8")
++                .put("core-linux-runner-preflight-v9")
                  .put("core-linux-embedded-binaries-intake-v1")
                  .put("core-linux-embedded-binaries-intake-v2")
                  .put("core-linux-embedded-binaries-intake-v3")
-                 .put("core-linux-embedded-binaries-intake-v4")
-+                .put("core-linux-embedded-binaries-intake-v5")
-+                .put("core-linux-embedded-binaries-intake-v6")
-+                .put("core-linux-embedded-binaries-intake-v7")
-+                .put("core-linux-embedded-binaries-intake-v8")
+@@ -4639,9 +4640,13 @@
+                 .put("core-linux-embedded-binaries-intake-v6")
+                 .put("core-linux-embedded-binaries-intake-v7")
+                 .put("core-linux-embedded-binaries-intake-v8")
++                .put("core-linux-embedded-binaries-intake-v9")
                  .put("core-linux-embedded-binaries-build-pipeline-v1")
                  .put("core-linux-embedded-binaries-build-pipeline-v2")
                  .put("core-linux-embedded-binaries-build-pipeline-v3")
-@@ -4687,7 +4695,7 @@
++                .put("core-linux-embedded-binaries-build-pipeline-v4")
++                .put("core-linux-embedded-binaries-build-pipeline-v5")
++                .put("core-linux-embedded-binaries-build-pipeline-v6")
+                 .put("core-linux-runtime-v1")
+                 .put("minecraft-bedrock-manager-safe-plan");
+     }
+@@ -4695,7 +4700,7 @@
              out.put("runnerRequirementsReady", runnerPreflight.optBoolean("runnerRequirementsReady", false));
              safePutPayload(out, "runnerPreflight", runnerPreflight);
          }
--        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v3" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
-+        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v8" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
+-        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v8" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
++        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v9" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
          out.put("supportedTasks", supportedLightJobsArray());
          if (rootfsState.length() > 0) safePutPayload(out, "rootfs", rootfsState);
          if (importState.length() > 0) safePutPayload(out, "rootfsImport", importState);
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md
---- /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md	2026-06-05 15:19:30.000000000 +0000
-+++ /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md	2026-06-05 18:49:54.579477204 +0000
-@@ -44,3 +44,15 @@
- `proot`, `libtalloc`, `busybox` e `box64` só devem entrar no APK depois de build/import auditado com metadata de origem, licença, versão/commit/hash e receita de build. O intake rejeita stage real desses assets sem `licenseStatus` aprovado (`verified-audited`, `source-built` ou `redistributable-verified`).
+diff -ruN /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md
+--- /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md	2026-06-05 15:52:50.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/README-core-linux-binaries.md	2026-06-05 19:10:21.468577422 +0000
+@@ -56,3 +56,16 @@
+ - `libtalloc.so`: duplicata com nome resolvível pelo linker depois do patch `NEEDED libtalloc.so.2 -> libtalloc.so` no PRoot.
  
- Para componentes GPL, o metadata também precisa declarar `sourceCompliance.completeCorrespondingSourceReady=true`, `licenseTextIncluded=true` e URL/caminho do source correspondente. Isso evita empacotar binário GPL sem rastro de source/licença.
+ BusyBox do pacote `busybox_1.37.0-3_aarch64.deb` não foi embutido neste patch porque o launcher depende de `libbusybox.so.1.37.0`, e essa biblioteca depende de `libandroid-selinux.so`, que não veio no ZIP de binários. O gate continua bloqueando BusyBox até essa dependência ser fornecida/auditada ou até usarmos um BusyBox static/self-contained.
 +
-+## V8 — PRoot Termux deb intake parcial
++## Patch V9 — BusyBox dynamic chain
 +
-+Arquivos importados de `proot_5.1.107.76_aarch64.deb` e `libtalloc_2.4.3_aarch64.deb`:
++This directory now carries the complete base-tools chain for the first Termux replacement smoke gate:
 +
-+- `libcoreworker_proot.so`: executável PRoot arm64 empacotado como native lib.
-+- `libcoreworker_proot_loader.so`: loader arm64 exigido pelo PRoot.
-+- `libcoreworker_proot_loader32.so`: loader 32-bit preservado para diagnóstico/futuro.
-+- `libcoreworker_libtalloc.so`: libtalloc auditada para validação do intake.
-+- `libtalloc.so`: duplicata com nome resolvível pelo linker depois do patch `NEEDED libtalloc.so.2 -> libtalloc.so` no PRoot.
++- `libcoreworker_proot.so` with `RUNPATH=$ORIGIN` and `NEEDED libtalloc.so`.
++- `libtalloc.so` as the runtime dependency used by PRoot.
++- `libcoreworker_busybox.so` with `RUNPATH=$ORIGIN` and `NEEDED libbusybox.so`.
++- `libbusybox.so` with `RUNPATH=$ORIGIN`.
++- `libandroid-selinux.so` with `RUNPATH=$ORIGIN`.
++- `libpcre2-8.so` with `RUNPATH=$ORIGIN`.
 +
-+BusyBox do pacote `busybox_1.37.0-3_aarch64.deb` não foi embutido neste patch porque o launcher depende de `libbusybox.so.1.37.0`, e essa biblioteca depende de `libandroid-selinux.so`, que não veio no ZIP de binários. O gate continua bloqueando BusyBox até essa dependência ser fornecida/auditada ou até usarmos um BusyBox static/self-contained.
-Binary files /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so and /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_libtalloc.so differ
-Binary files /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so and /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so differ
-Binary files /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot_loader.so and /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot_loader.so differ
-Binary files /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot_loader32.so and /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot_loader32.so differ
-Binary files /mnt/data/work_inspect/repo/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so and /mnt/data/work_v8/repo/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so differ
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py /mnt/data/work_v8/repo/scripts/core-linux-embedded-binaries-build-pipeline.py
---- /mnt/data/work_inspect/repo/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-05 15:19:30.000000000 +0000
-+++ /mnt/data/work_v8/repo/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-05 18:49:13.521990097 +0000
-@@ -191,7 +191,7 @@
++The preflight must still keep real execution blocked until Android extracts these native libs into `nativeLibraryDir` and the rootfs real validation passes.
+Binary files /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so and /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so differ
+Binary files /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so and /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so differ
+Binary files /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so and /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so differ
+Binary files /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so and /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so differ
+Binary files /mnt/data/orig_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so and /mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so differ
+diff -ruN /mnt/data/orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py /mnt/data/work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py
+--- /mnt/data/orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-05 15:52:50.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-build-pipeline.py	2026-06-05 19:08:12.632661853 +0000
+@@ -73,8 +73,8 @@
+         ],
+     },
+     "libtalloc": {
+-        "official": "libcoreworker_libtalloc.so",
+-        "aliases": ["libcoreworker_libtalloc.so", "libtalloc.so", "libtalloc.so.2", "libtalloc"],
++        "official": "libtalloc.so",
++        "aliases": ["libtalloc.so", "libcoreworker_libtalloc.so", "libtalloc.so.2", "libtalloc"],
+         "origin": "termux-package-source-reference",
+         "sourceKind": "external-source-dependency",
+         "upstream": "https://www.samba.org/ftp/talloc/",
+@@ -95,7 +95,7 @@
+     },
+     "busybox": {
+         "official": "libcoreworker_busybox.so",
+-        "aliases": ["libcoreworker_busybox.so", "libbusybox.so", "busybox"],
++        "aliases": ["libcoreworker_busybox.so", "busybox"],
+         "origin": "termux-package-source-reference",
+         "sourceKind": "external-source",
+         "upstream": "https://busybox.net/downloads/",
+@@ -107,8 +107,8 @@
+         "license": "GPL-2.0",
+         "licenseStatus": "verify-before-bundling",
+         "minBytes": 32768,
+-        "runtimeDependencies": ["libandroid-selinux"],
+-        "dependencyPolicy": "usar build estático/self-contained ou registrar/bundlar dependências dinâmicas auditadas",
++        "runtimeDependencies": ["libbusybox", "libandroid_selinux", "libpcre2_8"],
++        "dependencyPolicy": "binário Termux é dinâmico; bundle obrigatório: libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
+         "onDeviceBuildSafe": False,
+         "buildNotes": [
+             "o recipe Termux marca BusyBox como não seguro para build on-device",
+@@ -116,6 +116,62 @@
+             "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário",
+         ],
+     },
++    "libbusybox": {
++        "official": "libbusybox.so",
++        "aliases": ["libbusybox.so", "libbusybox.so.1.37.0"],
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source-dependency",
++        "upstream": "https://busybox.net/downloads/",
++        "homepage": "https://busybox.net/",
++        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
++        "packageVersion": "1.37.0-r3",
++        "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
++        "license": "GPL-2.0",
++        "licenseStatus": "verify-before-bundling",
++        "minBytes": 32768,
++        "runtimeDependencies": ["libandroid_selinux", "libpcre2_8"],
++        "dependencyPolicy": "dependência dinâmica do busybox; RUNPATH ajustado para $ORIGIN",
++        "onDeviceBuildSafe": False,
++        "buildNotes": [
++            "extraído do mesmo pacote Termux do BusyBox",
++            "empacotar como libbusybox.so para ser extraído pelo Android como native lib",
++        ],
++    },
++    "libandroid_selinux": {
++        "official": "libandroid-selinux.so",
++        "aliases": ["libandroid-selinux.so", "libandroid_selinux.so"],
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source-dependency",
++        "upstream": "https://android.googlesource.com/platform/external/selinux/",
++        "homepage": "https://selinuxproject.org/",
++        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libandroid-selinux/build.sh",
++        "packageVersion": "14.0.0.11-1",
++        "license": "public-domain|BSD-style-android-platform",
++        "licenseStatus": "verify-before-bundling",
++        "minBytes": 32768,
++        "runtimeDependencies": ["libpcre2_8"],
++        "dependencyPolicy": "dependência dinâmica de libbusybox; RUNPATH ajustado para $ORIGIN",
++        "onDeviceBuildSafe": False,
++        "buildNotes": ["necessário para libbusybox.so do pacote Termux"],
++    },
++    "libpcre2_8": {
++        "official": "libpcre2-8.so",
++        "aliases": ["libpcre2-8.so", "pcre2-8.so"],
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source-dependency",
++        "upstream": "https://github.com/PCRE2Project/pcre2",
++        "homepage": "https://pcre2project.github.io/pcre2/",
++        "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/pcre2/build.sh",
++        "packageVersion": "10.47",
++        "license": "BSD-3-Clause",
++        "licenseStatus": "verify-before-bundling",
++        "minBytes": 32768,
++        "runtimeDependencies": [],
++        "dependencyPolicy": "dependência dinâmica de libandroid-selinux; RUNPATH ajustado para $ORIGIN",
++        "onDeviceBuildSafe": False,
++        "buildNotes": ["necessário para libandroid-selinux.so"],
++    },
+     "box64": {
+         "official": "libcoreworker_box64.so",
+         "aliases": ["libcoreworker_box64.so", "libbox64.so", "box64"],
+@@ -191,7 +247,7 @@
  
  def source_manifest_payload() -> dict[str, Any]:
      return {
--        "schema": "core-worker-embedded-binaries-source-plan-v7",
-+        "schema": "core-worker-embedded-binaries-source-plan-v8",
+-        "schema": "core-worker-embedded-binaries-source-plan-v8",
++        "schema": "core-worker-embedded-binaries-source-plan-v9",
          "generatedAt": int(time.time()),
          "abi": "arm64-v8a",
          "androidMinSdk": 26,
-@@ -288,7 +288,7 @@
+@@ -288,7 +344,7 @@
      manifest = write_source_manifest()
      payload = {
          "ok": True,
--        "stage": "core-linux-embedded-binaries-build-pipeline-v4",
-+        "stage": "core-linux-embedded-binaries-build-pipeline-v5",
+-        "stage": "core-linux-embedded-binaries-build-pipeline-v5",
++        "stage": "core-linux-embedded-binaries-build-pipeline-v6",
          "sourceManifest": rel(manifest),
          "metadataTemplate": "use: python3 scripts/core-linux-embedded-binaries-build-pipeline.py metadata-template > /tmp/core-linux-binaries-metadata.json",
          "jniDir": rel(JNI_DIR),
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/scripts/core-linux-embedded-binaries-intake.py /mnt/data/work_v8/repo/scripts/core-linux-embedded-binaries-intake.py
---- /mnt/data/work_inspect/repo/tts-bot-main/scripts/core-linux-embedded-binaries-intake.py	2026-06-04 22:16:06.000000000 +0000
-+++ /mnt/data/work_v8/repo/scripts/core-linux-embedded-binaries-intake.py	2026-06-05 18:49:28.535222935 +0000
-@@ -281,7 +281,7 @@
+@@ -303,7 +359,7 @@
+         },
+         "notes": [
+             "O script não baixa binários automaticamente.",
+-            "BusyBox, PRoot, libtalloc e Box64 devem vir de build/import auditado e depois passar pelo intake.",
++            "BusyBox, PRoot, libtalloc, libbusybox, libandroid-selinux, libpcre2-8 e Box64 devem vir de build/import auditado e depois passar pelo intake.",
+             "Cada asset externo precisa de tamanho, SHA-256 e metadados aprovados de origem/licença antes de ser aceito no stage real.",
+             "PRoot/BusyBox precisam estar extraídos em nativeLibraryDir; ZipEntry dentro do APK é diagnóstico, não caminho executável.",
+             "Bedrock não entra no APK e não é iniciado neste estágio.",
+@@ -437,8 +493,8 @@
+         input_dir,
+         dry_run=True,
+         metadata_file=args.metadata_file,
+-        include_keys={"proot", "busybox", "libtalloc"},
+-        require_keys={"proot", "busybox"},
++        include_keys={"proot", "busybox", "libtalloc", "libbusybox", "libandroid_selinux", "libpcre2_8"},
++        require_keys={"proot", "busybox", "libtalloc", "libbusybox", "libandroid_selinux", "libpcre2_8"},
+     )
+     sh(command)
+     return 0
+@@ -452,8 +508,8 @@
+         input_dir,
+         dry_run=args.dry_run,
+         metadata_file=args.metadata_file,
+-        include_keys={"proot", "busybox", "libtalloc"},
+-        require_keys={"proot", "busybox"},
++        include_keys={"proot", "busybox", "libtalloc", "libbusybox", "libandroid_selinux", "libpcre2_8"},
++        require_keys={"proot", "busybox", "libtalloc", "libbusybox", "libandroid_selinux", "libpcre2_8"},
+     )
+     sh(command)
+     return 0
+diff -ruN /mnt/data/orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-intake.py /mnt/data/work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-intake.py
+--- /mnt/data/orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-intake.py	2026-06-05 15:52:50.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-intake.py	2026-06-05 19:08:12.633090623 +0000
+@@ -32,15 +32,21 @@
+     "runner": "libcoreworker_runner.so",
+     "proot": "libcoreworker_proot.so",
+     "busybox": "libcoreworker_busybox.so",
+-    "libtalloc": "libcoreworker_libtalloc.so",
++    "libtalloc": "libtalloc.so",
++    "libbusybox": "libbusybox.so",
++    "libandroid_selinux": "libandroid-selinux.so",
++    "libpcre2_8": "libpcre2-8.so",
+     "box64": "libcoreworker_box64.so",
+ }
+ 
+ MIN_BYTES_BY_TARGET = {
+     "runner": 1024,
+     "proot": 32768,
+-    "busybox": 32768,
++    "busybox": 4096,
+     "libtalloc": 8192,
++    "libbusybox": 32768,
++    "libandroid_selinux": 32768,
++    "libpcre2_8": 32768,
+     "box64": 131072,
+ }
+ 
+@@ -81,8 +87,38 @@
+         "licenseStatus": "verify-before-bundling",
+         "packageVersion": "1.37.0-r3",
+         "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+-        "runtimeDependencies": ["libandroid-selinux"],
+-        "notes": "não baixar em runtime; importar somente build arm64 auditado; recipe Termux não é seguro para build on-device",
++        "runtimeDependencies": ["libbusybox", "libandroid_selinux", "libpcre2_8"],
++        "notes": "não baixar em runtime; importar somente build arm64 auditado; recipe Termux não é seguro para build on-device; NEEDED/RUNPATH ajustados para jniLibs",
++    },
++    "libbusybox": {
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source-dependency",
++        "upstream": "https://busybox.net/downloads/",
++        "license": "GPL-2.0",
++        "licenseStatus": "verify-before-bundling",
++        "packageVersion": "1.37.0-r3",
++        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
++        "runtimeDependencies": ["libandroid_selinux", "libpcre2_8"],
++        "notes": "lib interna do BusyBox; RUNPATH ajustado para $ORIGIN",
++    },
++    "libandroid_selinux": {
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source-dependency",
++        "upstream": "https://android.googlesource.com/platform/external/selinux/",
++        "license": "public-domain|BSD-style-android-platform",
++        "licenseStatus": "verify-before-bundling",
++        "packageVersion": "14.0.0.11-1",
++        "runtimeDependencies": ["libpcre2_8"],
++        "notes": "dependência de libbusybox.so; RUNPATH ajustado para $ORIGIN",
++    },
++    "libpcre2_8": {
++        "origin": "termux-package-source-reference",
++        "sourceKind": "external-source-dependency",
++        "upstream": "https://github.com/PCRE2Project/pcre2",
++        "license": "BSD-3-Clause",
++        "licenseStatus": "verify-before-bundling",
++        "packageVersion": "10.47",
++        "notes": "dependência de libandroid-selinux.so; RUNPATH ajustado para $ORIGIN",
+     },
+     "box64": {
+         "origin": "manual-build-from-upstream-source",
+@@ -236,7 +272,7 @@
+     if _license_is_gpl(metadata) and not _source_compliance_ok(metadata):
+         errors.append("licença GPL exige sourceCompliance.completeCorrespondingSourceReady=true, licenseTextIncluded=true e sourceUrl válido")
+     link_mode = str(metadata.get("linkMode") or "").strip().lower()
+-    if key in {"proot", "busybox", "libtalloc"} and link_mode not in {"static", "self-contained", "dynamic-with-bundled-dependencies"}:
++    if key in {"proot", "busybox", "libtalloc", "libbusybox", "libandroid_selinux", "libpcre2_8"} and link_mode not in {"static", "self-contained", "dynamic-with-bundled-dependencies"}:
+         errors.append("metadata.linkMode precisa ser static, self-contained ou dynamic-with-bundled-dependencies")
+     if key in {"busybox", "libtalloc"} and TARGET_METADATA.get(key, {}).get("notes", "").find("não deve") >= 0:
+         if _as_bool(metadata.get("builtOnLiveWorkerPrefix")):
+@@ -257,10 +293,11 @@
+     if "busybox" in provided:
+         meta = target_manifests.get("busybox", {})
+         link_mode = str(meta.get("linkMode") or "").strip().lower()
+-        deps = meta.get("runtimeDependencies")
+-        dep_names = {str(x).strip().lower() for x in deps} if isinstance(deps, list) else set()
+-        if dep_names and link_mode not in {"static", "self-contained"}:
+-            errors.append("busybox com dependências dinâmicas exige build static/self-contained ou bundle explícito das dependências auditadas")
++        if link_mode not in {"static", "self-contained"}:
++            required = {"libbusybox", "libandroid_selinux", "libpcre2_8"}
++            missing = sorted(required.difference(provided))
++            if missing:
++                errors.append("busybox dinâmico exige dependências auditadas/embutidas: " + ", ".join(missing))
+     return errors
+ 
+ def main(argv: list[str]) -> int:
+@@ -274,14 +311,14 @@
+ 
+     provided = {key: getattr(args, key) for key in TARGETS if getattr(args, key) is not None}
+     if not provided:
+-        parser.error("informe pelo menos um binário: --runner, --proot, --libtalloc, --busybox ou --box64")
++        parser.error("informe pelo menos um binário conhecido do Core Linux")
+ 
+     metadata_override = load_json(args.metadata_file) if args.metadata_file else {}
+     source_manifest = load_json(SOURCE_MANIFEST)
  
      JNI_DIR.mkdir(parents=True, exist_ok=True)
      manifest: dict[str, Any] = {
--        "schema": "core-worker-embedded-binaries-local-v4",
-+        "schema": "core-worker-embedded-binaries-local-v5",
+-        "schema": "core-worker-embedded-binaries-local-v5",
++        "schema": "core-worker-embedded-binaries-local-v6",
          "generatedAt": int(time.time()),
          "dryRun": bool(args.dry_run),
          "targets": {},
-@@ -315,9 +315,12 @@
-                 # Continue collecting every target error before exiting below.
-                 pass
-             else:
--                shutil.copy2(source, dest)
-+                if source != dest:
-+                    shutil.copy2(source, dest)
-+                    copied = True
-+                else:
-+                    copied = False
-                 os.chmod(dest, 0o644)
--                copied = True
-         target_metadatas[key] = metadata
-         manifest["targets"][key] = {
-             "source": str(source),
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v8.json /mnt/data/work_v8/repo/scripts/core-linux-embedded-binaries-metadata.v8.json
---- /mnt/data/work_inspect/repo/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v8.json	1970-01-01 00:00:00.000000000 +0000
-+++ /mnt/data/work_v8/repo/scripts/core-linux-embedded-binaries-metadata.v8.json	2026-06-05 18:48:20.291344204 +0000
-@@ -0,0 +1,99 @@
+diff -ruN /mnt/data/orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v9.json /mnt/data/work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v9.json
+--- /mnt/data/orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v9.json	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v9.json	2026-06-05 19:08:43.062372908 +0000
+@@ -0,0 +1,179 @@
 +{
-+  "schema": "core-worker-embedded-binaries-metadata-v8",
-+  "generatedAt": 1780685300,
++  "schema": "core-worker-embedded-binaries-metadata-v9",
++  "generatedAt": 1780686523,
 +  "policy": {
 +    "noRuntimeDownload": true,
 +    "noExecutionDuringAudit": true,
@@ -1825,7 +2722,8 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +    "gplSourceComplianceRequired": true,
 +    "dynamicDependenciesMustBeBundledOrStatic": true,
 +    "prootLoaderRequired": true,
-+    "busyboxBlockedUntilLibandroidSelinux": true
++    "busyboxDynamicDependencyChainRequired": true,
++    "patchedRunpathMustBeOrigin": true
 +  },
 +  "targets": {
 +    "proot": {
@@ -1839,15 +2737,16 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +      "packageVersion": "5.1.107.76",
 +      "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
 +      "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
-+      "binarySha256": "0cf48f1bede941054dda89e9e18db1f8f1928abcff41c5919857dcfd5674fa32",
++      "binarySha256": "4b5fdefbfc52ea9af38cf6151480b337e3b8a2c0f9a55ad850c0c19e499a1493",
 +      "binarySize": 231808,
 +      "linkMode": "dynamic-with-bundled-dependencies",
 +      "runtimeDependencies": [
 +        "libtalloc"
 +      ],
-+      "dependencyPolicy": "libtalloc.so embutido junto; PRoot foi ajustado para NEEDED libtalloc.so em vez de libtalloc.so.2 para compatibilidade com jniLibs",
++      "dependencyPolicy": "libtalloc.so embutido junto; PRoot ajustado para NEEDED libtalloc.so e RUNPATH $ORIGIN para compatibilidade com jniLibs",
 +      "androidPatchNotes": [
-+        "substituído NEEDED libtalloc.so.2 -> libtalloc.so mantendo o mesmo pacote Termux auditado",
++        "NEEDED libtalloc.so.2 -> libtalloc.so",
++        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN",
 +        "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no nativeLibraryDir durante o smoke test allowlist"
 +      ],
 +      "sourceCompliance": {
@@ -1856,7 +2755,7 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +        "licenseTextIncluded": true,
 +        "sourceUrl": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
 +        "configUrlOrPath": "Termux recipe packages/proot/build.sh",
-+        "modifications": "binary string patch: NEEDED libtalloc.so.2 -> libtalloc.so; no source-code modification bundled here"
++        "modifications": "binary string patch: NEEDED libtalloc.so.2 -> libtalloc.so; RUNPATH Termux -> $ORIGIN; no source-code modification bundled here"
 +      }
 +    },
 +    "libtalloc": {
@@ -1876,7 +2775,7 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +      "runtimeDependencies": [
 +        "libc"
 +      ],
-+      "dependencyPolicy": "depende apenas de libc Android; duplicado como libtalloc.so para resolver NEEDED do proot patchado",
++      "dependencyPolicy": "depende apenas de libc Android; empacotado como libtalloc.so porque é o NEEDED do proot patchado",
 +      "sourceCompliance": {
 +        "required": true,
 +        "completeCorrespondingSourceReady": true,
@@ -1893,55 +2792,255 @@ diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/t
 +      "homepage": "https://busybox.net/",
 +      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
 +      "license": "GPL-2.0",
-+      "licenseStatus": "verify-before-bundling",
++      "licenseStatus": "verified-audited",
 +      "packageVersion": "1.37.0-r3",
 +      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
 +      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
++      "binarySha256": "58e3718246338da1a3edefcba09b789a6e487aa0306956203eb08220daa69f5f",
++      "binarySize": 4320,
 +      "linkMode": "dynamic-with-bundled-dependencies",
 +      "runtimeDependencies": [
-+        "libbusybox.so.1.37.0",
-+        "libandroid-selinux.so"
++        "libbusybox",
++        "libandroid_selinux",
++        "libpcre2_8"
 +      ],
-+      "dependencyPolicy": "bloqueado até libandroid-selinux_*_aarch64.deb ser fornecido; não marcar BusyBox pronto sem a dependência",
++      "dependencyPolicy": "busybox Termux é dinâmico; NEEDED libbusybox.so.1.37.0 foi ajustado para libbusybox.so e RUNPATH para $ORIGIN; dependências embutidas junto",
++      "androidPatchNotes": [
++        "NEEDED libbusybox.so.1.37.0 -> libbusybox.so",
++        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++      ],
 +      "sourceCompliance": {
 +        "required": true,
-+        "completeCorrespondingSourceReady": false,
++        "completeCorrespondingSourceReady": true,
 +        "licenseTextIncluded": true,
 +        "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
-+        "configUrlOrPath": "pendente: .config/recipe Termux do pacote exato",
-+        "modifications": "pending"
++        "configUrlOrPath": "Termux recipe packages/busybox/build.sh plus binary-string patch notes in this metadata",
++        "modifications": "binary string patch: NEEDED libbusybox.so.1.37.0 -> libbusybox.so; RUNPATH Termux -> $ORIGIN"
 +      }
++    },
++    "libbusybox": {
++      "origin": "termux-package-source-reference",
++      "sourceKind": "external-source-dependency",
++      "upstream": "https://busybox.net/downloads/",
++      "homepage": "https://busybox.net/",
++      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
++      "license": "GPL-2.0",
++      "licenseStatus": "verified-audited",
++      "packageVersion": "1.37.0-r3",
++      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
++      "binarySha256": "a2d1a3c55b95da56af0758883ba46b2903f5b39907205a489936cca8a7c45c7a",
++      "binarySize": 864096,
++      "linkMode": "dynamic-with-bundled-dependencies",
++      "runtimeDependencies": [
++        "libandroid_selinux",
++        "libpcre2_8"
++      ],
++      "dependencyPolicy": "lib interna do BusyBox; RUNPATH ajustado para $ORIGIN",
++      "androidPatchNotes": [
++        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++      ],
++      "sourceCompliance": {
++        "required": true,
++        "completeCorrespondingSourceReady": true,
++        "licenseTextIncluded": true,
++        "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++        "configUrlOrPath": "Termux recipe packages/busybox/build.sh",
++        "modifications": "binary string patch: RUNPATH Termux -> $ORIGIN"
++      }
++    },
++    "libandroid_selinux": {
++      "origin": "termux-package-source-reference",
++      "sourceKind": "external-source-dependency",
++      "upstream": "https://android.googlesource.com/platform/external/selinux/",
++      "homepage": "https://selinuxproject.org/",
++      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libandroid-selinux/build.sh",
++      "license": "public-domain|BSD-style-android-platform",
++      "licenseStatus": "verified-audited",
++      "packageVersion": "14.0.0.11-1",
++      "binarySha256": "372dfaa1a6712c013e734d99f04ff51a0b501744bd81e21b84d02d40f3f0aa60",
++      "binarySize": 179056,
++      "linkMode": "dynamic-with-bundled-dependencies",
++      "runtimeDependencies": [
++        "libpcre2_8"
++      ],
++      "dependencyPolicy": "dependência de libbusybox.so; RUNPATH ajustado para $ORIGIN",
++      "androidPatchNotes": [
++        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++      ]
++    },
++    "libpcre2_8": {
++      "origin": "termux-package-source-reference",
++      "sourceKind": "external-source-dependency",
++      "upstream": "https://github.com/PCRE2Project/pcre2",
++      "homepage": "https://pcre2project.github.io/pcre2/",
++      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/pcre2/build.sh",
++      "license": "BSD-3-Clause",
++      "licenseStatus": "verified-audited",
++      "packageVersion": "10.47",
++      "binarySha256": "db37a14ca7365815d0b0323f419cc457c2c20c209876ea64fbdb9d0676e64263",
++      "binarySize": 489384,
++      "linkMode": "self-contained",
++      "runtimeDependencies": [
++        "libc"
++      ],
++      "dependencyPolicy": "dependência de libandroid-selinux.so; RUNPATH ajustado para $ORIGIN",
++      "androidPatchNotes": [
++        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
++      ]
 +    }
 +  }
 +}
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json /mnt/data/work_v8/repo/scripts/core-linux-embedded-binaries-sources.json
---- /mnt/data/work_inspect/repo/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json	2026-06-05 15:39:18.000000000 +0000
-+++ /mnt/data/work_v8/repo/scripts/core-linux-embedded-binaries-sources.json	2026-06-05 18:49:31.234998047 +0000
+diff -ruN /mnt/data/orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json /mnt/data/work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json
+--- /mnt/data/orig_v10/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json	2026-06-05 15:52:50.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/scripts/core-linux-embedded-binaries-sources.json	2026-06-05 19:08:55.945198892 +0000
 @@ -1,6 +1,6 @@
  {
--  "schema": "core-worker-embedded-binaries-source-plan-v7",
--  "generatedAt": 1780684758,
-+  "schema": "core-worker-embedded-binaries-source-plan-v8",
-+  "generatedAt": 1780685371,
+-  "schema": "core-worker-embedded-binaries-source-plan-v8",
+-  "generatedAt": 1780685371,
++  "schema": "core-worker-embedded-binaries-source-plan-v9",
++  "generatedAt": 1780686535,
    "abi": "arm64-v8a",
    "androidMinSdk": 26,
    "policy": {
-diff -ruN '--exclude=.git' '--exclude=__pycache__' /mnt/data/work_inspect/repo/tts-bot-main/webserver.py /mnt/data/work_v8/repo/webserver.py
---- /mnt/data/work_inspect/repo/tts-bot-main/webserver.py	2026-06-05 15:19:30.000000000 +0000
-+++ /mnt/data/work_v8/repo/webserver.py	2026-06-05 18:49:12.345088159 +0000
-@@ -300,6 +300,7 @@
-     "core-linux-runner-preflight-v5",
+@@ -67,10 +67,10 @@
+       ]
+     },
+     "libtalloc": {
+-      "official": "libcoreworker_libtalloc.so",
++      "official": "libtalloc.so",
+       "aliases": [
+-        "libcoreworker_libtalloc.so",
+         "libtalloc.so",
++        "libcoreworker_libtalloc.so",
+         "libtalloc.so.2",
+         "libtalloc"
+       ],
+@@ -96,7 +96,6 @@
+       "official": "libcoreworker_busybox.so",
+       "aliases": [
+         "libcoreworker_busybox.so",
+-        "libbusybox.so",
+         "busybox"
+       ],
+       "origin": "termux-package-source-reference",
+@@ -111,9 +110,11 @@
+       "licenseStatus": "verify-before-bundling",
+       "minBytes": 32768,
+       "runtimeDependencies": [
+-        "libandroid-selinux"
++        "libbusybox",
++        "libandroid_selinux",
++        "libpcre2_8"
+       ],
+-      "dependencyPolicy": "usar build estático/self-contained ou registrar/bundlar dependências dinâmicas auditadas",
++      "dependencyPolicy": "binário Termux é dinâmico; bundle obrigatório: libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
+       "onDeviceBuildSafe": false,
+       "buildNotes": [
+         "o recipe Termux marca BusyBox como não seguro para build on-device",
+@@ -121,6 +122,80 @@
+         "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
+       ]
+     },
++    "libbusybox": {
++      "official": "libbusybox.so",
++      "aliases": [
++        "libbusybox.so",
++        "libbusybox.so.1.37.0"
++      ],
++      "origin": "termux-package-source-reference",
++      "sourceKind": "external-source-dependency",
++      "upstream": "https://busybox.net/downloads/",
++      "homepage": "https://busybox.net/",
++      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
++      "packageVersion": "1.37.0-r3",
++      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
++      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
++      "license": "GPL-2.0",
++      "licenseStatus": "verify-before-bundling",
++      "minBytes": 32768,
++      "runtimeDependencies": [
++        "libandroid_selinux",
++        "libpcre2_8"
++      ],
++      "dependencyPolicy": "dependência dinâmica do busybox; RUNPATH ajustado para $ORIGIN",
++      "onDeviceBuildSafe": false,
++      "buildNotes": [
++        "extraído do mesmo pacote Termux do BusyBox",
++        "empacotar como libbusybox.so para ser extraído pelo Android como native lib"
++      ]
++    },
++    "libandroid_selinux": {
++      "official": "libandroid-selinux.so",
++      "aliases": [
++        "libandroid-selinux.so",
++        "libandroid_selinux.so"
++      ],
++      "origin": "termux-package-source-reference",
++      "sourceKind": "external-source-dependency",
++      "upstream": "https://android.googlesource.com/platform/external/selinux/",
++      "homepage": "https://selinuxproject.org/",
++      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libandroid-selinux/build.sh",
++      "packageVersion": "14.0.0.11-1",
++      "license": "public-domain|BSD-style-android-platform",
++      "licenseStatus": "verify-before-bundling",
++      "minBytes": 32768,
++      "runtimeDependencies": [
++        "libpcre2_8"
++      ],
++      "dependencyPolicy": "dependência dinâmica de libbusybox; RUNPATH ajustado para $ORIGIN",
++      "onDeviceBuildSafe": false,
++      "buildNotes": [
++        "necessário para libbusybox.so do pacote Termux"
++      ]
++    },
++    "libpcre2_8": {
++      "official": "libpcre2-8.so",
++      "aliases": [
++        "libpcre2-8.so",
++        "pcre2-8.so"
++      ],
++      "origin": "termux-package-source-reference",
++      "sourceKind": "external-source-dependency",
++      "upstream": "https://github.com/PCRE2Project/pcre2",
++      "homepage": "https://pcre2project.github.io/pcre2/",
++      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/pcre2/build.sh",
++      "packageVersion": "10.47",
++      "license": "BSD-3-Clause",
++      "licenseStatus": "verify-before-bundling",
++      "minBytes": 32768,
++      "runtimeDependencies": [],
++      "dependencyPolicy": "dependência dinâmica de libandroid-selinux; RUNPATH ajustado para $ORIGIN",
++      "onDeviceBuildSafe": false,
++      "buildNotes": [
++        "necessário para libandroid-selinux.so"
++      ]
++    },
+     "box64": {
+       "official": "libcoreworker_box64.so",
+       "aliases": [
+diff -ruN /mnt/data/orig_v10/tts-bot-main/webserver.py /mnt/data/work_v10/tts-bot-main/webserver.py
+--- /mnt/data/orig_v10/tts-bot-main/webserver.py	2026-06-05 15:52:50.000000000 +0000
++++ /mnt/data/work_v10/tts-bot-main/webserver.py	2026-06-05 19:07:10.846466824 +0000
+@@ -301,6 +301,7 @@
      "core-linux-runner-preflight-v6",
      "core-linux-runner-preflight-v7",
-+    "core-linux-runner-preflight-v8",
+     "core-linux-runner-preflight-v8",
++    "core-linux-runner-preflight-v9",
      "core-linux-embedded-binaries-intake-v1",
      "core-linux-embedded-binaries-intake-v2",
      "core-linux-embedded-binaries-intake-v3",
-@@ -307,6 +308,7 @@
-     "core-linux-embedded-binaries-intake-v5",
+@@ -309,10 +310,13 @@
      "core-linux-embedded-binaries-intake-v6",
      "core-linux-embedded-binaries-intake-v7",
-+    "core-linux-embedded-binaries-intake-v8",
+     "core-linux-embedded-binaries-intake-v8",
++    "core-linux-embedded-binaries-intake-v9",
      "core-linux-embedded-binaries-build-pipeline-v1",
      "core-linux-embedded-binaries-build-pipeline-v2",
      "core-linux-embedded-binaries-build-pipeline-v3",
+     "core-linux-embedded-binaries-build-pipeline-v4",
++    "core-linux-embedded-binaries-build-pipeline-v5",
++    "core-linux-embedded-binaries-build-pipeline-v6",
+     "core-linux-runtime-v1",
+     "minecraft-bedrock-manager-safe-plan",
+ ]

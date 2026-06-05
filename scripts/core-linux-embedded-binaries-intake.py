@@ -32,15 +32,21 @@ TARGETS = {
     "runner": "libcoreworker_runner.so",
     "proot": "libcoreworker_proot.so",
     "busybox": "libcoreworker_busybox.so",
-    "libtalloc": "libcoreworker_libtalloc.so",
+    "libtalloc": "libtalloc.so",
+    "libbusybox": "libbusybox.so",
+    "libandroid_selinux": "libandroid-selinux.so",
+    "libpcre2_8": "libpcre2-8.so",
     "box64": "libcoreworker_box64.so",
 }
 
 MIN_BYTES_BY_TARGET = {
     "runner": 1024,
     "proot": 32768,
-    "busybox": 32768,
+    "busybox": 4096,
     "libtalloc": 8192,
+    "libbusybox": 32768,
+    "libandroid_selinux": 32768,
+    "libpcre2_8": 32768,
     "box64": 131072,
 }
 
@@ -81,8 +87,38 @@ TARGET_METADATA = {
         "licenseStatus": "verify-before-bundling",
         "packageVersion": "1.37.0-r3",
         "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
-        "runtimeDependencies": ["libandroid-selinux"],
-        "notes": "não baixar em runtime; importar somente build arm64 auditado; recipe Termux não é seguro para build on-device",
+        "runtimeDependencies": ["libbusybox", "libandroid_selinux", "libpcre2_8"],
+        "notes": "não baixar em runtime; importar somente build arm64 auditado; recipe Termux não é seguro para build on-device; NEEDED/RUNPATH ajustados para jniLibs",
+    },
+    "libbusybox": {
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source-dependency",
+        "upstream": "https://busybox.net/downloads/",
+        "license": "GPL-2.0",
+        "licenseStatus": "verify-before-bundling",
+        "packageVersion": "1.37.0-r3",
+        "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+        "runtimeDependencies": ["libandroid_selinux", "libpcre2_8"],
+        "notes": "lib interna do BusyBox; RUNPATH ajustado para $ORIGIN",
+    },
+    "libandroid_selinux": {
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source-dependency",
+        "upstream": "https://android.googlesource.com/platform/external/selinux/",
+        "license": "public-domain|BSD-style-android-platform",
+        "licenseStatus": "verify-before-bundling",
+        "packageVersion": "14.0.0.11-1",
+        "runtimeDependencies": ["libpcre2_8"],
+        "notes": "dependência de libbusybox.so; RUNPATH ajustado para $ORIGIN",
+    },
+    "libpcre2_8": {
+        "origin": "termux-package-source-reference",
+        "sourceKind": "external-source-dependency",
+        "upstream": "https://github.com/PCRE2Project/pcre2",
+        "license": "BSD-3-Clause",
+        "licenseStatus": "verify-before-bundling",
+        "packageVersion": "10.47",
+        "notes": "dependência de libandroid-selinux.so; RUNPATH ajustado para $ORIGIN",
     },
     "box64": {
         "origin": "manual-build-from-upstream-source",
@@ -236,7 +272,7 @@ def metadata_errors(key: str, metadata: dict[str, Any], info: dict[str, Any] | N
     if _license_is_gpl(metadata) and not _source_compliance_ok(metadata):
         errors.append("licença GPL exige sourceCompliance.completeCorrespondingSourceReady=true, licenseTextIncluded=true e sourceUrl válido")
     link_mode = str(metadata.get("linkMode") or "").strip().lower()
-    if key in {"proot", "busybox", "libtalloc"} and link_mode not in {"static", "self-contained", "dynamic-with-bundled-dependencies"}:
+    if key in {"proot", "busybox", "libtalloc", "libbusybox", "libandroid_selinux", "libpcre2_8"} and link_mode not in {"static", "self-contained", "dynamic-with-bundled-dependencies"}:
         errors.append("metadata.linkMode precisa ser static, self-contained ou dynamic-with-bundled-dependencies")
     if key in {"busybox", "libtalloc"} and TARGET_METADATA.get(key, {}).get("notes", "").find("não deve") >= 0:
         if _as_bool(metadata.get("builtOnLiveWorkerPrefix")):
@@ -257,10 +293,11 @@ def cross_target_errors(provided: dict[str, Path], target_manifests: dict[str, d
     if "busybox" in provided:
         meta = target_manifests.get("busybox", {})
         link_mode = str(meta.get("linkMode") or "").strip().lower()
-        deps = meta.get("runtimeDependencies")
-        dep_names = {str(x).strip().lower() for x in deps} if isinstance(deps, list) else set()
-        if dep_names and link_mode not in {"static", "self-contained"}:
-            errors.append("busybox com dependências dinâmicas exige build static/self-contained ou bundle explícito das dependências auditadas")
+        if link_mode not in {"static", "self-contained"}:
+            required = {"libbusybox", "libandroid_selinux", "libpcre2_8"}
+            missing = sorted(required.difference(provided))
+            if missing:
+                errors.append("busybox dinâmico exige dependências auditadas/embutidas: " + ", ".join(missing))
     return errors
 
 def main(argv: list[str]) -> int:
@@ -274,14 +311,14 @@ def main(argv: list[str]) -> int:
 
     provided = {key: getattr(args, key) for key in TARGETS if getattr(args, key) is not None}
     if not provided:
-        parser.error("informe pelo menos um binário: --runner, --proot, --libtalloc, --busybox ou --box64")
+        parser.error("informe pelo menos um binário conhecido do Core Linux")
 
     metadata_override = load_json(args.metadata_file) if args.metadata_file else {}
     source_manifest = load_json(SOURCE_MANIFEST)
 
     JNI_DIR.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, Any] = {
-        "schema": "core-worker-embedded-binaries-local-v5",
+        "schema": "core-worker-embedded-binaries-local-v6",
         "generatedAt": int(time.time()),
         "dryRun": bool(args.dry_run),
         "targets": {},
