@@ -62,7 +62,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.27"
+PHONE_WORKER_VERSION = "1.10.28"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -7713,6 +7713,39 @@ def _cleanup_old_apk_build_logs(build_root: Path, *, keep_logs: int | None = Non
             shutil.rmtree(path)
 
 
+def _cleanup_old_apk_build_artifacts(build_root: Path, *, keep_apks: int | None = None) -> dict[str, Any]:
+    """Remove APKs antigos do builder sem tocar no latest nem no build atual.
+
+    O diretório de artifacts cresce rápido no celular. A limpeza mantém os N APKs
+    mais recentes e seus JSONs irmãos. O resultado é apenas telemetria; falhas de
+    unlink são ignoradas para nunca quebrar um build publicado.
+    """
+    artifact_dir = build_root / "artifacts"
+    keep = max(3, int(keep_apks if keep_apks is not None else _env_int("PHONE_WORKER_APK_BUILD_KEEP_ARTIFACTS", 12)))
+    result: dict[str, Any] = {"enabled": True, "keep": keep, "removed": 0, "removedBytes": 0}
+    if not artifact_dir.is_dir():
+        result["enabled"] = False
+        return result
+    apks = sorted(artifact_dir.glob("*.apk"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True)
+    keep_set = {p.resolve() for p in apks[:keep] if p.exists()}
+    latest_meta = artifact_dir / "latest-artifact.json"
+    for apk in apks[keep:]:
+        if not apk.exists() or apk.resolve() in keep_set:
+            continue
+        candidates = [apk, apk.with_suffix(apk.suffix + ".json")]
+        for item in candidates:
+            if item == latest_meta or not item.exists():
+                continue
+            try:
+                size = item.stat().st_size
+                item.unlink()
+                result["removed"] += 1
+                result["removedBytes"] += size
+            except Exception:
+                pass
+    return result
+
+
 def _summarize_gradle_log(path: Path | None) -> dict[str, Any]:
     if path is None or not path.exists():
         return {"summary": "erro de Gradle sem log persistente", "permanent": False, "detail": ""}
@@ -8450,11 +8483,18 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             "notificationId": notification_id,
             "apkSigningMode": str(apk_signing.get("mode") or "compat-vps-debug-keystore"),
             "apkSigningKeystoreSha256": str(apk_signing.get("keystore_sha256") or ""),
+            "gradle_log_path": str(gradle_log),
+            "gradle_log_exists": bool(gradle_log.exists()),
+            "gradle_log_bytes": gradle_log.stat().st_size if gradle_log.exists() else 0,
+            "build_successful": True,
+            "build_result": "success",
+            "phoneWorkerVersion": PHONE_WORKER_VERSION,
             "created_at": time.time(),
         }
         with contextlib.suppress(Exception):
             _write_json_file_atomic(artifact_path.with_suffix(artifact_path.suffix + ".json"), artifact_meta)
             _write_json_file_atomic(artifact_dir / "latest-artifact.json", artifact_meta)
+        artifact_cleanup = _cleanup_old_apk_build_artifacts(build_root)
         result: dict[str, Any] = {
             "ok": True,
             "build_gradle_ok": True,
@@ -8478,6 +8518,8 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             },
             "source": {"url": source_url, "bytes": download.get("bytes"), "sha256": download.get("sha256"), "files": members},
             "builder_environment": builder_environment,
+            "artifact_meta": artifact_meta,
+            "artifact_cleanup": artifact_cleanup,
             "duration_seconds": round(time.time() - started, 3),
         }
         if bool(payload.get("publish", True)):

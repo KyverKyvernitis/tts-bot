@@ -447,22 +447,49 @@ def _save_pending(data: dict[str, Any]) -> None:
     tmp.replace(PENDING_PATH)
 
 
-def _manifest_version_code() -> int:
+def _latest_apk_manifest() -> dict[str, Any]:
     manifest = ROOT / "android" / "core-worker-app" / "releases" / "latest.json"
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
-        return int(data.get("versionCode") or 0)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _manifest_version_code() -> int:
+    try:
+        return int(_latest_apk_manifest().get("versionCode") or 0)
     except Exception:
         return 0
 
 
 def _manifest_source_sha() -> str:
-    manifest = ROOT / "android" / "core-worker-app" / "releases" / "latest.json"
+    data = _latest_apk_manifest()
+    return str(data.get("sourceFingerprint") or data.get("source_fingerprint") or data.get("sourceSha256") or data.get("source_sha256") or "").strip().lower()
+
+
+def _latest_apk_matches(version_code: int, source_fingerprint: str = "") -> bool:
+    data = _latest_apk_manifest()
+    if not data:
+        return False
     try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-        return str(data.get("sourceSha256") or data.get("source_sha256") or "").strip().lower()
+        manifest_code = int(data.get("versionCode") or 0)
     except Exception:
-        return ""
+        manifest_code = 0
+    if int(version_code or 0) and manifest_code < int(version_code or 0):
+        return False
+    expected = str(source_fingerprint or "").strip().lower()
+    if expected:
+        current_values = {
+            str(data.get("sourceFingerprint") or "").strip().lower(),
+            str(data.get("source_fingerprint") or "").strip().lower(),
+            str(data.get("sourceSha256") or "").strip().lower(),
+            str(data.get("source_sha256") or "").strip().lower(),
+        }
+        short = expected[:12]
+        if expected not in current_values and short and not any(short and short in value for value in current_values if value):
+            return False
+    return True
 
 
 def _workers_need_agent_version(snapshot: dict[str, Any], target_version: str) -> bool:
@@ -796,19 +823,36 @@ def _recent_failed_apk_build(version_name: str, source_fingerprint: str, *, cool
     now = time.time()
     try:
         snapshot = _load_registry_snapshot()
-        jobs = snapshot.get("jobs") if isinstance(snapshot.get("jobs"), list) else []
+        raw_jobs = snapshot.get("jobs")
+        if isinstance(raw_jobs, dict):
+            jobs = [j for j in raw_jobs.values() if isinstance(j, dict)]
+        else:
+            jobs = raw_jobs if isinstance(raw_jobs, list) else []
     except Exception:
         jobs = []
+    matching = []
     for job in jobs:
         if not isinstance(job, dict):
             continue
         if str(job.get("type") or "") != "apk_build_debug":
             continue
-        if str(job.get("status") or "").lower() != "failed":
-            continue
         if not _apk_build_job_matches_source(job, version_name, source_fingerprint):
             continue
         updated = float(job.get("updated_at") or job.get("finished_at") or job.get("created_at") or 0)
+        matching.append((updated, job))
+    matching.sort(key=lambda item: item[0], reverse=True)
+    for updated, job in matching:
+        status = str(job.get("status") or "").lower()
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        # Se um build/publicação mais novo já deu certo, uma falha antiga não pode
+        # manter a automação presa em cooldown. Foi isso que gerou falso negativo
+        # quando o APK 0.5.71 existia, mas o painel ainda apontava para log stale.
+        if status == "succeeded" and result.get("ok") is not False:
+            return {}
+        if status != "failed":
+            continue
+        if _latest_apk_matches(_read_android_version()[1], source_fingerprint):
+            return {}
         if updated and now - updated < cooldown:
             detail = _short(_apk_build_failure_detail(job), 240)
             return {

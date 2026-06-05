@@ -1008,7 +1008,120 @@ def _core_worker_core_linux_is_richer(value: dict | None) -> bool:
         or value.get("runnerPreflightState")
         or value.get("runnerPreflightSummary")
         or isinstance(value.get("runnerPreflight"), dict)
+        or isinstance(value.get("embedded"), dict)
     )
+
+
+def _core_worker_embedded_asset_public(value: dict | None) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "present": bool(value.get("present")),
+        "embeddedInApk": bool(value.get("embeddedInApk")),
+        "allowedForFutureExecution": bool(value.get("allowedForFutureExecution")),
+        "canExecute": bool(value.get("canExecute")),
+        "placeholder": bool(value.get("placeholder")),
+        "name": _safe_short_text(value.get("name"), 80),
+        "kind": _safe_short_text(value.get("kind"), 40),
+        "size": int(value.get("size") or 0),
+        "sha256": _safe_short_text(value.get("sha256"), 96),
+        "detectedBy": _safe_short_text(value.get("detectedBy"), 96),
+        "path": _safe_short_text(value.get("path"), 220),
+        "sourceApk": _safe_short_text(value.get("sourceApk"), 180),
+        "zipEntry": _safe_short_text(value.get("zipEntry"), 120),
+        "compressionMethod": _safe_short_text(value.get("compressionMethod"), 32),
+    }
+
+
+def _core_worker_embedded_summary(value: dict | None) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for key in ("executor", "runner", "proot", "busybox", "box64"):
+        item = value.get(key)
+        if isinstance(item, dict):
+            out[key] = _core_worker_embedded_asset_public(item)
+    for key, item in value.items():
+        if key in out or not isinstance(item, dict):
+            continue
+        out[_safe_short_text(key, 40)] = _core_worker_embedded_asset_public(item)
+    return out
+
+
+def _core_worker_core_linux_detail_score(value: dict | None) -> int:
+    if not isinstance(value, dict) or not value:
+        return 0
+    score = 0
+    if value.get("rootfsReady"):
+        score += 10
+    if str(value.get("rootfsValidationLevel") or "").lower() == "real" or str(value.get("state") or "").lower() == "rootfs_real_validated":
+        score += 20
+    runner = value.get("runnerPreflight") if isinstance(value.get("runnerPreflight"), dict) else {}
+    if runner:
+        score += 30
+    embedded = value.get("embedded") if isinstance(value.get("embedded"), dict) else runner.get("embedded") if isinstance(runner.get("embedded"), dict) else {}
+    if isinstance(embedded, dict):
+        for item in embedded.values():
+            if isinstance(item, dict) and item.get("present"):
+                score += 10
+                if item.get("sha256"):
+                    score += 5
+                if item.get("embeddedInApk"):
+                    score += 5
+    if isinstance(value.get("runnerMissing"), list) or isinstance(runner.get("missing"), list):
+        score += 5
+    return score
+
+
+def _merge_core_worker_core_linux_state(base: dict | None, extra: dict | None) -> dict:
+    if not isinstance(base, dict) or not base:
+        return dict(extra) if isinstance(extra, dict) else {}
+    if not isinstance(extra, dict) or not extra:
+        return dict(base)
+    merged = dict(base)
+    # O heartbeat de background pode ser compacto. Preserve dados vivos dele, mas
+    # use o último preflight/job para enriquecer rootfs/runner/assets.
+    for key in (
+        "runnerPreflight",
+        "runnerPreflightState",
+        "runnerPreflightSummary",
+        "runnerPreflightVersion",
+        "runnerReady",
+        "runnerBlocked",
+        "runnerExecutionAllowed",
+        "runnerRequirementsReady",
+        "runnerMissing",
+        "embedded",
+        "rootfs",
+        "rootfsImport",
+        "rootfsReady",
+        "rootfsValidationLevel",
+        "rootfsState",
+        "rootfsSummary",
+        "sourceJobType",
+        "lastResultAt",
+    ):
+        value = extra.get(key)
+        if value not in (None, "", [], {}):
+            current = merged.get(key)
+            if current in (None, "", [], {}) or _core_worker_core_linux_detail_score(extra) >= _core_worker_core_linux_detail_score(merged):
+                merged[key] = value
+    runner = merged.get("runnerPreflight") if isinstance(merged.get("runnerPreflight"), dict) else {}
+    if isinstance(runner.get("embedded"), dict):
+        merged["embedded"] = _core_worker_embedded_summary(runner.get("embedded"))
+    elif isinstance(extra.get("embedded"), dict) and not isinstance(merged.get("embedded"), dict):
+        merged["embedded"] = _core_worker_embedded_summary(extra.get("embedded"))
+    embedded = merged.get("embedded") if isinstance(merged.get("embedded"), dict) else {}
+    for key in ("executor", "runner", "proot", "busybox", "box64"):
+        item = embedded.get(key) if isinstance(embedded.get(key), dict) else {}
+        if item:
+            public_key = f"{key}Embedded" if key != "runner" else "coreRunnerEmbedded"
+            merged[public_key] = bool(item.get("embeddedInApk") or item.get("present"))
+            merged[f"{key}Sha256"] = _safe_short_text(item.get("sha256"), 96)
+            merged[f"{key}DetectedBy"] = _safe_short_text(item.get("detectedBy"), 96)
+    merged["termuxRequired"] = False
+    merged["bedrockStartAllowed"] = False
+    return merged
 
 
 def _merge_core_worker_app_heartbeat_record(record: dict, previous: dict | None) -> dict:
@@ -1161,21 +1274,22 @@ def _core_worker_app_latest_core_linux_state(worker_id: str = "", install_id: st
             core_linux["runnerMissing"] = [_safe_short_text(x, 120) for x in runner.get("missing", [])[:16]]
         compact_runner = dict(runner)
         if isinstance(compact_runner.get("embedded"), dict):
-            # Mantém só o resumo dos assets para não inflar o runtime-summary.
-            compact_embedded = {}
-            for key, value in compact_runner.get("embedded", {}).items():
-                if isinstance(value, dict):
-                    compact_embedded[key] = {
-                        "present": bool(value.get("present")),
-                        "embeddedInApk": bool(value.get("embeddedInApk")),
-                        "allowedForFutureExecution": bool(value.get("allowedForFutureExecution")),
-                        "name": _safe_short_text(value.get("name"), 80),
-                        "size": int(value.get("size") or 0),
-                        "sha256": _safe_short_text(value.get("sha256"), 96),
-                        "detectedBy": _safe_short_text(value.get("detectedBy"), 80),
-                    }
-            compact_runner["embedded"] = compact_embedded
+            # Mantém um resumo estável dos assets no runtime-summary.
+            # Antes isso ficava compacto demais e painéis/comandos liam `null`
+            # mesmo quando o preflight real já tinha validado executor/runner.
+            compact_runner["embedded"] = _core_worker_embedded_summary(compact_runner.get("embedded"))
         core_linux["runnerPreflight"] = compact_runner
+        if isinstance(compact_runner.get("embedded"), dict):
+            core_linux["embedded"] = compact_runner.get("embedded")
+            for asset_key, asset in compact_runner.get("embedded", {}).items():
+                if not isinstance(asset, dict):
+                    continue
+                if asset_key == "runner":
+                    core_linux["coreRunnerEmbedded"] = bool(asset.get("embeddedInApk") or asset.get("present"))
+                else:
+                    core_linux[f"{asset_key}Embedded"] = bool(asset.get("embeddedInApk") or asset.get("present"))
+                if asset.get("sha256"):
+                    core_linux[f"{asset_key}Sha256"] = _safe_short_text(asset.get("sha256"), 96)
     return {"coreLinux": core_linux, "coreLinuxSummary": summary, "coreLinuxState": state, "coreLinuxPrepared": prepared}
 
 def _core_worker_promote_rootfs_real_state(core_linux: dict, summary: str = "", state: str = "") -> tuple[dict, str, str, bool]:
@@ -1256,12 +1370,14 @@ def _core_worker_app_runtime_public_summary(worker_id: str = "", install_id: str
     native_runtime = _first_dict(record.get("nativeRuntime"), runtime.get("nativeRuntime"))
     light_jobs = _core_worker_app_jobs_public_summary(worker_id=effective_worker_id, install_id=effective_install_id)
     job_core_linux = _core_worker_app_latest_core_linux_state(worker_id=effective_worker_id, install_id=effective_install_id)
-    if (not core_linux or not _safe_short_text(core_linux.get("summary"), 180)) and isinstance(job_core_linux.get("coreLinux"), dict):
-        core_linux = job_core_linux.get("coreLinux")
+    if isinstance(job_core_linux.get("coreLinux"), dict):
+        core_linux = _merge_core_worker_core_linux_state(core_linux, job_core_linux.get("coreLinux"))
     core_linux_summary = _safe_short_text(record.get("coreLinuxSummary") or core_linux.get("summary") or job_core_linux.get("coreLinuxSummary"), 160)
     core_linux_state = _safe_short_text(record.get("coreLinuxState") or core_linux.get("state") or job_core_linux.get("coreLinuxState"), 80)
     core_linux_prepared = bool(record.get("coreLinuxPrepared") or core_linux.get("prepared") or job_core_linux.get("coreLinuxPrepared"))
     core_linux, promoted_summary, promoted_state, promoted_prepared = _core_worker_promote_rootfs_real_state(core_linux, core_linux_summary, core_linux_state)
+    if isinstance(job_core_linux.get("coreLinux"), dict):
+        core_linux = _merge_core_worker_core_linux_state(core_linux, job_core_linux.get("coreLinux"))
     if promoted_state:
         core_linux_summary = promoted_summary or core_linux_summary
         core_linux_state = promoted_state or core_linux_state

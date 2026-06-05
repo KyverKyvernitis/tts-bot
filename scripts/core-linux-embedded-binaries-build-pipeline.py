@@ -156,7 +156,7 @@ def write_source_manifest() -> Path:
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     SOURCE_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema": "core-worker-embedded-binaries-source-plan-v4",
+        "schema": "core-worker-embedded-binaries-source-plan-v5",
         "generatedAt": int(time.time()),
         "abi": "arm64-v8a",
         "androidMinSdk": 26,
@@ -298,16 +298,27 @@ def find_alias(input_dir: Path, key: str) -> Path | None:
     return None
 
 
-def build_intake_command(input_dir: Path, *, dry_run: bool, metadata_file: Path | None, allow_unverified_external: bool = False) -> list[str]:
+def build_intake_command(
+    input_dir: Path,
+    *,
+    dry_run: bool,
+    metadata_file: Path | None,
+    allow_unverified_external: bool = False,
+    include_keys: set[str] | None = None,
+) -> list[str]:
     command = [sys.executable, str(INTAKE)]
     found: list[str] = []
+    allowed = include_keys or set(TARGETS)
     for key in TARGETS:
+        if key not in allowed:
+            continue
         p = find_alias(input_dir, key)
         if p:
             command.extend([f"--{key}", str(p)])
             found.append(key)
     if not found:
-        raise SystemExit("nenhum binário conhecido encontrado no input-dir")
+        wanted = ", ".join(sorted(allowed))
+        raise SystemExit(f"nenhum binário conhecido encontrado no input-dir para: {wanted}")
     if metadata_file:
         command.extend(["--metadata-file", str(metadata_file.resolve())])
     if allow_unverified_external:
@@ -339,6 +350,39 @@ def cmd_audit_input(args: argparse.Namespace) -> int:
     sh(command)
     return 0
 
+
+
+def cmd_audit_base_tools(args: argparse.Namespace) -> int:
+    """Valida apenas PRoot + BusyBox antes de chegar no Box64.
+
+    Este comando é o próximo estágio seguro: ele não aceita Box64, não executa
+    nada e força dry-run. Serve para conferir origem/licença/hash dos dois
+    utilitários base que o runner vai precisar.
+    """
+    write_source_manifest()
+    input_dir = args.input_dir.resolve()
+    command = build_intake_command(
+        input_dir,
+        dry_run=True,
+        metadata_file=args.metadata_file,
+        include_keys={"proot", "busybox"},
+    )
+    sh(command)
+    return 0
+
+
+def cmd_stage_base_tools(args: argparse.Namespace) -> int:
+    """Copia PRoot + BusyBox auditados para jniLibs; Box64 continua fora."""
+    write_source_manifest()
+    input_dir = args.input_dir.resolve()
+    command = build_intake_command(
+        input_dir,
+        dry_run=args.dry_run,
+        metadata_file=args.metadata_file,
+        include_keys={"proot", "busybox"},
+    )
+    sh(command)
+    return 0
 
 def cmd_verify(args: argparse.Namespace) -> int:
     write_source_manifest()
@@ -384,6 +428,17 @@ def main(argv: list[str]) -> int:
     p_audit.add_argument("--input-dir", type=Path, required=True)
     p_audit.add_argument("--metadata-file", type=Path, help="JSON com origem/licença/versão/hash auditados")
     p_audit.set_defaults(func=cmd_audit_input)
+
+    p_base_audit = sub.add_parser("audit-base-tools", help="valida só proot+busybox em dry-run; Box64 fica para depois")
+    p_base_audit.add_argument("--input-dir", type=Path, required=True)
+    p_base_audit.add_argument("--metadata-file", type=Path, required=True, help="JSON com origem/licença/versão/hash auditados")
+    p_base_audit.set_defaults(func=cmd_audit_base_tools)
+
+    p_base_stage = sub.add_parser("stage-base-tools", help="importa só proot+busybox auditados; não toca Box64")
+    p_base_stage.add_argument("--input-dir", type=Path, required=True)
+    p_base_stage.add_argument("--metadata-file", type=Path, required=True, help="JSON com origem/licença/versão/hash auditados")
+    p_base_stage.add_argument("--dry-run", action="store_true")
+    p_base_stage.set_defaults(func=cmd_stage_base_tools)
 
     p_verify = sub.add_parser("verify", help="valida os binários presentes em jniLibs")
     p_verify.add_argument("--metadata-file", type=Path, help="JSON com origem/licença/versão/hash auditados")

@@ -1882,32 +1882,52 @@ def _core_worker_fcm_status_summary(worker_id: str = "") -> dict[str, Any]:
     }
 
 
-def _core_worker_push_status_text(worker_id: str = "") -> str:
-    summary = _core_worker_fcm_status_summary(worker_id)
-    active = int(summary.get("active") or 0)
-    if active <= 0:
-        if summary.get("needsRefresh"):
-            return "Push: token expirado · aguardando renovação pelo APK"
-        if int(summary.get("stale") or 0):
-            return "Push: token antigo · aguardando renovação pelo APK"
-        if int(summary.get("incomplete") or 0):
-            return "Push: token incompleto · aguardando confirmação do APK"
-        return "Push: aguardando APK registrar FCM"
-    permission = str(summary.get("permission") or "").lower()
-    suffix = ""
-    last_push = summary.get("lastPushAt")
-    if last_push:
-        suffix = f" · último push {_format_age(max(0, time.time() - float(last_push)))}"
-    status = str(summary.get("lastPushStatus") or "")
-    if status == "unregistered" or str(summary.get("lastErrorCode") or "").upper() == "UNREGISTERED":
-        return "Push: token expirado · aguardando renovação"
-    if status == "failed":
-        return "Push: falhou no último envio · detalhes no celular"
-    if permission == "missing":
-        return f"Push: token ativo · sem permissão visível{suffix}"
-    if status == "sent":
-        return f"Push: ativo · enviado{suffix}"
-    return f"Push: ativo ({active}){suffix}"
+def _apk_build_effectively_published(apk: dict[str, Any]) -> tuple[bool, str]:
+    if not isinstance(apk, dict) or not apk:
+        return False, ""
+    root = _repo_root()
+    latest_path = root / "android" / "core-worker-app" / "releases" / "latest.json"
+    try:
+        latest = json.loads(latest_path.read_text(encoding="utf-8")) if latest_path.exists() else {}
+    except Exception:
+        latest = {}
+    if not isinstance(latest, dict) or not latest:
+        return False, ""
+    want_version = str(apk.get("versionName") or apk.get("version_name") or "").strip()
+    try:
+        want_code = int(apk.get("versionCode") or apk.get("version_code") or 0)
+    except Exception:
+        want_code = 0
+    try:
+        got_code = int(latest.get("versionCode") or 0)
+    except Exception:
+        got_code = 0
+    got_version = str(latest.get("versionName") or "").strip()
+    if want_code and got_code and got_code < want_code:
+        return False, ""
+    if want_version and got_version and got_version != want_version and not (want_code and got_code >= want_code):
+        return False, ""
+    source_obj = apk.get("source") if isinstance(apk.get("source"), dict) else {}
+    expected_fp = str(
+        apk.get("sourceFingerprint")
+        or apk.get("source_fingerprint")
+        or apk.get("sourceSha256")
+        or apk.get("source_sha256")
+        or source_obj.get("sha256")
+        or ""
+    ).strip().lower()
+    if expected_fp:
+        values = {
+            str(latest.get("sourceFingerprint") or "").strip().lower(),
+            str(latest.get("source_fingerprint") or "").strip().lower(),
+            str(latest.get("sourceSha256") or "").strip().lower(),
+            str(latest.get("source_sha256") or "").strip().lower(),
+        }
+        short = expected_fp[:12]
+        if expected_fp not in values and short and not any(short in value for value in values if value):
+            return False, ""
+    label = got_version or want_version or str(got_code or want_code or "")
+    return True, label
 
 
 def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None) -> str:
@@ -1935,7 +1955,10 @@ def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None
             if _active_workers_need_agent_version(snapshot_workers, target):
                 parts.append(f"Worker: atualização pendente ({target})")
         if apk:
-            if apk.get("blocked_by_recent_failure") or (apk.get("ok") is False and not apk.get("pending")):
+            published, label = _apk_build_effectively_published(apk)
+            if published:
+                parts.append(f"APK: publicado {label or apk.get('versionName') or '?'}")
+            elif apk.get("blocked_by_recent_failure") or (apk.get("ok") is False and not apk.get("pending")):
                 retry = apk.get("retry_after_seconds")
                 if apk.get("permanent_failure"):
                     extra = " · correção necessária"
@@ -1961,8 +1984,9 @@ def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None
                 elif agent.get("pending") and _active_workers_need_agent_version(snapshot_workers, target):
                     parts.append(f"Worker: atualização pendente ({target})")
             if apk:
-                if apk.get("already_published"):
-                    parts.append(f"APK: publicado {apk.get('versionName') or '?'}")
+                published, label = _apk_build_effectively_published(apk)
+                if apk.get("already_published") or published:
+                    parts.append(f"APK: publicado {label or apk.get('versionName') or '?'}")
                 elif apk.get("blocked_by_recent_failure") or (apk.get("ok") is False and not apk.get("pending")):
                     suffix = " · correção necessária" if apk.get("permanent_failure") else ""
                     parts.append(f"APK: build falhou ({apk.get('versionName') or '?'}){suffix}")
@@ -2182,6 +2206,7 @@ def _append_job_technical_lines(lines: list[str], *, job: dict[str, Any], result
         lines.append("`job`: " + _shorten(_redact(json.dumps(compact_job, ensure_ascii=False, separators=(",", ":"))), limit=520))
     interesting_keys = [
         "version", "target_version", "current_version", "apk", "publish", "builder_environment",
+        "artifact_meta", "artifact_cleanup", "gradle_log_path", "gradle_error_summary", "publish_error",
         "source", "scripts", "battery", "network", "ping", "tailscale", "services",
         "ffmpeg", "ffprobe", "lines", "error_lines", "path", "work_dir",
     ]
