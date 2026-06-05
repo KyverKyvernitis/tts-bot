@@ -114,20 +114,39 @@ public final class CoreLinuxRuntimeManager {
         try {
             Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
             ensureBase(layout);
+
+            // Patch 87: o smoke test não pode mais criar scaffold automaticamente
+            // nem dar OK só porque o executor JNI e uma rootfs fake existem. A fase
+            // atual para substituir Termux exige rootfs real + runner + PRoot +
+            // BusyBox auditados. Enquanto isso não estiver pronto, este job vira um
+            // gate seguro e explícito, sem executar proot/busybox/box64/Bedrock.
             JSONObject executor = nativeExecutor;
             if (executor == null || !executor.optBoolean("readyForRootfs", false)) {
                 executor = CoreWorkerNativeExecutor.snapshot(context, layout.core, "test");
             }
-            JSONObject rootfs = rootfsSnapshot(context, layout.core, "prepare");
+            JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
             JSONObject rootfsState = rootfs.optJSONObject("rootfs");
             if (rootfsState == null) rootfsState = rootfs;
-            JSONObject runtime = runtimeSnapshot(context, layout.core, "smoke_test", executor);
+            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "smoke_gate");
+            JSONObject runtime = runtimeSnapshot(context, layout.core, "smoke_gate", executor);
+
+            boolean rootfsReal = runner.optBoolean("rootfsRealValidated", false)
+                    || "real".equals(rootfsState.optString("validationLevel", ""))
+                    || "rootfs_real_validated".equals(rootfsState.optString("state", ""));
+            boolean baseReady = runner.optBoolean("runnerBaseRequirementsReady", false)
+                    || runner.optBoolean("termuxReductionReady", false);
+            JSONArray missing = runner.optJSONArray("currentMissing");
+            if (missing == null) missing = runner.optJSONArray("missing");
+            if (missing == null) missing = new JSONArray();
+
             JSONArray checks = new JSONArray()
                     .put(check("core-linux dir", layout.core.isDirectory(), path(layout.core)))
                     .put(check("executor JNI allowlist", executor.optBoolean("readyForRootfs", false), executor.optString("summary", "")))
-                    .put(check("rootfs scaffold", rootfsState.optBoolean("rootfsReady", false), rootfsState.optString("summary", "")))
+                    .put(check("rootfs real", rootfsReal, rootfsState.optString("summary", "importe/valide rootfs real no APK")))
+                    .put(check("runner/proot/busybox base", baseReady, runner.optString("summary", "base Core Linux ainda pendente")))
                     .put(check("runtime state", runtime.optBoolean("ok", false), runtime.optString("summary", "")))
-                    .put(check("Bedrock bloqueado", true, "nenhum start real é feito nesta etapa"));
+                    .put(check("Bedrock bloqueado", true, "nenhum start real é feito nesta etapa"))
+                    .put(check("shell livre bloqueado", true, "somente allowlist futura; sem comando remoto arbitrário"));
             boolean ok = true;
             for (int i = 0; i < checks.length(); i++) {
                 JSONObject row = checks.optJSONObject(i);
@@ -136,20 +155,25 @@ public final class CoreLinuxRuntimeManager {
             JSONObject out = new JSONObject();
             out.put("ok", ok);
             out.put("type", "core_linux_runtime_smoke_test");
-            out.put("state", ok ? "smoke_test_ok" : "smoke_test_pending");
-            out.put("stage", "core-linux-runtime-v1");
+            out.put("state", ok ? "smoke_gate_ready" : "smoke_gate_blocked");
+            out.put("stage", "core-linux-runtime-smoke-gate-v2");
             out.put("termuxTouched", false);
             out.put("pythonTouched", false);
             out.put("serviceStarted", false);
             out.put("bedrockStarted", false);
+            out.put("runnerExecuted", false);
+            out.put("prootExecuted", false);
+            out.put("busyboxExecuted", false);
             out.put("checks", checks);
+            out.put("missing", missing);
             out.put("nativeExecutor", executor);
             out.put("rootfs", rootfsState);
             out.put("runtime", runtime);
+            out.put("runnerPreflight", runner);
             out.put("updatedAt", now());
             out.put("summary", ok
-                    ? "Smoke test Core Linux v1 ok · executor + rootfs sem Termux"
-                    : "Smoke test Core Linux v1 pendente · revise executor/rootfs");
+                    ? "Smoke gate Core Linux ok · base pronta para liberar runner allowlist"
+                    : "Smoke gate Core Linux bloqueado · falta base real para substituir Termux");
             writeJson(new File(layout.runtime, "core-linux-smoke-test.json"), out);
             appendLog(new File(layout.logs, "core-linux-smoke-test.log"), out.optString("summary"));
             return out;

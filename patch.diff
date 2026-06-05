@@ -1,348 +1,223 @@
-diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/PATCH_NOTES.md patch_repo/PATCH_NOTES.md
---- orig_repo/PATCH_NOTES.md	2026-06-05 00:50:34.000000000 +0000
-+++ patch_repo/PATCH_NOTES.md	2026-06-05 04:00:34.568654665 +0000
-@@ -1,29 +1,40 @@
--# Patch: event-loop-anti-lag-updater-priority
-+# Patch: core-linux-base-tools-phase
+diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/tts-bot-main/PATCH_NOTES.md work_repo/tts-bot-main/PATCH_NOTES.md
+--- orig_repo/tts-bot-main/PATCH_NOTES.md	2026-06-05 01:11:40.000000000 +0000
++++ work_repo/tts-bot-main/PATCH_NOTES.md	2026-06-05 18:07:09.791147077 +0000
+@@ -1,40 +1,37 @@
+-# Patch: core-linux-base-tools-phase
++# Patch: core-linux-smoke-gate-v2
  
--Base: `repo-20260605-004304.zip`
-+Base: `repo-20260605-005354.zip`
+-Base: `repo-20260605-005354.zip`
++Base: `repo-20260605-133937(2).zip`
  
  ## Corrige / melhora
  
--- Reduz travadas causadas por logging síncrono:
--  - logs do bot agora entram em fila (`QueueHandler`) e são gravados por uma thread de logging;
--  - formatação pesada de traceback/exception fica fora do event loop;
--  - mantém arquivo `logs/bot.log` e saída no journal, sem mudar formato público.
--- Diminui spam de traceback do `discord.gateway` quando heartbeat trava:
--  - primeiro alerta continua aparecendo;
--  - alertas repetidos de heartbeat/`Loop thread traceback` entram em cooldown configurável;
--  - evita que o próprio diagnóstico gere mais I/O durante lag.
--- Watchdog do event loop ficou mais útil e menos agressivo:
--  - cooldown configurável dos avisos;
--  - guarda os últimos atrasos em `/health`;
--  - em travas severas registra um resumo leve das tasks pendentes, sem dump gigante de stack.
--- Updater passa a rodar em baixa prioridade:
--  - aplica `renice` e `ionice` no processo do updater;
--  - filhos como `git fetch`, validações Python e scripts auxiliares herdam prioridade menor;
--  - reduz disputa com heartbeat/voz do Discord na VPS pequena.
-+- Separa o preflight do Core Linux em duas fases reais:
-+  - **fase atual:** rootfs real + executor + runner + PRoot + BusyBox;
-+  - **fase futura:** Box64 + Bedrock + `server.properties`.
-+- O painel/runtime não vai mais tratar Box64/Bedrock como pendência da fase base para substituir o Termux.
-+- Quando PRoot + BusyBox estiverem auditados e embutidos, o estado passa a indicar claramente:
-+  - `runnerBaseRequirementsReady=true`;
-+  - `termuxReductionReady=true`;
-+  - próximo passo: smoke test real allowlist (`APK → runner → proot → rootfs`).
-+- Mantém o bloqueio de segurança:
-+  - sem shell livre;
-+  - sem comando remoto arbitrário;
-+  - sem iniciar Bedrock;
-+  - sem executar Box64/proot/busybox durante o preflight.
-+- O `runtime-summary` e o painel `_worker` passam a expor melhor:
-+  - `baseToolsReady`;
-+  - `runnerBaseRequirementsReady`;
-+  - `termuxReductionReady`;
-+  - `bedrockRequirementsReady`;
-+  - `currentMissing` e `futureMissing` separados.
-+- Atualiza o APK para `0.5.75` (`versionCode 90`) para forçar build/publicação do próximo APK.
+-- Separa o preflight do Core Linux em duas fases reais:
+-  - **fase atual:** rootfs real + executor + runner + PRoot + BusyBox;
+-  - **fase futura:** Box64 + Bedrock + `server.properties`.
+-- O painel/runtime não vai mais tratar Box64/Bedrock como pendência da fase base para substituir o Termux.
+-- Quando PRoot + BusyBox estiverem auditados e embutidos, o estado passa a indicar claramente:
+-  - `runnerBaseRequirementsReady=true`;
+-  - `termuxReductionReady=true`;
+-  - próximo passo: smoke test real allowlist (`APK → runner → proot → rootfs`).
+-- Mantém o bloqueio de segurança:
+-  - sem shell livre;
+-  - sem comando remoto arbitrário;
+-  - sem iniciar Bedrock;
+-  - sem executar Box64/proot/busybox durante o preflight.
+-- O `runtime-summary` e o painel `_worker` passam a expor melhor:
+-  - `baseToolsReady`;
+-  - `runnerBaseRequirementsReady`;
+-  - `termuxReductionReady`;
+-  - `bedrockRequirementsReady`;
+-  - `currentMissing` e `futureMissing` separados.
+-- Atualiza o APK para `0.5.75` (`versionCode 90`) para forçar build/publicação do próximo APK.
++- Fecha o falso positivo do `apk_core_linux_runtime_smoke_test`:
++  - antes ele podia preparar/validar scaffold e retornar OK sem PRoot/BusyBox/rootfs real;
++  - agora ele vira um **smoke gate**: só fica OK quando a base real para substituir Termux estiver pronta.
++- O smoke gate passa a exigir:
++  - executor JNI allowlist pronto;
++  - rootfs real validado;
++  - `runnerBaseRequirementsReady`/`termuxReductionReady`;
++  - runner + PRoot + BusyBox auditados pelo preflight.
++- Remove `apk_core_linux_runtime_smoke_test` da fila automática da VPS enquanto essa etapa ainda depende de binários externos.
++  - o job continua disponível manualmente;
++  - evita painel “com erro” por uma etapa que ainda não deve rodar toda hora.
++- Atualiza capacidades visíveis para `core-linux-runner-preflight-v6` e `core-linux-embedded-binaries-intake-v6`.
++- Atualiza o APK para `0.5.76` (`versionCode 91`) para forçar publicação do próximo APK.
+ 
+ ## Próximo passo depois deste patch
+ 
+-- Importar PRoot + BusyBox auditados com:
+-  - `scripts/core-linux-embedded-binaries-build-pipeline.py audit-base-tools ...`
+-  - depois `stage-base-tools ...`
+-- Só depois liberar o smoke test real allowlist do rootfs.
++- Trazer os binários auditados `libcoreworker_proot.so` + `libcoreworker_busybox.so` e, se o PRoot não for estático, `libcoreworker_libtalloc.so`.
++- Rodar:
 +
-+## Próximo passo depois deste patch
-+
-+- Importar PRoot + BusyBox auditados com:
-+  - `scripts/core-linux-embedded-binaries-build-pipeline.py audit-base-tools ...`
-+  - depois `stage-base-tools ...`
-+- Só depois liberar o smoke test real allowlist do rootfs.
++```bash
++python3 scripts/core-linux-embedded-binaries-build-pipeline.py audit-base-tools --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
++python3 scripts/core-linux-embedded-binaries-build-pipeline.py stage-base-tools --input-dir /caminho/dos/binarios --metadata-file /tmp/core-linux-binaries-metadata.json
++python3 scripts/core-linux-embedded-binaries-build-pipeline.py verify --metadata-file /tmp/core-linux-binaries-metadata.json --strict
++```
  
  ## Não muda
  
  - Não toca CallKeeper.
--- Não muda assinatura/publicação de APK.
  - Não builda APK na VPS.
--- Não remove nem refatora módulos grandes neste patch.
-+- Não adiciona binários externos falsos/placeholders.
-+- Não inicia Bedrock e não libera runner real ainda.
-diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/android/core-worker-app/app/build.gradle patch_repo/android/core-worker-app/app/build.gradle
---- orig_repo/android/core-worker-app/app/build.gradle	2026-06-04 23:31:48.000000000 +0000
-+++ patch_repo/android/core-worker-app/app/build.gradle	2026-06-05 03:59:22.122622319 +0000
+-- Não adiciona binários externos falsos/placeholders.
+-- Não inicia Bedrock e não libera runner real ainda.
++- Não adiciona placeholders de PRoot/BusyBox.
++- Não inicia Bedrock, não abre shell livre e não executa comando remoto arbitrário.
+diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/tts-bot-main/android/core-worker-app/app/build.gradle work_repo/tts-bot-main/android/core-worker-app/app/build.gradle
+--- orig_repo/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 01:11:40.000000000 +0000
++++ work_repo/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 18:07:09.789280776 +0000
 @@ -58,8 +58,8 @@
          applicationId "dev.core.worker"
          minSdk 26
          targetSdk 34
--        versionCode 89
--        versionName "0.5.74"
-+        versionCode 90
-+        versionName "0.5.75"
+-        versionCode 90
+-        versionName "0.5.75"
++        versionCode 91
++        versionName "0.5.76"
  
          buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
          buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
-diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java patch_repo/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
---- orig_repo/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-04 22:16:06.000000000 +0000
-+++ patch_repo/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java	2026-06-05 03:58:19.286213699 +0000
-@@ -20,7 +20,7 @@
- import java.util.zip.ZipFile;
- 
- /**
-- * Preflight v5 do runner Core Linux.
-+ * Preflight v6 do runner Core Linux.
-  *
-  * Esta etapa apenas detecta requisitos e escreve estado. Ela não inicia Bedrock,
-  * não executa Box64/proot/busybox, não abre shell livre e não aceita comando remoto.
-@@ -106,22 +106,34 @@
-             boolean baseToolsReady = prootReady && busyboxReady && prootDependencyReady;
- 
-             JSONArray checks = new JSONArray();
-+            JSONArray baseChecks = new JSONArray();
-+            JSONArray futureChecks = new JSONArray();
-             JSONArray missing = new JSONArray();
-+            JSONArray futureMissing = new JSONArray();
-             JSONArray blockers = new JSONArray();
-             JSONArray warnings = new JSONArray();
-             JSONArray nextActions = new JSONArray();
- 
--            addCheck(checks, missing, "rootfs_real", "Rootfs real validado", rootfsReal, "importe/valide um rootfs real antes do runner");
--            addCheck(checks, missing, "native_executor", "Executor nativo do APK", nativeExecutorReady, "embutir/testar executor nativo allowlist");
--            addCheck(checks, missing, "core_runner_asset", "core-runner embutido no APK", runnerAssetReady, "embutir core-runner arm64 como libcoreworker_runner.so");
--            addCheck(checks, missing, "proot_embedded", "proot embutido no APK", prootReady, "embutir proot arm64 auditado com metadata aprovada");
--            addCheck(checks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox arm64 auditado com metadata aprovada");
-+            // Fase atual para substituir o Termux: rootfs + runner + PRoot + BusyBox.
-+            // Box64/Bedrock continuam aparecendo no diagnóstico, mas não contam como
-+            // pendência do runner base. Isso evita o painel parecer travado em Bedrock
-+            // quando o objetivo imediato ainda é só entrar no rootfs sem Termux.
-+            addCheck(baseChecks, missing, "rootfs_real", "Rootfs real validado", rootfsReal, "importe/valide um rootfs real antes do runner");
-+            addCheck(baseChecks, missing, "native_executor", "Executor nativo do APK", nativeExecutorReady, "embutir/testar executor nativo allowlist");
-+            addCheck(baseChecks, missing, "core_runner_asset", "core-runner embutido no APK", runnerAssetReady, "embutir core-runner arm64 como libcoreworker_runner.so");
-+            addCheck(baseChecks, missing, "proot_embedded", "proot embutido no APK", prootReady, "embutir proot arm64 auditado com metadata aprovada");
-+            addCheck(baseChecks, missing, "busybox_embedded", "busybox embutido no APK", busyboxReady, "embutir busybox arm64 auditado com metadata aprovada");
-             if (prootNeedsLibtalloc) {
--                addCheck(checks, missing, "libtalloc_embedded", "libtalloc embutido no APK", libtallocReady, "embutir libtalloc arm64 auditado junto com proot dinâmico");
-+                addCheck(baseChecks, missing, "libtalloc_embedded", "libtalloc embutido no APK", libtallocReady, "embutir libtalloc arm64 auditado junto com proot dinâmico");
-             }
--            addCheck(checks, missing, "box64_embedded", "Box64 embutido no APK", box64Ready, "embutir Box64 arm64 auditado com metadata aprovada; não usar binário baixado executável");
--            addCheck(checks, missing, "bedrock_server", "bedrock_server presente", bedrockServerReady, "preparar arquivos do servidor Bedrock");
--            addCheck(checks, missing, "server_properties", "server.properties presente", propertiesReady, "gerar ou revisar server.properties");
+diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java work_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java
+--- orig_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-03 14:41:58.000000000 +0000
++++ work_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-05 18:07:09.788803218 +0000
+@@ -114,20 +114,39 @@
+         try {
+             Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
+             ensureBase(layout);
 +
-+            // Fase futura: necessária para Bedrock, mas não para o primeiro smoke test
-+            // real do Core Linux. Mantemos separada para o próximo patch não pular etapa.
-+            addCheck(futureChecks, futureMissing, "box64_embedded", "Box64 embutido no APK", box64Ready, "embutir Box64 arm64 auditado com metadata aprovada; não usar binário baixado executável");
-+            addCheck(futureChecks, futureMissing, "bedrock_server", "bedrock_server presente", bedrockServerReady, "preparar arquivos do servidor Bedrock");
-+            addCheck(futureChecks, futureMissing, "server_properties", "server.properties presente", propertiesReady, "gerar ou revisar server.properties");
-+            copyChecks(checks, baseChecks);
-+            copyChecks(checks, futureChecks);
- 
-             if (writableBox64Blocked) {
-                 warnings.put("Box64 detectado em diretório gravável do app; Android 10+ bloqueia execução segura desse caminho");
-@@ -136,7 +148,7 @@
-             if (Build.VERSION.SDK_INT >= 29) {
-                 warnings.put("execução futura deve usar componentes embutidos no APK/native libs; binários importados não são executados");
++            // Patch 87: o smoke test não pode mais criar scaffold automaticamente
++            // nem dar OK só porque o executor JNI e uma rootfs fake existem. A fase
++            // atual para substituir Termux exige rootfs real + runner + PRoot +
++            // BusyBox auditados. Enquanto isso não estiver pronto, este job vira um
++            // gate seguro e explícito, sem executar proot/busybox/box64/Bedrock.
+             JSONObject executor = nativeExecutor;
+             if (executor == null || !executor.optBoolean("readyForRootfs", false)) {
+                 executor = CoreWorkerNativeExecutor.snapshot(context, layout.core, "test");
              }
--            blockers.put("runner real permanece bloqueado no preflight v5");
-+            blockers.put("runner real permanece bloqueado no preflight v6");
-             blockers.put("Bedrock start real permanece bloqueado");
-             blockers.put("shell livre permanece bloqueado");
-             blockers.put("comando remoto arbitrário permanece bloqueado");
-@@ -146,25 +158,35 @@
-                 if (!item.isEmpty()) nextActions.put(item);
-             }
-             if (nextActions.length() == 0) {
--                nextActions.put("aguardar patch do runner nativo controlado; execução real ainda não liberada");
-+                nextActions.put("executar smoke test real allowlist: APK → runner → proot → rootfs");
-+                if (futureMissing.length() > 0) {
-+                    nextActions.put("depois do smoke test, preparar Box64/Bedrock em etapa separada");
-+                }
-             }
- 
--            boolean requirementsReady = rootfsReal && nativeExecutorReady && runnerAssetReady && prootReady && busyboxReady && prootDependencyReady && box64Ready
--                    && bedrockServerReady && propertiesReady && !writableBox64Blocked;
-+            boolean runnerBaseRequirementsReady = rootfsReal && nativeExecutorReady && runnerAssetReady && baseToolsReady && !writableBox64Blocked;
-+            boolean bedrockRequirementsReady = runnerBaseRequirementsReady && box64Ready && bedrockServerReady && propertiesReady;
-+            boolean requirementsReady = runnerBaseRequirementsReady;
-             boolean runnerReady = false;
--            String state = requirementsReady ? "runner_preflight_ready_but_blocked" : "runner_preflight_blocked";
--            String summary = requirementsReady
--                    ? "Runner preflight pronto · execução real ainda bloqueada"
--                    : "Runner preflight concluído · " + missing.length() + " pendência(s)";
-+            String phase = runnerBaseRequirementsReady ? "rootfs_smoke_next" : "base_tools";
-+            String state = runnerBaseRequirementsReady ? "runner_base_tools_ready_but_blocked" : "runner_preflight_blocked";
-+            String summary = runnerBaseRequirementsReady
-+                    ? "Core Linux base pronto · smoke test real é o próximo passo"
-+                    : "Runner preflight concluído · " + missing.length() + " pendência(s) base";
-+            String phaseSummary = runnerBaseRequirementsReady
-+                    ? "Rootfs + executor + runner + PRoot + BusyBox prontos; execução real segue bloqueada até smoke test allowlist"
-+                    : "Preparando base para substituir Termux: falta validar/importar ferramentas base";
- 
+-            JSONObject rootfs = rootfsSnapshot(context, layout.core, "prepare");
++            JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
+             JSONObject rootfsState = rootfs.optJSONObject("rootfs");
+             if (rootfsState == null) rootfsState = rootfs;
+-            JSONObject runtime = runtimeSnapshot(context, layout.core, "smoke_test", executor);
++            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "smoke_gate");
++            JSONObject runtime = runtimeSnapshot(context, layout.core, "smoke_gate", executor);
++
++            boolean rootfsReal = runner.optBoolean("rootfsRealValidated", false)
++                    || "real".equals(rootfsState.optString("validationLevel", ""))
++                    || "rootfs_real_validated".equals(rootfsState.optString("state", ""));
++            boolean baseReady = runner.optBoolean("runnerBaseRequirementsReady", false)
++                    || runner.optBoolean("termuxReductionReady", false);
++            JSONArray missing = runner.optJSONArray("currentMissing");
++            if (missing == null) missing = runner.optJSONArray("missing");
++            if (missing == null) missing = new JSONArray();
++
+             JSONArray checks = new JSONArray()
+                     .put(check("core-linux dir", layout.core.isDirectory(), path(layout.core)))
+                     .put(check("executor JNI allowlist", executor.optBoolean("readyForRootfs", false), executor.optString("summary", "")))
+-                    .put(check("rootfs scaffold", rootfsState.optBoolean("rootfsReady", false), rootfsState.optString("summary", "")))
++                    .put(check("rootfs real", rootfsReal, rootfsState.optString("summary", "importe/valide rootfs real no APK")))
++                    .put(check("runner/proot/busybox base", baseReady, runner.optString("summary", "base Core Linux ainda pendente")))
+                     .put(check("runtime state", runtime.optBoolean("ok", false), runtime.optString("summary", "")))
+-                    .put(check("Bedrock bloqueado", true, "nenhum start real é feito nesta etapa"));
++                    .put(check("Bedrock bloqueado", true, "nenhum start real é feito nesta etapa"))
++                    .put(check("shell livre bloqueado", true, "somente allowlist futura; sem comando remoto arbitrário"));
+             boolean ok = true;
+             for (int i = 0; i < checks.length(); i++) {
+                 JSONObject row = checks.optJSONObject(i);
+@@ -136,20 +155,25 @@
              JSONObject out = new JSONObject();
-             out.put("ok", true);
-             out.put("component", "core_linux_runner_preflight");
-             out.put("action", safeAction);
--            out.put("stage", "core-linux-runner-preflight-v5");
--            out.put("preflightVersion", 5);
-+            out.put("stage", "core-linux-runner-preflight-v6");
-+            out.put("preflightVersion", 6);
-             out.put("state", state);
-             out.put("summary", summary);
-+            out.put("phase", phase);
-+            out.put("phaseSummary", phaseSummary);
-             out.put("coreLinuxDir", path(base));
-             out.put("nativeLibraryDir", path(nativeDir));
-             out.put("androidSdk", Build.VERSION.SDK_INT);
-@@ -178,6 +200,9 @@
-             out.put("runnerBlocked", true);
-             out.put("runnerExecutionAllowed", false);
-             out.put("runnerRequirementsReady", requirementsReady);
-+            out.put("runnerBaseRequirementsReady", runnerBaseRequirementsReady);
-+            out.put("bedrockRequirementsReady", bedrockRequirementsReady);
-+            out.put("termuxReductionReady", runnerBaseRequirementsReady);
-             out.put("bedrockStartAllowed", false);
-             out.put("rootfsRealValidated", rootfsReal);
-             out.put("nativeExecutorReady", nativeExecutorReady);
-@@ -193,7 +218,12 @@
-             out.put("bedrockServerPresent", bedrockServerReady);
-             out.put("serverPropertiesPresent", propertiesReady);
+             out.put("ok", ok);
+             out.put("type", "core_linux_runtime_smoke_test");
+-            out.put("state", ok ? "smoke_test_ok" : "smoke_test_pending");
+-            out.put("stage", "core-linux-runtime-v1");
++            out.put("state", ok ? "smoke_gate_ready" : "smoke_gate_blocked");
++            out.put("stage", "core-linux-runtime-smoke-gate-v2");
+             out.put("termuxTouched", false);
+             out.put("pythonTouched", false);
+             out.put("serviceStarted", false);
+             out.put("bedrockStarted", false);
++            out.put("runnerExecuted", false);
++            out.put("prootExecuted", false);
++            out.put("busyboxExecuted", false);
              out.put("checks", checks);
-+            out.put("baseChecks", baseChecks);
-+            out.put("futureChecks", futureChecks);
-             out.put("missing", missing);
-+            out.put("baseToolsMissing", missing);
-+            out.put("currentMissing", missing);
-+            out.put("futureMissing", futureMissing);
-             out.put("blockers", blockers);
-             out.put("warnings", warnings);
-             out.put("nextActions", nextActions);
-@@ -222,7 +252,7 @@
-                 err.put("runnerBlocked", true);
-                 err.put("runnerExecutionAllowed", false);
-                 err.put("bedrockStartAllowed", false);
--                err.put("preflightVersion", 5);
-+                err.put("preflightVersion", 6);
-                 err.put("updatedAt", System.currentTimeMillis());
-             } catch (Throwable ignored) {}
-             return err;
-@@ -242,6 +272,14 @@
-         if (!ok) missing.put(label);
-     }
- 
-+    private static void copyChecks(JSONArray dest, JSONArray source) throws Exception {
-+        if (dest == null || source == null) return;
-+        for (int i = 0; i < source.length(); i++) {
-+            Object item = source.opt(i);
-+            if (item != null) dest.put(item);
-+        }
-+    }
-+
-     private static boolean isRootfsRealValidated(JSONObject rootfsState, JSONObject importState, File rootfsDir) {
-         String state = lower(firstNonEmpty(
-                 rootfsState.optString("state", ""),
-@@ -284,7 +322,7 @@
-     private static JSONObject assetManifest(String[] executor, String[] runner, String[] proot, String[] busybox, String[] libtalloc, String[] box64,
-                                             JSONObject localManifest, JSONObject sourcePlan) throws Exception {
-         return new JSONObject()
--                .put("stage", "core-linux-embedded-binaries-intake-v5")
-+                .put("stage", "core-linux-embedded-binaries-intake-v6")
-                 .put("abi", "arm64-v8a")
-                 .put("executor", new JSONArray(executor))
-                 .put("runner", new JSONArray(runner))
-diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/changed_files.txt patch_repo/changed_files.txt
---- orig_repo/changed_files.txt	2026-06-05 00:50:34.000000000 +0000
-+++ patch_repo/changed_files.txt	2026-06-05 04:00:34.590013255 +0000
-@@ -1,6 +1,7 @@
--bot.py
--config.py
--scripts/tts-bot-update.sh
-+android/core-worker-app/app/build.gradle
-+android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
-+utility/commands/workers.py
-+webserver.py
++            out.put("missing", missing);
+             out.put("nativeExecutor", executor);
+             out.put("rootfs", rootfsState);
+             out.put("runtime", runtime);
++            out.put("runnerPreflight", runner);
+             out.put("updatedAt", now());
+             out.put("summary", ok
+-                    ? "Smoke test Core Linux v1 ok · executor + rootfs sem Termux"
+-                    : "Smoke test Core Linux v1 pendente · revise executor/rootfs");
++                    ? "Smoke gate Core Linux ok · base pronta para liberar runner allowlist"
++                    : "Smoke gate Core Linux bloqueado · falta base real para substituir Termux");
+             writeJson(new File(layout.runtime, "core-linux-smoke-test.json"), out);
+             appendLog(new File(layout.logs, "core-linux-smoke-test.log"), out.optString("summary"));
+             return out;
+diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java work_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
+--- orig_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-04 22:16:06.000000000 +0000
++++ work_repo/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 18:07:09.790822539 +0000
+@@ -321,11 +321,13 @@
+                 .put("core-linux-runner-preflight-v3")
+                 .put("core-linux-runner-preflight-v4")
+                 .put("core-linux-runner-preflight-v5")
++                .put("core-linux-runner-preflight-v6")
+                 .put("core-linux-embedded-binaries-intake-v1")
+                 .put("core-linux-embedded-binaries-intake-v2")
+                 .put("core-linux-embedded-binaries-intake-v3")
+                 .put("core-linux-embedded-binaries-intake-v4")
+                 .put("core-linux-embedded-binaries-intake-v5")
++                .put("core-linux-embedded-binaries-intake-v6")
+                 .put("core-linux-embedded-binaries-build-pipeline-v1")
+                 .put("core-linux-embedded-binaries-build-pipeline-v2")
+                 .put("core-linux-embedded-binaries-build-pipeline-v3")
+@@ -422,7 +424,7 @@
+                 out.put("runnerMissing", runner.optJSONArray("missing") == null ? new JSONArray() : runner.optJSONArray("missing"));
+                 out.put("runnerPreflight", runner);
+             }
+-            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v5" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
++            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v6" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
+             out.put("supportedTasks", supportedLightJobsArray());
+             if (runtime.length() > 0) out.put("runtime", runtime);
+             if (rootfs.length() > 0) out.put("rootfs", rootfs);
+diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/tts-bot-main/changed_files.txt work_repo/tts-bot-main/changed_files.txt
+--- orig_repo/tts-bot-main/changed_files.txt	2026-06-05 01:11:40.000000000 +0000
++++ work_repo/tts-bot-main/changed_files.txt	2026-06-05 18:07:42.796210615 +0000
+@@ -1,6 +1,6 @@
+ android/core-worker-app/app/build.gradle
+-android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRunnerPreflightManager.java
+-utility/commands/workers.py
++android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java
++android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
+ webserver.py
  PATCH_NOTES.md
  changed_files.txt
- patch.diff
-diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/utility/commands/workers.py patch_repo/utility/commands/workers.py
---- orig_repo/utility/commands/workers.py	2026-06-04 23:31:48.000000000 +0000
-+++ patch_repo/utility/commands/workers.py	2026-06-05 03:58:59.861610156 +0000
-@@ -1206,7 +1206,8 @@
-     diag = _shorten(record.get("diagnosticsSummary") or "diagnóstico aguardando", limit=90)
-     storage = _shorten(record.get("storageSummary") or "armazenamento aguardando", limit=80)
-     bridge = _shorten(record.get("bridgeSummary") or "ponte aguardando", limit=80)
--    linux = _shorten(record.get("coreLinuxSummary") or "Linux runtime aguardando", limit=80)
-+    core_linux = record.get("coreLinux") if isinstance(record.get("coreLinux"), dict) else {}
-+    linux = _shorten(core_linux.get("runnerPhaseSummary") or record.get("coreLinuxSummary") or "Linux runtime aguardando", limit=90)
-     bedrock = _shorten(record.get("bedrockSummary") or "Bedrock aguardando", limit=80)
-     perm = _shorten(record.get("notificationPermission") or "notificação ?", limit=32)
-     jobs = _core_worker_app_jobs_text(worker_id)
-@@ -1259,7 +1260,14 @@
-     rootfs_level = str(core_linux.get("rootfsValidationLevel") or "").lower()
-     if "rootfs_real_validated" in linux_state or "rootfs_real_validated" in rootfs_state or rootfs_level == "real":
-         parts.append("Rootfs real validado")
--        parts.append("runner bloqueado")
-+        if core_linux.get("termuxReductionReady") or core_linux.get("runnerBaseRequirementsReady"):
-+            parts.append("base sem Termux pronta")
-+            parts.append("smoke test pendente")
-+        elif core_linux.get("baseToolsReady"):
-+            parts.append("base tools pronta")
-+            parts.append("runner bloqueado")
-+        else:
-+            parts.append("runner bloqueado")
-     elif record.get("coreLinuxPrepared") or "pronto" in linux_summary or "plan" in linux_state:
-         parts.append("Linux pronto")
-     elif linux_summary:
-diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/webserver.py patch_repo/webserver.py
---- orig_repo/webserver.py	2026-06-04 22:16:06.000000000 +0000
-+++ patch_repo/webserver.py	2026-06-05 03:58:39.846069448 +0000
-@@ -190,12 +190,18 @@
-             out[key] = scrubbed
-         state_text = str(out.get("state") or out.get("stage") or out.get("component") or "").lower()
-         if "runner_preflight" in state_text or str(out.get("component") or "") == "core_linux_runner_preflight":
--            missing = out.get("missing") if isinstance(out.get("missing"), list) else None
-+            missing = out.get("currentMissing") if isinstance(out.get("currentMissing"), list) else out.get("missing") if isinstance(out.get("missing"), list) else None
-+            future = out.get("futureMissing") if isinstance(out.get("futureMissing"), list) else []
-             if missing is not None:
-                 count = len(missing)
-                 summary = str(out.get("summary") or "")
--                if "Runner preflight conclu" in summary:
--                    out["summary"] = f"Runner preflight concluído · {count} pendência(s)"
-+                # Mantém compatibilidade com preflight antigo, mas sem voltar a
-+                # contar Box64/Bedrock como pendência da fase base.
-+                if "Runner preflight conclu" in summary and "base" not in summary.lower():
-+                    out["summary"] = f"Runner preflight concluído · {count} pendência(s) base"
-+                    changed = True
-+                if future and "futureMissing" not in out:
-+                    out["futureMissing"] = future
-                     changed = True
-         return out, changed
-     if isinstance(value, list):
-@@ -227,9 +233,10 @@
-     # Corrige mensagem visível de preflight antigo após remover EULA.
-     result = scrubbed.get("result") if isinstance(scrubbed.get("result"), dict) else {}
-     runner = result.get("coreLinuxRunner") if isinstance(result.get("coreLinuxRunner"), dict) else {}
--    missing = runner.get("missing") if isinstance(runner.get("missing"), list) else None
-+    missing = runner.get("currentMissing") if isinstance(runner.get("currentMissing"), list) else runner.get("missing") if isinstance(runner.get("missing"), list) else None
-     if typ == "apk_core_linux_runner_preflight" and missing is not None:
--        msg = f"Runner preflight concluído · {len(missing)} pendência(s)"
-+        ready = bool(runner.get("runnerBaseRequirementsReady") or runner.get("termuxReductionReady"))
-+        msg = "Core Linux base pronto · smoke test real é o próximo passo" if ready else f"Runner preflight concluído · {len(missing)} pendência(s) base"
-         if scrubbed.get("message") != msg:
-             scrubbed["message"] = msg
-             changed = True
-@@ -1277,8 +1284,20 @@
-         core_linux["runnerBlocked"] = bool(runner.get("runnerBlocked", True))
-         core_linux["runnerExecutionAllowed"] = bool(runner.get("runnerExecutionAllowed"))
-         core_linux["runnerRequirementsReady"] = bool(runner.get("runnerRequirementsReady"))
--        if isinstance(runner.get("missing"), list):
--            core_linux["runnerMissing"] = [_safe_short_text(x, 120) for x in runner.get("missing", [])[:16]]
-+        core_linux["runnerBaseRequirementsReady"] = bool(runner.get("runnerBaseRequirementsReady") or runner.get("termuxReductionReady"))
-+        core_linux["baseToolsReady"] = bool(runner.get("baseToolsReady"))
-+        core_linux["termuxReductionReady"] = bool(runner.get("termuxReductionReady"))
-+        core_linux["bedrockRequirementsReady"] = bool(runner.get("bedrockRequirementsReady"))
-+        if runner.get("phase"):
-+            core_linux["runnerPhase"] = _safe_short_text(runner.get("phase"), 80)
-+        if runner.get("phaseSummary"):
-+            core_linux["runnerPhaseSummary"] = _safe_short_text(runner.get("phaseSummary"), 180)
-+        current_missing = runner.get("currentMissing") if isinstance(runner.get("currentMissing"), list) else runner.get("missing") if isinstance(runner.get("missing"), list) else []
-+        future_missing = runner.get("futureMissing") if isinstance(runner.get("futureMissing"), list) else []
-+        if current_missing:
-+            core_linux["runnerMissing"] = [_safe_short_text(x, 120) for x in current_missing[:16]]
-+        if future_missing:
-+            core_linux["runnerFutureMissing"] = [_safe_short_text(x, 120) for x in future_missing[:16]]
-         compact_runner = dict(runner)
-         if isinstance(compact_runner.get("embedded"), dict):
-             # Mantém um resumo estável dos assets no runtime-summary.
+diff -ruN '--exclude=__pycache__' '--exclude=patch.diff' orig_repo/tts-bot-main/webserver.py work_repo/tts-bot-main/webserver.py
+--- orig_repo/tts-bot-main/webserver.py	2026-06-05 01:11:40.000000000 +0000
++++ work_repo/tts-bot-main/webserver.py	2026-06-05 18:07:09.790337888 +0000
+@@ -298,11 +298,13 @@
+     "core-linux-runner-preflight-v3",
+     "core-linux-runner-preflight-v4",
+     "core-linux-runner-preflight-v5",
++    "core-linux-runner-preflight-v6",
+     "core-linux-embedded-binaries-intake-v1",
+     "core-linux-embedded-binaries-intake-v2",
+     "core-linux-embedded-binaries-intake-v3",
+     "core-linux-embedded-binaries-intake-v4",
+     "core-linux-embedded-binaries-intake-v5",
++    "core-linux-embedded-binaries-intake-v6",
+     "core-linux-embedded-binaries-build-pipeline-v1",
+     "core-linux-embedded-binaries-build-pipeline-v2",
+     "core-linux-embedded-binaries-build-pipeline-v3",
+@@ -1504,7 +1506,6 @@
+     "apk_core_linux_native_runtime_status",
+     "apk_core_linux_rootfs_status",
+     "apk_core_linux_rootfs_validate",
+-    "apk_core_linux_runtime_smoke_test",
+ }
+ 
+ CORE_WORKER_APP_MANUAL_JOB_TYPES = {

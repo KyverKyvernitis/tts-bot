@@ -298,11 +298,13 @@ CORE_WORKER_APK_V1_CAPABILITIES = [
     "core-linux-runner-preflight-v3",
     "core-linux-runner-preflight-v4",
     "core-linux-runner-preflight-v5",
+    "core-linux-runner-preflight-v6",
     "core-linux-embedded-binaries-intake-v1",
     "core-linux-embedded-binaries-intake-v2",
     "core-linux-embedded-binaries-intake-v3",
     "core-linux-embedded-binaries-intake-v4",
     "core-linux-embedded-binaries-intake-v5",
+    "core-linux-embedded-binaries-intake-v6",
     "core-linux-embedded-binaries-build-pipeline-v1",
     "core-linux-embedded-binaries-build-pipeline-v2",
     "core-linux-embedded-binaries-build-pipeline-v3",
@@ -1504,7 +1506,6 @@ CORE_WORKER_APP_AUTO_JOB_TYPES = {
     "apk_core_linux_native_runtime_status",
     "apk_core_linux_rootfs_status",
     "apk_core_linux_rootfs_validate",
-    "apk_core_linux_runtime_smoke_test",
 }
 
 CORE_WORKER_APP_MANUAL_JOB_TYPES = {
