@@ -267,7 +267,7 @@ public final class CoreLinuxRuntimeManager {
             Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
             ensureBase(layout);
 
-            // V13: smoke real do rootfs via PRoot, ainda com allowlist fixa.
+            // V13.2: smoke real do rootfs via PRoot, ainda com allowlist fixa.
             // Esta etapa prova entrada no rootfs e execução de comandos mínimos
             // pré-definidos. Continua sem shell livre, sem comando remoto arbitrário,
             // sem Box64, sem Bedrock e sem processo persistente.
@@ -278,8 +278,8 @@ public final class CoreLinuxRuntimeManager {
             JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
             JSONObject rootfsState = rootfs.optJSONObject("rootfs");
             if (rootfsState == null) rootfsState = rootfs;
-            JSONObject runtime = runtimeSnapshot(context, layout.core, "rootfs_smoke_v13", executor);
-            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "rootfs_smoke_v13");
+            JSONObject runtime = runtimeSnapshot(context, layout.core, "rootfs_smoke_v13_2", executor);
+            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "rootfs_smoke_v13_2");
             JSONObject baseSmoke = readJson(new File(layout.runtime, "core-linux-smoke-test.json"));
             if (baseSmoke == null) baseSmoke = new JSONObject();
 
@@ -306,7 +306,7 @@ public final class CoreLinuxRuntimeManager {
             boolean executorReady = executor.optBoolean("readyForRootfs", false);
             boolean runtimeOk = runtime.optBoolean("ok", false);
             JSONObject readiness = new JSONObject()
-                    .put("stage", "core-linux-rootfs-proot-smoke-v13.1")
+                    .put("stage", "core-linux-rootfs-proot-smoke-v13.2")
                     .put("baseToolsSmokeCachePresent", baseToolsSmokeCachePresent)
                     .put("baseToolsSmokeCacheOk", baseToolsSmokeCacheOk)
                     .put("baseToolsReadyFromPreflight", baseToolsReadyFromPreflight)
@@ -332,7 +332,7 @@ public final class CoreLinuxRuntimeManager {
                     .put(check("runtime state", runtimeOk, runtime.optString("summary", "")))
                     .put(check("PRoot embutido", runner.optBoolean("prootEmbedded", false), runner.optString("summary", "")))
                     .put(check("BusyBox embutido", runner.optBoolean("busyboxEmbedded", false), runner.optString("summary", "")))
-                    .put(check("shell livre bloqueado", true, "somente /bin/sh -c com comandos fixos allowlist"))
+                    .put(check("shell livre bloqueado", true, "somente BusyBox embutido com comandos fixos allowlist"))
                     .put(check("Box64 bloqueado", true, "Box64 fica para etapa posterior"))
                     .put(check("Bedrock bloqueado", true, "nenhum servidor é iniciado nesta etapa"));
 
@@ -344,6 +344,15 @@ public final class CoreLinuxRuntimeManager {
 
             File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir == null ? "" : context.getApplicationInfo().nativeLibraryDir);
             File proot = new File(nativeDir, "libcoreworker_proot.so");
+            File busyboxReal = new File(nativeDir, "libcoreworker_busybox.so");
+            JSONObject busyboxLaunch = prepareBusyboxArgv0Launcher(layout.runtime, busyboxReal);
+            File busyboxHost = new File(busyboxLaunch.optString("path", path(busyboxReal)));
+            JSONObject rootfsBind = prepareRootfsBusyboxBind(layout.rootfs, nativeDir, busyboxHost);
+            checks.put(check("BusyBox bind no rootfs", rootfsBind.optBoolean("ok", false),
+                    rootfsBind.optBoolean("ok", false)
+                            ? "BusyBox validado do APK será montado em /bin/busybox"
+                            : rootfsBind.optString("error", "falha preparando bind do BusyBox")));
+            if (!rootfsBind.optBoolean("ok", false)) prerequisitesOk = false;
             JSONObject rootfsSmoke = new JSONObject();
             JSONArray smokeChecks = new JSONArray();
             boolean echoOk = false;
@@ -351,29 +360,31 @@ public final class CoreLinuxRuntimeManager {
             boolean busyboxOk = false;
 
             if (prerequisitesOk) {
+                String busyboxBind = rootfsBind.optString("busyboxBind", path(busyboxHost) + ":/bin/busybox");
+                String nativeDirBind = rootfsBind.optString("nativeDirBind", path(nativeDir) + ":" + path(nativeDir));
                 JSONObject echo = runNativeTool(
-                        "proot rootfs echo ok",
+                        "proot rootfs busybox echo ok",
                         proot,
                         nativeDir,
                         layout.runtime,
                         10000L,
-                        "-r", path(layout.rootfs), "-w", "/", "/bin/sh", "-c", "echo ok"
+                        "-r", path(layout.rootfs), "-w", "/", "-b", busyboxBind, "-b", nativeDirBind, "/bin/busybox", "echo", "ok"
                 );
                 JSONObject osRelease = runNativeTool(
-                        "proot rootfs cat /etc/os-release",
+                        "proot rootfs busybox cat /etc/os-release",
                         proot,
                         nativeDir,
                         layout.runtime,
                         10000L,
-                        "-r", path(layout.rootfs), "-w", "/", "/bin/sh", "-c", "cat /etc/os-release"
+                        "-r", path(layout.rootfs), "-w", "/", "-b", busyboxBind, "-b", nativeDirBind, "/bin/busybox", "cat", "/etc/os-release"
                 );
                 JSONObject busybox = runNativeTool(
-                        "proot rootfs /bin/busybox true",
+                        "proot rootfs busybox true",
                         proot,
                         nativeDir,
                         layout.runtime,
                         10000L,
-                        "-r", path(layout.rootfs), "-w", "/", "/bin/busybox", "true"
+                        "-r", path(layout.rootfs), "-w", "/", "-b", busyboxBind, "-b", nativeDirBind, "/bin/busybox", "true"
                 );
                 echoOk = echo.optBoolean("ok", false) && "ok".equals(echo.optString("stdout", "").trim());
                 osReleaseOk = osRelease.optBoolean("ok", false) && osRelease.optString("stdout", "").contains("NAME=");
@@ -381,6 +392,10 @@ public final class CoreLinuxRuntimeManager {
                 rootfsSmoke.put("echo", echo);
                 rootfsSmoke.put("osRelease", osRelease);
                 rootfsSmoke.put("busyboxTrue", busybox);
+                rootfsSmoke.put("bindSetup", rootfsBind);
+                rootfsSmoke.put("busyboxArgv0Mode", busyboxLaunch.optString("mode", "argv0-symlink"));
+                rootfsSmoke.put("busyboxHostPath", path(busyboxHost));
+                rootfsSmoke.put("guestBusybox", "/bin/busybox");
                 rootfsSmoke.put("nativeLibraryDir", path(nativeDir));
                 rootfsSmoke.put("rootfsDir", path(layout.rootfs));
                 rootfsSmoke.put("workDir", path(layout.runtime));
@@ -388,12 +403,12 @@ public final class CoreLinuxRuntimeManager {
                         .put("LD_LIBRARY_PATH", path(nativeDir))
                         .put("PROOT_LOADER", path(new File(nativeDir, "libcoreworker_proot_loader.so")))
                         .put("PROOT_LOADER_32", path(new File(nativeDir, "libcoreworker_proot_loader32.so"))));
-                smokeChecks.put(check("rootfs echo", echoOk, echoOk ? "proot entrou no rootfs e /bin/sh executou echo ok" : "falha em /bin/sh -c echo ok; ver stdout/stderr"));
-                smokeChecks.put(check("rootfs os-release", osReleaseOk, osReleaseOk ? "/etc/os-release lido dentro do rootfs" : "falha ao ler /etc/os-release dentro do rootfs"));
+                smokeChecks.put(check("rootfs echo", echoOk, echoOk ? "proot entrou no rootfs e BusyBox bindado executou echo ok" : "falha em /bin/busybox echo ok; ver stdout/stderr"));
+                smokeChecks.put(check("rootfs os-release", osReleaseOk, osReleaseOk ? "/etc/os-release lido dentro do rootfs pelo BusyBox bindado" : "falha ao ler /etc/os-release dentro do rootfs"));
                 smokeChecks.put(check("rootfs busybox", busyboxOk, busyboxOk ? "/bin/busybox true executou dentro do rootfs" : "falha em /bin/busybox true; ver stdout/stderr"));
             } else {
                 rootfsSmoke.put("skipped", true);
-                rootfsSmoke.put("reason", "base/rootfs ainda não está pronto para smoke V13.1");
+                rootfsSmoke.put("reason", "base/rootfs ainda não está pronto para smoke V13.2");
                 rootfsSmoke.put("readiness", readiness);
                 smokeChecks.put(check("rootfs echo", false, "não executado: pré-requisitos pendentes"));
                 smokeChecks.put(check("rootfs os-release", false, "não executado: pré-requisitos pendentes"));
@@ -405,7 +420,7 @@ public final class CoreLinuxRuntimeManager {
             out.put("ok", ok);
             out.put("type", "core_linux_rootfs_proot_smoke_test");
             out.put("state", ok ? "rootfs_proot_smoke_ok" : (prerequisitesOk ? "rootfs_proot_smoke_failed" : "rootfs_proot_smoke_blocked"));
-            out.put("stage", "core-linux-rootfs-proot-smoke-v13.1");
+            out.put("stage", "core-linux-rootfs-proot-smoke-v13.2");
             out.put("termuxTouched", false);
             out.put("pythonTouched", false);
             out.put("serviceStarted", false);
@@ -416,9 +431,9 @@ public final class CoreLinuxRuntimeManager {
             out.put("runnerExecutionAllowed", false);
             out.put("commandsAllowlisted", true);
             out.put("commands", new JSONArray()
-                    .put("proot -r <rootfs> /bin/sh -c 'echo ok'")
-                    .put("proot -r <rootfs> /bin/sh -c 'cat /etc/os-release'")
-                    .put("proot -r <rootfs> /bin/busybox true"));
+                    .put("proot -r <rootfs> -b <apk-busybox>:/bin/busybox /bin/busybox echo ok")
+                    .put("proot -r <rootfs> -b <apk-busybox>:/bin/busybox /bin/busybox cat /etc/os-release")
+                    .put("proot -r <rootfs> -b <apk-busybox>:/bin/busybox /bin/busybox true"));
             out.put("checks", checks);
             out.put("smokeChecks", smokeChecks);
             out.put("rootfsSmoke", rootfsSmoke);
@@ -431,10 +446,10 @@ public final class CoreLinuxRuntimeManager {
             out.put("nextStep", ok ? "box64-intake" : "corrigir rootfs/PRoot antes de Box64");
             out.put("updatedAt", now());
             out.put("summary", ok
-                    ? "Smoke rootfs V13.1 ok · PRoot entrou no rootfs e executou allowlist sem Termux"
+                    ? "Smoke rootfs V13.2 ok · PRoot entrou no rootfs e executou BusyBox bindado sem Termux"
                     : (prerequisitesOk
-                        ? "Smoke rootfs V13.1 falhou · ver stdout/stderr por etapa"
-                        : "Smoke rootfs V13.1 bloqueado · falta base/rootfs validado"));
+                        ? "Smoke rootfs V13.2 falhou · ver stdout/stderr por etapa"
+                        : "Smoke rootfs V13.2 bloqueado · falta base/rootfs validado"));
             writeJson(new File(layout.runtime, "core-linux-rootfs-smoke-test.json"), out);
             appendLog(new File(layout.logs, "core-linux-rootfs-smoke-test.log"), out.optString("summary"));
             return out;
@@ -469,6 +484,59 @@ public final class CoreLinuxRuntimeManager {
                 out.put("target", path(busyboxReal));
                 out.put("error", shortThrowable(exc));
                 out.put("note", "fallback direto pode falhar com applet not found se argv0 não for busybox");
+            } catch (Throwable ignored) {}
+            return out;
+        }
+    }
+
+    private static String stripLeadingSlash(String value) {
+        if (value == null) return "";
+        String out = value;
+        while (out.startsWith("/")) out = out.substring(1);
+        return out;
+    }
+
+    private static JSONObject prepareRootfsBusyboxBind(File rootfsDir, File nativeDir, File busyboxHost) {
+        JSONObject out = new JSONObject();
+        try {
+            File binDir = new File(rootfsDir, "bin");
+            binDir.mkdirs();
+            File guestBusyboxMountPoint = new File(binDir, "busybox");
+            if (!guestBusyboxMountPoint.exists()) {
+                try (FileOutputStream fos = new FileOutputStream(guestBusyboxMountPoint)) {
+                    fos.write(new byte[0]);
+                }
+            }
+            //noinspection ResultOfMethodCallIgnored
+            guestBusyboxMountPoint.setReadable(true, true);
+            //noinspection ResultOfMethodCallIgnored
+            guestBusyboxMountPoint.setExecutable(true, true);
+
+            String nativeDirPath = path(nativeDir);
+            File guestNativeDirMountPoint = new File(rootfsDir, stripLeadingSlash(nativeDirPath));
+            guestNativeDirMountPoint.mkdirs();
+
+            out.put("ok", busyboxHost != null && busyboxHost.exists() && busyboxHost.canExecute());
+            out.put("mode", "bind-apk-busybox-into-rootfs");
+            out.put("busyboxHostPath", path(busyboxHost));
+            out.put("busyboxGuestPath", "/bin/busybox");
+            out.put("busyboxMountPoint", path(guestBusyboxMountPoint));
+            out.put("busyboxBind", path(busyboxHost) + ":/bin/busybox");
+            out.put("nativeDirHostPath", nativeDirPath);
+            out.put("nativeDirGuestPath", nativeDirPath);
+            out.put("nativeDirMountPoint", path(guestNativeDirMountPoint));
+            out.put("nativeDirBind", nativeDirPath + ":" + nativeDirPath);
+            out.put("note", "V13.2 monta BusyBox validado do APK no rootfs mínimo; não exige /bin/sh nem /bin/busybox próprios do rootfs");
+            if (!out.optBoolean("ok", false)) {
+                out.put("error", "BusyBox host ausente ou sem execução");
+            }
+            return out;
+        } catch (Throwable exc) {
+            try {
+                out.put("ok", false);
+                out.put("mode", "bind-apk-busybox-into-rootfs");
+                out.put("busyboxHostPath", path(busyboxHost));
+                out.put("error", shortThrowable(exc));
             } catch (Throwable ignored) {}
             return out;
         }
