@@ -13,6 +13,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -477,6 +478,186 @@ public final class CoreLinuxRuntimeManager {
             return out;
         } catch (Throwable exc) {
             return error("core_linux_rootfs_smoke_test", exc);
+        }
+    }
+
+
+    public static JSONObject box64IntakePreflight(Context context, File coreLinuxDir, JSONObject nativeExecutor) {
+        try {
+            Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
+            ensureBase(layout);
+
+            // V14: intake/preflight seguro do Box64. Esta etapa não executa Box64,
+            // não baixa binários, não inicia Bedrock e não abre shell. Ela apenas
+            // audita se um Box64 arm64 auditado já está embutido em jniLibs/nativeLibraryDir
+            // e se a base validada pelo V13.3 está pronta para o futuro smoke de Box64.
+            JSONObject executor = nativeExecutor;
+            if (executor == null || !executor.optBoolean("readyForRootfs", false)) {
+                executor = CoreWorkerNativeExecutor.snapshot(context, layout.core, "test");
+            }
+            JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
+            JSONObject rootfsState = rootfs.optJSONObject("rootfs");
+            if (rootfsState == null) rootfsState = rootfs;
+            JSONObject runtime = runtimeSnapshot(context, layout.core, "box64_intake_v14", executor);
+            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "box64_intake_v14");
+            JSONObject rootfsSmoke = readJson(new File(layout.runtime, "core-linux-rootfs-smoke-test.json"));
+            if (rootfsSmoke == null) rootfsSmoke = new JSONObject();
+
+            File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir == null ? "" : context.getApplicationInfo().nativeLibraryDir);
+            File box64Official = new File(nativeDir, "libcoreworker_box64.so");
+            File box64Alias = new File(nativeDir, "libbox64.so");
+            File box64 = box64Official.exists() ? box64Official : (box64Alias.exists() ? box64Alias : box64Official);
+            JSONObject officialInfo = binarySnapshot("libcoreworker_box64.so", box64Official, 131072L);
+            JSONObject aliasInfo = binarySnapshot("libbox64.so", box64Alias, 131072L);
+            JSONObject selectedInfo = binarySnapshot(box64.getName(), box64, 131072L);
+
+            boolean rootfsReady = rootfsState.optBoolean("rootfsReady", false);
+            String validationLevel = rootfsState.optString("validationLevel", "");
+            boolean rootfsReal = runner.optBoolean("rootfsRealValidated", false)
+                    || (rootfsReady && "real".equals(validationLevel))
+                    || "rootfs_validated".equals(rootfsState.optString("state", ""));
+            boolean rootfsSmokeOk = rootfsSmoke.optBoolean("ok", false)
+                    && "rootfs_proot_smoke_ok".equals(rootfsSmoke.optString("state", ""));
+            boolean baseReady = runner.optBoolean("baseToolsReady", false)
+                    && (runner.optBoolean("runnerBaseRequirementsReady", false) || runner.optBoolean("runnerRequirementsReady", false));
+            boolean selectedPresent = selectedInfo.optBoolean("exists", false);
+            boolean selectedElf64 = selectedInfo.optBoolean("elf64", false);
+            boolean selectedAarch64 = selectedInfo.optBoolean("aarch64", false);
+            boolean selectedSizeOk = selectedInfo.optBoolean("sizeOk", false);
+            boolean selectedExecutable = selectedInfo.optBoolean("canExecute", false);
+            boolean box64Ready = selectedPresent && selectedElf64 && selectedAarch64 && selectedSizeOk;
+
+            JSONArray checks = new JSONArray()
+                    .put(check("rootfs smoke V13.3", rootfsSmokeOk, rootfsSmokeOk ? "rootfs/PRoot/BusyBox bindado validado" : "execute o smoke rootfs V13.3 antes do Box64"))
+                    .put(check("rootfs real", rootfsReal, rootfsState.optString("summary", "rootfs real precisa estar validado")))
+                    .put(check("base PRoot/BusyBox", baseReady, runner.optString("summary", "base Core Linux pendente")))
+                    .put(check("executor JNI", executor.optBoolean("readyForRootfs", false), executor.optString("summary", "executor pendente")))
+                    .put(check("Box64 presente", selectedPresent, selectedPresent ? path(box64) : "libcoreworker_box64.so/libbox64.so não está embutido"))
+                    .put(check("Box64 ELF64", selectedElf64, selectedPresent ? "classe ELF64=" + selectedInfo.optString("elfClass", "") : "sem binário"))
+                    .put(check("Box64 AArch64", selectedAarch64, selectedPresent ? "machine=" + selectedInfo.optString("machine", "") : "sem binário"))
+                    .put(check("Box64 tamanho mínimo", selectedSizeOk, selectedPresent ? "size=" + selectedInfo.optLong("size", 0L) : "sem binário"))
+                    .put(check("Box64 execução ainda bloqueada", true, "V14 audita/intake; não executa box64 --version ainda"))
+                    .put(check("Bedrock bloqueado", true, "nenhum servidor é iniciado nesta etapa"))
+                    .put(check("shell livre bloqueado", true, "sem comando remoto arbitrário"));
+
+            boolean prerequisitesOk = rootfsSmokeOk && rootfsReal && baseReady && executor.optBoolean("readyForRootfs", false);
+            boolean ok = prerequisitesOk && box64Ready;
+            JSONObject readiness = new JSONObject()
+                    .put("stage", "core-linux-box64-intake-preflight-v14")
+                    .put("rootfsSmokeOk", rootfsSmokeOk)
+                    .put("rootfsRealValidated", rootfsReal)
+                    .put("baseToolsReady", runner.optBoolean("baseToolsReady", false))
+                    .put("runnerBaseRequirementsReady", runner.optBoolean("runnerBaseRequirementsReady", false))
+                    .put("executorReady", executor.optBoolean("readyForRootfs", false))
+                    .put("box64Present", selectedPresent)
+                    .put("box64Elf64", selectedElf64)
+                    .put("box64Aarch64", selectedAarch64)
+                    .put("box64SizeOk", selectedSizeOk)
+                    .put("box64CanExecute", selectedExecutable)
+                    .put("box64ReadyForSmoke", ok);
+
+            JSONObject box64Info = new JSONObject()
+                    .put("selected", selectedInfo)
+                    .put("official", officialInfo)
+                    .put("alias", aliasInfo)
+                    .put("expectedNames", new JSONArray().put("libcoreworker_box64.so").put("libbox64.so"))
+                    .put("nativeLibraryDir", path(nativeDir))
+                    .put("metadataPolicy", new JSONObject()
+                            .put("origin", "manual-build-from-upstream-source")
+                            .put("upstream", "https://github.com/ptitSeb/box64")
+                            .put("license", "MIT")
+                            .put("licenseStatusRequired", "verified-audited|source-built|redistributable-verified")
+                            .put("noAutoDownload", true)
+                            .put("noRuntimeDownload", true)
+                            .put("noBedrockStart", true)
+                            .put("noShell", true));
+
+            JSONObject out = new JSONObject();
+            out.put("ok", ok);
+            out.put("type", "core_linux_box64_intake_preflight");
+            out.put("stage", "core-linux-box64-intake-preflight-v14");
+            out.put("state", ok ? "box64_intake_ready" : (prerequisitesOk ? "box64_intake_missing_binary" : "box64_intake_blocked"));
+            out.put("termuxTouched", false);
+            out.put("pythonTouched", false);
+            out.put("serviceStarted", false);
+            out.put("bedrockStarted", false);
+            out.put("box64Started", false);
+            out.put("shellOpened", false);
+            out.put("remoteCommandAllowed", false);
+            out.put("runnerExecutionAllowed", false);
+            out.put("commandsAllowlisted", true);
+            out.put("executedBox64", false);
+            out.put("checks", checks);
+            out.put("readiness", readiness);
+            out.put("box64", box64Info);
+            out.put("rootfs", rootfsState);
+            out.put("rootfsSmoke", rootfsSmoke);
+            out.put("runnerPreflight", runner);
+            out.put("runtime", runtime);
+            out.put("nativeExecutor", executor);
+            out.put("nextStep", ok ? "box64-version-smoke" : (prerequisitesOk ? "embutir Box64 arm64 auditado no APK" : "corrigir base/rootfs antes de Box64"));
+            out.put("updatedAt", now());
+            out.put("summary", ok
+                    ? "Box64 V14 pronto para smoke futuro · binário auditado embutido e base rootfs validada"
+                    : (prerequisitesOk
+                        ? "Box64 V14 pendente · falta embutir libcoreworker_box64.so auditado"
+                        : "Box64 V14 bloqueado · base/rootfs ainda não está pronta"));
+            writeJson(new File(layout.runtime, "core-linux-box64-intake-preflight.json"), out);
+            appendLog(new File(layout.logs, "core-linux-box64-intake-preflight.log"), out.optString("summary"));
+            return out;
+        } catch (Throwable exc) {
+            return error("core_linux_box64_intake_preflight", exc);
+        }
+    }
+
+    private static JSONObject binarySnapshot(String label, File file, long minBytes) {
+        JSONObject out = new JSONObject();
+        try {
+            out.put("label", clean(label, 80));
+            out.put("path", path(file));
+            boolean exists = file != null && file.exists();
+            out.put("exists", exists);
+            out.put("size", exists ? file.length() : 0L);
+            out.put("canExecute", exists && file.canExecute());
+            out.put("sizeOk", exists && file.length() >= Math.max(1L, minBytes));
+            if (exists) {
+                byte[] header = readBytes(file, 64);
+                boolean isElf = header.length >= 20 && header[0] == 0x7f && header[1] == 'E' && header[2] == 'L' && header[3] == 'F';
+                int elfClass = header.length > 4 ? (header[4] & 0xff) : 0;
+                int machine = header.length > 19 ? ((header[18] & 0xff) | ((header[19] & 0xff) << 8)) : 0;
+                out.put("isElf", isElf);
+                out.put("elfClass", elfClass);
+                out.put("elf64", isElf && elfClass == 2);
+                out.put("machine", machine);
+                out.put("aarch64", isElf && machine == 183);
+                out.put("sha256", sha256(file));
+            } else {
+                out.put("isElf", false);
+                out.put("elf64", false);
+                out.put("aarch64", false);
+                out.put("sha256", "");
+            }
+        } catch (Throwable exc) {
+            try {
+                out.put("ok", false);
+                out.put("error", shortThrowable(exc));
+            } catch (Throwable ignored) {}
+        }
+        return out;
+    }
+
+    private static String sha256(File file) {
+        try (FileInputStream in = new FileInputStream(file)) {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) digest.update(buf, 0, n);
+            byte[] hash = digest.digest();
+            StringBuilder sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash) sb.append(String.format("%02x", b & 0xff));
+            return sb.toString();
+        } catch (Throwable ignored) {
+            return "";
         }
     }
 

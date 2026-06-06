@@ -1,7 +1,6 @@
 android/core-worker-app/app/build.gradle
 android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java
+android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
 android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
 android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java
-android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
 webserver.py
-patch.diff

@@ -1,296 +1,439 @@
-diff -ruN orig_v133/tts-bot-main/android/core-worker-app/app/build.gradle work_v133/tts-bot-main/android/core-worker-app/app/build.gradle
---- orig_v133/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-06 08:23:56.000000000 +0000
-+++ work_v133/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-06 14:47:34.603537826 +0000
+--- orig_v14/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-06 12:04:40.000000000 +0000
++++ work_v14/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-06 15:20:23.697319543 +0000
 @@ -58,8 +58,8 @@
          applicationId "dev.core.worker"
          minSdk 26
          targetSdk 34
--        versionCode 102
--        versionName "0.5.87"
-+        versionCode 103
-+        versionName "0.5.88"
+-        versionCode 103
+-        versionName "0.5.88"
++        versionCode 104
++        versionName "0.5.89"
  
          buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
          buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
-diff -ruN orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java
---- orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-06 08:23:56.000000000 +0000
-+++ work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-06 14:48:47.605916449 +0000
-@@ -267,7 +267,9 @@
-             Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
-             ensureBase(layout);
+--- orig_v14/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-06 12:04:40.000000000 +0000
++++ work_v14/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-06 15:20:23.699031839 +0000
+@@ -13,6 +13,7 @@
+ import java.io.FileOutputStream;
+ import java.nio.charset.StandardCharsets;
+ import java.nio.file.Files;
++import java.security.MessageDigest;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Comparator;
+@@ -480,6 +481,186 @@
+         }
+     }
  
--            // V13.2: smoke real do rootfs via PRoot, ainda com allowlist fixa.
-+            // V13.3: smoke real do rootfs via PRoot, ainda com allowlist fixa.
-+            // Mantém o BusyBox do APK bindado no rootfs e adiciona binds do runtime
-+            // Android (/system, /apex e nativeLibraryDir) para o linker Bionic iniciar o ELF.
-             // Esta etapa prova entrada no rootfs e execução de comandos mínimos
-             // pré-definidos. Continua sem shell livre, sem comando remoto arbitrário,
-             // sem Box64, sem Bedrock e sem processo persistente.
-@@ -278,8 +280,8 @@
-             JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
-             JSONObject rootfsState = rootfs.optJSONObject("rootfs");
-             if (rootfsState == null) rootfsState = rootfs;
--            JSONObject runtime = runtimeSnapshot(context, layout.core, "rootfs_smoke_v13_2", executor);
--            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "rootfs_smoke_v13_2");
-+            JSONObject runtime = runtimeSnapshot(context, layout.core, "rootfs_smoke_v13_3", executor);
-+            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "rootfs_smoke_v13_3");
-             JSONObject baseSmoke = readJson(new File(layout.runtime, "core-linux-smoke-test.json"));
-             if (baseSmoke == null) baseSmoke = new JSONObject();
- 
-@@ -306,7 +308,7 @@
-             boolean executorReady = executor.optBoolean("readyForRootfs", false);
-             boolean runtimeOk = runtime.optBoolean("ok", false);
-             JSONObject readiness = new JSONObject()
--                    .put("stage", "core-linux-rootfs-proot-smoke-v13.2")
-+                    .put("stage", "core-linux-rootfs-proot-smoke-v13.3")
-                     .put("baseToolsSmokeCachePresent", baseToolsSmokeCachePresent)
-                     .put("baseToolsSmokeCacheOk", baseToolsSmokeCacheOk)
-                     .put("baseToolsReadyFromPreflight", baseToolsReadyFromPreflight)
-@@ -362,13 +364,20 @@
-             if (prerequisitesOk) {
-                 String busyboxBind = rootfsBind.optString("busyboxBind", path(busyboxHost) + ":/bin/busybox");
-                 String nativeDirBind = rootfsBind.optString("nativeDirBind", path(nativeDir) + ":" + path(nativeDir));
-+                String systemBind = rootfsBind.optString("systemBind", "/system:/system");
-+                String apexBind = rootfsBind.optString("apexBind", "/apex:/apex");
-                 JSONObject echo = runNativeTool(
-                         "proot rootfs busybox echo ok",
-                         proot,
-                         nativeDir,
-                         layout.runtime,
-                         10000L,
--                        "-r", path(layout.rootfs), "-w", "/", "-b", busyboxBind, "-b", nativeDirBind, "/bin/busybox", "echo", "ok"
-+                        "-r", path(layout.rootfs), "-w", "/",
-+                        "-b", systemBind,
-+                        "-b", apexBind,
-+                        "-b", busyboxBind,
-+                        "-b", nativeDirBind,
-+                        "/bin/busybox", "echo", "ok"
-                 );
-                 JSONObject osRelease = runNativeTool(
-                         "proot rootfs busybox cat /etc/os-release",
-@@ -376,7 +385,12 @@
-                         nativeDir,
-                         layout.runtime,
-                         10000L,
--                        "-r", path(layout.rootfs), "-w", "/", "-b", busyboxBind, "-b", nativeDirBind, "/bin/busybox", "cat", "/etc/os-release"
-+                        "-r", path(layout.rootfs), "-w", "/",
-+                        "-b", systemBind,
-+                        "-b", apexBind,
-+                        "-b", busyboxBind,
-+                        "-b", nativeDirBind,
-+                        "/bin/busybox", "cat", "/etc/os-release"
-                 );
-                 JSONObject busybox = runNativeTool(
-                         "proot rootfs busybox true",
-@@ -384,7 +398,12 @@
-                         nativeDir,
-                         layout.runtime,
-                         10000L,
--                        "-r", path(layout.rootfs), "-w", "/", "-b", busyboxBind, "-b", nativeDirBind, "/bin/busybox", "true"
-+                        "-r", path(layout.rootfs), "-w", "/",
-+                        "-b", systemBind,
-+                        "-b", apexBind,
-+                        "-b", busyboxBind,
-+                        "-b", nativeDirBind,
-+                        "/bin/busybox", "true"
-                 );
-                 echoOk = echo.optBoolean("ok", false) && "ok".equals(echo.optString("stdout", "").trim());
-                 osReleaseOk = osRelease.optBoolean("ok", false) && osRelease.optString("stdout", "").contains("NAME=");
-@@ -397,6 +416,9 @@
-                 rootfsSmoke.put("busyboxHostPath", path(busyboxHost));
-                 rootfsSmoke.put("guestBusybox", "/bin/busybox");
-                 rootfsSmoke.put("nativeLibraryDir", path(nativeDir));
-+                rootfsSmoke.put("systemBind", systemBind);
-+                rootfsSmoke.put("apexBind", apexBind);
-+                rootfsSmoke.put("nativeDirBind", nativeDirBind);
-                 rootfsSmoke.put("rootfsDir", path(layout.rootfs));
-                 rootfsSmoke.put("workDir", path(layout.runtime));
-                 rootfsSmoke.put("env", new JSONObject()
-@@ -408,7 +430,7 @@
-                 smokeChecks.put(check("rootfs busybox", busyboxOk, busyboxOk ? "/bin/busybox true executou dentro do rootfs" : "falha em /bin/busybox true; ver stdout/stderr"));
-             } else {
-                 rootfsSmoke.put("skipped", true);
--                rootfsSmoke.put("reason", "base/rootfs ainda não está pronto para smoke V13.2");
-+                rootfsSmoke.put("reason", "base/rootfs ainda não está pronto para smoke V13.3");
-                 rootfsSmoke.put("readiness", readiness);
-                 smokeChecks.put(check("rootfs echo", false, "não executado: pré-requisitos pendentes"));
-                 smokeChecks.put(check("rootfs os-release", false, "não executado: pré-requisitos pendentes"));
-@@ -420,7 +442,7 @@
-             out.put("ok", ok);
-             out.put("type", "core_linux_rootfs_proot_smoke_test");
-             out.put("state", ok ? "rootfs_proot_smoke_ok" : (prerequisitesOk ? "rootfs_proot_smoke_failed" : "rootfs_proot_smoke_blocked"));
--            out.put("stage", "core-linux-rootfs-proot-smoke-v13.2");
-+            out.put("stage", "core-linux-rootfs-proot-smoke-v13.3");
-             out.put("termuxTouched", false);
-             out.put("pythonTouched", false);
-             out.put("serviceStarted", false);
-@@ -431,9 +453,9 @@
-             out.put("runnerExecutionAllowed", false);
-             out.put("commandsAllowlisted", true);
-             out.put("commands", new JSONArray()
--                    .put("proot -r <rootfs> -b <apk-busybox>:/bin/busybox /bin/busybox echo ok")
--                    .put("proot -r <rootfs> -b <apk-busybox>:/bin/busybox /bin/busybox cat /etc/os-release")
--                    .put("proot -r <rootfs> -b <apk-busybox>:/bin/busybox /bin/busybox true"));
-+                    .put("proot -r <rootfs> -b /system:/system -b /apex:/apex -b <apk-busybox>:/bin/busybox /bin/busybox echo ok")
-+                    .put("proot -r <rootfs> -b /system:/system -b /apex:/apex -b <apk-busybox>:/bin/busybox /bin/busybox cat /etc/os-release")
-+                    .put("proot -r <rootfs> -b /system:/system -b /apex:/apex -b <apk-busybox>:/bin/busybox /bin/busybox true"));
-             out.put("checks", checks);
-             out.put("smokeChecks", smokeChecks);
-             out.put("rootfsSmoke", rootfsSmoke);
-@@ -446,10 +468,10 @@
-             out.put("nextStep", ok ? "box64-intake" : "corrigir rootfs/PRoot antes de Box64");
-             out.put("updatedAt", now());
-             out.put("summary", ok
--                    ? "Smoke rootfs V13.2 ok · PRoot entrou no rootfs e executou BusyBox bindado sem Termux"
-+                    ? "Smoke rootfs V13.3 ok · PRoot entrou no rootfs e executou BusyBox bindado com runtime Android sem Termux"
-                     : (prerequisitesOk
--                        ? "Smoke rootfs V13.2 falhou · ver stdout/stderr por etapa"
--                        : "Smoke rootfs V13.2 bloqueado · falta base/rootfs validado"));
-+                        ? "Smoke rootfs V13.3 falhou · ver stdout/stderr por etapa"
-+                        : "Smoke rootfs V13.3 bloqueado · falta base/rootfs validado"));
-             writeJson(new File(layout.runtime, "core-linux-rootfs-smoke-test.json"), out);
-             appendLog(new File(layout.logs, "core-linux-rootfs-smoke-test.log"), out.optString("summary"));
-             return out;
-@@ -516,7 +538,17 @@
-             File guestNativeDirMountPoint = new File(rootfsDir, stripLeadingSlash(nativeDirPath));
-             guestNativeDirMountPoint.mkdirs();
- 
--            out.put("ok", busyboxHost != null && busyboxHost.exists() && busyboxHost.canExecute());
-+            File hostSystem = new File("/system");
-+            File hostApex = new File("/apex");
-+            File guestSystemMountPoint = new File(rootfsDir, "system");
-+            File guestApexMountPoint = new File(rootfsDir, "apex");
-+            guestSystemMountPoint.mkdirs();
-+            guestApexMountPoint.mkdirs();
 +
-+            boolean systemReady = hostSystem.exists() && hostSystem.isDirectory() && guestSystemMountPoint.isDirectory();
-+            boolean apexReady = hostApex.exists() && hostApex.isDirectory() && guestApexMountPoint.isDirectory();
++    public static JSONObject box64IntakePreflight(Context context, File coreLinuxDir, JSONObject nativeExecutor) {
++        try {
++            Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
++            ensureBase(layout);
 +
-+            out.put("ok", busyboxHost != null && busyboxHost.exists() && busyboxHost.canExecute() && systemReady && apexReady);
-             out.put("mode", "bind-apk-busybox-into-rootfs");
-             out.put("busyboxHostPath", path(busyboxHost));
-             out.put("busyboxGuestPath", "/bin/busybox");
-@@ -526,9 +558,23 @@
-             out.put("nativeDirGuestPath", nativeDirPath);
-             out.put("nativeDirMountPoint", path(guestNativeDirMountPoint));
-             out.put("nativeDirBind", nativeDirPath + ":" + nativeDirPath);
--            out.put("note", "V13.2 monta BusyBox validado do APK no rootfs mínimo; não exige /bin/sh nem /bin/busybox próprios do rootfs");
-+            out.put("systemHostPath", path(hostSystem));
-+            out.put("systemGuestPath", "/system");
-+            out.put("systemMountPoint", path(guestSystemMountPoint));
-+            out.put("systemBind", "/system:/system");
-+            out.put("systemReady", systemReady);
-+            out.put("apexHostPath", path(hostApex));
-+            out.put("apexGuestPath", "/apex");
-+            out.put("apexMountPoint", path(guestApexMountPoint));
-+            out.put("apexBind", "/apex:/apex");
-+            out.put("apexReady", apexReady);
-+            out.put("androidRuntimeBinds", new JSONArray()
-+                    .put("/system:/system")
-+                    .put("/apex:/apex")
-+                    .put(nativeDirPath + ":" + nativeDirPath));
-+            out.put("note", "V13.3 monta BusyBox validado do APK no rootfs mínimo e expõe /system, /apex e nativeLibraryDir para o linker Bionic; não exige /bin/sh nem /bin/busybox próprios do rootfs");
-             if (!out.optBoolean("ok", false)) {
--                out.put("error", "BusyBox host ausente ou sem execução");
-+                out.put("error", "BusyBox host ausente/sem execução ou runtime Android indisponível para bind");
-             }
-             return out;
-         } catch (Throwable exc) {
-diff -ruN orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
---- orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-06 08:23:56.000000000 +0000
-+++ work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-06 14:47:36.666336166 +0000
-@@ -330,6 +330,7 @@
-                 .put("core-linux-rootfs-proot-smoke-v13")
++            // V14: intake/preflight seguro do Box64. Esta etapa não executa Box64,
++            // não baixa binários, não inicia Bedrock e não abre shell. Ela apenas
++            // audita se um Box64 arm64 auditado já está embutido em jniLibs/nativeLibraryDir
++            // e se a base validada pelo V13.3 está pronta para o futuro smoke de Box64.
++            JSONObject executor = nativeExecutor;
++            if (executor == null || !executor.optBoolean("readyForRootfs", false)) {
++                executor = CoreWorkerNativeExecutor.snapshot(context, layout.core, "test");
++            }
++            JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
++            JSONObject rootfsState = rootfs.optJSONObject("rootfs");
++            if (rootfsState == null) rootfsState = rootfs;
++            JSONObject runtime = runtimeSnapshot(context, layout.core, "box64_intake_v14", executor);
++            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "box64_intake_v14");
++            JSONObject rootfsSmoke = readJson(new File(layout.runtime, "core-linux-rootfs-smoke-test.json"));
++            if (rootfsSmoke == null) rootfsSmoke = new JSONObject();
++
++            File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir == null ? "" : context.getApplicationInfo().nativeLibraryDir);
++            File box64Official = new File(nativeDir, "libcoreworker_box64.so");
++            File box64Alias = new File(nativeDir, "libbox64.so");
++            File box64 = box64Official.exists() ? box64Official : (box64Alias.exists() ? box64Alias : box64Official);
++            JSONObject officialInfo = binarySnapshot("libcoreworker_box64.so", box64Official, 131072L);
++            JSONObject aliasInfo = binarySnapshot("libbox64.so", box64Alias, 131072L);
++            JSONObject selectedInfo = binarySnapshot(box64.getName(), box64, 131072L);
++
++            boolean rootfsReady = rootfsState.optBoolean("rootfsReady", false);
++            String validationLevel = rootfsState.optString("validationLevel", "");
++            boolean rootfsReal = runner.optBoolean("rootfsRealValidated", false)
++                    || (rootfsReady && "real".equals(validationLevel))
++                    || "rootfs_validated".equals(rootfsState.optString("state", ""));
++            boolean rootfsSmokeOk = rootfsSmoke.optBoolean("ok", false)
++                    && "rootfs_proot_smoke_ok".equals(rootfsSmoke.optString("state", ""));
++            boolean baseReady = runner.optBoolean("baseToolsReady", false)
++                    && (runner.optBoolean("runnerBaseRequirementsReady", false) || runner.optBoolean("runnerRequirementsReady", false));
++            boolean selectedPresent = selectedInfo.optBoolean("exists", false);
++            boolean selectedElf64 = selectedInfo.optBoolean("elf64", false);
++            boolean selectedAarch64 = selectedInfo.optBoolean("aarch64", false);
++            boolean selectedSizeOk = selectedInfo.optBoolean("sizeOk", false);
++            boolean selectedExecutable = selectedInfo.optBoolean("canExecute", false);
++            boolean box64Ready = selectedPresent && selectedElf64 && selectedAarch64 && selectedSizeOk;
++
++            JSONArray checks = new JSONArray()
++                    .put(check("rootfs smoke V13.3", rootfsSmokeOk, rootfsSmokeOk ? "rootfs/PRoot/BusyBox bindado validado" : "execute o smoke rootfs V13.3 antes do Box64"))
++                    .put(check("rootfs real", rootfsReal, rootfsState.optString("summary", "rootfs real precisa estar validado")))
++                    .put(check("base PRoot/BusyBox", baseReady, runner.optString("summary", "base Core Linux pendente")))
++                    .put(check("executor JNI", executor.optBoolean("readyForRootfs", false), executor.optString("summary", "executor pendente")))
++                    .put(check("Box64 presente", selectedPresent, selectedPresent ? path(box64) : "libcoreworker_box64.so/libbox64.so não está embutido"))
++                    .put(check("Box64 ELF64", selectedElf64, selectedPresent ? "classe ELF64=" + selectedInfo.optString("elfClass", "") : "sem binário"))
++                    .put(check("Box64 AArch64", selectedAarch64, selectedPresent ? "machine=" + selectedInfo.optString("machine", "") : "sem binário"))
++                    .put(check("Box64 tamanho mínimo", selectedSizeOk, selectedPresent ? "size=" + selectedInfo.optLong("size", 0L) : "sem binário"))
++                    .put(check("Box64 execução ainda bloqueada", true, "V14 audita/intake; não executa box64 --version ainda"))
++                    .put(check("Bedrock bloqueado", true, "nenhum servidor é iniciado nesta etapa"))
++                    .put(check("shell livre bloqueado", true, "sem comando remoto arbitrário"));
++
++            boolean prerequisitesOk = rootfsSmokeOk && rootfsReal && baseReady && executor.optBoolean("readyForRootfs", false);
++            boolean ok = prerequisitesOk && box64Ready;
++            JSONObject readiness = new JSONObject()
++                    .put("stage", "core-linux-box64-intake-preflight-v14")
++                    .put("rootfsSmokeOk", rootfsSmokeOk)
++                    .put("rootfsRealValidated", rootfsReal)
++                    .put("baseToolsReady", runner.optBoolean("baseToolsReady", false))
++                    .put("runnerBaseRequirementsReady", runner.optBoolean("runnerBaseRequirementsReady", false))
++                    .put("executorReady", executor.optBoolean("readyForRootfs", false))
++                    .put("box64Present", selectedPresent)
++                    .put("box64Elf64", selectedElf64)
++                    .put("box64Aarch64", selectedAarch64)
++                    .put("box64SizeOk", selectedSizeOk)
++                    .put("box64CanExecute", selectedExecutable)
++                    .put("box64ReadyForSmoke", ok);
++
++            JSONObject box64Info = new JSONObject()
++                    .put("selected", selectedInfo)
++                    .put("official", officialInfo)
++                    .put("alias", aliasInfo)
++                    .put("expectedNames", new JSONArray().put("libcoreworker_box64.so").put("libbox64.so"))
++                    .put("nativeLibraryDir", path(nativeDir))
++                    .put("metadataPolicy", new JSONObject()
++                            .put("origin", "manual-build-from-upstream-source")
++                            .put("upstream", "https://github.com/ptitSeb/box64")
++                            .put("license", "MIT")
++                            .put("licenseStatusRequired", "verified-audited|source-built|redistributable-verified")
++                            .put("noAutoDownload", true)
++                            .put("noRuntimeDownload", true)
++                            .put("noBedrockStart", true)
++                            .put("noShell", true));
++
++            JSONObject out = new JSONObject();
++            out.put("ok", ok);
++            out.put("type", "core_linux_box64_intake_preflight");
++            out.put("stage", "core-linux-box64-intake-preflight-v14");
++            out.put("state", ok ? "box64_intake_ready" : (prerequisitesOk ? "box64_intake_missing_binary" : "box64_intake_blocked"));
++            out.put("termuxTouched", false);
++            out.put("pythonTouched", false);
++            out.put("serviceStarted", false);
++            out.put("bedrockStarted", false);
++            out.put("box64Started", false);
++            out.put("shellOpened", false);
++            out.put("remoteCommandAllowed", false);
++            out.put("runnerExecutionAllowed", false);
++            out.put("commandsAllowlisted", true);
++            out.put("executedBox64", false);
++            out.put("checks", checks);
++            out.put("readiness", readiness);
++            out.put("box64", box64Info);
++            out.put("rootfs", rootfsState);
++            out.put("rootfsSmoke", rootfsSmoke);
++            out.put("runnerPreflight", runner);
++            out.put("runtime", runtime);
++            out.put("nativeExecutor", executor);
++            out.put("nextStep", ok ? "box64-version-smoke" : (prerequisitesOk ? "embutir Box64 arm64 auditado no APK" : "corrigir base/rootfs antes de Box64"));
++            out.put("updatedAt", now());
++            out.put("summary", ok
++                    ? "Box64 V14 pronto para smoke futuro · binário auditado embutido e base rootfs validada"
++                    : (prerequisitesOk
++                        ? "Box64 V14 pendente · falta embutir libcoreworker_box64.so auditado"
++                        : "Box64 V14 bloqueado · base/rootfs ainda não está pronta"));
++            writeJson(new File(layout.runtime, "core-linux-box64-intake-preflight.json"), out);
++            appendLog(new File(layout.logs, "core-linux-box64-intake-preflight.log"), out.optString("summary"));
++            return out;
++        } catch (Throwable exc) {
++            return error("core_linux_box64_intake_preflight", exc);
++        }
++    }
++
++    private static JSONObject binarySnapshot(String label, File file, long minBytes) {
++        JSONObject out = new JSONObject();
++        try {
++            out.put("label", clean(label, 80));
++            out.put("path", path(file));
++            boolean exists = file != null && file.exists();
++            out.put("exists", exists);
++            out.put("size", exists ? file.length() : 0L);
++            out.put("canExecute", exists && file.canExecute());
++            out.put("sizeOk", exists && file.length() >= Math.max(1L, minBytes));
++            if (exists) {
++                byte[] header = readBytes(file, 64);
++                boolean isElf = header.length >= 20 && header[0] == 0x7f && header[1] == 'E' && header[2] == 'L' && header[3] == 'F';
++                int elfClass = header.length > 4 ? (header[4] & 0xff) : 0;
++                int machine = header.length > 19 ? ((header[18] & 0xff) | ((header[19] & 0xff) << 8)) : 0;
++                out.put("isElf", isElf);
++                out.put("elfClass", elfClass);
++                out.put("elf64", isElf && elfClass == 2);
++                out.put("machine", machine);
++                out.put("aarch64", isElf && machine == 183);
++                out.put("sha256", sha256(file));
++            } else {
++                out.put("isElf", false);
++                out.put("elf64", false);
++                out.put("aarch64", false);
++                out.put("sha256", "");
++            }
++        } catch (Throwable exc) {
++            try {
++                out.put("ok", false);
++                out.put("error", shortThrowable(exc));
++            } catch (Throwable ignored) {}
++        }
++        return out;
++    }
++
++    private static String sha256(File file) {
++        try (FileInputStream in = new FileInputStream(file)) {
++            MessageDigest digest = MessageDigest.getInstance("SHA-256");
++            byte[] buf = new byte[8192];
++            int n;
++            while ((n = in.read(buf)) > 0) digest.update(buf, 0, n);
++            byte[] hash = digest.digest();
++            StringBuilder sb = new StringBuilder(hash.length * 2);
++            for (byte b : hash) sb.append(String.format("%02x", b & 0xff));
++            return sb.toString();
++        } catch (Throwable ignored) {
++            return "";
++        }
++    }
++
+ 
+     private static JSONObject prepareBusyboxArgv0Launcher(File runtimeDir, File busyboxReal) {
+         JSONObject out = new JSONObject();
+--- orig_v14/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-06 12:04:40.000000000 +0000
++++ work_v14/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-06 15:20:23.710284836 +0000
+@@ -4644,6 +4644,7 @@
                  .put("core-linux-rootfs-proot-smoke-v13.1")
                  .put("core-linux-rootfs-proot-smoke-v13.2")
-+                .put("core-linux-rootfs-proot-smoke-v13.3")
+                 .put("core-linux-rootfs-proot-smoke-v13.3")
++                .put("core-linux-box64-intake-preflight-v14")
                  .put("core-linux-embedded-binaries-intake-v1")
                  .put("core-linux-embedded-binaries-intake-v2")
                  .put("core-linux-embedded-binaries-intake-v3")
-diff -ruN orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java
---- orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java	2026-06-06 08:23:56.000000000 +0000
-+++ work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java	2026-06-06 14:47:36.666962486 +0000
-@@ -171,6 +171,7 @@
-                 .put("core-linux-rootfs-proot-smoke-v13")
+@@ -5115,7 +5116,8 @@
+                 .put("apk_core_linux_runner_preflight")
+                 .put("apk_core_linux_runner_requirements")
+                 .put("apk_core_linux_runtime_smoke_test")
+-                .put("apk_core_linux_rootfs_smoke_test");
++                .put("apk_core_linux_rootfs_smoke_test")
++                .put("apk_core_linux_box64_preflight");
+     }
+ 
+     private boolean isCoreLinuxRuntimeV1JobType(String type) {
+@@ -5136,7 +5138,8 @@
+                 || "apk_core_linux_native_executor_test".equals(t)
+                 || "apk_core_linux_native_runtime_status".equals(t)
+                 || "apk_core_linux_runtime_smoke_test".equals(t)
+-                || "apk_core_linux_rootfs_smoke_test".equals(t);
++                || "apk_core_linux_rootfs_smoke_test".equals(t)
++                || "apk_core_linux_box64_preflight".equals(t);
+     }
+ 
+     private boolean isPausedRootfsBedrockJobType(String type) {
+@@ -5806,6 +5809,24 @@
+             return result;
+         }
+ 
++        if ("apk_core_linux_box64_preflight".equals(type)) {
++            JSONObject nativeExecutor = coreLinuxNativeExecutorSnapshot("test");
++            JSONObject box64 = CoreLinuxRuntimeManager.box64IntakePreflight(this, coreLinuxDir(), nativeExecutor);
++            safePutPayload(result, "coreLinuxBox64Preflight", box64);
++            coreLinuxSummary = box64.optString("summary", "preflight Box64 Core Linux executado");
++            coreLinuxState = box64.optString("state", "box64_intake_preflight");
++            coreLinuxPrepared = box64.optBoolean("ok", coreLinuxPrepared);
++            coreLinuxLastCheckAt = System.currentTimeMillis();
++            internalDiagnosticsSummary = coreLinuxSummary;
++            internalDiagnosticsLastAt = System.currentTimeMillis();
++            if (!box64.optBoolean("ok", false)) {
++                result.put("ok", false);
++                result.put("error", box64.optString("summary", "Box64 pendente"));
++            }
++            result.put("message", box64.optString("summary", "Box64 intake/preflight executado sem iniciar Bedrock"));
++            return result;
++        }
++
+         if ("apk_core_linux_native_executor_probe".equals(type)
+                 || "apk_core_linux_native_executor_test".equals(type)
+                 || "apk_core_linux_native_runtime_status".equals(type)
+--- orig_v14/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-06 12:04:40.000000000 +0000
++++ work_v14/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-06 15:21:03.977067357 +0000
+@@ -331,6 +331,7 @@
                  .put("core-linux-rootfs-proot-smoke-v13.1")
                  .put("core-linux-rootfs-proot-smoke-v13.2")
-+                .put("core-linux-rootfs-proot-smoke-v13.3")
+                 .put("core-linux-rootfs-proot-smoke-v13.3")
++                .put("core-linux-box64-intake-preflight-v14")
+                 .put("core-linux-embedded-binaries-intake-v1")
+                 .put("core-linux-embedded-binaries-intake-v2")
+                 .put("core-linux-embedded-binaries-intake-v3")
+@@ -393,7 +394,8 @@
+                 .put("apk_core_linux_runner_preflight")
+                 .put("apk_core_linux_runner_requirements")
+                 .put("apk_core_linux_runtime_smoke_test")
+-                .put("apk_core_linux_rootfs_smoke_test");
++                .put("apk_core_linux_rootfs_smoke_test")
++                .put("apk_core_linux_box64_preflight");
+     }
+ 
+     private JSONObject coreLinuxPublicSnapshot() {
+--- orig_v14/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java	2026-06-06 12:04:40.000000000 +0000
++++ work_v14/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java	2026-06-06 15:20:23.711535386 +0000
+@@ -172,6 +172,7 @@
+                 .put("core-linux-rootfs-proot-smoke-v13.1")
+                 .put("core-linux-rootfs-proot-smoke-v13.2")
+                 .put("core-linux-rootfs-proot-smoke-v13.3")
++                .put("core-linux-box64-intake-preflight-v14")
                  .put("minecraft-bedrock-manager-safe-plan");
      }
  
-diff -ruN orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
---- orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-06 08:23:56.000000000 +0000
-+++ work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-06 14:47:36.671143771 +0000
-@@ -4643,6 +4643,7 @@
-                 .put("core-linux-rootfs-proot-smoke-v13")
-                 .put("core-linux-rootfs-proot-smoke-v13.1")
-                 .put("core-linux-rootfs-proot-smoke-v13.2")
-+                .put("core-linux-rootfs-proot-smoke-v13.3")
-                 .put("core-linux-embedded-binaries-intake-v1")
-                 .put("core-linux-embedded-binaries-intake-v2")
-                 .put("core-linux-embedded-binaries-intake-v3")
-diff -ruN orig_v133/tts-bot-main/webserver.py work_v133/tts-bot-main/webserver.py
---- orig_v133/tts-bot-main/webserver.py	2026-06-06 08:23:56.000000000 +0000
-+++ work_v133/tts-bot-main/webserver.py	2026-06-06 14:49:08.066035765 +0000
-@@ -307,6 +307,7 @@
-     "core-linux-rootfs-proot-smoke-v13",
+@@ -207,7 +208,8 @@
+                 .put("apk_core_linux_runner_preflight")
+                 .put("apk_core_linux_runner_requirements")
+                 .put("apk_core_linux_runtime_smoke_test")
+-                .put("apk_core_linux_rootfs_smoke_test");
++                .put("apk_core_linux_rootfs_smoke_test")
++                .put("apk_core_linux_box64_preflight");
+     }
+ 
+     private JSONObject backgroundCoreLinuxSnapshot() throws Exception {
+--- orig_v14/tts-bot-main/webserver.py	2026-06-06 12:04:40.000000000 +0000
++++ work_v14/tts-bot-main/webserver.py	2026-06-06 15:20:23.713017789 +0000
+@@ -308,6 +308,7 @@
      "core-linux-rootfs-proot-smoke-v13.1",
      "core-linux-rootfs-proot-smoke-v13.2",
-+    "core-linux-rootfs-proot-smoke-v13.3",
+     "core-linux-rootfs-proot-smoke-v13.3",
++    "core-linux-box64-intake-preflight-v14",
      "core-linux-embedded-binaries-intake-v1",
      "core-linux-embedded-binaries-intake-v2",
      "core-linux-embedded-binaries-intake-v3",
-@@ -1792,7 +1793,7 @@
-         # V13: smoke rootfs via PRoot com comandos fixos no APK. Não aceita
-         # comando vindo da VPS; o payload só transporta o estágio esperado.
-         stage = _safe_short_text(payload.get("stage") or payload.get("smokeStage"), 80)
--        if stage in {"core-linux-rootfs-proot-smoke-v13", "core-linux-rootfs-proot-smoke-v13.1", "core-linux-rootfs-proot-smoke-v13.2"}:
-+        if stage in {"core-linux-rootfs-proot-smoke-v13", "core-linux-rootfs-proot-smoke-v13.1", "core-linux-rootfs-proot-smoke-v13.2", "core-linux-rootfs-proot-smoke-v13.3"}:
-             clean["stage"] = stage
-             clean["smokeStage"] = stage
-             clean["allowlistOnly"] = True
-@@ -1819,8 +1820,9 @@
- CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB = "apk_core_linux_runtime_smoke_test"
- CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_STAGE = "core-linux-base-tools-smoke-v12"
- CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB = "apk_core_linux_rootfs_smoke_test"
--CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE = "core-linux-rootfs-proot-smoke-v13.2"
--CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE = "core-linux-rootfs-proot-smoke-v13.1"
-+CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE = "core-linux-rootfs-proot-smoke-v13.3"
-+CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE = "core-linux-rootfs-proot-smoke-v13.2"
-+CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS2_STAGE = "core-linux-rootfs-proot-smoke-v13.1"
+@@ -1569,6 +1570,7 @@
+     # V12.1/V13: smokes reais controlados são manuais/seguros, nunca automáticos.
+     "apk_core_linux_runtime_smoke_test",
+     "apk_core_linux_rootfs_smoke_test",
++    "apk_core_linux_box64_preflight",
+     "apk_linux_box64_probe",
+     "apk_linux_provisioner_probe",
+     "apk_linux_prepare_directories",
+@@ -1694,6 +1696,7 @@
+     "apk_core_linux_native_runtime_status": "runtime nativo interno",
+     "apk_core_linux_runtime_smoke_test": "smoke test Core Linux",
+     "apk_core_linux_rootfs_smoke_test": "smoke rootfs PRoot",
++    "apk_core_linux_box64_preflight": "Box64 intake/preflight",
+     "apk_core_linux_internal_repair": "reparar Core Linux interno",
+     "apk_minecraft_bedrock_probe": "Bedrock diagnóstico",
+     "apk_minecraft_bedrock_status": "Bedrock status",
+@@ -1824,9 +1827,12 @@
+ CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE = "core-linux-rootfs-proot-smoke-v13.2"
+ CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS2_STAGE = "core-linux-rootfs-proot-smoke-v13.1"
  CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_LEGACY_STAGE = "core-linux-rootfs-proot-smoke-v13"
++CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB = "apk_core_linux_box64_preflight"
++CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE = "core-linux-box64-intake-preflight-v14"
  CORE_WORKER_APP_LOCAL_MANUAL_QUEUE_TYPES = {
      CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB,
-@@ -1846,10 +1848,10 @@
-         if stage != CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_STAGE:
-             return "smoke V12 exige payload.stage core-linux-base-tools-smoke-v12"
-     elif job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB:
--        if version_code < 102:
--            return "smoke V13.2 exige APK appVersionCode >= 102"
--        if stage not in {CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_LEGACY_STAGE}:
--            return "smoke V13.2 exige payload.stage core-linux-rootfs-proot-smoke-v13.2"
-+        if version_code < 103:
-+            return "smoke V13.3 exige APK appVersionCode >= 103"
-+        if stage not in {CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS2_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_LEGACY_STAGE}:
-+            return "smoke V13.3 exige payload.stage core-linux-rootfs-proot-smoke-v13.3"
+     CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB,
++    CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB,
+ }
+ 
+ 
+@@ -1852,6 +1858,11 @@
+             return "smoke V13.3 exige APK appVersionCode >= 103"
+         if stage not in {CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS2_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_LEGACY_STAGE}:
+             return "smoke V13.3 exige payload.stage core-linux-rootfs-proot-smoke-v13.3"
++    elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB:
++        if version_code < 104:
++            return "Box64 V14 exige APK appVersionCode >= 104"
++        if stage != CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE:
++            return "Box64 V14 exige payload.stage core-linux-box64-intake-preflight-v14"
      return ""
  
  
-@@ -2101,7 +2103,7 @@
+@@ -2020,7 +2031,7 @@
+                 "issuedAt": now,
+                 "title": CORE_WORKER_APP_JOB_LABELS.get(typ, typ),
+                 "status": "pending",
+-                "timeoutSec": 240 if typ in {CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB} else CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS,
++                "timeoutSec": 240 if typ in {CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB, CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB} else CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS,
+                 "maxRetries": 1,
+                 "installId": install_id,
+                 "workerId": worker_id,
+@@ -2029,6 +2040,8 @@
+                 job["payload"] = {"stage": CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_STAGE, "allowlistOnly": True, "forceFresh": True}
+             elif typ == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB:
+                 job["payload"] = {"stage": CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE, "allowlistOnly": True, "forceFresh": True}
++            elif typ == CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB:
++                job["payload"] = {"stage": CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE, "allowlistOnly": True, "forceFresh": True, "noExecute": True}
+             pending.append(job)
+             created.append(job)
+         data["pending"] = pending[-160:]
+@@ -2135,6 +2148,39 @@
+     return queued
  
  
- 
--def _core_worker_app_queue_core_linux_rootfs_smoke_v13(worker_id: str = "", install_id: str = "", *, reason: str = "manual-v13-2-rootfs-proot-smoke") -> dict:
-+def _core_worker_app_queue_core_linux_rootfs_smoke_v13(worker_id: str = "", install_id: str = "", *, reason: str = "manual-v13-3-rootfs-android-runtime-bind-smoke") -> dict:
-     path = _core_worker_app_jobs_path()
-     worker_id = _safe_short_text(worker_id, 80)
-     install_id = _safe_short_text(install_id, 80)
-@@ -3115,7 +3117,7 @@
++
++def _core_worker_app_queue_core_linux_box64_v14(worker_id: str = "", install_id: str = "", *, reason: str = "manual-v14-box64-intake-preflight") -> dict:
++    path = _core_worker_app_jobs_path()
++    worker_id = _safe_short_text(worker_id, 80)
++    install_id = _safe_short_text(install_id, 80)
++    with _core_worker_app_jobs_lock:
++        try:
++            data = _load_json_cached(path, {})
++        except Exception:
++            data = {}
++        if not isinstance(data, dict):
++            data = {}
++        archived = _core_worker_app_archive_pending_jobs(
++            data,
++            job_type=CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB,
++            install_id=install_id,
++            worker_id=worker_id,
++            reason="replace-with-single-v14-box64-preflight",
++        )
++        _atomic_write_json(path, data, mode=0o600)
++    queued = _core_worker_app_queue_internal_jobs_for_worker(
++        worker_id=worker_id,
++        install_id=install_id,
++        kinds=[CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB],
++        reason=reason,
++        allow_manual=True,
++    )
++    queued["archivedPending"] = archived
++    queued["stage"] = CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE
++    queued["safety"] = "manual audit/preflight; sem executar Box64; sem shell livre; sem comando arbitrário; sem Bedrock"
++    return queued
++
++
+ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
+     now = int(time.time())
+     if not isinstance(payload, dict):
+@@ -3117,12 +3163,23 @@
      install_id = _safe_short_text(payload.get("installId") or payload.get("install_id"), 80)
      if not worker_id and not install_id:
          return jsonify({"ok": False, "error": "workerId ou installId obrigatório"}), 400
--    reason = _safe_short_text(payload.get("reason") or ("manual-v13-2-rootfs-proot-smoke" if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB else "manual-v12-base-tools-smoke"), 80)
-+    reason = _safe_short_text(payload.get("reason") or ("manual-v13-3-rootfs-android-runtime-bind-smoke" if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB else "manual-v12-base-tools-smoke"), 80)
+-    reason = _safe_short_text(payload.get("reason") or ("manual-v13-3-rootfs-android-runtime-bind-smoke" if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB else "manual-v12-base-tools-smoke"), 80)
++    default_reason = "manual-v12-base-tools-smoke"
++    if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB:
++        default_reason = "manual-v13-3-rootfs-android-runtime-bind-smoke"
++    elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB:
++        default_reason = "manual-v14-box64-intake-preflight"
++    reason = _safe_short_text(payload.get("reason") or default_reason, 80)
      if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB:
          result = _core_worker_app_queue_core_linux_rootfs_smoke_v13(
              worker_id=worker_id,
+             install_id=install_id,
+             reason=reason,
++        )
++    elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB:
++        result = _core_worker_app_queue_core_linux_box64_v14(
++            worker_id=worker_id,
++            install_id=install_id,
++            reason=reason,
+         )
+     else:
+         result = _core_worker_app_queue_core_linux_smoke_v12(

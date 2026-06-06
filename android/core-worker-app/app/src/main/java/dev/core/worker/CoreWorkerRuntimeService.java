@@ -331,6 +331,7 @@ public class CoreWorkerRuntimeService extends Service {
                 .put("core-linux-rootfs-proot-smoke-v13.1")
                 .put("core-linux-rootfs-proot-smoke-v13.2")
                 .put("core-linux-rootfs-proot-smoke-v13.3")
+                .put("core-linux-box64-intake-preflight-v14")
                 .put("core-linux-embedded-binaries-intake-v1")
                 .put("core-linux-embedded-binaries-intake-v2")
                 .put("core-linux-embedded-binaries-intake-v3")
@@ -393,7 +394,8 @@ public class CoreWorkerRuntimeService extends Service {
                 .put("apk_core_linux_runner_preflight")
                 .put("apk_core_linux_runner_requirements")
                 .put("apk_core_linux_runtime_smoke_test")
-                .put("apk_core_linux_rootfs_smoke_test");
+                .put("apk_core_linux_rootfs_smoke_test")
+                .put("apk_core_linux_box64_preflight");
     }
 
     private JSONObject coreLinuxPublicSnapshot() {
