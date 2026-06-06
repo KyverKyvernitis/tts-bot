@@ -1419,6 +1419,9 @@ def _application_yml_head() -> str:
 
 BASE_ARCHIVE_ROOT_NAME = "tts-bot-main"
 BASE_ARCHIVE_MAX_BYTES = 23 * 1024 * 1024
+# Limite por arquivo da base leve. A base do /vps é para análise/patch,
+# não para transportar binários pesados toda vez.
+BASE_ARCHIVE_MAX_FILE_BYTES = 1_250_000
 BASE_ARCHIVE_SENSITIVE_NAMES = {
     ".env",
     "cookies.txt",
@@ -1433,7 +1436,7 @@ BASE_ARCHIVE_SENSITIVE_SUFFIXES = (
 )
 
 # A base gerada pelo /vps é enviada para análise de código, não para deploy.
-# Mantemos ela leve pulando assets binários, builds e manifestos gerados.
+# Mantemos ela leve pulando assets, binários, builds e manifestos gerados.
 BASE_ARCHIVE_ASSET_EXTENSIONS = {
     ".apng",
     ".avif",
@@ -1457,6 +1460,46 @@ BASE_ARCHIVE_ASSET_EXTENSIONS = {
     ".woff",
     ".woff2",
 }
+BASE_ARCHIVE_BINARY_EXTENSIONS = {
+    ".7z",
+    ".a",
+    ".aar",
+    ".apk",
+    ".apks",
+    ".bin",
+    ".class",
+    ".dat",
+    ".deb",
+    ".dex",
+    ".dll",
+    ".dylib",
+    ".elf",
+    ".exe",
+    ".gz",
+    ".jar",
+    ".lz4",
+    ".lzma",
+    ".o",
+    ".onnx",
+    ".pt",
+    ".rpm",
+    ".so",
+    ".tar",
+    ".tgz",
+    ".wasm",
+    ".xz",
+    ".zip",
+    ".zst",
+}
+BASE_ARCHIVE_BINARY_DIR_MARKERS = (
+    "android/core-worker-app/app/src/main/jnilibs/",
+    "android/core-worker-app/app/src/main/assets/core-linux/bin/",
+    "android/core-worker-app/app/src/main/assets/core-linux/rootfs/",
+    "android/core-worker-app/releases/",
+    "android/core-worker-app/app/build/",
+    "build/",
+    "dist/",
+)
 BASE_ARCHIVE_ASSET_DIR_NAMES = {
     "assets",
     "audio",
@@ -1509,28 +1552,43 @@ def _is_sensitive_tracked_file(rel: str) -> bool:
     return False
 
 
-def _is_base_archive_asset_or_manifest(rel: str) -> bool:
+def _base_archive_skip_reason(rel: str, *, size: int | None = None) -> str | None:
     normalized = rel.replace("\\", "/").lstrip("/")
+    lowered = normalized.lower()
     parts = [part.lower() for part in normalized.split("/") if part]
     name = parts[-1] if parts else ""
-    suffix = Path(name).suffix.lower()
+    suffixes = [suffix.lower() for suffix in Path(name).suffixes]
+    suffix = suffixes[-1] if suffixes else ""
 
     if name in BASE_ARCHIVE_MANIFEST_NAMES:
-        return True
+        return "manifesto"
     if len(parts) >= 2 and parts[-2] == ".vite" and name == "manifest.json":
-        return True
+        return "manifesto"
     if suffix in BASE_ARCHIVE_ASSET_EXTENSIONS:
-        return True
+        return "asset"
+    if suffix in BASE_ARCHIVE_BINARY_EXTENSIONS:
+        return "binário"
+    if len(suffixes) >= 2 and "".join(suffixes[-2:]) in {".tar.gz", ".tar.xz", ".tar.zst"}:
+        return "binário"
 
-    # Diretórios de mídia ficam fora mesmo quando algum arquivo não tem extensão.
-    # Evita mandar assets da Activity, SFX gerais e builds públicos pesados no /vps.
+    # Diretórios de mídia/binários ficam fora mesmo quando o arquivo não tem extensão.
+    # Isso evita mandar Box64, libs nativas, APKs publicados, rootfs e assets pesados
+    # toda vez que o dono pede a base Git leve no /vps.
     if any(part in BASE_ARCHIVE_ASSET_DIR_NAMES for part in parts):
-        return True
+        return "asset"
+    if any(lowered.startswith(marker) or f"/{marker}" in lowered for marker in BASE_ARCHIVE_BINARY_DIR_MARKERS):
+        return "binário"
     if "dist" in parts and any(part in {"assets", "audio", "images", "media"} for part in parts):
-        return True
+        return "asset"
     if "public" in parts and any(part in {"audio", "images", "assets", "media"} for part in parts):
-        return True
-    return False
+        return "asset"
+    if size is not None and size > BASE_ARCHIVE_MAX_FILE_BYTES:
+        return f"arquivo grande ({size / (1024 * 1024):.1f} MB)"
+    return None
+
+
+def _is_base_archive_asset_or_manifest(rel: str) -> bool:
+    return _base_archive_skip_reason(rel) is not None
 
 
 def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
@@ -1538,7 +1596,7 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
 
     Usa `git ls-files`, então pega apenas arquivos rastreados pelo repositório,
     mas com o conteúdo atual da VPS, inclusive mudanças ainda não commitadas.
-    Arquivos sensíveis, assets e manifestos gerados são pulados.
+    Arquivos sensíveis, assets, binários pesados e manifestos gerados são pulados.
     A base do /vps deve ser leve e voltada para análise de código; por isso
     nenhum manifesto separado é retornado/anexado junto da base.
     """
@@ -1577,7 +1635,7 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
                 f"Branch: {(branch.stdout or '').strip() if branch.returncode == 0 else 'desconhecida'}",
                 f"Commit HEAD: {(commit.stdout or '').strip() if commit.returncode == 0 else 'desconhecido'}",
                 "Conteúdo: arquivos retornados por `git ls-files`, usando o conteúdo atual do disco.",
-                "Arquivos sensíveis, assets e manifestos gerados são pulados.",
+                "Arquivos sensíveis, assets, binários pesados e manifestos gerados são pulados.",
                 "",
                 "# git status --short",
                 (status.stdout or "limpo").rstrip() if status.returncode == 0 else redact(status.stderr or status.stdout),
@@ -1593,12 +1651,17 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
                 if _is_sensitive_tracked_file(safe_rel):
                     skipped.append(f"{safe_rel} (sensível)")
                     continue
-                if _is_base_archive_asset_or_manifest(safe_rel):
-                    skipped.append(f"{safe_rel} (asset/manifesto)")
-                    continue
                 src = REPO_ROOT / safe_rel
                 if not src.is_file():
                     skipped.append(f"{safe_rel} (não é arquivo regular)")
+                    continue
+                try:
+                    size = src.stat().st_size
+                except OSError:
+                    size = None
+                skip_reason = _base_archive_skip_reason(safe_rel, size=size)
+                if skip_reason:
+                    skipped.append(f"{safe_rel} ({skip_reason})")
                     continue
                 zf.write(src, f"{BASE_ARCHIVE_ROOT_NAME}/{safe_rel}")
                 added += 1
@@ -1614,7 +1677,7 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
         size_mb = len(payload) / (1024 * 1024)
         return None, filename, f"Base zip ficou grande demais para anexar com segurança no Discord: {size_mb:.1f} MB.", ""
 
-    summary = f"Repositório anexado ({len(payload)} bytes)."
+    summary = f"Repositório leve anexado ({len(payload)} bytes)."
     return payload, filename, summary, ""
 
 

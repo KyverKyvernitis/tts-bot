@@ -108,7 +108,7 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
                     options=[
                         discord.SelectOption(
                             label="Base Git leve",
-                            description="Código rastreado pelo Git, sem assets e sem manifestos.",
+                            description="Código rastreado pelo Git, sem assets, binários e manifestos.",
                             value="base_git",
                             emoji="📦",
                             default=True,
@@ -975,7 +975,7 @@ class VpsCommandMixin:
                     payload, filename, summary, _manifest = await self._with_vps_timeout("base Git", build_git_tracked_base_archive(), timeout=VPS_BASE_TIMEOUT_SECONDS)
                     if payload and filename:
                         files.append(discord.File(io.BytesIO(payload), filename=filename))
-                        attachment_lines.append(f"📦 Repositório anexado ({_format_attachment_size(len(payload))}).")
+                        attachment_lines.append(f"📦 Repositório leve anexado ({_format_attachment_size(len(payload))}).")
                         generated_any = True
                     else:
                         error_lines.append(summary or "Não consegui gerar a base Git.")
