@@ -4641,6 +4641,7 @@ public class MainActivity extends Activity {
                 .put("core-linux-runner-preflight-v11")
                 .put("core-linux-base-tools-smoke-v12")
                 .put("core-linux-rootfs-proot-smoke-v13")
+                .put("core-linux-rootfs-proot-smoke-v13.1")
                 .put("core-linux-embedded-binaries-intake-v1")
                 .put("core-linux-embedded-binaries-intake-v2")
                 .put("core-linux-embedded-binaries-intake-v3")

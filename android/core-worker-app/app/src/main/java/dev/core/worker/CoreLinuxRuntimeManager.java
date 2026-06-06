@@ -283,20 +283,55 @@ public final class CoreLinuxRuntimeManager {
             JSONObject baseSmoke = readJson(new File(layout.runtime, "core-linux-smoke-test.json"));
             if (baseSmoke == null) baseSmoke = new JSONObject();
 
+            boolean rootfsReady = rootfsState.optBoolean("rootfsReady", false);
+            String validationLevel = rootfsState.optString("validationLevel", "");
+            String rootfsStateName = rootfsState.optString("state", "");
             boolean rootfsReal = runner.optBoolean("rootfsRealValidated", false)
-                    || "real".equals(rootfsState.optString("validationLevel", ""))
-                    || "rootfs_real_validated".equals(rootfsState.optString("state", ""));
-            boolean baseToolsOk = baseSmoke.optBoolean("ok", false)
+                    || (rootfsReady && "real".equals(validationLevel))
+                    || "rootfs_real_validated".equals(rootfsStateName)
+                    || "rootfs_validated".equals(rootfsStateName);
+
+            boolean baseToolsSmokeCachePresent = baseSmoke.length() > 0;
+            boolean baseToolsSmokeCacheOk = baseSmoke.optBoolean("ok", false)
                     && "base_tools_smoke_ok".equals(baseSmoke.optString("state", ""));
+            boolean runnerBaseRequirementsReady = runner.optBoolean("runnerBaseRequirementsReady", false)
+                    || runner.optBoolean("runnerRequirementsReady", false);
+            boolean baseToolsReadyFromPreflight = runner.optBoolean("baseToolsReady", false)
+                    && runnerBaseRequirementsReady
+                    && runner.optBoolean("prootEmbedded", false)
+                    && runner.optBoolean("busyboxEmbedded", false)
+                    && runner.optBoolean("prootDependencyReady", true)
+                    && runner.optBoolean("busyboxDependencyReady", true);
+            boolean baseToolsOk = baseToolsSmokeCacheOk || baseToolsReadyFromPreflight;
             boolean executorReady = executor.optBoolean("readyForRootfs", false);
             boolean runtimeOk = runtime.optBoolean("ok", false);
+            JSONObject readiness = new JSONObject()
+                    .put("stage", "core-linux-rootfs-proot-smoke-v13.1")
+                    .put("baseToolsSmokeCachePresent", baseToolsSmokeCachePresent)
+                    .put("baseToolsSmokeCacheOk", baseToolsSmokeCacheOk)
+                    .put("baseToolsReadyFromPreflight", baseToolsReadyFromPreflight)
+                    .put("baseToolsReady", runner.optBoolean("baseToolsReady", false))
+                    .put("runnerBaseRequirementsReady", runnerBaseRequirementsReady)
+                    .put("rootfsReady", rootfsReady)
+                    .put("validationLevel", validationLevel)
+                    .put("rootfsRealValidated", rootfsReal)
+                    .put("executorReady", executorReady)
+                    .put("runtimeOk", runtimeOk)
+                    .put("prootEmbedded", runner.optBoolean("prootEmbedded", false))
+                    .put("busyboxEmbedded", runner.optBoolean("busyboxEmbedded", false))
+                    .put("prootDependencyReady", runner.optBoolean("prootDependencyReady", false))
+                    .put("busyboxDependencyReady", runner.optBoolean("busyboxDependencyReady", false));
 
             JSONArray checks = new JSONArray()
-                    .put(check("base tools smoke V12.3", baseToolsOk, baseSmoke.optString("summary", "execute o smoke BusyBox/PRoot antes do rootfs")))
+                    .put(check("base tools ready", baseToolsOk,
+                            baseToolsOk
+                                    ? (baseToolsSmokeCacheOk ? "cache V12.3 ok" : "preflight recalculado prova BusyBox/PRoot prontos")
+                                    : "base tools não prontos; rode smoke BusyBox/PRoot ou corrija preflight"))
                     .put(check("rootfs real", rootfsReal, rootfsState.optString("summary", "rootfs real precisa estar validado")))
                     .put(check("executor JNI allowlist", executorReady, executor.optString("summary", "")))
                     .put(check("runtime state", runtimeOk, runtime.optString("summary", "")))
                     .put(check("PRoot embutido", runner.optBoolean("prootEmbedded", false), runner.optString("summary", "")))
+                    .put(check("BusyBox embutido", runner.optBoolean("busyboxEmbedded", false), runner.optString("summary", "")))
                     .put(check("shell livre bloqueado", true, "somente /bin/sh -c com comandos fixos allowlist"))
                     .put(check("Box64 bloqueado", true, "Box64 fica para etapa posterior"))
                     .put(check("Bedrock bloqueado", true, "nenhum servidor é iniciado nesta etapa"));
@@ -358,7 +393,8 @@ public final class CoreLinuxRuntimeManager {
                 smokeChecks.put(check("rootfs busybox", busyboxOk, busyboxOk ? "/bin/busybox true executou dentro do rootfs" : "falha em /bin/busybox true; ver stdout/stderr"));
             } else {
                 rootfsSmoke.put("skipped", true);
-                rootfsSmoke.put("reason", "base/rootfs ainda não está pronto para smoke V13");
+                rootfsSmoke.put("reason", "base/rootfs ainda não está pronto para smoke V13.1");
+                rootfsSmoke.put("readiness", readiness);
                 smokeChecks.put(check("rootfs echo", false, "não executado: pré-requisitos pendentes"));
                 smokeChecks.put(check("rootfs os-release", false, "não executado: pré-requisitos pendentes"));
                 smokeChecks.put(check("rootfs busybox", false, "não executado: pré-requisitos pendentes"));
@@ -369,7 +405,7 @@ public final class CoreLinuxRuntimeManager {
             out.put("ok", ok);
             out.put("type", "core_linux_rootfs_proot_smoke_test");
             out.put("state", ok ? "rootfs_proot_smoke_ok" : (prerequisitesOk ? "rootfs_proot_smoke_failed" : "rootfs_proot_smoke_blocked"));
-            out.put("stage", "core-linux-rootfs-proot-smoke-v13");
+            out.put("stage", "core-linux-rootfs-proot-smoke-v13.1");
             out.put("termuxTouched", false);
             out.put("pythonTouched", false);
             out.put("serviceStarted", false);
@@ -386,6 +422,7 @@ public final class CoreLinuxRuntimeManager {
             out.put("checks", checks);
             out.put("smokeChecks", smokeChecks);
             out.put("rootfsSmoke", rootfsSmoke);
+            out.put("readiness", readiness);
             out.put("baseToolsSmoke", baseSmoke);
             out.put("nativeExecutor", executor);
             out.put("rootfs", rootfsState);
@@ -394,10 +431,10 @@ public final class CoreLinuxRuntimeManager {
             out.put("nextStep", ok ? "box64-intake" : "corrigir rootfs/PRoot antes de Box64");
             out.put("updatedAt", now());
             out.put("summary", ok
-                    ? "Smoke rootfs V13 ok · PRoot entrou no rootfs e executou allowlist sem Termux"
+                    ? "Smoke rootfs V13.1 ok · PRoot entrou no rootfs e executou allowlist sem Termux"
                     : (prerequisitesOk
-                        ? "Smoke rootfs V13 falhou · ver stdout/stderr por etapa"
-                        : "Smoke rootfs V13 bloqueado · falta base/rootfs validado"));
+                        ? "Smoke rootfs V13.1 falhou · ver stdout/stderr por etapa"
+                        : "Smoke rootfs V13.1 bloqueado · falta base/rootfs validado"));
             writeJson(new File(layout.runtime, "core-linux-rootfs-smoke-test.json"), out);
             appendLog(new File(layout.logs, "core-linux-rootfs-smoke-test.log"), out.optString("summary"));
             return out;
