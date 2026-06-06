@@ -1,516 +1,296 @@
-diff -ruN /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/build.gradle ./android/core-worker-app/app/build.gradle
---- /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-05 17:08:10.000000000 +0000
-+++ ./android/core-worker-app/app/build.gradle	2026-06-05 20:35:44.955717769 +0000
+diff -ruN orig_v133/tts-bot-main/android/core-worker-app/app/build.gradle work_v133/tts-bot-main/android/core-worker-app/app/build.gradle
+--- orig_v133/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-06 08:23:56.000000000 +0000
++++ work_v133/tts-bot-main/android/core-worker-app/app/build.gradle	2026-06-06 14:47:34.603537826 +0000
 @@ -58,8 +58,8 @@
          applicationId "dev.core.worker"
          minSdk 26
          targetSdk 34
--        versionCode 96
--        versionName "0.5.81"
-+        versionCode 97
-+        versionName "0.5.82"
+-        versionCode 102
+-        versionName "0.5.87"
++        versionCode 103
++        versionName "0.5.88"
  
          buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
          buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
-diff -ruN /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java ./android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java
---- /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-05 15:08:52.000000000 +0000
-+++ ./android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-05 20:35:33.950719293 +0000
-@@ -7,12 +7,16 @@
- import org.json.JSONObject;
- 
- import java.io.File;
-+import java.io.ByteArrayOutputStream;
-+import java.io.InputStream;
- import java.io.FileInputStream;
- import java.io.FileOutputStream;
- import java.nio.charset.StandardCharsets;
-+import java.util.ArrayList;
- import java.util.Arrays;
- import java.util.Comparator;
- import java.util.List;
-+import java.util.concurrent.TimeUnit;
- 
- /**
-  * Runtime mínimo do Core Linux sem Termux.
-@@ -115,11 +119,10 @@
+diff -ruN orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java
+--- orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-06 08:23:56.000000000 +0000
++++ work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java	2026-06-06 14:48:47.605916449 +0000
+@@ -267,7 +267,9 @@
              Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
              ensureBase(layout);
  
--            // Patch 87: o smoke test não pode mais criar scaffold automaticamente
--            // nem dar OK só porque o executor JNI e uma rootfs fake existem. A fase
--            // atual para substituir Termux exige rootfs real + runner + PRoot +
--            // BusyBox auditados. Enquanto isso não estiver pronto, este job vira um
--            // gate seguro e explícito, sem executar proot/busybox/box64/Bedrock.
-+            // V12: primeiro smoke real controlado das ferramentas base. Continua sem
-+            // shell livre, sem comando remoto arbitrário, sem Box64 e sem Bedrock. A
-+            // única execução permitida aqui é uma allowlist fixa de PRoot/BusyBox
-+            // embutidos no APK e já aprovados pelo preflight v11.
-             JSONObject executor = nativeExecutor;
-             if (executor == null || !executor.optBoolean("readyForRootfs", false)) {
-                 executor = CoreWorkerNativeExecutor.snapshot(context, layout.core, "test");
-@@ -127,8 +130,8 @@
+-            // V13.2: smoke real do rootfs via PRoot, ainda com allowlist fixa.
++            // V13.3: smoke real do rootfs via PRoot, ainda com allowlist fixa.
++            // Mantém o BusyBox do APK bindado no rootfs e adiciona binds do runtime
++            // Android (/system, /apex e nativeLibraryDir) para o linker Bionic iniciar o ELF.
+             // Esta etapa prova entrada no rootfs e execução de comandos mínimos
+             // pré-definidos. Continua sem shell livre, sem comando remoto arbitrário,
+             // sem Box64, sem Bedrock e sem processo persistente.
+@@ -278,8 +280,8 @@
              JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
              JSONObject rootfsState = rootfs.optJSONObject("rootfs");
              if (rootfsState == null) rootfsState = rootfs;
--            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "smoke_gate");
--            JSONObject runtime = runtimeSnapshot(context, layout.core, "smoke_gate", executor);
-+            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "smoke_v12");
-+            JSONObject runtime = runtimeSnapshot(context, layout.core, "smoke_v12", executor);
+-            JSONObject runtime = runtimeSnapshot(context, layout.core, "rootfs_smoke_v13_2", executor);
+-            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "rootfs_smoke_v13_2");
++            JSONObject runtime = runtimeSnapshot(context, layout.core, "rootfs_smoke_v13_3", executor);
++            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "rootfs_smoke_v13_3");
+             JSONObject baseSmoke = readJson(new File(layout.runtime, "core-linux-smoke-test.json"));
+             if (baseSmoke == null) baseSmoke = new JSONObject();
  
-             boolean rootfsReal = runner.optBoolean("rootfsRealValidated", false)
-                     || "real".equals(rootfsState.optString("validationLevel", ""))
-@@ -146,34 +149,99 @@
-                     .put(check("runner/proot/busybox base", baseReady, runner.optString("summary", "base Core Linux ainda pendente")))
-                     .put(check("runtime state", runtime.optBoolean("ok", false), runtime.optString("summary", "")))
-                     .put(check("Bedrock bloqueado", true, "nenhum start real é feito nesta etapa"))
--                    .put(check("shell livre bloqueado", true, "somente allowlist futura; sem comando remoto arbitrário"));
--            boolean ok = true;
-+                    .put(check("Box64 bloqueado", true, "Box64 fica para etapa posterior ao smoke rootfs"))
-+                    .put(check("shell livre bloqueado", true, "somente allowlist fixa; sem comando remoto arbitrário"));
-+
-+            boolean prerequisitesOk = true;
-             for (int i = 0; i < checks.length(); i++) {
-                 JSONObject row = checks.optJSONObject(i);
--                if (row != null && !row.optBoolean("ok", false)) ok = false;
-+                if (row != null && !row.optBoolean("ok", false)) prerequisitesOk = false;
-+            }
-+
-+            File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir == null ? "" : context.getApplicationInfo().nativeLibraryDir);
-+            File busybox = new File(nativeDir, "libcoreworker_busybox.so");
-+            File proot = new File(nativeDir, "libcoreworker_proot.so");
-+            JSONObject smoke = new JSONObject();
-+            JSONArray smokeChecks = new JSONArray();
-+            boolean busyboxOk = false;
-+            boolean prootOk = false;
-+
-+            if (prerequisitesOk) {
-+                JSONObject busyboxSmoke = new JSONObject();
-+                JSONObject busyboxHelp = runNativeTool("busybox --help", busybox, nativeDir, layout.runtime, 8000L, "--help");
-+                JSONObject busyboxTrue = runNativeTool("busybox true", busybox, nativeDir, layout.runtime, 5000L, "true");
-+                JSONObject busyboxEcho = runNativeTool("busybox echo ok", busybox, nativeDir, layout.runtime, 5000L, "echo", "ok");
-+                busyboxSmoke.put("help", busyboxHelp);
-+                busyboxSmoke.put("true", busyboxTrue);
-+                busyboxSmoke.put("echo", busyboxEcho);
-+                busyboxOk = busyboxHelp.optBoolean("ok", false)
-+                        && busyboxTrue.optBoolean("ok", false)
-+                        && busyboxEcho.optBoolean("ok", false)
-+                        && "ok".equals(busyboxEcho.optString("stdout", "").trim());
-+
-+                JSONObject prootSmoke = new JSONObject();
-+                JSONObject prootHelp = runNativeTool("proot --help", proot, nativeDir, layout.runtime, 8000L, "--help");
-+                JSONObject prootVersion = runNativeTool("proot --version", proot, nativeDir, layout.runtime, 8000L, "--version");
-+                prootSmoke.put("help", prootHelp);
-+                prootSmoke.put("version", prootVersion);
-+                prootOk = prootHelp.optBoolean("ok", false) && prootVersion.optBoolean("ok", false);
-+
-+                smoke.put("busybox", busyboxSmoke);
-+                smoke.put("proot", prootSmoke);
-+                smoke.put("nativeLibraryDir", path(nativeDir));
-+                smoke.put("workDir", path(layout.runtime));
-+                smoke.put("env", new JSONObject()
-+                        .put("LD_LIBRARY_PATH", path(nativeDir))
-+                        .put("PROOT_LOADER", path(new File(nativeDir, "libcoreworker_proot_loader.so")))
-+                        .put("PROOT_LOADER_32", path(new File(nativeDir, "libcoreworker_proot_loader32.so"))));
-+                smokeChecks.put(check("busybox allowlist", busyboxOk, busyboxOk ? "busybox --help/true/echo ok" : "falha em uma etapa BusyBox; ver stdout/stderr"));
-+                smokeChecks.put(check("proot allowlist", prootOk, prootOk ? "proot --help/--version" : "falha em uma etapa PRoot; ver stdout/stderr/linker"));
-+            } else {
-+                smoke.put("skipped", true);
-+                smoke.put("reason", "preflight/base Core Linux ainda não está pronto");
-+                smokeChecks.put(check("busybox allowlist", false, "não executado: preflight/base pendente"));
-+                smokeChecks.put(check("proot allowlist", false, "não executado: preflight/base pendente"));
-             }
-+
-+            boolean ok = prerequisitesOk && busyboxOk && prootOk;
-             JSONObject out = new JSONObject();
+@@ -306,7 +308,7 @@
+             boolean executorReady = executor.optBoolean("readyForRootfs", false);
+             boolean runtimeOk = runtime.optBoolean("ok", false);
+             JSONObject readiness = new JSONObject()
+-                    .put("stage", "core-linux-rootfs-proot-smoke-v13.2")
++                    .put("stage", "core-linux-rootfs-proot-smoke-v13.3")
+                     .put("baseToolsSmokeCachePresent", baseToolsSmokeCachePresent)
+                     .put("baseToolsSmokeCacheOk", baseToolsSmokeCacheOk)
+                     .put("baseToolsReadyFromPreflight", baseToolsReadyFromPreflight)
+@@ -362,13 +364,20 @@
+             if (prerequisitesOk) {
+                 String busyboxBind = rootfsBind.optString("busyboxBind", path(busyboxHost) + ":/bin/busybox");
+                 String nativeDirBind = rootfsBind.optString("nativeDirBind", path(nativeDir) + ":" + path(nativeDir));
++                String systemBind = rootfsBind.optString("systemBind", "/system:/system");
++                String apexBind = rootfsBind.optString("apexBind", "/apex:/apex");
+                 JSONObject echo = runNativeTool(
+                         "proot rootfs busybox echo ok",
+                         proot,
+                         nativeDir,
+                         layout.runtime,
+                         10000L,
+-                        "-r", path(layout.rootfs), "-w", "/", "-b", busyboxBind, "-b", nativeDirBind, "/bin/busybox", "echo", "ok"
++                        "-r", path(layout.rootfs), "-w", "/",
++                        "-b", systemBind,
++                        "-b", apexBind,
++                        "-b", busyboxBind,
++                        "-b", nativeDirBind,
++                        "/bin/busybox", "echo", "ok"
+                 );
+                 JSONObject osRelease = runNativeTool(
+                         "proot rootfs busybox cat /etc/os-release",
+@@ -376,7 +385,12 @@
+                         nativeDir,
+                         layout.runtime,
+                         10000L,
+-                        "-r", path(layout.rootfs), "-w", "/", "-b", busyboxBind, "-b", nativeDirBind, "/bin/busybox", "cat", "/etc/os-release"
++                        "-r", path(layout.rootfs), "-w", "/",
++                        "-b", systemBind,
++                        "-b", apexBind,
++                        "-b", busyboxBind,
++                        "-b", nativeDirBind,
++                        "/bin/busybox", "cat", "/etc/os-release"
+                 );
+                 JSONObject busybox = runNativeTool(
+                         "proot rootfs busybox true",
+@@ -384,7 +398,12 @@
+                         nativeDir,
+                         layout.runtime,
+                         10000L,
+-                        "-r", path(layout.rootfs), "-w", "/", "-b", busyboxBind, "-b", nativeDirBind, "/bin/busybox", "true"
++                        "-r", path(layout.rootfs), "-w", "/",
++                        "-b", systemBind,
++                        "-b", apexBind,
++                        "-b", busyboxBind,
++                        "-b", nativeDirBind,
++                        "/bin/busybox", "true"
+                 );
+                 echoOk = echo.optBoolean("ok", false) && "ok".equals(echo.optString("stdout", "").trim());
+                 osReleaseOk = osRelease.optBoolean("ok", false) && osRelease.optString("stdout", "").contains("NAME=");
+@@ -397,6 +416,9 @@
+                 rootfsSmoke.put("busyboxHostPath", path(busyboxHost));
+                 rootfsSmoke.put("guestBusybox", "/bin/busybox");
+                 rootfsSmoke.put("nativeLibraryDir", path(nativeDir));
++                rootfsSmoke.put("systemBind", systemBind);
++                rootfsSmoke.put("apexBind", apexBind);
++                rootfsSmoke.put("nativeDirBind", nativeDirBind);
+                 rootfsSmoke.put("rootfsDir", path(layout.rootfs));
+                 rootfsSmoke.put("workDir", path(layout.runtime));
+                 rootfsSmoke.put("env", new JSONObject()
+@@ -408,7 +430,7 @@
+                 smokeChecks.put(check("rootfs busybox", busyboxOk, busyboxOk ? "/bin/busybox true executou dentro do rootfs" : "falha em /bin/busybox true; ver stdout/stderr"));
+             } else {
+                 rootfsSmoke.put("skipped", true);
+-                rootfsSmoke.put("reason", "base/rootfs ainda não está pronto para smoke V13.2");
++                rootfsSmoke.put("reason", "base/rootfs ainda não está pronto para smoke V13.3");
+                 rootfsSmoke.put("readiness", readiness);
+                 smokeChecks.put(check("rootfs echo", false, "não executado: pré-requisitos pendentes"));
+                 smokeChecks.put(check("rootfs os-release", false, "não executado: pré-requisitos pendentes"));
+@@ -420,7 +442,7 @@
              out.put("ok", ok);
-             out.put("type", "core_linux_runtime_smoke_test");
--            out.put("state", ok ? "smoke_gate_ready" : "smoke_gate_blocked");
--            out.put("stage", "core-linux-runtime-smoke-gate-v2");
-+            out.put("state", ok ? "base_tools_smoke_ok" : (prerequisitesOk ? "base_tools_smoke_failed" : "smoke_gate_blocked"));
-+            out.put("stage", "core-linux-base-tools-smoke-v12");
+             out.put("type", "core_linux_rootfs_proot_smoke_test");
+             out.put("state", ok ? "rootfs_proot_smoke_ok" : (prerequisitesOk ? "rootfs_proot_smoke_failed" : "rootfs_proot_smoke_blocked"));
+-            out.put("stage", "core-linux-rootfs-proot-smoke-v13.2");
++            out.put("stage", "core-linux-rootfs-proot-smoke-v13.3");
              out.put("termuxTouched", false);
              out.put("pythonTouched", false);
              out.put("serviceStarted", false);
-             out.put("bedrockStarted", false);
-+            out.put("box64Started", false);
-+            out.put("shellOpened", false);
-+            out.put("remoteCommandAllowed", false);
-             out.put("runnerExecuted", false);
--            out.put("prootExecuted", false);
--            out.put("busyboxExecuted", false);
-+            out.put("runnerExecutionAllowed", false);
-+            out.put("prootExecuted", prerequisitesOk);
-+            out.put("busyboxExecuted", prerequisitesOk);
-+            out.put("commandsAllowlisted", true);
-+            out.put("commands", new JSONArray()
-+                    .put("busybox --help")
-+                    .put("busybox true")
-+                    .put("busybox echo ok")
-+                    .put("proot --help")
-+                    .put("proot --version"));
+@@ -431,9 +453,9 @@
+             out.put("runnerExecutionAllowed", false);
+             out.put("commandsAllowlisted", true);
+             out.put("commands", new JSONArray()
+-                    .put("proot -r <rootfs> -b <apk-busybox>:/bin/busybox /bin/busybox echo ok")
+-                    .put("proot -r <rootfs> -b <apk-busybox>:/bin/busybox /bin/busybox cat /etc/os-release")
+-                    .put("proot -r <rootfs> -b <apk-busybox>:/bin/busybox /bin/busybox true"));
++                    .put("proot -r <rootfs> -b /system:/system -b /apex:/apex -b <apk-busybox>:/bin/busybox /bin/busybox echo ok")
++                    .put("proot -r <rootfs> -b /system:/system -b /apex:/apex -b <apk-busybox>:/bin/busybox /bin/busybox cat /etc/os-release")
++                    .put("proot -r <rootfs> -b /system:/system -b /apex:/apex -b <apk-busybox>:/bin/busybox /bin/busybox true"));
              out.put("checks", checks);
-+            out.put("smokeChecks", smokeChecks);
-             out.put("missing", missing);
-             out.put("nativeExecutor", executor);
-             out.put("rootfs", rootfsState);
-             out.put("runtime", runtime);
-             out.put("runnerPreflight", runner);
-+            out.put("baseToolsSmoke", smoke);
-+            out.put("nextStep", ok ? "rootfs-proot-smoke" : "corrigir erro de linker/permissão antes do rootfs smoke");
+             out.put("smokeChecks", smokeChecks);
+             out.put("rootfsSmoke", rootfsSmoke);
+@@ -446,10 +468,10 @@
+             out.put("nextStep", ok ? "box64-intake" : "corrigir rootfs/PRoot antes de Box64");
              out.put("updatedAt", now());
              out.put("summary", ok
--                    ? "Smoke gate Core Linux ok · base pronta para liberar runner allowlist"
--                    : "Smoke gate Core Linux bloqueado · falta base real para substituir Termux");
-+                    ? "Smoke real Core Linux V12 ok · BusyBox/PRoot executaram allowlist sem Termux"
-+                    : (prerequisitesOk
-+                        ? "Smoke real Core Linux V12 falhou · ver erro de linker/permissão em stdout/stderr"
-+                        : "Smoke real Core Linux V12 bloqueado · falta base real para substituir Termux"));
-             writeJson(new File(layout.runtime, "core-linux-smoke-test.json"), out);
-             appendLog(new File(layout.logs, "core-linux-smoke-test.log"), out.optString("summary"));
+-                    ? "Smoke rootfs V13.2 ok · PRoot entrou no rootfs e executou BusyBox bindado sem Termux"
++                    ? "Smoke rootfs V13.3 ok · PRoot entrou no rootfs e executou BusyBox bindado com runtime Android sem Termux"
+                     : (prerequisitesOk
+-                        ? "Smoke rootfs V13.2 falhou · ver stdout/stderr por etapa"
+-                        : "Smoke rootfs V13.2 bloqueado · falta base/rootfs validado"));
++                        ? "Smoke rootfs V13.3 falhou · ver stdout/stderr por etapa"
++                        : "Smoke rootfs V13.3 bloqueado · falta base/rootfs validado"));
+             writeJson(new File(layout.runtime, "core-linux-rootfs-smoke-test.json"), out);
+             appendLog(new File(layout.logs, "core-linux-rootfs-smoke-test.log"), out.optString("summary"));
              return out;
-@@ -182,6 +250,80 @@
-         }
-     }
+@@ -516,7 +538,17 @@
+             File guestNativeDirMountPoint = new File(rootfsDir, stripLeadingSlash(nativeDirPath));
+             guestNativeDirMountPoint.mkdirs();
  
-+    private static JSONObject runNativeTool(String label, File executable, File nativeDir, File workDir, long timeoutMs, String... args) {
-+        JSONObject out = new JSONObject();
-+        long started = now();
-+        try {
-+            File tmpDir = new File(workDir, "tmp");
-+            File prootTmp = new File(workDir, "proot-tmp");
-+            tmpDir.mkdirs();
-+            prootTmp.mkdirs();
+-            out.put("ok", busyboxHost != null && busyboxHost.exists() && busyboxHost.canExecute());
++            File hostSystem = new File("/system");
++            File hostApex = new File("/apex");
++            File guestSystemMountPoint = new File(rootfsDir, "system");
++            File guestApexMountPoint = new File(rootfsDir, "apex");
++            guestSystemMountPoint.mkdirs();
++            guestApexMountPoint.mkdirs();
 +
-+            ArrayList<String> command = new ArrayList<>();
-+            command.add(path(executable));
-+            if (args != null) command.addAll(Arrays.asList(args));
++            boolean systemReady = hostSystem.exists() && hostSystem.isDirectory() && guestSystemMountPoint.isDirectory();
++            boolean apexReady = hostApex.exists() && hostApex.isDirectory() && guestApexMountPoint.isDirectory();
 +
-+            out.put("label", label);
-+            out.put("attempted", true);
-+            out.put("executablePath", path(executable));
-+            out.put("exists", executable != null && executable.exists());
-+            out.put("size", executable != null && executable.exists() ? executable.length() : 0L);
-+            out.put("canExecute", executable != null && executable.canExecute());
-+            out.put("nativeLibraryDir", path(nativeDir));
-+            out.put("timeoutMs", timeoutMs);
-+            out.put("command", new JSONArray(command));
-+
-+            if (executable == null || !executable.exists()) {
-+                out.put("ok", false);
-+                out.put("exitCode", -1);
-+                out.put("error", "executable missing");
-+                out.put("durationMs", now() - started);
-+                return out;
-+            }
-+
-+            ProcessBuilder pb = new ProcessBuilder(command);
-+            pb.directory(workDir);
-+            String existingLd = pb.environment().get("LD_LIBRARY_PATH");
-+            String ld = path(nativeDir);
-+            if (existingLd != null && !existingLd.trim().isEmpty()) ld = ld + ":" + existingLd.trim();
-+            pb.environment().put("LD_LIBRARY_PATH", ld);
-+            pb.environment().put("TMPDIR", path(tmpDir));
-+            pb.environment().put("PROOT_TMP_DIR", path(prootTmp));
-+            pb.environment().put("PROOT_LOADER", path(new File(nativeDir, "libcoreworker_proot_loader.so")));
-+            pb.environment().put("PROOT_LOADER_32", path(new File(nativeDir, "libcoreworker_proot_loader32.so")));
-+
-+            Process process = pb.start();
-+            StreamCollector stdout = new StreamCollector(process.getInputStream(), TEXT_LIMIT);
-+            StreamCollector stderr = new StreamCollector(process.getErrorStream(), TEXT_LIMIT);
-+            stdout.start();
-+            stderr.start();
-+            boolean finished = process.waitFor(Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
-+            if (!finished) {
-+                process.destroyForcibly();
-+            }
-+            stdout.join(1500L);
-+            stderr.join(1500L);
-+            int exitCode = finished ? process.exitValue() : -1;
-+            out.put("ok", finished && exitCode == 0);
-+            out.put("timedOut", !finished);
-+            out.put("exitCode", exitCode);
-+            out.put("stdout", clean(stdout.text(), TEXT_LIMIT));
-+            out.put("stderr", clean(stderr.text(), TEXT_LIMIT));
-+            if (stdout.error != null) out.put("stdoutReadError", shortThrowable(stdout.error));
-+            if (stderr.error != null) out.put("stderrReadError", shortThrowable(stderr.error));
-+            out.put("durationMs", now() - started);
-+            return out;
-+        } catch (Throwable exc) {
-+            try {
-+                out.put("ok", false);
-+                out.put("exitCode", -1);
-+                out.put("error", shortThrowable(exc));
-+                out.put("durationMs", now() - started);
-+            } catch (Throwable ignored) {}
-+            return out;
-+        }
-+    }
-+
-     private static JSONObject prepare(Layout layout, boolean repair) throws Exception {
-         if (hasRealExistingRootfs(layout.rootfs)) {
-             JSONObject state = status(layout, repair ? "repair_blocked_real_rootfs" : "prepare_blocked_real_rootfs");
-@@ -582,6 +724,38 @@
-         }
-     }
- 
-+    private static final class StreamCollector extends Thread {
-+        private final InputStream in;
-+        private final int limit;
-+        private final ByteArrayOutputStream out = new ByteArrayOutputStream();
-+        volatile Throwable error;
-+
-+        StreamCollector(InputStream in, int limit) {
-+            this.in = in;
-+            this.limit = Math.max(1024, limit);
-+        }
-+
-+        @Override
-+        public void run() {
-+            byte[] buffer = new byte[4096];
-+            try {
-+                int n;
-+                while ((n = in.read(buffer)) >= 0) {
-+                    int remaining = limit - out.size();
-+                    if (remaining > 0) {
-+                        out.write(buffer, 0, Math.min(n, remaining));
-+                    }
-+                }
-+            } catch (Throwable exc) {
-+                error = exc;
-+            }
-+        }
-+
-+        String text() {
-+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
-+        }
-+    }
-+
-     private static final class Layout {
-         final File core;
-         final File rootfs;
-diff -ruN /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java ./android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
---- /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 17:08:10.000000000 +0000
-+++ ./android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-05 20:35:44.956170155 +0000
-@@ -326,6 +326,7 @@
-                 .put("core-linux-runner-preflight-v8")
-                 .put("core-linux-runner-preflight-v10")
-                 .put("core-linux-runner-preflight-v11")
-+                .put("core-linux-base-tools-smoke-v12")
++            out.put("ok", busyboxHost != null && busyboxHost.exists() && busyboxHost.canExecute() && systemReady && apexReady);
+             out.put("mode", "bind-apk-busybox-into-rootfs");
+             out.put("busyboxHostPath", path(busyboxHost));
+             out.put("busyboxGuestPath", "/bin/busybox");
+@@ -526,9 +558,23 @@
+             out.put("nativeDirGuestPath", nativeDirPath);
+             out.put("nativeDirMountPoint", path(guestNativeDirMountPoint));
+             out.put("nativeDirBind", nativeDirPath + ":" + nativeDirPath);
+-            out.put("note", "V13.2 monta BusyBox validado do APK no rootfs mínimo; não exige /bin/sh nem /bin/busybox próprios do rootfs");
++            out.put("systemHostPath", path(hostSystem));
++            out.put("systemGuestPath", "/system");
++            out.put("systemMountPoint", path(guestSystemMountPoint));
++            out.put("systemBind", "/system:/system");
++            out.put("systemReady", systemReady);
++            out.put("apexHostPath", path(hostApex));
++            out.put("apexGuestPath", "/apex");
++            out.put("apexMountPoint", path(guestApexMountPoint));
++            out.put("apexBind", "/apex:/apex");
++            out.put("apexReady", apexReady);
++            out.put("androidRuntimeBinds", new JSONArray()
++                    .put("/system:/system")
++                    .put("/apex:/apex")
++                    .put(nativeDirPath + ":" + nativeDirPath));
++            out.put("note", "V13.3 monta BusyBox validado do APK no rootfs mínimo e expõe /system, /apex e nativeLibraryDir para o linker Bionic; não exige /bin/sh nem /bin/busybox próprios do rootfs");
+             if (!out.optBoolean("ok", false)) {
+-                out.put("error", "BusyBox host ausente ou sem execução");
++                out.put("error", "BusyBox host ausente/sem execução ou runtime Android indisponível para bind");
+             }
+             return out;
+         } catch (Throwable exc) {
+diff -ruN orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
+--- orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-06 08:23:56.000000000 +0000
++++ work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java	2026-06-06 14:47:36.666336166 +0000
+@@ -330,6 +330,7 @@
+                 .put("core-linux-rootfs-proot-smoke-v13")
+                 .put("core-linux-rootfs-proot-smoke-v13.1")
+                 .put("core-linux-rootfs-proot-smoke-v13.2")
++                .put("core-linux-rootfs-proot-smoke-v13.3")
                  .put("core-linux-embedded-binaries-intake-v1")
                  .put("core-linux-embedded-binaries-intake-v2")
                  .put("core-linux-embedded-binaries-intake-v3")
-diff -ruN /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java ./android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
---- /mnt/data/orig_v12/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-05 17:08:10.000000000 +0000
-+++ ./android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-05 20:35:44.958840009 +0000
-@@ -4633,6 +4633,7 @@
-                 .put("core-linux-runner-preflight-v8")
-                 .put("core-linux-runner-preflight-v10")
-                 .put("core-linux-runner-preflight-v11")
-+                .put("core-linux-base-tools-smoke-v12")
+diff -ruN orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java
+--- orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java	2026-06-06 08:23:56.000000000 +0000
++++ work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java	2026-06-06 14:47:36.666962486 +0000
+@@ -171,6 +171,7 @@
+                 .put("core-linux-rootfs-proot-smoke-v13")
+                 .put("core-linux-rootfs-proot-smoke-v13.1")
+                 .put("core-linux-rootfs-proot-smoke-v13.2")
++                .put("core-linux-rootfs-proot-smoke-v13.3")
+                 .put("minecraft-bedrock-manager-safe-plan");
+     }
+ 
+diff -ruN orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
+--- orig_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-06 08:23:56.000000000 +0000
++++ work_v133/tts-bot-main/android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java	2026-06-06 14:47:36.671143771 +0000
+@@ -4643,6 +4643,7 @@
+                 .put("core-linux-rootfs-proot-smoke-v13")
+                 .put("core-linux-rootfs-proot-smoke-v13.1")
+                 .put("core-linux-rootfs-proot-smoke-v13.2")
++                .put("core-linux-rootfs-proot-smoke-v13.3")
                  .put("core-linux-embedded-binaries-intake-v1")
                  .put("core-linux-embedded-binaries-intake-v2")
                  .put("core-linux-embedded-binaries-intake-v3")
-diff -ruN /mnt/data/orig_v12/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v12.json ./scripts/core-linux-embedded-binaries-metadata.v12.json
---- /mnt/data/orig_v12/tts-bot-main/scripts/core-linux-embedded-binaries-metadata.v12.json	1970-01-01 00:00:00.000000000 +0000
-+++ ./scripts/core-linux-embedded-binaries-metadata.v12.json	2026-06-05 20:35:44.959684601 +0000
-@@ -0,0 +1,189 @@
-+{
-+  "schema": "core-worker-embedded-binaries-metadata-v11",
-+  "generatedAt": 1780688415,
-+  "policy": {
-+    "noRuntimeDownload": true,
-+    "noExecutionDuringAudit": true,
-+    "noOnDeviceUnsafeBuild": true,
-+    "gplSourceComplianceRequired": true,
-+    "dynamicDependenciesMustBeBundledOrStatic": true,
-+    "prootLoaderRequired": true,
-+    "busyboxDynamicDependencyChainRequired": true,
-+    "patchedRunpathMustBeOrigin": true,
-+    "busyboxWrapperAllowed": true,
-+    "busyboxPayloadMustBeBundled": true
-+  },
-+  "targets": {
-+    "proot": {
-+      "origin": "termux-package-source-reference",
-+      "sourceKind": "external-source",
-+      "upstream": "https://github.com/termux/proot",
-+      "homepage": "https://proot-me.github.io/",
-+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/proot/build.sh",
-+      "license": "GPL-2.0",
-+      "licenseStatus": "verified-audited",
-+      "packageVersion": "5.1.107.76",
-+      "sourceArchive": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
-+      "sourceSha256": "3807871e8b8473cb254b648de40773515d52ea63ba240afc4596eefc644d9e29",
-+      "binarySha256": "4b5fdefbfc52ea9af38cf6151480b337e3b8a2c0f9a55ad850c0c19e499a1493",
-+      "binarySize": 231808,
-+      "linkMode": "dynamic-with-bundled-dependencies",
-+      "runtimeDependencies": [
-+        "libtalloc"
-+      ],
-+      "dependencyPolicy": "libtalloc.so embutido junto; PRoot ajustado para NEEDED libtalloc.so e RUNPATH $ORIGIN para compatibilidade com jniLibs",
-+      "androidPatchNotes": [
-+        "NEEDED libtalloc.so.2 -> libtalloc.so",
-+        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN",
-+        "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no nativeLibraryDir durante o smoke test allowlist",
-+        "loader32 não bloqueia APK ARM64; suporte 32-bit fica para etapa multiarch futura"
-+      ],
-+      "sourceCompliance": {
-+        "required": true,
-+        "completeCorrespondingSourceReady": true,
-+        "licenseTextIncluded": true,
-+        "sourceUrl": "https://github.com/termux/proot/archive/v5.1.107.76.zip",
-+        "configUrlOrPath": "Termux recipe packages/proot/build.sh",
-+        "modifications": "binary string patch: NEEDED libtalloc.so.2 -> libtalloc.so; RUNPATH Termux -> $ORIGIN; no source-code modification bundled here"
-+      }
-+    },
-+    "libtalloc": {
-+      "origin": "termux-package-source-reference",
-+      "sourceKind": "external-source-dependency",
-+      "upstream": "https://www.samba.org/ftp/talloc/",
-+      "homepage": "https://talloc.samba.org/talloc/doc/html/index.html",
-+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libtalloc/build.sh",
-+      "license": "GPL-3.0",
-+      "licenseStatus": "verified-audited",
-+      "packageVersion": "2.4.3",
-+      "sourceArchive": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
-+      "sourceSha256": "dc46c40b9f46bb34dd97fe41f548b0e8b247b77a918576733c528e83abd854dd",
-+      "binarySha256": "61305220323c6f3f556c7a9df03c002d1b5f714f9b600f58acd0b97dfdbce342",
-+      "binarySize": 31440,
-+      "linkMode": "self-contained",
-+      "runtimeDependencies": [
-+        "libc"
-+      ],
-+      "dependencyPolicy": "depende apenas de libc Android; RUNPATH ajustado para $ORIGIN; empacotado como libtalloc.so porque é o NEEDED do proot patchado",
-+      "sourceCompliance": {
-+        "required": true,
-+        "completeCorrespondingSourceReady": true,
-+        "licenseTextIncluded": true,
-+        "sourceUrl": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
-+        "configUrlOrPath": "Termux recipe packages/libtalloc/build.sh",
-+        "modifications": "binary string patch: RUNPATH Termux -> $ORIGIN"
-+      },
-+      "androidPatchNotes": [
-+        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
-+      ]
-+    },
-+    "busybox": {
-+      "origin": "termux-package-source-reference",
-+      "sourceKind": "external-source",
-+      "upstream": "https://busybox.net/downloads/",
-+      "homepage": "https://busybox.net/",
-+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
-+      "license": "GPL-2.0",
-+      "licenseStatus": "verified-audited",
-+      "packageVersion": "1.37.0-r3",
-+      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
-+      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
-+      "binarySha256": "58e3718246338da1a3edefcba09b789a6e487aa0306956203eb08220daa69f5f",
-+      "binarySize": 4320,
-+      "linkMode": "dynamic-with-bundled-dependencies",
-+      "runtimeDependencies": [
-+        "libbusybox",
-+        "libandroid_selinux",
-+        "libpcre2_8"
-+      ],
-+      "dependencyPolicy": "libcoreworker_busybox.so é wrapper ELF pequeno; payload real obrigatório em libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
-+      "androidPatchNotes": [
-+        "NEEDED libbusybox.so.1.37.0 -> libbusybox.so",
-+        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN",
-+        "wrapper pequeno aceito no gate v10",
-+        "tamanho forte validado em libbusybox.so"
-+      ],
-+      "sourceCompliance": {
-+        "required": true,
-+        "completeCorrespondingSourceReady": true,
-+        "licenseTextIncluded": true,
-+        "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
-+        "configUrlOrPath": "Termux recipe packages/busybox/build.sh plus binary-string patch notes in this metadata",
-+        "modifications": "binary string patch: NEEDED libbusybox.so.1.37.0 -> libbusybox.so; RUNPATH Termux -> $ORIGIN; gate v10 aceita wrapper pequeno e valida payload em libbusybox.so"
-+      },
-+      "minBytes": 4096
-+    },
-+    "libbusybox": {
-+      "origin": "termux-package-source-reference",
-+      "sourceKind": "external-source-dependency",
-+      "upstream": "https://busybox.net/downloads/",
-+      "homepage": "https://busybox.net/",
-+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
-+      "license": "GPL-2.0",
-+      "licenseStatus": "verified-audited",
-+      "packageVersion": "1.37.0-r3",
-+      "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
-+      "sourceSha256": "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
-+      "binarySha256": "a2d1a3c55b95da56af0758883ba46b2903f5b39907205a489936cca8a7c45c7a",
-+      "binarySize": 864096,
-+      "linkMode": "dynamic-with-bundled-dependencies",
-+      "runtimeDependencies": [
-+        "libandroid_selinux",
-+        "libpcre2_8"
-+      ],
-+      "dependencyPolicy": "lib interna do BusyBox; RUNPATH ajustado para $ORIGIN",
-+      "androidPatchNotes": [
-+        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
-+      ],
-+      "sourceCompliance": {
-+        "required": true,
-+        "completeCorrespondingSourceReady": true,
-+        "licenseTextIncluded": true,
-+        "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
-+        "configUrlOrPath": "Termux recipe packages/busybox/build.sh",
-+        "modifications": "binary string patch: RUNPATH Termux -> $ORIGIN"
-+      }
-+    },
-+    "libandroid_selinux": {
-+      "origin": "termux-package-source-reference",
-+      "sourceKind": "external-source-dependency",
-+      "upstream": "https://android.googlesource.com/platform/external/selinux/",
-+      "homepage": "https://selinuxproject.org/",
-+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/libandroid-selinux/build.sh",
-+      "license": "public-domain|BSD-style-android-platform",
-+      "licenseStatus": "verified-audited",
-+      "packageVersion": "14.0.0.11-1",
-+      "binarySha256": "372dfaa1a6712c013e734d99f04ff51a0b501744bd81e21b84d02d40f3f0aa60",
-+      "binarySize": 179056,
-+      "linkMode": "dynamic-with-bundled-dependencies",
-+      "runtimeDependencies": [
-+        "libpcre2_8"
-+      ],
-+      "dependencyPolicy": "dependência de libbusybox.so; RUNPATH ajustado para $ORIGIN",
-+      "androidPatchNotes": [
-+        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
-+      ]
-+    },
-+    "libpcre2_8": {
-+      "origin": "termux-package-source-reference",
-+      "sourceKind": "external-source-dependency",
-+      "upstream": "https://github.com/PCRE2Project/pcre2",
-+      "homepage": "https://pcre2project.github.io/pcre2/",
-+      "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/pcre2/build.sh",
-+      "license": "BSD-3-Clause",
-+      "licenseStatus": "verified-audited",
-+      "packageVersion": "10.47",
-+      "binarySha256": "db37a14ca7365815d0b0323f419cc457c2c20c209876ea64fbdb9d0676e64263",
-+      "binarySize": 489384,
-+      "linkMode": "self-contained",
-+      "runtimeDependencies": [
-+        "libc"
-+      ],
-+      "dependencyPolicy": "dependência de libandroid-selinux.so; RUNPATH ajustado para $ORIGIN",
-+      "androidPatchNotes": [
-+        "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
-+      ]
-+    }
-+  },
-+  "notes": "V11: proot_loader32 é opcional/multiarch futuro; o caminho atual ARM64 valida apenas proot_loader ARM64."
-+}
-diff -ruN /mnt/data/orig_v12/tts-bot-main/webserver.py ./webserver.py
---- /mnt/data/orig_v12/tts-bot-main/webserver.py	2026-06-05 17:08:10.000000000 +0000
-+++ ./webserver.py	2026-06-05 20:35:44.959424853 +0000
-@@ -303,6 +303,7 @@
-     "core-linux-runner-preflight-v8",
-     "core-linux-runner-preflight-v10",
-     "core-linux-runner-preflight-v11",
-+    "core-linux-base-tools-smoke-v12",
+diff -ruN orig_v133/tts-bot-main/webserver.py work_v133/tts-bot-main/webserver.py
+--- orig_v133/tts-bot-main/webserver.py	2026-06-06 08:23:56.000000000 +0000
++++ work_v133/tts-bot-main/webserver.py	2026-06-06 14:49:08.066035765 +0000
+@@ -307,6 +307,7 @@
+     "core-linux-rootfs-proot-smoke-v13",
+     "core-linux-rootfs-proot-smoke-v13.1",
+     "core-linux-rootfs-proot-smoke-v13.2",
++    "core-linux-rootfs-proot-smoke-v13.3",
      "core-linux-embedded-binaries-intake-v1",
      "core-linux-embedded-binaries-intake-v2",
      "core-linux-embedded-binaries-intake-v3",
+@@ -1792,7 +1793,7 @@
+         # V13: smoke rootfs via PRoot com comandos fixos no APK. Não aceita
+         # comando vindo da VPS; o payload só transporta o estágio esperado.
+         stage = _safe_short_text(payload.get("stage") or payload.get("smokeStage"), 80)
+-        if stage in {"core-linux-rootfs-proot-smoke-v13", "core-linux-rootfs-proot-smoke-v13.1", "core-linux-rootfs-proot-smoke-v13.2"}:
++        if stage in {"core-linux-rootfs-proot-smoke-v13", "core-linux-rootfs-proot-smoke-v13.1", "core-linux-rootfs-proot-smoke-v13.2", "core-linux-rootfs-proot-smoke-v13.3"}:
+             clean["stage"] = stage
+             clean["smokeStage"] = stage
+             clean["allowlistOnly"] = True
+@@ -1819,8 +1820,9 @@
+ CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB = "apk_core_linux_runtime_smoke_test"
+ CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_STAGE = "core-linux-base-tools-smoke-v12"
+ CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB = "apk_core_linux_rootfs_smoke_test"
+-CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE = "core-linux-rootfs-proot-smoke-v13.2"
+-CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE = "core-linux-rootfs-proot-smoke-v13.1"
++CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE = "core-linux-rootfs-proot-smoke-v13.3"
++CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE = "core-linux-rootfs-proot-smoke-v13.2"
++CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS2_STAGE = "core-linux-rootfs-proot-smoke-v13.1"
+ CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_LEGACY_STAGE = "core-linux-rootfs-proot-smoke-v13"
+ CORE_WORKER_APP_LOCAL_MANUAL_QUEUE_TYPES = {
+     CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB,
+@@ -1846,10 +1848,10 @@
+         if stage != CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_STAGE:
+             return "smoke V12 exige payload.stage core-linux-base-tools-smoke-v12"
+     elif job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB:
+-        if version_code < 102:
+-            return "smoke V13.2 exige APK appVersionCode >= 102"
+-        if stage not in {CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_LEGACY_STAGE}:
+-            return "smoke V13.2 exige payload.stage core-linux-rootfs-proot-smoke-v13.2"
++        if version_code < 103:
++            return "smoke V13.3 exige APK appVersionCode >= 103"
++        if stage not in {CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS2_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_LEGACY_STAGE}:
++            return "smoke V13.3 exige payload.stage core-linux-rootfs-proot-smoke-v13.3"
+     return ""
+ 
+ 
+@@ -2101,7 +2103,7 @@
+ 
+ 
+ 
+-def _core_worker_app_queue_core_linux_rootfs_smoke_v13(worker_id: str = "", install_id: str = "", *, reason: str = "manual-v13-2-rootfs-proot-smoke") -> dict:
++def _core_worker_app_queue_core_linux_rootfs_smoke_v13(worker_id: str = "", install_id: str = "", *, reason: str = "manual-v13-3-rootfs-android-runtime-bind-smoke") -> dict:
+     path = _core_worker_app_jobs_path()
+     worker_id = _safe_short_text(worker_id, 80)
+     install_id = _safe_short_text(install_id, 80)
+@@ -3115,7 +3117,7 @@
+     install_id = _safe_short_text(payload.get("installId") or payload.get("install_id"), 80)
+     if not worker_id and not install_id:
+         return jsonify({"ok": False, "error": "workerId ou installId obrigatório"}), 400
+-    reason = _safe_short_text(payload.get("reason") or ("manual-v13-2-rootfs-proot-smoke" if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB else "manual-v12-base-tools-smoke"), 80)
++    reason = _safe_short_text(payload.get("reason") or ("manual-v13-3-rootfs-android-runtime-bind-smoke" if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB else "manual-v12-base-tools-smoke"), 80)
+     if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB:
+         result = _core_worker_app_queue_core_linux_rootfs_smoke_v13(
+             worker_id=worker_id,

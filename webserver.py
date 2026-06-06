@@ -307,6 +307,7 @@ CORE_WORKER_APK_V1_CAPABILITIES = [
     "core-linux-rootfs-proot-smoke-v13",
     "core-linux-rootfs-proot-smoke-v13.1",
     "core-linux-rootfs-proot-smoke-v13.2",
+    "core-linux-rootfs-proot-smoke-v13.3",
     "core-linux-embedded-binaries-intake-v1",
     "core-linux-embedded-binaries-intake-v2",
     "core-linux-embedded-binaries-intake-v3",
@@ -1792,7 +1793,7 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
         # V13: smoke rootfs via PRoot com comandos fixos no APK. Não aceita
         # comando vindo da VPS; o payload só transporta o estágio esperado.
         stage = _safe_short_text(payload.get("stage") or payload.get("smokeStage"), 80)
-        if stage in {"core-linux-rootfs-proot-smoke-v13", "core-linux-rootfs-proot-smoke-v13.1", "core-linux-rootfs-proot-smoke-v13.2"}:
+        if stage in {"core-linux-rootfs-proot-smoke-v13", "core-linux-rootfs-proot-smoke-v13.1", "core-linux-rootfs-proot-smoke-v13.2", "core-linux-rootfs-proot-smoke-v13.3"}:
             clean["stage"] = stage
             clean["smokeStage"] = stage
             clean["allowlistOnly"] = True
@@ -1819,8 +1820,9 @@ def _core_worker_app_job_max_retries(job: dict) -> int:
 CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB = "apk_core_linux_runtime_smoke_test"
 CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_STAGE = "core-linux-base-tools-smoke-v12"
 CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB = "apk_core_linux_rootfs_smoke_test"
-CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE = "core-linux-rootfs-proot-smoke-v13.2"
-CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE = "core-linux-rootfs-proot-smoke-v13.1"
+CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE = "core-linux-rootfs-proot-smoke-v13.3"
+CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE = "core-linux-rootfs-proot-smoke-v13.2"
+CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS2_STAGE = "core-linux-rootfs-proot-smoke-v13.1"
 CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_LEGACY_STAGE = "core-linux-rootfs-proot-smoke-v13"
 CORE_WORKER_APP_LOCAL_MANUAL_QUEUE_TYPES = {
     CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB,
@@ -1846,10 +1848,10 @@ def _core_worker_app_job_fetch_blocker(job: dict, fetch_payload: dict) -> str:
         if stage != CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_STAGE:
             return "smoke V12 exige payload.stage core-linux-base-tools-smoke-v12"
     elif job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB:
-        if version_code < 102:
-            return "smoke V13.2 exige APK appVersionCode >= 102"
-        if stage not in {CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_LEGACY_STAGE}:
-            return "smoke V13.2 exige payload.stage core-linux-rootfs-proot-smoke-v13.2"
+        if version_code < 103:
+            return "smoke V13.3 exige APK appVersionCode >= 103"
+        if stage not in {CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS2_STAGE, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_LEGACY_STAGE}:
+            return "smoke V13.3 exige payload.stage core-linux-rootfs-proot-smoke-v13.3"
     return ""
 
 
@@ -2101,7 +2103,7 @@ def _core_worker_app_queue_core_linux_smoke_v12(worker_id: str = "", install_id:
 
 
 
-def _core_worker_app_queue_core_linux_rootfs_smoke_v13(worker_id: str = "", install_id: str = "", *, reason: str = "manual-v13-2-rootfs-proot-smoke") -> dict:
+def _core_worker_app_queue_core_linux_rootfs_smoke_v13(worker_id: str = "", install_id: str = "", *, reason: str = "manual-v13-3-rootfs-android-runtime-bind-smoke") -> dict:
     path = _core_worker_app_jobs_path()
     worker_id = _safe_short_text(worker_id, 80)
     install_id = _safe_short_text(install_id, 80)
@@ -3115,7 +3117,7 @@ def core_worker_app_jobs_enqueue():
     install_id = _safe_short_text(payload.get("installId") or payload.get("install_id"), 80)
     if not worker_id and not install_id:
         return jsonify({"ok": False, "error": "workerId ou installId obrigatório"}), 400
-    reason = _safe_short_text(payload.get("reason") or ("manual-v13-2-rootfs-proot-smoke" if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB else "manual-v12-base-tools-smoke"), 80)
+    reason = _safe_short_text(payload.get("reason") or ("manual-v13-3-rootfs-android-runtime-bind-smoke" if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB else "manual-v12-base-tools-smoke"), 80)
     if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB:
         result = _core_worker_app_queue_core_linux_rootfs_smoke_v13(
             worker_id=worker_id,

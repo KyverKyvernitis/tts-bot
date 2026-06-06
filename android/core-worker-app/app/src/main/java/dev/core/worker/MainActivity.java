@@ -4643,6 +4643,7 @@ public class MainActivity extends Activity {
                 .put("core-linux-rootfs-proot-smoke-v13")
                 .put("core-linux-rootfs-proot-smoke-v13.1")
                 .put("core-linux-rootfs-proot-smoke-v13.2")
+                .put("core-linux-rootfs-proot-smoke-v13.3")
                 .put("core-linux-embedded-binaries-intake-v1")
                 .put("core-linux-embedded-binaries-intake-v2")
                 .put("core-linux-embedded-binaries-intake-v3")
