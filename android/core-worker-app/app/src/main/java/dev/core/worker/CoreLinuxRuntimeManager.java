@@ -631,6 +631,174 @@ public final class CoreLinuxRuntimeManager {
         }
     }
 
+
+    public static JSONObject box64VersionSmokeTest(Context context, File coreLinuxDir, JSONObject nativeExecutor) {
+        try {
+            Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
+            ensureBase(layout);
+
+            // V15: primeiro smoke controlado do Box64. Ainda não inicia Bedrock,
+            // não executa binário x86_64 arbitrário, não abre shell livre e não
+            // aceita comando remoto. O único executável testado é o asset auditado
+            // core-linux/bin/box64, extraído para diretório privado e validado por
+            // sha256/ELF/AArch64 antes de qualquer tentativa de execução.
+            JSONObject executor = nativeExecutor;
+            if (executor == null || !executor.optBoolean("readyForRootfs", false)) {
+                executor = CoreWorkerNativeExecutor.snapshot(context, layout.core, "test");
+            }
+            JSONObject intake = box64IntakePreflight(context, layout.core, executor);
+            JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
+            JSONObject rootfsState = rootfs.optJSONObject("rootfs");
+            if (rootfsState == null) rootfsState = rootfs;
+            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "box64_smoke_v15");
+            JSONObject runtime = runtimeSnapshot(context, layout.core, "box64_smoke_v15", executor);
+
+            File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir == null ? "" : context.getApplicationInfo().nativeLibraryDir);
+            File proot = new File(nativeDir, "libcoreworker_proot.so");
+            String assetPath = "core-linux/bin/box64";
+            String expectedSha = "bae41f0619e51307f6e75e1d83b54137c5ba395ba46ba4394de264613bcd73ca";
+            JSONObject extract = prepareBox64AssetExecutable(context, layout, assetPath, expectedSha, 131072L);
+            File box64Host = new File(extract.optString("path", path(new File(layout.bin, "box64"))));
+            JSONObject glibc = glibcRuntimeSnapshot(layout.rootfs);
+            JSONObject mount = prepareBox64GuestMountPoint(layout.rootfs, box64Host);
+
+            boolean rootfsReady = rootfsState.optBoolean("rootfsReady", false);
+            String validationLevel = rootfsState.optString("validationLevel", "");
+            boolean rootfsReal = runner.optBoolean("rootfsRealValidated", false)
+                    || (rootfsReady && "real".equals(validationLevel))
+                    || "rootfs_real_validated".equals(rootfsState.optString("state", ""))
+                    || "rootfs_validated".equals(rootfsState.optString("state", ""));
+            boolean baseReady = runner.optBoolean("baseToolsReady", false)
+                    && (runner.optBoolean("runnerBaseRequirementsReady", false) || runner.optBoolean("runnerRequirementsReady", false));
+            boolean intakeReady = intake.optBoolean("ok", false)
+                    && "box64_intake_ready".equals(intake.optString("state", ""));
+            boolean extractionReady = extract.optBoolean("ok", false)
+                    && extract.optBoolean("sha256Ok", false)
+                    && extract.optBoolean("elf64", false)
+                    && extract.optBoolean("aarch64", false)
+                    && extract.optBoolean("canExecute", false);
+            boolean glibcReady = glibc.optBoolean("ok", false);
+            boolean prerequisitesOk = rootfsReal && baseReady && executor.optBoolean("readyForRootfs", false) && intakeReady && extractionReady;
+            boolean canRun = prerequisitesOk && glibcReady && mount.optBoolean("ok", false) && proot.exists() && proot.canExecute();
+
+            JSONArray checks = new JSONArray()
+                    .put(check("Box64 intake V14.2.1", intakeReady, intake.optString("summary", "execute o preflight Box64 antes do smoke")))
+                    .put(check("rootfs real", rootfsReal, rootfsState.optString("summary", "rootfs precisa estar validado")))
+                    .put(check("base PRoot/BusyBox", baseReady, runner.optString("summary", "base Core Linux pendente")))
+                    .put(check("executor JNI", executor.optBoolean("readyForRootfs", false), executor.optString("summary", "executor pendente")))
+                    .put(check("Box64 asset extraído", extractionReady, extract.optBoolean("ok", false) ? "asset extraído e auditado" : extract.optString("error", "asset ausente ou inválido")))
+                    .put(check("runtime glibc do rootfs", glibcReady, glibcReady ? "loader/libs glibc encontrados no rootfs" : "faltam loader/libs glibc no rootfs"))
+                    .put(check("PRoot disponível", proot.exists() && proot.canExecute(), path(proot)))
+                    .put(check("mountpoint Box64", mount.optBoolean("ok", false), mount.optString("summary", "mountpoint pendente")))
+                    .put(check("Bedrock bloqueado", true, "nenhum servidor é iniciado no V15"))
+                    .put(check("shell livre bloqueado", true, "somente box64 --version/--help via allowlist fixa"))
+                    .put(check("x86_64 arbitrário bloqueado", true, "nenhum binário x86_64 do usuário é executado"));
+
+            JSONObject smoke = new JSONObject();
+            JSONArray smokeChecks = new JSONArray();
+            boolean versionOk = false;
+            boolean helpOk = false;
+            if (canRun) {
+                JSONObject version = runNativeTool("proot rootfs box64 --version", proot, nativeDir, layout.runtime, 12000L,
+                        "-r", path(layout.rootfs),
+                        "-b", path(box64Host) + ":/usr/local/bin/box64",
+                        "-w", "/",
+                        "/usr/local/bin/box64", "--version");
+                JSONObject help = runNativeTool("proot rootfs box64 --help", proot, nativeDir, layout.runtime, 12000L,
+                        "-r", path(layout.rootfs),
+                        "-b", path(box64Host) + ":/usr/local/bin/box64",
+                        "-w", "/",
+                        "/usr/local/bin/box64", "--help");
+                smoke.put("version", version);
+                smoke.put("help", help);
+                versionOk = version.optBoolean("ok", false);
+                helpOk = help.optBoolean("ok", false);
+                smokeChecks.put(check("box64 --version", versionOk, versionOk ? "Box64 respondeu versão" : "falha no --version; ver stdout/stderr"));
+                smokeChecks.put(check("box64 --help", helpOk, helpOk ? "Box64 respondeu help" : "falha no --help; ver stdout/stderr"));
+            } else {
+                smoke.put("skipped", true);
+                smoke.put("reason", !prerequisitesOk
+                        ? "preflight/extração/base ainda pendente"
+                        : (!glibcReady ? "rootfs sem runtime glibc necessário ao Box64" : "mountpoint/PRoot pendente"));
+                smokeChecks.put(check("box64 --version", false, "não executado: " + smoke.optString("reason")));
+                smokeChecks.put(check("box64 --help", false, "não executado: " + smoke.optString("reason")));
+            }
+
+            String state;
+            boolean ok = canRun && versionOk && helpOk;
+            if (ok) {
+                state = "box64_smoke_ok";
+            } else if (!prerequisitesOk) {
+                state = "box64_smoke_blocked_preflight";
+            } else if (!glibcReady) {
+                state = "box64_smoke_blocked_missing_glibc_runtime";
+            } else {
+                state = "box64_smoke_failed";
+            }
+
+            JSONObject readiness = new JSONObject()
+                    .put("stage", "core-linux-box64-version-smoke-v15")
+                    .put("rootfsRealValidated", rootfsReal)
+                    .put("baseReadyFromPreflight", baseReady)
+                    .put("executorReady", executor.optBoolean("readyForRootfs", false))
+                    .put("box64IntakeReady", intakeReady)
+                    .put("box64Extracted", extract.optBoolean("exists", false))
+                    .put("box64Sha256Ok", extract.optBoolean("sha256Ok", false))
+                    .put("box64Elf64", extract.optBoolean("elf64", false))
+                    .put("box64Aarch64", extract.optBoolean("aarch64", false))
+                    .put("box64CanExecute", extract.optBoolean("canExecute", false))
+                    .put("glibcRuntimeReady", glibcReady)
+                    .put("prootReady", proot.exists() && proot.canExecute())
+                    .put("mountReady", mount.optBoolean("ok", false))
+                    .put("readyForSmoke", canRun);
+
+            JSONObject out = new JSONObject();
+            out.put("ok", ok);
+            out.put("type", "core_linux_box64_version_smoke");
+            out.put("stage", "core-linux-box64-version-smoke-v15");
+            out.put("state", state);
+            out.put("termuxTouched", false);
+            out.put("pythonTouched", false);
+            out.put("serviceStarted", false);
+            out.put("bedrockStarted", false);
+            out.put("box64Started", canRun);
+            out.put("shellOpened", false);
+            out.put("remoteCommandAllowed", false);
+            out.put("runnerExecutionAllowed", false);
+            out.put("x86_64UserBinaryAllowed", false);
+            out.put("commandsAllowlisted", true);
+            out.put("commands", new JSONArray()
+                    .put("proot -r <rootfs> -b <box64>:/usr/local/bin/box64 /usr/local/bin/box64 --version")
+                    .put("proot -r <rootfs> -b <box64>:/usr/local/bin/box64 /usr/local/bin/box64 --help"));
+            out.put("checks", checks);
+            out.put("smokeChecks", smokeChecks);
+            out.put("readiness", readiness);
+            out.put("box64Extraction", extract);
+            out.put("glibcRuntime", glibc);
+            out.put("box64Mount", mount);
+            out.put("box64Smoke", smoke);
+            out.put("box64Intake", intake);
+            out.put("rootfs", rootfsState);
+            out.put("runnerPreflight", runner);
+            out.put("runtime", runtime);
+            out.put("nativeExecutor", executor);
+            out.put("nextStep", ok ? "bedrock-preflight-sem-start" : (!glibcReady ? "importar rootfs Linux com glibc arm64" : "corrigir extração/runtime Box64 antes do Bedrock"));
+            out.put("updatedAt", now());
+            out.put("summary", ok
+                    ? "Box64 V15 ok · --version/--help executaram dentro do rootfs via PRoot sem Termux"
+                    : (!prerequisitesOk
+                        ? "Box64 V15 bloqueado · preflight/extração/base pendente"
+                        : (!glibcReady
+                            ? "Box64 V15 bloqueado · rootfs sem runtime glibc arm64 necessário"
+                            : "Box64 V15 falhou · ver stdout/stderr do --version/--help")));
+            writeJson(new File(layout.runtime, "core-linux-box64-smoke-test.json"), out);
+            appendLog(new File(layout.logs, "core-linux-box64-smoke-test.log"), out.optString("summary"));
+            return out;
+        } catch (Throwable exc) {
+            return error("core_linux_box64_version_smoke", exc);
+        }
+    }
+
     private static JSONObject assetBinarySnapshot(Context context, String assetPath, String label, long minBytes) {
         JSONObject out = new JSONObject();
         try {
@@ -743,6 +911,203 @@ public final class CoreLinuxRuntimeManager {
         }
     }
 
+
+
+    private static JSONObject prepareBox64AssetExecutable(Context context, Layout layout, String assetPath, String expectedSha256, long minBytes) {
+        JSONObject out = new JSONObject();
+        File dest = new File(layout.bin, "box64");
+        try {
+            layout.bin.mkdirs();
+            JSONObject asset = assetBinarySnapshot(context, assetPath, "box64", minBytes);
+            out.put("asset", asset);
+            out.put("assetPath", assetPath);
+            out.put("path", path(dest));
+            if (!asset.optBoolean("exists", false)) {
+                out.put("ok", false);
+                out.put("exists", false);
+                out.put("error", "asset core-linux/bin/box64 ausente no APK");
+                return out;
+            }
+            boolean shouldCopy = !dest.exists() || dest.length() != asset.optLong("size", -1L);
+            if (!shouldCopy && expectedSha256 != null && expectedSha256.length() == 64) {
+                shouldCopy = !expectedSha256.equalsIgnoreCase(sha256(dest));
+            }
+            if (shouldCopy) {
+                File parent = dest.getParentFile();
+                if (parent != null) parent.mkdirs();
+                File tmp = new File(parent == null ? layout.bin : parent, "box64.tmp");
+                try (InputStream in = context.getAssets().open(assetPath); FileOutputStream fos = new FileOutputStream(tmp)) {
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = in.read(buf)) > 0) fos.write(buf, 0, n);
+                }
+                if (dest.exists()) Files.deleteIfExists(dest.toPath());
+                if (!tmp.renameTo(dest)) {
+                    copyFile(tmp, dest);
+                    Files.deleteIfExists(tmp.toPath());
+                }
+            }
+            //noinspection ResultOfMethodCallIgnored
+            dest.setReadable(true, true);
+            //noinspection ResultOfMethodCallIgnored
+            dest.setWritable(true, true);
+            //noinspection ResultOfMethodCallIgnored
+            dest.setExecutable(true, true);
+            JSONObject file = binarySnapshot("box64", dest, minBytes);
+            boolean shaOk = expectedSha256 == null || expectedSha256.isEmpty() || expectedSha256.equalsIgnoreCase(file.optString("sha256", ""));
+            boolean ok = file.optBoolean("exists", false)
+                    && file.optBoolean("sizeOk", false)
+                    && file.optBoolean("elf64", false)
+                    && file.optBoolean("aarch64", false)
+                    && file.optBoolean("canExecute", false)
+                    && shaOk;
+            out.put("ok", ok);
+            out.put("exists", file.optBoolean("exists", false));
+            out.put("copied", shouldCopy);
+            out.put("size", file.optLong("size", 0L));
+            out.put("sizeOk", file.optBoolean("sizeOk", false));
+            out.put("canExecute", file.optBoolean("canExecute", false));
+            out.put("elf64", file.optBoolean("elf64", false));
+            out.put("aarch64", file.optBoolean("aarch64", false));
+            out.put("sha256", file.optString("sha256", ""));
+            out.put("expectedSha256", expectedSha256 == null ? "" : expectedSha256);
+            out.put("sha256Ok", shaOk);
+            out.put("file", file);
+            out.put("note", "Box64 é asset Linux/glibc extraído para diretório privado antes do smoke; execução só via allowlist V15");
+            if (!ok) out.put("error", "Box64 extraído não passou em sha256/ELF/AArch64/permissão");
+            return out;
+        } catch (Throwable exc) {
+            try {
+                out.put("ok", false);
+                out.put("exists", dest.exists());
+                out.put("path", path(dest));
+                out.put("error", shortThrowable(exc));
+            } catch (Throwable ignored) {}
+            return out;
+        }
+    }
+
+    private static void copyFile(File src, File dst) throws Exception {
+        File parent = dst.getParentFile();
+        if (parent != null) parent.mkdirs();
+        try (FileInputStream in = new FileInputStream(src); FileOutputStream out = new FileOutputStream(dst)) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        }
+    }
+
+    private static JSONObject prepareBox64GuestMountPoint(File rootfsDir, File box64Host) {
+        JSONObject out = new JSONObject();
+        try {
+            File usrLocalBin = new File(rootfsDir, "usr/local/bin");
+            usrLocalBin.mkdirs();
+            File guest = new File(usrLocalBin, "box64");
+            if (!guest.exists()) {
+                try (FileOutputStream fos = new FileOutputStream(guest)) {
+                    fos.write(new byte[0]);
+                }
+            }
+            //noinspection ResultOfMethodCallIgnored
+            guest.setReadable(true, true);
+            //noinspection ResultOfMethodCallIgnored
+            guest.setExecutable(true, true);
+            boolean ok = box64Host != null && box64Host.exists() && box64Host.canExecute() && guest.exists();
+            out.put("ok", ok);
+            out.put("mode", "bind-extracted-box64-into-rootfs");
+            out.put("box64HostPath", path(box64Host));
+            out.put("box64GuestPath", "/usr/local/bin/box64");
+            out.put("box64MountPoint", path(guest));
+            out.put("box64Bind", path(box64Host) + ":/usr/local/bin/box64");
+            out.put("summary", ok ? "mountpoint Box64 pronto" : "Box64 host/mountpoint pendente");
+            return out;
+        } catch (Throwable exc) {
+            try {
+                out.put("ok", false);
+                out.put("mode", "bind-extracted-box64-into-rootfs");
+                out.put("box64HostPath", path(box64Host));
+                out.put("error", shortThrowable(exc));
+            } catch (Throwable ignored) {}
+            return out;
+        }
+    }
+
+    private static JSONObject glibcRuntimeSnapshot(File rootfsDir) {
+        JSONObject out = new JSONObject();
+        try {
+            JSONObject loader = fileStatusRelative(rootfsDir, "lib/ld-linux-aarch64.so.1");
+            JSONObject libc = firstExistingRelative(rootfsDir, "lib/aarch64-linux-gnu/libc.so.6", "usr/lib/aarch64-linux-gnu/libc.so.6", "lib/libc.so.6");
+            JSONObject libm = firstExistingRelative(rootfsDir, "lib/aarch64-linux-gnu/libm.so.6", "usr/lib/aarch64-linux-gnu/libm.so.6", "lib/libm.so.6");
+            JSONObject libresolv = firstExistingRelative(rootfsDir, "lib/aarch64-linux-gnu/libresolv.so.2", "usr/lib/aarch64-linux-gnu/libresolv.so.2", "lib/libresolv.so.2");
+            boolean ok = loader.optBoolean("exists", false)
+                    && libc.optBoolean("exists", false)
+                    && libm.optBoolean("exists", false)
+                    && libresolv.optBoolean("exists", false);
+            out.put("ok", ok);
+            out.put("rootfsDir", path(rootfsDir));
+            out.put("loader", loader);
+            out.put("libc", libc);
+            out.put("libm", libm);
+            out.put("libresolv", libresolv);
+            out.put("required", new JSONArray()
+                    .put("/lib/ld-linux-aarch64.so.1")
+                    .put("libc.so.6")
+                    .put("libm.so.6")
+                    .put("libresolv.so.2"));
+            out.put("summary", ok ? "runtime glibc arm64 presente no rootfs" : "runtime glibc arm64 ausente/incompleto no rootfs");
+            return out;
+        } catch (Throwable exc) {
+            try {
+                out.put("ok", false);
+                out.put("error", shortThrowable(exc));
+            } catch (Throwable ignored) {}
+            return out;
+        }
+    }
+
+    private static JSONObject firstExistingRelative(File rootfsDir, String... rels) {
+        JSONArray checked = new JSONArray();
+        JSONObject first = new JSONObject();
+        try {
+            for (String rel : rels) {
+                JSONObject item = fileStatusRelative(rootfsDir, rel);
+                checked.put(item);
+                if (item.optBoolean("exists", false)) {
+                    item.put("checked", checked);
+                    return item;
+                }
+                if (first.length() == 0) first = item;
+            }
+            first.put("checked", checked);
+        } catch (Throwable exc) {
+            try { first.put("error", shortThrowable(exc)); } catch (Throwable ignored) {}
+        }
+        return first;
+    }
+
+    private static JSONObject fileStatusRelative(File rootfsDir, String rel) {
+        JSONObject out = new JSONObject();
+        try {
+            String cleanRel = stripLeadingSlash(rel == null ? "" : rel);
+            File f = new File(rootfsDir, cleanRel);
+            out.put("relativePath", cleanRel);
+            out.put("guestPath", "/" + cleanRel);
+            out.put("path", path(f));
+            out.put("exists", f.exists());
+            out.put("isFile", f.isFile());
+            out.put("isDirectory", f.isDirectory());
+            out.put("canRead", f.canRead());
+            out.put("canExecute", f.canExecute());
+            out.put("size", f.exists() && f.isFile() ? f.length() : 0L);
+        } catch (Throwable exc) {
+            try {
+                out.put("relativePath", rel == null ? "" : rel);
+                out.put("exists", false);
+                out.put("error", shortThrowable(exc));
+            } catch (Throwable ignored) {}
+        }
+        return out;
+    }
 
     private static JSONObject prepareBusyboxArgv0Launcher(File runtimeDir, File busyboxReal) {
         JSONObject out = new JSONObject();

@@ -58,8 +58,8 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 107
-        versionName "0.5.92"
+        versionCode 108
+        versionName "0.5.93"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -264,7 +264,7 @@ tasks.register("verifyCoreLinuxBox64Asset") {
     doLast {
         def f = file("${projectDir}/src/main/assets/${coreLinuxBox64Asset.file}")
         if (!f.exists()) {
-            println("Core Linux Box64 asset v14.2.1: ausente; preflight deve reportar missing_binary")
+            println("Core Linux Box64 asset v15: ausente; preflight/smoke deve reportar missing_binary")
             return
         }
         byte[] head = new byte[Math.min(64, Math.max(0, f.length() as int))]
@@ -283,7 +283,7 @@ tasks.register("verifyCoreLinuxBox64Asset") {
         if (!reasons.isEmpty()) {
             throw new GradleException("Core Linux Box64 asset inválido: ${reasons.join('; ')}")
         }
-        println("Core Linux Box64 asset v14.2.1: present=true size=${f.length()} path=${coreLinuxBox64Asset.file}; execução bloqueada até V15")
+        println("Core Linux Box64 asset v15: present=true size=${f.length()} path=${coreLinuxBox64Asset.file}; execução controlada só por smoke allowlist")
     }
 }
 

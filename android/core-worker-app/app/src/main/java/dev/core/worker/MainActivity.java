@@ -4645,6 +4645,7 @@ public class MainActivity extends Activity {
                 .put("core-linux-rootfs-proot-smoke-v13.2")
                 .put("core-linux-rootfs-proot-smoke-v13.3")
                 .put("core-linux-box64-intake-preflight-v14.2.1")
+                .put("core-linux-box64-version-smoke-v15")
                 .put("core-linux-embedded-binaries-intake-v1")
                 .put("core-linux-embedded-binaries-intake-v2")
                 .put("core-linux-embedded-binaries-intake-v3")
@@ -5117,7 +5118,8 @@ public class MainActivity extends Activity {
                 .put("apk_core_linux_runner_requirements")
                 .put("apk_core_linux_runtime_smoke_test")
                 .put("apk_core_linux_rootfs_smoke_test")
-                .put("apk_core_linux_box64_preflight");
+                .put("apk_core_linux_box64_preflight")
+                .put("apk_core_linux_box64_smoke_test");
     }
 
     private boolean isCoreLinuxRuntimeV1JobType(String type) {
@@ -5139,7 +5141,8 @@ public class MainActivity extends Activity {
                 || "apk_core_linux_native_runtime_status".equals(t)
                 || "apk_core_linux_runtime_smoke_test".equals(t)
                 || "apk_core_linux_rootfs_smoke_test".equals(t)
-                || "apk_core_linux_box64_preflight".equals(t);
+                || "apk_core_linux_box64_preflight".equals(t)
+                || "apk_core_linux_box64_smoke_test".equals(t);
     }
 
     private boolean isPausedRootfsBedrockJobType(String type) {
@@ -5824,6 +5827,24 @@ public class MainActivity extends Activity {
                 result.put("error", box64.optString("summary", "Box64 pendente"));
             }
             result.put("message", box64.optString("summary", "Box64 intake/preflight executado sem iniciar Bedrock"));
+            return result;
+        }
+
+        if ("apk_core_linux_box64_smoke_test".equals(type)) {
+            JSONObject nativeExecutor = coreLinuxNativeExecutorSnapshot("test");
+            JSONObject smoke = CoreLinuxRuntimeManager.box64VersionSmokeTest(this, coreLinuxDir(), nativeExecutor);
+            safePutPayload(result, "coreLinuxBox64SmokeTest", smoke);
+            coreLinuxSummary = smoke.optString("summary", "smoke Box64 Core Linux executado");
+            coreLinuxState = smoke.optString("state", "box64_version_smoke");
+            coreLinuxPrepared = smoke.optBoolean("ok", coreLinuxPrepared);
+            coreLinuxLastCheckAt = System.currentTimeMillis();
+            internalDiagnosticsSummary = coreLinuxSummary;
+            internalDiagnosticsLastAt = System.currentTimeMillis();
+            if (!smoke.optBoolean("ok", false)) {
+                result.put("ok", false);
+                result.put("error", smoke.optString("summary", "Box64 smoke pendente"));
+            }
+            result.put("message", smoke.optString("summary", "Box64 smoke controlado executado sem iniciar Bedrock"));
             return result;
         }
 

@@ -1,13 +1,9 @@
+PATCH_NOTES_V15.md
 android/core-worker-app/app/build.gradle
-android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-local.json
-android/core-worker-app/app/src/main/assets/core-linux/embedded-binaries-manifest.json
 android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java
+android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
 android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
 android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java
-android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
-android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_box64.so
-scripts/core-linux-embedded-binaries-build-pipeline.py
-scripts/core-linux-embedded-binaries-intake.py
-scripts/core-linux-embedded-binaries-metadata.v12.json
-scripts/core-linux-embedded-binaries-sources.json
 webserver.py
+changed_files.txt
+patch.diff

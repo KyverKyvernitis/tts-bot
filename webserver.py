@@ -309,6 +309,7 @@ CORE_WORKER_APK_V1_CAPABILITIES = [
     "core-linux-rootfs-proot-smoke-v13.2",
     "core-linux-rootfs-proot-smoke-v13.3",
     "core-linux-box64-intake-preflight-v14.2.1",
+    "core-linux-box64-version-smoke-v15",
     "core-linux-embedded-binaries-intake-v1",
     "core-linux-embedded-binaries-intake-v2",
     "core-linux-embedded-binaries-intake-v3",
@@ -1571,6 +1572,7 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_core_linux_runtime_smoke_test",
     "apk_core_linux_rootfs_smoke_test",
     "apk_core_linux_box64_preflight",
+    "apk_core_linux_box64_smoke_test",
     "apk_linux_box64_probe",
     "apk_linux_provisioner_probe",
     "apk_linux_prepare_directories",
@@ -1697,6 +1699,7 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_core_linux_runtime_smoke_test": "smoke test Core Linux",
     "apk_core_linux_rootfs_smoke_test": "smoke rootfs PRoot",
     "apk_core_linux_box64_preflight": "Box64 intake/preflight",
+    "apk_core_linux_box64_smoke_test": "Box64 smoke version/help",
     "apk_core_linux_internal_repair": "reparar Core Linux interno",
     "apk_minecraft_bedrock_probe": "Bedrock diagnóstico",
     "apk_minecraft_bedrock_status": "Bedrock status",
@@ -1801,6 +1804,17 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
             clean["smokeStage"] = stage
             clean["allowlistOnly"] = True
             clean["forceFresh"] = True
+    elif job_type == "apk_core_linux_box64_smoke_test":
+        # V15: smoke controlado do Box64. O payload só informa o stage; o APK
+        # executa localmente apenas box64 --version/--help via allowlist fixa.
+        stage = _safe_short_text(payload.get("stage") or payload.get("smokeStage"), 80)
+        if stage == "core-linux-box64-version-smoke-v15":
+            clean["stage"] = stage
+            clean["smokeStage"] = stage
+            clean["allowlistOnly"] = True
+            clean["forceFresh"] = True
+            clean["noBedrock"] = True
+            clean["noUserBinary"] = True
     return clean
 
 
@@ -1829,10 +1843,13 @@ CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_PREVIOUS2_STAGE = "core-linux-rootfs
 CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_LEGACY_STAGE = "core-linux-rootfs-proot-smoke-v13"
 CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB = "apk_core_linux_box64_preflight"
 CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE = "core-linux-box64-intake-preflight-v14.2.1"
+CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB = "apk_core_linux_box64_smoke_test"
+CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE = "core-linux-box64-version-smoke-v15"
 CORE_WORKER_APP_LOCAL_MANUAL_QUEUE_TYPES = {
     CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB,
     CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB,
     CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB,
+    CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB,
 }
 
 
@@ -1863,6 +1880,11 @@ def _core_worker_app_job_fetch_blocker(job: dict, fetch_payload: dict) -> str:
             return "Box64 V14.2.1 exige APK appVersionCode >= 107"
         if stage != CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE:
             return "Box64 V14.2.1 exige payload.stage core-linux-box64-intake-preflight-v14.2.1"
+    elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB:
+        if version_code < 108:
+            return "Box64 V15 exige APK appVersionCode >= 108"
+        if stage != CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE:
+            return "Box64 V15 exige payload.stage core-linux-box64-version-smoke-v15"
     return ""
 
 
@@ -2031,7 +2053,7 @@ def _core_worker_app_queue_internal_jobs_for_worker(worker_id: str = "", install
                 "issuedAt": now,
                 "title": CORE_WORKER_APP_JOB_LABELS.get(typ, typ),
                 "status": "pending",
-                "timeoutSec": 240 if typ in {CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB, CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB} else CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS,
+                "timeoutSec": 240 if typ in {CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB, CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB, CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB} else CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS,
                 "maxRetries": 1,
                 "installId": install_id,
                 "workerId": worker_id,
@@ -2042,6 +2064,8 @@ def _core_worker_app_queue_internal_jobs_for_worker(worker_id: str = "", install
                 job["payload"] = {"stage": CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_STAGE, "allowlistOnly": True, "forceFresh": True}
             elif typ == CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB:
                 job["payload"] = {"stage": CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE, "allowlistOnly": True, "forceFresh": True, "noExecute": True}
+            elif typ == CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB:
+                job["payload"] = {"stage": CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE, "allowlistOnly": True, "forceFresh": True, "noBedrock": True, "noUserBinary": True}
             pending.append(job)
             created.append(job)
         data["pending"] = pending[-160:]
@@ -2180,6 +2204,39 @@ def _core_worker_app_queue_core_linux_box64_v14(worker_id: str = "", install_id:
     queued["safety"] = "manual audit/preflight V14.2.1; Box64 como asset; sem executar Box64; sem shell livre; sem comando arbitrário; sem Bedrock"
     return queued
 
+
+
+
+def _core_worker_app_queue_core_linux_box64_smoke_v15(worker_id: str = "", install_id: str = "", *, reason: str = "manual-v15-box64-version-smoke") -> dict:
+    path = _core_worker_app_jobs_path()
+    worker_id = _safe_short_text(worker_id, 80)
+    install_id = _safe_short_text(install_id, 80)
+    with _core_worker_app_jobs_lock:
+        try:
+            data = _load_json_cached(path, {})
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        archived = _core_worker_app_archive_pending_jobs(
+            data,
+            job_type=CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB,
+            install_id=install_id,
+            worker_id=worker_id,
+            reason="replace-with-single-v15-box64-version-smoke",
+        )
+        _atomic_write_json(path, data, mode=0o600)
+    queued = _core_worker_app_queue_internal_jobs_for_worker(
+        worker_id=worker_id,
+        install_id=install_id,
+        kinds=[CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB],
+        reason=reason,
+        allow_manual=True,
+    )
+    queued["archivedPending"] = archived
+    queued["stage"] = CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE
+    queued["safety"] = "manual smoke V15; somente box64 --version/--help; sem Bedrock; sem shell livre; sem comando arbitrário; sem binário x86_64 do usuário"
+    return queued
 
 def _core_worker_app_jobs_fetch(payload: dict) -> dict:
     now = int(time.time())
@@ -3168,6 +3225,8 @@ def core_worker_app_jobs_enqueue():
         default_reason = "manual-v13-3-rootfs-android-runtime-bind-smoke"
     elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB:
         default_reason = "manual-v14-2-1-box64-asset-preflight"
+    elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB:
+        default_reason = "manual-v15-box64-version-smoke"
     reason = _safe_short_text(payload.get("reason") or default_reason, 80)
     if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB:
         result = _core_worker_app_queue_core_linux_rootfs_smoke_v13(
@@ -3177,6 +3236,12 @@ def core_worker_app_jobs_enqueue():
         )
     elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB:
         result = _core_worker_app_queue_core_linux_box64_v14(
+            worker_id=worker_id,
+            install_id=install_id,
+            reason=reason,
+        )
+    elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB:
+        result = _core_worker_app_queue_core_linux_box64_smoke_v15(
             worker_id=worker_id,
             install_id=install_id,
             reason=reason,
