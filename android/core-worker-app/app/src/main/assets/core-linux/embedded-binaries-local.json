@@ -1,11 +1,11 @@
 {
   "schema": "core-worker-embedded-binaries-local-v6",
-  "generatedAt": 1780765933,
+  "generatedAt": 1780766842,
   "dryRun": false,
   "targets": {
     "runner": {
-      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_runner.so",
-      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_runner.so",
+      "source": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_runner.so",
+      "dest": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_runner.so",
       "copied": false,
       "metadata": {
         "origin": "local-core-worker",
@@ -35,8 +35,8 @@
       "sha256": "19da21d6d2ffd399f2e85cd8833f5a0c8534adae332b9e69ef3cb0329ac40600"
     },
     "proot": {
-      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
-      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
+      "source": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
+      "dest": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -72,7 +72,7 @@
         "androidPatchNotes": [
           "NEEDED libtalloc.so.2 -> libtalloc.so",
           "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN",
-          "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no nativeLibraryDir durante o smoke test allowlist",
+          "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no asset core-linux/bin durante o smoke test allowlist",
           "loader32 não bloqueia APK ARM64; suporte 32-bit fica para etapa multiarch futura"
         ],
         "sourceCompliance": {
@@ -95,8 +95,8 @@
       "sha256": "4b5fdefbfc52ea9af38cf6151480b337e3b8a2c0f9a55ad850c0c19e499a1493"
     },
     "busybox": {
-      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
-      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
+      "source": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
+      "dest": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -158,8 +158,8 @@
       "sha256": "58e3718246338da1a3edefcba09b789a6e487aa0306956203eb08220daa69f5f"
     },
     "libtalloc": {
-      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
-      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
+      "source": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
+      "dest": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -217,8 +217,8 @@
       "sha256": "61305220323c6f3f556c7a9df03c002d1b5f714f9b600f58acd0b97dfdbce342"
     },
     "libbusybox": {
-      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
-      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
+      "source": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
+      "dest": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -274,8 +274,8 @@
       "sha256": "a2d1a3c55b95da56af0758883ba46b2903f5b39907205a489936cca8a7c45c7a"
     },
     "libandroid_selinux": {
-      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
-      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
+      "source": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
+      "dest": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -319,8 +319,8 @@
       "sha256": "372dfaa1a6712c013e734d99f04ff51a0b501744bd81e21b84d02d40f3f0aa60"
     },
     "libpcre2_8": {
-      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
-      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
+      "source": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
+      "dest": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -364,8 +364,8 @@
       "sha256": "db37a14ca7365815d0b0323f419cc457c2c20c209876ea64fbdb9d0676e64263"
     },
     "box64": {
-      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_box64.so",
-      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_box64.so",
+      "source": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/bin/box64",
+      "dest": "/mnt/data/work_v1421b/tts-bot-main/android/core-worker-app/app/src/main/assets/core-linux/bin/box64",
       "copied": false,
       "metadata": {
         "origin": "ryanfortner-box64-debs-prebuilt",
@@ -383,12 +383,12 @@
         "binarySize": 28008024,
         "notes": [
           "Box64 é MIT; binário arm64 extraído do pacote .deb fornecido pelo operador.",
-          "Não executar em V14.2; somente preflight/intake e lib em nativeLibraryDir.",
+          "Não executar em V14.2.1; somente preflight/intake e asset core-linux/bin/box64.",
           "Box64 roda binários x86_64 userspace; Bedrock permanece bloqueado até smoke separado."
         ],
-        "official": "libcoreworker_box64.so",
+        "official": "box64",
         "aliases": [
-          "libcoreworker_box64.so",
+          "box64",
           "libbox64.so",
           "box64"
         ],
@@ -405,13 +405,13 @@
           "libm.so.6",
           "libresolv.so.2"
         ],
-        "dependencyPolicy": "V14.2 apenas embute/audita; execução de box64 --version fica bloqueada até smoke próprio dentro do rootfs Linux com loader glibc visível.",
+        "dependencyPolicy": "V14.2.1 apenas embute/audita; execução de box64 --version fica bloqueada até smoke próprio dentro do rootfs Linux com loader glibc visível.",
         "debSha256": "79c9e25b857cf2cde4c8f3ff15b42e57fd51e6e2c8187818eea6659902ff0755",
         "fallbackDebSha256": "4bec17d38e1037dcc62cc8aae092a1612e0a2b878fb729776ca9deb0b4a543c3",
         "linkMode": "dynamic-with-rootfs-dependencies",
         "buildRecipe": "prebuilt box64-android arm64 do ryanfortner/box64-debs; selecionado pelo operador; não baixado em runtime; pacote indica build Android/BAD_SIGNAL para ambiente Android-like.",
         "onDeviceBuildSafe": false,
-        "auditedBy": "core-worker-v14.2-intake",
+        "auditedBy": "core-worker-v14.2.1-asset-intake",
         "sourceCompliance": {
           "required": false,
           "completeCorrespondingSourceReady": true,

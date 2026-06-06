@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = ROOT / "android/core-worker-app/app"
 JNI_DIR = APP_DIR / "src/main/jniLibs/arm64-v8a"
 ASSETS_DIR = APP_DIR / "src/main/assets/core-linux"
+BOX64_ASSET = ASSETS_DIR / "bin/box64"
 RUNNER_SOURCE = APP_DIR / "src/main/cpp/coreworker_runner.c"
 BUILD_DIR = ROOT / "build/core-linux-embedded-binaries"
 OUT_DIR = BUILD_DIR / "out"
@@ -174,8 +175,8 @@ TARGETS: dict[str, dict[str, Any]] = {
         "buildNotes": ["necessário para libandroid-selinux.so"],
     },
     "box64": {
-        "official": "libcoreworker_box64.so",
-        "aliases": ["libcoreworker_box64.so", "libbox64.so", "box64"],
+        "official": "box64",
+        "aliases": ["box64", "libcoreworker_box64.so", "libbox64.so"],
         "origin": "ryanfortner-box64-debs-prebuilt",
         "sourceKind": "external-prebuilt-deb",
         "upstream": "https://github.com/ptitSeb/box64",
@@ -357,6 +358,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "sourceManifest": rel(manifest),
         "metadataTemplate": "use: python3 scripts/core-linux-embedded-binaries-build-pipeline.py metadata-template > /tmp/core-linux-binaries-metadata.json",
         "jniDir": rel(JNI_DIR),
+        "box64Asset": rel(BOX64_ASSET),
         "runnerSource": rel(RUNNER_SOURCE),
         "targets": TARGETS,
         "current": status(),
@@ -368,7 +370,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         },
         "notes": [
             "O script não baixa binários automaticamente.",
-            "BusyBox, PRoot, libtalloc, libbusybox, libandroid-selinux, libpcre2-8 e Box64 devem vir de build/import auditado e depois passar pelo intake.",
+            "BusyBox, PRoot, libtalloc, libbusybox, libandroid-selinux e libpcre2-8 ficam em jniLibs; Box64 deve vir de build/import auditado e ficar como asset core-linux/bin/box64.",
             "Cada asset externo precisa de tamanho, SHA-256 e metadados aprovados de origem/licença antes de ser aceito no stage real.",
             "PRoot/BusyBox precisam estar extraídos em nativeLibraryDir; ZipEntry dentro do APK é diagnóstico, não caminho executável.",
             "Bedrock não entra no APK e não é iniciado neste estágio.",
@@ -532,7 +534,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         command.extend(["--metadata-file", str(args.metadata_file.resolve())])
     any_present = False
     for key, meta in TARGETS.items():
-        p = JNI_DIR / str(meta["official"])
+        p = BOX64_ASSET if key == "box64" else (JNI_DIR / str(meta["official"]))
         if p.exists():
             command.extend([f"--{key}", str(p)])
             any_present = True

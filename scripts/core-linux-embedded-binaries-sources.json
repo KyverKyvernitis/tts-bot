@@ -198,9 +198,9 @@
       ]
     },
     "box64": {
-      "official": "libcoreworker_box64.so",
+      "official": "box64",
       "aliases": [
-        "libcoreworker_box64.so",
+        "box64",
         "libbox64.so",
         "box64"
       ],
@@ -213,7 +213,7 @@
       "blockedUntil": "box64-version-smoke-v15",
       "buildNotes": [
         "Box64 é userspace Linux x86_64 emulator para hosts ARM64; validar dentro do rootfs Linux/proot",
-        "V14.2 só embute e audita; não executar box64 --version ainda",
+        "V14.2.1 só embute e audita como asset core-linux/bin/box64; não executar box64 --version ainda",
         "Bedrock continua bloqueado até smoke Box64 separado"
       ],
       "homepage": "https://box86.org/",
@@ -230,7 +230,7 @@
         "libm.so.6",
         "libresolv.so.2"
       ],
-      "dependencyPolicy": "executar apenas dentro do rootfs Linux com loader glibc; não executar em Android puro no V14.2"
+      "dependencyPolicy": "executar apenas dentro do rootfs Linux com loader glibc; não executar em Android puro no V14.2.1"
     }
   }
 }

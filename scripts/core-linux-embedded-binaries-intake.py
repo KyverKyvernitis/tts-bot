@@ -24,6 +24,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 JNI_DIR = ROOT / "android/core-worker-app/app/src/main/jniLibs/arm64-v8a"
 ASSET_DIR = ROOT / "android/core-worker-app/app/src/main/assets/core-linux"
+ASSET_BIN_DIR = ASSET_DIR / "bin"
 ASSET_MANIFEST = ASSET_DIR / "embedded-binaries-manifest.json"
 OUT_MANIFEST = ASSET_DIR / "embedded-binaries-local.json"
 SOURCE_MANIFEST = ROOT / "scripts/core-linux-embedded-binaries-sources.json"
@@ -36,7 +37,7 @@ TARGETS = {
     "libbusybox": "libbusybox.so",
     "libandroid_selinux": "libandroid-selinux.so",
     "libpcre2_8": "libpcre2-8.so",
-    "box64": "libcoreworker_box64.so",
+    "box64": "box64",
 }
 
 MIN_BYTES_BY_TARGET = {
@@ -134,7 +135,7 @@ TARGET_METADATA = {
         "licenseStatus": "redistributable-verified",
         "binarySha256": "bae41f0619e51307f6e75e1d83b54137c5ba395ba46ba4394de264613bcd73ca",
         "binarySize": 28008024,
-        "notes": "V14.2 só embute/audita Box64 arm64; execução fica para smoke posterior dentro do rootfs Linux/proot",
+        "notes": "V14.2.1 embute/audita Box64 arm64 como asset core-linux/bin/box64; execução fica para smoke posterior dentro do rootfs Linux/proot",
     },
 }
 
@@ -325,6 +326,7 @@ def main(argv: list[str]) -> int:
     source_manifest = load_json(SOURCE_MANIFEST)
 
     JNI_DIR.mkdir(parents=True, exist_ok=True)
+    ASSET_BIN_DIR.mkdir(parents=True, exist_ok=True)
     manifest: dict[str, Any] = {
         "schema": "core-worker-embedded-binaries-local-v6",
         "generatedAt": int(time.time()),
@@ -353,7 +355,7 @@ def main(argv: list[str]) -> int:
         metadata_ok = not errors
         if errors and key != "runner":
             all_errors.extend(f"{key}: {e}" for e in errors)
-        dest = JNI_DIR / TARGETS[key]
+        dest = (ASSET_BIN_DIR / TARGETS[key]) if key == "box64" else (JNI_DIR / TARGETS[key])
         copied = False
         if not args.dry_run:
             if errors and key != "runner" and not args.allow_unverified_external:

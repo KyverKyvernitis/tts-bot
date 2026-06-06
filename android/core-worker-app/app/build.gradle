@@ -58,8 +58,8 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 106
-        versionName "0.5.91"
+        versionCode 107
+        versionName "0.5.92"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -95,8 +95,9 @@ android {
     sourceSets {
         main {
             // Scaffold explícito para assets nativos futuros do Core Linux.
-            // Os binários reais entram apenas como .so em jniLibs/arm64-v8a;
-            // manifestos e documentação ficam em assets para não simular executável pronto.
+            // PRoot/BusyBox ficam como .so em jniLibs para nativeLibraryDir.
+            // Box64 é executável Linux/glibc, então fica como asset controlado
+            // em assets/core-linux/bin/box64 e só será extraído em smoke futuro.
             jniLibs.srcDirs = ["src/main/jniLibs"]
             assets.srcDirs = ["src/main/assets"]
         }
@@ -109,6 +110,11 @@ android {
             // strip nesse ambiente. As libs são privadas/debug e podem ser empacotadas
             // sem strip para manter o build confiável no phone worker.
             keepDebugSymbols += ["**/*.so"]
+
+            // V14.2.1: Box64 é executável Linux/glibc. Se uma base antiga ainda
+            // trouxer libcoreworker_box64.so em jniLibs, excluímos do empacotamento
+            // nativo; a cópia oficial agora é assets/core-linux/bin/box64.
+            excludes += ["**/libcoreworker_box64.so", "**/libbox64.so"]
 
             // Patch 88: PRoot/BusyBox entram como native libs do APK para ficarem em
             // nativeLibraryDir, que é o caminho não gravável usado no smoke real. Se
@@ -155,7 +161,6 @@ def coreLinuxEmbeddedBinaries = [
          requires: ["libpcre2-8.so"]],
         [key: "libpcre2_8", file: "libpcre2-8.so", minBytes: 32768L, required: false],
         [key: "libtalloc", file: "libtalloc.so", minBytes: 8192L, required: false],
-        [key: "box64",   file: "libcoreworker_box64.so",   minBytes: 131072L, required: false],
 ]
 
 tasks.register("verifyCoreLinuxEmbeddedBinaries") {
@@ -249,8 +254,43 @@ tasks.register("verifyCoreLinuxEmbeddedBinaries") {
 
 
 
+// Box64 é ELF Linux/glibc executável, não shared library Android/Bionic.
+// Por isso fica em assets, não em jniLibs, para evitar que AGP/strip/mergeNativeLibs
+// trate o arquivo como lib Android. Esta verificação não executa Box64.
+def coreLinuxBox64Asset = [key: "box64", file: "core-linux/bin/box64", minBytes: 131072L, required: false]
+
+tasks.register("verifyCoreLinuxBox64Asset") {
+    description = "Valida o Box64 controlado em assets sem executar o binário."
+    doLast {
+        def f = file("${projectDir}/src/main/assets/${coreLinuxBox64Asset.file}")
+        if (!f.exists()) {
+            println("Core Linux Box64 asset v14.2.1: ausente; preflight deve reportar missing_binary")
+            return
+        }
+        byte[] head = new byte[Math.min(64, Math.max(0, f.length() as int))]
+        if (head.length > 0) {
+            f.withInputStream { it.read(head) }
+        }
+        def isElf = head.length >= 4 && head[0] == 0x7f && (head[1] & 0xff) == 69 && (head[2] & 0xff) == 76 && (head[3] & 0xff) == 70
+        def is64 = head.length >= 5 && head[4] == 2
+        def isAarch64 = head.length >= 20 && (head[18] & 0xff) == 183 && (head[19] & 0xff) == 0
+        def tooSmall = f.length() < (coreLinuxBox64Asset.minBytes as long)
+        def reasons = []
+        if (!isElf) reasons << "not_elf"
+        if (isElf && !is64) reasons << "not_elf64"
+        if (isElf && !isAarch64) reasons << "not_aarch64"
+        if (tooSmall) reasons << "size ${f.length()} < ${coreLinuxBox64Asset.minBytes}"
+        if (!reasons.isEmpty()) {
+            throw new GradleException("Core Linux Box64 asset inválido: ${reasons.join('; ')}")
+        }
+        println("Core Linux Box64 asset v14.2.1: present=true size=${f.length()} path=${coreLinuxBox64Asset.file}; execução bloqueada até V15")
+    }
+}
+
+
 tasks.named("preBuild").configure {
     dependsOn("verifyCoreLinuxEmbeddedBinaries")
+    dependsOn("verifyCoreLinuxBox64Asset")
 }
 
 
@@ -258,7 +298,8 @@ tasks.register("coreLinuxEmbeddedBinariesPlan") {
     description = "Mostra o plano local de build/import dos binários Core Linux sem baixar ou executar nada."
     doLast {
         println("Core Linux embedded binaries pipeline v2")
-        println("  oficiais em: src/main/jniLibs/arm64-v8a")
+        println("  oficiais base em: src/main/jniLibs/arm64-v8a")
+        println("  Box64 asset:  src/main/assets/core-linux/bin/box64")
         println("  manifesto:   src/main/assets/core-linux/embedded-binaries-manifest.json")
         println("  script:      scripts/core-linux-embedded-binaries-build-pipeline.py")
         coreLinuxEmbeddedBinaries.each { item ->

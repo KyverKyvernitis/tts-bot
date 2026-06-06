@@ -35,7 +35,7 @@
       "androidPatchNotes": [
         "NEEDED libtalloc.so.2 -> libtalloc.so",
         "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN",
-        "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no nativeLibraryDir durante o smoke test allowlist",
+        "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no asset core-linux/bin durante o smoke test allowlist",
         "loader32 não bloqueia APK ARM64; suporte 32-bit fica para etapa multiarch futura"
       ],
       "sourceCompliance": {
@@ -208,13 +208,13 @@
         "libm.so.6",
         "libresolv.so.2"
       ],
-      "dependencyPolicy": "V14.2 apenas embute/audita; execução de box64 --version fica bloqueada até smoke próprio dentro do rootfs Linux com loader glibc visível.",
+      "dependencyPolicy": "V14.2.1 apenas embute/audita; execução de box64 --version fica bloqueada até smoke próprio dentro do rootfs Linux com loader glibc visível.",
       "buildRecipe": "prebuilt box64-android arm64 do ryanfortner/box64-debs; selecionado pelo operador; não baixado em runtime; pacote indica build Android/BAD_SIGNAL para ambiente Android-like.",
       "onDeviceBuildSafe": false,
-      "auditedBy": "core-worker-v14.2-intake",
+      "auditedBy": "core-worker-v14.2.1-asset-intake",
       "notes": [
         "Box64 é MIT; binário arm64 extraído do pacote .deb fornecido pelo operador.",
-        "Não executar em V14.2; somente preflight/intake e lib em nativeLibraryDir.",
+        "Não executar em V14.2.1; somente preflight/intake e asset core-linux/bin/box64.",
         "Box64 roda binários x86_64 userspace; Bedrock permanece bloqueado até smoke separado."
       ],
       "sourceCompliance": {
