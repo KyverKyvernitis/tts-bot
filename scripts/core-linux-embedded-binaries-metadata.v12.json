@@ -1,6 +1,6 @@
 {
   "schema": "core-worker-embedded-binaries-metadata-v11",
-  "generatedAt": 1780688415,
+  "generatedAt": 1780765914,
   "policy": {
     "noRuntimeDownload": true,
     "noExecutionDuringAudit": true,
@@ -183,6 +183,48 @@
       "androidPatchNotes": [
         "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
       ]
+    },
+    "box64": {
+      "origin": "ryanfortner-box64-debs-prebuilt",
+      "sourceKind": "external-prebuilt-deb",
+      "upstream": "https://github.com/ptitSeb/box64",
+      "homepage": "https://box86.org/",
+      "packageRepository": "https://github.com/ryanfortner/box64-debs",
+      "packageFile": "box64-android_0.4.3+20260606.e694f2c-1_arm64.deb",
+      "packageVersion": "0.4.3+20260606.e694f2c-1",
+      "sourceCommit": "e694f2c",
+      "sourceArchive": "https://github.com/ptitSeb/box64/archive/e694f2c.tar.gz",
+      "license": "MIT",
+      "licenseStatus": "redistributable-verified",
+      "minBytes": 131072,
+      "binarySha256": "bae41f0619e51307f6e75e1d83b54137c5ba395ba46ba4394de264613bcd73ca",
+      "binarySize": 28008024,
+      "debSha256": "79c9e25b857cf2cde4c8f3ff15b42e57fd51e6e2c8187818eea6659902ff0755",
+      "fallbackDebSha256": "4bec17d38e1037dcc62cc8aae092a1612e0a2b878fb729776ca9deb0b4a543c3",
+      "linkMode": "dynamic-with-rootfs-dependencies",
+      "runtimeDependencies": [
+        "rootfs glibc/ld-linux-aarch64.so.1",
+        "libc.so.6",
+        "libm.so.6",
+        "libresolv.so.2"
+      ],
+      "dependencyPolicy": "V14.2 apenas embute/audita; execução de box64 --version fica bloqueada até smoke próprio dentro do rootfs Linux com loader glibc visível.",
+      "buildRecipe": "prebuilt box64-android arm64 do ryanfortner/box64-debs; selecionado pelo operador; não baixado em runtime; pacote indica build Android/BAD_SIGNAL para ambiente Android-like.",
+      "onDeviceBuildSafe": false,
+      "auditedBy": "core-worker-v14.2-intake",
+      "notes": [
+        "Box64 é MIT; binário arm64 extraído do pacote .deb fornecido pelo operador.",
+        "Não executar em V14.2; somente preflight/intake e lib em nativeLibraryDir.",
+        "Box64 roda binários x86_64 userspace; Bedrock permanece bloqueado até smoke separado."
+      ],
+      "sourceCompliance": {
+        "required": false,
+        "completeCorrespondingSourceReady": true,
+        "licenseTextIncluded": true,
+        "sourceUrl": "https://github.com/ptitSeb/box64/archive/e694f2c.tar.gz",
+        "configUrlOrPath": "https://github.com/ryanfortner/box64-debs",
+        "modifications": "none by core-worker; prebuilt external package imported as-is"
+      }
     }
   },
   "notes": "V11: proot_loader32 é opcional/multiarch futuro; o caminho atual ARM64 valida apenas proot_loader ARM64."

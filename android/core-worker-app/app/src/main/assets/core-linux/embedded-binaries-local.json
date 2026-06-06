@@ -1,11 +1,42 @@
 {
   "schema": "core-worker-embedded-binaries-local-v6",
-  "generatedAt": 1780686537,
+  "generatedAt": 1780765933,
   "dryRun": false,
   "targets": {
+    "runner": {
+      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_runner.so",
+      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_runner.so",
+      "copied": false,
+      "metadata": {
+        "origin": "local-core-worker",
+        "sourceKind": "project-source",
+        "licenseStatus": "internal-project",
+        "license": "private-internal",
+        "notes": "core-runner seguro próprio; preflight only",
+        "official": "libcoreworker_runner.so",
+        "aliases": [
+          "libcoreworker_runner.so",
+          "coreworker_runner",
+          "core-runner",
+          "runner"
+        ],
+        "source": "android/core-worker-app/app/src/main/cpp/coreworker_runner.c",
+        "minBytes": 1024,
+        "requiredAtBuild": true
+      },
+      "metadataOk": true,
+      "metadataErrors": [],
+      "isElf": true,
+      "elfClass": 2,
+      "machine": 183,
+      "isElf64": true,
+      "isAarch64": true,
+      "size": 3480,
+      "sha256": "19da21d6d2ffd399f2e85cd8833f5a0c8534adae332b9e69ef3cb0329ac40600"
+    },
     "proot": {
-      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
-      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
+      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
+      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_proot.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -41,7 +72,8 @@
         "androidPatchNotes": [
           "NEEDED libtalloc.so.2 -> libtalloc.so",
           "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN",
-          "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no nativeLibraryDir durante o smoke test allowlist"
+          "PROOT_LOADER deve apontar para libcoreworker_proot_loader.so no nativeLibraryDir durante o smoke test allowlist",
+          "loader32 não bloqueia APK ARM64; suporte 32-bit fica para etapa multiarch futura"
         ],
         "sourceCompliance": {
           "required": true,
@@ -63,8 +95,8 @@
       "sha256": "4b5fdefbfc52ea9af38cf6151480b337e3b8a2c0f9a55ad850c0c19e499a1493"
     },
     "busybox": {
-      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
-      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
+      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
+      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_busybox.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -88,12 +120,13 @@
         "homepage": "https://busybox.net/",
         "termuxBuildRecipe": "https://raw.githubusercontent.com/termux/termux-packages/master/packages/busybox/build.sh",
         "sourceArchive": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
-        "minBytes": 32768,
-        "dependencyPolicy": "busybox Termux é dinâmico; NEEDED libbusybox.so.1.37.0 foi ajustado para libbusybox.so e RUNPATH para $ORIGIN; dependências embutidas junto",
+        "minBytes": 4096,
+        "dependencyPolicy": "libcoreworker_busybox.so é wrapper ELF pequeno; payload real obrigatório em libbusybox.so + libandroid-selinux.so + libpcre2-8.so",
         "onDeviceBuildSafe": false,
         "buildNotes": [
           "o recipe Termux marca BusyBox como não seguro para build on-device",
           "não rodar build.sh no prefixo vivo do worker; usar ambiente isolado",
+          "wrapper pode ser pequeno; o tamanho forte fica em libbusybox.so",
           "GPL-2.0 exige source correspondente, .config e notas de modificação ao distribuir binário"
         ],
         "binarySha256": "58e3718246338da1a3edefcba09b789a6e487aa0306956203eb08220daa69f5f",
@@ -101,7 +134,9 @@
         "linkMode": "dynamic-with-bundled-dependencies",
         "androidPatchNotes": [
           "NEEDED libbusybox.so.1.37.0 -> libbusybox.so",
-          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
+          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN",
+          "wrapper pequeno aceito no gate v10",
+          "tamanho forte validado em libbusybox.so"
         ],
         "sourceCompliance": {
           "required": true,
@@ -109,7 +144,7 @@
           "licenseTextIncluded": true,
           "sourceUrl": "https://busybox.net/downloads/busybox-1.37.0.tar.bz2",
           "configUrlOrPath": "Termux recipe packages/busybox/build.sh plus binary-string patch notes in this metadata",
-          "modifications": "binary string patch: NEEDED libbusybox.so.1.37.0 -> libbusybox.so; RUNPATH Termux -> $ORIGIN"
+          "modifications": "binary string patch: NEEDED libbusybox.so.1.37.0 -> libbusybox.so; RUNPATH Termux -> $ORIGIN; gate v10 aceita wrapper pequeno e valida payload em libbusybox.so"
         }
       },
       "metadataOk": true,
@@ -123,8 +158,8 @@
       "sha256": "58e3718246338da1a3edefcba09b789a6e487aa0306956203eb08220daa69f5f"
     },
     "libtalloc": {
-      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
-      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
+      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
+      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libtalloc.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -152,21 +187,24 @@
           "recipe Termux remove/reescreve arquivos do prefixo; não buildar no Termux vivo do worker",
           "preferir build isolado/offline e empacotar apenas artefato auditado"
         ],
-        "binarySha256": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb",
+        "binarySha256": "61305220323c6f3f556c7a9df03c002d1b5f714f9b600f58acd0b97dfdbce342",
         "binarySize": 31440,
         "linkMode": "self-contained",
         "runtimeDependencies": [
           "libc"
         ],
-        "dependencyPolicy": "depende apenas de libc Android; empacotado como libtalloc.so porque é o NEEDED do proot patchado",
+        "dependencyPolicy": "depende apenas de libc Android; RUNPATH ajustado para $ORIGIN; empacotado como libtalloc.so porque é o NEEDED do proot patchado",
         "sourceCompliance": {
           "required": true,
           "completeCorrespondingSourceReady": true,
           "licenseTextIncluded": true,
           "sourceUrl": "https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz",
           "configUrlOrPath": "Termux recipe packages/libtalloc/build.sh",
-          "modifications": "none"
-        }
+          "modifications": "binary string patch: RUNPATH Termux -> $ORIGIN"
+        },
+        "androidPatchNotes": [
+          "RUNPATH /data/data/com.termux/files/usr/lib -> $ORIGIN"
+        ]
       },
       "metadataOk": true,
       "metadataErrors": [],
@@ -176,11 +214,11 @@
       "isElf64": true,
       "isAarch64": true,
       "size": 31440,
-      "sha256": "3c9b207c0a6ea2896b7523e03f55d9ab0d9e88baa115d4c32b84058ff4246fbb"
+      "sha256": "61305220323c6f3f556c7a9df03c002d1b5f714f9b600f58acd0b97dfdbce342"
     },
     "libbusybox": {
-      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
-      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
+      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
+      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbusybox.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -236,8 +274,8 @@
       "sha256": "a2d1a3c55b95da56af0758883ba46b2903f5b39907205a489936cca8a7c45c7a"
     },
     "libandroid_selinux": {
-      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
-      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
+      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
+      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libandroid-selinux.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -281,8 +319,8 @@
       "sha256": "372dfaa1a6712c013e734d99f04ff51a0b501744bd81e21b84d02d40f3f0aa60"
     },
     "libpcre2_8": {
-      "source": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
-      "dest": "/mnt/data/work_v10/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
+      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
+      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libpcre2-8.so",
       "copied": false,
       "metadata": {
         "origin": "termux-package-source-reference",
@@ -324,6 +362,74 @@
       "isAarch64": true,
       "size": 489384,
       "sha256": "db37a14ca7365815d0b0323f419cc457c2c20c209876ea64fbdb9d0676e64263"
+    },
+    "box64": {
+      "source": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_box64.so",
+      "dest": "/mnt/data/work_v142/repo_unzip/tts-bot-main/android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_box64.so",
+      "copied": false,
+      "metadata": {
+        "origin": "ryanfortner-box64-debs-prebuilt",
+        "sourceKind": "external-prebuilt-deb",
+        "upstream": "https://github.com/ptitSeb/box64",
+        "homepage": "https://box86.org/",
+        "packageRepository": "https://github.com/ryanfortner/box64-debs",
+        "packageFile": "box64-android_0.4.3+20260606.e694f2c-1_arm64.deb",
+        "packageVersion": "0.4.3+20260606.e694f2c-1",
+        "sourceCommit": "e694f2c",
+        "sourceArchive": "https://github.com/ptitSeb/box64/archive/e694f2c.tar.gz",
+        "license": "MIT",
+        "licenseStatus": "redistributable-verified",
+        "binarySha256": "bae41f0619e51307f6e75e1d83b54137c5ba395ba46ba4394de264613bcd73ca",
+        "binarySize": 28008024,
+        "notes": [
+          "Box64 é MIT; binário arm64 extraído do pacote .deb fornecido pelo operador.",
+          "Não executar em V14.2; somente preflight/intake e lib em nativeLibraryDir.",
+          "Box64 roda binários x86_64 userspace; Bedrock permanece bloqueado até smoke separado."
+        ],
+        "official": "libcoreworker_box64.so",
+        "aliases": [
+          "libcoreworker_box64.so",
+          "libbox64.so",
+          "box64"
+        ],
+        "minBytes": 131072,
+        "blockedUntil": "box64-version-smoke-v15",
+        "buildNotes": [
+          "Box64 é userspace Linux x86_64 emulator para hosts ARM64; validar dentro do rootfs Linux/proot",
+          "V14.2 só embute e audita; não executar box64 --version ainda",
+          "Bedrock continua bloqueado até smoke Box64 separado"
+        ],
+        "runtimeDependencies": [
+          "rootfs glibc/ld-linux-aarch64.so.1",
+          "libc.so.6",
+          "libm.so.6",
+          "libresolv.so.2"
+        ],
+        "dependencyPolicy": "V14.2 apenas embute/audita; execução de box64 --version fica bloqueada até smoke próprio dentro do rootfs Linux com loader glibc visível.",
+        "debSha256": "79c9e25b857cf2cde4c8f3ff15b42e57fd51e6e2c8187818eea6659902ff0755",
+        "fallbackDebSha256": "4bec17d38e1037dcc62cc8aae092a1612e0a2b878fb729776ca9deb0b4a543c3",
+        "linkMode": "dynamic-with-rootfs-dependencies",
+        "buildRecipe": "prebuilt box64-android arm64 do ryanfortner/box64-debs; selecionado pelo operador; não baixado em runtime; pacote indica build Android/BAD_SIGNAL para ambiente Android-like.",
+        "onDeviceBuildSafe": false,
+        "auditedBy": "core-worker-v14.2-intake",
+        "sourceCompliance": {
+          "required": false,
+          "completeCorrespondingSourceReady": true,
+          "licenseTextIncluded": true,
+          "sourceUrl": "https://github.com/ptitSeb/box64/archive/e694f2c.tar.gz",
+          "configUrlOrPath": "https://github.com/ryanfortner/box64-debs",
+          "modifications": "none by core-worker; prebuilt external package imported as-is"
+        }
+      },
+      "metadataOk": true,
+      "metadataErrors": [],
+      "isElf": true,
+      "elfClass": 2,
+      "machine": 183,
+      "isElf64": true,
+      "isAarch64": true,
+      "size": 28008024,
+      "sha256": "bae41f0619e51307f6e75e1d83b54137c5ba395ba46ba4394de264613bcd73ca"
     }
   },
   "policy": {

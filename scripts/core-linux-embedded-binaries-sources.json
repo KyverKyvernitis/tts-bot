@@ -1,6 +1,6 @@
 {
   "schema": "core-worker-embedded-binaries-source-plan-v11",
-  "generatedAt": 1780686535,
+  "generatedAt": 1780765914,
   "abi": "arm64-v8a",
   "androidMinSdk": 26,
   "policy": {
@@ -204,17 +204,33 @@
         "libbox64.so",
         "box64"
       ],
-      "origin": "manual-build-from-upstream-source",
-      "sourceKind": "external-source",
+      "origin": "ryanfortner-box64-debs-prebuilt",
+      "sourceKind": "external-prebuilt-deb",
       "upstream": "https://github.com/ptitSeb/box64",
       "license": "MIT",
-      "licenseStatus": "verify-before-bundling",
+      "licenseStatus": "redistributable-verified",
       "minBytes": 131072,
-      "blockedUntil": "proot-busybox-rootfs-ready",
+      "blockedUntil": "box64-version-smoke-v15",
       "buildNotes": [
         "Box64 é userspace Linux x86_64 emulator para hosts ARM64; validar dentro do rootfs Linux/proot",
-        "não executar em Android puro; runner real continua bloqueado até preflight completo"
-      ]
+        "V14.2 só embute e audita; não executar box64 --version ainda",
+        "Bedrock continua bloqueado até smoke Box64 separado"
+      ],
+      "homepage": "https://box86.org/",
+      "packageRepository": "https://github.com/ryanfortner/box64-debs",
+      "packageFile": "box64-android_0.4.3+20260606.e694f2c-1_arm64.deb",
+      "packageVersion": "0.4.3+20260606.e694f2c-1",
+      "sourceCommit": "e694f2c",
+      "sourceArchive": "https://github.com/ptitSeb/box64/archive/e694f2c.tar.gz",
+      "binarySha256": "bae41f0619e51307f6e75e1d83b54137c5ba395ba46ba4394de264613bcd73ca",
+      "binarySize": 28008024,
+      "runtimeDependencies": [
+        "rootfs glibc/ld-linux-aarch64.so.1",
+        "libc.so.6",
+        "libm.so.6",
+        "libresolv.so.2"
+      ],
+      "dependencyPolicy": "executar apenas dentro do rootfs Linux com loader glibc; não executar em Android puro no V14.2"
     }
   }
 }

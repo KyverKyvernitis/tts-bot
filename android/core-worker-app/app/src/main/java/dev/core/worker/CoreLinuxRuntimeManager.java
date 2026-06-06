@@ -487,7 +487,7 @@ public final class CoreLinuxRuntimeManager {
             Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
             ensureBase(layout);
 
-            // V14.1: intake/preflight seguro do Box64. Esta etapa não executa Box64,
+            // V14.2: intake/preflight seguro do Box64. Esta etapa não executa Box64,
             // não baixa binários, não inicia Bedrock e não abre shell. Ela apenas
             // audita se um Box64 arm64 auditado já está embutido em jniLibs/nativeLibraryDir
             // e se a base validada pelo V13.3 está pronta para o futuro smoke de Box64.
@@ -498,8 +498,8 @@ public final class CoreLinuxRuntimeManager {
             JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
             JSONObject rootfsState = rootfs.optJSONObject("rootfs");
             if (rootfsState == null) rootfsState = rootfs;
-            JSONObject runtime = runtimeSnapshot(context, layout.core, "box64_intake_v14_1", executor);
-            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "box64_intake_v14_1");
+            JSONObject runtime = runtimeSnapshot(context, layout.core, "box64_intake_v14_2", executor);
+            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "box64_intake_v14_2");
             JSONObject rootfsSmoke = readJson(new File(layout.runtime, "core-linux-rootfs-smoke-test.json"));
             if (rootfsSmoke == null) rootfsSmoke = new JSONObject();
 
@@ -543,14 +543,14 @@ public final class CoreLinuxRuntimeManager {
                     .put(check("Box64 ELF64", selectedElf64, selectedPresent ? "classe ELF64=" + selectedInfo.optString("elfClass", "") : "sem binário"))
                     .put(check("Box64 AArch64", selectedAarch64, selectedPresent ? "machine=" + selectedInfo.optString("machine", "") : "sem binário"))
                     .put(check("Box64 tamanho mínimo", selectedSizeOk, selectedPresent ? "size=" + selectedInfo.optLong("size", 0L) : "sem binário"))
-                    .put(check("Box64 execução ainda bloqueada", true, "V14.1 audita/intake; não executa box64 --version ainda"))
+                    .put(check("Box64 execução ainda bloqueada", true, "V14.2 audita/intake; não executa box64 --version ainda"))
                     .put(check("Bedrock bloqueado", true, "nenhum servidor é iniciado nesta etapa"))
                     .put(check("shell livre bloqueado", true, "sem comando remoto arbitrário"));
 
             boolean prerequisitesOk = rootfsReadyFromPreflight;
             boolean ok = prerequisitesOk && box64Ready;
             JSONObject readiness = new JSONObject()
-                    .put("stage", "core-linux-box64-intake-preflight-v14.1")
+                    .put("stage", "core-linux-box64-intake-preflight-v14.2")
                     .put("rootfsSmokeCachePresent", rootfsSmokeCachePresent)
                     .put("rootfsSmokeOk", rootfsSmokeCacheOk)
                     .put("rootfsReadyFromPreflight", rootfsReadyFromPreflight)
@@ -585,7 +585,7 @@ public final class CoreLinuxRuntimeManager {
             JSONObject out = new JSONObject();
             out.put("ok", ok);
             out.put("type", "core_linux_box64_intake_preflight");
-            out.put("stage", "core-linux-box64-intake-preflight-v14.1");
+            out.put("stage", "core-linux-box64-intake-preflight-v14.2");
             out.put("state", ok ? "box64_intake_ready" : (prerequisitesOk ? "box64_intake_missing_binary" : "box64_intake_blocked"));
             out.put("termuxTouched", false);
             out.put("pythonTouched", false);
@@ -608,10 +608,10 @@ public final class CoreLinuxRuntimeManager {
             out.put("nextStep", ok ? "box64-version-smoke" : (prerequisitesOk ? "embutir Box64 arm64 auditado no APK" : "corrigir base/rootfs antes de Box64"));
             out.put("updatedAt", now());
             out.put("summary", ok
-                    ? "Box64 V14.1 pronto para smoke futuro · binário auditado embutido e base rootfs validada"
+                    ? "Box64 V14.2 pronto para smoke futuro · binário auditado embutido e base rootfs validada"
                     : (prerequisitesOk
-                        ? "Box64 V14.1 pendente · falta embutir libcoreworker_box64.so auditado"
-                        : "Box64 V14.1 bloqueado · base/rootfs ainda não está pronta"));
+                        ? "Box64 V14.2 pendente · falta embutir libcoreworker_box64.so auditado"
+                        : "Box64 V14.2 bloqueado · base/rootfs ainda não está pronta"));
             writeJson(new File(layout.runtime, "core-linux-box64-intake-preflight.json"), out);
             appendLog(new File(layout.logs, "core-linux-box64-intake-preflight.log"), out.optString("summary"));
             return out;
