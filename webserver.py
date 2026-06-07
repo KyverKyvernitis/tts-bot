@@ -311,6 +311,7 @@ CORE_WORKER_APK_V1_CAPABILITIES = [
     "core-linux-box64-intake-preflight-v14.2.1",
     "core-linux-box64-version-smoke-v15",
     "core-linux-box64-version-smoke-v15.1",
+    "core-linux-box64-version-smoke-v15.2",
     "core-linux-embedded-binaries-intake-v1",
     "core-linux-embedded-binaries-intake-v2",
     "core-linux-embedded-binaries-intake-v3",
@@ -1806,10 +1807,10 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
             clean["allowlistOnly"] = True
             clean["forceFresh"] = True
     elif job_type == "apk_core_linux_box64_smoke_test":
-        # V15.1: smoke controlado do Box64. O payload só informa o stage; o APK
+        # V15.2: smoke controlado do Box64. O payload só informa o stage; o APK
         # executa localmente apenas box64 --version/--help via allowlist fixa, com extração streaming.
         stage = _safe_short_text(payload.get("stage") or payload.get("smokeStage"), 80)
-        if stage in {"core-linux-box64-version-smoke-v15", "core-linux-box64-version-smoke-v15.1"}:
+        if stage in {"core-linux-box64-version-smoke-v15", "core-linux-box64-version-smoke-v15.1", "core-linux-box64-version-smoke-v15.2"}:
             clean["stage"] = stage
             clean["smokeStage"] = stage
             clean["allowlistOnly"] = True
@@ -1845,7 +1846,7 @@ CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_LEGACY_STAGE = "core-linux-rootfs-pr
 CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB = "apk_core_linux_box64_preflight"
 CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE = "core-linux-box64-intake-preflight-v14.2.1"
 CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB = "apk_core_linux_box64_smoke_test"
-CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE = "core-linux-box64-version-smoke-v15.1"
+CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE = "core-linux-box64-version-smoke-v15.2"
 CORE_WORKER_APP_LOCAL_MANUAL_QUEUE_TYPES = {
     CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB,
     CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB,
@@ -1882,10 +1883,10 @@ def _core_worker_app_job_fetch_blocker(job: dict, fetch_payload: dict) -> str:
         if stage != CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE:
             return "Box64 V14.2.1 exige payload.stage core-linux-box64-intake-preflight-v14.2.1"
     elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB:
-        if version_code < 109:
-            return "Box64 V15.1 exige APK appVersionCode >= 109"
+        if version_code < 110:
+            return "Box64 V15.2 exige APK appVersionCode >= 110"
         if stage != CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE:
-            return "Box64 V15.1 exige payload.stage core-linux-box64-version-smoke-v15.1"
+            return "Box64 V15.2 exige payload.stage core-linux-box64-version-smoke-v15.2"
     return ""
 
 
@@ -2236,7 +2237,7 @@ def _core_worker_app_queue_core_linux_box64_smoke_v15(worker_id: str = "", insta
     )
     queued["archivedPending"] = archived
     queued["stage"] = CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE
-    queued["safety"] = "manual smoke V15.1; extração streaming; somente box64 --version/--help; sem Bedrock; sem shell livre; sem comando arbitrário; sem binário x86_64 do usuário"
+    queued["safety"] = "manual smoke V15.2; extração adiada se glibc ausente + streaming noCompress; somente box64 --version/--help; sem Bedrock; sem shell livre; sem comando arbitrário; sem binário x86_64 do usuário"
     return queued
 
 def _core_worker_app_jobs_fetch(payload: dict) -> dict:

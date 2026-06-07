@@ -1,6 +1,8 @@
 package dev.core.worker;
 
 import android.content.Context;
+import android.content.res.AssetFileDescriptor;
+import android.content.res.AssetManager;
 import android.os.Build;
 
 import org.json.JSONArray;
@@ -11,6 +13,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.BufferedInputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
@@ -637,7 +640,7 @@ public final class CoreLinuxRuntimeManager {
             Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
             ensureBase(layout);
 
-            // V15.1: smoke controlado do Box64 com extração/validação streaming.
+            // V15.2: smoke controlado do Box64 com extração/validação streaming.
             // A correção principal é não carregar o asset grande em memória e não
             // serializar estruturas pesadas no JSON final. O Box64 continua sem
             // executar Bedrock, sem shell livre, sem comando remoto e sem binário
@@ -652,16 +655,42 @@ public final class CoreLinuxRuntimeManager {
             JSONObject rootfs = rootfsSnapshot(context, layout.core, "status");
             JSONObject rootfsState = rootfs.optJSONObject("rootfs");
             if (rootfsState == null) rootfsState = rootfs;
-            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "box64_smoke_v15_1");
+            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(context, layout.core, "box64_smoke_v15_2");
 
             File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir == null ? "" : context.getApplicationInfo().nativeLibraryDir);
             File proot = new File(nativeDir, "libcoreworker_proot.so");
             String assetPath = "core-linux/bin/box64";
             String expectedSha = "bae41f0619e51307f6e75e1d83b54137c5ba395ba46ba4394de264613bcd73ca";
-            JSONObject extract = prepareBox64AssetExecutable(context, layout, assetPath, expectedSha, 131072L);
-            File box64Host = new File(extract.optString("path", path(new File(layout.bin, "box64"))));
+            boolean assetListed = assetExists(context, assetPath);
+
+            // V15.2: primeiro verificamos o runtime glibc do rootfs. O Box64 é um
+            // ELF Linux/glibc grande (~28 MB); se o rootfs mínimo ainda não possui
+            // /lib/ld-linux-aarch64.so.1 e libs glibc, não há motivo para tocar o
+            // asset pesado. Isso evita OOM em aparelhos com heap pequeno e ainda
+            // retorna o estado correto: missing_glibc_runtime.
             JSONObject glibc = glibcRuntimeSnapshot(layout.rootfs);
-            JSONObject mount = prepareBox64GuestMountPoint(layout.rootfs, box64Host);
+
+            JSONObject extract = new JSONObject()
+                    .put("ok", false)
+                    .put("skipped", true)
+                    .put("mode", "deferred-until-glibc-ready-v15.2")
+                    .put("assetPath", assetPath)
+                    .put("path", path(new File(layout.bin, "box64")))
+                    .put("exists", new File(layout.bin, "box64").exists())
+                    .put("assetPresent", assetListed)
+                    .put("reason", "rootfs sem runtime glibc; extração pesada adiada para evitar OOM")
+                    .put("error", "extração adiada: runtime glibc ausente");
+            if (glibc.optBoolean("ok", false)) {
+                extract = prepareBox64AssetExecutable(context, layout, assetPath, expectedSha, 131072L);
+            }
+            File box64Host = new File(extract.optString("path", path(new File(layout.bin, "box64"))));
+            JSONObject mount = glibc.optBoolean("ok", false)
+                    ? prepareBox64GuestMountPoint(layout.rootfs, box64Host)
+                    : new JSONObject()
+                            .put("ok", false)
+                            .put("skipped", true)
+                            .put("mode", "deferred-until-glibc-ready-v15.2")
+                            .put("summary", "mountpoint Box64 adiado: runtime glibc ausente");
 
             boolean rootfsReady = rootfsState.optBoolean("rootfsReady", false);
             String validationLevel = rootfsState.optString("validationLevel", "");
@@ -679,13 +708,15 @@ public final class CoreLinuxRuntimeManager {
                     && extract.optBoolean("elf64", false)
                     && extract.optBoolean("aarch64", false)
                     && extract.optBoolean("canExecute", false);
-            // O V15.1 aceita o asset extraído como prova atual mesmo se o cache do
-            // V14.2.1 tiver sido limpo ou truncado. Isso evita reexecutar preflight
-            // pesado e mantém o teste idempotente.
-            boolean intakeReady = cachedIntakeReady || extractionReady;
             boolean glibcReady = glibc.optBoolean("ok", false);
-            boolean prerequisitesOk = rootfsReal && baseReady && executor.optBoolean("readyForRootfs", false) && intakeReady && extractionReady;
-            boolean canRun = prerequisitesOk && glibcReady && mount.optBoolean("ok", false) && proot.exists() && proot.canExecute();
+            // O V15.2 não exige extração quando o rootfs ainda não tem glibc, porque
+            // o smoke real não poderia executar mesmo assim. O cache do V14.2.1 é
+            // suficiente para provar que o asset está embutido/auditado até o rootfs
+            // real estar pronto.
+            boolean intakeReady = cachedIntakeReady || extractionReady || (!glibcReady && assetListed);
+            boolean preflightOk = rootfsReal && baseReady && executor.optBoolean("readyForRootfs", false) && intakeReady;
+            boolean prerequisitesOk = preflightOk && (!glibcReady || extractionReady);
+            boolean canRun = preflightOk && glibcReady && extractionReady && mount.optBoolean("ok", false) && proot.exists() && proot.canExecute();
 
             JSONArray checks = new JSONArray()
                     .put(check("Box64 asset/cache V14.2.1", intakeReady, intakeReady ? "asset auditado disponível" : "execute o preflight Box64 antes do smoke"))
@@ -696,7 +727,7 @@ public final class CoreLinuxRuntimeManager {
                     .put(check("runtime glibc do rootfs", glibcReady, glibcReady ? "loader/libs glibc encontrados no rootfs" : "faltam loader/libs glibc no rootfs"))
                     .put(check("PRoot disponível", proot.exists() && proot.canExecute(), path(proot)))
                     .put(check("mountpoint Box64", mount.optBoolean("ok", false), mount.optString("summary", "mountpoint pendente")))
-                    .put(check("Bedrock bloqueado", true, "nenhum servidor é iniciado no V15.1"))
+                    .put(check("Bedrock bloqueado", true, "nenhum servidor é iniciado no V15.2"))
                     .put(check("shell livre bloqueado", true, "somente box64 --version/--help via allowlist fixa"))
                     .put(check("x86_64 arbitrário bloqueado", true, "nenhum binário x86_64 do usuário é executado"));
 
@@ -734,21 +765,24 @@ public final class CoreLinuxRuntimeManager {
             boolean ok = canRun && versionOk && helpOk;
             if (ok) {
                 state = "box64_smoke_ok";
-            } else if (!prerequisitesOk) {
+            } else if (!preflightOk) {
                 state = "box64_smoke_blocked_preflight";
             } else if (!glibcReady) {
                 state = "box64_smoke_blocked_missing_glibc_runtime";
+            } else if (!extractionReady) {
+                state = "box64_smoke_extract_failed";
             } else {
                 state = "box64_smoke_failed";
             }
 
             JSONObject readiness = new JSONObject()
-                    .put("stage", "core-linux-box64-version-smoke-v15.1")
+                    .put("stage", "core-linux-box64-version-smoke-v15.2")
                     .put("rootfsRealValidated", rootfsReal)
                     .put("baseReadyFromPreflight", baseReady)
                     .put("executorReady", executor.optBoolean("readyForRootfs", false))
                     .put("box64IntakeCacheReady", cachedIntakeReady)
                     .put("box64IntakeReady", intakeReady)
+                    .put("box64AssetPresent", assetListed)
                     .put("box64Extracted", extract.optBoolean("exists", false))
                     .put("box64Copied", extract.optBoolean("copied", false))
                     .put("box64Sha256Ok", extract.optBoolean("sha256Ok", false))
@@ -758,6 +792,8 @@ public final class CoreLinuxRuntimeManager {
                     .put("glibcRuntimeReady", glibcReady)
                     .put("prootReady", proot.exists() && proot.canExecute())
                     .put("mountReady", mount.optBoolean("ok", false))
+                    .put("preflightOk", preflightOk)
+                    .put("extractionDeferredUntilGlibc", !glibcReady && extract.optBoolean("skipped", false))
                     .put("readyForSmoke", canRun);
 
             JSONObject cachedIntakeSummary = new JSONObject()
@@ -784,7 +820,7 @@ public final class CoreLinuxRuntimeManager {
             JSONObject out = new JSONObject();
             out.put("ok", ok);
             out.put("type", "core_linux_box64_version_smoke");
-            out.put("stage", "core-linux-box64-version-smoke-v15.1");
+            out.put("stage", "core-linux-box64-version-smoke-v15.2");
             out.put("state", state);
             out.put("termuxTouched", false);
             out.put("pythonTouched", false);
@@ -811,21 +847,23 @@ public final class CoreLinuxRuntimeManager {
             out.put("runnerPreflight", runnerSummary);
             out.put("nativeExecutor", executorSummary);
             out.put("memoryPolicy", new JSONObject()
-                    .put("stage", "v15.1")
-                    .put("assetCopy", "streaming")
-                    .put("sha256", "incremental")
+                    .put("stage", "v15.2")
+                    .put("assetCopy", glibcReady ? "streaming-openfd-or-buffer" : "deferred-missing-glibc")
+                    .put("sha256", glibcReady ? "incremental" : "deferred")
                     .put("elfHeader", "first-64-bytes")
                     .put("largeJsonPayloads", false)
                     .put("binaryContentInJson", false));
-            out.put("nextStep", ok ? "bedrock-preflight-sem-start" : (!glibcReady ? "importar rootfs Linux com glibc arm64" : "corrigir extração/runtime Box64 antes do Bedrock"));
+            out.put("nextStep", ok ? "bedrock-preflight-sem-start" : (!preflightOk ? "corrigir preflight/base antes do Box64" : (!glibcReady ? "importar rootfs Linux com glibc arm64" : "corrigir extração/runtime Box64 antes do Bedrock")));
             out.put("updatedAt", now());
             out.put("summary", ok
-                    ? "Box64 V15.1 ok · --version/--help executaram dentro do rootfs via PRoot sem Termux"
-                    : (!prerequisitesOk
-                        ? "Box64 V15.1 bloqueado · preflight/extração/base pendente"
+                    ? "Box64 V15.2 ok · --version/--help executaram dentro do rootfs via PRoot sem Termux"
+                    : (!preflightOk
+                        ? "Box64 V15.2 bloqueado · preflight/base pendente"
                         : (!glibcReady
-                            ? "Box64 V15.1 bloqueado · rootfs sem runtime glibc arm64 necessário"
-                            : "Box64 V15.1 falhou · ver stdout/stderr do --version/--help")));
+                            ? "Box64 V15.2 bloqueado · rootfs sem runtime glibc arm64 necessário"
+                            : (!extractionReady
+                                ? "Box64 V15.2 falhou na extração streaming · ver box64Extraction"
+                                : "Box64 V15.2 falhou · ver stdout/stderr do --version/--help"))));
             writeJson(new File(layout.runtime, "core-linux-box64-smoke-test.json"), out);
             appendLog(new File(layout.logs, "core-linux-box64-smoke-test.log"), out.optString("summary"));
             return out;
@@ -948,6 +986,34 @@ public final class CoreLinuxRuntimeManager {
 
 
 
+    private static boolean assetExists(Context context, String assetPath) {
+        try {
+            if (assetPath == null || assetPath.trim().isEmpty()) return false;
+            int slash = assetPath.lastIndexOf('/');
+            String dir = slash >= 0 ? assetPath.substring(0, slash) : "";
+            String name = slash >= 0 ? assetPath.substring(slash + 1) : assetPath;
+            String[] names = context.getAssets().list(dir);
+            if (names == null) return false;
+            for (String item : names) {
+                if (name.equals(item)) return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private static InputStream openAssetStreaming(Context context, String assetPath) throws Exception {
+        // Prefer openFd/createInputStream when the asset is stored uncompressed in the APK.
+        // This avoids the platform allocating a large decompression buffer for Box64.
+        try {
+            AssetFileDescriptor afd = context.getAssets().openFd(assetPath);
+            return new BufferedInputStream(new AutoCloseAssetInputStream(afd), 32768);
+        } catch (Throwable ignored) {
+            // Fallback for old APKs or compressed assets. It is still chunked, but V15.2
+            // only reaches this when glibc is ready; current minimal rootfs blocks before it.
+            return new BufferedInputStream(context.getAssets().open(assetPath, AssetManager.ACCESS_STREAMING), 32768);
+        }
+    }
+
     private static JSONObject prepareBox64AssetExecutable(Context context, Layout layout, String assetPath, String expectedSha256, long minBytes) {
         JSONObject out = new JSONObject();
         File dest = new File(layout.bin, "box64");
@@ -956,7 +1022,7 @@ public final class CoreLinuxRuntimeManager {
             layout.bin.mkdirs();
             out.put("assetPath", assetPath);
             out.put("path", path(dest));
-            out.put("mode", "streaming-copy-sha256-v15.1");
+            out.put("mode", "streaming-copy-sha256-v15.2");
 
             boolean destAlreadyOk = false;
             if (dest.exists()) {
@@ -982,8 +1048,8 @@ public final class CoreLinuxRuntimeManager {
                 byte[] header = new byte[64];
                 int headerLen = 0;
                 long size = 0L;
-                try (InputStream in = context.getAssets().open(assetPath); FileOutputStream fos = new FileOutputStream(tmp)) {
-                    byte[] buf = new byte[8192];
+                try (InputStream in = openAssetStreaming(context, assetPath); FileOutputStream fos = new FileOutputStream(tmp)) {
+                    byte[] buf = new byte[32768];
                     int n;
                     while ((n = in.read(buf)) > 0) {
                         if (headerLen < header.length) {
@@ -1789,6 +1855,27 @@ public final class CoreLinuxRuntimeManager {
             return file == null ? "" : file.getAbsolutePath();
         } catch (Throwable ignored) {
             return "";
+        }
+    }
+
+    private static final class AutoCloseAssetInputStream extends InputStream {
+        private final AssetFileDescriptor afd;
+        private final InputStream delegate;
+
+        AutoCloseAssetInputStream(AssetFileDescriptor afd) throws Exception {
+            this.afd = afd;
+            this.delegate = afd.createInputStream();
+        }
+
+        @Override
+        public int read() throws java.io.IOException { return delegate.read(); }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws java.io.IOException { return delegate.read(b, off, len); }
+
+        @Override
+        public void close() throws java.io.IOException {
+            try { delegate.close(); } finally { afd.close(); }
         }
     }
 
