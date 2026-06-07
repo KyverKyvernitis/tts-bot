@@ -5833,20 +5833,113 @@ public class MainActivity extends Activity {
         }
 
         if ("apk_core_linux_box64_smoke_test".equals(type)) {
-            JSONObject nativeExecutor = coreLinuxNativeExecutorSnapshot("test");
-            JSONObject smoke = CoreLinuxRuntimeManager.box64VersionSmokeTest(this, coreLinuxDir(), nativeExecutor);
+            // V15.3.1 hard guard: não chamar helper genérico do CoreLinuxRuntimeManager
+            // aqui. Os testes V15.1/V15.2/V15.3 provaram que qualquer caminho que
+            // passa por snapshot/intake/asset Box64 pode acionar alocação gigante no
+            // Android antes de termos um erro útil. Esta etapa só faz File.exists()
+            // em caminhos pequenos do rootfs e retorna JSON curto.
+            File core = coreLinuxDir();
+            File rootfs = new File(core, "rootfs");
+            File loader = new File(rootfs, "lib/ld-linux-aarch64.so.1");
+            File libc1 = new File(rootfs, "lib/aarch64-linux-gnu/libc.so.6");
+            File libc2 = new File(rootfs, "usr/lib/aarch64-linux-gnu/libc.so.6");
+            File libm1 = new File(rootfs, "lib/aarch64-linux-gnu/libm.so.6");
+            File libm2 = new File(rootfs, "usr/lib/aarch64-linux-gnu/libm.so.6");
+            File libresolv1 = new File(rootfs, "lib/aarch64-linux-gnu/libresolv.so.2");
+            File libresolv2 = new File(rootfs, "usr/lib/aarch64-linux-gnu/libresolv.so.2");
+            File marker = new File(rootfs, ".core-worker-rootfs-ready");
+            File osRelease = new File(rootfs, "etc/os-release");
+
+            boolean rootfsDir = rootfs.exists() && rootfs.isDirectory();
+            boolean rootfsMinimalReady = rootfsDir && marker.exists() && osRelease.exists();
+            boolean loaderOk = loader.exists() && loader.isFile();
+            boolean libcOk = (libc1.exists() && libc1.isFile()) || (libc2.exists() && libc2.isFile());
+            boolean libmOk = (libm1.exists() && libm1.isFile()) || (libm2.exists() && libm2.isFile());
+            boolean libresolvOk = (libresolv1.exists() && libresolv1.isFile()) || (libresolv2.exists() && libresolv2.isFile());
+            boolean glibcReady = loaderOk && libcOk && libmOk && libresolvOk;
+            boolean ok = rootfsMinimalReady && glibcReady;
+            String state = !rootfsMinimalReady
+                    ? "box64_glibc_preflight_blocked_rootfs"
+                    : (!glibcReady ? "box64_smoke_blocked_missing_glibc_runtime" : "box64_glibc_preflight_ready");
+            String summary = ok
+                    ? "Box64 V15.3.1 pronto · runtime glibc arm64 presente; próxima etapa pode tocar no asset Box64"
+                    : (!rootfsMinimalReady
+                        ? "Box64 V15.3.1 bloqueado · rootfs mínimo ainda não validado"
+                        : "Box64 V15.3.1 bloqueado · rootfs sem runtime glibc arm64 necessário");
+
+            JSONArray missing = new JSONArray();
+            if (!rootfsDir) missing.put("rootfs_dir");
+            if (!marker.exists()) missing.put(".core-worker-rootfs-ready");
+            if (!osRelease.exists()) missing.put("etc/os-release");
+            if (!loaderOk) missing.put("/lib/ld-linux-aarch64.so.1");
+            if (!libcOk) missing.put("libc.so.6");
+            if (!libmOk) missing.put("libm.so.6");
+            if (!libresolvOk) missing.put("libresolv.so.2");
+
+            JSONObject glibc = new JSONObject()
+                    .put("ok", glibcReady)
+                    .put("loader", loaderOk)
+                    .put("libc", libcOk)
+                    .put("libm", libmOk)
+                    .put("libresolv", libresolvOk)
+                    .put("missing", missing);
+
+            JSONObject checks = new JSONObject()
+                    .put("rootfsDir", rootfsDir)
+                    .put("readyMarker", marker.exists())
+                    .put("osRelease", osRelease.exists())
+                    .put("loader", loaderOk)
+                    .put("libc", libcOk)
+                    .put("libm", libmOk)
+                    .put("libresolv", libresolvOk)
+                    .put("box64AssetOpened", false)
+                    .put("box64Extracted", false)
+                    .put("box64Executed", false)
+                    .put("nativeExecutorSnapshotCalled", false)
+                    .put("genericRuntimeSnapshotCalled", false);
+
+            JSONObject smoke = new JSONObject()
+                    .put("ok", ok)
+                    .put("type", "core_linux_box64_glibc_hard_guard")
+                    .put("stage", "core-linux-box64-glibc-preflight-v15.3.1")
+                    .put("state", state)
+                    .put("summary", summary)
+                    .put("termuxTouched", false)
+                    .put("pythonTouched", false)
+                    .put("serviceStarted", false)
+                    .put("bedrockStarted", false)
+                    .put("box64Started", false)
+                    .put("shellOpened", false)
+                    .put("remoteCommandAllowed", false)
+                    .put("x86_64UserBinaryAllowed", false)
+                    .put("rootfsDir", rootfs.getAbsolutePath())
+                    .put("rootfsMinimalReady", rootfsMinimalReady)
+                    .put("glibcRuntime", glibc)
+                    .put("missing", missing)
+                    .put("checks", checks)
+                    .put("memoryPolicy", new JSONObject()
+                            .put("stage", "v15.3.1")
+                            .put("hardGuardInMainActivity", true)
+                            .put("doesNotCallCoreLinuxRuntimeManagerBox64Smoke", true)
+                            .put("doesNotOpenBox64Asset", true)
+                            .put("doesNotExtractBox64", true)
+                            .put("doesNotHashBox64", true)
+                            .put("largeJsonPayloads", false))
+                    .put("nextStep", ok ? "v15.4-extrair-box64-e-rodar-version-help" : "importar/preparar rootfs Linux arm64 com glibc")
+                    .put("updatedAt", System.currentTimeMillis());
+
+            result.put("ok", ok);
             safePutPayload(result, "coreLinuxBox64SmokeTest", smoke);
-            coreLinuxSummary = smoke.optString("summary", "smoke Box64 Core Linux executado");
-            coreLinuxState = smoke.optString("state", "box64_version_smoke");
-            coreLinuxPrepared = smoke.optBoolean("ok", coreLinuxPrepared);
+            coreLinuxSummary = summary;
+            coreLinuxState = state;
+            coreLinuxPrepared = ok;
             coreLinuxLastCheckAt = System.currentTimeMillis();
-            internalDiagnosticsSummary = coreLinuxSummary;
+            internalDiagnosticsSummary = summary;
             internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!smoke.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", smoke.optString("summary", "Box64 smoke pendente"));
+            if (!ok) {
+                result.put("error", summary);
             }
-            result.put("message", smoke.optString("summary", "Box64 smoke controlado executado sem iniciar Bedrock"));
+            result.put("message", summary);
             return result;
         }
 

@@ -313,6 +313,7 @@ CORE_WORKER_APK_V1_CAPABILITIES = [
     "core-linux-box64-version-smoke-v15.1",
     "core-linux-box64-version-smoke-v15.2",
     "core-linux-box64-glibc-preflight-v15.3",
+    "core-linux-box64-glibc-preflight-v15.3.1",
     "core-linux-embedded-binaries-intake-v1",
     "core-linux-embedded-binaries-intake-v2",
     "core-linux-embedded-binaries-intake-v3",
@@ -1808,10 +1809,10 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
             clean["allowlistOnly"] = True
             clean["forceFresh"] = True
     elif job_type == "apk_core_linux_box64_smoke_test":
-        # V15.3: preflight glibc isolado do Box64. O payload só informa o stage; o APK
-        # não abre o asset pesado nem executa Box64 enquanto o runtime glibc estiver ausente.
+        # V15.3.1: hard guard glibc isolado do Box64. O payload só informa o stage;
+        # o APK não chama helpers Box64 nem abre o asset pesado enquanto o runtime glibc estiver ausente.
         stage = _safe_short_text(payload.get("stage") or payload.get("smokeStage"), 80)
-        if stage in {"core-linux-box64-version-smoke-v15", "core-linux-box64-version-smoke-v15.1", "core-linux-box64-version-smoke-v15.2", "core-linux-box64-glibc-preflight-v15.3"}:
+        if stage in {"core-linux-box64-version-smoke-v15", "core-linux-box64-version-smoke-v15.1", "core-linux-box64-version-smoke-v15.2", "core-linux-box64-glibc-preflight-v15.3", "core-linux-box64-glibc-preflight-v15.3.1"}:
             clean["stage"] = stage
             clean["smokeStage"] = stage
             clean["allowlistOnly"] = True
@@ -1847,7 +1848,7 @@ CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_LEGACY_STAGE = "core-linux-rootfs-pr
 CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB = "apk_core_linux_box64_preflight"
 CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE = "core-linux-box64-intake-preflight-v14.2.1"
 CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB = "apk_core_linux_box64_smoke_test"
-CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE = "core-linux-box64-glibc-preflight-v15.3"
+CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE = "core-linux-box64-glibc-preflight-v15.3.1"
 CORE_WORKER_APP_LOCAL_MANUAL_QUEUE_TYPES = {
     CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB,
     CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB,
@@ -1884,10 +1885,10 @@ def _core_worker_app_job_fetch_blocker(job: dict, fetch_payload: dict) -> str:
         if stage != CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE:
             return "Box64 V14.2.1 exige payload.stage core-linux-box64-intake-preflight-v14.2.1"
     elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB:
-        if version_code < 111:
-            return "Box64 V15.3 exige APK appVersionCode >= 111"
+        if version_code < 112:
+            return "Box64 V15.3.1 exige APK appVersionCode >= 112"
         if stage != CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE:
-            return "Box64 V15.3 exige payload.stage core-linux-box64-glibc-preflight-v15.3"
+            return "Box64 V15.3.1 exige payload.stage core-linux-box64-glibc-preflight-v15.3.1"
     return ""
 
 
@@ -2226,7 +2227,7 @@ def _core_worker_app_queue_core_linux_box64_smoke_v15(worker_id: str = "", insta
             job_type=CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB,
             install_id=install_id,
             worker_id=worker_id,
-            reason="replace-with-single-v15-3-box64-glibc-preflight",
+            reason="replace-with-single-v15-3-1-box64-glibc-hard-guard",
         )
         _atomic_write_json(path, data, mode=0o600)
     queued = _core_worker_app_queue_internal_jobs_for_worker(
@@ -2238,7 +2239,7 @@ def _core_worker_app_queue_core_linux_box64_smoke_v15(worker_id: str = "", insta
     )
     queued["archivedPending"] = archived
     queued["stage"] = CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE
-    queued["safety"] = "manual preflight V15.3; não abre asset Box64; só verifica glibc do rootfs; sem Bedrock; sem shell livre; sem comando arbitrário; sem binário x86_64 do usuário"
+    queued["safety"] = "manual preflight V15.3.1; hard guard no handler; não chama helpers Box64; só File.exists glibc do rootfs; sem Bedrock; sem shell livre; sem comando arbitrário; sem binário x86_64 do usuário"
     return queued
 
 def _core_worker_app_jobs_fetch(payload: dict) -> dict:
