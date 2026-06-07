@@ -333,6 +333,7 @@ public class CoreWorkerRuntimeService extends Service {
                 .put("core-linux-rootfs-proot-smoke-v13.3")
                 .put("core-linux-box64-intake-preflight-v14.2.1")
                 .put("core-linux-box64-version-smoke-v15")
+                .put("core-linux-box64-version-smoke-v15.1")
                 .put("core-linux-embedded-binaries-intake-v1")
                 .put("core-linux-embedded-binaries-intake-v2")
                 .put("core-linux-embedded-binaries-intake-v3")

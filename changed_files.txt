@@ -1,9 +1,7 @@
-PATCH_NOTES_V15.md
+PATCH_NOTES_V15_1.md
+webserver.py
 android/core-worker-app/app/build.gradle
 android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRuntimeManager.java
-android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
 android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
 android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java
-webserver.py
-changed_files.txt
-patch.diff
+android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
