@@ -58,8 +58,8 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 110
-        versionName "0.5.95"
+        versionCode 111
+        versionName "0.5.96"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -93,7 +93,7 @@ android {
 
 
     androidResources {
-        // V15.2: Box64 é asset executável Linux/glibc grande. Mantê-lo sem
+        // V15.3: Box64 é asset executável Linux/glibc grande. Mantê-lo sem
         // compressão evita alocação gigante do AssetManager durante extração.
         noCompress += ["box64"]
     }
@@ -270,7 +270,7 @@ tasks.register("verifyCoreLinuxBox64Asset") {
     doLast {
         def f = file("${projectDir}/src/main/assets/${coreLinuxBox64Asset.file}")
         if (!f.exists()) {
-            println("Core Linux Box64 asset v15.2: ausente; preflight/smoke deve reportar missing_binary")
+            println("Core Linux Box64 asset v15.3: ausente; preflight/smoke deve reportar missing_binary")
             return
         }
         byte[] head = new byte[Math.min(64, Math.max(0, f.length() as int))]
@@ -289,7 +289,7 @@ tasks.register("verifyCoreLinuxBox64Asset") {
         if (!reasons.isEmpty()) {
             throw new GradleException("Core Linux Box64 asset inválido: ${reasons.join('; ')}")
         }
-        println("Core Linux Box64 asset v15.2: present=true size=${f.length()} path=${coreLinuxBox64Asset.file}; execução controlada só por smoke allowlist; asset noCompress")
+        println("Core Linux Box64 asset v15.3: present=true size=${f.length()} path=${coreLinuxBox64Asset.file}; não aberto pelo preflight glibc V15.3; asset noCompress")
     }
 }
 

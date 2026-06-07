@@ -175,6 +175,7 @@ public class CoreWorkerUpdateJobService extends JobService {
                 .put("core-linux-box64-intake-preflight-v14.2.1")
                 .put("core-linux-box64-version-smoke-v15")
                 .put("core-linux-box64-version-smoke-v15.2")
+                .put("core-linux-box64-glibc-preflight-v15.3")
                 .put("minecraft-bedrock-manager-safe-plan");
     }
 
