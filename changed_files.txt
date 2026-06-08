@@ -1,5 +1,7 @@
 webserver.py
 android/core-worker-app/app/build.gradle
+android/core-worker-app/app/src/main/java/dev/core/worker/CoreLinuxRootfsImportManager.java
 android/core-worker-app/app/src/main/java/dev/core/worker/MainActivity.java
-PATCH_NOTES_V15_3_1.md
-changed_files.txt
+android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerRuntimeService.java
+android/core-worker-app/app/src/main/java/dev/core/worker/CoreWorkerUpdateJobService.java
+PATCH_NOTES_V16.md

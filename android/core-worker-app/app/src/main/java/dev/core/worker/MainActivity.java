@@ -4648,6 +4648,8 @@ public class MainActivity extends Activity {
                 .put("core-linux-box64-version-smoke-v15")
                 .put("core-linux-box64-version-smoke-v15.2")
                 .put("core-linux-box64-glibc-preflight-v15.3")
+                .put("core-linux-box64-glibc-preflight-v15.3.1")
+                .put("core-linux-rootfs-glibc-intake-preflight-v16")
                 .put("core-linux-embedded-binaries-intake-v1")
                 .put("core-linux-embedded-binaries-intake-v2")
                 .put("core-linux-embedded-binaries-intake-v3")
@@ -5115,6 +5117,7 @@ public class MainActivity extends Activity {
                 .put("apk_core_linux_rootfs_import_validate")
                 .put("apk_core_linux_rootfs_import_abort")
                 .put("apk_core_linux_rootfs_real_status")
+                .put("apk_core_linux_rootfs_glibc_preflight")
                 .put("apk_core_linux_runner_status")
                 .put("apk_core_linux_runner_preflight")
                 .put("apk_core_linux_runner_requirements")
@@ -5135,6 +5138,7 @@ public class MainActivity extends Activity {
                 || "apk_core_linux_rootfs_import_validate".equals(t)
                 || "apk_core_linux_rootfs_import_abort".equals(t)
                 || "apk_core_linux_rootfs_real_status".equals(t)
+                || "apk_core_linux_rootfs_glibc_preflight".equals(t)
                 || "apk_core_linux_runner_status".equals(t)
                 || "apk_core_linux_runner_preflight".equals(t)
                 || "apk_core_linux_runner_requirements".equals(t)
@@ -5693,11 +5697,14 @@ public class MainActivity extends Activity {
 
         if ("apk_core_linux_rootfs_import_status".equals(type)
                 || "apk_core_linux_rootfs_real_status".equals(type)
+                || "apk_core_linux_rootfs_glibc_preflight".equals(type)
                 || "apk_core_linux_rootfs_import_validate".equals(type)
                 || "apk_core_linux_rootfs_import_abort".equals(type)) {
             JSONObject rootfsImport;
             if ("apk_core_linux_rootfs_import_abort".equals(type)) {
                 rootfsImport = CoreLinuxRootfsImportManager.abort(this, coreLinuxDir());
+            } else if ("apk_core_linux_rootfs_glibc_preflight".equals(type)) {
+                rootfsImport = CoreLinuxRootfsImportManager.glibcPreflight(this, coreLinuxDir());
             } else if ("apk_core_linux_rootfs_import_validate".equals(type) || "apk_core_linux_rootfs_real_status".equals(type)) {
                 rootfsImport = CoreLinuxRootfsImportManager.validateActive(this, coreLinuxDir());
             } else {

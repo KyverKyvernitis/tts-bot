@@ -72,6 +72,55 @@ public final class CoreLinuxRootfsImportManager {
         }
     }
 
+
+    public static JSONObject glibcPreflight(Context context, File coreLinuxDir) {
+        try {
+            Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
+            ensureBase(layout);
+            JSONObject validation = validateReal(layout.rootfs);
+            JSONObject glibc = validation.optJSONObject("glibcRuntime");
+            if (glibc == null) glibc = glibcRuntimeSnapshot(layout.rootfs);
+            boolean ok = validation.optBoolean("ok", false) && glibc.optBoolean("ok", false);
+            JSONObject rootfsState = readJson(layout.rootfsStateFile);
+            JSONObject out = new JSONObject();
+            out.put("ok", ok);
+            out.put("component", "core_linux_rootfs_glibc_preflight");
+            out.put("action", "glibc_preflight");
+            out.put("stage", "core-linux-rootfs-glibc-intake-preflight-v16");
+            out.put("state", ok ? "rootfs_glibc_ready_for_box64" : "rootfs_glibc_preflight_missing_runtime");
+            out.put("summary", ok
+                    ? "Rootfs Linux arm64 com glibc validado · próximo passo pode executar smoke Box64"
+                    : "Rootfs V16 pendente · falta runtime glibc arm64 para Box64");
+            out.put("rootfsReady", ok);
+            out.put("distributionReady", ok);
+            out.put("validationLevel", ok ? "real-glibc" : validation.optString("validationLevel", "real"));
+            out.put("readyForBox64Install", ok);
+            out.put("readyForBox64Smoke", ok);
+            out.put("readyForBedrockStart", false);
+            out.put("rootfsDir", path(layout.rootfs));
+            out.put("rootfsState", rootfsState);
+            out.put("validation", validation);
+            out.put("glibcRuntime", glibc);
+            out.put("missing", validation.optJSONArray("missing") == null ? new JSONArray() : validation.optJSONArray("missing"));
+            out.put("checks", validation.optJSONObject("checks") == null ? new JSONObject() : validation.optJSONObject("checks"));
+            out.put("termuxTouched", false);
+            out.put("pythonTouched", false);
+            out.put("serviceStarted", false);
+            out.put("bedrockStarted", false);
+            out.put("box64Started", false);
+            out.put("shellOpened", false);
+            out.put("remoteCommandAllowed", false);
+            out.put("safety", safetySummary());
+            out.put("nextStep", ok ? "v17-box64-version-help-smoke" : "importar rootfs Linux arm64 com glibc pelo seletor do APK");
+            out.put("updatedAt", now());
+            writeJson(layout.importStateFile, out);
+            appendLog(layout.importLog, out.optString("summary"));
+            return out;
+        } catch (Throwable exc) {
+            return error("core_linux_rootfs_glibc_preflight", exc);
+        }
+    }
+
     public static JSONObject validateActive(Context context, File coreLinuxDir) {
         try {
             Layout layout = new Layout(resolveCoreLinuxDir(context, coreLinuxDir));
@@ -81,10 +130,10 @@ public final class CoreLinuxRootfsImportManager {
             out.put("ok", validation.optBoolean("ok", false));
             out.put("component", "core_linux_rootfs_import");
             out.put("action", "validate_active");
-            out.put("state", validation.optBoolean("ok", false) ? "rootfs_real_validated" : "rootfs_real_validation_failed");
+            out.put("state", validation.optBoolean("ok", false) ? "rootfs_real_glibc_validated" : "rootfs_real_validation_failed");
             out.put("summary", validation.optBoolean("ok", false)
-                    ? "Rootfs real validado · runner real ainda bloqueado"
-                    : "Rootfs real não passou na validação");
+                    ? "Rootfs real com glibc validado · Box64 smoke pode ser liberado em etapa futura"
+                    : "Rootfs real não passou na validação glibc V16");
             out.put("validation", validation);
             out.put("rootfsDir", path(layout.rootfs));
             out.put("safety", safetySummary());
@@ -200,8 +249,8 @@ public final class CoreLinuxRootfsImportManager {
             out.put("ok", true);
             out.put("component", "core_linux_rootfs_import");
             out.put("action", "import");
-            out.put("state", "rootfs_real_validated");
-            out.put("summary", "Rootfs real importado e validado · runner real ainda bloqueado");
+            out.put("state", "rootfs_real_glibc_validated");
+            out.put("summary", "Rootfs real com glibc importado e validado · Box64 smoke pode ser liberado em etapa futura");
             out.put("fileName", clean(displayName, 240));
             out.put("sha256", actualSha);
             out.put("sha256Verified", shaVerified);
@@ -284,6 +333,9 @@ public final class CoreLinuxRootfsImportManager {
         checks.put("homeCoreDir", new File(rootfs, "home/core").isDirectory());
         checks.put("varLogDir", new File(rootfs, "var/log").isDirectory());
         checks.put("policy", new File(rootfs, "opt/core-worker/rootfs-policy.json").exists());
+        checks.put("binSh", new File(rootfs, "bin/sh").exists() || new File(rootfs, "usr/bin/sh").exists());
+        JSONObject glibc = glibcRuntimeSnapshot(rootfs);
+        checks.put("glibcRuntime", glibc.optBoolean("ok", false));
         JSONArray missing = new JSONArray();
         JSONArray names = checks.names();
         if (names != null) {
@@ -292,16 +344,25 @@ public final class CoreLinuxRootfsImportManager {
                 if (!checks.optBoolean(key, false)) missing.put(key);
             }
         }
+        JSONArray glibcMissing = glibc.optJSONArray("missing");
+        if (glibcMissing != null) {
+            for (int i = 0; i < glibcMissing.length(); i++) {
+                String item = glibcMissing.optString(i, "");
+                if (!item.isEmpty()) missing.put(item);
+            }
+        }
         boolean ok = missing.length() == 0;
         return new JSONObject()
                 .put("ok", ok)
                 .put("rootfsReady", ok)
-                .put("state", ok ? "rootfs_real_validated" : "rootfs_real_validation_failed")
-                .put("validationLevel", "real")
+                .put("state", ok ? "rootfs_real_glibc_validated" : "rootfs_real_validation_failed")
+                .put("validationLevel", ok ? "real-glibc" : "real")
                 .put("distributionReady", ok)
                 .put("readyForBox64Install", ok)
+                .put("readyForBox64Smoke", ok)
                 .put("readyForBedrockStart", false)
                 .put("checks", checks)
+                .put("glibcRuntime", glibc)
                 .put("missing", missing)
                 .put("manifest", manifest);
     }
@@ -312,11 +373,12 @@ public final class CoreLinuxRootfsImportManager {
                 .put("schema", "core-worker-rootfs-state-v1")
                 .put("ok", ok)
                 .put("action", "import")
-                .put("state", ok ? "rootfs_real_validated" : "rootfs_real_validation_failed")
+                .put("state", ok ? "rootfs_real_glibc_validated" : "rootfs_real_validation_failed")
                 .put("rootfsReady", ok)
-                .put("validationLevel", "real")
+                .put("validationLevel", ok ? "real-glibc" : "real")
                 .put("distributionReady", ok)
                 .put("readyForBox64Install", ok)
+                .put("readyForBox64Smoke", ok)
                 .put("readyForBedrockStart", false)
                 .put("termuxRequired", false)
                 .put("runnerBlocked", true)
@@ -330,10 +392,10 @@ public final class CoreLinuxRootfsImportManager {
                 .put("validation", validation)
                 .put("blockers", ok ? new JSONArray() : validation.optJSONArray("missing"))
                 .put("warnings", new JSONArray()
-                        .put("rootfs real importado; execução de binários importados segue bloqueada nesta etapa")
+                        .put("rootfs real com glibc validado; execução de binários importados segue bloqueada nesta etapa")
                         .put("Bedrock/Box64/shell livre continuam bloqueados"))
                 .put("updatedAt", now())
-                .put("summary", ok ? "Rootfs real validado · runner real ainda bloqueado" : "Rootfs real falhou na validação");
+                .put("summary", ok ? "Rootfs real com glibc validado · Box64 smoke pode ser liberado em etapa futura" : "Rootfs real falhou na validação glibc V16");
     }
 
     private static JSONObject realManifest(File rootfs, String fileName, String sha, boolean expectedProvided, boolean shaVerified, TarStats stats, long started) throws Exception {
@@ -377,6 +439,7 @@ public final class CoreLinuxRootfsImportManager {
                 .put("appSpecificStorage", true)
                 .put("termuxFallbackOnly", true)
                 .put("rootfsImportV1", true)
+                .put("glibcRuntimeRequiredForBox64", true)
                 .put("runnerBlocked", true);
     }
 
@@ -714,6 +777,100 @@ public final class CoreLinuxRootfsImportManager {
         }
     }
 
+
+    private static JSONObject glibcRuntimeSnapshot(File rootfsDir) {
+        JSONObject out = new JSONObject();
+        try {
+            JSONObject loader = fileStatusRelative(rootfsDir, "lib/ld-linux-aarch64.so.1");
+            JSONObject libc = firstExistingRelative(rootfsDir,
+                    "lib/aarch64-linux-gnu/libc.so.6",
+                    "usr/lib/aarch64-linux-gnu/libc.so.6",
+                    "lib/libc.so.6");
+            JSONObject libm = firstExistingRelative(rootfsDir,
+                    "lib/aarch64-linux-gnu/libm.so.6",
+                    "usr/lib/aarch64-linux-gnu/libm.so.6",
+                    "lib/libm.so.6");
+            JSONObject libresolv = firstExistingRelative(rootfsDir,
+                    "lib/aarch64-linux-gnu/libresolv.so.2",
+                    "usr/lib/aarch64-linux-gnu/libresolv.so.2",
+                    "lib/libresolv.so.2");
+            boolean ok = loader.optBoolean("exists", false)
+                    && libc.optBoolean("exists", false)
+                    && libm.optBoolean("exists", false)
+                    && libresolv.optBoolean("exists", false);
+            JSONArray missing = new JSONArray();
+            if (!loader.optBoolean("exists", false)) missing.put("/lib/ld-linux-aarch64.so.1");
+            if (!libc.optBoolean("exists", false)) missing.put("libc.so.6");
+            if (!libm.optBoolean("exists", false)) missing.put("libm.so.6");
+            if (!libresolv.optBoolean("exists", false)) missing.put("libresolv.so.2");
+            out.put("ok", ok);
+            out.put("stage", "core-linux-rootfs-glibc-intake-preflight-v16");
+            out.put("rootfsDir", path(rootfsDir));
+            out.put("loader", loader);
+            out.put("libc", libc);
+            out.put("libm", libm);
+            out.put("libresolv", libresolv);
+            out.put("missing", missing);
+            out.put("required", new JSONArray()
+                    .put("/lib/ld-linux-aarch64.so.1")
+                    .put("libc.so.6")
+                    .put("libm.so.6")
+                    .put("libresolv.so.2"));
+            out.put("summary", ok ? "runtime glibc arm64 presente no rootfs" : "runtime glibc arm64 ausente/incompleto no rootfs");
+            return out;
+        } catch (Throwable exc) {
+            try {
+                out.put("ok", false);
+                out.put("error", shortThrowable(exc));
+                out.put("missing", new JSONArray().put("glibc_runtime_probe_error"));
+            } catch (Throwable ignored) {}
+            return out;
+        }
+    }
+
+    private static JSONObject firstExistingRelative(File rootfsDir, String... rels) {
+        JSONArray checked = new JSONArray();
+        JSONObject first = new JSONObject();
+        try {
+            if (rels != null) {
+                for (String rel : rels) {
+                    JSONObject row = fileStatusRelative(rootfsDir, rel);
+                    checked.put(row);
+                    if (row.optBoolean("exists", false) && first.length() == 0) first = row;
+                }
+            }
+            if (first.length() == 0) {
+                first.put("exists", false);
+                first.put("path", "");
+                first.put("relativePath", rels != null && rels.length > 0 ? rels[0] : "");
+            }
+            first.put("checked", checked);
+        } catch (Throwable exc) {
+            try { first.put("exists", false).put("error", shortThrowable(exc)).put("checked", checked); } catch (Throwable ignored) {}
+        }
+        return first;
+    }
+
+    private static JSONObject fileStatusRelative(File rootfsDir, String rel) {
+        JSONObject out = new JSONObject();
+        try {
+            String safeRel = String.valueOf(rel == null ? "" : rel).replace('\\', '/');
+            while (safeRel.startsWith("/")) safeRel = safeRel.substring(1);
+            File file = new File(rootfsDir, safeRel);
+            boolean exists = file.exists();
+            out.put("relativePath", safeRel);
+            out.put("path", path(file));
+            out.put("exists", exists);
+            out.put("isFile", exists && file.isFile());
+            out.put("isDirectory", exists && file.isDirectory());
+            out.put("canRead", exists && file.canRead());
+            out.put("size", exists && file.isFile() ? Math.max(0L, file.length()) : 0L);
+        } catch (Throwable exc) {
+            try { out.put("relativePath", clean(rel, 180)).put("exists", false).put("error", shortThrowable(exc)); } catch (Throwable ignored) {}
+        }
+        return out;
+    }
+
     private static String readDistribution(File rootfs) {
         try {
             byte[] raw = readBytes(new File(rootfs, "etc/os-release"), 8192);
@@ -788,7 +945,7 @@ public final class CoreLinuxRootfsImportManager {
     }
 
     private static String safetySummary() {
-        return "importação rootfs v1: arquivo escolhido pelo usuário, staging seguro, SHA-256 calculado, sem shell livre, sem executar binários, sem iniciar Bedrock";
+        return "importação rootfs v16: arquivo escolhido pelo usuário, staging seguro, SHA-256 calculado, valida glibc arm64, sem shell livre, sem executar binários, sem iniciar Bedrock";
     }
 
     private static JSONObject error(String component, Throwable exc) {

@@ -176,6 +176,8 @@ public class CoreWorkerUpdateJobService extends JobService {
                 .put("core-linux-box64-version-smoke-v15")
                 .put("core-linux-box64-version-smoke-v15.2")
                 .put("core-linux-box64-glibc-preflight-v15.3")
+                .put("core-linux-box64-glibc-preflight-v15.3.1")
+                .put("core-linux-rootfs-glibc-intake-preflight-v16")
                 .put("minecraft-bedrock-manager-safe-plan");
     }
 
@@ -207,6 +209,7 @@ public class CoreWorkerUpdateJobService extends JobService {
                 .put("apk_core_linux_rootfs_import_validate")
                 .put("apk_core_linux_rootfs_import_abort")
                 .put("apk_core_linux_rootfs_real_status")
+                .put("apk_core_linux_rootfs_glibc_preflight")
                 .put("apk_core_linux_runner_status")
                 .put("apk_core_linux_runner_preflight")
                 .put("apk_core_linux_runner_requirements")

@@ -371,6 +371,7 @@ CORE_WORKER_APK_V1_SUPPORTED_TASKS = [
     "apk_core_linux_rootfs_import_validate",
     "apk_core_linux_rootfs_import_abort",
     "apk_core_linux_rootfs_real_status",
+    "apk_core_linux_rootfs_glibc_preflight",
     "apk_core_linux_runner_status",
     "apk_core_linux_runner_preflight",
     "apk_core_linux_runner_requirements",
@@ -1569,6 +1570,7 @@ CORE_WORKER_APP_MANUAL_JOB_TYPES = {
     "apk_core_linux_rootfs_import_validate",
     "apk_core_linux_rootfs_import_abort",
     "apk_core_linux_rootfs_real_status",
+    "apk_core_linux_rootfs_glibc_preflight",
     "apk_core_linux_runner_status",
     "apk_core_linux_runner_preflight",
     "apk_core_linux_runner_requirements",
@@ -1684,6 +1686,7 @@ CORE_WORKER_APP_JOB_LABELS = {
     "apk_core_linux_rootfs_import_validate": "validar rootfs real",
     "apk_core_linux_rootfs_import_abort": "cancelar import rootfs",
     "apk_core_linux_rootfs_real_status": "rootfs real",
+    "apk_core_linux_rootfs_glibc_preflight": "rootfs glibc preflight",
     "apk_core_linux_runner_status": "runner Core Linux status",
     "apk_core_linux_runner_preflight": "runner Core Linux preflight",
     "apk_core_linux_runner_requirements": "runner Core Linux requisitos",
@@ -1808,6 +1811,17 @@ def _core_worker_app_safe_job_payload(job: dict) -> dict:
             clean["smokeStage"] = stage
             clean["allowlistOnly"] = True
             clean["forceFresh"] = True
+    elif job_type == "apk_core_linux_rootfs_glibc_preflight":
+        # V16: só preflight de rootfs/glibc. Não executa binários, não toca Box64,
+        # não abre shell e não aceita comando livre no payload.
+        stage = _safe_short_text(payload.get("stage") or payload.get("smokeStage"), 80)
+        if stage in {"", "core-linux-rootfs-glibc-intake-preflight-v16"}:
+            clean["stage"] = "core-linux-rootfs-glibc-intake-preflight-v16"
+            clean["smokeStage"] = "core-linux-rootfs-glibc-intake-preflight-v16"
+            clean["allowlistOnly"] = True
+            clean["forceFresh"] = True
+            clean["noBedrock"] = True
+            clean["noBox64"] = True
     elif job_type == "apk_core_linux_box64_smoke_test":
         # V15.3.1: hard guard glibc isolado do Box64. O payload só informa o stage;
         # o APK não chama helpers Box64 nem abre o asset pesado enquanto o runtime glibc estiver ausente.
@@ -1849,11 +1863,14 @@ CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB = "apk_core_linux_box64_preflight"
 CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE = "core-linux-box64-intake-preflight-v14.2.1"
 CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB = "apk_core_linux_box64_smoke_test"
 CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE = "core-linux-box64-glibc-preflight-v15.3.1"
+CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_JOB = "apk_core_linux_rootfs_glibc_preflight"
+CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_STAGE = "core-linux-rootfs-glibc-intake-preflight-v16"
 CORE_WORKER_APP_LOCAL_MANUAL_QUEUE_TYPES = {
     CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB,
     CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB,
     CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB,
     CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB,
+    CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_JOB,
 }
 
 
@@ -1889,6 +1906,11 @@ def _core_worker_app_job_fetch_blocker(job: dict, fetch_payload: dict) -> str:
             return "Box64 V15.3.1 exige APK appVersionCode >= 112"
         if stage != CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE:
             return "Box64 V15.3.1 exige payload.stage core-linux-box64-glibc-preflight-v15.3.1"
+    elif job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_JOB:
+        if version_code < 113:
+            return "Rootfs glibc V16 exige APK appVersionCode >= 113"
+        if stage != CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_STAGE:
+            return "Rootfs glibc V16 exige payload.stage core-linux-rootfs-glibc-intake-preflight-v16"
     return ""
 
 
@@ -2057,7 +2079,7 @@ def _core_worker_app_queue_internal_jobs_for_worker(worker_id: str = "", install
                 "issuedAt": now,
                 "title": CORE_WORKER_APP_JOB_LABELS.get(typ, typ),
                 "status": "pending",
-                "timeoutSec": 240 if typ in {CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB, CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB, CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB} else CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS,
+                "timeoutSec": 240 if typ in {CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB, CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB, CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB, CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB, CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_JOB} else CORE_WORKER_APP_JOB_DEFAULT_TIMEOUT_SECONDS,
                 "maxRetries": 1,
                 "installId": install_id,
                 "workerId": worker_id,
@@ -2070,6 +2092,8 @@ def _core_worker_app_queue_internal_jobs_for_worker(worker_id: str = "", install
                 job["payload"] = {"stage": CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE, "allowlistOnly": True, "forceFresh": True, "noExecute": True}
             elif typ == CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB:
                 job["payload"] = {"stage": CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE, "allowlistOnly": True, "forceFresh": True, "noBedrock": True, "noUserBinary": True}
+            elif typ == CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_JOB:
+                job["payload"] = {"stage": CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_STAGE, "allowlistOnly": True, "forceFresh": True, "noBedrock": True, "noBox64": True}
             pending.append(job)
             created.append(job)
         data["pending"] = pending[-160:]
@@ -2240,6 +2264,39 @@ def _core_worker_app_queue_core_linux_box64_smoke_v15(worker_id: str = "", insta
     queued["archivedPending"] = archived
     queued["stage"] = CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE
     queued["safety"] = "manual preflight V15.3.1; hard guard no handler; não chama helpers Box64; só File.exists glibc do rootfs; sem Bedrock; sem shell livre; sem comando arbitrário; sem binário x86_64 do usuário"
+    return queued
+
+
+
+def _core_worker_app_queue_core_linux_rootfs_glibc_v16(worker_id: str = "", install_id: str = "", *, reason: str = "manual-v16-rootfs-glibc-preflight") -> dict:
+    path = _core_worker_app_jobs_path()
+    worker_id = _safe_short_text(worker_id, 80)
+    install_id = _safe_short_text(install_id, 80)
+    with _core_worker_app_jobs_lock:
+        try:
+            data = _load_json_cached(path, {})
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        archived = _core_worker_app_archive_pending_jobs(
+            data,
+            job_type=CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_JOB,
+            install_id=install_id,
+            worker_id=worker_id,
+            reason="replace-with-single-v16-rootfs-glibc-preflight",
+        )
+        _atomic_write_json(path, data, mode=0o600)
+    queued = _core_worker_app_queue_internal_jobs_for_worker(
+        worker_id=worker_id,
+        install_id=install_id,
+        kinds=[CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_JOB],
+        reason=reason,
+        allow_manual=True,
+    )
+    queued["archivedPending"] = archived
+    queued["stage"] = CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_STAGE
+    queued["safety"] = "manual preflight V16; valida rootfs/glibc; sem executar binários importados; sem Box64; sem Bedrock; sem shell livre"
     return queued
 
 def _core_worker_app_jobs_fetch(payload: dict) -> dict:
@@ -3230,7 +3287,9 @@ def core_worker_app_jobs_enqueue():
     elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB:
         default_reason = "manual-v14-2-1-box64-asset-preflight"
     elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB:
-        default_reason = "manual-v15-1-box64-version-smoke"
+        default_reason = "manual-v15-3-1-box64-glibc-hard-guard"
+    elif job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_JOB:
+        default_reason = "manual-v16-rootfs-glibc-preflight"
     reason = _safe_short_text(payload.get("reason") or default_reason, 80)
     if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB:
         result = _core_worker_app_queue_core_linux_rootfs_smoke_v13(
@@ -3246,6 +3305,12 @@ def core_worker_app_jobs_enqueue():
         )
     elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB:
         result = _core_worker_app_queue_core_linux_box64_smoke_v15(
+            worker_id=worker_id,
+            install_id=install_id,
+            reason=reason,
+        )
+    elif job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_JOB:
+        result = _core_worker_app_queue_core_linux_rootfs_glibc_v16(
             worker_id=worker_id,
             install_id=install_id,
             reason=reason,
