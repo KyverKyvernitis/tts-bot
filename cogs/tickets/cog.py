@@ -230,11 +230,18 @@ class TicketsCog(commands.Cog):
             pass
 
     async def _after_editor_modal_save(self, interaction: discord.Interaction, guild_id: int, staff_id: int, text: str):
+        cfg = self._get_config(guild_id)
+        panel = cfg.get("panel") or {}
+        panel_is_published = bool(int(panel.get("channel_id") or 0) and int(panel.get("message_id") or 0))
+        refresh_note = ""
+        if panel_is_published:
+            ok, message = await self._refresh_public_panel(guild_id)
+            refresh_note = "\nPainel publicado atualizado." if ok else f"\nAviso: {message}"
         await self._refresh_editor_message(guild_id, staff_id)
         try:
-            await interaction.response.send_message(text, ephemeral=True)
+            await interaction.response.send_message(f"{text}{refresh_note}", ephemeral=True)
         except discord.InteractionResponded:
-            await interaction.followup.send(text, ephemeral=True)
+            await interaction.followup.send(f"{text}{refresh_note}", ephemeral=True)
         except Exception:
             pass
 

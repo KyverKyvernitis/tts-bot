@@ -312,65 +312,105 @@ class TicketEditorView(discord.ui.LayoutView):
         cfg = cog._get_config(self.guild_id)
         panel = cfg.get("panel") or {}
         channels = cfg.get("channels") or {}
-        roles = cfg.get("roles") or {}
         enabled = cfg.get("enabled") or {}
-        options = cfg.get("options") or {}
-        report_types = cfg.get("report_types") or []
 
-        enabled_text = " · ".join(
-            f"{PUBLIC_OPTIONS[k]['emoji']} {PUBLIC_OPTIONS[k]['label']}: {'on' if enabled.get(k, True) else 'off'}"
+        panel_channel_id = int(panel.get("channel_id") or 0)
+        panel_message_id = int(panel.get("message_id") or 0)
+        if panel_channel_id and panel_message_id:
+            panel_ref = f"publicado em <#{panel_channel_id}>"
+        else:
+            panel_ref = "não publicado"
+
+        category_id = int(channels.get("category_id") or 0)
+        logs_channel_id = int(channels.get("logs_channel_id") or 0)
+        suggestions_channel_id = int(channels.get("suggestions_channel_id") or 0)
+        tickets_ref = f"<#{category_id}>" if category_id else "canal atual / sem categoria"
+        logs_ref = f"<#{logs_channel_id}>" if logs_channel_id else "não configurado"
+        suggestions_ref = f"<#{suggestions_channel_id}>" if suggestions_channel_id else "não configurado"
+
+        active_names = [
+            f"{PUBLIC_OPTIONS[k]['emoji']} {PUBLIC_OPTIONS[k]['label']}"
             for k in TICKET_KINDS
-        )
-        panel_channel_id = panel.get("channel_id")
-        panel_message_id = panel.get("message_id")
-        panel_ref = (
-            f"<#{panel_channel_id}> / `{panel_message_id}`"
-            if panel_channel_id and panel_message_id
-            else "_não publicado_"
-        )
-        category_ref = f"<#{channels.get('category_id')}>" if channels.get("category_id") else "_canal atual/sem categoria_"
-        logs_ref = f"<#{channels.get('logs_channel_id')}>" if channels.get("logs_channel_id") else "_não configurado_"
-        suggestions_ref = f"<#{channels.get('suggestions_channel_id')}>" if channels.get("suggestions_channel_id") else "_não configurado_"
-        staff_ref = f"<@&{roles.get('staff_role_id')}>" if roles.get("staff_role_id") else "_não configurado_"
+            if bool(enabled.get(k, True))
+        ]
+        active_text = " · ".join(active_names) if active_names else "nenhuma opção ativa"
 
         summary = (
-            f"**Painel publicado:** {panel_ref}\n"
-            f"**Categoria tickets:** {category_ref}\n"
+            "Configure o sistema de atendimento deste servidor.\n"
+            "Use o menu abaixo para escolher o que deseja editar.\n\n"
+            f"**Painel:** {panel_ref}\n"
+            f"**Tickets:** {tickets_ref}\n"
             f"**Logs:** {logs_ref}\n"
-            f"**Sugestões:** {suggestions_ref}\n"
-            f"**Staff geral:** {staff_ref}\n"
-            f"**Opções:** {enabled_text}\n"
-            f"**Múltiplos tickets:** {'sim' if options.get('allow_multiple_open_tickets') else 'não'} · "
-            f"**Transcript ao fechar:** {'sim' if options.get('transcript_on_close') else 'não'}\n"
-            f"**Tipos de denúncia:** {len(report_types)}/10"
+            f"**Sugestões:** {suggestions_ref}\n\n"
+            f"**Ativos:** {active_text}"
         )
 
-        panel_btn = discord.ui.Button(label="Painel", emoji="📝", style=discord.ButtonStyle.primary, custom_id=f"tickets:edit_panel:{guild_id}:{staff_id}")
-        options_btn = discord.ui.Button(label="Opções", emoji="⚙️", style=discord.ButtonStyle.secondary, custom_id=f"tickets:edit_options:{guild_id}:{staff_id}")
-        channels_btn = discord.ui.Button(label="Canais", emoji="📁", style=discord.ButtonStyle.secondary, custom_id=f"tickets:edit_channels:{guild_id}:{staff_id}")
-        roles_btn = discord.ui.Button(label="Cargos", emoji="👥", style=discord.ButtonStyle.secondary, custom_id=f"tickets:edit_roles:{guild_id}:{staff_id}")
-        report_btn = discord.ui.Button(label="Denúncias", emoji="👾", style=discord.ButtonStyle.secondary, custom_id=f"tickets:edit_reports:{guild_id}:{staff_id}")
-        texts_btn = discord.ui.Button(label="Textos", emoji="💬", style=discord.ButtonStyle.secondary, custom_id=f"tickets:edit_texts:{guild_id}:{staff_id}")
-        preview_btn = discord.ui.Button(label="Preview", emoji="👁️", style=discord.ButtonStyle.secondary, custom_id=f"tickets:edit_preview:{guild_id}:{staff_id}")
-        refresh_btn = discord.ui.Button(label="Atualizar publicado", emoji="🔄", style=discord.ButtonStyle.success, custom_id=f"tickets:edit_refresh:{guild_id}:{staff_id}")
-        close_btn = discord.ui.Button(label="Apagar editor", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id=f"tickets:edit_delete:{guild_id}:{staff_id}")
-        panel_btn.callback = self._on_panel
-        options_btn.callback = self._on_options
-        channels_btn.callback = self._on_channels
-        roles_btn.callback = self._on_roles
-        report_btn.callback = self._on_reports
-        texts_btn.callback = self._on_texts
+        self.edit_select = discord.ui.Select(
+            placeholder="Escolha o que editar...",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label="Painel público",
+                    value="panel",
+                    description="Editar título, descrição, placeholder e cor.",
+                    emoji="📝",
+                ),
+                discord.SelectOption(
+                    label="Opções",
+                    value="options",
+                    description="Ligar/desligar opções e ajustar regras simples.",
+                    emoji="⚙️",
+                ),
+                discord.SelectOption(
+                    label="Canais",
+                    value="channels",
+                    description="Configurar categoria, logs e sugestões.",
+                    emoji="📁",
+                ),
+                discord.SelectOption(
+                    label="Cargos",
+                    value="roles",
+                    description="Configurar cargos da equipe por tipo.",
+                    emoji="👥",
+                ),
+                discord.SelectOption(
+                    label="Denúncias",
+                    value="reports",
+                    description="Editar até 10 tipos de denúncia.",
+                    emoji="👾",
+                ),
+                discord.SelectOption(
+                    label="Textos",
+                    value="texts",
+                    description="Editar textos de abertura, confirmação e fechamento.",
+                    emoji="💬",
+                ),
+            ],
+            custom_id=f"tickets:editor_select:{guild_id}:{staff_id}",
+        )
+        self.edit_select.callback = self._on_select
+
+        preview_btn = discord.ui.Button(
+            label="Preview",
+            emoji="👁️",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"tickets:edit_preview:{guild_id}:{staff_id}",
+        )
+        close_btn = discord.ui.Button(
+            emoji="⛔",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"tickets:edit_delete:{guild_id}:{staff_id}",
+        )
         preview_btn.callback = self._on_preview
-        refresh_btn.callback = self._on_refresh
         close_btn.callback = self._on_delete
 
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("# 🎫 Editor de Atendimento"),
             discord.ui.TextDisplay(summary),
             discord.ui.Separator(),
-            discord.ui.ActionRow(panel_btn, options_btn, channels_btn),
-            discord.ui.ActionRow(roles_btn, report_btn, texts_btn),
-            discord.ui.ActionRow(preview_btn, refresh_btn, close_btn),
+            discord.ui.ActionRow(self.edit_select),
+            discord.ui.ActionRow(preview_btn, close_btn),
             accent_color=discord.Color.gold(),
         ))
 
@@ -379,6 +419,39 @@ class TicketEditorView(discord.ui.LayoutView):
             await interaction.response.send_message("Só quem abriu esse editor pode usar.", ephemeral=True)
             return False
         return True
+
+    async def _on_select(self, interaction: discord.Interaction):
+        value = ""
+        try:
+            value = str((getattr(self.edit_select, "values", []) or [""])[0])
+        except Exception:
+            value = ""
+        if not value:
+            try:
+                data = interaction.data if isinstance(interaction.data, dict) else {}
+                value = str((data.get("values") or [""])[0])
+            except Exception:
+                value = ""
+
+        if value == "panel":
+            await self._on_panel(interaction)
+            return
+        if value == "options":
+            await self._on_options(interaction)
+            return
+        if value == "channels":
+            await self._on_channels(interaction)
+            return
+        if value == "roles":
+            await self._on_roles(interaction)
+            return
+        if value == "reports":
+            await self._on_reports(interaction)
+            return
+        if value == "texts":
+            await self._on_texts(interaction)
+            return
+        await interaction.response.send_message("Escolha inválida ou desatualizada.", ephemeral=True)
 
     async def _on_panel(self, interaction: discord.Interaction):
         from .modals import PanelEditModal
@@ -406,13 +479,6 @@ class TicketEditorView(discord.ui.LayoutView):
 
     async def _on_preview(self, interaction: discord.Interaction):
         await interaction.response.send_message(view=TicketPublicPanelView(self.cog, self.guild_id), ephemeral=True)
-
-    async def _on_refresh(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        ok, message = await self.cog._refresh_public_panel(self.guild_id)
-        await interaction.followup.send(message, ephemeral=True)
-        if ok:
-            await self.cog._refresh_editor_message(self.guild_id, self.staff_id)
 
     async def _on_delete(self, interaction: discord.Interaction):
         try:
