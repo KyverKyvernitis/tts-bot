@@ -19,6 +19,7 @@ from .constants import (
     TICKET_COMMAND_COOLDOWN,
     default_ticket_config,
 )
+from .permissions import permission_overwrite_from_scope
 from .transcripts import build_transcript_file
 from .utils import (
     is_staff,
@@ -28,6 +29,7 @@ from .utils import (
     slugify_channel_part,
     truncate,
 )
+from .webhooks import send_with_server_identity
 from .views import (
     PartnershipConfirmView,
     SimpleNoticeView,
@@ -177,7 +179,10 @@ class TicketsCog(commands.Cog):
 
     async def _publish_panel(self, channel: discord.abc.Messageable, guild_id: int) -> discord.Message:
         view = TicketPublicPanelView(self, guild_id)
-        message = await channel.send(view=view)
+        cfg = self._get_config(guild_id)
+        message = await send_with_server_identity(cfg, channel, view=view, wait=True)
+        if message is None:
+            raise RuntimeError("não foi possível enviar a mensagem do painel")
         try:
             self.bot.add_view(view, message_id=int(message.id))
         except Exception:
@@ -286,7 +291,14 @@ class TicketsCog(commands.Cog):
             await interaction.response.send_message("Canal de sugestões não configurado. Peça para a staff configurar em `ticketedit`.", ephemeral=True)
             return
         try:
-            await channel.send(view=SuggestionMessageView(guild_id=guild.id, author_id=int(interaction.user.id), title=title, body=body))
+            message = await send_with_server_identity(
+                cfg,
+                channel,
+                view=SuggestionMessageView(guild_id=guild.id, author_id=int(interaction.user.id), title=title, body=body),
+                wait=True,
+            )
+            if message is None:
+                raise RuntimeError("envio retornou vazio")
             await interaction.response.send_message("Sugestão enviada com sucesso.", ephemeral=True)
         except Exception as exc:
             log.warning("[tickets] falha ao enviar sugestão gid=%s: %r", guild.id, exc)
@@ -336,17 +348,27 @@ class TicketsCog(commands.Cog):
             channel_name = truncate(f"ticket-{ticket_number:04d}-{kind_part}-{user_part}", 95, suffix="").strip("-")
 
             overwrites: dict[discord.abc.Snowflake, discord.PermissionOverwrite] = {
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                guild.default_role: permission_overwrite_from_scope(cfg, "everyone"),
             }
             me = getattr(guild, "me", None)
             if me is not None:
-                overwrites[me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True, manage_messages=True, attach_files=True, embed_links=True)
+                overwrites[me] = discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    manage_channels=True,
+                    manage_messages=True,
+                    manage_webhooks=True,
+                    attach_files=True,
+                    embed_links=True,
+                    add_reactions=True,
+                )
             if isinstance(interaction.user, discord.Member):
-                overwrites[interaction.user] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True)
+                overwrites[interaction.user] = permission_overwrite_from_scope(cfg, "creator")
             for role_id in self._staff_role_ids_for_kind(cfg, kind):
                 role = guild.get_role(role_id)
                 if role is not None:
-                    overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True)
+                    overwrites[role] = permission_overwrite_from_scope(cfg, "staff")
 
             category = None
             category_id = int((cfg.get("channels") or {}).get("category_id") or 0)
@@ -380,9 +402,11 @@ class TicketsCog(commands.Cog):
             }
             intro_view = self._build_ticket_intro_view(guild_id, ticket=ticket, payload=payload, opener=interaction.user)
             try:
-                intro_message = await channel.send(view=intro_view)
+                intro_message = await send_with_server_identity(cfg, channel, view=intro_view, wait=True)
                 action_view = TicketChannelView(self, guild_id, int(channel.id))
-                action_message = await channel.send(view=action_view)
+                action_message = await send_with_server_identity(cfg, channel, view=action_view, wait=True)
+                if action_message is None:
+                    raise RuntimeError("não foi possível enviar ações do ticket")
                 ticket["control_message_id"] = int(action_message.id)
                 try:
                     self.bot.add_view(action_view, message_id=int(action_message.id))
@@ -467,10 +491,7 @@ class TicketsCog(commands.Cog):
             children.extend([discord.ui.Separator(), discord.ui.TextDisplay(payload_text.strip())])
         view.add_item(discord.ui.Container(*children, accent_color=color))
         try:
-            if file is not None:
-                await channel.send(view=view, file=file)
-            else:
-                await channel.send(view=view)
+            await send_with_server_identity(cfg, channel, view=view, file=file, wait=True)
         except Exception:
             pass
 
@@ -497,7 +518,8 @@ class TicketsCog(commands.Cog):
             await interaction.response.send_message("Canal do ticket não encontrado.", ephemeral=True)
             return
         try:
-            await channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True, reason="Usuário adicionado ao ticket")
+            cfg = self._get_config(int(interaction.guild_id or 0))
+            await channel.set_permissions(user, overwrite=permission_overwrite_from_scope(cfg, "creator"), reason="Usuário adicionado ao ticket")
             await interaction.response.edit_message(view=SimpleNoticeView(f"{member_display(user)} foi adicionado ao ticket.", color=discord.Color.green()))
         except Exception:
             await interaction.response.send_message("Não consegui adicionar esse usuário ao ticket.", ephemeral=True)
@@ -522,7 +544,7 @@ class TicketsCog(commands.Cog):
         await self._save_config(guild_id, cfg)
         texts = cfg.get("texts") or {}
         try:
-            await channel.send(view=SimpleNoticeView(str(texts.get("close_notice") or "Este ticket será fechado em alguns segundos."), color=discord.Color.dark_gray()))
+            await send_with_server_identity(cfg, channel, view=SimpleNoticeView(str(texts.get("close_notice") or "Este ticket será fechado em alguns segundos."), color=discord.Color.dark_gray()), wait=True)
         except Exception:
             pass
         await interaction.followup.send("Ticket fechado.", ephemeral=True)

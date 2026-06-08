@@ -12,6 +12,7 @@ from .constants import (
     PUBLIC_OPTIONS,
     TICKET_KINDS,
 )
+from .permissions import permission_summary, reset_permissions
 from .utils import accent_color, is_staff, truncate
 
 if TYPE_CHECKING:
@@ -313,6 +314,7 @@ class TicketEditorView(discord.ui.LayoutView):
         panel = cfg.get("panel") or {}
         channels = cfg.get("channels") or {}
         enabled = cfg.get("enabled") or {}
+        options_cfg = cfg.get("options") or {}
 
         panel_channel_id = int(panel.get("channel_id") or 0)
         panel_message_id = int(panel.get("message_id") or 0)
@@ -327,6 +329,7 @@ class TicketEditorView(discord.ui.LayoutView):
         tickets_ref = f"<#{category_id}>" if category_id else "canal atual / sem categoria"
         logs_ref = f"<#{logs_channel_id}>" if logs_channel_id else "não configurado"
         suggestions_ref = f"<#{suggestions_channel_id}>" if suggestions_channel_id else "não configurado"
+        webhook_ref = "servidor" if bool(options_cfg.get("use_server_webhook", False)) else "bot"
 
         active_names = [
             f"{PUBLIC_OPTIONS[k]['emoji']} {PUBLIC_OPTIONS[k]['label']}"
@@ -341,7 +344,8 @@ class TicketEditorView(discord.ui.LayoutView):
             f"**Painel:** {panel_ref}\n"
             f"**Tickets:** {tickets_ref}\n"
             f"**Logs:** {logs_ref}\n"
-            f"**Sugestões:** {suggestions_ref}\n\n"
+            f"**Sugestões:** {suggestions_ref}\n"
+            f"**Envio:** {webhook_ref}\n\n"
             f"**Ativos:** {active_text}"
         )
 
@@ -373,6 +377,12 @@ class TicketEditorView(discord.ui.LayoutView):
                     value="roles",
                     description="Selecionar cargos da equipe por tipo.",
                     emoji="👥",
+                ),
+                discord.SelectOption(
+                    label="Permissões",
+                    value="permissions",
+                    description="Gerenciar @everyone, staff e autor do ticket.",
+                    emoji="🔐",
                 ),
                 discord.SelectOption(
                     label="Denúncias",
@@ -445,6 +455,9 @@ class TicketEditorView(discord.ui.LayoutView):
         if value == "roles":
             await self._on_roles(interaction)
             return
+        if value == "permissions":
+            await self._on_permissions(interaction)
+            return
         if value == "reports":
             await self._on_reports(interaction)
             return
@@ -468,6 +481,12 @@ class TicketEditorView(discord.ui.LayoutView):
     async def _on_roles(self, interaction: discord.Interaction):
         from .modals import RolesEditModal
         await interaction.response.send_modal(RolesEditModal(self.cog, self.guild_id, self.staff_id))
+
+    async def _on_permissions(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            view=TicketPermissionsEditorView(self.cog, self.guild_id, self.staff_id),
+            ephemeral=True,
+        )
 
     async def _on_reports(self, interaction: discord.Interaction):
         from .modals import ReportTypesEditModal
@@ -493,3 +512,90 @@ class TicketEditorView(discord.ui.LayoutView):
         except Exception:
             pass
         self.stop()
+
+
+class TicketPermissionsEditorView(discord.ui.LayoutView):
+    def __init__(self, cog: "TicketsCog", guild_id: int, staff_id: int):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.staff_id = int(staff_id)
+        cfg = cog._get_config(self.guild_id)
+
+        self.select = discord.ui.Select(
+            placeholder="Escolha o grupo de permissões...",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label="@everyone",
+                    value="everyone",
+                    description="Permissões padrão de todos no canal do ticket.",
+                    emoji="🌐",
+                ),
+                discord.SelectOption(
+                    label="Cargos staff",
+                    value="staff",
+                    description="Permissões dos cargos configurados como equipe.",
+                    emoji="👥",
+                ),
+                discord.SelectOption(
+                    label="Autor do ticket",
+                    value="creator",
+                    description="Permissões do membro que abriu o ticket.",
+                    emoji="👤",
+                ),
+                discord.SelectOption(
+                    label="Restaurar padrão seguro",
+                    value="reset",
+                    description="Voltar @everyone privado e autor/staff liberados.",
+                    emoji="♻️",
+                ),
+            ],
+            custom_id=f"tickets:permissions_select:{self.guild_id}:{self.staff_id}",
+        )
+        self.select.callback = self._on_select
+
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("# 🔐 Permissões dos Tickets"),
+            discord.ui.TextDisplay(
+                "Configure quem pode ver, falar e gerenciar os canais criados.\n\n"
+                f"**Atual:**\n{permission_summary(cfg)}"
+            ),
+            discord.ui.Separator(),
+            discord.ui.ActionRow(self.select),
+            accent_color=discord.Color.blurple(),
+        ))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(getattr(interaction.user, "id", 0) or 0) != self.staff_id:
+            await interaction.response.send_message("Só quem abriu o editor pode usar.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_select(self, interaction: discord.Interaction):
+        value = ""
+        try:
+            value = str((getattr(self.select, "values", []) or [""])[0])
+        except Exception:
+            value = ""
+        if not value:
+            try:
+                data = interaction.data if isinstance(interaction.data, dict) else {}
+                value = str((data.get("values") or [""])[0])
+            except Exception:
+                value = ""
+
+        if value == "reset":
+            cfg = self.cog._get_config(self.guild_id)
+            reset_permissions(cfg)
+            await self.cog._save_config(self.guild_id, cfg)
+            await self.cog._after_editor_modal_save(interaction, self.guild_id, self.staff_id, "Permissões restauradas para o padrão seguro.")
+            return
+
+        if value in {"everyone", "staff", "creator"}:
+            from .modals import PermissionsEditModal
+            await interaction.response.send_modal(PermissionsEditModal(self.cog, self.guild_id, self.staff_id, value))
+            return
+
+        await interaction.response.send_message("Escolha inválida.", ephemeral=True)

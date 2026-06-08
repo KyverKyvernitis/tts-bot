@@ -2480,7 +2480,12 @@ def _settingsdb_tickets_defaults() -> Dict[str, Any]:
             "channels": {"category_id": 0, "logs_channel_id": 0, "suggestions_channel_id": 0},
             "roles": {"staff_role_id": 0, "partnership_staff_role_id": 0, "report_staff_role_id": 0, "other_staff_role_id": 0},
             "enabled": {"partnership": True, "report": True, "suggestion": True, "other": True},
-            "options": {"allow_multiple_open_tickets": False, "transcript_on_close": True},
+            "options": {"allow_multiple_open_tickets": False, "transcript_on_close": True, "use_server_webhook": False},
+            "permissions": {
+                "everyone": {"view_channel": False, "send_messages": False, "read_message_history": False, "attach_files": False, "embed_links": False, "add_reactions": False},
+                "staff": {"view_channel": True, "send_messages": True, "read_message_history": True, "attach_files": True, "embed_links": True, "add_reactions": True, "manage_messages": True, "manage_channels": False},
+                "creator": {"view_channel": True, "send_messages": True, "read_message_history": True, "attach_files": True, "embed_links": True, "add_reactions": True, "mention_everyone": False},
+            },
             "texts": {},
             "report_types": ["Spam", "Flood", "Ofensa", "Assédio", "Golpe", "Divulgação indevida", "Conteúdo impróprio", "Raid", "Fake account", "Outro"],
             "next_ticket_number": 1,

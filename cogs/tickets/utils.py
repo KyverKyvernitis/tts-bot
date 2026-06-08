@@ -101,6 +101,14 @@ def sanitize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
         payload = raw.get(section) if isinstance(raw.get(section), dict) else {}
         base[section].update(payload)
 
+    raw_permissions = raw.get("permissions") if isinstance(raw.get("permissions"), dict) else {}
+    for scope, defaults in list((base.get("permissions") or {}).items()):
+        payload = raw_permissions.get(scope) if isinstance(raw_permissions.get(scope), dict) else {}
+        if isinstance(defaults, dict):
+            defaults.update(payload)
+            for key, value in list(defaults.items()):
+                defaults[key] = bool(value)
+
     base["panel"]["channel_id"] = int(base["panel"].get("channel_id") or 0)
     base["panel"]["message_id"] = int(base["panel"].get("message_id") or 0)
     base["panel"]["title"] = truncate(base["panel"].get("title") or "🎫 Atendimento", 200, suffix="")
@@ -117,6 +125,7 @@ def sanitize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
 
     base["options"]["allow_multiple_open_tickets"] = bool(base["options"].get("allow_multiple_open_tickets", False))
     base["options"]["transcript_on_close"] = bool(base["options"].get("transcript_on_close", True))
+    base["options"]["use_server_webhook"] = bool(base["options"].get("use_server_webhook", False))
 
     for key, value in list(base["texts"].items()):
         base["texts"][key] = truncate(str(value or ""), 1800, suffix="")

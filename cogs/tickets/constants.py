@@ -79,6 +79,36 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "options": {
         "allow_multiple_open_tickets": False,
         "transcript_on_close": True,
+        "use_server_webhook": False,
+    },
+    "permissions": {
+        "everyone": {
+            "view_channel": False,
+            "send_messages": False,
+            "read_message_history": False,
+            "attach_files": False,
+            "embed_links": False,
+            "add_reactions": False,
+        },
+        "staff": {
+            "view_channel": True,
+            "send_messages": True,
+            "read_message_history": True,
+            "attach_files": True,
+            "embed_links": True,
+            "add_reactions": True,
+            "manage_messages": True,
+            "manage_channels": False,
+        },
+        "creator": {
+            "view_channel": True,
+            "send_messages": True,
+            "read_message_history": True,
+            "attach_files": True,
+            "embed_links": True,
+            "add_reactions": True,
+            "mention_everyone": False,
+        },
     },
     "texts": {
         "partnership_confirm": "Ao confirmar, criaremos um ticket privado para você conversar com a equipe responsável por parcerias.",

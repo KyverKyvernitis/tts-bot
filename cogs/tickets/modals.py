@@ -5,6 +5,14 @@ from typing import TYPE_CHECKING, Any
 import discord
 
 from .constants import DEFAULT_REPORT_TYPES, KIND_OTHER, KIND_REPORT
+from .permissions import (
+    TICKET_PERMISSION_LABELS,
+    SCOPE_LABELS,
+    default_permissions_config,
+    reset_permissions,
+    scope_permissions,
+    set_scope_permissions,
+)
 from .utils import clean_accent_hex, id_from_mention_or_text, normalize_report_types, parse_bool, truncate
 
 if TYPE_CHECKING:
@@ -327,9 +335,14 @@ class OptionsEditModal(discord.ui.Modal):
                 custom_id=f"tickets:options_transcript:{self.guild_id}",
                 default=bool(options_cfg.get("transcript_on_close", True)),
             )
+            self.webhook_checkbox = checkbox_cls(
+                custom_id=f"tickets:options_webhook:{self.guild_id}",
+                default=bool(options_cfg.get("use_server_webhook", False)),
+            )
             _add_labeled(self, "Opções ativas", self.enabled_group, description="Marque o que aparece no painel público.")
             _add_labeled(self, "Permitir vários tickets", self.multiple_checkbox, description="Se desligado, cada usuário só mantém um ticket aberto.")
             _add_labeled(self, "Transcript ao fechar", self.transcript_checkbox, description="Gera arquivo de histórico ao fechar o ticket.")
+            _add_labeled(self, "Usar webhook do servidor", self.webhook_checkbox, description="Mensagens visuais usam nome e foto do servidor quando possível.")
             self.uses_v2 = True
         except Exception:
             _safe_clear_modal_items(self)
@@ -341,9 +354,11 @@ class OptionsEditModal(discord.ui.Modal):
             self.enabled_input = discord.ui.TextInput(label="Opções ativas", default=active, placeholder="parceria, denuncia, sugestao, outros", max_length=120, required=True)
             self.multiple_input = discord.ui.TextInput(label="Permitir múltiplos tickets?", default="sim" if options_cfg.get("allow_multiple_open_tickets") else "não", max_length=10, required=True)
             self.transcript_input = discord.ui.TextInput(label="Transcript ao fechar?", default="sim" if options_cfg.get("transcript_on_close") else "não", max_length=10, required=True)
+            self.webhook_input = discord.ui.TextInput(label="Usar webhook do servidor?", default="sim" if options_cfg.get("use_server_webhook") else "não", max_length=10, required=True)
             self.add_item(self.enabled_input)
             self.add_item(self.multiple_input)
             self.add_item(self.transcript_input)
+            self.add_item(self.webhook_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         cfg = self.cog._get_config(self.guild_id)
@@ -357,6 +372,7 @@ class OptionsEditModal(discord.ui.Modal):
             }
             cfg["options"]["allow_multiple_open_tickets"] = bool(getattr(self.multiple_checkbox, "value", False))
             cfg["options"]["transcript_on_close"] = bool(getattr(self.transcript_checkbox, "value", False))
+            cfg["options"]["use_server_webhook"] = bool(getattr(self.webhook_checkbox, "value", False))
         else:
             raw = _input_value(self.enabled_input).lower()
             tokens = {token.strip() for token in raw.replace(";", ",").replace("/", ",").split(",") if token.strip()}
@@ -364,6 +380,7 @@ class OptionsEditModal(discord.ui.Modal):
             cfg["enabled"] = {"partnership": "partnership" in enabled_values, "report": "report" in enabled_values, "suggestion": "suggestion" in enabled_values, "other": "other" in enabled_values}
             cfg["options"]["allow_multiple_open_tickets"] = parse_bool(_input_value(self.multiple_input), default=False)
             cfg["options"]["transcript_on_close"] = parse_bool(_input_value(self.transcript_input), default=True)
+            cfg["options"]["use_server_webhook"] = parse_bool(_input_value(self.webhook_input), default=False)
         await self.cog._save_config(self.guild_id, cfg)
         await self.cog._after_editor_modal_save(interaction, self.guild_id, self.staff_id, "Opções salvas.")
 
@@ -508,6 +525,72 @@ class RolesEditModal(discord.ui.Modal):
             cfg["roles"]["other_staff_role_id"] = id_from_mention_or_text(_input_value(self.other_input))
         await self.cog._save_config(self.guild_id, cfg)
         await self.cog._after_editor_modal_save(interaction, self.guild_id, self.staff_id, "Cargos salvos.")
+
+
+class PermissionsEditModal(discord.ui.Modal):
+    def __init__(self, cog: "TicketsCog", guild_id: int, staff_id: int, scope: str):
+        labels = {"everyone": "@everyone", "staff": "staff", "creator": "autor"}
+        super().__init__(title=f"Permissões: {labels.get(scope, scope)}")
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.staff_id = int(staff_id)
+        self.scope = scope if scope in {"everyone", "staff", "creator"} else "creator"
+        cfg = cog._get_config(guild_id)
+        current = scope_permissions(cfg, self.scope)
+        defaults = default_permissions_config().get(self.scope, {})
+        self.uses_v2 = False
+
+        try:
+            checkbox_group_cls = getattr(discord.ui, "CheckboxGroup")
+            options = []
+            for key in defaults:
+                label = TICKET_PERMISSION_LABELS.get(key, key.replace("_", " "))
+                options.append(_checkbox_group_option(label, key, default=bool(current.get(key, False))))
+            self.permissions_group = checkbox_group_cls(
+                custom_id=f"tickets:permissions:{self.guild_id}:{self.scope}",
+                min_values=0,
+                max_values=max(1, len(options)),
+                required=False,
+                options=options,
+            )
+            description = "Marque as permissões liberadas neste grupo."
+            if self.scope == "everyone":
+                description = "Cuidado: marcar Ver canal pode tornar tickets públicos."
+            _add_labeled(self, SCOPE_LABELS.get(self.scope, self.scope), self.permissions_group, description=description)
+            self.uses_v2 = True
+        except Exception:
+            _safe_clear_modal_items(self)
+            enabled = ", ".join(key for key, value in current.items() if value)
+            allowed = ", ".join(defaults.keys())
+            self.permissions_input = discord.ui.TextInput(
+                label="Permissões liberadas",
+                default=truncate(enabled, 900, suffix=""),
+                placeholder=truncate(allowed, 100, suffix=""),
+                style=discord.TextStyle.paragraph,
+                max_length=900,
+                required=False,
+            )
+            self.add_item(self.permissions_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = self.cog._get_config(self.guild_id)
+        defaults = default_permissions_config().get(self.scope, {})
+        if self.uses_v2:
+            selected = set(_selected_strings(self.permissions_group))
+        else:
+            raw = _input_value(self.permissions_input).lower()
+            selected = {token.strip() for token in raw.replace(";", ",").replace("\n", ",").split(",") if token.strip()}
+        values = {key: key in selected for key in defaults}
+        set_scope_permissions(cfg, self.scope, values)
+        await self.cog._save_config(self.guild_id, cfg)
+        await self.cog._after_editor_modal_save(
+            interaction,
+            self.guild_id,
+            self.staff_id,
+            f"Permissões de {SCOPE_LABELS.get(self.scope, self.scope)} salvas.",
+        )
+
+
 
 
 class ReportTypesEditModal(discord.ui.Modal):

@@ -1,4 +1,10 @@
+cogs/tickets/cog.py
+cogs/tickets/constants.py
 cogs/tickets/modals.py
+cogs/tickets/permissions.py
+cogs/tickets/utils.py
 cogs/tickets/views.py
-PATCH_NOTES_TICKETS_MODAL_V2.md
+cogs/tickets/webhooks.py
+db.py
+PATCH_NOTES_TICKETS_WEBHOOK_PERMISSIONS.md
 changed_files.txt
