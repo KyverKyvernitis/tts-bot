@@ -39,6 +39,16 @@ def clean_accent_hex(raw: object, *, fallback: str = "#5865F2") -> str:
     return "#5865F2"
 
 
+def clean_panel_image_url(raw: object) -> str:
+    value = truncate(str(raw or "").strip(), 500, suffix="")
+    if not value:
+        return ""
+    lowered = value.lower()
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        return value
+    return ""
+
+
 def accent_color(raw: object, *, fallback: str = "#5865F2") -> discord.Color:
     hex_value = clean_accent_hex(raw, fallback=fallback)
     return discord.Color(int(hex_value[1:], 16))
@@ -115,6 +125,7 @@ def sanitize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
     base["panel"]["description"] = truncate(base["panel"].get("description") or "Escolha abaixo o tipo de atendimento.", 1800, suffix="")
     base["panel"]["placeholder"] = truncate(base["panel"].get("placeholder") or "Escolha uma opção", 100, suffix="")
     base["panel"]["accent_color"] = clean_accent_hex(base["panel"].get("accent_color"))
+    base["panel"]["image_url"] = clean_panel_image_url(base["panel"].get("image_url"))
 
     for key in ("category_id", "logs_channel_id", "suggestions_channel_id"):
         base["channels"][key] = int(base["channels"].get(key) or 0)

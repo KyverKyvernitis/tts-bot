@@ -13,7 +13,7 @@ from .constants import (
     TICKET_KINDS,
 )
 from .permissions import permission_summary, reset_permissions
-from .utils import accent_color, is_staff, truncate
+from .utils import accent_color, clean_panel_image_url, is_staff, truncate
 
 if TYPE_CHECKING:
     from .cog import TicketsCog
@@ -25,6 +25,33 @@ def _option_label(kind: str) -> str:
 
 def _option_emoji(kind: str) -> str:
     return PUBLIC_OPTIONS.get(kind, {}).get("emoji") or "🎫"
+
+
+def _panel_image_component(url: object) -> discord.ui.Item | None:
+    image_url = clean_panel_image_url(url)
+    if not image_url:
+        return None
+
+    gallery_cls = getattr(discord.ui, "MediaGallery", None)
+    item_cls = getattr(discord, "MediaGalleryItem", None) or getattr(discord.ui, "MediaGalleryItem", None)
+    if gallery_cls is not None and item_cls is not None:
+        attempts = (
+            lambda: gallery_cls(item_cls(media=image_url)),
+            lambda: gallery_cls(item_cls(url=image_url)),
+            lambda: gallery_cls(items=[item_cls(media=image_url)]),
+            lambda: gallery_cls(items=[item_cls(url=image_url)]),
+            lambda: gallery_cls([item_cls(media=image_url)]),
+            lambda: gallery_cls([item_cls(url=image_url)]),
+        )
+        for make_item in attempts:
+            try:
+                item = make_item()
+                if item is not None:
+                    return item
+            except Exception:
+                continue
+
+    return discord.ui.TextDisplay(f"[Imagem do painel]({image_url})")
 
 
 class TicketPublicPanelView(discord.ui.LayoutView):
@@ -52,6 +79,9 @@ class TicketPublicPanelView(discord.ui.LayoutView):
             discord.ui.TextDisplay(f"# {panel.get('title') or '🎫 Atendimento'}"),
             discord.ui.TextDisplay(str(panel.get("description") or "Escolha abaixo o tipo de atendimento.")),
         ]
+        image_item = _panel_image_component(panel.get("image_url"))
+        if image_item is not None:
+            children.extend([discord.ui.Separator(), image_item])
         self.select: discord.ui.Select | None = None
         if options:
             select = discord.ui.Select(
@@ -101,19 +131,12 @@ class PartnershipConfirmView(discord.ui.LayoutView):
             style=discord.ButtonStyle.success,
             custom_id=f"tickets:partnership_confirm:{self.guild_id}:{self.user_id}",
         )
-        cancel = discord.ui.Button(
-            label="Cancelar",
-            emoji="❌",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"tickets:partnership_cancel:{self.guild_id}:{self.user_id}",
-        )
         confirm.callback = self._on_confirm
-        cancel.callback = self._on_cancel
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("# 🤝 Parceria"),
             discord.ui.TextDisplay(str(texts.get("partnership_confirm") or "Ao confirmar, criaremos um ticket privado.")),
             discord.ui.Separator(),
-            discord.ui.ActionRow(confirm, cancel),
+            discord.ui.ActionRow(confirm),
             accent_color=discord.Color.blurple(),
         ))
 
@@ -144,32 +167,18 @@ class TicketChannelView(discord.ui.LayoutView):
         self.guild_id = int(guild_id)
         self.channel_id = int(channel_id)
 
-        add_user = discord.ui.Button(
-            label="Adicionar usuário",
-            emoji="👤",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"tickets:add_user:{self.guild_id}:{self.channel_id}",
-        )
-        transcript = discord.ui.Button(
-            label="Transcript",
-            emoji="📄",
-            style=discord.ButtonStyle.secondary,
-            custom_id=f"tickets:transcript:{self.guild_id}:{self.channel_id}",
-        )
         close = discord.ui.Button(
             label="Fechar",
             emoji="🔒",
             style=discord.ButtonStyle.danger,
             custom_id=f"tickets:close:{self.guild_id}:{self.channel_id}",
         )
-        add_user.callback = self._on_add_user
-        transcript.callback = self._on_transcript
         close.callback = self._on_close
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("## Ações do ticket"),
-            discord.ui.TextDisplay("Use os botões abaixo para gerenciar este atendimento."),
+            discord.ui.TextDisplay("Use o botão abaixo para encerrar este atendimento."),
             discord.ui.Separator(),
-            discord.ui.ActionRow(add_user, transcript, close),
+            discord.ui.ActionRow(close),
             accent_color=discord.Color.dark_gray(),
         ))
 
@@ -206,9 +215,11 @@ class TicketChannelView(discord.ui.LayoutView):
         if not await self._is_ticket_staff_or_owner(interaction):
             await interaction.response.send_message("Você não pode fechar este ticket.", ephemeral=True)
             return
-        await interaction.response.send_message(
-            view=CloseConfirmView(self.cog, self.guild_id, self.channel_id, int(interaction.user.id)),
-            ephemeral=True,
+        await self.cog._send_close_confirmation(
+            interaction,
+            guild_id=self.guild_id,
+            channel_id=self.channel_id,
+            user_id=int(interaction.user.id),
         )
 
 
@@ -357,7 +368,7 @@ class TicketEditorView(discord.ui.LayoutView):
                 discord.SelectOption(
                     label="Painel público",
                     value="panel",
-                    description="Editar título, descrição, placeholder e cor.",
+                    description="Editar título, descrição, placeholder, cor e imagem.",
                     emoji="📝",
                 ),
                 discord.SelectOption(

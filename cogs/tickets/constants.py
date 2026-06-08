@@ -58,6 +58,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "description": "Escolha abaixo o tipo de atendimento.",
         "placeholder": "Escolha uma opção",
         "accent_color": "#5865F2",
+        "image_url": "",
     },
     "channels": {
         "category_id": 0,

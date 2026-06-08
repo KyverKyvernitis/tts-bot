@@ -13,7 +13,7 @@ from .permissions import (
     scope_permissions,
     set_scope_permissions,
 )
-from .utils import clean_accent_hex, id_from_mention_or_text, normalize_report_types, parse_bool, truncate
+from .utils import clean_accent_hex, clean_panel_image_url, id_from_mention_or_text, normalize_report_types, parse_bool, truncate
 
 if TYPE_CHECKING:
     from .cog import TicketsCog
@@ -284,18 +284,32 @@ class PanelEditModal(discord.ui.Modal):
         self.desc_input = discord.ui.TextInput(label="Descrição", default=truncate(panel.get("description") or "", 1800, suffix=""), style=discord.TextStyle.paragraph, max_length=1800, required=True)
         self.placeholder_input = discord.ui.TextInput(label="Placeholder do select", default=truncate(panel.get("placeholder") or "", 100, suffix=""), max_length=100, required=True)
         self.color_input = discord.ui.TextInput(label="Cor HEX", default=clean_accent_hex(panel.get("accent_color")), max_length=16, required=True)
+        self.image_input = discord.ui.TextInput(
+            label="URL da imagem do painel",
+            default=truncate(panel.get("image_url") or "", 500, suffix=""),
+            placeholder="https://exemplo.com/imagem.png — opcional",
+            max_length=500,
+            required=False,
+        )
         self.add_item(self.title_input)
         self.add_item(self.desc_input)
         self.add_item(self.placeholder_input)
         self.add_item(self.color_input)
+        self.add_item(self.image_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        raw_image_url = _input_value(self.image_input)
+        image_url = clean_panel_image_url(raw_image_url)
+        if raw_image_url and not image_url:
+            await interaction.response.send_message("URL da imagem inválida. Use um link começando com `http://` ou `https://`, ou deixe vazio para remover.", ephemeral=True)
+            return
         cfg = self.cog._get_config(self.guild_id)
         cfg["panel"].update({
             "title": _input_value(self.title_input),
             "description": _input_value(self.desc_input),
             "placeholder": _input_value(self.placeholder_input),
             "accent_color": clean_accent_hex(_input_value(self.color_input)),
+            "image_url": image_url,
         })
         await self.cog._save_config(self.guild_id, cfg)
         await self.cog._after_editor_modal_save(interaction, self.guild_id, self.staff_id, "Painel salvo.")

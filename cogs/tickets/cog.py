@@ -524,6 +524,25 @@ class TicketsCog(commands.Cog):
         except Exception:
             await interaction.response.send_message("Não consegui adicionar esse usuário ao ticket.", ephemeral=True)
 
+    async def _send_close_confirmation(self, interaction: discord.Interaction, *, guild_id: int, channel_id: int, user_id: int):
+        channel = self.bot.get_channel(int(channel_id)) or getattr(interaction, "channel", None)
+        if not isinstance(channel, discord.TextChannel):
+            await self._reply_interaction(interaction, "Canal do ticket não encontrado.", ephemeral=True)
+            return
+        view = CloseConfirmView(self, int(guild_id), int(channel_id), int(user_id))
+        cfg = self._get_config(int(guild_id))
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        except Exception:
+            pass
+        message = await send_with_server_identity(cfg, channel, view=view, wait=True)
+        if message is None:
+            try:
+                await interaction.followup.send("Não consegui enviar a confirmação de fechamento.", ephemeral=True)
+            except Exception:
+                pass
+
     async def _close_ticket(self, interaction: discord.Interaction, channel_id: int):
         await interaction.response.defer(ephemeral=True)
         guild_id = int(interaction.guild_id or 0)
