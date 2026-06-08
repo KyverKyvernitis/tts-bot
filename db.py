@@ -2463,3 +2463,56 @@ def _settingsdb_get_all_tts_synt_stats(self) -> Dict[int, Dict[str, int]]:
 SettingsDB.increment_tts_synt_count = _settingsdb_increment_tts_synt_count
 SettingsDB.get_tts_synt_stats = _settingsdb_get_tts_synt_stats
 SettingsDB.get_all_tts_synt_stats = _settingsdb_get_all_tts_synt_stats
+
+
+# -----------------------------------------------------------------------------
+# Tickets / atendimento modular.
+# Mantém a configuração por guild no mesmo documento usado pelas outras cogs.
+# -----------------------------------------------------------------------------
+
+def _settingsdb_tickets_defaults() -> Dict[str, Any]:
+    try:
+        from cogs.tickets.constants import default_ticket_config
+        return default_ticket_config()
+    except Exception:
+        return {
+            "panel": {"channel_id": 0, "message_id": 0, "title": "🎫 Atendimento", "description": "Escolha abaixo o tipo de atendimento.", "placeholder": "Escolha uma opção", "accent_color": "#5865F2"},
+            "channels": {"category_id": 0, "logs_channel_id": 0, "suggestions_channel_id": 0},
+            "roles": {"staff_role_id": 0, "partnership_staff_role_id": 0, "report_staff_role_id": 0, "other_staff_role_id": 0},
+            "enabled": {"partnership": True, "report": True, "suggestion": True, "other": True},
+            "options": {"allow_multiple_open_tickets": False, "transcript_on_close": True},
+            "texts": {},
+            "report_types": ["Spam", "Flood", "Ofensa", "Assédio", "Golpe", "Divulgação indevida", "Conteúdo impróprio", "Raid", "Fake account", "Outro"],
+            "next_ticket_number": 1,
+            "active_tickets": [],
+        }
+
+
+def _settingsdb_get_tickets_config(self, guild_id: int) -> Dict[str, Any]:
+    doc = self._get_guild_doc(guild_id)
+    raw = deepcopy(doc.get("tickets") or {})
+    try:
+        from cogs.tickets.utils import sanitize_config
+        return sanitize_config(raw)
+    except Exception:
+        base = _settingsdb_tickets_defaults()
+        for key, value in raw.items() if isinstance(raw, dict) else []:
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                base[key].update(value)
+            else:
+                base[key] = deepcopy(value)
+        return base
+
+
+async def _settingsdb_set_tickets_config(self, guild_id: int, config: Dict[str, Any]):
+    doc = self._get_guild_doc(guild_id)
+    try:
+        from cogs.tickets.utils import sanitize_config
+        doc["tickets"] = sanitize_config(config)
+    except Exception:
+        doc["tickets"] = deepcopy(config)
+    await self._save_guild_doc(guild_id, doc)
+
+
+SettingsDB.get_tickets_config = _settingsdb_get_tickets_config
+SettingsDB.set_tickets_config = _settingsdb_set_tickets_config
