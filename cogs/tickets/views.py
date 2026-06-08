@@ -17,7 +17,7 @@ from .constants import (
     TICKET_KINDS,
 )
 from .permissions import permission_summary, reset_permissions
-from .utils import accent_color, clean_panel_image_url, create_custom_ticket_option, get_ticket_option, is_staff, iter_ticket_options, truncate
+from .utils import accent_color, clean_panel_image_url, create_custom_ticket_option, get_ticket_option, is_staff, iter_ticket_options, option_emoji_for_select, truncate
 
 if TYPE_CHECKING:
     from .cog import TicketsCog
@@ -60,6 +60,53 @@ def _panel_image_component(url: object) -> discord.ui.Item | None:
     return discord.ui.TextDisplay(f"[Imagem do painel]({image_url})")
 
 
+def _panel_thumbnail_component(url: object) -> discord.ui.Item | None:
+    image_url = clean_panel_image_url(url)
+    if not image_url:
+        return None
+
+    thumbnail_cls = getattr(discord.ui, "Thumbnail", None) or getattr(discord, "Thumbnail", None)
+    if thumbnail_cls is None:
+        return None
+    attempts = (
+        lambda: thumbnail_cls(media=image_url),
+        lambda: thumbnail_cls(url=image_url),
+    )
+    for make_item in attempts:
+        try:
+            item = make_item()
+            if item is not None:
+                return item
+        except Exception:
+            continue
+    return None
+
+
+def _panel_header_components(title: object, description: object, side_image_url: object) -> list[discord.ui.Item]:
+    title_item = discord.ui.TextDisplay(f"# {title or '🎫 Atendimento'}")
+    desc_item = discord.ui.TextDisplay(str(description or "Escolha abaixo o tipo de atendimento."))
+    thumbnail = _panel_thumbnail_component(side_image_url)
+    section_cls = getattr(discord.ui, "Section", None)
+    if thumbnail is not None and section_cls is not None:
+        attempts = (
+            lambda: section_cls(title_item, desc_item, accessory=thumbnail),
+            lambda: section_cls(accessory=thumbnail, children=[title_item, desc_item]),
+            lambda: section_cls([title_item, desc_item], accessory=thumbnail),
+        )
+        for make_item in attempts:
+            try:
+                section = make_item()
+                if section is not None:
+                    return [section]
+            except Exception:
+                continue
+    children = [title_item, desc_item]
+    image_url = clean_panel_image_url(side_image_url)
+    if image_url:
+        children.append(discord.ui.TextDisplay(f"[Imagem lateral]({image_url})"))
+    return children
+
+
 def _select_value(select: discord.ui.Select, interaction: discord.Interaction) -> str:
     try:
         return str((getattr(select, "values", []) or [""])[0])
@@ -88,13 +135,14 @@ class TicketPublicPanelView(discord.ui.LayoutView):
                 label=truncate(item.get("label") or option_id, 100, suffix=""),
                 value=truncate(option_id, 100, suffix=""),
                 description=truncate(item.get("description") or "Abrir atendimento.", 100, suffix=""),
-                emoji=item.get("emoji") or "🎫",
+                emoji=option_emoji_for_select(item.get("emoji"), fallback="🎫"),
             ))
 
-        children: list[discord.ui.Item] = [
-            discord.ui.TextDisplay(f"# {panel.get('title') or '🎫 Atendimento'}"),
-            discord.ui.TextDisplay(str(panel.get("description") or "Escolha abaixo o tipo de atendimento.")),
-        ]
+        children: list[discord.ui.Item] = _panel_header_components(
+            panel.get("title") or "🎫 Atendimento",
+            panel.get("description") or "Escolha abaixo o tipo de atendimento.",
+            panel.get("side_image_url"),
+        )
         image_item = _panel_image_component(panel.get("image_url"))
         if image_item is not None:
             children.extend([discord.ui.Separator(), image_item])
@@ -384,8 +432,14 @@ class TicketEditorView(discord.ui.LayoutView):
                 discord.SelectOption(
                     label="Painel público",
                     value="panel",
-                    description="Editar título, descrição, placeholder, cor e imagem.",
+                    description="Editar título, descrição e placeholder.",
                     emoji="📝",
+                ),
+                discord.SelectOption(
+                    label="Aparência",
+                    value="appearance",
+                    description="Editar cor, imagem principal e imagem lateral.",
+                    emoji="🎨",
                 ),
                 discord.SelectOption(
                     label="Opções",
@@ -479,6 +533,9 @@ class TicketEditorView(discord.ui.LayoutView):
         if value == "panel":
             await self._on_panel(interaction)
             return
+        if value == "appearance":
+            await self._on_appearance(interaction)
+            return
         if value == "options":
             await self._on_options(interaction)
             return
@@ -505,6 +562,10 @@ class TicketEditorView(discord.ui.LayoutView):
     async def _on_panel(self, interaction: discord.Interaction):
         from .modals import PanelEditModal
         await interaction.response.send_modal(PanelEditModal(self.cog, self.guild_id, self.staff_id))
+
+    async def _on_appearance(self, interaction: discord.Interaction):
+        from .modals import AppearanceEditModal
+        await interaction.response.send_modal(AppearanceEditModal(self.cog, self.guild_id, self.staff_id))
 
     async def _on_options(self, interaction: discord.Interaction):
         from .modals import OptionsEditModal
@@ -597,7 +658,7 @@ class TicketPanelOptionsEditorView(discord.ui.LayoutView):
                 label=truncate(item.get("label") or option_id, 100, suffix=""),
                 value=truncate(option_id, 100, suffix=""),
                 description=truncate(f"{status} · {flow_label}", 100, suffix=""),
-                emoji=item.get("emoji") or "🎫",
+                emoji=option_emoji_for_select(item.get("emoji"), fallback="🎫"),
             )
             try:
                 kwargs["default"] = option_id == selected
@@ -630,8 +691,15 @@ class TicketPanelOptionsEditorView(discord.ui.LayoutView):
             style=discord.ButtonStyle.secondary,
             custom_id=f"tickets:panel_option_add:{self.guild_id}:{self.staff_id}",
         )
+        delete_btn = discord.ui.Button(
+            emoji="🗑️",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"tickets:panel_option_delete:{self.guild_id}:{self.staff_id}",
+            disabled=not bool(selected),
+        )
         edit_btn.callback = self._on_edit
         add_btn.callback = self._on_add
+        delete_btn.callback = self._on_delete_option
 
         if selected_item:
             enabled = "ativa" if bool(selected_item.get("enabled", True)) else "desativada"
@@ -647,12 +715,12 @@ class TicketPanelOptionsEditorView(discord.ui.LayoutView):
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("# 🎛️ Opções do painel"),
             discord.ui.TextDisplay(
-                "Selecione uma opção para visualizar. Use **✏️ Editar** para alterar e **➕** para criar uma nova opção.\n\n"
+                "Selecione uma opção para visualizar. Use **✏️ Editar** para alterar, **➕** para criar e **🗑️** para remover/desativar.\n\n"
                 f"{selected_summary}"
             ),
             discord.ui.Separator(),
             discord.ui.ActionRow(self.select),
-            discord.ui.ActionRow(edit_btn, add_btn),
+            discord.ui.ActionRow(edit_btn, add_btn, delete_btn),
             accent_color=discord.Color.blurple(),
         ))
 
@@ -697,6 +765,88 @@ class TicketPanelOptionsEditorView(discord.ui.LayoutView):
             view=TicketPanelOptionsEditorView(self.cog, self.guild_id, self.staff_id, str(created.get("id") or ""))
         )
 
+    async def _on_delete_option(self, interaction: discord.Interaction):
+        option_id = self.selected_option_id
+        if not option_id:
+            await interaction.response.send_message("Selecione uma opção primeiro.", ephemeral=True)
+            return
+        cfg = self.cog._get_config(self.guild_id)
+        item = get_ticket_option(cfg, option_id) or {}
+        label = f"{item.get('emoji') or '🎫'} {item.get('label') or option_id}"
+        await interaction.response.edit_message(
+            view=TicketOptionDeleteConfirmView(self.cog, self.guild_id, self.staff_id, option_id, label)
+        )
+
+
+class TicketOptionDeleteConfirmView(discord.ui.LayoutView):
+    def __init__(self, cog: "TicketsCog", guild_id: int, staff_id: int, option_id: str, label: str):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.staff_id = int(staff_id)
+        self.option_id = str(option_id)
+        self.label = str(label or option_id)
+        confirm_btn = discord.ui.Button(emoji="🗑️", label="Confirmar", style=discord.ButtonStyle.secondary, custom_id=f"tickets:option_delete_confirm:{self.guild_id}:{self.staff_id}")
+        back_btn = discord.ui.Button(emoji="↩️", label="Voltar", style=discord.ButtonStyle.secondary, custom_id=f"tickets:option_delete_back:{self.guild_id}:{self.staff_id}")
+        confirm_btn.callback = self._on_confirm
+        back_btn.callback = self._on_back
+        cfg = cog._get_config(self.guild_id)
+        item = get_ticket_option(cfg, self.option_id) or {}
+        action = "desativar" if bool(item.get("builtin", False)) else "remover"
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("# 🗑️ Remover opção"),
+            discord.ui.TextDisplay(f"Deseja {action} **{self.label}**?"),
+            discord.ui.Separator(),
+            discord.ui.ActionRow(confirm_btn, back_btn),
+            accent_color=discord.Color.dark_gray(),
+        ))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if int(getattr(interaction.user, "id", 0) or 0) != self.staff_id:
+            await interaction.response.send_message("Só quem abriu o editor pode usar.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            view=TicketPanelOptionsEditorView(self.cog, self.guild_id, self.staff_id, self.option_id)
+        )
+
+    async def _on_confirm(self, interaction: discord.Interaction):
+        cfg = self.cog._get_config(self.guild_id)
+        items = cfg.get("option_items") if isinstance(cfg.get("option_items"), dict) else {}
+        item = items.get(self.option_id) if isinstance(items, dict) else None
+        if not isinstance(item, dict):
+            await interaction.response.send_message("Opção não encontrada.", ephemeral=True)
+            return
+        active_count = sum(1 for opt in items.values() if isinstance(opt, dict) and bool(opt.get("enabled", True)))
+        if active_count <= 1 and bool(item.get("enabled", True)):
+            await interaction.response.send_message("Não é possível deixar o painel sem nenhuma opção ativa.", ephemeral=True)
+            return
+        if bool(item.get("builtin", False)):
+            item["enabled"] = False
+            result = "Opção nativa desativada."
+        else:
+            items.pop(self.option_id, None)
+            result = "Opção personalizada removida."
+        cfg["enabled"] = {kind: bool((items.get(kind) or {}).get("enabled", False)) for kind in TICKET_KINDS}
+        await self.cog._save_config(self.guild_id, cfg)
+        await self.cog._refresh_editor_message(self.guild_id, self.staff_id)
+        panel = cfg.get("panel") or {}
+        if int(panel.get("channel_id") or 0) and int(panel.get("message_id") or 0):
+            try:
+                await self.cog._refresh_public_panel(self.guild_id)
+            except Exception:
+                pass
+        await interaction.response.edit_message(
+            view=TicketPanelOptionsEditorView(self.cog, self.guild_id, self.staff_id)
+        )
+        try:
+            await interaction.followup.send(result, ephemeral=True)
+        except Exception:
+            pass
+
+
 class TicketTextsEditorView(discord.ui.LayoutView):
     def __init__(self, cog: "TicketsCog", guild_id: int, staff_id: int):
         super().__init__(timeout=300)
@@ -713,7 +863,7 @@ class TicketTextsEditorView(discord.ui.LayoutView):
                 label=truncate(item.get("label") or option_id, 100, suffix=""),
                 value=truncate(option_id, 100, suffix=""),
                 description="Editar textos dessa opção.",
-                emoji=item.get("emoji") or "🎫",
+                emoji=option_emoji_for_select(item.get("emoji"), fallback="🎫"),
             ))
         options.append(discord.SelectOption(
             label="Fechamento do ticket",

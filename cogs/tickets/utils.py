@@ -118,9 +118,22 @@ def normalize_report_types(values: object) -> list[str]:
 
 
 
+CUSTOM_EMOJI_RE = re.compile(r"^<a?:[A-Za-z0-9_]{2,32}:\d{15,25}>$")
+
+
 def clean_option_emoji(raw: object, *, fallback: str = "🎫") -> str:
-    value = truncate(str(raw or "").strip(), 32, suffix="")
+    value = truncate(str(raw or "").strip(), 120, suffix="")
     return value or fallback
+
+
+def option_emoji_for_select(raw: object, *, fallback: str = "🎫") -> object:
+    value = clean_option_emoji(raw, fallback=fallback)
+    if CUSTOM_EMOJI_RE.match(value):
+        try:
+            return discord.PartialEmoji.from_str(value)
+        except Exception:
+            return value
+    return value
 
 
 def normalize_option_id(raw: object, *, fallback: str = "custom") -> str:
@@ -247,6 +260,7 @@ def sanitize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
     base["panel"]["placeholder"] = truncate(base["panel"].get("placeholder") or "Escolha uma opção", 100, suffix="")
     base["panel"]["accent_color"] = clean_accent_hex(base["panel"].get("accent_color"))
     base["panel"]["image_url"] = clean_panel_image_url(base["panel"].get("image_url"))
+    base["panel"]["side_image_url"] = clean_panel_image_url(base["panel"].get("side_image_url"))
 
     for key in ("category_id", "logs_channel_id", "suggestions_channel_id"):
         base["channels"][key] = int(base["channels"].get(key) or 0)

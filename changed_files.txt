@@ -1,4 +1,6 @@
-cogs/tickets/views.py
+cogs/tickets/constants.py
 cogs/tickets/modals.py
-PATCH_NOTES_TICKETS_OPTION_EDITOR_V2.md
+cogs/tickets/utils.py
+cogs/tickets/views.py
+PATCH_NOTES_TICKETS_APPEARANCE_OPTIONS.md
 changed_files.txt

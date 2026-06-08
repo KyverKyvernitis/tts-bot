@@ -306,36 +306,67 @@ class PanelEditModal(discord.ui.Modal):
         self.title_input = discord.ui.TextInput(label="Título", default=truncate(panel.get("title") or "", 200, suffix=""), max_length=200, required=True)
         self.desc_input = discord.ui.TextInput(label="Descrição", default=truncate(panel.get("description") or "", 1800, suffix=""), style=discord.TextStyle.paragraph, max_length=1800, required=True)
         self.placeholder_input = discord.ui.TextInput(label="Placeholder do select", default=truncate(panel.get("placeholder") or "", 100, suffix=""), max_length=100, required=True)
-        self.color_input = discord.ui.TextInput(label="Cor HEX", default=clean_accent_hex(panel.get("accent_color")), max_length=16, required=True)
-        self.image_input = discord.ui.TextInput(
-            label="URL da imagem do painel",
-            default=truncate(panel.get("image_url") or "", 500, suffix=""),
-            placeholder="https://exemplo.com/imagem.png — opcional",
-            max_length=500,
-            required=False,
-        )
         self.add_item(self.title_input)
         self.add_item(self.desc_input)
         self.add_item(self.placeholder_input)
-        self.add_item(self.color_input)
-        self.add_item(self.image_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        raw_image_url = _input_value(self.image_input)
-        image_url = clean_panel_image_url(raw_image_url)
-        if raw_image_url and not image_url:
-            await interaction.response.send_message("URL da imagem inválida. Use um link começando com `http://` ou `https://`, ou deixe vazio para remover.", ephemeral=True)
-            return
         cfg = self.cog._get_config(self.guild_id)
         cfg["panel"].update({
             "title": _input_value(self.title_input),
             "description": _input_value(self.desc_input),
             "placeholder": _input_value(self.placeholder_input),
-            "accent_color": clean_accent_hex(_input_value(self.color_input)),
-            "image_url": image_url,
         })
         await self.cog._save_config(self.guild_id, cfg)
         await self.cog._after_editor_modal_save(interaction, self.guild_id, self.staff_id, "Painel salvo.")
+
+
+class AppearanceEditModal(discord.ui.Modal):
+    def __init__(self, cog: "TicketsCog", guild_id: int, staff_id: int):
+        super().__init__(title="Editar aparência")
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.staff_id = int(staff_id)
+        cfg = cog._get_config(guild_id)
+        panel = cfg.get("panel") or {}
+        self.color_input = discord.ui.TextInput(label="Cor HEX", default=clean_accent_hex(panel.get("accent_color")), max_length=16, required=True)
+        self.image_input = discord.ui.TextInput(
+            label="URL da imagem principal",
+            default=truncate(panel.get("image_url") or "", 500, suffix=""),
+            placeholder="https://exemplo.com/banner.png — opcional",
+            max_length=500,
+            required=False,
+        )
+        self.side_image_input = discord.ui.TextInput(
+            label="URL da imagem lateral",
+            default=truncate(panel.get("side_image_url") or "", 500, suffix=""),
+            placeholder="https://exemplo.com/thumb.png — opcional",
+            max_length=500,
+            required=False,
+        )
+        self.add_item(self.color_input)
+        self.add_item(self.image_input)
+        self.add_item(self.side_image_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw_image_url = _input_value(self.image_input)
+        raw_side_image_url = _input_value(self.side_image_input)
+        image_url = clean_panel_image_url(raw_image_url)
+        side_image_url = clean_panel_image_url(raw_side_image_url)
+        if raw_image_url and not image_url:
+            await interaction.response.send_message("URL da imagem principal inválida. Use `http://` ou `https://`, ou deixe vazio para remover.", ephemeral=True)
+            return
+        if raw_side_image_url and not side_image_url:
+            await interaction.response.send_message("URL da imagem lateral inválida. Use `http://` ou `https://`, ou deixe vazio para remover.", ephemeral=True)
+            return
+        cfg = self.cog._get_config(self.guild_id)
+        cfg["panel"].update({
+            "accent_color": clean_accent_hex(_input_value(self.color_input)),
+            "image_url": image_url,
+            "side_image_url": side_image_url,
+        })
+        await self.cog._save_config(self.guild_id, cfg)
+        await self.cog._after_editor_modal_save(interaction, self.guild_id, self.staff_id, "Aparência salva.")
 
 
 class OptionsEditModal(discord.ui.Modal):
@@ -759,8 +790,8 @@ class TicketOptionEditModal(discord.ui.Modal):
             )
             self.emoji_input = discord.ui.TextInput(
                 label="Emoji",
-                default=truncate(item.get("emoji") or "🎫", 32, suffix=""),
-                max_length=32,
+                default=truncate(item.get("emoji") or "🎫", 120, suffix=""),
+                max_length=120,
                 required=True,
             )
             self.description_input = discord.ui.TextInput(
@@ -803,8 +834,8 @@ class TicketOptionEditModal(discord.ui.Modal):
             )
             self.emoji_input = discord.ui.TextInput(
                 label="Emoji",
-                default=truncate(item.get("emoji") or "🎫", 32, suffix=""),
-                max_length=32,
+                default=truncate(item.get("emoji") or "🎫", 120, suffix=""),
+                max_length=120,
                 required=True,
             )
             self.description_input = discord.ui.TextInput(

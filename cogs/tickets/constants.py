@@ -149,6 +149,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "placeholder": "Escolha uma opção",
         "accent_color": "#5865F2",
         "image_url": "",
+        "side_image_url": "",
     },
     "channels": {
         "category_id": 0,
