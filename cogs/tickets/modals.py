@@ -32,6 +32,7 @@ from .utils import (
     id_from_mention_or_text,
     iter_ticket_options,
     normalize_report_types,
+    option_emoji_text,
     parse_bool,
     truncate,
 )
@@ -388,7 +389,7 @@ class OptionsEditModal(discord.ui.Modal):
                 option_id = str(item.get("id") or "")
                 if not option_id:
                     continue
-                label = f"{item.get('emoji') or '🎫'} {item.get('label') or option_id}"
+                label = f"{option_emoji_text(item.get('emoji'), fallback='🎫')} {item.get('label') or option_id}"
                 group_options.append(_checkbox_group_option(label, option_id, default=bool(item.get("enabled", True))))
             self.enabled_group = checkbox_group_cls(
                 custom_id=f"tickets:options_enabled:{self.guild_id}",
@@ -887,7 +888,7 @@ class TicketOptionEditModal(discord.ui.Modal):
             interaction,
             self.guild_id,
             self.staff_id,
-            f"Opção salva: {item.get('emoji') or '🎫'} {item.get('label') or self.option_id} · {_flow_label(item.get('flow'))}."
+            f"Opção salva: {option_emoji_text(item.get('emoji'), fallback='🎫')} {item.get('label') or self.option_id} · {_flow_label(item.get('flow'))}."
         )
 
 

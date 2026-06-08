@@ -1,6 +1,6 @@
-cogs/tickets/constants.py
+cogs/tickets/cog.py
 cogs/tickets/modals.py
 cogs/tickets/utils.py
 cogs/tickets/views.py
-PATCH_NOTES_TICKETS_APPEARANCE_OPTIONS.md
+PATCH_NOTES_TICKETS_EMOJI_FIX.md
 changed_files.txt

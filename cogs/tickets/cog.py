@@ -30,6 +30,7 @@ from .utils import (
     is_staff,
     member_display,
     now_iso,
+    option_emoji_text,
     sanitize_config,
     slugify_channel_part,
     truncate,
@@ -331,7 +332,7 @@ class TicketsCog(commands.Cog):
             view = SuggestionMessageView(
                 guild_id=guild.id,
                 author_id=int(interaction.user.id),
-                title=f"{option.get('emoji') or '📨'} {title}",
+                title=f"{option_emoji_text(option.get('emoji'), fallback='📨')} {title}",
                 body=f"{option.get('opening_text') or ''}\n\n{body}".strip(),
             )
             message = await send_with_server_identity(cfg, channel, view=view, wait=True)

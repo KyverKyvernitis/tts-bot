@@ -119,21 +119,66 @@ def normalize_report_types(values: object) -> list[str]:
 
 
 CUSTOM_EMOJI_RE = re.compile(r"^<a?:[A-Za-z0-9_]{2,32}:\d{15,25}>$")
+CUSTOM_EMOJI_LIKE_RE = re.compile(r"^<a?:|^<|>$")
+
+
+def _looks_like_unicode_emoji(value: str) -> bool:
+    """Retorna True para emojis unicode comuns sem aceitar texto ASCII puro.
+
+    `discord.SelectOption(emoji=...)` aceita unicode e PartialEmoji, mas valores
+    inválidos fazem o Discord rejeitar o componente inteiro. Por isso, se alguém
+    salvar `abc`, `<:emoji:123` truncado ou outro texto quebrado, usamos fallback
+    em vez de quebrar Preview/Textos/Opções do painel.
+    """
+    if not value or len(value) > 32:
+        return False
+    for ch in value:
+        code = ord(ch)
+        category = unicodedata.category(ch)
+        if category in {"So", "Sk"}:
+            return True
+        if ch in {"\ufe0f", "\u200d", "\u20e3"}:
+            return True
+        if 0x1F000 <= code <= 0x1FAFF:
+            return True
+    return False
+
+
+def _sanitize_option_emoji_value(raw: object, *, fallback: str = "🎫") -> str:
+    value = truncate(str(raw or "").strip(), 120, suffix="")
+    fallback_value = truncate(str(fallback or "🎫").strip(), 120, suffix="") or "🎫"
+    if not value:
+        return fallback_value
+    if CUSTOM_EMOJI_RE.match(value):
+        return value
+    # Emoji custom truncado/quebrado: nunca enviar para SelectOption.
+    if CUSTOM_EMOJI_LIKE_RE.search(value):
+        return fallback_value
+    if _looks_like_unicode_emoji(value):
+        return value
+    return fallback_value
 
 
 def clean_option_emoji(raw: object, *, fallback: str = "🎫") -> str:
-    value = truncate(str(raw or "").strip(), 120, suffix="")
-    return value or fallback
+    return _sanitize_option_emoji_value(raw, fallback=fallback)
 
 
-def option_emoji_for_select(raw: object, *, fallback: str = "🎫") -> object:
+def option_emoji_for_select(raw: object, *, fallback: str = "🎫") -> object | None:
     value = clean_option_emoji(raw, fallback=fallback)
+    if not value:
+        return None
     if CUSTOM_EMOJI_RE.match(value):
         try:
             return discord.PartialEmoji.from_str(value)
         except Exception:
-            return value
-    return value
+            return None
+    if _looks_like_unicode_emoji(value):
+        return value
+    return None
+
+
+def option_emoji_text(raw: object, *, fallback: str = "🎫") -> str:
+    return clean_option_emoji(raw, fallback=fallback)
 
 
 def normalize_option_id(raw: object, *, fallback: str = "custom") -> str:

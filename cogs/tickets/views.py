@@ -17,11 +17,46 @@ from .constants import (
     TICKET_KINDS,
 )
 from .permissions import permission_summary, reset_permissions
-from .utils import accent_color, clean_panel_image_url, create_custom_ticket_option, get_ticket_option, is_staff, iter_ticket_options, option_emoji_for_select, truncate
+from .utils import (
+    accent_color,
+    clean_panel_image_url,
+    create_custom_ticket_option,
+    get_ticket_option,
+    is_staff,
+    iter_ticket_options,
+    option_emoji_for_select,
+    option_emoji_text,
+    truncate,
+)
 
 if TYPE_CHECKING:
     from .cog import TicketsCog
 
+
+
+
+def _safe_select_option(**kwargs: Any) -> discord.SelectOption:
+    """Cria SelectOption sem deixar emoji/config quebrada derrubar a interação."""
+    attempts: list[dict[str, Any]] = []
+    attempts.append(dict(kwargs))
+    without_default = dict(kwargs)
+    without_default.pop("default", None)
+    attempts.append(without_default)
+    without_emoji = dict(kwargs)
+    without_emoji.pop("emoji", None)
+    attempts.append(without_emoji)
+    without_both = dict(without_emoji)
+    without_both.pop("default", None)
+    attempts.append(without_both)
+
+    last_exc: Exception | None = None
+    for payload in attempts:
+        try:
+            return discord.SelectOption(**payload)
+        except Exception as exc:
+            last_exc = exc
+            continue
+    raise last_exc or RuntimeError("falha ao criar SelectOption")
 
 def _option_label(kind: str, cfg: dict[str, Any] | None = None) -> str:
     item = get_ticket_option(cfg or {}, kind) if cfg else None
@@ -131,7 +166,7 @@ class TicketPublicPanelView(discord.ui.LayoutView):
             option_id = str(item.get("id") or "")
             if not option_id:
                 continue
-            options.append(discord.SelectOption(
+            options.append(_safe_select_option(
                 label=truncate(item.get("label") or option_id, 100, suffix=""),
                 value=truncate(option_id, 100, suffix=""),
                 description=truncate(item.get("description") or "Abrir atendimento.", 100, suffix=""),
@@ -198,7 +233,7 @@ class PartnershipConfirmView(discord.ui.LayoutView):
         )
         confirm.callback = self._on_confirm
         self.add_item(discord.ui.Container(
-            discord.ui.TextDisplay(f"# {option.get('emoji') or '🎫'} {option.get('label') or 'Atendimento'}"),
+            discord.ui.TextDisplay(f"# {option_emoji_text(option.get('emoji'), fallback='🎫')} {option.get('label') or 'Atendimento'}"),
             discord.ui.TextDisplay(str(option.get("confirmation_text") or "Ao confirmar, criaremos um ticket privado.")),
             discord.ui.Separator(),
             discord.ui.ActionRow(confirm),
@@ -408,7 +443,7 @@ class TicketEditorView(discord.ui.LayoutView):
         webhook_ref = "servidor" if bool(options_cfg.get("use_server_webhook", False)) else "bot"
 
         active_names = [
-            f"{item.get('emoji') or '🎫'} {item.get('label') or item.get('id')}"
+            f"{option_emoji_text(item.get('emoji'), fallback='🎫')} {item.get('label') or item.get('id')}"
             for item in iter_ticket_options(cfg, include_disabled=False)
         ]
         active_text = " · ".join(active_names) if active_names else "nenhuma opção ativa"
@@ -660,12 +695,8 @@ class TicketPanelOptionsEditorView(discord.ui.LayoutView):
                 description=truncate(f"{status} · {flow_label}", 100, suffix=""),
                 emoji=option_emoji_for_select(item.get("emoji"), fallback="🎫"),
             )
-            try:
-                kwargs["default"] = option_id == selected
-                options.append(discord.SelectOption(**kwargs))
-            except TypeError:
-                kwargs.pop("default", None)
-                options.append(discord.SelectOption(**kwargs))
+            kwargs["default"] = option_id == selected
+            options.append(_safe_select_option(**kwargs))
 
         if not options:
             options.append(discord.SelectOption(label="Nenhuma opção", value="__none__", description="Use ➕ para criar uma opção.", emoji="⚠️"))
@@ -704,7 +735,7 @@ class TicketPanelOptionsEditorView(discord.ui.LayoutView):
         if selected_item:
             enabled = "ativa" if bool(selected_item.get("enabled", True)) else "desativada"
             selected_summary = (
-                f"**Selecionada:** {selected_item.get('emoji') or '🎫'} {selected_item.get('label') or selected}\n"
+                f"**Selecionada:** {option_emoji_text(selected_item.get('emoji'), fallback='🎫')} {selected_item.get('label') or selected}\n"
                 f"**Fluxo:** {_flow_label(selected_item.get('flow') or FLOW_MODAL_TICKET)}\n"
                 f"**Status:** {enabled}\n"
                 f"**Descrição:** {truncate(selected_item.get('description') or 'Abrir atendimento.', 220)}"
@@ -772,7 +803,7 @@ class TicketPanelOptionsEditorView(discord.ui.LayoutView):
             return
         cfg = self.cog._get_config(self.guild_id)
         item = get_ticket_option(cfg, option_id) or {}
-        label = f"{item.get('emoji') or '🎫'} {item.get('label') or option_id}"
+        label = f"{option_emoji_text(item.get('emoji'), fallback='🎫')} {item.get('label') or option_id}"
         await interaction.response.edit_message(
             view=TicketOptionDeleteConfirmView(self.cog, self.guild_id, self.staff_id, option_id, label)
         )
@@ -859,7 +890,7 @@ class TicketTextsEditorView(discord.ui.LayoutView):
             option_id = str(item.get("id") or "")
             if not option_id:
                 continue
-            options.append(discord.SelectOption(
+            options.append(_safe_select_option(
                 label=truncate(item.get("label") or option_id, 100, suffix=""),
                 value=truncate(option_id, 100, suffix=""),
                 description="Editar textos dessa opção.",
@@ -951,7 +982,7 @@ class TicketOptionTextsEditorView(discord.ui.LayoutView):
         )
         self.select.callback = self._on_select
         self.add_item(discord.ui.Container(
-            discord.ui.TextDisplay(f"# 💬 {item.get('emoji') or '🎫'} {item.get('label') or self.option_id}"),
+            discord.ui.TextDisplay(f"# 💬 {option_emoji_text(item.get('emoji'), fallback='🎫')} {item.get('label') or self.option_id}"),
             discord.ui.TextDisplay("Escolha exatamente qual texto deseja editar."),
             discord.ui.Separator(),
             discord.ui.ActionRow(self.select),
