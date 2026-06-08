@@ -10,6 +10,10 @@ import discord
 from discord.ext import commands
 
 from .constants import (
+    FLOW_CONFIRM_TICKET,
+    FLOW_DIRECT_TICKET,
+    FLOW_MODAL_CHANNEL,
+    FLOW_MODAL_TICKET,
     KIND_OTHER,
     KIND_PARTNERSHIP,
     KIND_REPORT,
@@ -22,6 +26,7 @@ from .constants import (
 from .permissions import permission_overwrite_from_scope
 from .transcripts import build_transcript_file
 from .utils import (
+    get_ticket_option,
     is_staff,
     member_display,
     now_iso,
@@ -257,28 +262,32 @@ class TicketsCog(commands.Cog):
             await interaction.response.send_message("Esse painel só funciona dentro de servidor.", ephemeral=True)
             return
         cfg = self._get_config(guild.id)
-        if value not in PUBLIC_OPTIONS:
+        option = get_ticket_option(cfg, value)
+        if not option:
             await interaction.response.send_message("Opção inválida ou desatualizada. Peça para a staff atualizar o painel.", ephemeral=True)
             return
-        if not bool((cfg.get("enabled") or {}).get(value, True)):
+        if not bool(option.get("enabled", True)):
             await interaction.response.send_message("Essa opção está desativada no momento.", ephemeral=True)
             return
-        if value == KIND_PARTNERSHIP:
-            await interaction.response.send_message(view=PartnershipConfirmView(self, guild.id, int(interaction.user.id)), ephemeral=True)
+        flow = str(option.get("flow") or FLOW_MODAL_TICKET)
+        if flow == FLOW_CONFIRM_TICKET:
+            await interaction.response.send_message(view=PartnershipConfirmView(self, guild.id, int(interaction.user.id), value), ephemeral=True)
             return
-        if value == KIND_SUGGESTION:
-            from .modals import SuggestionModal
-            await interaction.response.send_modal(SuggestionModal(self, guild.id))
+        if flow == FLOW_MODAL_CHANNEL:
+            from .modals import GenericChannelModal
+            await interaction.response.send_modal(GenericChannelModal(self, guild.id, value))
             return
-        if value == KIND_REPORT:
-            from .modals import ReportTicketModal
-            await interaction.response.send_modal(ReportTicketModal(self, guild.id))
+        if flow == FLOW_MODAL_TICKET:
+            from .modals import GenericTicketModal, ReportTicketModal
+            if value == KIND_REPORT and bool(option.get("use_report_types", True)):
+                await interaction.response.send_modal(ReportTicketModal(self, guild.id, value))
+            else:
+                await interaction.response.send_modal(GenericTicketModal(self, guild.id, value))
             return
-        if value == KIND_OTHER:
-            from .modals import OtherTicketModal
-            await interaction.response.send_modal(OtherTicketModal(self, guild.id))
+        if flow == FLOW_DIRECT_TICKET:
+            await self._create_ticket_from_interaction(interaction, kind=value, payload={})
             return
-        await interaction.response.send_message("Opção ainda não implementada.", ephemeral=True)
+        await interaction.response.send_message("Fluxo dessa opção está inválido. Peça para a staff revisar em `ticketedit`.", ephemeral=True)
 
     async def _handle_suggestion_submission(self, interaction: discord.Interaction, *, title: str, body: str):
         guild = interaction.guild
@@ -305,11 +314,67 @@ class TicketsCog(commands.Cog):
             log.warning("[tickets] falha ao enviar sugestão gid=%s: %r", guild.id, exc)
             await interaction.response.send_message("Não consegui enviar a sugestão no canal configurado.", ephemeral=True)
 
+
+    async def _handle_channel_option_submission(self, interaction: discord.Interaction, *, option_id: str, title: str, body: str):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Servidor não encontrado.", ephemeral=True)
+            return
+        cfg = self._get_config(guild.id)
+        option = get_ticket_option(cfg, option_id) or {}
+        channel_id = int(option.get("target_channel_id") or 0) or int((cfg.get("channels") or {}).get("suggestions_channel_id") or 0)
+        channel = self.bot.get_channel(channel_id)
+        if channel is None or not hasattr(channel, "send"):
+            await interaction.response.send_message("Canal destino não configurado. Configure um canal nessa opção ou em `ticketedit` > Canais.", ephemeral=True)
+            return
+        try:
+            view = SuggestionMessageView(
+                guild_id=guild.id,
+                author_id=int(interaction.user.id),
+                title=f"{option.get('emoji') or '📨'} {title}",
+                body=f"{option.get('opening_text') or ''}\n\n{body}".strip(),
+            )
+            message = await send_with_server_identity(cfg, channel, view=view, wait=True)
+            if message is None:
+                raise RuntimeError("envio retornou vazio")
+            await interaction.response.send_message("Mensagem enviada com sucesso.", ephemeral=True)
+        except Exception as exc:
+            log.warning("[tickets] falha ao enviar opção para canal gid=%s option=%s: %r", guild.id, option_id, exc)
+            await interaction.response.send_message("Não consegui enviar no canal configurado.", ephemeral=True)
+
     def _kind_label(self, kind: str) -> str:
-        return PUBLIC_OPTIONS.get(kind, {}).get("label") or kind
+        cfg = None
+        try:
+            # Chamadas internas normalmente já têm config sanitizada; este fallback
+            # mantém compatibilidade com chamadas antigas que só passam o kind.
+            for guild in getattr(self.bot, "guilds", []) or []:
+                cfg = self._get_config(int(guild.id))
+                if get_ticket_option(cfg, kind):
+                    break
+        except Exception:
+            cfg = None
+        item = get_ticket_option(cfg or {}, kind)
+        return (item or PUBLIC_OPTIONS.get(kind, {})).get("label") or kind
 
     def _kind_emoji(self, kind: str) -> str:
-        return PUBLIC_OPTIONS.get(kind, {}).get("emoji") or "🎫"
+        cfg = None
+        try:
+            for guild in getattr(self.bot, "guilds", []) or []:
+                cfg = self._get_config(int(guild.id))
+                if get_ticket_option(cfg, kind):
+                    break
+        except Exception:
+            cfg = None
+        item = get_ticket_option(cfg or {}, kind)
+        return (item or PUBLIC_OPTIONS.get(kind, {})).get("emoji") or "🎫"
+
+    def _kind_label_from_config(self, cfg: dict[str, Any], kind: str) -> str:
+        item = get_ticket_option(cfg, kind)
+        return (item or PUBLIC_OPTIONS.get(kind, {})).get("label") or kind
+
+    def _kind_emoji_from_config(self, cfg: dict[str, Any], kind: str) -> str:
+        item = get_ticket_option(cfg, kind)
+        return (item or PUBLIC_OPTIONS.get(kind, {})).get("emoji") or "🎫"
 
     def _staff_role_ids_for_kind(self, cfg: dict[str, Any], kind: str) -> list[int]:
         roles = cfg.get("roles") or {}
@@ -342,8 +407,8 @@ class TicketsCog(commands.Cog):
 
             ticket_number = int(cfg.get("next_ticket_number") or 1)
             cfg["next_ticket_number"] = ticket_number + 1
-            label = self._kind_label(kind)
-            emoji = self._kind_emoji(kind)
+            label = self._kind_label_from_config(cfg, kind)
+            emoji = self._kind_emoji_from_config(cfg, kind)
             user_part = slugify_channel_part(getattr(interaction.user, "display_name", None) or getattr(interaction.user, "name", None) or interaction.user.id)
             kind_part = slugify_channel_part(label, fallback="ticket")
             channel_name = truncate(f"ticket-{ticket_number:04d}-{kind_part}-{user_part}", 95, suffix="").strip("-")
@@ -426,19 +491,22 @@ class TicketsCog(commands.Cog):
         cfg = self._get_config(guild_id)
         texts = cfg.get("texts") or {}
         kind = str(ticket.get("kind") or KIND_OTHER)
-        label = str(ticket.get("label") or self._kind_label(kind))
-        emoji = self._kind_emoji(kind)
+        label = str(ticket.get("label") or self._kind_label_from_config(cfg, kind))
+        emoji = self._kind_emoji_from_config(cfg, kind)
         lines = [
             f"# {emoji} Ticket #{int(ticket.get('ticket_id') or 0):04d}",
             f"**Categoria:** {label}",
             f"**Aberto por:** {member_display(opener)} (`{int(getattr(opener, 'id', 0) or 0)}`)",
         ]
-        if kind == KIND_PARTNERSHIP:
-            opening = str(texts.get("partnership_opening") or "Envie aqui as informações da parceria.")
-        elif kind == KIND_REPORT:
-            opening = str(texts.get("report_opening") or "A equipe irá analisar a denúncia.")
-        else:
-            opening = str(texts.get("other_opening") or "Explique aqui o que você precisa.")
+        option = get_ticket_option(cfg, kind) or {}
+        opening = str(option.get("opening_text") or "")
+        if not opening:
+            if kind == KIND_PARTNERSHIP:
+                opening = str(texts.get("partnership_opening") or "Envie aqui as informações da parceria.")
+            elif kind == KIND_REPORT:
+                opening = str(texts.get("report_opening") or "A equipe irá analisar a denúncia.")
+            else:
+                opening = str(texts.get("other_opening") or "Explique aqui o que você precisa.")
         fields: list[discord.ui.Item] = [discord.ui.TextDisplay("\n".join(lines)), discord.ui.Separator(), discord.ui.TextDisplay(opening)]
         clean_payload = {str(k): str(v or "").strip() for k, v in (payload or {}).items() if str(v or "").strip()}
         if clean_payload:

@@ -1,4 +1,7 @@
+cogs/tickets/constants.py
+cogs/tickets/utils.py
+cogs/tickets/modals.py
+cogs/tickets/views.py
 cogs/tickets/cog.py
-cogs/tickets/webhooks.py
-PATCH_NOTES_TICKETS_WEBHOOK_ACTIONS_FIX.md
+PATCH_NOTES_TICKETS_CUSTOM_OPTIONS.md
 changed_files.txt

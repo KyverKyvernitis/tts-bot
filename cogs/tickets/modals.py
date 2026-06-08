@@ -4,7 +4,19 @@ from typing import TYPE_CHECKING, Any
 
 import discord
 
-from .constants import DEFAULT_REPORT_TYPES, KIND_OTHER, KIND_REPORT
+from .constants import (
+    ADD_CUSTOM_OPTION_VALUE,
+    DEFAULT_REPORT_TYPES,
+    FLOW_CONFIRM_TICKET,
+    FLOW_DIRECT_TICKET,
+    FLOW_MODAL_CHANNEL,
+    FLOW_MODAL_TICKET,
+    KIND_OTHER,
+    KIND_REPORT,
+    OPTION_FLOWS,
+    PUBLIC_OPTIONS,
+    TICKET_KINDS,
+)
 from .permissions import (
     TICKET_PERMISSION_LABELS,
     SCOPE_LABELS,
@@ -13,7 +25,18 @@ from .permissions import (
     scope_permissions,
     set_scope_permissions,
 )
-from .utils import clean_accent_hex, clean_panel_image_url, id_from_mention_or_text, normalize_report_types, parse_bool, truncate
+from .utils import (
+    clean_accent_hex,
+    clean_option_emoji,
+    clean_panel_image_url,
+    create_custom_ticket_option,
+    get_ticket_option,
+    id_from_mention_or_text,
+    iter_ticket_options,
+    normalize_report_types,
+    parse_bool,
+    truncate,
+)
 
 if TYPE_CHECKING:
     from .cog import TicketsCog
@@ -186,15 +209,17 @@ class OtherTicketModal(discord.ui.Modal):
 
 
 class ReportTicketModal(discord.ui.Modal):
-    def __init__(self, cog: "TicketsCog", guild_id: int):
+    def __init__(self, cog: "TicketsCog", guild_id: int, option_id: str = KIND_REPORT):
         cfg = cog._get_config(guild_id)
-        super().__init__(title="Enviar denúncia")
+        item = get_ticket_option(cfg, option_id) or get_ticket_option(cfg, KIND_REPORT) or {}
+        super().__init__(title=truncate(item.get("modal_title") or "Enviar denúncia", 45, suffix=""))
         self.cog = cog
         self.guild_id = int(guild_id)
+        self.option_id = str(option_id or KIND_REPORT)
         self.uses_type_select = False
         self.uses_user_select = False
         report_types = normalize_report_types(cfg.get("report_types") or DEFAULT_REPORT_TYPES)
-        notice = str((cfg.get("texts") or {}).get("report_modal_notice") or "Ao enviar, criaremos um ticket privado.")
+        notice = str(item.get("modal_notice") or (cfg.get("texts") or {}).get("report_modal_notice") or "Ao enviar, criaremos um ticket privado.")
 
         try:
             self.add_item(discord.ui.TextDisplay(truncate(notice, 350)))
@@ -262,7 +287,7 @@ class ReportTicketModal(discord.ui.Modal):
         target = _selected_user_text(self.target_select) if self.uses_user_select else _input_value(self.target_input)
         await self.cog._create_ticket_from_interaction(
             interaction,
-            kind=KIND_REPORT,
+            kind=self.option_id,
             payload={
                 "tipo": report_type or "Outro",
                 "usuário denunciado": target,
@@ -322,24 +347,29 @@ class OptionsEditModal(discord.ui.Modal):
         self.guild_id = int(guild_id)
         self.staff_id = int(staff_id)
         cfg = cog._get_config(guild_id)
-        enabled = cfg.get("enabled") or {}
         options_cfg = cfg.get("options") or {}
         self.uses_v2 = False
+
+        ticket_options = iter_ticket_options(cfg, include_disabled=True)
+        custom_count = len([item for item in ticket_options if not bool(item.get("builtin", False))])
 
         try:
             checkbox_group_cls = getattr(discord.ui, "CheckboxGroup")
             checkbox_cls = getattr(discord.ui, "Checkbox")
+            group_options = []
+            for item in ticket_options[:19]:
+                option_id = str(item.get("id") or "")
+                if not option_id:
+                    continue
+                label = f"{item.get('emoji') or '🎫'} {item.get('label') or option_id}"
+                group_options.append(_checkbox_group_option(label, option_id, default=bool(item.get("enabled", True))))
+            group_options.append(_checkbox_group_option("➕ Adicionar opção", ADD_CUSTOM_OPTION_VALUE, description="Cria uma nova opção personalizada.", default=False))
             self.enabled_group = checkbox_group_cls(
                 custom_id=f"tickets:options_enabled:{self.guild_id}",
                 min_values=0,
-                max_values=4,
+                max_values=max(1, len(group_options)),
                 required=False,
-                options=[
-                    _checkbox_group_option("🤝 Parceria", "partnership", default=bool(enabled.get("partnership", True))),
-                    _checkbox_group_option("👾 Denúncia", "report", default=bool(enabled.get("report", True))),
-                    _checkbox_group_option("⚡ Sugestão", "suggestion", default=bool(enabled.get("suggestion", True))),
-                    _checkbox_group_option("⚙️ Outros", "other", default=bool(enabled.get("other", True))),
-                ],
+                options=group_options,
             )
             self.multiple_checkbox = checkbox_cls(
                 custom_id=f"tickets:options_multiple:{self.guild_id}",
@@ -353,7 +383,7 @@ class OptionsEditModal(discord.ui.Modal):
                 custom_id=f"tickets:options_webhook:{self.guild_id}",
                 default=bool(options_cfg.get("use_server_webhook", False)),
             )
-            _add_labeled(self, "Opções ativas", self.enabled_group, description="Marque o que aparece no painel público.")
+            _add_labeled(self, "Opções ativas", self.enabled_group, description="Marque o que aparece no painel público. ➕ cria opção nova.")
             _add_labeled(self, "Permitir vários tickets", self.multiple_checkbox, description="Se desligado, cada usuário só mantém um ticket aberto.")
             _add_labeled(self, "Transcript ao fechar", self.transcript_checkbox, description="Gera arquivo de histórico ao fechar o ticket.")
             _add_labeled(self, "Usar webhook do servidor", self.webhook_checkbox, description="Mensagens visuais usam nome e foto do servidor quando possível.")
@@ -361,11 +391,11 @@ class OptionsEditModal(discord.ui.Modal):
         except Exception:
             _safe_clear_modal_items(self)
             active = ", ".join(
-                public_name
-                for public_name, kind in _PUBLIC_NAME_TO_KIND.items()
-                if public_name in {"parceria", "denuncia", "sugestao", "outros"} and enabled.get(kind, True)
+                str(item.get("id"))
+                for item in ticket_options
+                if bool(item.get("enabled", True))
             )
-            self.enabled_input = discord.ui.TextInput(label="Opções ativas", default=active, placeholder="parceria, denuncia, sugestao, outros", max_length=120, required=True)
+            self.enabled_input = discord.ui.TextInput(label="Opções ativas", default=active, placeholder="partnership, report, suggestion, other, adicionar", max_length=500, required=True)
             self.multiple_input = discord.ui.TextInput(label="Permitir múltiplos tickets?", default="sim" if options_cfg.get("allow_multiple_open_tickets") else "não", max_length=10, required=True)
             self.transcript_input = discord.ui.TextInput(label="Transcript ao fechar?", default="sim" if options_cfg.get("transcript_on_close") else "não", max_length=10, required=True)
             self.webhook_input = discord.ui.TextInput(label="Usar webhook do servidor?", default="sim" if options_cfg.get("use_server_webhook") else "não", max_length=10, required=True)
@@ -376,27 +406,45 @@ class OptionsEditModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         cfg = self.cog._get_config(self.guild_id)
+        created_label = ""
         if self.uses_v2:
             enabled_values = set(_selected_strings(self.enabled_group))
-            cfg["enabled"] = {
-                "partnership": "partnership" in enabled_values,
-                "report": "report" in enabled_values,
-                "suggestion": "suggestion" in enabled_values,
-                "other": "other" in enabled_values,
-            }
+            if ADD_CUSTOM_OPTION_VALUE in enabled_values:
+                created = create_custom_ticket_option(cfg)
+                if created:
+                    created_label = f"\nNova opção criada: {created.get('emoji')} {created.get('label')}."
+                    enabled_values.add(str(created.get("id")))
+                else:
+                    created_label = "\nLimite de opções atingido; nenhuma opção nova foi criada."
+            items = cfg.get("option_items") if isinstance(cfg.get("option_items"), dict) else {}
+            for option_id, item in items.items():
+                if isinstance(item, dict):
+                    item["enabled"] = option_id in enabled_values
+            cfg["enabled"] = {kind: bool((items.get(kind) or {}).get("enabled", False)) for kind in TICKET_KINDS}
             cfg["options"]["allow_multiple_open_tickets"] = bool(getattr(self.multiple_checkbox, "value", False))
             cfg["options"]["transcript_on_close"] = bool(getattr(self.transcript_checkbox, "value", False))
             cfg["options"]["use_server_webhook"] = bool(getattr(self.webhook_checkbox, "value", False))
         else:
             raw = _input_value(self.enabled_input).lower()
             tokens = {token.strip() for token in raw.replace(";", ",").replace("/", ",").split(",") if token.strip()}
+            if "adicionar" in tokens or "add" in tokens or "+" in tokens:
+                created = create_custom_ticket_option(cfg)
+                if created:
+                    created_label = f"\nNova opção criada: {created.get('emoji')} {created.get('label')}."
+                    tokens.add(str(created.get("id")))
+                else:
+                    created_label = "\nLimite de opções atingido; nenhuma opção nova foi criada."
             enabled_values = set(_PUBLIC_NAME_TO_KIND.get(token, token) for token in tokens)
-            cfg["enabled"] = {"partnership": "partnership" in enabled_values, "report": "report" in enabled_values, "suggestion": "suggestion" in enabled_values, "other": "other" in enabled_values}
+            items = cfg.get("option_items") if isinstance(cfg.get("option_items"), dict) else {}
+            for option_id, item in items.items():
+                if isinstance(item, dict):
+                    item["enabled"] = option_id in enabled_values
+            cfg["enabled"] = {kind: bool((items.get(kind) or {}).get("enabled", False)) for kind in TICKET_KINDS}
             cfg["options"]["allow_multiple_open_tickets"] = parse_bool(_input_value(self.multiple_input), default=False)
             cfg["options"]["transcript_on_close"] = parse_bool(_input_value(self.transcript_input), default=True)
             cfg["options"]["use_server_webhook"] = parse_bool(_input_value(self.webhook_input), default=False)
         await self.cog._save_config(self.guild_id, cfg)
-        await self.cog._after_editor_modal_save(interaction, self.guild_id, self.staff_id, "Opções salvas.")
+        await self.cog._after_editor_modal_save(interaction, self.guild_id, self.staff_id, f"Opções salvas.{created_label}")
 
 
 class ChannelsEditModal(discord.ui.Modal):
@@ -655,3 +703,223 @@ class TextsEditModal(discord.ui.Modal):
         })
         await self.cog._save_config(self.guild_id, cfg)
         await self.cog._after_editor_modal_save(interaction, self.guild_id, self.staff_id, "Textos salvos.")
+
+
+_FLOW_INPUT_HELP = "confirm_ticket, modal_ticket, modal_channel ou direct_ticket"
+
+
+def _normalize_flow_input(raw: object, *, fallback: str = FLOW_MODAL_TICKET) -> str:
+    text = str(raw or "").strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "confirmar": FLOW_CONFIRM_TICKET,
+        "confirmar_ticket": FLOW_CONFIRM_TICKET,
+        "confirm_ticket": FLOW_CONFIRM_TICKET,
+        "modal": FLOW_MODAL_TICKET,
+        "modal_ticket": FLOW_MODAL_TICKET,
+        "ticket_modal": FLOW_MODAL_TICKET,
+        "canal": FLOW_MODAL_CHANNEL,
+        "modal_channel": FLOW_MODAL_CHANNEL,
+        "sugestao": FLOW_MODAL_CHANNEL,
+        "sugestão": FLOW_MODAL_CHANNEL,
+        "direto": FLOW_DIRECT_TICKET,
+        "direct": FLOW_DIRECT_TICKET,
+        "direct_ticket": FLOW_DIRECT_TICKET,
+    }
+    return aliases.get(text, text if text in OPTION_FLOWS else fallback)
+
+
+class TicketOptionEditModal(discord.ui.Modal):
+    def __init__(self, cog: "TicketsCog", guild_id: int, staff_id: int, option_id: str):
+        cfg = cog._get_config(guild_id)
+        item = get_ticket_option(cfg, option_id) or {}
+        super().__init__(title=truncate(f"Editar opção: {item.get('label') or option_id}", 45, suffix=""))
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.staff_id = int(staff_id)
+        self.option_id = str(option_id)
+        self.label_input = discord.ui.TextInput(
+            label="Nome da opção",
+            default=truncate(item.get("label") or "Nova opção", 80, suffix=""),
+            max_length=80,
+            required=True,
+        )
+        self.emoji_input = discord.ui.TextInput(
+            label="Emoji",
+            default=truncate(item.get("emoji") or "🎫", 32, suffix=""),
+            max_length=32,
+            required=True,
+        )
+        self.description_input = discord.ui.TextInput(
+            label="Descrição no select",
+            default=truncate(item.get("description") or "Abrir atendimento.", 100, suffix=""),
+            max_length=100,
+            required=True,
+        )
+        self.flow_input = discord.ui.TextInput(
+            label="Fluxo",
+            default=str(item.get("flow") or FLOW_MODAL_TICKET),
+            placeholder=_FLOW_INPUT_HELP,
+            max_length=32,
+            required=True,
+        )
+        self.channel_input = discord.ui.TextInput(
+            label="Canal destino, se enviar para canal",
+            default=str(item.get("target_channel_id") or ""),
+            placeholder="ID ou menção; vazio usa canal de sugestões",
+            max_length=40,
+            required=False,
+        )
+        self.add_item(self.label_input)
+        self.add_item(self.emoji_input)
+        self.add_item(self.description_input)
+        self.add_item(self.flow_input)
+        self.add_item(self.channel_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = self.cog._get_config(self.guild_id)
+        items = cfg.get("option_items") if isinstance(cfg.get("option_items"), dict) else {}
+        item = items.get(self.option_id)
+        if not isinstance(item, dict):
+            await interaction.response.send_message("Opção não encontrada. Abra o editor novamente.", ephemeral=True)
+            return
+        item["label"] = truncate(_input_value(self.label_input), 80, suffix="") or "Nova opção"
+        item["emoji"] = clean_option_emoji(_input_value(self.emoji_input), fallback="🎫")
+        item["description"] = truncate(_input_value(self.description_input), 100, suffix="") or "Abrir atendimento."
+        item["flow"] = _normalize_flow_input(_input_value(self.flow_input), fallback=str(item.get("flow") or FLOW_MODAL_TICKET))
+        item["target_channel_id"] = id_from_mention_or_text(_input_value(self.channel_input))
+        cfg["enabled"] = {kind: bool((items.get(kind) or {}).get("enabled", False)) for kind in TICKET_KINDS}
+        await self.cog._save_config(self.guild_id, cfg)
+        await self.cog._after_editor_modal_save(interaction, self.guild_id, self.staff_id, "Opção salva.")
+
+
+class SingleTicketTextModal(discord.ui.Modal):
+    def __init__(self, cog: "TicketsCog", guild_id: int, staff_id: int, option_id: str, text_key: str):
+        cfg = cog._get_config(guild_id)
+        item = get_ticket_option(cfg, option_id) or {}
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.staff_id = int(staff_id)
+        self.option_id = str(option_id)
+        self.text_key = str(text_key)
+        labels = {
+            "confirmation_text": "Confirmação",
+            "opening_text": "Abertura/envio",
+            "modal_notice": "Aviso do modal",
+            "modal_title": "Título do modal",
+            "subject_label": "Campo assunto",
+            "body_label": "Campo descrição",
+            "close_notice": "Fechamento",
+        }
+        title = labels.get(self.text_key, self.text_key)
+        if self.text_key == "close_notice":
+            current = str((cfg.get("texts") or {}).get("close_notice") or "Este ticket será fechado em alguns segundos.")
+        else:
+            current = str(item.get(self.text_key) or "")
+        super().__init__(title=truncate(f"Texto: {title}", 45, suffix=""))
+        max_len = 1800 if self.text_key in {"confirmation_text", "opening_text", "modal_notice", "close_notice"} else 45
+        style = discord.TextStyle.paragraph if max_len > 100 else discord.TextStyle.short
+        self.text_input = discord.ui.TextInput(
+            label=truncate(title, 45, suffix=""),
+            default=truncate(current, max_len, suffix=""),
+            style=style,
+            max_length=max_len,
+            required=False if self.text_key in {"modal_notice"} else True,
+        )
+        self.add_item(self.text_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        cfg = self.cog._get_config(self.guild_id)
+        value = _input_value(self.text_input)
+        if self.text_key == "close_notice":
+            cfg.setdefault("texts", {})["close_notice"] = truncate(value, 1800, suffix="") or "Este ticket será fechado em alguns segundos."
+        else:
+            items = cfg.get("option_items") if isinstance(cfg.get("option_items"), dict) else {}
+            item = items.get(self.option_id)
+            if not isinstance(item, dict):
+                await interaction.response.send_message("Opção não encontrada. Abra o editor novamente.", ephemeral=True)
+                return
+            if self.text_key in {"modal_title", "subject_label", "body_label"}:
+                item[self.text_key] = truncate(value, 45, suffix="") or item.get(self.text_key) or "Texto"
+            else:
+                item[self.text_key] = truncate(value, 1800, suffix="")
+            # Mantém compatibilidade com os textos antigos para exports/backups.
+            if self.option_id == "partnership":
+                if self.text_key == "confirmation_text":
+                    cfg.setdefault("texts", {})["partnership_confirm"] = item[self.text_key]
+                elif self.text_key == "opening_text":
+                    cfg.setdefault("texts", {})["partnership_opening"] = item[self.text_key]
+            elif self.option_id == "report":
+                if self.text_key == "modal_notice":
+                    cfg.setdefault("texts", {})["report_modal_notice"] = item[self.text_key]
+                elif self.text_key == "opening_text":
+                    cfg.setdefault("texts", {})["report_opening"] = item[self.text_key]
+            elif self.option_id == "other" and self.text_key == "opening_text":
+                cfg.setdefault("texts", {})["other_opening"] = item[self.text_key]
+            elif self.option_id == "suggestion" and self.text_key == "opening_text":
+                cfg.setdefault("texts", {})["suggestion_published"] = item[self.text_key]
+        await self.cog._save_config(self.guild_id, cfg)
+        await self.cog._after_editor_modal_save(interaction, self.guild_id, self.staff_id, "Texto salvo.")
+
+
+class GenericTicketModal(discord.ui.Modal):
+    def __init__(self, cog: "TicketsCog", guild_id: int, option_id: str):
+        cfg = cog._get_config(guild_id)
+        item = get_ticket_option(cfg, option_id) or {}
+        super().__init__(title=truncate(item.get("modal_title") or item.get("label") or "Abrir ticket", 45, suffix=""))
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.option_id = str(option_id)
+        notice = str(item.get("modal_notice") or "")
+        if notice:
+            try:
+                self.add_item(discord.ui.TextDisplay(truncate(notice, 350)))
+            except Exception:
+                pass
+        self.subject_input = discord.ui.TextInput(
+            label=truncate(item.get("subject_label") or "Assunto", 45, suffix=""),
+            max_length=120,
+            required=True,
+        )
+        self.body_input = discord.ui.TextInput(
+            label=truncate(item.get("body_label") or "Explique o que você precisa", 45, suffix=""),
+            style=discord.TextStyle.paragraph,
+            max_length=1500,
+            required=True,
+        )
+        self.add_item(self.subject_input)
+        self.add_item(self.body_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog._create_ticket_from_interaction(
+            interaction,
+            kind=self.option_id,
+            payload={"assunto": _input_value(self.subject_input), "descrição": _input_value(self.body_input)},
+        )
+
+
+class GenericChannelModal(discord.ui.Modal):
+    def __init__(self, cog: "TicketsCog", guild_id: int, option_id: str):
+        cfg = cog._get_config(guild_id)
+        item = get_ticket_option(cfg, option_id) or {}
+        super().__init__(title=truncate(item.get("modal_title") or item.get("label") or "Enviar mensagem", 45, suffix=""))
+        self.cog = cog
+        self.guild_id = int(guild_id)
+        self.option_id = str(option_id)
+        notice = str(item.get("modal_notice") or "")
+        if notice:
+            try:
+                self.add_item(discord.ui.TextDisplay(truncate(notice, 350)))
+            except Exception:
+                pass
+        self.title_input = discord.ui.TextInput(label=truncate(item.get("subject_label") or "Título", 45, suffix=""), max_length=120, required=True)
+        self.body_input = discord.ui.TextInput(label=truncate(item.get("body_label") or "Descrição", 45, suffix=""), style=discord.TextStyle.paragraph, max_length=1500, required=True)
+        self.add_item(self.title_input)
+        self.add_item(self.body_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog._handle_channel_option_submission(
+            interaction,
+            option_id=self.option_id,
+            title=_input_value(self.title_input),
+            body=_input_value(self.body_input),
+        )

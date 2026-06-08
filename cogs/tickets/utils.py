@@ -7,7 +7,20 @@ from typing import Any
 
 import discord
 
-from .constants import DEFAULT_REPORT_TYPES, PUBLIC_OPTIONS, TICKET_KINDS, default_ticket_config
+from .constants import (
+    CUSTOM_OPTION_PREFIX,
+    DEFAULT_OPTION_ITEMS,
+    DEFAULT_REPORT_TYPES,
+    FLOW_CONFIRM_TICKET,
+    FLOW_DIRECT_TICKET,
+    FLOW_MODAL_CHANNEL,
+    FLOW_MODAL_TICKET,
+    MAX_PANEL_OPTIONS,
+    OPTION_FLOWS,
+    PUBLIC_OPTIONS,
+    TICKET_KINDS,
+    default_ticket_config,
+)
 
 
 def now_iso() -> str:
@@ -103,6 +116,114 @@ def normalize_report_types(values: object) -> list[str]:
     return result or list(DEFAULT_REPORT_TYPES)
 
 
+
+
+def clean_option_emoji(raw: object, *, fallback: str = "🎫") -> str:
+    value = truncate(str(raw or "").strip(), 32, suffix="")
+    return value or fallback
+
+
+def normalize_option_id(raw: object, *, fallback: str = "custom") -> str:
+    text = str(raw or "").strip().lower()
+    text = re.sub(r"[^a-z0-9_\-]+", "_", text).strip("_-")
+    return truncate(text or fallback, 48, suffix="")
+
+
+def _normalize_option_item(option_id: str, raw: dict[str, Any] | None, defaults: dict[str, Any] | None = None) -> dict[str, Any]:
+    defaults = dict(defaults or {})
+    raw = raw if isinstance(raw, dict) else {}
+    fallback_label = defaults.get("label") or "Nova opção"
+    fallback_emoji = defaults.get("emoji") or "➕"
+    flow = str(raw.get("flow") or defaults.get("flow") or FLOW_MODAL_TICKET)
+    if flow not in OPTION_FLOWS:
+        flow = FLOW_MODAL_TICKET
+    result = {
+        "id": option_id,
+        "builtin": bool(defaults.get("builtin", False)),
+        "enabled": bool(raw.get("enabled", defaults.get("enabled", True))),
+        "label": truncate(str(raw.get("label") or fallback_label), 80, suffix=""),
+        "emoji": clean_option_emoji(raw.get("emoji") or fallback_emoji, fallback=fallback_emoji),
+        "description": truncate(str(raw.get("description") or defaults.get("description") or "Abrir atendimento."), 100, suffix=""),
+        "flow": flow,
+        "confirmation_text": truncate(str(raw.get("confirmation_text") or defaults.get("confirmation_text") or "Ao confirmar, criaremos um ticket privado para você."), 1800, suffix=""),
+        "opening_text": truncate(str(raw.get("opening_text") or defaults.get("opening_text") or "A equipe irá analisar sua solicitação."), 1800, suffix=""),
+        "modal_title": truncate(str(raw.get("modal_title") or defaults.get("modal_title") or "Abrir ticket"), 45, suffix=""),
+        "modal_notice": truncate(str(raw.get("modal_notice") if raw.get("modal_notice") is not None else defaults.get("modal_notice") or ""), 350, suffix=""),
+        "subject_label": truncate(str(raw.get("subject_label") or defaults.get("subject_label") or "Assunto"), 45, suffix=""),
+        "body_label": truncate(str(raw.get("body_label") or defaults.get("body_label") or "Explique o que você precisa"), 45, suffix=""),
+        "target_channel_id": int(raw.get("target_channel_id") or defaults.get("target_channel_id") or 0),
+        "use_report_types": bool(raw.get("use_report_types", defaults.get("use_report_types", False))),
+    }
+    if not result["label"]:
+        result["label"] = "Nova opção"
+    if not result["subject_label"]:
+        result["subject_label"] = "Assunto"
+    if not result["body_label"]:
+        result["body_label"] = "Explique o que você precisa"
+    return result
+
+
+def iter_ticket_options(cfg: dict[str, Any], *, include_disabled: bool = True) -> list[dict[str, Any]]:
+    raw_items = cfg.get("option_items") if isinstance(cfg.get("option_items"), dict) else {}
+    ordered_ids = list(TICKET_KINDS)
+    custom_ids = sorted(
+        (str(key) for key in raw_items.keys() if str(key) not in set(TICKET_KINDS)),
+        key=lambda value: int(re.search(r"(\d+)$", value).group(1)) if re.search(r"(\d+)$", value) else 9999,
+    )
+    ordered_ids.extend(custom_ids)
+    result: list[dict[str, Any]] = []
+    for option_id in ordered_ids:
+        item = raw_items.get(option_id)
+        if not isinstance(item, dict):
+            continue
+        if include_disabled or bool(item.get("enabled", True)):
+            result.append(dict(item))
+    return result[:MAX_PANEL_OPTIONS]
+
+
+def get_ticket_option(cfg: dict[str, Any], option_id: str) -> dict[str, Any] | None:
+    option_id = str(option_id or "")
+    items = cfg.get("option_items") if isinstance(cfg.get("option_items"), dict) else {}
+    item = items.get(option_id)
+    if isinstance(item, dict):
+        return dict(item)
+    if option_id in DEFAULT_OPTION_ITEMS:
+        return dict(DEFAULT_OPTION_ITEMS[option_id])
+    return None
+
+
+def create_custom_ticket_option(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    cfg.setdefault("option_items", {})
+    items = cfg["option_items"] if isinstance(cfg.get("option_items"), dict) else {}
+    if len(items) >= MAX_PANEL_OPTIONS:
+        return None
+    try:
+        next_number = max(1, int(cfg.get("next_custom_option_number") or 1))
+    except Exception:
+        next_number = 1
+    existing = set(str(key) for key in items.keys())
+    while f"{CUSTOM_OPTION_PREFIX}{next_number}" in existing:
+        next_number += 1
+    option_id = f"{CUSTOM_OPTION_PREFIX}{next_number}"
+    item = _normalize_option_item(
+        option_id,
+        {
+            "enabled": True,
+            "label": f"Nova opção {next_number}",
+            "emoji": "➕",
+            "description": "Abrir atendimento personalizado.",
+            "flow": FLOW_MODAL_TICKET,
+            "opening_text": "A equipe irá analisar sua solicitação. Explique aqui o que você precisa.",
+            "modal_title": "Abrir atendimento",
+        },
+        {"builtin": False, "enabled": True, "emoji": "➕"},
+    )
+    item["builtin"] = False
+    items[option_id] = item
+    cfg["option_items"] = items
+    cfg["next_custom_option_number"] = next_number + 1
+    return item
+
 def sanitize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
     base = default_ticket_config()
     raw = cfg if isinstance(cfg, dict) else {}
@@ -141,14 +262,56 @@ def sanitize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
     for key, value in list(base["texts"].items()):
         base["texts"][key] = truncate(str(value or ""), 1800, suffix="")
 
+    # Migração: os textos antigos continuam valendo como texto padrão das opções nativas.
+    default_items = {key: dict(value) for key, value in DEFAULT_OPTION_ITEMS.items()}
+    default_items["partnership"]["confirmation_text"] = base["texts"].get("partnership_confirm") or default_items["partnership"].get("confirmation_text")
+    default_items["partnership"]["opening_text"] = base["texts"].get("partnership_opening") or default_items["partnership"].get("opening_text")
+    default_items["report"]["modal_notice"] = base["texts"].get("report_modal_notice") or default_items["report"].get("modal_notice")
+    default_items["report"]["opening_text"] = base["texts"].get("report_opening") or default_items["report"].get("opening_text")
+    default_items["other"]["opening_text"] = base["texts"].get("other_opening") or default_items["other"].get("opening_text")
+    default_items["suggestion"]["opening_text"] = base["texts"].get("suggestion_published") or default_items["suggestion"].get("opening_text")
+
+    raw_items = raw.get("option_items") if isinstance(raw.get("option_items"), dict) else {}
+    normalized_items: dict[str, dict[str, Any]] = {}
+    for kind in TICKET_KINDS:
+        merged = dict(default_items[kind])
+        if isinstance(raw_items.get(kind), dict):
+            merged.update(raw_items.get(kind) or {})
+        # Migração da chave enabled antiga.
+        merged["enabled"] = bool(base.get("enabled", {}).get(kind, merged.get("enabled", True))) if not raw_items else bool(merged.get("enabled", True))
+        normalized_items[kind] = _normalize_option_item(kind, merged, default_items[kind])
+
+    for raw_id, raw_item in raw_items.items():
+        option_id = normalize_option_id(raw_id)
+        if not option_id or option_id in normalized_items or option_id in TICKET_KINDS:
+            continue
+        if not isinstance(raw_item, dict):
+            continue
+        item = _normalize_option_item(option_id, raw_item, {"builtin": False, "enabled": True, "emoji": "➕"})
+        item["builtin"] = False
+        normalized_items[option_id] = item
+        if len(normalized_items) >= MAX_PANEL_OPTIONS:
+            break
+
+    base["option_items"] = normalized_items
+    base["enabled"] = {kind: bool(normalized_items.get(kind, {}).get("enabled", True)) for kind in TICKET_KINDS}
+
     base["report_types"] = normalize_report_types(raw.get("report_types") or base.get("report_types"))
     try:
         base["next_ticket_number"] = max(1, int(raw.get("next_ticket_number") or 1))
     except Exception:
         base["next_ticket_number"] = 1
+    try:
+        guessed_next_custom = max(
+            [int(match.group(1)) + 1 for key in normalized_items for match in [re.search(r"custom_(\d+)$", str(key))] if match] or [1]
+        )
+        base["next_custom_option_number"] = max(guessed_next_custom, int(raw.get("next_custom_option_number") or 1))
+    except Exception:
+        base["next_custom_option_number"] = 1
 
     active_tickets = raw.get("active_tickets") or []
     normalized_active: list[dict[str, Any]] = []
+    valid_kinds = set(normalized_items.keys()) | {"ticket"}
     if isinstance(active_tickets, list):
         seen_channels: set[int] = set()
         for item in active_tickets:
@@ -159,8 +322,9 @@ def sanitize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
             if not channel_id or not user_id or channel_id in seen_channels:
                 continue
             kind = str(item.get("kind") or "other")
-            if kind not in {"partnership", "report", "other"}:
+            if kind not in valid_kinds:
                 kind = "other"
+            option = normalized_items.get(kind) or normalized_items.get("other") or {}
             seen_channels.add(channel_id)
             normalized_active.append({
                 "ticket_id": int(item.get("ticket_id") or 0),
@@ -169,7 +333,7 @@ def sanitize_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
                 "user_id": user_id,
                 "kind": kind,
                 "created_at": str(item.get("created_at") or ""),
-                "label": str(item.get("label") or PUBLIC_OPTIONS.get(kind, {}).get("label") or kind),
+                "label": str(item.get("label") or option.get("label") or PUBLIC_OPTIONS.get(kind, {}).get("label") or kind),
             })
     base["active_tickets"] = normalized_active[-300:]
     return base

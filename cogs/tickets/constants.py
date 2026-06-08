@@ -14,6 +14,15 @@ KIND_SUGGESTION = "suggestion"
 KIND_OTHER = "other"
 TICKET_KINDS = (KIND_PARTNERSHIP, KIND_REPORT, KIND_SUGGESTION, KIND_OTHER)
 
+FLOW_CONFIRM_TICKET = "confirm_ticket"
+FLOW_MODAL_TICKET = "modal_ticket"
+FLOW_MODAL_CHANNEL = "modal_channel"
+FLOW_DIRECT_TICKET = "direct_ticket"
+OPTION_FLOWS = (FLOW_CONFIRM_TICKET, FLOW_MODAL_TICKET, FLOW_MODAL_CHANNEL, FLOW_DIRECT_TICKET)
+CUSTOM_OPTION_PREFIX = "custom_"
+MAX_PANEL_OPTIONS = 20
+ADD_CUSTOM_OPTION_VALUE = "__add_custom_option__"
+
 PUBLIC_OPTIONS: dict[str, dict[str, str]] = {
     KIND_PARTNERSHIP: {
         "label": "Parceria",
@@ -49,6 +58,87 @@ DEFAULT_REPORT_TYPES = [
     "Fake account",
     "Outro",
 ]
+
+DEFAULT_TEXTS: dict[str, str] = {
+    "partnership_confirm": "Ao confirmar, criaremos um ticket privado para você conversar com a equipe responsável por parcerias.",
+    "partnership_opening": "A equipe irá analisar sua solicitação. Envie aqui as informações da parceria.",
+    "report_modal_notice": "Ao enviar este formulário, criaremos um ticket privado para você conversar com a equipe. Use esse atendimento apenas para denúncias reais.",
+    "report_opening": "A equipe irá analisar a denúncia. Envie provas adicionais aqui, se necessário.",
+    "other_opening": "Explique aqui o que você precisa e aguarde a equipe.",
+    "suggestion_published": "Nova sugestão enviada para análise.",
+    "close_notice": "Este ticket será fechado em alguns segundos.",
+}
+
+DEFAULT_OPTION_ITEMS: dict[str, dict[str, Any]] = {
+    KIND_PARTNERSHIP: {
+        "id": KIND_PARTNERSHIP,
+        "builtin": True,
+        "enabled": True,
+        "label": PUBLIC_OPTIONS[KIND_PARTNERSHIP]["label"],
+        "emoji": PUBLIC_OPTIONS[KIND_PARTNERSHIP]["emoji"],
+        "description": PUBLIC_OPTIONS[KIND_PARTNERSHIP]["description"],
+        "flow": FLOW_CONFIRM_TICKET,
+        "confirmation_text": DEFAULT_TEXTS["partnership_confirm"],
+        "opening_text": DEFAULT_TEXTS["partnership_opening"],
+        "modal_title": "Abrir parceria",
+        "modal_notice": "",
+        "subject_label": "Assunto",
+        "body_label": "Explique o atendimento",
+        "target_channel_id": 0,
+        "use_report_types": False,
+    },
+    KIND_REPORT: {
+        "id": KIND_REPORT,
+        "builtin": True,
+        "enabled": True,
+        "label": PUBLIC_OPTIONS[KIND_REPORT]["label"],
+        "emoji": PUBLIC_OPTIONS[KIND_REPORT]["emoji"],
+        "description": PUBLIC_OPTIONS[KIND_REPORT]["description"],
+        "flow": FLOW_MODAL_TICKET,
+        "confirmation_text": "",
+        "opening_text": DEFAULT_TEXTS["report_opening"],
+        "modal_title": "Enviar denúncia",
+        "modal_notice": DEFAULT_TEXTS["report_modal_notice"],
+        "subject_label": "Usuário denunciado, se houver",
+        "body_label": "Descrição do ocorrido",
+        "target_channel_id": 0,
+        "use_report_types": True,
+    },
+    KIND_SUGGESTION: {
+        "id": KIND_SUGGESTION,
+        "builtin": True,
+        "enabled": True,
+        "label": PUBLIC_OPTIONS[KIND_SUGGESTION]["label"],
+        "emoji": PUBLIC_OPTIONS[KIND_SUGGESTION]["emoji"],
+        "description": PUBLIC_OPTIONS[KIND_SUGGESTION]["description"],
+        "flow": FLOW_MODAL_CHANNEL,
+        "confirmation_text": "",
+        "opening_text": DEFAULT_TEXTS["suggestion_published"],
+        "modal_title": "Enviar sugestão",
+        "modal_notice": "",
+        "subject_label": "Título da sugestão",
+        "body_label": "Descrição da sugestão",
+        "target_channel_id": 0,
+        "use_report_types": False,
+    },
+    KIND_OTHER: {
+        "id": KIND_OTHER,
+        "builtin": True,
+        "enabled": True,
+        "label": PUBLIC_OPTIONS[KIND_OTHER]["label"],
+        "emoji": PUBLIC_OPTIONS[KIND_OTHER]["emoji"],
+        "description": PUBLIC_OPTIONS[KIND_OTHER]["description"],
+        "flow": FLOW_MODAL_TICKET,
+        "confirmation_text": "",
+        "opening_text": DEFAULT_TEXTS["other_opening"],
+        "modal_title": "Abrir ticket",
+        "modal_notice": "",
+        "subject_label": "Assunto",
+        "body_label": "Explique o que você precisa",
+        "target_channel_id": 0,
+        "use_report_types": False,
+    },
+}
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "panel": {
@@ -111,16 +201,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "mention_everyone": False,
         },
     },
-    "texts": {
-        "partnership_confirm": "Ao confirmar, criaremos um ticket privado para você conversar com a equipe responsável por parcerias.",
-        "partnership_opening": "A equipe irá analisar sua solicitação. Envie aqui as informações da parceria.",
-        "report_modal_notice": "Ao enviar este formulário, criaremos um ticket privado para você conversar com a equipe. Use esse atendimento apenas para denúncias reais.",
-        "report_opening": "A equipe irá analisar a denúncia. Envie provas adicionais aqui, se necessário.",
-        "other_opening": "Explique aqui o que você precisa e aguarde a equipe.",
-        "close_notice": "Este ticket será fechado em alguns segundos.",
-    },
+    "texts": dict(DEFAULT_TEXTS),
+    "option_items": deepcopy(DEFAULT_OPTION_ITEMS),
     "report_types": list(DEFAULT_REPORT_TYPES),
     "next_ticket_number": 1,
+    "next_custom_option_number": 1,
     "active_tickets": [],
 }
 
