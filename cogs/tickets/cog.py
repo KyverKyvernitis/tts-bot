@@ -31,6 +31,7 @@ from .utils import (
 )
 from .webhooks import send_with_server_identity
 from .views import (
+    CloseConfirmView,
     PartnershipConfirmView,
     SimpleNoticeView,
     SuggestionMessageView,

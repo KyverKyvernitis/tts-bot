@@ -1,7 +1,4 @@
 cogs/tickets/cog.py
-cogs/tickets/constants.py
-cogs/tickets/modals.py
-cogs/tickets/utils.py
-cogs/tickets/views.py
-PATCH_NOTES_TICKETS_PANEL_IMAGE_FLOW.md
+cogs/tickets/webhooks.py
+PATCH_NOTES_TICKETS_WEBHOOK_ACTIONS_FIX.md
 changed_files.txt
