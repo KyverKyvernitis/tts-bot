@@ -359,19 +359,19 @@ class TicketEditorView(discord.ui.LayoutView):
                 discord.SelectOption(
                     label="Opções",
                     value="options",
-                    description="Ligar/desligar opções e ajustar regras simples.",
+                    description="Usar checkboxes para ligar/desligar opções.",
                     emoji="⚙️",
                 ),
                 discord.SelectOption(
                     label="Canais",
                     value="channels",
-                    description="Configurar categoria, logs e sugestões.",
+                    description="Selecionar categoria, logs e sugestões.",
                     emoji="📁",
                 ),
                 discord.SelectOption(
                     label="Cargos",
                     value="roles",
-                    description="Configurar cargos da equipe por tipo.",
+                    description="Selecionar cargos da equipe por tipo.",
                     emoji="👥",
                 ),
                 discord.SelectOption(

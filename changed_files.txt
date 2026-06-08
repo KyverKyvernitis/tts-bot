@@ -1,4 +1,4 @@
-cogs/tickets/cog.py
+cogs/tickets/modals.py
 cogs/tickets/views.py
-PATCH_NOTES_TICKETS_EDITOR.md
+PATCH_NOTES_TICKETS_MODAL_V2.md
 changed_files.txt
