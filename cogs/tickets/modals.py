@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 import discord
 
 from .constants import (
-    ADD_CUSTOM_OPTION_VALUE,
     DEFAULT_REPORT_TYPES,
     FLOW_CONFIRM_TICKET,
     FLOW_DIRECT_TICKET,
@@ -29,7 +28,6 @@ from .utils import (
     clean_accent_hex,
     clean_option_emoji,
     clean_panel_image_url,
-    create_custom_ticket_option,
     get_ticket_option,
     id_from_mention_or_text,
     iter_ticket_options,
@@ -351,8 +349,6 @@ class OptionsEditModal(discord.ui.Modal):
         self.uses_v2 = False
 
         ticket_options = iter_ticket_options(cfg, include_disabled=True)
-        custom_count = len([item for item in ticket_options if not bool(item.get("builtin", False))])
-
         try:
             checkbox_group_cls = getattr(discord.ui, "CheckboxGroup")
             checkbox_cls = getattr(discord.ui, "Checkbox")
@@ -363,7 +359,6 @@ class OptionsEditModal(discord.ui.Modal):
                     continue
                 label = f"{item.get('emoji') or '🎫'} {item.get('label') or option_id}"
                 group_options.append(_checkbox_group_option(label, option_id, default=bool(item.get("enabled", True))))
-            group_options.append(_checkbox_group_option("➕ Adicionar opção", ADD_CUSTOM_OPTION_VALUE, description="Cria uma nova opção personalizada.", default=False))
             self.enabled_group = checkbox_group_cls(
                 custom_id=f"tickets:options_enabled:{self.guild_id}",
                 min_values=0,
@@ -383,7 +378,7 @@ class OptionsEditModal(discord.ui.Modal):
                 custom_id=f"tickets:options_webhook:{self.guild_id}",
                 default=bool(options_cfg.get("use_server_webhook", False)),
             )
-            _add_labeled(self, "Opções ativas", self.enabled_group, description="Marque o que aparece no painel público. ➕ cria opção nova.")
+            _add_labeled(self, "Opções ativas", self.enabled_group, description="Marque o que aparece no painel público.")
             _add_labeled(self, "Permitir vários tickets", self.multiple_checkbox, description="Se desligado, cada usuário só mantém um ticket aberto.")
             _add_labeled(self, "Transcript ao fechar", self.transcript_checkbox, description="Gera arquivo de histórico ao fechar o ticket.")
             _add_labeled(self, "Usar webhook do servidor", self.webhook_checkbox, description="Mensagens visuais usam nome e foto do servidor quando possível.")
@@ -395,7 +390,7 @@ class OptionsEditModal(discord.ui.Modal):
                 for item in ticket_options
                 if bool(item.get("enabled", True))
             )
-            self.enabled_input = discord.ui.TextInput(label="Opções ativas", default=active, placeholder="partnership, report, suggestion, other, adicionar", max_length=500, required=True)
+            self.enabled_input = discord.ui.TextInput(label="Opções ativas", default=active, placeholder="partnership, report, suggestion, other", max_length=500, required=True)
             self.multiple_input = discord.ui.TextInput(label="Permitir múltiplos tickets?", default="sim" if options_cfg.get("allow_multiple_open_tickets") else "não", max_length=10, required=True)
             self.transcript_input = discord.ui.TextInput(label="Transcript ao fechar?", default="sim" if options_cfg.get("transcript_on_close") else "não", max_length=10, required=True)
             self.webhook_input = discord.ui.TextInput(label="Usar webhook do servidor?", default="sim" if options_cfg.get("use_server_webhook") else "não", max_length=10, required=True)
@@ -409,13 +404,6 @@ class OptionsEditModal(discord.ui.Modal):
         created_label = ""
         if self.uses_v2:
             enabled_values = set(_selected_strings(self.enabled_group))
-            if ADD_CUSTOM_OPTION_VALUE in enabled_values:
-                created = create_custom_ticket_option(cfg)
-                if created:
-                    created_label = f"\nNova opção criada: {created.get('emoji')} {created.get('label')}."
-                    enabled_values.add(str(created.get("id")))
-                else:
-                    created_label = "\nLimite de opções atingido; nenhuma opção nova foi criada."
             items = cfg.get("option_items") if isinstance(cfg.get("option_items"), dict) else {}
             for option_id, item in items.items():
                 if isinstance(item, dict):
@@ -427,13 +415,6 @@ class OptionsEditModal(discord.ui.Modal):
         else:
             raw = _input_value(self.enabled_input).lower()
             tokens = {token.strip() for token in raw.replace(";", ",").replace("/", ",").split(",") if token.strip()}
-            if "adicionar" in tokens or "add" in tokens or "+" in tokens:
-                created = create_custom_ticket_option(cfg)
-                if created:
-                    created_label = f"\nNova opção criada: {created.get('emoji')} {created.get('label')}."
-                    tokens.add(str(created.get("id")))
-                else:
-                    created_label = "\nLimite de opções atingido; nenhuma opção nova foi criada."
             enabled_values = set(_PUBLIC_NAME_TO_KIND.get(token, token) for token in tokens)
             items = cfg.get("option_items") if isinstance(cfg.get("option_items"), dict) else {}
             for option_id, item in items.items():
@@ -728,6 +709,35 @@ def _normalize_flow_input(raw: object, *, fallback: str = FLOW_MODAL_TICKET) -> 
     return aliases.get(text, text if text in OPTION_FLOWS else fallback)
 
 
+def _flow_label(flow: object) -> str:
+    labels = {
+        FLOW_CONFIRM_TICKET: "Confirmar e criar ticket",
+        FLOW_MODAL_TICKET: "Modal e criar ticket",
+        FLOW_MODAL_CHANNEL: "Modal e enviar para canal",
+        FLOW_DIRECT_TICKET: "Criar ticket direto",
+    }
+    return labels.get(str(flow or ""), "Modal e criar ticket")
+
+
+def _flow_select_options(current: str) -> list[discord.SelectOption]:
+    definitions = [
+        (FLOW_CONFIRM_TICKET, "Confirmar e criar ticket", "Mostra confirmação antes de criar o canal.", "✅"),
+        (FLOW_MODAL_TICKET, "Modal e criar ticket", "Abre modal e cria um ticket depois do envio.", "📝"),
+        (FLOW_MODAL_CHANNEL, "Modal e enviar para canal", "Abre modal e envia a resposta em um canal.", "📨"),
+        (FLOW_DIRECT_TICKET, "Criar ticket direto", "Cria o canal privado imediatamente.", "🎫"),
+    ]
+    options: list[discord.SelectOption] = []
+    for value, label, description, emoji in definitions:
+        kwargs = dict(label=label, value=value, description=description, emoji=emoji)
+        try:
+            kwargs["default"] = value == current
+            options.append(discord.SelectOption(**kwargs))
+        except TypeError:
+            kwargs.pop("default", None)
+            options.append(discord.SelectOption(**kwargs))
+    return options
+
+
 class TicketOptionEditModal(discord.ui.Modal):
     def __init__(self, cog: "TicketsCog", guild_id: int, staff_id: int, option_id: str):
         cfg = cog._get_config(guild_id)
@@ -737,43 +747,91 @@ class TicketOptionEditModal(discord.ui.Modal):
         self.guild_id = int(guild_id)
         self.staff_id = int(staff_id)
         self.option_id = str(option_id)
-        self.label_input = discord.ui.TextInput(
-            label="Nome da opção",
-            default=truncate(item.get("label") or "Nova opção", 80, suffix=""),
-            max_length=80,
-            required=True,
-        )
-        self.emoji_input = discord.ui.TextInput(
-            label="Emoji",
-            default=truncate(item.get("emoji") or "🎫", 32, suffix=""),
-            max_length=32,
-            required=True,
-        )
-        self.description_input = discord.ui.TextInput(
-            label="Descrição no select",
-            default=truncate(item.get("description") or "Abrir atendimento.", 100, suffix=""),
-            max_length=100,
-            required=True,
-        )
-        self.flow_input = discord.ui.TextInput(
-            label="Fluxo",
-            default=str(item.get("flow") or FLOW_MODAL_TICKET),
-            placeholder=_FLOW_INPUT_HELP,
-            max_length=32,
-            required=True,
-        )
-        self.channel_input = discord.ui.TextInput(
-            label="Canal destino, se enviar para canal",
-            default=str(item.get("target_channel_id") or ""),
-            placeholder="ID ou menção; vazio usa canal de sugestões",
-            max_length=40,
-            required=False,
-        )
-        self.add_item(self.label_input)
-        self.add_item(self.emoji_input)
-        self.add_item(self.description_input)
-        self.add_item(self.flow_input)
-        self.add_item(self.channel_input)
+        self.uses_v2 = False
+        current_flow = str(item.get("flow") or FLOW_MODAL_TICKET)
+
+        try:
+            self.label_input = discord.ui.TextInput(
+                label="Nome da opção",
+                default=truncate(item.get("label") or "Nova opção", 80, suffix=""),
+                max_length=80,
+                required=True,
+            )
+            self.emoji_input = discord.ui.TextInput(
+                label="Emoji",
+                default=truncate(item.get("emoji") or "🎫", 32, suffix=""),
+                max_length=32,
+                required=True,
+            )
+            self.description_input = discord.ui.TextInput(
+                label="Descrição no select",
+                default=truncate(item.get("description") or "Abrir atendimento.", 100, suffix=""),
+                max_length=100,
+                required=True,
+            )
+            self.flow_select = discord.ui.Select(
+                placeholder="Escolha o fluxo desta opção",
+                min_values=1,
+                max_values=1,
+                required=True,
+                options=_flow_select_options(current_flow),
+                custom_id=f"tickets:option_flow:{self.guild_id}:{self.option_id}",
+            )
+            channel_select_cls = getattr(discord.ui, "ChannelSelect")
+            self.target_channel_select = channel_select_cls(
+                placeholder="Canal destino, se o fluxo enviar para canal",
+                channel_types=_text_channel_types(),
+                min_values=0,
+                max_values=1,
+                required=False,
+                default_values=_guild_channel(cog, self.guild_id, int(item.get("target_channel_id") or 0)),
+                custom_id=f"tickets:option_target_channel:{self.guild_id}:{self.option_id}",
+            )
+            self.add_item(self.label_input)
+            self.add_item(self.emoji_input)
+            self.add_item(self.description_input)
+            _add_labeled(self, "Fluxo", self.flow_select, description="Escolha como essa opção se comporta no painel público.")
+            _add_labeled(self, "Canal destino", self.target_channel_select, description="Usado apenas no fluxo que envia a resposta para canal.")
+            self.uses_v2 = True
+        except Exception:
+            _safe_clear_modal_items(self)
+            self.label_input = discord.ui.TextInput(
+                label="Nome da opção",
+                default=truncate(item.get("label") or "Nova opção", 80, suffix=""),
+                max_length=80,
+                required=True,
+            )
+            self.emoji_input = discord.ui.TextInput(
+                label="Emoji",
+                default=truncate(item.get("emoji") or "🎫", 32, suffix=""),
+                max_length=32,
+                required=True,
+            )
+            self.description_input = discord.ui.TextInput(
+                label="Descrição no select",
+                default=truncate(item.get("description") or "Abrir atendimento.", 100, suffix=""),
+                max_length=100,
+                required=True,
+            )
+            self.flow_input = discord.ui.TextInput(
+                label="Fluxo",
+                default=current_flow,
+                placeholder=_FLOW_INPUT_HELP,
+                max_length=32,
+                required=True,
+            )
+            self.channel_input = discord.ui.TextInput(
+                label="Canal destino, se enviar para canal",
+                default=str(item.get("target_channel_id") or ""),
+                placeholder="ID ou menção; vazio usa canal de sugestões",
+                max_length=40,
+                required=False,
+            )
+            self.add_item(self.label_input)
+            self.add_item(self.emoji_input)
+            self.add_item(self.description_input)
+            self.add_item(self.flow_input)
+            self.add_item(self.channel_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         cfg = self.cog._get_config(self.guild_id)
@@ -785,11 +843,21 @@ class TicketOptionEditModal(discord.ui.Modal):
         item["label"] = truncate(_input_value(self.label_input), 80, suffix="") or "Nova opção"
         item["emoji"] = clean_option_emoji(_input_value(self.emoji_input), fallback="🎫")
         item["description"] = truncate(_input_value(self.description_input), 100, suffix="") or "Abrir atendimento."
-        item["flow"] = _normalize_flow_input(_input_value(self.flow_input), fallback=str(item.get("flow") or FLOW_MODAL_TICKET))
-        item["target_channel_id"] = id_from_mention_or_text(_input_value(self.channel_input))
+        if self.uses_v2:
+            selected_flow = (_selected_strings(self.flow_select) or [str(item.get("flow") or FLOW_MODAL_TICKET)])[0]
+            item["flow"] = _normalize_flow_input(selected_flow, fallback=str(item.get("flow") or FLOW_MODAL_TICKET))
+            item["target_channel_id"] = _first_selected_id(self.target_channel_select)
+        else:
+            item["flow"] = _normalize_flow_input(_input_value(self.flow_input), fallback=str(item.get("flow") or FLOW_MODAL_TICKET))
+            item["target_channel_id"] = id_from_mention_or_text(_input_value(self.channel_input))
         cfg["enabled"] = {kind: bool((items.get(kind) or {}).get("enabled", False)) for kind in TICKET_KINDS}
         await self.cog._save_config(self.guild_id, cfg)
-        await self.cog._after_editor_modal_save(interaction, self.guild_id, self.staff_id, "Opção salva.")
+        await self.cog._after_editor_modal_save(
+            interaction,
+            self.guild_id,
+            self.staff_id,
+            f"Opção salva: {item.get('emoji') or '🎫'} {item.get('label') or self.option_id} · {_flow_label(item.get('flow'))}."
+        )
 
 
 class SingleTicketTextModal(discord.ui.Modal):

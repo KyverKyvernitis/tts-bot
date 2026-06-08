@@ -17,7 +17,7 @@ from .constants import (
     TICKET_KINDS,
 )
 from .permissions import permission_summary, reset_permissions
-from .utils import accent_color, clean_panel_image_url, get_ticket_option, is_staff, iter_ticket_options, truncate
+from .utils import accent_color, clean_panel_image_url, create_custom_ticket_option, get_ticket_option, is_staff, iter_ticket_options, truncate
 
 if TYPE_CHECKING:
     from .cog import TicketsCog
@@ -559,43 +559,100 @@ class TicketEditorView(discord.ui.LayoutView):
 
 
 
+def _flow_label(flow: object) -> str:
+    labels = {
+        FLOW_CONFIRM_TICKET: "Confirmar e criar ticket",
+        FLOW_MODAL_TICKET: "Modal e criar ticket",
+        FLOW_MODAL_CHANNEL: "Modal e enviar para canal",
+        FLOW_DIRECT_TICKET: "Criar ticket direto",
+    }
+    return labels.get(str(flow or ""), "Modal e criar ticket")
+
+
 class TicketPanelOptionsEditorView(discord.ui.LayoutView):
-    def __init__(self, cog: "TicketsCog", guild_id: int, staff_id: int):
+    def __init__(self, cog: "TicketsCog", guild_id: int, staff_id: int, selected_option_id: str | None = None):
         super().__init__(timeout=300)
         self.cog = cog
         self.guild_id = int(guild_id)
         self.staff_id = int(staff_id)
         cfg = cog._get_config(self.guild_id)
-        options = []
-        for item in iter_ticket_options(cfg, include_disabled=True)[:25]:
+        items = iter_ticket_options(cfg, include_disabled=True)[:25]
+        valid_ids = [str(item.get("id") or "") for item in items if str(item.get("id") or "")]
+        selected = str(selected_option_id or "")
+        if selected not in valid_ids:
+            selected = valid_ids[0] if valid_ids else ""
+        self.selected_option_id = selected
+
+        options: list[discord.SelectOption] = []
+        selected_item: dict[str, Any] | None = None
+        for item in items:
             option_id = str(item.get("id") or "")
             if not option_id:
                 continue
-            status = "ligada" if bool(item.get("enabled", True)) else "desligada"
-            options.append(discord.SelectOption(
+            if option_id == selected:
+                selected_item = item
+            status = "ativa" if bool(item.get("enabled", True)) else "desativada"
+            flow_label = _flow_label(item.get("flow") or FLOW_MODAL_TICKET)
+            kwargs = dict(
                 label=truncate(item.get("label") or option_id, 100, suffix=""),
                 value=truncate(option_id, 100, suffix=""),
-                description=truncate(f"{status} · {item.get('flow') or 'modal_ticket'}", 100, suffix=""),
+                description=truncate(f"{status} · {flow_label}", 100, suffix=""),
                 emoji=item.get("emoji") or "🎫",
-            ))
+            )
+            try:
+                kwargs["default"] = option_id == selected
+                options.append(discord.SelectOption(**kwargs))
+            except TypeError:
+                kwargs.pop("default", None)
+                options.append(discord.SelectOption(**kwargs))
+
         if not options:
-            options.append(discord.SelectOption(label="Nenhuma opção", value="__none__", description="Crie uma opção em Editar opções.", emoji="⚠️"))
+            options.append(discord.SelectOption(label="Nenhuma opção", value="__none__", description="Use ➕ para criar uma opção.", emoji="⚠️"))
+
         self.select = discord.ui.Select(
-            placeholder="Escolha uma opção do painel para editar...",
+            placeholder="Escolha uma opção do painel...",
             min_values=1,
             max_values=1,
             options=options,
             custom_id=f"tickets:panel_options_select:{self.guild_id}:{self.staff_id}",
         )
         self.select.callback = self._on_select
+
+        edit_btn = discord.ui.Button(
+            emoji="✏️",
+            label="Editar",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"tickets:panel_option_edit:{self.guild_id}:{self.staff_id}",
+            disabled=not bool(selected),
+        )
+        add_btn = discord.ui.Button(
+            emoji="➕",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"tickets:panel_option_add:{self.guild_id}:{self.staff_id}",
+        )
+        edit_btn.callback = self._on_edit
+        add_btn.callback = self._on_add
+
+        if selected_item:
+            enabled = "ativa" if bool(selected_item.get("enabled", True)) else "desativada"
+            selected_summary = (
+                f"**Selecionada:** {selected_item.get('emoji') or '🎫'} {selected_item.get('label') or selected}\n"
+                f"**Fluxo:** {_flow_label(selected_item.get('flow') or FLOW_MODAL_TICKET)}\n"
+                f"**Status:** {enabled}\n"
+                f"**Descrição:** {truncate(selected_item.get('description') or 'Abrir atendimento.', 220)}"
+            )
+        else:
+            selected_summary = "Nenhuma opção criada ainda. Use ➕ para adicionar uma opção personalizada."
+
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("# 🎛️ Opções do painel"),
             discord.ui.TextDisplay(
-                "Edite nome, emoji, descrição e fluxo de cada opção.\n"
-                "Para criar uma nova opção, marque **➕ Adicionar opção** em **Editar opções**."
+                "Selecione uma opção para visualizar. Use **✏️ Editar** para alterar e **➕** para criar uma nova opção.\n\n"
+                f"{selected_summary}"
             ),
             discord.ui.Separator(),
             discord.ui.ActionRow(self.select),
+            discord.ui.ActionRow(edit_btn, add_btn),
             accent_color=discord.Color.blurple(),
         ))
 
@@ -610,9 +667,35 @@ class TicketPanelOptionsEditorView(discord.ui.LayoutView):
         if not option_id or option_id == "__none__":
             await interaction.response.send_message("Nenhuma opção selecionada.", ephemeral=True)
             return
+        await interaction.response.edit_message(
+            view=TicketPanelOptionsEditorView(self.cog, self.guild_id, self.staff_id, option_id)
+        )
+
+    async def _on_edit(self, interaction: discord.Interaction):
+        option_id = self.selected_option_id
+        if not option_id:
+            await interaction.response.send_message("Selecione uma opção primeiro.", ephemeral=True)
+            return
         from .modals import TicketOptionEditModal
         await interaction.response.send_modal(TicketOptionEditModal(self.cog, self.guild_id, self.staff_id, option_id))
 
+    async def _on_add(self, interaction: discord.Interaction):
+        cfg = self.cog._get_config(self.guild_id)
+        created = create_custom_ticket_option(cfg)
+        if not created:
+            await interaction.response.send_message("Limite de opções atingido; nenhuma opção nova foi criada.", ephemeral=True)
+            return
+        await self.cog._save_config(self.guild_id, cfg)
+        await self.cog._refresh_editor_message(self.guild_id, self.staff_id)
+        panel = cfg.get("panel") or {}
+        if int(panel.get("channel_id") or 0) and int(panel.get("message_id") or 0):
+            try:
+                await self.cog._refresh_public_panel(self.guild_id)
+            except Exception:
+                pass
+        await interaction.response.edit_message(
+            view=TicketPanelOptionsEditorView(self.cog, self.guild_id, self.staff_id, str(created.get("id") or ""))
+        )
 
 class TicketTextsEditorView(discord.ui.LayoutView):
     def __init__(self, cog: "TicketsCog", guild_id: int, staff_id: int):
