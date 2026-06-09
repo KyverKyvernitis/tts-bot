@@ -1864,7 +1864,7 @@ CORE_WORKER_APP_CORE_LINUX_BOX64_V14_STAGE = "core-linux-box64-intake-preflight-
 CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB = "apk_core_linux_box64_smoke_test"
 CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_STAGE = "core-linux-box64-glibc-preflight-v15.3.1"
 CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_JOB = "apk_core_linux_rootfs_glibc_preflight"
-CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_STAGE = "core-linux-rootfs-glibc-intake-preflight-v16.1"
+CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_STAGE = "core-linux-rootfs-glibc-intake-preflight-v16.2"
 CORE_WORKER_APP_LOCAL_MANUAL_QUEUE_TYPES = {
     CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB,
     CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB,
@@ -1923,7 +1923,7 @@ def _core_worker_app_job_matches(job: dict, install_id: str, worker_id: str) -> 
 def _core_worker_app_make_timeout_record(job: dict, now: int) -> dict:
     return {
         "receivedAt": now,
-        "jobId": _safe_short_text(job.get("id"), 64),
+        "jobId": _safe_short_text(job.get("id"), 128),
         "type": _safe_short_text(job.get("type"), 48),
         "installId": _safe_short_text(job.get("installId") or job.get("install_id"), 80),
         "workerId": _safe_short_text(job.get("workerId") or job.get("worker_id"), 80),
@@ -1938,7 +1938,7 @@ def _core_worker_app_make_timeout_record(job: dict, now: int) -> dict:
 
 def _core_worker_app_public_job(job: dict, now: int) -> dict:
     out = {
-        "id": _safe_short_text(job.get("id"), 64),
+        "id": _safe_short_text(job.get("id"), 128),
         "type": _safe_short_text(job.get("type"), 48),
         "reason": _safe_short_text(job.get("reason"), 80),
         "issuedAt": int(job.get("issuedAt") or now),
@@ -2067,10 +2067,22 @@ def _core_worker_app_queue_internal_jobs_for_worker(worker_id: str = "", install
             if isinstance(item, dict) and _core_worker_app_job_matches(item, install_id, worker_id):
                 existing_types.add(_core_worker_app_normalize_job_type(item.get("type")))
         created = []
+        manual_short_slugs = {
+            CORE_WORKER_APP_CORE_LINUX_SMOKE_V12_JOB: "cl-v12",
+            CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB: "cl-rfs-v13",
+            CORE_WORKER_APP_CORE_LINUX_BOX64_V14_JOB: "cl-b64-v14",
+            CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB: "cl-b64-v15",
+            CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_JOB: "cl-glibc-v16",
+        }
         for typ in job_types:
             if typ in existing_types:
                 continue
-            job_id = f"manual-{typ.replace('_', '-')}-{key[:16]}-{now}-{len(created)}"
+            # V16.2: IDs antigos começavam com o type longo e eram truncados para 64
+            # caracteres no /jobs/fetch. No APK isso fazia retries manuais diferentes
+            # virarem o mesmo jobId lembrado e serem ignorados como duplicados.
+            # Mantém unicidade no começo do ID e evita colisão mesmo em clientes antigos.
+            slug = manual_short_slugs.get(typ, typ.replace("apk_", "").replace("_", "-")[:18])
+            job_id = f"m-{now}-{uuid.uuid4().hex[:8]}-{slug}-{len(created)}"
             job = {
                 "id": job_id,
                 "type": typ,
@@ -2268,7 +2280,7 @@ def _core_worker_app_queue_core_linux_box64_smoke_v15(worker_id: str = "", insta
 
 
 
-def _core_worker_app_queue_core_linux_rootfs_glibc_v16(worker_id: str = "", install_id: str = "", *, reason: str = "manual-v16-1-rootfs-glibc-telemetry-preflight") -> dict:
+def _core_worker_app_queue_core_linux_rootfs_glibc_v16(worker_id: str = "", install_id: str = "", *, reason: str = "manual-v16-2-rootfs-glibc-telemetry-dedupe") -> dict:
     path = _core_worker_app_jobs_path()
     worker_id = _safe_short_text(worker_id, 80)
     install_id = _safe_short_text(install_id, 80)
@@ -2284,7 +2296,7 @@ def _core_worker_app_queue_core_linux_rootfs_glibc_v16(worker_id: str = "", inst
             job_type=CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_JOB,
             install_id=install_id,
             worker_id=worker_id,
-            reason="replace-with-single-v16-rootfs-glibc-preflight",
+            reason="replace-with-single-v16-2-rootfs-glibc-telemetry-dedupe",
         )
         _atomic_write_json(path, data, mode=0o600)
     queued = _core_worker_app_queue_internal_jobs_for_worker(
@@ -2296,7 +2308,7 @@ def _core_worker_app_queue_core_linux_rootfs_glibc_v16(worker_id: str = "", inst
     )
     queued["archivedPending"] = archived
     queued["stage"] = CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_STAGE
-    queued["safety"] = "manual preflight V16.1; valida rootfs/glibc com telemetria dedicada; sem executar binários importados; sem Box64; sem Bedrock; sem shell livre"
+    queued["safety"] = "manual preflight V16.2; valida rootfs/glibc com telemetria dedicada e jobId único; sem executar binários importados; sem Box64; sem Bedrock; sem shell livre"
     return queued
 
 def _core_worker_app_jobs_fetch(payload: dict) -> dict:
@@ -2395,7 +2407,7 @@ def _core_worker_app_jobs_fetch(payload: dict) -> dict:
                 blocked_job["lastFetchBlockAt"] = now
                 remaining.append(blocked_job)
                 continue
-            job_id = _safe_short_text(job.get("id") or f"job-{uuid.uuid4().hex[:12]}", 64)
+            job_id = _safe_short_text(job.get("id") or f"job-{uuid.uuid4().hex[:12]}", 128)
             if job_id in running or job_id in delivered_keys:
                 remaining.append(job)
                 continue
@@ -2495,7 +2507,7 @@ def _core_worker_app_jobs_result(payload: dict) -> dict:
     now = int(time.time())
     if not isinstance(payload, dict):
         payload = {}
-    job_id = _safe_short_text(payload.get("jobId") or payload.get("job_id"), 64)
+    job_id = _safe_short_text(payload.get("jobId") or payload.get("job_id"), 128)
     job_type = _core_worker_app_normalize_job_type(payload.get("type"))
     if not job_id:
         raise ValueError("jobId ausente")
@@ -3289,7 +3301,7 @@ def core_worker_app_jobs_enqueue():
     elif job_type == CORE_WORKER_APP_CORE_LINUX_BOX64_SMOKE_V15_JOB:
         default_reason = "manual-v15-3-1-box64-glibc-hard-guard"
     elif job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_GLIBC_V16_JOB:
-        default_reason = "manual-v16-1-rootfs-glibc-telemetry-preflight"
+        default_reason = "manual-v16-2-rootfs-glibc-telemetry-dedupe"
     reason = _safe_short_text(payload.get("reason") or default_reason, 80)
     if job_type == CORE_WORKER_APP_CORE_LINUX_ROOTFS_SMOKE_V13_JOB:
         result = _core_worker_app_queue_core_linux_rootfs_smoke_v13(

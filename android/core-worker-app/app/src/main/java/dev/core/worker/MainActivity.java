@@ -4649,7 +4649,7 @@ public class MainActivity extends Activity {
                 .put("core-linux-box64-version-smoke-v15.2")
                 .put("core-linux-box64-glibc-preflight-v15.3")
                 .put("core-linux-box64-glibc-preflight-v15.3.1")
-                .put("core-linux-rootfs-glibc-intake-preflight-v16.1")
+                .put("core-linux-rootfs-glibc-intake-preflight-v16.2")
                 .put("core-linux-embedded-binaries-intake-v1")
                 .put("core-linux-embedded-binaries-intake-v2")
                 .put("core-linux-embedded-binaries-intake-v3")
@@ -5024,6 +5024,15 @@ public class MainActivity extends Activity {
                             result.put("type", jobType);
                             result.put("deduplicated", true);
                             result.put("message", "job interno duplicado ignorado pelo APK");
+                            result.put("jobId", jobId);
+                            result.put("duplicateOf", jobId);
+                            result.put("reason", job.optString("reason", ""));
+                            JSONObject duplicatePayload = job.optJSONObject("payload");
+                            String duplicateStage = duplicatePayload == null ? "" : duplicatePayload.optString("stage", "");
+                            if (!duplicateStage.isEmpty()) {
+                                result.put("stage", duplicateStage);
+                                result.put("state", "job_duplicate_ignored");
+                            }
                         } else {
                             result = executeLightJob(job);
                         }
@@ -5712,12 +5721,12 @@ public class MainActivity extends Activity {
             }
             safePutPayload(result, "rootfsImport", rootfsImport);
             if ("apk_core_linux_rootfs_glibc_preflight".equals(type)) {
-                // V16.1: expor telemetria no nome esperado pela VPS/monitor.
+                // V16.2: expor telemetria no nome esperado pela VPS/monitor.
                 // O V16 já retornava a mensagem correta, mas o payload ficava em
                 // rootfsImport; os monitores olham coreLinuxRootfsGlibcPreflight.
                 // Mantém também stage/state no topo para registros espelhados.
                 safePutPayload(result, "coreLinuxRootfsGlibcPreflight", rootfsImport);
-                result.put("stage", rootfsImport.optString("stage", "core-linux-rootfs-glibc-intake-preflight-v16.1"));
+                result.put("stage", rootfsImport.optString("stage", "core-linux-rootfs-glibc-intake-preflight-v16.2"));
                 result.put("state", rootfsImport.optString("state", "rootfs_glibc_preflight"));
                 result.put("glibcRuntime", rootfsImport.optJSONObject("glibcRuntime") == null ? new JSONObject() : rootfsImport.optJSONObject("glibcRuntime"));
                 result.put("missing", rootfsImport.optJSONArray("missing") == null ? new JSONArray() : rootfsImport.optJSONArray("missing"));

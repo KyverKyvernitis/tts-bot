@@ -86,7 +86,7 @@ public final class CoreLinuxRootfsImportManager {
             out.put("ok", ok);
             out.put("component", "core_linux_rootfs_glibc_preflight");
             out.put("action", "glibc_preflight");
-            out.put("stage", "core-linux-rootfs-glibc-intake-preflight-v16.1");
+            out.put("stage", "core-linux-rootfs-glibc-intake-preflight-v16.2");
             out.put("state", ok ? "rootfs_glibc_ready_for_box64" : "rootfs_glibc_preflight_missing_runtime");
             out.put("summary", ok
                     ? "Rootfs Linux arm64 com glibc validado · próximo passo pode executar smoke Box64"
@@ -804,7 +804,7 @@ public final class CoreLinuxRootfsImportManager {
             if (!libm.optBoolean("exists", false)) missing.put("libm.so.6");
             if (!libresolv.optBoolean("exists", false)) missing.put("libresolv.so.2");
             out.put("ok", ok);
-            out.put("stage", "core-linux-rootfs-glibc-intake-preflight-v16.1");
+            out.put("stage", "core-linux-rootfs-glibc-intake-preflight-v16.2");
             out.put("rootfsDir", path(rootfsDir));
             out.put("loader", loader);
             out.put("libc", libc);
