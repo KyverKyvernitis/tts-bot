@@ -1022,7 +1022,7 @@ public class MainActivity extends Activity {
         bedrockAdvancedContent.setVisibility(View.GONE);
         readinessCard.addView(bedrockAdvancedContent);
 
-        Button rootfsImportButton = secondaryButton("Importar rootfs real");
+        Button rootfsImportButton = secondaryButton("Importar rootfs ARM64 glibc");
         rootfsImportButton.setOnClickListener(v -> showCoreLinuxRootfsImportDialog());
         bedrockAdvancedContent.addView(rootfsImportButton);
 
@@ -1110,8 +1110,8 @@ public class MainActivity extends Activity {
         shaInput.setSingleLine(true);
         shaInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         new AlertDialog.Builder(this)
-                .setTitle("Importar rootfs real")
-                .setMessage("Escolha um .tar, .tar.gz ou .tgz. O APK calcula o SHA-256, extrai em staging, valida e só promove se passar. Runner, Bedrock, Box64 e shell livre continuam bloqueados.")
+                .setTitle("Importar rootfs ARM64 com glibc")
+                .setMessage("Escolha um .tar, .tar.gz ou .tgz com Linux ARM64/glibc. O APK calcula SHA-256, extrai em staging, valida /bin/sh e runtime glibc, e só promove se passar. .tar.xz/.tar.zst ficam bloqueados até decompressor auditado. Runner, Bedrock, Box64 e shell livre continuam bloqueados.")
                 .setView(shaInput)
                 .setPositiveButton("Escolher arquivo", (dialog, which) -> {
                     pendingRootfsImportExpectedSha256 = shaInput.getText() == null ? "" : shaInput.getText().toString().trim();
@@ -1154,9 +1154,9 @@ public class MainActivity extends Activity {
     private void importCoreLinuxRootfsFromUri(Uri uri, String expectedSha256) {
         rootfsImportBusy = true;
         rootfsState = "rootfs_import_starting";
-        rootfsSummary = "Importação rootfs iniciada";
-        refreshLocalStatus("Importando rootfs real em staging. Não feche o app.");
-        appendBedrockTerminal("rootfs", "importação rootfs iniciada em staging; runner/Bedrock/Box64 seguem bloqueados");
+        rootfsSummary = "Importação rootfs V17 iniciada";
+        refreshLocalStatus("Importando rootfs ARM64/glibc em staging V17. Não feche o app.");
+        appendBedrockTerminal("rootfs", "importação rootfs V17 iniciada em staging; runner/Bedrock/Box64 seguem bloqueados");
         updateRootfsUi();
         new Thread(() -> {
             JSONObject result = CoreLinuxRootfsImportManager.importFromUri(this, coreLinuxDir(), uri, expectedSha256);
@@ -1246,8 +1246,8 @@ public class MainActivity extends Activity {
         boolean realValidated = isRootfsRealValidated(status) || (rootfs != null && isRootfsRealValidated(rootfs));
         if (realValidated) {
             coreLinuxPrepared = true;
-            coreLinuxState = "rootfs_real_validated";
-            coreLinuxSummary = firstNonEmpty(rootfsSummary, "Rootfs real validado · runner real ainda bloqueado");
+            coreLinuxState = "rootfs_glibc_ready_for_box64";
+            coreLinuxSummary = firstNonEmpty(rootfsSummary, "Rootfs real com glibc validado · runner real ainda bloqueado");
         } else {
             coreLinuxSummary = firstNonEmpty(statusSummary, rootSummary, coreLinuxSummary);
             coreLinuxState = firstNonEmpty(statusState, rootState, coreLinuxState);
@@ -1264,7 +1264,12 @@ public class MainActivity extends Activity {
         String state = value.optString("state", "").toLowerCase(Locale.ROOT);
         String importState = value.optString("rootfsImportState", "").toLowerCase(Locale.ROOT);
         String level = value.optString("validationLevel", value.optString("rootfsValidationLevel", "")).toLowerCase(Locale.ROOT);
-        return state.contains("rootfs_real_validated") || importState.contains("rootfs_real_validated") || "real".equals(level);
+        return state.contains("rootfs_real_validated")
+                || state.contains("rootfs_glibc_ready_for_box64")
+                || importState.contains("rootfs_real_validated")
+                || importState.contains("rootfs_glibc_ready_for_box64")
+                || "real".equals(level)
+                || "real-glibc".equals(level);
     }
 
     private String statsSummary(JSONObject stats) {

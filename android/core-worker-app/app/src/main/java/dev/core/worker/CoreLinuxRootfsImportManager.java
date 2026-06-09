@@ -43,6 +43,8 @@ public final class CoreLinuxRootfsImportManager {
     private static final long MAX_SINGLE_FILE_BYTES = 2L * 1024L * 1024L * 1024L;
     private static final int MAX_ENTRIES = 80000;
     private static final int TEXT_LIMIT = 64 * 1024;
+    private static final String ROOTFS_IMPORT_STAGE_V17 = "core-linux-rootfs-staging-import-v17";
+    private static final String ROOTFS_GLIBC_PREFLIGHT_STAGE_V16_2 = "core-linux-rootfs-glibc-intake-preflight-v16.2";
 
     private CoreLinuxRootfsImportManager() {}
 
@@ -86,11 +88,11 @@ public final class CoreLinuxRootfsImportManager {
             out.put("ok", ok);
             out.put("component", "core_linux_rootfs_glibc_preflight");
             out.put("action", "glibc_preflight");
-            out.put("stage", "core-linux-rootfs-glibc-intake-preflight-v16.2");
+            out.put("stage", ROOTFS_GLIBC_PREFLIGHT_STAGE_V16_2);
             out.put("state", ok ? "rootfs_glibc_ready_for_box64" : "rootfs_glibc_preflight_missing_runtime");
             out.put("summary", ok
                     ? "Rootfs Linux arm64 com glibc validado · próximo passo pode executar smoke Box64"
-                    : "Rootfs V16.1 pendente · falta runtime glibc arm64 para Box64");
+                    : "Rootfs V16.2 pendente · falta runtime glibc arm64 para Box64");
             out.put("rootfsReady", ok);
             out.put("distributionReady", ok);
             out.put("validationLevel", ok ? "real-glibc" : validation.optString("validationLevel", "real"));
@@ -130,10 +132,11 @@ public final class CoreLinuxRootfsImportManager {
             out.put("ok", validation.optBoolean("ok", false));
             out.put("component", "core_linux_rootfs_import");
             out.put("action", "validate_active");
-            out.put("state", validation.optBoolean("ok", false) ? "rootfs_real_glibc_validated" : "rootfs_real_validation_failed");
+            out.put("stage", ROOTFS_IMPORT_STAGE_V17);
+            out.put("state", validation.optBoolean("ok", false) ? "rootfs_glibc_ready_for_box64" : "rootfs_real_validation_failed");
             out.put("summary", validation.optBoolean("ok", false)
-                    ? "Rootfs real com glibc validado · Box64 smoke pode ser liberado em etapa futura"
-                    : "Rootfs real não passou na validação glibc V16");
+                    ? "Rootfs real com glibc validado em staging/ativo · próximo passo pode preparar smoke Box64"
+                    : "Rootfs real não passou na validação glibc V17");
             out.put("validation", validation);
             out.put("rootfsDir", path(layout.rootfs));
             out.put("safety", safetySummary());
@@ -159,6 +162,7 @@ public final class CoreLinuxRootfsImportManager {
             state.put("ok", true);
             state.put("component", "core_linux_rootfs_import");
             state.put("action", "abort");
+            state.put("stage", ROOTFS_IMPORT_STAGE_V17);
             state.put("state", "rootfs_import_aborted");
             state.put("summary", "Importação rootfs cancelada; rootfs ativa preservada");
             state.put("updatedAt", now());
@@ -183,7 +187,11 @@ public final class CoreLinuxRootfsImportManager {
                 return out;
             }
             if (!looksLikeTar(displayName)) {
-                return failure(layout, "rootfs_import_unsupported_format", "Formato não suportado: use .tar, .tar.gz ou .tgz", null);
+                String lowerName = String.valueOf(displayName == null ? "" : displayName).toLowerCase(Locale.ROOT);
+                String summary = (lowerName.endsWith(".tar.xz") || lowerName.endsWith(".txz") || lowerName.endsWith(".tar.zst") || lowerName.endsWith(".tzst"))
+                        ? "Formato detectado, mas esta etapa V17 aceita import real somente .tar, .tar.gz ou .tgz; .xz/.zst ficam bloqueados até decompressor auditado"
+                        : "Formato não suportado: use .tar, .tar.gz ou .tgz";
+                return failure(layout, "rootfs_import_unsupported_format", summary, null);
             }
             if (layout.core.getUsableSpace() > 0L && layout.core.getUsableSpace() < MIN_RECOMMENDED_FREE_BYTES) {
                 return failure(layout, "rootfs_import_low_storage", "Espaço livre insuficiente para importar rootfs com segurança", null);
@@ -195,8 +203,9 @@ public final class CoreLinuxRootfsImportManager {
             start.put("ok", true);
             start.put("component", "core_linux_rootfs_import");
             start.put("action", "import");
-            start.put("state", "rootfs_import_extracting");
-            start.put("summary", "Importando rootfs real em staging");
+            start.put("stage", ROOTFS_IMPORT_STAGE_V17);
+            start.put("state", "rootfs_import_extracting_staging");
+            start.put("summary", "Importando rootfs Linux ARM64 com glibc em staging V17");
             start.put("fileName", clean(displayName, 240));
             start.put("expectedSha256Provided", !expected.isEmpty());
             start.put("startedAt", started);
@@ -249,8 +258,9 @@ public final class CoreLinuxRootfsImportManager {
             out.put("ok", true);
             out.put("component", "core_linux_rootfs_import");
             out.put("action", "import");
-            out.put("state", "rootfs_real_glibc_validated");
-            out.put("summary", "Rootfs real com glibc importado e validado · Box64 smoke pode ser liberado em etapa futura");
+            out.put("stage", ROOTFS_IMPORT_STAGE_V17);
+            out.put("state", "rootfs_glibc_ready_for_box64");
+            out.put("summary", "Rootfs Linux ARM64 com glibc importado em staging, validado e promovido · pronto para preparar smoke Box64");
             out.put("fileName", clean(displayName, 240));
             out.put("sha256", actualSha);
             out.put("sha256Verified", shaVerified);
@@ -314,7 +324,7 @@ public final class CoreLinuxRootfsImportManager {
         new File(rootfs, "opt/core-worker").mkdirs();
         writeJson(new File(rootfs, ".core-worker-rootfs-manifest.json"), realManifest(rootfs, fileName, sha, expectedProvided, shaVerified, stats, started));
         writeJson(new File(rootfs, "opt/core-worker/rootfs-policy.json"), rootfsPolicy());
-        writeText(new File(rootfs, ".core-worker-rootfs-ready"), "readyAt=" + now() + "\nkind=" + ROOTFS_REAL_KIND + "\nstage=core-linux-rootfs-import-v1\n");
+        writeText(new File(rootfs, ".core-worker-rootfs-ready"), "readyAt=" + now() + "\nkind=" + ROOTFS_REAL_KIND + "\nstage=core-linux-rootfs-staging-import-v17\n");
         writeText(new File(rootfs, "opt/core-worker/README.imported-rootfs.txt"), "Rootfs real importado pelo Core Worker. Binários importados NÃO são executados nesta etapa; Bedrock/Box64/shell livre continuam bloqueados.\n");
     }
 
@@ -355,7 +365,8 @@ public final class CoreLinuxRootfsImportManager {
         return new JSONObject()
                 .put("ok", ok)
                 .put("rootfsReady", ok)
-                .put("state", ok ? "rootfs_real_glibc_validated" : "rootfs_real_validation_failed")
+                .put("stage", ROOTFS_IMPORT_STAGE_V17)
+                .put("state", ok ? "rootfs_glibc_ready_for_box64" : "rootfs_real_validation_failed")
                 .put("validationLevel", ok ? "real-glibc" : "real")
                 .put("distributionReady", ok)
                 .put("readyForBox64Install", ok)
@@ -373,7 +384,8 @@ public final class CoreLinuxRootfsImportManager {
                 .put("schema", "core-worker-rootfs-state-v1")
                 .put("ok", ok)
                 .put("action", "import")
-                .put("state", ok ? "rootfs_real_glibc_validated" : "rootfs_real_validation_failed")
+                .put("stage", ROOTFS_IMPORT_STAGE_V17)
+                .put("state", ok ? "rootfs_glibc_ready_for_box64" : "rootfs_real_validation_failed")
                 .put("rootfsReady", ok)
                 .put("validationLevel", ok ? "real-glibc" : "real")
                 .put("distributionReady", ok)
@@ -395,7 +407,7 @@ public final class CoreLinuxRootfsImportManager {
                         .put("rootfs real com glibc validado; execução de binários importados segue bloqueada nesta etapa")
                         .put("Bedrock/Box64/shell livre continuam bloqueados"))
                 .put("updatedAt", now())
-                .put("summary", ok ? "Rootfs real com glibc validado · Box64 smoke pode ser liberado em etapa futura" : "Rootfs real falhou na validação glibc V16");
+                .put("summary", ok ? "Rootfs real com glibc validado · pronto para preparar smoke Box64 em etapa futura" : "Rootfs real falhou na validação glibc V17");
     }
 
     private static JSONObject realManifest(File rootfs, String fileName, String sha, boolean expectedProvided, boolean shaVerified, TarStats stats, long started) throws Exception {
@@ -406,6 +418,7 @@ public final class CoreLinuxRootfsImportManager {
         return new JSONObject()
                 .put("schema", ROOTFS_MANIFEST_SCHEMA)
                 .put("kind", ROOTFS_REAL_KIND)
+                .put("stage", ROOTFS_IMPORT_STAGE_V17)
                 .put("version", 1)
                 .put("name", "Core Linux imported rootfs")
                 .put("source", "user-selected-document")
@@ -416,6 +429,7 @@ public final class CoreLinuxRootfsImportManager {
                 .put("distribution", readDistribution(rootfs))
                 .put("distributionReady", true)
                 .put("readyForBox64Install", true)
+                .put("readyForBox64Smoke", true)
                 .put("readyForBedrockStart", false)
                 .put("sha256", sha == null ? "" : sha)
                 .put("expectedSha256Provided", expectedProvided)
@@ -439,6 +453,7 @@ public final class CoreLinuxRootfsImportManager {
                 .put("appSpecificStorage", true)
                 .put("termuxFallbackOnly", true)
                 .put("rootfsImportV1", true)
+                .put("rootfsStagingImportV17", true)
                 .put("glibcRuntimeRequiredForBox64", true)
                 .put("runnerBlocked", true);
     }
@@ -632,6 +647,7 @@ public final class CoreLinuxRootfsImportManager {
             out.put("ok", true);
             out.put("component", "core_linux_rootfs_import");
             out.put("action", "progress");
+            out.put("stage", ROOTFS_IMPORT_STAGE_V17);
             out.put("state", state == null ? "rootfs_import_progress" : state);
             out.put("summary", summary == null ? "Importação rootfs em andamento" : summary);
             out.put("fileName", clean(fileName, 240));
@@ -649,6 +665,7 @@ public final class CoreLinuxRootfsImportManager {
         out.put("ok", false);
         out.put("component", "core_linux_rootfs_import");
         out.put("action", "import");
+        out.put("stage", ROOTFS_IMPORT_STAGE_V17);
         out.put("state", state);
         out.put("summary", summary);
         out.put("details", details == null ? new JSONObject() : details);
@@ -804,7 +821,7 @@ public final class CoreLinuxRootfsImportManager {
             if (!libm.optBoolean("exists", false)) missing.put("libm.so.6");
             if (!libresolv.optBoolean("exists", false)) missing.put("libresolv.so.2");
             out.put("ok", ok);
-            out.put("stage", "core-linux-rootfs-glibc-intake-preflight-v16.2");
+            out.put("stage", ROOTFS_GLIBC_PREFLIGHT_STAGE_V16_2);
             out.put("rootfsDir", path(rootfsDir));
             out.put("loader", loader);
             out.put("libc", libc);
@@ -945,7 +962,7 @@ public final class CoreLinuxRootfsImportManager {
     }
 
     private static String safetySummary() {
-        return "importação rootfs v16: arquivo escolhido pelo usuário, staging seguro, SHA-256 calculado, valida glibc arm64, sem shell livre, sem executar binários, sem iniciar Bedrock";
+        return "importação rootfs v17: arquivo escolhido pelo usuário, staging seguro, SHA-256 calculado, valida glibc arm64, sem shell livre, sem executar binários, sem iniciar Bedrock";
     }
 
     private static JSONObject error(String component, Throwable exc) {
