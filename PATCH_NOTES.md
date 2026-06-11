@@ -1,5 +1,5 @@
 # Patch V11 — PRoot loader32 optional gate
-
+. 
 Objetivo: corrigir o build do APK depois do V10. O V10 corrigiu o BusyBox wrapper, mas o Gradle passou a reprovar `libcoreworker_proot_loader32.so` porque ele é ELF32/ARM. Esse loader é multiarch futuro e não deve bloquear o APK ARM64 atual.
 
 ## O que muda
