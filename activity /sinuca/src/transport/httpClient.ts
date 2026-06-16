@@ -38,7 +38,7 @@ export function resolvePublicBaseCandidates() {
   const directHost = normalizeBase(configuredPublicHost || DEFAULT_PUBLIC_HOST);
   const currentOrigin = typeof window !== "undefined" ? window.location.origin : "";
 
-  return [configuredApiBase, directHost, currentOrigin]
+  return [configuredApiBase, currentOrigin, directHost]
     .filter(Boolean)
     .filter((value, index, array) => array.indexOf(value) === index);
 }
@@ -81,15 +81,16 @@ export function resolveStrictApiCandidates(path: string) {
 
 export function resolveTokenCandidates() {
   const candidates: string[] = [];
+
+  candidates.push("/token");
   for (const base of resolvePublicBaseCandidates()) {
     candidates.push(joinBaseAndPath(base, "/token"));
   }
-  candidates.push("/token");
 
+  candidates.push("/api/token");
   for (const base of resolvePublicBaseCandidates()) {
     candidates.push(joinBaseAndPath(base, "/api/token"));
   }
-  candidates.push("/api/token");
 
   return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
 }

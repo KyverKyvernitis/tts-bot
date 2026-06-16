@@ -288,8 +288,36 @@ export function getDiscordSdk(): DiscordSDK | null {
   return sdk;
 }
 
-async function configureDashboardOrientation(_discord: DiscordSDK) {
-  // Dashboard administrativo não força paisagem; deixa o Discord escolher o melhor layout.
+async function configureDashboardOrientation(discord: DiscordSDK): Promise<string> {
+  const commands = (discord as unknown as {
+    commands?: {
+      setOrientationLockState?: (payload: unknown) => Promise<unknown>;
+    };
+  }).commands;
+
+  if (!commands?.setOrientationLockState) {
+    return "orientation:unsupported";
+  }
+
+  const attempts: unknown[] = [
+    { lock_state: "PORTRAIT" },
+    { lock_state: "portrait" },
+    { orientation_lock_state: "PORTRAIT" },
+    { orientation_lock_state: "portrait" },
+    { lock_state: 2 },
+    { orientation_lock_state: 2 },
+  ];
+
+  for (const payload of attempts) {
+    try {
+      await commands.setOrientationLockState(payload);
+      return "orientation:portrait";
+    } catch {
+      // O SDK muda o formato entre versões; tenta o próximo formato seguro.
+    }
+  }
+
+  return "orientation:portrait-failed";
 }
 
 async function refineDisplayNameFromParticipants(discord: DiscordSDK, user: ActivityUser): Promise<ActivityUser> {
@@ -378,8 +406,7 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
     };
   }
 
-  await configureDashboardOrientation(discord);
-  bootDebug.push("orientation:flexible");
+  bootDebug.push(await configureDashboardOrientation(discord));
 
   const context = mergeContext(queryContext, discord as DiscordSdkWithContext);
   const currentUser = await resolveAuthenticatedUser(discord, fallbackUser, bootDebug, context.guildId);
