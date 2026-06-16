@@ -1,2 +1,0 @@
-android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libcoreworker_box64.so
-android/core-worker-app/app/src/main/jniLibs/arm64-v8a/libbox64.so
