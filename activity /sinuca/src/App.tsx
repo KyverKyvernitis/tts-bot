@@ -282,6 +282,14 @@ export default function App() {
   const userName = bootstrap.currentUser.displayName || "Admin";
   const hasUnsaved = changedFields.length > 0;
   const selectedPercent = selectedSummary && selectedSummary.total > 0 ? Math.round((selectedSummary.configured / selectedSummary.total) * 100) : 0;
+  const topModules = useMemo(
+    () => [...summary]
+      .sort((left, right) => Number(right.enabled === true) - Number(left.enabled === true) || right.configured - left.configured)
+      .slice(0, 6),
+    [summary],
+  );
+  const pendingSections = summary.filter((item) => item.total > item.configured).slice(0, 4);
+  const changedFieldLabels = changedFields.map((field) => field.label).slice(0, 4);
 
   return (
     <main className="dashboard-shell">
@@ -290,7 +298,7 @@ export default function App() {
           <span className="brand-icon">⚙️</span>
           <div>
             <strong>Dashboard</strong>
-            <small>Activity administrativa do servidor</small>
+            <small>Painel administrativo do servidor</small>
           </div>
         </div>
         <div className="topbar-actions">
@@ -303,10 +311,19 @@ export default function App() {
         <div className="hero-copy">
           <p className="eyebrow">Discord Activity</p>
           <h1>Dashboard</h1>
-          <p className="hero-text">Central interativa para configurar o bot neste servidor com validação de admin, salvamento seguro e visão rápida dos módulos.</p>
+          <p className="hero-text">Configure módulos, canais, permissões e automações do bot com uma experiência responsiva para celular e PC.</p>
           <div className="hero-meta">
             <span>Servidor: {guildId ?? "não identificado"}</span>
-            <span>Usuário: {userName}</span>
+            <span>Admin: {userName}</span>
+          </div>
+        </div>
+        <div className="hero-visual" aria-hidden="true">
+          <span className="hero-orb hero-orb--one" />
+          <span className="hero-orb hero-orb--two" />
+          <span className="hero-orb hero-orb--three" />
+          <div className="hero-glass-card">
+            <strong>{dashboardStats.percent}%</strong>
+            <small>configurado</small>
           </div>
         </div>
         <div className={`status-pill status-pill--${authState}`}>{message}</div>
@@ -345,14 +362,29 @@ export default function App() {
       {authState === "ready" && (
         <>
           <section className="stats-grid" aria-label="Resumo do dashboard">
-            <article className="stat-card">
-              <span className="stat-label">Configuração</span>
+            <article className="stat-card stat-card--wide">
+              <span className="stat-icon">📊</span>
+              <span className="stat-label">Configuração geral</span>
               <strong>{dashboardStats.percent}%</strong>
               <div className="progress-track"><span style={{ width: `${dashboardStats.percent}%` }} /></div>
             </article>
-            <article className="stat-card"><span className="stat-label">Campos definidos</span><strong>{dashboardStats.configured}/{dashboardStats.totalFields}</strong></article>
-            <article className="stat-card"><span className="stat-label">Módulos ativos</span><strong>{dashboardStats.active}</strong></article>
-            <article className="stat-card"><span className="stat-label">Pendências</span><strong>{dashboardStats.pending}</strong></article>
+            <article className="stat-card"><span className="stat-icon">✅</span><span className="stat-label">Campos definidos</span><strong>{dashboardStats.configured}/{dashboardStats.totalFields}</strong></article>
+            <article className="stat-card"><span className="stat-icon">🧩</span><span className="stat-label">Módulos ativos</span><strong>{dashboardStats.active}</strong></article>
+            <article className="stat-card"><span className="stat-icon">⚠️</span><span className="stat-label">Pendências</span><strong>{dashboardStats.pending}</strong></article>
+          </section>
+
+          <section className="module-bento" aria-label="Módulos em destaque">
+            {topModules.map((item) => (
+              <button
+                key={item.id}
+                className={`module-card module-card--${statusClass(item)} ${selectedSection?.id === item.id ? "module-card--active" : ""}`}
+                onClick={() => setSelectedSectionId(item.id)}
+              >
+                <span>{item.emoji}</span>
+                <strong>{item.label}</strong>
+                <small>{item.status}</small>
+              </button>
+            ))}
           </section>
 
           <section className="dashboard-grid">
@@ -455,6 +487,51 @@ export default function App() {
                 <div className="empty-state">Nenhuma seção carregada.</div>
               )}
             </section>
+
+            <aside className="inspector-panel" aria-label="Resumo da seção selecionada">
+              <div className="inspector-card inspector-card--primary">
+                <span className="inspector-emoji">{selectedSection?.emoji ?? "⚙️"}</span>
+                <p className="eyebrow">Seção atual</p>
+                <h3>{selectedSection?.label ?? "Carregando"}</h3>
+                <p>{selectedSection?.description ?? "Selecione uma área para configurar."}</p>
+                <div className="progress-track"><span style={{ width: `${selectedPercent}%` }} /></div>
+                <span className={`mini-badge mini-badge--${statusClass(selectedSummary)}`}>{selectedSummary?.status ?? "aguardando"}</span>
+              </div>
+
+              <div className="inspector-card">
+                <div className="panel-title-row">
+                  <h3>Alterações</h3>
+                  <span className="mini-badge">{changedFields.length}</span>
+                </div>
+                {changedFieldLabels.length ? (
+                  <ul className="change-list">
+                    {changedFieldLabels.map((label) => <li key={label}>{label}</li>)}
+                  </ul>
+                ) : (
+                  <p className="muted-text">Nenhuma alteração pendente nesta seção.</p>
+                )}
+              </div>
+
+              <div className="inspector-card">
+                <div className="panel-title-row">
+                  <h3>Pendências</h3>
+                  <span className="mini-badge mini-badge--pending">{dashboardStats.pending}</span>
+                </div>
+                {pendingSections.length ? (
+                  <div className="pending-stack">
+                    {pendingSections.map((item) => (
+                      <button key={item.id} onClick={() => setSelectedSectionId(item.id)}>
+                        <span>{item.emoji}</span>
+                        <strong>{item.label}</strong>
+                        <small>{item.configured}/{item.total}</small>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted-text">Tudo que o dashboard conhece já está configurado.</p>
+                )}
+              </div>
+            </aside>
           </section>
 
           {hasUnsaved && (
