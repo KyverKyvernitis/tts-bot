@@ -3363,7 +3363,7 @@ deploy_backend() {
 
   STAGE="reinício do backend"
   fuser -k "${BACK_PORT}/tcp" >/dev/null 2>&1 || true
-  run_as_ubuntu "cd \"$BACK_DIR\"; set -a; [ -f \"$REPO_DIR/.env\" ] && . \"$REPO_DIR/.env\" || true; [ -f .env ] && . ./.env || true; set +a; nohup node dist/index.js >> sinuca-server.log 2>&1 &"
+  run_as_ubuntu "cd \"$BACK_DIR\"; set -a; [ -f \"$REPO_DIR/.env\" ] && . \"$REPO_DIR/.env\" || true; [ -f .env ] && . ./.env || true; set +a; nohup node dist/index.js >> activity-dashboard-server.log 2>&1 &"
   sleep 3
   BACK_STATUS="backend reiniciado na porta $BACK_PORT"
 

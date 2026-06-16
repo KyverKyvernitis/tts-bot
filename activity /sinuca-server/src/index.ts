@@ -1,12 +1,7 @@
 import express from "express";
 import { createServer } from "http";
-import { WebSocketServer } from "ws";
-import { registerActivityRoutes } from "./routes/registerActivityRoutes.js";
-import { createBalanceService } from "./services/balanceService.js";
-import { createDiscordMessageService } from "./services/discordMessageService.js";
-import { createMatchSettlementService } from "./services/matchSettlementService.js";
-import { createActivityRealtimeRuntime } from "./realtime/runtime.js";
-import { registerSocketServer } from "./realtime/registerSocketServer.js";
+import { registerDashboardRoutes } from "./routes/registerDashboardRoutes.js";
+import { createDashboardConfigService } from "./services/dashboardConfigService.js";
 
 const app = express();
 
@@ -14,7 +9,7 @@ app.use((req, res, next) => {
   const origin = typeof req.headers.origin === "string" ? req.headers.origin : "*";
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
   res.setHeader("Access-Control-Allow-Credentials", "true");
 
@@ -25,10 +20,11 @@ app.use((req, res, next) => {
 
   next();
 });
-app.use(express.json());
+
+app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false }));
 app.use((req, _res, next) => {
-  console.log("[sinuca-http]", JSON.stringify({
+  console.log("[activity-dashboard-http]", JSON.stringify({
     method: req.method,
     url: req.url ?? null,
     origin: req.headers.origin ?? null,
@@ -42,7 +38,7 @@ const discordClientId = process.env.VITE_DISCORD_CLIENT_ID || process.env.DISCOR
 const discordClientSecret = process.env.DISCORD_CLIENT_SECRET || process.env.CLIENT_SECRET || "";
 
 async function exchangeDiscordCode(code: string): Promise<{ ok: boolean; accessToken: string | null; error: string | null; detail: string | null }> {
-  console.log("[sinuca-oauth] token request", JSON.stringify({
+  console.log("[activity-dashboard-oauth] token request", JSON.stringify({
     hasCode: Boolean(code),
     codeLength: code.length,
     hasClientId: Boolean(discordClientId),
@@ -70,7 +66,7 @@ async function exchangeDiscordCode(code: string): Promise<{ ok: boolean; accessT
     });
 
     const raw = await response.text();
-    console.log("[sinuca-oauth] token response", JSON.stringify({ status: response.status, body: raw.slice(0, 240) || "empty" }));
+    console.log("[activity-dashboard-oauth] token response", JSON.stringify({ status: response.status, body: raw.slice(0, 240) || "empty" }));
 
     let data: { access_token?: string; error?: string; error_description?: string } = {};
     try {
@@ -80,7 +76,7 @@ async function exchangeDiscordCode(code: string): Promise<{ ok: boolean; accessT
     }
 
     if (!response.ok || !data.access_token) {
-      console.error("[sinuca-oauth] token exchange failed", response.status, data);
+      console.error("[activity-dashboard-oauth] token exchange failed", response.status, data);
       return {
         ok: false,
         accessToken: null,
@@ -91,58 +87,25 @@ async function exchangeDiscordCode(code: string): Promise<{ ok: boolean; accessT
 
     return { ok: true, accessToken: data.access_token, error: null, detail: null };
   } catch (error) {
-    console.error("[sinuca-oauth] token exchange error", error);
+    console.error("[activity-dashboard-oauth] token exchange error", error);
     return { ok: false, accessToken: null, error: "token_exchange_exception", detail: null };
   }
 }
 
-const balanceService = createBalanceService({
+const dashboardConfigService = createDashboardConfigService({
   mongoUri: process.env.MONGODB_URI || process.env.MONGO_URI || "",
   mongoDbName: process.env.MONGODB_DB || process.env.MONGO_DB_NAME || process.env.MONGODB_DB_NAME || "chat_revive",
   mongoCollectionName: process.env.MONGODB_COLLECTION || process.env.MONGO_COLLECTION_NAME || process.env.MONGODB_COLLECTION_NAME || "settings",
 });
 
-const discordMessageService = createDiscordMessageService();
-const matchSettlementService = createMatchSettlementService({ balanceService, discordMessageService });
-
-const realtimeRuntime = createActivityRealtimeRuntime({
-  onFinishedGame: async ({ room, game }) => {
-    await matchSettlementService.handleFinishedGame(room, game);
-  },
-});
-
-registerActivityRoutes({
+registerDashboardRoutes({
   app,
-  runtime: realtimeRuntime,
-  balanceService,
+  configService: dashboardConfigService,
   exchangeDiscordCode,
 });
 
 const server = createServer(app);
-server.on("upgrade", (req) => {
-  console.log("[sinuca-upgrade]", JSON.stringify({
-    url: req.url ?? null,
-    origin: req.headers.origin ?? null,
-    referer: req.headers.referer ?? null,
-    ua: req.headers["user-agent"] ?? null,
-  }));
-});
-
-const wss = new WebSocketServer({ server, path: "/ws" });
-const stopRealtimeLifecycle = realtimeRuntime.startLifecycle();
-const stopSocketServer = registerSocketServer({
-  wss,
-  runtime: realtimeRuntime,
-  balanceService,
-  exchangeDiscordCode,
-});
-
-server.on("close", () => {
-  stopSocketServer();
-  stopRealtimeLifecycle();
-});
-
 const port = Number(process.env.PORT || 8787);
 server.listen(port, () => {
-  console.log(`[sinuca-server] ouvindo na porta ${port}`);
+  console.log(`[activity-dashboard-server] ouvindo na porta ${port}`);
 });

@@ -1,4 +1,4 @@
-import { Common, DiscordSDK } from "@discord/embedded-app-sdk";
+import { DiscordSDK } from "@discord/embedded-app-sdk";
 import type { ActivityBootstrap, ActivityContext, ActivityUser } from "../types/activity";
 
 interface AuthorizeCodeResult {
@@ -15,8 +15,8 @@ type DiscordSdkWithContext = DiscordSDK & {
 };
 
 let sdk: DiscordSDK | null = null;
-const cachedUserStorageKey = "sinuca_activity_cached_user";
-const cachedTokenStorageKey = "sinuca_activity_access_token";
+const cachedUserStorageKey = "activity_dashboard_cached_user";
+const cachedTokenStorageKey = "activity_dashboard_access_token";
 
 export function getOAuthRedirectUri(): string | null {
   const configured = (import.meta.env.VITE_DISCORD_REDIRECT_URI as string | undefined)?.trim();
@@ -140,7 +140,7 @@ function buildPendingUser(): ActivityUser {
 
   return {
     userId,
-    displayName: queryDisplay ?? cached?.displayName ?? "Conta não identificada",
+    displayName: queryDisplay ?? cached?.displayName ?? "Usuário não identificado",
     avatarUrl: cached?.avatarUrl ?? null,
   };
 }
@@ -178,7 +178,7 @@ function readCachedUser(): ActivityUser | null {
     if (typeof parsed.userId !== "string" || !parsed.userId.trim()) return null;
     return {
       userId: parsed.userId,
-      displayName: typeof parsed.displayName === "string" && parsed.displayName.trim() ? parsed.displayName : `Jogador ${parsed.userId.slice(0, 4)}`,
+      displayName: typeof parsed.displayName === "string" && parsed.displayName.trim() ? parsed.displayName : `Usuário ${parsed.userId.slice(0, 4)}`,
       avatarUrl: typeof parsed.avatarUrl === "string" && parsed.avatarUrl.trim() ? parsed.avatarUrl : null,
     };
   } catch {
@@ -234,21 +234,21 @@ export async function authenticateDiscordAccessToken(discord: DiscordSDK, access
   try {
     const authenticated = await discord.commands.authenticate({ access_token: accessToken });
     if (!authenticated) {
-      console.error("[sinuca-auth] authenticate returned null");
+      console.error("[activity-dashboard-auth] authenticate returned null");
       return null;
     }
     const user = (authenticated as { user?: { id?: string; global_name?: string | null; username?: string | null } }).user;
     if (!isDiscordSnowflake(user?.id)) {
-      console.error("[sinuca-auth] authenticate returned invalid user", user ?? null);
+      console.error("[activity-dashboard-auth] authenticate returned invalid user", user ?? null);
       return null;
     }
     return await enrichAuthenticatedUser(accessToken, {
       userId: user.id,
-      displayName: user.global_name ?? user.username ?? `Jogador ${user.id.slice(-4)}`,
+      displayName: user.global_name ?? user.username ?? `Usuário ${user.id.slice(-4)}`,
       avatarUrl: buildDiscordAvatarUrl(user.id, (user as { avatar?: string | null }).avatar ?? null),
     }, guildId ?? null);
   } catch (error) {
-    console.error("[sinuca-auth] authenticate exception", error);
+    console.error("[activity-dashboard-auth] authenticate exception", error);
     return null;
   }
 }
@@ -262,20 +262,20 @@ export async function authorizeDiscordCode(promptMode: AuthorizePromptMode): Pro
     const authorize = await discord.commands.authorize({
       client_id: clientId,
       response_type: "code",
-      state: `sinuca-auth-${promptMode}`,
+      state: `dashboard-auth-${promptMode}`,
       prompt: promptMode,
-      scope: ["identify", "guilds.members.read"],
+      scope: ["identify", "guilds", "guilds.members.read"],
     } as never);
 
     const code = (authorize as { code?: string | null }).code ?? null;
     if (!code) {
-      console.error("[sinuca-auth] authorize returned without code", { promptMode });
+      console.error("[activity-dashboard-auth] authorize returned without code", { promptMode });
       return { code: null, debug: `authorize:no_code:${promptMode}` };
     }
 
     return { code, debug: `authorize:code_ok:${promptMode}` };
   } catch (error) {
-    console.error("[sinuca-auth] authorize exception", { error, promptMode });
+    console.error("[activity-dashboard-auth] authorize exception", { error, promptMode });
     return { code: null, debug: `authorize:exception:${promptMode}:${getErrorMessage(error)}` };
   }
 }
@@ -288,16 +288,8 @@ export function getDiscordSdk(): DiscordSDK | null {
   return sdk;
 }
 
-async function lockLandscape(discord: DiscordSDK) {
-  try {
-    await discord.commands.setOrientationLockState({
-      lock_state: Common.OrientationLockStateTypeObject.LANDSCAPE,
-      picture_in_picture_lock_state: Common.OrientationLockStateTypeObject.LANDSCAPE,
-      grid_lock_state: Common.OrientationLockStateTypeObject.LANDSCAPE,
-    });
-  } catch {
-    // ignore orientation lock failures; portal config still acts as fallback
-  }
+async function configureDashboardOrientation(_discord: DiscordSDK) {
+  // Dashboard administrativo não força paisagem; deixa o Discord escolher o melhor layout.
 }
 
 async function refineDisplayNameFromParticipants(discord: DiscordSDK, user: ActivityUser): Promise<ActivityUser> {
@@ -386,8 +378,8 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
     };
   }
 
-  await lockLandscape(discord);
-  bootDebug.push("orientation:done");
+  await configureDashboardOrientation(discord);
+  bootDebug.push("orientation:flexible");
 
   const context = mergeContext(queryContext, discord as DiscordSdkWithContext);
   const currentUser = await resolveAuthenticatedUser(discord, fallbackUser, bootDebug, context.guildId);

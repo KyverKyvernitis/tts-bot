@@ -81,6 +81,7 @@ update.log
 update.log.*
 backup-configs.log
 sinuca-server.log
+activity-dashboard-server.log
 
 # =========================
 # Runtime / temp

@@ -1,4 +1,4 @@
-export const DEFAULT_PUBLIC_HOST = (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim() || "osakaagiota.duckdns.org";
+export const DEFAULT_PUBLIC_HOST = (import.meta.env.VITE_ACTIVITY_DASHBOARD_PUBLIC_HOST as string | undefined)?.trim() || (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim() || "osakaagiota.duckdns.org";
 
 export function joinBaseAndPath(base: string, path: string) {
   const normalizedBase = base.endsWith("/") ? base.slice(0, -1) : base;
@@ -7,8 +7,8 @@ export function joinBaseAndPath(base: string, path: string) {
 }
 
 export function resolvePublicBaseCandidates() {
-  const configuredApiBase = (import.meta.env.VITE_SINUCA_API_BASE_URL as string | undefined)?.trim();
-  const configuredPublicHost = (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim();
+  const configuredApiBase = (import.meta.env.VITE_ACTIVITY_DASHBOARD_API_BASE_URL as string | undefined)?.trim() || (import.meta.env.VITE_SINUCA_API_BASE_URL as string | undefined)?.trim();
+  const configuredPublicHost = (import.meta.env.VITE_ACTIVITY_DASHBOARD_PUBLIC_HOST as string | undefined)?.trim() || (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim();
   const candidates: string[] = [window.location.origin];
 
   if (configuredApiBase) {
