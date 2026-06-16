@@ -105,6 +105,17 @@ TTS_WORKER_AGENT_BUSY_RETRY_DELAY_SECONDS = max(0.05, float(getattr(config, "TTS
 TTS_WORKER_AGENT_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_WORKER_AGENT_MAX_AUDIO_MB", 8) or 8))
 TTS_WORKER_AGENT_MAX_TEXT_LENGTH = max(64, int(getattr(config, "TTS_WORKER_AGENT_MAX_TEXT_LENGTH", 1200) or 1200))
 TTS_WORKER_AGENT_PREFERRED_ENGINE = str(getattr(config, "TTS_WORKER_AGENT_PREFERRED_ENGINE", "auto") or "auto").strip().lower().replace("-", "_") or "auto"
+TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD = max(1, int(getattr(config, "TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD", 3) or 3))
+TTS_WORKER_AGENT_RAW_AUDIO_ENABLED = bool(getattr(config, "TTS_WORKER_AGENT_RAW_AUDIO_ENABLED", True))
+TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED = bool(getattr(config, "TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED", True))
+TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES = {
+    item.strip().lower().replace("-", "_")
+    for item in str(getattr(config, "TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES", "android_native,gcloud") or "android_native,gcloud").split(",")
+    if item.strip()
+}
+TTS_WORKER_AGENT_GTTS_MIN_WORKER_CHARS = max(0, int(getattr(config, "TTS_WORKER_AGENT_GTTS_MIN_WORKER_CHARS", 120) or 120))
+TTS_WORKER_AGENT_WORKER_SLOW_MARGIN = max(1.0, float(getattr(config, "TTS_WORKER_AGENT_WORKER_SLOW_MARGIN", 1.15) or 1.15))
+TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS = max(0.0, float(getattr(config, "TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS", 120.0) or 120.0))
 WORKER_VOICE_AGENT_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_ENABLED", True))
 WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", True))
 WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED = bool(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED", True))
@@ -384,6 +395,44 @@ class TTSAudioMixin:
             setattr(self, "_tts_gtts_rate_lock", lock)
         return lock
 
+    async def _get_phone_worker_http_session(self) -> aiohttp.ClientSession:
+        session = getattr(self, "_phone_worker_http_session", None)
+        if session is None or getattr(session, "closed", True):
+            connector = aiohttp.TCPConnector(
+                limit=8,
+                ttl_dns_cache=300,
+                keepalive_timeout=30,
+                enable_cleanup_closed=True,
+            )
+            session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=None))
+            setattr(self, "_phone_worker_http_session", session)
+        return session
+
+    def _close_phone_worker_http_session(self) -> None:
+        session = getattr(self, "_phone_worker_http_session", None)
+        if session is None or getattr(session, "closed", True):
+            return
+        setattr(self, "_phone_worker_http_session", None)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(session.close())
+
+    @staticmethod
+    def _parse_header_bool(value: Any) -> bool:
+        return str(value or "").strip().lower() in {"1", "true", "yes", "sim", "on"}
+
+    @staticmethod
+    def _parse_header_float(value: Any) -> float | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except Exception:
+            return None
+
 
     def _tts_agent_base_configured(self) -> bool:
         return bool(TTS_WORKER_AGENT_ENABLED and PHONE_WORKER_ENABLED and PHONE_WORKER_HOST and PHONE_WORKER_TOKEN)
@@ -587,6 +636,46 @@ class TTSAudioMixin:
             reset_failures=True,
         )
 
+    def _tts_agent_note_transient_health_failure(self, *, reason: str, last_error: str) -> bool:
+        """Keep a recently healthy worker route alive through a few probe glitches."""
+        state = self._tts_agent_route_state()
+        now = time.monotonic()
+        state["failure_count"] = int(state.get("failure_count") or 0) + 1
+        state["last_check_monotonic"] = now
+        state["last_error"] = str(last_error or reason or "health_error")[:220]
+        last_ok = float(state.get("last_ok_monotonic") or 0.0)
+        recently_ok = bool(last_ok and (now - last_ok) <= TTS_WORKER_AGENT_STALE_SECONDS)
+        if bool(state.get("ok")) and state.get("route") == "worker" and recently_ok and int(state.get("failure_count") or 0) < TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD:
+            state["reason"] = str(f"{reason}_degraded")[:160]
+            return True
+        return False
+
+    async def _fetch_tts_agent_light_health(self, *, base: str, headers: dict[str, str]) -> dict[str, Any]:
+        timeout = aiohttp.ClientTimeout(total=TTS_WORKER_AGENT_HEALTH_TIMEOUT_SECONDS)
+        session = await self._get_phone_worker_http_session()
+        # Endpoint leve novo: não chama _system_status(), então não trava a rota TTS
+        # por causa de music/boot/scripts/diagnósticos pesados do worker.
+        try:
+            async with session.get(f"{base}/tts-agent/health", headers=headers, timeout=timeout) as response:
+                text = await response.text()
+                if response.status == 404:
+                    raise RuntimeError("light_health_404")
+                if response.status < 200 or response.status >= 300:
+                    raise RuntimeError(f"HTTP {response.status}: {text[:180]}")
+                return json.loads(text or "{}")
+        except RuntimeError as exc:
+            if "light_health_404" not in str(exc):
+                raise
+        # Compatibilidade com worker antigo: ainda é mais leve que /health completo.
+        data = await self._request_phone_worker_json(
+            task="tts_agent_status",
+            payload={},
+            timeout_seconds=TTS_WORKER_AGENT_HEALTH_TIMEOUT_SECONDS,
+            max_audio_mb=1,
+            raise_on_worker_error=False,
+        )
+        return data
+
     async def _probe_tts_agent_health_once(self) -> None:
         metrics = self._get_metrics_store()
         if not self._tts_agent_base_configured():
@@ -599,12 +688,11 @@ class TTSAudioMixin:
         headers = {"Authorization": f"Bearer {PHONE_WORKER_TOKEN}", "Accept": "application/json"}
         started = time.monotonic()
         try:
-            timeout = aiohttp.ClientTimeout(total=TTS_WORKER_AGENT_HEALTH_TIMEOUT_SECONDS)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(f"{base}/health", headers=headers) as response:
-                    response.raise_for_status()
-                    data = await response.json(content_type=None)
+            data = await self._fetch_tts_agent_light_health(base=base, headers=headers)
             agent = data.get("tts_agent") if isinstance(data, dict) else None
+            if not isinstance(agent, dict) and isinstance(data, dict):
+                # /task tts_agent_status devolve o snapshot direto.
+                agent = data
             voice_agent = data.get("voice_agent") if isinstance(data, dict) else None
             if not isinstance(agent, dict):
                 agent = {}
@@ -622,8 +710,8 @@ class TTSAudioMixin:
                     route="worker",
                     ok=True,
                     reason=str(agent.get("state") or "health_ok"),
-                    worker_id=str(data.get("worker_id") or ""),
-                    worker_version=str(data.get("version") or ""),
+                    worker_id=str(data.get("worker_id") or agent.get("worker_id") or ""),
+                    worker_version=str(data.get("version") or data.get("worker_version") or agent.get("worker_version") or ""),
                     engine=str(agent.get("preferred_engine") or agent.get("engine") or ""),
                     available_engines=list(agent.get("available_engines") or []),
                     queue_active=int(agent.get("active") or 0),
@@ -637,8 +725,11 @@ class TTSAudioMixin:
                 self._tts_agent_set_route(route="vps", ok=False, reason=reason, last_error=reason)
         except Exception as exc:
             metrics["tts_agent_health_fail"] = int(metrics.get("tts_agent_health_fail", 0) or 0) + 1
-            self._tts_agent_set_route(route="vps", ok=False, reason="health_error", last_error=f"{type(exc).__name__}: {exc}")
-            self._log_debug(f"[tts_agent] health falhou após {(time.monotonic()-started)*1000.0:.1f}ms: {exc}")
+            error = f"{type(exc).__name__}: {exc}"
+            kept = self._tts_agent_note_transient_health_failure(reason="health_error", last_error=error)
+            if not kept:
+                self._tts_agent_set_route(route="vps", ok=False, reason="health_error", last_error=error)
+            self._log_debug(f"[tts_agent] health leve falhou após {(time.monotonic()-started)*1000.0:.1f}ms: {exc}; kept_worker={kept}")
 
     async def _tts_agent_health_loop(self) -> None:
         try:
@@ -1810,6 +1901,7 @@ class TTSAudioMixin:
         headers = {
             "Authorization": f"Bearer {PHONE_WORKER_TOKEN}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
         }
         request_payload = dict(payload)
         request_payload["task"] = task
@@ -1817,15 +1909,15 @@ class TTSAudioMixin:
         request_payload.setdefault("max_audio_bytes", max_audio_bytes)
         started = time.monotonic()
         timeout = aiohttp.ClientTimeout(total=max(1.0, float(timeout_seconds)))
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(f"{base}/task", headers=headers, json=request_payload) as response:
-                response_text = await response.text()
-                response_ms = (time.monotonic() - started) * 1000.0
-                if response.status < 200 or response.status >= 300:
-                    raise RuntimeError(f"HTTP {response.status}: {response_text[:260]}")
-                parse_started = time.monotonic()
-                data = json.loads(response_text or "{}")
-                parse_ms = (time.monotonic() - parse_started) * 1000.0
+        session = await self._get_phone_worker_http_session()
+        async with session.post(f"{base}/task", headers=headers, json=request_payload, timeout=timeout) as response:
+            response_text = await response.text()
+            response_ms = (time.monotonic() - started) * 1000.0
+            if response.status < 200 or response.status >= 300:
+                raise RuntimeError(f"HTTP {response.status}: {response_text[:260]}")
+            parse_started = time.monotonic()
+            data = json.loads(response_text or "{}")
+            parse_ms = (time.monotonic() - parse_started) * 1000.0
         data["total_ms"] = round((time.monotonic() - started) * 1000.0, 2)
         data["_vps_worker_request_ms"] = round(response_ms, 2)
         data["_vps_worker_json_parse_ms"] = round(parse_ms, 2)
@@ -1857,7 +1949,100 @@ class TTSAudioMixin:
         data["_vps_audio_decode_ms"] = round(decode_ms, 2)
         return data
 
+    def _worker_header_value(self, headers: Any, name: str, default: str = "") -> str:
+        return str(headers.get(name) or headers.get(name.lower()) or default or "").strip()
+
+    async def _request_phone_worker_raw_audio(self, *, payload: dict[str, Any], timeout_seconds: float, max_audio_mb: int) -> dict[str, Any]:
+        base = self._phone_worker_tts_base_url()
+        if not base:
+            raise RuntimeError("PHONE_WORKER_ENABLED/HOST/TOKEN não configurado")
+        max_audio_bytes = max(1, int(max_audio_mb)) * 1024 * 1024
+        request_payload = dict(payload)
+        request_payload.setdefault("max_audio_bytes", max_audio_bytes)
+        headers = {
+            "Authorization": f"Bearer {PHONE_WORKER_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "audio/ogg,audio/mpeg,audio/wav,application/octet-stream,application/json;q=0.4,*/*;q=0.1",
+        }
+        timeout = aiohttp.ClientTimeout(total=max(1.0, float(timeout_seconds)))
+        started = time.monotonic()
+        session = await self._get_phone_worker_http_session()
+        async with session.post(f"{base}/tts-agent/synthesize.raw", headers=headers, json=request_payload, timeout=timeout) as response:
+            content_type = str(response.headers.get("Content-Type") or "").lower()
+            if response.status in {404, 405}:
+                text = await response.text()
+                raise RuntimeError(f"raw_endpoint_unavailable: HTTP {response.status}: {text[:120]}")
+            if "application/json" in content_type:
+                text = await response.text()
+                try:
+                    parsed = json.loads(text or "{}")
+                except Exception:
+                    parsed = {"ok": False, "error": text[:240]}
+                if response.status < 200 or response.status >= 300 or parsed.get("ok") is False:
+                    raise RuntimeError(str(parsed.get("error") or f"HTTP {response.status}: {text[:180]}"))
+                # Worker antigo pode responder JSON mesmo no endpoint raw; decodifica sem segunda ida.
+                parsed["_vps_worker_request_ms"] = round((time.monotonic() - started) * 1000.0, 2)
+                return self._decode_worker_audio_payload(parsed, max_audio_mb=max_audio_mb)
+            raw = await response.read()
+            request_ms = (time.monotonic() - started) * 1000.0
+            if response.status < 200 or response.status >= 300:
+                raise RuntimeError(f"HTTP {response.status}: {raw[:180]!r}")
+            if not raw:
+                raise RuntimeError("worker raw não retornou áudio")
+            if len(raw) > max_audio_bytes:
+                raise RuntimeError(f"worker raw retornou áudio grande demais: {len(raw)} bytes")
+            expected_hash = self._worker_header_value(response.headers, "X-Core-Worker-Sha256")
+            actual_hash = hashlib.sha256(raw).hexdigest()
+            if expected_hash and expected_hash != actual_hash:
+                raise RuntimeError("sha256 do áudio raw retornado não confere")
+            audio_format = self._normalize_worker_audio_format(self._worker_header_value(response.headers, "X-Core-Worker-Audio-Format", "mp3"))
+            timing_ms: dict[str, Any] = {}
+            for header_name, key in (
+                ("X-Core-Worker-Worker-Total-Ms", "worker_total"),
+                ("X-Core-Worker-Worker-Synth-Ms", "worker_synth"),
+                ("X-Core-Worker-Cache-Read-Ms", "cache_read"),
+                ("X-Core-Worker-Android-Synth-Ms", "android_synth"),
+                ("X-Core-Worker-Android-Roundtrip-Ms", "android_roundtrip"),
+            ):
+                value = self._parse_header_float(self._worker_header_value(response.headers, header_name))
+                if value is not None:
+                    timing_ms[key] = round(value, 2)
+            data = {
+                "ok": True,
+                "raw_audio": raw,
+                "audio_bytes": raw,
+                "audio_format": audio_format,
+                "engine": self._worker_header_value(response.headers, "X-Core-Worker-Engine"),
+                "selected_engine": self._worker_header_value(response.headers, "X-Core-Worker-Selected-Engine") or self._worker_header_value(response.headers, "X-Core-Worker-Engine"),
+                "cache_hit": self._parse_header_bool(self._worker_header_value(response.headers, "X-Core-Worker-Cache-Hit")),
+                "sha256": actual_hash,
+                "worker_id": self._worker_header_value(response.headers, "X-Core-Worker-Id"),
+                "worker_version": self._worker_header_value(response.headers, "X-Core-Worker-Version"),
+                "worker_total_ms": timing_ms.get("worker_total", 0.0),
+                "worker_synth_ms": timing_ms.get("worker_synth", 0.0),
+                "timing_ms": timing_ms,
+                "_vps_worker_request_ms": round(request_ms, 2),
+                "_vps_worker_json_parse_ms": 0.0,
+                "_vps_audio_decode_ms": 0.0,
+                "_vps_worker_response_bytes": len(raw),
+                "audio_bytes_len": len(raw),
+            }
+            return data
+
     async def _request_phone_worker_tts_audio(self, *, task: str, payload: dict[str, Any], timeout_seconds: float, max_audio_mb: int) -> dict[str, Any]:
+        if TTS_WORKER_AGENT_RAW_AUDIO_ENABLED and task == "tts_agent_synthesize":
+            try:
+                return await self._request_phone_worker_raw_audio(
+                    payload=payload,
+                    timeout_seconds=timeout_seconds,
+                    max_audio_mb=max_audio_mb,
+                )
+            except Exception as exc:
+                # Compatibilidade: worker antigo sem endpoint raw cai no JSON/base64.
+                # Erro real de síntese não deve repetir outra síntese e piorar a latência.
+                if "raw_endpoint_unavailable" not in str(exc):
+                    raise
+                self._log_debug(f"[tts_agent] raw audio indisponível; tentando JSON/base64: {exc}")
         data = await self._request_phone_worker_json(
             task=task,
             payload=payload,
@@ -2675,11 +2860,11 @@ class TTSAudioMixin:
             request_payload = dict(payload)
             request_payload["task"] = "tts_cache_store"
             timeout = aiohttp.ClientTimeout(total=TTS_TURBO_WORKER_CACHE_STORE_TIMEOUT_SECONDS)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(f"{base}/task", headers=headers, json=request_payload) as response:
-                    text = await response.text()
-                    if response.status < 200 or response.status >= 300:
-                        raise RuntimeError(f"HTTP {response.status}: {text[:160]}")
+            session = await self._get_phone_worker_http_session()
+            async with session.post(f"{base}/task", headers=headers, json=request_payload, timeout=timeout) as response:
+                text = await response.text()
+                if response.status < 200 or response.status >= 300:
+                    raise RuntimeError(f"HTTP {response.status}: {text[:160]}")
             self._mark_worker_cache_index(key, "hit", meta={"engine": item.engine, "size": size, "source": "store"})
             self._record_worker_cache_store(True)
             self._log_debug(f"[tts_worker_cache] store ok | guild={item.guild_id} engine={item.engine} key={key[:10]} size={size}")
@@ -3390,10 +3575,44 @@ class TTSAudioMixin:
         self._mark_tts_agent_synth_failure(final_error)
         raise final_error
 
+    def _engine_average_ms(self, engine: str) -> float:
+        metrics = self._get_engine_metrics(engine)
+        count = int(metrics.get("synth_count", 0) or 0)
+        total = float(metrics.get("synth_total_ms", 0.0) or 0.0)
+        if count <= 0 or total <= 0:
+            return 0.0
+        return total / count
+
+    def _tts_agent_should_try_worker(self, item: QueueItem) -> tuple[bool, str]:
+        if not self._tts_agent_route_available():
+            return False, "worker_offline_or_not_ready"
+        engine = str(getattr(item, "engine", "") or "gtts").strip().lower().replace("-", "_") or "gtts"
+        if not TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED:
+            return True, "adaptive_disabled"
+        if engine in TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES:
+            return True, "always_worker_engine"
+        text_len = len(self._get_item_normalized_cache_text(item))
+        if engine == "gtts" and text_len < TTS_WORKER_AGENT_GTTS_MIN_WORKER_CHARS:
+            return False, "gtts_short_text_vps_fastpath"
+        local_avg = self._engine_average_ms(engine)
+        worker_avg = self._engine_average_ms(f"tts_agent:{engine}")
+        if worker_avg <= 0:
+            worker_avg = float(self._tts_agent_route_state().get("avg_synth_ms") or 0.0)
+        if local_avg > 0 and worker_avg > 0:
+            slow_limit = max(local_avg * TTS_WORKER_AGENT_WORKER_SLOW_MARGIN, local_avg + TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS)
+            if worker_avg > slow_limit:
+                return False, f"vps_faster:{local_avg:.0f}ms<{worker_avg:.0f}ms"
+        return True, "worker_ready"
+
     async def _generate_audio_file(self, item: QueueItem) -> str:
         agent_available = self._tts_agent_route_available()
-        self._record_tts_agent_route_sample(agent_available)
-        if agent_available:
+        use_agent, agent_decision = self._tts_agent_should_try_worker(item) if agent_available else (False, "worker_offline_or_not_ready")
+        self._record_tts_agent_route_sample(use_agent)
+        if agent_available and not use_agent:
+            self._tts_agent_route_state()["last_error"] = ""
+            self._tts_agent_route_state()["reason"] = agent_decision[:160]
+            self._log_debug(f"[tts_agent] rota VPS escolhida sem tentativa worker | guild={item.guild_id} engine={item.engine} motivo={agent_decision}")
+        if use_agent:
             try:
                 return await self._run_timed_generation(
                     f"tts_agent:{item.engine}",
@@ -3403,8 +3622,8 @@ class TTSAudioMixin:
             except Exception as e:
                 logger.warning("[tts_agent] TTS no worker falhou; usando fallback local/VPS | guild=%s engine=%s erro=%s", item.guild_id, item.engine, e)
 
-        if item.engine == "android_native" and not agent_available:
-            logger.warning("[tts_android_native] Android TTS nativo indisponível; usando fallback local | guild=%s", item.guild_id)
+        if item.engine == "android_native" and not use_agent:
+            logger.warning("[tts_android_native] Android TTS nativo indisponível; usando fallback local | guild=%s motivo=%s", item.guild_id, agent_decision)
             return await self._generate_piper_fallback_file(item)
 
         if item.engine == "piper":

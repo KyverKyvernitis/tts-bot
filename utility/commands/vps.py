@@ -693,8 +693,12 @@ class VpsCommandMixin:
         agent_enabled = bool(tts_agent.get("enabled"))
         agent_ok = bool(tts_agent.get("ok"))
         cooldown = float(tts_agent.get("cooldown_remaining_seconds") or 0.0)
-        route_label = "Worker" if route == "worker" and agent_ok else "VPS"
-        route_dot = "🟢" if route == "worker" and agent_ok else ("🟡" if agent_enabled and cooldown > 0 else "🔵")
+        route_reason = str(tts_agent.get("reason") or "").strip()
+        adaptive_vps = route == "worker" and agent_ok and (
+            route_reason.startswith("vps_faster") or route_reason in {"gtts_short_text_vps_fastpath"}
+        )
+        route_label = "VPS fast-path" if adaptive_vps else ("Worker" if route == "worker" and agent_ok else "VPS")
+        route_dot = "🔵" if adaptive_vps else ("🟢" if route == "worker" and agent_ok else ("🟡" if agent_enabled and cooldown > 0 else "🔵"))
         worker_id = str(tts_agent.get("worker_id") or "nenhum").strip() or "nenhum"
         worker_version = str(tts_agent.get("worker_version") or "").strip()
         worker_suffix = f" · versão {worker_version}" if worker_version else ""

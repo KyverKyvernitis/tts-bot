@@ -45,6 +45,10 @@ JOBS_STARTED = 0
 JOBS_FAILED = 0
 _PING_CACHE: dict[str, Any] = {}
 _ANDROID_TTS_STATUS_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
+_GCLOUD_TTS_CLIENT_LOCK = threading.Lock()
+_GCLOUD_TTS_CLIENT: Any | None = None
+_GCLOUD_TTS_CLIENT_SIGNATURE = ""
+_GCLOUD_TTS_CLIENT_ERROR = ""
 _CORE_WORKER_NETWORK_STATE: dict[str, Any] = {"last_ok_at": 0.0, "last_error_at": 0.0, "last_error": "", "last_error_kind": ""}
 _CORE_JOB_LOCK = threading.RLock()
 _CORE_JOB_ACTIVE: dict[str, Any] = {}
@@ -1738,6 +1742,56 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[s
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(data)))
     handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def _header_ascii(value: Any, *, limit: int = 180) -> str:
+    text = _short_text(value, limit=limit, default="")
+    return text.encode("ascii", errors="ignore").decode("ascii", errors="ignore")
+
+
+def _audio_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, meta: dict[str, Any]) -> None:
+    fmt = str(meta.get("audio_format") or meta.get("format") or "mp3").strip().lower().replace(".", "")
+    content_type = "audio/mpeg"
+    if fmt in {"ogg", "opus", "ogg_opus", "oggopus"}:
+        fmt = "ogg"
+        content_type = "audio/ogg"
+    elif fmt in {"wav", "wave"}:
+        fmt = "wav"
+        content_type = "audio/wav"
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(data)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Core-Worker-Audio-Format", fmt)
+    handler.send_header("X-Core-Worker-Engine", _header_ascii(meta.get("engine")))
+    handler.send_header("X-Core-Worker-Selected-Engine", _header_ascii(meta.get("selected_engine") or meta.get("engine")))
+    handler.send_header("X-Core-Worker-Cache-Hit", "true" if meta.get("cache_hit") else "false")
+    handler.send_header("X-Core-Worker-Sha256", _header_ascii(meta.get("sha256"), limit=80))
+    handler.send_header("X-Core-Worker-Id", _header_ascii(meta.get("worker_id"), limit=100))
+    handler.send_header("X-Core-Worker-Version", _header_ascii(meta.get("worker_version"), limit=40))
+    for key, header in (
+        ("worker_total_ms", "X-Core-Worker-Worker-Total-Ms"),
+        ("worker_synth_ms", "X-Core-Worker-Worker-Synth-Ms"),
+        ("cache_read_ms", "X-Core-Worker-Cache-Read-Ms"),
+        ("android_synth_ms", "X-Core-Worker-Android-Synth-Ms"),
+    ):
+        value = meta.get(key)
+        if value not in (None, ""):
+            handler.send_header(header, _header_ascii(value, limit=40))
+    timing = meta.get("timing_ms") if isinstance(meta.get("timing_ms"), dict) else {}
+    if timing:
+        if timing.get("worker_total") not in (None, ""):
+            handler.send_header("X-Core-Worker-Worker-Total-Ms", _header_ascii(timing.get("worker_total"), limit=40))
+        if timing.get("worker_synth") not in (None, ""):
+            handler.send_header("X-Core-Worker-Worker-Synth-Ms", _header_ascii(timing.get("worker_synth"), limit=40))
+        if timing.get("cache_read") not in (None, ""):
+            handler.send_header("X-Core-Worker-Cache-Read-Ms", _header_ascii(timing.get("cache_read"), limit=40))
+        if timing.get("android_synth") not in (None, ""):
+            handler.send_header("X-Core-Worker-Android-Synth-Ms", _header_ascii(timing.get("android_synth"), limit=40))
+        if timing.get("android_roundtrip") not in (None, ""):
+            handler.send_header("X-Core-Worker-Android-Roundtrip-Ms", _header_ascii(timing.get("android_roundtrip"), limit=40))
     handler.end_headers()
     handler.wfile.write(data)
 
@@ -3998,6 +4052,21 @@ class WorkerHandler(BaseHTTPRequestHandler):
             host, port = self._bind_host_port()
             _json_response(self, HTTPStatus.OK, _local_agent_status_payload(host=host, port=port))
             return
+        if path in {"/tts-agent/health", "/tts-agent/status"}:
+            if not self._require_auth():
+                return
+            try:
+                agent = self._task_tts_agent_status({})
+                payload = {
+                    "ok": bool(agent.get("ok")),
+                    "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
+                    "version": PHONE_WORKER_VERSION,
+                    "tts_agent": agent,
+                }
+                _json_response(self, HTTPStatus.OK, payload)
+            except Exception as exc:
+                _error(self, HTTPStatus.SERVICE_UNAVAILABLE, f"{type(exc).__name__}: {_short_text(exc, limit=180)}")
+            return
         if path not in {"/", "/health", "/status"}:
             _error(self, HTTPStatus.NOT_FOUND, "rota não encontrada")
             return
@@ -4076,6 +4145,24 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 _json_response(self, HTTPStatus.OK, result)
             except Exception as exc:
                 _error(self, HTTPStatus.BAD_REQUEST, f"{type(exc).__name__}: {exc}")
+            return
+        if path == "/tts-agent/synthesize.raw":
+            if not self._require_auth():
+                return
+            body = self._read_json()
+            if body is None:
+                return
+            try:
+                result = self._task_tts_agent_synthesize(body)
+                max_audio_bytes = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
+                raw = _b64decode(str(result.get("data_b64") or ""), max_bytes=max_audio_bytes)
+                if not raw:
+                    raise RuntimeError("TTS Agent não retornou áudio")
+                result["worker_id"] = str(result.get("worker_id") or os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip()
+                result["worker_version"] = str(result.get("worker_version") or PHONE_WORKER_VERSION)
+                _audio_response(self, HTTPStatus.OK, raw, result)
+            except Exception as exc:
+                _error(self, HTTPStatus.BAD_GATEWAY, f"{type(exc).__name__}: {_short_text(exc, limit=220)}")
             return
         if path != "/task":
             _error(self, HTTPStatus.NOT_FOUND, "rota não encontrada")
@@ -4448,6 +4535,39 @@ class WorkerHandler(BaseHTTPRequestHandler):
         path = tmp_dir / "google-credentials.json"
         path.write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(path)
+
+    def _google_credentials_signature(self) -> str:
+        configured_path = _gcloud_credentials_path()
+        if configured_path:
+            try:
+                path = Path(configured_path).expanduser()
+                stat_result = path.stat()
+                return f"path:{path.resolve()}:{int(stat_result.st_mtime)}:{int(stat_result.st_size)}"
+            except Exception:
+                return f"path:{configured_path}"
+        raw_json = (os.getenv("GOOGLE_CREDENTIALS_JSON", "") or "").strip()
+        if raw_json:
+            return "json:" + hashlib.sha256(raw_json.encode("utf-8", errors="ignore")).hexdigest()
+        return "missing"
+
+    def _get_worker_google_tts_client(self, tmp_dir: Path):
+        global _GCLOUD_TTS_CLIENT, _GCLOUD_TTS_CLIENT_SIGNATURE, _GCLOUD_TTS_CLIENT_ERROR
+        try:
+            from google.cloud import texttospeech_v1 as google_texttospeech  # type: ignore
+        except Exception as exc:
+            raise RuntimeError(f"google-cloud-texttospeech não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
+        signature = self._google_credentials_signature()
+        if _GCLOUD_TTS_CLIENT is not None and _GCLOUD_TTS_CLIENT_SIGNATURE == signature:
+            return _GCLOUD_TTS_CLIENT
+        with _GCLOUD_TTS_CLIENT_LOCK:
+            if _GCLOUD_TTS_CLIENT is not None and _GCLOUD_TTS_CLIENT_SIGNATURE == signature:
+                return _GCLOUD_TTS_CLIENT
+            self._ensure_worker_google_credentials_file(tmp_dir)
+            client = google_texttospeech.TextToSpeechClient()
+            _GCLOUD_TTS_CLIENT = client
+            _GCLOUD_TTS_CLIENT_SIGNATURE = signature
+            _GCLOUD_TTS_CLIENT_ERROR = ""
+            return client
 
     def _task_voice_agent_status(self, body: dict[str, Any]) -> dict[str, Any]:
         music_agent = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
@@ -4989,7 +5109,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 raise RuntimeError(f"google-cloud-texttospeech não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
             with tempfile.TemporaryDirectory(prefix="phone-worker-gcloud-credentials-") as tmp:
-                self._ensure_worker_google_credentials_file(Path(tmp))
+                client = self._get_worker_google_tts_client(Path(tmp))
                 language = self._normalize_tts_gcloud_language(body.get("language") or os.getenv("PHONE_WORKER_GOOGLE_TTS_LANGUAGE"))
                 voice_name = str(body.get("voice") or os.getenv("PHONE_WORKER_GOOGLE_TTS_VOICE") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
                 rate = self._normalize_tts_gcloud_rate(body.get("rate") or os.getenv("PHONE_WORKER_GOOGLE_TTS_SPEAKING_RATE"))
@@ -4998,7 +5118,6 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 audio_format = _gcloud_audio_suffix(encoding_name)
                 if voice_name and not voice_name.lower().startswith(language.lower() + "-"):
                     voice_name = ""
-                client = google_texttospeech.TextToSpeechClient()
                 voice_kwargs = {"language_code": language}
                 if voice_name:
                     voice_kwargs["name"] = voice_name
@@ -5536,7 +5655,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         from google.cloud import texttospeech_v1 as google_texttospeech  # type: ignore
                     except Exception as exc:
                         raise RuntimeError(f"google-cloud-texttospeech não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
-                    self._ensure_worker_google_credentials_file(tmp_dir)
+                    client = self._get_worker_google_tts_client(tmp_dir)
                     language = self._normalize_tts_gcloud_language(body.get("language") or os.getenv("PHONE_WORKER_GOOGLE_TTS_LANGUAGE"))
                     voice_name = str(body.get("voice") or os.getenv("PHONE_WORKER_GOOGLE_TTS_VOICE") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
                     rate = self._normalize_tts_gcloud_rate(body.get("rate") or os.getenv("PHONE_WORKER_GOOGLE_TTS_SPEAKING_RATE"))
@@ -5546,7 +5665,6 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     out_path = tmp_dir / f"speech.{audio_format}"
                     if voice_name and not voice_name.lower().startswith(language.lower() + "-"):
                         voice_name = ""
-                    client = google_texttospeech.TextToSpeechClient()
                     voice_kwargs = {"language_code": language}
                     if voice_name:
                         voice_kwargs["name"] = voice_name

@@ -517,6 +517,14 @@ TTS_WORKER_AGENT_BUSY_RETRY_DELAY_SECONDS = max(0.05, _parse_float(os.getenv("TT
 TTS_WORKER_AGENT_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_WORKER_AGENT_MAX_AUDIO_MB", "8"), 8))
 TTS_WORKER_AGENT_MAX_TEXT_LENGTH = max(64, _parse_int(os.getenv("TTS_WORKER_AGENT_MAX_TEXT_LENGTH", "1200"), 1200))
 TTS_WORKER_AGENT_PREFERRED_ENGINE = (os.getenv("TTS_WORKER_AGENT_PREFERRED_ENGINE", "auto") or "auto").strip().lower().replace("-", "_") or "auto"
+# Health leve + rota adaptativa: não deixa o TTS esperar worker offline/lento.
+TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD = max(1, _parse_int(os.getenv("TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD", "3"), 3))
+TTS_WORKER_AGENT_RAW_AUDIO_ENABLED = _parse_bool(os.getenv("TTS_WORKER_AGENT_RAW_AUDIO_ENABLED", "true"), True)
+TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED = _parse_bool(os.getenv("TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED", "true"), True)
+TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES = (os.getenv("TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES", "android_native,gcloud") or "android_native,gcloud").strip().lower().replace("-", "_")
+TTS_WORKER_AGENT_GTTS_MIN_WORKER_CHARS = max(0, _parse_int(os.getenv("TTS_WORKER_AGENT_GTTS_MIN_WORKER_CHARS", "120"), 120))
+TTS_WORKER_AGENT_WORKER_SLOW_MARGIN = max(1.0, _parse_float(os.getenv("TTS_WORKER_AGENT_WORKER_SLOW_MARGIN", "1.15"), 1.15))
+TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS = max(0.0, _parse_float(os.getenv("TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS", "120"), 120.0))
 
 # Worker Voice Agent roadmap: the VPS remains the bot/control plane, while the
 # turbo worker becomes the direct audio/voice plane when this staged path is ready.

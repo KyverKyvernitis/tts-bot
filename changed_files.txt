@@ -1,2 +1,7 @@
-cogs/tickets/webhooks.py
-PATCH_NOTES_TICKETS_WEBHOOK_PER_CHANNEL.md
+config.py
+cogs/tts/audio.py
+cogs/tts/cog.py
+deploy/termux/phone-worker/phone_worker.py
+utility/commands/vps.py
+PATCH_NOTES_TTS_LATENCY_FASTPATH.md
+changed_files.txt
