@@ -37,12 +37,13 @@ app.use((req, _res, next) => {
 const discordClientId = process.env.VITE_DISCORD_CLIENT_ID || process.env.DISCORD_CLIENT_ID || "";
 const discordClientSecret = process.env.DISCORD_CLIENT_SECRET || process.env.CLIENT_SECRET || "";
 
-async function exchangeDiscordCode(code: string): Promise<{ ok: boolean; accessToken: string | null; error: string | null; detail: string | null }> {
+async function exchangeDiscordCode(code: string, redirectUri?: string): Promise<{ ok: boolean; accessToken: string | null; error: string | null; detail: string | null }> {
   console.log("[activity-dashboard-oauth] token request", JSON.stringify({
     hasCode: Boolean(code),
     codeLength: code.length,
     hasClientId: Boolean(discordClientId),
     hasClientSecret: Boolean(discordClientSecret),
+    hasRedirectUri: Boolean(redirectUri),
   }));
 
   if (!code) {
@@ -58,6 +59,7 @@ async function exchangeDiscordCode(code: string): Promise<{ ok: boolean; accessT
     params.set("client_secret", discordClientSecret);
     params.set("grant_type", "authorization_code");
     params.set("code", code);
+    if (redirectUri) params.set("redirect_uri", redirectUri);
 
     const response = await fetch("https://discord.com/api/v10/oauth2/token", {
       method: "POST",

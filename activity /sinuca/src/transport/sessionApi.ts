@@ -1,4 +1,4 @@
-import { fetchWithTimeout, resolveApiCandidates } from "./httpClient";
+import { DashboardHttpError, fetchJsonFromCandidate, resolveTokenCandidates } from "./httpClient";
 
 export type OAuthExchangeResult = {
   ok: boolean;
@@ -7,74 +7,70 @@ export type OAuthExchangeResult = {
   detail: string | null;
 };
 
-export async function exchangeDiscordTokenRequest(code: string): Promise<OAuthExchangeResult> {
-  const baseCandidates = resolveApiCandidates("/token");
-  const attempts: string[] = [];
-  const requestVariants: Array<{ label: string; url: string; init: RequestInit }> = [];
+type TokenResponse = {
+  ok?: boolean;
+  access_token?: string;
+  accessToken?: string;
+  error?: string;
+  detail?: string;
+};
 
-  for (const baseUrl of baseCandidates) {
-    requestVariants.push({
-      label: `POST_JSON:${baseUrl}`,
-      url: baseUrl,
+function compactAttempt(error: unknown) {
+  if (error instanceof DashboardHttpError) {
+    if (error.code === "html_instead_of_json") return `${error.status || "sem_status"}:html_frontend`;
+    return `${error.status || "sem_status"}:${error.code}:${error.message.slice(0, 80)}`;
+  }
+  return error instanceof Error ? error.message.slice(0, 120) : String(error).slice(0, 120);
+}
+
+export async function exchangeDiscordTokenRequest(code: string, redirectUri?: string | null): Promise<OAuthExchangeResult> {
+  const attempts: string[] = [];
+  const candidates = resolveTokenCandidates();
+  const variants = candidates.flatMap((url) => ([
+    {
+      label: `json:${url}`,
+      url,
       init: {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({ code }),
+        credentials: "same-origin" as RequestCredentials,
+        body: JSON.stringify({ code, redirect_uri: redirectUri || undefined }),
       },
-    });
-    requestVariants.push({
-      label: `POST_FORM:${baseUrl}`,
-      url: baseUrl,
+    },
+    {
+      label: `form:${url}`,
+      url,
       init: {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        credentials: "same-origin",
-        body: new URLSearchParams({ code }).toString(),
+        credentials: "same-origin" as RequestCredentials,
+        body: new URLSearchParams({ code, ...(redirectUri ? { redirect_uri: redirectUri } : {}) }).toString(),
       },
-    });
-    requestVariants.push({
-      label: `GET_QUERY:${baseUrl}`,
-      url: `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}code=${encodeURIComponent(code)}`,
-      init: {
-        method: "GET",
-        credentials: "same-origin",
-      },
-    });
-  }
+    },
+  ]));
 
-  for (const variant of requestVariants) {
+  for (const variant of variants) {
     try {
-      const response = await fetchWithTimeout(variant.url, variant.init, 4000);
-      const raw = await response.text();
-      let parsed: { access_token?: string; error?: string; detail?: string } | null = null;
-      try {
-        parsed = raw ? JSON.parse(raw) as { access_token?: string; error?: string; detail?: string } : null;
-      } catch {
-        parsed = null;
+      const parsed = await fetchJsonFromCandidate<TokenResponse>(variant.url, variant.init, 5000);
+      const accessToken = parsed.access_token ?? parsed.accessToken ?? null;
+      if (typeof accessToken === "string" && accessToken.trim()) {
+        return { ok: true, accessToken, error: null, detail: `ok:${variant.label}` };
       }
-
-      if (response.ok && typeof parsed?.access_token === "string" && parsed.access_token) {
-        return {
-          ok: true,
-          accessToken: parsed.access_token,
-          error: null,
-          detail: `http_ok:${variant.label}:${response.status}`,
-        };
-      }
-
-      const detail = parsed?.error ?? parsed?.detail ?? (raw.slice(0, 180) || "empty");
-      attempts.push(`${variant.label}:${response.status}:${detail}`);
+      attempts.push(`${variant.label}:sem_access_token:${parsed.error ?? parsed.detail ?? "resposta sem token"}`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "unknown";
-      attempts.push(`${variant.label}:exception:${message}`);
+      attempts.push(`${variant.label}:${compactAttempt(error)}`);
     }
   }
+
+  const htmlHits = attempts.filter((item) => item.includes("html_frontend")).length;
+  const reason = htmlHits >= Math.max(1, Math.floor(attempts.length / 2))
+    ? "api_proxy_returning_frontend_html"
+    : "http_exchange_failed";
 
   return {
     ok: false,
     accessToken: null,
-    error: "http_exchange_failed",
-    detail: attempts.length ? attempts.join(" | ") : null,
+    error: reason,
+    detail: attempts.length ? attempts.slice(0, 8).join(" | ") : null,
   };
 }

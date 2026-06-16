@@ -5,11 +5,12 @@ import { verifyDashboardAccess } from "../services/discordAuthService.js";
 export interface RegisterDashboardRoutesOptions {
   app: Express;
   configService: DashboardConfigService;
-  exchangeDiscordCode(code: string): Promise<{ ok: boolean; accessToken: string | null; error: string | null; detail: string | null }>;
+  exchangeDiscordCode(code: string, redirectUri?: string): Promise<{ ok: boolean; accessToken: string | null; error: string | null; detail: string | null }>;
 }
 
 function sendNoStoreJson(res: Response, status: number, payload: unknown) {
   res.setHeader("Cache-Control", "no-store");
+  res.type("application/json");
   res.status(status).json(payload);
 }
 
@@ -31,31 +32,38 @@ async function requireDashboardAccess(req: Request, res: Response): Promise<{ ok
 }
 
 export function registerDashboardRoutes({ app, configService, exchangeDiscordCode }: RegisterDashboardRoutesOptions) {
-  app.get("/health", async (_req, res) => {
+  const healthHandler = async (_req: Request, res: Response) => {
     sendNoStoreJson(res, 200, {
       ok: true,
-      service: "activity-dashboard",
-      version: "1.0.0",
+      service: "dashboard",
+      version: "1.1.0",
       legacy_sinuca: false,
       time: new Date().toISOString(),
     });
-  });
+  };
 
-  app.post("/token", async (req, res) => {
+  const tokenHandler = async (req: Request, res: Response) => {
     const code = String((req.body && req.body.code) || "").trim();
-    const result = await exchangeDiscordCode(code);
+    const redirectUri = String((req.body && req.body.redirect_uri) || "").trim() || undefined;
+    const result = await exchangeDiscordCode(code, redirectUri);
     if (!result.ok || !result.accessToken) {
       sendNoStoreJson(res, 400, { ok: false, error: result.error || "token_exchange_failed", detail: result.detail || null });
       return;
     }
     sendNoStoreJson(res, 200, { ok: true, access_token: result.accessToken });
+  };
+
+  app.get(["/health", "/api/health"], healthHandler);
+  app.post(["/token", "/api/token"], tokenHandler);
+  app.all(["/token", "/api/token"], (_req, res) => {
+    sendNoStoreJson(res, 405, { ok: false, error: "method_not_allowed", detail: "Use POST com o código OAuth." });
   });
 
   app.get("/api/dashboard/bootstrap", async (req, res) => {
     const guildId = String(req.query.guild_id || "").trim();
     const access = await verifyDashboardAccess(bearer(req), guildId);
     if (!access.ok || !access.user) {
-      sendNoStoreJson(res, access.status, { ok: false, error: access.reason || "access_denied" });
+      sendNoStoreJson(res, access.status, { ok: false, error: access.reason || "access_denied", detail: access.detail ?? null });
       return;
     }
     sendNoStoreJson(res, 200, {
@@ -105,5 +113,9 @@ export function registerDashboardRoutes({ app, configService, exchangeDiscordCod
     } catch (error) {
       sendNoStoreJson(res, 500, { ok: false, error: error instanceof Error ? error.message : "save_failed" });
     }
+  });
+
+  app.use("/api", (req, res) => {
+    sendNoStoreJson(res, 404, { ok: false, error: "api_route_not_found", detail: `${req.method} ${req.originalUrl}` });
   });
 }

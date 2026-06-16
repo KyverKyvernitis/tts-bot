@@ -1,42 +1,66 @@
 export const DEFAULT_PUBLIC_HOST = (import.meta.env.VITE_ACTIVITY_DASHBOARD_PUBLIC_HOST as string | undefined)?.trim() || (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim() || "osakaagiota.duckdns.org";
 
+export class DashboardHttpError extends Error {
+  status: number;
+  url: string;
+  code: string;
+  raw: string | null;
+
+  constructor(message: string, status: number, url: string, code = "request_failed", raw: string | null = null) {
+    super(message);
+    this.name = "DashboardHttpError";
+    this.status = status;
+    this.url = url;
+    this.code = code;
+    this.raw = raw;
+  }
+}
+
 export function joinBaseAndPath(base: string, path: string) {
   const normalizedBase = base.endsWith("/") ? base.slice(0, -1) : base;
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  if (normalizedBase.endsWith("/api") && normalizedPath === "/api") return normalizedBase;
+  if (normalizedBase.endsWith("/api") && normalizedPath.startsWith("/api/")) {
+    return `${normalizedBase}${normalizedPath.slice(4)}`;
+  }
   return `${normalizedBase}${normalizedPath}`;
 }
 
+function normalizeBase(base: string) {
+  const trimmed = base.trim();
+  if (!trimmed) return "";
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
 export function resolvePublicBaseCandidates() {
-  const configuredApiBase = (import.meta.env.VITE_ACTIVITY_DASHBOARD_API_BASE_URL as string | undefined)?.trim() || (import.meta.env.VITE_SINUCA_API_BASE_URL as string | undefined)?.trim();
-  const configuredPublicHost = (import.meta.env.VITE_ACTIVITY_DASHBOARD_PUBLIC_HOST as string | undefined)?.trim() || (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim();
-  const candidates: string[] = [window.location.origin];
+  const configuredApiBase = normalizeBase((import.meta.env.VITE_ACTIVITY_DASHBOARD_API_BASE_URL as string | undefined)?.trim() || (import.meta.env.VITE_SINUCA_API_BASE_URL as string | undefined)?.trim() || "");
+  const configuredPublicHost = normalizeBase((import.meta.env.VITE_ACTIVITY_DASHBOARD_PUBLIC_HOST as string | undefined)?.trim() || (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim() || "");
+  const directHost = normalizeBase(configuredPublicHost || DEFAULT_PUBLIC_HOST);
+  const currentOrigin = typeof window !== "undefined" ? window.location.origin : "";
 
-  if (configuredApiBase) {
-    candidates.push(configuredApiBase);
-  }
-
-  const directHost = configuredPublicHost || DEFAULT_PUBLIC_HOST;
-  if (directHost) {
-    const withScheme = /^https?:\/\//i.test(directHost) ? directHost : `https://${directHost}`;
-    candidates.push(withScheme);
-  }
-
-  return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
+  return [configuredApiBase, directHost, currentOrigin]
+    .filter(Boolean)
+    .filter((value, index, array) => array.indexOf(value) === index);
 }
 
 export function resolveApiCandidates(path: string) {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const candidates: string[] = [`/api${normalizedPath}`];
+  const apiPath = normalizedPath.startsWith("/api/") || normalizedPath === "/api"
+    ? normalizedPath
+    : `/api${normalizedPath}`;
+  const legacyPath = normalizedPath.replace(/^\/api(?=\/|$)/, "") || "/";
+  const candidates: string[] = [];
 
   for (const base of resolvePublicBaseCandidates()) {
-    candidates.push(joinBaseAndPath(base, `/api${normalizedPath}`));
+    candidates.push(joinBaseAndPath(base, apiPath));
   }
+  candidates.push(apiPath);
 
   for (const base of resolvePublicBaseCandidates()) {
-    candidates.push(joinBaseAndPath(base, normalizedPath));
+    candidates.push(joinBaseAndPath(base, legacyPath));
   }
+  candidates.push(legacyPath);
 
-  candidates.push(normalizedPath);
   return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
 }
 
@@ -45,47 +69,29 @@ export function resolveStrictApiCandidates(path: string) {
   const apiPath = normalizedPath.startsWith("/api/") || normalizedPath === "/api"
     ? normalizedPath
     : `/api${normalizedPath}`;
-  const candidates: string[] = [apiPath];
+  const candidates: string[] = [];
 
   for (const base of resolvePublicBaseCandidates()) {
     candidates.push(joinBaseAndPath(base, apiPath));
   }
+  candidates.push(apiPath);
 
   return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
 }
 
-export function buildQueryStringFromPayload(payload: Record<string, unknown>) {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(payload)) {
-    if (value === undefined || value === null) continue;
-    if (typeof value === "boolean") {
-      params.set(key, value ? "true" : "false");
-      continue;
-    }
-    if (typeof value === "number") {
-      if (!Number.isFinite(value)) continue;
-      params.set(key, `${value}`);
-      continue;
-    }
-    params.set(key, String(value));
+export function resolveTokenCandidates() {
+  const candidates: string[] = [];
+  for (const base of resolvePublicBaseCandidates()) {
+    candidates.push(joinBaseAndPath(base, "/token"));
   }
-  return params.toString();
-}
+  candidates.push("/token");
 
-export function resolveLegacyBalanceAction(path: string) {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  if (normalizedPath === "/rooms") return "rooms_list";
-  if (normalizedPath === "/rooms/create") return "room_create";
-  if (normalizedPath === "/rooms/join") return "room_join";
-  if (normalizedPath === "/rooms/leave") return "room_leave";
-  if (normalizedPath === "/rooms/ready") return "room_ready";
-  if (normalizedPath === "/rooms/stake") return "room_stake";
-  if (normalizedPath === "/games/start") return "game_start";
-  if (normalizedPath === "/games/shoot") return "game_shoot";
-  if (normalizedPath === "/games/rematch-ready") return "game_rematch_ready";
-  if (normalizedPath === "/games/debug") return "ui_debug";
-  if (/^\/rooms\/[^/]+$/.test(normalizedPath)) return "room_get";
-  return null;
+  for (const base of resolvePublicBaseCandidates()) {
+    candidates.push(joinBaseAndPath(base, "/api/token"));
+  }
+  candidates.push("/api/token");
+
+  return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
 }
 
 export async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs = 2500) {
@@ -98,44 +104,102 @@ export async function fetchWithTimeout(input: RequestInfo | URL, init: RequestIn
   }
 }
 
-export function appendNoStoreNonce(urlLike: string | URL, nonce?: string) {
-  const url = new URL(urlLike.toString(), window.location.origin);
-  url.searchParams.set("_rt", nonce ?? `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-  return url;
+function looksLikeHtml(raw: string, contentType: string) {
+  const text = raw.trim().slice(0, 80).toLowerCase();
+  return contentType.includes("text/html") || text.startsWith("<!doctype html") || text.startsWith("<html");
 }
 
-export function dispatchLeaveBeacon(roomId: string, userId: string, closeRoom: boolean) {
-  const payload = new URLSearchParams();
-  payload.set('roomId', roomId);
-  payload.set('userId', userId);
-  payload.set('closeRoom', String(closeRoom));
-  payload.set('reason', closeRoom ? 'activity_unload_close' : 'activity_unload_leave');
+function payloadMessage(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  for (const key of ["error", "detail", "message", "reason"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
 
-  for (const baseUrl of resolveStrictApiCandidates('/rooms/leave')) {
+function sanitizeRawForMessage(raw: string, contentType: string) {
+  if (looksLikeHtml(raw, contentType)) {
+    return "A rota da API devolveu HTML do frontend. O proxy/fallback ainda não encaminhou essa chamada para o backend.";
+  }
+  const text = raw.replace(/\s+/g, " ").trim();
+  return text.slice(0, 220) || "Resposta vazia";
+}
+
+export async function fetchJsonFromCandidate<T>(url: string, init: RequestInit, timeoutMs = 5000): Promise<T> {
+  const response = await fetchWithTimeout(url, {
+    ...init,
+    cache: "no-store",
+    credentials: init.credentials ?? "same-origin",
+    headers: {
+      Accept: "application/json",
+      ...(init.headers ?? {}),
+    },
+  }, timeoutMs);
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  const raw = await response.text();
+
+  if (looksLikeHtml(raw, contentType)) {
+    throw new DashboardHttpError(
+      "A chamada caiu no HTML do frontend, não na API do dashboard.",
+      response.status || 0,
+      url,
+      "html_instead_of_json",
+      raw,
+    );
+  }
+
+  let parsed: unknown = null;
+  try {
+    parsed = raw ? JSON.parse(raw) : null;
+  } catch {
+    throw new DashboardHttpError(
+      sanitizeRawForMessage(raw, contentType),
+      response.status || 0,
+      url,
+      "invalid_json",
+      raw,
+    );
+  }
+
+  if (!response.ok) {
+    const message = payloadMessage(parsed) ?? `Falha HTTP ${response.status}`;
+    throw new DashboardHttpError(message, response.status, url, "http_error", raw);
+  }
+
+  return parsed as T;
+}
+
+export async function fetchJsonFromCandidates<T>(candidates: string[], init: RequestInit, timeoutMs = 5000): Promise<T> {
+  const attempts: string[] = [];
+  let lastError: unknown = null;
+
+  for (const url of candidates) {
     try {
-      if (typeof navigator.sendBeacon === 'function') {
-        const blob = new Blob([payload.toString()], { type: 'application/x-www-form-urlencoded;charset=UTF-8' });
-        if (navigator.sendBeacon(baseUrl, blob)) return true;
+      return await fetchJsonFromCandidate<T>(url, init, timeoutMs);
+    } catch (error) {
+      lastError = error;
+      if (error instanceof DashboardHttpError) {
+        attempts.push(`${error.status || "sem_status"} ${error.code} ${url}`);
+      } else {
+        const text = error instanceof Error ? error.message : String(error);
+        attempts.push(`erro ${url}: ${text}`);
       }
-    } catch {
-      // ignore and continue with keepalive fallback
     }
   }
 
-  for (const baseUrl of resolveStrictApiCandidates('/rooms/leave')) {
-    try {
-      void fetch(baseUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-        body: payload.toString(),
-        credentials: 'same-origin',
-        keepalive: true,
-      });
-      return true;
-    } catch {
-      // ignore and keep trying other candidates
-    }
+  if (lastError instanceof DashboardHttpError) {
+    const detail = attempts.slice(0, 6).join(" · ");
+    throw new DashboardHttpError(
+      `${lastError.message}${detail ? ` (${detail})` : ""}`,
+      lastError.status,
+      lastError.url,
+      lastError.code,
+      lastError.raw,
+    );
   }
 
-  return false;
+  const message = lastError instanceof Error ? lastError.message : String(lastError || "api_unreachable");
+  throw new Error(`${message}${attempts.length ? ` (${attempts.slice(0, 6).join(" · ")})` : ""}`);
 }
