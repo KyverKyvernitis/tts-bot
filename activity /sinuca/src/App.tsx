@@ -88,6 +88,20 @@ function statusClass(summary: DashboardSectionSummary | undefined) {
   return "partial";
 }
 
+function sectionPercent(summary: DashboardSectionSummary | undefined): number {
+  if (!summary || summary.total <= 0) return 0;
+  return Math.round((summary.configured / summary.total) * 100);
+}
+
+function moduleHint(summary: DashboardSectionSummary): string {
+  if (summary.enabled === false) return "Desativado";
+  if (summary.total <= 0) return summary.status;
+  const missing = Math.max(0, summary.total - summary.configured);
+  if (missing <= 0) return "Pronto para usar";
+  if (summary.configured <= 0) return "Comece por aqui";
+  return `${missing} pendência${missing === 1 ? "" : "s"}`;
+}
+
 export default function App() {
   const [bootstrap, setBootstrap] = useState<ActivityBootstrap>(pendingBootstrap);
   const [token, setToken] = useState<string | null>(() => readCachedToken());
@@ -101,6 +115,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [query, setQuery] = useState("");
+  const [mobileView, setMobileView] = useState<"home" | "section">("home");
 
   const guildId = bootstrap.context.guildId;
   const selectedSection = useMemo(
@@ -247,6 +262,11 @@ export default function App() {
     setDraft((current) => ({ ...current, [field.id]: normalizeInputValue(field, raw) }));
   }
 
+  function openSection(sectionId: string) {
+    setSelectedSectionId(sectionId);
+    setMobileView("section");
+  }
+
   useEffect(() => {
     let cancelled = false;
     bootstrapDiscord().then((result) => {
@@ -290,9 +310,10 @@ export default function App() {
   );
   const pendingSections = summary.filter((item) => item.total > item.configured).slice(0, 4);
   const changedFieldLabels = changedFields.map((field) => field.label).slice(0, 4);
+  const searchActive = query.trim().length > 0;
 
   return (
-    <main className="dashboard-shell">
+    <main className={`dashboard-shell dashboard-shell--${mobileView}`}>
       <header className="dashboard-topbar">
         <div className="brand-block">
           <span className="brand-icon">⚙️</span>
@@ -311,7 +332,7 @@ export default function App() {
         <div className="hero-copy">
           <p className="eyebrow">Discord Activity</p>
           <h1>Dashboard</h1>
-          <p className="hero-text">Configure módulos, canais, permissões e automações do bot com uma experiência responsiva para celular e PC.</p>
+          <p className="hero-text">Central administrativa para configurar módulos, canais, permissões e automações do servidor.</p>
           <div className="hero-meta">
             <span>Servidor: {guildId ?? "não identificado"}</span>
             <span>Admin: {userName}</span>
@@ -323,7 +344,7 @@ export default function App() {
           <span className="hero-orb hero-orb--three" />
           <div className="hero-glass-card">
             <strong>{dashboardStats.percent}%</strong>
-            <small>configurado</small>
+            <small>pronto</small>
           </div>
         </div>
         <div className={`status-pill status-pill--${authState}`}>{message}</div>
@@ -361,177 +382,226 @@ export default function App() {
 
       {authState === "ready" && (
         <>
-          <section className="stats-grid" aria-label="Resumo do dashboard">
-            <article className="stat-card stat-card--wide">
-              <span className="stat-icon">📊</span>
-              <span className="stat-label">Configuração geral</span>
-              <strong>{dashboardStats.percent}%</strong>
-              <div className="progress-track"><span style={{ width: `${dashboardStats.percent}%` }} /></div>
-            </article>
-            <article className="stat-card"><span className="stat-icon">✅</span><span className="stat-label">Campos definidos</span><strong>{dashboardStats.configured}/{dashboardStats.totalFields}</strong></article>
-            <article className="stat-card"><span className="stat-icon">🧩</span><span className="stat-label">Módulos ativos</span><strong>{dashboardStats.active}</strong></article>
-            <article className="stat-card"><span className="stat-icon">⚠️</span><span className="stat-label">Pendências</span><strong>{dashboardStats.pending}</strong></article>
-          </section>
-
-          <section className="module-bento" aria-label="Módulos em destaque">
-            {topModules.map((item) => (
-              <button
-                key={item.id}
-                className={`module-card module-card--${statusClass(item)} ${selectedSection?.id === item.id ? "module-card--active" : ""}`}
-                onClick={() => setSelectedSectionId(item.id)}
+          <section className="command-center dashboard-home" aria-label="Início do dashboard">
+            <div className="command-head">
+              <div>
+                <p className="eyebrow">Visão geral</p>
+                <h2>Configure o servidor por módulos</h2>
+                <p className="muted-text">Escolha uma área, ajuste apenas o necessário e salve quando houver alterações.</p>
+              </div>
+              <div
+                className="health-ring"
+                aria-label={`${dashboardStats.percent}% configurado`}
+                style={{ background: `radial-gradient(circle at center, rgba(12,15,25,0.95) 53%, transparent 54%), conic-gradient(var(--accent-strong) ${dashboardStats.percent}%, rgba(255,255,255,0.10) 0)` }}
               >
-                <span>{item.emoji}</span>
-                <strong>{item.label}</strong>
-                <small>{item.status}</small>
-              </button>
-            ))}
-          </section>
+                <span>{dashboardStats.percent}%</span>
+                <small>{dashboardStats.configured}/{dashboardStats.totalFields}</small>
+              </div>
+            </div>
 
-          <section className="dashboard-grid">
-            <aside className="section-list" aria-label="Áreas configuráveis">
+            <div className="overview-strip" aria-label="Resumo rápido">
+              <article><span>✅</span><strong>{dashboardStats.active}</strong><small>módulos ativos</small></article>
+              <article><span>🧩</span><strong>{summary.length}</strong><small>áreas</small></article>
+              <article><span>⚠️</span><strong>{dashboardStats.pending}</strong><small>pendências</small></article>
+            </div>
+
+            <label className="search-shell">
+              <span>🔎</span>
+              <input value={query} placeholder="Buscar área ou configuração..." onChange={(event) => setQuery(event.target.value)} />
+            </label>
+
+            <div className="module-grid" aria-label={searchActive ? "Resultado da busca" : "Módulos do servidor"}>
+              {filteredSections.map((item) => (
+                <button
+                  key={item.id}
+                  className={`module-tile module-tile--${statusClass(item)} ${selectedSection?.id === item.id ? "module-tile--active" : ""}`}
+                  onClick={() => openSection(item.id)}
+                >
+                  <span className="module-emoji">{item.emoji}</span>
+                  <span className="module-copy">
+                    <strong>{item.label}</strong>
+                    <small>{moduleHint(item)}</small>
+                  </span>
+                  <span className="module-progress">{sectionPercent(item)}%</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="quick-panel">
               <div className="panel-title-row">
-                <h2>Áreas</h2>
+                <h3>Ações rápidas</h3>
                 <button className="ghost-button ghost-button--small" disabled={busy} onClick={() => void refreshDashboard()}>Atualizar</button>
               </div>
-              <input className="search-input" value={query} placeholder="Buscar configuração..." onChange={(event) => setQuery(event.target.value)} />
-              <div className="section-buttons">
-                {filteredSections.map((item) => (
-                  <button
-                    key={item.id}
-                    className={`section-button section-button--${statusClass(item)} ${selectedSection?.id === item.id ? "section-button--active" : ""}`}
-                    onClick={() => setSelectedSectionId(item.id)}
-                  >
-                    <span className="section-emoji">{item.emoji}</span>
-                    <span className="section-copy">
-                      <strong>{item.label}</strong>
-                      <small>{item.status} · {sectionConfiguredLabel(item)}</small>
-                    </span>
-                  </button>
-                ))}
+              <div className="quick-actions">
+                {summary.some((item) => item.id === "tickets") && <button onClick={() => openSection("tickets")}>🎫 Publicar/ajustar tickets</button>}
+                {summary.some((item) => item.id === "welcome") && <button onClick={() => openSection("welcome")}>👋 Preview boas-vindas</button>}
+                {summary.some((item) => item.id === "tts") && <button onClick={() => openSection("tts")}>🔊 Testar TTS</button>}
+                {summary.some((item) => item.id === "logs") && <button onClick={() => openSection("logs")}>📜 Conferir logs</button>}
               </div>
-            </aside>
+            </div>
+          </section>
 
-            <section className="settings-panel">
-              {selectedSection ? (
-                <>
-                  <div className="settings-heading">
-                    <div>
-                      <p className="eyebrow">{selectedSection.emoji} {selectedSection.label}</p>
-                      <h2>{selectedSection.description}</h2>
-                      <p>{selectedSummary ? `${selectedSummary.configured} de ${selectedSummary.total} campos configurados.` : ""}</p>
-                    </div>
-                    <div className="button-row">
-                      <button className="ghost-button" onClick={() => setDraft(values)} disabled={!hasUnsaved || saving}>Desfazer</button>
-                      <button className="primary-button" onClick={() => void saveSection()} disabled={!hasUnsaved || saving}>{saving ? "Salvando..." : hasUnsaved ? `Salvar ${changedFields.length}` : "Salvo"}</button>
-                    </div>
-                  </div>
+          <section className="workspace dashboard-section-view" aria-label="Configuração da seção">
+            <nav className="section-rail" aria-label="Navegação rápida">
+              <button className="section-chip section-chip--home" onClick={() => setMobileView("home")}>⌂ Início</button>
+              {summary.map((item) => (
+                <button
+                  key={item.id}
+                  className={`section-chip section-chip--${statusClass(item)} ${selectedSection?.id === item.id ? "section-chip--active" : ""}`}
+                  onClick={() => openSection(item.id)}
+                >
+                  <span>{item.emoji}</span>{item.label}
+                </button>
+              ))}
+            </nav>
 
-                  <div className="section-overview">
-                    <div>
-                      <span className="stat-label">Progresso da seção</span>
-                      <strong>{selectedPercent}%</strong>
-                    </div>
-                    <div className="progress-track"><span style={{ width: `${selectedPercent}%` }} /></div>
-                    <span className={`mini-badge mini-badge--${statusClass(selectedSummary)}`}>{selectedSummary?.status ?? "carregando"}</span>
-                  </div>
-
-                  <div className="fields-grid">
-                    {selectedSection.fields.map((field) => {
-                      const current = draft[field.id];
-                      const changed = draft[field.id] !== values[field.id];
-                      return (
-                        <label key={field.id} className={`field-card ${changed ? "field-card--changed" : ""}`}>
-                          <span className="field-topline">
-                            <span className="field-label">{field.label}</span>
-                            {changed && <span className="mini-badge mini-badge--pending">alterado</span>}
-                          </span>
-                          {field.description && <span className="field-description">{field.description}</span>}
-                          {field.type === "boolean" ? (
-                            <span className="switch-row">
-                              <input
-                                type="checkbox"
-                                checked={Boolean(current)}
-                                onChange={(event) => updateDraft(field, event.target.checked)}
-                              />
-                              <span>{Boolean(current) ? "Ligado" : "Desligado"}</span>
-                            </span>
-                          ) : field.type === "select" ? (
-                            <select value={stringifyValue(current)} onChange={(event) => updateDraft(field, event.target.value)}>
-                              {(field.options ?? []).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                            </select>
-                          ) : field.type === "textarea" ? (
-                            <textarea
-                              value={stringifyValue(current)}
-                              maxLength={field.maxLength}
-                              placeholder={field.placeholder}
-                              onChange={(event) => updateDraft(field, event.target.value)}
-                            />
-                          ) : (
-                            <input
-                              type={field.type === "number" ? "number" : "text"}
-                              min={field.min}
-                              max={field.max}
-                              maxLength={field.maxLength}
-                              value={stringifyValue(current)}
-                              placeholder={field.placeholder ?? (field.type === "channel" ? "ID ou menção do canal" : field.type === "role" ? "ID ou menção do cargo" : field.type === "url" ? "https://..." : "")}
-                              onChange={(event) => updateDraft(field, event.target.value)}
-                            />
-                          )}
-                          <span className="field-current">Atual: {displayValue(field, values[field.id])}</span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                </>
-              ) : (
-                <div className="empty-state">Nenhuma seção carregada.</div>
-              )}
-            </section>
-
-            <aside className="inspector-panel" aria-label="Resumo da seção selecionada">
-              <div className="inspector-card inspector-card--primary">
-                <span className="inspector-emoji">{selectedSection?.emoji ?? "⚙️"}</span>
-                <p className="eyebrow">Seção atual</p>
-                <h3>{selectedSection?.label ?? "Carregando"}</h3>
-                <p>{selectedSection?.description ?? "Selecione uma área para configurar."}</p>
-                <div className="progress-track"><span style={{ width: `${selectedPercent}%` }} /></div>
-                <span className={`mini-badge mini-badge--${statusClass(selectedSummary)}`}>{selectedSummary?.status ?? "aguardando"}</span>
-              </div>
-
-              <div className="inspector-card">
+            <section className="dashboard-grid">
+              <aside className="section-list section-list--desktop" aria-label="Áreas configuráveis">
                 <div className="panel-title-row">
-                  <h3>Alterações</h3>
-                  <span className="mini-badge">{changedFields.length}</span>
+                  <h2>Áreas</h2>
+                  <button className="ghost-button ghost-button--small" disabled={busy} onClick={() => void refreshDashboard()}>Atualizar</button>
                 </div>
-                {changedFieldLabels.length ? (
-                  <ul className="change-list">
-                    {changedFieldLabels.map((label) => <li key={label}>{label}</li>)}
-                  </ul>
-                ) : (
-                  <p className="muted-text">Nenhuma alteração pendente nesta seção.</p>
-                )}
-              </div>
-
-              <div className="inspector-card">
-                <div className="panel-title-row">
-                  <h3>Pendências</h3>
-                  <span className="mini-badge mini-badge--pending">{dashboardStats.pending}</span>
-                </div>
-                {pendingSections.length ? (
-                  <div className="pending-stack">
-                    {pendingSections.map((item) => (
-                      <button key={item.id} onClick={() => setSelectedSectionId(item.id)}>
-                        <span>{item.emoji}</span>
+                <input className="search-input" value={query} placeholder="Buscar configuração..." onChange={(event) => setQuery(event.target.value)} />
+                <div className="section-buttons">
+                  {filteredSections.map((item) => (
+                    <button
+                      key={item.id}
+                      className={`section-button section-button--${statusClass(item)} ${selectedSection?.id === item.id ? "section-button--active" : ""}`}
+                      onClick={() => openSection(item.id)}
+                    >
+                      <span className="section-emoji">{item.emoji}</span>
+                      <span className="section-copy">
                         <strong>{item.label}</strong>
-                        <small>{item.configured}/{item.total}</small>
-                      </button>
-                    ))}
-                  </div>
+                        <small>{item.status} · {sectionConfiguredLabel(item)}</small>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </aside>
+
+              <section className="settings-panel">
+                {selectedSection ? (
+                  <>
+                    <button className="mobile-back" onClick={() => setMobileView("home")}>← Voltar ao início</button>
+                    <div className="settings-heading">
+                      <div>
+                        <p className="eyebrow">{selectedSection.emoji} {selectedSection.label}</p>
+                        <h2>{selectedSection.description}</h2>
+                        <p>{selectedSummary ? `${selectedSummary.configured} de ${selectedSummary.total} campos configurados.` : ""}</p>
+                      </div>
+                      <div className="button-row">
+                        <button className="ghost-button" onClick={() => setDraft(values)} disabled={!hasUnsaved || saving}>Desfazer</button>
+                        <button className="primary-button" onClick={() => void saveSection()} disabled={!hasUnsaved || saving}>{saving ? "Salvando..." : hasUnsaved ? `Salvar ${changedFields.length}` : "Salvo"}</button>
+                      </div>
+                    </div>
+
+                    <div className="section-overview">
+                      <div>
+                        <span className="stat-label">Progresso</span>
+                        <strong>{selectedPercent}%</strong>
+                      </div>
+                      <div className="progress-track"><span style={{ width: `${selectedPercent}%` }} /></div>
+                      <span className={`mini-badge mini-badge--${statusClass(selectedSummary)}`}>{selectedSummary?.status ?? "carregando"}</span>
+                    </div>
+
+                    <div className="fields-grid">
+                      {selectedSection.fields.map((field) => {
+                        const current = draft[field.id];
+                        const changed = draft[field.id] !== values[field.id];
+                        return (
+                          <label key={field.id} className={`field-card field-card--${field.type} ${changed ? "field-card--changed" : ""}`}>
+                            <span className="field-topline">
+                              <span className="field-label">{field.label}</span>
+                              {changed && <span className="mini-badge mini-badge--pending">alterado</span>}
+                            </span>
+                            {field.description && <span className="field-description">{field.description}</span>}
+                            {field.type === "boolean" ? (
+                              <span className="switch-row">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(current)}
+                                  onChange={(event) => updateDraft(field, event.target.checked)}
+                                />
+                                <span>{Boolean(current) ? "Ligado" : "Desligado"}</span>
+                              </span>
+                            ) : field.type === "select" ? (
+                              <select value={stringifyValue(current)} onChange={(event) => updateDraft(field, event.target.value)}>
+                                {(field.options ?? []).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                              </select>
+                            ) : field.type === "textarea" ? (
+                              <textarea
+                                value={stringifyValue(current)}
+                                maxLength={field.maxLength}
+                                placeholder={field.placeholder}
+                                onChange={(event) => updateDraft(field, event.target.value)}
+                              />
+                            ) : (
+                              <input
+                                type={field.type === "number" ? "number" : "text"}
+                                min={field.min}
+                                max={field.max}
+                                maxLength={field.maxLength}
+                                value={stringifyValue(current)}
+                                placeholder={field.placeholder ?? (field.type === "channel" ? "ID ou menção do canal" : field.type === "role" ? "ID ou menção do cargo" : field.type === "url" ? "https://..." : "")}
+                                onChange={(event) => updateDraft(field, event.target.value)}
+                              />
+                            )}
+                            <span className="field-current">Atual: {displayValue(field, values[field.id])}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </>
                 ) : (
-                  <p className="muted-text">Tudo que o dashboard conhece já está configurado.</p>
+                  <div className="empty-state">Nenhuma seção carregada.</div>
                 )}
-              </div>
-            </aside>
+              </section>
+
+              <aside className="inspector-panel" aria-label="Resumo da seção selecionada">
+                <div className="inspector-card inspector-card--primary">
+                  <span className="inspector-emoji">{selectedSection?.emoji ?? "⚙️"}</span>
+                  <p className="eyebrow">Seção atual</p>
+                  <h3>{selectedSection?.label ?? "Carregando"}</h3>
+                  <p>{selectedSection?.description ?? "Selecione uma área para configurar."}</p>
+                  <div className="progress-track"><span style={{ width: `${selectedPercent}%` }} /></div>
+                  <span className={`mini-badge mini-badge--${statusClass(selectedSummary)}`}>{selectedSummary?.status ?? "aguardando"}</span>
+                </div>
+
+                <div className="inspector-card">
+                  <div className="panel-title-row">
+                    <h3>Alterações</h3>
+                    <span className="mini-badge">{changedFields.length}</span>
+                  </div>
+                  {changedFieldLabels.length ? (
+                    <ul className="change-list">
+                      {changedFieldLabels.map((label) => <li key={label}>{label}</li>)}
+                    </ul>
+                  ) : (
+                    <p className="muted-text">Nenhuma alteração pendente nesta seção.</p>
+                  )}
+                </div>
+
+                <div className="inspector-card">
+                  <div className="panel-title-row">
+                    <h3>Pendências</h3>
+                    <span className="mini-badge mini-badge--pending">{dashboardStats.pending}</span>
+                  </div>
+                  {pendingSections.length ? (
+                    <div className="pending-stack">
+                      {pendingSections.map((item) => (
+                        <button key={item.id} onClick={() => openSection(item.id)}>
+                          <span>{item.emoji}</span>
+                          <strong>{item.label}</strong>
+                          <small>{item.configured}/{item.total}</small>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="muted-text">Tudo que o dashboard conhece já está configurado.</p>
+                  )}
+                </div>
+              </aside>
+            </section>
           </section>
 
           {hasUnsaved && (
