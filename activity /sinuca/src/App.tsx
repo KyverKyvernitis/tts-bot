@@ -98,11 +98,10 @@ function sectionPercent(summary: DashboardSectionSummary | undefined): number {
 
 function moduleHint(summary: DashboardSectionSummary): string {
   if (summary.enabled === false) return "Desativado";
-  if (summary.total <= 0) return summary.status;
-  const missing = Math.max(0, summary.total - summary.configured);
-  if (missing <= 0) return "Pronto para usar";
-  if (summary.configured <= 0) return "Comece por aqui";
-  return `${missing} pendência${missing === 1 ? "" : "s"}`;
+  if (summary.total <= 0) return summary.status || "Configurar";
+  if (summary.configured >= summary.total) return "Pronto";
+  if (summary.configured > 0) return "Parcial";
+  return "Configurar";
 }
 
 type RuntimeMode = "detecting" | "activity" | "browser";
@@ -352,7 +351,6 @@ export default function App() {
   const [selectedSectionId, setSelectedSectionId] = useState<string>("general");
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [query, setQuery] = useState("");
   const [mobileView, setMobileView] = useState<"home" | "section">("home");
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("detecting");
   const [browserView, setBrowserView] = useState<BrowserView>(() => initialBrowserView());
@@ -379,23 +377,13 @@ export default function App() {
     return selectedSection.fields.filter((field) => draft[field.id] !== values[field.id]);
   }, [draft, selectedSection, values]);
 
-  const filteredSections = useMemo(() => {
-    const text = query.trim().toLowerCase();
-    if (!text) return summary;
-    return summary.filter((item) => {
-      const section = sections.find((candidate) => candidate.id === item.id);
-      const fieldHit = section?.fields.some((field) => `${field.label} ${field.description ?? ""}`.toLowerCase().includes(text));
-      return `${item.label} ${item.description} ${item.status}`.toLowerCase().includes(text) || Boolean(fieldHit);
-    });
-  }, [query, sections, summary]);
 
   const dashboardStats = useMemo(() => {
     const totalFields = summary.reduce((acc, item) => acc + item.total, 0);
     const configured = summary.reduce((acc, item) => acc + item.configured, 0);
-    const active = summary.filter((item) => item.enabled === true).length;
-    const pending = Math.max(0, totalFields - configured);
+    const configuredSections = summary.filter((item) => item.total > 0 && item.configured >= item.total).length;
     const percent = totalFields > 0 ? Math.round((configured / totalFields) * 100) : 0;
-    return { totalFields, configured, active, pending, percent };
+    return { totalFields, configured, configuredSections, percent };
   }, [summary]);
 
   async function login(prompt: "none" | "consent" = "consent") {
@@ -599,7 +587,7 @@ export default function App() {
         setSelectedSectionId(settingsPayload.sections[0].id);
       }
       setAuthState("ready");
-      setMessage("Dashboard pronto.");
+      setMessage("");
     } catch (error) {
       const text = cleanErrorText(error);
       if (text.includes("403") || text.includes("access_denied") || text.includes("missing_manage_guild")) {
@@ -729,15 +717,7 @@ export default function App() {
   const userName = runtimeMode === "browser" ? browserUserName(browserUser, "Admin") : (bootstrap.currentUser.displayName || "Admin");
   const hasUnsaved = changedFields.length > 0;
   const selectedPercent = selectedSummary && selectedSummary.total > 0 ? Math.round((selectedSummary.configured / selectedSummary.total) * 100) : 0;
-  const topModules = useMemo(
-    () => [...summary]
-      .sort((left, right) => Number(right.enabled === true) - Number(left.enabled === true) || right.configured - left.configured)
-      .slice(0, 6),
-    [summary],
-  );
-  const pendingSections = summary.filter((item) => item.total > item.configured).slice(0, 4);
   const changedFieldLabels = changedFields.map((field) => field.label).slice(0, 4);
-  const searchActive = query.trim().length > 0;
 
   if (runtimeMode === "detecting") {
     return (
@@ -798,7 +778,7 @@ export default function App() {
           <span className="brand-icon">⚙️</span>
           <div>
             <strong>Dashboard</strong>
-            <small>Painel administrativo do servidor</small>
+            <small>{guildId ?? "Servidor"}</small>
           </div>
         </div>
         <div className="topbar-actions">
@@ -808,27 +788,10 @@ export default function App() {
         </div>
       </header>
 
-      <section className="dashboard-hero">
-        <div className="hero-copy">
-          <p className="eyebrow">{runtimeMode === "browser" ? "Web Dashboard" : "Discord Activity"}</p>
-          <h1>Dashboard</h1>
-          <p className="hero-text">Central administrativa para configurar módulos, canais, permissões e automações do servidor.</p>
-          <div className="hero-meta">
-            <span>Servidor: {guildId ?? "não identificado"}</span>
-            <span>Admin: {userName}</span>
-          </div>
-        </div>
-        <div className="hero-visual" aria-hidden="true">
-          <span className="hero-orb hero-orb--one" />
-          <span className="hero-orb hero-orb--two" />
-          <span className="hero-orb hero-orb--three" />
-          <div className="hero-glass-card">
-            <strong>{dashboardStats.percent}%</strong>
-            <small>pronto</small>
-          </div>
-        </div>
+      {authState !== "ready" && message && (
         <div className={`status-pill status-pill--${authState}`}>{message}</div>
-      </section>
+      )}
+
 
       {authState === "needs_login" && (
         <section className="auth-card">
@@ -863,35 +826,13 @@ export default function App() {
       {authState === "ready" && (
         <>
           <section className="command-center dashboard-home" aria-label="Início do dashboard">
-            <div className="command-head">
-              <div>
-                <p className="eyebrow">Visão geral</p>
-                <h2>Configure o servidor por módulos</h2>
-                <p className="muted-text">Escolha uma área, ajuste apenas o necessário e salve quando houver alterações.</p>
-              </div>
-              <div
-                className="health-ring"
-                aria-label={`${dashboardStats.percent}% configurado`}
-                style={{ background: `radial-gradient(circle at center, rgba(12,15,25,0.95) 53%, transparent 54%), conic-gradient(var(--accent-strong) ${dashboardStats.percent}%, rgba(255,255,255,0.10) 0)` }}
-              >
-                <span>{dashboardStats.percent}%</span>
-                <small>{dashboardStats.configured}/{dashboardStats.totalFields}</small>
-              </div>
-            </div>
-
-            <div className="overview-strip" aria-label="Resumo rápido">
-              <article><span>✅</span><strong>{dashboardStats.active}</strong><small>módulos ativos</small></article>
+            <div className="overview-strip overview-strip--compact" aria-label="Resumo rápido">
               <article><span>🧩</span><strong>{summary.length}</strong><small>áreas</small></article>
-              <article><span>⚠️</span><strong>{dashboardStats.pending}</strong><small>pendências</small></article>
+              <article><span>✅</span><strong>{dashboardStats.configuredSections}</strong><small>configuradas</small></article>
             </div>
 
-            <label className="search-shell">
-              <span>🔎</span>
-              <input value={query} placeholder="Buscar área ou configuração..." onChange={(event) => setQuery(event.target.value)} />
-            </label>
-
-            <div className="module-grid" aria-label={searchActive ? "Resultado da busca" : "Módulos do servidor"}>
-              {filteredSections.map((item) => (
+            <div className="module-grid" aria-label="Módulos do servidor">
+              {summary.map((item) => (
                 <button
                   key={item.id}
                   className={`module-tile module-tile--${statusClass(item)} ${selectedSection?.id === item.id ? "module-tile--active" : ""}`}
@@ -905,19 +846,6 @@ export default function App() {
                   <span className="module-progress">{sectionPercent(item)}%</span>
                 </button>
               ))}
-            </div>
-
-            <div className="quick-panel">
-              <div className="panel-title-row">
-                <h3>Ações rápidas</h3>
-                <button className="ghost-button ghost-button--small" disabled={busy} onClick={() => void refreshDashboard()}>Atualizar</button>
-              </div>
-              <div className="quick-actions">
-                {summary.some((item) => item.id === "tickets") && <button onClick={() => openSection("tickets")}>🎫 Publicar/ajustar tickets</button>}
-                {summary.some((item) => item.id === "welcome") && <button onClick={() => openSection("welcome")}>👋 Preview boas-vindas</button>}
-                {summary.some((item) => item.id === "tts") && <button onClick={() => openSection("tts")}>🔊 Testar TTS</button>}
-                {summary.some((item) => item.id === "logs") && <button onClick={() => openSection("logs")}>📜 Conferir logs</button>}
-              </div>
             </div>
           </section>
 
@@ -941,9 +869,8 @@ export default function App() {
                   <h2>Áreas</h2>
                   <button className="ghost-button ghost-button--small" disabled={busy} onClick={() => void refreshDashboard()}>Atualizar</button>
                 </div>
-                <input className="search-input" value={query} placeholder="Buscar configuração..." onChange={(event) => setQuery(event.target.value)} />
                 <div className="section-buttons">
-                  {filteredSections.map((item) => (
+                  {summary.map((item) => (
                     <button
                       key={item.id}
                       className={`section-button section-button--${statusClass(item)} ${selectedSection?.id === item.id ? "section-button--active" : ""}`}
@@ -1061,25 +988,6 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="inspector-card">
-                  <div className="panel-title-row">
-                    <h3>Pendências</h3>
-                    <span className="mini-badge mini-badge--pending">{dashboardStats.pending}</span>
-                  </div>
-                  {pendingSections.length ? (
-                    <div className="pending-stack">
-                      {pendingSections.map((item) => (
-                        <button key={item.id} onClick={() => openSection(item.id)}>
-                          <span>{item.emoji}</span>
-                          <strong>{item.label}</strong>
-                          <small>{item.configured}/{item.total}</small>
-                        </button>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="muted-text">Tudo que o dashboard conhece já está configurado.</p>
-                  )}
-                </div>
               </aside>
             </section>
           </section>
