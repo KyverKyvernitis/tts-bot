@@ -1,28 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  Activity as ActivityIcon,
-  Bot,
-  Cake,
   ChevronDown,
   ChevronRight,
-  ClipboardList,
+  Cpu,
   DoorOpen,
+  HardDrive,
   HelpCircle,
   Home,
   LayoutGrid,
-  LogOut,
   Mic,
   Music,
-  Palette,
   RefreshCw,
-  ScrollText,
   Server,
   Settings,
   ShieldCheck,
   Ticket,
-  Trophy,
-  User,
-  Webhook,
+  Cake,
+  UploadCloud,
   Zap,
   type LucideIcon,
 } from "lucide-react";
@@ -152,20 +146,15 @@ type DashboardVisualModule = DashboardSectionSummary & {
 };
 
 const MODULE_CATALOG: ModuleVisualMeta[] = [
-  { id: "general", label: "Geral", description: "Preferências básicas do servidor.", emoji: "⚙️", icon: Settings, group: "system", aliases: ["guild"] },
   { id: "welcome", label: "Boas-vindas", description: "Mensagem, canal e cargo automático para novos membros.", emoji: "👋", icon: DoorOpen, group: "main" },
-  { id: "forms", label: "Formulários", description: "Templates, canais e respostas em embed.", emoji: "📋", icon: ClipboardList, group: "main", aliases: ["form", "formularios"] },
   { id: "tickets", label: "Tickets", description: "Categorias, mensagens e permissões de atendimento.", emoji: "🎫", icon: Ticket, group: "main", aliases: ["ticket"] },
-  { id: "color_roles", label: "Cargos de cor", description: "Painel de seleção de cor personalizada.", emoji: "🎨", icon: Palette, group: "main", aliases: ["color-roles", "colors", "roles_color", "colorroles"] },
-  { id: "chatbot", label: "Chatbot IA", description: "Canais, perfis e multi-modelo de resposta.", emoji: "🤖", icon: Bot, group: "main", aliases: ["ai", "ia"] },
   { id: "birthday", label: "Aniversários", description: "Canal de parabéns e cargo do dia.", emoji: "🎂", icon: Cake, group: "main", aliases: ["birthdays"] },
-  { id: "tts", label: "TTS", description: "Vozes, idiomas e canais de leitura automática.", emoji: "🎙️", icon: Mic, group: "main" },
   { id: "music", label: "Música", description: "Filas, controle de DJ e qualidade de áudio.", emoji: "🎵", icon: Music, group: "main" },
-  { id: "logs", label: "Logs", description: "Canais de auditoria e eventos do bot.", emoji: "📜", icon: ScrollText, group: "system", aliases: ["logging"] },
-  { id: "permissions", label: "Permissões", description: "Cargos administrativos e acesso ao painel.", emoji: "🛡️", icon: ShieldCheck, group: "system", aliases: ["permissoes"] },
-  { id: "webhooks", label: "Webhooks", description: "Identidade e envio das mensagens do bot.", emoji: "🔗", icon: Webhook, group: "system", aliases: ["webhook"] },
-  { id: "status", label: "Status", description: "Saúde do bot, workers e integrações.", emoji: "📈", icon: ActivityIcon, group: "system", aliases: ["health"] },
-  { id: "gincana", label: "Gincana", description: "Eventos, pontuação e equipes.", emoji: "🏆", icon: Trophy, group: "main" },
+  { id: "tts", label: "TTS", description: "Vozes, idiomas e canais de leitura automática.", emoji: "🎙️", icon: Mic, group: "main" },
+  { id: "workers", label: "Workers", description: "Processos em segundo plano e filas de tarefas.", emoji: "🧩", icon: Cpu, group: "main", aliases: ["worker", "jobs", "queue"] },
+  { id: "updates", label: "Updates", description: "Notas de versão e avisos de atualização do bot.", emoji: "📦", icon: UploadCloud, group: "main", aliases: ["update", "changelog", "releases"] },
+  { id: "vps", label: "VPS", description: "Recursos do servidor, status e monitoramento da máquina.", emoji: "🖥️", icon: HardDrive, group: "main", aliases: ["server_host", "host", "machine"] },
+  { id: "general", label: "Configurações", description: "Preferências básicas do servidor e do painel.", emoji: "⚙️", icon: Settings, group: "system", aliases: ["guild", "config", "settings", "configuracoes"] },
 ];
 
 function normalizeModuleId(id: string): string {
@@ -1037,7 +1026,7 @@ export default function App() {
                 <span className="page-heading-icon"><LayoutGrid size={24} /></span>
                 <div>
                   <h1>Painel do servidor</h1>
-                  <p>{runtimeMode === "browser" ? activityServerLabel : guildId}</p>
+                  <p>Selecione um módulo abaixo para configurar.</p>
                 </div>
                 <button className="help-button" aria-label="Ajuda"><HelpCircle size={18} /></button>
               </div>
