@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import type { DashboardConfigService } from "../services/dashboardConfigService.js";
-import { verifyDashboardAccess } from "../services/discordAuthService.js";
+import { createDashboardInviteUrl, getDiscordUserIdentity, listDashboardServers, verifyDashboardAccess } from "../services/discordAuthService.js";
 
 export interface RegisterDashboardRoutesOptions {
   app: Express;
@@ -107,6 +107,38 @@ export function registerDashboardRoutes({ app, configService, exchangeDiscordCod
     }
   };
 
+
+  const sessionHandler = async (req: Request, res: Response) => {
+    const session = await getDiscordUserIdentity(bearer(req));
+    if (!session.ok || !session.user) {
+      sendNoStoreJson(res, session.status || 401, { ok: false, authenticated: false, error: "session_invalid" });
+      return;
+    }
+    sendNoStoreJson(res, 200, { ok: true, authenticated: true, user: session.user });
+  };
+
+  const serversHandler = async (req: Request, res: Response) => {
+    const result = await listDashboardServers(bearer(req));
+    sendNoStoreJson(res, result.status, result.ok
+      ? { ok: true, user: result.user, manageable: result.manageable, needsInvite: result.needsInvite }
+      : { ok: false, user: result.user, manageable: [], needsInvite: [], error: result.error || "servers_failed" });
+  };
+
+  const inviteHandler = async (req: Request, res: Response) => {
+    const guildId = dashboardGuildId(req);
+    const session = await getDiscordUserIdentity(bearer(req));
+    if (!session.ok || !session.user) {
+      sendNoStoreJson(res, session.status || 401, { ok: false, error: "session_invalid" });
+      return;
+    }
+    const inviteUrl = createDashboardInviteUrl(guildId);
+    if (!inviteUrl) {
+      sendNoStoreJson(res, 500, { ok: false, error: "invite_not_configured" });
+      return;
+    }
+    sendNoStoreJson(res, 200, { ok: true, guild_id: guildId, invite_url: inviteUrl });
+  };
+
   const dashboardRpcHandler = async (req: Request, res: Response): Promise<boolean> => {
     const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {};
     const action = firstString(body.dashboard_action, body.action);
@@ -151,6 +183,10 @@ export function registerDashboardRoutes({ app, configService, exchangeDiscordCod
   app.all(["/token", "/api/token"], (_req, res) => {
     sendNoStoreJson(res, 405, { ok: false, error: "method_not_allowed", detail: "Use POST com o código OAuth." });
   });
+
+  app.get("/api/session", sessionHandler);
+  app.get("/api/dashboard/servers", serversHandler);
+  app.get("/api/dashboard/guild/:guildId/invite", inviteHandler);
 
   app.get("/api/dashboard/bootstrap", sendBootstrap);
   app.get("/api/dashboard/guild/:guildId/summary", sendSummary);

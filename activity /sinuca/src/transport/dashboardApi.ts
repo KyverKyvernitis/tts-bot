@@ -1,4 +1,4 @@
-import type { DashboardBootstrapPayload, DashboardSettingsPayload, DashboardSummaryPayload } from "../types/dashboard";
+import type { DashboardBootstrapPayload, DashboardInvitePayload, DashboardServersPayload, DashboardSessionPayload, DashboardSettingsPayload, DashboardSummaryPayload } from "../types/dashboard";
 import { DashboardHttpError, fetchJsonFromCandidates, resolveStrictApiCandidates, resolveTokenCandidates } from "./httpClient";
 
 function authHeaders(accessToken: string): HeadersInit {
@@ -50,6 +50,31 @@ async function withTokenRpcPrimary<T>(apiCall: () => Promise<T>, accessToken: st
       throw rpcError;
     }
   }
+}
+
+
+export async function fetchDashboardSession(accessToken: string): Promise<DashboardSessionPayload> {
+  return await fetchJsonFromCandidates<DashboardSessionPayload>(
+    resolveStrictApiCandidates("/session"),
+    { method: "GET", headers: authHeaders(accessToken) },
+    6000,
+  );
+}
+
+export async function fetchDashboardServers(accessToken: string): Promise<DashboardServersPayload> {
+  return await fetchJsonFromCandidates<DashboardServersPayload>(
+    resolveStrictApiCandidates("/dashboard/servers"),
+    { method: "GET", headers: authHeaders(accessToken) },
+    8000,
+  );
+}
+
+export async function fetchDashboardInvite(accessToken: string, guildId: string): Promise<DashboardInvitePayload> {
+  return await fetchJsonFromCandidates<DashboardInvitePayload>(
+    resolveStrictApiCandidates(`/dashboard/guild/${encodeURIComponent(guildId)}/invite`),
+    { method: "GET", headers: authHeaders(accessToken) },
+    6000,
+  );
 }
 
 export async function fetchDashboardBootstrap(accessToken: string, guildId: string): Promise<DashboardBootstrapPayload> {

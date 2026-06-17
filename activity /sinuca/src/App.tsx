@@ -11,10 +11,13 @@ import {
   writeCachedUser,
 } from "./sdk/discord";
 import type { ActivityBootstrap } from "./types/activity";
-import type { DashboardFieldDefinition, DashboardSectionDefinition, DashboardSectionSummary } from "./types/dashboard";
+import type { DashboardFieldDefinition, DashboardSectionDefinition, DashboardSectionSummary, DashboardServerCard, DashboardUserPayload } from "./types/dashboard";
 import { exchangeDiscordTokenRequest } from "./transport/sessionApi";
 import {
   fetchDashboardBootstrap,
+  fetchDashboardInvite,
+  fetchDashboardServers,
+  fetchDashboardSession,
   fetchDashboardSettings,
   fetchDashboardSummary,
   patchDashboardSettings,
@@ -102,6 +105,241 @@ function moduleHint(summary: DashboardSectionSummary): string {
   return `${missing} pendência${missing === 1 ? "" : "s"}`;
 }
 
+type RuntimeMode = "detecting" | "activity" | "browser";
+type BrowserView = "landing" | "servers" | "invite";
+
+function readBrowserGuildFromLocation(): string | null {
+  if (typeof window === "undefined") return null;
+  const search = new URLSearchParams(window.location.search);
+  const queryGuild = search.get("guild_id") ?? search.get("guildId");
+  if (isSnowflake(queryGuild)) return queryGuild;
+  const match = window.location.pathname.match(/\/dashboard\/(\d{15,25})/);
+  return isSnowflake(match?.[1]) ? match[1] : null;
+}
+
+function initialBrowserView(): BrowserView {
+  if (typeof window === "undefined") return "landing";
+  if (window.location.pathname.startsWith("/dashboard")) return "servers";
+  return "landing";
+}
+
+function cleanOAuthCodeFromUrl(nextPath?: string) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  url.searchParams.delete("code");
+  url.searchParams.delete("state");
+  url.searchParams.delete("guild_id");
+  url.searchParams.delete("guildId");
+  const path = nextPath || `${url.pathname}${url.search}${url.hash}`;
+  window.history.replaceState({}, "", path);
+}
+
+function browserUserName(user: DashboardUserPayload | null, fallback: string) {
+  return user?.global_name || user?.username || fallback;
+}
+
+function browserUserAvatar(user: DashboardUserPayload | null): string | null {
+  if (!user?.id) return null;
+  if (user.avatar) return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=128`;
+  try {
+    const index = Number((BigInt(user.id) >> 22n) % 6n);
+    return `https://cdn.discordapp.com/embed/avatars/${index}.png`;
+  } catch {
+    return null;
+  }
+}
+
+function guildInitials(name: string): string {
+  return name.split(/\s+/).map((part) => part[0]).filter(Boolean).slice(0, 2).join("").toUpperCase() || "S";
+}
+
+function buildBrowserLoginUrl() {
+  const clientId = (import.meta.env.VITE_DISCORD_CLIENT_ID as string | undefined)?.trim();
+  if (!clientId) return null;
+  const redirectUri = getOAuthRedirectUri();
+  if (!redirectUri) return null;
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    scope: "identify guilds guilds.members.read",
+    prompt: "consent",
+    state: "dashboard-browser-login",
+  });
+  return `https://discord.com/oauth2/authorize?${params.toString()}`;
+}
+
+function BrowserTopbar({ loggedIn, user, onLogin, onDashboard }: { loggedIn: boolean; user: DashboardUserPayload | null; onLogin(): void; onDashboard(): void }) {
+  const avatar = browserUserAvatar(user);
+  return (
+    <header className="browser-topbar">
+      <button className="browser-brand" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
+        <span>⚙️</span>
+        <strong>Dashboard</strong>
+      </button>
+      <button className="browser-login-button" onClick={loggedIn ? onDashboard : onLogin}>
+        {loggedIn ? (
+          <>
+            {avatar ? <img src={avatar} alt="" /> : <span className="browser-avatar-fallback">✓</span>}
+            <span>Dashboard</span>
+          </>
+        ) : (
+          <>
+            <span>Entrar com Discord</span>
+          </>
+        )}
+      </button>
+    </header>
+  );
+}
+
+function BrowserLanding({ loggedIn, user, busy, message, onLogin, onDashboard }: { loggedIn: boolean; user: DashboardUserPayload | null; busy: boolean; message: string; onLogin(): void; onDashboard(): void }) {
+  return (
+    <div className="browser-page browser-page--landing">
+      <BrowserTopbar loggedIn={loggedIn} user={user} onLogin={onLogin} onDashboard={onDashboard} />
+      <section className="browser-hero reveal-card">
+        <div className="browser-hero-copy">
+          <p className="eyebrow">Dashboard web + Discord Activity</p>
+          <h1>Configure o bot sem decorar comandos.</h1>
+          <p>Use o painel para ajustar tickets, boas-vindas, TTS, música, logs, permissões e automações do servidor com uma interface visual.</p>
+          <div className="browser-hero-actions">
+            <button className="primary-button" disabled={busy} onClick={loggedIn ? onDashboard : onLogin}>{loggedIn ? "Abrir Dashboard" : "Entrar com Discord"}</button>
+            <a className="ghost-link" href="#guia">Ver guia</a>
+          </div>
+          {message && <span className="browser-status-line">{message}</span>}
+        </div>
+        <div className="browser-hero-preview" aria-hidden="true">
+          <div className="preview-window">
+            <div className="preview-sidebar"><span /><span /><span /></div>
+            <div className="preview-main">
+              <span className="preview-pill" />
+              <span className="preview-card preview-card--wide" />
+              <div className="preview-grid"><span /><span /><span /><span /></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="guia" className="browser-guide-grid">
+        {[
+          ["🎫", "Tickets", "Crie painéis, fluxos, cargos staff, mensagens e permissões de atendimento."],
+          ["👋", "Boas-vindas", "Configure canal, embed, mensagem, webhook, preview e limpeza automática."],
+          ["🔊", "TTS", "Ajuste engine, prefixos, limites, canal padrão e comportamento de voz."],
+          ["🎵", "Música", "Defina canal, cargo DJ, volume e preferências do player."],
+          ["📜", "Logs", "Centralize canais de auditoria, update, erro, tickets e TTS."],
+          ["🛡️", "Permissões", "Somente donos, admins e staff autorizado conseguem alterar o servidor."],
+        ].map(([emoji, title, text], index) => (
+          <article className="browser-guide-card reveal-card" style={{ transitionDelay: `${index * 45}ms` }} key={title}>
+            <span>{emoji}</span>
+            <h2>{title}</h2>
+            <p>{text}</p>
+          </article>
+        ))}
+      </section>
+
+      <section className="browser-flow-section reveal-card">
+        <p className="eyebrow">Como funciona</p>
+        <h2>Uma experiência diferente em cada lugar.</h2>
+        <div className="browser-flow-grid">
+          <article><strong>Dentro do Discord</strong><span>Abre direto no servidor atual após autorização.</span></article>
+          <article><strong>No navegador</strong><span>Mostra este guia, login e seleção dos servidores configuráveis.</span></article>
+          <article><strong>Sem o bot</strong><span>Servidores aparecem acinzentados e levam para a tela de convite.</span></article>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ServerAvatar({ server }: { server: DashboardServerCard }) {
+  return server.icon ? <img src={server.icon} alt="" /> : <span>{guildInitials(server.name)}</span>;
+}
+
+function BrowserServerPicker({
+  user,
+  manageable,
+  needsInvite,
+  loading,
+  message,
+  onSelect,
+  onInvite,
+  onRefresh,
+  onLogout,
+}: {
+  user: DashboardUserPayload | null;
+  manageable: DashboardServerCard[];
+  needsInvite: DashboardServerCard[];
+  loading: boolean;
+  message: string;
+  onSelect(server: DashboardServerCard): void;
+  onInvite(server: DashboardServerCard): void;
+  onRefresh(): void;
+  onLogout(): void;
+}) {
+  return (
+    <div className="browser-page browser-page--servers">
+      <BrowserTopbar loggedIn user={user} onLogin={onRefresh} onDashboard={onRefresh} />
+      <section className="server-picker-head reveal-card">
+        <div>
+          <p className="eyebrow">Servidores</p>
+          <h1>Escolha onde configurar.</h1>
+          <p>{browserUserName(user, "Sua conta")} pode configurar os servidores ativos abaixo. Servidores sem o bot aparecem desativados para convite.</p>
+        </div>
+        <div className="button-row">
+          <button className="ghost-button" disabled={loading} onClick={onRefresh}>{loading ? "Atualizando..." : "Atualizar"}</button>
+          <button className="ghost-button" onClick={onLogout}>Sair</button>
+        </div>
+        {message && <span className="browser-status-line">{message}</span>}
+      </section>
+
+      <section className="server-section reveal-card">
+        <div className="panel-title-row"><h2>Com bot instalado</h2><span className="mini-badge mini-badge--ready">{manageable.length}</span></div>
+        <div className="server-grid">
+          {manageable.map((server) => (
+            <button className="server-card server-card--active" key={server.id} onClick={() => onSelect(server)}>
+              <span className="server-avatar"><ServerAvatar server={server} /></span>
+              <span><strong>{server.name}</strong><small>{server.owner ? "Dono do servidor" : "Staff autorizado"}</small></span>
+              <em>Configurar</em>
+            </button>
+          ))}
+          {!loading && manageable.length === 0 && <p className="muted-text">Nenhum servidor configurável com o bot instalado foi encontrado.</p>}
+        </div>
+      </section>
+
+      <section className="server-section server-section--muted reveal-card">
+        <div className="panel-title-row"><h2>Seus servidores sem o bot</h2><span className="mini-badge">{needsInvite.length}</span></div>
+        <div className="server-grid">
+          {needsInvite.map((server) => (
+            <button className="server-card server-card--disabled" key={server.id} onClick={() => onInvite(server)}>
+              <span className="server-avatar"><ServerAvatar server={server} /></span>
+              <span><strong>{server.name}</strong><small>Bot ainda não está neste servidor</small></span>
+              <em>Convidar</em>
+            </button>
+          ))}
+          {!loading && needsInvite.length === 0 && <p className="muted-text">Nenhum servidor pendente de convite.</p>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function BrowserInviteScreen({ server, busy, message, onBack, onOpenInvite }: { server: DashboardServerCard | null; busy: boolean; message: string; onBack(): void; onOpenInvite(): void }) {
+  return (
+    <div className="browser-page browser-page--invite">
+      <section className="invite-panel reveal-card reveal-card--visible">
+        <span className="invite-orb">🤖</span>
+        <p className="eyebrow">Convidar bot</p>
+        <h1>{server ? server.name : "Servidor"}</h1>
+        <p>Para configurar este servidor pelo Dashboard, primeiro adicione o bot com as permissões necessárias.</p>
+        {message && <span className="browser-status-line">{message}</span>}
+        <div className="button-row">
+          <button className="ghost-button" onClick={onBack}>Voltar</button>
+          <button className="primary-button" disabled={busy || !server} onClick={onOpenInvite}>{busy ? "Preparando..." : "Convidar bot"}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export default function App() {
   const [bootstrap, setBootstrap] = useState<ActivityBootstrap>(pendingBootstrap);
   const [token, setToken] = useState<string | null>(() => readCachedToken());
@@ -116,8 +354,17 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [query, setQuery] = useState("");
   const [mobileView, setMobileView] = useState<"home" | "section">("home");
+  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("detecting");
+  const [browserView, setBrowserView] = useState<BrowserView>(() => initialBrowserView());
+  const [browserUser, setBrowserUser] = useState<DashboardUserPayload | null>(null);
+  const [browserManageableServers, setBrowserManageableServers] = useState<DashboardServerCard[]>([]);
+  const [browserInviteServers, setBrowserInviteServers] = useState<DashboardServerCard[]>([]);
+  const [browserSelectedGuildId, setBrowserSelectedGuildId] = useState<string | null>(() => readBrowserGuildFromLocation());
+  const [browserInviteServer, setBrowserInviteServer] = useState<DashboardServerCard | null>(null);
+  const [loadingServers, setLoadingServers] = useState(false);
 
-  const guildId = bootstrap.context.guildId;
+  const activityGuildId = bootstrap.context.guildId;
+  const guildId = runtimeMode === "browser" ? browserSelectedGuildId : activityGuildId;
   const selectedSection = useMemo(
     () => sections.find((section) => section.id === selectedSectionId) ?? sections[0] ?? null,
     [sections, selectedSectionId],
@@ -185,6 +432,151 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function startBrowserLogin() {
+    const url = buildBrowserLoginUrl();
+    if (!url) {
+      setAuthState("error");
+      setMessage("Login web não configurado: defina VITE_DISCORD_CLIENT_ID e Redirect URI.");
+      return;
+    }
+    window.location.href = url;
+  }
+
+  async function hydrateBrowserSession(accessToken: string) {
+    try {
+      const session = await fetchDashboardSession(accessToken);
+      if (session.ok && session.user) {
+        setBrowserUser(session.user);
+        setAuthState("ready");
+        setMessage("Sessão web conectada.");
+        return true;
+      }
+    } catch {
+      // handled below by clearing stale token
+    }
+    clearCachedToken();
+    setToken(null);
+    setBrowserUser(null);
+    setAuthState("needs_login");
+    setMessage("Entre com Discord para ver seus servidores.");
+    return false;
+  }
+
+  async function finishBrowserOAuthIfNeeded(): Promise<boolean> {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    if (!code) return false;
+    setBusy(true);
+    setMessage("Conectando sua conta Discord...");
+    try {
+      const exchanged = await exchangeDiscordTokenRequest(code, getOAuthRedirectUri());
+      if (!exchanged.ok || !exchanged.accessToken) {
+        setAuthState("error");
+        setMessage(cleanErrorText(exchanged.error || exchanged.detail || "login_web_failed"));
+        cleanOAuthCodeFromUrl("/");
+        return true;
+      }
+      writeCachedToken(exchanged.accessToken);
+      setToken(exchanged.accessToken);
+      await hydrateBrowserSession(exchanged.accessToken);
+      setBrowserView("servers");
+      cleanOAuthCodeFromUrl("/dashboard");
+      return true;
+    } catch (error) {
+      setAuthState("error");
+      setMessage(cleanErrorText(error));
+      cleanOAuthCodeFromUrl("/");
+      return true;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadBrowserServers() {
+    if (!token) {
+      setBrowserView("landing");
+      setAuthState("needs_login");
+      setMessage("Entre com Discord para abrir seus servidores.");
+      return;
+    }
+    setLoadingServers(true);
+    setMessage("Carregando servidores...");
+    try {
+      const payload = await fetchDashboardServers(token);
+      if (!payload.ok) throw new Error(payload.error || "servers_failed");
+      setBrowserUser(payload.user ?? browserUser);
+      setBrowserManageableServers(payload.manageable || []);
+      setBrowserInviteServers(payload.needsInvite || []);
+      setAuthState("ready");
+      setMessage("Escolha um servidor para configurar.");
+    } catch (error) {
+      const text = cleanErrorText(error);
+      if (text.includes("401") || text.includes("session_invalid") || text.includes("user_fetch_failed")) {
+        clearCachedToken();
+        setToken(null);
+        setBrowserUser(null);
+        setBrowserView("landing");
+        setAuthState("needs_login");
+        setMessage("Sessão expirada. Entre novamente.");
+      } else {
+        setAuthState("error");
+        setMessage(text || "Não consegui carregar seus servidores.");
+      }
+    } finally {
+      setLoadingServers(false);
+    }
+  }
+
+  function openBrowserServer(server: DashboardServerCard) {
+    setBrowserSelectedGuildId(server.id);
+    setBrowserView("servers");
+    setMobileView("home");
+    setSections([]);
+    setSummary([]);
+    setValues({});
+    setDraft({});
+    setMessage(`Abrindo ${server.name}...`);
+    window.history.pushState({}, "", `/dashboard/${server.id}`);
+  }
+
+  function openBrowserInvite(server: DashboardServerCard) {
+    setBrowserInviteServer(server);
+    setBrowserView("invite");
+    setMessage("Convide o bot para liberar a configuração deste servidor.");
+    window.history.pushState({}, "", "/dashboard/invite");
+  }
+
+  async function openInviteUrl() {
+    if (!browserInviteServer || !token) return;
+    setBusy(true);
+    try {
+      const payload = await fetchDashboardInvite(token, browserInviteServer.id);
+      const url = payload.invite_url || browserInviteServer.inviteUrl;
+      if (!payload.ok || !url) throw new Error(payload.error || "invite_url_missing");
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      const fallback = browserInviteServer.inviteUrl;
+      if (fallback) window.open(fallback, "_blank", "noopener,noreferrer");
+      else setMessage(cleanErrorText(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function logoutBrowser() {
+    clearCachedToken();
+    setToken(null);
+    setBrowserUser(null);
+    setBrowserManageableServers([]);
+    setBrowserInviteServers([]);
+    setBrowserSelectedGuildId(null);
+    setBrowserInviteServer(null);
+    setBrowserView("landing");
+    setAuthState("needs_login");
+    setMessage("Sessão encerrada.");
+    window.history.pushState({}, "", "/");
   }
 
   async function loadDashboard(accessToken: string, targetGuildId: string) {
@@ -269,26 +661,43 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    bootstrapDiscord().then((result) => {
+    bootstrapDiscord().then(async (result) => {
       if (cancelled) return;
       setBootstrap(result);
+
       if (!result.sdkReady) {
-        setAuthState("error");
-        setMessage("Abra esta página como Activity dentro do Discord.");
+        setRuntimeMode("browser");
+        const handledOAuth = await finishBrowserOAuthIfNeeded();
+        if (cancelled) return;
+        if (handledOAuth) return;
+
+        const cachedToken = readCachedToken();
+        if (cachedToken) {
+          setToken(cachedToken);
+          await hydrateBrowserSession(cachedToken);
+          if (readBrowserGuildFromLocation()) setBrowserSelectedGuildId(readBrowserGuildFromLocation());
+          return;
+        }
+
+        setAuthState("needs_login");
+        setMessage("Entre com Discord para abrir o guia ou seus servidores.");
         return;
       }
+
+      setRuntimeMode("activity");
       if (!result.context.guildId) {
         setAuthState("error");
         setMessage("Abra o dashboard dentro de um servidor para configurar o bot.");
         return;
       }
-      if (!token) {
+      if (!readCachedToken()) {
         setAuthState("needs_login");
         setMessage("Autorize sua conta para continuar.");
       }
     }).catch((error) => {
       if (cancelled) return;
-      setAuthState("error");
+      setRuntimeMode("browser");
+      setAuthState("needs_login");
       setMessage(cleanErrorText(error));
     });
     return () => { cancelled = true; };
@@ -297,9 +706,27 @@ export default function App() {
   useEffect(() => {
     if (!token || !isSnowflake(guildId)) return;
     void loadDashboard(token, guildId);
-  }, [token, guildId]);
+  }, [token, guildId, runtimeMode]);
 
-  const userName = bootstrap.currentUser.displayName || "Admin";
+  useEffect(() => {
+    if (runtimeMode !== "browser" || !token || browserView !== "servers" || browserSelectedGuildId) return;
+    void loadBrowserServers();
+  }, [runtimeMode, token, browserView, browserSelectedGuildId]);
+
+  useEffect(() => {
+    if (runtimeMode !== "browser") return;
+    const cards = Array.from(document.querySelectorAll(".reveal-card"));
+    if (!cards.length) return;
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) entry.target.classList.add("reveal-card--visible");
+      }
+    }, { threshold: 0.14 });
+    cards.forEach((card) => observer.observe(card));
+    return () => observer.disconnect();
+  }, [runtimeMode, browserView, token, browserManageableServers.length, browserInviteServers.length]);
+
+  const userName = runtimeMode === "browser" ? browserUserName(browserUser, "Admin") : (bootstrap.currentUser.displayName || "Admin");
   const hasUnsaved = changedFields.length > 0;
   const selectedPercent = selectedSummary && selectedSummary.total > 0 ? Math.round((selectedSummary.configured / selectedSummary.total) * 100) : 0;
   const topModules = useMemo(
@@ -312,8 +739,60 @@ export default function App() {
   const changedFieldLabels = changedFields.map((field) => field.label).slice(0, 4);
   const searchActive = query.trim().length > 0;
 
+  if (runtimeMode === "detecting") {
+    return (
+      <main className="dashboard-shell dashboard-shell--home">
+        <section className="auth-card">
+          <div className="auth-icon">⚙️</div>
+          <h2>Abrindo Dashboard</h2>
+          <p>Detectando se você está dentro do Discord ou no navegador...</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (runtimeMode === "browser" && !guildId) {
+    const loggedIn = Boolean(token && authState !== "needs_login");
+    if (loggedIn && browserView === "servers") {
+      return (
+        <BrowserServerPicker
+          user={browserUser}
+          manageable={browserManageableServers}
+          needsInvite={browserInviteServers}
+          loading={loadingServers}
+          message={message}
+          onSelect={openBrowserServer}
+          onInvite={openBrowserInvite}
+          onRefresh={() => void loadBrowserServers()}
+          onLogout={logoutBrowser}
+        />
+      );
+    }
+    if (loggedIn && browserView === "invite") {
+      return (
+        <BrowserInviteScreen
+          server={browserInviteServer}
+          busy={busy}
+          message={message}
+          onBack={() => { setBrowserView("servers"); window.history.pushState({}, "", "/dashboard"); }}
+          onOpenInvite={() => void openInviteUrl()}
+        />
+      );
+    }
+    return (
+      <BrowserLanding
+        loggedIn={loggedIn}
+        user={browserUser}
+        busy={busy}
+        message={message}
+        onLogin={startBrowserLogin}
+        onDashboard={() => { setBrowserView("servers"); window.history.pushState({}, "", "/dashboard"); void loadBrowserServers(); }}
+      />
+    );
+  }
+
   return (
-    <main className={`dashboard-shell dashboard-shell--${mobileView}`}>
+    <main className={`dashboard-shell dashboard-shell--${mobileView} dashboard-shell--${runtimeMode}`}>
       <header className="dashboard-topbar">
         <div className="brand-block">
           <span className="brand-icon">⚙️</span>
@@ -325,12 +804,13 @@ export default function App() {
         <div className="topbar-actions">
           <span className={`status-dot status-dot--${authState}`} />
           <span>{authState === "ready" ? "Conectado" : busy ? "Carregando" : "Aguardando"}</span>
+          {runtimeMode === "browser" && <button className="topbar-mini-button" onClick={() => { setBrowserSelectedGuildId(null); setBrowserView("servers"); window.history.pushState({}, "", "/dashboard"); }}>Servidores</button>}
         </div>
       </header>
 
       <section className="dashboard-hero">
         <div className="hero-copy">
-          <p className="eyebrow">Discord Activity</p>
+          <p className="eyebrow">{runtimeMode === "browser" ? "Web Dashboard" : "Discord Activity"}</p>
           <h1>Dashboard</h1>
           <p className="hero-text">Central administrativa para configurar módulos, canais, permissões e automações do servidor.</p>
           <div className="hero-meta">

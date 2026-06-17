@@ -61,3 +61,45 @@ export interface DashboardBootstrapPayload {
   sections?: Array<{ id: string; label: string; emoji: string; description: string }>;
   error?: string;
 }
+
+export interface DashboardUserPayload {
+  id: string;
+  username?: string | null;
+  global_name?: string | null;
+  avatar?: string | null;
+}
+
+export interface DashboardSessionPayload {
+  ok: boolean;
+  authenticated?: boolean;
+  user?: DashboardUserPayload | null;
+  error?: string;
+}
+
+export interface DashboardServerCard {
+  id: string;
+  name: string;
+  icon: string | null;
+  owner: boolean;
+  permissions: string;
+  botPresent: boolean;
+  canManage: boolean;
+  canInvite: boolean;
+  reason: string;
+  inviteUrl?: string | null;
+}
+
+export interface DashboardServersPayload {
+  ok: boolean;
+  user?: DashboardUserPayload | null;
+  manageable: DashboardServerCard[];
+  needsInvite: DashboardServerCard[];
+  error?: string;
+}
+
+export interface DashboardInvitePayload {
+  ok: boolean;
+  guild_id?: string;
+  invite_url?: string;
+  error?: string;
+}

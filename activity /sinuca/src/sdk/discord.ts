@@ -104,6 +104,16 @@ async function enrichAuthenticatedUser(accessToken: string, baseUser: ActivityUs
   return nextUser;
 }
 
+
+function withSdkReadyTimeout(discord: DiscordSDK): Promise<void> {
+  return Promise.race([
+    discord.ready().then(() => undefined),
+    new Promise<void>((_, reject) => {
+      window.setTimeout(() => reject(new Error("sdk_ready_timeout_browser")), 1400);
+    }),
+  ]);
+}
+
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     const bits = [error.name, error.message].filter(Boolean);
@@ -393,7 +403,7 @@ export async function bootstrapDiscord(): Promise<ActivityBootstrap> {
 
   try {
     bootDebug.push("sdk:ready:start");
-    await discord.ready();
+    await withSdkReadyTimeout(discord);
     bootDebug.push("sdk:ready:ok");
   } catch (error) {
     bootDebug.push(`sdk:ready:error:${getErrorMessage(error)}`);
