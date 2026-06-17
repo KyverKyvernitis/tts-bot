@@ -1,5 +1,32 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Activity as ActivityIcon,
+  Bot,
+  Cake,
+  ChevronDown,
+  ChevronRight,
+  ClipboardList,
+  DoorOpen,
+  HelpCircle,
+  Home,
+  LayoutGrid,
+  LogOut,
+  Mic,
+  Music,
+  Palette,
+  RefreshCw,
+  ScrollText,
+  Server,
+  Settings,
+  ShieldCheck,
+  Ticket,
+  Trophy,
+  User,
+  Webhook,
+  Zap,
+  type LucideIcon,
+} from "lucide-react";
+import {
   authenticateDiscordAccessToken,
   authorizeDiscordCode,
   bootstrapDiscord,
@@ -102,6 +129,110 @@ function moduleHint(summary: DashboardSectionSummary): string {
   if (summary.configured >= summary.total) return "Pronto";
   if (summary.configured > 0) return "Parcial";
   return "Configurar";
+}
+
+
+type ModuleGroup = "main" | "system";
+
+type ModuleVisualMeta = {
+  id: string;
+  label: string;
+  description: string;
+  emoji: string;
+  icon: LucideIcon;
+  group: ModuleGroup;
+  aliases?: string[];
+};
+
+type DashboardVisualModule = DashboardSectionSummary & {
+  icon: LucideIcon;
+  visualDescription: string;
+  group: ModuleGroup;
+  available: boolean;
+};
+
+const MODULE_CATALOG: ModuleVisualMeta[] = [
+  { id: "general", label: "Geral", description: "Preferências básicas do servidor.", emoji: "⚙️", icon: Settings, group: "system", aliases: ["guild"] },
+  { id: "welcome", label: "Boas-vindas", description: "Mensagem, canal e cargo automático para novos membros.", emoji: "👋", icon: DoorOpen, group: "main" },
+  { id: "forms", label: "Formulários", description: "Templates, canais e respostas em embed.", emoji: "📋", icon: ClipboardList, group: "main", aliases: ["form", "formularios"] },
+  { id: "tickets", label: "Tickets", description: "Categorias, mensagens e permissões de atendimento.", emoji: "🎫", icon: Ticket, group: "main", aliases: ["ticket"] },
+  { id: "color_roles", label: "Cargos de cor", description: "Painel de seleção de cor personalizada.", emoji: "🎨", icon: Palette, group: "main", aliases: ["color-roles", "colors", "roles_color", "colorroles"] },
+  { id: "chatbot", label: "Chatbot IA", description: "Canais, perfis e multi-modelo de resposta.", emoji: "🤖", icon: Bot, group: "main", aliases: ["ai", "ia"] },
+  { id: "birthday", label: "Aniversários", description: "Canal de parabéns e cargo do dia.", emoji: "🎂", icon: Cake, group: "main", aliases: ["birthdays"] },
+  { id: "tts", label: "TTS", description: "Vozes, idiomas e canais de leitura automática.", emoji: "🎙️", icon: Mic, group: "main" },
+  { id: "music", label: "Música", description: "Filas, controle de DJ e qualidade de áudio.", emoji: "🎵", icon: Music, group: "main" },
+  { id: "logs", label: "Logs", description: "Canais de auditoria e eventos do bot.", emoji: "📜", icon: ScrollText, group: "system", aliases: ["logging"] },
+  { id: "permissions", label: "Permissões", description: "Cargos administrativos e acesso ao painel.", emoji: "🛡️", icon: ShieldCheck, group: "system", aliases: ["permissoes"] },
+  { id: "webhooks", label: "Webhooks", description: "Identidade e envio das mensagens do bot.", emoji: "🔗", icon: Webhook, group: "system", aliases: ["webhook"] },
+  { id: "status", label: "Status", description: "Saúde do bot, workers e integrações.", emoji: "📈", icon: ActivityIcon, group: "system", aliases: ["health"] },
+  { id: "gincana", label: "Gincana", description: "Eventos, pontuação e equipes.", emoji: "🏆", icon: Trophy, group: "main" },
+];
+
+function normalizeModuleId(id: string): string {
+  return id.replace(/-/g, "_").toLowerCase();
+}
+
+function findModuleMeta(sectionId: string | null | undefined): ModuleVisualMeta | undefined {
+  const normalized = normalizeModuleId(sectionId || "");
+  return MODULE_CATALOG.find((item) => item.id === normalized || item.aliases?.some((alias) => normalizeModuleId(alias) === normalized));
+}
+
+function mergeDashboardModules(summary: DashboardSectionSummary[]): DashboardVisualModule[] {
+  const byNormalizedId = new Map(summary.map((item) => [normalizeModuleId(item.id), item]));
+  const used = new Set<string>();
+  const catalogModules = MODULE_CATALOG
+    .filter((item) => item.id !== "callkeeper" && item.id !== "call_keeper")
+    .map((meta) => {
+      const found = byNormalizedId.get(meta.id)
+        ?? meta.aliases?.map((alias) => byNormalizedId.get(normalizeModuleId(alias))).find(Boolean)
+        ?? null;
+      if (found) used.add(normalizeModuleId(found.id));
+      return {
+        id: found?.id ?? meta.id,
+        label: found?.label ?? meta.label,
+        emoji: found?.emoji ?? meta.emoji,
+        description: found?.description ?? meta.description,
+        enabled: found?.enabled ?? null,
+        configured: found?.configured ?? 0,
+        total: found?.total ?? 0,
+        status: found?.status ?? "Configurar",
+        icon: meta.icon,
+        visualDescription: meta.description,
+        group: meta.group,
+        available: Boolean(found),
+      } satisfies DashboardVisualModule;
+    });
+
+  const extraModules = summary
+    .filter((item) => !used.has(normalizeModuleId(item.id)) && !normalizeModuleId(item.id).includes("callkeeper") && !normalizeModuleId(item.id).includes("call_keeper"))
+    .map((item) => ({
+      ...item,
+      icon: findModuleMeta(item.id)?.icon ?? LayoutGrid,
+      visualDescription: item.description,
+      group: findModuleMeta(item.id)?.group ?? "main",
+      available: true,
+    } satisfies DashboardVisualModule));
+
+  return [...catalogModules, ...extraModules];
+}
+
+function sectionShortStatus(summary: DashboardSectionSummary | undefined, available = true): string {
+  if (!available) return "Configurar";
+  if (!summary) return "Carregando";
+  if (summary.enabled === false) return "Desativado";
+  if (summary.total <= 0) return summary.status || "Configurar";
+  if (summary.configured >= summary.total) return "Pronto";
+  if (summary.configured > 0) return `${summary.configured}/${summary.total}`;
+  return "Configurar";
+}
+
+function moduleDescription(module: DashboardVisualModule): string {
+  return module.visualDescription || module.description || "Configurações do módulo.";
+}
+
+function buildGuildAvatarText(guildId: string | null | undefined, fallback: string) {
+  const label = fallback?.trim() || guildId || "Servidor";
+  return guildInitials(label);
 }
 
 type RuntimeMode = "detecting" | "activity" | "browser";
@@ -718,6 +849,14 @@ export default function App() {
   const hasUnsaved = changedFields.length > 0;
   const selectedPercent = selectedSummary && selectedSummary.total > 0 ? Math.round((selectedSummary.configured / selectedSummary.total) * 100) : 0;
   const changedFieldLabels = changedFields.map((field) => field.label).slice(0, 4);
+  const displayModules = useMemo(() => mergeDashboardModules(summary), [summary]);
+  const activeVisualModule = useMemo(
+    () => displayModules.find((item) => item.id === selectedSectionId) ?? displayModules.find((item) => item.id === selectedSection?.id) ?? null,
+    [displayModules, selectedSection?.id, selectedSectionId],
+  );
+  const activityServerLabel = runtimeMode === "browser"
+    ? (browserManageableServers.find((server) => server.id === browserSelectedGuildId)?.name ?? browserSelectedGuildId ?? "Servidor")
+    : (bootstrap.context.guildId ? "Servidor atual" : "Servidor");
 
   if (runtimeMode === "detecting") {
     return (
@@ -772,237 +911,254 @@ export default function App() {
   }
 
   return (
-    <main className={`dashboard-shell dashboard-shell--${mobileView} dashboard-shell--${runtimeMode}`}>
-      <header className="dashboard-topbar">
-        <div className="brand-block">
-          <span className="brand-icon">⚙️</span>
-          <div>
-            <strong>Dashboard</strong>
-            <small>{guildId ?? "Servidor"}</small>
-          </div>
-        </div>
-        <div className="topbar-actions">
-          <span className={`status-dot status-dot--${authState}`} />
-          <span>{authState === "ready" ? "Conectado" : busy ? "Carregando" : "Aguardando"}</span>
-          {runtimeMode === "browser" && <button className="topbar-mini-button" onClick={() => { setBrowserSelectedGuildId(null); setBrowserView("servers"); window.history.pushState({}, "", "/dashboard"); }}>Servidores</button>}
-        </div>
-      </header>
-
-      {authState !== "ready" && message && (
-        <div className={`status-pill status-pill--${authState}`}>{message}</div>
-      )}
-
-
-      {authState === "needs_login" && (
-        <section className="auth-card">
-          <div className="auth-icon">🔐</div>
-          <h2>Entrar como administrador</h2>
-          <p>O dashboard usa sua conta Discord apenas para validar se você pode configurar este servidor.</p>
-          <button className="primary-button" disabled={busy} onClick={() => void login("consent")}>{busy ? "Autorizando..." : "Autorizar"}</button>
-        </section>
-      )}
-
-      {authState === "denied" && (
-        <section className="auth-card auth-card--danger">
-          <div className="auth-icon">⛔</div>
-          <h2>Sem permissão</h2>
-          <p>Somente dono do servidor, administradores ou membros com Gerenciar servidor podem alterar configurações.</p>
-          <button className="ghost-button" onClick={() => { clearCachedToken(); setToken(null); setAuthState("needs_login"); }}>Trocar conta</button>
-        </section>
-      )}
-
-      {authState === "error" && (
-        <section className="auth-card auth-card--danger">
-          <div className="auth-icon">⚠️</div>
-          <h2>Não foi possível abrir</h2>
-          <p>{message}</p>
-          <div className="button-row">
-            <button className="ghost-button" onClick={() => void refreshDashboard()} disabled={!token || !guildId || busy}>Tentar de novo</button>
-            <button className="ghost-button" onClick={() => { clearCachedToken(); setToken(null); setAuthState("needs_login"); }}>Reautenticar</button>
-          </div>
-        </section>
-      )}
-
-      {authState === "ready" && (
-        <>
-          <section className="command-center dashboard-home" aria-label="Início do dashboard">
-            <div className="overview-strip overview-strip--compact" aria-label="Resumo rápido">
-              <article><span>🧩</span><strong>{summary.length}</strong><small>áreas</small></article>
-              <article><span>✅</span><strong>{dashboardStats.configuredSections}</strong><small>configuradas</small></article>
+    <main className={`admin-dashboard admin-dashboard--${runtimeMode} admin-dashboard--${mobileView}`}>
+      <div className="admin-shell">
+        {authState === "ready" && (
+          <aside className="admin-sidebar" aria-label="Navegação do dashboard">
+            <div className="side-brand">
+              <span className="side-brand-icon"><Mic size={17} /></span>
+              <div>
+                <strong>osaka</strong>
+                <small>Dashboard</small>
+              </div>
             </div>
 
-            <div className="module-grid" aria-label="Módulos do servidor">
-              {summary.map((item) => (
-                <button
-                  key={item.id}
-                  className={`module-tile module-tile--${statusClass(item)} ${selectedSection?.id === item.id ? "module-tile--active" : ""}`}
-                  onClick={() => openSection(item.id)}
-                >
-                  <span className="module-emoji">{item.emoji}</span>
-                  <span className="module-copy">
-                    <strong>{item.label}</strong>
-                    <small>{moduleHint(item)}</small>
-                  </span>
-                  <span className="module-progress">{sectionPercent(item)}%</span>
-                </button>
-              ))}
+            <button
+              className={`side-link ${mobileView === "home" ? "side-link--active" : ""}`}
+              onClick={() => setMobileView("home")}
+            >
+              <Home size={16} />
+              <span>Início</span>
+            </button>
+
+            <div className="side-group">
+              <span>MÓDULOS</span>
+              {displayModules.filter((module) => module.group === "main").map((module) => {
+                const Icon = module.icon;
+                return (
+                  <button
+                    key={module.id}
+                    className={`side-link ${selectedSectionId === module.id && mobileView === "section" ? "side-link--active" : ""}`}
+                    onClick={() => openSection(module.id)}
+                  >
+                    <Icon size={16} />
+                    <span>{module.label}</span>
+                  </button>
+                );
+              })}
             </div>
-          </section>
 
-          <section className="workspace dashboard-section-view" aria-label="Configuração da seção">
-            <nav className="section-rail" aria-label="Navegação rápida">
-              <button className="section-chip section-chip--home" onClick={() => setMobileView("home")}>⌂ Início</button>
-              {summary.map((item) => (
-                <button
-                  key={item.id}
-                  className={`section-chip section-chip--${statusClass(item)} ${selectedSection?.id === item.id ? "section-chip--active" : ""}`}
-                  onClick={() => openSection(item.id)}
-                >
-                  <span>{item.emoji}</span>{item.label}
+            <div className="side-group">
+              <span>SISTEMA</span>
+              {displayModules.filter((module) => module.group === "system").map((module) => {
+                const Icon = module.icon;
+                return (
+                  <button
+                    key={module.id}
+                    className={`side-link ${selectedSectionId === module.id && mobileView === "section" ? "side-link--active" : ""}`}
+                    onClick={() => openSection(module.id)}
+                  >
+                    <Icon size={16} />
+                    <span>{module.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </aside>
+        )}
+
+        <section className="admin-main">
+          <header className="admin-topbar">
+            <div className="guild-switcher">
+              <span className="guild-avatar">{buildGuildAvatarText(guildId, activityServerLabel)}</span>
+              <div>
+                <strong>{activityServerLabel}</strong>
+                <small>{runtimeMode === "browser" ? "Dashboard web" : "Activity"}</small>
+              </div>
+              {runtimeMode === "browser" && <ChevronDown size={15} />}
+            </div>
+
+            <div className="admin-top-actions">
+              {authState === "ready" && (
+                <button className="icon-button" disabled={busy} onClick={() => void refreshDashboard()} aria-label="Atualizar">
+                  <RefreshCw size={17} className={busy ? "spin" : ""} />
                 </button>
-              ))}
-            </nav>
+              )}
+              {runtimeMode === "browser" && authState === "ready" && (
+                <button className="icon-button icon-button--wide" onClick={() => { setBrowserSelectedGuildId(null); setBrowserView("servers"); window.history.pushState({}, "", "/dashboard"); }}>
+                  <Server size={16} />
+                  <span>Servidores</span>
+                </button>
+              )}
+              <div className="user-chip">
+                <span>{guildInitials(userName)}</span>
+                <small>{userName}</small>
+              </div>
+            </div>
+          </header>
 
-            <section className="dashboard-grid">
-              <aside className="section-list section-list--desktop" aria-label="Áreas configuráveis">
-                <div className="panel-title-row">
-                  <h2>Áreas</h2>
-                  <button className="ghost-button ghost-button--small" disabled={busy} onClick={() => void refreshDashboard()}>Atualizar</button>
-                </div>
-                <div className="section-buttons">
-                  {summary.map((item) => (
-                    <button
-                      key={item.id}
-                      className={`section-button section-button--${statusClass(item)} ${selectedSection?.id === item.id ? "section-button--active" : ""}`}
-                      onClick={() => openSection(item.id)}
-                    >
-                      <span className="section-emoji">{item.emoji}</span>
-                      <span className="section-copy">
-                        <strong>{item.label}</strong>
-                        <small>{item.status} · {sectionConfiguredLabel(item)}</small>
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </aside>
+          {authState !== "ready" && message && (
+            <div className={`status-pill status-pill--${authState}`}>{message}</div>
+          )}
 
-              <section className="settings-panel">
-                {selectedSection ? (
-                  <>
-                    <button className="mobile-back" onClick={() => setMobileView("home")}>← Voltar ao início</button>
-                    <div className="settings-heading">
-                      <div>
-                        <p className="eyebrow">{selectedSection.emoji} {selectedSection.label}</p>
-                        <h2>{selectedSection.description}</h2>
-                        <p>{selectedSummary ? `${selectedSummary.configured} de ${selectedSummary.total} campos configurados.` : ""}</p>
-                      </div>
-                      <div className="button-row">
-                        <button className="ghost-button" onClick={() => setDraft(values)} disabled={!hasUnsaved || saving}>Desfazer</button>
-                        <button className="primary-button" onClick={() => void saveSection()} disabled={!hasUnsaved || saving}>{saving ? "Salvando..." : hasUnsaved ? `Salvar ${changedFields.length}` : "Salvo"}</button>
-                      </div>
-                    </div>
-
-                    <div className="section-overview">
-                      <div>
-                        <span className="stat-label">Progresso</span>
-                        <strong>{selectedPercent}%</strong>
-                      </div>
-                      <div className="progress-track"><span style={{ width: `${selectedPercent}%` }} /></div>
-                      <span className={`mini-badge mini-badge--${statusClass(selectedSummary)}`}>{selectedSummary?.status ?? "carregando"}</span>
-                    </div>
-
-                    <div className="fields-grid">
-                      {selectedSection.fields.map((field) => {
-                        const current = draft[field.id];
-                        const changed = draft[field.id] !== values[field.id];
-                        return (
-                          <label key={field.id} className={`field-card field-card--${field.type} ${changed ? "field-card--changed" : ""}`}>
-                            <span className="field-topline">
-                              <span className="field-label">{field.label}</span>
-                              {changed && <span className="mini-badge mini-badge--pending">alterado</span>}
-                            </span>
-                            {field.description && <span className="field-description">{field.description}</span>}
-                            {field.type === "boolean" ? (
-                              <span className="switch-row">
-                                <input
-                                  type="checkbox"
-                                  checked={Boolean(current)}
-                                  onChange={(event) => updateDraft(field, event.target.checked)}
-                                />
-                                <span>{Boolean(current) ? "Ligado" : "Desligado"}</span>
-                              </span>
-                            ) : field.type === "select" ? (
-                              <select value={stringifyValue(current)} onChange={(event) => updateDraft(field, event.target.value)}>
-                                {(field.options ?? []).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                              </select>
-                            ) : field.type === "textarea" ? (
-                              <textarea
-                                value={stringifyValue(current)}
-                                maxLength={field.maxLength}
-                                placeholder={field.placeholder}
-                                onChange={(event) => updateDraft(field, event.target.value)}
-                              />
-                            ) : (
-                              <input
-                                type={field.type === "number" ? "number" : "text"}
-                                min={field.min}
-                                max={field.max}
-                                maxLength={field.maxLength}
-                                value={stringifyValue(current)}
-                                placeholder={field.placeholder ?? (field.type === "channel" ? "ID ou menção do canal" : field.type === "role" ? "ID ou menção do cargo" : field.type === "url" ? "https://..." : "")}
-                                onChange={(event) => updateDraft(field, event.target.value)}
-                              />
-                            )}
-                            <span className="field-current">Atual: {displayValue(field, values[field.id])}</span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </>
-                ) : (
-                  <div className="empty-state">Nenhuma seção carregada.</div>
-                )}
-              </section>
-
-              <aside className="inspector-panel" aria-label="Resumo da seção selecionada">
-                <div className="inspector-card inspector-card--primary">
-                  <span className="inspector-emoji">{selectedSection?.emoji ?? "⚙️"}</span>
-                  <p className="eyebrow">Seção atual</p>
-                  <h3>{selectedSection?.label ?? "Carregando"}</h3>
-                  <p>{selectedSection?.description ?? "Selecione uma área para configurar."}</p>
-                  <div className="progress-track"><span style={{ width: `${selectedPercent}%` }} /></div>
-                  <span className={`mini-badge mini-badge--${statusClass(selectedSummary)}`}>{selectedSummary?.status ?? "aguardando"}</span>
-                </div>
-
-                <div className="inspector-card">
-                  <div className="panel-title-row">
-                    <h3>Alterações</h3>
-                    <span className="mini-badge">{changedFields.length}</span>
-                  </div>
-                  {changedFieldLabels.length ? (
-                    <ul className="change-list">
-                      {changedFieldLabels.map((label) => <li key={label}>{label}</li>)}
-                    </ul>
-                  ) : (
-                    <p className="muted-text">Nenhuma alteração pendente nesta seção.</p>
-                  )}
-                </div>
-
-              </aside>
+          {authState === "needs_login" && (
+            <section className="auth-card">
+              <div className="auth-icon"><ShieldCheck size={28} /></div>
+              <h2>Entrar como administrador</h2>
+              <p>Autorize sua conta Discord para validar acesso ao painel deste servidor.</p>
+              <button className="primary-button" disabled={busy} onClick={() => void login("consent")}>{busy ? "Autorizando..." : "Autorizar"}</button>
             </section>
-          </section>
+          )}
+
+          {authState === "denied" && (
+            <section className="auth-card auth-card--danger">
+              <div className="auth-icon"><ShieldCheck size={28} /></div>
+              <h2>Sem permissão</h2>
+              <p>Somente dono, administradores ou membros autorizados podem alterar configurações.</p>
+              <button className="ghost-button" onClick={() => { clearCachedToken(); setToken(null); setAuthState("needs_login"); }}>Trocar conta</button>
+            </section>
+          )}
+
+          {authState === "error" && (
+            <section className="auth-card auth-card--danger">
+              <div className="auth-icon"><HelpCircle size={28} /></div>
+              <h2>Não foi possível abrir</h2>
+              <p>{message}</p>
+              <div className="button-row">
+                <button className="ghost-button" onClick={() => void refreshDashboard()} disabled={!token || !guildId || busy}>Tentar de novo</button>
+                <button className="ghost-button" onClick={() => { clearCachedToken(); setToken(null); setAuthState("needs_login"); }}>Reautenticar</button>
+              </div>
+            </section>
+          )}
+
+          {authState === "ready" && mobileView === "home" && (
+            <section className="panel-page panel-page--home">
+              <div className="page-heading">
+                <span className="page-heading-icon"><LayoutGrid size={24} /></span>
+                <div>
+                  <h1>Painel do servidor</h1>
+                  <p>{runtimeMode === "browser" ? activityServerLabel : guildId}</p>
+                </div>
+                <button className="help-button" aria-label="Ajuda"><HelpCircle size={18} /></button>
+              </div>
+
+              <div className="admin-module-list">
+                {displayModules.filter((module) => module.group === "main").map((module, index) => {
+                  const Icon = module.icon;
+                  return (
+                    <button
+                      key={module.id}
+                      className={`admin-module-card admin-module-card--${statusClass(module)} ${module.available ? "" : "admin-module-card--placeholder"}`}
+                      style={{ animationDelay: `${index * 32}ms` }}
+                      onClick={() => openSection(module.id)}
+                    >
+                      <span className="module-icon-box"><Icon size={24} /></span>
+                      <span className="module-text">
+                        <strong>{module.label}</strong>
+                        <small>{moduleDescription(module)}</small>
+                      </span>
+                      <ChevronRight size={21} />
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {authState === "ready" && mobileView === "section" && (
+            <section className="panel-page panel-page--section">
+              <button className="mobile-back" onClick={() => setMobileView("home")}>← Início</button>
+
+              <div className="page-heading page-heading--section">
+                <span className="page-heading-icon">
+                  {activeVisualModule ? <activeVisualModule.icon size={24} /> : <Settings size={24} />}
+                </span>
+                <div>
+                  <h1>{activeVisualModule?.label ?? selectedSection?.label ?? "Configuração"}</h1>
+                  <p>{activeVisualModule ? moduleDescription(activeVisualModule) : selectedSection?.description}</p>
+                </div>
+                <span className={`state-badge state-badge--${statusClass(selectedSummary)}`}>{sectionShortStatus(selectedSummary, Boolean(selectedSection))}</span>
+              </div>
+
+              {selectedSection ? (
+                <>
+                  <div className="settings-actions">
+                    <button className="ghost-button" onClick={() => setDraft(values)} disabled={!hasUnsaved || saving}>Desfazer</button>
+                    <button className="primary-button" onClick={() => void saveSection()} disabled={!hasUnsaved || saving}>{saving ? "Salvando..." : hasUnsaved ? `Salvar ${changedFields.length}` : "Salvo"}</button>
+                  </div>
+
+                  <div className="settings-list">
+                    {selectedSection.fields.map((field) => {
+                      const current = draft[field.id];
+                      const changed = draft[field.id] !== values[field.id];
+                      return (
+                        <label key={field.id} className={`setting-row setting-row--${field.type} ${changed ? "setting-row--changed" : ""}`}>
+                          <span className="setting-row-head">
+                            <span>
+                              <strong>{field.label}</strong>
+                              {field.description && <small>{field.description}</small>}
+                            </span>
+                            {changed && <span className="state-badge state-badge--changed">alterado</span>}
+                          </span>
+
+                          {field.type === "boolean" ? (
+                            <span className="switch-row">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(current)}
+                                onChange={(event) => updateDraft(field, event.target.checked)}
+                              />
+                              <span>{Boolean(current) ? "Ligado" : "Desligado"}</span>
+                            </span>
+                          ) : field.type === "select" ? (
+                            <select value={stringifyValue(current)} onChange={(event) => updateDraft(field, event.target.value)}>
+                              {(field.options ?? []).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                            </select>
+                          ) : field.type === "textarea" ? (
+                            <textarea
+                              value={stringifyValue(current)}
+                              maxLength={field.maxLength}
+                              placeholder={field.placeholder}
+                              onChange={(event) => updateDraft(field, event.target.value)}
+                            />
+                          ) : (
+                            <input
+                              type={field.type === "number" ? "number" : "text"}
+                              min={field.min}
+                              max={field.max}
+                              maxLength={field.maxLength}
+                              value={stringifyValue(current)}
+                              placeholder={field.placeholder ?? (field.type === "channel" ? "ID ou menção do canal" : field.type === "role" ? "ID ou menção do cargo" : field.type === "url" ? "https://..." : "")}
+                              onChange={(event) => updateDraft(field, event.target.value)}
+                            />
+                          )}
+                          <span className="field-current">Atual: {displayValue(field, values[field.id])}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                <div className="module-empty">
+                  <Zap size={24} />
+                  <strong>Módulo pronto para integração</strong>
+                  <span>Esta área ainda não possui campos liberados na API do dashboard.</span>
+                </div>
+              )}
+            </section>
+          )}
 
           {hasUnsaved && (
             <div className="save-dock">
-              <span>{changedFields.length} alteração(ões) pendente(s) em {selectedSection?.label}.</span>
+              <span>{changedFields.length} alteração(ões) em {selectedSection?.label}.</span>
               <div className="button-row">
                 <button className="ghost-button ghost-button--small" onClick={() => setDraft(values)} disabled={saving}>Descartar</button>
-                <button className="primary-button primary-button--small" onClick={() => void saveSection()} disabled={saving}>Salvar agora</button>
+                <button className="primary-button primary-button--small" onClick={() => void saveSection()} disabled={saving}>Salvar</button>
               </div>
             </div>
           )}
-        </>
-      )}
+        </section>
+      </div>
     </main>
   );
 }
