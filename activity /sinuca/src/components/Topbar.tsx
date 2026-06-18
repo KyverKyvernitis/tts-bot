@@ -17,7 +17,7 @@ export function Topbar({ guildName, runtime, userName, busy, onRefresh, onChange
         <div className="osk-guild-avatar">{guildInitials(guildName)}</div>
         <div className="osk-guild-text">
           <strong>{guildName}</strong>
-          <small>{runtime === "browser" ? "Dashboard web" : "Dashboard do servidor"}</small>
+          <small>{runtime === "browser" ? "Dashboard web" : "Discord Activity"}</small>
         </div>
       </div>
 
@@ -25,7 +25,7 @@ export function Topbar({ guildName, runtime, userName, busy, onRefresh, onChange
         <button className="osk-icon-btn" onClick={onRefresh} aria-label="Atualizar" disabled={busy}>
           <RefreshCw size={16} className={busy ? "osk-spin" : undefined} />
         </button>
-        {onChangeServer && (
+        {runtime === "browser" && onChangeServer && (
           <button className="osk-icon-btn" onClick={onChangeServer} aria-label="Trocar servidor">
             <Server size={16} />
           </button>

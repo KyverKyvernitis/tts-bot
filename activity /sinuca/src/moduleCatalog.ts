@@ -1,18 +1,25 @@
 import type { LucideIcon } from "lucide-react";
 import {
+  Activity as ActivityIcon,
+  Bot,
   Cake,
-  Cpu,
+  ClipboardList,
   DoorOpen,
-  HardDrive,
   LayoutGrid,
   Mic,
   Music,
+  Palette,
+  ScrollText,
   Settings,
+  ShieldCheck,
   Ticket,
-  UploadCloud,
+  Trophy,
+  Webhook,
 } from "lucide-react";
 
-import type { DashboardSectionSummary } from "./types/dashboard";
+import type {
+  DashboardSectionSummary,
+} from "./types/dashboard";
 
 export type ModuleGroup = "main" | "system";
 
@@ -26,15 +33,20 @@ export interface ModuleVisualMeta {
 }
 
 export const MODULE_CATALOG: ModuleVisualMeta[] = [
+  { id: "general", label: "Geral", description: "Preferências básicas do servidor.", icon: Settings, group: "system", aliases: ["guild"] },
   { id: "welcome", label: "Boas-vindas", description: "Mensagem, canal e cargo automático para novos membros.", icon: DoorOpen, group: "main" },
+  { id: "forms", label: "Formulários", description: "Templates, canais e respostas em embed.", icon: ClipboardList, group: "main", aliases: ["form", "formularios"] },
   { id: "tickets", label: "Tickets", description: "Categorias, mensagens e permissões de atendimento.", icon: Ticket, group: "main", aliases: ["ticket"] },
-  { id: "birthday", label: "Aniversários", description: "Canal de parabéns, calendário público e cargo do dia.", icon: Cake, group: "main", aliases: ["birthdays", "aniversarios"] },
-  { id: "music", label: "Música", description: "Fila, permissões de DJ, volume e comportamento do player.", icon: Music, group: "main" },
-  { id: "tts", label: "TTS", description: "Vozes, idiomas, canais e limites de leitura automática.", icon: Mic, group: "main" },
-  { id: "workers", label: "Workers", description: "Processos em segundo plano, filas e capacidade dos workers.", icon: Cpu, group: "main", aliases: ["worker", "jobs", "queue"] },
-  { id: "updates", label: "Updates", description: "Canal de update, avisos e estado do auto update.", icon: UploadCloud, group: "main", aliases: ["update", "releases", "changelog"] },
-  { id: "vps", label: "VPS", description: "Recursos do servidor, status e monitoramento da máquina.", icon: HardDrive, group: "main", aliases: ["server_host", "host", "machine"] },
-  { id: "general", label: "Configurações", description: "Preferências básicas do servidor e do painel.", icon: Settings, group: "system", aliases: ["guild", "config", "settings", "configuracoes"] },
+  { id: "color_roles", label: "Cargos de cor", description: "Painel de seleção de cor personalizada.", icon: Palette, group: "main", aliases: ["color-roles", "colors", "roles_color", "colorroles"] },
+  { id: "chatbot", label: "Chatbot IA", description: "Canais, perfis e multi-modelo de resposta.", icon: Bot, group: "main", aliases: ["ai", "ia"] },
+  { id: "birthday", label: "Aniversários", description: "Canal de parabéns e cargo do dia.", icon: Cake, group: "main", aliases: ["birthdays"] },
+  { id: "tts", label: "TTS", description: "Vozes, idiomas e canais de leitura automática.", icon: Mic, group: "main" },
+  { id: "music", label: "Música", description: "Filas, controle de DJ e qualidade de áudio.", icon: Music, group: "main" },
+  { id: "gincana", label: "Jogos", description: "Crie eventos, divida em equipes e some pontos.", icon: Trophy, group: "main" },
+  { id: "logs", label: "Logs", description: "Canais de auditoria e eventos do bot.", icon: ScrollText, group: "system", aliases: ["logging"] },
+  { id: "permissions", label: "Permissões", description: "Cargos administrativos e acesso ao painel.", icon: ShieldCheck, group: "system", aliases: ["permissoes"] },
+  { id: "webhooks", label: "Webhooks", description: "Identidade e envio das mensagens do bot.", icon: Webhook, group: "system", aliases: ["webhook"] },
+  { id: "status", label: "Status", description: "Saúde do bot, workers e integrações.", icon: ActivityIcon, group: "system", aliases: ["health"] },
 ];
 
 export type DashboardVisualModule = DashboardSectionSummary & {
@@ -47,11 +59,6 @@ export function normalizeModuleId(id: string): string {
   return id.replace(/-/g, "_").toLowerCase();
 }
 
-function isHiddenModule(id: string): boolean {
-  const normalized = normalizeModuleId(id);
-  return ["callkeeper", "call_keeper", "sinuca", "pool", "bilhar", "game", "games", "jogo", "jogos", "gincana"].some((part) => normalized.includes(part));
-}
-
 export function findModuleMeta(sectionId: string | null | undefined): ModuleVisualMeta | undefined {
   const normalized = normalizeModuleId(sectionId || "");
   return MODULE_CATALOG.find(
@@ -62,31 +69,32 @@ export function findModuleMeta(sectionId: string | null | undefined): ModuleVisu
 }
 
 export function mergeDashboardModules(summary: DashboardSectionSummary[]): DashboardVisualModule[] {
-  const visibleSummary = summary.filter((item) => !isHiddenModule(item.id) && !isHiddenModule(item.label));
-  const byNormalizedId = new Map(visibleSummary.map((item) => [normalizeModuleId(item.id), item]));
+  const byNormalizedId = new Map(summary.map((item) => [normalizeModuleId(item.id), item]));
   const used = new Set<string>();
-  const catalog = MODULE_CATALOG.map((meta) => {
-    const found =
-      byNormalizedId.get(meta.id) ??
-      meta.aliases?.map((alias) => byNormalizedId.get(normalizeModuleId(alias))).find(Boolean) ??
-      null;
-    if (found) used.add(normalizeModuleId(found.id));
-    return {
-      id: found?.id ?? meta.id,
-      label: found?.label ?? meta.label,
-      emoji: found?.emoji ?? "•",
-      description: found?.description ?? meta.description,
-      enabled: found?.enabled ?? null,
-      configured: found?.configured ?? 0,
-      total: found?.total ?? 0,
-      status: found?.status ?? "Configurar",
-      icon: meta.icon,
-      group: meta.group,
-      available: Boolean(found),
-    } satisfies DashboardVisualModule;
-  });
+  const catalog = MODULE_CATALOG
+    .filter((item) => item.id !== "callkeeper" && item.id !== "call_keeper")
+    .map((meta) => {
+      const found =
+        byNormalizedId.get(meta.id) ??
+        meta.aliases?.map((alias) => byNormalizedId.get(normalizeModuleId(alias))).find(Boolean) ??
+        null;
+      if (found) used.add(normalizeModuleId(found.id));
+      return {
+        id: found?.id ?? meta.id,
+        label: found?.label ?? meta.label,
+        emoji: found?.emoji ?? "•",
+        description: found?.description ?? meta.description,
+        enabled: found?.enabled ?? null,
+        configured: found?.configured ?? 0,
+        total: found?.total ?? 0,
+        status: found?.status ?? "Configurar",
+        icon: meta.icon,
+        group: meta.group,
+        available: Boolean(found),
+      } satisfies DashboardVisualModule;
+    });
 
-  const extras = visibleSummary
+  const extras = summary
     .filter((item) => !used.has(normalizeModuleId(item.id)))
     .map((item) => ({
       ...item,

@@ -1,4 +1,8 @@
-/* Dashboard design system */
+/* ============================================================
+   Osaka Bot — Dashboard design system
+   Single self-contained stylesheet for the redesigned activity
+   dashboard + browser landing/picker/invite.
+   ============================================================ */
 
 :root {
   color-scheme: dark;
@@ -69,7 +73,7 @@
     "Space Grotesk", "Inter", ui-sans-serif, system-ui, sans-serif;
 }
 
-/* Reset scoped to the dashboard root. */
+/* Reset scoped to the activity root so we don't leak globally */
 .osk-root,
 .osk-root * { box-sizing: border-box; }
 .osk-root {
@@ -104,7 +108,9 @@
 .osk-root button:disabled { cursor: not-allowed; opacity: 0.55; }
 .osk-root a { color: inherit; text-decoration: none; }
 
-/* Dashboard */
+/* ============================================================
+   ACTIVITY DASHBOARD
+   ============================================================ */
 .osk-app {
   position: relative;
   z-index: 1;
@@ -1437,10 +1443,4 @@
   .osk-module-grid { grid-template-columns: repeat(2, 1fr); }
   .osk-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .osk-field[data-type="textarea"] { grid-column: 1 / -1; }
-}
-.osk-server-avatar img {
-  width: 100%;
-  height: 100%;
-  border-radius: inherit;
-  object-fit: cover;
 }

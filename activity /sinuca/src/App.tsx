@@ -596,8 +596,6 @@ export default function App() {
         <BrowserLanding
           loggedIn={loggedIn}
           user={browserUser}
-          busy={busy}
-          message={message}
           onLogin={startBrowserLogin}
           onDashboard={() => { setBrowserView("servers"); window.history.pushState({}, "", "/dashboard"); void loadBrowserServers(); }}
         />
@@ -639,7 +637,7 @@ export default function App() {
           {authState === "ready" && (
             <Topbar
               guildName={serverLabel}
-              runtime={runtimeMode === "browser" ? "browser" : "activity"}
+              runtime="browser"
               userName={userName}
               busy={busy}
               onRefresh={() => void refreshDashboard()}

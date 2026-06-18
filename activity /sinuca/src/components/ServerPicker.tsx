@@ -2,10 +2,6 @@ import { ArrowRight, Plus, RefreshCw } from "lucide-react";
 import type { DashboardServerCard, DashboardUserPayload } from "../types/dashboard";
 import { guildInitials } from "../moduleCatalog";
 
-function ServerAvatar({ server }: { server: DashboardServerCard }) {
-  return server.icon ? <img src={server.icon} alt="" /> : <>{guildInitials(server.name)}</>;
-}
-
 interface ServerPickerProps {
   user: DashboardUserPayload | null;
   manageable: DashboardServerCard[];
@@ -68,7 +64,7 @@ export function ServerPicker({
         <div className="osk-server-grid">
           {manageable.map((s) => (
             <button key={s.id} className="osk-server-card" onClick={() => onSelect(s)}>
-              <span className="osk-server-avatar"><ServerAvatar server={s} /></span>
+              <span className="osk-server-avatar">{guildInitials(s.name)}</span>
               <span>
                 <strong>{s.name}</strong>
                 <small>{s.owner ? "Você é dono" : "Staff autorizado"}</small>
@@ -97,7 +93,7 @@ export function ServerPicker({
               data-disabled="true"
               onClick={() => onInvite(s)}
             >
-              <span className="osk-server-avatar"><ServerAvatar server={s} /></span>
+              <span className="osk-server-avatar">{guildInitials(s.name)}</span>
               <span>
                 <strong>{s.name}</strong>
                 <small>O bot ainda não está neste servidor</small>
