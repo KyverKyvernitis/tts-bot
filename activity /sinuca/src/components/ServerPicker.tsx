@@ -1,4 +1,4 @@
-import { ArrowRight, Plus, RefreshCw } from "lucide-react";
+import { ArrowRight, Plus, RefreshCw, ServerCrash } from "lucide-react";
 import type { DashboardServerCard, DashboardUserPayload } from "../types/dashboard";
 import { guildInitials } from "../moduleCatalog";
 
@@ -30,7 +30,7 @@ export function ServerPicker({
       <nav className="osk-browser-nav">
         <a className="osk-browser-brand" href="#">
           <span className="osk-browser-brand-mark">OK</span>
-          osaka.dashboard
+          <span className="osk-browser-brand-text">osaka.dashboard</span>
         </a>
         <div className="osk-browser-nav-actions">
           <button className="osk-btn osk-btn--sm" onClick={onRefresh} disabled={loading}>
@@ -70,12 +70,15 @@ export function ServerPicker({
                 <small>{s.owner ? "Você é dono" : "Staff autorizado"}</small>
               </span>
               <span className="osk-server-cta">
-                Configurar <ArrowRight size={13} />
+                <span className="osk-server-cta-label">Configurar</span> <ArrowRight size={13} />
               </span>
             </button>
           ))}
           {!loading && manageable.length === 0 && (
-            <div className="osk-empty">Nenhum servidor configurável encontrado.</div>
+            <div className="osk-empty">
+              <ServerCrash size={18} />
+              <span>Nenhum servidor configurável encontrado.</span>
+            </div>
           )}
         </div>
       </section>
@@ -99,12 +102,15 @@ export function ServerPicker({
                 <small>O bot ainda não está neste servidor</small>
               </span>
               <span className="osk-server-cta">
-                Convidar <Plus size={13} />
+                <span className="osk-server-cta-label">Convidar</span> <Plus size={13} />
               </span>
             </button>
           ))}
           {!loading && needsInvite.length === 0 && (
-            <div className="osk-empty">Nenhum servidor pendente de convite.</div>
+            <div className="osk-empty">
+              <ServerCrash size={18} />
+              <span>Nenhum servidor pendente de convite.</span>
+            </div>
           )}
         </div>
       </section>

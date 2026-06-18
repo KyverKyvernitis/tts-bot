@@ -36,19 +36,53 @@ export function BrowserLanding({ loggedIn, user, onLogin, onDashboard }: Browser
           </div>
         </div>
 
-        <div className="osk-preview" aria-hidden>
+        <div className="osk-preview" aria-hidden="true">
           <div className="osk-preview-bar">
             <i /><i /><i />
+            <span className="osk-preview-url">osaka.dashboard/painel</span>
           </div>
           <div className="osk-preview-body">
-            <div className="osk-preview-side">
-              <span /><span /><span /><span /><span />
+            <div className="osk-preview-nav">
+              <span className="osk-preview-nav-brand">
+                <span />
+                osaka
+              </span>
+              <span className="osk-preview-nav-item" data-active="true">
+                <DoorOpen size={12} /> Boas-vindas
+              </span>
+              <span className="osk-preview-nav-item">
+                <Ticket size={12} /> Tickets
+              </span>
+              <span className="osk-preview-nav-item">
+                <Mic size={12} /> TTS
+              </span>
+              <span className="osk-preview-nav-item">
+                <Bot size={12} /> Chatbot IA
+              </span>
             </div>
-            <div className="osk-preview-main">
+            <div className="osk-preview-content">
               <span className="osk-preview-pill" />
-              <div className="osk-preview-row" />
-              <div className="osk-preview-row" />
-              <div className="osk-preview-row" />
+              <div className="osk-preview-card">
+                <span className="osk-preview-card-icon" data-state="ready" />
+                <span className="osk-preview-card-lines">
+                  <span /><span />
+                </span>
+                <span className="osk-preview-card-badge" data-state="ready">Pronto</span>
+              </div>
+              <div className="osk-preview-card">
+                <span className="osk-preview-card-icon" data-state="partial" />
+                <span className="osk-preview-card-lines">
+                  <span /><span />
+                </span>
+                <span className="osk-preview-card-badge" data-state="partial">3/5</span>
+              </div>
+              <div className="osk-preview-card">
+                <span className="osk-preview-card-icon" data-state="pending" />
+                <span className="osk-preview-card-lines">
+                  <span /><span />
+                </span>
+                <span className="osk-preview-card-badge" data-state="pending">Configurar</span>
+              </div>
             </div>
           </div>
         </div>
@@ -115,7 +149,7 @@ function BrowserNav({
     <nav className="osk-browser-nav">
       <a className="osk-browser-brand" href="#">
         <span className="osk-browser-brand-mark">OK</span>
-        osaka.dashboard
+        <span className="osk-browser-brand-text">osaka.dashboard</span>
       </a>
       <div className="osk-browser-nav-actions">
         {loggedIn ? (
