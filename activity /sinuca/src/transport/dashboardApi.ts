@@ -54,19 +54,33 @@ async function withTokenRpcPrimary<T>(apiCall: () => Promise<T>, accessToken: st
 
 
 export async function fetchDashboardSession(accessToken: string): Promise<DashboardSessionPayload> {
-  return await fetchJsonFromCandidates<DashboardSessionPayload>(
-    resolveStrictApiCandidates("/session"),
-    { method: "GET", headers: authHeaders(accessToken) },
-    6000,
-  );
+  try {
+    return await callDashboardTokenRpc<DashboardSessionPayload>(accessToken, "", "session");
+  } catch (rpcError) {
+    if (rpcError instanceof DashboardHttpError && rpcError.code === "http_error" && (rpcError.status === 401 || rpcError.status === 403)) {
+      throw rpcError;
+    }
+    return await fetchJsonFromCandidates<DashboardSessionPayload>(
+      resolveStrictApiCandidates("/session"),
+      { method: "GET", headers: authHeaders(accessToken) },
+      6000,
+    );
+  }
 }
 
 export async function fetchDashboardServers(accessToken: string): Promise<DashboardServersPayload> {
-  return await fetchJsonFromCandidates<DashboardServersPayload>(
-    resolveStrictApiCandidates("/dashboard/servers"),
-    { method: "GET", headers: authHeaders(accessToken) },
-    8000,
-  );
+  try {
+    return await callDashboardTokenRpc<DashboardServersPayload>(accessToken, "", "servers");
+  } catch (rpcError) {
+    if (rpcError instanceof DashboardHttpError && rpcError.code === "http_error" && (rpcError.status === 401 || rpcError.status === 403)) {
+      throw rpcError;
+    }
+    return await fetchJsonFromCandidates<DashboardServersPayload>(
+      resolveStrictApiCandidates("/dashboard/servers"),
+      { method: "GET", headers: authHeaders(accessToken) },
+      8000,
+    );
+  }
 }
 
 export async function fetchDashboardInvite(accessToken: string, guildId: string): Promise<DashboardInvitePayload> {

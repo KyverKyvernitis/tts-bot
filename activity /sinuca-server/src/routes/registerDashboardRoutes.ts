@@ -152,6 +152,14 @@ export function registerDashboardRoutes({ app, configService, exchangeDiscordCod
     const action = firstString(body.dashboard_action, body.action);
     if (!action) return false;
 
+    if (action === "session") {
+      await sessionHandler(req, res);
+      return true;
+    }
+    if (action === "servers") {
+      await serversHandler(req, res);
+      return true;
+    }
     if (action === "bootstrap") {
       await sendBootstrap(req, res);
       return true;
@@ -196,15 +204,15 @@ export function registerDashboardRoutes({ app, configService, exchangeDiscordCod
     sendNoStoreJson(res, 405, { ok: false, error: "method_not_allowed", detail: "Use POST com o código OAuth." });
   });
 
-  app.get("/api/session", sessionHandler);
-  app.get("/api/dashboard/servers", serversHandler);
-  app.get("/api/dashboard/guild/:guildId/invite", inviteHandler);
+  app.get(["/session", "/api/session"], sessionHandler);
+  app.get(["/dashboard/servers", "/api/dashboard/servers"], serversHandler);
+  app.get(["/dashboard/guild/:guildId/invite", "/api/dashboard/guild/:guildId/invite"], inviteHandler);
 
-  app.get("/api/dashboard/bootstrap", sendBootstrap);
-  app.get("/api/dashboard/guild/:guildId/summary", sendSummary);
-  app.get("/api/dashboard/guild/:guildId/settings", sendSettings);
-  app.get("/api/dashboard/guild/:guildId/options", sendOptions);
-  app.patch("/api/dashboard/guild/:guildId/settings", saveSettings);
+  app.get(["/dashboard/bootstrap", "/api/dashboard/bootstrap"], sendBootstrap);
+  app.get(["/dashboard/guild/:guildId/summary", "/api/dashboard/guild/:guildId/summary"], sendSummary);
+  app.get(["/dashboard/guild/:guildId/settings", "/api/dashboard/guild/:guildId/settings"], sendSettings);
+  app.get(["/dashboard/guild/:guildId/options", "/api/dashboard/guild/:guildId/options"], sendOptions);
+  app.patch(["/dashboard/guild/:guildId/settings", "/api/dashboard/guild/:guildId/settings"], saveSettings);
 
   app.use("/api", (req, res) => {
     sendNoStoreJson(res, 404, { ok: false, error: "api_route_not_found", detail: `${req.method} ${req.originalUrl}` });
