@@ -15,6 +15,7 @@ from ..constants import (
     VARIABLES_BY_TEMPLATE,
 )
 from ..helpers import (
+    _announcement_time_from_config,
     _birthday_date,
     _channel_mention,
     _find_unknown_variables,
@@ -103,8 +104,7 @@ class BirthdayAdminView(discord.ui.LayoutView):
         register_channel_id = int(cfg.get("register_channel_id") or 0)
         announce_channel_id = int(cfg.get("announce_channel_id") or 0)
         count = int(cfg.get("birthday_count") or 0)
-        hour = int(cfg.get("announce_hour", 9) or 9)
-        minute = int(cfg.get("announce_minute", 0) or 0)
+        hour, minute = _announcement_time_from_config(cfg)
         lines = [
             "# 🎂 Aniversários",
             "",
@@ -184,8 +184,7 @@ class BirthdayAdminView(discord.ui.LayoutView):
 
     def _build_announce(self):
         channel_id = int(self.config.get("announce_channel_id") or 0)
-        hour = int(self.config.get("announce_hour", 9) or 9)
-        minute = int(self.config.get("announce_minute", 0) or 0)
+        hour, minute = _announcement_time_from_config(self.config)
         lines = [
             "# 📢 Avisos",
             "Escolha onde o bot vai mandar os parabéns.",
@@ -285,8 +284,7 @@ class BirthdayAdminView(discord.ui.LayoutView):
     def _build_preferences(self):
         cfg = self.config
         opts = cfg["options"]
-        hour = int(cfg.get("announce_hour", 9) or 9)
-        minute = int(cfg.get("announce_minute", 0) or 0)
+        hour, minute = _announcement_time_from_config(cfg)
         lines = [
             "# ⚙️ Preferências",
             f"**Horário dos avisos:** `{hour:02d}:{minute:02d}`",

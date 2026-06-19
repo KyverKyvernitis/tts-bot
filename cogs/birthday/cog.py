@@ -21,6 +21,7 @@ from .constants import (
 )
 from .helpers import (
     _age_for,
+    _announcement_time_from_config,
     _birthday_date,
     _birthday_date_full,
     _birthday_timestamp,
@@ -89,8 +90,9 @@ class BirthdayCog(commands.Cog):
         }
         opts.update(dict(cfg.get("options") or {}))
         cfg["options"] = opts
-        cfg.setdefault("announce_hour", 9)
-        cfg.setdefault("announce_minute", 0)
+        announce_hour, announce_minute = _announcement_time_from_config(cfg)
+        cfg["announce_hour"] = announce_hour
+        cfg["announce_minute"] = announce_minute
         cfg.setdefault("timezone", DEFAULT_TIMEZONE)
         return cfg
 
@@ -606,7 +608,8 @@ class BirthdayCog(commands.Cog):
             return
         tz = ZoneInfo(str(cfg.get("timezone") or DEFAULT_TIMEZONE))
         now = datetime.now(tz)
-        if int(cfg.get("announce_hour", 9) or 9) != now.hour or int(cfg.get("announce_minute", 0) or 0) != now.minute:
+        announce_hour, announce_minute = _announcement_time_from_config(cfg)
+        if announce_hour != now.hour or announce_minute != now.minute:
             return
         channel = guild.get_channel(channel_id)
         if channel is None:

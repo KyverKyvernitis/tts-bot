@@ -14,6 +14,7 @@ from ..constants import (
     VARIABLES_BY_TEMPLATE,
 )
 from ..helpers import (
+    _announcement_time_from_config,
     _find_unknown_variables,
     _make_notice_view,
     _template_variable_hint,
@@ -81,8 +82,7 @@ class BirthdayTimeModal(discord.ui.Modal):
         super().__init__(title="Horário dos avisos")
         self.panel = view
         cfg = view.cog._normalize_config(view.config)
-        hour = int(cfg.get("announce_hour", 9) or 9)
-        minute = int(cfg.get("announce_minute", 0) or 0)
+        hour, minute = _announcement_time_from_config(cfg)
         timezone_name = str(cfg.get("timezone") or DEFAULT_TIMEZONE)
         self.time_input = discord.ui.TextInput(
             label="Horário",

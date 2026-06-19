@@ -83,6 +83,27 @@ def _channel_mention(channel_id: int | None) -> str:
     return f"<#{cid}>" if cid else "não configurado"
 
 
+def _bounded_int(value: Any, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    if value is None:
+        return int(default)
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    if minimum is not None and result < minimum:
+        return int(default)
+    if maximum is not None and result > maximum:
+        return int(default)
+    return result
+
+
+def _announcement_time_from_config(config: dict[str, Any] | None) -> tuple[int, int]:
+    cfg = dict(config or {})
+    hour = _bounded_int(cfg.get("announce_hour"), 9, minimum=0, maximum=23)
+    minute = _bounded_int(cfg.get("announce_minute"), 0, minimum=0, maximum=59)
+    return hour, minute
+
+
 def _member_display(member: discord.Member | None, user_id: int, fallback: str | None = None) -> str:
     if member is not None:
         return str(getattr(member, "display_name", None) or getattr(member, "name", None) or user_id)
