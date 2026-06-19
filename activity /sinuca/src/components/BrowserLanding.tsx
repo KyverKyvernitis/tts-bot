@@ -1,4 +1,4 @@
-import { ArrowRight, Bot, ClipboardList, DoorOpen, Mic, ScrollText, Sparkles, Ticket } from "lucide-react";
+import { ArrowRight, Bot, ClipboardList, DoorOpen, Mic, ScrollText, Ticket } from "lucide-react";
 import type { DashboardUserPayload } from "../types/dashboard";
 import { SmartAvatar } from "./SmartAvatar";
 
@@ -17,13 +17,11 @@ export function BrowserLanding({ loggedIn, user, onLogin, onDashboard }: Browser
 
       <section className="osk-browser-hero">
         <div>
-          <span className="osk-hero-eyebrow-lg">Activity + Web</span>
           <h1>
-            Seu servidor, do seu jeito — <span>sem abrir documentação.</span>
+            Painel <span>de controle</span>
           </h1>
           <p>
-            Tickets, boas-vindas, TTS, música, IA, logs, jogos e mais. Clica, ajusta e salva —
-            direto dentro do Discord ou aqui no navegador.
+            Configure tickets, boas-vindas, aniversários, TTS, música, logs e jogos pelo painel.
           </p>
           <div className="osk-hero-actions">
             <button className="osk-btn osk-btn--primary osk-btn--lg" onClick={loggedIn ? onDashboard : onLogin}>
@@ -107,29 +105,6 @@ export function BrowserLanding({ loggedIn, user, onLogin, onDashboard }: Browser
         ))}
       </section>
 
-      <section className="osk-flow">
-        <span className="osk-hero-eyebrow">
-          <Sparkles size={12} /> Como funciona
-        </span>
-        <h2>Cada lugar tem um jeito diferente de abrir.</h2>
-        <div className="osk-flow-grid">
-          <div className="osk-flow-item">
-            <span className="osk-flow-item-step">1</span>
-            <strong>Dentro do Discord</strong>
-            <p>Abre na hora no servidor em que você ativou a Activity.</p>
-          </div>
-          <div className="osk-flow-item">
-            <span className="osk-flow-item-step">2</span>
-            <strong>No navegador</strong>
-            <p>Faz login, escolhe o servidor e cai direto no painel.</p>
-          </div>
-          <div className="osk-flow-item">
-            <span className="osk-flow-item-step">3</span>
-            <strong>Sem o bot ainda?</strong>
-            <p>O servidor aparece apagado e te leva pra tela de convite num clique.</p>
-          </div>
-        </div>
-      </section>
     </div>
   );
 }
