@@ -97,6 +97,12 @@ function initialBrowserView(): BrowserView {
   return "landing";
 }
 
+function hasBrowserOAuthReturn(): boolean {
+  if (typeof window === "undefined") return false;
+  const params = new URLSearchParams(window.location.search);
+  return params.has("code") || params.has("error");
+}
+
 function cleanOAuthCodeFromUrl(nextPath?: string) {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
@@ -276,22 +282,40 @@ export default function App() {
   }
 
   async function finishBrowserOAuthIfNeeded(): Promise<boolean> {
+    if (typeof window === "undefined") return false;
     const params = new URLSearchParams(window.location.search);
+    const oauthError = params.get("error");
     const code = params.get("code");
+
+    if (oauthError) {
+      setAuthState("error");
+      setMessage(cleanErrorText(params.get("error_description") || oauthError));
+      cleanOAuthCodeFromUrl("/");
+      return true;
+    }
+
     if (!code) return false;
     setBusy(true);
+    setAuthState("booting");
     setMessage("Conectando sua conta Discord...");
     try {
-      const exchanged = await exchangeDiscordTokenRequest(code, getOAuthRedirectUri());
+      const redirectUri = getOAuthRedirectUri();
+      const exchanged = await exchangeDiscordTokenRequest(code, redirectUri);
       if (!exchanged.ok || !exchanged.accessToken) {
         setAuthState("error");
         setMessage(cleanErrorText(exchanged.error || exchanged.detail || "login_web_failed"));
         cleanOAuthCodeFromUrl("/");
         return true;
       }
+
       writeCachedToken(exchanged.accessToken);
       setToken(exchanged.accessToken);
-      await hydrateBrowserSession(exchanged.accessToken);
+      const sessionOk = await hydrateBrowserSession(exchanged.accessToken);
+      if (!sessionOk) {
+        cleanOAuthCodeFromUrl("/");
+        return true;
+      }
+
       setBrowserView("servers");
       cleanOAuthCodeFromUrl("/dashboard");
       return true;
@@ -511,26 +535,36 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+
+    async function hydrateBrowserFromCurrentUrl() {
+      setRuntimeMode("browser");
+      const handledOAuth = await finishBrowserOAuthIfNeeded();
+      if (cancelled || handledOAuth) return;
+
+      const cachedToken = readCachedToken();
+      if (cachedToken) {
+        setToken(cachedToken);
+        await hydrateBrowserSession(cachedToken);
+        const guildFromUrl = readBrowserGuildFromLocation();
+        if (guildFromUrl) setBrowserSelectedGuildId(guildFromUrl);
+        return;
+      }
+
+      setAuthState("needs_login");
+      setMessage("Entre com Discord para abrir o guia ou seus servidores.");
+    }
+
+    if (hasBrowserOAuthReturn()) {
+      void hydrateBrowserFromCurrentUrl();
+      return () => { cancelled = true; };
+    }
+
     bootstrapDiscord().then(async (result) => {
       if (cancelled) return;
       setBootstrap(result);
 
       if (!result.sdkReady) {
-        setRuntimeMode("browser");
-        const handledOAuth = await finishBrowserOAuthIfNeeded();
-        if (cancelled || handledOAuth) return;
-
-        const cachedToken = readCachedToken();
-        if (cachedToken) {
-          setToken(cachedToken);
-          await hydrateBrowserSession(cachedToken);
-          const guildFromUrl = readBrowserGuildFromLocation();
-          if (guildFromUrl) setBrowserSelectedGuildId(guildFromUrl);
-          return;
-        }
-
-        setAuthState("needs_login");
-        setMessage("Entre com Discord para abrir o guia ou seus servidores.");
+        await hydrateBrowserFromCurrentUrl();
         return;
       }
 

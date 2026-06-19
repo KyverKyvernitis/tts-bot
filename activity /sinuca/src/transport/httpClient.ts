@@ -32,15 +32,32 @@ function normalizeBase(base: string) {
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
+function isDiscordActivityOrigin(origin: string) {
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    return host === "discordsays.com" || host.endsWith(".discordsays.com");
+  } catch {
+    return false;
+  }
+}
+
+function currentOriginForApi(): string {
+  if (typeof window === "undefined") return "";
+  const origin = window.location.origin || "";
+  return isDiscordActivityOrigin(origin) ? "" : origin;
+}
+
+function dedupe(values: string[]) {
+  return values.filter((value, index, array) => Boolean(value) && array.indexOf(value) === index);
+}
+
 export function resolvePublicBaseCandidates() {
   const configuredApiBase = normalizeBase((import.meta.env.VITE_ACTIVITY_DASHBOARD_API_BASE_URL as string | undefined)?.trim() || (import.meta.env.VITE_SINUCA_API_BASE_URL as string | undefined)?.trim() || "");
   const configuredPublicHost = normalizeBase((import.meta.env.VITE_ACTIVITY_DASHBOARD_PUBLIC_HOST as string | undefined)?.trim() || (import.meta.env.VITE_SINUCA_PUBLIC_HOST as string | undefined)?.trim() || "");
   const directHost = normalizeBase(configuredPublicHost || DEFAULT_PUBLIC_HOST);
-  const currentOrigin = typeof window !== "undefined" ? window.location.origin : "";
+  const currentOrigin = currentOriginForApi();
 
-  return [configuredApiBase, currentOrigin, directHost]
-    .filter(Boolean)
-    .filter((value, index, array) => array.indexOf(value) === index);
+  return dedupe([configuredApiBase, currentOrigin, directHost]);
 }
 
 export function resolveApiCandidates(path: string) {
@@ -50,18 +67,19 @@ export function resolveApiCandidates(path: string) {
     : `/api${normalizedPath}`;
   const legacyPath = normalizedPath.replace(/^\/api(?=\/|$)/, "") || "/";
   const candidates: string[] = [];
+  const bases = resolvePublicBaseCandidates();
 
-  for (const base of resolvePublicBaseCandidates()) {
+  for (const base of bases) {
     candidates.push(joinBaseAndPath(base, apiPath));
   }
-  candidates.push(apiPath);
+  if (currentOriginForApi()) candidates.push(apiPath);
 
-  for (const base of resolvePublicBaseCandidates()) {
+  for (const base of bases) {
     candidates.push(joinBaseAndPath(base, legacyPath));
   }
-  candidates.push(legacyPath);
+  if (currentOriginForApi()) candidates.push(legacyPath);
 
-  return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
+  return dedupe(candidates);
 }
 
 export function resolveStrictApiCandidates(path: string) {
@@ -74,25 +92,26 @@ export function resolveStrictApiCandidates(path: string) {
   for (const base of resolvePublicBaseCandidates()) {
     candidates.push(joinBaseAndPath(base, apiPath));
   }
-  candidates.push(apiPath);
+  if (currentOriginForApi()) candidates.push(apiPath);
 
-  return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
+  return dedupe(candidates);
 }
 
 export function resolveTokenCandidates() {
   const candidates: string[] = [];
+  const bases = resolvePublicBaseCandidates();
 
-  candidates.push("/token");
-  for (const base of resolvePublicBaseCandidates()) {
+  for (const base of bases) {
     candidates.push(joinBaseAndPath(base, "/token"));
-  }
-
-  candidates.push("/api/token");
-  for (const base of resolvePublicBaseCandidates()) {
     candidates.push(joinBaseAndPath(base, "/api/token"));
   }
 
-  return candidates.filter((value, index, array) => value && array.indexOf(value) === index);
+  if (currentOriginForApi()) {
+    candidates.push("/token");
+    candidates.push("/api/token");
+  }
+
+  return dedupe(candidates);
 }
 
 export async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs = 2500) {
