@@ -270,15 +270,22 @@ export default function App() {
         setMessage("Sessão web conectada.");
         return true;
       }
-    } catch {
-      // handled below by clearing stale token
+      throw new Error(session.error || "session_invalid");
+    } catch (error) {
+      const text = cleanErrorText(error);
+      const expired = text.includes("401") || text.includes("session_invalid") || text.includes("user_fetch_failed");
+      if (expired) {
+        clearCachedToken();
+        setToken(null);
+        setBrowserUser(null);
+        setAuthState("needs_login");
+        setMessage("Entre com Discord para ver seus servidores.");
+        return false;
+      }
+      setAuthState("error");
+      setMessage(text || "Não consegui validar sua sessão no backend do dashboard.");
+      return false;
     }
-    clearCachedToken();
-    setToken(null);
-    setBrowserUser(null);
-    setAuthState("needs_login");
-    setMessage("Entre com Discord para ver seus servidores.");
-    return false;
   }
 
   async function finishBrowserOAuthIfNeeded(): Promise<boolean> {
@@ -618,9 +625,63 @@ export default function App() {
     );
   }
 
-  const loggedIn = Boolean(token && authState !== "needs_login");
+  const loggedIn = Boolean(token && authState === "ready");
+
+  function renderBrowserAuthStatus() {
+    if (authState === "booting") {
+      return (
+        <div className="osk-root">
+          <main className="osk-app">
+            <div className="osk-main">
+              <section className="osk-auth">
+                <div className="osk-auth-icon"><LoaderCircle size={28} className="osk-spin" /></div>
+                <h2>Entrando com Discord</h2>
+                <p>{message || "Validando autorização..."}</p>
+              </section>
+            </div>
+          </main>
+        </div>
+      );
+    }
+
+    if (authState === "error" || authState === "denied") {
+      return (
+        <div className="osk-root">
+          <main className="osk-app">
+            <div className="osk-main">
+              <section className="osk-auth">
+                <div className="osk-auth-icon">{authState === "denied" ? <ShieldCheck size={28} /> : <HelpCircle size={28} />}</div>
+                <h2>{authState === "denied" ? "Sem permissão" : "Não foi possível entrar"}</h2>
+                <p>{message || "A autenticação com Discord não foi concluída."}</p>
+                <div className="osk-invite-actions">
+                  <button className="osk-btn osk-btn--primary" disabled={busy} onClick={startBrowserLogin}>Entrar novamente</button>
+                  <button
+                    className="osk-btn"
+                    disabled={busy}
+                    onClick={() => {
+                      clearCachedToken();
+                      setToken(null);
+                      setBrowserUser(null);
+                      setAuthState("needs_login");
+                      setMessage("Entre com Discord para abrir o guia ou seus servidores.");
+                      setBrowserView("landing");
+                      window.history.replaceState({}, "", "/");
+                    }}
+                  >Voltar</button>
+                </div>
+              </section>
+            </div>
+          </main>
+        </div>
+      );
+    }
+
+    return null;
+  }
 
   if (runtimeMode === "browser" && !guildId) {
+    const browserAuthStatus = renderBrowserAuthStatus();
+    if (browserAuthStatus) return browserAuthStatus;
     if (loggedIn && browserView === "servers") {
       return (
         <div className="osk-root">
