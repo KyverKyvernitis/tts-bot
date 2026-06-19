@@ -57,7 +57,7 @@ export interface DashboardSummaryPayload {
 export interface DashboardBootstrapPayload {
   ok: boolean;
   guild_id?: string;
-  user?: { id: string; username?: string | null; global_name?: string | null; avatar?: string | null };
+  user?: { id: string; username?: string | null; global_name?: string | null; avatar?: string | null; avatarUrl?: string | null };
   sections?: Array<{ id: string; label: string; emoji: string; description: string }>;
   error?: string;
 }
@@ -67,6 +67,7 @@ export interface DashboardUserPayload {
   username?: string | null;
   global_name?: string | null;
   avatar?: string | null;
+  avatarUrl?: string | null;
 }
 
 export interface DashboardSessionPayload {
@@ -101,5 +102,26 @@ export interface DashboardInvitePayload {
   ok: boolean;
   guild_id?: string;
   invite_url?: string;
+  error?: string;
+}
+
+export interface DashboardChannelOption {
+  id: string;
+  name: string;
+  type: number;
+  parentId?: string | null;
+}
+
+export interface DashboardRoleOption {
+  id: string;
+  name: string;
+  color?: number;
+}
+
+export interface DashboardOptionsPayload {
+  ok: boolean;
+  guildId?: string;
+  channels: DashboardChannelOption[];
+  roles: DashboardRoleOption[];
   error?: string;
 }

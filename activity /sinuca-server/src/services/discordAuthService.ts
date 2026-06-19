@@ -3,6 +3,7 @@ export interface DiscordUserIdentity {
   username?: string | null;
   global_name?: string | null;
   avatar?: string | null;
+  avatarUrl?: string | null;
 }
 
 export interface DashboardAccessResult {
@@ -99,6 +100,19 @@ function guildIconUrl(guildId: string, iconHash: unknown): string | null {
   return `https://cdn.discordapp.com/icons/${guildId}/${iconHash}.${extension}?size=128`;
 }
 
+export function discordAvatarUrl(userId: unknown, avatarHash: unknown): string | null {
+  if (typeof avatarHash !== "string" || !avatarHash.trim()) return null;
+  const id = String(userId ?? "").trim();
+  if (!id) return null;
+  const extension = avatarHash.startsWith("a_") ? "gif" : "png";
+  return `https://cdn.discordapp.com/avatars/${id}/${avatarHash}.${extension}?size=128`;
+}
+
+function withAvatarUrl<T extends { id: string; avatar?: string | null }>(user: T | null): (T & { avatarUrl: string | null }) | null {
+  if (!user) return null;
+  return { ...user, avatarUrl: discordAvatarUrl(user.id, user.avatar) };
+}
+
 export function createDashboardInviteUrl(guildId?: string | null): string | null {
   const appClientId = clientId();
   if (!appClientId) return null;
@@ -121,7 +135,7 @@ export async function getDiscordUserIdentity(accessToken: string): Promise<{ ok:
   if (!me.ok || !me.data || !/^\d{15,25}$/.test(String(me.data.id ?? ""))) {
     return { ok: false, status: me.status || 401, user: null };
   }
-  return { ok: true, status: 200, user: me.data };
+  return { ok: true, status: 200, user: withAvatarUrl(me.data) };
 }
 
 async function hasGuildAdminPermission(guildId: string, userId: string): Promise<{ ok: boolean; reason: string }> {
@@ -165,6 +179,69 @@ async function checkBotInGuild(guildId: string, botGuildIds: Set<string> | null)
   if (!token) return false;
   const response = await fetchDiscordJson<Record<string, unknown>>(`https://discord.com/api/v10/guilds/${guildId}`, `Bot ${token}`);
   return response.ok;
+}
+
+export interface DashboardChannelOption {
+  id: string;
+  name: string;
+  type: number;
+  parentId: string | null;
+}
+
+export interface DashboardRoleOption {
+  id: string;
+  name: string;
+  color: number;
+}
+
+export interface DashboardGuildOptionsResult {
+  ok: boolean;
+  channels: DashboardChannelOption[];
+  roles: DashboardRoleOption[];
+  error?: string;
+}
+
+/**
+ * Canais e cargos reais do servidor, usados para trocar campos de ID manual
+ * por seletores no dashboard. Usa o mesmo bot token já utilizado para checar
+ * permissões — não adiciona nenhuma credencial nova. Se faltar o bot token,
+ * retorna ok:false com a razão (o frontend mantém o input manual nesse caso).
+ */
+export async function listGuildChannelsAndRoles(guildId: string): Promise<DashboardGuildOptionsResult> {
+  const token = botToken();
+  if (!token) return { ok: false, channels: [], roles: [], error: "bot_token_missing" };
+
+  const auth = `Bot ${token}`;
+  const [channelsResp, rolesResp] = await Promise.all([
+    fetchDiscordJson<Array<Record<string, unknown>>>(`https://discord.com/api/v10/guilds/${guildId}/channels`, auth),
+    fetchDiscordJson<Array<Record<string, unknown>>>(`https://discord.com/api/v10/guilds/${guildId}/roles`, auth),
+  ]);
+
+  if (!channelsResp.ok || !Array.isArray(channelsResp.data)) {
+    return { ok: false, channels: [], roles: [], error: `channels_fetch_failed_${channelsResp.status}` };
+  }
+  if (!rolesResp.ok || !Array.isArray(rolesResp.data)) {
+    return { ok: false, channels: [], roles: [], error: `roles_fetch_failed_${rolesResp.status}` };
+  }
+
+  const channels: DashboardChannelOption[] = channelsResp.data
+    .map((channel) => ({
+      id: String(channel.id ?? ""),
+      name: String(channel.name ?? ""),
+      type: Number(channel.type ?? -1),
+      parentId: channel.parent_id ? String(channel.parent_id) : null,
+    }))
+    .filter((channel) => /^\d{15,25}$/.test(channel.id) && channel.name);
+
+  const roles: DashboardRoleOption[] = rolesResp.data
+    .map((role) => ({
+      id: String(role.id ?? ""),
+      name: String(role.name ?? ""),
+      color: Number(role.color ?? 0),
+    }))
+    .filter((role) => /^\d{15,25}$/.test(role.id) && role.id !== guildId && role.name !== "@everyone");
+
+  return { ok: true, channels, roles };
 }
 
 export async function listDashboardServers(accessToken: string): Promise<DashboardServerListResult> {

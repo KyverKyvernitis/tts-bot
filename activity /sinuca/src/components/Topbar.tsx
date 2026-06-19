@@ -1,20 +1,22 @@
 import { RefreshCw, Server } from "lucide-react";
-import { guildInitials } from "../moduleCatalog";
+import { SmartAvatar } from "./SmartAvatar";
 
 interface TopbarProps {
   guildName: string;
+  guildIcon?: string | null;
   runtime: "activity" | "browser";
   userName: string;
+  userAvatar?: string | null;
   busy?: boolean;
   onRefresh(): void;
   onChangeServer?(): void;
 }
 
-export function Topbar({ guildName, runtime, userName, busy, onRefresh, onChangeServer }: TopbarProps) {
+export function Topbar({ guildName, guildIcon, runtime, userName, userAvatar, busy, onRefresh, onChangeServer }: TopbarProps) {
   return (
     <header className="osk-topbar">
       <div className="osk-guild">
-        <div className="osk-guild-avatar">{guildInitials(guildName)}</div>
+        <SmartAvatar className="osk-guild-avatar" src={guildIcon} name={guildName} type="server" alt={guildName} />
         <div className="osk-guild-text">
           <strong>{guildName}</strong>
           <small>{runtime === "browser" ? "Dashboard web" : "Discord Activity"}</small>
@@ -31,7 +33,7 @@ export function Topbar({ guildName, runtime, userName, busy, onRefresh, onChange
           </button>
         )}
         <div className="osk-user-chip">
-          <span className="osk-user-chip-avatar">{guildInitials(userName)}</span>
+          <SmartAvatar className="osk-user-chip-avatar" src={userAvatar} name={userName} type="user" alt={userName} />
           <small>{userName}</small>
         </div>
       </div>

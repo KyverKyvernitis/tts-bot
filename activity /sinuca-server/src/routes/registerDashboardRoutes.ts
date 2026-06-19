@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import type { DashboardConfigService } from "../services/dashboardConfigService.js";
-import { createDashboardInviteUrl, getDiscordUserIdentity, listDashboardServers, verifyDashboardAccess } from "../services/discordAuthService.js";
+import { createDashboardInviteUrl, getDiscordUserIdentity, listDashboardServers, listGuildChannelsAndRoles, verifyDashboardAccess } from "../services/discordAuthService.js";
 
 export interface RegisterDashboardRoutesOptions {
   app: Express;
@@ -34,7 +34,7 @@ function dashboardGuildId(req: Request): string {
   return firstString(req.params.guildId, req.query.guild_id, body.guild_id, body.guildId);
 }
 
-async function requireDashboardAccess(req: Request, res: Response): Promise<{ ok: true; userId: string; guildId: string; user: { id: string; username?: string | null; global_name?: string | null; avatar?: string | null } } | null> {
+async function requireDashboardAccess(req: Request, res: Response): Promise<{ ok: true; userId: string; guildId: string; user: { id: string; username?: string | null; global_name?: string | null; avatar?: string | null; avatarUrl?: string | null } } | null> {
   const guildId = dashboardGuildId(req);
   const access = await verifyDashboardAccess(bearer(req), guildId);
   if (!access.ok || !access.user) {
@@ -65,6 +65,7 @@ export function registerDashboardRoutes({ app, configService, exchangeDiscordCod
         username: auth.user.username ?? null,
         global_name: auth.user.global_name ?? null,
         avatar: auth.user.avatar ?? null,
+        avatarUrl: auth.user.avatarUrl ?? null,
       },
       guild_id: auth.guildId,
       sections: configService.listSections().map(({ id, label, emoji, description }) => ({ id, label, emoji, description })),
@@ -91,6 +92,13 @@ export function registerDashboardRoutes({ app, configService, exchangeDiscordCod
     } catch (error) {
       sendNoStoreJson(res, 500, { ok: false, error: error instanceof Error ? error.message : "settings_failed" });
     }
+  };
+
+  const sendOptions = async (req: Request, res: Response) => {
+    const auth = await requireDashboardAccess(req, res);
+    if (!auth) return;
+    const result = await listGuildChannelsAndRoles(auth.guildId);
+    sendNoStoreJson(res, 200, { ok: result.ok, guildId: auth.guildId, channels: result.channels, roles: result.roles, error: result.error ?? null });
   };
 
   const saveSettings = async (req: Request, res: Response) => {
@@ -156,6 +164,10 @@ export function registerDashboardRoutes({ app, configService, exchangeDiscordCod
       await sendSettings(req, res);
       return true;
     }
+    if (action === "options") {
+      await sendOptions(req, res);
+      return true;
+    }
     if (action === "settings:update" || action === "save_settings") {
       await saveSettings(req, res);
       return true;
@@ -191,6 +203,7 @@ export function registerDashboardRoutes({ app, configService, exchangeDiscordCod
   app.get("/api/dashboard/bootstrap", sendBootstrap);
   app.get("/api/dashboard/guild/:guildId/summary", sendSummary);
   app.get("/api/dashboard/guild/:guildId/settings", sendSettings);
+  app.get("/api/dashboard/guild/:guildId/options", sendOptions);
   app.patch("/api/dashboard/guild/:guildId/settings", saveSettings);
 
   app.use("/api", (req, res) => {

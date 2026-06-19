@@ -1,6 +1,6 @@
 import { ArrowRight, Bot, ClipboardList, DoorOpen, Mic, ScrollText, Sparkles, Ticket } from "lucide-react";
 import type { DashboardUserPayload } from "../types/dashboard";
-import { guildInitials } from "../moduleCatalog";
+import { SmartAvatar } from "./SmartAvatar";
 
 interface BrowserLandingProps {
   loggedIn: boolean;
@@ -13,7 +13,7 @@ export function BrowserLanding({ loggedIn, user, onLogin, onDashboard }: Browser
   const name = user?.global_name || user?.username || "Conta Discord";
   return (
     <div className="osk-browser">
-      <BrowserNav loggedIn={loggedIn} userName={name} onLogin={onLogin} onDashboard={onDashboard} />
+      <BrowserNav loggedIn={loggedIn} userName={name} userAvatar={user?.avatarUrl} onLogin={onLogin} onDashboard={onDashboard} />
 
       <section className="osk-browser-hero">
         <div>
@@ -137,11 +137,13 @@ export function BrowserLanding({ loggedIn, user, onLogin, onDashboard }: Browser
 function BrowserNav({
   loggedIn,
   userName,
+  userAvatar,
   onLogin,
   onDashboard,
 }: {
   loggedIn: boolean;
   userName: string;
+  userAvatar?: string | null;
   onLogin(): void;
   onDashboard(): void;
 }) {
@@ -154,9 +156,14 @@ function BrowserNav({
       <div className="osk-browser-nav-actions">
         {loggedIn ? (
           <button className="osk-btn osk-btn--sm" onClick={onDashboard}>
-            <span className="osk-user-chip-avatar" style={{ width: 22, height: 22, borderRadius: "50%" }}>
-              {guildInitials(userName)}
-            </span>
+            <SmartAvatar
+              className="osk-user-chip-avatar"
+              src={userAvatar}
+              name={userName}
+              type="user"
+              alt={userName}
+              size={22}
+            />
             Dashboard
           </button>
         ) : (

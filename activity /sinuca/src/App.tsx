@@ -15,6 +15,7 @@ import {
 import type { ActivityBootstrap } from "./types/activity";
 import type {
   DashboardFieldDefinition,
+  DashboardOptionsPayload,
   DashboardSectionDefinition,
   DashboardSectionSummary,
   DashboardServerCard,
@@ -24,6 +25,7 @@ import { exchangeDiscordTokenRequest } from "./transport/sessionApi";
 import {
   fetchDashboardBootstrap,
   fetchDashboardInvite,
+  fetchDashboardOptions,
   fetchDashboardServers,
   fetchDashboardSession,
   fetchDashboardSettings,
@@ -134,12 +136,18 @@ function activityUserPayload(bootstrap: ActivityBootstrap): DashboardUserPayload
     username: bootstrap.currentUser.displayName,
     global_name: bootstrap.currentUser.displayName,
     avatar: null,
+    avatarUrl: bootstrap.currentUser.avatarUrl ?? null,
   };
 }
 
 function guildLabelFromServers(guildId: string | null, servers: DashboardServerCard[], fallback: string) {
   if (!guildId) return fallback;
   return servers.find((server) => server.id === guildId)?.name ?? fallback;
+}
+
+function guildIconFromServers(guildId: string | null, servers: DashboardServerCard[]): string | null {
+  if (!guildId) return null;
+  return servers.find((server) => server.id === guildId)?.icon ?? null;
 }
 
 export default function App() {
@@ -165,6 +173,7 @@ export default function App() {
   const [browserInviteServer, setBrowserInviteServer] = useState<DashboardServerCard | null>(null);
   const [loadingServers, setLoadingServers] = useState(false);
   const [showServerPicker, setShowServerPicker] = useState(false);
+  const [guildOptions, setGuildOptions] = useState<DashboardOptionsPayload | null>(null);
 
   const activityGuildId = bootstrap.context.guildId;
   const guildId = runtimeMode === "browser"
@@ -192,9 +201,13 @@ export default function App() {
   const userName = runtimeMode === "browser"
     ? browserUserName(browserUser, "Admin")
     : (bootstrap.currentUser.displayName || "Admin");
+  const userAvatarUrl = runtimeMode === "browser"
+    ? (browserUser?.avatarUrl ?? null)
+    : (bootstrap.currentUser.avatarUrl ?? null);
   const serverLabel = runtimeMode === "browser"
     ? guildLabelFromServers(guildId, browserManageableServers, guildId ?? "Servidor")
     : guildLabelFromServers(guildId, browserManageableServers, activityGuildOverride ? (guildId ?? "Servidor") : "Servidor atual");
+  const serverIconUrl = guildIconFromServers(guildId, browserManageableServers);
 
   async function login(prompt: "none" | "consent" = "consent") {
     const discord = getDiscordSdk();
@@ -334,6 +347,7 @@ export default function App() {
     setSummary([]);
     setValues({});
     setDraft({});
+    setGuildOptions(null);
   }
 
   function openServer(server: DashboardServerCard) {
@@ -400,9 +414,19 @@ export default function App() {
     if (runtimeMode === "browser") window.history.pushState({}, "", "/");
   }
 
+  async function loadGuildOptions(accessToken: string, targetGuildId: string) {
+    try {
+      const payload = await fetchDashboardOptions(accessToken, targetGuildId);
+      setGuildOptions(payload);
+    } catch (error) {
+      setGuildOptions({ ok: false, channels: [], roles: [], error: cleanErrorText(error) });
+    }
+  }
+
   async function loadDashboard(accessToken: string, targetGuildId: string) {
     setBusy(true);
     setMessage("Carregando configurações do servidor...");
+    void loadGuildOptions(accessToken, targetGuildId);
     try {
       const [bootPayload, summaryPayload, settingsPayload] = await Promise.all([
         fetchDashboardBootstrap(accessToken, targetGuildId),
@@ -637,8 +661,10 @@ export default function App() {
           {authState === "ready" && (
             <Topbar
               guildName={serverLabel}
+              guildIcon={serverIconUrl}
               runtime="browser"
               userName={userName}
+              userAvatar={userAvatarUrl}
               busy={busy}
               onRefresh={() => void refreshDashboard()}
               onChangeServer={token ? openServerPicker : undefined}
@@ -694,6 +720,7 @@ export default function App() {
               summary={selectedSummary}
               values={values}
               draft={draft}
+              guildOptions={guildOptions}
               onChange={updateDraft}
               onBack={() => setDashboardView("home")}
             />

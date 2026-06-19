@@ -1,4 +1,4 @@
-import type { DashboardBootstrapPayload, DashboardInvitePayload, DashboardServersPayload, DashboardSessionPayload, DashboardSettingsPayload, DashboardSummaryPayload } from "../types/dashboard";
+import type { DashboardBootstrapPayload, DashboardInvitePayload, DashboardOptionsPayload, DashboardServersPayload, DashboardSessionPayload, DashboardSettingsPayload, DashboardSummaryPayload } from "../types/dashboard";
 import { DashboardHttpError, fetchJsonFromCandidates, resolveStrictApiCandidates, resolveTokenCandidates } from "./httpClient";
 
 function authHeaders(accessToken: string): HeadersInit {
@@ -114,6 +114,25 @@ export async function fetchDashboardSettings(accessToken: string, guildId: strin
     accessToken,
     guildId,
     "settings",
+  );
+}
+
+/**
+ * Canais e cargos reais do servidor (para trocar campos de ID manual por
+ * seletores). Se o backend ainda não tiver o endpoint /options ou faltar o
+ * token de bot, retorna ok:false com listas vazias — o frontend mantém o
+ * input manual como fallback nesse caso.
+ */
+export async function fetchDashboardOptions(accessToken: string, guildId: string): Promise<DashboardOptionsPayload> {
+  return await withTokenRpcPrimary(
+    () => fetchJsonFromCandidates<DashboardOptionsPayload>(
+      resolveStrictApiCandidates(`/dashboard/guild/${encodeURIComponent(guildId)}/options`),
+      { method: "GET", headers: authHeaders(accessToken) },
+      6000,
+    ),
+    accessToken,
+    guildId,
+    "options",
   );
 }
 
