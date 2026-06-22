@@ -354,13 +354,9 @@ class CallKeeperRuntime:
 
     def _required_bots_for_member_count(self, member_count: int) -> int:
         member_count = max(0, int(member_count or 0))
-        if member_count <= 1:
+        if member_count <= 0:
             return 3
-        if member_count == 2:
-            return 2
-        if member_count == 3:
-            return 1
-        return 0
+        return max(0, 3 - member_count)
 
     def _is_voice_target(self, channel: object) -> bool:
         return isinstance(channel, (discord.VoiceChannel, discord.StageChannel))
