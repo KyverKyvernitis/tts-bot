@@ -186,7 +186,8 @@ class CallKeeper(commands.Cog):
                 )
             return
 
-        # _callkeeper <canal> muda o foco. Não funciona como off.
+        # _callkeeper <canal> guia os auxiliares para o canal informado.
+        # _callkeeper sozinho continua sendo apenas interruptor.
         if canal:
             target = await self._resolve_channel_argument(ctx, canal)
             if target is None:
@@ -201,18 +202,15 @@ class CallKeeper(commands.Cog):
                 return
 
             await store.set_channel_id(self.settings.guild_id, int(target.id))
-            if store.is_enabled(self.settings.guild_id):
-                message = f"Foco do CallKeeper alterado para {target.mention}."
-            else:
-                message = f"Foco do CallKeeper salvo em {target.mention}. Use `_callkeeper` para ligar."
+            await store.set_enabled(self.settings.guild_id, True)
             with contextlib.suppress(discord.HTTPException):
-                await ctx.reply(message, mention_author=False)
+                await ctx.reply(f"CallKeepers direcionados para {target.mention}.", mention_author=False)
             return
 
         if store.is_enabled(self.settings.guild_id):
             await store.set_enabled(self.settings.guild_id, False)
             with contextlib.suppress(discord.HTTPException):
-                await ctx.reply("CallKeeper desligado. O serviço separado vai remover os auxiliares da call.", mention_author=False)
+                await ctx.reply("CallKeeper desativado.", mention_author=False)
             return
 
         target = await self._resolve_default_target_channel(ctx, store)
@@ -233,7 +231,7 @@ class CallKeeper(commands.Cog):
         await store.set_channel_id(self.settings.guild_id, int(target.id))
         await store.set_enabled(self.settings.guild_id, True)
         with contextlib.suppress(discord.HTTPException):
-            await ctx.reply(f"CallKeeper ligado em {target.mention}. O serviço separado vai aplicar a regra.", mention_author=False)
+            await ctx.reply(f"CallKeeper ativado em {target.mention}.", mention_author=False)
 
 
 async def setup(bot: commands.Bot):
