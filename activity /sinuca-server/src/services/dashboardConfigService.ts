@@ -1,4 +1,4 @@
-import { MongoClient, type Collection, type Db, type Document } from "mongodb";
+import { Long, MongoClient, type Collection, type Db, type Document } from "mongodb";
 
 export type DashboardFieldType = "boolean" | "text" | "textarea" | "number" | "channel" | "role" | "select" | "color" | "url";
 export type DashboardFieldScope = "guild" | "welcome" | "birthday";
@@ -186,6 +186,59 @@ const sections: DashboardSectionDefinition[] = [
   },
 ];
 
+
+function snowflakeToLong(value: string): Long {
+  const text = String(value ?? "").trim();
+  if (!/^\d{1,25}$/.test(text)) {
+    return Long.ZERO;
+  }
+  try {
+    return Long.fromString(text, false);
+  } catch {
+    return Long.ZERO;
+  }
+}
+
+function snowflakeFromRaw(raw: unknown): Long {
+  const text = String(raw ?? "").trim();
+  const match = text.match(/\d{15,25}/);
+  if (!match) return Long.ZERO;
+  return snowflakeToLong(match[0]);
+}
+
+function isLongLike(value: unknown): value is Long {
+  return value instanceof Long || (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { toString?: unknown }).toString === "function" &&
+    typeof (value as { low?: unknown }).low === "number" &&
+    typeof (value as { high?: unknown }).high === "number"
+  );
+}
+
+function serializeFieldValue(field: DashboardFieldDefinition, value: unknown): unknown {
+  if (field.type === "channel" || field.type === "role") {
+    if (isLongLike(value)) {
+      const text = value.toString();
+      return text === "0" ? "" : text;
+    }
+    if (typeof value === "number") {
+      return Number.isFinite(value) && value > 0 ? String(Math.trunc(value)) : "";
+    }
+    const text = String(value ?? "").trim();
+    return text === "0" ? "" : text;
+  }
+  return value;
+}
+
+function dotSetForPath(target: Record<string, unknown>, path: string, value: unknown) {
+  const cleanPath = path.split(".").filter(Boolean).join(".");
+  if (!cleanPath || cleanPath.includes("$") || cleanPath.includes("..")) {
+    return;
+  }
+  target[cleanPath] = value;
+}
+
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
 }
@@ -223,10 +276,7 @@ function normalizeFieldValue(field: DashboardFieldDefinition, raw: unknown): unk
     return Math.max(field.min ?? Number.MIN_SAFE_INTEGER, Math.min(field.max ?? Number.MAX_SAFE_INTEGER, Math.trunc(n)));
   }
   if (field.type === "channel" || field.type === "role") {
-    const text = String(raw ?? "").trim();
-    const match = text.match(/\d{15,25}/);
-    if (!match) return 0;
-    return Number(match[0]);
+    return snowflakeFromRaw(raw);
   }
   if (field.type === "select") {
     const value = String(raw ?? "").trim();
@@ -255,13 +305,13 @@ function allFields() {
 }
 
 function defaultGuildDoc(guildId: string): Record<string, unknown> {
-  return { type: "guild", guild_id: Number(guildId) };
+  return { type: "guild", guild_id: snowflakeToLong(guildId) };
 }
 
 function defaultWelcomeDoc(guildId: string): Record<string, unknown> {
   return {
     type: WELCOME_DOC_CONFIG,
-    guild_id: Number(guildId),
+    guild_id: snowflakeToLong(guildId),
     enabled: false,
     channel_id: 0,
     render_mode: "components_v2",
@@ -278,7 +328,7 @@ function defaultWelcomeDoc(guildId: string): Record<string, unknown> {
 function defaultBirthdayDoc(guildId: string): Record<string, unknown> {
   return {
     type: BIRTHDAY_DOC_CONFIG,
-    guild_id: Number(guildId),
+    guild_id: snowflakeToLong(guildId),
     enabled: false,
     register_channel_id: 0,
     announce_channel_id: 0,
@@ -316,19 +366,19 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
 
   async function getGuildDoc(guildId: string): Promise<Record<string, unknown>> {
     const collection = await getCollection();
-    const doc = await collection.findOne({ type: "guild", guild_id: Number(guildId) }, { projection: { _id: 0 } });
+    const doc = await collection.findOne({ type: "guild", guild_id: snowflakeToLong(guildId) }, { projection: { _id: 0 } });
     return { ...defaultGuildDoc(guildId), ...(doc as Record<string, unknown> | null ?? {}) };
   }
 
   async function getWelcomeDoc(guildId: string): Promise<Record<string, unknown>> {
     const collection = await getCollection();
-    const doc = await collection.findOne({ type: WELCOME_DOC_CONFIG, guild_id: Number(guildId) }, { projection: { _id: 0 } });
+    const doc = await collection.findOne({ type: WELCOME_DOC_CONFIG, guild_id: snowflakeToLong(guildId) }, { projection: { _id: 0 } });
     return { ...defaultWelcomeDoc(guildId), ...(doc as Record<string, unknown> | null ?? {}) };
   }
 
   async function getBirthdayDoc(guildId: string): Promise<Record<string, unknown>> {
     const collection = await getCollection();
-    const doc = await collection.findOne({ type: BIRTHDAY_DOC_CONFIG, guild_id: Number(guildId) }, { projection: { _id: 0 } });
+    const doc = await collection.findOne({ type: BIRTHDAY_DOC_CONFIG, guild_id: snowflakeToLong(guildId) }, { projection: { _id: 0 } });
     return { ...defaultBirthdayDoc(guildId), ...(doc as Record<string, unknown> | null ?? {}) };
   }
 
@@ -340,32 +390,43 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
   function valuesFromDocs(docs: Awaited<ReturnType<typeof readAll>>) {
     const values: Record<string, unknown> = {};
     for (const field of allFields()) {
-      values[field.id] = getPath(docs[field.scope], field.path);
+      values[field.id] = serializeFieldValue(field, getPath(docs[field.scope], field.path));
     }
     return values;
   }
 
-  async function saveDocs(guildId: string, docs: Awaited<ReturnType<typeof readAll>>, scopes: Set<DashboardFieldScope>) {
+  async function saveDocs(guildId: string, patches: Map<DashboardFieldScope, Record<string, unknown>>) {
     const collection = await getCollection();
+    const guildIdValue = snowflakeToLong(guildId);
     const jobs: Promise<unknown>[] = [];
-    if (scopes.has("guild")) {
-      const guildDoc = clone(docs.guild);
-      guildDoc.type = "guild";
-      guildDoc.guild_id = Number(guildId);
-      jobs.push(collection.updateOne({ type: "guild", guild_id: Number(guildId) }, { $set: guildDoc }, { upsert: true }));
+
+    const guildPatch = patches.get("guild");
+    if (guildPatch && Object.keys(guildPatch).length) {
+      jobs.push(collection.updateOne(
+        { type: "guild", guild_id: guildIdValue },
+        { $set: { type: "guild", guild_id: guildIdValue, ...guildPatch } },
+        { upsert: true },
+      ));
     }
-    if (scopes.has("welcome")) {
-      const welcomeDoc = clone(docs.welcome);
-      welcomeDoc.type = WELCOME_DOC_CONFIG;
-      welcomeDoc.guild_id = Number(guildId);
-      jobs.push(collection.updateOne({ type: WELCOME_DOC_CONFIG, guild_id: Number(guildId) }, { $set: welcomeDoc }, { upsert: true }));
+
+    const welcomePatch = patches.get("welcome");
+    if (welcomePatch && Object.keys(welcomePatch).length) {
+      jobs.push(collection.updateOne(
+        { type: WELCOME_DOC_CONFIG, guild_id: guildIdValue },
+        { $set: { type: WELCOME_DOC_CONFIG, guild_id: guildIdValue, ...welcomePatch } },
+        { upsert: true },
+      ));
     }
-    if (scopes.has("birthday")) {
-      const birthdayDoc = clone(docs.birthday);
-      birthdayDoc.type = BIRTHDAY_DOC_CONFIG;
-      birthdayDoc.guild_id = Number(guildId);
-      jobs.push(collection.updateOne({ type: BIRTHDAY_DOC_CONFIG, guild_id: Number(guildId) }, { $set: birthdayDoc }, { upsert: true }));
+
+    const birthdayPatch = patches.get("birthday");
+    if (birthdayPatch && Object.keys(birthdayPatch).length) {
+      jobs.push(collection.updateOne(
+        { type: BIRTHDAY_DOC_CONFIG, guild_id: guildIdValue },
+        { $set: { type: BIRTHDAY_DOC_CONFIG, guild_id: guildIdValue, ...birthdayPatch } },
+        { upsert: true },
+      ));
     }
+
     await Promise.all(jobs);
   }
 
@@ -406,18 +467,20 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
     async updateSettings(guildId: string, updates: Record<string, unknown>) {
       const docs = await readAll(guildId);
       const fieldsById = new Map(allFields().map((field) => [field.id, field]));
-      const touched = new Set<DashboardFieldScope>();
+      const patches = new Map<DashboardFieldScope, Record<string, unknown>>();
       const saved: string[] = [];
       for (const [fieldId, rawValue] of Object.entries(updates || {})) {
         const field = fieldsById.get(fieldId);
         if (!field) continue;
         const value = normalizeFieldValue(field, rawValue);
         setPath(docs[field.scope], field.path, value);
-        touched.add(field.scope);
+        const scopePatch = patches.get(field.scope) ?? {};
+        dotSetForPath(scopePatch, field.path, value);
+        patches.set(field.scope, scopePatch);
         saved.push(field.id);
       }
       if (saved.length) {
-        await saveDocs(guildId, docs, touched);
+        await saveDocs(guildId, patches);
       }
       return { ok: true, values: valuesFromDocs(docs), saved };
     },
