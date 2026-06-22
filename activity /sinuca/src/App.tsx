@@ -8,8 +8,9 @@ import {
   clearCachedToken,
   getDiscordSdk,
   getOAuthRedirectUri,
+  readCachedDashboardAuth,
   readCachedToken,
-  writeCachedToken,
+  writeCachedDashboardAuth,
   writeCachedUser,
 } from "./sdk/discord";
 import type { ActivityBootstrap } from "./types/activity";
@@ -21,7 +22,7 @@ import type {
   DashboardServerCard,
   DashboardUserPayload,
 } from "./types/dashboard";
-import { exchangeDiscordTokenRequest } from "./transport/sessionApi";
+import { exchangeDiscordTokenRequest, refreshDiscordTokenRequest } from "./transport/sessionApi";
 import {
   fetchDashboardBootstrap,
   fetchDashboardInvite,
@@ -49,6 +50,8 @@ const pendingBootstrap: ActivityBootstrap = {
   currentUser: { userId: "pending-auth", displayName: "Carregando usuário...", avatarUrl: null },
   bootDebug: [],
 };
+
+const tokenRefreshMarginMs = 5 * 60 * 1000;
 
 type RuntimeMode = "detecting" | "activity" | "browser";
 type AuthState = "booting" | "needs_login" | "ready" | "denied" | "error";
@@ -146,6 +149,41 @@ function activityUserPayload(bootstrap: ActivityBootstrap): DashboardUserPayload
   };
 }
 
+function persistDashboardAuth(result: { accessToken: string | null; refreshToken?: string | null; expiresAt?: number | null }) {
+  if (!result.accessToken) return;
+  writeCachedDashboardAuth({
+    accessToken: result.accessToken,
+    refreshToken: result.refreshToken ?? null,
+    expiresAt: result.expiresAt ?? null,
+  });
+}
+
+async function restoreCachedBrowserToken(): Promise<string | null> {
+  const cached = readCachedDashboardAuth();
+  if (!cached?.accessToken) return null;
+
+  const shouldRefresh = typeof cached.expiresAt === "number" && cached.expiresAt <= Date.now() + tokenRefreshMarginMs;
+  if (!shouldRefresh) return cached.accessToken;
+
+  if (!cached.refreshToken) {
+    clearCachedToken();
+    return null;
+  }
+
+  const refreshed = await refreshDiscordTokenRequest(cached.refreshToken);
+  if (!refreshed.ok || !refreshed.accessToken) {
+    clearCachedToken();
+    return null;
+  }
+
+  persistDashboardAuth({
+    accessToken: refreshed.accessToken,
+    refreshToken: refreshed.refreshToken ?? cached.refreshToken,
+    expiresAt: refreshed.expiresAt,
+  });
+  return refreshed.accessToken;
+}
+
 function guildLabelFromServers(guildId: string | null, servers: DashboardServerCard[], fallback: string) {
   if (!guildId) return fallback;
   return servers.find((server) => server.id === guildId)?.name ?? fallback;
@@ -237,7 +275,7 @@ export default function App() {
         setMessage(cleanErrorText(exchanged.error || exchanged.detail || "erro desconhecido"));
         return;
       }
-      writeCachedToken(exchanged.accessToken);
+      persistDashboardAuth(exchanged);
       const user = await authenticateDiscordAccessToken(discord, exchanged.accessToken, guildId);
       if (user) writeCachedUser(user);
       setToken(exchanged.accessToken);
@@ -315,7 +353,7 @@ export default function App() {
         return true;
       }
 
-      writeCachedToken(exchanged.accessToken);
+      persistDashboardAuth(exchanged);
       setToken(exchanged.accessToken);
       const sessionOk = await hydrateBrowserSession(exchanged.accessToken);
       if (!sessionOk) {
@@ -548,7 +586,7 @@ export default function App() {
       const handledOAuth = await finishBrowserOAuthIfNeeded();
       if (cancelled || handledOAuth) return;
 
-      const cachedToken = readCachedToken();
+      const cachedToken = await restoreCachedBrowserToken();
       if (cachedToken) {
         setToken(cachedToken);
         await hydrateBrowserSession(cachedToken);
@@ -595,7 +633,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!token || !isSnowflake(guildId)) return;
+    if (runtimeMode === "detecting" || !token || !isSnowflake(guildId)) return;
     void loadDashboard(token, guildId);
   }, [token, guildId, runtimeMode]);
 

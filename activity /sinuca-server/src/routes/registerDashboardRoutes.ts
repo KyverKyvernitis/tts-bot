@@ -2,10 +2,20 @@ import type { Express, Request, Response } from "express";
 import type { DashboardConfigService } from "../services/dashboardConfigService.js";
 import { createDashboardInviteUrl, getDiscordUserIdentity, listDashboardServers, listGuildChannelsAndRoles, verifyDashboardAccess } from "../services/discordAuthService.js";
 
+export interface DashboardOAuthTokenResult {
+  ok: boolean;
+  accessToken: string | null;
+  refreshToken?: string | null;
+  expiresIn?: number | null;
+  error: string | null;
+  detail: string | null;
+}
+
 export interface RegisterDashboardRoutesOptions {
   app: Express;
   configService: DashboardConfigService;
-  exchangeDiscordCode(code: string, redirectUri?: string): Promise<{ ok: boolean; accessToken: string | null; error: string | null; detail: string | null }>;
+  exchangeDiscordCode(code: string, redirectUri?: string): Promise<DashboardOAuthTokenResult>;
+  refreshDiscordToken(refreshToken: string): Promise<DashboardOAuthTokenResult>;
 }
 
 function sendNoStoreJson(res: Response, status: number, payload: unknown) {
@@ -44,7 +54,7 @@ async function requireDashboardAccess(req: Request, res: Response): Promise<{ ok
   return { ok: true, userId: access.user.id, guildId, user: access.user };
 }
 
-export function registerDashboardRoutes({ app, configService, exchangeDiscordCode }: RegisterDashboardRoutesOptions) {
+export function registerDashboardRoutes({ app, configService, exchangeDiscordCode, refreshDiscordToken }: RegisterDashboardRoutesOptions) {
   const healthHandler = async (_req: Request, res: Response) => {
     sendNoStoreJson(res, 200, {
       ok: true,
@@ -188,14 +198,24 @@ export function registerDashboardRoutes({ app, configService, exchangeDiscordCod
   const tokenHandler = async (req: Request, res: Response) => {
     if (await dashboardRpcHandler(req, res)) return;
 
-    const code = String((req.body && req.body.code) || "").trim();
-    const redirectUri = String((req.body && req.body.redirect_uri) || "").trim() || undefined;
-    const result = await exchangeDiscordCode(code, redirectUri);
+    const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {};
+    const grantType = firstString(body.grant_type, body.grantType);
+    const refreshToken = firstString(body.refresh_token, body.refreshToken);
+
+    const result = grantType === "refresh_token" || (!firstString(body.code) && refreshToken)
+      ? await refreshDiscordToken(refreshToken)
+      : await exchangeDiscordCode(firstString(body.code), firstString(body.redirect_uri, body.redirectUri) || undefined);
+
     if (!result.ok || !result.accessToken) {
       sendNoStoreJson(res, 400, { ok: false, error: result.error || "token_exchange_failed", detail: result.detail || null });
       return;
     }
-    sendNoStoreJson(res, 200, { ok: true, access_token: result.accessToken });
+    sendNoStoreJson(res, 200, {
+      ok: true,
+      access_token: result.accessToken,
+      refresh_token: result.refreshToken ?? null,
+      expires_in: result.expiresIn ?? null,
+    });
   };
 
   app.get(["/health", "/api/health"], healthHandler);

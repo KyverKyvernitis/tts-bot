@@ -17,6 +17,14 @@ type DiscordSdkWithContext = DiscordSDK & {
 let sdk: DiscordSDK | null = null;
 const cachedUserStorageKey = "activity_dashboard_cached_user";
 const cachedTokenStorageKey = "activity_dashboard_access_token";
+const cachedDashboardAuthStorageKey = "activity_dashboard_auth_v1";
+
+export interface CachedDashboardAuth {
+  accessToken: string;
+  refreshToken: string | null;
+  expiresAt: number | null;
+  savedAt: number;
+}
 
 export function getOAuthRedirectUri(): string | null {
   const configured = (import.meta.env.VITE_DISCORD_REDIRECT_URI as string | undefined)?.trim();
@@ -205,18 +213,68 @@ export function writeCachedUser(user: ActivityUser) {
   }
 }
 
-export function readCachedToken(): string | null {
+function parseCachedDashboardAuth(raw: string | null): CachedDashboardAuth | null {
+  if (!raw) return null;
   try {
-    return window.localStorage.getItem(cachedTokenStorageKey) || window.sessionStorage.getItem(cachedTokenStorageKey);
+    const parsed = JSON.parse(raw) as Partial<CachedDashboardAuth>;
+    if (typeof parsed.accessToken !== "string" || !parsed.accessToken.trim()) return null;
+    return {
+      accessToken: parsed.accessToken.trim(),
+      refreshToken: typeof parsed.refreshToken === "string" && parsed.refreshToken.trim() ? parsed.refreshToken.trim() : null,
+      expiresAt: typeof parsed.expiresAt === "number" && Number.isFinite(parsed.expiresAt) ? parsed.expiresAt : null,
+      savedAt: typeof parsed.savedAt === "number" && Number.isFinite(parsed.savedAt) ? parsed.savedAt : Date.now(),
+    };
   } catch {
     return null;
   }
 }
 
-export function writeCachedToken(token: string) {
+export function readCachedDashboardAuth(): CachedDashboardAuth | null {
   try {
-    window.localStorage.setItem(cachedTokenStorageKey, token);
-    window.sessionStorage.setItem(cachedTokenStorageKey, token);
+    const persisted = parseCachedDashboardAuth(window.localStorage.getItem(cachedDashboardAuthStorageKey));
+    if (persisted) return persisted;
+    const session = parseCachedDashboardAuth(window.sessionStorage.getItem(cachedDashboardAuthStorageKey));
+    if (session) return session;
+    const legacy = window.localStorage.getItem(cachedTokenStorageKey) || window.sessionStorage.getItem(cachedTokenStorageKey);
+    return legacy && legacy.trim()
+      ? { accessToken: legacy.trim(), refreshToken: null, expiresAt: null, savedAt: Date.now() }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeCachedDashboardAuth(auth: { accessToken: string; refreshToken?: string | null; expiresAt?: number | null }) {
+  const accessToken = auth.accessToken.trim();
+  if (!accessToken) return;
+  const payload: CachedDashboardAuth = {
+    accessToken,
+    refreshToken: auth.refreshToken?.trim() || null,
+    expiresAt: typeof auth.expiresAt === "number" && Number.isFinite(auth.expiresAt) ? auth.expiresAt : null,
+    savedAt: Date.now(),
+  };
+  try {
+    const raw = JSON.stringify(payload);
+    window.localStorage.setItem(cachedDashboardAuthStorageKey, raw);
+    window.sessionStorage.setItem(cachedDashboardAuthStorageKey, raw);
+    window.localStorage.setItem(cachedTokenStorageKey, accessToken);
+    window.sessionStorage.setItem(cachedTokenStorageKey, accessToken);
+  } catch {
+    // ignore storage failures
+  }
+}
+
+export function readCachedToken(): string | null {
+  return readCachedDashboardAuth()?.accessToken ?? null;
+}
+
+export function writeCachedToken(token: string) {
+  const accessToken = token.trim();
+  if (!accessToken) return;
+  try {
+    window.localStorage.setItem(cachedTokenStorageKey, accessToken);
+    window.sessionStorage.setItem(cachedTokenStorageKey, accessToken);
+    writeCachedDashboardAuth({ accessToken });
   } catch {
     // ignore storage failures
   }
@@ -224,6 +282,8 @@ export function writeCachedToken(token: string) {
 
 export function clearCachedToken() {
   try {
+    window.localStorage.removeItem(cachedDashboardAuthStorageKey);
+    window.sessionStorage.removeItem(cachedDashboardAuthStorageKey);
     window.localStorage.removeItem(cachedTokenStorageKey);
     window.sessionStorage.removeItem(cachedTokenStorageKey);
   } catch {

@@ -18,7 +18,7 @@ export function BrowserLanding({ loggedIn, user, onLogin, onDashboard }: Browser
       <section className="osk-browser-hero">
         <div>
           <h1>
-            Painel <span>de controle</span>
+            Painel de controle <span>— Configure seu servidor</span>
           </h1>
           <p>
             Configure tickets, boas-vindas, aniversários, TTS, música, logs e jogos pelo painel.
