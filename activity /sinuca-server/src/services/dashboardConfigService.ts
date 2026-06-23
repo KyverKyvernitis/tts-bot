@@ -49,7 +49,7 @@ export interface DashboardConfigService {
   listSections(): DashboardSectionDefinition[];
   getSummary(guildId: string): Promise<DashboardGuildSummary>;
   getSettings(guildId: string): Promise<{ guildId: string; sections: DashboardSectionDefinition[]; values: Record<string, unknown> }>;
-  updateSettings(guildId: string, updates: Record<string, unknown>): Promise<{ ok: true; values: Record<string, unknown>; saved: string[] }>;
+  updateSettings(guildId: string, updates: Record<string, unknown>): Promise<{ ok: true; values: Record<string, unknown>; saved: string[]; revision?: number; changed_sections?: string[] }>;
 }
 
 interface CreateDashboardConfigServiceOptions {
@@ -395,7 +395,7 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
     return values;
   }
 
-  async function saveDocs(guildId: string, patches: Map<DashboardFieldScope, Record<string, unknown>>) {
+  async function saveDocs(guildId: string, patches: Map<DashboardFieldScope, Record<string, unknown>>, changedSections: string[]) {
     const collection = await getCollection();
     const guildIdValue = snowflakeToLong(guildId);
     const jobs: Promise<unknown>[] = [];
@@ -428,6 +428,23 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
     }
 
     await Promise.all(jobs);
+
+    const revisionResult = await collection.findOneAndUpdate(
+      { type: "guild", guild_id: guildIdValue },
+      {
+        $set: {
+          type: "guild",
+          guild_id: guildIdValue,
+          dashboard_updated_at: Math.floor(Date.now() / 1000),
+          dashboard_changed_sections: changedSections,
+        },
+        $inc: { dashboard_revision: 1 },
+      },
+      { upsert: true, returnDocument: "after", projection: { _id: 0, dashboard_revision: 1 } },
+    );
+
+    const revision = revisionResult?.dashboard_revision;
+    return typeof revision === "number" ? revision : undefined;
   }
 
   return {
@@ -469,6 +486,7 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
       const fieldsById = new Map(allFields().map((field) => [field.id, field]));
       const patches = new Map<DashboardFieldScope, Record<string, unknown>>();
       const saved: string[] = [];
+      const changedSections = new Set<string>();
       for (const [fieldId, rawValue] of Object.entries(updates || {})) {
         const field = fieldsById.get(fieldId);
         if (!field) continue;
@@ -478,11 +496,11 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
         dotSetForPath(scopePatch, field.path, value);
         patches.set(field.scope, scopePatch);
         saved.push(field.id);
+        changedSections.add(field.id.split(".")[0] || field.scope);
       }
-      if (saved.length) {
-        await saveDocs(guildId, patches);
-      }
-      return { ok: true, values: valuesFromDocs(docs), saved };
+      const changedSectionsList = Array.from(changedSections);
+      const revision = saved.length ? await saveDocs(guildId, patches, changedSectionsList) : undefined;
+      return { ok: true, values: valuesFromDocs(docs), saved, revision, changed_sections: changedSectionsList };
     },
   };
 }

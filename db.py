@@ -104,6 +104,40 @@ class SettingsDB:
     def _get_guild_doc(self, guild_id: int) -> Dict[str, Any]:
         return self.guild_cache.get(guild_id, {"type": "guild", "guild_id": guild_id})
 
+    async def reload_guild_cache(self, guild_id: int) -> Dict[str, Any]:
+        gid = int(guild_id or 0)
+        if gid <= 0:
+            return {}
+
+        query = {
+            "guild_id": gid,
+            "$or": [
+                {"type": "guild"},
+                {"type": {"$exists": False}, "user_id": {"$exists": False}},
+            ],
+        }
+        merged: Dict[str, Any] | None = None
+        cursor = self.coll.find(query, {"_id": 0})
+        async for doc in cursor:
+            doc_type = doc.get("type")
+            normalized = dict(doc)
+            normalized["type"] = "guild"
+            if merged is None:
+                merged = normalized
+            elif doc_type == "guild":
+                merged = {**merged, **normalized}
+            else:
+                merged = {**normalized, **merged}
+
+        if merged is None:
+            self.guild_cache.pop(gid, None)
+            self._invalidate_resolved_tts_cache(guild_id=gid)
+            return {}
+
+        self.guild_cache[gid] = merged
+        self._invalidate_resolved_tts_cache(guild_id=gid)
+        return merged
+
     async def _save_guild_doc(self, guild_id: int, doc: Dict[str, Any]):
         doc["type"] = "guild"
         doc["guild_id"] = guild_id

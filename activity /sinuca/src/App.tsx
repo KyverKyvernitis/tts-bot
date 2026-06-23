@@ -117,6 +117,48 @@ function cleanOAuthCodeFromUrl(nextPath?: string) {
   window.history.replaceState({}, "", path);
 }
 
+const cachedBrowserGuildKey = "osk_dashboard_last_guild";
+
+function normalizeServerId(value: unknown): string {
+  return String(value ?? "").trim();
+}
+
+function findServerById(guildId: string | null, servers: DashboardServerCard[]): DashboardServerCard | null {
+  const target = normalizeServerId(guildId);
+  if (!target) return null;
+  return servers.find((server) => normalizeServerId(server.id) === target) ?? null;
+}
+
+function readCachedBrowserGuild(guildId: string | null): DashboardServerCard | null {
+  if (typeof window === "undefined" || !guildId) return null;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(cachedBrowserGuildKey) || "null") as DashboardServerCard | null;
+    return parsed && normalizeServerId(parsed.id) === normalizeServerId(guildId) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedBrowserGuild(server: DashboardServerCard | null) {
+  if (typeof window === "undefined" || !server) return;
+  try {
+    window.localStorage.setItem(cachedBrowserGuildKey, JSON.stringify({
+      id: normalizeServerId(server.id),
+      name: server.name,
+      icon: server.icon ?? null,
+      owner: Boolean(server.owner),
+      permissions: String(server.permissions ?? ""),
+      botPresent: Boolean(server.botPresent),
+      canManage: Boolean(server.canManage),
+      canInvite: Boolean(server.canInvite),
+      reason: String(server.reason ?? "cached"),
+      inviteUrl: server.inviteUrl ?? null,
+    } satisfies DashboardServerCard));
+  } catch {
+    // Cache leve de UI; falha aqui não deve bloquear o dashboard.
+  }
+}
+
 function browserUserName(user: DashboardUserPayload | null, fallback: string) {
   return user?.global_name || user?.username || fallback;
 }
@@ -186,12 +228,12 @@ async function restoreCachedBrowserToken(): Promise<string | null> {
 
 function guildLabelFromServers(guildId: string | null, servers: DashboardServerCard[], fallback: string) {
   if (!guildId) return fallback;
-  return servers.find((server) => server.id === guildId)?.name ?? fallback;
+  return findServerById(guildId, servers)?.name ?? readCachedBrowserGuild(guildId)?.name ?? fallback;
 }
 
 function guildIconFromServers(guildId: string | null, servers: DashboardServerCard[]): string | null {
   if (!guildId) return null;
-  return servers.find((server) => server.id === guildId)?.icon ?? null;
+  return findServerById(guildId, servers)?.icon ?? readCachedBrowserGuild(guildId)?.icon ?? null;
 }
 
 export default function App() {
@@ -213,6 +255,7 @@ export default function App() {
   const [browserManageableServers, setBrowserManageableServers] = useState<DashboardServerCard[]>([]);
   const [browserInviteServers, setBrowserInviteServers] = useState<DashboardServerCard[]>([]);
   const [browserSelectedGuildId, setBrowserSelectedGuildId] = useState<string | null>(() => readBrowserGuildFromLocation());
+  const [browserServerHydrationKey, setBrowserServerHydrationKey] = useState<string | null>(null);
   const [activityGuildOverride, setActivityGuildOverride] = useState<string | null>(null);
   const [browserInviteServer, setBrowserInviteServer] = useState<DashboardServerCard | null>(null);
   const [loadingServers, setLoadingServers] = useState(false);
@@ -386,9 +429,13 @@ export default function App() {
     try {
       const payload = await fetchDashboardServers(token);
       if (!payload.ok) throw new Error(payload.error || "servers_failed");
+      const manageable = payload.manageable || [];
+      const needsInvite = payload.needsInvite || [];
       setBrowserUser(payload.user ?? browserUser ?? activityUserPayload(bootstrap));
-      setBrowserManageableServers(payload.manageable || []);
-      setBrowserInviteServers(payload.needsInvite || []);
+      setBrowserManageableServers(manageable);
+      setBrowserInviteServers(needsInvite);
+      const activeServer = findServerById(browserSelectedGuildId ?? readBrowserGuildFromLocation(), manageable);
+      if (activeServer) writeCachedBrowserGuild(activeServer);
       setAuthState("ready");
       setMessage("Escolha um servidor para configurar.");
     } catch (error) {
@@ -420,6 +467,7 @@ export default function App() {
   }
 
   function openServer(server: DashboardServerCard) {
+    writeCachedBrowserGuild(server);
     resetDashboardData();
     setMessage(`Abrindo ${server.name}...`);
     if (runtimeMode === "activity") {
@@ -428,6 +476,7 @@ export default function App() {
       return;
     }
     setBrowserSelectedGuildId(server.id);
+    setBrowserServerHydrationKey(server.id);
     setBrowserView("servers");
     window.history.pushState({}, "", `/dashboard/${server.id}`);
   }
@@ -435,6 +484,7 @@ export default function App() {
   function openServerPicker() {
     if (runtimeMode === "browser") {
       setBrowserSelectedGuildId(null);
+      setBrowserServerHydrationKey(null);
       setBrowserView("servers");
       window.history.pushState({}, "", "/dashboard");
     } else {
@@ -474,6 +524,7 @@ export default function App() {
     setBrowserManageableServers([]);
     setBrowserInviteServers([]);
     setBrowserSelectedGuildId(null);
+    setBrowserServerHydrationKey(null);
     setActivityGuildOverride(null);
     setBrowserInviteServer(null);
     setBrowserView("landing");
@@ -646,6 +697,14 @@ export default function App() {
       void loadBrowserServers();
     }
   }, [runtimeMode, token, browserView, browserSelectedGuildId, showServerPicker]);
+
+  useEffect(() => {
+    if (runtimeMode !== "browser" || !token || !browserSelectedGuildId || loadingServers) return;
+    if (findServerById(browserSelectedGuildId, browserManageableServers)) return;
+    if (browserServerHydrationKey === browserSelectedGuildId) return;
+    setBrowserServerHydrationKey(browserSelectedGuildId);
+    void loadBrowserServers();
+  }, [runtimeMode, token, browserSelectedGuildId, browserManageableServers.length, loadingServers, browserServerHydrationKey]);
 
   if (runtimeMode === "detecting") {
     return (

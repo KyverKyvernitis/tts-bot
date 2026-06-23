@@ -112,6 +112,17 @@
 .osk-root button:disabled { cursor: not-allowed; opacity: 0.55; }
 .osk-root a { color: inherit; text-decoration: none; }
 
+.osk-module-card,
+.osk-server-card,
+.osk-top-action,
+.osk-btn,
+.osk-sidebar-item,
+.osk-smart-select-trigger {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
 /* Foco visível e consistente para navegação por teclado */
 .osk-root button:focus-visible,
 .osk-root a:focus-visible,
