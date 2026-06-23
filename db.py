@@ -2181,6 +2181,68 @@ SettingsDB.get_color_roles_config = _settingsdb_get_color_roles_config
 SettingsDB.set_color_roles_config = _settingsdb_set_color_roles_config
 
 
+
+# ===== Role icons cog =====
+# Persistência da cog cogs/role_icons/. Mantém o padrão de configs por guild.
+
+def _settingsdb_role_icons_defaults() -> Dict[str, Any]:
+    return {
+        "connections": [],
+        "revision": 0,
+    }
+
+
+def _settingsdb_get_role_icons_config(self, guild_id: int) -> Dict[str, Any]:
+    doc = self._get_guild_doc(int(guild_id))
+    raw = deepcopy(doc.get("role_icons") or {})
+    base = _settingsdb_role_icons_defaults()
+    try:
+        base["revision"] = max(0, int(raw.get("revision") or 0))
+    except Exception:
+        base["revision"] = 0
+    connections: list[Dict[str, Any]] = []
+    seen_roles: set[int] = set()
+    for item in raw.get("connections") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            user_id = int(item.get("user_id") or 0)
+            role_id = int(item.get("role_id") or 0)
+        except Exception:
+            continue
+        if user_id <= 0 or role_id <= 0 or role_id in seen_roles:
+            continue
+        seen_roles.add(role_id)
+        connections.append({
+            "id": str(item.get("id") or f"{user_id}:{role_id}")[:80],
+            "user_id": user_id,
+            "role_id": role_id,
+            "enabled": bool(item.get("enabled", True)),
+            "original_icon_path": str(item.get("original_icon_path") or "")[:500],
+            "original_icon_hash": str(item.get("original_icon_hash") or "")[:96],
+            "last_color": str(item.get("last_color") or "")[:16],
+            "last_rendered_hash": str(item.get("last_rendered_hash") or "")[:96],
+            "last_status": str(item.get("last_status") or "")[:220],
+            "last_updated_at": str(item.get("last_updated_at") or "")[:80],
+            "created_at": str(item.get("created_at") or "")[:80],
+            "updated_at": str(item.get("updated_at") or "")[:80],
+        })
+        if len(connections) >= 10:
+            break
+    base["connections"] = connections
+    return base
+
+
+async def _settingsdb_set_role_icons_config(self, guild_id: int, config: Dict[str, Any]):
+    doc = self._get_guild_doc(int(guild_id))
+    doc["role_icons"] = deepcopy(config)
+    await self._save_guild_doc(int(guild_id), doc)
+
+
+SettingsDB.get_role_icons_config = _settingsdb_get_role_icons_config
+SettingsDB.set_role_icons_config = _settingsdb_set_role_icons_config
+
+
 # ===== Forms cog =====
 # Persistência da cog cogs/forms/. Segue o padrão monkey-patch usado pra
 # color_roles acima — mantém o SettingsDB original limpo e adiciona métodos

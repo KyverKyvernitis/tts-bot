@@ -1400,6 +1400,13 @@ class ColorRolesCog(commands.Cog):
                 return slot_num, dict(slot)
         return 0, None
 
+    def _dispatch_member_color_changed(self, member: discord.Member, color_hex: str | None) -> None:
+        try:
+            clean = _clean_hex(str(color_hex or ""), "") if color_hex else None
+            self.bot.dispatch("member_color_changed", member, clean or None)
+        except Exception:
+            logger.debug("[color_roles] falha ao emitir evento member_color_changed", exc_info=True)
+
     async def _handle_public_pick(self, interaction: discord.Interaction, slot_number: int):
         guild = interaction.guild
         member = interaction.user if isinstance(interaction.user, discord.Member) else None
@@ -1463,6 +1470,7 @@ class ColorRolesCog(commands.Cog):
                 text = self._render_template(template, member=member, slot=slot, removed_name=str(slot.get("name") or ""))
                 removed_name = _normalize_color_name(str(slot.get("name") or ""))
                 await reply(text or f"cor {removed_name} removida.")
+                self._dispatch_member_color_changed(member, None)
                 return
             if roles_to_remove:
                 await member.remove_roles(*roles_to_remove, reason="Troca de cor pelo painel")
@@ -1483,6 +1491,7 @@ class ColorRolesCog(commands.Cog):
             text = self._render_template(template, member=member, slot=slot, added_name=str(slot.get("name") or ""))
         applied_name = _normalize_color_name(str(slot.get("name") or ""))
         await reply(text or f"cor {applied_name} aplicada.")
+        self._dispatch_member_color_changed(member, _clean_hex(str(slot.get("role_hex") or slot.get("text_hex") or ""), "#ffffff"))
 
     async def _delete_existing_panel_messages(self, guild_id: int):
         cfg = self._get_config(guild_id)
