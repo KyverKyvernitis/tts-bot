@@ -7,7 +7,6 @@ import type {
   DashboardSectionSummary,
 } from "../types/dashboard";
 import type { DashboardVisualModule } from "../moduleCatalog";
-import { shortStatusLabel, statusClass } from "../moduleCatalog";
 import { SmartSelect, type SmartSelectOption } from "./SmartSelect";
 
 interface SectionEditorProps {
@@ -81,7 +80,6 @@ export function SectionEditor({
   onChange,
   onBack,
 }: SectionEditorProps) {
-  const state = statusClass(summary);
   const Icon = module?.icon ?? Settings;
   const optionsMissingReason = guildOptions && !guildOptions.ok ? guildOptions.error : null;
 
@@ -100,8 +98,8 @@ export function SectionEditor({
           <h1>{section.label}</h1>
           <p>{module?.description ?? section.description}</p>
         </div>
-        <span className="osk-badge" data-state={state}>
-          {shortStatusLabel(summary)}
+        <span className="osk-badge" data-state="neutral">
+          {section.fields.length} opções
         </span>
       </div>
 

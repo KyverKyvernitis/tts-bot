@@ -1,6 +1,5 @@
 import { Home } from "lucide-react";
 import type { DashboardVisualModule } from "../moduleCatalog";
-import { statusClass } from "../moduleCatalog";
 
 interface SidebarProps {
   modules: DashboardVisualModule[];
@@ -17,13 +16,12 @@ export function Sidebar({ modules, selectedSectionId, view, onHome, onSelect }: 
   const renderLink = (m: DashboardVisualModule) => {
     const Icon = m.icon;
     const isActive = view === "section" && selectedSectionId === m.id;
-    const state = statusClass(m);
     return (
       <button
         key={m.id}
         className="osk-side-link"
         data-active={isActive}
-        data-state={state}
+        data-state={m.enabled === false ? "off" : "neutral"}
         onClick={() => onSelect(m.id)}
       >
         <Icon size={16} />

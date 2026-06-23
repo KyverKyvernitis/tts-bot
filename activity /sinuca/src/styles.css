@@ -495,19 +495,13 @@
   margin-left: 4px;
   font-weight: 500;
 }
-.osk-progress {
+.osk-hero-accent {
   margin-top: 16px;
   height: 6px;
   border-radius: 999px;
-  background: rgba(255,255,255,0.05);
-  overflow: hidden;
-  border: 1px solid var(--osk-line);
-}
-.osk-progress-bar {
-  height: 100%;
   background: var(--osk-grad-brand);
-  border-radius: 999px;
-  transition: width 600ms var(--osk-ease);
+  opacity: 0.92;
+  box-shadow: 0 0 18px rgba(99,102,241,0.22);
 }
 
 /* ---------- Module grid ---------- */
@@ -600,6 +594,11 @@
   background: rgba(255,255,255,0.04);
   color: var(--osk-text-soft);
   border: 1px solid var(--osk-line);
+}
+.osk-module-card[data-state="neutral"] .osk-module-icon {
+  background: var(--osk-brand-soft);
+  color: #c4b5fd;
+  border-color: rgba(99,102,241,0.24);
 }
 .osk-module-card[data-state="ready"] .osk-module-icon {
   background: var(--osk-ready-soft);
