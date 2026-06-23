@@ -74,6 +74,55 @@ const WELCOME_MODE_OPTIONS = [
   { value: "normal", label: "Mensagem normal" },
 ];
 
+const WELCOME_STYLE_OPTIONS = [
+  { value: "complete", label: "Completo" },
+  { value: "simple", label: "Simples" },
+  { value: "compact", label: "Compacto" },
+];
+
+const WELCOME_COLOR_MODE_OPTIONS = [
+  { value: "fixed", label: "Cor fixa" },
+  { value: "member_avatar", label: "Combinar com avatar do membro" },
+];
+
+const WELCOME_MEDIA_MODE_OPTIONS = [
+  { value: "custom", label: "Link personalizado" },
+  { value: "avatar_stars", label: "Estrelas pelo avatar" },
+];
+
+const WELCOME_WEBHOOK_NAME_OPTIONS = [
+  { value: "fixed", label: "Nome personalizado" },
+  { value: "server", label: "Nome do servidor" },
+  { value: "member", label: "Nome do membro" },
+  { value: "inviter", label: "Nome de quem convidou" },
+];
+
+const WELCOME_WEBHOOK_AVATAR_OPTIONS = [
+  { value: "server", label: "Avatar do servidor" },
+  { value: "member", label: "Avatar do membro" },
+  { value: "inviter", label: "Avatar de quem convidou" },
+  { value: "custom", label: "Avatar por link" },
+];
+
+const WELCOME_EMBED_IMAGE_MODE_OPTIONS = [
+  { value: "none", label: "Sem imagem" },
+  { value: "member", label: "Avatar do membro" },
+  { value: "inviter", label: "Avatar de quem convidou" },
+  { value: "server", label: "Ícone do servidor" },
+  { value: "bot", label: "Avatar do bot" },
+  { value: "custom", label: "Link personalizado" },
+];
+
+const WELCOME_EMBED_MAIN_IMAGE_MODE_OPTIONS = [
+  ...WELCOME_EMBED_IMAGE_MODE_OPTIONS,
+  { value: "avatar_stars", label: "Estrelas pelo avatar" },
+];
+
+const BIRTHDAY_LEAP_MODE_OPTIONS = [
+  { value: "feb28", label: "Avisar em 28/02" },
+  { value: "mar01", label: "Avisar em 01/03" },
+];
+
 const sections: DashboardSectionDefinition[] = [
   {
     id: "general",
@@ -90,17 +139,52 @@ const sections: DashboardSectionDefinition[] = [
     id: "welcome",
     label: "Boas-vindas",
     emoji: "👋",
-    description: "Canal, modo, mensagem pública e webhook de boas-vindas.",
+    description: "Canal, modo, aparência, mensagens, DM e webhook de boas-vindas.",
     fields: [
       { id: "welcome.enabled", label: "Ativar boas-vindas", type: "boolean", scope: "welcome", path: "enabled" },
       { id: "welcome.channel_id", label: "Canal de boas-vindas", type: "channel", scope: "welcome", path: "channel_id" },
-      { id: "welcome.render_mode", label: "Modo de envio", type: "select", scope: "welcome", path: "render_mode", options: WELCOME_MODE_OPTIONS },
-      { id: "welcome.public.title", label: "Título", type: "text", scope: "welcome", path: "public.title", maxLength: 180, placeholder: "Bem-vindo(a)!" },
-      { id: "welcome.public.body", label: "Mensagem", type: "textarea", scope: "welcome", path: "public.body", maxLength: 1800, placeholder: "Olá, {membro_mencao}. Seja bem-vindo(a) ao {servidor}." },
-      { id: "welcome.public.footer", label: "Rodapé", type: "text", scope: "welcome", path: "public.footer", maxLength: 300 },
-      { id: "welcome.webhook.enabled", label: "Usar webhook", type: "boolean", scope: "welcome", path: "webhook.enabled" },
-      { id: "welcome.webhook.name", label: "Nome do webhook", type: "text", scope: "welcome", path: "webhook.name", maxLength: 80, placeholder: "Boas-vindas" },
+      { id: "welcome.render_mode", label: "Modo público", type: "select", scope: "welcome", path: "render_mode", options: WELCOME_MODE_OPTIONS },
+      { id: "welcome.style", label: "Estilo Components V2", type: "select", scope: "welcome", path: "style", options: WELCOME_STYLE_OPTIONS },
       { id: "welcome.delete_on_leave_enabled", label: "Apagar se sair em até 24h", type: "boolean", scope: "welcome", path: "delete_on_leave_enabled" },
+      { id: "welcome.dm_enabled", label: "Enviar mensagem no privado", type: "boolean", scope: "welcome", path: "dm_enabled" },
+      { id: "welcome.dm_render_mode", label: "Modo da DM", type: "select", scope: "welcome", path: "dm_render_mode", options: WELCOME_MODE_OPTIONS },
+      { id: "welcome.decorative_emoji_enabled", label: "Emojis decorativos", type: "boolean", scope: "welcome", path: "decorative_emoji_enabled" },
+      { id: "welcome.accent_color", label: "Cor de destaque", type: "color", scope: "welcome", path: "accent_color", placeholder: "#5865F2" },
+      { id: "welcome.accent_color_mode", label: "Modo da cor", type: "select", scope: "welcome", path: "accent_color_mode", options: WELCOME_COLOR_MODE_OPTIONS },
+      { id: "welcome.media_mode", label: "Imagem/banner", type: "select", scope: "welcome", path: "media_mode", options: WELCOME_MEDIA_MODE_OPTIONS },
+      { id: "welcome.media_url", label: "URL da imagem/banner", type: "url", scope: "welcome", path: "media_url", maxLength: 1000, placeholder: "https://exemplo.com/banner.png" },
+
+      { id: "welcome.public.title", label: "Título público", type: "text", scope: "welcome", path: "public.title", maxLength: 256, placeholder: "Bem-vindo(a)!" },
+      { id: "welcome.public.body", label: "Mensagem pública", type: "textarea", scope: "welcome", path: "public.body", maxLength: 1800, placeholder: "Olá, {membro_mencao}. Seja bem-vindo(a) ao {servidor}." },
+      { id: "welcome.public.footer", label: "Rodapé público", type: "text", scope: "welcome", path: "public.footer", maxLength: 300 },
+
+      { id: "welcome.embed.content", label: "Texto acima do embed", type: "textarea", scope: "welcome", path: "embed.content", maxLength: 1800 },
+      { id: "welcome.embed.author_name", label: "Embed: autor", type: "text", scope: "welcome", path: "embed.author_name", maxLength: 256 },
+      { id: "welcome.embed.author_icon_mode", label: "Embed: ícone do autor", type: "select", scope: "welcome", path: "embed.author_icon_mode", options: WELCOME_EMBED_IMAGE_MODE_OPTIONS },
+      { id: "welcome.embed.author_icon_url", label: "Embed: URL do ícone do autor", type: "url", scope: "welcome", path: "embed.author_icon_url", maxLength: 1000 },
+      { id: "welcome.embed.author_url", label: "Embed: URL do autor", type: "url", scope: "welcome", path: "embed.author_url", maxLength: 1000 },
+      { id: "welcome.embed.title", label: "Embed: título", type: "text", scope: "welcome", path: "embed.title", maxLength: 256 },
+      { id: "welcome.embed.title_url", label: "Embed: URL do título", type: "url", scope: "welcome", path: "embed.title_url", maxLength: 1000 },
+      { id: "welcome.embed.description", label: "Embed: descrição", type: "textarea", scope: "welcome", path: "embed.description", maxLength: 1800 },
+      { id: "welcome.embed.color", label: "Embed: cor", type: "color", scope: "welcome", path: "embed.color", placeholder: "#5865F2" },
+      { id: "welcome.embed.color_mode", label: "Embed: modo da cor", type: "select", scope: "welcome", path: "embed.color_mode", options: WELCOME_COLOR_MODE_OPTIONS },
+      { id: "welcome.embed.thumbnail_mode", label: "Embed: thumbnail", type: "select", scope: "welcome", path: "embed.thumbnail_mode", options: WELCOME_EMBED_IMAGE_MODE_OPTIONS },
+      { id: "welcome.embed.thumbnail_url", label: "Embed: URL da thumbnail", type: "url", scope: "welcome", path: "embed.thumbnail_url", maxLength: 1000 },
+      { id: "welcome.embed.image_mode", label: "Embed: imagem principal", type: "select", scope: "welcome", path: "embed.image_mode", options: WELCOME_EMBED_MAIN_IMAGE_MODE_OPTIONS },
+      { id: "welcome.embed.image_url", label: "Embed: URL da imagem", type: "url", scope: "welcome", path: "embed.image_url", maxLength: 1000 },
+      { id: "welcome.embed.footer_text", label: "Embed: rodapé", type: "text", scope: "welcome", path: "embed.footer_text", maxLength: 2048 },
+      { id: "welcome.embed.footer_icon_mode", label: "Embed: ícone do rodapé", type: "select", scope: "welcome", path: "embed.footer_icon_mode", options: WELCOME_EMBED_IMAGE_MODE_OPTIONS },
+      { id: "welcome.embed.footer_icon_url", label: "Embed: URL do ícone do rodapé", type: "url", scope: "welcome", path: "embed.footer_icon_url", maxLength: 1000 },
+
+      { id: "welcome.dm.title", label: "DM: título", type: "text", scope: "welcome", path: "dm.title", maxLength: 256, placeholder: "Bem-vindo(a) ao {servidor}!" },
+      { id: "welcome.dm.body", label: "DM: mensagem", type: "textarea", scope: "welcome", path: "dm.body", maxLength: 1800 },
+      { id: "welcome.dm.footer", label: "DM: rodapé", type: "text", scope: "welcome", path: "dm.footer", maxLength: 300 },
+
+      { id: "welcome.webhook.enabled", label: "Usar webhook", type: "boolean", scope: "welcome", path: "webhook.enabled" },
+      { id: "welcome.webhook.name_mode", label: "Nome do webhook", type: "select", scope: "welcome", path: "webhook.name_mode", options: WELCOME_WEBHOOK_NAME_OPTIONS },
+      { id: "welcome.webhook.name", label: "Nome personalizado do webhook", type: "text", scope: "welcome", path: "webhook.name", maxLength: 80, placeholder: "Boas-vindas" },
+      { id: "welcome.webhook.avatar_mode", label: "Avatar do webhook", type: "select", scope: "welcome", path: "webhook.avatar_mode", options: WELCOME_WEBHOOK_AVATAR_OPTIONS },
+      { id: "welcome.webhook.avatar_url", label: "URL do avatar do webhook", type: "url", scope: "welcome", path: "webhook.avatar_url", maxLength: 1000 },
     ],
     actions: [
       { id: "preview_welcome", label: "Preview", description: "Mostra como a mensagem ficaria para um membro de teste." },
@@ -128,15 +212,26 @@ const sections: DashboardSectionDefinition[] = [
     id: "birthday",
     label: "Aniversários",
     emoji: "🎂",
-    description: "Canal de cadastro, canal de avisos, calendário e fuso.",
+    description: "Cadastro, avisos, calendário, mensagens e preferências de aniversário.",
     fields: [
       { id: "birthday.enabled", label: "Ativar aniversários", type: "boolean", scope: "birthday", path: "enabled" },
-      { id: "birthday.register_channel_id", label: "Canal/thread de cadastro", type: "channel", scope: "birthday", path: "register_channel_id" },
+      { id: "birthday.register_channel_id", label: "Canal do calendário/cadastro", type: "channel", scope: "birthday", path: "register_channel_id", description: "Canal onde fica a mensagem pública e a thread de cadastro." },
       { id: "birthday.announce_channel_id", label: "Canal de avisos", type: "channel", scope: "birthday", path: "announce_channel_id" },
-      { id: "birthday.calendar_channel_id", label: "Canal do calendário", type: "channel", scope: "birthday", path: "calendar_channel_id" },
       { id: "birthday.timezone", label: "Fuso horário", type: "text", scope: "birthday", path: "timezone", maxLength: 64, placeholder: "America/Sao_Paulo" },
       { id: "birthday.announce_hour", label: "Hora do aviso", type: "number", scope: "birthday", path: "announce_hour", min: 0, max: 23 },
       { id: "birthday.announce_minute", label: "Minuto do aviso", type: "number", scope: "birthday", path: "announce_minute", min: 0, max: 59 },
+      { id: "birthday.options.show_age", label: "Mostrar idade nos avisos", type: "boolean", scope: "birthday", path: "options.show_age" },
+      { id: "birthday.options.group_announcements", label: "Agrupar aniversariantes do dia", type: "boolean", scope: "birthday", path: "options.group_announcements" },
+      { id: "birthday.options.delete_on_leave", label: "Remover quando sair do servidor", type: "boolean", scope: "birthday", path: "options.delete_on_leave" },
+      { id: "birthday.options.leap_day_mode", label: "Aniversário em 29/02", type: "select", scope: "birthday", path: "options.leap_day_mode", options: BIRTHDAY_LEAP_MODE_OPTIONS },
+      { id: "birthday.options.valid_reaction", label: "Reação em data válida", type: "text", scope: "birthday", path: "options.valid_reaction", maxLength: 20, placeholder: "✅" },
+      { id: "birthday.templates.calendar", label: "Template do calendário", type: "textarea", scope: "birthday", path: "templates.calendar", maxLength: 1800 },
+      { id: "birthday.templates.saved", label: "Mensagem ao salvar", type: "textarea", scope: "birthday", path: "templates.saved", maxLength: 1800 },
+      { id: "birthday.templates.updated", label: "Mensagem ao atualizar", type: "textarea", scope: "birthday", path: "templates.updated", maxLength: 1800 },
+      { id: "birthday.templates.invalid", label: "Mensagem de data inválida", type: "textarea", scope: "birthday", path: "templates.invalid", maxLength: 1800 },
+      { id: "birthday.templates.announce_single", label: "Aviso individual", type: "textarea", scope: "birthday", path: "templates.announce_single", maxLength: 1800 },
+      { id: "birthday.templates.announce_group", label: "Aviso agrupado", type: "textarea", scope: "birthday", path: "templates.announce_group", maxLength: 1800 },
+      { id: "birthday.templates.empty_calendar", label: "Calendário vazio", type: "textarea", scope: "birthday", path: "templates.empty_calendar", maxLength: 1800 },
     ],
   },
   {
@@ -169,19 +264,6 @@ const sections: DashboardSectionDefinition[] = [
       { id: "music.channel_id", label: "Canal de música", type: "channel", scope: "guild", path: "music.channel_id" },
       { id: "music.dj_role_id", label: "Cargo DJ", type: "role", scope: "guild", path: "music.dj_role_id" },
       { id: "music.default_volume", label: "Volume padrão", type: "number", scope: "guild", path: "music.default_volume", min: 1, max: 200 },
-    ],
-  },
-  {
-    id: "logs",
-    label: "Logs",
-    emoji: "📜",
-    description: "Canais usados para auditoria e registros do servidor.",
-    fields: [
-      { id: "logs.admin_channel_id", label: "Logs admin", type: "channel", scope: "guild", path: "logs.admin_channel_id" },
-      { id: "logs.error_channel_id", label: "Logs de erro", type: "channel", scope: "guild", path: "logs.error_channel_id" },
-      { id: "logs.update_channel_id", label: "Logs de update", type: "channel", scope: "guild", path: "logs.update_channel_id" },
-      { id: "logs.tts_channel_id", label: "Logs de TTS", type: "channel", scope: "guild", path: "logs.tts_channel_id" },
-      { id: "logs.tickets_channel_id", label: "Logs de tickets", type: "channel", scope: "guild", path: "tickets.channels.logs_channel_id" },
     ],
   },
 ];
@@ -320,8 +402,54 @@ function defaultWelcomeDoc(guildId: string): Record<string, unknown> {
       body: "Olá, {membro_mencao}. Seja bem-vindo(a) ao **{servidor}**.",
       footer: "Você é o membro #{contador}.",
     },
-    webhook: { enabled: false, name: "Boas-vindas" },
+    dm_enabled: false,
     delete_on_leave_enabled: false,
+    decorative_emoji_enabled: false,
+    auto_role_ids: [],
+    style: "complete",
+    dm_render_mode: "components_v2",
+    accent_color: "#5865F2",
+    accent_color_mode: "fixed",
+    media_url: "",
+    media_mode: "custom",
+    embed: {
+      content: "",
+      author_name: "",
+      author_icon_mode: "none",
+      author_icon_url: "",
+      author_url: "",
+      title: "",
+      title_url: "",
+      description: "",
+      color: "",
+      color_mode: "fixed",
+      thumbnail_mode: "none",
+      thumbnail_url: "",
+      image_mode: "custom",
+      image_url: "",
+      footer_text: "",
+      footer_icon_mode: "none",
+      footer_icon_url: "",
+    },
+    dm: {
+      title: "Bem-vindo(a) ao {servidor}!",
+      body: "Que bom ter você por aqui, {membro}. Aproveite o servidor.",
+      footer: "",
+    },
+    webhook: {
+      enabled: false,
+      channel_id: 0,
+      webhook_id: 0,
+      webhook_token: "",
+      name: "Boas-vindas",
+      name_mode: "fixed",
+      avatar_mode: "server",
+      avatar_url: "",
+    },
+    variants: [],
+    mode_configs: {},
+    invite_cache: {},
+    special_rules: [],
   };
 }
 
@@ -332,10 +460,26 @@ function defaultBirthdayDoc(guildId: string): Record<string, unknown> {
     enabled: false,
     register_channel_id: 0,
     announce_channel_id: 0,
-    calendar_channel_id: 0,
     timezone: "America/Sao_Paulo",
     announce_hour: 9,
     announce_minute: 0,
+    options: {
+      allow_update: true,
+      show_age: true,
+      group_announcements: true,
+      delete_on_leave: true,
+      leap_day_mode: "feb28",
+      valid_reaction: "✅",
+    },
+    templates: {
+      calendar: "# 🎂 Aniversários${birthdaycalendarblock}",
+      saved: "Prontinho, ${usermention}. Seu aniversário foi salvo como **${birthdaydate}** 🎂",
+      updated: "Prontinho, ${usermention}. Atualizei seu aniversário para **${birthdaydate}** 🎂",
+      invalid: "Data inválida. Mande uma data no estilo **dia/mês**.",
+      announce_single: "🎂 Feliz aniversário, ${usermention}! Hoje é seu dia.",
+      announce_group: "🎂 Hoje temos ${birthdaycount} aniversariante(s)!\n\n${birthdaymentions}",
+      empty_calendar: "Nenhum aniversário cadastrado ainda.",
+    },
   };
 }
 
