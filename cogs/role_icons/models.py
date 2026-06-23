@@ -37,13 +37,13 @@ def sanitize_connection(raw: dict[str, Any]) -> dict[str, Any] | None:
         role_id = int(raw.get("role_id") or 0)
     except Exception:
         return None
-    if user_id <= 0 or role_id <= 0:
+    if role_id <= 0:
         return None
-    connection_id = str(raw.get("id") or f"{user_id}:{role_id}")[:80]
+    connection_id = str(raw.get("id") or str(role_id))[:80]
     original_path = str(raw.get("original_icon_path") or "")[:500]
     return {
         "id": connection_id,
-        "user_id": user_id,
+        "user_id": max(0, user_id),
         "role_id": role_id,
         "enabled": bool(raw.get("enabled", True)),
         "original_icon_path": original_path,

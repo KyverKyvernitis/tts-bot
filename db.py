@@ -2210,11 +2210,12 @@ def _settingsdb_get_role_icons_config(self, guild_id: int) -> Dict[str, Any]:
             role_id = int(item.get("role_id") or 0)
         except Exception:
             continue
-        if user_id <= 0 or role_id <= 0 or role_id in seen_roles:
+        if role_id <= 0 or role_id in seen_roles:
             continue
+        user_id = max(0, user_id)
         seen_roles.add(role_id)
         connections.append({
-            "id": str(item.get("id") or f"{user_id}:{role_id}")[:80],
+            "id": str(item.get("id") or str(role_id))[:80],
             "user_id": user_id,
             "role_id": role_id,
             "enabled": bool(item.get("enabled", True)),
