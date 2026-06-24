@@ -1,4 +1,5 @@
-import { ChevronLeft, Settings } from "lucide-react";
+import { ChevronLeft, ChevronRight, Settings } from "lucide-react";
+import { useEffect, useState } from "react";
 import type {
   DashboardChannelOption,
   DashboardFieldDefinition,
@@ -82,138 +83,183 @@ export function SectionEditor({
 }: SectionEditorProps) {
   const Icon = module?.icon ?? Settings;
   const optionsMissingReason = guildOptions && !guildOptions.ok ? guildOptions.error : null;
+  const groups = section.groups && section.groups.length > 0 ? section.groups : null;
+  const [activeGroup, setActiveGroup] = useState<string | null>(null);
+
+  useEffect(() => {
+    setActiveGroup(null);
+  }, [section.id]);
+
+  const insideGroup = Boolean(groups) && activeGroup !== null;
+  const fieldsToShow = groups ? section.fields.filter((field) => field.group === activeGroup) : section.fields;
+
+  function handleBack() {
+    if (insideGroup) {
+      setActiveGroup(null);
+      return;
+    }
+    onBack();
+  }
 
   return (
     <section className="osk-page">
-      <button className="osk-back-btn" onClick={onBack}>
+      <button className="osk-back-btn" onClick={handleBack}>
         <ChevronLeft size={14} />
-        Início
+        {insideGroup ? section.label : "Início"}
       </button>
 
       <div className="osk-section-head">
         <span className="osk-section-icon">
           <Icon size={22} />
         </span>
-        <div>
-          <h1>{section.label}</h1>
-          <p>{module?.description ?? section.description}</p>
-        </div>
-        <span className="osk-badge" data-state="neutral">
-          {section.fields.length} opções
-        </span>
+        {insideGroup ? (
+          <div>
+            <span className="osk-hero-eyebrow">{section.label}</span>
+            <h1>{activeGroup}</h1>
+          </div>
+        ) : (
+          <div>
+            <h1>{section.label}</h1>
+            <p>{module?.description ?? section.description}</p>
+          </div>
+        )}
       </div>
 
-      <div className="osk-fields">
-        {section.fields.map((field) => {
-          const current = draft[field.id];
-          const currentValue = stringifyValue(current);
-          const changed = draft[field.id] !== values[field.id];
-          const channelOptions = field.type === "channel" && guildOptions?.ok
-            ? channelOptionsForField(field, guildOptions.channels)
-            : null;
-          const roleOptions = field.type === "role" && guildOptions?.ok
-            ? guildOptions.roles.map((role) => ({ value: role.id, label: `@${role.name}` }))
-            : null;
-
-          return (
-            <div
-              key={field.id}
-              className="osk-field"
-              data-type={field.type}
-              data-changed={changed}
+      {groups && !insideGroup ? (
+        <div className="osk-module-grid">
+          {groups.map((group, idx) => (
+            <button
+              key={group}
+              className="osk-module-card"
+              data-state="neutral"
+              style={{ animationDelay: `${idx * 24}ms` }}
+              onClick={() => setActiveGroup(group)}
             >
-              <div className="osk-field-head">
-                <div>
-                  <strong>{field.label}</strong>
-                  {field.description && <small>{field.description}</small>}
-                </div>
-                {changed && (
-                  <span className="osk-badge" data-state="changed">
-                    alterado
-                  </span>
-                )}
-              </div>
-
-              {field.type === "boolean" ? (
-                <label className="osk-switch">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(current)}
-                    onChange={(event) => onChange(field, event.target.checked)}
-                  />
-                  <span className="osk-switch-track" />
-                  <span className="osk-switch-label">
-                    {Boolean(current) ? "Ligado" : "Desligado"}
-                  </span>
-                </label>
-              ) : field.type === "select" ? (
-                <SmartSelect
-                  id={`field-${field.id}`}
-                  value={currentValue}
-                  options={field.options ?? []}
-                  onChange={(next) => onChange(field, next)}
-                  placeholder="Selecione"
-                />
-              ) : field.type === "channel" && channelOptions ? (
-                <SmartSelect
-                  id={`field-${field.id}`}
-                  value={currentValue}
-                  options={channelOptions}
-                  onChange={(next) => onChange(field, next === currentValue ? "" : next)}
-                  placeholder="Selecione um canal"
-                  emptyLabel="Nenhum canal encontrado"
-                />
-              ) : field.type === "role" && roleOptions ? (
-                <SmartSelect
-                  id={`field-${field.id}`}
-                  value={currentValue}
-                  options={roleOptions}
-                  onChange={(next) => onChange(field, next === currentValue ? "" : next)}
-                  placeholder="Selecione um cargo"
-                  emptyLabel="Nenhum cargo encontrado"
-                />
-              ) : field.type === "textarea" ? (
-                <textarea
-                  value={currentValue}
-                  maxLength={field.maxLength}
-                  placeholder={field.placeholder}
-                  onChange={(event) => onChange(field, event.target.value)}
-                />
-              ) : (
-                <input
-                  type={field.type === "number" ? "number" : "text"}
-                  min={field.min}
-                  max={field.max}
-                  maxLength={field.maxLength}
-                  value={currentValue}
-                  placeholder={
-                    field.placeholder ??
-                    (field.type === "channel"
-                      ? "ID ou menção do canal"
-                      : field.type === "role"
-                        ? "ID ou menção do cargo"
-                        : field.type === "url"
-                          ? "https://..."
-                          : "")
-                  }
-                  onChange={(event) => onChange(field, event.target.value)}
-                />
-              )}
-
-              {(field.type === "channel" || field.type === "role") && !channelOptions && !roleOptions && optionsMissingReason && (
-                <small className="osk-field-warn">
-                  Lista de {field.type === "channel" ? "canais" : "cargos"} indisponível agora
-                  (endpoint /dashboard/guild/:guildId/options — {optionsMissingReason}). Usando ID manual por enquanto.
-                </small>
-              )}
-
-              <span className="osk-field-hint">
-                Atual: <strong>{displayValue(field, values[field.id], guildOptions)}</strong>
+              <span className="osk-module-icon">
+                <Icon size={20} />
               </span>
-            </div>
-          );
-        })}
-      </div>
+              <span className="osk-module-body">
+                <span className="osk-module-head">
+                  <strong>{group}</strong>
+                </span>
+              </span>
+              <ChevronRight size={18} className="osk-module-chev" />
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="osk-fields">
+          {fieldsToShow.map((field) => {
+            const current = draft[field.id];
+            const currentValue = stringifyValue(current);
+            const changed = draft[field.id] !== values[field.id];
+            const channelOptions = field.type === "channel" && guildOptions?.ok
+              ? channelOptionsForField(field, guildOptions.channels)
+              : null;
+            const roleOptions = field.type === "role" && guildOptions?.ok
+              ? guildOptions.roles.map((role) => ({ value: role.id, label: `@${role.name}` }))
+              : null;
+
+            return (
+              <div
+                key={field.id}
+                className="osk-field"
+                data-type={field.type}
+                data-changed={changed}
+              >
+                <div className="osk-field-head">
+                  <div>
+                    <strong>{field.label}</strong>
+                    {field.description && <small>{field.description}</small>}
+                  </div>
+                  {changed && (
+                    <span className="osk-badge" data-state="changed">
+                      alterado
+                    </span>
+                  )}
+                </div>
+
+                {field.type === "boolean" ? (
+                  <label className="osk-switch">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(current)}
+                      onChange={(event) => onChange(field, event.target.checked)}
+                    />
+                    <span className="osk-switch-track" />
+                    <span className="osk-switch-label">
+                      {Boolean(current) ? "Ligado" : "Desligado"}
+                    </span>
+                  </label>
+                ) : field.type === "select" ? (
+                  <SmartSelect
+                    id={`field-${field.id}`}
+                    value={currentValue}
+                    options={field.options ?? []}
+                    onChange={(next) => onChange(field, next)}
+                    placeholder="Selecione"
+                  />
+                ) : field.type === "channel" && channelOptions ? (
+                  <SmartSelect
+                    id={`field-${field.id}`}
+                    value={currentValue}
+                    options={channelOptions}
+                    onChange={(next) => onChange(field, next === currentValue ? "" : next)}
+                    placeholder="Selecione um canal"
+                    emptyLabel="Nenhum canal encontrado"
+                  />
+                ) : field.type === "role" && roleOptions ? (
+                  <SmartSelect
+                    id={`field-${field.id}`}
+                    value={currentValue}
+                    options={roleOptions}
+                    onChange={(next) => onChange(field, next === currentValue ? "" : next)}
+                    placeholder="Selecione um cargo"
+                    emptyLabel="Nenhum cargo encontrado"
+                  />
+                ) : field.type === "textarea" ? (
+                  <textarea
+                    value={currentValue}
+                    maxLength={field.maxLength}
+                    placeholder={field.placeholder}
+                    onChange={(event) => onChange(field, event.target.value)}
+                  />
+                ) : (
+                  <input
+                    type={field.type === "number" ? "number" : "text"}
+                    min={field.min}
+                    max={field.max}
+                    maxLength={field.maxLength}
+                    value={currentValue}
+                    placeholder={
+                      field.placeholder ??
+                      (field.type === "channel"
+                        ? "ID ou menção do canal"
+                        : field.type === "role"
+                          ? "ID ou menção do cargo"
+                          : field.type === "url"
+                            ? "https://..."
+                            : "")
+                    }
+                    onChange={(event) => onChange(field, event.target.value)}
+                  />
+                )}
+
+                {(field.type === "channel" || field.type === "role") && !channelOptions && !roleOptions && optionsMissingReason && (
+                  <small className="osk-field-warn">
+                    Lista de {field.type === "channel" ? "canais" : "cargos"} indisponível agora
+                    (endpoint /dashboard/guild/:guildId/options — {optionsMissingReason}). Usando ID manual por enquanto.
+                  </small>
+                )}
+
+                <span className="osk-field-hint">
+                  Atual: <strong>{displayValue(field, values[field.id], guildOptions)}</strong>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 }

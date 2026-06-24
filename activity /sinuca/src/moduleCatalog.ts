@@ -104,31 +104,6 @@ export function mergeDashboardModules(summary: DashboardSectionSummary[]): Dashb
   return [...catalog, ...extras];
 }
 
-export function statusClass(
-  summary: { enabled: boolean | null; configured: number; total: number } | undefined,
-): "ready" | "partial" | "pending" | "off" | "neutral" {
-  if (!summary) return "neutral";
-  if (summary.enabled === false) return "off";
-  if (summary.total <= 0) return "pending";
-  if (summary.configured >= summary.total) return "ready";
-  if (summary.configured > 0) return "partial";
-  return "pending";
-}
-
-export function sectionPercent(summary: { configured: number; total: number } | undefined): number {
-  if (!summary || summary.total <= 0) return 0;
-  return Math.round((summary.configured / summary.total) * 100);
-}
-
-export function shortStatusLabel(summary: DashboardSectionSummary | undefined): string {
-  if (!summary) return "—";
-  if (summary.enabled === false) return "Desativado";
-  if (summary.total <= 0) return "Configurar";
-  if (summary.configured >= summary.total) return "Pronto";
-  if (summary.configured > 0) return `${summary.configured}/${summary.total}`;
-  return "Configurar";
-}
-
 export function guildInitials(name: string): string {
   return (
     name

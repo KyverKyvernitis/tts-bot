@@ -7,10 +7,11 @@ interface HomePageProps {
   onOpen(id: string): void;
 }
 
+const HERO_CHIPS = ["Mensagens", "Canais", "Permissões", "Automação", "Aparência"];
+
 export function HomePage({ guildName, modules, onOpen }: HomePageProps) {
   const main = modules.filter((m) => m.group === "main");
   const system = modules.filter((m) => m.group === "system");
-  const totalOptions = modules.reduce((acc, m) => acc + m.total, 0);
 
   return (
     <section className="osk-page">
@@ -20,7 +21,7 @@ export function HomePage({ guildName, modules, onOpen }: HomePageProps) {
             <span className="osk-hero-eyebrow">Painel · {guildName}</span>
             <h1>Configure cada módulo do bot em um lugar.</h1>
             <p>
-              Ajuste recursos, mensagens, canais e permissões do servidor sem sair do painel.
+              Ajuste mensagens, canais, permissões e preferências do servidor.
             </p>
           </div>
           <button className="osk-icon-btn" aria-label="Ajuda">
@@ -28,23 +29,12 @@ export function HomePage({ guildName, modules, onOpen }: HomePageProps) {
           </button>
         </div>
 
-        <div className="osk-hero-stats">
-          <div className="osk-stat">
-            <span className="osk-stat-label">Módulos</span>
-            <span className="osk-stat-value">{modules.length}</span>
-          </div>
-          <div className="osk-stat">
-            <span className="osk-stat-label">Principais</span>
-            <span className="osk-stat-value">{main.length}</span>
-          </div>
-          <div className="osk-stat">
-            <span className="osk-stat-label">Sistema</span>
-            <span className="osk-stat-value">{system.length}</span>
-          </div>
-          <div className="osk-stat">
-            <span className="osk-stat-label">Opções</span>
-            <span className="osk-stat-value">{totalOptions}</span>
-          </div>
+        <div className="osk-hero-chips">
+          {HERO_CHIPS.map((chip) => (
+            <span key={chip} className="osk-chip">
+              {chip}
+            </span>
+          ))}
         </div>
 
         <div className="osk-hero-accent" aria-hidden />
@@ -71,9 +61,6 @@ function ModuleGrid({
       <div className="osk-section-title">
         <LayoutGrid size={14} color="var(--osk-muted)" />
         <h2>{label}</h2>
-        <span className="osk-section-title-count">
-          {modules.length} módulos
-        </span>
         <span className="osk-section-title-line" />
       </div>
       <div className="osk-module-grid">

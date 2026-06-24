@@ -17,6 +17,7 @@ export interface DashboardFieldDefinition {
   max?: number;
   maxLength?: number;
   options?: DashboardFieldOption[];
+  group?: string;
 }
 
 export interface DashboardSectionDefinition {
@@ -24,8 +25,9 @@ export interface DashboardSectionDefinition {
   label: string;
   emoji: string;
   description: string;
+  groups?: string[];
   fields: DashboardFieldDefinition[];
-  actions?: Array<{ id: string; label: string; description?: string }>;
+  actions?: Array<{ id: string; label: string; description?: string; group?: string }>;
 }
 
 export interface DashboardSectionSummary {
