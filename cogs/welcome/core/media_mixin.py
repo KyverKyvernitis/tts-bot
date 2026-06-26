@@ -11,13 +11,14 @@ from pathlib import Path
 import logging
 import random
 import re
+import secrets
 import time
 import urllib.error
 import urllib.request
-import uuid
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import discord
 from discord.ext import commands
@@ -72,6 +73,7 @@ class WelcomeMediaMixin:
                 key = f"{'a' if bool(match.group(1)) else 's'}:{emoji_id}"
                 item = by_key.get(key)
                 if item is not None:
+                    item["occurrences"] = int(item.get("occurrences") or 1) + 1
                     raws = item.setdefault("raw_variants", [])
                     if raw not in raws:
                         raws.append(raw)
@@ -86,6 +88,7 @@ class WelcomeMediaMixin:
                     "animated": bool(match.group(1)),
                     "name": str(match.group(2) or "emoji")[:32],
                     "id": emoji_id,
+                    "occurrences": 1,
                 }
                 by_key[key] = item
                 found.append(item)
@@ -434,51 +437,218 @@ class WelcomeMediaMixin:
         info = await self.bot.application_info()
         return int(info.id)
 
+    def _next_welcome_midnight_utc(self, now: datetime | None = None) -> datetime:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        try:
+            local_tz = ZoneInfo(WELCOME_EMOJI_TIMEZONE)
+        except Exception:
+            local_tz = timezone(timedelta(hours=-3))
+        local_now = current.astimezone(local_tz)
+        local_midnight = (local_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        return local_midnight.astimezone(timezone.utc)
+
+    async def _refresh_application_emoji_state_locked(self, *, force: bool = False) -> list[dict[str, Any]]:
+        cached_at = float(getattr(self, "_application_emoji_state_at", 0.0) or 0.0)
+        cached_items = getattr(self, "_application_emoji_items", None)
+        if not force and isinstance(cached_items, list) and (time.monotonic() - cached_at) < 15.0:
+            return list(cached_items)
+
+        app_id = await self._application_id()
+        from discord.http import Route
+        request = getattr(getattr(self.bot, "http", None), "request", None)
+        if not app_id or not callable(request):
+            return []
+        data = await request(Route("GET", "/applications/{application_id}/emojis", application_id=app_id))
+        raw_items = data.get("items") if isinstance(data, dict) else data
+        items = [dict(item) for item in (raw_items or []) if isinstance(item, dict) and item.get("id")]
+        self._application_emoji_items = items
+        self._application_emoji_names = {str(item.get("name") or "") for item in items if str(item.get("name") or "")}
+        self._application_emoji_count = len(items)
+        self._application_emoji_state_at = time.monotonic()
+        return list(items)
+
+    async def _application_emojis_snapshot(self, *, force: bool = False) -> list[dict[str, Any]]:
+        lock = getattr(self, "_emoji_api_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._emoji_api_lock = lock
+        async with lock:
+            return await self._refresh_application_emoji_state_locked(force=force)
+
+    def _numeric_application_emoji_name_locked(self) -> str:
+        existing = set(getattr(self, "_application_emoji_names", set()) or set())
+        reserved = set(getattr(self, "_emoji_name_reservations", set()) or set())
+        for _ in range(200):
+            candidate = f"{secrets.randbelow(1_000_000):06d}"
+            if candidate not in existing and candidate not in reserved:
+                reserved.add(candidate)
+                self._emoji_name_reservations = reserved
+                return candidate
+        raise RuntimeError("não consegui reservar nome numérico para application emoji")
+
     async def _create_application_emoji(self, *, name: str, data_b64: str, fmt: str) -> dict[str, Any] | None:
+        del name  # O nome público é sempre um número aleatório de seis dígitos.
+        lock = getattr(self, "_emoji_api_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._emoji_api_lock = lock
+        reserved_name = ""
         try:
             app_id = await self._application_id()
             if not app_id:
                 return None
             fmt = "gif" if str(fmt or "").lower() == "gif" else "png"
             image_data = f"data:image/{fmt};base64,{data_b64}"
-            clean_name = re.sub(r"[^A-Za-z0-9_]+", "_", str(name or "cwemoji"))[:26].strip("_") or "cwemoji"
-            clean_name = f"cw_{clean_name}_{uuid.uuid4().hex[:5]}"[:32]
             from discord.http import Route
             request = getattr(getattr(self.bot, "http", None), "request", None)
             if not callable(request):
                 return None
-            data = await request(Route("POST", "/applications/{application_id}/emojis", application_id=app_id), json={"name": clean_name, "image": image_data})
-            if not isinstance(data, dict) or not data.get("id"):
-                return None
-            return {"id": str(data.get("id")), "name": str(data.get("name") or clean_name), "animated": bool(data.get("animated"))}
+
+            async with lock:
+                await self._refresh_application_emoji_state_locked()
+                current_count = int(getattr(self, "_application_emoji_count", 0) or 0)
+                usable_limit = max(0, WELCOME_APPLICATION_EMOJI_LIMIT - WELCOME_APPLICATION_EMOJI_RESERVED_SLOTS)
+                if current_count >= usable_limit:
+                    last_warning = float(getattr(self, "_emoji_capacity_warning_at", 0.0) or 0.0)
+                    if (time.monotonic() - last_warning) >= 60.0:
+                        log.warning(
+                            "application emojis sem margem para boas-vindas: total=%s limite_operacional=%s; usando emojis originais",
+                            current_count,
+                            usable_limit,
+                        )
+                        self._emoji_capacity_warning_at = time.monotonic()
+                    return None
+
+                reserved_name = self._numeric_application_emoji_name_locked()
+                try:
+                    data = await request(
+                        Route("POST", "/applications/{application_id}/emojis", application_id=app_id),
+                        json={"name": reserved_name, "image": image_data},
+                    )
+                finally:
+                    reservations = set(getattr(self, "_emoji_name_reservations", set()) or set())
+                    reservations.discard(reserved_name)
+                    self._emoji_name_reservations = reservations
+
+                if not isinstance(data, dict) or not data.get("id"):
+                    return None
+                created = {
+                    "id": str(data.get("id")),
+                    "name": str(data.get("name") or reserved_name),
+                    "animated": bool(data.get("animated")),
+                }
+                items = list(getattr(self, "_application_emoji_items", []) or [])
+                items.append(created)
+                self._application_emoji_items = items
+                names = set(getattr(self, "_application_emoji_names", set()) or set())
+                names.add(created["name"])
+                self._application_emoji_names = names
+                self._application_emoji_count = current_count + 1
+                self._application_emoji_state_at = time.monotonic()
+                return created
         except Exception as exc:
+            if reserved_name:
+                reservations = set(getattr(self, "_emoji_name_reservations", set()) or set())
+                reservations.discard(reserved_name)
+                self._emoji_name_reservations = reservations
+            code = int(getattr(exc, "code", 0) or 0)
+            if code == 30008:
+                self._application_emoji_state_at = 0.0
             log.warning("não consegui criar application emoji temporário de boas-vindas: %r", exc)
             return None
 
-    async def _record_temp_emoji(self, *, guild_id: int, member_id: int, emoji: dict[str, Any], message_id: int = 0) -> None:
+    async def _record_temp_emoji(
+        self,
+        *,
+        guild_id: int,
+        member_id: int,
+        emoji: dict[str, Any],
+        message_id: int = 0,
+        preview: bool = False,
+    ) -> bool:
         db = self.db
         if db is None or not hasattr(db, "coll"):
-            return
+            log.warning("não registrei application emoji de boas-vindas: settings_db indisponível")
+            return False
+        emoji_id = str(emoji.get("id") or "")
+        if not re.fullmatch(r"\d{15,25}", emoji_id):
+            return False
         now = datetime.now(timezone.utc)
-        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         doc = {
             "type": WELCOME_DOC_EMOJI,
             "guild_id": int(guild_id or 0),
+            # A coleção settings possui índice único em (guild_id, user_id, type).
+            # Usar o snowflake do próprio emoji impede que apenas o primeiro emoji do
+            # servidor seja persistido com user_id=null.
+            "user_id": int(emoji_id),
             "member_id": int(member_id or 0),
             "message_id": int(message_id or 0),
-            "emoji_id": str(emoji.get("id") or ""),
+            "emoji_id": emoji_id,
             "emoji_name": str(emoji.get("name") or ""),
             "animated": bool(emoji.get("animated")),
+            "preview": bool(preview),
             "created_at": now,
-            "delete_after": midnight,
+            "delete_after": self._next_welcome_midnight_utc(now),
             "status": "active",
         }
-        if doc["emoji_id"]:
-            with contextlib.suppress(Exception):
-                await db.coll.insert_one(doc)
+        try:
+            await db.coll.update_one(
+                {"type": WELCOME_DOC_EMOJI, "guild_id": doc["guild_id"], "user_id": doc["user_id"]},
+                {"$set": doc, "$unset": {"deleted_at": "", "delete_reason": ""}},
+                upsert=True,
+            )
+            return True
+        except Exception as exc:
+            log.warning("não consegui registrar application emoji temporário %s: %r", emoji_id, exc)
+            return False
+
+    def _temp_emoji_ids_from_config(self, cfg: dict[str, Any] | None) -> list[str]:
+        result: list[str] = []
+        for raw in (cfg or {}).get(WELCOME_TEMP_EMOJI_IDS_KEY, []) or []:
+            emoji_id = str(raw or "")
+            if re.fullmatch(r"\d{15,25}", emoji_id) and emoji_id not in result:
+                result.append(emoji_id)
+        return result
+
+    async def _remove_temp_emoji_records(self, emoji_ids: list[str]) -> None:
+        ids = [str(raw) for raw in emoji_ids if re.fullmatch(r"\d{15,25}", str(raw or ""))]
+        if not ids:
+            return
+        db = self.db
+        if db is None or not hasattr(db, "coll"):
+            return
+        with contextlib.suppress(Exception):
+            await db.coll.delete_many({"type": WELCOME_DOC_EMOJI, "emoji_id": {"$in": ids}})
+
+    async def _discard_temp_emojis(self, emoji_ids: list[str], *, reason: str) -> None:
+        ids = []
+        for raw in emoji_ids or []:
+            emoji_id = str(raw or "")
+            if re.fullmatch(r"\d{15,25}", emoji_id) and emoji_id not in ids:
+                ids.append(emoji_id)
+        if not ids:
+            return
+        deleted: list[str] = []
+        failed = 0
+        for emoji_id in ids:
+            if await self._delete_application_emoji(emoji_id):
+                deleted.append(emoji_id)
+            else:
+                failed += 1
+        if deleted:
+            await self._remove_temp_emoji_records(deleted)
+        log.debug(
+            "[welcome-emojis] descarte reason=%s deleted=%s failed=%s",
+            reason,
+            len(deleted),
+            failed,
+        )
 
     async def _prepare_decorative_emojis(self, config: dict[str, Any], *, member: discord.Member | None, mode: str, dm: bool = False, invite_info: dict[str, Any] | None = None, preview: bool = False) -> dict[str, Any]:
         cfg = self._normalize_config(config)
+        cfg.pop(WELCOME_TEMP_EMOJI_IDS_KEY, None)
         if dm or member is None or not bool(cfg.get("decorative_emoji_enabled", False)):
             return cfg
         effective_limit = await self._decorative_emoji_limit_for_member(member)
@@ -492,9 +662,8 @@ class WelcomeMediaMixin:
         emoji_palette = self._subtle_emoji_palette(base_rgb, avatar_palette)
         emoji_palette_hex = self._hex_palette_from_rgb(emoji_palette)
 
-        # O worker pode devolver só parte dos emojis (ex.: o segundo asset animado falhou).
-        # Nesse caso, tentamos completar localmente apenas os que faltaram. O fallback é por
-        # emoji individual: o que não tiver replacement confirmado permanece original.
+        # O worker pode devolver só parte dos emojis. O que faltar é processado
+        # localmente; qualquer falha individual mantém o emoji original completo.
         processed_by_key: dict[str, dict[str, Any]] = {}
         worker_items = await self._worker_recolor_emojis(emojis, color_hex=color_hex, palette_hex=emoji_palette_hex, limit=effective_limit, monochrome=self._palette_is_mostly_monochrome(emoji_palette))
         for item in worker_items or []:
@@ -514,54 +683,99 @@ class WelcomeMediaMixin:
             return cfg
 
         replacements: dict[str, str] = {}
-        created_for_tracking: list[dict[str, Any]] = []
-        for original in emojis:
-            key = str(original.get("key") or "")
-            item = processed_by_key.get(key)
-            if not item:
-                continue
-            emoji_id = str(original.get("id") or item.get("id") or "")
-            if not re.fullmatch(r"\d{15,25}", emoji_id):
-                continue
-            normalized_item = await self._normalize_emoji_upload_item(item)
-            if normalized_item is None:
-                # Falhou? Mantém esse emoji base original em todas as ocorrências.
-                continue
-            created = await self._create_application_emoji(name=str(normalized_item.get("name") or item.get("name") or original.get("name") or "cwemoji"), data_b64=str(normalized_item.get("data_b64") or ""), fmt=str(normalized_item.get("format") or "png"))
-            if not created:
-                # Falhou? Mantém esse emoji base original em todas as ocorrências.
-                continue
-            # Use somente o tipo real do emoji criado. Se a animação caiu para PNG,
-            # o token precisa ser estático; usar <a:...> para emoji estático pode renderizar estranho.
-            animated = bool(created.get("animated")) or str(normalized_item.get("format") or "").lower() == "gif"
-            replacement = f"<a:{created.get('name')}:{created.get('id')}>" if animated else f"<:{created.get('name')}:{created.get('id')}>"
-            # Troca global por ID para cobrir nomes diferentes e todas as ocorrências.
-            replacements[f"id:{emoji_id}"] = replacement
-            # Compatibilidade: também troca os tokens raw conhecidos.
-            raws = item.get("raw_variants") if isinstance(item.get("raw_variants"), list) else original.get("raw_variants")
-            if not isinstance(raws, list) or not raws:
-                raws = [item.get("raw") or original.get("raw")]
-            for raw in [str(raw or "") for raw in raws if str(raw or "")]:
-                replacements[raw] = replacement
-            created_for_tracking.append(created)
+        created_ids: list[str] = []
+        replaced_keys: set[str] = set()
+        try:
+            for original in emojis:
+                key = str(original.get("key") or "")
+                item = processed_by_key.get(key)
+                if not item:
+                    continue
+                emoji_id = str(original.get("id") or item.get("id") or "")
+                if not re.fullmatch(r"\d{15,25}", emoji_id):
+                    continue
+                normalized_item = await self._normalize_emoji_upload_item(item)
+                if normalized_item is None:
+                    continue
+                created = await self._create_application_emoji(
+                    name=str(normalized_item.get("name") or item.get("name") or original.get("name") or "emoji"),
+                    data_b64=str(normalized_item.get("data_b64") or ""),
+                    fmt=str(normalized_item.get("format") or "png"),
+                )
+                if not created:
+                    continue
+                created_id = str(created.get("id") or "")
+                tracked = await self._record_temp_emoji(
+                    guild_id=int(getattr(member.guild, "id", 0) or 0),
+                    member_id=int(getattr(member, "id", 0) or 0),
+                    emoji=created,
+                    preview=preview,
+                )
+                if not tracked:
+                    await self._delete_application_emoji(created_id)
+                    continue
+
+                animated = bool(created.get("animated")) or str(normalized_item.get("format") or "").lower() == "gif"
+                replacement = f"<a:{created.get('name')}:{created_id}>" if animated else f"<:{created.get('name')}:{created_id}>"
+                replacements[f"id:{emoji_id}"] = replacement
+                raws = item.get("raw_variants") if isinstance(item.get("raw_variants"), list) else original.get("raw_variants")
+                if not isinstance(raws, list) or not raws:
+                    raws = [item.get("raw") or original.get("raw")]
+                for raw in [str(raw or "") for raw in raws if str(raw or "")]:
+                    replacements[raw] = replacement
+                created_ids.append(created_id)
+                replaced_keys.add(key)
+        except asyncio.CancelledError:
+            if created_ids:
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(self._discard_temp_emojis(created_ids, reason="prepare_failed"))
+            raise
+        except Exception:
+            if created_ids:
+                await self._discard_temp_emojis(created_ids, reason="prepare_failed")
+            raise
 
         if not replacements:
             return cfg
         cfg = self._replace_emoji_tokens_in_config(cfg, replacements, mode=mode, dm=dm)
-        for created in created_for_tracking:
-            await self._record_temp_emoji(guild_id=int(getattr(member.guild, "id", 0) or 0), member_id=int(getattr(member, "id", 0) or 0), emoji=created)
+        cfg[WELCOME_TEMP_EMOJI_IDS_KEY] = list(created_ids)
+        reused = sum(max(0, int(item.get("occurrences") or 1) - 1) for item in emojis if str(item.get("key") or "") in replaced_keys)
+        log.debug(
+            "[welcome-emojis] unique=%s created=%s reused=%s fallback=%s preview=%s",
+            len(emojis),
+            len(created_ids),
+            reused,
+            max(0, len(emojis) - len(created_ids)),
+            bool(preview),
+        )
         return cfg
 
     async def _delete_application_emoji(self, emoji_id: str) -> bool:
+        try:
+            parsed_id = int(str(emoji_id or ""))
+        except Exception:
+            return False
+        lock = getattr(self, "_emoji_api_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._emoji_api_lock = lock
         try:
             app_id = await self._application_id()
             from discord.http import Route
             request = getattr(getattr(self.bot, "http", None), "request", None)
             if not callable(request):
                 return False
-            await request(Route("DELETE", "/applications/{application_id}/emojis/{emoji_id}", application_id=app_id, emoji_id=int(emoji_id)))
+            async with lock:
+                await request(Route("DELETE", "/applications/{application_id}/emojis/{emoji_id}", application_id=app_id, emoji_id=parsed_id))
+                current_count = getattr(self, "_application_emoji_count", None)
+                if isinstance(current_count, int) and current_count > 0:
+                    self._application_emoji_count = current_count - 1
+                items = list(getattr(self, "_application_emoji_items", []) or [])
+                self._application_emoji_items = [item for item in items if str(item.get("id") or "") != str(parsed_id)]
+                self._application_emoji_state_at = time.monotonic()
             return True
         except discord.NotFound:
+            self._application_emoji_state_at = 0.0
             return True
         except Exception as exc:
             log.debug("não consegui apagar emoji temporário de boas-vindas %s: %r", emoji_id, exc)
@@ -572,32 +786,80 @@ class WelcomeMediaMixin:
         if db is None or not hasattr(db, "coll"):
             return
         now = datetime.now(timezone.utc)
+        deleted = 0
+        missing_id = 0
+        failed = 0
         try:
-            cursor = db.coll.find({"type": WELCOME_DOC_EMOJI, "status": "active", "delete_after": {"$lte": now}}, {"_id": 1, "emoji_id": 1})
+            cursor = db.coll.find(
+                {"type": WELCOME_DOC_EMOJI, "status": "active", "delete_after": {"$lte": now}},
+                {"_id": 1, "emoji_id": 1},
+            )
             async for doc in cursor:
                 emoji_id = str(doc.get("emoji_id") or "")
-                if not emoji_id:
-                    await db.coll.update_one({"_id": doc.get("_id")}, {"$set": {"status": "deleted", "deleted_at": now}})
+                if not re.fullmatch(r"\d{15,25}", emoji_id):
+                    missing_id += 1
+                    await db.coll.delete_one({"_id": doc.get("_id")})
                     continue
                 ok = await self._delete_application_emoji(emoji_id)
                 if ok:
-                    await db.coll.update_one({"_id": doc.get("_id")}, {"$set": {"status": "deleted", "deleted_at": now}})
+                    deleted += 1
+                    await db.coll.delete_one({"_id": doc.get("_id")})
                 else:
-                    await asyncio.sleep(2.0)
-                await asyncio.sleep(0.35)
+                    failed += 1
+            # Remove registros encerrados pelo mecanismo antigo para a coleção não
+            # crescer indefinidamente após cada limpeza diária.
+            await db.coll.delete_many({"type": WELCOME_DOC_EMOJI, "status": "deleted"})
+            if deleted or missing_id or failed:
+                log.info(
+                    "[welcome-emojis] limpeza da meia-noite deleted=%s missing=%s failed=%s",
+                    deleted,
+                    missing_id,
+                    failed,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.debug("purge de emojis temporários de boas-vindas falhou: %r", exc)
+            log.warning("purge de emojis temporários de boas-vindas falhou: %r", exc)
+
+    async def _purge_legacy_welcome_emojis_once(self) -> None:
+        try:
+            items = await self._application_emojis_snapshot(force=True)
+        except Exception as exc:
+            log.warning("não consegui listar application emojis antigos de boas-vindas: %r", exc)
+            return
+        legacy = [item for item in items if str(item.get("name") or "").startswith(WELCOME_LEGACY_EMOJI_PREFIX)]
+        if not legacy:
+            return
+        log.info("[welcome-emojis] removendo %s emoji(s) legado(s) com prefixo %s", len(legacy), WELCOME_LEGACY_EMOJI_PREFIX)
+        deleted_ids: list[str] = []
+        failed = 0
+        for index, item in enumerate(legacy, start=1):
+            emoji_id = str(item.get("id") or "")
+            if emoji_id and await self._delete_application_emoji(emoji_id):
+                deleted_ids.append(emoji_id)
+            else:
+                failed += 1
+            if index % 100 == 0:
+                log.info("[welcome-emojis] migração antiga %s/%s", index, len(legacy))
+            await asyncio.sleep(0.05)
+        if deleted_ids:
+            await self._remove_temp_emoji_records(deleted_ids)
+        log.info("[welcome-emojis] migração antiga concluída deleted=%s failed=%s", len(deleted_ids), failed)
 
     async def _emoji_midnight_purge_loop(self) -> None:
         try:
-            await asyncio.sleep(20)
-            await self._purge_temp_emojis_once()
+            await asyncio.sleep(10)
+            await self._purge_legacy_welcome_emojis_once()
             while True:
-                now = datetime.now()
-                tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                await asyncio.sleep(max(60.0, (tomorrow - now).total_seconds()))
-                await self._purge_temp_emojis_once()
+                try:
+                    await self._purge_temp_emojis_once()
+                    now = datetime.now(timezone.utc)
+                    midnight = self._next_welcome_midnight_utc(now)
+                    await asyncio.sleep(max(1.0, (midnight - now).total_seconds()) + 1.0)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.warning("ciclo de limpeza de application emojis falhou; tentando novamente: %r", exc)
+                    await asyncio.sleep(60)
         except asyncio.CancelledError:
             return

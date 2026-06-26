@@ -41,26 +41,37 @@ class WelcomeDeliveryMixin:
             cfg = await self._prepare_decorative_emojis(cfg, member=member, mode=mode, dm=dm, invite_info=invite_info)
         except Exception as exc:
             log.warning("falha ao preparar emojis de boas-vindas; mantendo originais: %r", exc)
+        prepared_emoji_ids = self._temp_emoji_ids_from_config(cfg)
         try:
-            cfg, files = await self._prepare_dynamic_media(cfg, member=member, mode=mode, dm=dm)
-        except Exception as exc:
-            log.warning("falha ao montar mídia de boas-vindas; enviando sem imagem dinâmica: %r", exc)
-            cfg, files = self._drop_dynamic_star_media(cfg, mode=mode), []
-        allowed = discord.AllowedMentions.none() if dm else discord.AllowedMentions(users=True, roles=False, everyone=False)
-        if mode == "embed":
-            content, embed = self._make_embed_payload(cfg, member=member, guild_id=member.guild.id, dm=dm, invite_info=invite_info)
-            kwargs: dict[str, Any] = {"embed": embed, "allowed_mentions": allowed}
-            if content:
-                kwargs["content"] = content
+            try:
+                cfg, files = await self._prepare_dynamic_media(cfg, member=member, mode=mode, dm=dm)
+            except Exception as exc:
+                log.warning("falha ao montar mídia de boas-vindas; enviando sem imagem dinâmica: %r", exc)
+                cfg, files = self._drop_dynamic_star_media(cfg, mode=mode), []
+            allowed = discord.AllowedMentions.none() if dm else discord.AllowedMentions(users=True, roles=False, everyone=False)
+            if mode == "embed":
+                content, embed = self._make_embed_payload(cfg, member=member, guild_id=member.guild.id, dm=dm, invite_info=invite_info)
+                kwargs: dict[str, Any] = {"embed": embed, "allowed_mentions": allowed}
+                if content:
+                    kwargs["content"] = content
+                if files:
+                    kwargs["files"] = files
+                return await destination.send(**kwargs)
+            if mode == "normal":
+                return await destination.send(content=self._make_normal_content(cfg, member=member, guild_id=member.guild.id, dm=dm, invite_info=invite_info), allowed_mentions=allowed)
+            kwargs: dict[str, Any] = {"view": self._make_components_view(cfg, member=member, dm=dm, invite_info=invite_info), "allowed_mentions": allowed}
             if files:
                 kwargs["files"] = files
             return await destination.send(**kwargs)
-        if mode == "normal":
-            return await destination.send(content=self._make_normal_content(cfg, member=member, guild_id=member.guild.id, dm=dm, invite_info=invite_info), allowed_mentions=allowed)
-        kwargs: dict[str, Any] = {"view": self._make_components_view(cfg, member=member, dm=dm, invite_info=invite_info), "allowed_mentions": allowed}
-        if files:
-            kwargs["files"] = files
-        return await destination.send(**kwargs)
+        except asyncio.CancelledError:
+            if prepared_emoji_ids:
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(self._discard_temp_emojis(prepared_emoji_ids, reason="send_cancelled"))
+            raise
+        except Exception:
+            if prepared_emoji_ids:
+                await self._discard_temp_emojis(prepared_emoji_ids, reason="send_failed")
+            raise
 
     def _avatar_url_for(self, mode: str, *, member: discord.Member, guild: discord.Guild, invite_info: dict[str, Any] | None, custom_url: str = "") -> str:
         if mode == "custom" and custom_url:
@@ -150,25 +161,28 @@ class WelcomeDeliveryMixin:
             cfg = await self._prepare_decorative_emojis(cfg, member=member, mode=mode, dm=False, invite_info=invite_info)
         except Exception as exc:
             log.warning("falha ao preparar emojis de webhook de boas-vindas; mantendo originais: %r", exc)
+        prepared_emoji_ids = self._temp_emoji_ids_from_config(cfg)
+        published = False
         try:
-            cfg, files = await self._prepare_dynamic_media(cfg, member=member, mode=mode, dm=False)
-        except Exception as exc:
-            log.warning("falha ao montar mídia de webhook de boas-vindas; enviando sem imagem dinâmica: %r", exc)
-            cfg, files = self._drop_dynamic_star_media(cfg, mode=mode), []
-        webhook = await self._create_or_get_welcome_webhook(channel, webhook_cfg)
-        if webhook is None:
-            return False, None
-        name = self._webhook_username_for(str(webhook_cfg.get("name_mode") or "fixed"), member=member, guild=member.guild, invite_info=invite_info, fixed=str(webhook_cfg.get("name") or DEFAULT_WEBHOOK_NAME))
-        avatar_url = self._avatar_url_for(str(webhook_cfg.get("avatar_mode") or "server"), member=member, guild=member.guild, invite_info=invite_info, custom_url=str(webhook_cfg.get("avatar_url") or ""))
-        allowed = discord.AllowedMentions(users=True, roles=False, everyone=False)
-        kwargs: dict[str, Any] = {"username": name, "allowed_mentions": allowed, "wait": bool(wait)}
-        if avatar_url:
-            kwargs["avatar_url"] = avatar_url
-        if isinstance(channel, discord.Thread):
-            kwargs["thread"] = channel
-        if files:
-            kwargs["files"] = files
-        try:
+            try:
+                cfg, files = await self._prepare_dynamic_media(cfg, member=member, mode=mode, dm=False)
+            except Exception as exc:
+                log.warning("falha ao montar mídia de webhook de boas-vindas; enviando sem imagem dinâmica: %r", exc)
+                cfg, files = self._drop_dynamic_star_media(cfg, mode=mode), []
+            webhook = await self._create_or_get_welcome_webhook(channel, webhook_cfg)
+            if webhook is None:
+                return False, None
+            name = self._webhook_username_for(str(webhook_cfg.get("name_mode") or "fixed"), member=member, guild=member.guild, invite_info=invite_info, fixed=str(webhook_cfg.get("name") or DEFAULT_WEBHOOK_NAME))
+            avatar_url = self._avatar_url_for(str(webhook_cfg.get("avatar_mode") or "server"), member=member, guild=member.guild, invite_info=invite_info, custom_url=str(webhook_cfg.get("avatar_url") or ""))
+            allowed = discord.AllowedMentions(users=True, roles=False, everyone=False)
+            kwargs: dict[str, Any] = {"username": name, "allowed_mentions": allowed, "wait": bool(wait)}
+            if avatar_url:
+                kwargs["avatar_url"] = avatar_url
+            if isinstance(channel, discord.Thread):
+                kwargs["thread"] = channel
+            if files:
+                kwargs["files"] = files
+
             message = None
             if mode == "embed":
                 content, embed = self._make_embed_payload(cfg, member=member, guild_id=member.guild.id, invite_info=invite_info)
@@ -179,12 +193,21 @@ class WelcomeDeliveryMixin:
                 message = await webhook.send(content=self._make_normal_content(cfg, member=member, guild_id=member.guild.id, invite_info=invite_info), **kwargs)
             else:
                 message = await webhook.send(view=self._make_components_view(cfg, member=member, invite_info=invite_info), **kwargs)
+            published = True
             return True, message if isinstance(message, discord.Message) else None
+        except asyncio.CancelledError:
+            raise
         except TypeError:
             # Algumas versões aceitam webhook sem view V2. Se acontecer, usa o bot no canal.
             return False, None
         except discord.HTTPException:
             return False, None
+        finally:
+            if not published and prepared_emoji_ids:
+                try:
+                    await asyncio.shield(self._discard_temp_emojis(prepared_emoji_ids, reason="webhook_failed"))
+                except Exception:
+                    pass
 
     def _welcome_utc_now(self) -> datetime:
         return datetime.now(timezone.utc)

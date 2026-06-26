@@ -45,6 +45,13 @@ class WelcomeCog(WelcomeRulesMixin, WelcomeDeliveryMixin, WelcomeMediaMixin, Wel
         self.bot = bot
         self._warmup_task: asyncio.Task | None = None
         self._emoji_purge_task: asyncio.Task | None = None
+        self._emoji_api_lock = asyncio.Lock()
+        self._emoji_name_reservations: set[str] = set()
+        self._application_emoji_items: list[dict[str, Any]] = []
+        self._application_emoji_names: set[str] = set()
+        self._application_emoji_count: int | None = None
+        self._application_emoji_state_at = 0.0
+        self._emoji_capacity_warning_at = 0.0
         self._emoji_worker_active: dict[str, int] = {}
         self._avatar_color_cache: dict[str, str] = {}
         self._avatar_palette_cache: dict[str, list[tuple[int, int, int]]] = {}

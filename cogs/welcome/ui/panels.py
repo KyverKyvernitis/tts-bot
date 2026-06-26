@@ -117,13 +117,15 @@ class WelcomeAdminView(discord.ui.LayoutView):
             cfg = await self.cog._prepare_decorative_emojis(cfg, member=member, mode=mode, dm=dm, invite_info=None, preview=True)
         except Exception as exc:
             log.warning("falha ao preparar emojis do preview de boas-vindas; mantendo originais: %r", exc)
+        prepared_emoji_ids = self.cog._temp_emoji_ids_from_config(cfg)
+        published = False
         try:
-            cfg, files = await self.cog._prepare_dynamic_media(cfg, member=member, mode=mode, dm=dm)
-        except Exception as exc:
-            log.warning("falha ao montar mídia do preview de boas-vindas; usando preview sem imagem dinâmica: %r", exc)
-            cfg, files = self.cog._drop_dynamic_star_media(cfg, mode=mode), []
-        allowed = discord.AllowedMentions.none()
-        try:
+            try:
+                cfg, files = await self.cog._prepare_dynamic_media(cfg, member=member, mode=mode, dm=dm)
+            except Exception as exc:
+                log.warning("falha ao montar mídia do preview de boas-vindas; usando preview sem imagem dinâmica: %r", exc)
+                cfg, files = self.cog._drop_dynamic_star_media(cfg, mode=mode), []
+            allowed = discord.AllowedMentions.none()
             if mode == "embed":
                 content, embed = self.cog._make_embed_payload(cfg, member=member, guild_id=self.guild_id, dm=dm)
                 kwargs: dict[str, Any] = {"embed": embed, "ephemeral": True, "allowed_mentions": allowed}
@@ -132,10 +134,12 @@ class WelcomeAdminView(discord.ui.LayoutView):
                 if files:
                     kwargs["files"] = files
                 await interaction.followup.send(**kwargs)
+                published = True
                 return
             if mode == "normal":
                 content = self.cog._make_normal_content(cfg, member=member, guild_id=self.guild_id, dm=dm)
                 await interaction.followup.send(content=content, ephemeral=True, allowed_mentions=allowed)
+                published = True
                 return
             view = discord.ui.LayoutView(timeout=None)
             view.add_item(self.cog._make_welcome_container(cfg, member=member, guild_id=self.guild_id, dm=dm))
@@ -143,13 +147,20 @@ class WelcomeAdminView(discord.ui.LayoutView):
             if files:
                 kwargs["files"] = files
             await interaction.followup.send(**kwargs)
-        except Exception as exc:
+            published = True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
             log.exception("falha ao enviar preview de boas-vindas")
             with contextlib.suppress(Exception):
                 await interaction.followup.send(
-                    view=_make_notice_view("Preview indisponível", "Não consegui montar a prévia agora. A mensagem real continua protegida por fallback." , ok=False),
+                    view=_make_notice_view("Preview indisponível", "Não consegui montar a prévia agora. A mensagem real continua protegida por fallback.", ok=False),
                     ephemeral=True,
                 )
+        finally:
+            if not published and prepared_emoji_ids:
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(self.cog._discard_temp_emojis(prepared_emoji_ids, reason="preview_failed"))
 
     async def update_rule(self, rule_id: str, updates: dict[str, Any], notice: str) -> bool:
         cfg = deepcopy(self.config)
