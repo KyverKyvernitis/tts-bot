@@ -1,0 +1,31 @@
+POLÍTICA DE PRIVACIDADE
+
+Última atualização: 25 de junho de 2026
+
+Esta política explica de forma simples como o bot pode tratar dados necessários para funcionar.
+
+1. Dados que podem ser processados
+O bot pode processar identificadores do Discord, como ID de usuário, servidor, canal, mensagem e cargo, além de configurações salvas pelos administradores do servidor.
+
+Dependendo dos recursos usados, o bot também pode processar conteúdo enviado em comandos, formulários, mensagens ou interações.
+
+2. Finalidade
+Esses dados são usados somente para executar recursos do bot, manter configurações, prevenir abuso, corrigir erros e melhorar a estabilidade do serviço.
+
+3. Armazenamento
+Alguns dados podem ser armazenados enquanto forem necessários para o funcionamento do recurso correspondente. Registros técnicos podem ser mantidos temporariamente para diagnóstico e segurança.
+
+4. Compartilhamento
+Os dados podem ser processados por serviços necessários ao funcionamento do bot e pelo próprio Discord. O tratamento feito pelo Discord segue os termos e a política de privacidade da plataforma.
+
+5. Exclusão de dados
+Usuários e administradores podem solicitar a exclusão de dados relacionados ao bot pelos canais de suporte informados na página oficial.
+
+6. Segurança
+São adotadas medidas razoáveis para proteger os dados, mas nenhum sistema é totalmente livre de riscos.
+
+7. Alterações nesta política
+Esta política pode ser atualizada quando necessário. A versão mais recente será disponibilizada no mesmo endereço.
+
+8. Contato
+Dúvidas ou solicitações de privacidade devem ser enviadas pelos canais de suporte informados na página oficial do bot.

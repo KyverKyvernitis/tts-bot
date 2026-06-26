@@ -1,0 +1,23 @@
+TERMOS DE SERVIÇO
+
+Última atualização: 25 de junho de 2026
+
+Ao usar este bot, você concorda com estes termos.
+
+1. Uso do bot
+O bot deve ser usado de forma legal e de acordo com as regras do Discord e dos servidores em que estiver presente.
+
+2. Uso indevido
+Não é permitido usar o bot para spam, abuso, fraude, assédio, exploração de falhas ou qualquer atividade que prejudique outras pessoas, servidores ou serviços.
+
+3. Disponibilidade
+O bot pode ficar indisponível, receber alterações ou ter recursos removidos a qualquer momento. Não há garantia de funcionamento contínuo ou livre de erros.
+
+4. Responsabilidade
+O uso do bot é por sua conta e risco. O responsável pelo bot não se responsabiliza por perdas, danos, punições em servidores ou problemas causados por uso incorreto, configurações inadequadas ou indisponibilidade do serviço.
+
+5. Alterações nestes termos
+Estes termos podem ser atualizados quando necessário. O uso contínuo do bot após uma alteração significa que você aceita a versão atualizada.
+
+6. Contato
+Dúvidas ou solicitações devem ser enviadas pelos canais de suporte informados na página oficial do bot.
