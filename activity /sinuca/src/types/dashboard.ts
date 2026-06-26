@@ -5,6 +5,23 @@ export interface DashboardFieldOption {
   label: string;
 }
 
+export type DashboardTemplateSyntax = "curly" | "dollar_curly";
+
+export interface DashboardTemplateVariable {
+  key: string;
+  label: string;
+}
+
+export interface DashboardTemplateVariables {
+  syntax: DashboardTemplateSyntax;
+  items: DashboardTemplateVariable[];
+}
+
+export interface DashboardGroupMetadata {
+  kind?: "message";
+  variables?: DashboardTemplateVariables;
+}
+
 export interface DashboardFieldDefinition {
   id: string;
   label: string;
@@ -26,6 +43,7 @@ export interface DashboardSectionDefinition {
   emoji: string;
   description: string;
   groups?: string[];
+  groupMetadata?: Record<string, DashboardGroupMetadata>;
   fields: DashboardFieldDefinition[];
   actions?: Array<{ id: string; label: string; description?: string; group?: string }>;
 }

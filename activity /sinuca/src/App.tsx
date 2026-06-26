@@ -261,6 +261,7 @@ export default function App() {
   const [loadingServers, setLoadingServers] = useState(false);
   const [showServerPicker, setShowServerPicker] = useState(false);
   const [guildOptions, setGuildOptions] = useState<DashboardOptionsPayload | null>(null);
+  const [messageEditorActive, setMessageEditorActive] = useState(false);
 
   const activityGuildId = bootstrap.context.guildId;
   const guildId = runtimeMode === "browser"
@@ -913,12 +914,16 @@ export default function App() {
               values={values}
               draft={draft}
               guildOptions={guildOptions}
+              hasUnsavedChanges={changedFields.length > 0}
+              applying={saving}
               onChange={updateDraft}
+              onApply={saveSection}
+              onMessageEditorActiveChange={setMessageEditorActive}
               onBack={() => setDashboardView("home")}
             />
           )}
 
-          {authState === "ready" && selectedSection && (
+          {authState === "ready" && selectedSection && !messageEditorActive && (
             <SaveDock
               changedCount={changedFields.length}
               sectionLabel={selectedSection.label}

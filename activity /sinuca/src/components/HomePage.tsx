@@ -7,7 +7,7 @@ interface HomePageProps {
   onOpen(id: string): void;
 }
 
-const HERO_CHIPS = ["Mensagens", "Canais", "Permissões", "Automação", "Aparência"];
+const HERO_CHIPS = ["TTS", "Chatbot", "Boas-vindas", "Cores", "Tickets"];
 
 export function HomePage({ guildName, modules, onOpen }: HomePageProps) {
   const main = modules.filter((m) => m.group === "main");

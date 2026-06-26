@@ -8,6 +8,23 @@ export interface DashboardFieldOption {
   label: string;
 }
 
+export type DashboardTemplateSyntax = "curly" | "dollar_curly";
+
+export interface DashboardTemplateVariable {
+  key: string;
+  label: string;
+}
+
+export interface DashboardTemplateVariables {
+  syntax: DashboardTemplateSyntax;
+  items: DashboardTemplateVariable[];
+}
+
+export interface DashboardGroupMetadata {
+  kind?: "message";
+  variables?: DashboardTemplateVariables;
+}
+
 export interface DashboardFieldDefinition {
   id: string;
   label: string;
@@ -29,6 +46,7 @@ export interface DashboardSectionDefinition {
   emoji: string;
   description: string;
   groups?: string[];
+  groupMetadata?: Record<string, DashboardGroupMetadata>;
   fields: DashboardFieldDefinition[];
   actions?: Array<{ id: string; label: string; description?: string; group?: string }>;
 }
@@ -125,6 +143,120 @@ const BIRTHDAY_LEAP_MODE_OPTIONS = [
   { value: "mar01", label: "Avisar em 01/03" },
 ];
 
+const WELCOME_VARIABLE_HELP: Record<string, string> = {
+  membro: "nome exibido do membro",
+  membro_mencao: "menção do membro",
+  usuario: "nome de usuário",
+  usuario_id: "ID do membro",
+  membro_id: "ID do membro",
+  membro_avatar: "avatar do membro",
+  servidor: "nome do servidor",
+  servidor_id: "ID do servidor",
+  servidor_icone: "ícone do servidor",
+  contador: "quantidade atual de membros",
+  criado_em: "data de criação da conta",
+  criado_relativo: "há quanto tempo a conta foi criada",
+  entrou_em: "horário da entrada no servidor",
+  convite_codigo: "código do convite usado",
+  convite: "mesmo valor de {convite_codigo}",
+  convite_canal: "nome do canal do convite",
+  convite_canal_mencao: "menção do canal do convite",
+  convite_usos: "quantidade de usos do convite",
+  convidador: "nome de quem convidou",
+  convidador_nome: "nome de quem convidou",
+  convidador_mencao: "menção de quem convidou",
+  convidador_avatar: "avatar de quem convidou",
+  bot_avatar: "avatar do bot",
+  convite_desconhecido: "texto curto quando o convite não for detectado",
+};
+
+const BIRTHDAY_VARIABLE_HELP: Record<string, string> = {
+  usermention: "menciona o membro",
+  userid: "ID do membro",
+  username: "nome de usuário",
+  userdisplayname: "nome exibido no servidor",
+  usernickname: "apelido no servidor",
+  usermessage: "mensagem enviada na thread",
+  birthdayday: "dia do aniversário",
+  birthdaymonth: "mês do aniversário",
+  birthdayyear: "ano informado, se existir",
+  birthdaydate: "data no formato dia/mês",
+  birthdaydatefull: "data com ano quando existir",
+  birthdayage: "idade, se o ano foi informado",
+  birthdaytimestamp: "timestamp Discord do aniversário deste ano",
+  birthdaycount: "quantidade de aniversários cadastrados/no dia",
+  birthdaycalendarblock: "bloco público do calendário com resumo e meses, oculto quando não há aniversariantes",
+  birthdaycalendar: "calendário completo por mês e dia",
+  birthdaycalendarcompact: "calendário em linhas curtas",
+  birthdaycalendarnext10: "próximos 10 aniversários",
+  birthdaycalendarnext20: "próximos 20 aniversários",
+  birthdaymentions: "menções dos aniversariantes do dia",
+  birthdaynames: "nomes dos aniversariantes do dia",
+  birthdaylist: "lista com marcadores dos aniversariantes do dia",
+  birthdaylistnumbered: "lista numerada dos aniversariantes do dia",
+  nextbirthdayname: "nome do próximo aniversariante",
+  nextbirthdaydate: "data do próximo aniversário",
+  nextbirthdaymention: "menção do próximo aniversariante",
+  guildname: "nome do servidor",
+  guildid: "ID do servidor",
+  guildmembercount: "quantidade de membros do servidor",
+  announcechannel: "canal de avisos configurado",
+  registerchannel: "canal do calendário configurado",
+  nowtimestamp: "timestamp atual para usar em <t:${nowtimestamp}:R>",
+  nowdate: "data atual",
+  nowtime: "horário atual",
+  validexample: "exemplo de data válida",
+};
+
+function templateVariables(
+  syntax: DashboardTemplateSyntax,
+  keys: string[],
+  labels: Record<string, string>,
+): DashboardTemplateVariables {
+  return {
+    syntax,
+    items: keys.map((key) => ({ key, label: labels[key] ?? key })),
+  };
+}
+
+const WELCOME_TEMPLATE_VARIABLES = templateVariables(
+  "curly",
+  Object.keys(WELCOME_VARIABLE_HELP),
+  WELCOME_VARIABLE_HELP,
+);
+
+const BIRTHDAY_REGISTER_VARIABLES = templateVariables(
+  "dollar_curly",
+  [
+    "usermention", "userid", "username", "userdisplayname", "usernickname",
+    "birthdayday", "birthdaymonth", "birthdayyear", "birthdaydate", "birthdaydatefull",
+    "birthdayage", "birthdaytimestamp", "nowtimestamp", "usermessage", "validexample",
+  ],
+  BIRTHDAY_VARIABLE_HELP,
+);
+
+const BIRTHDAY_ANNOUNCE_VARIABLES = templateVariables(
+  "dollar_curly",
+  [
+    "usermention", "userid", "username", "userdisplayname", "usernickname",
+    "birthdayday", "birthdaymonth", "birthdayyear", "birthdaydate", "birthdaydatefull",
+    "birthdayage", "birthdaytimestamp", "birthdaycount", "birthdaymentions", "birthdaynames",
+    "birthdaylist", "birthdaylistnumbered", "nowtimestamp", "guildname",
+  ],
+  BIRTHDAY_VARIABLE_HELP,
+);
+
+const BIRTHDAY_CALENDAR_VARIABLES = templateVariables(
+  "dollar_curly",
+  [
+    "guildname", "guildid", "guildmembercount", "birthdaycount", "birthdaycalendarblock",
+    "birthdaycalendar", "birthdaycalendarcompact", "birthdaycalendarnext10",
+    "birthdaycalendarnext20", "nextbirthdayname", "nextbirthdaydate", "nextbirthdaymention",
+    "nowtimestamp", "nowdate", "nowtime", "announcechannel", "registerchannel",
+  ],
+  BIRTHDAY_VARIABLE_HELP,
+);
+
 const sections: DashboardSectionDefinition[] = [
   {
     id: "general",
@@ -143,6 +275,11 @@ const sections: DashboardSectionDefinition[] = [
     emoji: "👋",
     description: "Canal, modo, aparência, mensagens, DM e webhook de boas-vindas.",
     groups: ["Mensagem de entrada", "Embed", "Mensagem privada", "Aparência", "Webhook"],
+    groupMetadata: {
+      "Mensagem de entrada": { kind: "message", variables: WELCOME_TEMPLATE_VARIABLES },
+      Embed: { kind: "message", variables: WELCOME_TEMPLATE_VARIABLES },
+      "Mensagem privada": { kind: "message", variables: WELCOME_TEMPLATE_VARIABLES },
+    },
     fields: [
       { id: "welcome.enabled", label: "Ativar boas-vindas", type: "boolean", scope: "welcome", path: "enabled", group: "Mensagem de entrada" },
       { id: "welcome.channel_id", label: "Canal de boas-vindas", type: "channel", scope: "welcome", path: "channel_id", group: "Mensagem de entrada" },
@@ -217,6 +354,11 @@ const sections: DashboardSectionDefinition[] = [
     emoji: "🎂",
     description: "Cadastro, avisos, calendário, mensagens e preferências de aniversário.",
     groups: ["Geral", "Canais", "Registro de datas", "Avisos", "Calendário"],
+    groupMetadata: {
+      "Registro de datas": { kind: "message", variables: BIRTHDAY_REGISTER_VARIABLES },
+      Avisos: { kind: "message", variables: BIRTHDAY_ANNOUNCE_VARIABLES },
+      Calendário: { kind: "message", variables: BIRTHDAY_CALENDAR_VARIABLES },
+    },
     fields: [
       { id: "birthday.enabled", label: "Ativar aniversários", type: "boolean", scope: "birthday", path: "enabled", group: "Geral" },
 
