@@ -70,6 +70,8 @@ class WelcomeMediaMixin:
             for match in CUSTOM_EMOJI_RE.finditer(str(text or "")):
                 raw = match.group(0)
                 emoji_id = str(match.group(3) or "")
+                if emoji_id in WELCOME_PROTECTED_DECORATIVE_EMOJI_IDS:
+                    continue
                 key = f"{'a' if bool(match.group(1)) else 's'}:{emoji_id}"
                 item = by_key.get(key)
                 if item is not None:

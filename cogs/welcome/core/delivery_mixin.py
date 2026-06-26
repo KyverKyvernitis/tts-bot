@@ -34,6 +34,111 @@ from .helpers import *
 log = logging.getLogger(__name__)
 
 class WelcomeDeliveryMixin:
+    async def _cleanup_recent_account_join_tracking(self, *, now: datetime | None = None) -> None:
+        db = self.db
+        if db is None or not hasattr(db, "coll"):
+            return
+        now = now or self._welcome_utc_now()
+        cutoff = now - timedelta(seconds=WELCOME_RECENT_ACCOUNT_WINDOW_SECONDS)
+        try:
+            result = await db.coll.delete_many({
+                "type": WELCOME_DOC_RECENT_ACCOUNT,
+                "guild_id": WELCOME_RECENT_ACCOUNT_GUILD_ID,
+                "joined_at": {"$lt": cutoff},
+            })
+            deleted = int(getattr(result, "deleted_count", 0) or 0)
+            if deleted:
+                log.debug("[welcome-recent-account] registros expirados removidos: %s", deleted)
+        except Exception as exc:
+            log.debug("[welcome-recent-account] não consegui limpar registros expirados: %r", exc)
+
+    def _recent_account_fallback_count(self, *, member_id: int, now: datetime) -> int:
+        cutoff = now - timedelta(seconds=WELCOME_RECENT_ACCOUNT_WINDOW_SECONDS)
+        cache = getattr(self, "_recent_account_join_fallback", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._recent_account_join_fallback = cache
+        for user_id, joined_at in list(cache.items()):
+            parsed = self._welcome_as_utc(joined_at)
+            if parsed is None or parsed < cutoff:
+                cache.pop(user_id, None)
+        cache[int(member_id)] = now
+        return len(cache)
+
+    async def _record_recent_account_join(self, member: discord.Member, *, now: datetime) -> int:
+        lock = getattr(self, "_recent_account_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._recent_account_lock = lock
+
+        async with lock:
+            cutoff = now - timedelta(seconds=WELCOME_RECENT_ACCOUNT_WINDOW_SECONDS)
+            db = self.db
+            if db is not None and hasattr(db, "coll"):
+                try:
+                    await db.coll.delete_many({
+                        "type": WELCOME_DOC_RECENT_ACCOUNT,
+                        "guild_id": WELCOME_RECENT_ACCOUNT_GUILD_ID,
+                        "joined_at": {"$lt": cutoff},
+                    })
+                    await db.coll.update_one(
+                        {
+                            "type": WELCOME_DOC_RECENT_ACCOUNT,
+                            "guild_id": WELCOME_RECENT_ACCOUNT_GUILD_ID,
+                            "user_id": int(member.id),
+                        },
+                        {
+                            "$set": {
+                                "member_id": int(member.id),
+                                "joined_at": now,
+                                "account_created_at": self._welcome_as_utc(getattr(member, "created_at", None)),
+                            },
+                            "$setOnInsert": {
+                                "type": WELCOME_DOC_RECENT_ACCOUNT,
+                                "guild_id": WELCOME_RECENT_ACCOUNT_GUILD_ID,
+                                "user_id": int(member.id),
+                            },
+                        },
+                        upsert=True,
+                    )
+                    return int(await db.coll.count_documents({
+                        "type": WELCOME_DOC_RECENT_ACCOUNT,
+                        "guild_id": WELCOME_RECENT_ACCOUNT_GUILD_ID,
+                        "joined_at": {"$gte": cutoff},
+                    }))
+                except Exception as exc:
+                    log.warning(
+                        "[welcome-recent-account] falha ao persistir janela guild=%s member=%s: %r",
+                        WELCOME_RECENT_ACCOUNT_GUILD_ID,
+                        member.id,
+                        exc,
+                    )
+            return self._recent_account_fallback_count(member_id=int(member.id), now=now)
+
+    async def _recent_account_warning_mode(self, member: discord.Member) -> str:
+        if int(getattr(getattr(member, "guild", None), "id", 0) or 0) != WELCOME_RECENT_ACCOUNT_GUILD_ID:
+            return ""
+        if bool(getattr(member, "bot", False)):
+            return ""
+        created_at = self._welcome_as_utc(getattr(member, "created_at", None))
+        if created_at is None:
+            return ""
+        now = self._welcome_utc_now()
+        age_seconds = max(0.0, (now - created_at).total_seconds())
+        if age_seconds >= WELCOME_RECENT_ACCOUNT_MAX_AGE_SECONDS:
+            return ""
+        count = await self._record_recent_account_join(member, now=now)
+        mode = "burst" if count >= WELCOME_RECENT_ACCOUNT_BURST_THRESHOLD else "single"
+        log.info(
+            "[welcome-recent-account] guild=%s member=%s age_seconds=%s recent_count=%s mode=%s",
+            WELCOME_RECENT_ACCOUNT_GUILD_ID,
+            member.id,
+            int(age_seconds),
+            count,
+            mode,
+        )
+        return mode
+
     async def _send_rendered(self, destination: discord.abc.Messageable, cfg: dict[str, Any], *, member: discord.Member, dm: bool = False, invite_info: dict[str, Any] | None = None):
         cfg = await self._with_dynamic_colors(cfg, member=member)
         mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")

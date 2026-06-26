@@ -34,6 +34,30 @@ from .helpers import *
 log = logging.getLogger(__name__)
 
 class WelcomeRenderMixin:
+    def _recent_account_warning_lines(self, config: dict[str, Any], *, guild_id: int | None, dm: bool = False) -> list[str]:
+        if dm or int(guild_id or 0) != WELCOME_RECENT_ACCOUNT_GUILD_ID:
+            return []
+        mode = str((config or {}).get(WELCOME_RECENT_ACCOUNT_WARNING_KEY) or "")
+        if mode == "preview":
+            return [WELCOME_RECENT_ACCOUNT_SINGLE_WARNING, WELCOME_RECENT_ACCOUNT_BURST_WARNING]
+        if mode == "burst":
+            return [WELCOME_RECENT_ACCOUNT_BURST_WARNING]
+        if mode == "single":
+            return [WELCOME_RECENT_ACCOUNT_SINGLE_WARNING]
+        return []
+
+    def _append_recent_account_warnings(self, content: str, config: dict[str, Any], *, guild_id: int | None, dm: bool = False, limit: int = 1990) -> str:
+        lines = self._recent_account_warning_lines(config, guild_id=guild_id, dm=dm)
+        if not lines:
+            return _trim(content, limit)
+        warning_block = "\n".join(lines)
+        base = str(content or "").rstrip()
+        if not base:
+            return _trim(warning_block, limit)
+        available = max(0, limit - len(warning_block) - 1)
+        base = _trim(base, available).rstrip()
+        return f"{base}\n{warning_block}" if base else _trim(warning_block, limit)
+
     def _member_values(self, member: discord.Member | None, *, guild_id: int | None = None, invite_info: dict[str, Any] | None = None) -> dict[str, str]:
         guild = getattr(member, "guild", None) if member is not None else None
         if guild is None and guild_id:
@@ -425,9 +449,13 @@ class WelcomeRenderMixin:
             children.append(discord.ui.TextDisplay("# Bem-vindo(a)!"))
         return discord.ui.Container(*children, accent_color=_color_from_hex(cfg.get("accent_color")))
 
-    def _make_components_view(self, config: dict[str, Any], *, member: discord.Member, dm: bool = False, invite_info: dict[str, Any] | None = None) -> discord.ui.LayoutView:
+    def _make_components_view(self, config: dict[str, Any], *, member: discord.Member | None, guild_id: int | None = None, dm: bool = False, invite_info: dict[str, Any] | None = None) -> discord.ui.LayoutView:
+        resolved_guild_id = int(getattr(getattr(member, "guild", None), "id", 0) or guild_id or 0)
         view = discord.ui.LayoutView(timeout=None)
-        view.add_item(self._make_welcome_container(config, member=member, guild_id=int(member.guild.id), dm=dm, invite_info=invite_info))
+        warning_lines = self._recent_account_warning_lines(config, guild_id=resolved_guild_id, dm=dm)
+        if warning_lines:
+            view.add_item(discord.ui.TextDisplay("\n".join(warning_lines)))
+        view.add_item(self._make_welcome_container(config, member=member, guild_id=resolved_guild_id, dm=dm, invite_info=invite_info))
         return view
 
     def _image_url_from_mode(self, mode: str, custom_url: str, *, member: discord.Member | None, guild_id: int | None = None, invite_info: dict[str, Any] | None = None) -> str:
@@ -492,7 +520,8 @@ class WelcomeRenderMixin:
                 embed.set_footer(text=_trim(embed_footer, 2048), icon_url=footer_icon)
             else:
                 embed.set_footer(text=_trim(embed_footer, 2048))
-        return _trim(content, 1990), embed
+        content = self._append_recent_account_warnings(content, cfg, guild_id=guild_id, dm=dm, limit=1990)
+        return content, embed
 
     def _make_embed(self, config: dict[str, Any], *, member: discord.Member | None, guild_id: int | None = None, dm: bool = False, invite_info: dict[str, Any] | None = None) -> discord.Embed:
         return self._make_embed_payload(config, member=member, guild_id=guild_id, dm=dm, invite_info=invite_info)[1]
@@ -506,19 +535,31 @@ class WelcomeRenderMixin:
             parts.append(body)
         if dm and footer:
             parts.append(footer)
-        return _trim("\n\n".join(parts) or "Bem-vindo(a)!", 1990)
+        content = "\n\n".join(parts) or "Bem-vindo(a)!"
+        return self._append_recent_account_warnings(content, config, guild_id=guild_id, dm=dm, limit=1990)
 
     def _append_render_preview(self, view: discord.ui.LayoutView, config: dict[str, Any], *, member: discord.Member | None, guild_id: int, dm: bool = False):
         cfg = self._normalize_config(config)
+        if not dm and int(guild_id or 0) == WELCOME_RECENT_ACCOUNT_GUILD_ID:
+            cfg[WELCOME_RECENT_ACCOUNT_WARNING_KEY] = "preview"
         mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")
         if mode == "components_v2":
+            warning_lines = self._recent_account_warning_lines(cfg, guild_id=guild_id, dm=dm)
+            if warning_lines:
+                view.add_item(discord.ui.TextDisplay("\n".join(warning_lines)))
             view.add_item(self._make_welcome_container(cfg, member=member, guild_id=guild_id, dm=dm))
             return
         if mode == "normal":
             content = self._make_normal_content(cfg, member=member, guild_id=guild_id, dm=dm)
             view.add_item(discord.ui.Container(discord.ui.TextDisplay(_trim("## Mensagem normal\n" + content)), accent_color=_color_from_hex(cfg.get("accent_color"))))
             return
-        view.add_item(discord.ui.Container(
+        content, _ = self._make_embed_payload(cfg, member=member, guild_id=guild_id, dm=dm)
+        children: list[discord.ui.Item[Any]] = [
             discord.ui.TextDisplay("## Embed\nO preview real em embed é enviado como uma mensagem separada, para aparecer igual ao Discord mostra."),
+        ]
+        if content:
+            children.extend([discord.ui.Separator(), discord.ui.TextDisplay(_trim("## Mensagem acima\n" + content))])
+        view.add_item(discord.ui.Container(
+            *children,
             accent_color=_color_from_hex((cfg.get("embed") or {}).get("color") or cfg.get("accent_color")),
         ))

@@ -111,6 +111,9 @@ class WelcomeAdminView(discord.ui.LayoutView):
                 cfg = self.cog._apply_variant(cfg, self.cog._find_variant(cfg, variant_id))
             else:
                 cfg = self.cog._apply_variant(cfg, self.cog._pick_variant(cfg))
+            if self.guild_id == WELCOME_RECENT_ACCOUNT_GUILD_ID:
+                cfg = dict(cfg)
+                cfg[WELCOME_RECENT_ACCOUNT_WARNING_KEY] = "preview"
         cfg = await self.cog._with_dynamic_colors(cfg, member=member)
         mode = str(cfg.get("dm_render_mode") if dm else cfg.get("render_mode") or "components_v2")
         try:
@@ -141,8 +144,7 @@ class WelcomeAdminView(discord.ui.LayoutView):
                 await interaction.followup.send(content=content, ephemeral=True, allowed_mentions=allowed)
                 published = True
                 return
-            view = discord.ui.LayoutView(timeout=None)
-            view.add_item(self.cog._make_welcome_container(cfg, member=member, guild_id=self.guild_id, dm=dm))
+            view = self.cog._make_components_view(cfg, member=member, guild_id=self.guild_id, dm=dm)
             kwargs: dict[str, Any] = {"view": view, "ephemeral": True, "allowed_mentions": allowed}
             if files:
                 kwargs["files"] = files

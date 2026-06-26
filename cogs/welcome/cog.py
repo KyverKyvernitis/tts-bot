@@ -53,6 +53,8 @@ class WelcomeCog(WelcomeRulesMixin, WelcomeDeliveryMixin, WelcomeMediaMixin, Wel
         self._application_emoji_state_at = 0.0
         self._emoji_capacity_warning_at = 0.0
         self._emoji_worker_active: dict[str, int] = {}
+        self._recent_account_lock = asyncio.Lock()
+        self._recent_account_join_fallback: dict[int, datetime] = {}
         self._avatar_color_cache: dict[str, str] = {}
         self._avatar_palette_cache: dict[str, list[tuple[int, int, int]]] = {}
         self._star_image_cache: dict[str, bytes] = {}
@@ -145,6 +147,7 @@ class WelcomeCog(WelcomeRulesMixin, WelcomeDeliveryMixin, WelcomeMediaMixin, Wel
     async def cog_load(self):
         await self._refresh_bot_owner_ids()
         await self._ensure_indexes()
+        await self._cleanup_recent_account_join_tracking()
         self._warmup_task = asyncio.create_task(self._warmup_invites())
         self._emoji_purge_task = asyncio.create_task(self._emoji_midnight_purge_loop())
 
@@ -165,6 +168,7 @@ class WelcomeCog(WelcomeRulesMixin, WelcomeDeliveryMixin, WelcomeMediaMixin, Wel
             await db.coll.create_index([("type", 1), ("guild_id", 1), ("member_id", 1)], name="welcome_sent_member")
             await db.coll.create_index([("type", 1), ("expires_at", 1)], name="welcome_sent_expires")
             await db.coll.create_index([("type", 1), ("delete_after", 1)], name="welcome_temp_emoji_purge")
+            await db.coll.create_index([("type", 1), ("guild_id", 1), ("joined_at", 1)], name="welcome_recent_account_window")
         except Exception as exc:
             text = str(exc)
             if "IndexOptionsConflict" in text or "Index already exists" in text:
@@ -337,6 +341,10 @@ class WelcomeCog(WelcomeRulesMixin, WelcomeDeliveryMixin, WelcomeMediaMixin, Wel
         base_effective = self._apply_variant(cfg, variant)
         rule = self._pick_special_rule(cfg, invite_info)
         effective = self._effective_config_for_rule(base_effective, rule)
+        recent_account_warning = await self._recent_account_warning_mode(member)
+        if recent_account_warning:
+            effective = dict(effective)
+            effective[WELCOME_RECENT_ACCOUNT_WARNING_KEY] = recent_account_warning
         await self._apply_auto_roles(member, effective)
         channel_id = int(effective.get("channel_id") or 0)
         if channel_id:
