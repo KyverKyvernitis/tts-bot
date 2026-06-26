@@ -15,6 +15,8 @@ export interface MessageEditorProps {
   values: Record<string, unknown>;
   draft: Record<string, unknown>;
   guildOptions: DashboardOptionsPayload | null;
+  botName?: string;
+  botAvatarUrl?: string | null;
   variables?: DashboardTemplateVariables;
   hasUnsavedChanges: boolean;
   applying: boolean;

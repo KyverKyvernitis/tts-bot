@@ -20,6 +20,8 @@ interface SectionEditorProps {
   values: Record<string, unknown>;
   draft: Record<string, unknown>;
   guildOptions: DashboardOptionsPayload | null;
+  previewBotName?: string;
+  previewBotAvatarUrl?: string | null;
   hasUnsavedChanges: boolean;
   applying: boolean;
   onChange(field: DashboardFieldDefinition, raw: string | boolean): void;
@@ -35,6 +37,8 @@ export function SectionEditor({
   values,
   draft,
   guildOptions,
+  previewBotName,
+  previewBotAvatarUrl,
   hasUnsavedChanges,
   applying,
   onChange,
@@ -79,6 +83,8 @@ export function SectionEditor({
         values={values}
         draft={draft}
         guildOptions={guildOptions}
+        botName={previewBotName}
+        botAvatarUrl={previewBotAvatarUrl}
         variables={activeGroupMetadata?.variables}
         hasUnsavedChanges={hasUnsavedChanges}
         applying={applying}

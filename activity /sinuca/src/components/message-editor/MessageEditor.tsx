@@ -25,6 +25,8 @@ export function MessageEditor({
   values,
   draft,
   guildOptions,
+  botName,
+  botAvatarUrl,
   variables,
   hasUnsavedChanges,
   applying,
@@ -187,10 +189,13 @@ export function MessageEditor({
             <div className="osk-message-editor__mode-content">
               {mode === "visual" ? (
                 <MessageVisualEditor
+                  groupLabel={groupLabel}
                   fields={fields}
                   values={values}
                   draft={draft}
                   guildOptions={guildOptions}
+                  botName={botName}
+                  botAvatarUrl={botAvatarUrl}
                   onChange={onChange}
                 />
               ) : mode === "json" ? (
@@ -211,7 +216,7 @@ export function MessageEditor({
               <strong>Prévia</strong>
               <small>Representação aproximada da mensagem</small>
             </div>
-            <MessagePreview groupLabel={groupLabel} fields={fields} draft={draft} />
+            <MessagePreview groupLabel={groupLabel} fields={fields} draft={draft} guildOptions={guildOptions} botName={botName} botAvatarUrl={botAvatarUrl} />
           </aside>
         </div>
       </div>

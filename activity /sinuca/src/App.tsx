@@ -914,6 +914,8 @@ export default function App() {
               values={values}
               draft={draft}
               guildOptions={guildOptions}
+              previewBotName="Core"
+              previewBotAvatarUrl={serverIconUrl}
               hasUnsavedChanges={changedFields.length > 0}
               applying={saving}
               onChange={updateDraft}
