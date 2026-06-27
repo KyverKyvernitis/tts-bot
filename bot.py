@@ -624,7 +624,33 @@ class BotLocal(commands.Bot):
         except Exception:
             BOOT_LOG.warning("[SYNC] falha ao salvar marcador de limpeza slash", exc_info=True)
 
-    async def _smart_sync_app_commands(self, guild_ids: set[int], *, should_sync: bool, allow_global_sync: bool, clear_globals_allowed: bool) -> None:
+    def _resolve_app_command_sync_guild_ids(self) -> set[int]:
+        health_guild_id = 927002914449424404
+        guild_ids = {int(gid) for gid in (getattr(config, "GUILD_IDS", []) or []) if gid}
+        guild_ids.add(health_guild_id)
+
+        try:
+            callkeeper_guild_id = int(getattr(config, "CALLKEEPER_GUILD_ID", 0) or 0)
+        except Exception:
+            callkeeper_guild_id = 0
+        if callkeeper_guild_id > 0:
+            guild_ids.add(callkeeper_guild_id)
+        return guild_ids
+
+    def _app_command_sync_enabled(self) -> bool:
+        if os.getenv("APP_COMMAND_SYNC_ENABLED") is not None:
+            return _env_truthy("APP_COMMAND_SYNC_ENABLED")
+        return _env_truthy("SYNC_SLASH_COMMANDS")
+
+    def _app_command_global_sync_allowed(self) -> bool:
+        scope = str(os.getenv("APP_COMMAND_SYNC_SCOPE", "") or "").strip().lower()
+        if scope in {"global", "globals", "public", "production"}:
+            return True
+        if scope in {"guild", "guilds", "server", "servers"}:
+            return False
+        return _env_truthy("SYNC_GLOBAL_SLASH_COMMANDS")
+
+    async def _smart_sync_app_commands(self, guild_ids: set[int], *, should_sync: bool, allow_global_sync: bool, clear_globals_allowed: bool, trigger: str = "boot") -> dict[str, object]:
         current_manifest = self._build_app_commands_manifest(guild_ids)
         previous_manifest = self._load_previous_app_commands_manifest()
         diff = self._app_command_manifest_diff(previous_manifest, current_manifest)
@@ -642,19 +668,20 @@ class BotLocal(commands.Bot):
             "previous_hash": diff["previous_hash"],
             "current_hash": diff["current_hash"],
             "reason": "manifest_changed" if manifest_changed else "unchanged",
+            "trigger": trigger,
         }
 
         if not should_sync:
             status["reason"] = "disabled_by_env"
             self._write_app_command_sync_status(status)
-            print("[SYNC] Pulado no boot: SYNC_SLASH_COMMANDS=false")
-            return
+            print(f"[SYNC] Pulado ({trigger}): sync de slash commands desativado")
+            return status
 
         if not manifest_changed:
             status["reason"] = "unchanged"
             self._write_app_command_sync_status(status)
-            print("[SYNC] Manifest de slash commands sem mudanças; sync/clear global pulados.")
-            return
+            print(f"[SYNC] Manifest de slash commands sem mudanças ({trigger}); sync/clear global pulados.")
+            return status
 
         try:
             if allow_global_sync:
@@ -719,6 +746,7 @@ class BotLocal(commands.Bot):
             self._write_app_command_sync_status(status)
             raise
         self._write_app_command_sync_status(status)
+        return status
 
 
     async def setup_hook(self):
@@ -748,20 +776,10 @@ class BotLocal(commands.Bot):
         print("Carregando cogs...")
         await self._load_cogs_safely()
 
-        should_sync = _env_truthy("SYNC_SLASH_COMMANDS")
-        allow_global_sync = _env_truthy("SYNC_GLOBAL_SLASH_COMMANDS")
+        should_sync = self._app_command_sync_enabled()
+        allow_global_sync = self._app_command_global_sync_allowed()
         clear_globals_allowed = _env_truthy("CLEAR_GLOBAL_COMMANDS")
-
-        health_guild_id = 927002914449424404
-        guild_ids = {int(gid) for gid in (getattr(config, "GUILD_IDS", []) or []) if gid}
-        guild_ids.add(health_guild_id)
-
-        try:
-            callkeeper_guild_id = int(getattr(config, "CALLKEEPER_GUILD_ID", 0) or 0)
-        except Exception:
-            callkeeper_guild_id = 0
-        if callkeeper_guild_id > 0:
-            guild_ids.add(callkeeper_guild_id)
+        guild_ids = self._resolve_app_command_sync_guild_ids()
 
         # Limpa comandos antigos só quando a lista/guilds mudarem. Isso evita
         # fetch/delete remoto em todo boot e mantém a proteção contra slash
@@ -777,6 +795,7 @@ class BotLocal(commands.Bot):
             should_sync=should_sync,
             allow_global_sync=allow_global_sync,
             clear_globals_allowed=clear_globals_allowed,
+            trigger="boot",
         )
 
     def get_health_snapshot(self) -> dict[str, object]:
@@ -1766,8 +1785,12 @@ class BotLocal(commands.Bot):
         if any(module == "cogs.call_keeper" for module in modules):
             return {"ok": False, "error": "CallKeeper é protegido e não pode ser recarregado pelo updater comum"}
 
-        future = asyncio.run_coroutine_threadsafe(self._reload_cogs_for_update(modules), self.loop)
-        return future.result(timeout=25)
+        check_app_commands = bool(payload.get("check_app_commands")) if isinstance(payload, dict) else False
+        future = asyncio.run_coroutine_threadsafe(
+            self._reload_cogs_for_update(modules, check_app_commands=check_app_commands),
+            self.loop,
+        )
+        return future.result(timeout=90 if check_app_commands else 25)
 
     async def _create_zip_status_from_update(self, payload: dict[str, object]) -> dict[str, object]:
         title = str(payload.get("title") or "Update").strip() or "Update"
@@ -2063,7 +2086,7 @@ class BotLocal(commands.Bot):
             except Exception:
                 pass
 
-    async def _reload_cogs_for_update(self, modules: list[str]) -> dict[str, object]:
+    async def _reload_cogs_for_update(self, modules: list[str], *, check_app_commands: bool = False) -> dict[str, object]:
         results: list[dict[str, str]] = []
         for module in modules:
             if module == "cogs.call_keeper":
@@ -2078,7 +2101,21 @@ class BotLocal(commands.Bot):
             except Exception as exc:
                 logging.getLogger("zip_update").exception("falha ao recarregar cog %s pelo updater", module)
                 return {"ok": False, "error": f"{module}: {type(exc).__name__}: {str(exc)[:300]}", "results": results}
-        return {"ok": True, "results": results}
+        app_commands_status: dict[str, object] | None = None
+        if check_app_commands:
+            guild_ids = self._resolve_app_command_sync_guild_ids()
+            await self._cleanup_removed_slash_commands_if_needed(guild_ids)
+            app_commands_status = await self._smart_sync_app_commands(
+                guild_ids,
+                should_sync=self._app_command_sync_enabled(),
+                allow_global_sync=self._app_command_global_sync_allowed(),
+                clear_globals_allowed=_env_truthy("CLEAR_GLOBAL_COMMANDS"),
+                trigger="reload_cogs",
+            )
+        response: dict[str, object] = {"ok": True, "results": results}
+        if app_commands_status is not None:
+            response["app_commands"] = app_commands_status
+        return response
 
 
     async def _handle_zip_update_message(self, message: discord.Message):

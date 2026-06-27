@@ -160,6 +160,7 @@ APP_COMMAND_SYNC_ADDED_COUNT=0
 APP_COMMAND_SYNC_REMOVED_COUNT=0
 APP_COMMAND_SYNC_CHANGED=0
 APP_COMMAND_SYNC_PERFORMED=0
+APP_COMMANDS_MAY_HAVE_CHANGED=0
 CHANGED_FILES_RAW=""
 CHANGED_DIFF_NUMSTAT_RAW=""
 DIFF_TOTAL_SUMMARY=""
@@ -2484,6 +2485,11 @@ classify_changed_files() {
   PHONE_WORKER_SYNC_REQUIRED=0
   CORE_WORKER_APK_CHANGED=0
   CORE_WORKER_AUTOMATION_REQUIRED=0
+  APP_COMMANDS_MAY_HAVE_CHANGED=0
+
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(bot\.py|cogs/.*\.py|cogs/.*/.*\.py|utility/commands/.*\.py)$'; then
+    APP_COMMANDS_MAY_HAVE_CHANGED=1
+  fi
 
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity /sinuca/'; then
     FRONT_CHANGED=1
@@ -2555,12 +2561,14 @@ PYFAST
 
 try_fast_cog_reload() {
   local modules_text="${1:-}"
+  local check_app_commands="${2:-0}"
   [[ -n "${modules_text//[[:space:]]/}" ]] || return 1
   local payload token header_args=() response http_code
-  payload="$(MODULES_TEXT="$modules_text" python3 - <<'PYPAYLOAD'
+  payload="$(MODULES_TEXT="$modules_text" CHECK_APP_COMMANDS="$check_app_commands" python3 - <<'PYPAYLOAD'
 import json, os
 mods = [line.strip() for line in (os.environ.get("MODULES_TEXT") or "").splitlines() if line.strip()]
-print(json.dumps({"modules": mods}, ensure_ascii=False))
+check = str(os.environ.get("CHECK_APP_COMMANDS") or "").strip().lower() in {"1", "true", "yes", "sim", "on"}
+print(json.dumps({"modules": mods, "check_app_commands": check}, ensure_ascii=False))
 PYPAYLOAD
 )"
   token=""
@@ -2571,7 +2579,7 @@ PYPAYLOAD
     header_args=(-H "X-Update-Token: $token")
   fi
   response="$(mktemp)"
-  http_code="$(curl -sS -o "$response" -w '%{http_code}' --max-time 30 -H 'Content-Type: application/json' "${header_args[@]}" -d "$payload" http://127.0.0.1:10000/internal/update/reload-cogs 2>/dev/null || true)"
+  http_code="$(curl -sS -o "$response" -w '%{http_code}' --max-time 90 -H 'Content-Type: application/json' "${header_args[@]}" -d "$payload" http://127.0.0.1:10000/internal/update/reload-cogs 2>/dev/null || true)"
   if [[ "$http_code" != "200" ]]; then
     FAST_RELOAD_STATUS="falhou; fallback restart (${http_code:-sem HTTP})"
     logger -t "$LOG_TAG" "Fast reload falhou HTTP=${http_code:-sem HTTP}: $(cat "$response" 2>/dev/null | tail -c 300)"
@@ -3216,7 +3224,7 @@ deploy_bot() {
     FAST_RELOAD_MODULES="$fast_modules"
     if [[ -n "${fast_modules//[[:space:]]/}" ]]; then
       STAGE="reload rápido de cogs"
-      if try_fast_cog_reload "$fast_modules"; then
+      if try_fast_cog_reload "$fast_modules" "$APP_COMMANDS_MAY_HAVE_CHANGED"; then
         return 0
       fi
       logger -t "$LOG_TAG" "Fast reload indisponível; usando restart completo seguro do bot principal. Status: $FAST_RELOAD_STATUS"
