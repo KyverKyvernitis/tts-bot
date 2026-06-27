@@ -42,35 +42,36 @@ class SaySession:
 class _SayModal(discord.ui.Modal):
     """Modal principal do /say usando componentes reais do Discord UI Kit."""
 
+    GUIDE_TEXT = (
+        "Selecione um usuário para falar com o nick/avatar dele. "
+        "Sem usuário, a fala sai como o servidor. "
+        "Escreva uma mensagem ou marque o modo de 30 segundos."
+    )
+
     def __init__(self, cog: "SayCog", interaction: discord.Interaction):
         super().__init__(title="Falar por webhook")
         self.cog = cog
         self.source = interaction
 
+        # O TextDisplay deixa o guia visível no topo em clientes que suportam
+        # componentes V2 em modais. Se a lib/cliente não aceitar, as descrições
+        # dos campos abaixo continuam explicando o fluxo sem quebrar o modal.
+        text_display = getattr(discord.ui, "TextDisplay", None)
+        if text_display is not None:
+            with contextlib.suppress(Exception):
+                self.add_item(text_display(self.GUIDE_TEXT))
+
         self.user_select = discord.ui.UserSelect(
             custom_id="say_user",
-            placeholder="Selecione o usuário quando for falar como usuário",
+            placeholder="Opcional: selecione alguém para falar como essa pessoa",
             min_values=0,
             max_values=1,
             required=False,
         )
 
-        self.identity_group = discord.ui.RadioGroup(custom_id="say_identity", required=True)
-        self.identity_group.add_option(
-            label="Servidor",
-            value="server",
-            description="Usa nome e ícone do servidor.",
-            default=True,
-        )
-        self.identity_group.add_option(
-            label="Usuário selecionado",
-            value="user",
-            description="Usa nick e avatar do usuário selecionado.",
-        )
-
         self.message_input = discord.ui.TextInput(
             custom_id="say_text",
-            placeholder="Opcional. Deixe vazio para só ativar por 30 segundos.",
+            placeholder="Digite a mensagem. Deixe vazio se quiser só ativar por 30 segundos.",
             required=False,
             max_length=2000,
             style=discord.TextStyle.paragraph,
@@ -80,28 +81,22 @@ class _SayModal(discord.ui.Modal):
 
         self.add_item(
             discord.ui.Label(
-                text="Usuário",
-                description="Opcional quando a fala for pelo servidor.",
+                text="Usuário opcional",
+                description="Selecionado = fala como o usuário. Vazio = fala como o servidor.",
                 component=self.user_select,
             )
         )
         self.add_item(
             discord.ui.Label(
-                text="Falar usando",
-                component=self.identity_group,
-            )
-        )
-        self.add_item(
-            discord.ui.Label(
                 text="O que falar",
-                description="Opcional. Se vazio, marque a opção de 30 segundos.",
+                description="Opcional. Se deixar vazio, marque “Virar por 30 segundos”.",
                 component=self.message_input,
             )
         )
         self.add_item(
             discord.ui.Label(
                 text="Virar por 30 segundos?",
-                description="Reenvia suas próximas mensagens pelo webhook temporário.",
+                description="Apaga suas próximas mensagens e reenvia pelo webhook temporário.",
                 component=self.session_checkbox,
             )
         )
@@ -111,10 +106,8 @@ class _SayModal(discord.ui.Modal):
         if isinstance(selected_member, discord.User) and interaction.guild is not None:
             selected_member = interaction.guild.get_member(selected_member.id) or selected_member
 
-        identity_mode = str(self.identity_group.value or "server")
         await self.cog._handle_modal_submit(
             interaction,
-            identity_mode=identity_mode,
             selected_member=selected_member,
             initial_text=str(self.message_input.value or ""),
             enable_session=bool(self.session_checkbox.value),
@@ -350,7 +343,6 @@ class SayCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         *,
-        identity_mode: str,
         selected_member: discord.Member | discord.User | None,
         initial_text: str,
         enable_session: bool,
@@ -362,16 +354,10 @@ class SayCog(commands.Cog):
             return
 
         text = str(initial_text or "").strip()
-        if identity_mode == "user":
-            if selected_member is None:
-                await self._send_ephemeral(interaction, "Selecione um usuário ou escolha falar como servidor.")
-                return
-            identity = self._identity_for_user(selected_member)
-        else:
-            identity = self._identity_for_server(interaction.guild)
+        identity = self._identity_for_user(selected_member) if selected_member is not None else self._identity_for_server(interaction.guild)
 
         if not text and not enable_session:
-            await self._send_ephemeral(interaction, "Escreva algo ou marque a opção de 30 segundos.")
+            await self._send_ephemeral(interaction, "Nada para enviar. Escreva uma mensagem ou marque “Virar por 30 segundos”.")
             return
 
         webhook: discord.Webhook | None = None
