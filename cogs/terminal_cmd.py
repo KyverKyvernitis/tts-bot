@@ -647,7 +647,36 @@ class TerminalCommandCog(commands.Cog):
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
 
-    async def _run_shell(self, command: str) -> ShellResult:
+    def _build_subprocess_env(self, ctx: commands.Context, command: str) -> dict[str, str]:
+        env = dict(os.environ)
+
+        def put(name: str, value: object) -> None:
+            if value is None:
+                return
+            text = str(value)
+            if text:
+                env[name] = text
+
+        guild = getattr(ctx, "guild", None)
+        channel = getattr(ctx, "channel", None)
+        author = getattr(ctx, "author", None)
+        message = getattr(ctx, "message", None)
+
+        put("DISCORD_CMD_GUILD_ID", getattr(guild, "id", ""))
+        put("DISCORD_CMD_GUILD_NAME", getattr(guild, "name", ""))
+        put("DISCORD_CMD_CHANNEL_ID", getattr(channel, "id", ""))
+        put("DISCORD_CMD_CHANNEL_NAME", getattr(channel, "name", ""))
+        put("DISCORD_CMD_AUTHOR_ID", getattr(author, "id", ""))
+        put("DISCORD_CMD_AUTHOR_NAME", getattr(author, "name", ""))
+        put("DISCORD_CMD_AUTHOR_DISPLAY_NAME", getattr(author, "display_name", ""))
+        put("DISCORD_CMD_MESSAGE_ID", getattr(message, "id", ""))
+        put("DISCORD_CMD_MESSAGE_URL", getattr(message, "jump_url", ""))
+        put("DISCORD_CMD_REPO_ROOT", REPO_ROOT)
+        put("DISCORD_CMD_BOT_USER_ID", getattr(getattr(self.bot, "user", None), "id", ""))
+        put("DISCORD_CMD_RAW", _truncate_text(command, 8192, suffix=""))
+        return env
+
+    async def _run_shell(self, ctx: commands.Context, command: str) -> ShellResult:
         timeout = _env_float("TERMINAL_CMD_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
         start = time.monotonic()
         proc = await asyncio.create_subprocess_shell(
@@ -657,6 +686,7 @@ class TerminalCommandCog(commands.Cog):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            env=self._build_subprocess_env(ctx, command),
         )
         state = {"bytes": 0, "truncated": False}
         stdout_chunks: list[bytes] = []
@@ -736,6 +766,11 @@ class TerminalCommandCog(commands.Cog):
             header += "\nSaída completa enviada em arquivo."
         return f"{header}\n\n{preview}", file
 
+    def _should_suppress_shell_notice(self, result: ShellResult) -> bool:
+        if result.exit_code != 0 or result.timed_out or result.truncated:
+            return False
+        return not (result.stdout or b"").strip() and not (result.stderr or b"").strip()
+
     async def _stop_primary_bot(self, ctx: commands.Context) -> None:
         await self._reply_notice(
             ctx,
@@ -780,10 +815,12 @@ class TerminalCommandCog(commands.Cog):
 
         async with self._run_lock:
             try:
-                result = await self._run_shell(command)
+                result = await self._run_shell(ctx, command)
             except Exception as exc:
                 await self._reply_notice(ctx, "Terminal", f"Falha ao executar: `{type(exc).__name__}: {exc}`", ok=False)
                 return
+        if self._should_suppress_shell_notice(result):
+            return
         body, file = self._format_shell_result(result)
         try:
             await self._reply_notice(ctx, "Terminal", body, ok=(result.exit_code == 0 and not result.timed_out), file=file)
