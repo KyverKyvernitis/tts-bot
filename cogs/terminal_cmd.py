@@ -41,6 +41,13 @@ CALLKEEPER_TERMS = (
     "callkeeper_service.py",
     "cogs/call_keeper.py",
 )
+CALLKEEPER_RESCUE_MARKERS = (
+    "uso rescue",
+    "_cmd start bot",
+    "_cmd restart bot",
+    "_cmd status bot",
+    "_cmd logs bot",
+)
 INTERACTIVE_EDITORS = {"nano", "vim", "vi", "micro", "edit"}
 
 
@@ -470,6 +477,31 @@ class TerminalCommandCog(commands.Cog):
             kwargs["file"] = file
         return await ctx.reply(**kwargs)
 
+    def _is_callkeeper_rescue_hint(self, message: discord.Message) -> bool:
+        author = getattr(message, "author", None)
+        if not getattr(author, "bot", False):
+            return False
+        text = _collapse_shell_text(getattr(message, "content", ""))
+        if not text:
+            return False
+        return all(marker in text for marker in CALLKEEPER_RESCUE_MARKERS)
+
+    async def _suppress_callkeeper_rescue_hints(self, ctx: commands.Context) -> None:
+        channel = getattr(ctx, "channel", None)
+        command_message = getattr(ctx, "message", None)
+        if channel is None or command_message is None or not hasattr(channel, "history"):
+            return
+        # Os CallKeepers também escutam `_cmd` para rescue. Como o updater comum
+        # protege callkeeper_runtime, a cog principal limpa apenas os avisos de uso
+        # gerados por comandos `_cmd` que pertencem ao terminal do bot principal.
+        for _ in range(10):
+            with contextlib.suppress(Exception):
+                async for message in channel.history(limit=30, after=command_message):
+                    if self._is_callkeeper_rescue_hint(message):
+                        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                            await message.delete()
+            await asyncio.sleep(0.5)
+
     def resolve_edit_path(self, raw_path: str) -> Path:
         raw = str(raw_path or "").strip()
         if not raw:
@@ -793,6 +825,7 @@ class TerminalCommandCog(commands.Cog):
         if not command:
             await self._reply_notice(ctx, "Terminal", "Use `_cmd <comando de terminal>` ou `_cmd nano <arquivo>`.", ok=False)
             return
+        self.bot.loop.create_task(self._suppress_callkeeper_rescue_hints(ctx))
         if _touches_callkeeper(command):
             await self._reply_notice(ctx, "Terminal", "Bloqueado: CallKeeper é protegido para recuperação do bot.", ok=False)
             return
