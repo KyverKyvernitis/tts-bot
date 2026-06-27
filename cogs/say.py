@@ -43,9 +43,8 @@ class _SayModal(discord.ui.Modal):
     """Modal principal do /say usando componentes reais do Discord UI Kit."""
 
     GUIDE_TEXT = (
-        "Selecione um usuário para falar com o nick/avatar dele. "
-        "Sem usuário, a fala sai como o servidor. "
-        "Escreva uma mensagem ou marque o modo de 30 segundos."
+        "Selecione um usuário para usar nome/avatar dele. "
+        "Sem usuário, usa o servidor."
     )
 
     def __init__(self, cog: "SayCog", interaction: discord.Interaction):
@@ -63,7 +62,7 @@ class _SayModal(discord.ui.Modal):
 
         self.user_select = discord.ui.UserSelect(
             custom_id="say_user",
-            placeholder="Opcional: selecione alguém para falar como essa pessoa",
+            placeholder="Selecionar usuário",
             min_values=0,
             max_values=1,
             required=False,
@@ -71,7 +70,7 @@ class _SayModal(discord.ui.Modal):
 
         self.message_input = discord.ui.TextInput(
             custom_id="say_text",
-            placeholder="Digite a mensagem. Deixe vazio se quiser só ativar por 30 segundos.",
+            placeholder="Texto para enviar agora.",
             required=False,
             max_length=2000,
             style=discord.TextStyle.paragraph,
@@ -81,22 +80,22 @@ class _SayModal(discord.ui.Modal):
 
         self.add_item(
             discord.ui.Label(
-                text="Usuário opcional",
-                description="Selecionado = fala como o usuário. Vazio = fala como o servidor.",
+                text="Usuário",
+                description="Opcional.",
                 component=self.user_select,
             )
         )
         self.add_item(
             discord.ui.Label(
-                text="O que falar",
-                description="Opcional. Se deixar vazio, marque “Virar por 30 segundos”.",
+                text="Mensagem",
+                description="Deixe vazio para usar só o modo de 30 segundos.",
                 component=self.message_input,
             )
         )
         self.add_item(
             discord.ui.Label(
-                text="Virar por 30 segundos?",
-                description="Apaga suas próximas mensagens e reenvia pelo webhook temporário.",
+                text="Modo 30 segundos",
+                description="Reenvia suas próximas mensagens e apaga as originais.",
                 component=self.session_checkbox,
             )
         )
@@ -357,7 +356,7 @@ class SayCog(commands.Cog):
         identity = self._identity_for_user(selected_member) if selected_member is not None else self._identity_for_server(interaction.guild)
 
         if not text and not enable_session:
-            await self._send_ephemeral(interaction, "Nada para enviar. Escreva uma mensagem ou marque “Virar por 30 segundos”.")
+            await self._send_ephemeral(interaction, "Nada para enviar. Escreva uma mensagem ou marque “Modo 30 segundos”.")
             return
 
         webhook: discord.Webhook | None = None
