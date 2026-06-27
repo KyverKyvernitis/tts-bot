@@ -39,55 +39,9 @@ class SaySession:
     relayed_count: int = 0
 
 
-class _PlainModal(discord.ui.Modal):
-    """Fallback para ambientes sem componentes novos em modal."""
-
-    def __init__(self, cog: "SayCog", interaction: discord.Interaction):
-        super().__init__(title="Falar por webhook")
-        self.cog = cog
-        self.source = interaction
-        self.message_input = discord.ui.TextInput(
-            label="O que falar",
-            placeholder="Opcional. Deixe vazio para ativar por 30 segundos.",
-            required=False,
-            max_length=2000,
-            style=discord.TextStyle.paragraph,
-        )
-        self.user_id_input = discord.ui.TextInput(
-            label="ID do usuário",
-            placeholder="Opcional. Deixe vazio para usar o servidor.",
-            required=False,
-            max_length=24,
-        )
-        self.thirty_input = discord.ui.TextInput(
-            label="Virar por 30 segundos?",
-            placeholder="sim/não",
-            default="sim",
-            required=False,
-            max_length=8,
-        )
-        self.add_item(self.message_input)
-        self.add_item(self.user_id_input)
-        self.add_item(self.thirty_input)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        user_id = str(self.user_id_input.value or "").strip()
-        use_30s = str(self.thirty_input.value or "").strip().lower() not in {"0", "n", "nao", "não", "no", "false"}
-        member = None
-        if user_id and interaction.guild:
-            with contextlib.suppress(Exception):
-                member = interaction.guild.get_member(int(user_id)) or await interaction.guild.fetch_member(int(user_id))
-        identity_mode = "user" if member else "server"
-        await self.cog._handle_modal_submit(
-            interaction,
-            identity_mode=identity_mode,
-            selected_member=member,
-            initial_text=str(self.message_input.value or ""),
-            enable_session=use_30s,
-        )
-
-
 class _SayModal(discord.ui.Modal):
+    """Modal principal do /say usando componentes reais do Discord UI Kit."""
+
     def __init__(self, cog: "SayCog", interaction: discord.Interaction):
         super().__init__(title="Falar por webhook")
         self.cog = cog
@@ -95,11 +49,12 @@ class _SayModal(discord.ui.Modal):
 
         self.user_select = discord.ui.UserSelect(
             custom_id="say_user",
-            placeholder="Selecione um usuário se for falar como usuário",
+            placeholder="Selecione o usuário quando for falar como usuário",
             min_values=0,
             max_values=1,
             required=False,
         )
+
         self.identity_group = discord.ui.RadioGroup(custom_id="say_identity", required=True)
         self.identity_group.add_option(
             label="Servidor",
@@ -108,28 +63,44 @@ class _SayModal(discord.ui.Modal):
             default=True,
         )
         self.identity_group.add_option(
-            label="Usuário",
+            label="Usuário selecionado",
             value="user",
             description="Usa nick e avatar do usuário selecionado.",
         )
+
         self.message_input = discord.ui.TextInput(
             custom_id="say_text",
-            label="O que falar",
-            placeholder="Opcional. Se vazio, use a opção de 30 segundos.",
+            placeholder="Opcional. Deixe vazio para só ativar por 30 segundos.",
             required=False,
             max_length=2000,
             style=discord.TextStyle.paragraph,
         )
+
         self.session_checkbox = discord.ui.Checkbox(custom_id="say_30s", default=False)
 
-        self.add_item(discord.ui.Label(text="Usuário", component=self.user_select))
-        self.add_item(discord.ui.Label(text="Falar usando", component=self.identity_group))
-        # TextInput continua aceito diretamente; em 2.7 também funciona dentro de Label.
-        # Usamos Label para manter o modal alinhado ao Components V2.
-        self.add_item(discord.ui.Label(text="Mensagem", component=self.message_input))
         self.add_item(
             discord.ui.Label(
-                text="Modo por 30 segundos",
+                text="Usuário",
+                description="Opcional quando a fala for pelo servidor.",
+                component=self.user_select,
+            )
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="Falar usando",
+                component=self.identity_group,
+            )
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="O que falar",
+                description="Opcional. Se vazio, marque a opção de 30 segundos.",
+                component=self.message_input,
+            )
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="Virar por 30 segundos?",
                 description="Reenvia suas próximas mensagens pelo webhook temporário.",
                 component=self.session_checkbox,
             )
@@ -139,9 +110,11 @@ class _SayModal(discord.ui.Modal):
         selected_member = self.user_select.values[0] if self.user_select.values else None
         if isinstance(selected_member, discord.User) and interaction.guild is not None:
             selected_member = interaction.guild.get_member(selected_member.id) or selected_member
+
+        identity_mode = str(self.identity_group.value or "server")
         await self.cog._handle_modal_submit(
             interaction,
-            identity_mode=str(self.identity_group.value or "server"),
+            identity_mode=identity_mode,
             selected_member=selected_member,
             initial_text=str(self.message_input.value or ""),
             enable_session=bool(self.session_checkbox.value),
@@ -448,15 +421,8 @@ class SayCog(commands.Cog):
         try:
             await interaction.response.send_modal(_SayModal(self, interaction))
         except Exception:
-            LOG.warning("modal novo do /say falhou; usando fallback simples", exc_info=True)
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_modal(_PlainModal(self, interaction))
-                else:
-                    await interaction.followup.send("Não consegui abrir o modal completo. Tente novamente.", ephemeral=True)
-            except Exception:
-                LOG.exception("falha ao abrir modal fallback do /say")
-                await self._send_ephemeral(interaction, "Não consegui abrir o modal do /say.")
+            LOG.exception("falha ao abrir modal com componentes reais do /say")
+            await self._send_ephemeral(interaction, "Não consegui abrir o modal do /say.")
 
     @commands.Cog.listener("on_message")
     async def _say_on_message(self, message: discord.Message) -> None:
