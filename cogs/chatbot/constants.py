@@ -146,6 +146,29 @@ MAX_GUILD_CONTEXT_CHARS = 4000
 MAX_CHANNEL_CONTEXT_CHARS = 3000
 MAX_MODEL_REPLY_CHARS = 4000
 
+
+# -----------------------------------------------------------------------------
+# /chatbot persona
+# -----------------------------------------------------------------------------
+
+PROFILE_KIND_NORMAL = "normal"
+PROFILE_KIND_USER_STYLE = "user_style"
+
+# Coleta para personas: buscamos mais do que 80 porque filtros removem comandos,
+# links soltos e mensagens muito curtas. Não aumentar sem testar latência.
+PERSONA_MAX_MESSAGES = 80
+PERSONA_LIGHT_MESSAGES = 30
+PERSONA_MIN_GOOD_MESSAGES = 20
+PERSONA_HISTORY_SCAN_MIN = 220
+PERSONA_HISTORY_SCAN_LIMIT = 600
+PERSONA_MIN_MESSAGE_CHARS = 6
+PERSONA_MAX_MESSAGE_CHARS = 320
+PERSONA_MAX_TOTAL_CHARS = 12_000
+PERSONA_GENERATION_TIMEOUT_SECONDS = 60.0
+PERSONA_GENERATION_TEMPERATURE = 0.35
+PERSONA_GENERATED_PROMPT_MAX_CHARS = 1_400
+PERSONA_COMMAND_PREFIXES = ("/", "!", "?", ".", "_", ";")
+
 # -----------------------------------------------------------------------------
 # Caches em RAM (com TTL — são evictados depois)
 # -----------------------------------------------------------------------------

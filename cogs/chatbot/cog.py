@@ -22,7 +22,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Optional
 
 import aiohttp
@@ -363,43 +363,49 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return None
 
+    def _profile_name_candidates(
+        self, guild: Optional[discord.Guild], profile: ChatbotProfile
+    ) -> list[str]:
+        names: list[str] = []
+        if getattr(profile, "dynamic_identity", False) and profile.source_user_id and guild is not None:
+            member = guild.get_member(int(profile.source_user_id))
+            if member is not None:
+                names.append(str(getattr(member, "display_name", "") or member.name))
+        for name in (profile.name, profile.fallback_name):
+            name = str(name or "").strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
     def _match_profile_mention(
-        self, content: str, profiles: list[ChatbotProfile]
+        self, content: str, profiles: list[ChatbotProfile], guild: Optional[discord.Guild] = None
     ) -> tuple[Optional[ChatbotProfile], str]:
         """Tenta casar `@Nome` no início da mensagem com um dos profiles.
 
-        Algoritmo:
-          1. Se match regex `@palavra...` captura a potential name
-          2. Pra cada profile, tenta bater `content` começa com `@{nome}`
-             (case-insensitive) — começamos pelos nomes MAIS LONGOS pra
-             evitar que "Lu" match num profile "Lua"
-          3. Se achou, retorna (profile, resto_do_conteúdo_sem_o_token)
-
-        Returns:
-            (profile_matched, content_sem_token) ou (None, content_original)
+        Para personas, também aceita o nick atual do usuário vinculado quando
+        ele está em cache no servidor.
         """
         stripped = content.lstrip()
         if not stripped.startswith("@"):
             return (None, content)
 
-        # Ordena por tamanho do nome decrescente pra evitar prefix collisions
-        # (um profile "Lu" não roubar match do "Lua").
-        sorted_profiles = sorted(profiles, key=lambda p: -len(p.name))
+        candidates: list[tuple[ChatbotProfile, str]] = []
+        for p in profiles:
+            for name in self._profile_name_candidates(guild, p):
+                candidates.append((p, name))
+        candidates.sort(key=lambda item: -len(item[1]))
 
         lower = stripped.lower()
-        for p in sorted_profiles:
-            pname = (p.name or "").strip()
+        for p, pname in candidates:
+            pname = (pname or "").strip()
             if not pname:
                 continue
             token = f"@{pname.lower()}"
             if lower.startswith(token):
-                # Verifica que o próximo char é whitespace ou end — evita
-                # match parcial em "@Lua123" → "Lua". Mas "@Lua," deve valer.
                 next_idx = len(token)
                 if next_idx >= len(stripped):
                     remainder = ""
                 elif stripped[next_idx].isalnum():
-                    # próximo é alfanumérico = não é o profile "Lua", é outro nome
                     continue
                 else:
                     remainder = stripped[next_idx:].lstrip(" ,:;-—")
@@ -447,7 +453,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
         # --- 2. Menção de nome `@Nome` ----------------------------------------
         matched, remainder = self._match_profile_mention(
-            message.content, profiles,
+            message.content, profiles, guild,
         )
         if matched is not None:
             is_temp = active is None or matched.profile_id != active.profile_id
@@ -469,7 +475,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 ).strip().lower()
                 matched_profile = None
                 for p in profiles:
-                    if p.name.strip().lower() == author_name:
+                    names = self._profile_name_candidates(guild, p)
+                    if any(name.strip().lower() == author_name for name in names):
                         matched_profile = p
                         break
                 # Fallback: se webhook_id está no cache gerenciado e o nome
@@ -562,6 +569,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             return False
 
         channel = message.channel
+        profile = await self._profile_with_resolved_identity(message.guild, profile)
         prompt_class = "adult_allowed" if parse_image_intent(img_prompt).category == "adult_allowed" else "safe"
         log.info(
             "chatbot: gerando imagem | profile=%s prompt=%r",
@@ -997,6 +1005,44 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
     # -------------------------------------------------------------------------
     # Text safety / prompt bounding
     # -------------------------------------------------------------------------
+
+
+    async def _resolve_profile_identity(
+        self,
+        guild: Optional[discord.Guild],
+        profile: ChatbotProfile,
+    ) -> tuple[str, str]:
+        """Resolve nome/avatar efetivos do profile.
+
+        Profiles `user_style` usam identidade dinâmica: nick e avatar atuais do
+        usuário vinculado, com fallback salvo caso ele saia do servidor.
+        """
+        name = str(profile.name or profile.fallback_name or "Chatbot").strip()
+        avatar_url = str(profile.avatar_url or profile.fallback_avatar_url or "").strip()
+        if getattr(profile, "dynamic_identity", False) and profile.source_user_id and guild is not None:
+            member = guild.get_member(int(profile.source_user_id))
+            if member is None:
+                try:
+                    member = await guild.fetch_member(int(profile.source_user_id))
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    member = None
+            if member is not None:
+                name = str(getattr(member, "display_name", "") or member.name or name)
+                avatar = getattr(member, "display_avatar", None) or getattr(member, "avatar", None)
+                avatar_url = str(getattr(avatar, "url", "") or avatar_url)
+        name = self._neutralize_mentions(name)[:C.MAX_NAME_LENGTH].strip() or "Chatbot"
+        avatar_url = avatar_url[:C.MAX_AVATAR_URL_LENGTH].strip()
+        return name, avatar_url
+
+    async def _profile_with_resolved_identity(
+        self,
+        guild: Optional[discord.Guild],
+        profile: ChatbotProfile,
+    ) -> ChatbotProfile:
+        name, avatar_url = await self._resolve_profile_identity(guild, profile)
+        if name == profile.name and avatar_url == profile.avatar_url:
+            return profile
+        return replace(profile, name=name, avatar_url=avatar_url)
 
     def _neutralize_mentions(self, text: str) -> str:
         """Remove menções globais do texto enviado/ecoado pelo chatbot.
@@ -1495,6 +1541,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             return
 
         user_display = str(getattr(author, "display_name", author.name))
+        display_profile = await self._profile_with_resolved_identity(guild, profile)
 
         # 1. Reação de processando
         reaction_applied = await self._add_processing_reaction(message)
@@ -1566,7 +1613,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             channel_context: Optional[str] = None
             if is_temporary and channel_msgs:
                 channel_context = self._format_channel_history(
-                    channel_msgs, profile.name,
+                    channel_msgs, display_profile.name,
                 )
 
             # Detecta se o canal é age-restricted. Threads herdam do pai
@@ -1597,7 +1644,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 )
 
             system, messages = self._build_messages(
-                profile=profile,
+                profile=display_profile,
                 user_history=user_hist,
                 guild_context=guild_hist,
                 user_name=user_display,
@@ -1614,7 +1661,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             # NÃO loga o prompt completo (é longo e pode ter PII). Só metadados.
             log.info(
                 "chatbot: gerando resposta | profile=%s canal=%s modo=%s",
-                profile.name,
+                display_profile.name,
                 "nsfw" if channel_is_nsfw else "sfw",
                 "temporary" if is_temporary else "active",
             )
@@ -1625,7 +1672,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     reply = await self._router.chat(
                         system=system,
                         messages=messages,
-                        temperature=profile.temperature,
+                        temperature=display_profile.temperature,
                     )
                 except AllProvidersExhausted:
                     log.warning("chatbot: todos providers exauridos")
@@ -1658,7 +1705,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             tts_file = await self._maybe_generate_tts(
                 content=content,  # texto original do user
                 reply=reply,
-                profile=profile,
+                profile=display_profile,
                 guild_id=(message.guild.id if message.guild else None),
             )
             reply = self._sanitize_audio_capability_claim(
@@ -1690,8 +1737,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
             sent = await self._webhooks.send_as_profile(
                 channel=channel,
-                profile_name=profile.name,
-                avatar_url=profile.avatar_url,
+                profile_name=display_profile.name,
+                avatar_url=display_profile.avatar_url,
                 content=final_content or None,
                 files=files if files else None,
             )
@@ -1699,7 +1746,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 # Fallback: envia como o próprio bot avisando que falhou o webhook.
                 try:
                     await channel.send(
-                        (f"**{profile.name}:**\n{final_content}"[:1990] if final_content else None),
+                        (f"**{display_profile.name}:**\n{final_content}"[:1990] if final_content else None),
                         allowed_mentions=discord.AllowedMentions.none(),
                         files=files if files else discord.utils.MISSING,
                     )
@@ -1709,7 +1756,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
             await self._maybe_enqueue_voice_call_tts(
                 message=message,
-                profile=profile,
+                profile=display_profile,
                 spoken_text=reply,
                 audio_was_sent=(tts_file is not None),
             )

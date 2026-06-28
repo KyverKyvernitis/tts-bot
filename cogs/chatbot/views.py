@@ -15,12 +15,13 @@ Também exporta uma View simples pra confirmação de ações destrutivas
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import discord
 
 from . import constants as C
 from .profiles import ChatbotProfile, ProfileStore
+from .persona import PersonaModalConfig, PersonaOptions
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +61,189 @@ def _parse_int_safe(text: str, default: int, lo: int, hi: int) -> int:
     except (ValueError, TypeError):
         return default
     return max(lo, min(hi, val))
+
+
+def _modal_label(text: str, component: discord.ui.Item, description: str | None = None):
+    """Cria Label para componentes modernos em modal.
+
+    discord.py 2.7 usa keyword-only (`text=`, `component=`). O helper deixa a
+    construção em um ponto só e facilita fallback se a assinatura mudar.
+    """
+    return discord.ui.Label(
+        text=text[:45],
+        description=(description[:100] if description else None),
+        component=component,
+    )
+
+
+class PersonaConfigModal(discord.ui.Modal, title="Criar persona"):
+    """Modal moderno de `/chatbot persona`.
+
+    Usa componentes suportados em modais pelo discord.py 2.7+: UserSelect,
+    ChannelSelect, RadioGroup e CheckboxGroup, cada um dentro de Label.
+    """
+
+    def __init__(
+        self,
+        *,
+        requester_id: int,
+        on_submit_config: Callable[[discord.Interaction, PersonaModalConfig], Awaitable[None]],
+    ):
+        super().__init__(timeout=600.0)
+        self._requester_id = int(requester_id)
+        self._on_submit_config = on_submit_config
+
+        self.user_select = discord.ui.UserSelect(
+            custom_id="chatbot_persona_user",
+            placeholder="Escolha o usuário base",
+            min_values=1,
+            max_values=1,
+            required=True,
+        )
+        self.channel_select = discord.ui.ChannelSelect(
+            custom_id="chatbot_persona_channel",
+            placeholder="Canal de onde as mensagens serão lidas",
+            channel_types=[
+                discord.ChannelType.text,
+                discord.ChannelType.news,
+                discord.ChannelType.public_thread,
+                discord.ChannelType.private_thread,
+            ],
+            min_values=1,
+            max_values=1,
+            required=True,
+        )
+        self.action_group = discord.ui.RadioGroup(
+            custom_id="chatbot_persona_action",
+            required=True,
+        )
+        self.action_group.add_option(
+            label="Criar ou atualizar",
+            value="upsert",
+            description="Gera uma persona nova ou substitui a existente.",
+            default=True,
+        )
+        self.action_group.add_option(
+            label="Remover persona",
+            value="remove",
+            description="Apaga a persona vinculada a esse usuário.",
+        )
+
+        self.depth_group = discord.ui.RadioGroup(
+            custom_id="chatbot_persona_depth",
+            required=True,
+        )
+        self.depth_group.add_option(
+            label="Leve — até 30 mensagens",
+            value="30",
+            description="Mais rápido, menos fiel ao estilo.",
+        )
+        self.depth_group.add_option(
+            label="Normal — até 80 mensagens",
+            value="80",
+            description="Melhor base para copiar o jeito de escrever.",
+            default=True,
+        )
+
+        self.options_group = discord.ui.CheckboxGroup(
+            custom_id="chatbot_persona_options",
+            required=False,
+            min_values=0,
+            max_values=5,
+        )
+        self.options_group.add_option(
+            label="Ignorar links",
+            value="ignore_links",
+            description="Não usa mensagens que são só link.",
+            default=True,
+        )
+        self.options_group.add_option(
+            label="Ignorar comandos",
+            value="ignore_commands",
+            description="Remove mensagens com prefixo de comando.",
+            default=True,
+        )
+        self.options_group.add_option(
+            label="Ignorar mensagens curtas",
+            value="ignore_short",
+            description="Evita amostras sem estilo suficiente.",
+            default=True,
+        )
+        self.options_group.add_option(
+            label="Não copiar frases exatas",
+            value="avoid_exact_copy",
+            description="Extrai estilo, não frases literais.",
+            default=True,
+        )
+        self.options_group.add_option(
+            label="Ativar depois de criar",
+            value="activate",
+            description="Deixa essa persona como profile ativo.",
+            default=True,
+        )
+
+        self.add_item(_modal_label(
+            "Usuário base",
+            self.user_select,
+            "Nick e avatar serão resolvidos desse usuário.",
+        ))
+        self.add_item(_modal_label(
+            "Canal de leitura",
+            self.channel_select,
+            "Lê até 80 mensagens públicas desse canal.",
+        ))
+        self.add_item(_modal_label(
+            "Ação",
+            self.action_group,
+            "Criar/atualizar ou remover a persona.",
+        ))
+        self.add_item(_modal_label(
+            "Profundidade",
+            self.depth_group,
+            "Quantidade máxima de mensagens usadas.",
+        ))
+        self.add_item(_modal_label(
+            "Filtros",
+            self.options_group,
+            "Limpeza aplicada antes de mandar à IA.",
+        ))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user is None or int(interaction.user.id) != self._requester_id:
+            await interaction.response.send_message(
+                "Este modal não é pra você.", ephemeral=True
+            )
+            return
+
+        try:
+            selected_user = self.user_select.values[0]
+            selected_channel = self.channel_select.values[0]
+            target_user_id = int(getattr(selected_user, "id"))
+            channel_id = int(getattr(selected_channel, "id"))
+            sample_limit = int(self.depth_group.value or C.PERSONA_MAX_MESSAGES)
+            selected_options = set(self.options_group.values or [])
+            config = PersonaModalConfig(
+                action=str(self.action_group.value or "upsert"),
+                target_user_id=target_user_id,
+                channel_id=channel_id,
+                sample_limit=sample_limit,
+                options=PersonaOptions(
+                    ignore_links="ignore_links" in selected_options,
+                    ignore_commands="ignore_commands" in selected_options,
+                    ignore_short="ignore_short" in selected_options,
+                    avoid_exact_copy=("avoid_exact_copy" in selected_options),
+                    activate_after_create=("activate" in selected_options),
+                ),
+            )
+        except Exception:
+            log.exception("chatbot: falha ao ler modal de persona")
+            await interaction.response.send_message(
+                "❌ Não consegui ler a configuração do modal.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self._on_submit_config(interaction, config)
 
 
 class ProfileCreateModal(discord.ui.Modal, title="Criar profile do chatbot"):

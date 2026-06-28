@@ -48,6 +48,14 @@ class ChatbotProfile:
     # quando pedirem explicitamente; 1 = sempre. Default 0.
     # Permite profiles tipo "locutor" falarem muito, ou mudos tipo "sussurrador".
     tts_chance: float = 0.0
+    profile_kind: str = C.PROFILE_KIND_NORMAL
+    source_user_id: int = 0
+    source_channel_id: int = 0
+    dynamic_identity: bool = False
+    fallback_name: str = ""
+    fallback_avatar_url: str = ""
+    persona_sample_count: int = 0
+    persona_generated_at: float = 0.0
     created_by: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -64,6 +72,14 @@ class ChatbotProfile:
             history_size=int(doc.get("history_size") or C.DEFAULT_HISTORY_SIZE),
             active=bool(doc.get("active") or False),
             tts_chance=float(doc.get("tts_chance") or 0.0),
+            profile_kind=str(doc.get("profile_kind") or C.PROFILE_KIND_NORMAL),
+            source_user_id=int(doc.get("source_user_id") or 0),
+            source_channel_id=int(doc.get("source_channel_id") or 0),
+            dynamic_identity=bool(doc.get("dynamic_identity") or False),
+            fallback_name=str(doc.get("fallback_name") or ""),
+            fallback_avatar_url=str(doc.get("fallback_avatar_url") or ""),
+            persona_sample_count=int(doc.get("persona_sample_count") or 0),
+            persona_generated_at=float(doc.get("persona_generated_at") or 0.0),
             created_by=int(doc.get("created_by") or 0),
             created_at=float(doc.get("created_at") or time.time()),
             updated_at=float(doc.get("updated_at") or time.time()),
@@ -81,6 +97,14 @@ class ChatbotProfile:
             "history_size": self.history_size,
             "active": self.active,
             "tts_chance": self.tts_chance,
+            "profile_kind": self.profile_kind,
+            "source_user_id": self.source_user_id,
+            "source_channel_id": self.source_channel_id,
+            "dynamic_identity": self.dynamic_identity,
+            "fallback_name": self.fallback_name,
+            "fallback_avatar_url": self.fallback_avatar_url,
+            "persona_sample_count": self.persona_sample_count,
+            "persona_generated_at": self.persona_generated_at,
             "created_by": self.created_by,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -144,6 +168,17 @@ class ProfileStore:
             "type": C.DOC_TYPE_PROFILE,
             "guild_id": int(guild_id),
         })
+
+    async def get_user_style_profile(
+        self, guild_id: int, source_user_id: int
+    ) -> Optional[ChatbotProfile]:
+        doc = await self._coll.find_one({
+            "type": C.DOC_TYPE_PROFILE,
+            "guild_id": int(guild_id),
+            "profile_kind": C.PROFILE_KIND_USER_STYLE,
+            "source_user_id": int(source_user_id),
+        })
+        return ChatbotProfile.from_doc(doc) if doc else None
 
     # --- Escrita ---------------------------------------------------------------
 
@@ -219,6 +254,88 @@ class ProfileStore:
             "type": C.DOC_TYPE_PROFILE,
             "guild_id": int(guild_id),
             "profile_id": str(profile_id),
+        })
+        return result.deleted_count > 0
+
+    async def upsert_user_style_profile(
+        self,
+        *,
+        guild_id: int,
+        source_user_id: int,
+        source_channel_id: int,
+        created_by: int,
+        fallback_name: str,
+        fallback_avatar_url: str,
+        system_prompt: str,
+        sample_count: int,
+        activate: bool = False,
+    ) -> tuple[ChatbotProfile, bool]:
+        """Cria ou atualiza o profile especial vinculado a um usuário.
+
+        Retorna (profile, created). O profile_id é determinístico para que
+        `/chatbot persona` atualize a persona do usuário sem criar duplicatas.
+        """
+        now = time.time()
+        guild_id_i = int(guild_id)
+        source_user_id_i = int(source_user_id)
+        profile_id = f"persona-{source_user_id_i}"
+        existing = await self.get_user_style_profile(guild_id_i, source_user_id_i)
+        created = existing is None
+
+        updates: dict[str, Any] = {
+            "type": C.DOC_TYPE_PROFILE,
+            "guild_id": guild_id_i,
+            "profile_id": profile_id,
+            "name": fallback_name.strip()[:C.MAX_NAME_LENGTH] or "Persona",
+            "avatar_url": fallback_avatar_url.strip()[:C.MAX_AVATAR_URL_LENGTH],
+            "system_prompt": system_prompt.strip()[:C.MAX_SYSTEM_EXTRA_LENGTH],
+            "temperature": C.DEFAULT_TEMPERATURE,
+            "history_size": C.DEFAULT_HISTORY_SIZE,
+            "profile_kind": C.PROFILE_KIND_USER_STYLE,
+            "source_user_id": source_user_id_i,
+            "source_channel_id": int(source_channel_id),
+            "dynamic_identity": True,
+            "fallback_name": fallback_name.strip()[:C.MAX_NAME_LENGTH] or "Persona",
+            "fallback_avatar_url": fallback_avatar_url.strip()[:C.MAX_AVATAR_URL_LENGTH],
+            "persona_sample_count": int(sample_count),
+            "persona_generated_at": now,
+            "created_by": int(created_by if created else (existing.created_by if existing else created_by)),
+            "updated_at": now,
+        }
+        if created:
+            updates["created_at"] = now
+            updates["active"] = False
+        else:
+            # Preserva flags editadas manualmente em versões futuras.
+            updates["active"] = bool(existing.active)
+            updates["tts_chance"] = float(existing.tts_chance)
+            updates["created_at"] = float(existing.created_at)
+
+        await self._coll.update_one(
+            {
+                "type": C.DOC_TYPE_PROFILE,
+                "guild_id": guild_id_i,
+                "profile_id": profile_id,
+            },
+            {"$set": updates},
+            upsert=True,
+        )
+        if activate:
+            activated = await self.set_active_profile(guild_id_i, profile_id)
+            if activated is not None:
+                return activated, created
+        profile = await self.get_profile(guild_id_i, profile_id)
+        if profile is None:
+            # Defensivo: não deveria acontecer depois do upsert.
+            profile = ChatbotProfile.from_doc(updates)
+        return profile, created
+
+    async def delete_user_style_profile(self, guild_id: int, source_user_id: int) -> bool:
+        result = await self._coll.delete_one({
+            "type": C.DOC_TYPE_PROFILE,
+            "guild_id": int(guild_id),
+            "profile_kind": C.PROFILE_KIND_USER_STYLE,
+            "source_user_id": int(source_user_id),
         })
         return result.deleted_count > 0
 

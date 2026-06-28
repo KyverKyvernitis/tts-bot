@@ -10,7 +10,7 @@ Organização:
 
 Em vez de subgroups (que ficam poluídos no autocomplete do Discord), usamos
 comandos diretos com `app_commands.Choice` pra escolher a ação. Fica apenas 2
-entradas em `/chatbot` em vez de 10 espalhadas por 3 subgroups.
+entradas enxutas em `/chatbot` em vez de subgroups espalhados.
 
 Comandos de "operador do bot" (master prompt, reset cross-guild) ficam em um
 grupo separado `/chatbotadmin` registrado só na MANAGEMENT_GUILD_ID. Eles não
@@ -27,6 +27,7 @@ de saber que mudou o profile).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -36,7 +37,23 @@ from discord.ext import commands
 
 from . import constants as C
 from .profiles import ChatbotProfile
-from .views import ConfirmView, MasterEditModal, ProfileCreateModal, ProfileEditModal
+from .persona import (
+    build_persona_generation_payload,
+    build_user_style_system_prompt,
+    collect_user_persona_samples,
+    parse_persona_generation_response,
+    resolve_member_avatar_url,
+    resolve_member_display_name,
+    PersonaModalConfig,
+)
+from .providers import AllProvidersExhausted, ProviderError
+from .views import (
+    ConfirmView,
+    MasterEditModal,
+    PersonaConfigModal,
+    ProfileCreateModal,
+    ProfileEditModal,
+)
 
 log = logging.getLogger(__name__)
 
@@ -358,6 +375,7 @@ class ChatbotCommandsMixin:
         ]
         for p in profiles:
             status = "⭐ ativo" if p.active else "inativo"
+            kind = "persona" if p.profile_kind == C.PROFILE_KIND_USER_STYLE else "profile"
             prompt_preview = (p.system_prompt or "").strip().replace("\n", " ")
             if len(prompt_preview) > 80:
                 prompt_preview = prompt_preview[:77] + "..."
@@ -409,9 +427,17 @@ class ChatbotCommandsMixin:
         # Resposta PÚBLICA (não ephemeral) — o server todo se beneficia de
         # saber qual profile está ativo agora.
         # Embed pra ficar visualmente agradável e mostrar o avatar do profile.
-        safe_name = discord.utils.escape_markdown(activated.name)
+        display_name = activated.name
+        display_avatar = activated.avatar_url
+        resolver = getattr(self, "_resolve_profile_identity", None)
+        if callable(resolver):
+            try:
+                display_name, display_avatar = await resolver(guild, activated)
+            except Exception:
+                log.exception("chatbot: falha ao resolver identidade dinâmica")
+        safe_name = discord.utils.escape_markdown(display_name)
         embed = discord.Embed(
-            title=f"⭐ Chatbot ativo: {activated.name}",
+            title=f"⭐ Chatbot ativo: {display_name}",
             description=(
                 f"Mencione o bot no início de uma mensagem "
                 f"(ex: {interaction.client.user.mention} oi) ou responda a "
@@ -419,9 +445,9 @@ class ChatbotCommandsMixin:
             ),
             color=discord.Color.blurple(),
         )
-        if activated.avatar_url:
+        if display_avatar:
             try:
-                embed.set_thumbnail(url=activated.avatar_url)
+                embed.set_thumbnail(url=display_avatar)
             except Exception:
                 pass  # URL inválida — só ignora o thumbnail
         await interaction.response.send_message(embed=embed)
@@ -457,6 +483,240 @@ class ChatbotCommandsMixin:
             "🚫 Chatbot desativado. Menções e replies não serão respondidos "
             "até reativar com `/chatbot profile acao:Ativar`.",
             ephemeral=False,
+        )
+
+
+    # --- /chatbot persona -----------------------------------------------------
+
+    async def _resolve_selected_persona_channel(
+        self,
+        interaction: discord.Interaction,
+        channel_id: int,
+    ) -> Optional[discord.abc.Messageable]:
+        guild = interaction.guild
+        if guild is None:
+            return None
+        channel = None
+        get_channel_or_thread = getattr(guild, "get_channel_or_thread", None)
+        if callable(get_channel_or_thread):
+            channel = get_channel_or_thread(int(channel_id))
+        if channel is None:
+            channel = guild.get_channel(int(channel_id))
+        if channel is None:
+            channel = interaction.client.get_channel(int(channel_id))
+        if channel is None:
+            try:
+                channel = await guild.fetch_channel(int(channel_id))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                channel = None
+        return channel if isinstance(channel, (discord.TextChannel, discord.Thread)) else None
+
+    async def _resolve_persona_member_or_user(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+    ) -> Optional[discord.abc.User]:
+        member = guild.get_member(int(user_id))
+        if member is not None:
+            return member
+        try:
+            return await guild.fetch_member(int(user_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            user = self.bot.get_user(int(user_id))
+            if user is not None:
+                return user
+            try:
+                return await self.bot.fetch_user(int(user_id))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return None
+
+    def _persona_channel_permissions_ok(
+        self,
+        channel: discord.abc.Messageable,
+        guild: discord.Guild,
+    ) -> bool:
+        me = guild.me
+        if me is None or not hasattr(channel, "permissions_for"):
+            return False
+        perms = channel.permissions_for(me)  # type: ignore[attr-defined]
+        return bool(getattr(perms, "view_channel", False) and getattr(perms, "read_message_history", False))
+
+    async def _do_persona(self, interaction: discord.Interaction):
+        if not await _staff_check(interaction):
+            await interaction.response.send_message(
+                "Só staff (Manage Server) pode criar personas.", ephemeral=True
+            )
+            return
+        if not self._require_ready(interaction):
+            await interaction.response.send_message(
+                "Chatbot não está pronto. Tenta de novo em alguns segundos.",
+                ephemeral=True,
+            )
+            return
+        if getattr(self, "_router", None) is None:
+            await interaction.response.send_message(
+                "Chatbot não está com provider de IA pronto.", ephemeral=True
+            )
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Só funciona em servidor.", ephemeral=True
+            )
+            return
+
+        modal = PersonaConfigModal(
+            requester_id=interaction.user.id,
+            on_submit_config=self._handle_persona_modal,
+        )
+        await interaction.response.send_modal(modal)
+
+    async def _handle_persona_modal(
+        self,
+        interaction: discord.Interaction,
+        config: PersonaModalConfig,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send("Só funciona em servidor.", ephemeral=True)
+            return
+        if self._profiles is None or getattr(self, "_router", None) is None:
+            await interaction.followup.send("Chatbot não está pronto.", ephemeral=True)
+            return
+
+        target = await self._resolve_persona_member_or_user(guild, config.target_user_id)
+        if target is None:
+            await interaction.followup.send(
+                "Não encontrei esse usuário no servidor.", ephemeral=True
+            )
+            return
+        if getattr(target, "bot", False):
+            await interaction.followup.send(
+                "Persona de bot não é suportada.", ephemeral=True
+            )
+            return
+
+        channel = await self._resolve_selected_persona_channel(interaction, config.channel_id)
+        if channel is None:
+            await interaction.followup.send(
+                "Escolha um canal de texto ou thread válido.", ephemeral=True
+            )
+            return
+        if not self._persona_channel_permissions_ok(channel, guild):
+            await interaction.followup.send(
+                "Não tenho permissão para ler histórico nesse canal.", ephemeral=True
+            )
+            return
+
+        display_name = resolve_member_display_name(target)
+        avatar_url = resolve_member_avatar_url(target)
+
+        if config.action == "remove":
+            deleted = await self._profiles.delete_user_style_profile(guild.id, config.target_user_id)
+            if deleted:
+                await interaction.followup.send(
+                    f"Persona de **{discord.utils.escape_markdown(display_name)}** removida.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "Esse usuário não tinha persona criada.", ephemeral=True,
+                )
+            return
+
+        existing = await self._profiles.get_user_style_profile(guild.id, config.target_user_id)
+        if existing is None:
+            count = await self._profiles.count_profiles(guild.id)
+            if count >= C.MAX_PROFILES_PER_GUILD:
+                await interaction.followup.send(
+                    f"Limite de {C.MAX_PROFILES_PER_GUILD} profiles atingido. "
+                    "Apague um profile antes de criar uma persona nova.",
+                    ephemeral=True,
+                )
+                return
+
+        try:
+            sample_result = await collect_user_persona_samples(
+                channel=channel,
+                user_id=config.target_user_id,
+                sample_limit=config.sample_limit,
+                options=config.options,
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Não tenho permissão para ler esse canal.", ephemeral=True
+            )
+            return
+        except discord.HTTPException:
+            log.exception("chatbot: falha ao coletar mensagens para persona")
+            await interaction.followup.send(
+                "Falha ao ler histórico do canal.", ephemeral=True
+            )
+            return
+
+        if len(sample_result.samples) < C.PERSONA_MIN_GOOD_MESSAGES:
+            await interaction.followup.send(
+                f"Não encontrei mensagens suficientes desse usuário nesse canal. "
+                f"Boas: {len(sample_result.samples)} · mínimo: {C.PERSONA_MIN_GOOD_MESSAGES}.",
+                ephemeral=True,
+            )
+            return
+
+        system, messages = build_persona_generation_payload(
+            display_name=display_name,
+            samples=sample_result.samples,
+            avoid_exact_copy=config.options.avoid_exact_copy,
+        )
+        try:
+            async with self._provider_sem:
+                raw = await asyncio.wait_for(
+                    self._router.chat(
+                        system=system,
+                        messages=messages,
+                        temperature=C.PERSONA_GENERATION_TEMPERATURE,
+                    ),
+                    timeout=C.PERSONA_GENERATION_TIMEOUT_SECONDS,
+                )
+        except AllProvidersExhausted:
+            await interaction.followup.send(
+                "Nenhum provider de IA está disponível agora.", ephemeral=True
+            )
+            return
+        except (ProviderError, asyncio.TimeoutError):
+            log.exception("chatbot: falha ao gerar persona")
+            await interaction.followup.send(
+                "Falha ao gerar a persona com IA. Tenta de novo em alguns segundos.",
+                ephemeral=True,
+            )
+            return
+
+        parsed = parse_persona_generation_response(raw)
+        if not parsed.style_prompt:
+            await interaction.followup.send(
+                "A IA não retornou uma personalidade válida.", ephemeral=True
+            )
+            return
+
+        system_prompt = build_user_style_system_prompt(parsed.style_prompt)
+        profile, created = await self._profiles.upsert_user_style_profile(
+            guild_id=guild.id,
+            source_user_id=config.target_user_id,
+            source_channel_id=config.channel_id,
+            created_by=interaction.user.id,
+            fallback_name=display_name,
+            fallback_avatar_url=avatar_url,
+            system_prompt=system_prompt,
+            sample_count=len(sample_result.samples),
+            activate=config.options.activate_after_create,
+        )
+
+        action_text = "criada" if created else "atualizada"
+        active_text = " e ativada" if profile.active else ""
+        channel_mention = getattr(channel, "mention", f"`{config.channel_id}`")
+        await interaction.followup.send(
+            f"Persona de **{discord.utils.escape_markdown(display_name)}** {action_text}{active_text}.\n"
+            f"Base: {len(sample_result.samples)} mensagens em {channel_mention}.\n"
+            f"`ID: {profile.profile_id}`",
+            ephemeral=True,
         )
 
     # --- /chatbot reset_server ------------------------------------------------
@@ -725,6 +985,15 @@ class ChatbotCommandsMixin:
             await self._do_profile_apagar(interaction, profile)  # type: ignore[arg-type]
         elif action == "ativar":
             await self._do_profile_ativar(interaction, profile)  # type: ignore[arg-type]
+
+    # --- /chatbot persona -----------------------------------------------------
+    @chatbot.command(
+        name="persona",
+        description="Criar, atualizar ou remover persona baseada em um usuário",
+    )
+    @_safe_slash
+    async def chatbot_persona(self, interaction: discord.Interaction):
+        await self._do_persona(interaction)
 
     # --- /chatbot memoria -----------------------------------------------------
     # Antes era um subgroup com 1 só comando (`reset_server`). Agora é comando
