@@ -75,6 +75,27 @@ async def ensure_indexes(coll) -> None:
             sparse=True,
         )
 
+        # Reply robusto: mensagem enviada pelo webhook -> profile que enviou.
+        await coll.create_index(
+            [("type", 1), ("message_id", 1)],
+            name="chatbot_msg_map_lookup",
+            unique=True,
+            partialFilterExpression={"type": C.DOC_TYPE_MESSAGE_MAP},
+        )
+        await coll.create_index(
+            [("type", 1), ("guild_id", 1), ("created_at", 1)],
+            name="chatbot_msg_map_cleanup",
+            partialFilterExpression={"type": C.DOC_TYPE_MESSAGE_MAP},
+        )
+
+        # Config única do modo extrovert por guild.
+        await coll.create_index(
+            [("type", 1), ("guild_id", 1)],
+            name="chatbot_extrovert_unique",
+            unique=True,
+            partialFilterExpression={"type": C.DOC_TYPE_EXTROVERT},
+        )
+
         log.info("chatbot: índices do %s verificados", C.CHATBOT_COLLECTION_NAME)
     except Exception:
         # Não é fatal. Bot continua funcionando, só sem os índices

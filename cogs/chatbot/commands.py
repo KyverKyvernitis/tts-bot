@@ -47,8 +47,10 @@ from .persona import (
     PersonaModalConfig,
 )
 from .providers import AllProvidersExhausted, ProviderError
+from .extrovert import ExtrovertModalConfig
 from .views import (
     ConfirmView,
+    ExtrovertConfigModal,
     MasterEditModal,
     PersonaConfigModal,
     ProfileCreateModal,
@@ -719,6 +721,123 @@ class ChatbotCommandsMixin:
             ephemeral=True,
         )
 
+    # --- /chatbot extrovert ---------------------------------------------------
+
+    async def _do_extrovert(self, interaction: discord.Interaction):
+        if not await _staff_check(interaction):
+            await interaction.response.send_message(
+                "Só staff (Manage Server) pode configurar o extrovert.", ephemeral=True
+            )
+            return
+        if not self._require_ready(interaction):
+            await interaction.response.send_message(
+                "Chatbot não está pronto. Tenta de novo em alguns segundos.",
+                ephemeral=True,
+            )
+            return
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Só funciona em servidor.", ephemeral=True
+            )
+            return
+        extrovert_store = getattr(self, "_extrovert", None)
+        if extrovert_store is None:
+            await interaction.response.send_message(
+                "Extrovert não está pronto.", ephemeral=True
+            )
+            return
+
+        profiles = await self._profiles.list_profiles(interaction.guild.id)
+        if not profiles:
+            await interaction.response.send_message(
+                "Crie pelo menos um profile antes de ativar o extrovert.",
+                ephemeral=True,
+            )
+            return
+
+        current = await extrovert_store.get_config(interaction.guild.id)
+        modal = ExtrovertConfigModal(
+            requester_id=interaction.user.id,
+            profiles=profiles,
+            current_config=current,
+            on_submit_config=self._handle_extrovert_modal,
+        )
+        await interaction.response.send_modal(modal)
+
+    async def _handle_extrovert_modal(
+        self,
+        interaction: discord.Interaction,
+        config: ExtrovertModalConfig,
+    ) -> None:
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send("Só funciona em servidor.", ephemeral=True)
+            return
+        if self._profiles is None or getattr(self, "_extrovert", None) is None:
+            await interaction.followup.send("Chatbot não está pronto.", ephemeral=True)
+            return
+
+        extrovert_store = self._extrovert
+        previous = await extrovert_store.get_config(guild.id)
+
+        selected_profiles = list(config.profile_ids) or list(previous.profile_ids)
+        selected_channels = list(config.channel_ids) or list(previous.channel_ids)
+
+        all_profiles = await self._profiles.list_profiles(guild.id)
+        valid_profile_ids = {p.profile_id for p in all_profiles}
+        selected_profiles = [pid for pid in selected_profiles if pid in valid_profile_ids]
+
+        valid_channels = []
+        for channel_id in selected_channels:
+            channel = guild.get_channel(int(channel_id))
+            if channel is None:
+                get_channel_or_thread = getattr(guild, "get_channel_or_thread", None)
+                if callable(get_channel_or_thread):
+                    channel = get_channel_or_thread(int(channel_id))
+            if isinstance(channel, (discord.TextChannel, discord.VoiceChannel, discord.StageChannel, discord.Thread)):
+                valid_channels.append(int(channel_id))
+
+        if config.enabled:
+            if not selected_profiles:
+                await interaction.followup.send(
+                    "Escolha pelo menos um profile válido para ativar o extrovert.",
+                    ephemeral=True,
+                )
+                return
+            if not valid_channels:
+                await interaction.followup.send(
+                    "Escolha pelo menos um canal válido para ativar o extrovert.",
+                    ephemeral=True,
+                )
+                return
+            if not (config.options.allow_text_channels or config.options.allow_voice_channels):
+                await interaction.followup.send(
+                    "Deixe canais de texto ou canais de voz marcados.",
+                    ephemeral=True,
+                )
+                return
+
+        saved = await extrovert_store.save_config(
+            guild_id=guild.id,
+            enabled=config.enabled,
+            chance_percent=config.chance_percent,
+            profile_ids=selected_profiles,
+            channel_ids=valid_channels,
+            options=config.options,
+            updated_by=interaction.user.id,
+        )
+
+        if not saved.enabled:
+            await interaction.followup.send("Extrovert desativado.", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            f"Extrovert ativado com {saved.chance_percent}% de chance "
+            f"em {len(saved.channel_ids)} canal(is) para {len(saved.profile_ids)} profile(s).",
+            ephemeral=True,
+        )
+
+
     # --- /chatbot reset_server ------------------------------------------------
 
     async def _do_memoria_reset_server(self, interaction: discord.Interaction):
@@ -994,6 +1113,15 @@ class ChatbotCommandsMixin:
     @_safe_slash
     async def chatbot_persona(self, interaction: discord.Interaction):
         await self._do_persona(interaction)
+
+    # --- /chatbot extrovert ---------------------------------------------------
+    @chatbot.command(
+        name="extrovert",
+        description="Configurar chance de profiles responderem sem menção",
+    )
+    @_safe_slash
+    async def chatbot_extrovert(self, interaction: discord.Interaction):
+        await self._do_extrovert(interaction)
 
     # --- /chatbot memoria -----------------------------------------------------
     # Antes era um subgroup com 1 só comando (`reset_server`). Agora é comando

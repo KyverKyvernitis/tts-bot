@@ -42,6 +42,14 @@ from .imagegen import (
 )
 from .memory import MemoryStore, MemoryEntry
 from .profiles import ProfileStore, ChatbotProfile
+from .extrovert import (
+    ExtrovertStore,
+    extrovert_prompt_hint,
+    is_extrovert_candidate,
+    pick_profile as pick_extrovert_profile,
+    roll_chance as roll_extrovert_chance,
+)
+from .message_index import MessageProfileIndex
 from .providers import (
     AllProvidersExhausted,
     ChatMessage,
@@ -68,13 +76,16 @@ class TriggerInfo:
       no prompt pra dar contexto da conversa em andamento.
     - `content`: o texto da mensagem do user SEM o gatilho (sem `<@bot>` ou
       `@Nome` inicial)
-    - `via`: string descritiva ('bot_mention', 'profile_name', 'reply') — só
-      pra logs, não afeta lógica.
+    - `via`: string descritiva ('bot_mention', 'profile_name', 'reply',
+      'extrovert') — só pra logs, não afeta lógica.
+    - `behavior_hint`: instrução extra para modos especiais, como resposta
+      espontânea do extrovert.
     """
     profile: ChatbotProfile
     is_temporary: bool
     content: str
     via: str
+    behavior_hint: str = ""
 
 
 IntentKind = Literal["normal_chat", "image_safe", "image_adult", "chat_adult", "audio_request"]
@@ -121,6 +132,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._master: Optional[MasterPromptStore] = None
         self._router: Optional[ProviderRouter] = None
         self._webhooks: Optional[WebhookManager] = None
+        self._extrovert: Optional[ExtrovertStore] = None
+        self._message_index: Optional[MessageProfileIndex] = None
 
         # Semaphore global — limita N chamadas simultâneas ao provider.
         # Isso é a defesa principal contra picos de memória e contra
@@ -141,6 +154,14 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         # respostas dentro do mesmo canal/profile sem bloquear outros canais.
         self._turn_locks: dict[tuple[int, int, str], asyncio.Lock] = {}
         self._turn_lock_touched: dict[tuple[int, int, str], float] = {}
+
+        # Cooldowns específicos do modo extrovert. Separados do cooldown normal
+        # para não afetar menção/reply e para controlar respostas espontâneas.
+        self._extrovert_channel_cooldowns: dict[tuple[int, int], float] = {}
+        self._extrovert_user_cooldowns: dict[tuple[int, int], float] = {}
+        self._extrovert_profile_cooldowns: dict[tuple[int, str], float] = {}
+        self._extrovert_guild_cooldowns: dict[int, float] = {}
+        self._extrovert_last_channel_response: dict[tuple[int, int], float] = {}
 
         # Cache de history do canal — evita re-fetch quando vários profiles
         # são invocados em sequência. Key: channel_id, value: list[Message]
@@ -180,6 +201,8 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         self._profiles = ProfileStore(chatbot_coll)
         self._memory = MemoryStore(chatbot_coll)
         self._master = MasterPromptStore(chatbot_coll)
+        self._extrovert = ExtrovertStore(chatbot_coll)
+        self._message_index = MessageProfileIndex(chatbot_coll)
 
         groq_key = os.environ.get("GROQ_API_KEY") or ""
         gemini_key = os.environ.get("GEMINI_API_KEY") or ""
@@ -249,6 +272,14 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 for key in lock_stale:
                     self._turn_lock_touched.pop(key, None)
                     self._turn_locks.pop(key, None)
+
+                # Limpa cooldowns do extrovert para manter RAM bounded.
+                self._cleanup_extrovert_cooldowns(now)
+                if self._message_index is not None:
+                    try:
+                        await self._message_index.cleanup_old()
+                    except Exception:
+                        log.exception("chatbot: falha ao limpar message index")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -284,6 +315,63 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
 
     def _touch_turn_lock(self, key: tuple[int, int, str]) -> None:
         self._turn_lock_touched[key] = time.monotonic()
+
+    def _cleanup_extrovert_cooldowns(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else float(now)
+        for mapping in (
+            self._extrovert_channel_cooldowns,
+            self._extrovert_user_cooldowns,
+            self._extrovert_profile_cooldowns,
+            self._extrovert_guild_cooldowns,
+            self._extrovert_last_channel_response,
+        ):
+            stale = [
+                key for key, expires in list(mapping.items())
+                if now - float(expires) > C.EXTROVERT_COOLDOWN_IDLE_TTL_SECONDS
+            ]
+            for key in stale:
+                mapping.pop(key, None)
+
+    def _is_extrovert_on_cooldown(
+        self, *, guild_id: int, channel_id: int, user_id: int, profile_id: str
+    ) -> bool:
+        now = time.monotonic()
+        checks = (
+            self._extrovert_guild_cooldowns.get(int(guild_id), 0.0),
+            self._extrovert_channel_cooldowns.get((int(guild_id), int(channel_id)), 0.0),
+            self._extrovert_user_cooldowns.get((int(guild_id), int(user_id)), 0.0),
+            self._extrovert_profile_cooldowns.get((int(guild_id), str(profile_id)), 0.0),
+        )
+        return any(expire > now for expire in checks)
+
+    def _apply_extrovert_cooldowns(
+        self, *, guild_id: int, channel_id: int, user_id: int, profile_id: str
+    ) -> None:
+        now = time.monotonic()
+        gid = int(guild_id)
+        cid = int(channel_id)
+        uid = int(user_id)
+        pid = str(profile_id)
+        self._extrovert_guild_cooldowns[gid] = now + C.EXTROVERT_GUILD_COOLDOWN_SECONDS
+        self._extrovert_channel_cooldowns[(gid, cid)] = now + C.EXTROVERT_CHANNEL_COOLDOWN_SECONDS
+        self._extrovert_user_cooldowns[(gid, uid)] = now + C.EXTROVERT_USER_COOLDOWN_SECONDS
+        self._extrovert_profile_cooldowns[(gid, pid)] = now + C.EXTROVERT_PROFILE_COOLDOWN_SECONDS
+        self._extrovert_last_channel_response[(gid, cid)] = now
+
+    async def _remember_sent_profile_message(
+        self, *, guild_id: int, channel_id: int, message_id: int, profile_id: str
+    ) -> None:
+        if self._message_index is None:
+            return
+        try:
+            await self._message_index.remember(
+                guild_id=guild_id,
+                channel_id=channel_id,
+                message_id=message_id,
+                profile_id=profile_id,
+            )
+        except Exception:
+            log.exception("chatbot: falha ao registrar mensagem de profile")
 
     # -------------------------------------------------------------------------
     # Trigger detection
@@ -412,6 +500,94 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 return (p, remainder)
         return (None, content)
 
+    async def _resolve_reply_profile_by_index(
+        self,
+        message: discord.Message,
+        profiles: list[ChatbotProfile],
+    ) -> Optional[ChatbotProfile]:
+        """Resolve profile de uma reply usando message_id -> profile_id.
+
+        É o caminho correto para personas/user_style, porque nick/avatar do
+        webhook são dinâmicos e não devem ser usados como chave.
+        """
+        if self._message_index is None or message.reference is None:
+            return None
+        ref_id = int(getattr(message.reference, "message_id", 0) or 0)
+        if ref_id <= 0:
+            return None
+        try:
+            mapped = await self._message_index.resolve(ref_id)
+        except Exception:
+            log.exception("chatbot: falha ao resolver reply pelo índice")
+            return None
+        if mapped is None:
+            return None
+        if message.guild is not None and int(mapped.guild_id) != int(message.guild.id):
+            return None
+        by_id = {p.profile_id: p for p in profiles}
+        return by_id.get(mapped.profile_id)
+
+    async def _resolve_extrovert_trigger(
+        self,
+        message: discord.Message,
+        profiles: list[ChatbotProfile],
+    ) -> Optional["TriggerInfo"]:
+        if self._extrovert is None or message.guild is None:
+            return None
+        guild = message.guild
+
+        try:
+            config = await self._extrovert.get_config(guild.id)
+        except Exception:
+            log.exception("chatbot: falha ao carregar config extrovert")
+            return None
+
+        if not is_extrovert_candidate(message, config):
+            return None
+
+        channel_key = (int(guild.id), int(message.channel.id))
+        if config.options.avoid_channel_streak:
+            last = self._extrovert_last_channel_response.get(channel_key, 0.0)
+            if last and time.monotonic() < last + C.EXTROVERT_CHANNEL_COOLDOWN_SECONDS:
+                return None
+
+        blocked_profiles = {
+            pid for (gid, pid), expire in self._extrovert_profile_cooldowns.items()
+            if int(gid) == int(guild.id) and expire > time.monotonic()
+        }
+        profile = pick_extrovert_profile(
+            profiles=profiles,
+            config=config,
+            blocked_profile_ids=blocked_profiles,
+        )
+        if profile is None:
+            return None
+
+        if self._is_extrovert_on_cooldown(
+            guild_id=guild.id,
+            channel_id=message.channel.id,
+            user_id=message.author.id,
+            profile_id=profile.profile_id,
+        ):
+            return None
+
+        if not roll_extrovert_chance(config):
+            return None
+
+        self._apply_extrovert_cooldowns(
+            guild_id=guild.id,
+            channel_id=message.channel.id,
+            user_id=message.author.id,
+            profile_id=profile.profile_id,
+        )
+        return TriggerInfo(
+            profile=profile,
+            is_temporary=True,
+            content=(message.content or "").strip(),
+            via="extrovert",
+            behavior_hint=extrovert_prompt_hint(),
+        )
+
     async def _resolve_trigger(
         self, message: discord.Message
     ) -> Optional["TriggerInfo"]:
@@ -464,37 +640,42 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 via="profile_name",
             )
 
-        # --- 3. Reply a webhook de profile ------------------------------------
+        # --- 3. Reply a mensagem enviada por profile ---------------------------
         if message.reference is not None:
-            replied = await self._resolve_reply_target(message)
-            if replied is not None and replied.webhook_id is not None:
-                # Tenta identificar o profile dono do webhook.
-                # Webhook novo = nosso cache + nome do autor.
-                author_name = str(
-                    getattr(replied.author, "name", "") or ""
-                ).strip().lower()
-                matched_profile = None
-                for p in profiles:
-                    names = self._profile_name_candidates(guild, p)
-                    if any(name.strip().lower() == author_name for name in names):
-                        matched_profile = p
-                        break
-                # Fallback: se webhook_id está no cache gerenciado e o nome
-                # não bateu (ex: profile foi renomeado), usa o active.
-                if matched_profile is None and self._webhooks is not None:
-                    if self._webhooks.is_managed_webhook_id(replied.webhook_id):
-                        matched_profile = active
-                if matched_profile is not None:
-                    is_temp = (
-                        active is None
-                        or matched_profile.profile_id != active.profile_id
-                    )
-                    return TriggerInfo(
-                        profile=matched_profile,
-                        is_temporary=is_temp,
-                        content=message.content.strip(),
-                        via="reply",
-                    )
+            matched_profile = await self._resolve_reply_profile_by_index(message, profiles)
+
+            # Fallback legado para mensagens enviadas antes deste índice existir.
+            if matched_profile is None:
+                replied = await self._resolve_reply_target(message)
+                if replied is not None and replied.webhook_id is not None:
+                    author_name = str(
+                        getattr(replied.author, "name", "") or ""
+                    ).strip().lower()
+                    for p in profiles:
+                        names = self._profile_name_candidates(guild, p)
+                        if any(name.strip().lower() == author_name for name in names):
+                            matched_profile = p
+                            break
+                    if matched_profile is None and self._webhooks is not None:
+                        if self._webhooks.is_managed_webhook_id(replied.webhook_id):
+                            matched_profile = active
+
+            if matched_profile is not None:
+                is_temp = (
+                    active is None
+                    or matched_profile.profile_id != active.profile_id
+                )
+                return TriggerInfo(
+                    profile=matched_profile,
+                    is_temporary=is_temp,
+                    content=message.content.strip(),
+                    via="reply",
+                )
+
+        # --- 4. Extrovert: resposta espontânea sem menção ----------------------
+        extrovert = await self._resolve_extrovert_trigger(message, profiles)
+        if extrovert is not None:
+            return extrovert
 
         return None
 
@@ -620,14 +801,27 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 content=caption[:1900],
                 files=[file],
             )
-            if sent is None:
+            if sent is not None:
+                await self._remember_sent_profile_message(
+                    guild_id=message.guild.id if message.guild else 0,
+                    channel_id=message.channel.id,
+                    message_id=sent.id,
+                    profile_id=profile.profile_id,
+                )
+            else:
                 # Fallback sem webhook
                 try:
                     file2 = discord.File(_io.BytesIO(generated.image.data), filename=filename)
-                    await channel.send(
+                    fallback_sent = await channel.send(
                         content=f"**{profile.name}:** {caption[:1800]}",
                         files=[file2],
                         allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    await self._remember_sent_profile_message(
+                        guild_id=message.guild.id if message.guild else 0,
+                        channel_id=message.channel.id,
+                        message_id=fallback_sent.id,
+                        profile_id=profile.profile_id,
                     )
                 except discord.HTTPException:
                     log.warning("chatbot: fallback imagegen send falhou")
@@ -1182,6 +1376,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         is_temporary: bool = False,
         channel_is_nsfw: bool = False,
         image_urls: Optional[list[str]] = None,
+        behavior_hint: str = "",
     ) -> tuple[str, list[ChatMessage]]:
         """Monta o payload final: (system_prompt, [messages]).
 
@@ -1203,6 +1398,10 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             is_temporary=is_temporary,
             channel_is_nsfw=channel_is_nsfw,
         )
+
+        # Nota extra de comportamento para modos especiais (ex: extrovert).
+        if behavior_hint and behavior_hint.strip():
+            system = system + "\n\n" + behavior_hint.strip()
 
         # Contexto coletivo do profile (de conversas anteriores dele no server)
         collective = self._format_guild_context(guild_context)
@@ -1351,14 +1550,22 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         if self._router is None or self._profiles is None:
             return  # cog não inicializado
 
-        # Pré-filtro barato: se não tem `<@botid>`, `@` no começo, nem reference,
-        # não há como ser trigger. Descartamos sem chamar resolver.
+        # Pré-filtro barato: menção/reply continuam como antes. Para o
+        # extrovert, aceitamos mensagens comuns somente quando o cache indica
+        # que pode haver config ativa neste guild/canal (ou cache miss após restart).
         content = message.content or ""
         stripped = content.lstrip()
         has_bot_mention = self._is_mention_at_start(message)
         has_name_mention = stripped.startswith("@")
         has_reference = message.reference is not None
-        if not (has_bot_mention or has_name_mention or has_reference):
+        has_direct_trigger = has_bot_mention or has_name_mention or has_reference
+        has_extrovert_candidate = (
+            not has_direct_trigger
+            and bool(content.strip())
+            and self._extrovert is not None
+            and self._extrovert.quick_might_apply(message.guild.id, message.channel.id)
+        )
+        if not (has_direct_trigger or has_extrovert_candidate):
             return
 
         # Processa em task separada — _resolve_trigger pode tocar Mongo/API,
@@ -1479,6 +1686,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                             self._generate_and_send(
                                 message, trigger.profile, content_for_ai,
                                 is_temporary=trigger.is_temporary,
+                                behavior_hint=trigger.behavior_hint,
                             ),
                             timeout=C.CHAT_TURN_TIMEOUT_SECONDS,
                         )
@@ -1501,6 +1709,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         content: str,
         *,
         is_temporary: bool = False,
+        behavior_hint: str = "",
     ) -> None:
         """Parte 2: chama IA + envia via webhook.
 
@@ -1655,6 +1864,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 is_temporary=is_temporary,
                 channel_is_nsfw=channel_is_nsfw,
                 image_urls=image_urls,
+                behavior_hint=behavior_hint,
             )
 
             # Log do modo — útil pra debugar se diretiva entrou certo.
@@ -1742,13 +1952,26 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 content=final_content or None,
                 files=files if files else None,
             )
-            if sent is None:
+            if sent is not None:
+                await self._remember_sent_profile_message(
+                    guild_id=guild.id,
+                    channel_id=channel.id,
+                    message_id=sent.id,
+                    profile_id=profile.profile_id,
+                )
+            else:
                 # Fallback: envia como o próprio bot avisando que falhou o webhook.
                 try:
-                    await channel.send(
+                    fallback_sent = await channel.send(
                         (f"**{display_profile.name}:**\n{final_content}"[:1990] if final_content else None),
                         allowed_mentions=discord.AllowedMentions.none(),
                         files=files if files else discord.utils.MISSING,
+                    )
+                    await self._remember_sent_profile_message(
+                        guild_id=guild.id,
+                        channel_id=channel.id,
+                        message_id=fallback_sent.id,
+                        profile_id=profile.profile_id,
                     )
                 except discord.HTTPException:
                     log.warning("chatbot: fallback send também falhou | channel=%s", channel.id)

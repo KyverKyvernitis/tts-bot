@@ -181,8 +181,27 @@ PROFILE_CACHE_TTL_SECONDS = 600   # 10 min
 
 # Mapping de message_id → profile_id (para resolver replies).
 # TTL longo porque o usuário pode replicar uma mensagem antiga.
-MESSAGE_PROFILE_CACHE_MAX_ENTRIES = 500
-MESSAGE_PROFILE_CACHE_TTL_SECONDS = 7 * 24 * 3600  # 7 dias
+MESSAGE_PROFILE_CACHE_MAX_ENTRIES = 2000
+MESSAGE_PROFILE_CACHE_TTL_SECONDS = 14 * 24 * 3600  # 14 dias
+
+# -----------------------------------------------------------------------------
+# /chatbot extrovert
+# -----------------------------------------------------------------------------
+
+EXTROVERT_DEFAULT_CHANCE_PERCENT = 5
+EXTROVERT_MIN_CHANCE_PERCENT = 1
+EXTROVERT_MAX_CHANCE_PERCENT = 20
+EXTROVERT_MIN_MESSAGE_CHARS = 8
+EXTROVERT_MAX_REPLY_CHARS = 800
+EXTROVERT_CHANNEL_COOLDOWN_SECONDS = 45.0
+EXTROVERT_USER_COOLDOWN_SECONDS = 90.0
+EXTROVERT_PROFILE_COOLDOWN_SECONDS = 60.0
+EXTROVERT_GUILD_COOLDOWN_SECONDS = 15.0
+EXTROVERT_COOLDOWN_IDLE_TTL_SECONDS = 30 * 60.0
+EXTROVERT_CONFIG_CACHE_MAX_ENTRIES = 100
+EXTROVERT_CONFIG_CACHE_TTL_SECONDS = 120.0
+EXTROVERT_PROFILE_SELECT_LIMIT = 5
+EXTROVERT_CHANNEL_SELECT_LIMIT = 10
 
 # -----------------------------------------------------------------------------
 # System prompt
@@ -221,6 +240,7 @@ SYSTEM_PROMPT_WARNING = (
 DOC_TYPE_PROFILE = "chatbot_profile"
 DOC_TYPE_MEMORY = "chatbot_memory"
 DOC_TYPE_MESSAGE_MAP = "chatbot_msg_map"
+DOC_TYPE_EXTROVERT = "chatbot_extrovert"
 DOC_TYPE_MASTER = "chatbot_master"
 
 # -----------------------------------------------------------------------------

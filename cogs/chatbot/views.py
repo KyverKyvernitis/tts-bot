@@ -22,6 +22,7 @@ import discord
 from . import constants as C
 from .profiles import ChatbotProfile, ProfileStore
 from .persona import PersonaModalConfig, PersonaOptions
+from .extrovert import ExtrovertConfig, ExtrovertModalConfig, ExtrovertOptions
 
 log = logging.getLogger(__name__)
 
@@ -237,6 +238,199 @@ class PersonaConfigModal(discord.ui.Modal, title="Criar persona"):
             )
         except Exception:
             log.exception("chatbot: falha ao ler modal de persona")
+            await interaction.response.send_message(
+                "❌ Não consegui ler a configuração do modal.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self._on_submit_config(interaction, config)
+
+
+class ExtrovertConfigModal(discord.ui.Modal, title="Chatbot extrovert"):
+    """Modal moderno de `/chatbot extrovert`.
+
+    Configura respostas espontâneas sem painel: status, chance, profiles,
+    canais e filtros principais.
+    """
+
+    def __init__(
+        self,
+        *,
+        requester_id: int,
+        profiles: list[ChatbotProfile],
+        current_config: ExtrovertConfig,
+        on_submit_config: Callable[[discord.Interaction, ExtrovertModalConfig], Awaitable[None]],
+    ):
+        super().__init__(timeout=600.0)
+        self._requester_id = int(requester_id)
+        self._profiles = list(profiles)
+        self._current_config = current_config
+        self._on_submit_config = on_submit_config
+
+        self.status_group = discord.ui.RadioGroup(
+            custom_id="chatbot_extrovert_status",
+            required=True,
+        )
+        self.status_group.add_option(
+            label="Ativado",
+            value="on",
+            description="Profiles podem responder sem menção pela chance configurada.",
+            default=bool(current_config.enabled),
+        )
+        self.status_group.add_option(
+            label="Desativado",
+            value="off",
+            description="Mantém a configuração salva, mas não responde sozinho.",
+            default=not bool(current_config.enabled),
+        )
+
+        current_chance = int(current_config.chance_percent or C.EXTROVERT_DEFAULT_CHANCE_PERCENT)
+        self.chance_group = discord.ui.RadioGroup(
+            custom_id="chatbot_extrovert_chance",
+            required=True,
+        )
+        for chance, label, desc in (
+            (1, "1% — raro", "Quase nunca entra na conversa."),
+            (2, "2% — baixo", "Baixa presença."),
+            (5, "5% — normal", "Equilibrado para brincar."),
+            (10, "10% — alto", "Bem participativo."),
+            (20, "20% — muito alto", "Use só em canal de zoeira."),
+        ):
+            self.chance_group.add_option(
+                label=label,
+                value=str(chance),
+                description=desc,
+                default=(chance == current_chance),
+            )
+
+        options = []
+        current_ids = set(current_config.profile_ids or [])
+        for profile in profiles[:25]:
+            kind = "persona" if profile.profile_kind == C.PROFILE_KIND_USER_STYLE else "profile"
+            prefix = "⭐ " if profile.active else ""
+            options.append(discord.SelectOption(
+                label=(prefix + profile.name)[:100],
+                value=profile.profile_id,
+                description=(f"{kind} · {profile.profile_id}")[:100],
+                default=profile.profile_id in current_ids,
+            ))
+        self.profile_select = discord.ui.Select(
+            custom_id="chatbot_extrovert_profiles",
+            placeholder="Profiles que podem responder sozinhos",
+            min_values=0,
+            max_values=max(1, min(C.EXTROVERT_PROFILE_SELECT_LIMIT, len(options))),
+            options=options,
+            required=False,
+        )
+
+        self.channel_select = discord.ui.ChannelSelect(
+            custom_id="chatbot_extrovert_channels",
+            placeholder="Canais onde o extrovert pode agir",
+            channel_types=[
+                discord.ChannelType.text,
+                discord.ChannelType.news,
+                discord.ChannelType.voice,
+                discord.ChannelType.stage_voice,
+            ],
+            min_values=0,
+            max_values=C.EXTROVERT_CHANNEL_SELECT_LIMIT,
+            required=False,
+        )
+
+        opts = current_config.options
+        self.options_group = discord.ui.CheckboxGroup(
+            custom_id="chatbot_extrovert_options",
+            required=False,
+            min_values=0,
+            max_values=5,
+        )
+        self.options_group.add_option(
+            label="Canais de texto",
+            value="allow_text",
+            description="Permite agir em canais de texto selecionados.",
+            default=opts.allow_text_channels,
+        )
+        self.options_group.add_option(
+            label="Canais de voz",
+            value="allow_voice",
+            description="Permite agir no chat de canais de voz selecionados.",
+            default=opts.allow_voice_channels,
+        )
+        self.options_group.add_option(
+            label="Ignorar links",
+            value="ignore_links",
+            description="Não responde mensagens que são só link.",
+            default=opts.ignore_links,
+        )
+        self.options_group.add_option(
+            label="Ignorar mensagens curtas",
+            value="ignore_short",
+            description="Evita responder ruído sem contexto.",
+            default=opts.ignore_short,
+        )
+        self.options_group.add_option(
+            label="Evitar sequência",
+            value="avoid_streak",
+            description="Não responde se o último envio espontâneo foi recente no canal.",
+            default=opts.avoid_channel_streak,
+        )
+
+        self.add_item(_modal_label(
+            "Status",
+            self.status_group,
+            "Liga ou desliga respostas espontâneas.",
+        ))
+        self.add_item(_modal_label(
+            "Chance",
+            self.chance_group,
+            "Probabilidade por mensagem elegível.",
+        ))
+        self.add_item(_modal_label(
+            "Profiles",
+            self.profile_select,
+            "Escolha até 5 profiles.",
+        ))
+        self.add_item(_modal_label(
+            "Canais",
+            self.channel_select,
+            "Escolha até 10 canais.",
+        ))
+        self.add_item(_modal_label(
+            "Opções",
+            self.options_group,
+            "Filtros e tipos de canal.",
+        ))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user is None or int(interaction.user.id) != self._requester_id:
+            await interaction.response.send_message(
+                "Este modal não é pra você.", ephemeral=True
+            )
+            return
+
+        try:
+            enabled = str(self.status_group.value or "off") == "on"
+            chance = int(self.chance_group.value or C.EXTROVERT_DEFAULT_CHANCE_PERCENT)
+            profile_ids = tuple(str(v) for v in (self.profile_select.values or []) if str(v or "").strip())
+            channel_ids = tuple(int(getattr(ch, "id")) for ch in (self.channel_select.values or []))
+            selected_options = set(self.options_group.values or [])
+            options = ExtrovertOptions(
+                allow_text_channels=("allow_text" in selected_options),
+                allow_voice_channels=("allow_voice" in selected_options),
+                ignore_links=("ignore_links" in selected_options),
+                ignore_short=("ignore_short" in selected_options),
+                avoid_channel_streak=("avoid_streak" in selected_options),
+            )
+            config = ExtrovertModalConfig(
+                enabled=enabled,
+                chance_percent=chance,
+                profile_ids=profile_ids,
+                channel_ids=channel_ids,
+                options=options,
+            )
+        except Exception:
+            log.exception("chatbot: falha ao ler modal extrovert")
             await interaction.response.send_message(
                 "❌ Não consegui ler a configuração do modal.", ephemeral=True
             )
