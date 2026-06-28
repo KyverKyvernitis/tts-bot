@@ -188,6 +188,17 @@ class WebhookManager:
                 session=self._session,
             )
 
+    def _rewind_files(self, files: Optional[list[discord.File]]) -> None:
+        """Reposiciona anexos antes de retry de webhook quando possível."""
+        for file in files or []:
+            fp = getattr(file, "fp", None)
+            if fp is None:
+                continue
+            try:
+                fp.seek(0)
+            except Exception:
+                pass
+
     async def send_as_profile(
         self,
         *,
@@ -218,19 +229,20 @@ class WebhookManager:
         safe_name = safe_name.replace("discord", "disc0rd")[:80] or "Chatbot"
 
         # Content também tem que caber em 2000 chars (limite do Discord).
-        # O provider já gera respostas curtas, mas truncamos por segurança.
+        # Se há arquivo e não há texto, envia só o anexo; não injeta "...".
         safe_content = (content or "").strip()[:2000]
-        if not safe_content:
+        if not safe_content and not files:
             safe_content = "..."
 
         # Kwargs comuns do send
         send_kwargs = dict(
-            content=safe_content,
             username=safe_name,
             avatar_url=avatar_url or discord.utils.MISSING,
             wait=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+        if safe_content:
+            send_kwargs["content"] = safe_content
         # Se estamos enviando PRA thread, precisamos setar thread=
         if isinstance(channel, discord.Thread):
             send_kwargs["thread"] = channel
@@ -249,12 +261,32 @@ class WebhookManager:
             webhook2 = await self._resolve_webhook(channel)
             if webhook2 is None:
                 return None
+            self._rewind_files(files)
             try:
                 return await webhook2.send(**send_kwargs)
             except discord.HTTPException as e:
                 log.warning("chatbot: falha no retry de send | channel=%s err=%s", channel.id, e)
                 return None
         except discord.HTTPException as e:
+            # Token/permissão/cache inválido também pode cair como HTTPException
+            # genérica. Para 401/403/404, invalida e tenta resolver o webhook
+            # novamente uma única vez. Outros erros ficam quietos.
+            status = int(getattr(e, "status", 0) or 0)
+            if status in (401, 403, 404):
+                host = self._webhook_host_channel(channel)
+                host_id = host.id if host is not None else channel.id
+                self._cache.pop(host_id)
+                webhook2 = await self._resolve_webhook(channel)
+                if webhook2 is not None:
+                    self._rewind_files(files)
+                    try:
+                        return await webhook2.send(**send_kwargs)
+                    except discord.HTTPException as retry_error:
+                        log.warning(
+                            "chatbot: falha no retry HTTP %s | channel=%s err=%s",
+                            status, channel.id, retry_error,
+                        )
+                        return None
             log.warning(
                 "chatbot: falha ao enviar via webhook | channel=%s err=%s",
                 channel.id, e,

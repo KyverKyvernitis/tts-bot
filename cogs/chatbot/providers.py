@@ -340,8 +340,20 @@ class ProviderRouter:
                     break  # não insiste no mesmo provider, próximo
                 except ProviderError as e:
                     last_error = e
+                    status = int(getattr(e, "status", 0) or 0)
+                    # Erros de credencial, instabilidade do provider e erro de
+                    # rede sem status tendem a afetar todos os modelos. Pausa
+                    # o provider inteiro para não martelar API quebrada.
+                    if status in (401, 403) or status >= 500 or status == 0:
+                        cooldown = 60.0 if status in (401, 403) else 20.0
+                        state.mark_failure(cooldown)
+                        log.warning(
+                            "chatbot: %s/%s falhou (%s), provider em cooldown %.0fs: %s",
+                            provider_name, model, status or "rede", cooldown, e,
+                        )
+                        break
                     log.warning("chatbot: %s/%s falhou: %s", provider_name, model, e)
-                    # erros não-429 em modelo específico: tenta o próximo modelo do mesmo provider
+                    # erros de modelo específico, como 404, tentam o próximo modelo
                     continue
 
         # chegou aqui? todos os modelos de todos providers falharam.

@@ -17,6 +17,7 @@ e são herdados por esta classe. Modais ficam em `views.py`.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import re
@@ -136,6 +137,11 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         # Usa dict simples; limpa periodicamente no watchdog.
         self._user_cooldowns: dict[tuple[int, int], float] = {}
 
+        # Locks por (guild_id, channel_id, profile_id). Preservam a ordem das
+        # respostas dentro do mesmo canal/profile sem bloquear outros canais.
+        self._turn_locks: dict[tuple[int, int, str], asyncio.Lock] = {}
+        self._turn_lock_touched: dict[tuple[int, int, str], float] = {}
+
         # Cache de history do canal — evita re-fetch quando vários profiles
         # são invocados em sequência. Key: channel_id, value: list[Message]
         # (só os N mais recentes antes da chamada).
@@ -230,6 +236,19 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 stale = [k for k, exp in self._user_cooldowns.items() if exp < now]
                 for k in stale:
                     self._user_cooldowns.pop(k, None)
+
+                # Remove locks antigos que não estão em uso. Isso evita que
+                # servidores com muitos canais criem um dict crescente em RAM.
+                lock_stale = []
+                for key, touched in list(self._turn_lock_touched.items()):
+                    lock = self._turn_locks.get(key)
+                    if lock is None:
+                        lock_stale.append(key)
+                    elif not lock.locked() and now - touched > C.TURN_LOCK_IDLE_TTL_SECONDS:
+                        lock_stale.append(key)
+                for key in lock_stale:
+                    self._turn_lock_touched.pop(key, None)
+                    self._turn_locks.pop(key, None)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -246,6 +265,25 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
     async def _decrement_queue(self) -> None:
         async with self._queue_lock:
             self._queue_depth = max(0, self._queue_depth - 1)
+
+    def _turn_key(
+        self,
+        guild_id: int,
+        channel_id: int,
+        profile_id: str,
+    ) -> tuple[int, int, str]:
+        return (int(guild_id), int(channel_id), str(profile_id or "active"))
+
+    def _turn_lock_for(self, key: tuple[int, int, str]) -> asyncio.Lock:
+        self._turn_lock_touched[key] = time.monotonic()
+        lock = self._turn_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._turn_locks[key] = lock
+        return lock
+
+    def _touch_turn_lock(self, key: tuple[int, int, str]) -> None:
+        self._turn_lock_touched[key] = time.monotonic()
 
     # -------------------------------------------------------------------------
     # Trigger detection
@@ -893,15 +931,13 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         if not msgs:
             return None
 
-        lines: list[str] = []
+        lines_reversed: list[str] = []
         target_lower = (target_profile_name or "").strip().lower()
-        for m in msgs:
-            text = (m.content or "").strip()
+        total = 0
+        for m in reversed(msgs):
+            text = self._clean_prompt_text(m.content or "", 300).replace("\n", " ")
             if not text:
                 continue
-            text = text.replace("\n", " ")
-            if len(text) > 300:
-                text = text[:297] + "..."
 
             if m.webhook_id is not None:
                 # Webhook — identifica o profile pelo nome do author
@@ -909,20 +945,28 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     getattr(m.author, "name", "") or ""
                 ).strip()
                 if author_name.lower() == target_lower:
-                    lines.append(f"[você, em mensagem anterior]: {text}")
+                    line = f"[você, em mensagem anterior]: {text}"
                 else:
-                    lines.append(f"[{author_name or 'outro profile'}]: {text}")
+                    safe_author = self._clean_prompt_text(author_name or "outro profile", 80)
+                    line = f"[{safe_author}]: {text}"
             else:
                 # Humano
                 display = str(
                     getattr(m.author, "display_name", None)
                     or getattr(m.author, "name", "alguém")
                 ).strip()
-                lines.append(f"{display}: {text}")
+                safe_display = self._clean_prompt_text(display or "alguém", 80)
+                line = f"{safe_display}: {text}"
 
-        if not lines:
+            next_total = total + len(line) + 1
+            if next_total > C.MAX_CHANNEL_CONTEXT_CHARS and lines_reversed:
+                break
+            lines_reversed.append(line)
+            total = next_total
+
+        if not lines_reversed:
             return None
-        return "\n".join(lines)
+        return "\n".join(reversed(lines_reversed))
 
 
     def _format_reply_context(
@@ -934,24 +978,52 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         Limita o snippet a ~200 chars pra não inflar o prompt. Retorna None
         se a mensagem não tem conteúdo textual útil (ex: só embed/attachment).
         """
-        text = (replied.content or "").strip()
+        text = self._clean_prompt_text(replied.content or "", 200).replace("\n", " ")
         if not text:
             return None  # sem texto útil pra dar contexto
 
         # Nome: prefere display_name (apelido no server). Se for webhook,
         # o author.name é o nome do profile (customizado no send).
         author = replied.author
-        name = str(getattr(author, "display_name", None) or author.name or "alguém").strip()
-
-        # Trunca o conteúdo. Reply context não precisa ser perfeito — é só
-        # pra a IA saber do que a pessoa está falando.
-        snippet = text.replace("\n", " ")
-        if len(snippet) > 200:
-            snippet = snippet[:197] + "..."
+        name = self._clean_prompt_text(
+            getattr(author, "display_name", None) or author.name or "alguém",
+            80,
+        )
 
         # Aspas + nome — formato que o modelo entende naturalmente.
-        return f'respondendo a {name}: "{snippet}"'
+        return f'respondendo a {name}: "{text}"'
 
+
+    # -------------------------------------------------------------------------
+    # Text safety / prompt bounding
+    # -------------------------------------------------------------------------
+
+    def _neutralize_mentions(self, text: str) -> str:
+        """Remove menções globais do texto enviado/ecoado pelo chatbot.
+
+        allowed_mentions=None já impede ping real, mas neutralizar o texto evita
+        visual de @everyone/@here em mensagens de webhook e fallback.
+        """
+        text = str(text or "")
+        return (
+            text.replace("@everyone", "@\u200beveryone")
+            .replace("@here", "@\u200bhere")
+        )
+
+    def _clean_prompt_text(self, text: str, limit: int) -> str:
+        """Texto compacto para contexto do modelo, com limite defensivo."""
+        text = str(text or "").strip()
+        # Mantém quebras simples, mas tira excesso que infla tokens sem utilidade.
+        text = re.sub(r"[ \t\r\f\v]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        if limit > 0 and len(text) > limit:
+            return text[: max(0, limit - 3)].rstrip() + "..."
+        return text
+
+    def _sanitize_model_reply(self, text: str) -> str:
+        """Normaliza a resposta do modelo antes de enviar/persistir."""
+        text = self._clean_prompt_text(text, C.MAX_MODEL_REPLY_CHARS)
+        return self._neutralize_mentions(text)
 
     # -------------------------------------------------------------------------
     # Prompt building
@@ -1022,22 +1094,34 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         return "\n".join(parts)
 
     def _format_guild_context(self, guild_entries: list[MemoryEntry]) -> str:
-        """Formata o histórico coletivo como texto pra injetar no prompt.
+        """Formata histórico coletivo com limite de caracteres.
 
-        Usamos formato legível, não JSON, pra economizar tokens. O guard
-        de anti-injection vem antes via `COLLECTIVE_MEMORY_GUARD` no cog
-        (ver `_build_messages`).
+        Usa as entradas mais recentes primeiro para evitar prompt gigante em
+        servidores movimentados. O guard anti-injection continua no caller.
         """
         if not guild_entries:
             return ""
-        lines = []
-        for e in guild_entries:
+
+        lines_reversed: list[str] = []
+        total = 0
+        for e in reversed(guild_entries):
+            content = self._clean_prompt_text(e.content, C.MAX_MEMORY_ENTRY_CHARS)
+            if not content:
+                continue
             if e.role == "user":
-                name = e.user_name or "alguém"
-                lines.append(f"{name}: {e.content}")
+                name = self._clean_prompt_text(e.user_name or "alguém", 80)
+                line = f"{name}: {content}"
             else:  # assistant
-                lines.append(f"[bot]: {e.content}")
-        return "\n".join(lines)
+                line = f"[bot]: {content}"
+            next_total = total + len(line) + 1
+            if next_total > C.MAX_GUILD_CONTEXT_CHARS and lines_reversed:
+                break
+            lines_reversed.append(line)
+            total = next_total
+
+        if not lines_reversed:
+            return ""
+        return "\n".join(reversed(lines_reversed))
 
     def _build_messages(
         self,
@@ -1105,16 +1189,28 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
             )
 
         messages: list[ChatMessage] = []
-        for e in user_history:
-            if e.role in ("user", "assistant") and e.content:
-                messages.append(ChatMessage(role=e.role, content=e.content))
+        history_reversed: list[ChatMessage] = []
+        total_history_chars = 0
+        for e in reversed(user_history):
+            if e.role not in ("user", "assistant"):
+                continue
+            content_piece = self._clean_prompt_text(e.content, C.MAX_MEMORY_ENTRY_CHARS)
+            if not content_piece:
+                continue
+            next_total = total_history_chars + len(content_piece)
+            if next_total > C.MAX_USER_HISTORY_CONTEXT_CHARS and history_reversed:
+                break
+            history_reversed.append(ChatMessage(role=e.role, content=content_piece))
+            total_history_chars = next_total
+        messages.extend(reversed(history_reversed))
 
         # Mensagem nova do usuário: prefixa com nome + opcionalmente reply context
-        content = user_message.strip()[:C.MAX_USER_MESSAGE_LENGTH]
+        content = self._clean_prompt_text(user_message, C.MAX_USER_MESSAGE_LENGTH)
+        safe_user_name = self._clean_prompt_text(user_name, 80) or "alguém"
         if reply_context:
-            prefixed = f"[{user_name}] ({reply_context}): {content}"
+            prefixed = f"[{safe_user_name}] ({reply_context}): {content}"
         else:
-            prefixed = f"[{user_name}]: {content}"
+            prefixed = f"[{safe_user_name}]: {content}"
         messages.append(ChatMessage(
             role="user",
             content=prefixed,
@@ -1173,12 +1269,12 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
         """
         # Trunca a mensagem original pra 120 chars no quote — pra não gastar
         # espaço da resposta se o usuário mandou um textão.
-        snippet = (user_content or "").strip().replace("\n", " ")
-        if len(snippet) > 120:
-            snippet = snippet[:117] + "..."
+        snippet = self._clean_prompt_text(user_content or "", 120).replace("\n", " ")
+        snippet = self._neutralize_mentions(snippet)
         # Escapa asteriscos no nome do user (evita bold quebrado se o nome
         # tiver **). Aspas como fallback não precisa escapar.
-        safe_name = (user_name or "alguém").replace("**", "").strip()
+        safe_name = self._clean_prompt_text(user_name or "alguém", 80).replace("**", "").strip()
+        safe_name = self._neutralize_mentions(safe_name)
         if not safe_name:
             safe_name = "alguém"
         return f"> **{safe_name}:** {snippet}"
@@ -1191,7 +1287,9 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
     async def on_message(self, message: discord.Message):
         # Descarta ruído o mais rápido possível — este método DEVE retornar
         # em <10ms pra não atrapalhar o TTS e outros listeners.
-        if message.author.bot:
+        if message.author.bot or message.webhook_id is not None:
+            return
+        if message.type is not discord.MessageType.default:
             return
         if message.guild is None:
             return  # só em guilds, DMs não
@@ -1293,33 +1391,56 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 return
 
             try:
-                intent = self._detect_user_intent(content_for_ai)
-                if intent.kind == "chat_adult":
-                    try:
-                        await message.reply(
-                            "🔞 Roleplay adulto não está disponível no chat. Posso fazer roleplay não explícito.",
-                            mention_author=False,
-                            delete_after=20.0,
-                        )
-                    except discord.HTTPException:
-                        pass
-                    return
-
-                # Branch imagegen: se user pediu imagem, gera ao invés de chat
-                if intent.kind in ("image_safe", "image_adult"):
-                    handled = await self._maybe_generate_image(
-                        message=message,
-                        profile=trigger.profile,
-                        prompt_text=content_for_ai,
-                        image_prompt=intent.prompt,
-                    )
-                    if handled:
-                        return  # já enviou a imagem; não chama chat
-
-                await self._generate_and_send(
-                    message, trigger.profile, content_for_ai,
-                    is_temporary=trigger.is_temporary,
+                turn_key = self._turn_key(
+                    guild.id,
+                    message.channel.id,
+                    trigger.profile.profile_id,
                 )
+                turn_lock = self._turn_lock_for(turn_key)
+
+                # Serializa só o mesmo canal/profile. Outros canais e outros
+                # profiles continuam processando em paralelo pelo semaphore global.
+                async with turn_lock:
+                    self._touch_turn_lock(turn_key)
+
+                    intent = self._detect_user_intent(content_for_ai)
+                    if intent.kind == "chat_adult":
+                        try:
+                            await message.reply(
+                                "🔞 Roleplay adulto não está disponível no chat. Posso fazer roleplay não explícito.",
+                                mention_author=False,
+                                delete_after=20.0,
+                            )
+                        except discord.HTTPException:
+                            pass
+                        return
+
+                    # Branch imagegen: se user pediu imagem, gera ao invés de chat.
+                    # Não aplica CHAT_TURN_TIMEOUT_SECONDS aqui porque imagegen
+                    # costuma ter latência maior e já controla falhas no router.
+                    if intent.kind in ("image_safe", "image_adult"):
+                        handled = await self._maybe_generate_image(
+                            message=message,
+                            profile=trigger.profile,
+                            prompt_text=content_for_ai,
+                            image_prompt=intent.prompt,
+                        )
+                        if handled:
+                            return  # já enviou a imagem; não chama chat
+
+                    try:
+                        await asyncio.wait_for(
+                            self._generate_and_send(
+                                message, trigger.profile, content_for_ai,
+                                is_temporary=trigger.is_temporary,
+                            ),
+                            timeout=C.CHAT_TURN_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        log.warning(
+                            "chatbot: turno expirou | guild=%s channel=%s profile=%s",
+                            guild.id, message.channel.id, trigger.profile.profile_id,
+                        )
             finally:
                 await self._decrement_queue()
 
@@ -1407,7 +1528,13 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                 gather_args.append(channel_history_task)
 
             try:
-                results = await asyncio.gather(*gather_args, return_exceptions=True)
+                results = await asyncio.wait_for(
+                    asyncio.gather(*gather_args, return_exceptions=True),
+                    timeout=C.CONTEXT_LOAD_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                log.warning("chatbot: timeout ao ler contexto; seguindo sem histórico")
+                results = [[]] * len(gather_args)
             except Exception:
                 log.exception("chatbot: falha ao ler contexto")
                 results = [[]] * len(gather_args)
@@ -1521,7 +1648,7 @@ class ChatbotCog(ChatbotCommandsMixin, commands.Cog, name="Chatbot"):
                     log.exception("chatbot: erro inesperado ao chamar provider")
                     return
 
-            reply = (reply or "").strip()
+            reply = self._sanitize_model_reply(reply)
             if not reply:
                 return  # sem resposta útil, fica quieto
 

@@ -126,6 +126,26 @@ MAX_QUEUE_SIZE = 15
 # Cooldown por usuário — não dispara >1 mensagem a cada X segundos.
 USER_COOLDOWN_SECONDS = 2.0
 
+# Tempo máximo para montar contexto do Mongo/history antes de chamar o modelo.
+# Se travar, o chatbot continua com contexto vazio em vez de prender a fila.
+CONTEXT_LOAD_TIMEOUT_SECONDS = 6.0
+
+# Tempo máximo de um turno de chat comum. Imagegen fica fora desse limite
+# porque provedores de imagem podem demorar mais e já têm controles próprios.
+CHAT_TURN_TIMEOUT_SECONDS = 45.0
+
+# Locks por canal/profile ficam em RAM para preservar ordem das respostas.
+# Depois de inativos, são limpos pelo watchdog para não crescer indefinidamente.
+TURN_LOCK_IDLE_TTL_SECONDS = 10 * 60.0
+
+# Limites de contexto enviados ao modelo. Mantém custo/latência previsíveis
+# mesmo se a memória tiver mensagens antigas muito grandes.
+MAX_MEMORY_ENTRY_CHARS = 700
+MAX_USER_HISTORY_CONTEXT_CHARS = 6000
+MAX_GUILD_CONTEXT_CHARS = 4000
+MAX_CHANNEL_CONTEXT_CHARS = 3000
+MAX_MODEL_REPLY_CHARS = 4000
+
 # -----------------------------------------------------------------------------
 # Caches em RAM (com TTL — são evictados depois)
 # -----------------------------------------------------------------------------
