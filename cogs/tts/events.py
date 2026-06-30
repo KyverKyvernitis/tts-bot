@@ -183,30 +183,17 @@ class TTSVoiceEventsMixin:
             return
 
         engine = validate_engine(resolved.get("engine", "gtts"))
-        if engine == "gcloud":
-            item = QueueItem(
-                guild_id=message.guild.id,
-                channel_id=voice_channel.id,
-                author_id=message.author.id,
-                text=text,
-                engine=engine,
-                voice=str(resolved.get("gcloud_voice", "") or ""),
-                language=str(resolved.get("gcloud_language", "") or ""),
-                rate=str(resolved.get("gcloud_rate", "") or ""),
-                pitch=str(resolved.get("gcloud_pitch", "") or ""),
-            )
-        else:
-            item = QueueItem(
-                guild_id=message.guild.id,
-                channel_id=voice_channel.id,
-                author_id=message.author.id,
-                text=text,
-                engine=engine,
-                voice=validate_voice(resolved.get("voice", EDGE_DEFAULT_VOICE), self.edge_voice_names),
-                language=validate_language(resolved.get("language", GTTS_DEFAULT_LANGUAGE), self.gtts_languages),
-                rate=validate_rate(resolved.get("rate", "+0%")),
-                pitch=validate_pitch(resolved.get("pitch", "+0Hz")),
-            )
+        item = QueueItem(
+            guild_id=message.guild.id,
+            channel_id=voice_channel.id,
+            author_id=message.author.id,
+            text=text,
+            engine=engine,
+            voice=validate_voice(resolved.get("voice", EDGE_DEFAULT_VOICE), self.edge_voice_names),
+            language=validate_language(resolved.get("language", GTTS_DEFAULT_LANGUAGE), self.gtts_languages),
+            rate=validate_rate(resolved.get("rate", "+0%")),
+            pitch=validate_pitch(resolved.get("pitch", "+0Hz")),
+        )
 
         state = self._get_state(message.guild.id)
         state.last_text_channel_id = message.channel.id

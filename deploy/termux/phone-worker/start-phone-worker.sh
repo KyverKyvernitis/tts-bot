@@ -317,12 +317,6 @@ pip_source_builds_enabled() {
 }
 
 
-google_cloud_tts_native_enabled() {
-  truthy "${PHONE_WORKER_TTS_AGENT_GCLOUD_ENABLED:-${PHONE_WORKER_GOOGLE_TTS_ENABLED:-false}}" && return 0
-  local cred="${PHONE_WORKER_GOOGLE_APPLICATION_CREDENTIALS:-${GOOGLE_APPLICATION_CREDENTIALS:-}}"
-  [[ -n "$cred" && -s "$cred" ]] && return 0
-  return 1
-}
 
 install_attempt_allowed() {
   local key="$1"
@@ -403,7 +397,7 @@ cleanup_stale_heavy_dependency_builds() {
   truthy "${PHONE_WORKER_KILL_STALE_HEAVY_DEP_BUILDS:-true}" || return 0
   heavy_python_deps_enabled && return 0
   command -v ps >/dev/null 2>&1 || return 0
-  local pattern='google-cloud-texttospeech|grpcio|GRPC_XDS|pyb/temp\.android|pip/_vendor|pyproject_hooks|build_wheel|python -m pip install|pip install|aarch64-linux-android-clang|clang\+\+'
+  local pattern='pyb/temp\.android|pip/_vendor|pyproject_hooks|build_wheel|python -m pip install|pip install|aarch64-linux-android-clang|clang\+\+'
   local round pid
   for round in 1 2 3; do
     ps -ef 2>/dev/null | grep -Ei "$pattern" | grep -v grep | grep -v 'phone_worker.py' | awk '{print $2}' | while read -r pid; do
@@ -446,14 +440,6 @@ ensure_turbo_python_tts_deps_if_needed() {
   is_turbo_profile || return 0
   safe_pip_install_module "edge-tts" "edge_tts" "edge-tts" light || true
   safe_pip_install_module "gTTS" "gtts" "gTTS" light || true
-  if google_cloud_tts_native_enabled; then
-    # Ordem testada no Termux: grpcio/cryptography via pkg primeiro; pip só instala
-    # a client library depois, sem tentar compilar Rust/clang no celular.
-    safe_pkg_install_missing "google-cloud-tts-native" python-grpcio python-cryptography protobuf libprotobuf || true
-    safe_pip_install_module "google-cloud-texttospeech" "google.cloud.texttospeech_v1" "google-cloud-texttospeech" light || true
-  else
-    log "Google Cloud TTS nativo do worker sem credencial/opt-in; usando outras engines"
-  fi
 }
 
 ensure_music_ytdlp_deps_if_needed() {
@@ -472,10 +458,6 @@ ensure_music_agent_deps_if_needed() {
   safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp[default]" light || true
   safe_pip_install_module "edge-tts" "edge_tts" "edge-tts" light || true
   safe_pip_install_module "gTTS" "gtts" "gTTS" light || true
-  if google_cloud_tts_native_enabled; then
-    safe_pkg_install_missing "google-cloud-tts-native" python-grpcio python-cryptography protobuf libprotobuf || true
-    safe_pip_install_module "google-cloud-texttospeech" "google.cloud.texttospeech_v1" "google-cloud-texttospeech" light || true
-  fi
   "$PYTHON_BIN" - <<'PYMUSICAGENTCHECK' >/dev/null 2>&1 && log "perfil turbo: dependências do Music Agent prontas" || log "perfil turbo: Music Agent ainda possui dependências ausentes; será reportado no health"
 import aiohttp, discord, nacl, yt_dlp, davey, edge_tts, gtts  # noqa: F401
 PYMUSICAGENTCHECK

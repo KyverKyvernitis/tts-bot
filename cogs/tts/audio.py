@@ -20,10 +20,6 @@ import edge_tts
 from gtts import gTTS
 from gtts.tts import gTTSError
 
-try:
-    from google.cloud import texttospeech_v1 as google_texttospeech
-except Exception:  # pragma: no cover - dependência opcional em tempo de import
-    google_texttospeech = None
 
 import config
 from .helpers import validate_voice
@@ -40,7 +36,6 @@ TTS_SYNTH_CONCURRENCY = max(1, int(getattr(config, "TTS_SYNTH_CONCURRENCY", 3)))
 TTS_EDGE_TIMEOUT_SECONDS = max(1.0, float(getattr(config, "TTS_EDGE_TIMEOUT_SECONDS", 10)))
 TTS_GTTS_CONCURRENCY = max(1, int(getattr(config, "TTS_GTTS_CONCURRENCY", 1)))
 TTS_GTTS_TIMEOUT_SECONDS = max(5.0, float(getattr(config, "TTS_GTTS_TIMEOUT_SECONDS", 20.0)))
-TTS_GCLOUD_TIMEOUT_SECONDS = max(5.0, float(getattr(config, "TTS_GCLOUD_TIMEOUT_SECONDS", 20.0)))
 TTS_PLAYBACK_TIMEOUT_BASE_SECONDS = max(5.0, float(getattr(config, "TTS_PLAYBACK_TIMEOUT_BASE_SECONDS", 12.0)))
 TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS = max(0.0, float(getattr(config, "TTS_PLAYBACK_TIMEOUT_PER_CHAR_SECONDS", 0.08)))
 TTS_PLAYBACK_TIMEOUT_MAX_SECONDS = max(TTS_PLAYBACK_TIMEOUT_BASE_SECONDS, float(getattr(config, "TTS_PLAYBACK_TIMEOUT_MAX_SECONDS", 120.0)))
@@ -53,15 +48,8 @@ TTS_BOOT_WARMUP_ENABLED = bool(getattr(config, "TTS_BOOT_WARMUP_ENABLED", True))
 TTS_ENGINE_ALERT_COOLDOWN_SECONDS = max(60.0, float(getattr(config, "TTS_ENGINE_ALERT_COOLDOWN_SECONDS", 900)))
 TTS_ENGINE_FAILURE_ALERT_THRESHOLD = max(1, int(getattr(config, "TTS_ENGINE_FAILURE_ALERT_THRESHOLD", 3)))
 TTS_ENGINE_SLOW_WARN_SECONDS = max(1.0, float(getattr(config, "TTS_ENGINE_SLOW_WARN_SECONDS", 8.0)))
-GOOGLE_CLOUD_TTS_LANGUAGE_CODE = str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR").strip() or "pt-BR"
-GOOGLE_CLOUD_TTS_VOICE_NAME = str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
-GOOGLE_CLOUD_TTS_SPEAKING_RATE = float(getattr(config, "GOOGLE_CLOUD_TTS_SPEAKING_RATE", 1.0))
-GOOGLE_CLOUD_TTS_PITCH = float(getattr(config, "GOOGLE_CLOUD_TTS_PITCH", 0.0))
-GOOGLE_CLOUD_TTS_AUDIO_ENCODING = str(getattr(config, "GOOGLE_CLOUD_TTS_AUDIO_ENCODING", "OGG_OPUS") or "OGG_OPUS").strip().upper().replace("-", "_")
-GOOGLE_CLOUD_TTS_FALLBACK_AUDIO_ENCODING = str(getattr(config, "GOOGLE_CLOUD_TTS_FALLBACK_AUDIO_ENCODING", "MP3") or "MP3").strip().upper().replace("-", "_")
 TTS_OPUS_PLAYBACK_ENABLED = bool(getattr(config, "TTS_OPUS_PLAYBACK_ENABLED", True))
 TTS_OPUS_PLAYBACK_COPY_CODEC = bool(getattr(config, "TTS_OPUS_PLAYBACK_COPY_CODEC", True))
-WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_GCLOUD = bool(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_GCLOUD", True))
 WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB = max(1, int(getattr(config, "WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB", 8) or 8))
 TTS_FFMPEG_BEFORE_OPTIONS = getattr(config, "TTS_FFMPEG_BEFORE_OPTIONS", "-nostdin")
 TTS_FFMPEG_OPTIONS = getattr(config, "TTS_FFMPEG_OPTIONS", "-vn -loglevel error")
@@ -110,7 +98,7 @@ TTS_WORKER_AGENT_RAW_AUDIO_ENABLED = bool(getattr(config, "TTS_WORKER_AGENT_RAW_
 TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED = bool(getattr(config, "TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED", True))
 TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES = {
     item.strip().lower().replace("-", "_")
-    for item in str(getattr(config, "TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES", "android_native,gcloud") or "android_native,gcloud").split(",")
+    for item in str(getattr(config, "TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES", "android_native") or "android_native").split(",")
     if item.strip()
 }
 TTS_WORKER_AGENT_GTTS_MIN_WORKER_CHARS = max(0, int(getattr(config, "TTS_WORKER_AGENT_GTTS_MIN_WORKER_CHARS", 120) or 120))
@@ -149,8 +137,7 @@ PHONE_WORKER_TOKEN = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip(
 
 _RUNTIME_DIR = os.path.join(TTS_TEMP_DIR, "runtime")
 _CACHE_DIR = os.path.join(TTS_TEMP_DIR, "cache")
-_CREDENTIALS_DIR = os.path.join(TTS_TEMP_DIR, "credentials")
-_TTS_REQUIRED_DIRS = (TTS_TEMP_DIR, _RUNTIME_DIR, _CACHE_DIR, _CREDENTIALS_DIR)
+_TTS_REQUIRED_DIRS = (TTS_TEMP_DIR, _RUNTIME_DIR, _CACHE_DIR)
 
 logger = logging.getLogger(__name__)
 
@@ -182,13 +169,11 @@ def _tts_temp_dirs_snapshot() -> dict[str, object]:
         "root": TTS_TEMP_DIR,
         "runtime": _RUNTIME_DIR,
         "cache": _CACHE_DIR,
-        "credentials": _CREDENTIALS_DIR,
         "ok": all(bool(v) for v in status.values()),
         "exists": {
             "root": bool(status.get(TTS_TEMP_DIR)),
             "runtime": bool(status.get(_RUNTIME_DIR)),
             "cache": bool(status.get(_CACHE_DIR)),
-            "credentials": bool(status.get(_CREDENTIALS_DIR)),
         },
     }
 
@@ -329,32 +314,6 @@ class TTSAudioMixin:
             return "+0Hz"
         return f"{sign}{number}Hz"
 
-    def _normalize_gcloud_language(self, raw: str) -> str:
-        value = str(raw or "").strip() or GOOGLE_CLOUD_TTS_LANGUAGE_CODE
-        value = value.replace("_", "-")
-        return value or "pt-BR"
-
-    def _normalize_gcloud_voice(self, raw: str) -> str:
-        value = str(raw or "").strip() or GOOGLE_CLOUD_TTS_VOICE_NAME
-        return value or "pt-BR-Standard-A"
-
-    def _normalize_gcloud_rate(self, raw: str | float) -> str:
-        try:
-            numeric = float(str(raw).strip().replace(",", "."))
-        except Exception:
-            numeric = float(GOOGLE_CLOUD_TTS_SPEAKING_RATE or 1.0)
-        numeric = max(0.25, min(2.0, numeric))
-        return f"{numeric:.2f}".rstrip("0").rstrip(".")
-
-    def _normalize_gcloud_pitch(self, raw: str | float) -> str:
-        try:
-            numeric = float(str(raw).strip().replace(",", "."))
-        except Exception:
-            numeric = float(GOOGLE_CLOUD_TTS_PITCH or 0.0)
-        numeric = max(-20.0, min(20.0, numeric))
-        if abs(numeric - round(numeric)) < 1e-9:
-            return str(int(round(numeric)))
-        return f"{numeric:.2f}".rstrip("0").rstrip(".")
 
     def _estimate_playback_timeout(self, item: QueueItem | None = None) -> float:
         text_len = len((getattr(item, "text", "") or "").strip()) if item is not None else 0
@@ -464,7 +423,6 @@ class TTSAudioMixin:
                 "last_cache_hit": False,
                 "last_synth_ms": 0.0,
                 "voice_agent": {},
-                "gcloud": {},
             }
             setattr(self, "_tts_agent_route", state)
         return state
@@ -499,7 +457,6 @@ class TTSAudioMixin:
             "last_cache_hit": bool(state.get("last_cache_hit")),
             "last_synth_ms": float(state.get("last_synth_ms") or 0.0),
             "voice_agent": dict(state.get("voice_agent") or {}),
-            "gcloud": dict(state.get("gcloud") or {}),
         }
 
     def _tts_agent_set_route(
@@ -625,7 +582,7 @@ class TTSAudioMixin:
             worker_id=str(data.get("worker_id") or state.get("worker_id") or ""),
             worker_version=str(data.get("worker_version") or state.get("worker_version") or ""),
             engine=str(selected_engine or state.get("engine") or ""),
-            available_engines=list(data.get("available_engines") or state.get("available_engines") or []),
+            available_engines=[e for e in list(data.get("available_engines") or state.get("available_engines") or []) if str(e).strip().lower().replace("-", "_") not in {"gcloud", "google", "google_cloud", "googlecloud", "google_tts"}],
             avg_synth_ms=float(total_ms),
             last_requested_engine=requested_engine,
             last_selected_engine=selected_engine,
@@ -700,9 +657,6 @@ class TTSAudioMixin:
                 voice_agent = {}
             if voice_agent:
                 self._update_worker_voice_agent_snapshot(voice_agent)
-            gcloud_status = agent.get("gcloud") if isinstance(agent.get("gcloud"), dict) else {}
-            if gcloud_status:
-                self._tts_agent_route_state()["gcloud"] = dict(gcloud_status)
             ok = bool(data.get("ok", True) and agent.get("ok") and agent.get("available") and agent.get("synth_ready"))
             if ok:
                 metrics["tts_agent_health_ok"] = int(metrics.get("tts_agent_health_ok", 0) or 0) + 1
@@ -713,7 +667,7 @@ class TTSAudioMixin:
                     worker_id=str(data.get("worker_id") or agent.get("worker_id") or ""),
                     worker_version=str(data.get("version") or data.get("worker_version") or agent.get("worker_version") or ""),
                     engine=str(agent.get("preferred_engine") or agent.get("engine") or ""),
-                    available_engines=list(agent.get("available_engines") or []),
+                    available_engines=[e for e in list(agent.get("available_engines") or []) if str(e).strip().lower().replace("-", "_") not in {"gcloud", "google", "google_cloud", "googlecloud", "google_tts"}],
                     queue_active=int(agent.get("active") or 0),
                     queue_limit=int(agent.get("concurrency_limit") or 0),
                     avg_synth_ms=float(agent.get("avg_synth_ms") or 0.0),
@@ -1267,10 +1221,6 @@ class TTSAudioMixin:
         try:
             await asyncio.to_thread(self._prime_tts_runtime)
             await asyncio.to_thread(self._prune_tmp_audio_dir, force=True)
-
-            if google_texttospeech is not None and (((os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()) or ((os.getenv("GOOGLE_CREDENTIALS_JSON") or "").strip())):
-                with contextlib.suppress(Exception):
-                    await asyncio.to_thread(self._get_google_tts_client)
         finally:
             duration_ms = (time.monotonic() - started_at) * 1000.0
             metrics["last_warmup_completed_at"] = time.time()
@@ -1386,7 +1336,7 @@ class TTSAudioMixin:
         except FileNotFoundError:
             # A cleanup job may have deleted an empty runtime dir between the
             # import-time mkdir and this synthesis request. Recreate and retry
-            # once so Edge/gTTS/Google do not all fail for the same infra issue.
+            # once so Edge/gTTS do not all fail for the same infra issue.
             _ensure_tts_temp_dirs()
             fd, path = tempfile.mkstemp(prefix="tts_", suffix=suffix, dir=_RUNTIME_DIR)
         os.close(fd)
@@ -1553,18 +1503,11 @@ class TTSAudioMixin:
         if engine == "edge":
             voice = validate_voice(item.voice, getattr(self, "edge_voice_names", set()))
             payload = f"edge|{voice}|{self._normalize_edge_rate(item.rate)}|{self._normalize_edge_pitch(item.pitch)}|{text}"
-        elif engine == "gcloud":
-            language = self._normalize_gcloud_language(item.language)
-            voice = self._normalize_gcloud_voice(item.voice)
-            rate = self._normalize_gcloud_rate(item.rate)
-            pitch = self._normalize_gcloud_pitch(item.pitch)
-            encoding = self._normalize_gcloud_audio_encoding(GOOGLE_CLOUD_TTS_AUDIO_ENCODING)
-            payload = f"gcloud|{encoding}|{language}|{voice}|{rate}|{pitch}|{text}"
         elif engine == "piper":
             model = str(getattr(item, "piper_model", "") or TTS_PIPER_MODEL_NAME).strip() or TTS_PIPER_MODEL_NAME
             payload = f"piper|worker|{model}|{text}"
         elif engine == "android_native":
-            language = (item.language or GOOGLE_CLOUD_TTS_LANGUAGE_CODE or "pt-BR").strip().lower().replace('_', '-')
+            language = (item.language or "pt-BR").strip().lower().replace('_', '-')
             voice = str(item.voice or "auto").strip() or "auto"
             payload = f"android_native|worker|{language}|{voice}|{item.rate or '1.0'}|{item.pitch or '1.0'}|{text}"
         else:
@@ -1592,10 +1535,7 @@ class TTSAudioMixin:
     def _cache_suffix_candidates_for_item(self, item: QueueItem) -> list[str]:
         engine = str(getattr(item, "engine", "") or "gtts").strip().lower()
         candidates: list[str] = []
-        if engine == "gcloud":
-            candidates.append(self._google_cloud_audio_suffix(self._normalize_gcloud_audio_encoding(GOOGLE_CLOUD_TTS_AUDIO_ENCODING)))
-            candidates.append(self._google_cloud_audio_suffix(self._normalize_gcloud_audio_encoding(GOOGLE_CLOUD_TTS_FALLBACK_AUDIO_ENCODING)))
-        elif engine in {"piper", "android_native"}:
+        if engine in {"piper", "android_native"}:
             candidates.extend([".wav", ".mp3", ".ogg"])
         else:
             candidates.append(".mp3")
@@ -1679,203 +1619,6 @@ class TTSAudioMixin:
                 pass
             raise
 
-    def _parse_google_credentials_json(self, raw_json: str) -> dict:
-        text = (raw_json or "").strip()
-        candidates = [text]
-        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"\"", "'"}:
-            candidates.append(text[1:-1].strip())
-
-        last_error: Exception | None = None
-        for candidate in candidates:
-            if not candidate:
-                continue
-            try:
-                parsed = json.loads(candidate)
-                if isinstance(parsed, str):
-                    parsed = json.loads(parsed)
-                if not isinstance(parsed, dict):
-                    raise RuntimeError("GOOGLE_CREDENTIALS_JSON não contém um objeto JSON válido.")
-                return parsed
-            except Exception as exc:
-                last_error = exc
-
-        preview = text[:180].replace("\n", "\\n")
-        if isinstance(last_error, json.JSONDecodeError):
-            detail = f"linha {last_error.lineno}, coluna {last_error.colno}: {last_error.msg}"
-        elif last_error is not None:
-            detail = str(last_error)
-        else:
-            detail = "conteúdo ausente"
-        raise RuntimeError(
-            "GOOGLE_CREDENTIALS_JSON está inválido. "
-            f"Detalhe: {detail}. Prévia: {preview or 'vazia'}"
-        ) from last_error
-
-    def _ensure_google_credentials_file(self) -> None:
-        if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-            setattr(self, "_google_credentials_error", None)
-            return
-
-        raw_json = (os.getenv("GOOGLE_CREDENTIALS_JSON", "") or "").strip()
-        if not raw_json:
-            setattr(self, "_google_credentials_error", None)
-            return
-
-        cached_error = getattr(self, "_google_credentials_error", None)
-        if cached_error:
-            raise RuntimeError(cached_error)
-
-        try:
-            parsed = self._parse_google_credentials_json(raw_json)
-        except Exception as exc:
-            message = str(exc).strip() or "GOOGLE_CREDENTIALS_JSON está inválido."
-            setattr(self, "_google_credentials_error", message)
-            logger.error("[tts_voice] Credenciais Google inválidas: %s", message)
-            raise RuntimeError(message) from exc
-
-        path = os.path.join(_CREDENTIALS_DIR, "chat_revive_google_credentials.json")
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(parsed, handle, ensure_ascii=False)
-        setattr(self, "_google_credentials_error", None)
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = path
-
-    def _get_google_tts_client(self):
-        if google_texttospeech is None:
-            raise RuntimeError("A dependência google-cloud-texttospeech não está instalada.")
-        self._ensure_google_credentials_file()
-        client = getattr(self, "_google_tts_client", None)
-        if client is None:
-            client = google_texttospeech.TextToSpeechClient()
-            setattr(self, "_google_tts_client", client)
-        return client
-
-    def _normalize_gcloud_audio_encoding(self, raw: Any) -> str:
-        value = str(raw or "").strip().upper().replace("-", "_").replace(" ", "_")
-        aliases = {
-            "": "MP3",
-            "OGG": "OGG_OPUS",
-            "OPUS": "OGG_OPUS",
-            "OGGOPUS": "OGG_OPUS",
-            "OGG_OPUS": "OGG_OPUS",
-            "WAV": "LINEAR16",
-            "WAVE": "LINEAR16",
-            "LINEAR_16": "LINEAR16",
-        }
-        value = aliases.get(value, value)
-        if value in {"MP3", "OGG_OPUS", "LINEAR16", "MULAW", "ALAW", "PCM", "M4A"}:
-            return value
-        return "MP3"
-
-    def _google_cloud_audio_suffix(self, encoding: str) -> str:
-        encoding = self._normalize_gcloud_audio_encoding(encoding)
-        if encoding == "OGG_OPUS":
-            return ".ogg"
-        if encoding in {"LINEAR16", "PCM"}:
-            return ".wav"
-        if encoding == "M4A":
-            return ".m4a"
-        if encoding == "MULAW":
-            return ".mulaw"
-        if encoding == "ALAW":
-            return ".alaw"
-        return ".mp3"
-
-    def _google_cloud_audio_format_label(self, encoding: str) -> str:
-        encoding = self._normalize_gcloud_audio_encoding(encoding)
-        if encoding == "OGG_OPUS":
-            return "ogg_opus"
-        if encoding == "LINEAR16":
-            return "wav"
-        return encoding.lower()
-
-    def _google_cloud_audio_encoding_enum(self, encoding: str):
-        encoding = self._normalize_gcloud_audio_encoding(encoding)
-        enum = getattr(google_texttospeech.AudioEncoding, encoding, None) if google_texttospeech is not None else None
-        if enum is None:
-            raise RuntimeError(f"Google Cloud TTS não suporta audioEncoding={encoding} nesta dependência")
-        return enum
-
-    async def _generate_google_cloud_file(self, text: str, language: str, voice_name: str, rate: str, pitch: str) -> str:
-        language = self._normalize_gcloud_language(language)
-        voice_name = self._normalize_gcloud_voice(voice_name)
-        normalized_rate = self._normalize_gcloud_rate(rate)
-        normalized_pitch = self._normalize_gcloud_pitch(pitch)
-        if voice_name and not str(voice_name).lower().startswith(str(language).lower() + '-'):
-            voice_name = ''
-
-        primary_encoding = self._normalize_gcloud_audio_encoding(GOOGLE_CLOUD_TTS_AUDIO_ENCODING)
-        fallback_encoding = self._normalize_gcloud_audio_encoding(GOOGLE_CLOUD_TTS_FALLBACK_AUDIO_ENCODING)
-        encoding_candidates: list[str] = []
-        for candidate in (primary_encoding, fallback_encoding, "MP3"):
-            candidate = self._normalize_gcloud_audio_encoding(candidate)
-            if candidate not in encoding_candidates:
-                encoding_candidates.append(candidate)
-
-        self._log_debug(
-            "[tts_voice] Google Cloud TTS synth | "
-            f"voice={voice_name!r} language={language!r} rate={normalized_rate!r} pitch={normalized_pitch!r} "
-            f"encoding={primary_encoding!r} text={text[:80]!r}"
-        )
-
-        last_error: Exception | None = None
-        for index, encoding in enumerate(encoding_candidates):
-            path = self._make_runtime_temp_file(suffix=self._google_cloud_audio_suffix(encoding))
-            attempt_failed = False
-            try:
-                client = await asyncio.wait_for(asyncio.to_thread(self._get_google_tts_client), timeout=TTS_GCLOUD_TIMEOUT_SECONDS)
-                synthesis_input = google_texttospeech.SynthesisInput(text=text)
-                voice_kwargs = {"language_code": language}
-                if voice_name:
-                    voice_kwargs["name"] = voice_name
-                voice = google_texttospeech.VoiceSelectionParams(**voice_kwargs)
-                audio_config = google_texttospeech.AudioConfig(
-                    audio_encoding=self._google_cloud_audio_encoding_enum(encoding),
-                    speaking_rate=float(normalized_rate),
-                    pitch=float(normalized_pitch),
-                )
-                request = google_texttospeech.SynthesizeSpeechRequest(
-                    input=synthesis_input,
-                    voice=voice,
-                    audio_config=audio_config,
-                )
-
-                async with self._get_synth_semaphore():
-                    response = await asyncio.wait_for(asyncio.to_thread(client.synthesize_speech, request=request), timeout=TTS_GCLOUD_TIMEOUT_SECONDS)
-
-                    def _write_audio_file(target_path: str, data: bytes) -> None:
-                        with open(target_path, 'wb') as handle:
-                            handle.write(data)
-
-                    await asyncio.wait_for(asyncio.to_thread(_write_audio_file, path, response.audio_content), timeout=max(5.0, TTS_GCLOUD_TIMEOUT_SECONDS))
-                if os.path.getsize(path) <= 0:
-                    raise RuntimeError(f"Google Cloud TTS retornou áudio vazio em {encoding}")
-                if index > 0:
-                    logger.warning(
-                        "[tts_voice] Google Cloud TTS usou fallback de formato | solicitado=%s usado=%s",
-                        primary_encoding,
-                        encoding,
-                    )
-                setattr(self, "_last_gcloud_audio_encoding", encoding)
-                return path
-            except asyncio.TimeoutError as exc:
-                attempt_failed = True
-                last_error = RuntimeError(f"Google Cloud TTS timeout após {TTS_GCLOUD_TIMEOUT_SECONDS:.1f}s em {encoding}")
-                logger.warning("[tts_voice] Google Cloud TTS travou e foi cancelado | language=%s encoding=%s timeout=%.1fs", language, encoding, TTS_GCLOUD_TIMEOUT_SECONDS)
-            except Exception as exc:
-                attempt_failed = True
-                last_error = exc
-                if index < len(encoding_candidates) - 1:
-                    logger.warning(
-                        "[tts_voice] Google Cloud TTS falhou no formato %s; tentando fallback | language=%s erro=%s",
-                        encoding,
-                        language,
-                        exc,
-                    )
-            finally:
-                if attempt_failed and os.path.exists(path):
-                    with contextlib.suppress(Exception):
-                        os.remove(path)
-        raise RuntimeError(str(last_error or "Google Cloud TTS falhou em todos os formatos"))
 
     def _phone_worker_tts_benchmark_base_url(self) -> str:
         if not PHONE_WORKER_ENABLED or not PHONE_WORKER_HOST or not PHONE_WORKER_TOKEN:
@@ -2525,41 +2268,7 @@ class TTSAudioMixin:
         }
 
     async def _maybe_attach_prebuilt_direct_tts_audio(self, payload: dict[str, Any], item: QueueItem) -> str | None:
-        if not WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_GCLOUD:
-            return None
-        if str(item.engine or "").strip().lower() != "gcloud":
-            return None
-        path = await self._run_timed_generation(
-            "gcloud:direct_prebuild",
-            lambda: self._generate_google_cloud_file(item.text, item.language, item.voice, item.rate, item.pitch),
-            guild_id=item.guild_id,
-        )
-        try:
-            size = os.path.getsize(path)
-            max_bytes = WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB * 1024 * 1024
-            if size <= 0:
-                raise RuntimeError("Google Cloud prebuild retornou arquivo vazio")
-            if size > max_bytes:
-                raise RuntimeError(f"Google Cloud prebuild grande demais: {size} bytes")
-            raw = await asyncio.to_thread(lambda p: open(p, "rb").read(), path)
-            payload["audio_b64"] = base64.b64encode(raw).decode("ascii")
-            payload["audio_format"] = self._path_audio_format(path)
-            payload["prebuilt_audio"] = True
-            payload["prebuilt_audio_source"] = "vps_google_cloud"
-            payload["prebuilt_audio_bytes"] = len(raw)
-            payload["engine"] = "gcloud"
-            payload["selected_engine"] = "gcloud"
-            logger.info(
-                "[worker_voice_agent] Google Cloud prebuild para TTS direto | guild=%s format=%s bytes=%s",
-                item.guild_id,
-                payload.get("audio_format"),
-                len(raw),
-            )
-            return path
-        except Exception:
-            with contextlib.suppress(Exception):
-                os.remove(path)
-            raise
+        return None
 
     async def _worker_voice_agent_begin_transfer(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload = dict(payload)
@@ -2922,15 +2631,6 @@ class TTSAudioMixin:
             rate = str(getattr(item, "piper_fallback_rate", "") or item.rate or "+0%")
             pitch = str(getattr(item, "piper_fallback_pitch", "") or item.pitch or "+0Hz")
             return await self._run_timed_generation("edge", lambda: self._generate_edge_file(item.text, voice, rate, pitch), guild_id=item.guild_id)
-        if fallback_engine == "gcloud":
-            language = str(getattr(item, "piper_fallback_language", "") or GOOGLE_CLOUD_TTS_LANGUAGE_CODE)
-            voice = str(getattr(item, "piper_fallback_voice", "") or GOOGLE_CLOUD_TTS_VOICE_NAME)
-            rate = str(getattr(item, "piper_fallback_rate", "") or GOOGLE_CLOUD_TTS_SPEAKING_RATE)
-            pitch = str(getattr(item, "piper_fallback_pitch", "") or GOOGLE_CLOUD_TTS_PITCH)
-            try:
-                return await self._run_timed_generation("gcloud", lambda: self._generate_google_cloud_file(item.text, language, voice, rate, pitch), guild_id=item.guild_id)
-            except Exception as exc:
-                logger.warning("[tts_piper] fallback gcloud falhou, usando gTTS | guild=%s erro=%s", item.guild_id, exc)
         language = str(getattr(item, "piper_fallback_language", "") or item.language or GTTS_DEFAULT_LANGUAGE)
         return await self._run_timed_generation("gtts", lambda: self._generate_gtts_file(item.text, language), guild_id=item.guild_id)
 
@@ -2983,11 +2683,6 @@ class TTSAudioMixin:
             language = str(resolved.get("language") or base_item.language or GTTS_DEFAULT_LANGUAGE)
             rate = str(resolved.get("rate") or base_item.rate or "+0%")
             pitch = str(resolved.get("pitch") or base_item.pitch or "+0Hz")
-        elif engine == "gcloud":
-            voice = str(resolved.get("gcloud_voice") or GOOGLE_CLOUD_TTS_VOICE_NAME)
-            language = str(resolved.get("gcloud_language") or GOOGLE_CLOUD_TTS_LANGUAGE_CODE)
-            rate = str(resolved.get("gcloud_rate") or GOOGLE_CLOUD_TTS_SPEAKING_RATE)
-            pitch = str(resolved.get("gcloud_pitch") or GOOGLE_CLOUD_TTS_PITCH)
         elif engine == "piper":
             voice = ""
             language = str(resolved.get("language") or base_item.language or GTTS_DEFAULT_LANGUAGE)
@@ -2995,7 +2690,7 @@ class TTSAudioMixin:
             pitch = "+0Hz"
         elif engine == "android_native":
             voice = str(resolved.get("android_voice") or "")
-            language = str(resolved.get("android_language") or base_item.language or GOOGLE_CLOUD_TTS_LANGUAGE_CODE or "pt-BR")
+            language = str(resolved.get("android_language") or base_item.language or "pt-BR")
             rate = str(resolved.get("android_rate") or base_item.rate or "1.0")
             pitch = str(resolved.get("android_pitch") or base_item.pitch or "1.0")
         else:
@@ -3028,8 +2723,6 @@ class TTSAudioMixin:
                 raise RuntimeError("Android TTS nativo roda apenas no APK/phone-worker")
             if engine == "edge":
                 path = await self._generate_edge_file(item.text, item.voice, item.rate, item.pitch)
-            elif engine == "gcloud":
-                path = await self._generate_google_cloud_file(item.text, item.language, item.voice, item.rate, item.pitch)
             else:
                 engine = "gtts"
                 path = await self._generate_gtts_file(item.text, item.language)
@@ -3307,7 +3000,7 @@ class TTSAudioMixin:
 
     async def _send_tts_turbo_benchmark_report(self, channel: Any, base_item: QueueItem, resolved: dict[str, Any] | None) -> None:
         benchmark_text = TTS_TURBO_BENCHMARK_TRIGGER_TEXT
-        engines = ("android_native", "edge", "gtts", "gcloud")
+        engines = ("android_native", "edge", "gtts")
         started = time.monotonic()
         results: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
         worker_meta: dict[str, Any] = {}
@@ -3441,13 +3134,13 @@ class TTSAudioMixin:
     def _tts_agent_payload_for_item(self, item: QueueItem) -> dict[str, Any]:
         return {
             "text": str(item.text or "")[:TTS_WORKER_AGENT_MAX_TEXT_LENGTH],
-            "engine": str(item.engine or "gtts").strip().lower().replace("-", "_"),
+            "engine": "gtts" if str(item.engine or "gtts").strip().lower().replace("-", "_") in {"gcloud", "google", "google_cloud", "googlecloud", "google_tts"} else str(item.engine or "gtts").strip().lower().replace("-", "_"),
             "voice": str(item.voice or ""),
             "language": str(item.language or ""),
             "rate": str(item.rate or "+0%"),
             "pitch": str(item.pitch or "+0Hz"),
             "preferred_engine": TTS_WORKER_AGENT_PREFERRED_ENGINE,
-            "fallback_engine": str(getattr(item, "piper_fallback_engine", "") or "gtts"),
+            "fallback_engine": "gtts" if str(getattr(item, "piper_fallback_engine", "") or "gtts").strip().lower().replace("-", "_") in {"gcloud", "google", "google_cloud", "googlecloud", "google_tts"} else str(getattr(item, "piper_fallback_engine", "") or "gtts"),
             "fallback_voice": str(getattr(item, "piper_fallback_voice", "") or item.voice or ""),
             "fallback_language": str(getattr(item, "piper_fallback_language", "") or item.language or GTTS_DEFAULT_LANGUAGE),
             "fallback_rate": str(getattr(item, "piper_fallback_rate", "") or item.rate or "+0%"),
@@ -3646,21 +3339,6 @@ class TTSAudioMixin:
                 )
             except Exception as e:
                 logger.warning("[tts_voice] Edge falhou, usando gTTS | guild=%s erro=%s", item.guild_id, e)
-                return await self._run_timed_generation(
-                    "gtts",
-                    lambda: self._generate_gtts_file(item.text, item.language),
-                    guild_id=item.guild_id,
-                )
-
-        if item.engine == "gcloud":
-            try:
-                return await self._run_timed_generation(
-                    "gcloud",
-                    lambda: self._generate_google_cloud_file(item.text, item.language, item.voice, item.rate, item.pitch),
-                    guild_id=item.guild_id,
-                )
-            except Exception as e:
-                logger.warning("[tts_voice] Google Cloud TTS falhou, usando gTTS | guild=%s erro=%s", item.guild_id, e)
                 return await self._run_timed_generation(
                     "gtts",
                     lambda: self._generate_gtts_file(item.text, item.language),

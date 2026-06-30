@@ -1,6 +1,6 @@
 """Monta o payload de TTS a partir de uma mensagem do Discord.
 
-Aplica o engine forçado pelo prefixo (gtts/edge/gcloud), preenche valores
+Aplica o engine forçado pelo prefixo (gTTS/Edge/ATTS), preenche valores
 default quando o user não configurou, renderiza o texto final (limpo +
 prefixo de autor se ligado) e devolve o `QueueItem` pronto pro dispatcher.
 """
@@ -61,17 +61,11 @@ async def build_message_tts_payload(
         resolved["voice"] = resolved.get("voice") or "pt-BR-FranciscaNeural"
         resolved["rate"] = resolved.get("rate") or "+0%"
         resolved["pitch"] = resolved.get("pitch") or "+0Hz"
-    elif forced_engine == "gcloud":
-        resolved["engine"] = "gcloud"
-        resolved["language"] = resolved.get("gcloud_language") or str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR")
-        resolved["voice"] = resolved.get("gcloud_voice") or str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A")
-        resolved["rate"] = resolved.get("gcloud_rate") or str(getattr(config, "GOOGLE_CLOUD_TTS_SPEAKING_RATE", 1.0) or 1.0)
-        resolved["pitch"] = resolved.get("gcloud_pitch") or str(getattr(config, "GOOGLE_CLOUD_TTS_PITCH", 0.0) or 0.0)
     elif forced_engine == "android_native":
         # ATTS usa o Android TTS nativo do APK/phone-worker. Guardamos a engine
         # efetiva antiga para fallback local se o celular estiver offline/lento.
         resolved["engine"] = "android_native"
-        resolved["language"] = resolved.get("android_language") or str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR")
+        resolved["language"] = resolved.get("android_language") or "pt-BR"
         resolved["voice"] = resolved.get("android_voice") or ""
         resolved["rate"] = resolved.get("android_rate") or "1.0"
         resolved["pitch"] = resolved.get("android_pitch") or "1.0"

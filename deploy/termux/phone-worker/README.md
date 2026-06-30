@@ -2,15 +2,9 @@
 
 A versão `1.10.28` do phone worker mantém o builder APK no worker/turbo, melhora rastreio de artifact/log e adiciona limpeza segura de artifacts antigos. A base ATTS do APK `0.5.54` mantêm a ponte ATTS rápida, adiciona catálogo de vozes Android para o painel do bot e registra métricas finas por etapa no caminho ATTS. O serviço persistente do APK mantém uma instância `TextToSpeech` aquecida e expõe somente em `127.0.0.1:8877` as rotas locais `GET /native-tts/status`, `POST /native-tts/synthesize` e `POST /native-tts/synthesize.raw`. O Termux/phone_worker usa a rota binária raw para evitar JSON/base64 gigante no caminho rápido, anuncia a engine `android_native` quando o APK estiver pronto e usa cache normal do worker depois da primeira síntese e retorna tempos de cache/Android/worker para diagnóstico de latência.
 
-O prefixo experimental `%texto` continua existindo, mas agora usa `android_native` por padrão via `TTS_PIPER_EXPERIMENT_ENGINE=android_native`. Piper não foi removido: ele fica como fallback legado se a variável for alterada para `piper` ou se uma chamada antiga ainda pedir essa engine. A ordem automática do TTS Agent passa a preferir `android_native`, depois `gcloud`, `edge`, `gtts` e, por último, `piper` quando houver modelo local.
+O prefixo experimental `%texto` continua existindo, mas agora usa `android_native` por padrão via `TTS_PIPER_EXPERIMENT_ENGINE=android_native`. Piper não foi removido: ele fica como fallback legado se a variável for alterada para `piper` ou se uma chamada antiga ainda pedir essa engine. A ordem automática do TTS Agent passa a preferir `android_native`, depois `edge`, `gtts` e, por último, `piper` quando houver modelo local.
 
 Variáveis opcionais do worker: `PHONE_WORKER_ANDROID_TTS_ENABLED=true`, `PHONE_WORKER_ANDROID_TTS_URL=http://127.0.0.1:8877`, `PHONE_WORKER_ANDROID_TTS_STATUS_TIMEOUT_SECONDS=0.45`, `PHONE_WORKER_ANDROID_TTS_STATUS_CACHE_SECONDS=5` e `PHONE_WORKER_ANDROID_TTS_SYNTH_TIMEOUT_MS=4500`.
-
-## Patch 85.10: Google Cloud OGG_OPUS + TTS direto controlado
-
-A versão `1.10.21` mantém a VPS como cérebro do bot, mas melhora o caminho de voz: Google Cloud TTS na VPS passa a preferir `OGG_OPUS` para reduzir trabalho de reencode quando o destino é voz/Opus, com fallback automático para `MP3` se o formato não estiver disponível. O playback local da VPS tenta usar `FFmpegOpusAudio` para arquivos OGG/Opus antes de cair para PCM.
-
-No TTS direto worker→Discord, o Music Agent sobe para `0.3.25` e passa a aceitar áudio prebuilt em OGG/Opus por `audio_b64`, usando a rota Opus quando possível. Para Google Cloud, a VPS pode pré-gerar OGG_OPUS e enviar ao worker, evitando que o worker caia para gTTS só porque não tem Google Cloud local. A transferência de posse continua controlada: o worker só toca voz quando a VPS libera a sessão, e o fallback VPS permanece obrigatório se algo falhar.
 
 ## Patch 85.9: TTS direto worker → Discord voice
 
@@ -50,16 +44,6 @@ O `voice_agent` agora mostra `shared_session_ready`, quantidade de sessões, gui
 
 # Phone Worker Termux
 
-
-
-## Patch 85.10: Google Cloud TTS nativo no worker turbo
-
-A versão `1.10.22` integra Google Cloud TTS diretamente no `TTS Agent` do worker turbo confiável. Quando `google-cloud-texttospeech` está instalado e existe uma service account em runtime, o worker anuncia `gcloud` como engine pronta, usa `OGG_OPUS` por padrão e mostra no health se a biblioteca, credencial e encoding estão prontos. A ordem automática de engine passa a preferir `gcloud`, depois `piper`, `edge` e `gtts`.
-
-A chave deve ficar apenas em `~/phone-worker/secrets/google-tts-service-account.json` ou caminho privado equivalente apontado por `PHONE_WORKER_GOOGLE_APPLICATION_CREDENTIALS`/`GOOGLE_APPLICATION_CREDENTIALS`. Não coloque o JSON no repositório, patch zip, logs ou GitHub. O painel/health mostra apenas presença da credencial, nunca o conteúdo.
-
-No Termux, o caminho testado para dependências é: primeiro `pkg install python-grpcio python-cryptography protobuf libprotobuf`, depois `pip install google-cloud-texttospeech`. O start script passa a respeitar essa ordem quando Google Cloud TTS estiver habilitado ou a credencial existir, evitando compilar `grpcio`/`cryptography` pelo pip.
-
 ## Patch 85.3: base do Worker Voice Agent
 
 A versão `1.10.14` também passa a expor `voice_agent` em `/health`, `/status` e `/local/status`, além da task direta `voice_agent_status`. Essa etapa **não** faz o worker controlar o bot inteiro e ainda não ativa TTS direto worker → Discord por padrão. Ela cria a base de telemetria/contrato para o próximo caminho: VPS continua sendo o cérebro do bot, enquanto o worker turbo vira o plano de voz/áudio compartilhado para Música + TTS quando estiver saudável.
@@ -70,7 +54,7 @@ O `voice_agent` junta o estado do `music_agent` e do `tts_agent`, mostra se a se
 
 A versão `1.10.14` adiciona as tasks diretas `tts_agent_status` e `tts_agent_synthesize` e expõe `tts_agent` em `/health`, `/status` e `/local/status`. Quando o worker turbo está online, saudável e com alguma engine TTS pronta, a VPS pode trocar o modo do TTS para `worker` sem testar o celular a cada frase. Se o health falhar, se o agent ficar velho ou se a síntese falhar repetidamente, a VPS volta para o modo `vps` por cooldown e tenta recuperar pelo health loop.
 
-O TTS Agent reutiliza as engines já conhecidas do worker: `piper` quando há modelo/config local, `edge` quando `edge-tts` está instalado, `gtts` quando disponível e `gcloud` apenas se `PHONE_WORKER_TTS_AGENT_GCLOUD_ENABLED=true`. O Piper continua usando o cache grande local do worker; a VPS ainda mantém seu cache próprio e consulta o cache remoto como segunda camada.
+O TTS Agent reutiliza as engines já conhecidas do worker: `piper` quando há modelo/config local, `edge` quando `edge-tts` está instalado e `gtts` quando disponível. O Piper continua usando o cache grande local do worker; a VPS ainda mantém seu cache próprio e consulta o cache remoto como segunda camada.
 
 Textos longos passam a ser divididos em partes menores pela VPS. Isso permite começar a reprodução pelo primeiro bloco e usar o prefetch já existente para preparar o próximo bloco enquanto o áudio atual toca, sem esperar sintetizar a mensagem inteira antes de falar.
 
@@ -87,7 +71,7 @@ Piper/modelos continuam locais no celular: configure `PHONE_WORKER_PIPER_COMMAND
 
 ## Patch 84.7: benchmark TTS turbo
 
-A versão `1.8.9` adiciona a task direta `tts_synthesize_benchmark`, restrita ao perfil `turbo` com as capacidades `tts-synth` e `tts-benchmark`. Ela sintetiza áudio curto por `edge`, `gtts` ou `gcloud` e devolve o MP3 para a VPS medir o tempo total real do worker, incluindo ida, síntese, retorno e validação. O worker não vira dependência do TTS: se estiver offline, lento, sem dependência ou sem credencial Google local, a VPS continua sintetizando sozinha e o relatório informa a falha curta.
+A versão `1.8.9` adiciona a task direta `tts_synthesize_benchmark`, restrita ao perfil `turbo` com as capacidades `tts-synth` e `tts-benchmark`. Ela sintetiza áudio curto por `edge` ou `gtts` e devolve o MP3 para a VPS medir o tempo total real do worker, incluindo ida, síntese, retorno e validação. O worker não vira dependência do TTS: se estiver offline, lento ou sem dependência local, a VPS continua sintetizando sozinha e o relatório informa a falha curta.
 
 ## Patch 84.6: resultados antigos, republicação e allowlist multi-worker
 

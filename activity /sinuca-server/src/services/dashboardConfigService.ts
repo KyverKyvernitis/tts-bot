@@ -84,7 +84,6 @@ const BIRTHDAY_DOC_CONFIG = "birthday_config";
 const TTS_ENGINE_OPTIONS = [
   { value: "gtts", label: "gTTS" },
   { value: "edge", label: "Edge" },
-  { value: "gcloud", label: "Google Cloud" },
   { value: "android_native", label: "Android nativo / ATTS" },
 ];
 
@@ -395,7 +394,6 @@ const sections: DashboardSectionDefinition[] = [
       { id: "tts.tts_prefix", label: "Prefixo TTS", type: "text", scope: "guild", path: "tts_prefix", maxLength: 8, placeholder: "," },
       { id: "tts.gtts_prefix", label: "Prefixo gTTS", type: "text", scope: "guild", path: "gtts_prefix", maxLength: 8, placeholder: "." },
       { id: "tts.edge_prefix", label: "Prefixo Edge", type: "text", scope: "guild", path: "edge_prefix", maxLength: 8, placeholder: "," },
-      { id: "tts.gcloud_prefix", label: "Prefixo Google", type: "text", scope: "guild", path: "gcloud_prefix", maxLength: 8, placeholder: "'" },
       { id: "tts.atts_prefix", label: "Prefixo ATTS", type: "text", scope: "guild", path: "atts_prefix", maxLength: 8, placeholder: "%" },
       { id: "tts.speech_limit_seconds", label: "Limite por fala", type: "number", scope: "guild", path: "speech_limit_seconds", min: 1, max: 600 },
       { id: "tts.announce_author_enabled", label: "Anunciar autor", type: "boolean", scope: "guild", path: "announce_author_enabled" },

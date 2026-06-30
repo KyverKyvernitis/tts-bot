@@ -161,7 +161,6 @@ class ModeSelect(discord.ui.Select):
             discord.SelectOption(label="ATTS", description="Android TTS nativo do worker", value="android_native", emoji="📱"),
             discord.SelectOption(label="gtts", description="Mais simples e compatível", value="gtts", emoji="🗣️"),
             discord.SelectOption(label="edge", description="Voz natural com voice, speed e pitch", value="edge", emoji="✨"),
-            discord.SelectOption(label="gcloud", description="Google Cloud TTS com idioma, voz, velocidade e tom próprios", value="gcloud", emoji="☁️"),
         ]
         super().__init__(
             placeholder="Escolha o modo de TTS",
@@ -244,94 +243,8 @@ class PitchSelect(discord.ui.Select):
         await self.cog._apply_pitch_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message, target_user_id=getattr(getattr(self, 'view', None), 'target_user_id', None), target_user_name=getattr(getattr(self, 'view', None), 'target_user_name', None))
 
 
-class GCloudSpeedSelect(discord.ui.Select):
-    def __init__(self, cog: "TTSVoice", *, server: bool):
-        self.cog = cog
-        self.server = server
-        options = [
-            discord.SelectOption(label="0.25x", description="Extremamente devagar", value="0.25"),
-            discord.SelectOption(label="0.50x", description="Bem mais devagar", value="0.5"),
-            discord.SelectOption(label="0.75x", description="Um pouco mais devagar", value="0.75"),
-            discord.SelectOption(label="1.00x", description="Velocidade normal", value="1.0"),
-            discord.SelectOption(label="1.25x", description="Um pouco mais rápido", value="1.25"),
-            discord.SelectOption(label="1.50x", description="Mais rápido", value="1.5"),
-            discord.SelectOption(label="1.75x", description="Bem mais rápido", value="1.75"),
-            discord.SelectOption(label="2.00x", description="Extremamente rápido", value="2.0"),
-        ]
-        super().__init__(placeholder="Escolha a velocidade do Google Cloud", min_values=1, max_values=1, options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
-        await self.cog._apply_gcloud_speed_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message, target_user_id=getattr(getattr(self, 'view', None), 'target_user_id', None), target_user_name=getattr(getattr(self, 'view', None), 'target_user_name', None))
 
 
-class GCloudPitchSelect(discord.ui.Select):
-    def __init__(self, cog: "TTSVoice", *, server: bool):
-        self.cog = cog
-        self.server = server
-        options = [
-            discord.SelectOption(label="-20", description="Extremamente grave", value="-20"),
-            discord.SelectOption(label="-15", description="Muito grave", value="-15"),
-            discord.SelectOption(label="-10", description="Mais grave", value="-10"),
-            discord.SelectOption(label="-5", description="Levemente grave", value="-5"),
-            discord.SelectOption(label="0", description="Tom normal", value="0"),
-            discord.SelectOption(label="+5", description="Levemente agudo", value="5"),
-            discord.SelectOption(label="+10", description="Mais agudo", value="10"),
-            discord.SelectOption(label="+15", description="Muito agudo", value="15"),
-            discord.SelectOption(label="+20", description="Extremamente agudo", value="20"),
-        ]
-        super().__init__(placeholder="Escolha o tom do Google Cloud", min_values=1, max_values=1, options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
-        await self.cog._apply_gcloud_pitch_from_panel(interaction, self.values[0], server=self.server, source_panel_message=source_panel_message, target_user_id=getattr(getattr(self, 'view', None), 'target_user_id', None), target_user_name=getattr(getattr(self, 'view', None), 'target_user_name', None))
-
-
-
-class GCloudLanguageSelect(discord.ui.Select):
-    def __init__(self, cog: "TTSVoice", *, server: bool, options: list[discord.SelectOption]):
-        self.cog = cog
-        self.server = server
-        super().__init__(
-            placeholder="Escolha o idioma do Google Cloud",
-            min_values=1,
-            max_values=1,
-            options=options[:25],
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
-        await self.cog._apply_gcloud_language_from_panel(
-            interaction,
-            self.values[0],
-            server=self.server,
-            source_panel_message=source_panel_message,
-            target_user_id=getattr(getattr(self, 'view', None), 'target_user_id', None),
-            target_user_name=getattr(getattr(self, 'view', None), 'target_user_name', None),
-        )
-
-
-class GCloudVoiceSelect(discord.ui.Select):
-    def __init__(self, cog: "TTSVoice", *, server: bool, options: list[discord.SelectOption]):
-        self.cog = cog
-        self.server = server
-        super().__init__(
-            placeholder="Escolha a voz do Google Cloud",
-            min_values=1,
-            max_values=1,
-            options=options[:25],
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        source_panel_message = getattr(getattr(self, "view", None), "source_panel_message", None)
-        await self.cog._apply_gcloud_voice_from_panel(
-            interaction,
-            self.values[0],
-            server=self.server,
-            source_panel_message=source_panel_message,
-            target_user_id=getattr(getattr(self, 'view', None), 'target_user_id', None),
-            target_user_name=getattr(getattr(self, 'view', None), 'target_user_name', None),
-        )
 
 
 class VoiceRegionSelect(discord.ui.Select):
@@ -624,87 +537,7 @@ class EdgePrefixModal(discord.ui.Modal, title="Alterar prefixo do modo Edge"):
         )
 
 
-class GCloudPrefixModal(discord.ui.Modal, title="Alterar prefixo do Google Cloud"):
-    new_prefix = discord.ui.TextInput(
-        label="Novo prefixo do Google Cloud",
-        placeholder="Ex.: '",
-        required=True,
-        min_length=1,
-        max_length=8,
-    )
 
-    def __init__(self, cog: "TTSVoice", panel_message: discord.Message, owner_id: int, guild_id: int):
-        super().__init__()
-        self.cog = cog
-        self.panel_message = panel_message
-        self.owner_id = owner_id
-        self.guild_id = guild_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await self.cog._apply_server_prefix_from_modal(
-            interaction,
-            prefix_kind="gcloud",
-            prefix=str(self.new_prefix),
-            panel_message=self.panel_message,
-        )
-
-
-class GCloudLanguageModal(discord.ui.Modal, title="Alterar idioma do Google Cloud"):
-    language = discord.ui.TextInput(
-        label="Idioma do Google Cloud",
-        placeholder="Ex.: pt-BR",
-        required=True,
-        max_length=16,
-    )
-
-    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None, current_value: str | None = None):
-        super().__init__()
-        self.cog = cog
-        self.panel_message = panel_message
-        self.server = server
-        self.target_user_id = target_user_id
-        self.target_user_name = target_user_name
-        if current_value is not None:
-            self.language.default = str(current_value or "")[:16]
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await self.cog._apply_gcloud_language_from_modal(
-            interaction,
-            str(self.language),
-            server=self.server,
-            panel_message=self.panel_message,
-            target_user_id=self.target_user_id,
-            target_user_name=self.target_user_name,
-        )
-
-
-class GCloudVoiceModal(discord.ui.Modal, title="Alterar voz do Google Cloud"):
-    voice_name = discord.ui.TextInput(
-        label="Voz do Google Cloud",
-        placeholder="Ex.: pt-BR-Standard-A",
-        required=True,
-        max_length=64,
-    )
-
-    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None, current_value: str | None = None):
-        super().__init__()
-        self.cog = cog
-        self.panel_message = panel_message
-        self.server = server
-        self.target_user_id = target_user_id
-        self.target_user_name = target_user_name
-        if current_value is not None:
-            self.voice_name.default = str(current_value or "")[:64]
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await self.cog._apply_gcloud_voice_from_modal(
-            interaction,
-            str(self.voice_name),
-            server=self.server,
-            panel_message=self.panel_message,
-            target_user_id=self.target_user_id,
-            target_user_name=self.target_user_name,
-        )
 
 
 class IgnoredRoleSelect(discord.ui.RoleSelect):
@@ -1232,97 +1065,8 @@ def _top_gtts_language_options(cog: "TTSVoice", current: str = "") -> list[disco
     return items or [discord.SelectOption(label="Português Brasil (pt-br)", description="Idioma gTTS", value="pt-br", default=True)]
 
 
-def _top_gcloud_language_options(current: str = "") -> list[discord.SelectOption]:
-    preferred = [current or "pt-BR", "pt-BR", "en-US", "es-ES", "ja-JP", "fr-FR", "it-IT", "de-DE"]
-    seen = set()
-    options = []
-    for code in preferred:
-        code = str(code or "").strip()
-        if not code or code in seen:
-            continue
-        seen.add(code)
-        options.append(discord.SelectOption(label=code, description="Idioma Google Cloud", value=code))
-    return options
 
 
-def _coerce_gcloud_voice_for_language(cog: "TTSVoice", voice: str, language: str) -> str:
-    language = str(language or "pt-BR").strip() or "pt-BR"
-    voice = str(voice or "").strip()
-    if not voice:
-        return ""
-    if cog._gcloud_voice_matches_language(voice, language):
-        return voice
-    simple = voice.strip()
-    if re.fullmatch(r"[A-Z]", simple, flags=re.I):
-        return f"{language}-Standard-{simple.upper()}"
-    if re.fullmatch(r"(?:Standard|Wavenet|Neural2|Studio|Chirp3(?:-HD)?)-[A-Z0-9]+", simple, flags=re.I):
-        return f"{language}-{simple}"
-    return ""
-
-
-def _gcloud_voice_options_for_language(cog: "TTSVoice", *, language: str, current: str = "") -> list[discord.SelectOption]:
-    language = str(language or "pt-BR").strip() or "pt-BR"
-    current = _coerce_gcloud_voice_for_language(cog, current, language)
-    catalog = list(getattr(cog, "_gcloud_voices_cache", []) or [])
-    options: list[discord.SelectOption] = []
-    try:
-        if catalog:
-            raw_options = cog._build_gcloud_voice_options_from_catalog(catalog, language, current_value=current or None)
-            for option in raw_options:
-                value = str(getattr(option, "value", "") or "").strip()
-                if value and cog._gcloud_voice_matches_language(value, language):
-                    options.append(option)
-    except Exception as e:
-        print(f"[tts_modal] falha ao filtrar vozes Google por idioma: {e!r}")
-        traceback.print_exception(type(e), e, e.__traceback__)
-        options = []
-
-    if not options:
-        families = ["Standard", "Wavenet", "Neural2"]
-        letters = ["A", "B", "C", "D", "E"]
-        names: list[str] = []
-        if current:
-            names.append(current)
-        for family in families:
-            for letter in letters:
-                names.append(f"{language}-{family}-{letter}")
-        seen: set[str] = set()
-        for name in names:
-            if not name or name in seen or not cog._gcloud_voice_matches_language(name, language):
-                continue
-            seen.add(name)
-            options.append(discord.SelectOption(label=_shorten(name, 100), description="Voz Google", value=name))
-            if len(options) >= 25:
-                break
-
-    if not options:
-        options = [discord.SelectOption(label=f"{language}-Standard-A", description="Voz Google", value=f"{language}-Standard-A")]
-
-    current_values = {str(getattr(opt, "value", "") or "") for opt in options}
-    if current and current not in current_values:
-        options.insert(0, discord.SelectOption(label=_shorten(current, 100), description="Voz Google", value=current))
-
-    has_default = False
-    for index, option in enumerate(options[:25]):
-        value = str(getattr(option, "value", "") or "")
-        try:
-            option.default = bool(current and value == current)
-            has_default = has_default or bool(option.default)
-        except Exception:
-            pass
-    if not has_default and options:
-        try:
-            options[0].default = True
-        except Exception:
-            pass
-    return options[:25]
-
-
-def _top_gcloud_voice_options(cog: "TTSVoice", current: str = "", language: str = "pt-BR") -> list[discord.SelectOption]:
-    return _gcloud_voice_options_for_language(cog, language=language, current=current)
-
-_ATTS_VOICE_CATALOG_CACHE: dict[str, object] = {"by_locale": {}, "last_error": ""}
-ATTS_LOAD_ERROR_MESSAGE = "Não consegui carregar o ATTS agora. Tente novamente em alguns instantes."
 
 
 def _atts_locale_matches(voice_locale: str, language: str) -> bool:
@@ -2032,212 +1776,6 @@ class GTTSSettingsModal(discord.ui.Modal, title="Editar gTTS"):
         )
 
 
-class GoogleSettingsModal(discord.ui.Modal, title="Editar Google"):
-    def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None, *, server: bool, target_user_id: int | None = None, target_user_name: str | None = None, force_text_fallback: bool = False):
-        super().__init__()
-        self.cog = cog
-        self.panel_message = panel_message
-        self.server = bool(server)
-        self.target_user_id = target_user_id
-        self.target_user_name = target_user_name
-        self.force_text_fallback = bool(force_text_fallback)
-        user_id = int(target_user_id or 0)
-        guild_id = int(getattr(panel_message, "guild", None).id) if getattr(panel_message, "guild", None) else 0
-        self.current_language = cog._get_current_gcloud_language(guild_id, user_id, server=server) if guild_id else str(getattr(config, "GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR")
-        self.current_voice = cog._get_current_gcloud_voice(guild_id, user_id, server=server) if guild_id else str(getattr(config, "GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A")
-        self.current_rate = _current_tts_value(cog, guild_id, user_id, "gcloud_rate", "1.0", server=server)
-        self.current_pitch = _current_tts_value(cog, guild_id, user_id, "gcloud_pitch", "0.0", server=server)
-        if self.force_text_fallback or not self._build_guided_modal():
-            self._build_text_fallback()
-
-    def _build_guided_modal(self) -> bool:
-        if not _modal_label_available():
-            return False
-        try:
-            language_select = _make_modal_select(
-                "gcloud_language",
-                placeholder="Idioma Google",
-                options=_with_default_option(_top_gcloud_language_options(self.current_language), self.current_language),
-            )
-            voice_select = _make_modal_select(
-                "gcloud_voice",
-                placeholder="Voz Google",
-                options=_gcloud_voice_options_for_language(self.cog, language=self.current_language, current=self.current_voice),
-            )
-            ok = _add_modal_label_item(
-                self,
-                "language",
-                text="Idioma Google",
-                description="",
-                component=language_select,
-            )
-            ok = ok and _add_modal_label_item(
-                self,
-                "voice",
-                text="Voz Google",
-                description="",
-                component=voice_select,
-            )
-            ok = ok and _add_modal_radio(
-                self,
-                "rate",
-                text="Velocidade Google",
-                description="",
-                current=self.current_rate,
-                options=[
-                    ("Mais lenta", "0.75", ""),
-                    ("Normal", "1.0", ""),
-                    ("Mais rápida", "1.25", ""),
-                    ("Bem mais rápida", "1.5", ""),
-                ],
-            )
-            ok = ok and _add_modal_radio(
-                self,
-                "pitch",
-                text="Tom Google",
-                description="",
-                current=self.current_pitch,
-                options=[
-                    ("Mais grave", "-5", ""),
-                    ("Normal", "0", ""),
-                    ("Mais agudo", "5", ""),
-                    ("Bem mais agudo", "10", ""),
-                ],
-            )
-            return bool(ok)
-        except Exception as e:
-            print(f"[tts_modal] Google guiado falhou: {e!r}")
-            try:
-                self.clear_items()
-            except Exception:
-                pass
-            return False
-
-    def _build_text_fallback(self) -> None:
-        _add_modal_text_input(
-            self,
-            "language",
-            label="Idioma Google",
-            placeholder="Idioma da voz Google. Ex.: pt-BR, en-US, es-ES",
-            current=self.current_language,
-            max_length=16,
-        )
-        _add_modal_text_input(
-            self,
-            "voice",
-            label="Voz Google",
-            placeholder="Voz usada com 'texto. Ex.: pt-BR-Standard-A",
-            current=self.current_voice,
-            max_length=80,
-        )
-        _add_modal_text_input(
-            self,
-            "rate",
-            label="Velocidade Google",
-            placeholder="Use 1.0 normal, 0.75 lenta ou 1.25 rápida",
-            current=self.current_rate,
-            max_length=8,
-        )
-        _add_modal_text_input(
-            self,
-            "pitch",
-            label="Tom Google",
-            placeholder="Use 0 normal, -5 grave ou 5 agudo",
-            current=self.current_pitch,
-            max_length=8,
-        )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        updates: dict[str, object] = {}
-        details: list[str] = []
-        history_bits: list[str] = []
-
-        language = _single_component_value(getattr(self, "language", None), self.current_language)
-        selected_language = self.current_language
-        if language:
-            value, error = self.cog._validate_gcloud_language_input(language)
-            if error or value is None:
-                await interaction.response.send_message(embed=self.cog._make_embed("Idioma inválido", error or "Idioma inválido.", ok=False), ephemeral=True)
-                return
-            selected_language = value
-            if str(value) != str(self.current_language):
-                updates["gcloud_language"] = value
-                details.append(f"• Idioma: {value}")
-                history_bits.append(f"idioma {value}")
-
-        voice = _single_component_value(getattr(self, "voice", None), self.current_voice)
-        selected_voice = str(voice or self.current_voice or "").strip()
-        if selected_voice:
-            value, error = self.cog._validate_gcloud_voice_input(selected_voice)
-            if error or value is None:
-                await interaction.response.send_message(embed=self.cog._make_embed("Voz inválida", error or "Voz inválida.", ok=False), ephemeral=True)
-                return
-            selected_voice = value
-
-        adjusted_voice = ""
-        if selected_language and selected_voice and not self.cog._gcloud_voice_matches_language(selected_voice, selected_language):
-            catalog = await self.cog._load_gcloud_voices()
-            adjusted_voice = self.cog._pick_first_gcloud_voice_for_language(catalog, selected_language) if catalog else f"{selected_language}-Standard-A"
-            selected_voice = adjusted_voice
-
-        if selected_voice and str(selected_voice) != str(self.current_voice):
-            updates["gcloud_voice"] = selected_voice
-            label = "Voz ajustada" if adjusted_voice else "Voz"
-            details.append(f"• {label}: {selected_voice}")
-            history_bits.append("voz ajustada" if adjusted_voice else f"voz {human_voice_name(selected_voice)}")
-
-        rate = _single_component_value(getattr(self, "rate", None), self.current_rate)
-        if rate:
-            value = self.cog._normalize_gcloud_rate_value(rate)
-            current_rate = self.cog._normalize_gcloud_rate_value(self.current_rate)
-            if str(value) != str(current_rate):
-                updates["gcloud_rate"] = value
-                details.append(f"• Velocidade: {human_rate(value)}")
-                history_bits.append(f"velocidade {human_rate(value)}")
-
-        pitch = _single_component_value(getattr(self, "pitch", None), self.current_pitch)
-        if pitch:
-            value = self.cog._normalize_gcloud_pitch_value(pitch)
-            current_pitch = self.cog._normalize_gcloud_pitch_value(self.current_pitch)
-            if str(value) != str(current_pitch):
-                updates["gcloud_pitch"] = value
-                details.append(f"• Tom: {human_pitch(value)}")
-                history_bits.append(f"tom {human_pitch(value)}")
-
-        if len(history_bits) == 1:
-            bit = history_bits[0]
-            if bit == "voz ajustada":
-                history_label = "o Google" if self.server else "o próprio Google"
-                history_value = "voz ajustada"
-            else:
-                key, _, value = bit.partition(" ")
-                article = {"voz": "a", "velocidade": "a", "tom": "o", "idioma": "o"}.get(key, "o")
-                poss = {"voz": "própria", "velocidade": "própria", "tom": "próprio", "idioma": "próprio"}.get(key, "próprio")
-                history_label = f"{article} {poss + ' ' if not self.server else ''}{key} do Google"
-                history_value = value or "atualizado"
-        else:
-            history_label = "o Google" if self.server else "o próprio Google"
-            if "gcloud_language" in updates and "gcloud_voice" in updates:
-                history_value = "idioma e voz atualizados"
-            elif updates:
-                history_value = "leitura atualizada" if set(updates) <= {"gcloud_rate", "gcloud_pitch"} else "configurações atualizadas"
-            else:
-                history_value = "sem alterações"
-
-        await _save_tts_modal_updates(
-            self.cog,
-            interaction,
-            source_panel_message=self.panel_message,
-            server=self.server,
-            updates=updates,
-            history_label=history_label,
-            history_value=history_value,
-            success_title="Google atualizado",
-            success_description="\n".join(details) if details else "Nada mudou.",
-            target_user_id=self.target_user_id,
-            target_user_name=self.target_user_name,
-        )
-
 
 def _normalize_atts_locale(value: object, default: str = "pt-BR") -> str:
     raw = str(value or default or "").strip().replace("_", "-")
@@ -2329,7 +1867,7 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
         if guided_ok:
             return
 
-        # O ATTS depende do catálogo do worker para abrir igual ao Google Cloud.
+        # O ATTS depende do catálogo do worker para montar as opções.
         # Se o modal guiado não puder ser montado, não abrimos o formulário antigo
         # de campos livres para o usuário comum; mostramos a mensagem mínima no
         # chamador. O fallback textual fica só para chamadas legadas explícitas.
@@ -2565,7 +2103,6 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
     atts_prefix = discord.ui.TextInput(label="Prefixo do ATTS", placeholder="Ex.: %", required=False, max_length=8)
     gtts_prefix = discord.ui.TextInput(label="Prefixo do gTTS", placeholder="Ex.: .", required=False, max_length=8)
     edge_prefix = discord.ui.TextInput(label="Prefixo do Edge", placeholder="Ex.: ,", required=False, max_length=8)
-    google_prefix = discord.ui.TextInput(label="Prefixo do Google", placeholder="Ex.: '", required=False, max_length=8)
 
     def __init__(self, cog: "TTSVoice", panel_message: discord.Message | None):
         super().__init__()
@@ -2581,7 +2118,6 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
         self.atts_prefix.default = str((defaults or {}).get("atts_prefix") or getattr(config, "TTS_ATTS_PREFIX", "%") or "%")[:8]
         self.gtts_prefix.default = str((defaults or {}).get("tts_prefix") or (defaults or {}).get("gtts_prefix") or getattr(config, "TTS_PREFIX", ".") or ".")[:8]
         self.edge_prefix.default = str((defaults or {}).get("edge_prefix") or getattr(config, "EDGE_TTS_PREFIX", ",") or ",")[:8]
-        self.google_prefix.default = str((defaults or {}).get("gcloud_prefix") or getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'") or "'")[:8]
 
     async def on_submit(self, interaction: discord.Interaction):
         updates = {}
@@ -2591,7 +2127,6 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
             ("atts_prefix", "ATTS", ("atts_prefix",)),
             ("gtts_prefix", "gTTS", ("gtts_prefix", "tts_prefix")),
             ("edge_prefix", "Edge", ("edge_prefix",)),
-            ("google_prefix", "Google", ("gcloud_prefix",)),
         ]:
             value = _item_value(getattr(self, field_name, None))
             if value:
@@ -2925,7 +2460,6 @@ class TTSPublicLauncherSelect(discord.ui.Select):
             discord.SelectOption(label="ATTS", description="Idioma, voz, velocidade e tom do Android TTS", value="atts", emoji="📱"),
             discord.SelectOption(label="Edge", description="Idioma, voz, velocidade e tom do Edge", value="edge", emoji="🔊"),
             discord.SelectOption(label="gTTS", description="Idioma do gTTS", value="gtts", emoji="🔤"),
-            discord.SelectOption(label="Google", description="Idioma, voz e leitura Google", value="gcloud", emoji="☁️"),
             discord.SelectOption(label="Apelido", description="Nome que o bot fala por você", value="spoken_name", emoji="🪪"),
         ]
         super().__init__(
@@ -2969,13 +2503,6 @@ class TTSPublicLauncherSelect(discord.ui.Select):
                 lambda: GTTSSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name),
                 lambda: GTTSSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name, force_text_fallback=True),
                 context="public-gtts",
-            )
-        elif value == "gcloud":
-            await _send_settings_modal_with_fallback(
-                interaction,
-                lambda: GoogleSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name),
-                lambda: GoogleSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name, force_text_fallback=True),
-                context="public-google",
             )
         elif value == "spoken_name":
             current_value = panel.cog._get_saved_spoken_name(interaction.guild.id, interaction.user.id)
@@ -3108,9 +2635,6 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
             "**gTTS**",
             "Voz simples. Use: `.texto`",
             "",
-            "**Google**",
-            "Google Cloud. Use: `'texto`",
-            "",
             "**Últimas alterações**",
             history,
         ]
@@ -3217,11 +2741,11 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
         await interaction.response.send_message(
             embed=self.cog._make_embed(
                 "Ajuda do TTS",
-                "Edge, gTTS e Google são modos de voz. O prefixo é só o símbolo digitado antes da frase.\n\n"
+                "ATTS, Edge e gTTS são modos de voz. O prefixo é só o símbolo digitado antes da frase.\n\n"
                 "Exemplos:\n"
+                "• `%bom dia` usa ATTS.\n"
                 "• `,bom dia` usa Edge.\n"
-                "• `.bom dia` usa gTTS.\n"
-                "• `'bom dia` usa Google.",
+                "• `.bom dia` usa gTTS.",
                 ok=True,
             ),
             ephemeral=True,
@@ -3313,8 +2837,6 @@ class TTSModeActionsView(_BaseTTSView):
             return "%"
         if self.mode == "edge":
             return ","
-        if self.mode == "gcloud":
-            return str(getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'") or "'")
         return "."
 
     def _mode_title_description(self) -> tuple[str, str]:
@@ -3326,7 +2848,7 @@ class TTSModeActionsView(_BaseTTSView):
             return "Edge", f"Usado quando a mensagem começa com `{prefix}texto`. Escolha no menu o que quer mudar."
         if self.mode == "gtts":
             return "gTTS", f"Usado quando a mensagem começa com `{prefix}texto`. Escolha no menu o que quer mudar."
-        return "Google", f"Usado quando a mensagem começa com `{prefix}texto`. Escolha no menu o que quer mudar."
+        return "gTTS", f"Usado quando a mensagem começa com `{prefix}texto`. Escolha no menu o que quer mudar."
 
     async def send(self, interaction: discord.Interaction):
         title, description = self._mode_title_description()
@@ -3381,54 +2903,8 @@ class TTSModeActionsView(_BaseTTSView):
             ephemeral=True,
         )
 
-    async def _open_google_language(self, interaction: discord.Interaction):
-        current_target_user_id = int(self.target_user_id or interaction.user.id)
-        current_value = self.cog._get_current_gcloud_language(self.guild_id, current_target_user_id, server=self.server)
-        await self.cog._open_gcloud_language_picker(
-            interaction,
-            owner_id=self._target_owner(interaction),
-            guild_id=self.guild_id,
-            current_value=current_value,
-            server=self.server,
-            source_panel_message=self.source_panel_message,
-            target_user_id=None if self.owner_id == 0 and self.target_user_id is None else self.target_user_id,
-            target_user_name=self.target_user_name,
-        )
 
-    async def _open_google_voice(self, interaction: discord.Interaction):
-        current_target_user_id = int(self.target_user_id or interaction.user.id)
-        current_language = self.cog._get_current_gcloud_language(self.guild_id, current_target_user_id, server=self.server)
-        current_value = self.cog._get_current_gcloud_voice(self.guild_id, current_target_user_id, server=self.server)
-        await self.cog._open_gcloud_voice_picker(
-            interaction,
-            owner_id=self._target_owner(interaction),
-            guild_id=self.guild_id,
-            language_code=current_language,
-            current_value=current_value,
-            server=self.server,
-            source_panel_message=self.source_panel_message,
-            target_user_id=None if self.owner_id == 0 and self.target_user_id is None else self.target_user_id,
-            target_user_name=self.target_user_name,
-        )
 
-    async def _open_google_reading(self, interaction: discord.Interaction):
-        view = _SimpleSelectView(
-            self.cog,
-            self._target_owner(interaction),
-            self.guild_id,
-            "Leitura Google",
-            "Muda velocidade e tom usados pelo modo Google.",
-            GCloudSpeedSelect(self.cog, server=self.server),
-            source_panel_message=self.source_panel_message,
-            target_user_id=self.target_user_id,
-            target_user_name=self.target_user_name,
-        )
-        pitch_select = GCloudPitchSelect(self.cog, server=self.server)
-        pitch_select.source_panel_message = self.source_panel_message
-        pitch_select.target_user_id = self.target_user_id
-        pitch_select.target_user_name = self.target_user_name
-        view.add_item(pitch_select)
-        await view.send(interaction)
 
     async def _back_to_main_panel(self, interaction: discord.Interaction):
         if interaction.guild is None:
@@ -3467,7 +2943,6 @@ class PrefixTargetSelect(discord.ui.Select):
             discord.SelectOption(label="ATTS", description="Símbolo antes da frase para usar ATTS. Exemplo: %bom dia", value="atts", emoji="📱"),
             discord.SelectOption(label="gTTS", description="Símbolo antes da frase para usar gTTS. Exemplo: .bom dia", value="gtts", emoji="🔤"),
             discord.SelectOption(label="Edge", description="Símbolo antes da frase para usar Edge. Exemplo: ,bom dia", value="edge", emoji="🔊"),
-            discord.SelectOption(label="Google", description="Símbolo antes da frase para usar Google. Exemplo: 'bom dia", value="gcloud", emoji="☁️"),
         ]
         super().__init__(placeholder="Escolha qual prefixo alterar", min_values=1, max_values=1, options=options)
 
@@ -3482,8 +2957,6 @@ class PrefixTargetSelect(discord.ui.Select):
             await interaction.response.send_modal(ATTSPrefixModal(self.cog, source_panel_message, owner_id, guild_id))
         elif value == "edge":
             await interaction.response.send_modal(EdgePrefixModal(self.cog, source_panel_message, owner_id, guild_id))
-        elif value == "gcloud":
-            await interaction.response.send_modal(GCloudPrefixModal(self.cog, source_panel_message, owner_id, guild_id))
         else:
             await interaction.response.send_modal(GTTSPrefixModal(self.cog, source_panel_message, owner_id, guild_id))
 
@@ -3535,57 +3008,8 @@ class TTSAdvancedActionsView(_BaseTTSView):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Idioma Google", style=discord.ButtonStyle.secondary, emoji="☁️", row=0)
-    async def gcloud_language_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        current_target_user_id = int(self.target_user_id or interaction.user.id)
-        current_value = self.cog._get_current_gcloud_language(self.guild_id, current_target_user_id, server=self.server)
-        await self.cog._open_gcloud_language_picker(
-            interaction,
-            owner_id=self._target_owner(interaction),
-            guild_id=self.guild_id,
-            current_value=current_value,
-            server=self.server,
-            source_panel_message=self.source_panel_message,
-            target_user_id=None if self.owner_id == 0 and self.target_user_id is None else self.target_user_id,
-            target_user_name=self.target_user_name,
-        )
 
-    @discord.ui.button(label="Voz Google", style=discord.ButtonStyle.secondary, emoji="🎙️", row=0)
-    async def gcloud_voice_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        current_target_user_id = int(self.target_user_id or interaction.user.id)
-        current_language = self.cog._get_current_gcloud_language(self.guild_id, current_target_user_id, server=self.server)
-        current_value = self.cog._get_current_gcloud_voice(self.guild_id, current_target_user_id, server=self.server)
-        await self.cog._open_gcloud_voice_picker(
-            interaction,
-            owner_id=self._target_owner(interaction),
-            guild_id=self.guild_id,
-            language_code=current_language,
-            current_value=current_value,
-            server=self.server,
-            source_panel_message=self.source_panel_message,
-            target_user_id=None if self.owner_id == 0 and self.target_user_id is None else self.target_user_id,
-            target_user_name=self.target_user_name,
-        )
 
-    @discord.ui.button(label="Leitura Google", style=discord.ButtonStyle.secondary, emoji="🎚️", row=1)
-    async def gcloud_reading_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = _SimpleSelectView(
-            self.cog,
-            self._target_owner(interaction),
-            self.guild_id,
-            "Leitura Google",
-            "Muda velocidade e tom usados pelo modo Google.",
-            GCloudSpeedSelect(self.cog, server=self.server),
-            source_panel_message=self.source_panel_message,
-            target_user_id=self.target_user_id,
-            target_user_name=self.target_user_name,
-        )
-        pitch_select = GCloudPitchSelect(self.cog, server=self.server)
-        pitch_select.source_panel_message = self.source_panel_message
-        pitch_select.target_user_id = self.target_user_id
-        pitch_select.target_user_name = self.target_user_name
-        view.add_item(pitch_select)
-        await view.send(interaction)
 
     @discord.ui.button(label="Cargo ignorado", style=discord.ButtonStyle.secondary, emoji="🚫", row=1)
     async def ignored_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3605,7 +3029,7 @@ class TTSAdvancedActionsView(_BaseTTSView):
             self._target_owner(interaction),
             self.guild_id,
             "Modo de TTS",
-            "Escolhe o motor padrão usado por comandos antigos. Os prefixos ATTS, Edge, gTTS e Google continuam escolhendo o motor por mensagem.",
+            "Escolhe o motor padrão usado por comandos antigos. Os prefixos ATTS, Edge e gTTS continuam escolhendo o motor por mensagem.",
             ModeSelect(self.cog, server=self.server),
             source_panel_message=self.source_panel_message,
             target_user_id=self.target_user_id,
@@ -3633,11 +3057,10 @@ class TTSMainPanelSelect(discord.ui.Select):
         self.server = bool(server)
         if self.server:
             options = [
-                discord.SelectOption(label="Prefixos", description="Símbolos do bot, ATTS, Edge, gTTS e Google", value="prefixes", emoji="⌨️"),
+                discord.SelectOption(label="Prefixos", description="Símbolos do bot, ATTS, Edge e gTTS", value="prefixes", emoji="⌨️"),
                 discord.SelectOption(label="ATTS", description="Android TTS padrão do servidor", value="atts", emoji="📱"),
                 discord.SelectOption(label="Edge", description="Idioma, voz e leitura Edge padrão do servidor", value="edge", emoji="🔊"),
                 discord.SelectOption(label="gTTS", description="Idioma gTTS padrão do servidor", value="gtts", emoji="🔤"),
-                discord.SelectOption(label="Google", description="Idioma, voz e leitura Google padrão", value="gcloud", emoji="☁️"),
                 discord.SelectOption(label="Regras", description="Autor antes da frase e cargo ignorado", value="rules", emoji="☑️"),
             ]
             placeholder = "Escolha o ajuste do servidor"
@@ -3646,7 +3069,6 @@ class TTSMainPanelSelect(discord.ui.Select):
                 discord.SelectOption(label="ATTS", description="Android nativo: idioma, voz, velocidade e tom", value="atts", emoji="📱"),
                 discord.SelectOption(label="Edge", description="Voz natural: idioma, voz, velocidade e tom", value="edge", emoji="🔊"),
                 discord.SelectOption(label="gTTS", description="Voz simples: idioma usado no gTTS", value="gtts", emoji="🔤"),
-                discord.SelectOption(label="Google", description="Google Cloud: idioma, voz e leitura", value="gcloud", emoji="☁️"),
                 discord.SelectOption(label="Apelido", description="Nome que o bot fala por você", value="spoken_name", emoji="🪪"),
             ]
             placeholder = "Escolha o que editar"
@@ -3664,8 +3086,6 @@ class TTSMainPanelSelect(discord.ui.Select):
             await panel._open_edge_panel(interaction)
         elif value == "gtts":
             await panel._open_gtts_panel(interaction)
-        elif value == "gcloud":
-            await panel._open_google_panel(interaction)
         elif value == "spoken_name":
             await panel._open_spoken_name_modal(interaction)
         elif value == "prefixes":
@@ -3697,11 +3117,9 @@ class TTSModeActionSelect(discord.ui.Select):
             placeholder = "Editar gTTS"
         else:
             options = [
-                discord.SelectOption(label="Idioma Google", description="Idioma da voz Google", value="google_language", emoji="☁️"),
-                discord.SelectOption(label="Voz Google", description="Voz do Google Cloud", value="google_voice", emoji="🎙️"),
-                discord.SelectOption(label="Leitura Google", description="Velocidade e tom do Google", value="google_reading", emoji="🎚️"),
+                discord.SelectOption(label="Idioma gTTS", description="Idioma usado no prefixo gTTS", value="gtts_language", emoji="🌐"),
             ]
-            placeholder = "Editar Google"
+            placeholder = "Editar gTTS"
         super().__init__(placeholder=placeholder, min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
@@ -3726,12 +3144,6 @@ class TTSModeActionSelect(discord.ui.Select):
             await panel._open_edge_reading(interaction)
         elif value == "gtts_language":
             await panel._open_gtts_language(interaction)
-        elif value == "google_language":
-            await panel._open_google_language(interaction)
-        elif value == "google_voice":
-            await panel._open_google_voice(interaction)
-        elif value == "google_reading":
-            await panel._open_google_reading(interaction)
         else:
             await interaction.response.send_message("Opção indisponível.", ephemeral=True)
 
@@ -3856,9 +3268,9 @@ class TTSMainPanelView(_BaseTTSLayoutView):
         else:
             await _send_settings_modal_with_fallback(
                 interaction,
-                lambda: GoogleSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name),
-                lambda: GoogleSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name, force_text_fallback=True),
-                context="panel-google",
+                lambda: GTTSSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name),
+                lambda: GTTSSettingsModal(self.cog, panel_message, server=self.server, target_user_id=target_user_id, target_user_name=target_user_name, force_text_fallback=True),
+                context="panel-gtts",
             )
 
 
@@ -3871,8 +3283,6 @@ class TTSMainPanelView(_BaseTTSLayoutView):
     async def _open_gtts_panel(self, interaction: discord.Interaction):
         await self._open_mode_panel(interaction, "gtts")
 
-    async def _open_google_panel(self, interaction: discord.Interaction):
-        await self._open_mode_panel(interaction, "gcloud")
 
     async def _open_voice_panel(self, interaction: discord.Interaction):
         print(f"[tts_panel] voice_button | user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
@@ -3938,7 +3348,7 @@ class TTSMainPanelView(_BaseTTSLayoutView):
         await interaction.response.send_message(
             embed=self.cog._make_embed(
                 "Opção removida",
-                "Esse painel foi simplificado. Use ATTS, Edge, gTTS, Google, Apelido ou o comando separado do TTS do servidor.",
+                "Esse painel foi simplificado. Use ATTS, Edge, gTTS, Apelido ou o comando separado do TTS do servidor.",
                 ok=True,
             ),
             ephemeral=True,

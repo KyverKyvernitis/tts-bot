@@ -45,10 +45,6 @@ JOBS_STARTED = 0
 JOBS_FAILED = 0
 _PING_CACHE: dict[str, Any] = {}
 _ANDROID_TTS_STATUS_CACHE: dict[str, Any] = {"at": 0.0, "data": {}}
-_GCLOUD_TTS_CLIENT_LOCK = threading.Lock()
-_GCLOUD_TTS_CLIENT: Any | None = None
-_GCLOUD_TTS_CLIENT_SIGNATURE = ""
-_GCLOUD_TTS_CLIENT_ERROR = ""
 _CORE_WORKER_NETWORK_STATE: dict[str, Any] = {"last_ok_at": 0.0, "last_error_at": 0.0, "last_error": "", "last_error_kind": ""}
 _CORE_JOB_LOCK = threading.RLock()
 _CORE_JOB_ACTIVE: dict[str, Any] = {}
@@ -295,7 +291,7 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "turbo": {
         "label": "Turbo",
         "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "voice-agent", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "tts-google", "tts-gtts", "tts-edge", "tts-gcloud", "tts-android-native", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "tts-gtts", "tts-edge", "tts-android-native", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -1818,80 +1814,8 @@ def _b64encode(data: bytes, *, max_bytes: int) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
-def _env_path(*names: str) -> str:
-    for name in names:
-        value = str(os.getenv(name, "") or "").strip()
-        if value:
-            return os.path.expandvars(os.path.expanduser(value))
-    return ""
 
 
-def _gcloud_tts_enabled() -> bool:
-    # Default safe/autodetect: only becomes usable when library + credential are present.
-    return _env_bool("PHONE_WORKER_TTS_AGENT_GCLOUD_ENABLED", _env_bool("PHONE_WORKER_GOOGLE_TTS_ENABLED", True))
-
-
-def _gcloud_credentials_path() -> str:
-    return _env_path("PHONE_WORKER_GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_APPLICATION_CREDENTIALS")
-
-
-def _gcloud_audio_encoding_name(raw: Any = None) -> str:
-    value = str(raw or os.getenv("PHONE_WORKER_GOOGLE_TTS_AUDIO_ENCODING") or os.getenv("PHONE_WORKER_TTS_AGENT_GCLOUD_AUDIO_ENCODING") or "OGG_OPUS").strip().upper().replace("-", "_")
-    aliases = {
-        "OGG": "OGG_OPUS",
-        "OPUS": "OGG_OPUS",
-        "OGGOPUS": "OGG_OPUS",
-        "WAV": "LINEAR16",
-        "WAVE": "LINEAR16",
-        "PCM": "LINEAR16",
-    }
-    value = aliases.get(value, value)
-    return value if value in {"OGG_OPUS", "MP3", "LINEAR16", "MULAW", "ALAW"} else "OGG_OPUS"
-
-
-def _gcloud_audio_suffix(encoding: str) -> str:
-    encoding = _gcloud_audio_encoding_name(encoding)
-    if encoding == "OGG_OPUS":
-        return "ogg"
-    if encoding == "LINEAR16":
-        return "wav"
-    return "mp3"
-
-
-def _gcloud_tts_status() -> dict[str, Any]:
-    enabled = _gcloud_tts_enabled()
-    status: dict[str, Any] = {
-        "enabled": bool(enabled),
-        "library": False,
-        "credentials": False,
-        "ready": False,
-        "encoding": _gcloud_audio_encoding_name(),
-        "credential_path_present": False,
-        "last_error": "",
-    }
-    if not enabled:
-        status["last_error"] = "PHONE_WORKER_TTS_AGENT_GCLOUD_ENABLED=false"
-        return status
-    ok, err = _module_import_ok("google.cloud.texttospeech_v1")
-    status["library"] = bool(ok)
-    if not ok:
-        status["last_error"] = _short_text(err or "google-cloud-texttospeech ausente", limit=120)
-        return status
-    cred_path = _gcloud_credentials_path()
-    status["credential_path_present"] = bool(cred_path)
-    if cred_path:
-        try:
-            path = Path(cred_path).expanduser()
-            status["credentials"] = path.exists() and path.stat().st_size > 0
-        except Exception as exc:
-            status["credentials"] = False
-            status["last_error"] = _short_text(exc, limit=120)
-    elif str(os.getenv("GOOGLE_CREDENTIALS_JSON", "") or "").strip():
-        status["credentials"] = True
-    else:
-        status["last_error"] = "credencial ausente"
-    status["ready"] = bool(status["library"] and status["credentials"])
-    return status
 
 
 
@@ -2048,9 +1972,6 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
         "piper_config": False,
         "edge_tts": False,
         "gtts": False,
-        "gcloud_tts": False,
-        "gcloud_credentials": False,
-        "gcloud_encoding": _gcloud_audio_encoding_name(),
         "android_native_tts": False,
     }
     model = str(os.getenv("PHONE_WORKER_PIPER_MODEL", "") or "").strip()
@@ -2077,14 +1998,6 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
     deps["android_native_url"] = str(android_status.get("url") or _android_tts_base_url())
     if android_status.get("last_error"):
         deps["android_native_error"] = _short_text(android_status.get("last_error"), limit=100)
-    gcloud_status = _gcloud_tts_status()
-    deps["gcloud_tts"] = bool(gcloud_status.get("ready"))
-    deps["gcloud_library"] = bool(gcloud_status.get("library"))
-    deps["gcloud_credentials"] = bool(gcloud_status.get("credentials"))
-    deps["gcloud_enabled"] = bool(gcloud_status.get("enabled"))
-    deps["gcloud_encoding"] = str(gcloud_status.get("encoding") or "OGG_OPUS")
-    if gcloud_status.get("last_error"):
-        deps["gcloud_error"] = _short_text(gcloud_status.get("last_error"), limit=100)
     missing = [key for key in ("ffmpeg", "ffprobe", "edge_tts", "gtts") if not deps.get(key)]
     deps["ok"] = not missing
     deps["missing"] = missing
@@ -2097,9 +2010,7 @@ def _tts_agent_available_engines(deps: dict[str, Any] | None = None) -> list[str
     engines: list[str] = []
     if deps.get("android_native_tts"):
         engines.append("android_native")
-    if deps.get("gcloud_tts"):
-        engines.append("gcloud")
-    # Piper ficou legado. O fluxo normal anuncia ATTS/Google/Edge/gTTS.
+    # Piper ficou legado. O fluxo normal anuncia ATTS/Edge/gTTS.
     if deps.get("edge_tts"):
         engines.append("edge")
     if deps.get("gtts"):
@@ -2109,11 +2020,11 @@ def _tts_agent_available_engines(deps: dict[str, Any] | None = None) -> list[str
 
 def _tts_agent_preferred_engine(available: list[str]) -> str:
     requested = str(os.getenv("PHONE_WORKER_TTS_AGENT_ENGINE") or "auto").strip().lower().replace("-", "_") or "auto"
-    aliases = {"google": "gcloud", "google_cloud": "gcloud", "googlecloud": "gcloud", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native"}
+    aliases = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native"}
     requested = aliases.get(requested, requested)
     if requested != "auto" and requested in available:
         return requested
-    for candidate in ("android_native", "gcloud", "edge", "gtts"):
+    for candidate in ("android_native", "edge", "gtts"):
         if candidate in available:
             return candidate
     return ""
@@ -2163,7 +2074,6 @@ def _tts_agent_snapshot() -> dict[str, Any]:
         "preferred_engine": preferred,
         "selected_engine": preferred or last_engine,
         "deps": deps,
-        "gcloud": {k: v for k, v in _gcloud_tts_status().items() if k != "credential_path"},
         "active": active,
         "concurrency_limit": _tts_agent_queue_limit(),
         "total": total,
@@ -2555,7 +2465,6 @@ def _music_voice_dependency_specs() -> dict[str, dict[str, Any]]:
         "aiohttp": {"module": "aiohttp", "pip": "aiohttp"},
         "gTTS": {"module": "gtts", "pip": "gTTS"},
         "edge-tts": {"module": "edge_tts", "pip": "edge-tts"},
-        "google-cloud-texttospeech": {"module": "google.cloud.texttospeech_v1", "pip": "google-cloud-texttospeech", "optional": True},
     }
 
 
@@ -4292,22 +4201,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
             language = "pt"
         return language
 
-    def _normalize_tts_gcloud_language(self, raw: Any) -> str:
-        return str(raw or "pt-BR").strip().replace("_", "-") or "pt-BR"
 
-    def _normalize_tts_gcloud_rate(self, raw: Any) -> float:
-        try:
-            value = float(str(raw).strip().replace(",", "."))
-        except Exception:
-            value = 1.0
-        return max(0.25, min(2.0, value))
 
-    def _normalize_tts_gcloud_pitch(self, raw: Any) -> float:
-        try:
-            value = float(str(raw).strip().replace(",", "."))
-        except Exception:
-            value = 0.0
-        return max(-20.0, min(20.0, value))
 
     def _ensure_tts_cache_allowed(self) -> tuple[list[str], list[str]]:
         profile = _current_core_worker_profile()
@@ -4513,61 +4408,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
             raise RuntimeError("tts_synthesize_piper é restrito ao perfil turbo com tts-synth")
         return roles, capabilities
 
-    def _ensure_worker_google_credentials_file(self, tmp_dir: Path) -> None:
-        configured_path = _gcloud_credentials_path()
-        if configured_path:
-            path = Path(configured_path).expanduser()
-            if not path.exists() or path.stat().st_size <= 0:
-                raise RuntimeError("gcloud com caminho de credencial ausente/vazio no worker")
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(path)
-            return
-        raw_json = (os.getenv("GOOGLE_CREDENTIALS_JSON", "") or "").strip()
-        if not raw_json:
-            raise RuntimeError("gcloud sem PHONE_WORKER_GOOGLE_APPLICATION_CREDENTIALS/GOOGLE_APPLICATION_CREDENTIALS/GOOGLE_CREDENTIALS_JSON no worker")
-        try:
-            parsed = json.loads(raw_json)
-            if isinstance(parsed, str):
-                parsed = json.loads(parsed)
-            if not isinstance(parsed, dict):
-                raise ValueError("JSON não é objeto")
-        except Exception as exc:
-            raise RuntimeError(f"GOOGLE_CREDENTIALS_JSON inválido no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
-        path = tmp_dir / "google-credentials.json"
-        path.write_text(json.dumps(parsed, ensure_ascii=False), encoding="utf-8")
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(path)
 
-    def _google_credentials_signature(self) -> str:
-        configured_path = _gcloud_credentials_path()
-        if configured_path:
-            try:
-                path = Path(configured_path).expanduser()
-                stat_result = path.stat()
-                return f"path:{path.resolve()}:{int(stat_result.st_mtime)}:{int(stat_result.st_size)}"
-            except Exception:
-                return f"path:{configured_path}"
-        raw_json = (os.getenv("GOOGLE_CREDENTIALS_JSON", "") or "").strip()
-        if raw_json:
-            return "json:" + hashlib.sha256(raw_json.encode("utf-8", errors="ignore")).hexdigest()
-        return "missing"
 
-    def _get_worker_google_tts_client(self, tmp_dir: Path):
-        global _GCLOUD_TTS_CLIENT, _GCLOUD_TTS_CLIENT_SIGNATURE, _GCLOUD_TTS_CLIENT_ERROR
-        try:
-            from google.cloud import texttospeech_v1 as google_texttospeech  # type: ignore
-        except Exception as exc:
-            raise RuntimeError(f"google-cloud-texttospeech não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
-        signature = self._google_credentials_signature()
-        if _GCLOUD_TTS_CLIENT is not None and _GCLOUD_TTS_CLIENT_SIGNATURE == signature:
-            return _GCLOUD_TTS_CLIENT
-        with _GCLOUD_TTS_CLIENT_LOCK:
-            if _GCLOUD_TTS_CLIENT is not None and _GCLOUD_TTS_CLIENT_SIGNATURE == signature:
-                return _GCLOUD_TTS_CLIENT
-            self._ensure_worker_google_credentials_file(tmp_dir)
-            client = google_texttospeech.TextToSpeechClient()
-            _GCLOUD_TTS_CLIENT = client
-            _GCLOUD_TTS_CLIENT_SIGNATURE = signature
-            _GCLOUD_TTS_CLIENT_ERROR = ""
-            return client
 
     def _task_voice_agent_status(self, body: dict[str, Any]) -> dict[str, Any]:
         music_agent = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
@@ -4854,7 +4696,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         requested = str(body.get("engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
         preferred = str(body.get("preferred_engine") or os.getenv("PHONE_WORKER_TTS_AGENT_ENGINE") or "auto").strip().lower().replace("-", "_") or "auto"
         fallback = str(body.get("fallback_engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
-        aliases = {"google": "gcloud", "google_cloud": "gcloud", "googlecloud": "gcloud", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native"}
+        aliases = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native"}
         requested = aliases.get(requested, requested)
         preferred = aliases.get(preferred, preferred)
         fallback = aliases.get(fallback, fallback)
@@ -4864,11 +4706,11 @@ class WorkerHandler(BaseHTTPRequestHandler):
         order.append(requested)
         if fallback != requested:
             order.append(fallback)
-        for candidate in ("android_native", "gcloud", "edge", "gtts"):
+        for candidate in ("android_native", "edge", "gtts"):
             order.append(candidate)
         deduped: list[str] = []
         for engine in order:
-            if engine not in {"android_native", "edge", "gtts", "gcloud"}:
+            if engine not in {"android_native", "edge", "gtts"}:
                 continue
             if engine not in available:
                 continue
@@ -4888,7 +4730,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
     def _tts_agent_standard_cache_key(self, body: dict[str, Any], *, engine: str) -> str:
         normalized_engine = str(engine or body.get("engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
-        aliases = {"google": "gcloud", "google_tts": "gcloud", "googlecloud": "gcloud", "google_cloud": "gcloud", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native"}
+        aliases = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native"}
         normalized_engine = aliases.get(normalized_engine, normalized_engine)
         requested_engine = str(body.get("engine") or normalized_engine).strip().lower().replace("-", "_") or normalized_engine
         requested_engine = aliases.get(requested_engine, requested_engine)
@@ -4899,7 +4741,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         text = " ".join(str(body.get("text") or "").strip().split()).lower()
         text = text.replace("!!", "!").replace("??", "?").replace("..", ".")
         if normalized_engine == "android_native":
-            language = self._normalize_tts_gcloud_language(body.get("language") or body.get("fallback_language") or "pt-BR")
+            language = str(body.get("language") or body.get("fallback_language") or "pt-BR").strip().replace("_", "-") or "pt-BR"
             voice = str(body.get("voice") or "auto").strip() or "auto"
             rate = str(body.get("rate") or "1.0").strip() or "1.0"
             pitch = str(body.get("pitch") or "1.0").strip() or "1.0"
@@ -4909,13 +4751,6 @@ class WorkerHandler(BaseHTTPRequestHandler):
             rate = self._normalize_tts_edge_rate(body.get("rate"))
             pitch = self._normalize_tts_edge_pitch(body.get("pitch"))
             payload = f"edge|{voice}|{rate}|{pitch}|{text}"
-        elif normalized_engine == "gcloud":
-            language = self._normalize_tts_gcloud_language(body.get("language") or os.getenv("PHONE_WORKER_GOOGLE_TTS_LANGUAGE"))
-            voice_name = str(body.get("voice") or os.getenv("PHONE_WORKER_GOOGLE_TTS_VOICE") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
-            rate = self._normalize_tts_gcloud_rate(body.get("rate") or os.getenv("PHONE_WORKER_GOOGLE_TTS_SPEAKING_RATE"))
-            pitch = self._normalize_tts_gcloud_pitch(body.get("pitch") or os.getenv("PHONE_WORKER_GOOGLE_TTS_PITCH"))
-            encoding_name = _gcloud_audio_encoding_name(body.get("audio_encoding") or body.get("audio_format"))
-            payload = f"gcloud|{language}|{voice_name}|{rate}|{pitch}|{encoding_name}|{text}"
         else:
             language = self._normalize_tts_gtts_language(body.get("language") or body.get("fallback_language"))
             payload = f"gtts|{language}|{text}"
@@ -4993,6 +4828,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 tmp.unlink()
 
     def _synthesize_standard_tts_bytes(self, body: dict[str, Any], *, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, timeout: int) -> dict[str, Any]:
+        engine = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts"}.get(str(engine or "gtts").strip().lower().replace("-", "_"), str(engine or "gtts").strip().lower().replace("-", "_"))
         text = str(body.get("text") or "").strip()
         if not text:
             raise ValueError("texto vazio")
@@ -5103,36 +4939,6 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     asyncio.run(asyncio.wait_for(_save_edge(), timeout=timeout))
                     data = out_path.read_bytes() if out_path.exists() else b""
             logs.append(f"edge voice={voice} rate={rate} pitch={pitch}")
-        elif engine == "gcloud":
-            try:
-                from google.cloud import texttospeech_v1 as google_texttospeech  # type: ignore
-            except Exception as exc:
-                raise RuntimeError(f"google-cloud-texttospeech não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
-            with tempfile.TemporaryDirectory(prefix="phone-worker-gcloud-credentials-") as tmp:
-                client = self._get_worker_google_tts_client(Path(tmp))
-                language = self._normalize_tts_gcloud_language(body.get("language") or os.getenv("PHONE_WORKER_GOOGLE_TTS_LANGUAGE"))
-                voice_name = str(body.get("voice") or os.getenv("PHONE_WORKER_GOOGLE_TTS_VOICE") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
-                rate = self._normalize_tts_gcloud_rate(body.get("rate") or os.getenv("PHONE_WORKER_GOOGLE_TTS_SPEAKING_RATE"))
-                pitch = self._normalize_tts_gcloud_pitch(body.get("pitch") or os.getenv("PHONE_WORKER_GOOGLE_TTS_PITCH"))
-                encoding_name = _gcloud_audio_encoding_name(body.get("audio_encoding") or body.get("audio_format"))
-                audio_format = _gcloud_audio_suffix(encoding_name)
-                if voice_name and not voice_name.lower().startswith(language.lower() + "-"):
-                    voice_name = ""
-                voice_kwargs = {"language_code": language}
-                if voice_name:
-                    voice_kwargs["name"] = voice_name
-                request = google_texttospeech.SynthesizeSpeechRequest(
-                    input=google_texttospeech.SynthesisInput(text=text),
-                    voice=google_texttospeech.VoiceSelectionParams(**voice_kwargs),
-                    audio_config=google_texttospeech.AudioConfig(
-                        audio_encoding=getattr(google_texttospeech.AudioEncoding, encoding_name, google_texttospeech.AudioEncoding.OGG_OPUS),
-                        speaking_rate=rate,
-                        pitch=pitch,
-                    ),
-                )
-                response = client.synthesize_speech(request=request)
-                data = bytes(response.audio_content or b"")
-                logs.append(f"gcloud language={language} voice={voice_name or 'auto'} encoding={encoding_name} rate={rate} pitch={pitch}")
         else:
             try:
                 from gtts import gTTS  # type: ignore
@@ -5597,7 +5403,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
     def _task_tts_synthesize_benchmark(self, body: dict[str, Any]) -> dict[str, Any]:
         roles, capabilities = self._ensure_tts_benchmark_turbo_allowed()
         engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_")
-        if engine not in {"android_native", "edge", "gtts", "gcloud"}:
+        if engine not in {"android_native", "edge", "gtts"}:
             raise ValueError("engine inválida para benchmark TTS")
         text = str(body.get("text") or "").strip()
         if not text:
@@ -5650,36 +5456,6 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     result["engine"] = "piper"
                     result["logs"] = (logs + list(result.get("logs") or []))[:10]
                     return result
-                elif engine == "gcloud":
-                    try:
-                        from google.cloud import texttospeech_v1 as google_texttospeech  # type: ignore
-                    except Exception as exc:
-                        raise RuntimeError(f"google-cloud-texttospeech não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
-                    client = self._get_worker_google_tts_client(tmp_dir)
-                    language = self._normalize_tts_gcloud_language(body.get("language") or os.getenv("PHONE_WORKER_GOOGLE_TTS_LANGUAGE"))
-                    voice_name = str(body.get("voice") or os.getenv("PHONE_WORKER_GOOGLE_TTS_VOICE") or "pt-BR-Standard-A").strip() or "pt-BR-Standard-A"
-                    rate = self._normalize_tts_gcloud_rate(body.get("rate") or os.getenv("PHONE_WORKER_GOOGLE_TTS_SPEAKING_RATE"))
-                    pitch = self._normalize_tts_gcloud_pitch(body.get("pitch") or os.getenv("PHONE_WORKER_GOOGLE_TTS_PITCH"))
-                    encoding_name = _gcloud_audio_encoding_name(body.get("audio_encoding") or body.get("audio_format"))
-                    audio_format = _gcloud_audio_suffix(encoding_name)
-                    out_path = tmp_dir / f"speech.{audio_format}"
-                    if voice_name and not voice_name.lower().startswith(language.lower() + "-"):
-                        voice_name = ""
-                    voice_kwargs = {"language_code": language}
-                    if voice_name:
-                        voice_kwargs["name"] = voice_name
-                    request = google_texttospeech.SynthesizeSpeechRequest(
-                        input=google_texttospeech.SynthesisInput(text=text),
-                        voice=google_texttospeech.VoiceSelectionParams(**voice_kwargs),
-                        audio_config=google_texttospeech.AudioConfig(
-                            audio_encoding=getattr(google_texttospeech.AudioEncoding, encoding_name, google_texttospeech.AudioEncoding.OGG_OPUS),
-                            speaking_rate=rate,
-                            pitch=pitch,
-                        ),
-                    )
-                    response = client.synthesize_speech(request=request)
-                    out_path.write_bytes(response.audio_content)
-                    logs.append(f"gcloud language={language} voice={voice_name or 'auto'} encoding={encoding_name} rate={rate} pitch={pitch}")
                 else:
                     try:
                         from gtts import gTTS  # type: ignore

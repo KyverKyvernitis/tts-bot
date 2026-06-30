@@ -2,7 +2,7 @@
 
 Tem dois tipos de prefixo aqui:
 - prefixo do BOT (`_join`, `_leave`, `_help` etc) — comandos de controle
-- prefixo de FALA (`,`, `.`, `'`) — escolhe a engine de TTS pra essa mensagem
+- prefixo de FALA (`%`, `,`, `.`) — escolhe a engine de TTS pra essa mensagem
 
 Cada guild pode customizar todos os prefixos via painel de servidor; este
 módulo só aplica e devolve a decisão pro cog principal executar.
@@ -28,10 +28,7 @@ class PrefixRoutingConfig:
     atts_prefix: str
     gtts_prefix: str
     edge_prefix: str
-    gcloud_prefix: str
-
-
-def build_prefix_routing_config(guild_defaults: dict[str, Any] | None, *, bot_prefix_default: str, atts_prefix_default: str = "%", gcloud_prefix_default: str) -> PrefixRoutingConfig:
+def build_prefix_routing_config(guild_defaults: dict[str, Any] | None, *, bot_prefix_default: str, atts_prefix_default: str = "%") -> PrefixRoutingConfig:
     # Cada prefixo tem um fallback hardcoded — usado quando a guild ainda
     # não configurou nada ou o doc tá faltando o campo.
     defaults = guild_defaults or {}
@@ -40,7 +37,6 @@ def build_prefix_routing_config(guild_defaults: dict[str, Any] | None, *, bot_pr
         atts_prefix=str(defaults.get("atts_prefix", atts_prefix_default) or atts_prefix_default),
         gtts_prefix=str(defaults.get("gtts_prefix", defaults.get("tts_prefix", ".")) or "."),
         edge_prefix=str(defaults.get("edge_prefix", ",") or ","),
-        gcloud_prefix=str(defaults.get("gcloud_prefix", gcloud_prefix_default) or gcloud_prefix_default),
     )
 
 
@@ -93,9 +89,9 @@ def match_prefix_control_command(content: str, bot_prefix: str) -> PrefixControl
     return None
 
 
-def match_engine_prefix(content: str, *, atts_prefix: str, edge_prefix: str, gtts_prefix: str, gcloud_prefix: str) -> tuple[str | None, str | None]:
+def match_engine_prefix(content: str, *, atts_prefix: str, edge_prefix: str, gtts_prefix: str) -> tuple[str | None, str | None]:
     # Ordem importa: ATTS primeiro porque % é a engine rápida principal; depois
-    # edge/gtts/google preservam o comportamento antigo e evitam overlap.
+    # Edge/gTTS preservam o comportamento antigo e evitam overlap.
     text = str(content or "")
     if atts_prefix and text.startswith(atts_prefix):
         return "android_native", atts_prefix
@@ -103,8 +99,6 @@ def match_engine_prefix(content: str, *, atts_prefix: str, edge_prefix: str, gtt
         return "edge", edge_prefix
     if gtts_prefix and text.startswith(gtts_prefix):
         return "gtts", gtts_prefix
-    if gcloud_prefix and text.startswith(gcloud_prefix):
-        return "gcloud", gcloud_prefix
     return None, None
 
 

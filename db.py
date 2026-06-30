@@ -614,10 +614,6 @@ class SettingsDB:
             "language": str(tts.get("language", "") or ""),
             "rate": str(tts.get("rate", "") or ""),
             "pitch": str(tts.get("pitch", "") or ""),
-            "gcloud_voice": str(tts.get("gcloud_voice", "") or ""),
-            "gcloud_language": str(tts.get("gcloud_language", "") or ""),
-            "gcloud_rate": str(tts.get("gcloud_rate", "") or ""),
-            "gcloud_pitch": str(tts.get("gcloud_pitch", "") or ""),
             "android_voice": str(tts.get("android_voice", "") or ""),
             "android_language": str(tts.get("android_language", "") or ""),
             "android_rate": str(tts.get("android_rate", "") or ""),
@@ -627,7 +623,6 @@ class SettingsDB:
             "atts_prefix": str(g.get("atts_prefix", getattr(config, "TTS_ATTS_PREFIX", "%")) or getattr(config, "TTS_ATTS_PREFIX", "%")),
             "gtts_prefix": str(g.get("gtts_prefix", g.get("tts_prefix", ".")) or "."),
             "edge_prefix": str(g.get("edge_prefix", ",") or ","),
-            "gcloud_prefix": str(g.get("gcloud_prefix", getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'")) or getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'")),
             "speech_limit_seconds": int(g.get("speech_limit_seconds", 30) or 30),
             "announce_author": bool(g.get("announce_author_enabled", False)),
             "auto_leave": bool(g.get("auto_leave_enabled", True)),
@@ -647,10 +642,6 @@ class SettingsDB:
         language: Optional[str] = None,
         rate: Optional[str] = None,
         pitch: Optional[str] = None,
-        gcloud_voice: Optional[str] = None,
-        gcloud_language: Optional[str] = None,
-        gcloud_rate: Optional[str] = None,
-        gcloud_pitch: Optional[str] = None,
         android_voice: Optional[str] = None,
         android_language: Optional[str] = None,
         android_rate: Optional[str] = None,
@@ -660,7 +651,6 @@ class SettingsDB:
         atts_prefix: Optional[str] = None,
         gtts_prefix: Optional[str] = None,
         edge_prefix: Optional[str] = None,
-        gcloud_prefix: Optional[str] = None,
         speech_limit_seconds: Optional[int] = None,
         announce_author: Optional[bool] = None,
         auto_leave: Optional[bool] = None,
@@ -680,14 +670,6 @@ class SettingsDB:
             tts["rate"] = rate
         if pitch is not None:
             tts["pitch"] = pitch
-        if gcloud_voice is not None:
-            tts["gcloud_voice"] = gcloud_voice
-        if gcloud_language is not None:
-            tts["gcloud_language"] = gcloud_language
-        if gcloud_rate is not None:
-            tts["gcloud_rate"] = gcloud_rate
-        if gcloud_pitch is not None:
-            tts["gcloud_pitch"] = gcloud_pitch
         if android_voice is not None:
             tts["android_voice"] = android_voice
         if android_language is not None:
@@ -706,8 +688,6 @@ class SettingsDB:
             doc["gtts_prefix"] = str(gtts_prefix or ".")[:8]
         if edge_prefix is not None:
             doc["edge_prefix"] = str(edge_prefix or ",")[:8]
-        if gcloud_prefix is not None:
-            doc["gcloud_prefix"] = str(gcloud_prefix or getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'"))[:8]
         if speech_limit_seconds is not None:
             try:
                 doc["speech_limit_seconds"] = max(1, min(600, int(speech_limit_seconds)))
@@ -884,10 +864,6 @@ class SettingsDB:
             "language": str(tts.get("language", "") or ""),
             "rate": str(tts.get("rate", "") or ""),
             "pitch": str(tts.get("pitch", "") or ""),
-            "gcloud_voice": str(tts.get("gcloud_voice", "") or ""),
-            "gcloud_language": str(tts.get("gcloud_language", "") or ""),
-            "gcloud_rate": str(tts.get("gcloud_rate", "") or ""),
-            "gcloud_pitch": str(tts.get("gcloud_pitch", "") or ""),
             "android_voice": str(tts.get("android_voice", "") or ""),
             "android_language": str(tts.get("android_language", "") or ""),
             "android_rate": str(tts.get("android_rate", "") or ""),
@@ -905,10 +881,6 @@ class SettingsDB:
         language: Optional[str] = None,
         rate: Optional[str] = None,
         pitch: Optional[str] = None,
-        gcloud_voice: Optional[str] = None,
-        gcloud_language: Optional[str] = None,
-        gcloud_rate: Optional[str] = None,
-        gcloud_pitch: Optional[str] = None,
         android_voice: Optional[str] = None,
         android_language: Optional[str] = None,
         android_rate: Optional[str] = None,
@@ -929,14 +901,6 @@ class SettingsDB:
             tts["rate"] = rate
         if pitch is not None:
             tts["pitch"] = pitch
-        if gcloud_voice is not None:
-            tts["gcloud_voice"] = gcloud_voice
-        if gcloud_language is not None:
-            tts["gcloud_language"] = gcloud_language
-        if gcloud_rate is not None:
-            tts["gcloud_rate"] = gcloud_rate
-        if gcloud_pitch is not None:
-            tts["gcloud_pitch"] = gcloud_pitch
         if android_voice is not None:
             tts["android_voice"] = android_voice
         if android_language is not None:
@@ -1020,7 +984,7 @@ class SettingsDB:
         engine = pick("engine", "gtts").lower().replace("-", "_")
         if engine in {"atts", "android", "android_tts", "native", "native_android"}:
             engine = "android_native"
-        if engine not in ("android_native", "edge", "gtts", "gcloud"):
+        if engine not in ("android_native", "edge", "gtts"):
             engine = "gtts"
 
         resolved = {
@@ -1029,10 +993,6 @@ class SettingsDB:
             "language": pick("language", "pt-br"),
             "rate": pick("rate", "+0%"),
             "pitch": pick("pitch", "+0Hz"),
-            "gcloud_voice": pick("gcloud_voice", "pt-BR-Standard-A"),
-            "gcloud_language": pick("gcloud_language", "pt-BR"),
-            "gcloud_rate": pick("gcloud_rate", "1.0"),
-            "gcloud_pitch": pick("gcloud_pitch", "0.0"),
             "android_voice": pick("android_voice", ""),
             "android_language": pick("android_language", "pt-BR"),
             "android_rate": pick("android_rate", "1.0"),
@@ -1043,7 +1003,6 @@ class SettingsDB:
             "atts_prefix": str(guild.get("atts_prefix", getattr(config, "TTS_ATTS_PREFIX", "%")) or getattr(config, "TTS_ATTS_PREFIX", "%")),
             "gtts_prefix": str(guild.get("gtts_prefix", guild.get("tts_prefix", ".")) or "."),
             "edge_prefix": str(guild.get("edge_prefix", ",") or ","),
-            "gcloud_prefix": str(guild.get("gcloud_prefix", "'") or "'"),
             "speech_limit_seconds": int(guild.get("speech_limit_seconds", 30) or 30),
         }
         self._resolved_tts_cache[cache_key] = dict(resolved)
@@ -2463,11 +2422,11 @@ _TTS_SYNT_ENGINE_ALIASES = {
     "edge-tts": "edge",
     "microsoft": "edge",
     "gtts": "gtts",
-    "google": "google",
-    "gcloud": "google",
-    "google_cloud": "google",
-    "google-cloud": "google",
-    "googlecloud": "google",
+    "google": "gtts",
+    "gcloud": "gtts",
+    "google_cloud": "gtts",
+    "google-cloud": "gtts",
+    "googlecloud": "gtts",
 }
 
 

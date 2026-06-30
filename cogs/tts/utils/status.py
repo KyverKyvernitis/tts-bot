@@ -33,6 +33,4 @@ def status_engine_label(engine: str) -> str:
     value = str(engine or "gtts").lower()
     if value == "edge":
         return "🗣️ Edge"
-    if value == "gcloud":
-        return "☁️ Google Cloud"
     return "🌐 gTTS"

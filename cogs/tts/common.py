@@ -12,11 +12,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-try:
-    from google.cloud import texttospeech_v1 as google_texttospeech
-except Exception:  # pragma: no cover - dependência opcional em tempo de import
-    google_texttospeech = None
-
 import config
 from .audio import GuildTTSState, QueueItem, TTSAudioMixin
 
@@ -225,6 +220,6 @@ def build_gtts_language_aliases(languages: dict[str, str]) -> dict[str, str]:
 
 def validate_mode(mode: str) -> str:
     value = str(mode or "").strip().lower()
-    if value in {"android_native", "atts", "android", "android_tts", "native", "edge", "gtts", "gcloud"}:
+    if value in {"android_native", "atts", "android", "android_tts", "native", "edge", "gtts"}:
         return "android_native" if value in {"atts", "android", "android_tts", "native"} else value
     return "gtts"

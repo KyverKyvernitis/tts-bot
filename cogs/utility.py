@@ -417,7 +417,6 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
             "bot_prefix": str(getattr(config, "BOT_PREFIX", getattr(config, "PREFIX", "_")) or "_"),
             "gtts_prefix": ".",
             "edge_prefix": ",",
-            "gcloud_prefix": str(getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'") or "'"),
         }
         if guild is None:
             return defaults
@@ -435,7 +434,6 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         defaults["bot_prefix"] = str(guild_defaults.get("bot_prefix", defaults["bot_prefix"]) or defaults["bot_prefix"])
         defaults["gtts_prefix"] = str(guild_defaults.get("gtts_prefix", guild_defaults.get("tts_prefix", defaults["gtts_prefix"])) or defaults["gtts_prefix"])
         defaults["edge_prefix"] = str(guild_defaults.get("edge_prefix", defaults["edge_prefix"]) or defaults["edge_prefix"])
-        defaults["gcloud_prefix"] = str(guild_defaults.get("gcloud_prefix", defaults["gcloud_prefix"]) or defaults["gcloud_prefix"])
         return defaults
 
     async def _fetch_root_command_ids_cached(self, guild: discord.Guild | None) -> dict[str, int]:
@@ -451,7 +449,6 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         bot_prefix = prefixes["bot_prefix"]
         gtts_prefix = prefixes["gtts_prefix"]
         edge_prefix = prefixes["edge_prefix"]
-        gcloud_prefix = prefixes["gcloud_prefix"]
 
         # Slash mentions: cada um vira `</nome:ID>` no Discord (clicável). Quando
         # o root não está no cache (comando guild-only fora da guild correta,
@@ -496,8 +493,8 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
             "**10.** Jogos"
         )
         prefixes_text = (
-            f"**Bot:** `{bot_prefix}`  ·  **gTTS:** `{gtts_prefix}`  ·  "
-            f"**Edge:** `{edge_prefix}`  ·  **gcloud:** `{gcloud_prefix}`"
+            f"**Bot:** `{bot_prefix}`  ·  **ATTS:** `%`  ·  "
+            f"**gTTS:** `{gtts_prefix}`  ·  **Edge:** `{edge_prefix}`"
         )
         quick_start = (
             f"› {help_slash} ou {prefix_help} — abre esta central\n"
@@ -530,9 +527,6 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
                 f"### Edge — `{edge_prefix}`\n"
                 f"Exemplo: `{edge_prefix}essa frase vai no edge`\n"
                 "Vozes neurais da Microsoft. Mais natural, com várias opções por idioma.\n\n"
-                f"### Google Cloud — `{gcloud_prefix}`\n"
-                f"Exemplo: `{gcloud_prefix}essa fala usa o google cloud`\n"
-                "Vozes premium do Google. Qualidade alta, requer config no servidor.\n\n"
                 "Voz, idioma, velocidade e tom usados nesses prefixos seguem o "
                 f"painel pessoal ({tts_menu_slash}) ou o painel do servidor."
             ),

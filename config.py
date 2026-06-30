@@ -105,18 +105,9 @@ OFF_COLOR = 0xED4245
 
 GTTS_DEFAULT_LANGUAGE = os.getenv("GTTS_DEFAULT_LANGUAGE", "pt-br")
 
-GOOGLE_CLOUD_TTS_PREFIX = (os.getenv("GOOGLE_CLOUD_TTS_PREFIX", "'") or "'").strip() or "'"
-GOOGLE_CLOUD_TTS_LANGUAGE_CODE = (os.getenv("GOOGLE_CLOUD_TTS_LANGUAGE_CODE", "pt-BR") or "pt-BR").strip()
-GOOGLE_CLOUD_TTS_VOICE_NAME = (os.getenv("GOOGLE_CLOUD_TTS_VOICE_NAME", "pt-BR-Standard-A") or "pt-BR-Standard-A").strip()
-GOOGLE_CLOUD_TTS_SPEAKING_RATE = _parse_float(os.getenv("GOOGLE_CLOUD_TTS_SPEAKING_RATE", "1.0"), 1.0)
-GOOGLE_CLOUD_TTS_PITCH = _parse_float(os.getenv("GOOGLE_CLOUD_TTS_PITCH", "0.0"), 0.0)
-GOOGLE_CLOUD_TTS_AUDIO_ENCODING = (os.getenv("GOOGLE_CLOUD_TTS_AUDIO_ENCODING", "OGG_OPUS") or "OGG_OPUS").strip().upper().replace("-", "_")
-GOOGLE_CLOUD_TTS_FALLBACK_AUDIO_ENCODING = (os.getenv("GOOGLE_CLOUD_TTS_FALLBACK_AUDIO_ENCODING", "MP3") or "MP3").strip().upper().replace("-", "_")
-# When Google Cloud returns OGG_OPUS, try to keep playback on an Opus path instead of forcing PCM first.
 TTS_OPUS_PLAYBACK_ENABLED = _parse_bool(os.getenv("TTS_OPUS_PLAYBACK_ENABLED", "true"), True)
 TTS_OPUS_PLAYBACK_COPY_CODEC = _parse_bool(os.getenv("TTS_OPUS_PLAYBACK_COPY_CODEC", "true"), True)
-# For direct worker voice, prebuild Google Cloud output on the VPS as OGG_OPUS and send it to the worker.
-WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_GCLOUD = _parse_bool(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_GCLOUD", "true"), True)
+WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_GCLOUD = False
 WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB = max(1, _parse_int(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB", "8"), 8))
 
 # TTS tuning recomendado
@@ -521,7 +512,7 @@ TTS_WORKER_AGENT_PREFERRED_ENGINE = (os.getenv("TTS_WORKER_AGENT_PREFERRED_ENGIN
 TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD = max(1, _parse_int(os.getenv("TTS_WORKER_AGENT_HEALTH_FAILURE_THRESHOLD", "3"), 3))
 TTS_WORKER_AGENT_RAW_AUDIO_ENABLED = _parse_bool(os.getenv("TTS_WORKER_AGENT_RAW_AUDIO_ENABLED", "true"), True)
 TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED = _parse_bool(os.getenv("TTS_WORKER_AGENT_ADAPTIVE_ROUTING_ENABLED", "true"), True)
-TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES = (os.getenv("TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES", "android_native,gcloud") or "android_native,gcloud").strip().lower().replace("-", "_")
+TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES = (os.getenv("TTS_WORKER_AGENT_ALWAYS_WORKER_ENGINES", "android_native") or "android_native").strip().lower().replace("-", "_")
 TTS_WORKER_AGENT_GTTS_MIN_WORKER_CHARS = max(0, _parse_int(os.getenv("TTS_WORKER_AGENT_GTTS_MIN_WORKER_CHARS", "120"), 120))
 TTS_WORKER_AGENT_WORKER_SLOW_MARGIN = max(1.0, _parse_float(os.getenv("TTS_WORKER_AGENT_WORKER_SLOW_MARGIN", "1.15"), 1.15))
 TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS = max(0.0, _parse_float(os.getenv("TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS", "120"), 120.0))

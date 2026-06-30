@@ -54,11 +54,6 @@ async def _apply_server_prefix_from_modal(
         desc = f"O prefixo do modo Edge do servidor agora é `{cleaned}`"
         history_entry = cog._server_history_text(interaction, "o prefixo do modo Edge", cog._quote_value(cleaned))
         title = "Prefixo do modo Edge atualizado"
-    elif prefix_kind == "gcloud":
-        await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, gcloud_prefix=cleaned))
-        desc = f"O prefixo do Google Cloud do servidor agora é `{cleaned}`"
-        history_entry = cog._server_history_text(interaction, "o prefixo do Google Cloud", cog._quote_value(cleaned))
-        title = "Prefixo do Google Cloud atualizado"
     else:
         await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, gtts_prefix=cleaned, tts_prefix=cleaned))
         desc = f"O prefixo do modo gTTS do servidor agora é `{cleaned}`"
@@ -134,7 +129,7 @@ async def _apply_mode_from_panel(cog, interaction: discord.Interaction, mode: st
     effective_user_id, effective_user_name, is_public_user_panel = cog._resolve_panel_target_user(interaction, server=server, message_id=message_id, target_user_id=target_user_id, target_user_name=target_user_name)
     if server:
         await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, engine=value))
-        desc = f"O modo padrão do servidor agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos ATTS, Edge, gTTS e Google continuam escolhendo o motor por mensagem."
+        desc = f"O modo padrão do servidor agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos ATTS, Edge e gTTS continuam escolhendo o motor por mensagem."
         history_entry = cog._server_history_text(interaction, "o modo padrão do servidor", value)
         await cog._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
         cog._append_public_panel_history(message_id, history_entry)
@@ -142,7 +137,7 @@ async def _apply_mode_from_panel(cog, interaction: discord.Interaction, mode: st
     else:
         history_entry = cog._user_history_text(interaction, "o próprio modo" if effective_user_id == interaction.user.id else "o modo", value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
         await cog._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, engine=value, history_entry=history_entry)
-        desc = f"O modo de TTS de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"O seu modo de TTS agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos ATTS, Edge, gTTS e Google continuam escolhendo o motor por mensagem."
+        desc = f"O modo de TTS de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"O seu modo de TTS agora é `{value}`. Esse ajuste só afeta comandos antigos e compatibilidade; os prefixos ATTS, Edge e gTTS continuam escolhendo o motor por mensagem."
         cog._append_public_panel_history(message_id, history_entry)
         last_changes = list((await cog._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get("user_last_changes", []) or [])
 
@@ -427,170 +422,6 @@ async def _apply_pitch_from_panel(cog, interaction: discord.Interaction, pitch: 
     if server:
         await cog._announce_panel_change(interaction, title="Configuração de TTS atualizada", description=desc)
 
-async def _apply_gcloud_language_from_modal(cog, interaction: discord.Interaction, language: str, *, server: bool, panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
-    await cog._apply_gcloud_language_from_panel(interaction, language, server=server, source_panel_message=panel_message, target_user_id=target_user_id, target_user_name=target_user_name)
-
-async def _apply_gcloud_voice_from_modal(cog, interaction: discord.Interaction, voice_name: str, *, server: bool, panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
-    await cog._apply_gcloud_voice_from_panel(interaction, voice_name, server=server, source_panel_message=panel_message, target_user_id=target_user_id, target_user_name=target_user_name)
-
-async def _apply_gcloud_language_from_panel(cog, interaction: discord.Interaction, language: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
-    if server and not interaction.user.guild_permissions.kick_members:
-        await cog._respond(interaction, embed=cog._make_embed('Sem permissão', 'Você precisa da permissão `Expulsar Membros` para alterar as configurações do servidor por esse painel.', ok=False), ephemeral=True)
-        return
-    db = cog._get_db()
-    if db is None:
-        await cog._respond(interaction, embed=cog._make_embed('Banco indisponível', 'Não consegui acessar o banco de dados agora.', ok=False), ephemeral=True)
-        return
-    value, error = cog._validate_gcloud_language_input(language)
-    if error or value is None:
-        await cog._respond(interaction, embed=cog._make_embed('Idioma inválido', error or 'Idioma inválido.', ok=False), ephemeral=True)
-        return
-    panel_message, message_id = cog._resolve_public_panel_message(interaction, source_panel_message)
-    effective_user_id, effective_user_name, is_public_user_panel = cog._resolve_panel_target_user(interaction, server=server, message_id=message_id, target_user_id=target_user_id, target_user_name=target_user_name)
-
-    catalog = await cog._load_gcloud_voices()
-    current_voice = cog._get_current_gcloud_voice(interaction.guild.id, effective_user_id, server=server)
-    updates: dict[str, str] = {'gcloud_language': value}
-    adjusted_voice = ''
-    if catalog and not cog._gcloud_voice_matches_language(current_voice, value):
-        adjusted_voice = cog._pick_first_gcloud_voice_for_language(catalog, value)
-        if adjusted_voice:
-            updates['gcloud_voice'] = adjusted_voice
-
-    if server:
-        await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, **updates))
-        desc = f"O idioma do Google Cloud do servidor agora é `{value}`."
-        history_entry = cog._server_history_text(interaction, 'o idioma do Google Cloud do servidor', value)
-        if adjusted_voice:
-            desc += f" A voz do Google foi ajustada para `{adjusted_voice}` para combinar com o idioma."
-            history_entry = cog._server_history_text(interaction, 'o idioma do Google Cloud do servidor', f'{value} (voz ajustada para {adjusted_voice})')
-        await cog._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
-        cog._append_public_panel_history(message_id, history_entry)
-        last_changes = list((await cog._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get('server_last_changes', []) or [])
-    else:
-        history_entry = cog._user_history_text(interaction, 'o próprio idioma do Google' if effective_user_id == interaction.user.id else 'o idioma do Google', value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
-        if adjusted_voice:
-            history_entry = cog._user_history_text(interaction, 'o próprio idioma do Google' if effective_user_id == interaction.user.id else 'o idioma do Google', f'{value} (voz ajustada para {adjusted_voice})', message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
-        await cog._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, history_entry=history_entry, **updates)
-        desc = f"O idioma do Google Cloud de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"O seu idioma do Google Cloud agora é `{value}`."
-        if adjusted_voice:
-            desc += f" A voz do Google foi ajustada para `{adjusted_voice}` para combinar com o idioma."
-        cog._append_public_panel_history(message_id, history_entry)
-        last_changes = list((await cog._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get('user_last_changes', []) or [])
-    embed = await cog._build_settings_embed(interaction.guild.id, effective_user_id if not server else interaction.user.id, server=server, panel_kind='server' if server else 'user', last_changes=last_changes, message_id=message_id, target_user_name=effective_user_name if not server else None, viewer_user_id=interaction.user.id)
-    view_target_user_id = None if server or is_public_user_panel else effective_user_id
-    view_target_user_name = None if server or is_public_user_panel else effective_user_name
-    view = cog._build_panel_view(0 if message_id in cog._public_panel_states else interaction.user.id, interaction.guild.id, server=server, target_user_id=view_target_user_id, target_user_name=view_target_user_name)
-    if panel_message is not None:
-        view.message = panel_message
-    await cog._panel_update_after_change(interaction, embed=embed, view=view, title='Configuração de TTS atualizada', description=desc, target_message=panel_message)
-    if server:
-        await cog._announce_panel_change(interaction, title='Configuração de TTS atualizada', description=desc)
-
-async def _apply_gcloud_voice_from_panel(cog, interaction: discord.Interaction, voice_name: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
-    if server and not interaction.user.guild_permissions.kick_members:
-        await cog._respond(interaction, embed=cog._make_embed('Sem permissão', 'Você precisa da permissão `Expulsar Membros` para alterar as configurações do servidor por esse painel.', ok=False), ephemeral=True)
-        return
-    db = cog._get_db()
-    if db is None:
-        await cog._respond(interaction, embed=cog._make_embed('Banco indisponível', 'Não consegui acessar o banco de dados agora.', ok=False), ephemeral=True)
-        return
-    value, error = cog._validate_gcloud_voice_input(voice_name)
-    if error or value is None:
-        await cog._respond(interaction, embed=cog._make_embed('Voz inválida', error or 'Voz inválida.', ok=False), ephemeral=True)
-        return
-    panel_message, message_id = cog._resolve_public_panel_message(interaction, source_panel_message)
-    effective_user_id, effective_user_name, is_public_user_panel = cog._resolve_panel_target_user(interaction, server=server, message_id=message_id, target_user_id=target_user_id, target_user_name=target_user_name)
-    if server:
-        await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, gcloud_voice=value))
-        desc = f"A voz do Google Cloud do servidor agora é `{value}`."
-        history_entry = cog._server_history_text(interaction, 'a voz do Google Cloud do servidor', value)
-        await cog._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
-        cog._append_public_panel_history(message_id, history_entry)
-        last_changes = list((await cog._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get('server_last_changes', []) or [])
-    else:
-        history_entry = cog._user_history_text(interaction, 'a própria voz do Google' if effective_user_id == interaction.user.id else 'a voz do Google', value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
-        await cog._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, gcloud_voice=value, history_entry=history_entry)
-        desc = f"A voz do Google Cloud de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"A sua voz do Google Cloud agora é `{value}`."
-        cog._append_public_panel_history(message_id, history_entry)
-        last_changes = list((await cog._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get('user_last_changes', []) or [])
-    embed = await cog._build_settings_embed(interaction.guild.id, effective_user_id if not server else interaction.user.id, server=server, panel_kind='server' if server else 'user', last_changes=last_changes, message_id=message_id, target_user_name=effective_user_name if not server else None, viewer_user_id=interaction.user.id)
-    view_target_user_id = None if server or is_public_user_panel else effective_user_id
-    view_target_user_name = None if server or is_public_user_panel else effective_user_name
-    view = cog._build_panel_view(0 if message_id in cog._public_panel_states else interaction.user.id, interaction.guild.id, server=server, target_user_id=view_target_user_id, target_user_name=view_target_user_name)
-    if panel_message is not None:
-        view.message = panel_message
-    await cog._panel_update_after_change(interaction, embed=embed, view=view, title='Configuração de TTS atualizada', description=desc, target_message=panel_message)
-    if server:
-        await cog._announce_panel_change(interaction, title='Configuração de TTS atualizada', description=desc)
-
-async def _apply_gcloud_speed_from_panel(cog, interaction: discord.Interaction, speed: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
-    if server and not interaction.user.guild_permissions.kick_members:
-        await cog._respond(interaction, embed=cog._make_embed('Sem permissão', 'Você precisa da permissão `Expulsar Membros` para alterar as configurações do servidor por esse painel.', ok=False), ephemeral=True)
-        return
-    db = cog._get_db()
-    if db is None:
-        await cog._respond(interaction, embed=cog._make_embed('Banco indisponível', 'Não consegui acessar o banco de dados agora.', ok=False), ephemeral=True)
-        return
-    value = cog._normalize_gcloud_rate_value(speed)
-    panel_message, message_id = cog._resolve_public_panel_message(interaction, source_panel_message)
-    effective_user_id, effective_user_name, is_public_user_panel = cog._resolve_panel_target_user(interaction, server=server, message_id=message_id, target_user_id=target_user_id, target_user_name=target_user_name)
-    if server:
-        await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, gcloud_rate=value))
-        desc = f"A velocidade do Google Cloud do servidor agora é `{value}`."
-        history_entry = cog._server_history_text(interaction, 'a velocidade do Google Cloud do servidor', value)
-        await cog._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
-        cog._append_public_panel_history(message_id, history_entry)
-        last_changes = list((await cog._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get('server_last_changes', []) or [])
-    else:
-        history_entry = cog._user_history_text(interaction, 'a própria velocidade do Google' if effective_user_id == interaction.user.id else 'a velocidade do Google', value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
-        await cog._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, gcloud_rate=value, history_entry=history_entry)
-        desc = f"A velocidade do Google Cloud de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"A sua velocidade do Google Cloud agora é `{value}`."
-        cog._append_public_panel_history(message_id, history_entry)
-        last_changes = list((await cog._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get('user_last_changes', []) or [])
-    embed = await cog._build_settings_embed(interaction.guild.id, effective_user_id if not server else interaction.user.id, server=server, panel_kind='server' if server else 'user', last_changes=last_changes, message_id=message_id, target_user_name=effective_user_name if not server else None, viewer_user_id=interaction.user.id)
-    view_target_user_id = None if server or is_public_user_panel else effective_user_id
-    view_target_user_name = None if server or is_public_user_panel else effective_user_name
-    view = cog._build_panel_view(0 if message_id in cog._public_panel_states else interaction.user.id, interaction.guild.id, server=server, target_user_id=view_target_user_id, target_user_name=view_target_user_name)
-    if panel_message is not None:
-        view.message = panel_message
-    await cog._panel_update_after_change(interaction, embed=embed, view=view, title='Configuração de TTS atualizada', description=desc, target_message=panel_message)
-    if server:
-        await cog._announce_panel_change(interaction, title='Configuração de TTS atualizada', description=desc)
-
-async def _apply_gcloud_pitch_from_panel(cog, interaction: discord.Interaction, pitch: str, *, server: bool, source_panel_message: discord.Message | None = None, target_user_id: int | None = None, target_user_name: str | None = None):
-    if server and not interaction.user.guild_permissions.kick_members:
-        await cog._respond(interaction, embed=cog._make_embed('Sem permissão', 'Você precisa da permissão `Expulsar Membros` para alterar as configurações do servidor por esse painel.', ok=False), ephemeral=True)
-        return
-    db = cog._get_db()
-    if db is None:
-        await cog._respond(interaction, embed=cog._make_embed('Banco indisponível', 'Não consegui acessar o banco de dados agora.', ok=False), ephemeral=True)
-        return
-    value = cog._normalize_gcloud_pitch_value(pitch)
-    panel_message, message_id = cog._resolve_public_panel_message(interaction, source_panel_message)
-    effective_user_id, effective_user_name, is_public_user_panel = cog._resolve_panel_target_user(interaction, server=server, message_id=message_id, target_user_id=target_user_id, target_user_name=target_user_name)
-    if server:
-        await cog._maybe_await(db.set_guild_tts_defaults(interaction.guild.id, gcloud_pitch=value))
-        desc = f"O tom do Google Cloud do servidor agora é `{value}`."
-        history_entry = cog._server_history_text(interaction, 'o tom do Google Cloud do servidor', value)
-        await cog._maybe_await(db.set_guild_panel_last_change(interaction.guild.id, server_last_change=history_entry))
-        cog._append_public_panel_history(message_id, history_entry)
-        last_changes = list((await cog._maybe_await(db.get_panel_history(interaction.guild.id, interaction.user.id))).get('server_last_changes', []) or [])
-    else:
-        history_entry = cog._user_history_text(interaction, 'o próprio tom do Google' if effective_user_id == interaction.user.id else 'o tom do Google', value, message_id=message_id, target_user_id=effective_user_id, target_user_name=effective_user_name)
-        await cog._set_user_tts_and_refresh(interaction.guild.id, effective_user_id, gcloud_pitch=value, history_entry=history_entry)
-        desc = f"O tom do Google Cloud de {effective_user_name} agora é `{value}`." if effective_user_id != interaction.user.id else f"O seu tom do Google Cloud agora é `{value}`."
-        cog._append_public_panel_history(message_id, history_entry)
-        last_changes = list((await cog._maybe_await(db.get_panel_history(interaction.guild.id, effective_user_id))).get('user_last_changes', []) or [])
-    embed = await cog._build_settings_embed(interaction.guild.id, effective_user_id if not server else interaction.user.id, server=server, panel_kind='server' if server else 'user', last_changes=last_changes, message_id=message_id, target_user_name=effective_user_name if not server else None, viewer_user_id=interaction.user.id)
-    view_target_user_id = None if server or is_public_user_panel else effective_user_id
-    view_target_user_name = None if server or is_public_user_panel else effective_user_name
-    view = cog._build_panel_view(0 if message_id in cog._public_panel_states else interaction.user.id, interaction.guild.id, server=server, target_user_id=view_target_user_id, target_user_name=view_target_user_name)
-    if panel_message is not None:
-        view.message = panel_message
-    await cog._panel_update_after_change(interaction, embed=embed, view=view, title='Configuração de TTS atualizada', description=desc, target_message=panel_message)
-    if server:
-        await cog._announce_panel_change(interaction, title='Configuração de TTS atualizada', description=desc)
 
 async def _apply_spoken_name_from_modal(
     cog,

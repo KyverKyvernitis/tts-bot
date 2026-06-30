@@ -63,7 +63,6 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
         guild_defaults,
         bot_prefix_default=str(getattr(config, "BOT_PREFIX", "_") or "_"),
         atts_prefix_default=str(getattr(config, "TTS_ATTS_PREFIX", "%") or "%"),
-        gcloud_prefix_default=str(getattr(config, "GOOGLE_CLOUD_TTS_PREFIX", "'") or "'"),
     )
 
     # Comandos `_join`, `_leave`, `_clear`, etc passam por aqui antes de qualquer
@@ -92,8 +91,8 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
             legacy_prefix
             and legacy_prefix != routing.bot_prefix
             and message.content.startswith(legacy_prefix)
-            and legacy_prefix in {routing.atts_prefix, routing.gtts_prefix, routing.edge_prefix, routing.gcloud_prefix}
-            and len({routing.atts_prefix, routing.gtts_prefix, routing.edge_prefix, routing.gcloud_prefix}) < 4
+            and legacy_prefix in {routing.atts_prefix, routing.gtts_prefix, routing.edge_prefix}
+            and len({routing.atts_prefix, routing.gtts_prefix, routing.edge_prefix}) < 3
         ):
             return MessageGateDecision(
                 should_process_tts=True,
@@ -104,14 +103,13 @@ async def analyze_message_for_tts(cog: Any, message: Any) -> MessageGateDecision
                 reason="legacy_tts_prefix_matched",
             )
 
-    # Casa um dos prefixos de fala (ATTS / gTTS / Edge / Google). Se nenhum casar,
+    # Casa um dos prefixos de fala (ATTS / gTTS / Edge). Se nenhum casar,
     # a mensagem é texto comum e o gate ignora.
     forced_engine, active_prefix = match_engine_prefix(
         message.content,
         atts_prefix=routing.atts_prefix,
         edge_prefix=routing.edge_prefix,
         gtts_prefix=routing.gtts_prefix,
-        gcloud_prefix=routing.gcloud_prefix,
     )
     if not forced_engine or not active_prefix:
         for legacy_prefix in legacy_prefixes:

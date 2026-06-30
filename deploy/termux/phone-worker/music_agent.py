@@ -884,9 +884,8 @@ class MusicAgent:
             "aiohttp": "aiohttp",
             "gTTS": "gtts",
             "edge-tts": "edge_tts",
-            "google-cloud-texttospeech": "google.cloud.texttospeech_v1",
         }
-        optional_modules = {"google-cloud-texttospeech"}
+        optional_modules: set[str] = set()
         for label, module in modules.items():
             try:
                 importlib.import_module(module)
@@ -1499,19 +1498,7 @@ class MusicAgent:
             return raw if raw.startswith(("+", "-")) else "+" + raw
         return "+0Hz"
 
-    def _gcloud_audio_encoding_name(self, raw: Any = None) -> str:
-        value = str(raw or os.getenv("PHONE_WORKER_GOOGLE_TTS_AUDIO_ENCODING") or os.getenv("PHONE_WORKER_TTS_AGENT_GCLOUD_AUDIO_ENCODING") or "OGG_OPUS").strip().upper().replace("-", "_")
-        aliases = {"OGG": "OGG_OPUS", "OPUS": "OGG_OPUS", "OGGOPUS": "OGG_OPUS", "WAV": "LINEAR16", "WAVE": "LINEAR16", "PCM": "LINEAR16"}
-        value = aliases.get(value, value)
-        return value if value in {"OGG_OPUS", "MP3", "LINEAR16", "MULAW", "ALAW"} else "OGG_OPUS"
 
-    def _gcloud_audio_suffix(self, encoding: str) -> str:
-        encoding = self._gcloud_audio_encoding_name(encoding)
-        if encoding == "OGG_OPUS":
-            return ".ogg"
-        if encoding == "LINEAR16":
-            return ".wav"
-        return ".mp3"
 
     def _tts_cache_enabled(self) -> bool:
         return truthy(os.getenv("MUSIC_AGENT_TTS_CACHE_ENABLED"), truthy(os.getenv("PHONE_WORKER_TTS_AGENT_CACHE_ENABLED"), True))
@@ -1594,7 +1581,7 @@ class MusicAgent:
 
     def _tts_cache_key_for_body(self, body: dict[str, Any], *, engine: str, text: str) -> str:
         requested_engine = str(body.get("engine") or engine or "gtts").strip().lower().replace("-", "_") or "gtts"
-        aliases = {"google": "gcloud", "google_tts": "gcloud", "googlecloud": "gcloud", "google_cloud": "gcloud", "edge_tts": "edge"}
+        aliases = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "edge_tts": "edge"}
         requested_engine = aliases.get(requested_engine, requested_engine)
         normalized_engine = aliases.get(str(engine or requested_engine).strip().lower().replace("-", "_"), str(engine or requested_engine).strip().lower().replace("-", "_"))
         provided = str(body.get("cache_key") or "").strip()
@@ -1605,11 +1592,6 @@ class MusicAgent:
         if engine == "edge":
             voice = str(body.get("voice") or "pt-BR-FranciscaNeural").strip() or "pt-BR-FranciscaNeural"
             payload = f"edge|{voice}|{self._normalize_edge_rate(body.get('rate'))}|{self._normalize_edge_pitch(body.get('pitch'))}|{normalized_text}"
-        elif engine == "gcloud":
-            language = self._normalize_tts_language(body.get("language") or os.getenv("PHONE_WORKER_GOOGLE_TTS_LANGUAGE") or "pt-BR").replace("pt-br", "pt-BR")
-            voice = str(body.get("voice") or os.getenv("PHONE_WORKER_GOOGLE_TTS_VOICE") or "pt-BR-Standard-A").strip()
-            encoding = self._gcloud_audio_encoding_name(body.get("audio_encoding") or body.get("audio_format"))
-            payload = f"gcloud|{language}|{voice}|{encoding}|{normalized_text}"
         else:
             language = self._normalize_tts_language(body.get("language"))
             payload = f"gtts|{language}|{normalized_text}"
@@ -1663,8 +1645,8 @@ class MusicAgent:
         if not text:
             raise ValueError("texto TTS vazio")
         engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_")
-        if engine in {"google", "google_tts", "googlecloud", "google_cloud"}:
-            engine = "gcloud"
+        if engine in {"google", "google_tts", "googlecloud", "google_cloud", "gcloud"}:
+            engine = "gtts"
         cache_key = ""
         if self._tts_cache_enabled():
             with contextlib.suppress(Exception):
@@ -1695,30 +1677,6 @@ class MusicAgent:
                     communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
                     await communicate.save(str(tmp_path))
                     data = tmp_path.read_bytes() if tmp_path.exists() else b""
-        if engine == "gcloud":
-            try:
-                from google.cloud import texttospeech_v1 as google_texttospeech  # type: ignore
-                language = self._normalize_tts_language(body.get("language") or os.getenv("PHONE_WORKER_GOOGLE_TTS_LANGUAGE") or "pt-BR").replace("pt-br", "pt-BR")
-                voice_name = str(body.get("voice") or os.getenv("PHONE_WORKER_GOOGLE_TTS_VOICE") or "pt-BR-Standard-A").strip()
-                encoding_name = self._gcloud_audio_encoding_name(body.get("audio_encoding") or body.get("audio_format"))
-                audio_format = self._gcloud_audio_suffix(encoding_name).lstrip(".")
-                client = google_texttospeech.TextToSpeechClient()
-                voice_kwargs = {"language_code": language}
-                if voice_name and voice_name.lower().startswith(language.lower() + "-"):
-                    voice_kwargs["name"] = voice_name
-                response = client.synthesize_speech(
-                    request=google_texttospeech.SynthesizeSpeechRequest(
-                        input=google_texttospeech.SynthesisInput(text=text),
-                        voice=google_texttospeech.VoiceSelectionParams(**voice_kwargs),
-                        audio_config=google_texttospeech.AudioConfig(audio_encoding=getattr(google_texttospeech.AudioEncoding, encoding_name, google_texttospeech.AudioEncoding.OGG_OPUS)),
-                    )
-                )
-                data = bytes(response.audio_content or b"")
-                body["audio_format"] = audio_format
-            except Exception as exc:
-                self.log("tts_gcloud_fallback_gtts", error=f"{type(exc).__name__}: {short_text(exc, 120)}")
-                engine = "gtts"
-                cache_key = ""
         if engine == "gtts":
             try:
                 from gtts import gTTS  # type: ignore
@@ -1899,10 +1857,6 @@ class MusicAgent:
                     return discord.FFmpegPCMAudio(tts_input_path, executable=self.ffmpeg_executable, before_options="-nostdin", options="-vn -sn -dn -loglevel warning")
 
                 audio_format = str(body.get("audio_format") or body.get("format") or "").strip().lower()
-                requested_engine = str(body.get("engine") or "").strip().lower().replace("-", "_")
-                if not audio_format and requested_engine in {"gcloud", "google", "google_cloud", "googlecloud", "google_tts"}:
-                    audio_format = self._gcloud_audio_suffix(self._gcloud_audio_encoding_name(body.get("audio_encoding"))).lstrip(".")
-                    body["audio_format"] = audio_format
                 path = Path(tmp) / f"tts{_audio_suffix_from_format(audio_format)}"
                 audio_url = str(body.get("audio_url") or body.get("url") or "").strip()
                 audio_b64 = str(body.get("audio_b64") or body.get("audioBase64") or "").strip()
