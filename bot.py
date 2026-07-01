@@ -151,6 +151,7 @@ from webserver import run_webserver, set_health_provider, set_update_action_prov
 from music_system import AudioRouter
 from utility.interaction_safety import is_unknown_interaction, safe_send_interaction_message
 from utility.application_bio import ApplicationBioService
+from utility.application_presence import ApplicationPresenceService
 
 
 BOOT_LOG = logging.getLogger("bot.boot")
@@ -283,6 +284,7 @@ class BotLocal(commands.Bot):
         self._removed_slash_cleanup_state_path = self._repo_root / "data" / "removed_slash_cleanup_state.json"
         self.audio_router = AudioRouter(self)
         self.application_bio = ApplicationBioService(self, self._repo_root / "data" / "application_bio.json")
+        self.application_presence = ApplicationPresenceService(self)
         self._music_bitrate_reconciled = False
         self._music_voice_status_reconciled = False
         self._music_startup_reconcile_task: asyncio.Task | None = None
@@ -2253,6 +2255,12 @@ class BotLocal(commands.Bot):
             self._health_task.cancel()
         if self._music_startup_reconcile_task is not None:
             self._music_startup_reconcile_task.cancel()
+        application_presence = getattr(self, "application_presence", None)
+        if application_presence is not None:
+            try:
+                await application_presence.close()
+            except Exception as e:
+                print(f"[bot] falha ao fechar application_presence: {e!r}")
         application_bio = getattr(self, "application_bio", None)
         if application_bio is not None:
             try:
@@ -2313,15 +2321,9 @@ class BotLocal(commands.Bot):
     async def on_ready(self):
         print(f"Logado como {self.user} (id: {self.user.id})")
         print(f"Em {len(self.guilds)} servidor(es)")
-        try:
-            await self.change_presence(
-                activity=discord.Activity(
-                    type=discord.ActivityType.listening,
-                    name="/help | _help",
-                )
-            )
-        except Exception as e:
-            print(f"[bot] falha ao aplicar presence: {e!r}")
+        application_presence = getattr(self, "application_presence", None)
+        if application_presence is not None:
+            application_presence.start()
         self._schedule_music_startup_reconcile()
         if self._health_task is None or self._health_task.done():
             self._health_task = asyncio.create_task(self._health_monitor_loop())
@@ -2332,11 +2334,17 @@ class BotLocal(commands.Bot):
             application_bio.start()
 
     async def on_guild_join(self, guild: discord.Guild):
+        application_presence = getattr(self, "application_presence", None)
+        if application_presence is not None:
+            application_presence.schedule_refresh()
         application_bio = getattr(self, "application_bio", None)
         if application_bio is not None:
             application_bio.schedule_sync("guild_join")
 
     async def on_guild_remove(self, guild: discord.Guild):
+        application_presence = getattr(self, "application_presence", None)
+        if application_presence is not None:
+            application_presence.schedule_refresh()
         application_bio = getattr(self, "application_bio", None)
         if application_bio is not None:
             application_bio.schedule_sync("guild_remove")
