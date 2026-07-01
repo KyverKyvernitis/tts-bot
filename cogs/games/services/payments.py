@@ -42,15 +42,12 @@ class GincanaPaymentMixin:
 
         payer_text = (payer.mention if payer else "Pagador") + payer_ok
         target_text = (target.mention if target else "Destinatário") + target_ok
-        desc_lines = [
-            f"{payer_text} → {target_text}",
-            "",
-            f"Transferência de: {self._chip_text(gross_amount, kind='balance')}",
-        ]
-        if fee > 0:
-            desc_lines.append(f"Imposto: {self._chip_text(fee, kind='loss')}")
-        desc_lines.append(f"{target.mention if target else 'Recebe'} recebe: {self._chip_text(net_amount, kind='gain')}")
-        desc = "\n".join(desc_lines)
+        desc = (
+            f"{payer_text} → {target_text}\n\n"
+            f"Transferência de: {self._chip_text(gross_amount, kind='balance')}\n"
+            f"Imposto: {self._chip_text(fee, kind='loss')}\n"
+            f"{target.mention if target else 'Recebe'} recebe: {self._chip_text(net_amount, kind='gain')}"
+        )
         embed = discord.Embed(title="💸 Confirmar pagamento", description=desc, color=discord.Color.blurple())
         embed.set_footer(text="Pagador e destinatário precisam confirmar com ✅")
         return embed
@@ -72,10 +69,34 @@ class GincanaPaymentMixin:
         if amount <= 0:
             await message.channel.send(embed=self._make_embed("💸 Valor inválido", "O valor precisa ser maior que zero.", ok=False))
             return True
-        fee = 0
-        net_amount = amount
+        fee = max(1, int(round(amount * 0.02)))
+        net_amount = amount - fee
+        if net_amount <= 0:
+            await message.channel.send(embed=self._make_embed("💸 Valor inválido", "O valor é muito baixo para essa transferência.", ok=False))
+            return True
+
         total = amount
         payer_chips = self.db.get_user_chips(guild.id, message.author.id, default=CHIPS_INITIAL)
+        if not self._user_has_played_any_game(guild.id, message.author.id):
+            await message.channel.send(
+                embed=self._make_embed(
+                    "💸 Pagamento bloqueado",
+                    "Você precisa participar de pelo menos **1 jogo** antes de enviar pagamentos.",
+                    ok=False,
+                )
+            )
+            self._payment_sessions.pop((guild.id, message.author.id), None)
+            return True
+        if not self._user_has_played_any_game(guild.id, target.id):
+            await message.channel.send(
+                embed=self._make_embed(
+                    "💸 Pagamento bloqueado",
+                    f"{target.mention} precisa participar de pelo menos **1 jogo** antes de receber pagamentos.",
+                    ok=False,
+                )
+            )
+            self._payment_sessions.pop((guild.id, message.author.id), None)
+            return True
         if payer_chips < total:
             await message.channel.send(embed=self._make_embed("💸 Saldo insuficiente", "Esse pagamento usa só fichas normais. Fichas bônus não entram no pay.", ok=False))
             self._payment_sessions.pop((guild.id, message.author.id), None)
@@ -210,9 +231,16 @@ class GincanaPaymentMixin:
             return
 
         amount = int(session.get("amount") or 0)
-        net_amount = int(session.get("net_amount") or amount)
+        fee = int(session.get("fee") or max(1, int(round(amount * 0.02))))
+        net_amount = int(session.get("net_amount") or max(0, amount - fee))
         total = int(session.get("total") or amount)
         payer_chips = self.db.get_user_chips(guild.id, payer.id, default=CHIPS_INITIAL)
+        if not self._user_has_played_any_game(guild.id, payer.id):
+            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{payer.mention} precisa participar de pelo menos **1 jogo** antes de enviar pagamentos.")
+            return
+        if not self._user_has_played_any_game(guild.id, target.id):
+            await self._expire_payment_session(session_key, title="💸 Pagamento bloqueado", reason=f"{target.mention} precisa participar de pelo menos **1 jogo** antes de receber pagamentos.")
+            return
         if payer_chips < total:
             await self._expire_payment_session(session_key, title="💸 Saldo insuficiente", reason="Esse pagamento usa só fichas normais. Fichas bônus não entram no pay.")
             return
@@ -231,6 +259,7 @@ class GincanaPaymentMixin:
                     title="✅ Pagamento concluído",
                     description=(
                         f"{payer.mention} enviou {self._chip_text(amount, kind='balance')} para {target.mention}.\n"
+                        f"Imposto: {self._chip_text(fee, kind='loss')}\n"
                         f"{target.mention} recebeu {self._chip_text(net_amount, kind='gain')}"
                     ),
                     color=discord.Color.green(),
