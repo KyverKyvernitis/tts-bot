@@ -1,0 +1,247 @@
+import asyncio
+import logging
+import os
+import re
+
+import discord
+
+from config import MUTE_TOGGLE_WORD, TRIGGER_WORD
+
+_ROB_TRIGGER_RE = re.compile(r"^\s*(?:roubar|rob)\s+<@!?\d+>\s*$", re.IGNORECASE)
+
+
+class GincanaMessageRouterMixin:
+    def _message_router_timeout_seconds(self) -> float:
+        try:
+            return max(1.0, float(os.getenv("GINCANA_MESSAGE_HANDLER_TIMEOUT_SECONDS", "8.0") or "8.0"))
+        except Exception:
+            return 8.0
+
+    async def _safe_route_call(self, handler_name: str, message: discord.Message) -> bool:
+        handler = getattr(self, handler_name, None)
+        if handler is None:
+            return False
+        heavy_handlers = {
+            "_handle_race_trigger",
+            "_handle_buckshot_trigger",
+            "_handle_corrida_trigger",
+            "_handle_poker_trigger",
+            "_handle_truco_trigger",
+            "_handle_carta_trigger",
+            "_handle_roleta_trigger",
+        }
+        try:
+            if handler_name in heavy_handlers:
+                return bool(await handler(message))
+            return bool(await asyncio.wait_for(handler(message), timeout=self._message_router_timeout_seconds()))
+        except asyncio.TimeoutError:
+            logging.getLogger("gincana.router").warning(
+                "handler de mensagem ignorado por timeout | handler=%s guild=%s channel=%s author=%s",
+                handler_name,
+                getattr(getattr(message, "guild", None), "id", None),
+                getattr(getattr(message, "channel", None), "id", None),
+                getattr(getattr(message, "author", None), "id", None),
+            )
+            return False
+        except Exception as e:
+            logging.getLogger("gincana.router").warning("%s falhou: %r", handler_name, e)
+            return False
+
+    def _matches_exact_trigger(self, content: str | None, trigger: str) -> bool:
+        if not trigger:
+            return False
+        return str(content or "").strip().casefold() == str(trigger).strip().casefold()
+
+    async def _handle_text_profile_commands(self, message: discord.Message) -> bool:
+        content = str(message.content or "").strip().casefold()
+        if not content or content.startswith("_"):
+            return False
+        if content not in {"ficha", "fichas", "rank", "leaderboard", "daily", "bonus", "login", "recarga", "recarrega", "extrato"}:
+            return False
+        if message.guild is None:
+            return True
+        if content in {"ficha", "fichas"}:
+            await message.channel.send(view=self._make_chip_balance_view(message.author))
+            return True
+        if content == "extrato":
+            await message.channel.send(view=self._make_chip_history_view(message.author, limit=10))
+            return True
+        if content in {"rank", "leaderboard"}:
+            await message.channel.send(embed=await self._make_chip_leaderboard_embed_async(message.guild, message.author))
+            return True
+        if content in {"recarga", "recarrega"}:
+            used, new_balance, note = await self._try_use_chip_recharge(message.guild.id, message.author.id)
+            await message.channel.send(view=self._make_chip_recharge_view(message.guild.id, message.author.id, used, new_balance, note))
+            return True
+
+        claimed, new_balance, bonus, bonus_bonus, streak = await self._claim_daily_bonus_with_activity(message.guild.id, message.author.id)
+        if not claimed:
+            await message.channel.send(
+                embed=self._make_embed(
+                    "🎁 Daily já resgatado",
+                    f"Você já pegou seu bônus de hoje. Streak atual: **{streak}**.",
+                    ok=False,
+                )
+            )
+            return True
+        await self._grant_weekly_points(message.guild.id, message.author.id, max(3, bonus // 2))
+        spin_granted, _spin_state = await self._grant_daily_roleta_spin(message.guild.id, message.author.id)
+        carta_spin_granted, _carta_spin_state = await self._grant_daily_carta_spin(message.guild.id, message.author.id)
+        spin_text = "Você ganhou **+1 giro de roleta**" if spin_granted else "Seu giro extra da roleta já estava disponível"
+        carta_spin_text = "Você ganhou **+1 giro de cartas**" if carta_spin_granted else "Seu giro extra de cartas já estava disponível"
+        embed = discord.Embed(
+            title="🎁 Bônus diário resgatado",
+            description=(
+                f"Você ganhou {self._chip_amount(bonus)}\n"
+                f"Você ganhou {self._bonus_chip_amount(bonus_bonus)} em fichas bônus\n"
+                f"{spin_text}\n"
+                f"{carta_spin_text}\n"
+                f"Streak atual: **{streak}**\n"
+                f"Saldo atual: {self._format_compact_chip_balance(message.guild.id, message.author.id)}"
+            ),
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text="Volte amanhã para manter a sequência")
+        await message.channel.send(embed=embed)
+        return True
+
+    async def _handle_rob_trigger(self, message: discord.Message) -> bool:
+        content = str(message.content or "").strip()
+        if content.casefold().startswith("_"):
+            return False
+        if not _ROB_TRIGGER_RE.fullmatch(content):
+            return False
+        if message.guild is None:
+            return True
+        mentions = [member for member in getattr(message, "mentions", []) if isinstance(member, discord.Member)]
+        if len(mentions) != 1:
+            return False
+        target = mentions[0]
+        await self._run_robbery(message.channel, message.guild, message.author, target)
+        return True
+
+    async def _handle_gincana_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+
+        if await self._safe_route_call("_handle_payment_message", message):
+            return
+
+        if await self._safe_route_call("_handle_text_profile_commands", message):
+            return
+
+        if await self._safe_route_call("_handle_race_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_rob_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_mendigar_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_focus_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_rola_toggle_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_role_toggle_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_dj_toggle_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_buckshot_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_target_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_corrida_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_poker_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_truco_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_carta_trigger", message):
+            return
+
+        if await self._safe_route_call("_handle_roleta_trigger", message):
+            return
+
+        if not self.db.gincana_enabled(message.guild.id):
+            return
+
+        if self._gincana_only_kick_members(message.guild.id) and not self._is_staff_member(message.author):
+            return
+
+        if not TRIGGER_WORD and not MUTE_TOGGLE_WORD:
+            return
+
+        voice_channel = self._call_trigger_channel(message)
+        if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
+            return
+
+        content = message.content or ""
+        normalized_content = content.strip().casefold()
+        trigger_match = bool(TRIGGER_WORD and normalized_content == TRIGGER_WORD.casefold())
+        mute_match = bool(MUTE_TOGGLE_WORD and normalized_content == MUTE_TOGGLE_WORD.casefold())
+        if not trigger_match and not mute_match:
+            return
+
+        targets = self._resolve_targets(message.guild, voice_channel)
+        if not targets:
+            return
+
+        target_ids = {member.id for member in targets}
+        author_is_target = message.author.id in target_ids
+        author_is_focused_non_staff = self._is_focused_non_staff_member(message.author) if mute_match else False
+        did_trigger_action = False
+
+        if trigger_match:
+            did_trigger_action = True
+            trigger_voice_channel = voice_channel if isinstance(voice_channel, discord.VoiceChannel) else None
+
+            if trigger_voice_channel is not None:
+                try:
+                    await self._play_disconnect_trigger_sfx(
+                        message.guild,
+                        trigger_voice_channel,
+                        target_count=len(targets),
+                    )
+                except Exception:
+                    pass
+                try:
+                    await asyncio.sleep(0.20)
+                except Exception:
+                    pass
+
+            for target in targets:
+                if target.voice and target.voice.channel:
+                    try:
+                        await target.move_to(None, reason="economia disconnect")
+                    except Exception:
+                        pass
+
+        if mute_match:
+            if author_is_focused_non_staff:
+                return
+            did_trigger_action = True
+            if author_is_target:
+                return
+
+            for target in targets:
+                if target.voice and target.voice.channel:
+                    try:
+                        new_muted = not bool(target.voice.mute)
+                        await target.edit(mute=new_muted, reason="economia toggle mute")
+                    except Exception:
+                        pass
+
+            await self._refresh_targets_suffix_nicknames(message.guild, targets)
+
+        if did_trigger_action:
+            await self._react_success_temporarily(message)

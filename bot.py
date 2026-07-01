@@ -181,7 +181,8 @@ TRUTHY_VALUES = {"1", "true", "yes", "y", "on", "sim", "s"}
 # `cogs.tts` é carregado por módulos explícitos mais abaixo; carregar o pacote
 # inteiro também criaria ambiguidade/duplicidade.
 SKIPPED_COG_FILES = {"voice_moderation"}
-SKIPPED_COG_PACKAGES = {"tts"}
+SKIPPED_COG_PACKAGES = {"tts", "gincana"}
+COG_EXTENSION_ALIASES = {"cogs.gincana": "cogs.games"}
 EXPLICIT_COG_EXTENSIONS = (
     "cogs.tts.cog",
     "cogs.tts.toggle",
@@ -214,9 +215,9 @@ def _normalize_extension_name(value: str) -> str:
     value = value.strip(".")
     if not value:
         return ""
-    if value.startswith("cogs."):
-        return value
-    return f"cogs.{value}"
+    if not value.startswith("cogs."):
+        value = f"cogs.{value}"
+    return COG_EXTENSION_ALIASES.get(value, value)
 
 
 def _cfg(*names: str, default=None):
@@ -2089,6 +2090,7 @@ class BotLocal(commands.Bot):
     async def _reload_cogs_for_update(self, modules: list[str], *, check_app_commands: bool = False) -> dict[str, object]:
         results: list[dict[str, str]] = []
         for module in modules:
+            module = _normalize_extension_name(module)
             if module == "cogs.call_keeper":
                 return {"ok": False, "error": "CallKeeper é protegido", "results": results}
             try:

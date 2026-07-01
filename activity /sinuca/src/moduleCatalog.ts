@@ -41,7 +41,7 @@ export const MODULE_CATALOG: ModuleVisualMeta[] = [
   { id: "birthday", label: "Aniversários", description: "Canal de parabéns e cargo do dia.", icon: Cake, group: "main", aliases: ["birthdays"] },
   { id: "tts", label: "TTS", description: "Vozes, idiomas e canais de leitura automática.", icon: Mic, group: "main" },
   { id: "music", label: "Música", description: "Filas, controle de DJ e qualidade de áudio.", icon: Music, group: "main" },
-  { id: "gincana", label: "Jogos", description: "Crie eventos, divida em equipes e some pontos.", icon: Trophy, group: "main" },
+  { id: "games", label: "Jogos", description: "Crie eventos, divida em equipes e some pontos.", icon: Trophy, group: "main", aliases: ["gincana"] },
   { id: "permissions", label: "Permissões", description: "Cargos administrativos e acesso ao painel.", icon: ShieldCheck, group: "system", aliases: ["permissoes"] },
   { id: "webhooks", label: "Webhooks", description: "Identidade e envio das mensagens do bot.", icon: Webhook, group: "system", aliases: ["webhook"] },
   { id: "status", label: "Status", description: "Saúde do bot, workers e integrações.", icon: ActivityIcon, group: "system", aliases: ["health"] },
