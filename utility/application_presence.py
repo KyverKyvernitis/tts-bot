@@ -15,8 +15,8 @@ LOG = logging.getLogger("bot.application_presence")
 VARIABLE_RE = re.compile(r"\{n:([a-z0-9_.:-]+)\}", flags=re.IGNORECASE)
 
 DEFAULT_STATUS_TEMPLATES = (
-    "「🌐」{n:sv} servers",
-    "「👥 」{n:m} usuários",
+    "「👥 」_𝗵𝗲𝗹𝗽 • {n:m} usuários",
+    "「🌐」_𝗵𝗲𝗹𝗽 • {n:sv} servidores",
 )
 
 
