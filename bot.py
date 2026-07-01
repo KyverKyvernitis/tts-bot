@@ -150,6 +150,7 @@ from db import SettingsDB
 from webserver import run_webserver, set_health_provider, set_update_action_provider
 from music_system import AudioRouter
 from utility.interaction_safety import is_unknown_interaction, safe_send_interaction_message
+from utility.application_bio import ApplicationBioService
 
 
 BOOT_LOG = logging.getLogger("bot.boot")
@@ -281,6 +282,7 @@ class BotLocal(commands.Bot):
         self._app_command_sync_status_path = self._repo_root / "data" / "app_commands_sync_status.json"
         self._removed_slash_cleanup_state_path = self._repo_root / "data" / "removed_slash_cleanup_state.json"
         self.audio_router = AudioRouter(self)
+        self.application_bio = ApplicationBioService(self, self._repo_root / "data" / "application_bio.json")
         self._music_bitrate_reconciled = False
         self._music_voice_status_reconciled = False
         self._music_startup_reconcile_task: asyncio.Task | None = None
@@ -2251,6 +2253,12 @@ class BotLocal(commands.Bot):
             self._health_task.cancel()
         if self._music_startup_reconcile_task is not None:
             self._music_startup_reconcile_task.cancel()
+        application_bio = getattr(self, "application_bio", None)
+        if application_bio is not None:
+            try:
+                await application_bio.close()
+            except Exception as e:
+                print(f"[bot] falha ao fechar application_bio: {e!r}")
         router = getattr(self, "audio_router", None)
         if router is not None:
             try:
@@ -2319,6 +2327,19 @@ class BotLocal(commands.Bot):
             self._health_task = asyncio.create_task(self._health_monitor_loop())
         if self._event_loop_watchdog_task is None or self._event_loop_watchdog_task.done():
             self._event_loop_watchdog_task = asyncio.create_task(self._event_loop_watchdog_loop())
+        application_bio = getattr(self, "application_bio", None)
+        if application_bio is not None:
+            application_bio.start()
+
+    async def on_guild_join(self, guild: discord.Guild):
+        application_bio = getattr(self, "application_bio", None)
+        if application_bio is not None:
+            application_bio.schedule_sync("guild_join")
+
+    async def on_guild_remove(self, guild: discord.Guild):
+        application_bio = getattr(self, "application_bio", None)
+        if application_bio is not None:
+            application_bio.schedule_sync("guild_remove")
 
     async def _dispatch_tts_message_bridge(self, message: discord.Message) -> None:
         # Regressão defensiva: o TTS depende de on_message para transformar
