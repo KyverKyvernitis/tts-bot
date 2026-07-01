@@ -39,7 +39,7 @@ CARTA_WEIGHTS = (40, 28, 18, 10, 4)
 CARTA_SPIN_LIMIT = 5
 CARTA_WINDOW_SECONDS = ROLETA_WINDOW_SECONDS
 CARTA_DAILY_EXTRA_CAP = ROLETA_DAILY_EXTRA_CAP
-ROLETA_TRIGGER_COOLDOWN_SECONDS = 20.0
+ROLETA_TRIGGER_COOLDOWN_SECONDS = 5.0
 ROLETA_REPLAY_WINDOW_SECONDS = 20.0
 GAME_ANIMATION_LIMIT_PER_GUILD = 2
 GAME_ANIMATION_STALE_SECONDS = 75.0
@@ -736,7 +736,7 @@ class GincanaRoletaMixin:
                     while reroll[1] == target_middle[idx]:
                         reroll = self._build_roleta_column()
                     columns[idx] = reroll
-            disabled_view = _GameReplayView(self, owner_id=owner_id or getattr(message.author, "id", 0), kind="roleta", enabled=False) if owner_id else None
+            disabled_view = None
             opening_embed = self._make_roleta_spin_embed(self._render_roleta_board(columns), balance_text=balance_text, footer_text=footer_text, entry_cost=entry_cost, jackpot=jackpot)
             try:
                 if spin_message is None:
@@ -1259,8 +1259,7 @@ class GincanaRoletaMixin:
                         embed.set_footer(text=roleta_footer)
                     except Exception:
                         pass
-                replay_view = _GameReplayView(self, owner_id=actor.id, kind="roleta", enabled=True)
-                await self._deliver_game_result(source_message, spin_message, embed=embed, view=replay_view)
+                await self._deliver_game_result(source_message, spin_message, embed=embed, view=None)
                 return True
             finally:
                 if use_source_reactions:
@@ -1424,7 +1423,7 @@ class GincanaRoletaMixin:
             cooldown_remaining = self._roleta_trigger_cooldown_remaining(guild.id, message.author.id)
             if cooldown_remaining > 0:
                 try:
-                    await message.channel.send(embed=self._make_embed("🎰 Aguarde um pouco", f"Espere **{int(cooldown_remaining) + 1}s** para usar a roleta novamente. Se o botão **🔄** da sua última roleta ainda estiver ativo, você pode usá-lo.", ok=False))
+                    await message.channel.send(embed=self._make_embed("🎰 Aguarde um pouco", f"Espere **{int(cooldown_remaining) + 1}s** para usar a roleta novamente.", ok=False))
                 except Exception:
                     pass
                 return True
