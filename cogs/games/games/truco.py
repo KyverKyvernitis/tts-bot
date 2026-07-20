@@ -201,31 +201,6 @@ class TrucoTableView(discord.ui.LayoutView):
 
     def refresh_buttons(self):
         self.clear_items()
-        hand = discord.ui.Button(label="Ver mão", style=discord.ButtonStyle.primary)
-        hand.callback = self._my_hand
-        buttons = [hand]
-        if not self.game.finished:
-            if self.game.status == "awaiting_raise_response":
-                accept = discord.ui.Button(label="Aceitar", style=discord.ButtonStyle.success)
-                accept.callback = self._accept_raise
-                buttons.append(accept)
-                nxt = self.cog._truco_next_raise_label(self.game)
-                if nxt:
-                    up = discord.ui.Button(label=f"Pedir {nxt}", style=discord.ButtonStyle.secondary)
-                    up.callback = self._raise_action
-                    buttons.append(up)
-                leave = discord.ui.Button(label="Correr", style=discord.ButtonStyle.danger)
-                leave.callback = self._run_action
-                buttons.append(leave)
-            else:
-                nxt = self.cog._truco_next_raise_label(self.game)
-                if nxt:
-                    up = discord.ui.Button(label=f"Pedir {nxt}", style=discord.ButtonStyle.secondary)
-                    up.callback = self._raise_action
-                    buttons.append(up)
-                leave = discord.ui.Button(label="Correr", style=discord.ButtonStyle.danger)
-                leave.callback = self._run_action
-                buttons.append(leave)
         lines = self.cog._truco_status_lines(self.game)
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(lines["header"])),
@@ -235,21 +210,8 @@ class TrucoTableView(discord.ui.LayoutView):
             discord.ui.TextDisplay("\n".join(lines["mesa"])),
             discord.ui.Separator(),
             discord.ui.TextDisplay("\n".join(lines["status"])),
-            discord.ui.ActionRow(*buttons),
             accent_color=self.cog._truco_accent_color(self.game),
         ))
-
-    async def _my_hand(self, interaction: discord.Interaction):
-        await self.cog._handle_truco_show_hand(interaction, self.game)
-
-    async def _raise_action(self, interaction: discord.Interaction):
-        await self.cog._handle_truco_raise(interaction, self.game)
-
-    async def _run_action(self, interaction: discord.Interaction):
-        await self.cog._handle_truco_run(interaction, self.game)
-
-    async def _accept_raise(self, interaction: discord.Interaction):
-        await self.cog._handle_truco_accept_raise(interaction, self.game)
 
     async def on_timeout(self):
         try:
@@ -682,7 +644,7 @@ class GincanaTrucoMixin:
         status = [
             "## Agora",
             game.status_text,
-            "Abra **Ver mão** para jogar pelas mensagens diretas.",
+            "Use a mensagem direta do bot para jogar.",
         ]
         return {"header": duel, "meta": meta, "mesa": mesa, "status": status}
 
