@@ -19,6 +19,7 @@ import shlex
 import stat
 import secrets
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import tempfile
 import sys
@@ -62,7 +63,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.31"
+PHONE_WORKER_VERSION = "1.10.32"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -1814,6 +1815,16 @@ def _b64encode(data: bytes, *, max_bytes: int) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
+def _with_tts_audio_payload(payload: dict[str, Any], data: bytes, *, max_bytes: int, raw_response: bool) -> dict[str, Any]:
+    if len(data) > max_bytes:
+        raise ValueError("resultado grande demais")
+    if raw_response:
+        payload["_raw_audio"] = data
+    else:
+        payload["data_b64"] = _b64encode(data, max_bytes=max_bytes)
+    return payload
+
+
 
 
 
@@ -2453,6 +2464,26 @@ _TTS_AGENT_TOTAL_MS = 0.0
 _TTS_AGENT_LAST_ERROR = ""
 _TTS_AGENT_LAST_ENGINE = ""
 _TTS_AGENT_LAST_OK_AT = 0.0
+_TTS_CACHE_MAINTENANCE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts-cache-maint")
+_TTS_CACHE_MAINTENANCE_SLOTS = threading.BoundedSemaphore(2)
+
+
+def _submit_tts_cache_maintenance(callback, *args, **kwargs) -> bool:
+    if not _TTS_CACHE_MAINTENANCE_SLOTS.acquire(blocking=False):
+        return False
+
+    def _runner() -> None:
+        try:
+            callback(*args, **kwargs)
+        finally:
+            _TTS_CACHE_MAINTENANCE_SLOTS.release()
+
+    try:
+        _TTS_CACHE_MAINTENANCE_EXECUTOR.submit(_runner)
+        return True
+    except Exception:
+        _TTS_CACHE_MAINTENANCE_SLOTS.release()
+        return False
 
 
 def _music_voice_dependency_specs() -> dict[str, dict[str, Any]]:
@@ -4062,11 +4093,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
             if body is None:
                 return
             try:
-                result = self._task_tts_agent_synthesize(body)
+                result = self._task_tts_agent_synthesize(body, raw_response=True)
                 max_audio_bytes = max(1024, min(self.max_output_bytes, int(body.get("max_audio_bytes") or self.max_output_bytes)))
-                raw = _b64decode(str(result.get("data_b64") or ""), max_bytes=max_audio_bytes)
+                raw = result.pop("_raw_audio", None)
+                if not isinstance(raw, (bytes, bytearray)) or not raw:
+                    raw = _b64decode(str(result.get("data_b64") or ""), max_bytes=max_audio_bytes)
                 if not raw:
                     raise RuntimeError("TTS Agent não retornou áudio")
+                raw = bytes(raw)
                 result["worker_id"] = str(result.get("worker_id") or os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip()
                 result["worker_version"] = str(result.get("worker_version") or PHONE_WORKER_VERSION)
                 _audio_response(self, HTTPStatus.OK, raw, result)
@@ -4298,6 +4332,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 continue
             total_bytes = max(0, total_bytes - size)
             stats = [item for item in stats if item[2] != path]
+
+    def _schedule_tts_cache_prune(self, *, protected: Path, piper: bool = False) -> bool:
+        callback = self._prune_piper_cache if piper else self._prune_tts_cache
+        return _submit_tts_cache_maintenance(callback, protected=protected)
 
     def _task_tts_cache_lookup(self, body: dict[str, Any]) -> dict[str, Any]:
         roles, capabilities = self._ensure_tts_cache_allowed()
@@ -4764,7 +4802,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         mode = str(body.get("cache_mode") or "prefer").strip().lower()
         return mode not in {"0", "false", "off", "disabled", "none", "bypass", "no_store"}
 
-    def _tts_agent_standard_cache_hit(self, *, key: str, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int) -> dict[str, Any] | None:
+    def _tts_agent_standard_cache_hit(self, *, key: str, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, raw_response: bool = False) -> dict[str, Any] | None:
         path, audio_format = self._find_tts_cache_file(key)
         if path is None:
             return None
@@ -4784,7 +4822,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "worker_total": round(total_ms, 2),
             "worker_synth": 0.0,
         }
-        return {
+        result = {
             "ok": True,
             "engine": engine,
             "selected_engine": engine,
@@ -4806,8 +4844,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "size": len(data),
             "sha256": digest,
             "logs": logs[:10],
-            "data_b64": _b64encode(data, max_bytes=max_audio_bytes),
         }
+        return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
     def _store_tts_agent_standard_cache(self, *, key: str, data: bytes, audio_format: str, logs: list[str]) -> None:
         if not key or not data:
@@ -4819,7 +4857,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
             tmp.write_bytes(data)
             os.replace(tmp, path)
             self._touch_tts_cache_file(path)
-            self._prune_tts_cache(protected=path)
+            if not self._schedule_tts_cache_prune(protected=path):
+                self._prune_tts_cache(protected=path)
             logs.append(f"standard-cache store {path.name} {len(data)}B")
         except Exception as exc:
             logs.append(f"standard-cache store falhou: {type(exc).__name__}: {_short_text(exc, limit=90)}")
@@ -4827,7 +4866,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             with contextlib.suppress(Exception):
                 tmp.unlink()
 
-    def _synthesize_standard_tts_bytes(self, body: dict[str, Any], *, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, timeout: int) -> dict[str, Any]:
+    def _synthesize_standard_tts_bytes(self, body: dict[str, Any], *, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, timeout: int, raw_response: bool = False) -> dict[str, Any]:
         engine = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts"}.get(str(engine or "gtts").strip().lower().replace("-", "_"), str(engine or "gtts").strip().lower().replace("-", "_"))
         text = str(body.get("text") or "").strip()
         if not text:
@@ -4846,6 +4885,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     logs=logs,
                     started=started,
                     max_audio_bytes=max_audio_bytes,
+                    raw_response=raw_response,
                 )
                 if hit is not None:
                     return hit
@@ -4919,11 +4959,11 @@ class WorkerHandler(BaseHTTPRequestHandler):
 
             async def _edge_bytes() -> bytes:
                 communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
-                chunks: list[bytes] = []
+                buffer = io.BytesIO()
                 async for chunk in communicate.stream():
                     if chunk.get("type") == "audio" and chunk.get("data"):
-                        chunks.append(bytes(chunk["data"]))
-                return b"".join(chunks)
+                        buffer.write(chunk["data"])
+                return buffer.getvalue()
 
             try:
                 data = asyncio.run(asyncio.wait_for(_edge_bytes(), timeout=timeout))
@@ -4962,7 +5002,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         stage_ms["worker_synth"] = round(synth_ms, 2)
         stage_ms["worker_total"] = round(synth_ms, 2)
         digest = hashlib.sha256(data).hexdigest()
-        return {
+        result = {
             "ok": True,
             "engine": engine,
             "selected_engine": engine,
@@ -4985,10 +5025,10 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "size": len(data),
             "sha256": digest,
             "logs": logs[:10],
-            "data_b64": _b64encode(data, max_bytes=max_audio_bytes),
         }
+        return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
-    def _task_tts_agent_synthesize(self, body: dict[str, Any]) -> dict[str, Any]:
+    def _task_tts_agent_synthesize(self, body: dict[str, Any], *, raw_response: bool = False) -> dict[str, Any]:
         roles, capabilities = self._ensure_tts_piper_turbo_allowed()
         if not _env_bool("PHONE_WORKER_TTS_AGENT_ENABLED", True):
             raise RuntimeError("PHONE_WORKER_TTS_AGENT_ENABLED=false")
@@ -5025,7 +5065,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         piper_body = dict(body)
                         piper_body["engine"] = "piper"
                         piper_body.setdefault("cache_mode", "prefer")
-                        result = self._synthesize_piper_bytes(piper_body, benchmark=False)
+                        result = self._synthesize_piper_bytes(piper_body, benchmark=False, raw_response=raw_response)
                         result["engine"] = "piper"
                         result["selected_engine"] = "piper"
                         result["worker_id"] = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip()
@@ -5044,6 +5084,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                         started=started,
                         max_audio_bytes=max_audio_bytes,
                         timeout=timeout,
+                        raw_response=raw_response,
                     )
                     elapsed_ms = (time.monotonic() - started) * 1000.0
                     _tts_agent_record_done(ok=True, engine=engine, elapsed_ms=elapsed_ms)
@@ -5184,7 +5225,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             total_bytes = max(0, total_bytes - size)
             stats = [item for item in stats if item[2] != path]
 
-    def _piper_cache_hit_result(self, *, path: Path, audio_format: str, key: str, roles: list[str], capabilities: list[str], logs: list[str], max_audio_bytes: int, started: float, cache_mode: str = "prefer") -> dict[str, Any]:
+    def _piper_cache_hit_result(self, *, path: Path, audio_format: str, key: str, roles: list[str], capabilities: list[str], logs: list[str], max_audio_bytes: int, started: float, cache_mode: str = "prefer", raw_response: bool = False) -> dict[str, Any]:
         read_started = time.monotonic()
         data = path.read_bytes()
         read_ms = (time.monotonic() - read_started) * 1000.0
@@ -5196,7 +5237,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         digest = hashlib.sha256(data).hexdigest()
         total_ms = (time.monotonic() - started) * 1000.0
         logs.append(f"cache hit Piper {path.name} {len(data)} B em {read_ms:.1f} ms")
-        return {
+        result = {
             "ok": True,
             "engine": "piper",
             "audio_format": audio_format,
@@ -5214,9 +5255,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "size": len(data),
             "sha256": digest,
             "logs": logs[:10],
-            "data_b64": _b64encode(data, max_bytes=max_audio_bytes),
             "worker_total_ms": round(total_ms, 2),
         }
+        return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
     def _piper_cache_miss_result(self, *, key: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, cache_mode: str) -> dict[str, Any]:
         total_ms = (time.monotonic() - started) * 1000.0
@@ -5239,7 +5280,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "worker_total_ms": round(total_ms, 2),
         }
 
-    def _synthesize_piper_bytes(self, body: dict[str, Any], *, benchmark: bool) -> dict[str, Any]:
+    def _synthesize_piper_bytes(self, body: dict[str, Any], *, benchmark: bool, raw_response: bool = False) -> dict[str, Any]:
         roles, capabilities = self._ensure_tts_piper_turbo_allowed()
         text = str(body.get("text") or "").strip()
         if not text:
@@ -5274,6 +5315,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     max_audio_bytes=max_audio_bytes,
                     started=started,
                     cache_mode=cache_mode,
+                    raw_response=raw_response,
                 )
             logs.append("cache miss Piper")
             if cache_mode in cache_only_modes:
@@ -5369,13 +5411,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 tmp_cache_path.write_bytes(data)
                 os.replace(tmp_cache_path, cache_path)
                 self._touch_piper_cache_file(cache_path)
-                self._prune_piper_cache(protected=cache_path)
+                if not self._schedule_tts_cache_prune(protected=cache_path, piper=True):
+                    self._prune_piper_cache(protected=cache_path)
                 cache_stored = True
                 logs.append(f"cache store Piper {cache_path.name} {len(data)} B")
             except Exception as exc:
                 logs.append(f"cache store Piper falhou: {_short_text(exc, limit=120)}")
         logs.append(f"worker Piper gerou {len(data)} bytes em {synth_ms:.1f} ms")
-        return {
+        result = {
             "ok": True,
             "engine": "piper",
             "audio_format": audio_format,
@@ -5393,9 +5436,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "size": len(data),
             "sha256": digest,
             "logs": logs[:10],
-            "data_b64": _b64encode(data, max_bytes=max_audio_bytes),
             "worker_total_ms": round(synth_ms, 2),
         }
+        return _with_tts_audio_payload(result, data, max_bytes=max_audio_bytes, raw_response=raw_response)
 
     def _task_tts_synthesize_piper(self, body: dict[str, Any]) -> dict[str, Any]:
         return self._synthesize_piper_bytes(body, benchmark=False)

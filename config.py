@@ -490,6 +490,10 @@ TTS_TURBO_WORKER_CACHE_LOOKUP_TIMEOUT_SECONDS = max(0.15, _parse_float(os.getenv
 TTS_TURBO_WORKER_CACHE_STORE_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("TTS_TURBO_WORKER_CACHE_STORE_TIMEOUT_SECONDS", "2.5"), 2.5))
 TTS_TURBO_WORKER_CACHE_MAX_AUDIO_MB = max(1, _parse_int(os.getenv("TTS_TURBO_WORKER_CACHE_MAX_AUDIO_MB", "8"), 8))
 TTS_TURBO_WORKER_CACHE_STORE_BACKGROUND = _parse_bool(os.getenv("TTS_TURBO_WORKER_CACHE_STORE_BACKGROUND", "true"), True)
+# Upload de cache é secundário: mantém uma fila pequena e serializada para não
+# competir com síntese, playback e memória da VPS durante bursts.
+TTS_TURBO_WORKER_CACHE_STORE_CONCURRENCY = max(1, _parse_int(os.getenv("TTS_TURBO_WORKER_CACHE_STORE_CONCURRENCY", "1"), 1))
+TTS_TURBO_WORKER_CACHE_STORE_MAX_PENDING = max(TTS_TURBO_WORKER_CACHE_STORE_CONCURRENCY, _parse_int(os.getenv("TTS_TURBO_WORKER_CACHE_STORE_MAX_PENDING", "6"), 6))
 TTS_TURBO_WORKER_CACHE_MISS_COOLDOWN_SECONDS = max(1.0, _parse_float(os.getenv("TTS_TURBO_WORKER_CACHE_MISS_COOLDOWN_SECONDS", "45.0"), 45.0))
 TTS_TURBO_WORKER_CACHE_ERROR_COOLDOWN_SECONDS = max(1.0, _parse_float(os.getenv("TTS_TURBO_WORKER_CACHE_ERROR_COOLDOWN_SECONDS", "10.0"), 10.0))
 TTS_TURBO_WORKER_CACHE_INDEX_MAX_ENTRIES = max(128, _parse_int(os.getenv("TTS_TURBO_WORKER_CACHE_INDEX_MAX_ENTRIES", "4096"), 4096))
@@ -549,6 +553,10 @@ WORKER_VOICE_AGENT_CONNECTION_REPORT_TIMEOUT_SECONDS = max(0.6, _parse_float(os.
 TTS_LONG_TEXT_CHUNK_ENABLED = _parse_bool(os.getenv("TTS_LONG_TEXT_CHUNK_ENABLED", "true"), True)
 TTS_LONG_TEXT_CHUNK_MAX_CHARS = max(160, _parse_int(os.getenv("TTS_LONG_TEXT_CHUNK_MAX_CHARS", "420"), 420))
 TTS_LONG_TEXT_CHUNK_MAX_PARTS = max(1, _parse_int(os.getenv("TTS_LONG_TEXT_CHUNK_MAX_PARTS", "8"), 8))
+# Índice do cache local é verificado periodicamente, em vez de varrer todos os
+# arquivos após cada fala.
+TTS_CACHE_INDEX_SWEEP_INTERVAL_SECONDS = max(5.0, _parse_float(os.getenv("TTS_CACHE_INDEX_SWEEP_INTERVAL_SECONDS", "30"), 30.0))
+TTS_CACHE_INDEX_SWEEP_MAX_ENTRIES = max(4, _parse_int(os.getenv("TTS_CACHE_INDEX_SWEEP_MAX_ENTRIES", "32"), 32))
 
 # Uso do phone-worker fora do /vps: preparação de áudio TTS para Lavalink.
 # A VPS sempre mantém fallback local.

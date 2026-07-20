@@ -44,6 +44,8 @@ TTS_CACHEABLE_TEXT_MAX_LENGTH = max(64, int(getattr(config, "TTS_CACHEABLE_TEXT_
 TTS_CACHEABLE_TEXT_HARD_MAX_LENGTH = max(TTS_CACHEABLE_TEXT_MAX_LENGTH, int(getattr(config, "TTS_CACHEABLE_TEXT_HARD_MAX_LENGTH", 1200)))
 TTS_LONG_TEXT_CACHE_MIN_REPEATS = max(1, int(getattr(config, "TTS_LONG_TEXT_CACHE_MIN_REPEATS", 2)))
 TTS_TEMP_PRUNE_INTERVAL_SECONDS = max(5.0, float(getattr(config, "TTS_TEMP_PRUNE_INTERVAL_SECONDS", 20)))
+TTS_CACHE_INDEX_SWEEP_INTERVAL_SECONDS = max(5.0, float(getattr(config, "TTS_CACHE_INDEX_SWEEP_INTERVAL_SECONDS", 30.0)))
+TTS_CACHE_INDEX_SWEEP_MAX_ENTRIES = max(4, int(getattr(config, "TTS_CACHE_INDEX_SWEEP_MAX_ENTRIES", 32) or 32))
 TTS_BOOT_WARMUP_ENABLED = bool(getattr(config, "TTS_BOOT_WARMUP_ENABLED", True))
 TTS_ENGINE_ALERT_COOLDOWN_SECONDS = max(60.0, float(getattr(config, "TTS_ENGINE_ALERT_COOLDOWN_SECONDS", 900)))
 TTS_ENGINE_FAILURE_ALERT_THRESHOLD = max(1, int(getattr(config, "TTS_ENGINE_FAILURE_ALERT_THRESHOLD", 3)))
@@ -78,6 +80,8 @@ TTS_TURBO_WORKER_CACHE_LOOKUP_TIMEOUT_SECONDS = max(0.15, float(getattr(config, 
 TTS_TURBO_WORKER_CACHE_STORE_TIMEOUT_SECONDS = max(0.5, float(getattr(config, "TTS_TURBO_WORKER_CACHE_STORE_TIMEOUT_SECONDS", 2.5) or 2.5))
 TTS_TURBO_WORKER_CACHE_MAX_AUDIO_MB = max(1, int(getattr(config, "TTS_TURBO_WORKER_CACHE_MAX_AUDIO_MB", 8) or 8))
 TTS_TURBO_WORKER_CACHE_STORE_BACKGROUND = bool(getattr(config, "TTS_TURBO_WORKER_CACHE_STORE_BACKGROUND", True))
+TTS_TURBO_WORKER_CACHE_STORE_CONCURRENCY = max(1, int(getattr(config, "TTS_TURBO_WORKER_CACHE_STORE_CONCURRENCY", 1) or 1))
+TTS_TURBO_WORKER_CACHE_STORE_MAX_PENDING = max(TTS_TURBO_WORKER_CACHE_STORE_CONCURRENCY, int(getattr(config, "TTS_TURBO_WORKER_CACHE_STORE_MAX_PENDING", 6) or 6))
 TTS_TURBO_WORKER_CACHE_MISS_COOLDOWN_SECONDS = max(1.0, float(getattr(config, "TTS_TURBO_WORKER_CACHE_MISS_COOLDOWN_SECONDS", 45.0) or 45.0))
 TTS_TURBO_WORKER_CACHE_ERROR_COOLDOWN_SECONDS = max(1.0, float(getattr(config, "TTS_TURBO_WORKER_CACHE_ERROR_COOLDOWN_SECONDS", 10.0) or 10.0))
 TTS_TURBO_WORKER_CACHE_INDEX_MAX_ENTRIES = max(128, int(getattr(config, "TTS_TURBO_WORKER_CACHE_INDEX_MAX_ENTRIES", 4096) or 4096))
@@ -138,6 +142,7 @@ PHONE_WORKER_TOKEN = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip(
 _RUNTIME_DIR = os.path.join(TTS_TEMP_DIR, "runtime")
 _CACHE_DIR = os.path.join(TTS_TEMP_DIR, "cache")
 _TTS_REQUIRED_DIRS = (TTS_TEMP_DIR, _RUNTIME_DIR, _CACHE_DIR)
+_TTS_CACHE_SUFFIXES = (".mp3", ".ogg", ".opus", ".wav", ".m4a", ".mulaw", ".alaw")
 
 logger = logging.getLogger(__name__)
 
@@ -795,6 +800,27 @@ class TTSAudioMixin:
             setattr(self, "_tts_cache_order", cache_order)
         return cache_order
 
+    def _get_global_cache_paths(self) -> dict[str, str]:
+        cache_paths = getattr(self, "_tts_cache_paths", None)
+        if cache_paths is None:
+            cache_paths = {}
+            setattr(self, "_tts_cache_paths", cache_paths)
+        return cache_paths
+
+    def _get_worker_cache_store_tasks(self) -> set[asyncio.Task]:
+        tasks = getattr(self, "_tts_worker_cache_store_tasks", None)
+        if tasks is None:
+            tasks = set()
+            setattr(self, "_tts_worker_cache_store_tasks", tasks)
+        return tasks
+
+    def _get_worker_cache_store_semaphore(self) -> asyncio.Semaphore:
+        semaphore = getattr(self, "_tts_worker_cache_store_semaphore", None)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(TTS_TURBO_WORKER_CACHE_STORE_CONCURRENCY)
+            setattr(self, "_tts_worker_cache_store_semaphore", semaphore)
+        return semaphore
+
     def _get_long_text_repeat_counts(self) -> dict[str, int]:
         counts = getattr(self, "_tts_long_text_repeat_counts", None)
         if counts is None:
@@ -1177,37 +1203,46 @@ class TTSAudioMixin:
 
     def _hydrate_cache_index(self) -> None:
         cache_order = self._get_global_cache_order()
+        cache_paths = self._get_global_cache_paths()
         cache_frequency = self._get_cache_frequency_map()
         cache_order.clear()
+        cache_paths.clear()
+        cache_frequency.clear()
         if not os.path.isdir(_CACHE_DIR):
             return
-        cache_files = []
+        cache_files: list[tuple[float, str, str]] = []
         try:
             with os.scandir(_CACHE_DIR) as entries:
                 for entry in entries:
                     if not entry.is_file(follow_symlinks=False):
                         continue
-                    if not entry.name.lower().endswith(".mp3"):
+                    suffix = os.path.splitext(entry.name)[1].lower()
+                    if suffix not in _TTS_CACHE_SUFFIXES:
                         continue
                     try:
                         stat = entry.stat()
                     except FileNotFoundError:
                         continue
-                    cache_files.append((stat.st_mtime, entry.name[:-4]))
+                    cache_files.append((stat.st_mtime, os.path.splitext(entry.name)[0], os.path.abspath(entry.path)))
         except FileNotFoundError:
             return
 
-        for modified_ts, key in sorted(cache_files, key=lambda item: item[0]):
+        for modified_ts, key, path in sorted(cache_files, key=lambda item: item[0]):
             cache_order[key] = modified_ts
-            cache_frequency.setdefault(key, 1)
+            cache_order.move_to_end(key)
+            cache_paths[key] = path
+            cache_frequency[key] = 1
 
     def _prime_tts_runtime(self) -> None:
         self._get_synth_semaphore()
         self._get_gtts_semaphore()
         self._get_gtts_rate_lock()
         self._get_global_cache_order()
+        self._get_global_cache_paths()
         self._get_cache_frequency_map()
         self._get_inflight_cache_tasks()
+        self._get_worker_cache_store_tasks()
+        self._get_worker_cache_store_semaphore()
         self._get_worker_cache_index()
         self._get_metrics_store()
         self._hydrate_cache_index()
@@ -1396,17 +1431,30 @@ class TTSAudioMixin:
             total_bytes = max(0, total_bytes - size)
             if abs_path.startswith(os.path.abspath(_CACHE_DIR) + os.sep):
                 cache_key = os.path.splitext(os.path.basename(abs_path))[0]
-                cache_order.pop(cache_key, None)
-                self._get_cache_frequency_map().pop(cache_key, None)
+                self._forget_cache_entry(cache_key, path=abs_path)
 
 
-    def _touch_cache_entry(self, state: GuildTTSState, key: str) -> None:
+    def _touch_cache_entry(self, state: GuildTTSState, key: str, *, path: str | None = None) -> None:
         cache_order = self._get_global_cache_order()
+        cache_paths = self._get_global_cache_paths()
         cache_frequency = self._get_cache_frequency_map()
         now = time.time()
         cache_order[key] = now
         cache_order.move_to_end(key)
         cache_frequency[key] = int(cache_frequency.get(key, 0) or 0) + 1
+        if path:
+            cache_paths[key] = os.path.abspath(path)
+
+    def _forget_cache_entry(self, key: str, *, path: str | None = None) -> None:
+        cache_paths = self._get_global_cache_paths()
+        mapped = str(cache_paths.get(key) or "")
+        if path is not None and mapped and os.path.abspath(mapped) != os.path.abspath(path):
+            # A cleanup may remove an older duplicate with another extension.
+            # Keep the active cache entry and its usage metadata in that case.
+            return
+        self._get_global_cache_order().pop(key, None)
+        self._get_cache_frequency_map().pop(key, None)
+        cache_paths.pop(key, None)
 
     def _is_piper_cache_key(self, key: str) -> bool:
         return str(key or "").startswith("piper_")
@@ -1419,78 +1467,122 @@ class TTSAudioMixin:
         total_over = len(cache_order) > (TTS_AUDIO_CACHE_SIZE + TTS_PIPER_VPS_CACHE_SIZE)
         return normal_over, piper_over, total_over
 
+    def _cache_path_for_key(self, key: str, *, item: QueueItem | None = None) -> str | None:
+        cache_paths = self._get_global_cache_paths()
+        mapped = str(cache_paths.get(key) or "")
+        if mapped and os.path.isfile(mapped):
+            return mapped
+        if mapped:
+            cache_paths.pop(key, None)
+
+        suffixes = self._cache_suffix_candidates_for_item(item) if item is not None else list(_TTS_CACHE_SUFFIXES)
+        for suffix in suffixes:
+            candidate = self._cache_path(key, suffix=suffix)
+            if os.path.isfile(candidate):
+                cache_paths[key] = os.path.abspath(candidate)
+                return candidate
+        return None
+
+    def _cache_index_sweep_due(self, *, force: bool = False) -> bool:
+        if force:
+            setattr(self, "_tts_last_cache_index_sweep_monotonic", time.monotonic())
+            return True
+        now = time.monotonic()
+        last = float(getattr(self, "_tts_last_cache_index_sweep_monotonic", 0.0) or 0.0)
+        if (now - last) < TTS_CACHE_INDEX_SWEEP_INTERVAL_SECONDS:
+            return False
+        setattr(self, "_tts_last_cache_index_sweep_monotonic", now)
+        return True
+
+    def _remove_cache_file(self, key: str, path: str | None) -> None:
+        self._forget_cache_entry(key, path=path)
+        if not path:
+            return
+        with contextlib.suppress(FileNotFoundError, OSError):
+            os.remove(path)
+
     def _purge_cache(self, state: GuildTTSState, *, protected_paths: Optional[set[str]] = None, force_tmp_prune: bool = False) -> None:
         cache_order = self._get_global_cache_order()
         cache_frequency = self._get_cache_frequency_map()
-
-        missing = []
-        for key in list(cache_order.keys()):
-            path = self._cache_path(key)
-            if not os.path.exists(path):
-                missing.append(key)
-
-        for key in missing:
-            cache_order.pop(key, None)
-            cache_frequency.pop(key, None)
-
         protected = {os.path.abspath(p) for p in (protected_paths or set()) if p}
+
+        if self._cache_index_sweep_due(force=force_tmp_prune):
+            now = time.time()
+            sweep_entries = list(cache_order.items())
+            if not force_tmp_prune:
+                sweep_entries = sweep_entries[:TTS_CACHE_INDEX_SWEEP_MAX_ENTRIES]
+            for key, last_used_ts in sweep_entries:
+                path = self._cache_path_for_key(key)
+                abs_path = os.path.abspath(path) if path else ""
+                expired = bool(
+                    TTS_AUDIO_CACHE_TTL_SECONDS > 0
+                    and (now - float(last_used_ts or 0.0)) > TTS_AUDIO_CACHE_TTL_SECONDS
+                )
+                if not path:
+                    self._forget_cache_entry(key)
+                elif expired and abs_path not in protected:
+                    self._remove_cache_file(key, path)
+
         while True:
             normal_over, piper_over, total_over = self._cache_quota_overflow(cache_order)
             if not (normal_over or piper_over or total_over):
                 break
 
             candidate_key = None
+            candidate_path = None
             candidate_score = None
-
             for key, last_used_ts in cache_order.items():
                 is_piper = self._is_piper_cache_key(key)
                 if piper_over and not is_piper:
                     continue
                 if normal_over and not piper_over and is_piper:
                     continue
-                path = self._cache_path(key)
+                path = self._cache_path_for_key(key)
+                if not path:
+                    candidate_key = key
+                    candidate_path = None
+                    break
                 abs_path = os.path.abspath(path)
                 if abs_path in protected:
                     continue
                 score = (int(cache_frequency.get(key, 0) or 0), float(last_used_ts))
                 if candidate_score is None or score < candidate_score:
                     candidate_key = key
+                    candidate_path = path
                     candidate_score = score
 
             if candidate_key is None:
                 break
-
-            path = self._cache_path(candidate_key)
-            cache_order.pop(candidate_key, None)
-            cache_frequency.pop(candidate_key, None)
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except Exception:
-                pass
+            self._remove_cache_file(candidate_key, candidate_path)
 
         self._prune_tmp_audio_dir(protected_paths=protected_paths, force=force_tmp_prune)
 
     async def _store_in_cache(self, state: GuildTTSState, item: QueueItem, source_path: str) -> str:
         key = self._cache_key(item)
         path = self._cache_path(key, suffix=self._cache_suffix_from_path(source_path))
+        existing = self._cache_path_for_key(key, item=item)
 
-        if os.path.exists(path):
-            self._touch_cache_entry(state, key)
-            self._purge_cache(state, protected_paths={path}, force_tmp_prune=True)
-            return path
+        if existing:
+            if os.path.abspath(existing) != os.path.abspath(source_path):
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    os.remove(source_path)
+            self._touch_cache_entry(state, key, path=existing)
+            self._purge_cache(state, protected_paths={existing})
+            return existing
 
         try:
-            await asyncio.to_thread(shutil.move, source_path, path)
+            await asyncio.to_thread(os.replace, source_path, path)
         except Exception:
             try:
                 await asyncio.to_thread(shutil.copyfile, source_path, path)
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    os.remove(source_path)
             except Exception:
                 return source_path
 
-        self._touch_cache_entry(state, key)
+        self._touch_cache_entry(state, key, path=path)
         self._record_cache_store()
-        self._purge_cache(state, protected_paths={path}, force_tmp_prune=True)
+        self._purge_cache(state, protected_paths={path})
         return path
 
     def _cache_key(self, item: QueueItem) -> str:
@@ -1524,22 +1616,22 @@ class TTSAudioMixin:
         clean_suffix = str(suffix or ".mp3").strip().lower()
         if not clean_suffix.startswith("."):
             clean_suffix = f".{clean_suffix}"
-        if clean_suffix not in {".mp3", ".ogg", ".opus", ".wav", ".m4a", ".mulaw", ".alaw"}:
+        if clean_suffix not in _TTS_CACHE_SUFFIXES:
             clean_suffix = ".mp3"
         return os.path.join(_CACHE_DIR, f"{key}{clean_suffix}")
 
     def _cache_suffix_from_path(self, path: str) -> str:
         suffix = os.path.splitext(str(path or ""))[1].lower()
-        return suffix if suffix in {".mp3", ".ogg", ".opus", ".wav", ".m4a", ".mulaw", ".alaw"} else ".mp3"
+        return suffix if suffix in _TTS_CACHE_SUFFIXES else ".mp3"
 
-    def _cache_suffix_candidates_for_item(self, item: QueueItem) -> list[str]:
-        engine = str(getattr(item, "engine", "") or "gtts").strip().lower()
+    def _cache_suffix_candidates_for_item(self, item: QueueItem | None) -> list[str]:
+        engine = str(getattr(item, "engine", "") or "gtts").strip().lower() if item is not None else ""
         candidates: list[str] = []
         if engine in {"piper", "android_native"}:
-            candidates.extend([".wav", ".mp3", ".ogg"])
-        else:
-            candidates.append(".mp3")
-        candidates.extend([".mp3", ".ogg", ".wav"])
+            candidates.extend([".wav", ".ogg", ".mp3"])
+        elif engine:
+            candidates.extend([".mp3", ".ogg", ".wav"])
+        candidates.extend(_TTS_CACHE_SUFFIXES)
         result: list[str] = []
         for suffix in candidates:
             suffix = self._cache_suffix_from_path(f"x{suffix}")
@@ -1547,18 +1639,19 @@ class TTSAudioMixin:
                 result.append(suffix)
         return result
 
-
     def _try_get_cached_path(self, state: GuildTTSState, item: QueueItem) -> Optional[str]:
         key = self._cache_key(item)
-        path = ""
-        for candidate in self._cache_suffix_candidates_for_item(item):
-            path = self._cache_path(key, suffix=candidate)
-            if os.path.exists(path):
-                break
-        else:
+        path = self._cache_path_for_key(key, item=item)
+        if not path:
             return None
 
-        self._touch_cache_entry(state, key)
+        cache_order = self._get_global_cache_order()
+        last_used = float(cache_order.get(key, 0.0) or 0.0)
+        if TTS_AUDIO_CACHE_TTL_SECONDS > 0 and last_used and (time.time() - last_used) > TTS_AUDIO_CACHE_TTL_SECONDS:
+            self._remove_cache_file(key, path)
+            return None
+
+        self._touch_cache_entry(state, key, path=path)
         self._record_cache_hit(item.engine)
         self._log_debug(f"[tts_voice] cache hit | guild={item.guild_id} key={key[:10]} path={os.path.basename(path)}")
         return path
@@ -1695,7 +1788,14 @@ class TTSAudioMixin:
     def _worker_header_value(self, headers: Any, name: str, default: str = "") -> str:
         return str(headers.get(name) or headers.get(name.lower()) or default or "").strip()
 
-    async def _request_phone_worker_raw_audio(self, *, payload: dict[str, Any], timeout_seconds: float, max_audio_mb: int) -> dict[str, Any]:
+    async def _request_phone_worker_raw_audio(
+        self,
+        *,
+        payload: dict[str, Any],
+        timeout_seconds: float,
+        max_audio_mb: int,
+        stream_to_file: bool = False,
+    ) -> dict[str, Any]:
         base = self._phone_worker_tts_base_url()
         if not base:
             raise RuntimeError("PHONE_WORKER_ENABLED/HOST/TOKEN não configurado")
@@ -1723,22 +1823,58 @@ class TTSAudioMixin:
                     parsed = {"ok": False, "error": text[:240]}
                 if response.status < 200 or response.status >= 300 or parsed.get("ok") is False:
                     raise RuntimeError(str(parsed.get("error") or f"HTTP {response.status}: {text[:180]}"))
-                # Worker antigo pode responder JSON mesmo no endpoint raw; decodifica sem segunda ida.
                 parsed["_vps_worker_request_ms"] = round((time.monotonic() - started) * 1000.0, 2)
                 return self._decode_worker_audio_payload(parsed, max_audio_mb=max_audio_mb)
-            raw = await response.read()
-            request_ms = (time.monotonic() - started) * 1000.0
             if response.status < 200 or response.status >= 300:
-                raise RuntimeError(f"HTTP {response.status}: {raw[:180]!r}")
-            if not raw:
-                raise RuntimeError("worker raw não retornou áudio")
-            if len(raw) > max_audio_bytes:
-                raise RuntimeError(f"worker raw retornou áudio grande demais: {len(raw)} bytes")
+                raw_error = await response.content.read(180)
+                raise RuntimeError(f"HTTP {response.status}: {raw_error!r}")
+
+            audio_format = self._normalize_worker_audio_format(
+                self._worker_header_value(response.headers, "X-Core-Worker-Audio-Format", "mp3")
+            )
             expected_hash = self._worker_header_value(response.headers, "X-Core-Worker-Sha256")
-            actual_hash = hashlib.sha256(raw).hexdigest()
+            actual_hash = ""
+            raw: bytes | None = None
+            audio_path = ""
+            audio_size = 0
+
+            if stream_to_file:
+                suffix = ".wav" if audio_format == "wav" else ".ogg" if audio_format == "ogg" else ".mp3"
+                audio_path = self._make_runtime_temp_file(suffix=suffix)
+                hasher = hashlib.sha256()
+                try:
+                    with open(audio_path, "wb") as handle:
+                        async for chunk in response.content.iter_chunked(64 * 1024):
+                            if not chunk:
+                                continue
+                            audio_size += len(chunk)
+                            if audio_size > max_audio_bytes:
+                                raise RuntimeError(f"worker raw retornou áudio grande demais: {audio_size} bytes")
+                            handle.write(chunk)
+                            hasher.update(chunk)
+                    if audio_size <= 0:
+                        raise RuntimeError("worker raw não retornou áudio")
+                    actual_hash = hasher.hexdigest()
+                except Exception:
+                    with contextlib.suppress(FileNotFoundError, OSError):
+                        os.remove(audio_path)
+                    raise
+            else:
+                raw = await response.read()
+                audio_size = len(raw)
+                if not raw:
+                    raise RuntimeError("worker raw não retornou áudio")
+                if audio_size > max_audio_bytes:
+                    raise RuntimeError(f"worker raw retornou áudio grande demais: {audio_size} bytes")
+                actual_hash = hashlib.sha256(raw).hexdigest()
+
+            request_ms = (time.monotonic() - started) * 1000.0
             if expected_hash and expected_hash != actual_hash:
+                if audio_path:
+                    with contextlib.suppress(FileNotFoundError, OSError):
+                        os.remove(audio_path)
                 raise RuntimeError("sha256 do áudio raw retornado não confere")
-            audio_format = self._normalize_worker_audio_format(self._worker_header_value(response.headers, "X-Core-Worker-Audio-Format", "mp3"))
+
             timing_ms: dict[str, Any] = {}
             for header_name, key in (
                 ("X-Core-Worker-Worker-Total-Ms", "worker_total"),
@@ -1752,8 +1888,6 @@ class TTSAudioMixin:
                     timing_ms[key] = round(value, 2)
             data = {
                 "ok": True,
-                "raw_audio": raw,
-                "audio_bytes": raw,
                 "audio_format": audio_format,
                 "engine": self._worker_header_value(response.headers, "X-Core-Worker-Engine"),
                 "selected_engine": self._worker_header_value(response.headers, "X-Core-Worker-Selected-Engine") or self._worker_header_value(response.headers, "X-Core-Worker-Engine"),
@@ -1767,22 +1901,34 @@ class TTSAudioMixin:
                 "_vps_worker_request_ms": round(request_ms, 2),
                 "_vps_worker_json_parse_ms": 0.0,
                 "_vps_audio_decode_ms": 0.0,
-                "_vps_worker_response_bytes": len(raw),
-                "audio_bytes_len": len(raw),
+                "_vps_worker_response_bytes": audio_size,
+                "audio_bytes_len": audio_size,
             }
+            if audio_path:
+                data["audio_path"] = audio_path
+            elif raw is not None:
+                data["raw_audio"] = raw
+                data["audio_bytes"] = raw
             return data
 
-    async def _request_phone_worker_tts_audio(self, *, task: str, payload: dict[str, Any], timeout_seconds: float, max_audio_mb: int) -> dict[str, Any]:
+    async def _request_phone_worker_tts_audio(
+        self,
+        *,
+        task: str,
+        payload: dict[str, Any],
+        timeout_seconds: float,
+        max_audio_mb: int,
+        stream_to_file: bool = False,
+    ) -> dict[str, Any]:
         if TTS_WORKER_AGENT_RAW_AUDIO_ENABLED and task == "tts_agent_synthesize":
             try:
                 return await self._request_phone_worker_raw_audio(
                     payload=payload,
                     timeout_seconds=timeout_seconds,
                     max_audio_mb=max_audio_mb,
+                    stream_to_file=stream_to_file,
                 )
             except Exception as exc:
-                # Compatibilidade: worker antigo sem endpoint raw cai no JSON/base64.
-                # Erro real de síntese não deve repetir outra síntese e piorar a latência.
                 if "raw_endpoint_unavailable" not in str(exc):
                     raise
                 self._log_debug(f"[tts_agent] raw audio indisponível; tentando JSON/base64: {exc}")
@@ -1794,6 +1940,7 @@ class TTSAudioMixin:
             raise_on_worker_error=True,
         )
         return self._decode_worker_audio_payload(data, max_audio_mb=max_audio_mb)
+
 
     def _worker_voice_agent_session_reports(self) -> dict[int, dict[str, Any]]:
         reports = getattr(self, "_worker_voice_agent_session_report_cache", None)
@@ -2581,6 +2728,10 @@ class TTSAudioMixin:
             self._record_worker_cache_store(False)
             self._log_debug(f"[tts_worker_cache] store falhou | guild={item.guild_id} engine={item.engine} erro={exc}")
 
+    async def _store_worker_turbo_cache_limited(self, item: QueueItem, path: str) -> None:
+        async with self._get_worker_cache_store_semaphore():
+            await self._store_worker_turbo_cache(item, path)
+
     def _schedule_worker_turbo_cache_store(self, item: QueueItem, path: str) -> None:
         if not TTS_TURBO_WORKER_CACHE_STORE_BACKGROUND:
             return
@@ -2588,8 +2739,22 @@ class TTSAudioMixin:
             return
         if not PHONE_WORKER_ENABLED or not PHONE_WORKER_HOST or not PHONE_WORKER_TOKEN:
             return
-        task = asyncio.create_task(self._store_worker_turbo_cache(item, path))
-        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        tasks = self._get_worker_cache_store_tasks()
+        if len(tasks) >= TTS_TURBO_WORKER_CACHE_STORE_MAX_PENDING:
+            self._log_debug(
+                f"[tts_worker_cache] store descartado por backlog | guild={item.guild_id} engine={item.engine} pending={len(tasks)}"
+            )
+            return
+        task = asyncio.create_task(self._store_worker_turbo_cache_limited(item, path))
+        tasks.add(task)
+
+        def _done(done_task: asyncio.Task) -> None:
+            tasks.discard(done_task)
+            if not done_task.cancelled():
+                with contextlib.suppress(Exception):
+                    done_task.exception()
+
+        task.add_done_callback(_done)
 
     async def _generate_piper_worker_file(self, item: QueueItem) -> str:
         text = str(item.text or "").strip()
@@ -3183,6 +3348,7 @@ class TTSAudioMixin:
         last_error: Exception | None = None
         max_attempts = max(1, int(TTS_WORKER_AGENT_BUSY_RETRY_ATTEMPTS or 0) + 1)
         for attempt in range(max_attempts):
+            path = ""
             try:
                 request_started = time.monotonic()
                 data = await self._request_phone_worker_tts_audio(
@@ -3190,25 +3356,33 @@ class TTSAudioMixin:
                     payload=self._tts_agent_payload_for_item(item),
                     timeout_seconds=TTS_WORKER_AGENT_SYNTH_TIMEOUT_SECONDS,
                     max_audio_mb=TTS_WORKER_AGENT_MAX_AUDIO_MB,
+                    stream_to_file=True,
                 )
                 request_ms = (time.monotonic() - request_started) * 1000.0
-                raw = data.get("raw_audio") or data.get("audio_bytes")
-                if not isinstance(raw, (bytes, bytearray)) or not raw:
-                    raise RuntimeError("TTS Agent não retornou áudio")
                 data["requested_engine"] = str(item.engine or "").strip().lower()
-                data["audio_bytes_len"] = len(raw)
                 fmt = self._normalize_worker_audio_format(data.get("audio_format"))
                 data["audio_format"] = fmt
-                suffix = ".wav" if fmt == "wav" else ".ogg" if fmt == "ogg" else ".mp3"
-                path = self._make_runtime_temp_file(suffix=suffix)
+                path = str(data.get("audio_path") or "")
+                write_ms = 0.0
+                raw = data.get("raw_audio") or data.get("audio_bytes")
+                if path:
+                    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+                        raise RuntimeError("TTS Agent retornou arquivo de áudio inválido")
+                    data["audio_bytes_len"] = int(data.get("audio_bytes_len") or os.path.getsize(path))
+                else:
+                    if not isinstance(raw, (bytes, bytearray)) or not raw:
+                        raise RuntimeError("TTS Agent não retornou áudio")
+                    data["audio_bytes_len"] = len(raw)
+                    suffix = ".wav" if fmt == "wav" else ".ogg" if fmt == "ogg" else ".mp3"
+                    path = self._make_runtime_temp_file(suffix=suffix)
 
-                def _write_audio(target: str, content: bytes) -> None:
-                    with open(target, "wb") as handle:
-                        handle.write(content)
+                    def _write_audio(target: str, content: bytes) -> None:
+                        with open(target, "wb") as handle:
+                            handle.write(content)
 
-                write_started = time.monotonic()
-                await asyncio.to_thread(_write_audio, path, bytes(raw))
-                write_ms = (time.monotonic() - write_started) * 1000.0
+                    write_started = time.monotonic()
+                    await asyncio.to_thread(_write_audio, path, bytes(raw))
+                    write_ms = (time.monotonic() - write_started) * 1000.0
                 total_ms = (time.monotonic() - started) * 1000.0
                 self._record_tts_agent_synth_success(total_ms=total_ms, data=data)
                 selected_engine = str(data.get("selected_engine") or data.get("engine") or "").strip().lower()
@@ -3238,7 +3412,7 @@ class TTSAudioMixin:
                     item.engine,
                     selected_engine or "unknown",
                     fmt,
-                    len(raw),
+                    int(data.get("audio_bytes_len") or 0),
                     bool(data.get("cache_hit")),
                     total_ms,
                     " ".join(timing_bits),
@@ -3247,6 +3421,9 @@ class TTSAudioMixin:
                     setattr(item, "_tts_agent_inline_cache", True)
                 return path
             except Exception as exc:
+                if path:
+                    with contextlib.suppress(FileNotFoundError, OSError):
+                        os.remove(path)
                 last_error = exc
                 if attempt < max_attempts - 1 and self._is_tts_agent_transient_busy_error(exc):
                     metrics["tts_agent_busy_retries"] = int(metrics.get("tts_agent_busy_retries", 0) or 0) + 1
