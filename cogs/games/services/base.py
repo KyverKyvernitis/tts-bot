@@ -545,16 +545,11 @@ class GincanaBase:
             reward_lines.append(
                 f"-# A recompensa inclui +{extra_streak_bonus} {self._CHIP_EMOJI} pela ofensiva."
             )
-        reward_lines.append("-# Fichas bônus são usadas antes das fichas normais.")
-
         streak_lines = [
             "## 🔥 Ofensiva diária",
             f"**{streak_label}**",
             f"**Progresso da ofensiva:** {streak_progress}",
         ]
-        if streak_transition == "restarted":
-            streak_lines.append("A ofensiva anterior foi reiniciada e recomeça hoje.")
-
         view.add_item(
             discord.ui.Container(
                 discord.ui.TextDisplay(
