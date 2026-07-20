@@ -2,6 +2,7 @@ import asyncio
 import base64
 import random
 import time
+from datetime import datetime, timedelta
 
 import discord
 from discord.ext import commands
@@ -431,7 +432,6 @@ class GincanaBase:
 
     async def _claim_daily_bonus_with_activity(self, guild_id: int, user_id: int, *, base_amount: int = 10) -> tuple[bool, int, int, int, int]:
         claimed, new_balance, bonus, streak = await self.db.claim_daily_bonus(guild_id, user_id, base_amount=base_amount)
-        bonus_chips = self._get_user_bonus_chips(guild_id, user_id)
         if claimed:
             await self._mark_chip_activity(guild_id, user_id)
             try:
@@ -441,6 +441,167 @@ class GincanaBase:
             except Exception:
                 pass
         return claimed, new_balance, bonus, 10, streak
+
+    def _daily_streak_label(self, streak: int) -> str:
+        value = max(0, int(streak or 0))
+        return "1 dia consecutivo" if value == 1 else f"{value} dias consecutivos"
+
+    def _daily_streak_progress(self, streak: int) -> str:
+        filled = min(7, max(0, int(streak or 0)))
+        return f"`{'▰' * filled}{'▱' * (7 - filled)}`  **{filled}/7**"
+
+    def _daily_reset_remaining_seconds(self) -> float:
+        try:
+            now = self.db._sao_paulo_now()
+            next_reset = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            return max(0.0, float((next_reset - now).total_seconds()))
+        except Exception:
+            return 24 * 60 * 60
+
+    def _format_daily_reset_remaining(self, seconds: float) -> str:
+        try:
+            total_minutes = max(1, int((float(seconds) + 59) // 60))
+        except Exception:
+            total_minutes = 1
+        hours, minutes = divmod(total_minutes, 60)
+        if hours and minutes:
+            return f"{hours}h {minutes}min"
+        if hours:
+            return f"{hours}h"
+        return f"{minutes}min"
+
+    def _daily_streak_transition(self, status: dict) -> str:
+        last_key = str(status.get("last_claim_key", "") or "")
+        current_streak = max(0, int(status.get("streak", 0) or 0))
+        if not last_key or current_streak <= 0:
+            return "started"
+        try:
+            today = datetime.strptime(str(status.get("today_key", "")), "%Y-%m-%d").date()
+            last_claim = datetime.strptime(last_key, "%Y-%m-%d").date()
+            return "continued" if today - last_claim == timedelta(days=1) else "restarted"
+        except Exception:
+            return "restarted"
+
+    def _make_daily_view(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        claimed: bool,
+        streak: int,
+        bonus: int = 0,
+        bonus_bonus: int = 0,
+        spin_granted: bool = False,
+        carta_spin_granted: bool = False,
+        streak_transition: str = "continued",
+    ) -> discord.ui.LayoutView:
+        view = discord.ui.LayoutView(timeout=None)
+        streak_value = max(0, int(streak or 0))
+        streak_label = self._daily_streak_label(streak_value)
+        streak_progress = self._daily_streak_progress(streak_value)
+
+        if not claimed:
+            next_streak = streak_value + 1
+            next_label = "1 dia" if next_streak == 1 else f"{next_streak} dias"
+            remaining = self._format_daily_reset_remaining(self._daily_reset_remaining_seconds())
+            view.add_item(
+                discord.ui.Container(
+                    discord.ui.TextDisplay(
+                        "# ⏳ Bônus diário já resgatado\n"
+                        "Sua recompensa de hoje já está garantida."
+                    ),
+                    discord.ui.Separator(),
+                    discord.ui.TextDisplay(
+                        "## 🔥 Sequência diária\n"
+                        f"**{streak_label}**\n"
+                        f"**Progresso do bônus:** {streak_progress}\n"
+                        f"Próximo avanço: **{next_label}**."
+                    ),
+                    discord.ui.Separator(),
+                    discord.ui.TextDisplay(
+                        "## Próximo resgate\n"
+                        f"Disponível em **{remaining}**.\n"
+                        "-# Volte depois do reset para continuar a sequência."
+                    ),
+                    accent_color=discord.Color.orange(),
+                )
+            )
+            return view
+
+        reward_lines = [
+            "## Recompensas de hoje",
+            f"• **+{int(bonus)}** {self._CHIP_EMOJI} fichas",
+            f"• **+{int(bonus_bonus)}** {self._CHIP_BONUS_EMOJI} fichas bônus",
+            (
+                "• 🎰 **+1 giro de roleta**"
+                if spin_granted
+                else "• 🎰 Giro extra da roleta **já disponível**"
+            ),
+            (
+                "• 🎴 **+1 giro de cartas**"
+                if carta_spin_granted
+                else "• 🎴 Giro extra de cartas **já disponível**"
+            ),
+        ]
+        extra_streak_bonus = max(0, int(bonus) - 10)
+        if extra_streak_bonus > 0:
+            reward_lines.append(
+                f"-# A recompensa inclui +{extra_streak_bonus} {self._CHIP_EMOJI} pela sequência."
+            )
+        reward_lines.append("-# Fichas bônus são usadas antes das fichas normais.")
+
+        next_streak = streak_value + 1
+        next_label = "1 dia" if next_streak == 1 else f"{next_streak} dias"
+        streak_lines = [
+            "## 🔥 Sequência diária",
+            f"**{streak_label}**",
+            f"**Progresso do bônus:** {streak_progress}",
+        ]
+        if streak_transition == "restarted":
+            streak_lines.append("A sequência anterior foi reiniciada e recomeça hoje.")
+        streak_lines.append(f"Volte amanhã para avançar para **{next_label}**.")
+
+        view.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(
+                    "# 🎁 Bônus diário resgatado\n"
+                    "As recompensas de hoje já foram adicionadas à sua conta."
+                ),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("\n".join(reward_lines)),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("\n".join(streak_lines)),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(
+                    "## Saldo atual\n"
+                    f"{self._format_compact_chip_balance(guild_id, user_id)}"
+                ),
+                accent_color=discord.Color.green(),
+            )
+        )
+        return view
+
+    async def _claim_daily_view(self, guild_id: int, user_id: int) -> discord.ui.LayoutView:
+        previous_status = self.db.get_user_daily_status(guild_id, user_id)
+        streak_transition = self._daily_streak_transition(previous_status)
+        claimed, _new_balance, bonus, bonus_bonus, streak = await self._claim_daily_bonus_with_activity(guild_id, user_id)
+        if not claimed:
+            return self._make_daily_view(guild_id, user_id, claimed=False, streak=streak)
+
+        await self._grant_weekly_points(guild_id, user_id, max(3, bonus // 2))
+        spin_granted, _spin_state = await self._grant_daily_roleta_spin(guild_id, user_id)
+        carta_spin_granted, _carta_spin_state = await self._grant_daily_carta_spin(guild_id, user_id)
+        return self._make_daily_view(
+            guild_id,
+            user_id,
+            claimed=True,
+            streak=streak,
+            bonus=bonus,
+            bonus_bonus=bonus_bonus,
+            spin_granted=spin_granted,
+            carta_spin_granted=carta_spin_granted,
+            streak_transition=streak_transition,
+        )
 
     async def _force_reset_chips(self, guild_id: int, user_id: int, *, amount: int = CHIPS_DEFAULT) -> int:
         await self._set_user_chips_value(guild_id, user_id, int(amount), mark_activity=True)
@@ -517,10 +678,16 @@ class GincanaBase:
 
     def _daily_bonus_text(self, guild_id: int, user_id: int) -> str:
         status = self.db.get_user_daily_status(guild_id, user_id)
-        streak = int(status.get("streak", 0) or 0)
+        streak = max(0, int(status.get("streak", 0) or 0))
+        streak_text = self._daily_streak_label(streak)
         if status.get("available"):
-            return f"Use **_daily** para pegar seu bônus • Streak: **{streak}**"
-        return f"Já resgatado hoje • Streak: **{streak}**"
+            transition = self._daily_streak_transition(status)
+            if transition == "continued":
+                return f"Disponível agora • Sequência atual: **{streak_text}**"
+            if transition == "restarted":
+                return "Disponível agora • O próximo resgate inicia uma nova sequência"
+            return "Disponível agora • Comece sua sequência diária"
+        return f"Resgatado hoje • Sequência: **{streak_text}**"
 
     def _best_game_summary(self, stats: dict) -> str | None:
         roleta_wins = int(stats.get('roleta_jackpots', 0) or 0) + int(stats.get('cartas_jackpots', 0) or 0)

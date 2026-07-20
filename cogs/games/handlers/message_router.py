@@ -74,35 +74,9 @@ class GincanaMessageRouterMixin:
             await message.channel.send(view=self._make_chip_recharge_view(message.guild.id, message.author.id, used, new_balance, note))
             return True
 
-        claimed, new_balance, bonus, bonus_bonus, streak = await self._claim_daily_bonus_with_activity(message.guild.id, message.author.id)
-        if not claimed:
-            await message.channel.send(
-                embed=self._make_embed(
-                    "🎁 Daily já resgatado",
-                    f"Você já pegou seu bônus de hoje. Streak atual: **{streak}**.",
-                    ok=False,
-                )
-            )
-            return True
-        await self._grant_weekly_points(message.guild.id, message.author.id, max(3, bonus // 2))
-        spin_granted, _spin_state = await self._grant_daily_roleta_spin(message.guild.id, message.author.id)
-        carta_spin_granted, _carta_spin_state = await self._grant_daily_carta_spin(message.guild.id, message.author.id)
-        spin_text = "Você ganhou **+1 giro de roleta**" if spin_granted else "Seu giro extra da roleta já estava disponível"
-        carta_spin_text = "Você ganhou **+1 giro de cartas**" if carta_spin_granted else "Seu giro extra de cartas já estava disponível"
-        embed = discord.Embed(
-            title="🎁 Bônus diário resgatado",
-            description=(
-                f"Você ganhou {self._chip_amount(bonus)}\n"
-                f"Você ganhou {self._bonus_chip_amount(bonus_bonus)} em fichas bônus\n"
-                f"{spin_text}\n"
-                f"{carta_spin_text}\n"
-                f"Streak atual: **{streak}**\n"
-                f"Saldo atual: {self._format_compact_chip_balance(message.guild.id, message.author.id)}"
-            ),
-            color=discord.Color.green(),
+        await message.channel.send(
+            view=await self._claim_daily_view(message.guild.id, message.author.id)
         )
-        embed.set_footer(text="Volte amanhã para manter a sequência")
-        await message.channel.send(embed=embed)
         return True
 
     async def _handle_rob_trigger(self, message: discord.Message) -> bool:
