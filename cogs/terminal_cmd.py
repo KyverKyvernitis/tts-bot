@@ -18,6 +18,8 @@ from typing import Iterable
 import discord
 from discord.ext import commands
 
+from .terminal_fun import TerminalFunRouter
+
 try:
     import config
 except Exception:  # pragma: no cover - fallback defensivo para testes isolados
@@ -31,6 +33,7 @@ OUTPUT_PREVIEW_CHARS = 3200
 EDITOR_PAGE_LINES = 80
 EDITOR_MAX_FILE_BYTES = 1024 * 1024
 EDITOR_TIMEOUT_SECONDS = 30 * 60
+DISCORD_MESSAGE_MAX_CHARS = 2000
 BOT_SERVICE = "tts-bot.service"
 CALLKEEPER_TERMS = (
     "callkeeper",
@@ -443,6 +446,7 @@ class TerminalCommandCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._run_lock = asyncio.Lock()
+        self._fun_router = TerminalFunRouter(self)
 
     async def _is_owner(self, ctx: commands.Context) -> bool:
         user_id = _safe_int(getattr(ctx.author, "id", 0))
@@ -476,6 +480,186 @@ class TerminalCommandCog(commands.Cog):
         if file is not None:
             kwargs["file"] = file
         return await ctx.reply(**kwargs)
+
+    def _usage_text(self) -> str:
+        return (
+            "Use `_cmd help` para ver os subcomandos, "
+            "`_cmd <comando de terminal>` para o Bash ou `_cmd nano <arquivo>` para o editor."
+        )
+
+    async def _send_direct_message(self, ctx: commands.Context, user_id: int, content: str) -> None:
+        if len(content) > DISCORD_MESSAGE_MAX_CHARS:
+            await self._reply_notice(
+                ctx,
+                "Terminal · DM",
+                f"A mensagem ultrapassa o limite de {DISCORD_MESSAGE_MAX_CHARS} caracteres do Discord.",
+                ok=False,
+            )
+            return
+
+        try:
+            user = self.bot.get_user(user_id)
+            if user is None:
+                user = await self.bot.fetch_user(user_id)
+            sent = await user.send(
+                content,
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False,
+                    roles=False,
+                    users=True,
+                    replied_user=False,
+                ),
+            )
+        except discord.NotFound:
+            await self._reply_notice(ctx, "Terminal · DM", f"Usuário `{user_id}` não encontrado.", ok=False)
+            return
+        except discord.Forbidden:
+            await self._reply_notice(
+                ctx,
+                "Terminal · DM",
+                "O Discord recusou a mensagem privada. O usuário pode estar com as DMs fechadas ou não compartilhar servidor com o bot.",
+                ok=False,
+            )
+            return
+        except discord.HTTPException as exc:
+            await self._reply_notice(
+                ctx,
+                "Terminal · DM",
+                f"Falha ao enviar a mensagem: `{type(exc).__name__}: {exc}`",
+                ok=False,
+            )
+            return
+        except Exception as exc:
+            await self._reply_notice(
+                ctx,
+                "Terminal · DM",
+                f"Falha inesperada: `{type(exc).__name__}: {exc}`",
+                ok=False,
+            )
+            return
+
+        user_label = discord.utils.escape_markdown(str(user))
+        await self._reply_notice(
+            ctx,
+            "Terminal · DM",
+            f"Mensagem enviada para **{user_label}** (`{user.id}`).\nID da mensagem: `{sent.id}`.",
+            ok=True,
+        )
+
+    async def _send_channel_message(self, ctx: commands.Context, channel_id: int, content: str) -> None:
+        if len(content) > DISCORD_MESSAGE_MAX_CHARS:
+            await self._reply_notice(
+                ctx,
+                "Terminal · canal",
+                f"A mensagem ultrapassa o limite de {DISCORD_MESSAGE_MAX_CHARS} caracteres do Discord.",
+                ok=False,
+            )
+            return
+
+        try:
+            channel = self.bot.get_channel(channel_id)
+            if channel is None:
+                channel = await self.bot.fetch_channel(channel_id)
+        except discord.NotFound:
+            await self._reply_notice(ctx, "Terminal · canal", f"Canal `{channel_id}` não encontrado.", ok=False)
+            return
+        except discord.Forbidden:
+            await self._reply_notice(ctx, "Terminal · canal", "O bot não tem acesso a esse canal.", ok=False)
+            return
+        except discord.HTTPException as exc:
+            await self._reply_notice(
+                ctx,
+                "Terminal · canal",
+                f"Falha ao localizar o canal: `{type(exc).__name__}: {exc}`",
+                ok=False,
+            )
+            return
+
+        if not isinstance(channel, discord.abc.Messageable):
+            await self._reply_notice(
+                ctx,
+                "Terminal · canal",
+                f"O destino `{channel_id}` não aceita mensagens.",
+                ok=False,
+            )
+            return
+
+        try:
+            sent = await channel.send(
+                content,
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=False,
+                    roles=False,
+                    users=True,
+                    replied_user=False,
+                ),
+            )
+        except discord.Forbidden:
+            await self._reply_notice(
+                ctx,
+                "Terminal · canal",
+                "O bot não tem permissão para enviar mensagens nesse canal.",
+                ok=False,
+            )
+            return
+        except discord.HTTPException as exc:
+            await self._reply_notice(
+                ctx,
+                "Terminal · canal",
+                f"Falha ao enviar a mensagem: `{type(exc).__name__}: {exc}`",
+                ok=False,
+            )
+            return
+        except Exception as exc:
+            await self._reply_notice(
+                ctx,
+                "Terminal · canal",
+                f"Falha inesperada: `{type(exc).__name__}: {exc}`",
+                ok=False,
+            )
+            return
+
+        channel_mention = getattr(channel, "mention", f"`{channel_id}`")
+        jump_url = getattr(sent, "jump_url", "")
+        detail = f"Mensagem enviada em {channel_mention}.\nID da mensagem: `{sent.id}`."
+        if jump_url:
+            detail += f"\n[Abrir mensagem]({jump_url})"
+        await self._reply_notice(ctx, "Terminal · canal", detail, ok=True)
+
+    async def _handle_message_subcommand(self, ctx: commands.Context, command: str) -> bool:
+        parts = command.split(maxsplit=2)
+        if not parts:
+            return False
+
+        subcommand = parts[0].casefold()
+        if subcommand not in {"dm", "canal", "channel"}:
+            return False
+
+        label = "dm" if subcommand == "dm" else "canal"
+        if len(parts) < 3:
+            usage = (
+                "`_cmd dm <id_do_usuário> <mensagem>`"
+                if subcommand == "dm"
+                else "`_cmd canal <id_do_canal> <mensagem>`"
+            )
+            await self._reply_notice(ctx, f"Terminal · {label}", f"Use {usage}.", ok=False)
+            return True
+
+        target_raw = parts[1].strip()
+        target_id = _safe_int(target_raw)
+        content = parts[2].strip()
+        if target_id <= 0 or not target_raw.isdigit():
+            await self._reply_notice(ctx, f"Terminal · {label}", "Informe um ID numérico válido.", ok=False)
+            return True
+        if not content:
+            await self._reply_notice(ctx, f"Terminal · {label}", "A mensagem não pode ficar vazia.", ok=False)
+            return True
+
+        if subcommand == "dm":
+            await self._send_direct_message(ctx, target_id, content)
+        else:
+            await self._send_channel_message(ctx, target_id, content)
+        return True
 
     def _is_callkeeper_rescue_hint(self, message: discord.Message) -> bool:
         author = getattr(message, "author", None)
@@ -823,9 +1007,16 @@ class TerminalCommandCog(commands.Cog):
             return
         command = str(command or "").strip()
         if not command:
-            await self._reply_notice(ctx, "Terminal", "Use `_cmd <comando de terminal>` ou `_cmd nano <arquivo>`.", ok=False)
+            await self._reply_notice(ctx, "Terminal", self._usage_text(), ok=False)
             return
         self.bot.loop.create_task(self._suppress_callkeeper_rescue_hints(ctx))
+
+        if await self._handle_message_subcommand(ctx, command):
+            return
+
+        if await self._fun_router.handle(ctx, command):
+            return
+
         if _touches_callkeeper(command):
             await self._reply_notice(ctx, "Terminal", "Bloqueado: CallKeeper é protegido para recuperação do bot.", ok=False)
             return
@@ -868,7 +1059,7 @@ class TerminalCommandCog(commands.Cog):
             return
         if isinstance(error, commands.MissingRequiredArgument):
             if await self._is_owner(ctx):
-                await self._reply_notice(ctx, "Terminal", "Use `_cmd <comando de terminal>` ou `_cmd nano <arquivo>`.", ok=False)
+                await self._reply_notice(ctx, "Terminal", self._usage_text(), ok=False)
             return
         if isinstance(error, commands.CheckFailure):
             return
