@@ -98,6 +98,7 @@ class GincanaBase:
     _CHIP_GAIN_EMOJI = "<:emoji_64:1485043651292827788>"
     _CHIP_LOSS_EMOJI = "<:emoji_65:1485043671077228786>"
     _CHIP_BONUS_EMOJI = "<:laranja:1487076933819830443>"
+    _EFFECT_EMOJI = "<:star:1487936913431072780>"
     _MAX_CHIP_DEBT = 100
 
     def __init__(self, bot: commands.Bot, db: SettingsDB):
@@ -910,38 +911,38 @@ class GincanaBase:
                 "name": "Preto",
                 "emoji": "🥷🏿",
                 "effects": [
-                    {"key": "mao_negra", "title": "Mão Negra", "desc": "Você pode roubar **2** vezes a cada **4h**"},
-                    {"key": "labia", "title": "Lábia", "desc": "Você pode mendigar **2** vezes a cada **3h**"},
-                    {"key": "sangue_frio", "title": "Sangue Frio", "desc": f"Ao falhar em roubar: **5** {self._CHIP_LOSS_EMOJI}"},
-                    {"key": "mao_grande", "title": "Mão Grande", "desc": f"Roubo máximo: **40** {self._CHIP_EMOJI}"},
+                    {"key": "mao_negra", "title": "Mão Negra", "desc": "Permite realizar **2 roubos** a cada **4h**."},
+                    {"key": "labia", "title": "Lábia", "desc": "Permite pedir esmola **2 vezes** a cada **3h**."},
+                    {"key": "sangue_frio", "title": "Sangue Frio", "desc": f"Ao falhar em um roubo, a perda é reduzida para **5** {self._CHIP_LOSS_EMOJI}."},
+                    {"key": "mao_grande", "title": "Mão Grande", "desc": f"Aumenta o valor máximo de cada roubo para **40** {self._CHIP_EMOJI}."},
                 ],
             },
             "apostador": {
                 "name": "Apostador",
                 "emoji": "🎰",
                 "effects": [
-                    {"key": "jackpot", "title": "999 Jackpot", "desc": f"**{self._format_percent_text(0.15)}** • **100** {self._CHIP_GAIN_EMOJI}"},
-                    {"key": "all_in", "title": "777 All-in", "desc": f"**{self._format_percent_text(0.05)}** • **200** {self._CHIP_GAIN_EMOJI}"},
-                    {"key": "666", "title": "666 Besta", "desc": f"**{self._format_percent_text(0.25)}** • O custo da roleta é estornado"},
-                    {"key": "mesa_alta", "title": "Mesa Alta", "desc": f"Entrada da roleta agora é de **25** {self._CHIP_LOSS_EMOJI}"},
+                    {"key": "jackpot", "title": "Jackpot 999", "desc": f"Tem **{self._format_percent_text(0.15)} de chance** de obter **999** e receber **100** {self._CHIP_GAIN_EMOJI}."},
+                    {"key": "all_in", "title": "All-in 777", "desc": f"Tem **{self._format_percent_text(0.05)} de chance** de obter **777** e receber **200** {self._CHIP_GAIN_EMOJI}."},
+                    {"key": "666", "title": "Marca da Besta", "desc": f"Quando não sair jackpot, há **{self._format_percent_text(0.25)} de chance** de obter **666** e recuperar o custo do giro."},
+                    {"key": "mesa_alta", "title": "Mesa Alta", "desc": f"Aumenta o custo de cada giro da Roleta para **25** {self._CHIP_LOSS_EMOJI}."},
                 ],
             },
             "sortudo": {
                 "name": "Sortudo",
                 "emoji": "🍀",
                 "effects": [
-                    {"key": "midas", "title": "Midas", "desc": f"Buckshot dourado: **{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)}** • Truco dourado: **{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)}**"},
-                    {"key": "premio_extra", "title": "Prêmio Extra", "desc": f"Truco dourado: **+20** {self._CHIP_BONUS_EMOJI}"},
-                    {"key": "bencao", "title": "Benção", "desc": "Ganha **1** carga a cada **7h**, acumula até **2**. Roleta e cartas gastam **1**"},
+                    {"key": "midas", "title": "Midas", "desc": f"Buckshot e Truco têm **{self._format_percent_text(RACE_SPECIAL_SORTUDO_CHANCE)} de chance** de iniciar na versão dourada."},
+                    {"key": "premio_extra", "title": "Prêmio Extra", "desc": f"No Truco dourado, cada vencedor recebe **+20** {self._CHIP_BONUS_EMOJI} adicionais."},
+                    {"key": "bencao", "title": "Bênção", "desc": "Recebe **1 carga gratuita a cada 7h** e pode guardar até **2 cargas**. Cada carga paga **1 giro da Roleta** ou **1 mão de Cartas**."},
                 ],
             },
             "coringa": {
                 "name": "Coringa",
                 "emoji": "🃏",
                 "effects": [
-                    {"key": "as", "title": "Às", "desc": f"Em jogos de lobby: **{self._format_percent_text(0.35)}** de chance de recuperar **50%** da entrada"},
-                    {"key": "trapaceiro", "title": "Trapaceiro", "desc": f"Ao falhar em roubar: **{self._format_percent_text(0.25)}** de chance de não perder nada"},
-                    {"key": "redencao", "title": "Redenção", "desc": f"Em roleta e cartas: **{self._format_percent_text(0.5)}** de chance de recuperar **50%** do custo do giro"},
+                    {"key": "as", "title": "Ás", "desc": f"Em jogos com lobby, há **{self._format_percent_text(0.35)} de chance** de recuperar **50% da entrada** após uma derrota."},
+                    {"key": "trapaceiro", "title": "Trapaceiro", "desc": f"Ao falhar em um roubo, há **{self._format_percent_text(0.25)} de chance** de não perder fichas."},
+                    {"key": "redencao", "title": "Redenção", "desc": f"Ao perder na Roleta ou em Cartas, há **{self._format_percent_text(0.5)} de chance** de recuperar **50% do custo**."},
                 ],
             },
         }
@@ -970,22 +971,39 @@ class GincanaBase:
         if not title:
             return ""
         detail_map = {
-            "labia": "seu uso extra de mendigar foi aplicado.",
-            "bencao": "uma benção foi usada.",
-            "mao_negra": "você usou o limite ampliado de roubo.",
-            "mao_grande": "o roubo máximo foi ampliado.",
-            "sangue_frio": "a perda ao falhar foi reduzida.",
-            "trapaceiro": "você se safou da perda no roubo.",
-            "jackpot": "o prêmio especial de **100** foi ativado.",
-            "all_in": "o prêmio especial de **200** foi ativado.",
-            "666": "o custo da roleta foi estornado.",
+            "labia": "o uso extra de pedir esmola foi liberado.",
+            "bencao": "uma carga pagou esta jogada.",
+            "mao_negra": "o segundo roubo do período foi utilizado.",
+            "mao_grande": "o limite máximo do roubo foi ampliado.",
+            "sangue_frio": "a penalidade do roubo foi reduzida.",
+            "trapaceiro": "você escapou da penalidade do roubo.",
+            "jackpot": f"você acertou o **999** e recebeu **100** {self._CHIP_GAIN_EMOJI}.",
+            "all_in": f"você acertou o **777** e recebeu **200** {self._CHIP_GAIN_EMOJI}.",
+            "666": "o custo do giro foi devolvido.",
             "midas": "a versão dourada foi ativada.",
-            "premio_extra": f"o prêmio bônus de **20** {self._CHIP_BONUS_EMOJI} foi aplicado.",
-            "as": "você recuperou **50%** da entrada do lobby.",
-            "redencao": "você recuperou **50%** do custo do giro.",
+            "premio_extra": f"cada vencedor recebeu **+20** {self._CHIP_BONUS_EMOJI} adicionais.",
+            "as": "você recuperou **50% da entrada**.",
+            "redencao": "você recuperou **50% do custo**.",
         }
-        suffix = str(detail or detail_map.get(str(effect_key or "").strip().lower(), "")).strip()
-        return f"Efeito **{title}** foi usado, {suffix}" if suffix else f"Efeito **{title}** foi usado."
+        effect_key = str(effect_key or "").strip().lower()
+        activation_labels = {
+            "labia": "Lábia ativada",
+            "bencao": "Bênção consumida",
+            "mao_negra": "Mão Negra ativada",
+            "mao_grande": "Mão Grande ativada",
+            "sangue_frio": "Sangue Frio ativado",
+            "trapaceiro": "Trapaceiro ativado",
+            "jackpot": "Jackpot 999 ativado",
+            "all_in": "All-in 777 ativado",
+            "666": "Marca da Besta ativada",
+            "midas": "Midas ativado",
+            "premio_extra": "Prêmio Extra ativado",
+            "as": "Ás ativado",
+            "redencao": "Redenção ativada",
+        }
+        suffix = str(detail or detail_map.get(effect_key, "")).strip()
+        label = activation_labels.get(effect_key, f"{title} ativado")
+        return f"{self._EFFECT_EMOJI} **{label}:** {suffix}" if suffix else f"{self._EFFECT_EMOJI} **{label}.**"
 
     def _race_effect_marker(self, guild_id: int, user_id: int, effect_key: str) -> str:
         return self._race_effect_message(guild_id, user_id, effect_key)
@@ -1268,11 +1286,11 @@ class GincanaBase:
 
     def _sortudo_blessing_note(self, guild_id: int, user_id: int, *, kind: str) -> str:
         kind_key = str(kind or "").strip().lower()
-        detail = "uma benção bancou esse giro." if kind_key == "roleta" else "uma benção bancou essa mão."
+        detail = "uma carga pagou este giro." if kind_key == "roleta" else "uma carga pagou esta mão."
         marker = self._race_effect_message(guild_id, user_id, "bencao", detail)
         if marker:
             return marker
-        return "Uma benção bancou esse giro." if kind_key == "roleta" else "Uma benção bancou essa mão."
+        return "Uma bênção pagou este giro." if kind_key == "roleta" else "Uma bênção pagou esta mão."
 
     async def _maybe_apply_coringa_cashback(self, guild_id: int, user_id: int, entry_cost: int, *, chance: float = 0.35) -> int:
         if entry_cost <= 0 or not self._race_is(guild_id, user_id, "coringa"):

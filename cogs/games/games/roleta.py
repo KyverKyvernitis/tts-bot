@@ -115,14 +115,16 @@ class GincanaRoletaMixin:
             ]
             return "```text\n" + "\n".join(lines) + "\n```"
         def _build_game_flow_description(self, *, entry_cost: int, jackpot: int, balance_text: str, board: str, summary: str | None = None) -> str:
-            lines = [
-                f"Entrada: **{entry_cost} {self._CHIP_LOSS_EMOJI}**",
-                f"Jackpot: **{jackpot} {self._CHIP_GAIN_EMOJI}**",
-                f"Saldo atual: {balance_text}",
-            ]
+            lines: list[str] = []
             if summary:
-                lines.extend(["", summary])
-            lines.extend(["", board])
+                lines.extend([summary, ""])
+            lines.extend([
+                f"**Entrada:** {entry_cost} {self._CHIP_LOSS_EMOJI}",
+                f"**Jackpot:** {jackpot} {self._CHIP_GAIN_EMOJI}",
+                f"**Saldo atual:** {balance_text}",
+                "",
+                board,
+            ])
             return "\n".join(lines)
         def _roleta_jackpot_preview(self, guild_id: int, user_id: int) -> int:
             return ROLETA_APOSTADOR_MEGA_JACKPOT_CHIPS if self._race_is(guild_id, user_id, "apostador") else ROLETA_JACKPOT_CHIPS
@@ -254,7 +256,8 @@ class GincanaRoletaMixin:
             available = int(state.get("available", 0) or 0)
             if available <= 0 and is_staff:
                 return "Seus giros acabaram, mas como você é staff você ainda pode girar."
-            return f"Restam {available} giros • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
+            giro_text = "giro" if available == 1 else "giros"
+            return f"Resta {available} {giro_text} • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
 
         def _roleta_spin_message_text(self, state: dict[str, float | int]) -> tuple[str, str]:
             total = max(ROLETA_SPIN_LIMIT, int(state.get("total", ROLETA_SPIN_LIMIT) or ROLETA_SPIN_LIMIT))
@@ -881,7 +884,8 @@ class GincanaRoletaMixin:
             available = int(state.get("available", 0) or 0)
             if available <= 0 and is_staff:
                 return "Seus giros de cartas acabaram, mas como você é staff você ainda pode girar."
-            return f"Restam {available} giros de cartas • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
+            giro_text = "giro de cartas" if available == 1 else "giros de cartas"
+            return f"Resta {available} {giro_text} • Reset em {self._format_roleta_reset_time(float(state.get('reset_in', 0.0) or 0.0))}"
 
         def _carta_spin_message_text(self, state: dict[str, float | int]) -> tuple[str, str]:
             total = max(CARTA_SPIN_LIMIT, int(state.get("total", CARTA_SPIN_LIMIT) or CARTA_SPIN_LIMIT))
@@ -1204,7 +1208,7 @@ class GincanaRoletaMixin:
                         await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
                         await self.db.add_user_game_stat(guild.id, actor.id, "roleta_jackpots", 1)
                         await self._grant_weekly_points(guild.id, actor.id, 20)
-                        summary = f"Você ganhou {self._chip_amount(result_amount)}."
+                        summary = f"**Prêmio:** {self._chip_text(result_amount, kind='gain')}."
                         effect_note = ""
                         if self._race_is(guild.id, actor.id, "apostador"):
                             effect_note = self._race_effect_message(guild.id, actor.id, "all_in" if result_kind == "jackpot_mega" else "jackpot")
@@ -1212,12 +1216,12 @@ class GincanaRoletaMixin:
                             summary = f"{effect_note}\n{summary}"
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
-                        embed = self._make_roleta_result_embed("💥🎰 JACKPOT 777!!" if result_kind == "jackpot_mega" else ("💥🎰 JACKPOT 999!!" if self._race_is(guild.id, actor.id, "apostador") else "💥🎰 JACKPOT!!"), summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=True, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
+                        embed = self._make_roleta_result_embed("🎰 Jackpot 777!" if result_kind == "jackpot_mega" else ("🎰 Jackpot 999!" if self._race_is(guild.id, actor.id, "apostador") else "🎰 Jackpot!"), summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=True, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
                     elif result_kind == "joker_premium":
                         await self._record_game_played(guild.id, actor.id, weekly_points=6)
                         await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
                         await self._grant_weekly_points(guild.id, actor.id, 8)
-                        summary = f"Teve símbolo coringa e rendeu {self._chip_text(result_amount, kind='gain')}."
+                        summary = f"O símbolo coringa completou a combinação.\n**Prêmio:** {self._chip_text(result_amount, kind='gain')}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
                         embed = self._make_roleta_result_embed("🎰 Coringa premiado", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, near=True, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
@@ -1225,33 +1229,34 @@ class GincanaRoletaMixin:
                         await self._record_game_played(guild.id, actor.id, weekly_points=4)
                         await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
                         await self._grant_weekly_points(guild.id, actor.id, 6)
-                        summary = f"Esse giro rendeu {self._chip_text(result_amount, kind='gain')}."
+                        summary = f"Você acertou uma combinação parcial.\n**Prêmio:** {self._chip_text(result_amount, kind='gain')}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
                         embed = self._make_roleta_result_embed("🎰 Giro parcial", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, near=True, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
                     elif result_kind == "return":
                         await self._record_game_played(guild.id, actor.id, weekly_points=3)
                         await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio da roleta")
-                        summary = f"Você recuperou {self._chip_text(result_amount, kind='gain')}."
+                        summary = f"**Custo recuperado:** {self._chip_text(result_amount, kind='gain')}."
                         effect_note = self._race_effect_message(guild.id, actor.id, "666") if self._race_is(guild.id, actor.id, "apostador") else ""
                         if effect_note:
                             summary = f"{effect_note}\n{summary}"
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
-                        embed = self._make_roleta_result_embed("🎰 Giro de retorno", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, near=True, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
+                        embed = self._make_roleta_result_embed("🎰 Custo recuperado", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, near=True, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
                     else:
                         await self._record_game_played(guild.id, actor.id, weekly_points=2)
                         refund = await self._maybe_apply_coringa_cashback(guild.id, actor.id, entry_cost, chance=0.5)
-                        summary = f"Você perdeu {self._chip_amount(entry_cost)}."
+                        summary = f"Você não recebeu prêmio neste giro.\n**Custo do giro:** {self._chip_text(entry_cost, kind='loss')}."
                         if refund > 0:
                             effect_note = self._race_effect_message(guild.id, actor.id, "redencao", f"você recuperou {self._chip_text(refund, kind='gain')} do custo do giro.")
-                            summary += f"\n{effect_note or ('O efeito Coringa devolveu ' + self._chip_text(refund, kind='gain') + '.')}"
+                            final_loss = max(0, int(entry_cost) - int(refund))
+                            summary = f"{effect_note or ('Você recuperou ' + self._chip_text(refund, kind='gain') + '.')}\n**Perda final:** {self._chip_text(final_loss, kind='loss')}."
                         if chip_note:
                             summary = f"{chip_note}\n{summary}"
-                        embed = self._make_roleta_result_embed("🎰 Não foi dessa vez...", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
+                        embed = self._make_roleta_result_embed("🎰 Sem prêmio neste giro", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, footer_text=roleta_footer, entry_cost=entry_cost, jackpot=jackpot_preview)
                 except Exception:
-                    fallback_title = "💥🎰 JACKPOT!!" if success else "🎰 Não foi dessa vez..."
-                    fallback_text = f"Você ganhou {self._chip_amount(jackpot_preview)}." if success else f"Você perdeu {self._chip_amount(entry_cost)}."
+                    fallback_title = "🎰 Jackpot!" if success else "🎰 Sem prêmio neste giro"
+                    fallback_text = f"**Prêmio:** {self._chip_text(jackpot_preview, kind='gain')}." if success else f"**Custo do giro:** {self._chip_text(entry_cost, kind='loss')}."
                     if chip_note:
                         fallback_text = f"{chip_note}\n{fallback_text}"
                     embed = self._make_embed(fallback_title, fallback_text, ok=success)
@@ -1292,12 +1297,12 @@ class GincanaRoletaMixin:
                     await self._change_user_chips(guild.id, actor.id, CARTA_JACKPOT_CHIPS, reason="Prêmio das cartas")
                     await self.db.add_user_game_stat(guild.id, actor.id, "cartas_jackpots", 1)
                     await self._grant_weekly_points(guild.id, actor.id, 18)
-                    summary = f"{flavor}\nVocê ganhou {self._chip_amount(CARTA_JACKPOT_CHIPS)}."
+                    summary = f"{flavor}\n**Prêmio:** {self._chip_text(CARTA_JACKPOT_CHIPS, kind='gain')}."
                     if streak_line:
                         summary = f"{summary}\n*{streak_line}*"
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"
-                    embed = self._make_carta_result_embed("🎴 JACKPOT!!", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=True, premium=True, footer_text=carta_footer, entry_cost=entry_cost, jackpot=CARTA_JACKPOT_CHIPS)
+                    embed = self._make_carta_result_embed("🎴 Jackpot!", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=True, premium=True, footer_text=carta_footer, entry_cost=entry_cost, jackpot=CARTA_JACKPOT_CHIPS)
                     result_reaction = jackpot_emoji
                 elif result_kind in {"rare", "premium", "partial", "return"}:
                     weekly_map = {"rare": 8, "premium": 7, "partial": 4, "return": 2}
@@ -1305,9 +1310,9 @@ class GincanaRoletaMixin:
                     await self._change_user_chips(guild.id, actor.id, result_amount, reason="Prêmio das cartas")
                     if result_kind in {"rare", "premium"}:
                         await self._grant_weekly_points(guild.id, actor.id, 6)
-                    line = f"{flavor}\nEssa mão rendeu {self._chip_text(result_amount, kind='gain')}."
+                    line = f"{flavor}\n**Prêmio:** {self._chip_text(result_amount, kind='gain')}."
                     if result_kind == "return":
-                        line = f"{flavor}\nVocê recuperou {self._chip_text(result_amount, kind='gain')}."
+                        line = f"{flavor}\n**Custo recuperado:** {self._chip_text(result_amount, kind='gain')}."
                         if self._race_is(guild.id, actor.id, "apostador"):
                             effect_note = self._race_effect_message(guild.id, actor.id, "666")
                             if effect_note:
@@ -1316,7 +1321,7 @@ class GincanaRoletaMixin:
                         line = f"{line}\n*{streak_line}*"
                     if chip_note:
                         line = f"{chip_note}\n{line}"
-                    titles = {"rare": "🎴 Mão rara", "premium": "🎴 Coringa premiado", "partial": "🎴 Boa mão", "return": "🎴 Giro de retorno"}
+                    titles = {"rare": "🎴 Mão rara", "premium": "🎴 Coringa premiado", "partial": "🎴 Mão premiada", "return": "🎴 Custo recuperado"}
                     embed = self._make_carta_result_embed(titles.get(result_kind, "🎴 Boa mão"), line, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=True, premium=result_kind in {"rare", "premium"}, footer_text=carta_footer, entry_cost=entry_cost, jackpot=CARTA_JACKPOT_CHIPS)
                     if result_kind in {"return", "premium"}:
                         result_reaction = "🃏"
@@ -1327,13 +1332,14 @@ class GincanaRoletaMixin:
                 else:
                     await self._record_game_played(guild.id, actor.id, weekly_points=2)
                     refund = await self._maybe_apply_coringa_cashback(guild.id, actor.id, entry_cost, chance=0.5)
-                    summary = f"{flavor}\nVocê perdeu {self._chip_text(entry_cost, kind='loss')}."
+                    summary = f"{flavor}\n**Custo da mão:** {self._chip_text(entry_cost, kind='loss')}."
                     if refund > 0:
-                        effect_note = self._race_effect_message(guild.id, actor.id, "redencao", f"você recuperou {self._chip_text(refund, kind='gain')} do custo do giro.")
-                        summary += f"\n{effect_note or ('O efeito Coringa devolveu ' + self._chip_text(refund, kind='gain') + '.')}"
+                        effect_note = self._race_effect_message(guild.id, actor.id, "redencao", f"você recuperou {self._chip_text(refund, kind='gain')} do custo da mão.")
+                        final_loss = max(0, int(entry_cost) - int(refund))
+                        summary = f"{effect_note or ('Você recuperou ' + self._chip_text(refund, kind='gain') + '.')}\n**Perda final:** {self._chip_text(final_loss, kind='loss')}."
                     if chip_note:
                         summary = f"{chip_note}\n{summary}"
-                    embed = self._make_carta_result_embed("🎴 Não foi dessa vez...", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, premium=False, footer_text=carta_footer, entry_cost=entry_cost, jackpot=CARTA_JACKPOT_CHIPS)
+                    embed = self._make_carta_result_embed("🎴 Sem prêmio nesta mão", summary, board, balance_text=self._format_compact_chip_balance(guild.id, actor.id), success=False, premium=False, footer_text=carta_footer, entry_cost=entry_cost, jackpot=CARTA_JACKPOT_CHIPS)
                     result_reaction = lose_emoji
                 replay_view = _GameReplayView(self, owner_id=actor.id, kind="cartas", enabled=True)
                 await self._deliver_game_result(source_message, spin_message, embed=embed, view=replay_view)

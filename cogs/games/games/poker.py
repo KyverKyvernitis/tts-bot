@@ -366,7 +366,7 @@ class GincanaPokerMixin:
         score = self._poker_hand_score(hand)
         base = self._poker_hand_name(hand)
         if score >= 6:
-            return f"✨ {base}"
+            return f"{self._EFFECT_EMOJI} {base}"
         if score >= 4:
             return f"🔥 {base}"
         if score >= 2:
@@ -419,12 +419,12 @@ class GincanaPokerMixin:
         current_bet = max(game.round_bets.values(), default=0)
         own_bet = game.round_bets.get(member.id, 0)
         to_call = max(0, current_bet - own_bet)
-        turn_text = "É a sua vez." if game.turn_id == member.id else "Aguarde a vez do outro jogador."
+        turn_text = "É a sua vez." if game.turn_id == member.id else "Aguarde a jogada do adversário."
 
         if game.phase == "invite":
-            status_text = "Aceite o duelo para a rodada começar."
+            status_text = "Aceite o duelo para iniciar a rodada."
         elif game.phase == "draw_select":
-            status_text = "Troque até 3 cartas e confirme." if not confirmed else "Troca confirmada. Aguardando o outro jogador."
+            status_text = "Marque até 3 cartas e confirme a troca." if not confirmed else "Troca confirmada. Aguardando o adversário."
         elif game.phase in {"pre_draw_bet", "post_draw_bet"}:
             if to_call > 0:
                 status_text = f"Você precisa pagar {self._chip_amount(to_call)}, aumentar ou desistir. {turn_text}"
@@ -434,7 +434,7 @@ class GincanaPokerMixin:
             status_text = "Rodada encerrada."
 
         embed = discord.Embed(
-            title="🃏 Sua mão de poker",
+            title="🃏 Sua mão no Poker",
             description=f"**{member.display_name}**\n{self._format_hand(hand)}",
             color=discord.Color.blurple(),
         )
@@ -451,7 +451,7 @@ class GincanaPokerMixin:
         return embed
 
     def _make_poker_dm_final_embed(self, player: discord.Member, player_hand: list[Card], opponent: discord.Member, opponent_hand: list[Card], result_text: str, game: PokerGame) -> discord.Embed:
-        embed = discord.Embed(title="🃏 Resultado da rodada", description=result_text, color=discord.Color.green())
+        embed = discord.Embed(title="🃏 Resultado do Poker", description=result_text, color=discord.Color.green())
         embed.add_field(
             name=f"{player.display_name} — {self._poker_hand_display(player_hand)}",
             value=self._format_hand(player_hand),
@@ -469,14 +469,14 @@ class GincanaPokerMixin:
 
     def _make_poker_result_embed(self, player_a: discord.Member, hand_a: list[Card], player_b: discord.Member, hand_b: list[Card], outcome: int, game: PokerGame) -> discord.Embed:
         if outcome > 0:
-            title = "🃏 Vitória no poker"
-            description = f"{self._CHIP_GAIN_EMOJI} {player_a.mention} levou o pote de {self._chip_amount(game.pot)} contra {player_b.mention}."
+            title = "🏆 Vitória no Poker"
+            description = f"**Vencedor:** {player_a.mention}\n**Pote:** {self._chip_text(game.pot, kind='gain')}\n**Adversário:** {player_b.mention}"
         elif outcome < 0:
-            title = "🃏 Vitória no poker"
-            description = f"{self._CHIP_GAIN_EMOJI} {player_b.mention} levou o pote de {self._chip_amount(game.pot)} contra {player_a.mention}."
+            title = "🏆 Vitória no Poker"
+            description = f"**Vencedor:** {player_b.mention}\n**Pote:** {self._chip_text(game.pot, kind='gain')}\n**Adversário:** {player_a.mention}"
         else:
-            title = "🃏 Empate no poker"
-            description = f"{self._CHIP_EMOJI} {player_a.mention} e {player_b.mention} dividiram o pote de {self._chip_amount(game.pot)}."
+            title = "🤝 Empate no Poker"
+            description = f"{player_a.mention} e {player_b.mention} dividiram o pote.\n**Pote total:** {self._chip_amount(game.pot)}"
 
         embed = self._make_embed(title, description, ok=True)
         embed.add_field(name=f"{player_a.display_name} — {self._poker_hand_display(hand_a)}", value=self._format_hand(hand_a), inline=False)
@@ -1026,9 +1026,9 @@ class GincanaPokerMixin:
         try:
             status_message = await message.channel.send(
                 embed=self._make_poker_status_embed(
-                    "🃏 Convite de poker",
+                    "🃏 Convite para o Poker",
                     (
-                        f"Duelo entre {message.author.mention} e {opponent.mention}. Enviando as DMs com o convite e as mãos privadas..."
+                        f"**Duelo:** {message.author.mention} × {opponent.mention}\nAs mãos privadas e o convite estão sendo enviados por DM."
                         + (f"\n{host_note}" if host_note else "")
                         + (f"\n{opponent.mention}: {opp_note}" if opp_note else "")
                     ),

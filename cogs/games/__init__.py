@@ -256,10 +256,10 @@ class _RacePanelView(discord.ui.LayoutView):
         race_name = str(info.get("name") or "Sem raça")
         active = self.cog._is_user_race_active(self.guild_id, self.user_id)
         state_text = "Ativa" if active else "Desativada"
-        lines = [f"# {emoji} Raça", f"**{race_name}**", f"**Estado:** {state_text}", "", "## Efeitos"]
+        lines = [f"# {emoji} {race_name}", f"**Estado:** {state_text}", "", "## Benefícios"]
         for effect in self.cog._get_race_effects(race_key):
             lines.append(f"• **{effect.get('title')}**: {effect.get('desc')}")
-        lines.extend(["", f"**Troca:** {RACE_REROLL_COST} {self.cog._CHIP_EMOJI}"])
+        lines.extend(["", f"**Trocar raça:** {RACE_REROLL_COST} {self.cog._CHIP_EMOJI}"])
         return lines
 
     def _build_layout(self):
@@ -296,7 +296,14 @@ class _RacePanelView(discord.ui.LayoutView):
         current = self.cog._get_user_race_key(self.guild_id, self.user_id)
         normal_chips = int(self.cog.db.get_user_chips(self.guild_id, self.user_id, default=CHIPS_INITIAL) or 0)
         if normal_chips < RACE_REROLL_COST:
-            await interaction.response.send_message(view=self.cog._make_v2_notice("🍀 Raça", [f"Você precisa de {RACE_REROLL_COST} {self.cog._CHIP_EMOJI} para trocar."], ok=False), ephemeral=True)
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice(
+                    "🍀 Saldo insuficiente",
+                    [f"Trocar de raça custa **{RACE_REROLL_COST}** {self.cog._CHIP_EMOJI}."],
+                    ok=False,
+                ),
+                ephemeral=True,
+            )
             return
         await self.cog._change_user_chips(self.guild_id, self.user_id, -RACE_REROLL_COST, mark_activity=True, reason="Troca de raça")
         await self.cog._roll_user_race(self.guild_id, self.user_id, exclude_current=bool(current))
@@ -358,7 +365,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         info = self._get_race_info_by_key(race_key) or {}
         emoji = str(info.get("emoji") or "🍀")
         race_name = str(info.get("name") or "Sem raça")
-        lines = [f"# {emoji} Raça", f"**{race_name}**", "Raça definida.", "", "## Efeitos"]
+        lines = [f"# {emoji} Nova raça: {race_name}", "Sua raça foi definida.", "", "## Benefícios"]
         for effect in self._get_race_effects(race_key):
             lines.append(f"• **{effect.get('title')}**: {effect.get('desc')}")
         view = discord.ui.LayoutView(timeout=None)
@@ -716,7 +723,7 @@ class GamesCog(dcommands.Cog, GamesCore):
             await self._change_user_chips(guild.id, author.id, -penalty, mark_activity=True, reason="Multa por roubo falho")
         lines = [
             f"Você tentou roubar {target.mention}, mas foi pego no flagra.",
-            (f"Você perdeu {self._chip_text(penalty, kind='loss')}." if penalty > 0 else "Mas o efeito Coringa te salvou dessa perda.")
+            (f"Você perdeu {self._chip_text(penalty, kind='loss')}." if penalty > 0 else "Você não perdeu fichas.")
         ]
         marker = self._race_effect_message(guild.id, author.id, "mao_negra")
         if self._race_is(guild.id, author.id, "preto") and robbery_used_count > 1 and marker:

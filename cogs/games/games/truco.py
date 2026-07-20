@@ -141,15 +141,15 @@ class Truco2v2LobbyView(discord.ui.LayoutView):
             f"# {self.cog._truco_title_text(self.lobby)} 2v2",
             f"**Entrada:** {self.cog._chip_amount(TRUCO_ENTRY)} cada",
             f"**Pote inicial:** {self.cog._chip_amount(40)}",
-            f"**Bônus dos vencedores:** +{reward_bonus} fichas bônus cada",
+            f"**Bônus por vencedor:** **+{reward_bonus}** {self.cog._CHIP_BONUS_EMOJI}",
         ]
         if creator:
             header.append(f"**Criador:** {creator.mention}")
         team1 = [f"### 🟦 Time 1 ({len(a_mentions)}/2)"] + (a_mentions or ["• Vazio"])
         team2 = [f"### 🟥 Time 2 ({len(b_mentions)}/2)"] + (b_mentions or ["• Vazio"])
         foot = [
-            "Entre em um time, troque rápido com 🔄 ou saia do lobby.",
-            "O truco começa quando os dois times fecharem com 2 jogadores.",
+            "Escolha um time abaixo. Use 🔄 para trocar de lado.",
+            "A partida pode começar quando os dois times tiverem 2 jogadores.",
         ]
         row1 = discord.ui.ActionRow(self.join_a, self.join_b, self.swap)
         row2 = discord.ui.ActionRow(self.leave, self.start, self.cancel)
@@ -428,7 +428,7 @@ class GincanaTrucoMixin:
         return self._truco_variant(game_or_lobby) == "golden"
 
     def _truco_title_text(self, game_or_lobby) -> str:
-        return "✨ Truco dourado" if self._truco_is_golden(game_or_lobby) else "🃏 Truco"
+        return f"{self._EFFECT_EMOJI} Truco dourado" if self._truco_is_golden(game_or_lobby) else "🃏 Truco"
 
     def _truco_bonus_reward_value(self, game_or_lobby) -> int:
         return self._truco_bonus_reward_for_variant(self._truco_variant(game_or_lobby))
@@ -566,10 +566,10 @@ class GincanaTrucoMixin:
             f"{self._truco_member_mention(guild, game.players_order[0])} desafiou {self._truco_member_mention(guild, game.players_order[1])}.",
             f"**Entrada:** {self._chip_amount(TRUCO_ENTRY)} cada",
             f"**Pote inicial:** {self._chip_amount(game.pot)}",
-            f"**Bônus dos vencedores:** +{reward_bonus} {self._CHIP_BONUS_EMOJI} cada",
+            f"**Bônus do vencedor:** **+{reward_bonus}** {self._CHIP_BONUS_EMOJI}",
         ]
         if self._truco_is_golden(game):
-            lines.append("Modo dourado ativo para esta mesa.")
+            lines.append("Esta mesa começou no modo dourado.")
         marker = str(getattr(game, "race_effect_marker", "") or "").strip()
         if marker:
             lines.append(marker)
@@ -609,7 +609,7 @@ class GincanaTrucoMixin:
             mesa.append("Ninguém jogou carta ainda.")
         if game.table_history:
             mesa.extend(["", "## Vazas", *game.table_history[-3:]])
-        status = ["## Status", game.status_text, "Use **Ver mão** para acompanhar o jogo na DM."]
+        status = ["## Status da partida", game.status_text, "Use **Ver mão** para acompanhar suas cartas pela DM."]
         return {"header": duel, "meta": meta, "mesa": mesa, "status": status}
 
     def _truco_hand_lines(self, game: TrucoGame, player_id: int, *, dm_ok: bool = True) -> dict[str, list[str]]:
@@ -959,25 +959,25 @@ class GincanaTrucoMixin:
         winner_text = self._truco_team_mentions(game, guild, winner_team) if game.mode == "2v2" else self._truco_member_mention(guild, winners[0])
         loser_text = self._truco_member_mention(guild, loser_id) if guild else "Alguém"
         if reason == "correu":
-            end_line = f"{loser_text} saiu do jogo."
-            summary = f"{winner_text} levou a rodada."
+            end_line = f"{loser_text} saiu da partida."
+            summary = f"**Vencedor:** {winner_text}."
             game.status_text = "Jogo encerrado por saída."
         elif reason == "tempo esgotado":
             end_line = f"{loser_text} não respondeu a tempo."
-            summary = f"{winner_text} levou a rodada."
+            summary = f"**Vencedor:** {winner_text}."
             game.status_text = "Jogo encerrado por abandono."
         else:
-            end_line = f"{winner_text} venceu o jogo."
-            summary = "O jogo foi encerrado."
+            end_line = f"**Vencedor:** {winner_text}."
+            summary = "A melhor de três foi concluída."
             game.status_text = "Jogo encerrado com vitória normal."
         lines = self._truco_status_lines(game, title="🃏 Truco")
         reward_bonus = self._truco_bonus_reward_value(game)
         reward_line = (
-            f"{winner_text} levou **{game.pot}** {self._CHIP_GAIN_EMOJI} e ganhou **+{reward_bonus}** {self._CHIP_BONUS_EMOJI}."
+            f"**Premiação:** **{game.pot}** {self._CHIP_GAIN_EMOJI} + **{reward_bonus}** {self._CHIP_BONUS_EMOJI}."
             if game.mode == "1v1" else
-            f"{winner_text} levou **{game.pot}** {self._CHIP_GAIN_EMOJI} e cada vencedor ganhou **+{reward_bonus}** {self._CHIP_BONUS_EMOJI}."
+            f"**Pote do time:** **{game.pot}** {self._CHIP_GAIN_EMOJI} • **Bônus por vencedor:** **+{reward_bonus}** {self._CHIP_BONUS_EMOJI}."
         )
-        lines["status"] = [game.status_text, end_line, summary, reward_line]
+        lines["status"] = ["## Resultado", end_line, summary, reward_line]
         closed = discord.ui.LayoutView(timeout=None)
         closed.add_item(discord.ui.Container(
             discord.ui.TextDisplay("\n".join(lines["header"])),
@@ -1014,7 +1014,7 @@ class GincanaTrucoMixin:
             return False
         self._truco_cleanup_broken_busy_state(guild.id)
         if guild.id in self._truco_games or guild.id in self._truco_lobbies:
-            await message.channel.send(embed=self._make_embed("🃏 Truco ocupado", "Já existe um truco em andamento neste servidor.", ok=False))
+            await message.channel.send(embed=self._make_embed("🃏 Partida em andamento", "Já existe uma partida de Truco neste servidor. Aguarde o término antes de abrir outra.", ok=False))
             return True
         mentions = [m for m in message.mentions if not m.bot]
         if len(mentions) != 1:

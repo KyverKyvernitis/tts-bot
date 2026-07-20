@@ -404,13 +404,13 @@ class _BuckshotJoinView(discord.ui.LayoutView):
         else:
             self.start_button.label = 'Atirar'
             self.start_button.disabled = False
-        lines1 = [f"# {self.cog._buckshot_title(self.session)}", f"**Entrada:** {self.cog._chip_amount(stake)}", f"**Pote atual:** {self.cog._chip_amount(payout_total)}", "**Lobby:** **30s**"]
+        lines1 = [f"# {self.cog._buckshot_title(self.session)}", f"**Entrada:** {self.cog._chip_amount(stake)}", f"**Pote atual:** {self.cog._chip_amount(payout_total)}", "**Inscrições:** 30s"]
         plist = [f"### Participantes ({len(participants)})"]
         if participants:
             plist.extend(f"• {m.mention}" for m in participants)
         else:
             plist.append('• Ninguém entrou ainda.')
-        foot = ['Entre pelo botão abaixo.', 'O criador da rodada ou a staff pode começar quando houver pelo menos 2 participantes.']
+        foot = ['Use o botão abaixo para entrar.', 'O criador da rodada ou a staff pode começar quando houver pelo menos 2 participantes.']
         if countdown > 0:
             foot.append('A contagem começou e ainda dá tempo de entrar.')
         row = discord.ui.ActionRow(self.join_button, self.start_button)
@@ -479,9 +479,9 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             lobby_message = session.get('lobby_message') or session.get('message')
             if lobby_message is not None:
                 try:
-                    await lobby_message.edit(view=_BuckshotLobbyClosedView('✨ Rodada dourada cancelada' if self._buckshot_is_golden(session) else '<a:r_gun01:1484661880323838002> Rodada cancelada', [
+                    await lobby_message.edit(view=_BuckshotLobbyClosedView(f'{self._EFFECT_EMOJI} Rodada dourada cancelada' if self._buckshot_is_golden(session) else '<a:r_gun01:1484661880323838002> Rodada cancelada', [
                         'A rodada foi encerrada automaticamente porque ficou travada por tempo demais.',
-                        'As entradas foram devolvidas.',
+                        'Todas as entradas foram devolvidas.',
                     ], color=self._buckshot_color(session)))
                 except Exception:
                     pass
@@ -505,7 +505,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
         return 30 if self._buckshot_is_golden(session) else BUCKSHOT_STAKE
 
     def _buckshot_title(self, session: dict | None) -> str:
-        return '<a:uzi:1487936659692458054> Roleta dourada' if self._buckshot_is_golden(session) else '<:gunforward:1484655577836683434> Roleta russa'
+        return '<a:uzi:1487936659692458054> Roleta russa dourada' if self._buckshot_is_golden(session) else '<:gunforward:1484655577836683434> Roleta russa'
 
     def _buckshot_color(self, session: dict | None) -> discord.Color:
         return discord.Color.gold() if self._buckshot_is_golden(session) else discord.Color.blurple()
@@ -706,9 +706,9 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                     await self._buckshot_refund_entry(guild.id, session, int(uid), self._buckshot_stake(session))
                 if lobby_message is not None:
                     try:
-                        await lobby_message.edit(view=_BuckshotLobbyClosedView('✨ Rodada dourada cancelada' if self._buckshot_is_golden(session) else '<a:r_gun01:1484661880323838002> Rodada cancelada', [
-                            'Não ficaram participantes suficientes.',
-                            'As entradas foram devolvidas.',
+                        await lobby_message.edit(view=_BuckshotLobbyClosedView(f'{self._EFFECT_EMOJI} Rodada dourada cancelada' if self._buckshot_is_golden(session) else '<a:r_gun01:1484661880323838002> Rodada cancelada', [
+                            'A rodada precisa de pelo menos **2 participantes**.',
+                            'Todas as entradas foram devolvidas.',
                         ], color=self._buckshot_color(session)))
                     except Exception:
                         pass
@@ -783,7 +783,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                     await self.db.add_user_game_stat(guild.id, chosen.id, 'buckshot_golden_eliminations', 1)
                 await self._record_game_played(guild.id, chosen.id, weekly_points=3)
                 refund = await self._maybe_apply_coringa_lobby_refund(guild.id, chosen.id, stake)
-                lines.append(f"{'<a:uzi:1487936659692458054>💥' if is_golden else '<:gunforward:1484655577836683434>💥'} O disparo aconteceu. {chosen.mention} foi eliminado.")
+                lines.append(f"{'<a:uzi:1487936659692458054>💥' if is_golden else '<:gunforward:1484655577836683434>💥'} **Eliminado:** {chosen.mention}.")
                 if refund > 0:
                     effect_note = self._race_effect_message(guild.id, chosen.id, 'as', f"{chosen.mention} recuperou {self._chip_text(refund, kind='gain')} da entrada.")
                     if effect_note:
@@ -798,7 +798,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                     else:
                         eliminated_entry_text = f"**{chosen_spend['chips']} {self._CHIP_GAIN_EMOJI}**"
 
-                    lines.append(f"Cada sobrevivente recebeu a própria entrada de volta: {returned_entry_text}.")
+                    lines.append(f"**Entrada devolvida:** cada sobrevivente recebeu {returned_entry_text}.")
 
                     if eliminated_normal_total > 0 or eliminated_bonus_total > 0:
                         share_normal_max = base_each + (1 if base_remainder > 0 else 0)
@@ -817,7 +817,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                             else:
                                 share_parts.append(f"**{share_bonus_max} {self._CHIP_BONUS_EMOJI}** para alguns e **{share_bonus_min} {self._CHIP_BONUS_EMOJI}** para os demais")
                         lines.append(
-                            f"A entrada do eliminado ({eliminated_entry_text}) foi dividida entre **{winner_count}** sobreviventes: " + " • ".join(share_parts) + "."
+                            f"**Entrada do eliminado:** {eliminated_entry_text}, dividida entre **{winner_count} sobreviventes** — " + " • ".join(share_parts) + "."
                         )
 
                     if bonus_total > 0:
@@ -825,24 +825,24 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                         min_bonus_gain = bonus_each
                         if bonus_remainder == 0:
                             lines.append(
-                                f"Bônus da rodada: **{bonus_each} {self._CHIP_BONUS_EMOJI}** para cada sobrevivente."
+                                f"**Bônus da rodada:** **{bonus_each} {self._CHIP_BONUS_EMOJI}** para cada sobrevivente."
                             )
                         else:
                             lines.append(
-                                f"Bônus da rodada: **{max_bonus_gain} {self._CHIP_BONUS_EMOJI}** para alguns e **{min_bonus_gain} {self._CHIP_BONUS_EMOJI}** para os demais."
+                                f"**Bônus da rodada:** **{max_bonus_gain} {self._CHIP_BONUS_EMOJI}** para alguns e **{min_bonus_gain} {self._CHIP_BONUS_EMOJI}** para os demais."
                             )
 
                     if eliminated_normal_total <= 0 and eliminated_bonus_total <= 0 and bonus_total <= 0 and golden_bonus_each <= 0:
                         lines.append("Os sobreviventes não receberam nada.")
 
                     if is_golden and winners:
-                        lines.append(f"Bônus dourado: cada sobrevivente recebeu **+{golden_bonus_each} {self._CHIP_BONUS_EMOJI}**.")
+                        lines.append(f"**Bônus dourado:** cada sobrevivente recebeu **+{golden_bonus_each} {self._CHIP_BONUS_EMOJI}**.")
                 else:
                     lines.append(f"Ninguém sobreviveu para receber a entrada de **{eliminated_entry_total} {self._CHIP_LOSS_EMOJI}**.")
 
             if lobby_message is not None:
                 try:
-                    await lobby_message.edit(view=_BuckshotLobbyClosedView('✨ Resultado do buckshot dourado' if is_golden else '<:gunforward:1484655577836683434> Resultado do buckshot', lines, color=self._buckshot_color(session)))
+                    await lobby_message.edit(view=_BuckshotLobbyClosedView(f'{self._EFFECT_EMOJI} Resultado do Buckshot dourado' if is_golden else '<:gunforward:1484655577836683434> Resultado do Buckshot', lines, color=self._buckshot_color(session)))
                 except Exception:
                     pass
             current = self._buckshot_sessions.get(guild_id)

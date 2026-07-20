@@ -84,7 +84,7 @@ class _RaceLobbyView(discord.ui.LayoutView):
         rodada_cheia_active = pending_bonus > 0
 
         header_lines = [
-            "# 🐎 Corrida aberta",
+            "# 🐎 Corrida de cavalos",
             f"**Condição:** {condition_name}",
         ]
         if special_name:
@@ -93,7 +93,7 @@ class _RaceLobbyView(discord.ui.LayoutView):
             header_lines.append(f"🎉 **Rodada cheia ativada** (+{pending_bonus} fichas bônus)")
         header_lines.append(f"**Entrada:** {self.cog._chip_amount(CORRIDA_STAKE)}")
         header_lines.append(f"**Pote atual:** {self.cog._chip_amount(pot_total)}" + (f" • Bônus: {self.cog._bonus_chip_amount(effective_bonus)}" if effective_bonus > 0 else ""))
-        header_lines.append(f"**Duração:** **{_CORRIDA_DURATION_SECONDS}s**")
+        header_lines.append(f"**Tempo de corrida:** {_CORRIDA_DURATION_SECONDS}s")
 
         participants_lines = [f"### Participantes ({len(participants)})"]
         if participants:
@@ -101,7 +101,7 @@ class _RaceLobbyView(discord.ui.LayoutView):
         else:
             participants_lines.append("• Ninguém entrou ainda.")
 
-        info_lines = ["Confirme abaixo para entrar."]
+        info_lines = ["Use o botão abaixo para entrar."]
         info_lines.append("O criador da corrida ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes.")
 
         row = discord.ui.ActionRow(self.join_button, self.start_button)
@@ -479,7 +479,7 @@ class _RaceStateView(discord.ui.LayoutView):
         lines = cog._build_race_lines(guild, session)
 
         if finished:
-            title = "# 🏁 Corrida encerrada"
+            title = "# 🏁 Resultado da corrida"
         else:
             title = "# 🔥 Reta final" if session.get("final_stretch") else "# 🐎 Corrida em andamento"
 
@@ -549,7 +549,7 @@ class GincanaCorridaMixin:
         guild = self.bot.get_guild(guild_id)
         if guild is not None:
             try:
-                await self._close_lobby_message(session, guild, title="🐎 Corrida encerrada", detail="A corrida anterior foi finalizada automaticamente após travar. As entradas foram devolvidas.")
+                await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="A corrida ficou inativa por tempo demais e foi encerrada automaticamente. Todas as entradas foram devolvidas.")
             except Exception:
                 pass
         self._race_sessions.pop(guild_id, None)
@@ -1157,7 +1157,7 @@ class GincanaCorridaMixin:
             await self._change_user_chips(guild.id, only_id, CORRIDA_STAKE, reason="Devolução da corrida (1 jogador)")
             session["starting"] = False
             session["ended"] = True
-            await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Só 1 jogador entrou. A entrada foi devolvida.")
+            await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="A corrida precisa de pelo menos **2 participantes**. A entrada foi devolvida.")
             self._race_sessions.pop(guild_id, None)
             return True
         if len(participants) < 2:
@@ -1165,7 +1165,7 @@ class GincanaCorridaMixin:
                 await self._change_user_chips(guild.id, user_id, CORRIDA_STAKE, reason="Devolução da corrida (cancelada)")
             session["starting"] = False
             session["ended"] = True
-            await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Não ficaram participantes suficientes. As entradas foram devolvidas.")
+            await self._close_lobby_message(session, guild, title="🐎 Corrida cancelada", detail="Não restaram participantes suficientes. Todas as entradas foram devolvidas.")
             self._race_sessions.pop(guild_id, None)
             return True
 
@@ -1426,7 +1426,7 @@ class GincanaCorridaMixin:
             winner_text = self._chip_text(winner_net, kind='gain')
             if winner_bonus > 0:
                 winner_text += f" + {self._bonus_chip_amount(winner_bonus)}"
-            result_lines.append(f"🏆 {winner.mention} venceu a corrida — {winner_text}")
+            result_lines.append(f"🏆 **Vencedor:** {winner.mention} — **ganho líquido:** {winner_text}")
         finish_meta = session.get("finish_meta") or {}
         if len(final_order) >= 2:
             leader = final_order[0]
@@ -1510,7 +1510,7 @@ class GincanaCorridaMixin:
                 if refund_note:
                     result_lines.append(refund_note)
             else:
-                refund_note = f"Efeito **Às** foi usado, **{len(coringa_refunds)}** jogadores recuperaram {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada."
+                refund_note = f"{self._EFFECT_EMOJI} **Ás ativado:** **{len(coringa_refunds)} jogadores** recuperaram {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada."
                 result_lines.append(refund_note)
 
         session["starting"] = False

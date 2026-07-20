@@ -220,10 +220,10 @@ class GincanaAlvoMixin:
             return text
         def _target_opening_text(self, participants: list[discord.Member]) -> str:
             if len(participants) >= 3:
-                return "Os **2 melhores tiros** levam o prêmio."
+                return "Os **2 melhores tiros** dividem a premiação."
             if len(participants) == 2:
-                return "Com **2 participantes**, só **1** leva o prêmio."
-            return "Use o botão para entrar e clique em **🏁 Iniciar** para começar antes do tempo."
+                return "Com **2 participantes**, apenas o melhor tiro recebe o prêmio."
+            return "Entre pelo botão e use **🏁 Iniciar** para começar antes do tempo."
         def _target_bonus_for_participants(self, count: int) -> int:
             if count >= 7:
                 return 10
@@ -430,7 +430,7 @@ class GincanaAlvoMixin:
                         for member in bullseye_members:
                             await self._change_user_bonus_chips(guild.id, member.id, bull_bonus, reason="Mosca no alvo")
                             await self._grant_weekly_points(guild.id, member.id, bull_bonus)
-                        result_lines.append(f"✨ Cada bullseye recebeu um bônus de {self._bonus_chip_amount(bull_bonus)}.")
+                        result_lines.append(f"{self._EFFECT_EMOJI} **Bullseye bônus:** cada acerto perfeito recebeu {self._bonus_chip_amount(bull_bonus)}.")
 
                 if rewards:
                     result_lines.append("")
@@ -592,10 +592,10 @@ class _TargetJoinView(discord.ui.LayoutView):
         self.join_button.label = f"🎯 Entrar ({len(participants)})"
 
         header = [
-            "# 🎯 Rodada aberta",
+            "# 🎯 Tiro ao alvo",
             f"**Entrada:** {self.cog._chip_amount(ALVO_STAKE)}",
             f"**Pote atual:** {self.cog._chip_amount(pot_total)}" + (f" • Bônus: {self.cog._bonus_chip_amount(bonus_total)}" if bonus_total > 0 else ""),
-            "**Lobby:** **30s**",
+            "**Inscrições:** 30s",
         ]
         info = [f"**Condição:** {modifier.get('name','Alvo padrão')}", f"**Pote base:** {self.cog._chip_amount(pot_total)}" + (f" • Bônus: {self.cog._bonus_chip_amount(bonus_total)}" if bonus_total > 0 else "")]
         desc = str(modifier.get('description') or '').strip()
@@ -606,7 +606,7 @@ class _TargetJoinView(discord.ui.LayoutView):
             plist.extend(f"• {m.mention}" for m in participants)
         else:
             plist.append("• Ninguém entrou ainda.")
-        foot = ["Entre pelo botão verde.", "O criador da rodada ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes."]
+        foot = ["Use o botão verde para entrar.", "O criador da rodada ou a staff pode iniciar com 🏁 quando houver pelo menos 2 participantes."]
         if countdown > 0:
             foot.append("A contagem começou e ainda dá tempo de entrar.")
         row = discord.ui.ActionRow(self.join_button, self.start_button)
@@ -655,12 +655,12 @@ class _TargetStateView(discord.ui.LayoutView):
         modifier = session.get('modifier') or {'name': 'Alvo padrão'}
         participants = cog._get_target_participants(guild, session)
         if finished:
-            summary = session.get('summary_line') or f"<:boom:1485862099308804107> Os tiros foram disparados. Prêmio: {cog._chip_amount(int(session.get('prize_total') or 0))}"
+            summary = session.get('summary_line') or f"<:boom:1485862099308804107> **Pote distribuído:** {cog._chip_amount(int(session.get('prize_total') or 0))}"
             hits = session.get('hit_lines') or ['A rodada terminou.']
             podium = session.get('podium_lines') or []
             closing = session.get('closing_line') or None
             items = [
-                discord.ui.TextDisplay('# 🎯 Resultado do alvo\n' + f"**Condição:** {modifier.get('name','Alvo padrão')}\n" + f"**Participantes:** {len(participants)}"),
+                discord.ui.TextDisplay('# 🎯 Resultado da rodada\n' + f"**Condição:** {modifier.get('name','Alvo padrão')}\n" + f"**Participantes:** {len(participants)}"),
                 discord.ui.Separator(),
                 discord.ui.TextDisplay(summary),
                 discord.ui.Separator(),
@@ -673,11 +673,11 @@ class _TargetStateView(discord.ui.LayoutView):
             self.add_item(discord.ui.Container(*items, accent_color=discord.Color.blurple()))
         else:
             lines = [
-                '# 🎯 Rodada iniciada',
+                '# 🎯 Disparos em andamento',
                 f"**Condição:** {modifier.get('name','Alvo padrão')}",
                 f"**Participantes:** {len(participants)}",
                 '',
-                'A mira está sendo ajustada.',
+                'Os participantes estão ajustando a mira.',
             ]
             self.add_item(discord.ui.Container(discord.ui.TextDisplay('\n'.join(lines)), accent_color=discord.Color.blurple()))
 
@@ -862,7 +862,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             await self._change_user_chips(guild.id, only_id, ALVO_STAKE, reason="Devolução do alvo")
             if lobby_message is not None:
                 try:
-                    await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'Só 1 jogador entrou. A entrada foi devolvida.'))
+                    await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'A rodada precisa de pelo menos **2 participantes**. A entrada foi devolvida.'))
                 except Exception: pass
             self._target_sessions.pop(guild_id, None)
             return True
@@ -871,7 +871,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 await self._change_user_chips(guild.id, user_id, ALVO_STAKE, reason="Devolução do alvo")
             if lobby_message is not None:
                 try:
-                    await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'Não ficaram participantes suficientes. As entradas foram devolvidas.'))
+                    await lobby_message.edit(view=_TargetLobbyClosedView(session, guild, '🎯 Rodada cancelada', 'Não restaram participantes suficientes. Todas as entradas foram devolvidas.'))
                 except Exception: pass
             self._target_sessions.pop(guild_id, None)
             return True
@@ -919,7 +919,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 for member in bullseye_members:
                     await self._change_user_bonus_chips(guild.id, member.id, bull_bonus, reason="Mosca no alvo")
                     await self._grant_weekly_points(guild.id, member.id, bull_bonus)
-                bonus_line = f"✨ Bullseye bônus: {self._bonus_chip_amount(bull_bonus)} para cada bullseye."
+                bonus_line = f"{self._EFFECT_EMOJI} **Bullseye bônus:** {self._bonus_chip_amount(bull_bonus)} para cada acerto perfeito."
         podium_lines = []
         winner_mentions = []
         winning_reward = 0
@@ -969,13 +969,13 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 if refund_note:
                     closing_parts.append(refund_note)
             else:
-                closing_parts.append(f"Efeito **Às** foi usado, **{len(coringa_refunds)}** jogadores recuperaram {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada.")
-        session['summary_line'] = f"<:boom:1485862099308804107> Os tiros foram disparados. Pote base: {self._chip_amount(prize_total)}"
+                closing_parts.append(f"{self._EFFECT_EMOJI} **Ás ativado:** **{len(coringa_refunds)} jogadores** recuperaram {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada.")
+        session['summary_line'] = f"<:boom:1485862099308804107> **Pote distribuído:** {self._chip_amount(prize_total)}"
         if bonus_chips > 0:
             session['summary_line'] += f" • Bônus: {self._bonus_chip_amount(bonus_chips)}"
         session['hit_lines'] = hit_lines
         if winner_mentions and len(winner_mentions) == 1:
-            session['podium_lines'] = [f"🥇 {winner_mentions[0]} venceu — {self._chip_text(winning_reward, kind='gain')}"]
+            session['podium_lines'] = [f"🥇 **Vencedor:** {winner_mentions[0]} — {self._chip_text(winning_reward, kind='gain')}"]
         else:
             session['podium_lines'] = podium_lines
         session['closing_line'] = '\n'.join(closing_parts[:2]) if closing_parts else None
