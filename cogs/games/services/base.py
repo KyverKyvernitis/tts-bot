@@ -501,8 +501,6 @@ class GincanaBase:
         streak_progress = self._daily_streak_progress(streak_value)
 
         if not claimed:
-            next_streak = streak_value + 1
-            next_label = "1 dia" if next_streak == 1 else f"{next_streak} dias"
             remaining = self._format_daily_reset_remaining(self._daily_reset_remaining_seconds())
             view.add_item(
                 discord.ui.Container(
@@ -512,16 +510,15 @@ class GincanaBase:
                     ),
                     discord.ui.Separator(),
                     discord.ui.TextDisplay(
-                        "## 🔥 Sequência diária\n"
+                        "## 🔥 Ofensiva diária\n"
                         f"**{streak_label}**\n"
-                        f"**Progresso do bônus:** {streak_progress}\n"
-                        f"Próximo avanço: **{next_label}**."
+                        f"**Progresso da ofensiva:** {streak_progress}"
                     ),
                     discord.ui.Separator(),
                     discord.ui.TextDisplay(
                         "## Próximo resgate\n"
                         f"Disponível em **{remaining}**.\n"
-                        "-# Volte depois do reset para continuar a sequência."
+                        "-# Volte depois do reset para manter sua ofensiva."
                     ),
                     accent_color=discord.Color.orange(),
                 )
@@ -546,20 +543,17 @@ class GincanaBase:
         extra_streak_bonus = max(0, int(bonus) - 10)
         if extra_streak_bonus > 0:
             reward_lines.append(
-                f"-# A recompensa inclui +{extra_streak_bonus} {self._CHIP_EMOJI} pela sequência."
+                f"-# A recompensa inclui +{extra_streak_bonus} {self._CHIP_EMOJI} pela ofensiva."
             )
         reward_lines.append("-# Fichas bônus são usadas antes das fichas normais.")
 
-        next_streak = streak_value + 1
-        next_label = "1 dia" if next_streak == 1 else f"{next_streak} dias"
         streak_lines = [
-            "## 🔥 Sequência diária",
+            "## 🔥 Ofensiva diária",
             f"**{streak_label}**",
-            f"**Progresso do bônus:** {streak_progress}",
+            f"**Progresso da ofensiva:** {streak_progress}",
         ]
         if streak_transition == "restarted":
-            streak_lines.append("A sequência anterior foi reiniciada e recomeça hoje.")
-        streak_lines.append(f"Volte amanhã para avançar para **{next_label}**.")
+            streak_lines.append("A ofensiva anterior foi reiniciada e recomeça hoje.")
 
         view.add_item(
             discord.ui.Container(
@@ -683,11 +677,11 @@ class GincanaBase:
         if status.get("available"):
             transition = self._daily_streak_transition(status)
             if transition == "continued":
-                return f"Disponível agora • Sequência atual: **{streak_text}**"
+                return f"Disponível agora • Ofensiva atual: **{streak_text}**"
             if transition == "restarted":
-                return "Disponível agora • O próximo resgate inicia uma nova sequência"
-            return "Disponível agora • Comece sua sequência diária"
-        return f"Resgatado hoje • Sequência: **{streak_text}**"
+                return "Disponível agora • O próximo resgate inicia uma nova ofensiva"
+            return "Disponível agora • Comece sua ofensiva diária"
+        return f"Resgatado hoje • Ofensiva: **{streak_text}**"
 
     def _best_game_summary(self, stats: dict) -> str | None:
         roleta_wins = int(stats.get('roleta_jackpots', 0) or 0) + int(stats.get('cartas_jackpots', 0) or 0)
