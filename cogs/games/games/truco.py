@@ -57,6 +57,7 @@ class TrucoGame:
     pending_raise_to: int | None = None
     finished: bool = False
     dm_messages: dict[int, discord.Message] = field(default_factory=dict)
+    match_history: dict[str, int] | None = None
     last_activity_at: float = field(default_factory=time.monotonic)
 
     @property
@@ -479,6 +480,62 @@ class GincanaTrucoMixin:
             lines.append(f"**{label}** · {winner}")
         return lines
 
+    def _truco_match_history_lines(
+        self,
+        game: TrucoGame,
+        guild: discord.Guild | None,
+        *,
+        viewer_id: int | None = None,
+    ) -> list[str]:
+        history = game.match_history or {}
+        try:
+            low_id = int(history.get("player_low_id", 0) or 0)
+            high_id = int(history.get("player_high_id", 0) or 0)
+            low_wins = max(0, int(history.get("low_wins", 0) or 0))
+            high_wins = max(0, int(history.get("high_wins", 0) or 0))
+            total_games = max(0, int(history.get("total_games", 0) or 0))
+            streak_winner_id = int(history.get("streak_winner_id", 0) or 0)
+            streak_count = max(0, int(history.get("streak_count", 0) or 0))
+        except Exception:
+            return []
+
+        if low_id <= 0 or high_id <= 0 or total_games <= 0:
+            return []
+
+        wins_by_user = {low_id: low_wins, high_id: high_wins}
+        if viewer_id is not None and int(viewer_id) in wins_by_user:
+            first_id = int(viewer_id)
+            second_id = high_id if first_id == low_id else low_id
+        else:
+            winner_id = int(game.teams[game.winner_team or 0][0]) if game.winner_team in (0, 1) else low_id
+            first_id = winner_id if winner_id in wins_by_user else low_id
+            second_id = high_id if first_id == low_id else low_id
+
+        def _label(user_id: int) -> str:
+            if viewer_id is not None and int(viewer_id) == int(user_id):
+                return "Você"
+            return self._truco_member_name(guild, user_id)
+
+        first_name = _label(first_id)
+        second_name = _label(second_id)
+        first_wins = wins_by_user[first_id]
+        second_wins = wins_by_user[second_id]
+        partida = "partida disputada" if total_games == 1 else "partidas disputadas"
+        lines = [
+            "## Histórico de partidas",
+            f"**{first_name}** `{first_wins}` ━ `{second_wins}` **{second_name}**",
+        ]
+
+        if first_wins == second_wins:
+            lines.append(f"*Duelo empatado após {total_games} {partida}.*")
+        else:
+            lines.append(f"*{total_games} {partida}.*")
+
+        if streak_count >= 2 and streak_winner_id in wins_by_user:
+            streak_name = _label(streak_winner_id)
+            lines.append(f"🔥 **{streak_name}** venceu as últimas **{streak_count} partidas**.")
+        return lines
+
     def _truco_member_name(self, guild: discord.Guild | None, user_id: int) -> str:
         member = guild.get_member(int(user_id)) if guild else None
         return member.display_name if member else str(user_id)
@@ -578,13 +635,10 @@ class GincanaTrucoMixin:
         pid = int(player_id)
         cards = game.hands.get(pid, [])
         player_team = self._truco_team_index(game, pid)
-        team0, team1 = self._truco_score_counts(game)
 
         if game.finished:
             won = player_team is not None and player_team == game.winner_team
             reason = game.finish_reason or "jogo encerrado"
-            own_score = team0 if player_team == 0 else team1
-            opponent_score = team1 if player_team == 0 else team0
             loser_name = self._truco_member_name(guild, getattr(game, "loser_id", 0) or 0)
             winner_id = int(game.teams[game.winner_team or 0][0])
             opponent_name = self._truco_member_name(guild, winner_id)
@@ -598,9 +652,9 @@ class GincanaTrucoMixin:
             elif reason == "tempo esgotado" and won:
                 header = ["# 🎉 Vitória", f"{loser_name} não jogou a tempo."]
             elif won:
-                header = ["# 🎉 Vitória", f"Você venceu a partida por **{own_score}–{opponent_score}**."]
+                header = ["# 🎉 Vitória", "Você venceu a partida."]
             else:
-                header = ["# 💥 Derrota", f"{opponent_name} venceu a partida por **{opponent_score}–{own_score}**."]
+                header = ["# 💥 Derrota", f"{opponent_name} venceu a partida."]
 
             meta = [
                 f"**Valendo:** {self._chip_amount(game.pot)}",
@@ -614,7 +668,7 @@ class GincanaTrucoMixin:
             contribution = int(game.contribution.get(pid, TRUCO_ENTRY))
             if won:
                 result_lines = [
-                    "## Resultado",
+                    "## Recompensa",
                     f"Você recebeu **{game.pot}** {self._CHIP_GAIN_EMOJI} e **+{self._truco_bonus_reward_value(game)}** {self._CHIP_BONUS_EMOJI}.",
                     f"**Saldo:** **{current_chips}** {self._CHIP_EMOJI} · **{current_bonus}** {self._CHIP_BONUS_EMOJI}",
                 ]
@@ -624,7 +678,8 @@ class GincanaTrucoMixin:
                     f"Você perdeu **{contribution}** {self._CHIP_LOSS_EMOJI}.",
                     f"**Saldo:** **{current_chips}** {self._CHIP_EMOJI} · **{current_bonus}** {self._CHIP_BONUS_EMOJI}",
                 ]
-            return {"header": header, "meta": meta, "mesa": rounds, "cards": result_lines, "status": []}
+            match_history = self._truco_match_history_lines(game, guild, viewer_id=pid)
+            return {"header": header, "meta": meta, "mesa": rounds, "cards": result_lines, "status": match_history}
 
         if game.status == "awaiting_raise_response" and self._truco_can_answer_raise(game, pid):
             raise_name = _TRUCO_RAISE_NAMES.get(game.pending_raise_to, "aumento")
@@ -899,6 +954,19 @@ class GincanaTrucoMixin:
             )
             await self.db.add_user_game_stat(game.guild_id, loser_user_id, "truco_losses", 1)
             await self._record_game_played(game.guild_id, loser_user_id, weekly_points=2)
+
+            record_history = getattr(self.db, "record_truco_match", None)
+            if callable(record_history):
+                try:
+                    game.match_history = await record_history(
+                        game.guild_id,
+                        int(game.teams[0][0]),
+                        int(game.teams[1][0]),
+                        winner_id,
+                        match_id=game.session_id,
+                    )
+                except Exception as exc:
+                    print(f"[truco] Falha ao registrar histórico da partida {game.session_id}: {exc}")
         finally:
             game.status = "finished"
             await self._truco_release_game(game)
@@ -906,9 +974,6 @@ class GincanaTrucoMixin:
         guild = self.bot.get_guild(game.guild_id)
         winner_text = self._truco_member_mention(guild, winner_id)
         loser_text = self._truco_member_mention(guild, loser_id)
-        team0, team1 = self._truco_score_counts(game)
-        winner_score = team0 if winner_team == 0 else team1
-        loser_score = team1 if winner_team == 0 else team0
 
         if reason == "correu":
             title = "# 🏳️ Partida encerrada"
@@ -924,21 +989,20 @@ class GincanaTrucoMixin:
                 if self._truco_is_golden(game)
                 else "# 🏆 Vitória no truco"
             )
-            lead = f"{winner_text} venceu a partida por **{winner_score}–{loser_score}**."
+            lead = f"{winner_text} venceu a partida contra {loser_text}."
             game.status_text = "Partida encerrada."
 
         meta = [
             f"**Valendo:** {self._chip_amount(game.pot)}",
             f"**Vira:** {self._truco_card_public_display(game.vira)} · **Manilha:** {game.manilha_rank or '—'}",
-            f"**Placar final:** {self._truco_score_text(game, guild)}",
         ]
-        history = self._truco_round_history_lines(game, guild)
-        rounds = ["## Vazas", *(history or ["Nenhuma vaza foi concluída."])]
+        round_history = self._truco_round_history_lines(game, guild)
+        rounds = ["## Vazas", *(round_history or ["Nenhuma vaza foi concluída."])]
         reward = f"{winner_text} recebeu **{game.pot}** {self._CHIP_GAIN_EMOJI} e **+{self._truco_bonus_reward_value(game)}** {self._CHIP_BONUS_EMOJI}."
-        rewards = ["## Premiação", reward]
+        rewards = ["## Prêmio", reward]
+        match_history = self._truco_match_history_lines(game, guild)
 
-        closed = discord.ui.LayoutView(timeout=None)
-        closed.add_item(discord.ui.Container(
+        items = [
             discord.ui.TextDisplay("\n".join([title, lead])),
             discord.ui.Separator(),
             discord.ui.TextDisplay("\n".join(meta)),
@@ -946,6 +1010,15 @@ class GincanaTrucoMixin:
             discord.ui.TextDisplay("\n".join(rounds)),
             discord.ui.Separator(),
             discord.ui.TextDisplay("\n".join(rewards)),
+        ]
+        if match_history:
+            items.extend([
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("\n".join(match_history)),
+            ])
+        closed = discord.ui.LayoutView(timeout=None)
+        closed.add_item(discord.ui.Container(
+            *items,
             accent_color=self._truco_accent_color(game),
         ))
         await self._truco_safe_edit(game.status_message, embed=None, view=closed)
@@ -1209,8 +1282,18 @@ class GincanaTrucoMixin:
                 game.hands[user_id] = [deck.pop(0) for _ in range(3)]
             game.status = "active"
             game.status_text = "Distribuindo as cartas..."
-            game.challenge_message = None
-            game.status_message = await channel.send(view=TrucoTableView(self, game))
+            game.status_message = game.challenge_message
+            if game.status_message is not None:
+                edited = await self._truco_safe_edit(
+                    game.status_message,
+                    embed=None,
+                    view=TrucoTableView(self, game),
+                    content=None,
+                )
+                if not edited:
+                    game.status_message = None
+            if game.status_message is None:
+                game.status_message = await channel.send(view=TrucoTableView(self, game))
             await asyncio.sleep(0.8)
             game.status_text = "Revelando a vira..."
             await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))

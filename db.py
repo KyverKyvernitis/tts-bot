@@ -19,9 +19,11 @@ class SettingsDB:
         self.client = AsyncIOMotorClient(uri)
         self.db = self.client[db_name]
         self.coll = self.db[coll_name]
+        self.truco_history_coll = self.db[f"{coll_name}_truco_history"]
         self.guild_cache: Dict[int, Dict[str, Any]] = {}
         self.user_cache: Dict[tuple[int, int], Dict[str, Any]] = {}
         self._resolved_tts_cache: Dict[tuple[int, int], Dict[str, str]] = {}
+        self._truco_history_lock = asyncio.Lock()
 
     async def init(self):
         await self._ensure_indexes()
@@ -64,6 +66,16 @@ class SettingsDB:
             await self.coll.create_index([("type", 1), ("guild_id", 1)], name="birthday_type_guild")
             await self.coll.create_index([("type", 1), ("guild_id", 1), ("user_id", 1)], name="birthday_entry_user")
             await self.coll.create_index([("type", 1), ("guild_id", 1), ("month", 1), ("day", 1)], name="birthday_entry_date")
+
+            await self.truco_history_coll.create_index(
+                [("guild_id", 1), ("player_low_id", 1), ("player_high_id", 1)],
+                unique=True,
+                name="truco_history_guild_pair",
+            )
+            await self.truco_history_coll.create_index(
+                [("guild_id", 1), ("updated_at", -1)],
+                name="truco_history_guild_updated",
+            )
         except Exception as e:
             print(f"[db] Erro ao garantir índices: {e}")
 
@@ -1512,6 +1524,110 @@ async def _settingsdb_add_user_game_stat(self, guild_id: int, user_id: int, key:
     await self._save_user_doc(guild_id, user_id, doc)
     return new_value
 
+def _settingsdb_normalize_truco_history_doc(doc: Dict[str, Any] | None) -> Dict[str, int]:
+    source = doc or {}
+
+    def _int(key: str) -> int:
+        try:
+            return max(0, int(source.get(key, 0) or 0))
+        except Exception:
+            return 0
+
+    return {
+        "player_low_id": _int("player_low_id"),
+        "player_high_id": _int("player_high_id"),
+        "low_wins": _int("low_wins"),
+        "high_wins": _int("high_wins"),
+        "total_games": _int("total_games"),
+        "streak_winner_id": _int("streak_winner_id"),
+        "streak_count": _int("streak_count"),
+    }
+
+async def _settingsdb_get_truco_match_history(
+    self,
+    guild_id: int,
+    player_a_id: int,
+    player_b_id: int,
+) -> Dict[str, int]:
+    low_id, high_id = sorted((int(player_a_id), int(player_b_id)))
+    doc = await self.truco_history_coll.find_one(
+        {
+            "guild_id": int(guild_id),
+            "player_low_id": low_id,
+            "player_high_id": high_id,
+        },
+        {"_id": 0},
+    )
+    return _settingsdb_normalize_truco_history_doc(doc)
+
+async def _settingsdb_record_truco_match(
+    self,
+    guild_id: int,
+    player_a_id: int,
+    player_b_id: int,
+    winner_id: int,
+    *,
+    match_id: str,
+) -> Dict[str, int]:
+    gid = int(guild_id)
+    player_a = int(player_a_id)
+    player_b = int(player_b_id)
+    winner = int(winner_id)
+    if player_a <= 0 or player_b <= 0 or player_a == player_b:
+        raise ValueError("Jogadores inválidos para o histórico de Truco.")
+    if winner not in {player_a, player_b}:
+        raise ValueError("O vencedor precisa participar da partida de Truco.")
+
+    low_id, high_id = sorted((player_a, player_b))
+    match_key = str(match_id or "").strip()
+    query = {
+        "guild_id": gid,
+        "player_low_id": low_id,
+        "player_high_id": high_id,
+    }
+
+    # O registro de sessões impede que o mesmo confronto termine em paralelo.
+    # O lock também protege contra callbacks duplicados no mesmo processo.
+    async with self._truco_history_lock:
+        existing = await self.truco_history_coll.find_one(query, {"_id": 0}) or {}
+        recorded_ids = [str(value) for value in (existing.get("recorded_match_ids", []) or [])]
+        if match_key and match_key in recorded_ids:
+            return _settingsdb_normalize_truco_history_doc(existing)
+
+        previous_streak_winner = int(existing.get("streak_winner_id", 0) or 0)
+        previous_streak_count = max(0, int(existing.get("streak_count", 0) or 0))
+        streak_count = previous_streak_count + 1 if previous_streak_winner == winner else 1
+        now = datetime.now(timezone.utc)
+
+        update: Dict[str, Any] = {
+            "$inc": {
+                "total_games": 1,
+                ("low_wins" if winner == low_id else "high_wins"): 1,
+            },
+            "$set": {
+                "streak_winner_id": winner,
+                "streak_count": streak_count,
+                "updated_at": now,
+            },
+            "$setOnInsert": {
+                "guild_id": gid,
+                "player_low_id": low_id,
+                "player_high_id": high_id,
+                "created_at": now,
+            },
+        }
+        if match_key:
+            update["$push"] = {
+                "recorded_match_ids": {
+                    "$each": [match_key],
+                    "$slice": -50,
+                }
+            }
+
+        await self.truco_history_coll.update_one(query, update, upsert=True)
+        current = await self.truco_history_coll.find_one(query, {"_id": 0})
+        return _settingsdb_normalize_truco_history_doc(current)
+
 def _settingsdb_get_chip_leaderboard(self, guild_id: int, *, limit: int = 10) -> list[Dict[str, int]]:
     rows: list[Dict[str, int]] = []
     default_chips = 100
@@ -1562,6 +1678,8 @@ SettingsDB.set_user_chip_reset_at = _settingsdb_set_user_chip_reset_at
 SettingsDB.maybe_reset_user_chips = _settingsdb_maybe_reset_user_chips
 SettingsDB.get_user_game_stats = _settingsdb_get_user_game_stats
 SettingsDB.add_user_game_stat = _settingsdb_add_user_game_stat
+SettingsDB.get_truco_match_history = _settingsdb_get_truco_match_history
+SettingsDB.record_truco_match = _settingsdb_record_truco_match
 SettingsDB.get_chip_leaderboard = _settingsdb_get_chip_leaderboard
 SettingsDB.get_game_stat_leaderboard = _settingsdb_get_game_stat_leaderboard
 
