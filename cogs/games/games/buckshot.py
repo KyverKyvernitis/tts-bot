@@ -23,6 +23,10 @@ from ..constants import (
     ROLETA_JACKPOT_CHIPS,
 )
 
+
+_BUCKSHOT_SURVIVOR_BONUS = 10
+_BUCKSHOT_GOLDEN_SURVIVOR_BONUS = 25
+
 class _BuckshotJoinView(discord.ui.View):
     def __init__(self, cog: "GincanaTriggerMixin", guild_id: int, *, timeout: float = 30.0):
         super().__init__(timeout=timeout)
@@ -519,6 +523,49 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
     def _buckshot_reaction_emoji(self, session: dict | None) -> str:
         return '<a:uzi:1487936659692458054>' if self._buckshot_is_golden(session) else '<a:r_gun01:1484661880323838002>'
 
+    @staticmethod
+    def _buckshot_reward_range(minimum: int, maximum: int, emoji: str) -> str | None:
+        minimum = max(0, int(minimum or 0))
+        maximum = max(minimum, int(maximum or 0))
+        if maximum <= 0:
+            return None
+        if minimum == maximum:
+            return f"**{minimum} {emoji}**"
+        return f"**{minimum}–{maximum} {emoji}**"
+
+    def _format_buckshot_reward_summary(
+        self,
+        *,
+        normal_each: int,
+        normal_remainder: int,
+        eliminated_bonus_each: int,
+        eliminated_bonus_remainder: int,
+        round_bonus_each: int,
+        round_bonus_remainder: int,
+        fixed_bonus_each: int,
+    ) -> str:
+        normal_min = max(0, int(normal_each or 0))
+        normal_max = normal_min + (1 if int(normal_remainder or 0) > 0 else 0)
+        bonus_min = (
+            max(0, int(eliminated_bonus_each or 0))
+            + max(0, int(round_bonus_each or 0))
+            + max(0, int(fixed_bonus_each or 0))
+        )
+        bonus_max = bonus_min
+        if int(eliminated_bonus_remainder or 0) > 0:
+            bonus_max += 1
+        if int(round_bonus_remainder or 0) > 0:
+            bonus_max += 1
+
+        reward_parts = ['entrada devolvida']
+        normal_text = self._buckshot_reward_range(normal_min, normal_max, self._CHIP_GAIN_EMOJI)
+        bonus_text = self._buckshot_reward_range(bonus_min, bonus_max, self._CHIP_BONUS_EMOJI)
+        if normal_text:
+            reward_parts.append(normal_text)
+        if bonus_text:
+            reward_parts.append(bonus_text)
+        return f"🏆 **Prêmio:** {' + '.join(reward_parts)} para cada sobrevivente."
+
     def _buckshot_entry_spend(self, session: dict, user_id: int, stake: int) -> dict[str, object]:
         spend_map = session.get('entry_spend') or {}
         raw = spend_map.get(int(user_id)) or {}
@@ -741,7 +788,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 bonus_total = 10
             elif player_count >= 3:
                 bonus_total = 5
-            golden_bonus_each = 15 if is_golden else 0
+            fixed_bonus_each = _BUCKSHOT_GOLDEN_SURVIVOR_BONUS if is_golden else _BUCKSHOT_SURVIVOR_BONUS
             lines: list[str] = []
             public_race_notices: list[str] = []
             owner_id = int(session.get('owner_id') or 0)
@@ -768,7 +815,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                         returned_normal = max(0, int(own_spend.get('chips', 0) or 0))
                         returned_bonus = max(0, int(own_spend.get('bonus', 0) or 0))
                         normal_gain = returned_normal + base_each + (1 if index < base_remainder else 0)
-                        bonus_gain = returned_bonus + eliminated_bonus_each + (1 if index < eliminated_bonus_remainder else 0) + bonus_each + (1 if index < bonus_remainder else 0) + golden_bonus_each
+                        bonus_gain = returned_bonus + eliminated_bonus_each + (1 if index < eliminated_bonus_remainder else 0) + bonus_each + (1 if index < bonus_remainder else 0) + fixed_bonus_each
                         race_payouts[winner.id] = normal_gain + bonus_gain
                         if normal_gain > 0:
                             await self._change_user_chips(guild.id, winner.id, normal_gain, reason="Vitória no buckshot")
@@ -802,54 +849,17 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                         public_race_notices,
                     )
                 if winners:
-                    winner_count = len(winners)
-                    returned_entry_text = self._chip_amount(stake)
-                    if chosen_spend.get('chips', 0) and chosen_spend.get('bonus', 0):
-                        eliminated_entry_text = f"**{chosen_spend['chips']} {self._CHIP_GAIN_EMOJI}** + **{chosen_spend['bonus']} {self._CHIP_BONUS_EMOJI}**"
-                    elif chosen_spend.get('bonus', 0):
-                        eliminated_entry_text = f"**{chosen_spend['bonus']} {self._CHIP_BONUS_EMOJI}**"
-                    else:
-                        eliminated_entry_text = f"**{chosen_spend['chips']} {self._CHIP_GAIN_EMOJI}**"
-
-                    lines.append(f"**Entrada devolvida:** cada sobrevivente recebeu {returned_entry_text}.")
-
-                    if eliminated_normal_total > 0 or eliminated_bonus_total > 0:
-                        share_normal_max = base_each + (1 if base_remainder > 0 else 0)
-                        share_normal_min = base_each
-                        share_bonus_max = eliminated_bonus_each + (1 if eliminated_bonus_remainder > 0 else 0)
-                        share_bonus_min = eliminated_bonus_each
-                        share_parts = []
-                        if eliminated_normal_total > 0:
-                            if base_remainder == 0:
-                                share_parts.append(f"**{base_each} {self._CHIP_GAIN_EMOJI}** para cada um")
-                            else:
-                                share_parts.append(f"**{share_normal_max} {self._CHIP_GAIN_EMOJI}** para alguns e **{share_normal_min} {self._CHIP_GAIN_EMOJI}** para os demais")
-                        if eliminated_bonus_total > 0:
-                            if eliminated_bonus_remainder == 0:
-                                share_parts.append(f"**{eliminated_bonus_each} {self._CHIP_BONUS_EMOJI}** para cada um")
-                            else:
-                                share_parts.append(f"**{share_bonus_max} {self._CHIP_BONUS_EMOJI}** para alguns e **{share_bonus_min} {self._CHIP_BONUS_EMOJI}** para os demais")
-                        lines.append(
-                            f"**Entrada do eliminado:** {eliminated_entry_text}, dividida entre **{winner_count} sobreviventes** — " + " • ".join(share_parts) + "."
+                    lines.append(
+                        self._format_buckshot_reward_summary(
+                            normal_each=base_each,
+                            normal_remainder=base_remainder,
+                            eliminated_bonus_each=eliminated_bonus_each,
+                            eliminated_bonus_remainder=eliminated_bonus_remainder,
+                            round_bonus_each=bonus_each,
+                            round_bonus_remainder=bonus_remainder,
+                            fixed_bonus_each=fixed_bonus_each,
                         )
-
-                    if bonus_total > 0:
-                        max_bonus_gain = bonus_each + (1 if bonus_remainder > 0 else 0)
-                        min_bonus_gain = bonus_each
-                        if bonus_remainder == 0:
-                            lines.append(
-                                f"**Bônus da rodada:** **{bonus_each} {self._CHIP_BONUS_EMOJI}** para cada sobrevivente."
-                            )
-                        else:
-                            lines.append(
-                                f"**Bônus da rodada:** **{max_bonus_gain} {self._CHIP_BONUS_EMOJI}** para alguns e **{min_bonus_gain} {self._CHIP_BONUS_EMOJI}** para os demais."
-                            )
-
-                    if eliminated_normal_total <= 0 and eliminated_bonus_total <= 0 and bonus_total <= 0 and golden_bonus_each <= 0:
-                        lines.append("Os sobreviventes não receberam nada.")
-
-                    if is_golden and winners:
-                        lines.append(f"**Bônus dourado:** cada sobrevivente recebeu **+{golden_bonus_each} {self._CHIP_BONUS_EMOJI}**.")
+                    )
                 else:
                     lines.append(f"Ninguém sobreviveu para receber a entrada de **{eliminated_entry_total} {self._CHIP_LOSS_EMOJI}**.")
 
