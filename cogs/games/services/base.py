@@ -3,6 +3,7 @@ import base64
 import random
 import time
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import discord
 from discord.ext import commands
@@ -126,6 +127,7 @@ class GincanaBase:
         self._truco_games: dict[str, object] = {}
         self._truco_guild_sessions: dict[int, set[str]] = {}
         self._gincana_message_edit_locks: dict[int, asyncio.Lock] = {}
+        self._race_progress_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
 
     def _touch_runtime_state(self, state: dict | None, *, kind: str | None = None, guild_id: int | None = None) -> float:
@@ -605,7 +607,7 @@ class GincanaBase:
         doc["chip_recharge_manual_initialized"] = False
         doc.pop("race_key", None)
         doc.pop("race_active", None)
-        for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_sortudo_blessing_charges", "race_sortudo_blessing_started_at", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses"):
+        for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_sortudo_blessing_charges", "race_sortudo_blessing_started_at", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses", "race_state"):
             doc.pop(field, None)
         await self.db._save_user_doc(guild_id, user_id, doc)
         return int(amount)
@@ -624,7 +626,7 @@ class GincanaBase:
         doc["has_chip_activity"] = False
         doc.pop("race_key", None)
         doc.pop("race_active", None)
-        for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_sortudo_blessing_charges", "race_sortudo_blessing_started_at", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses"):
+        for field in ("race_free_roleta_spins", "race_free_carta_spins", "race_sortudo_blessing_charges", "race_sortudo_blessing_started_at", "race_robbery_window_started_at", "race_robbery_uses", "race_mendigar_window_started_at", "race_mendigar_uses", "race_state"):
             doc.pop(field, None)
         await self.db._save_user_doc(guild_id, user_id, doc)
         return int(doc["chips"])
@@ -1106,6 +1108,33 @@ class GincanaBase:
                     {"key": "redencao", "title": "Redenção", "desc": f"Ao perder na Roleta ou em Cartas, há **{self._format_percent_text(0.5)} de chance** de recuperar **50% do custo**."},
                 ],
             },
+            "vampiro": {
+                "name": "Vampiro",
+                "emoji": "🧛",
+                "effects": [
+                    {"key": "hunt", "title": "Hunt", "desc": "Das **18h às 6h**, a primeira vitória válida concede **2 Sangues**; as seguintes, **1**. Máximo de **3**. O mesmo rival entra em espera por **4h**."},
+                    {"key": "harvest", "title": "Harvest", "desc": f"Com **3 Sangues**, consome as cargas e recebe **35** {self._CHIP_BONUS_EMOJI}. Pode ativar **2 vezes por noite**."},
+                ],
+            },
+            "fenix": {
+                "name": "Fênix",
+                "emoji": "🐦‍🔥",
+                "effects": [
+                    {"key": "sunrise", "title": "Sunrise", "desc": "Das **6h às 18h**, as duas primeiras derrotas pagas guardam **1 Brasa** cada."},
+                    {"key": "rebirth", "title": "Rebirth", "desc": f"A próxima vitória paga consome as Brasas: **1** concede **30** {self._CHIP_BONUS_EMOJI}; **2** concedem **40** {self._CHIP_BONUS_EMOJI}."},
+                    {"key": "second_dawn", "title": "Second Dawn", "desc": f"Uma vez por dia, uma derrota que deixe o saldo em **15 ou menos** recupera até **15** {self._CHIP_EMOJI}, mirando **25** no total."},
+                ],
+            },
+            "glitch": {
+                "name": "Glitch",
+                "emoji": "👁️⃤",
+                "effects": [
+                    {"key": "desync", "title": "Desync", "desc": "Cada partida paga válida adiciona **1 fragmento**. O terceiro resultado entra em **ERROR**."},
+                    {"key": "overflow", "title": "Overflow", "desc": f"Uma vitória em **ERROR** concede de **30 a 45** {self._CHIP_BONUS_EMOJI}, conforme o lucro líquido."},
+                    {"key": "rollback", "title": "Rollback", "desc": "Uma derrota em **ERROR** devolve **75% da entrada**, limitado a **20**, na mesma composição."},
+                    {"key": "memory_leak", "title": "Memory Leak", "desc": "Após resolver o ERROR, há **25% de chance** de preservar **1 fragmento**."},
+                ],
+            },
         }
 
     def _get_race_effects(self, race_key: str) -> list[dict[str, str]]:
@@ -1145,6 +1174,15 @@ class GincanaBase:
             "premio_extra": f"cada vencedor recebeu **+20** {self._CHIP_BONUS_EMOJI} adicionais.",
             "as": "você recuperou **50% da entrada**.",
             "redencao": "você recuperou **50% do custo**.",
+            "hunt": "Sangue acumulado.",
+            "harvest": f"você recebeu **35** {self._CHIP_BONUS_EMOJI}.",
+            "sunrise": "Brasa armazenada.",
+            "rebirth": "as Brasas foram consumidas.",
+            "second_dawn": "o saldo foi recuperado.",
+            "desync": "fragmento registrado.",
+            "overflow": "o ERROR premiou a vitória.",
+            "rollback": "parte da entrada foi restaurada.",
+            "memory_leak": "1 fragmento foi preservado.",
         }
         effect_key = str(effect_key or "").strip().lower()
         activation_labels = {
@@ -1161,6 +1199,15 @@ class GincanaBase:
             "premio_extra": "Prêmio Extra ativado",
             "as": "Ás ativado",
             "redencao": "Redenção ativada",
+            "hunt": "Hunt",
+            "harvest": "Harvest",
+            "sunrise": "Sunrise",
+            "rebirth": "Rebirth",
+            "second_dawn": "Second Dawn",
+            "desync": "Desync",
+            "overflow": "Overflow",
+            "rollback": "Rollback",
+            "memory_leak": "Memory Leak",
         }
         suffix = str(detail or detail_map.get(effect_key, "")).strip()
         label = activation_labels.get(effect_key, f"{title} ativado")
@@ -1267,6 +1314,7 @@ class GincanaBase:
                 "race_robbery_uses",
                 "race_mendigar_window_started_at",
                 "race_mendigar_uses",
+                "race_state",
             ):
                 doc.pop(field, None)
             if key == "sortudo":
@@ -1296,6 +1344,231 @@ class GincanaBase:
 
     def _race_is(self, guild_id: int, user_id: int, race_key: str) -> bool:
         return self._get_user_race_key(guild_id, user_id) == str(race_key or "").strip().lower() and self._is_user_race_active(guild_id, user_id)
+
+    def _race_progress_lock(self, guild_id: int, user_id: int) -> asyncio.Lock:
+        key = (int(guild_id), int(user_id))
+        lock = self._race_progress_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._race_progress_locks[key] = lock
+        return lock
+
+    def _race_now(self) -> datetime:
+        try:
+            now = self.db._sao_paulo_now()
+            if isinstance(now, datetime):
+                return now
+        except Exception:
+            pass
+        return datetime.now(ZoneInfo("America/Sao_Paulo"))
+
+    def _race_period_info(self, now: datetime | None = None) -> tuple[str, str]:
+        current = now or self._race_now()
+        if current.hour >= 18 or current.hour < 6:
+            night_date = (current - timedelta(days=1)).date() if current.hour < 6 else current.date()
+            return "night", night_date.isoformat()
+        return "day", current.date().isoformat()
+
+    def _entry_spend_parts(self, guild_id: int, user_id: int, amount: int) -> dict[str, object]:
+        spend = max(0, int(amount or 0))
+        bonus = self._get_user_bonus_chips(guild_id, user_id)
+        bonus_used = min(bonus, spend)
+        period, period_key = self._race_period_info()
+        return {
+            "bonus": bonus_used,
+            "chips": spend - bonus_used,
+            "_race_period": period,
+            "_race_period_key": period_key,
+        }
+
+    def _normalize_entry_spend(self, entry_spend: dict | None) -> dict[str, int]:
+        raw = entry_spend or {}
+        return {
+            "chips": max(0, int(raw.get("chips", 0) or 0)),
+            "bonus": max(0, int(raw.get("bonus", 0) or 0)),
+        }
+
+    def _split_refund_by_entry(self, entry_spend: dict[str, int], amount: int) -> dict[str, int]:
+        spend = self._normalize_entry_spend(entry_spend)
+        total = spend["chips"] + spend["bonus"]
+        target = min(max(0, int(amount or 0)), total)
+        if target <= 0 or total <= 0:
+            return {"chips": 0, "bonus": 0}
+        bonus_share = int(round(target * spend["bonus"] / total))
+        bonus_share = min(spend["bonus"], max(0, bonus_share))
+        normal_share = target - bonus_share
+        if normal_share > spend["chips"]:
+            overflow = normal_share - spend["chips"]
+            normal_share = spend["chips"]
+            bonus_share = min(spend["bonus"], bonus_share + overflow)
+        return {"chips": normal_share, "bonus": bonus_share}
+
+    async def _apply_new_race_result(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        won: bool | None,
+        entry_spend: dict | None,
+        payout: int = 0,
+        opponent_ids=(),
+        valid: bool = True,
+        allow_hunt: bool = True,
+    ) -> list[str]:
+        """Aplica progressão das raças novas sem interferir na resolução do jogo."""
+        try:
+            race_key = self._get_user_race_key(guild_id, user_id)
+            if race_key not in {"vampiro", "fenix", "glitch"} or not self._is_user_race_active(guild_id, user_id):
+                return []
+            if not valid:
+                return []
+            raw_entry = dict(entry_spend or {})
+            spend = self._normalize_entry_spend(raw_entry)
+            entry_total = spend["chips"] + spend["bonus"]
+            now = self._race_now()
+            current_period, current_period_key = self._race_period_info(now)
+            stored_period = str(raw_entry.get("_race_period") or "").strip().lower()
+            stored_period_key = str(raw_entry.get("_race_period_key") or "").strip()
+            if stored_period in {"day", "night"} and stored_period_key:
+                period, period_key = stored_period, stored_period_key
+            else:
+                period, period_key = current_period, current_period_key
+            timestamp = float(now.timestamp())
+            opponents = sorted({int(value) for value in (opponent_ids or ()) if int(value) > 0 and int(value) != int(user_id)})
+
+            async with self._race_progress_lock(guild_id, user_id):
+                doc = self.db._get_user_doc(guild_id, user_id)
+                state_root = dict(doc.get("race_state") or {})
+                state = dict(state_root.get(race_key) or {})
+                notes: list[str] = []
+                normal_delta = 0
+                bonus_delta = 0
+                normal_reason = ""
+                bonus_reason = ""
+
+                if race_key == "vampiro":
+                    if won is not True or period != "night" or not allow_hunt or not opponents:
+                        return []
+                    if str(state.get("night_key") or "") != period_key:
+                        state = {"night_key": period_key, "blood": 0, "wins": 0, "harvests": 0, "opponents": {}}
+                    harvests = max(0, int(state.get("harvests", 0) or 0))
+                    if harvests >= 2:
+                        return []
+                    opponent_log = dict(state.get("opponents") or {})
+                    eligible_opponents = [opponent_id for opponent_id in opponents if timestamp - float(opponent_log.get(str(opponent_id), 0) or 0.0) >= 4 * 60 * 60]
+                    if not eligible_opponents:
+                        return []
+                    for opponent_id in eligible_opponents:
+                        opponent_log[str(opponent_id)] = timestamp
+                    wins = max(0, int(state.get("wins", 0) or 0))
+                    gain = 2 if wins == 0 else 1
+                    blood = min(3, max(0, int(state.get("blood", 0) or 0)) + gain)
+                    state.update({"night_key": period_key, "blood": blood, "wins": wins + 1, "opponents": opponent_log})
+                    if blood >= 3:
+                        state["blood"] = 0
+                        state["harvests"] = harvests + 1
+                        bonus_delta = 35
+                        bonus_reason = "Harvest do Vampiro"
+                        notes.append(self._race_effect_message(guild_id, user_id, "harvest", f"+35 {self._CHIP_BONUS_EMOJI} ({state['harvests']}/2 nesta noite)."))
+                    else:
+                        notes.append(self._race_effect_message(guild_id, user_id, "hunt", f"+{gain} Sangues ({blood}/3)."))
+
+                elif race_key == "fenix":
+                    if period != "day" or entry_total <= 0 or won is None:
+                        return []
+                    if str(state.get("day_key") or "") != period_key:
+                        state = {"day_key": period_key, "embers": 0, "second_dawn_used": False}
+                    embers = min(2, max(0, int(state.get("embers", 0) or 0)))
+                    if won:
+                        if embers <= 0:
+                            return []
+                        reward = 30 if embers == 1 else 40
+                        state["embers"] = 0
+                        bonus_delta = reward
+                        bonus_reason = "Rebirth da Fênix"
+                        notes.append(self._race_effect_message(guild_id, user_id, "rebirth", f"{embers} Brasa{'s' if embers != 1 else ''} consumida{'s' if embers != 1 else ''}; +{reward} {self._CHIP_BONUS_EMOJI}."))
+                    else:
+                        if embers < 2:
+                            embers += 1
+                            state["embers"] = embers
+                            notes.append(self._race_effect_message(guild_id, user_id, "sunrise", f"1 Brasa armazenada ({embers}/2)."))
+                        if not bool(state.get("second_dawn_used", False)):
+                            chips_now = int(doc.get("chips", CHIPS_INITIAL) or 0)
+                            bonus_now = max(0, int(doc.get("bonus_chips", 0) or 0))
+                            total_now = chips_now + bonus_now
+                            if total_now <= 15:
+                                recovery = min(15, max(0, 25 - total_now))
+                                if recovery > 0:
+                                    normal_delta = recovery
+                                    normal_reason = "Second Dawn da Fênix"
+                                    state["second_dawn_used"] = True
+                                    notes.append(self._race_effect_message(guild_id, user_id, "second_dawn", f"+{recovery} {self._CHIP_EMOJI}."))
+
+                elif race_key == "glitch":
+                    if entry_total <= 0:
+                        return []
+                    fragments = min(2, max(0, int(state.get("fragments", 0) or 0)))
+                    if won is None:
+                        if fragments < 2:
+                            fragments += 1
+                            state["fragments"] = fragments
+                            notes.append(self._race_effect_message(guild_id, user_id, "desync", f"{fragments}/3 fragmentos."))
+                        else:
+                            state["fragments"] = 2
+                            notes.append(self._race_effect_message(guild_id, user_id, "desync", "ERROR pendente até um resultado decisivo."))
+                    else:
+                        fragments += 1
+                        if fragments < 3:
+                            state["fragments"] = fragments
+                            notes.append(self._race_effect_message(guild_id, user_id, "desync", f"{fragments}/3 fragmentos."))
+                        else:
+                            if won:
+                                net_profit = max(0, int(payout or 0) - entry_total)
+                                reward = min(45, max(30, 20 + int(net_profit * 0.5)))
+                                bonus_delta = reward
+                                bonus_reason = "Overflow do Glitch"
+                                notes.append(self._race_effect_message(guild_id, user_id, "overflow", f"+{reward} {self._CHIP_BONUS_EMOJI}."))
+                            else:
+                                refund_total = min(20, int(entry_total * 0.75))
+                                refund = self._split_refund_by_entry(spend, refund_total)
+                                normal_delta = refund["chips"]
+                                bonus_delta = refund["bonus"]
+                                normal_reason = "Rollback do Glitch"
+                                bonus_reason = "Rollback do Glitch"
+                                parts = []
+                                if normal_delta:
+                                    parts.append(f"{normal_delta} {self._CHIP_EMOJI}")
+                                if bonus_delta:
+                                    parts.append(f"{bonus_delta} {self._CHIP_BONUS_EMOJI}")
+                                notes.append(self._race_effect_message(guild_id, user_id, "rollback", "+" + " + ".join(parts) + "." if parts else "nenhuma ficha devolvida."))
+                            leaked = random.random() < 0.25
+                            state["fragments"] = 1 if leaked else 0
+                            if leaked:
+                                notes.append(self._race_effect_message(guild_id, user_id, "memory_leak", "1 fragmento preservado."))
+
+                state_root[race_key] = state
+                doc["race_state"] = state_root
+                if normal_delta:
+                    doc["chips"] = int(doc.get("chips", CHIPS_INITIAL) or 0) + normal_delta
+                if bonus_delta:
+                    doc["bonus_chips"] = max(0, int(doc.get("bonus_chips", 0) or 0)) + bonus_delta
+                if normal_delta or bonus_delta:
+                    doc["has_chip_activity"] = True
+                await self.db._save_user_doc(guild_id, user_id, doc)
+                if normal_delta:
+                    try:
+                        await self.db.append_chip_history(guild_id, user_id, delta=normal_delta, kind="chips", reason=normal_reason or "Efeito de raça")
+                    except Exception:
+                        pass
+                if bonus_delta:
+                    try:
+                        await self.db.append_chip_history(guild_id, user_id, delta=bonus_delta, kind="bonus", reason=bonus_reason or "Efeito de raça")
+                    except Exception:
+                        pass
+                return [note for note in notes if note]
+        except Exception as exc:
+            print(f"[games:races] Falha ao aplicar raça para {guild_id}/{user_id}: {exc}")
+            return []
 
     def _roleta_cost_for_user(self, guild_id: int, user_id: int) -> int:
         return ROLETA_APOSTADOR_COST if self._race_is(guild_id, user_id, "apostador") else ROLETA_COST

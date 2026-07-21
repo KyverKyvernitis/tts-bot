@@ -769,6 +769,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             if not confirmed:
                 return
         entry_text = self._entry_consume_text(guild.id, user.id, ALVO_STAKE)
+        entry_spend = self._entry_spend_parts(guild.id, user.id, ALVO_STAKE)
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, ALVO_STAKE, reason="Entrada no alvo")
         if needs_negative_confirm:
             chip_note = None
@@ -782,6 +783,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 pass
             return
         locked.add(user.id)
+        session.setdefault('entry_spend', {})[user.id] = entry_spend
         session['bonus_chips'] = self._target_bonus_for_participants(len(locked))
         self._touch_runtime_state(session, kind='alvo', guild_id=guild.id)
         try: await interaction.response.send_message(chip_note or entry_text, ephemeral=True)
@@ -942,6 +944,26 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             for user_id, amount in bonus_rewards.items():
                 if amount > 0:
                     await self._change_user_bonus_chips(guild.id, user_id, amount, reason="Bônus do alvo")
+        race_effect_lines: list[str] = []
+        participant_ids = [member.id for member in participants]
+        entry_spend_map = session.get('entry_spend') or {}
+        bull_bonus_value = int(modifier.get('bullseye_bonus', 0) or 0)
+        bullseye_ids = {member.id for member in bullseye_members}
+        for member in participants:
+            payout = int(rewards.get(member.id, 0) or 0) + int(bonus_rewards.get(member.id, 0) or 0)
+            if member.id in bullseye_ids:
+                payout += bull_bonus_value
+            notes = await self._apply_new_race_result(
+                guild.id,
+                member.id,
+                won=int(rewards.get(member.id, 0) or 0) > 0,
+                entry_spend=entry_spend_map.get(member.id) or {'chips': ALVO_STAKE, 'bonus': 0},
+                payout=payout,
+                opponent_ids=[user_id for user_id in participant_ids if user_id != member.id],
+                valid=True,
+                allow_hunt=True,
+            )
+            race_effect_lines.extend(f"{member.mention} — {note}" for note in notes)
         coringa_refunds: list[tuple[int, int]] = []
         for member in participants:
             if int(rewards.get(member.id, 0) or 0) > 0:
@@ -970,6 +992,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                     closing_parts.append(refund_note)
             else:
                 closing_parts.append(f"{self._EFFECT_EMOJI} **Ás ativado:** **{len(coringa_refunds)} jogadores** recuperaram {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada.")
+        closing_parts.extend(race_effect_lines)
         session['summary_line'] = f"<:boom:1485862099308804107> **Pote distribuído:** {self._chip_amount(prize_total)}"
         if bonus_chips > 0:
             session['summary_line'] += f" • Bônus: {self._bonus_chip_amount(bonus_chips)}"
@@ -978,7 +1001,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             session['podium_lines'] = [f"🥇 **Vencedor:** {winner_mentions[0]} — {self._chip_text(winning_reward, kind='gain')}"]
         else:
             session['podium_lines'] = podium_lines
-        session['closing_line'] = '\n'.join(closing_parts[:2]) if closing_parts else None
+        session['closing_line'] = '\n'.join(closing_parts[:16]) if closing_parts else None
         session['prize_total'] = prize_total
         result_lines = [session['summary_line'], '', *hit_lines]
         if session['podium_lines']:
@@ -1016,6 +1039,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, ALVO_STAKE, title="🎯 Confirmar entrada")
             if not confirmed:
                 return True
+        entry_spend = self._entry_spend_parts(guild.id, message.author.id, ALVO_STAKE)
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, ALVO_STAKE, reason="Entrada no alvo")
         if needs_negative_confirm:
             chip_note = None
@@ -1027,6 +1051,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             'text_channel_id': message.channel.id,
             'owner_id': message.author.id,
             'locked_participants': {message.author.id},
+            'entry_spend': {message.author.id: entry_spend},
             'modifier': self._roll_target_modifier(),
             'bonus_chips': self._target_bonus_for_participants(1),
             'lobby_message': None,

@@ -51,6 +51,7 @@ class TrucoGame:
     vira: tuple[str, str] | None = None
     manilha_rank: str | None = None
     contribution: dict[int, int] = field(default_factory=dict)
+    entry_spend: dict[int, dict[str, object]] = field(default_factory=dict)
     pot: int = 0
     accepted: bool = False
     pending_raise_by: int | None = None
@@ -937,6 +938,7 @@ class GincanaTrucoMixin:
 
         winner_id = int(game.teams[winner_team][0])
         loser_user_id = int(game.teams[1 - winner_team][0])
+        race_effect_lines: list[str] = []
         try:
             for user_id in game.players:
                 await self.db.add_user_game_stat(game.guild_id, user_id, "truco_games", 1)
@@ -967,6 +969,25 @@ class GincanaTrucoMixin:
                     )
                 except Exception as exc:
                     print(f"[truco] Falha ao registrar histórico da partida {game.session_id}: {exc}")
+
+            if reason == "jogo encerrado":
+                for user_id, did_win in ((winner_id, True), (loser_user_id, False)):
+                    entry_spend = game.entry_spend.get(user_id) or {
+                        "chips": int(game.contribution.get(user_id, TRUCO_ENTRY) or TRUCO_ENTRY),
+                        "bonus": 0,
+                    }
+                    notes = await self._apply_new_race_result(
+                        game.guild_id,
+                        user_id,
+                        won=did_win,
+                        entry_spend=entry_spend,
+                        payout=(game.pot + self._truco_bonus_reward_value(game)) if did_win else 0,
+                        opponent_ids=[loser_user_id if did_win else winner_id],
+                        valid=True,
+                        allow_hunt=True,
+                    )
+                    mention = self._truco_member_mention(self.bot.get_guild(game.guild_id), user_id)
+                    race_effect_lines.extend(f"{mention} — {note}" for note in notes)
         finally:
             game.status = "finished"
             await self._truco_release_game(game)
@@ -1015,6 +1036,11 @@ class GincanaTrucoMixin:
             items.extend([
                 discord.ui.Separator(),
                 discord.ui.TextDisplay("\n".join(match_history)),
+            ])
+        if race_effect_lines:
+            items.extend([
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("\n".join(race_effect_lines)),
             ])
         closed = discord.ui.LayoutView(timeout=None)
         closed.add_item(discord.ui.Container(
@@ -1257,6 +1283,16 @@ class GincanaTrucoMixin:
                 consumed_entries.append((user_id, normal_part, bonus_part))
 
             game.entry_refunds = consumed_entries
+            period, period_key = self._race_period_info()
+            game.entry_spend = {
+                int(user_id): {
+                    "chips": int(normal_part),
+                    "bonus": int(bonus_part),
+                    "_race_period": period,
+                    "_race_period_key": period_key,
+                }
+                for user_id, normal_part, bonus_part in consumed_entries
+            }
             game.accepted = True
             game.status = "starting"
 
@@ -1497,6 +1533,11 @@ class GincanaTrucoMixin:
                     await interaction.response.send_message("Não foi possível cobrar o aumento. Nada foi alterado.", ephemeral=True)
                     return
                 consumed.append((user_id, normal_part, bonus_part))
+            for user_id, normal_part, bonus_part in consumed:
+                current_spend = dict(game.entry_spend.get(int(user_id)) or {})
+                current_spend["chips"] = int(current_spend.get("chips", 0) or 0) + int(normal_part)
+                current_spend["bonus"] = int(current_spend.get("bonus", 0) or 0) + int(bonus_part)
+                game.entry_spend[int(user_id)] = current_spend
             for user_id, delta in deltas.items():
                 game.contribution[user_id] = int(game.contribution.get(user_id, TRUCO_ENTRY)) + delta
             game.level = target_level

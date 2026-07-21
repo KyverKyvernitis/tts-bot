@@ -50,6 +50,8 @@ class PokerGame:
     stack_normal: dict[int, int] = field(default_factory=dict)
     stack_bonus: dict[int, int] = field(default_factory=dict)
     round_bets: dict[int, int] = field(default_factory=dict)
+    entry_spend: dict[int, dict[str, object]] = field(default_factory=dict)
+    race_notes: list[str] = field(default_factory=list)
     round_acted: set[int] = field(default_factory=set)
     pot: int = 0
     buy_in: int = POKER_BUY_IN
@@ -247,6 +249,10 @@ class GincanaPokerMixin:
         remaining = spend - use_bonus
         game.stack_bonus[player_id] = bonus - use_bonus
         game.stack_normal[player_id] = normal - remaining
+        spent = dict(game.entry_spend.get(player_id) or {})
+        spent["bonus"] = int(spent.get("bonus", 0) or 0) + use_bonus
+        spent["chips"] = int(spent.get("chips", 0) or 0) + remaining
+        game.entry_spend[player_id] = spent
         game.stacks[player_id] = self._poker_total_stack(game, player_id)
         return True
 
@@ -484,6 +490,8 @@ class GincanaPokerMixin:
         embed.add_field(name=f"Stack final — {player_a.display_name}", value=self._poker_stack_text(game, player_a.id), inline=True)
         embed.add_field(name=f"Stack final — {player_b.display_name}", value=self._poker_stack_text(game, player_b.id), inline=True)
         embed.add_field(name="Trocas reveladas", value=f"{player_a.display_name}: **{game.exchange_counts.get(player_a.id, 0)}**\n{player_b.display_name}: **{game.exchange_counts.get(player_b.id, 0)}**", inline=True)
+        if game.race_notes:
+            embed.add_field(name="Efeitos de raça", value="\n".join(game.race_notes), inline=False)
         return embed
 
     async def _disable_poker_views(self, game: PokerGame):
@@ -647,6 +655,32 @@ class GincanaPokerMixin:
             await self._record_poker_result(game.guild_id, player_b.id, player_a.id)
         else:
             await self._record_poker_round(game.guild_id, player_a.id, player_b.id)
+
+        payout_map = {
+            player_a.id: game.pot if outcome > 0 else (game.pot // 2 if outcome == 0 else 0),
+            player_b.id: game.pot if outcome < 0 else (game.pot - game.pot // 2 if outcome == 0 else 0),
+        }
+        won_map = {
+            player_a.id: True if outcome > 0 else (False if outcome < 0 else None),
+            player_b.id: True if outcome < 0 else (False if outcome > 0 else None),
+        }
+        player_names = {player_a.id: player_a.mention, player_b.id: player_b.mention}
+        for player_id in game.players:
+            opponent_id = game.other_player(player_id)
+            notes = await self._apply_new_race_result(
+                game.guild_id,
+                player_id,
+                won=won_map[player_id],
+                entry_spend=game.entry_spend.get(player_id) or {"chips": game.buy_in, "bonus": 0},
+                payout=int(payout_map[player_id]),
+                opponent_ids=[opponent_id],
+                valid=True,
+                allow_hunt=True,
+            )
+            game.race_notes.extend(f"{player_names[player_id]} — {note}" for note in notes)
+            game.stack_normal[player_id] = int(self.db.get_user_chips(game.guild_id, player_id, default=100) or 0)
+            game.stack_bonus[player_id] = int(self._get_user_bonus_chips(game.guild_id, player_id) or 0)
+            game.stacks[player_id] = self._poker_total_stack(game, player_id)
         await self._disable_poker_views(game)
 
         if game.status_message is not None:
@@ -1013,6 +1047,10 @@ class GincanaPokerMixin:
         game.selected = {message.author.id: set(), opponent.id: set()}
         game.confirmed = {message.author.id: False, opponent.id: False}
         game.accepted = {message.author.id: False, opponent.id: False}
+        game.entry_spend = {
+            message.author.id: self._entry_spend_parts(guild.id, message.author.id, POKER_BUY_IN),
+            opponent.id: self._entry_spend_parts(guild.id, opponent.id, POKER_BUY_IN),
+        }
         host_stack_normal, host_stack_bonus, host_stack = self._poker_project_stack_after_buy_in(guild.id, message.author.id, POKER_BUY_IN)
         opp_stack_normal, opp_stack_bonus, opp_stack = self._poker_project_stack_after_buy_in(guild.id, opponent.id, POKER_BUY_IN)
         game.stack_normal = {message.author.id: host_stack_normal, opponent.id: opp_stack_normal}

@@ -480,7 +480,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         content = str(message.content or "").strip().casefold()
         if content.startswith("_"):
             return False
-        if content != "race":
+        if content not in {"race", "raça"}:
             return False
         if message.guild is None:
             return True

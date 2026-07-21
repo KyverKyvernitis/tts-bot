@@ -519,29 +519,39 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
     def _buckshot_reaction_emoji(self, session: dict | None) -> str:
         return '<a:uzi:1487936659692458054>' if self._buckshot_is_golden(session) else '<a:r_gun01:1484661880323838002>'
 
-    def _buckshot_entry_spend(self, session: dict, user_id: int, stake: int) -> dict[str, int]:
+    def _buckshot_entry_spend(self, session: dict, user_id: int, stake: int) -> dict[str, object]:
         spend_map = session.get('entry_spend') or {}
         raw = spend_map.get(int(user_id)) or {}
         bonus_spent = max(0, int(raw.get('bonus', 0) or 0))
         normal_spent = max(0, int(raw.get('chips', 0) or 0))
         total = bonus_spent + normal_spent
         if total <= 0 and stake > 0:
-            return {'chips': int(stake), 'bonus': 0}
-        if total > stake > 0:
-            overflow = total - int(stake)
-            reduce_bonus = min(bonus_spent, overflow)
-            bonus_spent -= reduce_bonus
-            overflow -= reduce_bonus
-            if overflow > 0:
-                normal_spent = max(0, normal_spent - overflow)
-        return {'chips': normal_spent, 'bonus': bonus_spent}
+            result: dict[str, object] = {'chips': int(stake), 'bonus': 0}
+        else:
+            if total > stake > 0:
+                overflow = total - int(stake)
+                reduce_bonus = min(bonus_spent, overflow)
+                bonus_spent -= reduce_bonus
+                overflow -= reduce_bonus
+                if overflow > 0:
+                    normal_spent = max(0, normal_spent - overflow)
+            result = {'chips': normal_spent, 'bonus': bonus_spent}
+        period = str(raw.get('_race_period') or '').strip().lower()
+        period_key = str(raw.get('_race_period_key') or '').strip()
+        if period in {'day', 'night'} and period_key:
+            result['_race_period'] = period
+            result['_race_period_key'] = period_key
+        return result
 
     def _buckshot_record_entry_spend(self, session: dict, user_id: int, stake: int, *, bonus_before: int):
         spend_map = dict(session.get('entry_spend') or {})
         bonus_used = min(max(0, int(bonus_before)), max(0, int(stake)))
+        period, period_key = self._race_period_info()
         spend_map[int(user_id)] = {
             'bonus': bonus_used,
             'chips': max(0, int(stake) - bonus_used),
+            '_race_period': period,
+            '_race_period_key': period_key,
         }
         session['entry_spend'] = spend_map
 
@@ -745,6 +755,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 bonus_total = 5
             golden_bonus_each = 15 if is_golden else 0
             lines: list[str] = []
+            race_payouts: dict[int, int] = {}
             if chosen is None:
                 lines.append(('<a:uzi:1487936659692458054>' if is_golden else '<:gunforward:1484655577836683434>') + ' O disparo aconteceu. Ninguém foi eliminado.')
             else:
@@ -768,6 +779,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                         returned_bonus = max(0, int(own_spend.get('bonus', 0) or 0))
                         normal_gain = returned_normal + base_each + (1 if index < base_remainder else 0)
                         bonus_gain = returned_bonus + eliminated_bonus_each + (1 if index < eliminated_bonus_remainder else 0) + bonus_each + (1 if index < bonus_remainder else 0) + golden_bonus_each
+                        race_payouts[winner.id] = normal_gain + bonus_gain
                         if normal_gain > 0:
                             await self._change_user_chips(guild.id, winner.id, normal_gain, reason="Vitória no buckshot")
                         if bonus_gain > 0:
@@ -840,6 +852,21 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 else:
                     lines.append(f"Ninguém sobreviveu para receber a entrada de **{eliminated_entry_total} {self._CHIP_LOSS_EMOJI}**.")
 
+            eligible_ids = [member.id for member in eligible]
+            for member in eligible:
+                round_won = None if chosen is None else member.id != chosen.id
+                notes = await self._apply_new_race_result(
+                    guild.id,
+                    member.id,
+                    won=round_won,
+                    entry_spend=self._buckshot_entry_spend(session, member.id, stake),
+                    payout=int(race_payouts.get(member.id, 0) or 0),
+                    opponent_ids=[user_id for user_id in eligible_ids if user_id != member.id],
+                    valid=True,
+                    allow_hunt=True,
+                )
+                lines.extend(f"{member.mention} — {note}" for note in notes)
+
             if lobby_message is not None:
                 try:
                     await lobby_message.edit(view=_BuckshotLobbyClosedView(f'{self._EFFECT_EMOJI} Resultado do Buckshot dourado' if is_golden else '<:gunforward:1484655577836683434> Resultado do Buckshot', lines, color=self._buckshot_color(session)))
@@ -893,7 +920,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             'manual_participants': {message.author.id},
             'focus_participants': set(),
             'locked_participants': {message.author.id},
-            'entry_spend': {message.author.id: {'bonus': min(max(0, int(bonus_before)), stake), 'chips': max(0, stake - min(max(0, int(bonus_before)), stake))}},
+            'entry_spend': {message.author.id: self._entry_spend_parts(guild.id, message.author.id, stake)},
             'lobby_message': None,
             'message': None,
             'view': None,

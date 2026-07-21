@@ -754,6 +754,7 @@ class GincanaCorridaMixin:
                 return
 
         entry_text = self._entry_consume_text(guild.id, user.id, CORRIDA_STAKE)
+        entry_spend = self._entry_spend_parts(guild.id, user.id, CORRIDA_STAKE)
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, user.id, CORRIDA_STAKE, reason="Entrada na corrida")
         if needs_negative_confirm:
             chip_note = None
@@ -762,6 +763,7 @@ class GincanaCorridaMixin:
             return
 
         locked.add(user.id)
+        session.setdefault("entry_spend", {})[user.id] = entry_spend
         session.setdefault("progress", {})[user.id] = 0.0
         session.setdefault("state_map", {})[user.id] = _HORSE_START
         view.join_button.label = f"🐎 Entrar ({len(self._get_race_participants(guild, session))})"
@@ -1503,6 +1505,21 @@ class GincanaCorridaMixin:
                 bonus_reason = "Bônus da corrida (rodada cheia)" if session.get("rodada_cheia") else "Bônus da corrida"
                 await self._change_user_bonus_chips(guild.id, user_id, amount, reason=bonus_reason)
 
+        entry_spend_map = session.get("entry_spend") or {}
+        participant_ids = [member.id for member in final_order]
+        for member in final_order:
+            notes = await self._apply_new_race_result(
+                guild.id,
+                member.id,
+                won=member.id in winner_ids,
+                entry_spend=entry_spend_map.get(member.id) or {"chips": CORRIDA_STAKE, "bonus": 0},
+                payout=int(rewards.get(member.id, 0) or 0) + int(bonus_rewards.get(member.id, 0) or 0),
+                opponent_ids=[user_id for user_id in participant_ids if user_id != member.id],
+                valid=True,
+                allow_hunt=True,
+            )
+            result_lines.extend(f"{member.mention} — {note}" for note in notes)
+
         if coringa_refunds:
             if len(coringa_refunds) == 1:
                 refund_user = guild.get_member(coringa_refunds[0][0])
@@ -1514,7 +1531,7 @@ class GincanaCorridaMixin:
                 result_lines.append(refund_note)
 
         session["starting"] = False
-        session["result_lines"] = result_lines[:4]
+        session["result_lines"] = result_lines[:20]
         message = session.get("message")
         if message is not None:
             try:
@@ -1550,6 +1567,7 @@ class GincanaCorridaMixin:
             if not confirmed:
                 return True
 
+        entry_spend = self._entry_spend_parts(guild.id, message.author.id, CORRIDA_STAKE)
         paid, _balance, chip_note = await self._try_consume_chips(guild.id, message.author.id, CORRIDA_STAKE, reason="Entrada na corrida")
         if needs_negative_confirm:
             chip_note = None
@@ -1569,6 +1587,7 @@ class GincanaCorridaMixin:
             "text_channel_id": message.channel.id,
             "owner_id": message.author.id,
             "locked_participants": {message.author.id},
+            "entry_spend": {message.author.id: entry_spend},
             "progress": {message.author.id: 0.0},
             "state_map": {message.author.id: _HORSE_START},
             "arrival_groups": [],
