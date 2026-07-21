@@ -31,6 +31,7 @@ class TrucoGame:
     session_id: str
     guild_id: int
     channel_id: int
+    owner_id: int
     players_order: list[int]
     teams: list[tuple[int, ...]]
     variant: str = "normal"
@@ -573,6 +574,7 @@ class GincanaTrucoMixin:
             session_id=f"truco:{uuid4().hex}",
             guild_id=int(guild_id),
             channel_id=int(channel_id),
+            owner_id=players[0],
             players_order=players,
             teams=[(players[0],), (players[1],)],
             variant=str(variant or "normal"),
@@ -943,6 +945,8 @@ class GincanaTrucoMixin:
 
         winner_id = int(game.teams[winner_team][0])
         loser_user_id = int(game.teams[1 - winner_team][0])
+        owner_id = int(game.owner_id)
+        public_race_notices: list[str] = []
         try:
             for user_id in game.players:
                 await self.db.add_user_game_stat(game.guild_id, user_id, "truco_games", 1)
@@ -990,11 +994,13 @@ class GincanaTrucoMixin:
                         valid=True,
                         allow_hunt=True,
                     )
-                    await self._deliver_or_queue_private_race_notices(
+                    await self._route_lobby_race_notices(
                         game.race_interactions.get(user_id),
                         game.guild_id,
                         user_id,
+                        owner_id,
                         notes,
+                        public_race_notices,
                     )
         finally:
             game.status = "finished"
@@ -1040,6 +1046,11 @@ class GincanaTrucoMixin:
             discord.ui.Separator(),
             discord.ui.TextDisplay("\n".join(rewards)),
         ]
+        if public_race_notices:
+            items.extend([
+                discord.ui.Separator(),
+                discord.ui.TextDisplay("\n".join(["## Habilidade", *public_race_notices])),
+            ])
         if match_history:
             items.extend([
                 discord.ui.Separator(),
@@ -1050,7 +1061,9 @@ class GincanaTrucoMixin:
             *items,
             accent_color=self._truco_accent_color(game),
         ))
-        await self._truco_safe_edit(game.status_message, embed=None, view=closed)
+        delivered = await self._truco_safe_edit(game.status_message, embed=None, view=closed)
+        if not delivered and public_race_notices:
+            self._queue_private_race_notices(game.guild_id, owner_id, public_race_notices)
         await self._truco_refresh_private_views(game)
 
     async def _expire_truco_invite(self, game: TrucoGame):

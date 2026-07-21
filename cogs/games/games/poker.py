@@ -480,7 +480,17 @@ class GincanaPokerMixin:
         embed.add_field(name="Stack rival", value=self._poker_stack_text(game, opponent.id), inline=True)
         return embed
 
-    def _make_poker_result_embed(self, player_a: discord.Member, hand_a: list[Card], player_b: discord.Member, hand_b: list[Card], outcome: int, game: PokerGame) -> discord.Embed:
+    def _make_poker_result_embed(
+        self,
+        player_a: discord.Member,
+        hand_a: list[Card],
+        player_b: discord.Member,
+        hand_b: list[Card],
+        outcome: int,
+        game: PokerGame,
+        *,
+        race_notices=(),
+    ) -> discord.Embed:
         if outcome > 0:
             title = "🏆 Vitória no Poker"
             description = f"**Vencedor:** {player_a.mention}\n**Pote:** {self._chip_text(game.pot, kind='gain')}\n**Adversário:** {player_b.mention}"
@@ -497,6 +507,9 @@ class GincanaPokerMixin:
         embed.add_field(name=f"Stack final — {player_a.display_name}", value=self._poker_stack_text(game, player_a.id), inline=True)
         embed.add_field(name=f"Stack final — {player_b.display_name}", value=self._poker_stack_text(game, player_b.id), inline=True)
         embed.add_field(name="Trocas reveladas", value=f"{player_a.display_name}: **{game.exchange_counts.get(player_a.id, 0)}**\n{player_b.display_name}: **{game.exchange_counts.get(player_b.id, 0)}**", inline=True)
+        clean_notices = self._clean_race_notices(race_notices)
+        if clean_notices:
+            embed.add_field(name="Habilidade", value="\n".join(clean_notices), inline=False)
         return embed
 
     async def _disable_poker_views(self, game: PokerGame):
@@ -669,6 +682,7 @@ class GincanaPokerMixin:
             player_a.id: True if outcome > 0 else (False if outcome < 0 else None),
             player_b.id: True if outcome < 0 else (False if outcome > 0 else None),
         }
+        public_race_notices: list[str] = []
         for player_id in game.players:
             opponent_id = game.other_player(player_id)
             notes = await self._apply_new_race_result(
@@ -681,25 +695,39 @@ class GincanaPokerMixin:
                 valid=True,
                 allow_hunt=True,
             )
-            await self._deliver_or_queue_private_race_notices(
+            await self._route_lobby_race_notices(
                 game.race_interactions.get(player_id),
                 game.guild_id,
                 player_id,
+                game.host_id,
                 notes,
+                public_race_notices,
             )
             game.stack_normal[player_id] = int(self.db.get_user_chips(game.guild_id, player_id, default=100) or 0)
             game.stack_bonus[player_id] = int(self._get_user_bonus_chips(game.guild_id, player_id) or 0)
             game.stacks[player_id] = self._poker_total_stack(game, player_id)
         await self._disable_poker_views(game)
 
+        public_result_delivered = False
         if game.status_message is not None:
             try:
                 await game.status_message.edit(
-                    embed=self._make_poker_result_embed(player_a, game.hands[player_a.id], player_b, game.hands[player_b.id], outcome, game),
+                    embed=self._make_poker_result_embed(
+                        player_a,
+                        game.hands[player_a.id],
+                        player_b,
+                        game.hands[player_b.id],
+                        outcome,
+                        game,
+                        race_notices=public_race_notices,
+                    ),
                     view=None,
                 )
+                public_result_delivered = True
             except Exception:
                 pass
+        if public_race_notices and not public_result_delivered:
+            self._queue_private_race_notices(game.guild_id, game.host_id, public_race_notices)
 
         if outcome > 0:
             text_a = "Você venceu a rodada."

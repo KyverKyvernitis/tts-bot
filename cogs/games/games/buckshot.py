@@ -543,18 +543,6 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             result['_race_period_key'] = period_key
         return result
 
-    def _buckshot_record_entry_spend(self, session: dict, user_id: int, stake: int, *, bonus_before: int):
-        spend_map = dict(session.get('entry_spend') or {})
-        bonus_used = min(max(0, int(bonus_before)), max(0, int(stake)))
-        period, period_key = self._race_period_info()
-        spend_map[int(user_id)] = {
-            'bonus': bonus_used,
-            'chips': max(0, int(stake) - bonus_used),
-            '_race_period': period,
-            '_race_period_key': period_key,
-        }
-        session['entry_spend'] = spend_map
-
     async def _buckshot_refund_entry(self, guild_id: int, session: dict, user_id: int, stake: int):
         spend = self._buckshot_entry_spend(session, user_id, stake)
         if spend.get('bonus', 0) > 0:
@@ -612,7 +600,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 if not confirmed:
                     return
             entry_text = self._entry_consume_text(guild.id, member.id, stake)
-            bonus_before = self._get_user_bonus_chips(guild.id, member.id)
+            entry_spend = self._entry_spend_parts(guild.id, member.id, stake)
             paid, _balance, note = await self._try_consume_chips(guild.id, member.id, stake, reason="Entrada no buckshot")
             if needs_negative_confirm:
                 note = None
@@ -628,7 +616,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             manual = set(session.get('manual_participants', set()) or set())
             manual.add(member.id)
             session['manual_participants'] = manual
-            self._buckshot_record_entry_spend(session, member.id, stake, bonus_before=bonus_before)
+            session.setdefault('entry_spend', {})[member.id] = entry_spend
             locked.add(member.id)
             session['locked_participants'] = locked
             session.setdefault('race_interactions', {})[member.id] = interaction
@@ -755,6 +743,8 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 bonus_total = 5
             golden_bonus_each = 15 if is_golden else 0
             lines: list[str] = []
+            public_race_notices: list[str] = []
+            owner_id = int(session.get('owner_id') or 0)
             race_payouts: dict[int, int] = {}
             if chosen is None:
                 lines.append(('<a:uzi:1487936659692458054>' if is_golden else '<:gunforward:1484655577836683434>') + ' O disparo aconteceu. Ninguém foi eliminado.')
@@ -797,9 +787,20 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                 refund = await self._maybe_apply_coringa_lobby_refund(guild.id, chosen.id, stake)
                 lines.append(f"{'<a:uzi:1487936659692458054>💥' if is_golden else '<:gunforward:1484655577836683434>💥'} **Eliminado:** {chosen.mention}.")
                 if refund > 0:
-                    effect_note = self._race_effect_message(guild.id, chosen.id, 'as', f"{chosen.mention} recuperou {self._chip_text(refund, kind='gain')} da entrada.")
-                    if effect_note:
-                        lines.append(effect_note)
+                    effect_note = self._race_effect_message(
+                        guild.id,
+                        chosen.id,
+                        'as',
+                        f"recuperou {self._chip_text(refund, kind='gain')} da entrada.",
+                    )
+                    await self._route_lobby_race_notices(
+                        (session.get('race_interactions') or {}).get(chosen.id),
+                        guild.id,
+                        chosen.id,
+                        owner_id,
+                        [effect_note],
+                        public_race_notices,
+                    )
                 if winners:
                     winner_count = len(winners)
                     returned_entry_text = self._chip_amount(stake)
@@ -865,18 +866,29 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                     valid=True,
                     allow_hunt=True,
                 )
-                await self._deliver_or_queue_private_race_notices(
+                await self._route_lobby_race_notices(
                     (session.get('race_interactions') or {}).get(member.id),
                     guild.id,
                     member.id,
+                    owner_id,
                     notes,
+                    public_race_notices,
                 )
 
+            if public_race_notices:
+                lines.extend(public_race_notices)
+
+            result_delivered = False
             if lobby_message is not None:
-                try:
-                    await lobby_message.edit(view=_BuckshotLobbyClosedView(f'{self._EFFECT_EMOJI} Resultado do Buckshot dourado' if is_golden else '<:gunforward:1484655577836683434> Resultado do Buckshot', lines, color=self._buckshot_color(session)))
-                except Exception:
-                    pass
+                final_view = _BuckshotLobbyClosedView(
+                    f'{self._EFFECT_EMOJI} Resultado do Buckshot dourado' if is_golden else '<:gunforward:1484655577836683434> Resultado do Buckshot',
+                    lines,
+                    color=self._buckshot_color(session),
+                )
+                edit_state = await self._safe_view_edit(lobby_message, final_view)
+                result_delivered = edit_state in {'ok', 'skipped'}
+            if public_race_notices and not result_delivered:
+                self._queue_private_race_notices(guild.id, owner_id, public_race_notices)
             current = self._buckshot_sessions.get(guild_id)
             if current is session:
                 self._buckshot_sessions.pop(guild_id, None)
@@ -905,12 +917,12 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             return True
         variant = 'golden' if random.random() < self._special_variant_chance_for_user(guild.id, message.author.id) else 'normal'
         stake = 30 if variant == 'golden' else BUCKSHOT_STAKE
-        bonus_before = self._get_user_bonus_chips(guild.id, message.author.id)
         needs_negative_confirm = self._needs_negative_confirmation(guild.id, message.author.id, stake)
         if needs_negative_confirm:
             confirmed = await self._confirm_negative_from_message(message, guild.id, message.author.id, stake, title="💥 Confirmar entrada")
             if not confirmed:
                 return True
+        entry_spend = self._entry_spend_parts(guild.id, message.author.id, stake)
         paid, _balance, note = await self._try_consume_chips(guild.id, message.author.id, stake, reason="Entrada no buckshot")
         if needs_negative_confirm:
             note = None
@@ -925,7 +937,7 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             'manual_participants': {message.author.id},
             'focus_participants': set(),
             'locked_participants': {message.author.id},
-            'entry_spend': {message.author.id: self._entry_spend_parts(guild.id, message.author.id, stake)},
+            'entry_spend': {message.author.id: entry_spend},
             'lobby_message': None,
             'message': None,
             'view': None,

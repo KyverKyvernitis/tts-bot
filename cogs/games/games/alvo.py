@@ -945,6 +945,8 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 if amount > 0:
                     await self._change_user_bonus_chips(guild.id, user_id, amount, reason="Bônus do alvo")
         participant_ids = [member.id for member in participants]
+        owner_id = int(session.get('owner_id') or 0)
+        public_race_notices: list[str] = []
         entry_spend_map = session.get('entry_spend') or {}
         bull_bonus_value = int(modifier.get('bullseye_bonus', 0) or 0)
         bullseye_ids = {member.id for member in bullseye_members}
@@ -962,19 +964,34 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 valid=True,
                 allow_hunt=True,
             )
-            await self._deliver_or_queue_private_race_notices(
+            await self._route_lobby_race_notices(
                 (session.get('race_interactions') or {}).get(member.id),
                 guild.id,
                 member.id,
+                owner_id,
                 notes,
+                public_race_notices,
             )
-        coringa_refunds: list[tuple[int, int]] = []
         for member in participants:
             if int(rewards.get(member.id, 0) or 0) > 0:
                 continue
             refund = await self._maybe_apply_coringa_lobby_refund(guild.id, member.id, ALVO_STAKE)
-            if refund > 0:
-                coringa_refunds.append((member.id, int(refund)))
+            if refund <= 0:
+                continue
+            refund_note = self._race_effect_message(
+                guild.id,
+                member.id,
+                'as',
+                f"recuperou {self._chip_text(refund, kind='gain')} da entrada.",
+            )
+            await self._route_lobby_race_notices(
+                (session.get('race_interactions') or {}).get(member.id),
+                guild.id,
+                member.id,
+                owner_id,
+                [refund_note],
+                public_race_notices,
+            )
 
         closing_parts = []
         if winner_mentions and len(winner_mentions) > 1:
@@ -988,14 +1005,9 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                     closing_parts.append(line)
         if bonus_line:
             closing_parts.append(bonus_line)
-        if coringa_refunds:
-            if len(coringa_refunds) == 1:
-                refund_member = guild.get_member(coringa_refunds[0][0])
-                refund_note = self._race_effect_message(guild.id, coringa_refunds[0][0], 'as', f"{(refund_member.mention if refund_member else 'Um jogador')} recuperou {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada.")
-                if refund_note:
-                    closing_parts.append(refund_note)
-            else:
-                closing_parts.append(f"{self._EFFECT_EMOJI} **Ás ativado:** **{len(coringa_refunds)} jogadores** recuperaram {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada.")
+        public_race_notices = self._clean_race_notices(public_race_notices)
+        closing_limit = max(0, 16 - len(public_race_notices))
+        closing_parts = closing_parts[:closing_limit] + public_race_notices[:16]
         session['summary_line'] = f"<:boom:1485862099308804107> **Pote distribuído:** {self._chip_amount(prize_total)}"
         if bonus_chips > 0:
             session['summary_line'] += f" • Bônus: {self._bonus_chip_amount(bonus_chips)}"
@@ -1004,7 +1016,7 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             session['podium_lines'] = [f"🥇 **Vencedor:** {winner_mentions[0]} — {self._chip_text(winning_reward, kind='gain')}"]
         else:
             session['podium_lines'] = podium_lines
-        session['closing_line'] = '\n'.join(closing_parts[:16]) if closing_parts else None
+        session['closing_line'] = '\n'.join(closing_parts) if closing_parts else None
         session['prize_total'] = prize_total
         result_lines = [session['summary_line'], '', *hit_lines]
         if session['podium_lines']:
@@ -1013,13 +1025,14 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             result_lines += ['', session['closing_line']]
         final_text = "\n".join(result_lines)
         session['result_lines'] = result_lines
+        result_delivered = False
         if message is not None:
-            try:
-                final_view = _TargetStateView(self, guild, session, finished=True)
-                session['view'] = final_view
-                await message.edit(view=final_view)
-            except Exception:
-                pass
+            final_view = _TargetStateView(self, guild, session, finished=True)
+            session['view'] = final_view
+            edit_state = await self._safe_view_edit(message, final_view)
+            result_delivered = edit_state in {'ok', 'skipped'}
+        if public_race_notices and not result_delivered:
+            self._queue_private_race_notices(guild.id, owner_id, public_race_notices)
         current = self._target_sessions.get(guild_id)
         if current is session:
             self._target_sessions.pop(guild_id, None)

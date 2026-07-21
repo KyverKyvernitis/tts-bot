@@ -1444,17 +1444,38 @@ class GincanaBase:
             self._race_progress_locks[key] = lock
         return lock
 
+    @staticmethod
+    def _clean_race_notices(notes) -> list[str]:
+        if isinstance(notes, str):
+            source = (notes,)
+        else:
+            source = notes or ()
+        clean: list[str] = []
+        seen: set[str] = set()
+        for note in source:
+            text = str(note or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            clean.append(text)
+        return clean
+
     def _queue_private_race_notices(self, guild_id: int, user_id: int, notes) -> None:
-        clean = [str(note).strip() for note in (notes or ()) if str(note or "").strip()]
+        clean = self._clean_race_notices(notes)
         if not clean:
             return
         key = (int(guild_id), int(user_id))
         queued = self._race_private_notices.setdefault(key, [])
         for note in clean:
-            if not queued or queued[-1] != note:
+            if note not in queued:
                 queued.append(note)
         if len(queued) > 12:
             del queued[:-12]
+
+    def _append_public_race_notices(self, target: list[str], notes) -> None:
+        for note in self._clean_race_notices(notes):
+            if note not in target:
+                target.append(note)
 
     def _take_private_race_notices(self, guild_id: int, user_id: int) -> list[str]:
         return list(self._race_private_notices.pop((int(guild_id), int(user_id)), []))
@@ -1540,7 +1561,7 @@ class GincanaBase:
         user_id: int,
         notes,
     ) -> bool:
-        clean = [str(note).strip() for note in (notes or ()) if str(note or "").strip()]
+        clean = self._clean_race_notices(notes)
         if not clean:
             return True
         if interaction is not None:
@@ -1564,6 +1585,28 @@ class GincanaBase:
                         pass
         self._queue_private_race_notices(guild_id, user_id, clean)
         return False
+
+    async def _route_lobby_race_notices(
+        self,
+        interaction: discord.Interaction | None,
+        guild_id: int,
+        user_id: int,
+        owner_id: int,
+        notes,
+        public_notes: list[str],
+    ) -> bool:
+        clean = self._clean_race_notices(notes)
+        if not clean:
+            return True
+        if int(owner_id or 0) > 0 and int(user_id) == int(owner_id):
+            self._append_public_race_notices(public_notes, clean)
+            return True
+        return await self._deliver_or_queue_private_race_notices(
+            interaction,
+            guild_id,
+            user_id,
+            clean,
+        )
 
     def _race_now(self) -> datetime:
         try:

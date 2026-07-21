@@ -518,15 +518,7 @@ class GincanaCorridaMixin:
     _RACE_STALE_ACTIVE_SECONDS = _CORRIDA_DURATION_SECONDS + 120.0
 
     async def _safe_edit_message_view(self, message: discord.Message | None, view: discord.ui.View | discord.ui.LayoutView) -> str:
-        if message is None:
-            return "missing"
-        try:
-            await message.edit(view=view)
-            return "ok"
-        except discord.NotFound:
-            return "missing"
-        except discord.HTTPException:
-            return "error"
+        return await self._safe_view_edit(message, view)
 
     async def _cleanup_stale_race_session(self, guild_id: int, session: dict):
         if session.get("_cleanup_started"):
@@ -1508,6 +1500,8 @@ class GincanaCorridaMixin:
 
         entry_spend_map = session.get("entry_spend") or {}
         participant_ids = [member.id for member in final_order]
+        owner_id = int(session.get("owner_id") or 0)
+        public_race_notices: list[str] = []
         for member in final_order:
             notes = await self._apply_new_race_result(
                 guild.id,
@@ -1519,35 +1513,46 @@ class GincanaCorridaMixin:
                 valid=True,
                 allow_hunt=True,
             )
-            await self._deliver_or_queue_private_race_notices(
+            await self._route_lobby_race_notices(
                 (session.get("race_interactions") or {}).get(member.id),
                 guild.id,
                 member.id,
+                owner_id,
                 notes,
+                public_race_notices,
             )
 
-        if coringa_refunds:
-            if len(coringa_refunds) == 1:
-                refund_user = guild.get_member(coringa_refunds[0][0])
-                refund_note = self._race_effect_message(guild.id, coringa_refunds[0][0], 'as', f"{(refund_user.mention if refund_user else 'Um jogador')} recuperou {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada.")
-                if refund_note:
-                    result_lines.append(refund_note)
-            else:
-                refund_note = f"{self._EFFECT_EMOJI} **Ás ativado:** **{len(coringa_refunds)} jogadores** recuperaram {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada."
-                result_lines.append(refund_note)
+        for user_id, refund in coringa_refunds:
+            refund_note = self._race_effect_message(
+                guild.id,
+                user_id,
+                'as',
+                f"recuperou {self._chip_text(refund, kind='gain')} da entrada.",
+            )
+            await self._route_lobby_race_notices(
+                (session.get("race_interactions") or {}).get(user_id),
+                guild.id,
+                user_id,
+                owner_id,
+                [refund_note],
+                public_race_notices,
+            )
+        public_race_notices = self._clean_race_notices(public_race_notices)
 
         session["starting"] = False
-        session["result_lines"] = result_lines[:20]
+        result_limit = max(0, 20 - len(public_race_notices))
+        session["result_lines"] = result_lines[:result_limit] + public_race_notices[:20]
         message = session.get("message")
+        result_delivered = False
         if message is not None:
-            try:
-                final_view = _RaceStateView(self, guild, session, finished=True)
-                session["view"] = final_view
-                edit_state = await self._safe_edit_message_view(message, final_view)
-                if edit_state == "missing":
-                    session["message"] = None
-            except Exception:
-                pass
+            final_view = _RaceStateView(self, guild, session, finished=True)
+            session["view"] = final_view
+            edit_state = await self._safe_edit_message_view(message, final_view)
+            result_delivered = edit_state in {"ok", "skipped"}
+            if edit_state == "missing":
+                session["message"] = None
+        if public_race_notices and not result_delivered:
+            self._queue_private_race_notices(guild.id, owner_id, public_race_notices)
 
         self._race_sessions.pop(guild_id, None)
         return True
