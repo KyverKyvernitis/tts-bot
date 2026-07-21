@@ -234,10 +234,9 @@ class SettingsDB:
 
 
     def gincana_enabled(self, guild_id: int) -> bool:
-        g = self.guild_cache.get(guild_id, {})
-        if "gincana_enabled" in g:
-            return bool(g.get("gincana_enabled", True))
-        return bool(g.get("anti_mzk_enabled", True))
+        # A economia não possui mais uma chave geral de liga/desliga. O método
+        # continua existindo para compatibilidade com os handlers antigos.
+        return True
 
     async def set_gincana_enabled(self, guild_id: int, value: bool):
         doc = self._get_guild_doc(guild_id)
@@ -245,6 +244,38 @@ class SettingsDB:
         doc["gincana_enabled"] = enabled
         doc["anti_mzk_enabled"] = enabled
         await self._save_guild_doc(guild_id, doc)
+
+    def get_gincana_input_mode(self, guild_id: int) -> str:
+        g = self.guild_cache.get(int(guild_id), {}) or {}
+        value = str(g.get("gincana_input_mode", "triggers") or "triggers").strip().casefold()
+        return "commands" if value == "commands" else "triggers"
+
+    async def set_gincana_input_mode(self, guild_id: int, value: str):
+        mode = str(value or "triggers").strip().casefold()
+        if mode not in {"triggers", "commands"}:
+            mode = "triggers"
+        doc = self._get_guild_doc(int(guild_id))
+        doc["gincana_input_mode"] = mode
+        await self._save_guild_doc(int(guild_id), doc)
+
+    def get_gincana_channel_id(self, guild_id: int) -> int:
+        g = self.guild_cache.get(int(guild_id), {}) or {}
+        try:
+            return max(0, int(g.get("gincana_channel_id", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    async def set_gincana_channel_id(self, guild_id: int, channel_id: int | None):
+        try:
+            parsed = max(0, int(channel_id or 0))
+        except (TypeError, ValueError):
+            parsed = 0
+        doc = self._get_guild_doc(int(guild_id))
+        if parsed:
+            doc["gincana_channel_id"] = parsed
+        else:
+            doc.pop("gincana_channel_id", None)
+        await self._save_guild_doc(int(guild_id), doc)
 
     def get_gincana_role_ids(self, guild_id: int) -> list[int]:
         g = self.guild_cache.get(guild_id, {})

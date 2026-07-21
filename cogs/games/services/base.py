@@ -341,6 +341,95 @@ class GincanaBase:
         view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(body)), accent_color=color))
         return view
 
+    def _gincana_input_mode(self, guild_id: int) -> str:
+        getter = getattr(self.db, "get_gincana_input_mode", None)
+        if not callable(getter):
+            return "triggers"
+        try:
+            value = str(getter(int(guild_id)) or "triggers").strip().casefold()
+        except Exception:
+            return "triggers"
+        return "commands" if value == "commands" else "triggers"
+
+    def _gincana_channel_id(self, guild_id: int) -> int:
+        getter = getattr(self.db, "get_gincana_channel_id", None)
+        if not callable(getter):
+            return 0
+        try:
+            return max(0, int(getter(int(guild_id)) or 0))
+        except Exception:
+            return 0
+
+    def _get_gincana_channel(self, guild: discord.Guild):
+        channel_id = self._gincana_channel_id(guild.id)
+        if not channel_id:
+            return None
+        getter = getattr(guild, "get_channel_or_thread", None)
+        if callable(getter):
+            channel = getter(channel_id)
+            if channel is not None:
+                return channel
+        return guild.get_channel(channel_id)
+
+    def _gincana_channel_matches(self, guild: discord.Guild, channel) -> bool:
+        configured_id = self._gincana_channel_id(guild.id)
+        if not configured_id:
+            return True
+        configured = self._get_gincana_channel(guild)
+        if configured is None:
+            # Canal removido: o servidor volta ao comportamento padrão até a
+            # configuração ser aberta e o ID antigo ser limpo.
+            return True
+        try:
+            channel_id = int(getattr(channel, "id", 0) or 0)
+            parent_id = int(getattr(channel, "parent_id", 0) or 0)
+        except Exception:
+            return False
+        return channel_id == configured_id or parent_id == configured_id
+
+    def _games_trigger_entry_allowed(self, guild: discord.Guild, channel) -> bool:
+        if self._gincana_input_mode(guild.id) != "triggers":
+            return False
+        return self._gincana_channel_matches(guild, channel)
+
+    async def _ensure_games_command_entry(
+        self,
+        ctx: commands.Context,
+        *,
+        trigger_hint: str | None = None,
+    ) -> bool:
+        guild = ctx.guild
+        if guild is None:
+            await ctx.reply(
+                view=self._make_v2_notice("Servidor inválido", ["Use esse comando dentro de um servidor."], ok=False),
+                mention_author=False,
+            )
+            return False
+
+        if self._gincana_input_mode(guild.id) != "commands":
+            lines = ["Este servidor usa triggers."]
+            if trigger_hint:
+                lines.append(f"Use `{trigger_hint}` sem prefixo.")
+            await ctx.reply(
+                view=self._make_v2_notice("Modo por triggers", lines, ok=False),
+                mention_author=False,
+            )
+            return False
+
+        if not self._gincana_channel_matches(guild, ctx.channel):
+            channel = self._get_gincana_channel(guild)
+            channel_text = getattr(channel, "mention", "o canal configurado")
+            await ctx.reply(
+                view=self._make_v2_notice(
+                    "Canal exclusivo",
+                    [f"Use os comandos da Games em {channel_text}."],
+                    ok=False,
+                ),
+                mention_author=False,
+            )
+            return False
+        return True
+
     def _call_trigger_channel(self, message: discord.Message) -> discord.VoiceChannel | discord.StageChannel | None:
         channel = getattr(message, "channel", None)
         if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
@@ -2114,9 +2203,9 @@ class GincanaBase:
         return True
 
     def _gincana_only_kick_members(self, guild_id: int) -> bool:
-        guild_cache = getattr(self.db, "guild_cache", {}) or {}
-        guild_doc = guild_cache.get(guild_id, {}) or {}
-        return bool(guild_doc.get("gincana_only_kick_members", guild_doc.get("anti_mzk_only_kick_members", False)))
+        # O modo "somente staff" foi removido do painel da economia. Mantemos
+        # o helper para que handlers antigos não precisem de migração em massa.
+        return False
 
     def _get_staff_role(self, guild: discord.Guild) -> discord.Role | None:
         role_id = 0

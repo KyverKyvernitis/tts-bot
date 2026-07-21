@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import random
 import re
 import time
@@ -6,6 +7,8 @@ import time
 import discord
 from discord import app_commands
 from discord.ext import commands as dcommands
+
+from config import TRIGGER_WORD
 
 from .cog import GamesCore
 from .constants import (
@@ -18,6 +21,31 @@ from .constants import (
     RACE_REROLL_COST,
     _guild_scoped,
 )
+
+
+_CALL_COMMAND_NAME = str(TRIGGER_WORD or "pinto").strip().casefold()
+if not re.fullmatch(r"[a-z0-9_-]{1,32}", _CALL_COMMAND_NAME) or _CALL_COMMAND_NAME in {
+    "ficha", "daily", "recarga", "painelficha", "rank", "poker", "truco", "roubar",
+    "pay", "race", "roleta", "carta", "corrida", "alvo", "buckshot", "mendigar",
+    "focus", "pica", "rola", "dj",
+}:
+    _CALL_COMMAND_NAME = "pinto"
+
+
+log = logging.getLogger(__name__)
+
+
+class _CommandMessageProxy:
+    """Mensagem real com conteúdo adaptado para reutilizar handlers de trigger."""
+
+    def __init__(self, message: discord.Message, *, content: str, mentions: list[discord.Member] | None = None):
+        self._message = message
+        self.content = str(content)
+        self.mentions = list(mentions or [])
+        self.raw_mentions = [int(member.id) for member in self.mentions]
+
+    def __getattr__(self, name):
+        return getattr(self._message, name)
 
 
 class _MendigarRequestView(discord.ui.LayoutView):
@@ -509,28 +537,51 @@ class GamesCog(dcommands.Cog, GamesCore):
         self._remember_race_panel_message(message.guild.id, message.author.id, sent)
         return True
 
-    @_guild_scoped()
-    @app_commands.command(name="economia", description="Gerencia as roles e modos da economia")
-    @app_commands.describe(
-        action="Escolha o que fazer",
-        role_id="ID da role para adicionar ou remover",
-    )
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Adicionar role", value="add"),
-        app_commands.Choice(name="Remover role", value="remove"),
-        app_commands.Choice(name="Listar roles", value="list"),
-        app_commands.Choice(name="Ativar ou desativar", value="toggle"),
-        app_commands.Choice(name="Ativar ou desativar só para staff", value="toggle_kick_only"),
-        app_commands.Choice(name="Definir cargo staff", value="set_staff_role"),
-        app_commands.Choice(name="Remover cargo staff", value="clear_staff_role"),
-    ])
-    async def economia(
+    async def _dispatch_prefix_trigger(
         self,
-        interaction: discord.Interaction,
-        action: str,
-        role_id: str | None = None,
-    ):
-        await self._run_gincana_command(interaction, action, role_id)
+        ctx: dcommands.Context,
+        *,
+        handler_name: str,
+        content: str,
+        trigger_hint: str,
+        mentions: list[discord.Member] | None = None,
+        failure_title: str = "Games",
+    ) -> bool:
+        if not await self._ensure_games_command_entry(ctx, trigger_hint=trigger_hint):
+            return False
+        handler = getattr(self, handler_name, None)
+        if not callable(handler):
+            await ctx.reply(
+                view=self._make_v2_notice(failure_title, ["Esse comando não está disponível agora."], ok=False),
+                mention_author=False,
+            )
+            return False
+        proxy = _CommandMessageProxy(ctx.message, content=content, mentions=mentions)
+        try:
+            handled = bool(await handler(proxy))
+        except Exception:
+            log.exception(
+                "games: falha em comando prefixado handler=%s guild=%s user=%s",
+                handler_name,
+                getattr(ctx.guild, "id", 0),
+                getattr(ctx.author, "id", 0),
+            )
+            await ctx.reply(
+                view=self._make_v2_notice(failure_title, ["O comando falhou antes de concluir."], ok=False),
+                mention_author=False,
+            )
+            return False
+        if not handled:
+            await ctx.reply(
+                view=self._make_v2_notice(failure_title, ["Não foi possível executar agora."], ok=False),
+                mention_author=False,
+            )
+        return handled
+
+    @_guild_scoped()
+    @app_commands.command(name="economia", description="Configura cargo, canal e forma de uso da Games")
+    async def economia(self, interaction: discord.Interaction):
+        await self._run_gincana_command(interaction)
 
     @economia.error
     async def economia_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -538,23 +589,19 @@ class GamesCog(dcommands.Cog, GamesCore):
 
     @dcommands.command(name="ficha", aliases=["fichas"])
     async def ficha(self, ctx: dcommands.Context):
-        if ctx.guild is None:
-            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="ficha"):
             return
-        view = self._make_chip_balance_view(ctx.author)
-        await ctx.reply(view=view, mention_author=False)
+        await ctx.reply(view=self._make_chip_balance_view(ctx.author), mention_author=False)
+
+    @dcommands.command(name="extrato")
+    async def extrato_command(self, ctx: dcommands.Context):
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="extrato"):
+            return
+        await ctx.reply(view=self._make_chip_history_view(ctx.author, limit=10), mention_author=False)
 
     @dcommands.command(name="daily", aliases=["bonus", "login"])
     async def daily(self, ctx: dcommands.Context):
-        if ctx.guild is None:
-            await ctx.reply(
-                view=self._make_v2_notice(
-                    "Daily indisponível",
-                    ["Use esse comando dentro de um servidor."],
-                    ok=False,
-                ),
-                mention_author=False,
-            )
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="daily"):
             return
         await ctx.reply(
             view=await self._claim_daily_view(ctx.guild.id, ctx.author.id),
@@ -563,16 +610,21 @@ class GamesCog(dcommands.Cog, GamesCore):
 
     @dcommands.command(name="recarga", aliases=["recarrega"])
     async def recarga(self, ctx: dcommands.Context):
-        if ctx.guild is None:
-            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="recarga"):
             return
         used, new_balance, note = await self._try_use_chip_recharge(ctx.guild.id, ctx.author.id)
-        await ctx.reply(view=self._make_chip_recharge_view(ctx.guild.id, ctx.author.id, used, new_balance, note), mention_author=False)
+        await ctx.reply(
+            view=self._make_chip_recharge_view(ctx.guild.id, ctx.author.id, used, new_balance, note),
+            mention_author=False,
+        )
 
     @dcommands.command(name="painelficha", aliases=["fichapainel", "adminficha"])
     async def painelficha(self, ctx: dcommands.Context):
         if ctx.guild is None:
-            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+            await ctx.reply(
+                view=self._make_v2_notice("Servidor inválido", ["Use esse comando dentro de um servidor."], ok=False),
+                mention_author=False,
+            )
             return
         is_owner = await self._chip_admin_is_bot_owner(ctx.author)
         if not is_owner and (not isinstance(ctx.author, discord.Member) or not self._is_staff_member(ctx.author)):
@@ -582,47 +634,211 @@ class GamesCog(dcommands.Cog, GamesCore):
 
     @dcommands.command(name="rank", aliases=["leaderboard"])
     async def rank(self, ctx: dcommands.Context):
-        if ctx.guild is None:
-            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="rank"):
             return
         embed = await self._make_chip_leaderboard_embed_async(ctx.guild, ctx.author)
         await ctx.reply(embed=embed, mention_author=False)
 
+    @dcommands.command(name="race", aliases=["raça"])
+    async def race_command(self, ctx: dcommands.Context):
+        await self._dispatch_prefix_trigger(
+            ctx,
+            handler_name="_handle_race_trigger",
+            content="race",
+            trigger_hint="race",
+            failure_title="🍀 Raça",
+        )
+
+    @dcommands.command(name="pay")
+    async def pay_command(
+        self,
+        ctx: dcommands.Context,
+        target: discord.Member | None = None,
+        amount: int | None = None,
+    ):
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="pay @usuário valor"):
+            return
+        if target is None or amount is None:
+            await ctx.reply(
+                view=self._make_v2_notice("💸 Pagamento", [f"Use `{ctx.clean_prefix}pay @usuário valor`."], ok=False),
+                mention_author=False,
+            )
+            return
+        proxy = _CommandMessageProxy(
+            ctx.message,
+            content=f"pay {target.mention} {int(amount)}",
+            mentions=[target],
+        )
+        await self._handle_payment_message(proxy)
+
+    @dcommands.command(name="roleta")
+    async def roleta_command(self, ctx: dcommands.Context):
+        await self._dispatch_prefix_trigger(
+            ctx,
+            handler_name="_handle_roleta_trigger",
+            content="roleta",
+            trigger_hint="roleta",
+            failure_title="🎰 Roleta",
+        )
+
+    @dcommands.command(name="carta", aliases=["cartas"])
+    async def carta_command(self, ctx: dcommands.Context):
+        await self._dispatch_prefix_trigger(
+            ctx,
+            handler_name="_handle_carta_trigger",
+            content="cartas",
+            trigger_hint="cartas",
+            failure_title="🎴 Cartas",
+        )
+
+    @dcommands.command(name="corrida")
+    async def corrida_command(self, ctx: dcommands.Context):
+        await self._dispatch_prefix_trigger(
+            ctx,
+            handler_name="_handle_corrida_trigger",
+            content="corrida",
+            trigger_hint="corrida",
+            failure_title="🏁 Corrida",
+        )
+
+    @dcommands.command(name="alvo")
+    async def alvo_command(self, ctx: dcommands.Context):
+        await self._dispatch_prefix_trigger(
+            ctx,
+            handler_name="_handle_target_trigger",
+            content="alvo",
+            trigger_hint="alvo",
+            failure_title="🎯 Alvo",
+        )
+
+    @dcommands.command(name="buckshot")
+    async def buckshot_command(self, ctx: dcommands.Context):
+        await self._dispatch_prefix_trigger(
+            ctx,
+            handler_name="_handle_buckshot_trigger",
+            content="buckshot",
+            trigger_hint="buckshot",
+            failure_title="🔫 Buckshot",
+        )
+
     @dcommands.command(name="poker")
     async def poker_command(self, ctx: dcommands.Context, opponent: discord.Member | None = None):
-        if ctx.guild is None:
-            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
-            return
         if opponent is None:
-            await ctx.reply(embed=self._make_embed("🃏 Poker", "Use `poker @usuário` para iniciar uma partida.", ok=False), mention_author=False)
+            if not await self._ensure_games_command_entry(ctx, trigger_hint="poker @usuário"):
+                return
+            await ctx.reply(
+                view=self._make_v2_notice("🃏 Poker", [f"Use `{ctx.clean_prefix}poker @usuário`."], ok=False),
+                mention_author=False,
+            )
             return
-        fake = type("_Msg", (), {})()
-        fake.guild = ctx.guild
-        fake.author = ctx.author
-        fake.channel = ctx.channel
-        fake.content = f"poker {opponent.mention}"
-        fake.mentions = [opponent]
-        handled = await self._handle_poker_trigger(fake)
-        if not handled:
-            await ctx.reply(embed=self._make_embed("🃏 Poker", "Não foi possível iniciar a partida agora.", ok=False), mention_author=False)
+        await self._dispatch_prefix_trigger(
+            ctx,
+            handler_name="_handle_poker_trigger",
+            content=f"poker {opponent.mention}",
+            mentions=[opponent],
+            trigger_hint="poker @usuário",
+            failure_title="🃏 Poker",
+        )
 
     @dcommands.command(name="truco")
     async def truco_command(self, ctx: dcommands.Context, opponent: discord.Member | None = None):
-        if ctx.guild is None:
-            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
-            return
         if opponent is None:
-            await ctx.reply(embed=self._make_embed("🃏 Truco", "Use `truco @usuário` para desafiar alguém.", ok=False), mention_author=False)
+            if not await self._ensure_games_command_entry(ctx, trigger_hint="truco @usuário"):
+                return
+            await ctx.reply(
+                view=self._make_v2_notice("🃏 Truco", [f"Use `{ctx.clean_prefix}truco @usuário`."], ok=False),
+                mention_author=False,
+            )
             return
-        fake = type("_Msg", (), {})()
-        fake.guild = ctx.guild
-        fake.author = ctx.author
-        fake.channel = ctx.channel
-        fake.content = f"truco {opponent.mention}"
-        fake.mentions = [opponent]
-        handled = await self._handle_truco_trigger(fake)
-        if not handled:
-            await ctx.reply(embed=self._make_embed("🃏 Truco", "Não foi possível iniciar a mão agora.", ok=False), mention_author=False)
+        await self._dispatch_prefix_trigger(
+            ctx,
+            handler_name="_handle_truco_trigger",
+            content=f"truco {opponent.mention}",
+            mentions=[opponent],
+            trigger_hint="truco @usuário",
+            failure_title="🃏 Truco",
+        )
+
+    @dcommands.command(name="mendigar")
+    async def mendigar_command(
+        self,
+        ctx: dcommands.Context,
+        amount: int | None = None,
+        target: discord.Member | None = None,
+    ):
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="mendigar valor"):
+            return
+        if amount is None:
+            await ctx.reply(
+                view=self._make_v2_notice(
+                    "🥺 Esmola",
+                    [
+                        f"Use `{ctx.clean_prefix}mendigar 40`.",
+                        f"Ou `{ctx.clean_prefix}mendigar 40 @usuário`.",
+                    ],
+                    ok=False,
+                ),
+                mention_author=False,
+            )
+            return
+        proxy = _CommandMessageProxy(
+            ctx.message,
+            content=f"mendigar {int(amount)}" + (f" {target.mention}" if target else ""),
+            mentions=([target] if target else []),
+        )
+        await self._start_mendigar_request(proxy, amount=int(amount), target=target)
+
+    @dcommands.command(name="focus")
+    async def focus_command(self, ctx: dcommands.Context, *, arguments: str = ""):
+        content = "focus" + (f" {arguments.strip()}" if arguments.strip() else "")
+        await self._dispatch_prefix_trigger(
+            ctx,
+            handler_name="_handle_focus_trigger",
+            content=content,
+            mentions=[m for m in ctx.message.mentions if isinstance(m, discord.Member)],
+            trigger_hint="focus",
+            failure_title="🎯 Focus",
+        )
+
+    @dcommands.command(name="pica")
+    async def pica_command(self, ctx: dcommands.Context):
+        await self._dispatch_prefix_trigger(
+            ctx,
+            handler_name="_handle_role_toggle_trigger",
+            content="pica",
+            trigger_hint="pica",
+            failure_title="Pica",
+        )
+
+    @dcommands.command(name="rola")
+    async def rola_command(self, ctx: dcommands.Context):
+        await self._dispatch_prefix_trigger(
+            ctx,
+            handler_name="_handle_rola_toggle_trigger",
+            content="rola",
+            trigger_hint="rola",
+            failure_title="Rola",
+        )
+
+    @dcommands.command(name="dj")
+    async def dj_command(self, ctx: dcommands.Context):
+        await self._dispatch_prefix_trigger(
+            ctx,
+            handler_name="_handle_dj_toggle_trigger",
+            content="dj",
+            trigger_hint="dj",
+            failure_title="DJ",
+        )
+
+    @dcommands.command(name=_CALL_COMMAND_NAME)
+    async def call_trigger_command(self, ctx: dcommands.Context):
+        await self._dispatch_prefix_trigger(
+            ctx,
+            handler_name="_handle_call_control_trigger",
+            content=str(TRIGGER_WORD or _CALL_COMMAND_NAME),
+            trigger_hint=str(TRIGGER_WORD or _CALL_COMMAND_NAME),
+            failure_title="Call",
+        )
 
     async def _run_robbery(self, channel: discord.abc.Messageable, guild: discord.Guild, author: discord.Member, target: discord.Member):
         if target.bot:
@@ -713,8 +929,7 @@ class GamesCog(dcommands.Cog, GamesCore):
 
     @dcommands.command(name="roubar", aliases=["rob"])
     async def roubar_command(self, ctx: dcommands.Context, target: discord.Member | None = None):
-        if ctx.guild is None:
-            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
+        if not await self._ensure_games_command_entry(ctx, trigger_hint="roubar @usuário"):
             return
         if target is None:
             await ctx.reply(view=self._make_v2_notice("🕵️ Roubo", [f"Use `{ctx.clean_prefix}roubar @usuário` para tentar a sorte."], ok=False), mention_author=False)

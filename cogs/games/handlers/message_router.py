@@ -94,8 +94,83 @@ class GincanaMessageRouterMixin:
         await self._run_robbery(message.channel, message.guild, message.author, target)
         return True
 
+    async def _handle_call_control_trigger(self, message: discord.Message) -> bool:
+        guild = message.guild
+        if guild is None:
+            return False
+        if not TRIGGER_WORD and not MUTE_TOGGLE_WORD:
+            return False
+
+        voice_channel = self._call_trigger_channel(message)
+        if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
+            return False
+
+        normalized_content = str(message.content or "").strip().casefold()
+        trigger_match = bool(TRIGGER_WORD and normalized_content == TRIGGER_WORD.casefold())
+        mute_match = bool(MUTE_TOGGLE_WORD and normalized_content == MUTE_TOGGLE_WORD.casefold())
+        if not trigger_match and not mute_match:
+            return False
+
+        targets = self._resolve_targets(guild, voice_channel)
+        if not targets:
+            return True
+
+        target_ids = {member.id for member in targets}
+        author_is_target = message.author.id in target_ids
+        author_is_focused_non_staff = self._is_focused_non_staff_member(message.author) if mute_match else False
+        did_trigger_action = False
+
+        if trigger_match:
+            did_trigger_action = True
+            trigger_voice_channel = voice_channel if isinstance(voice_channel, discord.VoiceChannel) else None
+
+            if trigger_voice_channel is not None:
+                try:
+                    await self._play_disconnect_trigger_sfx(
+                        guild,
+                        trigger_voice_channel,
+                        target_count=len(targets),
+                    )
+                except Exception:
+                    pass
+                try:
+                    await asyncio.sleep(0.20)
+                except Exception:
+                    pass
+
+            for target in targets:
+                if target.voice and target.voice.channel:
+                    try:
+                        await target.move_to(None, reason="economia disconnect")
+                    except Exception:
+                        pass
+
+        if mute_match:
+            if author_is_focused_non_staff:
+                return True
+            did_trigger_action = True
+            if author_is_target:
+                return True
+
+            for target in targets:
+                if target.voice and target.voice.channel:
+                    try:
+                        new_muted = not bool(target.voice.mute)
+                        await target.edit(mute=new_muted, reason="economia toggle mute")
+                    except Exception:
+                        pass
+
+            await self._refresh_targets_suffix_nicknames(guild, targets)
+
+        if did_trigger_action:
+            await self._react_success_temporarily(message)
+        return did_trigger_action
+
     async def _handle_gincana_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
+            return
+
+        if not self._games_trigger_entry_allowed(message.guild, message.channel):
             return
 
         if await self._safe_route_call("_handle_payment_message", message):
@@ -146,76 +221,5 @@ class GincanaMessageRouterMixin:
         if await self._safe_route_call("_handle_roleta_trigger", message):
             return
 
-        if not self.db.gincana_enabled(message.guild.id):
-            return
 
-        if self._gincana_only_kick_members(message.guild.id) and not self._is_staff_member(message.author):
-            return
-
-        if not TRIGGER_WORD and not MUTE_TOGGLE_WORD:
-            return
-
-        voice_channel = self._call_trigger_channel(message)
-        if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
-            return
-
-        content = message.content or ""
-        normalized_content = content.strip().casefold()
-        trigger_match = bool(TRIGGER_WORD and normalized_content == TRIGGER_WORD.casefold())
-        mute_match = bool(MUTE_TOGGLE_WORD and normalized_content == MUTE_TOGGLE_WORD.casefold())
-        if not trigger_match and not mute_match:
-            return
-
-        targets = self._resolve_targets(message.guild, voice_channel)
-        if not targets:
-            return
-
-        target_ids = {member.id for member in targets}
-        author_is_target = message.author.id in target_ids
-        author_is_focused_non_staff = self._is_focused_non_staff_member(message.author) if mute_match else False
-        did_trigger_action = False
-
-        if trigger_match:
-            did_trigger_action = True
-            trigger_voice_channel = voice_channel if isinstance(voice_channel, discord.VoiceChannel) else None
-
-            if trigger_voice_channel is not None:
-                try:
-                    await self._play_disconnect_trigger_sfx(
-                        message.guild,
-                        trigger_voice_channel,
-                        target_count=len(targets),
-                    )
-                except Exception:
-                    pass
-                try:
-                    await asyncio.sleep(0.20)
-                except Exception:
-                    pass
-
-            for target in targets:
-                if target.voice and target.voice.channel:
-                    try:
-                        await target.move_to(None, reason="economia disconnect")
-                    except Exception:
-                        pass
-
-        if mute_match:
-            if author_is_focused_non_staff:
-                return
-            did_trigger_action = True
-            if author_is_target:
-                return
-
-            for target in targets:
-                if target.voice and target.voice.channel:
-                    try:
-                        new_muted = not bool(target.voice.mute)
-                        await target.edit(mute=new_muted, reason="economia toggle mute")
-                    except Exception:
-                        pass
-
-            await self._refresh_targets_suffix_nicknames(message.guild, targets)
-
-        if did_trigger_action:
-            await self._react_success_temporarily(message)
+        await self._safe_route_call("_handle_call_control_trigger", message)
