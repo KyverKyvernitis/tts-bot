@@ -784,10 +784,10 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             return
         locked.add(user.id)
         session.setdefault('entry_spend', {})[user.id] = entry_spend
+        session.setdefault('race_interactions', {})[user.id] = interaction
         session['bonus_chips'] = self._target_bonus_for_participants(len(locked))
         self._touch_runtime_state(session, kind='alvo', guild_id=guild.id)
-        try: await interaction.response.send_message(chip_note or entry_text, ephemeral=True)
-        except Exception: pass
+        await self._send_race_lobby_feedback(interaction, guild.id, user.id, chip_note or entry_text)
         await self._refresh_target_message(guild.id)
 
     async def _handle_target_start_button(self, interaction: discord.Interaction, view: _TargetJoinView):
@@ -944,7 +944,6 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
             for user_id, amount in bonus_rewards.items():
                 if amount > 0:
                     await self._change_user_bonus_chips(guild.id, user_id, amount, reason="Bônus do alvo")
-        race_effect_lines: list[str] = []
         participant_ids = [member.id for member in participants]
         entry_spend_map = session.get('entry_spend') or {}
         bull_bonus_value = int(modifier.get('bullseye_bonus', 0) or 0)
@@ -963,7 +962,12 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                 valid=True,
                 allow_hunt=True,
             )
-            race_effect_lines.extend(f"{member.mention} — {note}" for note in notes)
+            await self._deliver_or_queue_private_race_notices(
+                (session.get('race_interactions') or {}).get(member.id),
+                guild.id,
+                member.id,
+                notes,
+            )
         coringa_refunds: list[tuple[int, int]] = []
         for member in participants:
             if int(rewards.get(member.id, 0) or 0) > 0:
@@ -992,7 +996,6 @@ class GincanaAlvoMixin(GincanaAlvoMixin):
                     closing_parts.append(refund_note)
             else:
                 closing_parts.append(f"{self._EFFECT_EMOJI} **Ás ativado:** **{len(coringa_refunds)} jogadores** recuperaram {self._chip_text(coringa_refunds[0][1], kind='gain')} da entrada.")
-        closing_parts.extend(race_effect_lines)
         session['summary_line'] = f"<:boom:1485862099308804107> **Pote distribuído:** {self._chip_amount(prize_total)}"
         if bonus_chips > 0:
             session['summary_line'] += f" • Bônus: {self._bonus_chip_amount(bonus_chips)}"

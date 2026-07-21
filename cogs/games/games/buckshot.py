@@ -631,10 +631,10 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
             self._buckshot_record_entry_spend(session, member.id, stake, bonus_before=bonus_before)
             locked.add(member.id)
             session['locked_participants'] = locked
+            session.setdefault('race_interactions', {})[member.id] = interaction
             self._touch_runtime_state(session, kind='buckshot', guild_id=guild.id)
         await self._refresh_buckshot_message(guild.id)
-        try: await interaction.response.send_message(note or entry_text, ephemeral=True)
-        except Exception: pass
+        await self._send_race_lobby_feedback(interaction, guild.id, member.id, note or entry_text)
 
     async def _handle_buckshot_start_button(self, interaction: discord.Interaction, view: _BuckshotJoinView):
         guild = interaction.guild
@@ -865,7 +865,12 @@ class GincanaBuckshotMixin(GincanaBuckshotMixin):
                     valid=True,
                     allow_hunt=True,
                 )
-                lines.extend(f"{member.mention} — {note}" for note in notes)
+                await self._deliver_or_queue_private_race_notices(
+                    (session.get('race_interactions') or {}).get(member.id),
+                    guild.id,
+                    member.id,
+                    notes,
+                )
 
             if lobby_message is not None:
                 try:

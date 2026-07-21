@@ -128,6 +128,7 @@ class GincanaBase:
         self._truco_guild_sessions: dict[int, set[str]] = {}
         self._gincana_message_edit_locks: dict[int, asyncio.Lock] = {}
         self._race_progress_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._race_private_notices: dict[tuple[int, int], list[str]] = {}
 
 
     def _touch_runtime_state(self, state: dict | None, *, kind: str | None = None, guild_id: int | None = None) -> float:
@@ -1122,7 +1123,7 @@ class GincanaBase:
                 "effects": [
                     {"key": "sunrise", "title": "Sunrise", "desc": "Das **6h às 18h**, as duas primeiras derrotas pagas guardam **1 Brasa** cada."},
                     {"key": "rebirth", "title": "Rebirth", "desc": f"A próxima vitória paga consome as Brasas: **1** concede **30** {self._CHIP_BONUS_EMOJI}; **2** concedem **40** {self._CHIP_BONUS_EMOJI}."},
-                    {"key": "second_dawn", "title": "Second Dawn", "desc": f"Uma vez por dia, uma derrota que deixe o saldo em **15 ou menos** recupera até **15** {self._CHIP_EMOJI}, mirando **25** no total."},
+                    {"key": "second_dawn", "title": "Second Dawn", "desc": f"Uma vez por dia, uma derrota que deixe o saldo total abaixo de **30** concede **30** {self._CHIP_BONUS_EMOJI}."},
                 ],
             },
             "glitch": {
@@ -1178,7 +1179,7 @@ class GincanaBase:
             "harvest": f"você recebeu **35** {self._CHIP_BONUS_EMOJI}.",
             "sunrise": "Brasa armazenada.",
             "rebirth": "as Brasas foram consumidas.",
-            "second_dawn": "o saldo foi recuperado.",
+            "second_dawn": f"você recebeu **30** {self._CHIP_BONUS_EMOJI}.",
             "desync": "fragmento registrado.",
             "overflow": "o ERROR premiou a vitória.",
             "rollback": "parte da entrada foi restaurada.",
@@ -1305,6 +1306,7 @@ class GincanaBase:
             doc.pop("race_key", None)
             doc.pop("race_active", None)
         if reset_state:
+            self._race_private_notices.pop((int(guild_id), int(user_id)), None)
             for field in (
                 "race_free_roleta_spins",
                 "race_free_carta_spins",
@@ -1352,6 +1354,127 @@ class GincanaBase:
             lock = asyncio.Lock()
             self._race_progress_locks[key] = lock
         return lock
+
+    def _queue_private_race_notices(self, guild_id: int, user_id: int, notes) -> None:
+        clean = [str(note).strip() for note in (notes or ()) if str(note or "").strip()]
+        if not clean:
+            return
+        key = (int(guild_id), int(user_id))
+        queued = self._race_private_notices.setdefault(key, [])
+        for note in clean:
+            if not queued or queued[-1] != note:
+                queued.append(note)
+        if len(queued) > 12:
+            del queued[:-12]
+
+    def _take_private_race_notices(self, guild_id: int, user_id: int) -> list[str]:
+        return list(self._race_private_notices.pop((int(guild_id), int(user_id)), []))
+
+    def _race_lobby_status_line(self, guild_id: int, user_id: int) -> str:
+        race_key = self._get_user_race_key(guild_id, user_id)
+        if race_key not in {"vampiro", "fenix", "glitch"} or not self._is_user_race_active(guild_id, user_id):
+            return ""
+        doc = self.db._get_user_doc(guild_id, user_id)
+        state = dict((doc.get("race_state") or {}).get(race_key) or {})
+        period, period_key = self._race_period_info()
+        if race_key == "vampiro":
+            if period != "night":
+                return "🧛 **Hunt:** indisponível durante o dia."
+            if str(state.get("night_key") or "") != period_key:
+                blood = 0
+                harvests = 0
+            else:
+                blood = min(3, max(0, int(state.get("blood", 0) or 0)))
+                harvests = min(2, max(0, int(state.get("harvests", 0) or 0)))
+            return f"🧛 **Hunt:** {blood}/3 Sangues • Harvest {harvests}/2."
+        if race_key == "fenix":
+            if period != "day":
+                return "🐦‍🔥 **Habilidades:** indisponíveis durante a noite."
+            if str(state.get("day_key") or "") != period_key:
+                embers = 0
+                dawn_used = False
+            else:
+                embers = min(2, max(0, int(state.get("embers", 0) or 0)))
+                dawn_used = bool(state.get("second_dawn_used", False))
+            dawn_status = "usado" if dawn_used else "disponível"
+            return f"🐦‍🔥 **Sunrise:** {embers}/2 Brasas • Second Dawn {dawn_status}."
+        fragments = min(2, max(0, int(state.get("fragments", 0) or 0)))
+        if fragments >= 2:
+            return "👁️⃤ **Desync:** 2/3 fragmentos • ERROR no próximo resultado decisivo."
+        return f"👁️⃤ **Desync:** {fragments}/3 fragmentos."
+
+    async def _send_race_lobby_feedback(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        user_id: int,
+        base_text: str,
+    ) -> bool:
+        pending = self._take_private_race_notices(guild_id, user_id)
+        parts = [str(base_text or "").strip()]
+        parts.extend(note for note in pending if note)
+        try:
+            status = self._race_lobby_status_line(guild_id, user_id)
+        except Exception:
+            status = ""
+        if status:
+            parts.append(status)
+        text = "\n\n".join(part for part in parts if part)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+            return True
+        except Exception:
+            if getattr(interaction, "guild", None) is None:
+                try:
+                    if interaction.response.is_done():
+                        await interaction.followup.send(text)
+                    else:
+                        await interaction.response.send_message(text)
+                    return True
+                except Exception:
+                    pass
+            self._queue_private_race_notices(guild_id, user_id, pending)
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.defer(ephemeral=True)
+            except Exception:
+                pass
+            return False
+
+    async def _deliver_or_queue_private_race_notices(
+        self,
+        interaction: discord.Interaction | None,
+        guild_id: int,
+        user_id: int,
+        notes,
+    ) -> bool:
+        clean = [str(note).strip() for note in (notes or ()) if str(note or "").strip()]
+        if not clean:
+            return True
+        if interaction is not None:
+            try:
+                text = "\n".join(clean)
+                if interaction.response.is_done():
+                    await interaction.followup.send(text, ephemeral=True)
+                else:
+                    await interaction.response.send_message(text, ephemeral=True)
+                return True
+            except Exception:
+                if getattr(interaction, "guild", None) is None:
+                    try:
+                        text = "\n".join(clean)
+                        if interaction.response.is_done():
+                            await interaction.followup.send(text)
+                        else:
+                            await interaction.response.send_message(text)
+                        return True
+                    except Exception:
+                        pass
+        self._queue_private_race_notices(guild_id, user_id, clean)
+        return False
 
     def _race_now(self) -> datetime:
         try:
@@ -1496,13 +1619,11 @@ class GincanaBase:
                             chips_now = int(doc.get("chips", CHIPS_INITIAL) or 0)
                             bonus_now = max(0, int(doc.get("bonus_chips", 0) or 0))
                             total_now = chips_now + bonus_now
-                            if total_now <= 15:
-                                recovery = min(15, max(0, 25 - total_now))
-                                if recovery > 0:
-                                    normal_delta = recovery
-                                    normal_reason = "Second Dawn da Fênix"
-                                    state["second_dawn_used"] = True
-                                    notes.append(self._race_effect_message(guild_id, user_id, "second_dawn", f"+{recovery} {self._CHIP_EMOJI}."))
+                            if total_now < 30:
+                                bonus_delta += 30
+                                bonus_reason = "Second Dawn da Fênix"
+                                state["second_dawn_used"] = True
+                                notes.append(self._race_effect_message(guild_id, user_id, "second_dawn", f"+30 {self._CHIP_BONUS_EMOJI}."))
 
                 elif race_key == "glitch":
                     if entry_total <= 0:

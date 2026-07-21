@@ -58,6 +58,7 @@ class TrucoGame:
     pending_raise_to: int | None = None
     finished: bool = False
     dm_messages: dict[int, discord.Message] = field(default_factory=dict)
+    race_interactions: dict[int, discord.Interaction] = field(default_factory=dict)
     match_history: dict[str, int] | None = None
     last_activity_at: float = field(default_factory=time.monotonic)
 
@@ -156,6 +157,7 @@ class TrucoHandView(discord.ui.LayoutView):
         for index, card in enumerate(hand):
             button = discord.ui.Button(label=self.cog._truco_card_display(card), style=discord.ButtonStyle.secondary, disabled=disabled_cards)
             async def _callback(interaction: discord.Interaction, idx=index):
+                self.game.race_interactions[self.player_id] = interaction
                 await self.cog._handle_truco_play_card(interaction, self.game, self.player_id, idx)
             button.callback = _callback
             card_buttons.append(button)
@@ -201,12 +203,15 @@ class TrucoHandView(discord.ui.LayoutView):
         ))
 
     async def _raise_action(self, interaction: discord.Interaction):
+        self.game.race_interactions[self.player_id] = interaction
         await self.cog._handle_truco_raise(interaction, self.game)
 
     async def _run_action(self, interaction: discord.Interaction):
+        self.game.race_interactions[self.player_id] = interaction
         await self.cog._handle_truco_run(interaction, self.game)
 
     async def _accept_raise(self, interaction: discord.Interaction):
+        self.game.race_interactions[self.player_id] = interaction
         await self.cog._handle_truco_accept_raise(interaction, self.game)
 
 
@@ -938,7 +943,6 @@ class GincanaTrucoMixin:
 
         winner_id = int(game.teams[winner_team][0])
         loser_user_id = int(game.teams[1 - winner_team][0])
-        race_effect_lines: list[str] = []
         try:
             for user_id in game.players:
                 await self.db.add_user_game_stat(game.guild_id, user_id, "truco_games", 1)
@@ -986,8 +990,12 @@ class GincanaTrucoMixin:
                         valid=True,
                         allow_hunt=True,
                     )
-                    mention = self._truco_member_mention(self.bot.get_guild(game.guild_id), user_id)
-                    race_effect_lines.extend(f"{mention} — {note}" for note in notes)
+                    await self._deliver_or_queue_private_race_notices(
+                        game.race_interactions.get(user_id),
+                        game.guild_id,
+                        user_id,
+                        notes,
+                    )
         finally:
             game.status = "finished"
             await self._truco_release_game(game)
@@ -1036,11 +1044,6 @@ class GincanaTrucoMixin:
             items.extend([
                 discord.ui.Separator(),
                 discord.ui.TextDisplay("\n".join(match_history)),
-            ])
-        if race_effect_lines:
-            items.extend([
-                discord.ui.Separator(),
-                discord.ui.TextDisplay("\n".join(race_effect_lines)),
             ])
         closed = discord.ui.LayoutView(timeout=None)
         closed.add_item(discord.ui.Container(
@@ -1295,6 +1298,7 @@ class GincanaTrucoMixin:
             }
             game.accepted = True
             game.status = "starting"
+            game.race_interactions[interaction.user.id] = interaction
 
         started = discord.ui.LayoutView(timeout=None)
         started.add_item(discord.ui.Container(
@@ -1302,6 +1306,7 @@ class GincanaTrucoMixin:
             accent_color=self._truco_accent_color(game),
         ))
         await self._truco_update_interaction_message(interaction, view=started)
+        await self._send_race_lobby_feedback(interaction, game.guild_id, interaction.user.id, "Entrada confirmada.")
         await self._start_truco_game(game)
 
     async def _start_truco_game(self, game: TrucoGame):

@@ -764,10 +764,11 @@ class GincanaCorridaMixin:
 
         locked.add(user.id)
         session.setdefault("entry_spend", {})[user.id] = entry_spend
+        session.setdefault("race_interactions", {})[user.id] = interaction
         session.setdefault("progress", {})[user.id] = 0.0
         session.setdefault("state_map", {})[user.id] = _HORSE_START
         view.join_button.label = f"🐎 Entrar ({len(self._get_race_participants(guild, session))})"
-        await self._send_component_feedback(interaction, chip_note or entry_text)
+        await self._send_race_lobby_feedback(interaction, guild.id, user.id, chip_note or entry_text)
         await self._refresh_race_message(guild.id)
 
     async def _handle_race_start_button(self, interaction: discord.Interaction, view: _RaceLobbyView):
@@ -1518,7 +1519,12 @@ class GincanaCorridaMixin:
                 valid=True,
                 allow_hunt=True,
             )
-            result_lines.extend(f"{member.mention} — {note}" for note in notes)
+            await self._deliver_or_queue_private_race_notices(
+                (session.get("race_interactions") or {}).get(member.id),
+                guild.id,
+                member.id,
+                notes,
+            )
 
         if coringa_refunds:
             if len(coringa_refunds) == 1:

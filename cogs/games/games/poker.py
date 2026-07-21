@@ -51,7 +51,7 @@ class PokerGame:
     stack_bonus: dict[int, int] = field(default_factory=dict)
     round_bets: dict[int, int] = field(default_factory=dict)
     entry_spend: dict[int, dict[str, object]] = field(default_factory=dict)
-    race_notes: list[str] = field(default_factory=list)
+    race_interactions: dict[int, discord.Interaction] = field(default_factory=dict)
     round_acted: set[int] = field(default_factory=set)
     pot: int = 0
     buy_in: int = POKER_BUY_IN
@@ -109,31 +109,38 @@ class PokerSelectionView(discord.ui.View):
 
     def _make_toggle_callback(self, index: int):
         async def _callback(interaction: discord.Interaction):
+            self.game.race_interactions[self.player_id] = interaction
             async with self.game.action_lock:
                 await self.cog._handle_poker_toggle(interaction, self.game, self.player_id, index)
         return _callback
 
     async def _clear_selection(self, interaction: discord.Interaction):
+        self.game.race_interactions[self.player_id] = interaction
         async with self.game.action_lock:
             await self.cog._handle_poker_clear(interaction, self.game, self.player_id)
 
     async def _confirm_selection(self, interaction: discord.Interaction):
+        self.game.race_interactions[self.player_id] = interaction
         async with self.game.action_lock:
             await self.cog._handle_poker_confirm(interaction, self.game, self.player_id)
 
     async def _accept_duel(self, interaction: discord.Interaction):
+        self.game.race_interactions[self.player_id] = interaction
         async with self.game.action_lock:
             await self.cog._handle_poker_accept(interaction, self.game, self.player_id)
 
     async def _check_call(self, interaction: discord.Interaction):
+        self.game.race_interactions[self.player_id] = interaction
         async with self.game.action_lock:
             await self.cog._handle_poker_check_call(interaction, self.game, self.player_id)
 
     async def _bet_raise(self, interaction: discord.Interaction):
+        self.game.race_interactions[self.player_id] = interaction
         async with self.game.action_lock:
             await self.cog._handle_poker_bet_raise(interaction, self.game, self.player_id)
 
     async def _fold(self, interaction: discord.Interaction):
+        self.game.race_interactions[self.player_id] = interaction
         async with self.game.action_lock:
             await self.cog._handle_poker_fold(interaction, self.game, self.player_id)
 
@@ -490,8 +497,6 @@ class GincanaPokerMixin:
         embed.add_field(name=f"Stack final — {player_a.display_name}", value=self._poker_stack_text(game, player_a.id), inline=True)
         embed.add_field(name=f"Stack final — {player_b.display_name}", value=self._poker_stack_text(game, player_b.id), inline=True)
         embed.add_field(name="Trocas reveladas", value=f"{player_a.display_name}: **{game.exchange_counts.get(player_a.id, 0)}**\n{player_b.display_name}: **{game.exchange_counts.get(player_b.id, 0)}**", inline=True)
-        if game.race_notes:
-            embed.add_field(name="Efeitos de raça", value="\n".join(game.race_notes), inline=False)
         return embed
 
     async def _disable_poker_views(self, game: PokerGame):
@@ -664,7 +669,6 @@ class GincanaPokerMixin:
             player_a.id: True if outcome > 0 else (False if outcome < 0 else None),
             player_b.id: True if outcome < 0 else (False if outcome > 0 else None),
         }
-        player_names = {player_a.id: player_a.mention, player_b.id: player_b.mention}
         for player_id in game.players:
             opponent_id = game.other_player(player_id)
             notes = await self._apply_new_race_result(
@@ -677,7 +681,12 @@ class GincanaPokerMixin:
                 valid=True,
                 allow_hunt=True,
             )
-            game.race_notes.extend(f"{player_names[player_id]} — {note}" for note in notes)
+            await self._deliver_or_queue_private_race_notices(
+                game.race_interactions.get(player_id),
+                game.guild_id,
+                player_id,
+                notes,
+            )
             game.stack_normal[player_id] = int(self.db.get_user_chips(game.guild_id, player_id, default=100) or 0)
             game.stack_bonus[player_id] = int(self._get_user_bonus_chips(game.guild_id, player_id) or 0)
             game.stacks[player_id] = self._poker_total_stack(game, player_id)
@@ -859,9 +868,10 @@ class GincanaPokerMixin:
             await interaction.response.defer()
             return
         game.accepted[player_id] = True
+        game.race_interactions[player_id] = interaction
         await self._update_poker_dm(game, player_id)
         await self._update_poker_status(game)
-        await interaction.response.defer()
+        await self._send_race_lobby_feedback(interaction, game.guild_id, player_id, "Duelo aceito.")
         if all(game.accepted.get(pid, False) for pid in game.players):
             game.phase = "pre_draw_bet"
             self._reset_betting_round(game, turn_id=game.host_id)
