@@ -3,14 +3,17 @@ import random
 import re
 import time
 from dataclasses import dataclass, field
+from uuid import uuid4
 
 import discord
+
+from ..services.session_registry import GameSessionRegistry, MAX_ACTIVE_GAME_USERS_PER_GUILD
+
 
 TRUCO_ENTRY = 10
 TRUCO_BONUS_REWARD = 10
 _TRUCO_INVITE_TIMEOUT = 60.0
 _TRUCO_ACTION_TIMEOUT = 180.0
-_TRUCO_LOBBY_TIMEOUT = 90.0
 
 _TRUCO_RANKS = ["4", "5", "6", "7", "Q", "J", "K", "A", "2", "3"]
 _TRUCO_SUITS = ["♦", "♠", "♥", "♣"]
@@ -19,31 +22,15 @@ _TRUCO_PUBLIC_SUIT = {"♦": "♦️", "♠": "♠️", "♥": "♥️", "♣": 
 _TRUCO_LEVELS = [1, 3, 6, 9, 12]
 _TRUCO_TARGET_POT_1V1 = {1: 20, 3: 40, 6: 60, 9: 90, 12: 120}
 _TRUCO_TARGET_CONTRIB_1V1 = {1: 10, 3: 20, 6: 30, 9: 45, 12: 60}
-_TRUCO_TARGET_POT_2V2 = {1: 40, 3: 80, 6: 120, 9: 180, 12: 240}
-_TRUCO_TARGET_CONTRIB_2V2 = {1: 10, 3: 20, 6: 30, 9: 45, 12: 60}
 _TRUCO_RAISE_NAMES = {3: "truco", 6: "seis", 9: "nove", 12: "doze"}
 _TRUCO_TRIGGER_RE = re.compile(r"^\s*truco\s+<@!?(\d+)>\s*$", re.IGNORECASE)
-_TRUCO_2V2_TRIGGER_RE = re.compile(r"^\s*(truco2|truco\s+2v2)\s*$", re.IGNORECASE)
-
-
-@dataclass
-class TrucoLobby:
-    guild_id: int
-    channel_id: int
-    creator_id: int
-    variant: str = "normal"
-    team_a: list[int] = field(default_factory=list)
-    team_b: list[int] = field(default_factory=list)
-    message: discord.Message | None = None
-    started: bool = False
-    last_activity_at: float = field(default_factory=time.monotonic)
 
 
 @dataclass
 class TrucoGame:
+    session_id: str
     guild_id: int
     channel_id: int
-    mode: str
     players_order: list[int]
     teams: list[tuple[int, ...]]
     variant: str = "normal"
@@ -111,87 +98,6 @@ class TrucoChallengeView(discord.ui.LayoutView):
             pass
 
 
-class Truco2v2LobbyView(discord.ui.LayoutView):
-    def __init__(self, cog: "GincanaTrucoMixin", lobby: TrucoLobby, guild: discord.Guild):
-        super().__init__(timeout=_TRUCO_LOBBY_TIMEOUT)
-        self.cog = cog
-        self.lobby = lobby
-        self.guild = guild
-        self.join_a = discord.ui.Button(label="🟦 Entrar no time 1", style=discord.ButtonStyle.primary)
-        self.join_b = discord.ui.Button(label="🟥 Entrar no time 2", style=discord.ButtonStyle.danger)
-        self.swap = discord.ui.Button(label="🔄 Trocar de time", style=discord.ButtonStyle.secondary)
-        self.leave = discord.ui.Button(label="Sair", style=discord.ButtonStyle.secondary)
-        self.start = discord.ui.Button(label="🚩 Iniciar", style=discord.ButtonStyle.success)
-        self.cancel = discord.ui.Button(label="Cancelar", style=discord.ButtonStyle.danger)
-        self.join_a.callback = self._join_a
-        self.join_b.callback = self._join_b
-        self.swap.callback = self._swap
-        self.leave.callback = self._leave
-        self.start.callback = self._start
-        self.cancel.callback = self._cancel
-        self._build_layout()
-
-    def _build_layout(self):
-        self.clear_items()
-        a_mentions = [self.guild.get_member(uid).mention for uid in self.lobby.team_a if self.guild.get_member(uid)]
-        b_mentions = [self.guild.get_member(uid).mention for uid in self.lobby.team_b if self.guild.get_member(uid)]
-        creator = self.guild.get_member(self.lobby.creator_id)
-        reward_bonus = self.cog._truco_bonus_reward_value(self.lobby)
-        bonus_label = "Bônus dourado" if self.cog._truco_is_golden(self.lobby) else "Bônus por vencedor"
-        header = [
-            f"# {self.cog._truco_title_text(self.lobby)} 2v2",
-            f"**Entrada:** {self.cog._chip_amount(TRUCO_ENTRY)} por jogador",
-            f"**Valendo:** {self.cog._chip_amount(40)}",
-            f"**{bonus_label}:** **+{reward_bonus}** {self.cog._CHIP_BONUS_EMOJI}",
-        ]
-        if creator:
-            header.append(f"**Criador:** {creator.mention}")
-        team1 = [f"### 🟦 Time 1 ({len(a_mentions)}/2)"] + (a_mentions or ["• Vazio"])
-        team2 = [f"### 🟥 Time 2 ({len(b_mentions)}/2)"] + (b_mentions or ["• Vazio"])
-        foot = [
-            "Escolha um time. A partida começa quando os dois lados estiverem completos.",
-            "Use **Trocar de time** para mudar de lado.",
-        ]
-        row1 = discord.ui.ActionRow(self.join_a, self.join_b, self.swap)
-        row2 = discord.ui.ActionRow(self.leave, self.start, self.cancel)
-        self.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("\n".join(header)),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(team1)),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(team2)),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay("\n".join(foot)),
-            row1,
-            row2,
-            accent_color=self.cog._truco_accent_color(self.lobby),
-        ))
-
-    async def _join_a(self, interaction: discord.Interaction):
-        await self.cog._handle_truco2_lobby_join(interaction, self.lobby, 0, self)
-
-    async def _join_b(self, interaction: discord.Interaction):
-        await self.cog._handle_truco2_lobby_join(interaction, self.lobby, 1, self)
-
-    async def _swap(self, interaction: discord.Interaction):
-        await self.cog._handle_truco2_lobby_swap(interaction, self.lobby, self)
-
-    async def _leave(self, interaction: discord.Interaction):
-        await self.cog._handle_truco2_lobby_leave(interaction, self.lobby, self)
-
-    async def _start(self, interaction: discord.Interaction):
-        await self.cog._handle_truco2_lobby_start(interaction, self.lobby, self)
-
-    async def _cancel(self, interaction: discord.Interaction):
-        await self.cog._handle_truco2_lobby_cancel(interaction, self.lobby, self)
-
-    async def on_timeout(self):
-        try:
-            await self.cog._handle_truco2_lobby_timeout(self.lobby)
-        except Exception:
-            pass
-
-
 class TrucoTableView(discord.ui.LayoutView):
     def __init__(self, cog: "GincanaTrucoMixin", game: TrucoGame):
         super().__init__(timeout=_TRUCO_ACTION_TIMEOUT)
@@ -215,10 +121,19 @@ class TrucoTableView(discord.ui.LayoutView):
 
     async def on_timeout(self):
         try:
-            if self.game.finished:
-                return
-            loser = self.game.turn_id or self.game.players_order[0]
-            await self.cog._finish_truco_game(self.game, winner_team=self.cog._truco_other_team(self.game, loser), loser_id=loser, reason="tempo esgotado")
+            lock = self.cog._truco_get_play_lock(self.game)
+            async with lock:
+                if self.game.finished or not self.cog._truco_is_current_game(self.game):
+                    return
+                if self.cog._truco_idle_for(self.game) < (_TRUCO_ACTION_TIMEOUT - 1.0):
+                    return
+                loser = self.game.turn_id or self.game.players_order[0]
+                await self.cog._finish_truco_game(
+                    self.game,
+                    winner_team=self.cog._truco_other_team(self.game, loser),
+                    loser_id=loser,
+                    reason="tempo esgotado",
+                )
         except Exception:
             pass
 
@@ -295,10 +210,14 @@ class TrucoHandView(discord.ui.LayoutView):
 
 class GincanaTrucoMixin:
     def _ensure_truco_state(self):
+        if not hasattr(self, "_game_sessions"):
+            self._game_sessions = GameSessionRegistry(
+                max_active_users_per_guild=MAX_ACTIVE_GAME_USERS_PER_GUILD
+            )
         if not hasattr(self, "_truco_games"):
             self._truco_games = {}
-        if not hasattr(self, "_truco_lobbies"):
-            self._truco_lobbies = {}
+        if not hasattr(self, "_truco_guild_sessions"):
+            self._truco_guild_sessions = {}
         if not hasattr(self, "_truco_play_locks"):
             self._truco_play_locks = {}
         if not hasattr(self, "_truco_play_inflight"):
@@ -325,14 +244,28 @@ class GincanaTrucoMixin:
                 if marker and marker[0] == key:
                     inflight.discard(marker)
 
-    def _truco_release_guild_busy_state(self, guild_id: int, *, game: TrucoGame | None = None, lobby: TrucoLobby | None = None):
-        current_game = self._truco_games.get(guild_id)
-        if current_game is not None and (game is None or current_game is game):
-            self._truco_games.pop(guild_id, None)
-            self._truco_clear_runtime_guards(current_game)
-        current_lobby = self._truco_lobbies.get(guild_id)
-        if current_lobby is not None and (lobby is None or current_lobby is lobby):
-            self._truco_lobbies.pop(guild_id, None)
+    def _truco_remove_local_game(self, game: TrucoGame):
+        current = self._truco_games.get(game.session_id)
+        if current is not game:
+            return
+        self._truco_games.pop(game.session_id, None)
+        guild_sessions = self._truco_guild_sessions.get(game.guild_id)
+        if guild_sessions is not None:
+            guild_sessions.discard(game.session_id)
+            if not guild_sessions:
+                self._truco_guild_sessions.pop(game.guild_id, None)
+        self._truco_clear_runtime_guards(game)
+
+    async def _truco_release_game(self, game: TrucoGame):
+        self._truco_remove_local_game(game)
+        await self._game_sessions.release(game.session_id)
+
+    def _truco_register_game(self, game: TrucoGame):
+        self._truco_games[game.session_id] = game
+        self._truco_guild_sessions.setdefault(game.guild_id, set()).add(game.session_id)
+
+    def _truco_is_current_game(self, game: TrucoGame) -> bool:
+        return self._truco_games.get(game.session_id) is game
 
     def _truco_touch_runtime(self, game_or_lobby) -> float:
         now = time.monotonic()
@@ -362,36 +295,63 @@ class GincanaTrucoMixin:
                 await self._change_user_chips(guild_id, int(user_id), int(normal_amount), mark_activity=True, reason="Devolução do truco")
 
     async def _truco_abort_game_start(self, game: TrucoGame, *, notice: str):
-        if getattr(game, '_start_abort_handled', False):
+        if getattr(game, "_start_abort_handled", False):
             return False
         game._start_abort_handled = True
         game.finished = True
-        refund_entries = list(getattr(game, 'entry_refunds', []) or [])
+        refund_entries = list(getattr(game, "entry_refunds", []) or [])
         if refund_entries:
             await self._truco_refund_consumed_entries(game.guild_id, refund_entries)
             game.entry_refunds = []
-        self._truco_release_guild_busy_state(game.guild_id, game=game)
+        await self._truco_release_game(game)
         closed = discord.ui.LayoutView(timeout=None)
         closed.add_item(discord.ui.Container(discord.ui.TextDisplay(f"# 🃏 Truco\n{notice}"), accent_color=discord.Color.red()))
         target_message = game.status_message or game.challenge_message
         await self._truco_safe_edit(target_message, embed=None, view=closed)
         return False
 
-    def _truco_cleanup_broken_busy_state(self, guild_id: int):
-        game = self._truco_games.get(guild_id)
-        if game is not None:
-            if getattr(game, "finished", False):
-                self._truco_release_guild_busy_state(guild_id, game=game)
-            elif str(getattr(game, 'status', '') or '') == 'invite' and self._truco_idle_for(game) > (_TRUCO_INVITE_TIMEOUT + 20.0):
-                game.finished = True
-                self._truco_release_guild_busy_state(guild_id, game=game)
-        lobby = self._truco_lobbies.get(guild_id)
-        if lobby is not None:
-            if getattr(lobby, "started", False):
-                self._truco_release_guild_busy_state(guild_id, lobby=lobby)
-            elif self._truco_idle_for(lobby) > (_TRUCO_LOBBY_TIMEOUT + 20.0):
-                lobby.started = True
-                self._truco_release_guild_busy_state(guild_id, lobby=lobby)
+    async def _truco_cleanup_stale_sessions(self):
+        self._ensure_truco_state()
+        expired_ids = set(await self._game_sessions.find_expired())
+        stale_invites: list[TrucoGame] = []
+        stale_games: list[TrucoGame] = []
+        known_session_ids = set(self._truco_games)
+
+        for game in list(self._truco_games.values()):
+            if game.finished:
+                self._truco_remove_local_game(game)
+                await self._game_sessions.release(game.session_id)
+                continue
+            idle = self._truco_idle_for(game)
+            expired = game.session_id in expired_ids
+            if game.status == "invite" and (expired or idle > (_TRUCO_INVITE_TIMEOUT + 20.0)):
+                stale_invites.append(game)
+            elif game.status != "invite" and (expired or idle > (_TRUCO_ACTION_TIMEOUT + 45.0)):
+                stale_games.append(game)
+
+        for game in stale_invites:
+            await self._expire_truco_invite(game)
+        for game in stale_games:
+            lock = self._truco_get_play_lock(game)
+            async with lock:
+                if game.finished or not self._truco_is_current_game(game):
+                    continue
+                if self._truco_idle_for(game) <= (_TRUCO_ACTION_TIMEOUT + 45.0):
+                    await self._game_sessions.touch(
+                        game.session_id,
+                        ttl=_TRUCO_ACTION_TIMEOUT + 90.0,
+                    )
+                    continue
+                loser_id = game.turn_id or game.players_order[0]
+                await self._finish_truco_game(
+                    game,
+                    winner_team=self._truco_other_team(game, loser_id),
+                    loser_id=loser_id,
+                    reason="tempo esgotado",
+                )
+
+        for orphan_session_id in expired_ids - known_session_ids:
+            await self._game_sessions.release(orphan_session_id)
 
     def _truco_variant(self, game_or_lobby) -> str:
         return str(getattr(game_or_lobby, "variant", "normal") or "normal").lower()
@@ -457,26 +417,11 @@ class GincanaTrucoMixin:
                 return idx
         return None
 
-    def _truco_partner(self, game: TrucoGame, player_id: int) -> int | None:
-        team_idx = self._truco_team_index(game, player_id)
-        if team_idx is None:
-            return None
-        team = list(game.teams[team_idx])
-        if len(team) < 2:
-            return None
-        for uid in team:
-            if uid != int(player_id):
-                return uid
-        return None
 
     def _truco_target_contrib(self, game: TrucoGame, level: int) -> int:
-        if game.mode == "2v2":
-            return _TRUCO_TARGET_CONTRIB_2V2[level]
         return _TRUCO_TARGET_CONTRIB_1V1[level]
 
     def _truco_target_pot(self, game: TrucoGame, level: int) -> int:
-        if game.mode == "2v2":
-            return _TRUCO_TARGET_POT_2V2[level]
         return _TRUCO_TARGET_POT_1V1[level]
 
     def _truco_next_raise_level(self, current: int):
@@ -500,15 +445,10 @@ class GincanaTrucoMixin:
         )
 
     def _truco_fixed_player_order(self, game: TrucoGame, viewer_id: int | None = None) -> list[int]:
-        order: list[int] = []
-        team_size = max((len(team) for team in game.teams), default=0)
-        for index in range(team_size):
-            for team in game.teams:
-                if index < len(team):
-                    order.append(int(team[index]))
+        order = [int(user_id) for user_id in game.players_order]
         if viewer_id is not None and int(viewer_id) in order:
             viewer = int(viewer_id)
-            order = [viewer, *[uid for uid in order if uid != viewer]]
+            order = [viewer, *[user_id for user_id in order if user_id != viewer]]
         return order
 
     def _truco_score_text(self, game: TrucoGame, guild: discord.Guild | None, viewer_id: int | None = None) -> str:
@@ -517,28 +457,22 @@ class GincanaTrucoMixin:
             viewer_team = self._truco_team_index(game, int(viewer_id))
             own = team0 if viewer_team == 0 else team1
             other = team1 if viewer_team == 0 else team0
-            if game.mode == "2v2":
-                return f"Seu time **{own}** · Adversários **{other}**"
-            opponent_id = next((uid for uid in game.players if self._truco_team_index(game, uid) != viewer_team), None)
+            opponent_id = next(
+                (user_id for user_id in game.players if self._truco_team_index(game, user_id) != viewer_team),
+                None,
+            )
             opponent = self._truco_member_name(guild, opponent_id) if opponent_id is not None else "Adversário"
             return f"Você **{own}** · {opponent} **{other}**"
-        if game.mode == "2v2":
-            return f"Time 1 **{team0}** · Time 2 **{team1}**"
         player0 = self._truco_member_name(guild, int(game.teams[0][0]))
         player1 = self._truco_member_name(guild, int(game.teams[1][0]))
         return f"{player0} **{team0}** · {player1} **{team1}**"
 
     def _truco_round_history_lines(self, game: TrucoGame, guild: discord.Guild | None, viewer_id: int | None = None) -> list[str]:
         lines: list[str] = []
-        viewer_team = self._truco_team_index(game, int(viewer_id)) if viewer_id is not None else None
         for index, winner_team in enumerate(game.round_results):
             label = self._truco_round_label(index)
             if winner_team is None:
                 winner = "Empate"
-            elif viewer_id is not None and game.mode == "2v2":
-                winner = "Seu time" if winner_team == viewer_team else "Adversários"
-            elif game.mode == "2v2":
-                winner = self._truco_team_name(game, guild, winner_team)
             else:
                 winner_id = int(game.teams[winner_team][0])
                 winner = "Você" if viewer_id is not None and winner_id == int(viewer_id) else self._truco_member_name(guild, winner_id)
@@ -555,16 +489,7 @@ class GincanaTrucoMixin:
         member = guild.get_member(int(user_id)) if guild else None
         return member.mention if member else f"<@{int(user_id)}>"
 
-    def _truco_team_name(self, game: TrucoGame, guild: discord.Guild | None, team_idx: int) -> str:
-        if team_idx not in (0, 1):
-            return "Time"
-        names = [self._truco_member_name(guild, uid) for uid in game.teams[team_idx]]
-        return " + ".join(names)
 
-    def _truco_team_mentions(self, game: TrucoGame, guild: discord.Guild | None, team_idx: int) -> str:
-        if team_idx not in (0, 1):
-            return "—"
-        return " • ".join(self._truco_member_mention(guild, uid) for uid in game.teams[team_idx])
 
     def _truco_rotate_order(self, players_order: list[int], starter_id: int) -> list[int]:
         if starter_id not in players_order:
@@ -572,19 +497,27 @@ class GincanaTrucoMixin:
         idx = players_order.index(starter_id)
         return list(players_order[idx:]) + list(players_order[:idx])
 
-    def _truco_make_game(self, guild_id: int, channel_id: int, mode: str, players_order: list[int], teams: list[tuple[int, ...]], *, variant: str = "normal") -> TrucoGame:
+    def _truco_make_game(
+        self,
+        guild_id: int,
+        channel_id: int,
+        players_order: list[int],
+        *,
+        variant: str = "normal",
+    ) -> TrucoGame:
+        players = [int(user_id) for user_id in players_order]
         game = TrucoGame(
-            guild_id=guild_id,
-            channel_id=channel_id,
-            mode=mode,
-            players_order=list(players_order),
-            teams=[tuple(team) for team in teams],
+            session_id=f"truco:{uuid4().hex}",
+            guild_id=int(guild_id),
+            channel_id=int(channel_id),
+            players_order=players,
+            teams=[(players[0],), (players[1],)],
             variant=str(variant or "normal"),
             level=1,
-            status="invite" if mode == "1v1" else "lobby_starting",
-            hand_starter_id=players_order[0],
-            turn_id=players_order[0],
-            contribution={uid: TRUCO_ENTRY for uid in players_order},
+            status="invite",
+            hand_starter_id=players[0],
+            turn_id=players[0],
+            contribution={user_id: TRUCO_ENTRY for user_id in players},
         )
         game.pot = self._truco_target_pot(game, 1)
         self._truco_touch_runtime(game)
@@ -613,18 +546,10 @@ class GincanaTrucoMixin:
     def _truco_status_lines(self, game: TrucoGame, *, title: str = "🃏 Truco") -> dict[str, list[str]]:
         guild = self.bot.get_guild(game.guild_id)
         title = self._truco_title_text(game)
-        if game.mode == "2v2":
-            duel = [
-                f"# {title} 2v2",
-                self._truco_team_mentions(game, guild, 0),
-                "**contra**",
-                self._truco_team_mentions(game, guild, 1),
-            ]
-        else:
-            duel = [
-                f"# {title}",
-                f"{self._truco_member_mention(guild, int(game.teams[0][0]))} × {self._truco_member_mention(guild, int(game.teams[1][0]))}",
-            ]
+        duel = [
+            f"# {title}",
+            f"{self._truco_member_mention(guild, int(game.teams[0][0]))} × {self._truco_member_mention(guild, int(game.teams[1][0]))}",
+        ]
         meta = [
             f"**Valendo:** {self._chip_amount(game.pot)}",
             f"**Vira:** {self._truco_card_public_display(game.vira)} · **Manilha:** {game.manilha_rank or '—'}",
@@ -632,9 +557,9 @@ class GincanaTrucoMixin:
         ]
         mesa = ["## Mesa"]
         shown = False
-        for uid in self._truco_fixed_player_order(game):
-            card = game.cards_on_table.get(uid)
-            mesa.append(f"**{self._truco_member_name(guild, uid)}** · {self._truco_card_public_display(card) if card else '—'}")
+        for user_id in self._truco_fixed_player_order(game):
+            card = game.cards_on_table.get(user_id)
+            mesa.append(f"**{self._truco_member_name(guild, user_id)}** · {self._truco_card_public_display(card) if card else '—'}")
             shown = shown or bool(card)
         if not shown:
             mesa.append("A mesa está limpa.")
@@ -644,7 +569,7 @@ class GincanaTrucoMixin:
         status = [
             "## Agora",
             game.status_text,
-            "Use a mensagem direta do bot para jogar.",
+            "Jogue pela mensagem direta enviada pelo bot.",
         ]
         return {"header": duel, "meta": meta, "mesa": mesa, "status": status}
 
@@ -652,7 +577,6 @@ class GincanaTrucoMixin:
         guild = self.bot.get_guild(game.guild_id)
         pid = int(player_id)
         cards = game.hands.get(pid, [])
-        partner = self._truco_partner(game, pid)
         player_team = self._truco_team_index(game, pid)
         team0, team1 = self._truco_score_counts(game)
 
@@ -662,24 +586,17 @@ class GincanaTrucoMixin:
             own_score = team0 if player_team == 0 else team1
             opponent_score = team1 if player_team == 0 else team0
             loser_name = self._truco_member_name(guild, getattr(game, "loser_id", 0) or 0)
-            opponent_name = (
-                self._truco_team_name(game, guild, game.winner_team or 0)
-                if game.mode == "2v2"
-                else self._truco_member_name(guild, int(game.teams[game.winner_team or 0][0]))
-            )
+            winner_id = int(game.teams[game.winner_team or 0][0])
+            opponent_name = self._truco_member_name(guild, winner_id)
 
             if reason == "correu" and getattr(game, "loser_id", None) == pid:
                 header = ["# 🏳️ Você correu", "A partida terminou quando você correu."]
             elif reason == "correu" and won:
                 header = ["# 🎉 Vitória", f"{loser_name} correu da partida."]
-            elif reason == "correu":
-                header = ["# 💥 Derrota", f"{loser_name} correu da partida."]
             elif reason == "tempo esgotado" and getattr(game, "loser_id", None) == pid:
                 header = ["# ⏱️ Tempo esgotado", "Você não jogou a tempo."]
             elif reason == "tempo esgotado" and won:
                 header = ["# 🎉 Vitória", f"{loser_name} não jogou a tempo."]
-            elif reason == "tempo esgotado":
-                header = ["# 💥 Derrota", f"{loser_name} não jogou a tempo."]
             elif won:
                 header = ["# 🎉 Vitória", f"Você venceu a partida por **{own_score}–{opponent_score}**."]
             else:
@@ -694,18 +611,17 @@ class GincanaTrucoMixin:
 
             current_chips = int(self.db.get_user_chips(game.guild_id, pid, default=100) or 0)
             current_bonus = int(self._get_user_bonus_chips(game.guild_id, pid) or 0)
-            contrib = int(game.contribution.get(pid, TRUCO_ENTRY))
+            contribution = int(game.contribution.get(pid, TRUCO_ENTRY))
             if won:
-                share = int(game.pot / max(1, len(game.teams[game.winner_team or 0])))
                 result_lines = [
                     "## Resultado",
-                    f"Você recebeu **{share}** {self._CHIP_GAIN_EMOJI} e **+{self._truco_bonus_reward_value(game)}** {self._CHIP_BONUS_EMOJI}.",
+                    f"Você recebeu **{game.pot}** {self._CHIP_GAIN_EMOJI} e **+{self._truco_bonus_reward_value(game)}** {self._CHIP_BONUS_EMOJI}.",
                     f"**Saldo:** **{current_chips}** {self._CHIP_EMOJI} · **{current_bonus}** {self._CHIP_BONUS_EMOJI}",
                 ]
             else:
                 result_lines = [
                     "## Resultado",
-                    f"Você perdeu **{contrib}** {self._CHIP_LOSS_EMOJI}.",
+                    f"Você perdeu **{contribution}** {self._CHIP_LOSS_EMOJI}.",
                     f"**Saldo:** **{current_chips}** {self._CHIP_EMOJI} · **{current_bonus}** {self._CHIP_BONUS_EMOJI}",
                 ]
             return {"header": header, "meta": meta, "mesa": rounds, "cards": result_lines, "status": []}
@@ -714,7 +630,7 @@ class GincanaTrucoMixin:
             raise_name = _TRUCO_RAISE_NAMES.get(game.pending_raise_to, "aumento")
             status = f"{self._truco_member_name(guild, game.pending_raise_by or 0)} pediu **{raise_name}**. Aceite, aumente ou corra."
         elif game.status == "awaiting_raise_response":
-            status = "Aguardando o outro lado responder ao aumento."
+            status = "Aguardando o adversário responder ao aumento."
         elif pid == game.turn_id:
             status = "Escolha uma carta para jogar."
         else:
@@ -726,14 +642,12 @@ class GincanaTrucoMixin:
             f"**Vira:** {self._truco_card_public_display(game.vira)} · **Manilha:** {game.manilha_rank or '—'}",
             f"**Placar:** {self._truco_score_text(game, guild, viewer_id=pid)}",
         ]
-        if partner:
-            meta.append(f"**Parceiro:** {self._truco_member_name(guild, partner)}")
 
         mesa = ["## Mesa"]
         any_card = False
-        for uid in self._truco_fixed_player_order(game, viewer_id=pid):
-            label = "Você" if int(uid) == pid else self._truco_member_name(guild, uid)
-            card = game.cards_on_table.get(uid)
+        for user_id in self._truco_fixed_player_order(game, viewer_id=pid):
+            label = "Você" if int(user_id) == pid else self._truco_member_name(guild, user_id)
+            card = game.cards_on_table.get(user_id)
             mesa.append(f"**{label}** · {self._truco_card_public_display(card) if card else '—'}")
             any_card = any_card or bool(card)
         if not any_card:
@@ -895,8 +809,7 @@ class GincanaTrucoMixin:
         return 0 if starter_team is None else starter_team
 
     async def _truco_resolve_round(self, game: TrucoGame):
-        expected = 2 if game.mode == "1v1" else 4
-        if len(game.cards_on_table) < expected:
+        if len(game.cards_on_table) < 2:
             return
         game.status_text = "Conferindo a vaza..."
         await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
@@ -908,23 +821,17 @@ class GincanaTrucoMixin:
             game.status_text = f"A {label.lower()} vaza empatou."
             game.table_history.append(game.status_text)
         else:
-            if game.mode == "2v2":
-                name = self._truco_team_name(game, guild, winner_team)
-            else:
-                winning_players = [
-                    pid for pid in game.cards_on_table.keys()
-                    if self._truco_team_index(game, pid) == winner_team
-                ]
-                if winning_players:
-                    winner_pid = max(
-                        winning_players,
-                        key=lambda pid: self._truco_card_strength_key(
-                            game.cards_on_table[pid], game.manilha_rank or ""
-                        ),
-                    )
-                else:
-                    winner_pid = list(game.teams[winner_team])[0]
-                name = self._truco_member_name(guild, winner_pid)
+            winning_players = [
+                user_id for user_id in game.cards_on_table
+                if self._truco_team_index(game, user_id) == winner_team
+            ]
+            winner_id = max(
+                winning_players,
+                key=lambda user_id: self._truco_card_strength_key(
+                    game.cards_on_table[user_id], game.manilha_rank or ""
+                ),
+            )
+            name = self._truco_member_name(guild, winner_id)
             game.status_text = f"{name} venceu a {label.lower()} vaza."
             game.table_history.append(game.status_text)
         game.round_results.append(winner_team)
@@ -932,17 +839,25 @@ class GincanaTrucoMixin:
         await self._truco_refresh_private_views(game)
         await asyncio.sleep(0.8)
         hand_winner = self._truco_hand_winner_team(game)
-        # determine round-starter for next round before clearing
         if winner_team is not None:
-            winning_players = [pid for pid in game.cards_on_table.keys() if self._truco_team_index(game, pid) == winner_team]
-            # player with strongest card among winners
-            starter = max(winning_players, key=lambda pid: self._truco_card_strength_key(game.cards_on_table[pid], game.manilha_rank or ""))
+            winning_players = [
+                user_id for user_id in game.cards_on_table
+                if self._truco_team_index(game, user_id) == winner_team
+            ]
+            starter = max(
+                winning_players,
+                key=lambda user_id: self._truco_card_strength_key(
+                    game.cards_on_table[user_id], game.manilha_rank or ""
+                ),
+            )
         else:
             starter = game.hand_starter_id or game.players_order[0]
         game.cards_on_table.clear()
         game.round_index += 1
         if hand_winner is not None or len(game.round_results) >= 3:
-            await self._finish_truco_game(game, winner_team=(hand_winner if hand_winner is not None else self._truco_team_index(game, starter) or 0), loser_id=starter, reason="jogo encerrado")
+            final_winner = hand_winner if hand_winner is not None else (self._truco_team_index(game, starter) or 0)
+            loser_id = int(game.teams[1 - final_winner][0])
+            await self._finish_truco_game(game, winner_team=final_winner, loser_id=loser_id, reason="jogo encerrado")
             return
         game.hand_starter_id = starter
         game.players_order = self._truco_rotate_order(game.players_order, starter)
@@ -960,30 +875,37 @@ class GincanaTrucoMixin:
         if game.finished:
             return
         game.finished = True
-        game.status = "finished"
+        game.status = "finishing"
         game.finish_reason = reason
         game.winner_team = winner_team
         game.loser_id = loser_id
-        self._truco_release_guild_busy_state(game.guild_id, game=game)
-        winners = list(game.teams[winner_team])
-        losers = [uid for idx, team in enumerate(game.teams) if idx != winner_team for uid in team]
-        all_players = [uid for team in game.teams for uid in team]
-        share = int(game.pot / max(1, len(winners)))
-        for uid in all_players:
-            await self.db.add_user_game_stat(game.guild_id, uid, "truco_games", 1)
-        for uid in winners:
-            await self.db.add_user_game_stat(game.guild_id, uid, "truco_wins", 1)
-            await self._record_game_played(game.guild_id, uid, weekly_points=6)
+
+        winner_id = int(game.teams[winner_team][0])
+        loser_user_id = int(game.teams[1 - winner_team][0])
+        try:
+            for user_id in game.players:
+                await self.db.add_user_game_stat(game.guild_id, user_id, "truco_games", 1)
+            await self.db.add_user_game_stat(game.guild_id, winner_id, "truco_wins", 1)
+            await self._record_game_played(game.guild_id, winner_id, weekly_points=6)
             win_reason = "Vitória no truco dourado" if self._truco_is_golden(game) else "Vitória no truco"
             bonus_reason = "Bônus do truco dourado" if self._truco_is_golden(game) else "Bônus do truco"
-            await self._change_user_chips(game.guild_id, uid, share, mark_activity=True, reason=win_reason)
-            await self._change_user_bonus_chips(game.guild_id, uid, self._truco_bonus_reward_value(game), mark_activity=True, reason=bonus_reason)
-        for uid in losers:
-            await self.db.add_user_game_stat(game.guild_id, uid, "truco_losses", 1)
-            await self._record_game_played(game.guild_id, uid, weekly_points=2)
+            await self._change_user_chips(game.guild_id, winner_id, game.pot, mark_activity=True, reason=win_reason)
+            await self._change_user_bonus_chips(
+                game.guild_id,
+                winner_id,
+                self._truco_bonus_reward_value(game),
+                mark_activity=True,
+                reason=bonus_reason,
+            )
+            await self.db.add_user_game_stat(game.guild_id, loser_user_id, "truco_losses", 1)
+            await self._record_game_played(game.guild_id, loser_user_id, weekly_points=2)
+        finally:
+            game.status = "finished"
+            await self._truco_release_game(game)
+
         guild = self.bot.get_guild(game.guild_id)
-        winner_text = self._truco_team_mentions(game, guild, winner_team) if game.mode == "2v2" else self._truco_member_mention(guild, winners[0])
-        loser_text = self._truco_member_mention(guild, loser_id) if guild else "Alguém"
+        winner_text = self._truco_member_mention(guild, winner_id)
+        loser_text = self._truco_member_mention(guild, loser_id)
         team0, team1 = self._truco_score_counts(game)
         winner_score = team0 if winner_team == 0 else team1
         loser_score = team1 if winner_team == 0 else team0
@@ -1012,11 +934,7 @@ class GincanaTrucoMixin:
         ]
         history = self._truco_round_history_lines(game, guild)
         rounds = ["## Vazas", *(history or ["Nenhuma vaza foi concluída."])]
-        reward_bonus = self._truco_bonus_reward_value(game)
-        if game.mode == "1v1":
-            reward = f"{winner_text} recebeu **{share}** {self._CHIP_GAIN_EMOJI} e **+{reward_bonus}** {self._CHIP_BONUS_EMOJI}."
-        else:
-            reward = f"Cada vencedor recebeu **{share}** {self._CHIP_GAIN_EMOJI} e **+{reward_bonus}** {self._CHIP_BONUS_EMOJI}."
+        reward = f"{winner_text} recebeu **{game.pot}** {self._CHIP_GAIN_EMOJI} e **+{self._truco_bonus_reward_value(game)}** {self._CHIP_BONUS_EMOJI}."
         rewards = ["## Premiação", reward]
 
         closed = discord.ui.LayoutView(timeout=None)
@@ -1034,10 +952,12 @@ class GincanaTrucoMixin:
         await self._truco_refresh_private_views(game)
 
     async def _expire_truco_invite(self, game: TrucoGame):
-        if game.finished or game.accepted:
-            return
-        game.finished = True
-        self._truco_release_guild_busy_state(game.guild_id, game=game)
+        lock = self._truco_get_play_lock(game)
+        async with lock:
+            if game.finished or game.accepted or game.status != "invite":
+                return
+            game.finished = True
+            await self._truco_release_game(game)
         closed = discord.ui.LayoutView(timeout=None)
         closed.add_item(discord.ui.Container(
             discord.ui.TextDisplay("# Desafio expirado\nNinguém respondeu ao truco a tempo."),
@@ -1051,42 +971,77 @@ class GincanaTrucoMixin:
         if guild is None:
             return False
         raw = str(message.content or "").strip()
-        if _TRUCO_2V2_TRIGGER_RE.match(raw):
-            return await self._handle_truco2_trigger(message)
         if not _TRUCO_TRIGGER_RE.match(raw):
             return False
-        self._truco_cleanup_broken_busy_state(guild.id)
-        if guild.id in self._truco_games or guild.id in self._truco_lobbies:
-            await message.channel.send(embed=self._make_embed("🃏 Partida em andamento", "Já existe uma partida de Truco neste servidor. Aguarde o término antes de abrir outra.", ok=False))
-            return True
-        mentions = [m for m in message.mentions if not m.bot]
+
+        await self._truco_cleanup_stale_sessions()
+        mentions = [member for member in message.mentions if not member.bot]
         if len(mentions) != 1:
             await message.channel.send(embed=self._make_embed("🃏 Truco", "Use `truco @usuário` para desafiar alguém.", ok=False))
             return True
+
         challenger = message.author
         opponent = mentions[0]
         if opponent.id == challenger.id:
             await message.channel.send(embed=self._make_embed("🃏 Truco", "Você precisa desafiar outra pessoa.", ok=False))
             return True
+        if await self._game_sessions.is_user_busy(challenger.id):
+            await message.channel.send(embed=self._make_embed("🃏 Truco", "Você já participa de uma partida ou possui um desafio pendente.", ok=False))
+            return True
+        if await self._game_sessions.is_user_busy(opponent.id):
+            await message.channel.send(embed=self._make_embed("🃏 Truco", "Esse usuário já participa de outra partida ou possui um desafio pendente.", ok=False))
+            return True
+
         ok, _current, note = await self._ensure_action_chips(guild.id, challenger.id, TRUCO_ENTRY)
         if not ok:
             await message.channel.send(embed=self._make_embed("🃏 Truco", note or "Você não tem saldo suficiente para entrar nesse jogo.", ok=False))
             return True
-        if not await self._truco_require_dm_for_players([challenger.id, opponent.id], channel=message.channel, guild=guild):
-            return True
-        game = self._truco_make_game(guild.id, message.channel.id, "1v1", [challenger.id, opponent.id], [(challenger.id,), (opponent.id,)], variant=self._roll_truco_variant_for_user(guild.id, challenger.id))
-        game.race_effect_marker = self._race_effect_marker(guild.id, challenger.id, "midas") if self._truco_is_golden(game) and self._race_is(guild.id, challenger.id, "sortudo") else ""
-        self._truco_games[guild.id] = game
-        embed = discord.Embed(
-            title="🃏 Truco",
-            description=(
-                f"{challenger.mention} chamou {opponent.mention} pro truco.\n"
-                f"Entrada: **{TRUCO_ENTRY}** {self._CHIP_EMOJI} cada."
-            ),
-            color=discord.Color.dark_green(),
+
+        game = self._truco_make_game(
+            guild.id,
+            message.channel.id,
+            [challenger.id, opponent.id],
+            variant=self._roll_truco_variant_for_user(guild.id, challenger.id),
         )
+        reservation = await self._game_sessions.create_pending(
+            session_id=game.session_id,
+            game_type="truco",
+            guild_id=guild.id,
+            owner_id=challenger.id,
+            ttl=_TRUCO_INVITE_TIMEOUT + 30.0,
+            required_free_user_ids={opponent.id},
+        )
+        if not reservation.ok:
+            if reservation.code == "guild_full":
+                text = (
+                    f"Este servidor já possui {MAX_ACTIVE_GAME_USERS_PER_GUILD} jogadores "
+                    "em partidas de Truco."
+                )
+            elif opponent.id in reservation.busy_user_ids:
+                text = "Esse usuário já participa de outra partida ou possui um desafio pendente."
+            else:
+                text = "Você já participa de uma partida ou possui um desafio pendente."
+            await message.channel.send(embed=self._make_embed("🃏 Truco", text, ok=False))
+            return True
+
+        if not await self._truco_require_dm_for_players([challenger.id, opponent.id], channel=message.channel, guild=guild):
+            await self._game_sessions.release(game.session_id)
+            return True
+
+        game.race_effect_marker = (
+            self._race_effect_marker(guild.id, challenger.id, "midas")
+            if self._truco_is_golden(game) and self._race_is(guild.id, challenger.id, "sortudo")
+            else ""
+        )
+        self._truco_register_game(game)
         view = TrucoChallengeView(self, game)
-        game.challenge_message = await message.channel.send(view=view)
+        try:
+            game.challenge_message = await message.channel.send(view=view)
+        except Exception:
+            game.finished = True
+            await self._truco_release_game(game)
+            await message.channel.send(embed=self._make_embed("🃏 Truco", "Não consegui publicar o desafio agora. Tente novamente.", ok=False))
+            return True
         if note:
             try:
                 await message.channel.send(note)
@@ -1094,182 +1049,28 @@ class GincanaTrucoMixin:
                 pass
         return True
 
-    async def _handle_truco2_trigger(self, message: discord.Message) -> bool:
-        self._ensure_truco_state()
-        guild = message.guild
-        if guild is None:
-            return False
-        self._truco_cleanup_broken_busy_state(guild.id)
-        if guild.id in self._truco_games or guild.id in self._truco_lobbies:
-            await message.channel.send(embed=self._make_embed("🃏 Truco ocupado", "Já existe um truco em andamento neste servidor.", ok=False))
-            return True
-        lobby = TrucoLobby(guild_id=guild.id, channel_id=message.channel.id, creator_id=message.author.id, variant=self._roll_truco_variant_for_user(guild.id, message.author.id))
-        lobby.race_effect_marker = self._race_effect_marker(guild.id, message.author.id, "midas") if self._truco_is_golden(lobby) and self._race_is(guild.id, message.author.id, "sortudo") else ""
-        lobby.team_a = [message.author.id]
-        self._truco_touch_runtime(lobby)
-        self._truco_lobbies[guild.id] = lobby
-        view = Truco2v2LobbyView(self, lobby, guild)
-        try:
-            lobby.message = await message.channel.send(view=view)
-        except Exception:
-            lobby.started = True
-            self._truco_release_guild_busy_state(guild.id, lobby=lobby)
-            await message.channel.send(embed=self._make_embed("🃏 Truco 2v2", "Não consegui abrir o lobby do truco agora. Tente novamente.", ok=False))
-            return True
-        return True
-
-    async def _handle_truco2_lobby_join(self, interaction: discord.Interaction, lobby: TrucoLobby, team_idx: int, view: Truco2v2LobbyView):
-        self._truco_touch_runtime(lobby)
-        guild = interaction.guild
-        user = interaction.user
-        if guild is None or not isinstance(user, discord.Member):
-            return
-        if guild.id not in self._truco_lobbies or self._truco_lobbies[guild.id] is not lobby or lobby.started:
-            await interaction.response.send_message("Esse lobby já foi fechado.", ephemeral=True)
-            return
-        if user.id in lobby.team_a or user.id in lobby.team_b:
-            await interaction.response.send_message("Você já está no lobby. Use 🔄 para trocar de time.", ephemeral=True)
-            return
-        team = lobby.team_a if team_idx == 0 else lobby.team_b
-        if len(team) >= 2:
-            await interaction.response.send_message("Esse time já está cheio.", ephemeral=True)
-            return
-        ok, _cur, note = await self._ensure_action_chips(guild.id, user.id, TRUCO_ENTRY)
-        if not ok:
-            await interaction.response.send_message(note or "Você não pode entrar nesse truco agora.", ephemeral=True)
-            return
-        if self._needs_negative_confirmation(guild.id, user.id, TRUCO_ENTRY):
-            confirmed = await self._confirm_negative_ephemeral(interaction, guild.id, user.id, TRUCO_ENTRY, title="⚠️ Confirmar entrada")
-            if not confirmed:
-                return
-        if not await self._truco_require_dm_for_players([user.id], interaction=interaction, guild=guild):
-            return
-        team.append(user.id)
-        view._build_layout()
-        await self._truco_update_interaction_message(interaction, view=view)
-
-    async def _handle_truco2_lobby_swap(self, interaction: discord.Interaction, lobby: TrucoLobby, view: Truco2v2LobbyView):
-        self._truco_touch_runtime(lobby)
-        user_id = interaction.user.id
-        if user_id in lobby.team_a:
-            if len(lobby.team_b) >= 2:
-                await interaction.response.send_message("O outro time já está cheio.", ephemeral=True)
-                return
-            lobby.team_a.remove(user_id)
-            lobby.team_b.append(user_id)
-        elif user_id in lobby.team_b:
-            if len(lobby.team_a) >= 2:
-                await interaction.response.send_message("O outro time já está cheio.", ephemeral=True)
-                return
-            lobby.team_b.remove(user_id)
-            lobby.team_a.append(user_id)
-        else:
-            await interaction.response.send_message("Você ainda não entrou no lobby.", ephemeral=True)
-            return
-        view._build_layout()
-        await self._truco_update_interaction_message(interaction, view=view)
-
-    async def _handle_truco2_lobby_leave(self, interaction: discord.Interaction, lobby: TrucoLobby, view: Truco2v2LobbyView):
-        self._truco_touch_runtime(lobby)
-        uid = interaction.user.id
-        changed = False
-        if uid in lobby.team_a:
-            lobby.team_a.remove(uid)
-            changed = True
-        if uid in lobby.team_b:
-            lobby.team_b.remove(uid)
-            changed = True
-        if not changed:
-            await interaction.response.send_message("Você não está no lobby.", ephemeral=True)
-            return
-        view._build_layout()
-        await self._truco_update_interaction_message(interaction, view=view)
-
-    async def _handle_truco2_lobby_cancel(self, interaction: discord.Interaction, lobby: TrucoLobby, view: Truco2v2LobbyView):
-        self._truco_touch_runtime(lobby)
-        guild = interaction.guild
-        if guild is None:
-            return
-        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
-        if interaction.user.id != lobby.creator_id and not (isinstance(member, discord.Member) and self._is_staff_member(member)):
-            await interaction.response.send_message("Só o criador ou a staff pode cancelar.", ephemeral=True)
-            return
-        self._truco_lobbies.pop(guild.id, None)
-        lobby.started = True
-        closed = discord.ui.LayoutView(timeout=None)
-        closed.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco 2v2\nO lobby foi cancelado."), accent_color=discord.Color.red()))
-        await self._truco_update_interaction_message(interaction, view=closed)
-
-    async def _handle_truco2_lobby_timeout(self, lobby: TrucoLobby):
-        self._truco_touch_runtime(lobby)
-        self._truco_lobbies.pop(lobby.guild_id, None)
-        if lobby.message:
-            closed = discord.ui.LayoutView(timeout=None)
-            closed.add_item(discord.ui.Container(discord.ui.TextDisplay("# 🃏 Truco 2v2\nO lobby expirou sem fechar os times."), accent_color=discord.Color.red()))
-            try:
-                await lobby.message.edit(view=closed)
-            except Exception:
-                pass
-
-    async def _handle_truco2_lobby_start(self, interaction: discord.Interaction, lobby: TrucoLobby, view: Truco2v2LobbyView):
-        self._truco_touch_runtime(lobby)
-        guild = interaction.guild
-        if guild is None:
-            return
-        member = interaction.user if isinstance(interaction.user, discord.Member) else guild.get_member(interaction.user.id)
-        if interaction.user.id != lobby.creator_id and not (isinstance(member, discord.Member) and self._is_staff_member(member)):
-            await interaction.response.send_message("Só o criador ou a staff pode iniciar.", ephemeral=True)
-            return
-        if len(lobby.team_a) != 2 or len(lobby.team_b) != 2:
-            await interaction.response.send_message("Feche os dois times com 2 jogadores antes de começar.", ephemeral=True)
-            return
-        players = lobby.team_a + lobby.team_b
-        for uid in players:
-            ok, _cur, note = await self._ensure_action_chips(guild.id, uid, TRUCO_ENTRY)
-            if not ok:
-                await interaction.response.send_message(f"{self._truco_member_mention(guild, uid)} não pode entrar agora. {note or ''}".strip(), ephemeral=True)
-                return
-        if not await self._truco_require_dm_for_players(players, interaction=interaction, guild=guild):
-            return
-        # consume entry now
-        consumed_entries: list[tuple[int, int, int]] = []
-        for uid in players:
-            normal_part, bonus_part = self._truco_entry_refund_parts(guild.id, uid, TRUCO_ENTRY)
-            paid, _bal, note = await self._try_consume_chips(guild.id, uid, TRUCO_ENTRY, reason="Entrada no truco")
-            if not paid:
-                if consumed_entries:
-                    await self._truco_refund_consumed_entries(guild.id, consumed_entries)
-                await interaction.response.send_message(f"Não foi possível cobrar a entrada de {self._truco_member_mention(guild, uid)}.", ephemeral=True)
-                return
-            consumed_entries.append((int(uid), normal_part, bonus_part))
-        order = [lobby.team_a[0], lobby.team_b[0], lobby.team_a[1], lobby.team_b[1]]
-        game = self._truco_make_game(guild.id, lobby.channel_id, "2v2", order, [tuple(lobby.team_a), tuple(lobby.team_b)], variant=lobby.variant)
-        game.race_effect_marker = str(getattr(lobby, "race_effect_marker", "") or "")
-        game.entry_refunds = consumed_entries
-        self._truco_games[guild.id] = game
-        self._truco_lobbies.pop(guild.id, None)
-        lobby.started = True
-        closed = discord.ui.LayoutView(timeout=None)
-        closed.add_item(discord.ui.Container(
-            discord.ui.TextDisplay(f"# {self._truco_title_text(lobby)} 2v2\nTimes completos. Distribuindo as cartas..."),
-            accent_color=self._truco_accent_color(lobby),
-        ))
-        await self._truco_update_interaction_message(interaction, view=closed)
-        await self._start_truco_game(game)
 
     async def _handle_truco_decline(self, interaction: discord.Interaction, game: TrucoGame):
         self._truco_touch_runtime(game)
         if interaction.user.id != game.players_order[1]:
             guild = self.bot.get_guild(game.guild_id)
             target = self._truco_member_mention(guild, game.players_order[1])
-            if interaction.user.id == game.players_order[0]:
-                text = f"Você enviou este desafio. Aguarde {target} responder."
-            else:
-                text = f"Somente {target} pode responder a este desafio."
+            text = (
+                f"Você enviou este desafio. Aguarde {target} responder."
+                if interaction.user.id == game.players_order[0]
+                else f"Somente {target} pode responder a este desafio."
+            )
             await interaction.response.send_message(text, ephemeral=True)
             return
-        game.finished = True
-        self._truco_release_guild_busy_state(game.guild_id, game=game)
+
+        lock = self._truco_get_play_lock(game)
+        async with lock:
+            if game.finished or game.accepted or game.status != "invite" or not self._truco_is_current_game(game):
+                await interaction.response.send_message("Este desafio já foi encerrado.", ephemeral=True)
+                return
+            game.finished = True
+            await self._truco_release_game(game)
+
         closed = discord.ui.LayoutView(timeout=None)
         closed.add_item(discord.ui.Container(
             discord.ui.TextDisplay(f"# Truco recusado\n{interaction.user.mention} não aceitou o desafio."),
@@ -1282,41 +1083,110 @@ class GincanaTrucoMixin:
         if interaction.user.id != game.players_order[1]:
             guild = self.bot.get_guild(game.guild_id)
             target = self._truco_member_mention(guild, game.players_order[1])
-            if interaction.user.id == game.players_order[0]:
-                text = f"Você enviou este desafio. Aguarde {target} responder."
-            else:
-                text = f"Somente {target} pode responder a este desafio."
+            text = (
+                f"Você enviou este desafio. Aguarde {target} responder."
+                if interaction.user.id == game.players_order[0]
+                else f"Somente {target} pode responder a este desafio."
+            )
             await interaction.response.send_message(text, ephemeral=True)
             return
-        ok, _cur, note = await self._ensure_action_chips(game.guild_id, interaction.user.id, TRUCO_ENTRY)
+
+        ok, _current, note = await self._ensure_action_chips(game.guild_id, interaction.user.id, TRUCO_ENTRY)
         if not ok:
             await interaction.response.send_message(note or "Você não tem saldo suficiente para aceitar.", ephemeral=True)
             return
         if self._needs_negative_confirmation(game.guild_id, interaction.user.id, TRUCO_ENTRY):
-            confirmed = await self._confirm_negative_ephemeral(interaction, game.guild_id, interaction.user.id, TRUCO_ENTRY, title="⚠️ Confirmar entrada")
+            confirmed = await self._confirm_negative_ephemeral(
+                interaction,
+                game.guild_id,
+                interaction.user.id,
+                TRUCO_ENTRY,
+                title="⚠️ Confirmar entrada",
+            )
             if not confirmed:
                 return
+
         guild = interaction.guild
-        if guild is not None:
-            if not await self._truco_require_dm_for_players(list(game.players), interaction=interaction, guild=guild):
+        if guild is not None and not await self._truco_require_dm_for_players(list(game.players), interaction=interaction, guild=guild):
+            return
+
+        lock = self._truco_get_play_lock(game)
+        async with lock:
+            if game.finished or game.accepted or game.status != "invite" or not self._truco_is_current_game(game):
+                if interaction.response.is_done():
+                    await interaction.followup.send("Este desafio já foi encerrado.", ephemeral=True)
+                else:
+                    await interaction.response.send_message("Este desafio já foi encerrado.", ephemeral=True)
                 return
-        consumed_entries: list[tuple[int, int, int]] = []
-        challenger_id = int(game.players_order[0])
-        challenger_normal, challenger_bonus = self._truco_entry_refund_parts(game.guild_id, challenger_id, TRUCO_ENTRY)
-        paid, _b, note = await self._try_consume_chips(game.guild_id, challenger_id, TRUCO_ENTRY, reason="Entrada no truco")
-        if not paid:
-            await interaction.response.send_message("Não foi possível cobrar a entrada do desafiante agora.", ephemeral=True)
-            return
-        consumed_entries.append((challenger_id, challenger_normal, challenger_bonus))
-        opponent_id = int(interaction.user.id)
-        opponent_normal, opponent_bonus = self._truco_entry_refund_parts(game.guild_id, opponent_id, TRUCO_ENTRY)
-        paid, _b, note = await self._try_consume_chips(game.guild_id, opponent_id, TRUCO_ENTRY, reason="Entrada no truco")
-        if not paid:
-            await self._truco_refund_consumed_entries(game.guild_id, consumed_entries)
-            await interaction.response.send_message("Não foi possível cobrar a sua entrada agora.", ephemeral=True)
-            return
-        consumed_entries.append((opponent_id, opponent_normal, opponent_bonus))
-        game.entry_refunds = consumed_entries
+
+            challenger_id = int(game.players_order[0])
+            opponent_id = int(game.players_order[1])
+            for user_id, message_text in (
+                (challenger_id, "O desafiante não possui saldo suficiente para começar."),
+                (opponent_id, "Você não possui saldo suficiente para começar."),
+            ):
+                can_pay, _balance, _note = await self._ensure_action_chips(game.guild_id, user_id, TRUCO_ENTRY)
+                if not can_pay:
+                    if interaction.response.is_done():
+                        await interaction.followup.send(message_text, ephemeral=True)
+                    else:
+                        await interaction.response.send_message(message_text, ephemeral=True)
+                    return
+
+            reservation = await self._game_sessions.activate(
+                session_id=game.session_id,
+                user_ids=set(game.players),
+                ttl=_TRUCO_ACTION_TIMEOUT + 90.0,
+            )
+            if not reservation.ok:
+                if reservation.code == "guild_full":
+                    text = (
+                        f"Este servidor já possui {MAX_ACTIVE_GAME_USERS_PER_GUILD} jogadores "
+                        "em partidas de Truco."
+                    )
+                    if interaction.response.is_done():
+                        await interaction.followup.send(text, ephemeral=True)
+                    else:
+                        await interaction.response.send_message(text, ephemeral=True)
+                    return
+
+                game.finished = True
+                await self._truco_release_game(game)
+                closed = discord.ui.LayoutView(timeout=None)
+                closed.add_item(discord.ui.Container(
+                    discord.ui.TextDisplay("# Desafio encerrado\nUm dos jogadores não está mais disponível para esta partida."),
+                    accent_color=discord.Color.red(),
+                ))
+                await self._truco_update_interaction_message(interaction, view=closed)
+                return
+
+            consumed_entries: list[tuple[int, int, int]] = []
+            for user_id in (challenger_id, opponent_id):
+                normal_part, bonus_part = self._truco_entry_refund_parts(game.guild_id, user_id, TRUCO_ENTRY)
+                paid, _balance, _payment_note = await self._try_consume_chips(
+                    game.guild_id,
+                    user_id,
+                    TRUCO_ENTRY,
+                    reason="Entrada no truco",
+                )
+                if not paid:
+                    if consumed_entries:
+                        await self._truco_refund_consumed_entries(game.guild_id, consumed_entries)
+                    game.finished = True
+                    await self._truco_release_game(game)
+                    closed = discord.ui.LayoutView(timeout=None)
+                    closed.add_item(discord.ui.Container(
+                        discord.ui.TextDisplay("# Desafio encerrado\nNão foi possível cobrar as entradas. Nenhuma ficha foi perdida."),
+                        accent_color=discord.Color.red(),
+                    ))
+                    await self._truco_update_interaction_message(interaction, view=closed)
+                    return
+                consumed_entries.append((user_id, normal_part, bonus_part))
+
+            game.entry_refunds = consumed_entries
+            game.accepted = True
+            game.status = "starting"
+
         started = discord.ui.LayoutView(timeout=None)
         started.add_item(discord.ui.Container(
             discord.ui.TextDisplay(f"# {self._truco_title_text(game)}\nDesafio aceito. Distribuindo as cartas..."),
@@ -1327,6 +1197,7 @@ class GincanaTrucoMixin:
 
     async def _start_truco_game(self, game: TrucoGame):
         self._truco_touch_runtime(game)
+        await self._game_sessions.touch(game.session_id, ttl=_TRUCO_ACTION_TIMEOUT + 90.0)
         try:
             channel = self.bot.get_channel(game.channel_id)
             if channel is None:
@@ -1334,28 +1205,29 @@ class GincanaTrucoMixin:
             deck = self._truco_create_deck()
             game.vira = deck.pop(0)
             game.manilha_rank = self._truco_manilha_rank(game.vira[0])
-            for uid in game.players:
-                game.hands[uid] = [deck.pop(0) for _ in range(3)]
-            game.accepted = True
+            for user_id in game.players:
+                game.hands[user_id] = [deck.pop(0) for _ in range(3)]
             game.status = "active"
             game.status_text = "Distribuindo as cartas..."
             game.challenge_message = None
             game.status_message = await channel.send(view=TrucoTableView(self, game))
-            await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
             await asyncio.sleep(0.8)
             game.status_text = "Revelando a vira..."
             await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
             await asyncio.sleep(0.8)
             dm_failed = []
-            for uid in game.players:
+            for user_id in game.players:
                 self._truco_touch_runtime(game)
-                ok_dm = await self._truco_send_hand_dm(game, uid)
+                ok_dm = await self._truco_send_hand_dm(game, user_id)
                 if not ok_dm:
-                    dm_failed.append(uid)
+                    dm_failed.append(user_id)
             if dm_failed:
                 guild = self.bot.get_guild(game.guild_id)
-                failed_mentions = ", ".join(self._truco_member_mention(guild, uid) for uid in dm_failed)
-                return await self._truco_abort_game_start(game, notice=f"Não consegui enviar mensagem direta para {failed_mentions}. Habilitem as mensagens diretas do servidor e tentem novamente. As entradas foram devolvidas.")
+                failed_mentions = ", ".join(self._truco_member_mention(guild, user_id) for user_id in dm_failed)
+                return await self._truco_abort_game_start(
+                    game,
+                    notice=f"Não consegui enviar mensagem direta para {failed_mentions}. Habilitem as mensagens diretas do servidor e tentem novamente. As entradas foram devolvidas.",
+                )
             await self._truco_show_turn(game)
             game.entry_refunds = []
             return True
@@ -1412,7 +1284,7 @@ class GincanaTrucoMixin:
             inflight.add(inflight_marker)
         try:
             async with lock:
-                if game.finished or game.status != "active":
+                if game.finished or game.status != "active" or not self._truco_is_current_game(game):
                     await interaction.response.send_message("Não é possível jogar uma carta neste momento.", ephemeral=True)
                     return
                 if player_id != game.turn_id:
@@ -1429,6 +1301,7 @@ class GincanaTrucoMixin:
                 guild = self.bot.get_guild(game.guild_id)
                 game.status_text = f"{self._truco_member_mention(guild, player_id)} jogou uma carta."
                 game.cards_on_table[player_id] = card
+                await self._game_sessions.touch(game.session_id, ttl=_TRUCO_ACTION_TIMEOUT + 90.0)
                 if not interaction.response.is_done():
                     await interaction.response.defer()
                 try:
@@ -1439,12 +1312,10 @@ class GincanaTrucoMixin:
                 await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
                 await self._truco_refresh_private_views(game)
                 await asyncio.sleep(0.8)
-                expected = 2 if game.mode == "1v1" else 4
-                if len(game.cards_on_table) < expected:
-                    # next in current rotated order not yet played
-                    for uid in game.players_order:
-                        if uid not in game.cards_on_table:
-                            game.turn_id = uid
+                if len(game.cards_on_table) < 2:
+                    for user_id in game.players_order:
+                        if user_id not in game.cards_on_table:
+                            game.turn_id = user_id
                             break
                     await self._truco_show_turn(game)
                     return
@@ -1467,75 +1338,92 @@ class GincanaTrucoMixin:
         if interaction.user.id not in game.players:
             await interaction.response.send_message("Você não participa desta partida.", ephemeral=True)
             return
-        if game.finished:
-            await interaction.response.send_message("O jogo já terminou.", ephemeral=True)
-            return
-        if game.status == "awaiting_raise_response":
-            if not self._truco_can_answer_raise(game, interaction.user.id):
-                await interaction.response.send_message("Aguardando o outro time responder o aumento atual.", ephemeral=True)
+        lock = self._truco_get_play_lock(game)
+        async with lock:
+            if game.finished or not self._truco_is_current_game(game):
+                await interaction.response.send_message("O jogo já terminou.", ephemeral=True)
                 return
-            base = game.pending_raise_to or game.level
-        else:
-            if interaction.user.id != game.turn_id:
-                await interaction.response.send_message("Você só pode pedir aumento na sua vez.", ephemeral=True)
+            if game.status == "awaiting_raise_response":
+                if not self._truco_can_answer_raise(game, interaction.user.id):
+                    await interaction.response.send_message("Aguardando o adversário responder ao aumento atual.", ephemeral=True)
+                    return
+                base = game.pending_raise_to or game.level
+            else:
+                if game.status != "active" or interaction.user.id != game.turn_id:
+                    await interaction.response.send_message("Você só pode pedir aumento na sua vez.", ephemeral=True)
+                    return
+                base = game.level
+            next_level = self._truco_next_raise_level(base)
+            if not next_level:
+                await interaction.response.send_message("Esse jogo já chegou no máximo.", ephemeral=True)
                 return
-            base = game.level
-        nxt = self._truco_next_raise_level(base)
-        if not nxt:
-            await interaction.response.send_message("Esse jogo já chegou no máximo.", ephemeral=True)
-            return
-        requester_team = self._truco_team_index(game, interaction.user.id)
-        target_contrib = self._truco_target_contrib(game, nxt)
-        for pid in game.teams[requester_team]:
-            delta = max(0, target_contrib - int(game.contribution.get(pid, TRUCO_ENTRY)))
-            ok, _cur, note = await self._ensure_action_chips(game.guild_id, pid, delta)
+            requester_team = self._truco_team_index(game, interaction.user.id)
+            target_contribution = self._truco_target_contrib(game, next_level)
+            requester_id = int(game.teams[requester_team][0])
+            delta = max(0, target_contribution - int(game.contribution.get(requester_id, TRUCO_ENTRY)))
+            ok, _current, note = await self._ensure_action_chips(game.guild_id, requester_id, delta)
             if not ok:
-                await interaction.response.send_message(note or "Seu time não pode subir o jogo agora.", ephemeral=True)
+                await interaction.response.send_message(note or "Você não pode subir o jogo agora.", ephemeral=True)
                 return
-        guild = self.bot.get_guild(game.guild_id)
-        game.status = "awaiting_raise_response"
-        game.pending_raise_by = interaction.user.id
-        game.pending_raise_to = nxt
-        game.status_text = f"{self._truco_member_mention(guild, interaction.user.id)} pediu **{_TRUCO_RAISE_NAMES[nxt]}**."
+            guild = self.bot.get_guild(game.guild_id)
+            game.status = "awaiting_raise_response"
+            game.pending_raise_by = interaction.user.id
+            game.pending_raise_to = next_level
+            game.status_text = f"{self._truco_member_mention(guild, interaction.user.id)} pediu **{_TRUCO_RAISE_NAMES[next_level]}**."
+            await self._game_sessions.touch(game.session_id, ttl=_TRUCO_ACTION_TIMEOUT + 90.0)
         if interaction.response.is_done():
-            await interaction.followup.send(f"Pedido de {_TRUCO_RAISE_NAMES[nxt]} enviado.", ephemeral=True)
+            await interaction.followup.send(f"Pedido de {_TRUCO_RAISE_NAMES[next_level]} enviado.", ephemeral=True)
         else:
-            await interaction.response.send_message(f"Pedido de {_TRUCO_RAISE_NAMES[nxt]} enviado.", ephemeral=True)
+            await interaction.response.send_message(f"Pedido de {_TRUCO_RAISE_NAMES[next_level]} enviado.", ephemeral=True)
         await self._truco_safe_edit(game.status_message, embed=None, view=TrucoTableView(self, game))
         await self._truco_refresh_private_views(game)
 
     async def _handle_truco_accept_raise(self, interaction: discord.Interaction, game: TrucoGame):
         self._truco_touch_runtime(game)
-        if game.status != "awaiting_raise_response" or not game.pending_raise_to or not game.pending_raise_by:
-            await interaction.response.send_message("Não há aumento pendente agora.", ephemeral=True)
-            return
-        if not self._truco_can_answer_raise(game, interaction.user.id):
-            await interaction.response.send_message("A resposta desse aumento não é sua.", ephemeral=True)
-            return
-        target_level = game.pending_raise_to
-        target_contrib = self._truco_target_contrib(game, target_level)
-        requester_team = self._truco_team_index(game, game.pending_raise_by)
-        accepting_team = 1 - requester_team
-        deltas = {}
-        for pid in game.players:
-            deltas[pid] = max(0, target_contrib - int(game.contribution.get(pid, TRUCO_ENTRY)))
-        for pid in game.teams[requester_team] + game.teams[accepting_team]:
-            delta = deltas[pid]
-            ok, _cur, note = await self._ensure_action_chips(game.guild_id, pid, delta)
-            if not ok:
-                await interaction.response.send_message(note or "Nem todo mundo consegue bancar o aumento agora.", ephemeral=True)
+        lock = self._truco_get_play_lock(game)
+        async with lock:
+            if game.finished or not self._truco_is_current_game(game):
+                await interaction.response.send_message("O jogo já terminou.", ephemeral=True)
                 return
-        for pid, delta in deltas.items():
-            if delta > 0:
-                await self._try_consume_chips(game.guild_id, pid, delta, reason="Aumento no truco")
-                game.contribution[pid] = int(game.contribution.get(pid, TRUCO_ENTRY)) + delta
-        game.level = target_level
-        game.pot = self._truco_target_pot(game, target_level)
-        game.status = "active"
-        game.pending_raise_by = None
-        game.pending_raise_to = None
-        guild = self.bot.get_guild(game.guild_id)
-        game.status_text = f"{self._truco_member_mention(guild, interaction.user.id)} aceitou. O jogo agora vale **{target_level}**."
+            if game.status != "awaiting_raise_response" or not game.pending_raise_to or not game.pending_raise_by:
+                await interaction.response.send_message("Não há aumento pendente agora.", ephemeral=True)
+                return
+            if not self._truco_can_answer_raise(game, interaction.user.id):
+                await interaction.response.send_message("A resposta desse aumento não é sua.", ephemeral=True)
+                return
+            target_level = game.pending_raise_to
+            target_contribution = self._truco_target_contrib(game, target_level)
+            deltas = {
+                user_id: max(0, target_contribution - int(game.contribution.get(user_id, TRUCO_ENTRY)))
+                for user_id in game.players
+            }
+            for user_id, delta in deltas.items():
+                ok, _current, note = await self._ensure_action_chips(game.guild_id, user_id, delta)
+                if not ok:
+                    await interaction.response.send_message(note or "Um dos jogadores não consegue bancar o aumento agora.", ephemeral=True)
+                    return
+            consumed: list[tuple[int, int, int]] = []
+            for user_id, delta in deltas.items():
+                if delta <= 0:
+                    continue
+                normal_part, bonus_part = self._truco_entry_refund_parts(game.guild_id, user_id, delta)
+                paid, _balance, _note = await self._try_consume_chips(game.guild_id, user_id, delta, reason="Aumento no truco")
+                if not paid:
+                    if consumed:
+                        await self._truco_refund_consumed_entries(game.guild_id, consumed)
+                    await interaction.response.send_message("Não foi possível cobrar o aumento. Nada foi alterado.", ephemeral=True)
+                    return
+                consumed.append((user_id, normal_part, bonus_part))
+            for user_id, delta in deltas.items():
+                game.contribution[user_id] = int(game.contribution.get(user_id, TRUCO_ENTRY)) + delta
+            game.level = target_level
+            game.pot = self._truco_target_pot(game, target_level)
+            game.status = "active"
+            game.pending_raise_by = None
+            game.pending_raise_to = None
+            guild = self.bot.get_guild(game.guild_id)
+            game.status_text = f"{self._truco_member_mention(guild, interaction.user.id)} aceitou. O jogo agora vale **{target_level}**."
+            await self._game_sessions.touch(game.session_id, ttl=_TRUCO_ACTION_TIMEOUT + 90.0)
         if interaction.response.is_done():
             await interaction.followup.send("Aumento aceito.", ephemeral=True)
         else:
@@ -1548,10 +1436,15 @@ class GincanaTrucoMixin:
         if interaction.user.id not in game.players:
             await interaction.response.send_message("Você não participa desta partida.", ephemeral=True)
             return
-        loser_team = self._truco_team_index(game, interaction.user.id)
-        winner_team = 1 - loser_team
-        if interaction.response.is_done():
-            await interaction.followup.send("Você correu da partida.", ephemeral=True)
-        else:
-            await interaction.response.send_message("Você correu da partida.", ephemeral=True)
-        await self._finish_truco_game(game, winner_team=winner_team, loser_id=interaction.user.id, reason="correu")
+        lock = self._truco_get_play_lock(game)
+        async with lock:
+            if game.finished or not self._truco_is_current_game(game):
+                await interaction.response.send_message("O jogo já terminou.", ephemeral=True)
+                return
+            loser_team = self._truco_team_index(game, interaction.user.id)
+            winner_team = 1 - loser_team
+            if interaction.response.is_done():
+                await interaction.followup.send("Você correu da partida.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Você correu da partida.", ephemeral=True)
+            await self._finish_truco_game(game, winner_team=winner_team, loser_id=interaction.user.id, reason="correu")

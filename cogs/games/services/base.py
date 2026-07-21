@@ -25,6 +25,7 @@ from ..constants import (
     TRUCO_GOLDEN_BONUS_EXTRA,
 )
 from db import SettingsDB
+from .session_registry import GameSessionRegistry, MAX_ACTIVE_GAME_USERS_PER_GUILD
 
 
 SORTUDO_BLESSING_INTERVAL_SECONDS = 7 * 60 * 60
@@ -119,7 +120,11 @@ class GincanaBase:
         self._payment_sessions: dict[tuple[int, int], dict] = {}
         self._race_sessions: dict[int, dict] = {}
         self._race_panel_messages: dict[tuple[int, int], tuple[int, int]] = {}
-        self._truco_games: dict[int, object] = {}
+        self._game_sessions = GameSessionRegistry(
+            max_active_users_per_guild=MAX_ACTIVE_GAME_USERS_PER_GUILD
+        )
+        self._truco_games: dict[str, object] = {}
+        self._truco_guild_sessions: dict[int, set[str]] = {}
         self._gincana_message_edit_locks: dict[int, asyncio.Lock] = {}
 
 

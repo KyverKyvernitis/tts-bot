@@ -623,21 +623,6 @@ class GamesCog(dcommands.Cog, GamesCore):
         if not handled:
             await ctx.reply(embed=self._make_embed("🃏 Truco", "Não foi possível iniciar a mão agora.", ok=False), mention_author=False)
 
-    @dcommands.command(name="truco2", aliases=["truco2v2"])
-    async def truco2_command(self, ctx: dcommands.Context):
-        if ctx.guild is None:
-            await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
-            return
-        fake = type("_Msg", (), {})()
-        fake.guild = ctx.guild
-        fake.author = ctx.author
-        fake.channel = ctx.channel
-        fake.content = "truco2"
-        fake.mentions = []
-        handled = await self._handle_truco_trigger(fake)
-        if not handled:
-            await ctx.reply(embed=self._make_embed("🃏 Truco 2v2", "Não foi possível abrir o lobby agora.", ok=False), mention_author=False)
-
     async def _run_robbery(self, channel: discord.abc.Messageable, guild: discord.Guild, author: discord.Member, target: discord.Member):
         if target.bot:
             await channel.send(view=self._make_v2_notice("🕵️ Roubo", ["Você tentou roubar um bot. Isso foi longe demais."], ok=False))
