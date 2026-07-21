@@ -94,23 +94,26 @@ def build_feedback_created_dm(feedback: dict[str, Any]) -> discord.ui.LayoutView
     guild_name = display_name(feedback.get("guild_name") or "Servidor", limit=100)
     body = (
         f"# {info['emoji']} Feedback enviado\n"
-        "Sua solicitação foi registrada e já está disponível para análise.\n"
+        "Sua solicitação foi registrada.\n"
         "\n"
-        f"**Protocolo**\n`{protocol}`\n"
-        "\n"
-        f"**Tipo**\n{info['label']}\n"
-        "\n"
-        f"**Servidor de origem**\n{guild_name}"
+        f"## `{protocol}` · {info['label']}\n"
+        f"**Servidor**\n{guild_name}"
     )
     instructions = (
         "## Adicionar informações\n"
-        "Envie uma mensagem nesta DM começando com `_`.\n"
+        "Comece sua mensagem com um sublinhado.\n"
         "\n"
-        "**Exemplo**\n"
-        "`_ O problema também acontece em outro comando.`\n"
-        "\n"
-        "As respostas do dono do bot chegarão por esta conversa. "
-        "Use `_status` para ver o destino atual ou `_trocar` para selecionar outro atendimento aberto."
+        "```text\n"
+        "_ O problema também acontece em outro comando.\n"
+        "```\n"
+        "As respostas do dono do bot chegarão por esta conversa."
+    )
+    shortcuts = (
+        "**Atalhos**\n"
+        "```text\n"
+        "_status  Ver o destino atual\n"
+        "_trocar  Trocar de atendimento\n"
+        "```"
     )
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(
@@ -118,6 +121,8 @@ def build_feedback_created_dm(feedback: dict[str, Any]) -> discord.ui.LayoutView
             discord.ui.TextDisplay(_trim(body)),
             discord.ui.Separator(),
             discord.ui.TextDisplay(_trim(instructions)),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(_trim(shortcuts)),
             accent_color=info["accent"],
         )
     )
@@ -154,7 +159,7 @@ def build_additional_message_view(
             f"\n\n**Anexos**\n{attachment_count} arquivo(s) encaminhado(s)."
         )
     body = (
-        f"## Informação adicional · `{protocol_of(feedback)}`\n"
+        "## Informação adicional\n"
         "Enviada pelo autor do feedback.\n"
         "\n"
         f"{quote_text(content, limit=2600)}"
@@ -168,18 +173,6 @@ def build_additional_message_view(
         )
     )
     return view
-
-
-def build_additional_confirmation(feedback: dict[str, Any]) -> discord.ui.LayoutView:
-    return notice_view(
-        "Informação adicionada",
-        [
-            f"Sua mensagem foi enviada para `{protocol_of(feedback)}`.",
-            f"**Destino ativo:** {display_name(feedback.get('guild_name') or 'Servidor', limit=100)}",
-        ],
-        ok=True,
-        accent_color=category_info(feedback)["accent"],
-    )
 
 
 def build_owner_update_dm(
@@ -198,7 +191,14 @@ def build_owner_update_dm(
         f"{quote_text(content, limit=2600)}"
         f"{attachment_line}"
     )
-    instructions = "Para responder, envie uma mensagem nesta DM começando com `_`."
+    instructions = (
+        "## Como responder\n"
+        "Comece sua mensagem com um sublinhado.\n"
+        "\n"
+        "```text\n"
+        "_ Sua resposta\n"
+        "```"
+    )
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(
         discord.ui.Container(
@@ -242,7 +242,9 @@ def build_active_status_view(
     ]
     if open_count > 1:
         lines.append(
-            f"Você possui {open_count} atendimentos abertos. Use `_trocar` para mudar o destino."
+            f"Você possui {open_count} atendimentos abertos.\n"
+            "Para mudar o destino, envie:\n"
+            "```text\n_trocar\n```"
         )
     return notice_view("Destino ativo", lines, ok=True, accent_color=info["accent"])
 

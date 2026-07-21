@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,7 +13,6 @@ from pymongo import ReturnDocument
 
 from .components import (
     build_active_status_view,
-    build_additional_confirmation,
     build_additional_message_view,
     build_delivery_failure_view,
     build_feedback_created_dm,
@@ -300,11 +298,7 @@ class FeedbackCog(commands.Cog):
 
     def _thread_name(self, feedback: dict[str, Any]) -> str:
         info = category_info(feedback)
-        author_name = re.sub(
-            r"[\r\n\t]+", " ", str(feedback.get("author_name") or "Usuário")
-        ).strip()
-        author_name = re.sub(r"\s+", " ", author_name)[:40] or "Usuário"
-        return f"[{info['title']}] {protocol_of(feedback)} · {author_name}"[:100]
+        return f"[{info['title']}] {protocol_of(feedback)}"[:100]
 
     async def _copy_attachments(self, message: discord.Message) -> list[discord.File]:
         files: list[discord.File] = []
@@ -387,7 +381,7 @@ class FeedbackCog(commands.Cog):
                         "Feedback já aberto",
                         [
                             f"Você já possui o atendimento `{protocol_of(active)}` neste servidor.",
-                            "Ele foi definido como destino ativo. Use minha DM e comece a mensagem com `_` para adicionar informações.",
+                            "Ele foi definido como destino ativo. Na minha DM, comece a mensagem com um sublinhado para adicionar informações.",
                         ],
                         ok=False,
                         accent_color=category_info(active)["accent"],
@@ -506,7 +500,7 @@ class FeedbackCog(commands.Cog):
                         "Feedback já aberto",
                         [
                             f"O atendimento `{protocol_of(existing)}` continua aberto neste servidor.",
-                            "Use minha DM e comece a mensagem com `_` para acrescentar informações.",
+                            "Na minha DM, comece a mensagem com um sublinhado para acrescentar informações.",
                         ],
                         ok=False,
                         accent_color=category_info(existing)["accent"],
@@ -968,10 +962,10 @@ class FeedbackCog(commands.Cog):
                     "$inc": {"user_message_count": 1},
                 },
             )
-            await message.channel.send(
-                view=build_additional_confirmation(fresh),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            with contextlib.suppress(
+                discord.HTTPException, discord.Forbidden, discord.NotFound
+            ):
+                await message.add_reaction("✅")
 
     async def _forward_owner_message(
         self, message: discord.Message, feedback: dict[str, Any]

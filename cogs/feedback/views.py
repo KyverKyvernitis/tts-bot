@@ -22,7 +22,7 @@ class _ReviewButton(discord.ui.Button):
         self.cog = cog
         self.protocol = protocol_of(feedback)
         super().__init__(
-            label="Marcar em análise",
+            label="Em análise",
             emoji="🔎",
             style=discord.ButtonStyle.primary,
             custom_id=f"feedback:review:{self.protocol}",
@@ -38,7 +38,7 @@ class _ResolveButton(discord.ui.Button):
         self.cog = cog
         self.protocol = protocol_of(feedback)
         super().__init__(
-            label="Marcar como resolvido",
+            label="Resolver",
             emoji="✅",
             style=discord.ButtonStyle.success,
             custom_id=f"feedback:resolve:{self.protocol}",
