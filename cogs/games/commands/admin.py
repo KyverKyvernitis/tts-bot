@@ -3,6 +3,8 @@ import logging
 import discord
 from discord import app_commands
 
+import config
+
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +40,14 @@ class _EconomyStaffModal(discord.ui.Modal, title="Cargo da staff"):
             default=False,
         )
 
-        self.add_item(_label("Cargo", self.role_select, "Pode abrir os painéis administrativos da Games."))
-        self.add_item(_label("Remover cargo atual", self.clear_checkbox, "Deixa apenas as permissões nativas e o dono do bot."))
+        self.add_item(_label("Cargo", self.role_select, "Pode usar os controles administrativos."))
+        self.add_item(
+            _label(
+                "Remover cargo atual",
+                self.clear_checkbox,
+                "Mantém o acesso do dono do servidor, dono do bot e permissões nativas.",
+            )
+        )
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await self.cog._economy_validate_interaction(interaction, opener_id=self.opener_id):
@@ -63,13 +71,21 @@ class _EconomyStaffModal(discord.ui.Modal, title="Cargo da staff"):
             role = guild.get_role(role_id) if role_id else None
             if role is None:
                 await interaction.response.send_message(
-                    view=self.cog._make_v2_notice("Cargo não selecionado", ["Selecione um cargo ou marque a opção de remover."], ok=False),
+                    view=self.cog._make_v2_notice(
+                        "Cargo não selecionado",
+                        ["Selecione um cargo ou marque a opção de remover."],
+                        ok=False,
+                    ),
                     ephemeral=True,
                 )
                 return
             if role.is_default():
                 await interaction.response.send_message(
-                    view=self.cog._make_v2_notice("Cargo inválido", ["O cargo @everyone não pode ser usado como staff."], ok=False),
+                    view=self.cog._make_v2_notice(
+                        "Cargo inválido",
+                        ["O cargo @everyone não pode ser usado como staff."],
+                        ok=False,
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -110,7 +126,7 @@ class _EconomyChannelModal(discord.ui.Modal, title="Canal dos jogos"):
             default=False,
         )
 
-        self.add_item(_label("Canal", self.channel_select, "Comandos e triggers da Games começam somente aqui."))
+        self.add_item(_label("Canal", self.channel_select, "Comandos e triggers começam somente aqui."))
         self.add_item(_label("Usar todos os canais", self.clear_checkbox, "Remove o canal exclusivo."))
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -134,7 +150,11 @@ class _EconomyChannelModal(discord.ui.Modal, title="Canal dos jogos"):
             channel_id = int(getattr(channel, "id", 0) or 0)
             if channel_id <= 0:
                 await interaction.response.send_message(
-                    view=self.cog._make_v2_notice("Canal não selecionado", ["Selecione um canal ou marque a opção de liberar todos."], ok=False),
+                    view=self.cog._make_v2_notice(
+                        "Canal não selecionado",
+                        ["Selecione um canal ou marque a opção de liberar todos."],
+                        ok=False,
+                    ),
                     ephemeral=True,
                 )
                 return
@@ -154,6 +174,7 @@ class _EconomyModeModal(discord.ui.Modal, title="Forma de uso"):
         self.opener_id = int(opener_id)
 
         current = cog._gincana_input_mode(guild.id)
+        prefix = cog._economy_prefix()
         self.mode_group = discord.ui.RadioGroup(
             custom_id="games_economy_input_mode",
             required=True,
@@ -167,10 +188,10 @@ class _EconomyModeModal(discord.ui.Modal, title="Forma de uso"):
         self.mode_group.add_option(
             label="Comandos",
             value="commands",
-            description="Use o prefixo do bot, como _roleta e _daily.",
+            description=f"Use comandos como {prefix}roleta, {prefix}daily e {prefix}race.",
             default=current == "commands",
         )
-        self.add_item(_label("Entrada", self.mode_group, "Apenas uma forma fica ativa por vez."))
+        self.add_item(_label("Forma de uso", self.mode_group, "Apenas uma forma fica ativa por vez."))
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await self.cog._economy_validate_interaction(interaction, opener_id=self.opener_id):
@@ -197,7 +218,7 @@ class _EconomyModeModal(discord.ui.Modal, title="Forma de uso"):
         )
 
 
-class _EconomyResetModal(discord.ui.Modal, title="Restaurar padrão"):
+class _EconomyResetModal(discord.ui.Modal, title="Restaurar configurações"):
     def __init__(self, cog: "GincanaCommandMixin", *, guild_id: int, opener_id: int):
         super().__init__(timeout=300)
         self.cog = cog
@@ -211,7 +232,7 @@ class _EconomyResetModal(discord.ui.Modal, title="Restaurar padrão"):
             _label(
                 "Confirmar restauração",
                 self.confirm_checkbox,
-                "Remove o cargo e o canal exclusivos e volta para triggers.",
+                "Remove cargo e canal exclusivos e volta para triggers.",
             )
         )
 
@@ -227,7 +248,11 @@ class _EconomyResetModal(discord.ui.Modal, title="Restaurar padrão"):
             return
         if not bool(self.confirm_checkbox.value):
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Nada alterado", ["Marque a confirmação para restaurar o padrão."], ok=False),
+                view=self.cog._make_v2_notice(
+                    "Nada alterado",
+                    ["Marque a confirmação para restaurar as configurações."],
+                    ok=False,
+                ),
                 ephemeral=True,
             )
             return
@@ -236,7 +261,7 @@ class _EconomyResetModal(discord.ui.Modal, title="Restaurar padrão"):
         await self.cog.db.set_gincana_channel_id(guild.id, 0)
         await self.cog.db.set_gincana_input_mode(guild.id, "triggers")
         await interaction.response.edit_message(
-            view=self.cog._make_economy_panel_view(guild, self.opener_id, notice="Configuração restaurada.")
+            view=self.cog._make_economy_panel_view(guild, self.opener_id, notice="Configurações restauradas.")
         )
 
 
@@ -250,51 +275,108 @@ class _EconomyPanelView(discord.ui.LayoutView):
         staff_role = cog._get_staff_role(guild)
         channel = cog._get_gincana_channel(guild)
         mode = cog._gincana_input_mode(guild.id)
+        prefix = cog._economy_prefix()
 
-        staff_button = discord.ui.Button(label="Alterar", emoji="🛡️", style=discord.ButtonStyle.secondary)
+        staff_button = discord.ui.Button(
+            label="Escolher cargo",
+            emoji="🛡️",
+            style=discord.ButtonStyle.secondary,
+        )
         staff_button.callback = self._edit_staff
-        channel_button = discord.ui.Button(label="Alterar", emoji="📍", style=discord.ButtonStyle.secondary)
+        channel_button = discord.ui.Button(
+            label="Escolher canal",
+            emoji="📍",
+            style=discord.ButtonStyle.secondary,
+        )
         channel_button.callback = self._edit_channel
-        mode_button = discord.ui.Button(label="Alterar", emoji="🔁", style=discord.ButtonStyle.secondary)
+        mode_button = discord.ui.Button(
+            label="Mudar modo",
+            emoji="🔁",
+            style=discord.ButtonStyle.secondary,
+        )
         mode_button.callback = self._edit_mode
-        reset_button = discord.ui.Button(label="Restaurar padrão", emoji="↩️", style=discord.ButtonStyle.secondary)
+        reset_button = discord.ui.Button(
+            label="Restaurar configurações",
+            emoji="↩️",
+            style=discord.ButtonStyle.danger,
+        )
         reset_button.callback = self._reset
-        close_button = discord.ui.Button(label="Fechar", emoji="✖️", style=discord.ButtonStyle.secondary)
-        close_button.callback = self._close
+
+        adjust_button = discord.ui.Button(
+            label="Ajustar usuário",
+            emoji="💰",
+            style=discord.ButtonStyle.secondary,
+        )
+        adjust_button.callback = self._adjust_user
+        race_button = discord.ui.Button(
+            label="Gerenciar raça",
+            emoji="🧬",
+            style=discord.ButtonStyle.secondary,
+        )
+        race_button.callback = self._manage_race
+        reset_user_button = discord.ui.Button(
+            label="Resetar usuário",
+            emoji="♻️",
+            style=discord.ButtonStyle.secondary,
+        )
+        reset_user_button.callback = self._reset_user
+        reset_server_button = discord.ui.Button(
+            label="Resetar servidor",
+            emoji="🧨",
+            style=discord.ButtonStyle.danger,
+        )
+        reset_server_button.callback = self._reset_server
 
         staff_text = staff_role.mention if staff_role is not None else "Não definido"
         channel_text = getattr(channel, "mention", None) or "Todos os canais"
         mode_text = "Comandos" if mode == "commands" else "Triggers"
-        mode_example = "`_roleta` · `_daily` · `_race`" if mode == "commands" else "`roleta` · `daily` · `race`"
+        if mode == "commands":
+            mode_example = f"Use `{prefix}roleta`, `{prefix}daily` e `{prefix}race`."
+        else:
+            mode_example = "Use palavras como `roleta`, `daily` e `race`."
 
-        items: list[discord.ui.Item] = [
-            discord.ui.TextDisplay("# ⚙️ Economia\nConfiguração da cog Games."),
+        config_items: list[discord.ui.Item] = [
+            discord.ui.TextDisplay("# ⚙️ Economia\nGerencie jogos, fichas e raças neste servidor."),
         ]
         if notice:
-            items.extend([
+            config_items.append(discord.ui.TextDisplay(f"{cog._EFFECT_EMOJI} {notice}"))
+        config_items.extend(
+            [
+                discord.ui.Separator(),
+                discord.ui.Section(
+                    discord.ui.TextDisplay(
+                        f"## Cargo da staff\n{staff_text}\nPode usar os controles administrativos."
+                    ),
+                    accessory=staff_button,
+                ),
                 discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
-                discord.ui.TextDisplay(f"{cog._EFFECT_EMOJI} {notice}"),
-            ])
-        items.extend([
-            discord.ui.Separator(),
-            discord.ui.Section(
-                discord.ui.TextDisplay(f"## Cargo da staff\n{staff_text}"),
-                accessory=staff_button,
-            ),
-            discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
-            discord.ui.Section(
-                discord.ui.TextDisplay(f"## Canal dos jogos\n{channel_text}"),
-                accessory=channel_button,
-            ),
-            discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
-            discord.ui.Section(
-                discord.ui.TextDisplay(f"## Forma de uso\n**{mode_text}**\n{mode_example}"),
-                accessory=mode_button,
-            ),
-            discord.ui.Separator(),
-            discord.ui.ActionRow(reset_button, close_button),
-        ])
-        self.add_item(discord.ui.Container(*items, accent_color=discord.Color.blurple()))
+                discord.ui.Section(
+                    discord.ui.TextDisplay(
+                        f"## Canal dos jogos\n{channel_text}\nComandos e triggers começam neste canal."
+                    ),
+                    accessory=channel_button,
+                ),
+                discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+                discord.ui.Section(
+                    discord.ui.TextDisplay(f"## Forma de uso\n**{mode_text}**\n{mode_example}"),
+                    accessory=mode_button,
+                ),
+                discord.ui.Separator(),
+                discord.ui.ActionRow(reset_button),
+            ]
+        )
+        self.add_item(discord.ui.Container(*config_items, accent_color=discord.Color.blurple()))
+
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(
+                    "## Fichas e raças\nAjuste saldos, raças e resets de usuários."
+                ),
+                discord.ui.ActionRow(adjust_button, race_button),
+                discord.ui.ActionRow(reset_user_button, reset_server_button),
+                accent_color=discord.Color.orange(),
+            )
+        )
 
     async def _validate(self, interaction: discord.Interaction) -> discord.Guild | None:
         if not await self.cog._economy_validate_interaction(interaction, opener_id=self.opener_id):
@@ -311,17 +393,23 @@ class _EconomyPanelView(discord.ui.LayoutView):
     async def _edit_staff(self, interaction: discord.Interaction):
         guild = await self._validate(interaction)
         if guild is not None:
-            await interaction.response.send_modal(_EconomyStaffModal(self.cog, guild=guild, opener_id=self.opener_id))
+            await interaction.response.send_modal(
+                _EconomyStaffModal(self.cog, guild=guild, opener_id=self.opener_id)
+            )
 
     async def _edit_channel(self, interaction: discord.Interaction):
         guild = await self._validate(interaction)
         if guild is not None:
-            await interaction.response.send_modal(_EconomyChannelModal(self.cog, guild=guild, opener_id=self.opener_id))
+            await interaction.response.send_modal(
+                _EconomyChannelModal(self.cog, guild=guild, opener_id=self.opener_id)
+            )
 
     async def _edit_mode(self, interaction: discord.Interaction):
         guild = await self._validate(interaction)
         if guild is not None:
-            await interaction.response.send_modal(_EconomyModeModal(self.cog, guild=guild, opener_id=self.opener_id))
+            await interaction.response.send_modal(
+                _EconomyModeModal(self.cog, guild=guild, opener_id=self.opener_id)
+            )
 
     async def _reset(self, interaction: discord.Interaction):
         guild = await self._validate(interaction)
@@ -330,16 +418,31 @@ class _EconomyPanelView(discord.ui.LayoutView):
                 _EconomyResetModal(self.cog, guild_id=guild.id, opener_id=self.opener_id)
             )
 
-    async def _close(self, interaction: discord.Interaction):
-        if await self._validate(interaction) is None:
-            return
-        self.stop()
-        await interaction.response.edit_message(
-            view=self.cog._make_v2_notice("Economia", ["Painel fechado."], ok=True)
-        )
+    async def _adjust_user(self, interaction: discord.Interaction):
+        if await self._validate(interaction) is not None:
+            await interaction.response.send_modal(self.cog._make_chip_adjust_modal(self.opener_id))
+
+    async def _manage_race(self, interaction: discord.Interaction):
+        if await self._validate(interaction) is not None:
+            await interaction.response.send_modal(self.cog._make_chip_race_modal(self.opener_id))
+
+    async def _reset_user(self, interaction: discord.Interaction):
+        if await self._validate(interaction) is not None:
+            await interaction.response.send_modal(self.cog._make_chip_user_reset_modal(self.opener_id))
+
+    async def _reset_server(self, interaction: discord.Interaction):
+        if await self._validate(interaction) is not None:
+            await interaction.response.send_modal(self.cog._make_chip_server_reset_modal(self.opener_id))
 
 
 class GincanaCommandMixin:
+    def _economy_prefix(self) -> str:
+        for name in ("BOT_PREFIX", "PREFIX"):
+            value = str(getattr(config, name, "") or "").strip()
+            if value:
+                return value
+        return "_"
+
     async def _economy_is_bot_owner(self, user: discord.abc.User) -> bool:
         user_id = int(getattr(user, "id", 0) or 0)
         owner_id = int(getattr(self.bot, "owner_id", 0) or 0)
@@ -374,7 +477,11 @@ class GincanaCommandMixin:
             return False
         if not await self._economy_user_allowed(guild, interaction.user):
             await interaction.response.send_message(
-                view=self._make_v2_notice("Sem permissão", ["Você não pode alterar a economia deste servidor."], ok=False),
+                view=self._make_v2_notice(
+                    "Sem permissão",
+                    ["Você não pode alterar a economia deste servidor."],
+                    ok=False,
+                ),
                 ephemeral=True,
             )
             return False
@@ -393,19 +500,33 @@ class GincanaCommandMixin:
         if raw_mode not in {"triggers", "commands"}:
             await self.db.set_gincana_input_mode(guild.id, "triggers")
 
-    def _make_economy_panel_view(self, guild: discord.Guild, opener_id: int, *, notice: str | None = None) -> discord.ui.LayoutView:
+    def _make_economy_panel_view(
+        self,
+        guild: discord.Guild,
+        opener_id: int,
+        *,
+        notice: str | None = None,
+    ) -> discord.ui.LayoutView:
         return _EconomyPanelView(self, guild=guild, opener_id=opener_id, notice=notice)
 
     async def _run_gincana_command(self, interaction: discord.Interaction):
         if interaction.guild is None:
             await interaction.response.send_message(
-                view=self._make_v2_notice("Servidor inválido", ["Use `/economia` dentro de um servidor."], ok=False),
+                view=self._make_v2_notice(
+                    "Servidor inválido",
+                    ["Use `/economia` dentro de um servidor."],
+                    ok=False,
+                ),
                 ephemeral=True,
             )
             return
         if not await self._economy_user_allowed(interaction.guild, interaction.user):
             await interaction.response.send_message(
-                view=self._make_v2_notice("Sem permissão", ["Você não pode alterar a economia deste servidor."], ok=False),
+                view=self._make_v2_notice(
+                    "Sem permissão",
+                    ["Você não pode alterar a economia deste servidor."],
+                    ok=False,
+                ),
                 ephemeral=True,
             )
             return

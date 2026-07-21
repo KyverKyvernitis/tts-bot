@@ -675,8 +675,8 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         pages.append(HelpPage(
             title="🪙 Economia",
             body=(
-                "Saldo, daily, recarga, pagamentos e ranking. Triggers como `ficha` ou `daily` "
-                "funcionam digitando a palavra sozinha no chat, sem prefixo.\n\n"
+                "Saldo, daily, recarga, pagamentos e ranking. O servidor pode usar triggers "
+                "ou comandos prefixados, conforme a configuração da economia.\n\n"
                 "### Atalhos do dia a dia\n"
                 f"Saldo: `{bot_prefix}ficha` ou `ficha`\n"
                 "Extrato: `extrato` — 10 últimas movimentações\n"
@@ -689,13 +689,9 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
                 "Fichas bônus saem antes das normais nas apostas, e ganhos quitam dívida primeiro "
                 "antes de voltar para o saldo. O daily dá fichas normais, fichas bônus e libera "
                 "os giros extras do dia.\n\n"
-                "### Painel de staff\n"
-                f"`{bot_prefix}painelficha` (alias: `fichapainel`, `adminficha`)\n"
-                "Painel completo para ajustar saldo, resetar usuário ou resetar o servidor inteiro. "
-                "Qualquer staff com permissão **Expulsar membros** pode usar todos os botões.\n\n"
-                "### Configuração\n"
+                "### Administração\n"
                 f"{economia_slash}\n"
-                "Ativa/desativa a economia, define cargo staff e gerencia roles que recebem features extras."
+                "Configura staff, canal e forma de uso. Também ajusta fichas, raças e resets."
             ),
             accent=discord.Color.orange(),
         ))

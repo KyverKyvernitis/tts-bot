@@ -579,7 +579,7 @@ class GamesCog(dcommands.Cog, GamesCore):
         return handled
 
     @_guild_scoped()
-    @app_commands.command(name="economia", description="Configura cargo, canal e forma de uso da Games")
+    @app_commands.command(name="economia", description="Gerencia jogos, fichas e raças neste servidor")
     async def economia(self, interaction: discord.Interaction):
         await self._run_gincana_command(interaction)
 
@@ -617,20 +617,6 @@ class GamesCog(dcommands.Cog, GamesCore):
             view=self._make_chip_recharge_view(ctx.guild.id, ctx.author.id, used, new_balance, note),
             mention_author=False,
         )
-
-    @dcommands.command(name="painelficha", aliases=["fichapainel", "adminficha"])
-    async def painelficha(self, ctx: dcommands.Context):
-        if ctx.guild is None:
-            await ctx.reply(
-                view=self._make_v2_notice("Servidor inválido", ["Use esse comando dentro de um servidor."], ok=False),
-                mention_author=False,
-            )
-            return
-        is_owner = await self._chip_admin_is_bot_owner(ctx.author)
-        if not is_owner and (not isinstance(ctx.author, discord.Member) or not self._is_staff_member(ctx.author)):
-            await ctx.reply(view=self._make_v2_notice("Sem permissão", ["Esse painel é exclusivo da staff."], ok=False), mention_author=False)
-            return
-        await ctx.reply(view=self._make_chip_admin_panel_view(ctx.author.id), mention_author=False)
 
     @dcommands.command(name="rank", aliases=["leaderboard"])
     async def rank(self, ctx: dcommands.Context):

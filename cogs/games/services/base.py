@@ -422,7 +422,7 @@ class GincanaBase:
             await ctx.reply(
                 view=self._make_v2_notice(
                     "Canal exclusivo",
-                    [f"Use os comandos da Games em {channel_text}."],
+                    [f"Use os comandos de jogos em {channel_text}."],
                     ok=False,
                 ),
                 mention_author=False,

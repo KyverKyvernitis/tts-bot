@@ -38,21 +38,21 @@ class _AdminUserAdjustModal(discord.ui.Modal, title="Ajustar saldo"):
             required=True,
         )
         self.chips_input = discord.ui.TextInput(
-            label="Fichas normais",
+            custom_id="games_chip_admin_adjust_chips",
             placeholder="Deixe vazio para não alterar",
             required=False,
             max_length=16,
         )
         self.bonus_input = discord.ui.TextInput(
-            label="Fichas bônus",
+            custom_id="games_chip_admin_adjust_bonus",
             placeholder="Deixe vazio para não alterar",
             required=False,
             max_length=16,
         )
 
         self.add_item(_modal_label("Usuário", self.target_select, "Selecione quem terá o saldo alterado."))
-        self.add_item(self.chips_input)
-        self.add_item(self.bonus_input)
+        self.add_item(_modal_label("Fichas normais", self.chips_input, "Aceita números negativos."))
+        self.add_item(_modal_label("Fichas bônus", self.bonus_input, "Deixe vazio para não alterar."))
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await self.cog._chip_admin_validate_interaction(
@@ -129,7 +129,18 @@ class _AdminUserResetModal(discord.ui.Modal, title="Resetar usuário"):
             max_values=1,
             required=True,
         )
-        self.add_item(_modal_label("Usuário", self.target_select, "O perfil de fichas será reiniciado."))
+        self.confirm_checkbox = discord.ui.Checkbox(
+            custom_id="games_chip_admin_reset_user_confirm",
+            default=False,
+        )
+        self.add_item(_modal_label("Usuário", self.target_select, "Fichas, bônus e raça serão reiniciados."))
+        self.add_item(
+            _modal_label(
+                "Confirmar reset",
+                self.confirm_checkbox,
+                "Restaura fichas, bônus e raça do usuário.",
+            )
+        )
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await self.cog._chip_admin_validate_interaction(
@@ -142,6 +153,13 @@ class _AdminUserResetModal(discord.ui.Modal, title="Resetar usuário"):
         if guild is None:
             await interaction.response.send_message(
                 view=self.cog._make_v2_notice("Servidor inválido", ["Use esse painel dentro de um servidor."], ok=False),
+                ephemeral=True,
+            )
+            return
+
+        if not bool(self.confirm_checkbox.value):
+            await interaction.response.send_message(
+                view=self.cog._make_v2_notice("Nada alterado", ["Marque a confirmação para resetar o usuário."], ok=False),
                 ephemeral=True,
             )
             return
@@ -339,7 +357,7 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
                     await self.cog._set_user_race_active(guild.id, member.id, False)
         except Exception:
             log.exception(
-                "games: falha ao alterar raça via painelficha guild=%s actor=%s target=%s operation=%s",
+                "games: falha ao alterar raça via economia guild=%s actor=%s target=%s operation=%s",
                 guild.id,
                 getattr(interaction.user, "id", 0),
                 member.id,
@@ -372,7 +390,7 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
             lines.append("**Progresso:** reiniciado")
 
         log.info(
-            "games: raça alterada via painelficha guild=%s actor=%s target=%s operation=%s old=%s new=%s active=%s",
+            "games: raça alterada via economia guild=%s actor=%s target=%s operation=%s old=%s new=%s active=%s",
             guild.id,
             getattr(interaction.user, "id", 0),
             member.id,
@@ -390,17 +408,21 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
 
 
 class _AdminServerResetModal(discord.ui.Modal, title="Resetar servidor"):
-    confirm_input = discord.ui.TextInput(
-        label="Confirmação",
-        placeholder="Digite RESETAR",
-        required=True,
-        max_length=16,
-    )
-
     def __init__(self, cog: "GincanaChipAdminMixin", opener_id: int):
         super().__init__(timeout=300)
         self.cog = cog
         self.opener_id = int(opener_id)
+        self.confirm_checkbox = discord.ui.Checkbox(
+            custom_id="games_chip_admin_reset_server_confirm",
+            default=False,
+        )
+        self.add_item(
+            _modal_label(
+                "Confirmar reset do servidor",
+                self.confirm_checkbox,
+                "Apaga fichas, raças e progresso de todos os perfis ativos.",
+            )
+        )
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await self.cog._chip_admin_validate_interaction(
@@ -416,9 +438,9 @@ class _AdminServerResetModal(discord.ui.Modal, title="Resetar servidor"):
                 ephemeral=True,
             )
             return
-        if str(self.confirm_input.value or "").strip().upper() != "RESETAR":
+        if not bool(self.confirm_checkbox.value):
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Confirmação inválida", ["Digite RESETAR para continuar."], ok=False),
+                view=self.cog._make_v2_notice("Nada alterado", ["Marque a confirmação para resetar o servidor."], ok=False),
                 ephemeral=True,
             )
             return
@@ -443,112 +465,6 @@ class _AdminServerResetModal(discord.ui.Modal, title="Resetar servidor"):
             view=self.cog._make_v2_notice("Servidor resetado", lines, ok=True),
             ephemeral=True,
         )
-
-
-class _ChipAdminPanelView(discord.ui.LayoutView):
-    def __init__(self, cog: "GincanaChipAdminMixin", opener_id: int):
-        super().__init__(timeout=600)
-        self.cog = cog
-        self.opener_id = int(opener_id)
-
-        adjust_button = discord.ui.Button(
-            style=discord.ButtonStyle.secondary,
-            label="Ajustar usuário",
-            emoji="💰",
-        )
-        adjust_button.callback = self._adjust_user
-        race_button = discord.ui.Button(
-            style=discord.ButtonStyle.secondary,
-            label="Gerenciar raça",
-            emoji="🧬",
-        )
-        race_button.callback = self._manage_race
-        reset_user_button = discord.ui.Button(
-            style=discord.ButtonStyle.secondary,
-            label="Resetar usuário",
-            emoji="♻️",
-        )
-        reset_user_button.callback = self._reset_user
-        reset_server_button = discord.ui.Button(
-            style=discord.ButtonStyle.danger,
-            label="Resetar servidor",
-            emoji="🧨",
-        )
-        reset_server_button.callback = self._reset_server
-        close_button = discord.ui.Button(
-            style=discord.ButtonStyle.secondary,
-            label="Fechar",
-            emoji="✖️",
-        )
-        close_button.callback = self._close_panel
-
-        primary_row = discord.ui.ActionRow(adjust_button, race_button)
-        secondary_row = discord.ui.ActionRow(reset_user_button, reset_server_button, close_button)
-        lines = [
-            "# 🛠️ Painel de fichas",
-            "Ajuste fichas e raças em um só lugar.",
-            "Staff e dono do bot podem usar todos os botões.",
-            "Valores negativos são aceitos nas fichas normais.",
-        ]
-        self.add_item(
-            discord.ui.Container(
-                discord.ui.TextDisplay("\n".join(lines)),
-                primary_row,
-                secondary_row,
-                accent_color=discord.Color.blurple(),
-            )
-        )
-
-    async def _adjust_user(self, interaction: discord.Interaction):
-        if not await self.cog._chip_admin_validate_interaction(
-            interaction,
-            opener_id=self.opener_id,
-            owner_only=False,
-        ):
-            return
-        await interaction.response.send_modal(_AdminUserAdjustModal(self.cog, self.opener_id))
-
-    async def _manage_race(self, interaction: discord.Interaction):
-        if not await self.cog._chip_admin_validate_interaction(
-            interaction,
-            opener_id=self.opener_id,
-            owner_only=False,
-        ):
-            return
-        await interaction.response.send_modal(_AdminRaceModal(self.cog, self.opener_id))
-
-    async def _reset_user(self, interaction: discord.Interaction):
-        if not await self.cog._chip_admin_validate_interaction(
-            interaction,
-            opener_id=self.opener_id,
-            owner_only=False,
-        ):
-            return
-        await interaction.response.send_modal(_AdminUserResetModal(self.cog, self.opener_id))
-
-    async def _reset_server(self, interaction: discord.Interaction):
-        if not await self.cog._chip_admin_validate_interaction(
-            interaction,
-            opener_id=self.opener_id,
-            owner_only=False,
-        ):
-            return
-        await interaction.response.send_modal(_AdminServerResetModal(self.cog, self.opener_id))
-
-    async def _close_panel(self, interaction: discord.Interaction):
-        if not await self.cog._chip_admin_validate_interaction(
-            interaction,
-            opener_id=self.opener_id,
-            owner_only=False,
-        ):
-            return
-        closed = self.cog._make_v2_notice(
-            "Painel fechado",
-            ["Abra de novo pelo comando quando precisar."],
-            ok=True,
-        )
-        await interaction.response.edit_message(view=closed)
-        self.stop()
 
 
 class GincanaChipAdminMixin:
@@ -632,11 +548,21 @@ class GincanaChipAdminMixin:
             return False
 
         is_owner = await self._chip_admin_is_bot_owner(user)
-        member = user if isinstance(user, discord.Member) else interaction.guild.get_member(user.id) if interaction.guild else None
-        if not is_owner and (member is None or not self._is_staff_member(member)):
+        guild = interaction.guild
+        allowed = is_owner
+        economy_allowed = getattr(self, "_economy_user_allowed", None)
+        if not allowed and guild is not None and callable(economy_allowed):
+            try:
+                allowed = bool(await economy_allowed(guild, user))
+            except Exception:
+                allowed = False
+        if not allowed:
+            member = user if isinstance(user, discord.Member) else guild.get_member(user.id) if guild else None
+            allowed = member is not None and self._is_staff_member(member)
+        if not allowed:
             if send_response and not interaction.response.is_done():
                 await interaction.response.send_message(
-                    view=self._make_v2_notice("Sem permissão", ["Esse painel é exclusivo da staff."], ok=False),
+                    view=self._make_v2_notice("Sem permissão", ["Você não pode usar os controles administrativos."], ok=False),
                     ephemeral=True,
                 )
             return False
@@ -649,5 +575,14 @@ class GincanaChipAdminMixin:
             return False
         return True
 
-    def _make_chip_admin_panel_view(self, opener_id: int) -> discord.ui.LayoutView:
-        return _ChipAdminPanelView(self, opener_id)
+    def _make_chip_adjust_modal(self, opener_id: int) -> discord.ui.Modal:
+        return _AdminUserAdjustModal(self, opener_id)
+
+    def _make_chip_race_modal(self, opener_id: int) -> discord.ui.Modal:
+        return _AdminRaceModal(self, opener_id)
+
+    def _make_chip_user_reset_modal(self, opener_id: int) -> discord.ui.Modal:
+        return _AdminUserResetModal(self, opener_id)
+
+    def _make_chip_server_reset_modal(self, opener_id: int) -> discord.ui.Modal:
+        return _AdminServerResetModal(self, opener_id)
