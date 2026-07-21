@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import random
 import time
 from pathlib import Path
@@ -336,6 +337,8 @@ class GincanaRoletaMixin:
                 self._game_animation_states: dict[int, dict[str, object]] = {}
             if not hasattr(self, "_roleta_trigger_cooldowns"):
                 self._roleta_trigger_cooldowns: dict[tuple[int, int], float] = {}
+            if not hasattr(self, "_game_message_edit_locks"):
+                self._game_message_edit_locks: dict[int, asyncio.Lock] = {}
 
         def _game_animation_state(self, guild_id: int) -> dict[str, object]:
             self._ensure_game_animation_runtime()
@@ -477,50 +480,83 @@ class GincanaRoletaMixin:
                 return True
             return "rate limit" in str(exc).casefold()
 
+        def _is_permanent_game_message_error(self, exc: Exception) -> bool:
+            if isinstance(exc, (discord.Forbidden, discord.NotFound)):
+                return True
+            try:
+                status = int(getattr(exc, "status", 0) or 0)
+            except Exception:
+                status = 0
+            return 400 <= status < 500 and status != 429
+
+        def _game_message_edit_lock(self, message: discord.Message) -> asyncio.Lock:
+            self._ensure_game_animation_runtime()
+            message_id = int(getattr(message, "id", 0) or id(message))
+            lock = self._game_message_edit_locks.get(message_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._game_message_edit_locks[message_id] = lock
+            return lock
+
+        def _drop_game_message_edit_lock(self, message: discord.Message | None):
+            if message is None:
+                return
+            self._ensure_game_animation_runtime()
+            message_id = int(getattr(message, "id", 0) or id(message))
+            self._game_message_edit_locks.pop(message_id, None)
+
         async def _edit_game_message(self, message: discord.Message, *, embed: discord.Embed, view: discord.ui.View | None = None, final: bool = False) -> bool:
-            attempts = 8 if final else 1
-            delay = 0.75
-            for _ in range(attempts):
-                try:
-                    if view is None:
-                        await message.edit(embed=embed)
-                    else:
-                        await message.edit(embed=embed, view=view)
-                    return True
-                except Exception as exc:
-                    if final and self._is_edit_rate_limited(exc):
-                        retry_after = getattr(exc, "retry_after", None)
-                        try:
-                            sleep_for = float(retry_after) if retry_after is not None else delay
-                        except Exception:
-                            sleep_for = delay
-                        await asyncio.sleep(max(0.4, min(sleep_for, 5.0)))
-                        delay = min(delay * 1.6, 5.0)
-                        continue
-                    if final:
-                        await asyncio.sleep(max(0.35, min(delay, 2.0)))
-                        delay = min(delay * 1.4, 2.5)
-                        continue
-                    return False
+            attempts = 10 if final else 4
+            delay = 0.75 if final else 0.30
+            lock = self._game_message_edit_lock(message)
+            async with lock:
+                for attempt in range(attempts):
+                    try:
+                        if view is None:
+                            await message.edit(embed=embed)
+                        else:
+                            await message.edit(embed=embed, view=view)
+                        return True
+                    except Exception as exc:
+                        if self._is_permanent_game_message_error(exc):
+                            return False
+                        if attempt >= attempts - 1:
+                            break
+                        if self._is_edit_rate_limited(exc):
+                            retry_after = getattr(exc, "retry_after", None)
+                            try:
+                                sleep_for = float(retry_after) if retry_after is not None else delay
+                            except Exception:
+                                sleep_for = delay
+                            await asyncio.sleep(max(0.35, min(sleep_for, 5.0)))
+                            delay = min(delay * 1.6, 5.0)
+                            continue
+                        await asyncio.sleep(max(0.20, min(delay, 2.0)))
+                        delay = min(delay * 1.5, 2.5)
             return False
 
         async def _send_game_message(self, channel: discord.abc.Messageable, *, embed: discord.Embed, view: discord.ui.View | None = None, final: bool = False) -> discord.Message | None:
-            attempts = 8 if final else 2
-            delay = 0.75
-            for _ in range(attempts):
+            attempts = 10 if final else 4
+            delay = 0.75 if final else 0.30
+            for attempt in range(attempts):
                 try:
                     return await channel.send(embed=embed, view=view)
                 except Exception as exc:
-                    if self._is_edit_rate_limited(exc) or final:
+                    if self._is_permanent_game_message_error(exc):
+                        return None
+                    if attempt >= attempts - 1:
+                        break
+                    if self._is_edit_rate_limited(exc):
                         retry_after = getattr(exc, "retry_after", None)
                         try:
                             sleep_for = float(retry_after) if retry_after is not None else delay
                         except Exception:
                             sleep_for = delay
-                        await asyncio.sleep(max(0.4, min(sleep_for, 5.0)))
+                        await asyncio.sleep(max(0.35, min(sleep_for, 5.0)))
                         delay = min(delay * 1.6, 5.0)
                         continue
-                    return None
+                    await asyncio.sleep(max(0.20, min(delay, 2.0)))
+                    delay = min(delay * 1.5, 2.5)
             return None
 
         async def _delete_game_message(self, message: discord.Message | None):
@@ -530,42 +566,77 @@ class GincanaRoletaMixin:
                 await message.delete()
             except Exception:
                 pass
+            finally:
+                self._drop_game_message_edit_lock(message)
+
+        def _is_own_game_message(self, message: discord.Message | None) -> bool:
+            if message is None:
+                return False
+            bot_user = getattr(getattr(self, "bot", None), "user", None)
+            bot_user_id = getattr(bot_user, "id", None)
+            return bot_user_id is not None and getattr(getattr(message, "author", None), "id", None) == bot_user_id
+
+        async def _render_or_replace_game_message(self, source_message: discord.Message, target_message: discord.Message | None, *, embed: discord.Embed, view: discord.ui.View | None = None, final: bool = False) -> discord.Message | None:
+            if target_message is not None:
+                edited = await self._edit_game_message(target_message, embed=embed, view=view, final=final)
+                if edited:
+                    if isinstance(view, _GameReplayView):
+                        view.message = target_message
+                    return target_message
+
+            channel = getattr(target_message, "channel", None) or getattr(source_message, "channel", None)
+            if channel is None:
+                return None
+            replacement = await self._send_game_message(channel, embed=embed, view=view, final=final)
+            if replacement is None:
+                return None
+            if isinstance(view, _GameReplayView):
+                view.message = replacement
+            if target_message is not None and target_message is not replacement:
+                if self._is_own_game_message(target_message):
+                    await self._delete_game_message(target_message)
+                else:
+                    self._drop_game_message_edit_lock(target_message)
+            return replacement
 
         async def _deliver_game_result(self, source_message: discord.Message, target_message: discord.Message | None, *, embed: discord.Embed, view: discord.ui.View | None = None) -> discord.Message | None:
             target = target_message or source_message
             if target is None:
                 return None
 
-            disabled_view = view
-            if isinstance(disabled_view, _GameReplayView):
-                disabled_view.set_enabled(False)
-                disabled_view.message = target
+            disabled_view = None
+            if isinstance(view, _GameReplayView):
+                disabled_view = _GameReplayView(self, owner_id=view.owner_id, kind=view.kind, enabled=False)
 
-            start = time.monotonic()
-            grace_deadline = start + 2.0
-            final_rendered = False
-            while not final_rendered:
-                final_rendered = await self._edit_game_message(target, embed=embed, view=disabled_view, final=False)
-                if final_rendered:
-                    remaining = grace_deadline - time.monotonic()
-                    if remaining > 0:
-                        await asyncio.sleep(remaining)
-                    break
-                await asyncio.sleep(0.25)
-
-            if not final_rendered:
+            delivered = await self._render_or_replace_game_message(source_message, target, embed=embed, view=disabled_view, final=True)
+            if delivered is None:
+                if isinstance(disabled_view, _GameReplayView):
+                    disabled_view.stop()
+                self._drop_game_message_edit_lock(target)
+                logging.getLogger("gincana.roleta").warning(
+                    "não foi possível entregar o resultado do jogo | guild=%s channel=%s message=%s",
+                    getattr(getattr(source_message, "guild", None), "id", None),
+                    getattr(getattr(source_message, "channel", None), "id", None),
+                    getattr(target, "id", None),
+                )
                 return target
+
+            await asyncio.sleep(2.0)
 
             if isinstance(view, _GameReplayView):
                 view.set_enabled(True)
-                view.message = target
-                while True:
-                    enabled_ok = await self._edit_game_message(target, embed=embed, view=view, final=False)
-                    if enabled_ok:
-                        return target
-                    await asyncio.sleep(0.25)
+                enabled_message = None
+                try:
+                    enabled_message = await self._render_or_replace_game_message(source_message, delivered, embed=embed, view=view, final=True)
+                finally:
+                    if isinstance(disabled_view, _GameReplayView):
+                        disabled_view.stop()
+                final_message = enabled_message or delivered
+                self._drop_game_message_edit_lock(final_message)
+                return final_message
 
-            return target
+            self._drop_game_message_edit_lock(delivered)
+            return delivered
 
         def _roleta_trigger_cooldown_remaining(self, guild_id: int, user_id: int) -> float:
             self._ensure_game_animation_runtime()
@@ -741,19 +812,9 @@ class GincanaRoletaMixin:
                     columns[idx] = reroll
             disabled_view = None
             opening_embed = self._make_roleta_spin_embed(self._render_roleta_board(columns), balance_text=balance_text, footer_text=footer_text, entry_cost=entry_cost, jackpot=jackpot)
-            try:
-                if spin_message is None:
-                    spin_message = await self._send_game_message(message.channel, embed=opening_embed, view=disabled_view, final=False)
-                else:
-                    updated = await self._edit_game_message(spin_message, embed=opening_embed, view=disabled_view, final=False)
-                    if not updated:
-                        spin_message = await self._send_game_message(message.channel, embed=opening_embed, view=disabled_view, final=False)
-                if spin_message is None:
-                    return None, None
-                if disabled_view is not None and spin_message is not None:
-                    disabled_view.message = spin_message
-            except Exception:
-                return spin_message, None
+            spin_message = await self._render_or_replace_game_message(message, spin_message, embed=opening_embed, view=disabled_view, final=False)
+            if spin_message is None:
+                return None, None
 
             target_duration = 5.0
             intervals = [0.18, 0.21, 0.24, 0.28, 0.33, 0.39, 0.47, 0.58, 0.72, 0.90, 1.05]
@@ -801,7 +862,10 @@ class GincanaRoletaMixin:
                                 self._spin_roleta_column(columns[column_index])
                         board = self._render_roleta_board(columns)
                     previous_board = board
-                    await self._edit_game_message(spin_message, embed=self._make_roleta_spin_embed(board, balance_text=balance_text, footer_text=footer_text, entry_cost=entry_cost, jackpot=jackpot), view=disabled_view, final=False)
+                    frame_embed = self._make_roleta_spin_embed(board, balance_text=balance_text, footer_text=footer_text, entry_cost=entry_cost, jackpot=jackpot)
+                    rendered_message = await self._render_or_replace_game_message(message, spin_message, embed=frame_embed, view=disabled_view, final=False)
+                    if rendered_message is not None:
+                        spin_message = rendered_message
                 finally:
                     if has_turn and guild_id is not None and session_id is not None:
                         await self._advance_game_animation_turn(guild_id, session_id)
@@ -1102,20 +1166,10 @@ class GincanaRoletaMixin:
                         reroll = self._build_carta_column()
                     columns[idx] = reroll
             disabled_view = _GameReplayView(self, owner_id=owner_id or getattr(message.author, "id", 0), kind="cartas", enabled=False) if owner_id else None
-            try:
-                opening_embed = self._make_carta_spin_embed(self._render_carta_board(columns), balance_text=balance_text, footer_text=footer_text, entry_cost=entry_cost, jackpot=jackpot)
-                if spin_message is None:
-                    spin_message = await self._send_game_message(message.channel, embed=opening_embed, view=disabled_view, final=False)
-                else:
-                    updated = await self._edit_game_message(spin_message, embed=opening_embed, view=disabled_view, final=False)
-                    if not updated:
-                        spin_message = await self._send_game_message(message.channel, embed=opening_embed, view=disabled_view, final=False)
-                if spin_message is None:
-                    return None, None
-                if disabled_view is not None and spin_message is not None:
-                    disabled_view.message = spin_message
-            except Exception:
-                return spin_message, None
+            opening_embed = self._make_carta_spin_embed(self._render_carta_board(columns), balance_text=balance_text, footer_text=footer_text, entry_cost=entry_cost, jackpot=jackpot)
+            spin_message = await self._render_or_replace_game_message(message, spin_message, embed=opening_embed, view=disabled_view, final=False)
+            if spin_message is None:
+                return None, None
             target_duration = 4.6
             intervals = [0.18, 0.21, 0.25, 0.30, 0.36, 0.44, 0.55, 0.70, 0.90, 1.05]
             scale = target_duration / sum(intervals)
@@ -1161,7 +1215,10 @@ class GincanaRoletaMixin:
                                 self._spin_carta_column(columns[column_index])
                         board = self._render_carta_board(columns)
                     previous_board = board
-                    await self._edit_game_message(spin_message, embed=self._make_carta_spin_embed(board, balance_text=balance_text, footer_text=footer_text, entry_cost=entry_cost, jackpot=jackpot), view=disabled_view, final=False)
+                    frame_embed = self._make_carta_spin_embed(board, balance_text=balance_text, footer_text=footer_text, entry_cost=entry_cost, jackpot=jackpot)
+                    rendered_message = await self._render_or_replace_game_message(message, spin_message, embed=frame_embed, view=disabled_view, final=False)
+                    if rendered_message is not None:
+                        spin_message = rendered_message
                 finally:
                     if has_turn and guild_id is not None and session_id is not None:
                         await self._advance_game_animation_turn(guild_id, session_id)
