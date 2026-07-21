@@ -574,7 +574,8 @@ class GamesCog(dcommands.Cog, GamesCore):
         if ctx.guild is None:
             await ctx.reply(embed=self._make_embed("Servidor inválido", "Use esse comando dentro de um servidor", ok=False), mention_author=False)
             return
-        if not isinstance(ctx.author, discord.Member) or not self._is_staff_member(ctx.author):
+        is_owner = await self._chip_admin_is_bot_owner(ctx.author)
+        if not is_owner and (not isinstance(ctx.author, discord.Member) or not self._is_staff_member(ctx.author)):
             await ctx.reply(view=self._make_v2_notice("Sem permissão", ["Esse painel é exclusivo da staff."], ok=False), mention_author=False)
             return
         await ctx.reply(view=self._make_chip_admin_panel_view(ctx.author.id), mention_author=False)
