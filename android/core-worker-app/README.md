@@ -673,3 +673,14 @@ A VPS não depende desse perfil para funcionar. Se o celular estiver offline, o 
 - O resumo de jobs no painel mostra cobertura real, por exemplo `jobs internos: 12/14 ok · aquecendo · 6 manuais`, em vez de tratar jobs manuais como falhas.
 - A UI técnica do APK passa a mostrar a cobertura do catálogo de jobs recebido da VPS.
 - Continua sem shell, sem Python interno, sem build pelo APK e sem acesso ao Termux. Jobs reais seguem no phone-worker/Termux.
+
+## Versão 0.6.2 — agente autônomo de jobs
+
+- O polling de `/core-worker/app/jobs/fetch`, a execução da allowlist e o envio para `/core-worker/app/jobs/result` saíram da `MainActivity`.
+- `CoreWorkerRuntimeService` agora é o único proprietário da fila e continua trabalhando com a interface fechada.
+- Resultados são gravados primeiro em uma outbox interna e só são removidos depois que a VPS confirma `ok: true`.
+- O agente usa executor serial, deduplicação local, backoff exponencial, wake lock limitado e recuperação pelo boot, `JobScheduler` e FCM.
+- A tela apenas solicita sincronização e lê o estado persistido; ela não executa jobs nem confirma resultados.
+- O catálogo de 44 jobs seguros foi centralizado em `CoreWorkerJobCatalog`, evitando divergência entre Activity, serviço e heartbeat periódico.
+- Um stop explícito grava `agent_enabled=false` e não é revertido automaticamente por boot, FCM ou reabertura do app. A reativação acontece pelo controle do runtime ou por novo pareamento.
+- Esta etapa não libera shell arbitrário, Bedrock, Box64 real ou os jobs pesados ainda dependentes de binários/serviços externos.

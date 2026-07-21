@@ -39,7 +39,7 @@ public class CoreWorkerUpdateJobService extends JobService {
 
     public static void schedule(Context context, String reason) {
         try {
-            String serverUrl = normalizedServerUrl();
+            String serverUrl = normalizedServerUrl(context);
             if (serverUrl.isEmpty()) {
                 return;
             }
@@ -86,12 +86,19 @@ public class CoreWorkerUpdateJobService extends JobService {
     }
 
     private void runUpdateCheck(JobParameters params) {
-        String serverUrl = normalizedServerUrl();
+        String serverUrl = normalizedServerUrl(this);
         if (serverUrl.isEmpty()) {
             return;
         }
         try {
-            reportRuntimeHeartbeat(serverUrl, params == null || params.getExtras() == null ? "scheduled" : params.getExtras().getString("reason", "scheduled"));
+            String reason = params == null || params.getExtras() == null
+                    ? "scheduled"
+                    : params.getExtras().getString("reason", "scheduled");
+            if (CoreWorkerRuntimeService.shouldRunAgent(this)) {
+                // ACTION_POLL_NOW também sobe o foreground service caso ele tenha sido morto.
+                CoreWorkerRuntimeService.requestPoll(this, "job_scheduler:" + reason);
+            }
+            reportRuntimeHeartbeat(serverUrl, reason);
             JSONObject manifest = fetchLatestManifest(serverUrl);
             if (manifest == null) {
                 return;
@@ -150,73 +157,11 @@ public class CoreWorkerUpdateJobService extends JobService {
 
 
     private org.json.JSONArray coreWorkerApkCapabilitiesArray() {
-        return new org.json.JSONArray()
-                .put("apk-native")
-                .put("android-status")
-                .put("native-boot")
-                .put("python-embedded")
-                .put("internal-jobs")
-                .put("core-linux-runtime")
-                .put("core-linux-rootfs-manager")
-                .put("core-linux-rootfs-import-v1")
-                .put("core-linux-runner-preflight-v1")
-                .put("core-linux-runner-preflight-v2")
-                .put("core-linux-runner-preflight-v3")
-                .put("core-linux-runner-preflight-v4")
-                .put("core-linux-embedded-binaries-intake-v2")
-                .put("core-linux-embedded-binaries-intake-v3")
-                .put("core-linux-embedded-binaries-intake-v4")
-                .put("core-linux-runtime-v1")
-                .put("core-linux-base-tools-smoke-v12")
-                .put("core-linux-rootfs-proot-smoke-v13")
-                .put("core-linux-rootfs-proot-smoke-v13.1")
-                .put("core-linux-rootfs-proot-smoke-v13.2")
-                .put("core-linux-rootfs-proot-smoke-v13.3")
-                .put("core-linux-box64-intake-preflight-v14.2.1")
-                .put("core-linux-box64-version-smoke-v15")
-                .put("core-linux-box64-version-smoke-v15.2")
-                .put("core-linux-box64-glibc-preflight-v15.3")
-                .put("core-linux-box64-glibc-preflight-v15.3.1")
-                .put("core-linux-rootfs-glibc-intake-preflight-v16.1")
-                .put("minecraft-bedrock-manager-safe-plan");
+        return CoreWorkerJobCatalog.capabilities();
     }
 
     private org.json.JSONArray supportedLightJobsArray() {
-        return new org.json.JSONArray()
-                .put("apk_ping")
-                .put("apk_status_refresh")
-                .put("apk_diagnostic")
-                .put("apk_check_update")
-                .put("apk_test_vps_connection")
-                .put("apk_sync_runtime_state")
-                .put("apk_job_history")
-                .put("apk_device_diagnostic")
-                .put("apk_push_diagnostic")
-                .put("apk_update_diagnostic")
-                .put("apk_runtime_diagnostic")
-                .put("apk_worker_bridge_status")
-                .put("apk_native_worker_status")
-                .put("apk_native_boot_status")
-                .put("apk_local_shell_probe")
-                .put("apk_core_linux_native_executor_probe")
-                .put("apk_core_linux_native_executor_test")
-                .put("apk_core_linux_native_runtime_status")
-                .put("apk_core_linux_rootfs_status")
-                .put("apk_core_linux_rootfs_prepare")
-                .put("apk_core_linux_rootfs_validate")
-                .put("apk_core_linux_rootfs_clean_staging")
-                .put("apk_core_linux_rootfs_import_status")
-                .put("apk_core_linux_rootfs_import_validate")
-                .put("apk_core_linux_rootfs_import_abort")
-                .put("apk_core_linux_rootfs_real_status")
-                .put("apk_core_linux_rootfs_glibc_preflight")
-                .put("apk_core_linux_runner_status")
-                .put("apk_core_linux_runner_preflight")
-                .put("apk_core_linux_runner_requirements")
-                .put("apk_core_linux_runtime_smoke_test")
-                .put("apk_core_linux_rootfs_smoke_test")
-                .put("apk_core_linux_box64_preflight")
-                .put("apk_core_linux_box64_smoke_test");
+        return CoreWorkerJobCatalog.supportedJobs();
     }
 
     private JSONObject backgroundCoreLinuxSnapshot() throws Exception {
@@ -271,8 +216,11 @@ public class CoreWorkerUpdateJobService extends JobService {
         JSONObject runtime = new JSONObject();
         runtime.put("state", executor.optString("state", "background-heartbeat"));
         runtime.put("summary", firstNonEmpty(executor.optString("summary", ""), "APK nativo em background; jobs internos seguros declarados"));
-        runtime.put("workerOnline", true);
-        runtime.put("workerState", executor.optBoolean("readyForRootfs", false) ? "ready" : "pending");
+        boolean agentRunning = prefs().getBoolean("foreground_runtime_active", false)
+                && prefs().getBoolean("job_executor_ready", false);
+        runtime.put("workerOnline", agentRunning);
+        runtime.put("workerState", agentRunning ? "ready" : "stopped");
+        runtime.put("jobExecutorReady", prefs().getBoolean("job_executor_ready", false));
         runtime.put("pythonAvailable", false);
         runtime.put("lastHeartbeatAt", executor.optLong("updatedAt", 0L));
         runtime.put("supportedTasks", supportedLightJobsArray());
@@ -327,10 +275,14 @@ public class CoreWorkerUpdateJobService extends JobService {
             payload.put("supportedTasks", supportedLightJobsArray());
             payload.put("app_jobs", supportedLightJobsArray());
             JSONObject status = new JSONObject();
-            status.put("apk_native_worker", true);
+            boolean agentRunning = prefs().getBoolean("foreground_runtime_active", false)
+                    && prefs().getBoolean("job_executor_ready", false);
+            status.put("apk_native_worker", agentRunning);
+            status.put("job_executor_ready", prefs().getBoolean("job_executor_ready", false));
+            status.put("jobs_runtime", "foreground-service-autonomous-agent");
             status.put("background", true);
             status.put("termux_required_now", false);
-            status.put("termux_role", "fallback-temporario");
+            status.put("termux_role", "fallback-legado");
             status.put("native_heartbeat_reason", reason == null ? "scheduled" : reason);
             status.put("runtime_mode", "apk-native-python-linux-assisted-runtime");
             status.put("python_runtime", "embedded-background-linux-aware");
@@ -364,18 +316,20 @@ public class CoreWorkerUpdateJobService extends JobService {
         payload.put("deviceName", prefs().getString("device_name", ""));
         payload.put("runtime_mode", "apk-native-python-linux-assisted-runtime");
         payload.put("internal_runtime", "apk-native-background-python-linux-aware");
-        payload.put("jobsRuntime", "apk-native-python-linux-assisted-runtime");
+        payload.put("jobsRuntime", "foreground-service-autonomous-agent");
         JSONObject status = new JSONObject();
-        status.put("app", "background");
+        status.put("app", "background-recovery");
         status.put("apk_companion", true);
         status.put("android_sdk", Build.VERSION.SDK_INT);
         status.put("native_boot", true);
+        status.put("job_executor_ready", prefs().getBoolean("job_executor_ready", false));
+        status.put("jobs_runtime", "foreground-service-autonomous-agent");
         status.put("python_runtime", "embedded-background-linux-aware");
         status.put("supported_tasks", supportedLightJobsArray());
         status.put("coreLinux", backgroundCoreLinuxSnapshot());
         status.put("nativeRuntime", backgroundNativeRuntimeSnapshot());
         status.put("termux_required_now", false);
-        status.put("termux_role", "fallback-temporario");
+        status.put("termux_role", "fallback-legado");
         status.put("notification_permission", hasNotificationPermission() ? "granted" : "missing");
         payload.put("status", status);
         return payload;
@@ -428,8 +382,17 @@ public class CoreWorkerUpdateJobService extends JobService {
         return getSharedPreferences(PREFS, MODE_PRIVATE);
     }
 
-    private static String normalizedServerUrl() {
-        String url = BuildConfig.CORE_WORKER_VPS_URL == null ? "" : BuildConfig.CORE_WORKER_VPS_URL.trim();
+    private static String normalizedServerUrl(Context context) {
+        String url = "";
+        try {
+            if (context != null) {
+                url = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("server_url", "").trim();
+            }
+        } catch (Throwable ignored) {
+        }
+        if (url.isEmpty()) {
+            url = BuildConfig.CORE_WORKER_VPS_URL == null ? "" : BuildConfig.CORE_WORKER_VPS_URL.trim();
+        }
         return url.replaceAll("/+$", "");
     }
 

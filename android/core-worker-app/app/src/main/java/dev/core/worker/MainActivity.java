@@ -395,6 +395,7 @@ public class MainActivity extends Activity {
         safeStartupTask("reportRuntimeReady", () -> reportAppState("runtime_internal_ready", "runtime interno preparado em modo híbrido; heartbeat/status direto ativo"));
         safeStartupTask("sendInternalRuntimeHeartbeat", () -> sendInternalRuntimeHeartbeat(false, "app_opened"));
         safeStartupTask("sendNativeWorkerHeartbeat", () -> sendNativeWorkerHeartbeat(false, "app_opened"));
+        safeStartupTask("ensureAutonomousAgent", () -> ensureAutonomousAgentRunning("app_opened"));
         safeStartupTask("fetchAndRunLightJobs", () -> fetchAndRunLightJobs(false, "app_opened"));
         safeStartupTask("updatePermissionGate", this::updatePermissionGate);
         show("Pronto. O app verifica pareamento e atualizações sem travar a tela.");
@@ -412,6 +413,7 @@ public class MainActivity extends Activity {
             startupLog("onResume:waiting-full-startup fallback=" + startupFallbackVisible);
             return;
         }
+        safeStartupTask("resume:readAgentJobState", this::readAgentJobState);
         safeStartupTask("resume:updatePermissionGate", this::updatePermissionGate);
         if (!shouldRunActivityResumeSync()) {
             startupLog("onResume:sync-debounced");
@@ -1991,6 +1993,7 @@ public class MainActivity extends Activity {
                         .putString("native_worker_id", workerId)
                         .putString("worker_token", nativePair.optString("token", ""))
                         .putBoolean("paired_via_native_apk", true)
+                        .putBoolean("agent_enabled", true)
                         .remove("paired_via_local_agent")
                         .apply();
                 nativeWorkerOnline = true;
@@ -2001,6 +2004,7 @@ public class MainActivity extends Activity {
                 registerFcmTokenAsync("native_pair_success");
                 sendInternalRuntimeHeartbeat(false, "native_pair_success");
                 sendNativeWorkerHeartbeat(false, "native_pair_success");
+                CoreWorkerRuntimeService.requestStart(this, "native_pair_success");
                 vpsState = "ok";
                 show("Celular conectado direto pelo APK.\nPerfil: " + profileLabel(profile) + "\nWorker: " + emptyFallback(workerId, "apk") + "\nTermux ficou apenas como fallback temporário.");
                 return;
@@ -2850,6 +2854,7 @@ public class MainActivity extends Activity {
 
 
     private void readForegroundRuntimeState() {
+        readAgentJobState();
         try {
             foregroundRuntimeActive = prefs.getBoolean("foreground_runtime_active", false);
             foregroundRuntimeLastTickAt = prefs.getLong("foreground_runtime_last_tick_at", 0L);
@@ -2903,23 +2908,17 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject startForegroundRuntime(String reason) throws Exception {
-        Intent intent = new Intent(this, CoreWorkerRuntimeService.class);
-        intent.setAction(CoreWorkerRuntimeService.ACTION_START);
-        intent.putExtra("reason", reason == null ? "manual" : reason);
-        if (Build.VERSION.SDK_INT >= 26) {
-            startForegroundService(intent);
-        } else {
-            startService(intent);
-        }
+        CoreWorkerRuntimeService.requestStart(this, reason == null ? "manual" : reason);
         prefs.edit()
+                .putBoolean("agent_enabled", true)
                 .putBoolean("foreground_runtime_active", true)
-                .putString("foreground_runtime_state", "serviço persistente solicitado")
+                .putString("foreground_runtime_state", "agente autônomo solicitado")
                 .putLong("foreground_runtime_last_requested_at", System.currentTimeMillis())
                 .apply();
         readForegroundRuntimeState();
         JSONObject out = foregroundRuntimeSnapshot("start");
         out.put("started", true);
-        out.put("summary", "Runtime persistente solicitado com notificação fixa");
+        out.put("summary", "Agente autônomo solicitado com notificação fixa");
         return out;
     }
 
@@ -2929,14 +2928,15 @@ public class MainActivity extends Activity {
         intent.putExtra("reason", reason == null ? "manual" : reason);
         startService(intent);
         prefs.edit()
+                .putBoolean("agent_enabled", false)
                 .putBoolean("foreground_runtime_active", false)
-                .putString("foreground_runtime_state", "serviço persistente parado")
+                .putString("foreground_runtime_state", "agente autônomo parado")
                 .putLong("foreground_runtime_last_requested_at", System.currentTimeMillis())
                 .apply();
         readForegroundRuntimeState();
         JSONObject out = foregroundRuntimeSnapshot("stop");
         out.put("stopped", true);
-        out.put("summary", "Runtime persistente parado; jobs curtos continuam por fetch manual/agendado");
+        out.put("summary", "Agente autônomo parado; nenhum job será executado até reativar o serviço");
         return out;
     }
 
@@ -4915,6 +4915,47 @@ public class MainActivity extends Activity {
         showLocalAgentText();
     }
 
+    private void ensureAutonomousAgentRunning(String reason) {
+        try {
+            // Um stop explícito deve sobreviver a reopen/FCM/boot. Instalações antigas,
+            // sem a chave agent_enabled, são migradas automaticamente quando pareadas.
+            if (prefs.contains("agent_enabled") && !prefs.getBoolean("agent_enabled", false)) {
+                return;
+            }
+            boolean paired = hasPairing()
+                    || prefs.getBoolean("paired_via_native_apk", false)
+                    || !prefs.getString("worker_token", "").trim().isEmpty();
+            if (!paired) return;
+            prefs.edit().putBoolean("agent_enabled", true).apply();
+            CoreWorkerRuntimeService.requestStart(this, reason == null ? "activity" : reason);
+        } catch (Throwable exc) {
+            appStatusLastError = shortThrowable(exc);
+        }
+    }
+
+    private void readAgentJobState() {
+        try {
+            internalLightJobsState = prefs.getString("internal_light_jobs_state", internalLightJobsState);
+            internalLightJobsLastCheckAt = prefs.getLong("internal_light_jobs_last_check_at", internalLightJobsLastCheckAt);
+            internalLightJobsLastFetchStartedAt = prefs.getLong("internal_light_jobs_last_fetch_started_at", internalLightJobsLastFetchStartedAt);
+            internalLightJobsLastCount = prefs.getInt("internal_light_jobs_last_count", internalLightJobsLastCount);
+            internalLightJobsLastSummary = prefs.getString("internal_light_jobs_last_summary", internalLightJobsLastSummary);
+            internalLightJobsRunningCount = prefs.getInt("internal_jobs_running_count", internalLightJobsRunningCount);
+            internalLightJobsPendingCount = prefs.getInt("internal_jobs_pending_count", internalLightJobsPendingCount);
+            internalLightJobsQueueSummary = prefs.getString("internal_jobs_queue_summary", internalLightJobsQueueSummary);
+            internalLightJobsAutoTotal = prefs.getInt("internal_jobs_auto_total", internalLightJobsAutoTotal);
+            internalLightJobsManualTotal = prefs.getInt("internal_jobs_manual_total", internalLightJobsManualTotal);
+            internalLightJobsCatalogSummary = prefs.getString("internal_jobs_catalog_summary", internalLightJobsCatalogSummary);
+            internalLightJobsLastFetchReason = prefs.getString("internal_light_jobs_last_fetch_reason", internalLightJobsLastFetchReason);
+            internalLightJobsLastFetchAppVersion = prefs.getString("internal_light_jobs_last_fetch_app_version", internalLightJobsLastFetchAppVersion);
+            internalLightJobsLastFetchAppVersionCode = prefs.getInt("internal_light_jobs_last_fetch_app_version_code", internalLightJobsLastFetchAppVersionCode);
+            internalLightJobsLastFetchHttpStatus = prefs.getInt("internal_light_jobs_last_fetch_http_status", internalLightJobsLastFetchHttpStatus);
+            internalLightJobsLastReturnedCount = prefs.getInt("internal_light_jobs_last_returned_count", internalLightJobsLastReturnedCount);
+            internalLightJobsLastFetchError = prefs.getString("internal_light_jobs_last_fetch_error", internalLightJobsLastFetchError);
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void fetchAndRunLightJobs(boolean showResult, String reason) {
         String serverUrl = normalizedServerUrl();
         if (serverUrl.isEmpty()) {
@@ -4922,161 +4963,17 @@ public class MainActivity extends Activity {
             updateSystemChecklistText();
             return;
         }
-        long now = System.currentTimeMillis();
-        long minInterval = showResult ? 0L : 25_000L;
-        if (minInterval > 0L && internalLightJobsLastFetchStartedAt > 0L && now - internalLightJobsLastFetchStartedAt < minInterval) {
-            internalLightJobsState = "sincronização recente";
-            internalLightJobsLastSummary = "aguardando próximo lote";
-            updateSystemChecklistText();
-            return;
+        ensureAutonomousAgentRunning(reason == null ? "activity_request" : reason);
+        CoreWorkerRuntimeService.requestPoll(this, reason == null ? "activity_request" : reason);
+        readAgentJobState();
+        internalLightJobsState = "sincronização solicitada ao agente";
+        internalLightJobsLastFetchReason = reason == null ? "activity_request" : reason;
+        updateSystemChecklistText();
+        if (showResult) {
+            show("Sincronização solicitada ao agente autônomo. A execução continua mesmo com a tela fechada.");
         }
-        if (!internalLightJobsFetchRunning.compareAndSet(false, true)) {
-            internalLightJobsState = "sincronização já em andamento";
-            updateSystemChecklistText();
-            return;
-        }
-        internalLightJobsLastFetchStartedAt = now;
-        new Thread(() -> {
-            try {
-                JSONObject payload = statusSnapshot();
-                payload.put("installId", installId());
-                payload.put("workerId", effectiveWorkerId());
-                payload.put("appVersion", APP_VERSION);
-                payload.put("appVersionCode", BuildConfig.VERSION_CODE);
-                payload.put("versionName", APP_VERSION);
-                payload.put("versionCode", BuildConfig.VERSION_CODE);
-                payload.put("source", "core-worker-apk-foreground-fetch-v12-2");
-                payload.put("reason", reason == null ? "background" : reason);
-                payload.put("fetchStage", "core-linux-job-fetch-v12.2");
-                payload.put("force", shouldForceLightJobFetch(reason, showResult));
-                payload.put("supportedJobs", supportedLightJobsArray());
-                payload.put("supported_tasks", supportedLightJobsArray());
-                payload.put("supportedTasks", supportedLightJobsArray());
-                payload.put("capabilities", coreWorkerApkCapabilitiesArray());
-                safePutPayload(payload, "runtime", runtimeSnapshot());
-                internalLightJobsLastFetchReason = reason == null ? "background" : reason;
-                internalLightJobsLastFetchAppVersion = APP_VERSION;
-                internalLightJobsLastFetchAppVersionCode = BuildConfig.VERSION_CODE;
-                internalLightJobsLastFetchError = "";
-                HttpResult response = request("POST", serverUrl + "/core-worker/app/jobs/fetch", payload, null);
-                internalLightJobsLastCheckAt = System.currentTimeMillis();
-                internalLightJobsLastFetchHttpStatus = response.status;
-                if (!response.ok()) {
-                    internalLightJobsState = "falha HTTP " + response.status;
-                    internalRuntimeLastError = compactResultBody(response.body);
-                    internalLightJobsLastFetchError = internalRuntimeLastError;
-                    updateSystemChecklistText();
-                    return;
-                }
-                JSONObject body = new JSONObject(response.body);
-                if (body.optBoolean("throttled", false)) {
-                    int retryAfter = Math.max(1, body.optInt("retryAfterSeconds", 10));
-                    internalLightJobsState = "fila em cooldown";
-                    internalLightJobsLastSummary = "VPS pediu nova checagem em " + retryAfter + "s";
-                    JSONObject queue = body.optJSONObject("queue");
-                    if (queue != null) {
-                        internalLightJobsPendingCount = queue.optInt("pending", 0);
-                        internalLightJobsRunningCount = queue.optInt("running", 0);
-                        internalLightJobsQueueSummary = internalLightJobsRunningCount + " rodando · " + internalLightJobsPendingCount + " pendentes";
-                    }
-                    updateSystemChecklistText();
-                    return;
-                }
-                JSONArray jobs = body.optJSONArray("jobs");
-                int count = jobs == null ? 0 : jobs.length();
-                internalLightJobsLastCount = count;
-                internalLightJobsLastReturnedCount = count;
-                JSONObject queue = body.optJSONObject("queue");
-                if (queue != null) {
-                    internalLightJobsPendingCount = queue.optInt("pending", 0);
-                    internalLightJobsRunningCount = queue.optInt("running", 0);
-                    internalLightJobsQueueSummary = internalLightJobsRunningCount + " rodando · " + internalLightJobsPendingCount + " pendentes";
-                } else {
-                    internalLightJobsPendingCount = 0;
-                    internalLightJobsRunningCount = 0;
-                    internalLightJobsQueueSummary = "fila sincronizada";
-                }
-                JSONObject catalog = body.optJSONObject("catalog");
-                if (catalog != null) {
-                    JSONArray automatic = catalog.optJSONArray("automatic");
-                    JSONArray manual = catalog.optJSONArray("manual");
-                    internalLightJobsAutoTotal = automatic == null ? 0 : automatic.length();
-                    internalLightJobsManualTotal = manual == null ? 0 : manual.length();
-                    internalLightJobsCatalogSummary = internalLightJobsAutoTotal + " automáticos · " + internalLightJobsManualTotal + " manuais";
-                }
-                if (count <= 0) {
-                    internalLightJobsState = "fila vazia";
-                    internalLightJobsLastSummary = "fila vazia";
-                    internalLightJobsRunningCount = 0;
-                    internalLightJobsQueueSummary = internalLightJobsPendingCount > 0 ? (internalLightJobsPendingCount + " pendentes") : "fila vazia";
-                    clearTransientApkNetworkError();
-                    updateSystemChecklistText();
-                    if (showResult) show("Runtime interno verificado. Nenhum job interno pendente.");
-                    return;
-                }
-                int okCount = 0;
-                for (int i = 0; i < count; i++) {
-                    JSONObject job = jobs.optJSONObject(i);
-                    if (job == null) continue;
-                    JSONObject result;
-                    long startedAt = System.currentTimeMillis();
-                    String jobId = job.optString("id", "");
-                    String jobType = job.optString("type", "job");
-                    try {
-                        if (wasJobRecentlyCompleted(jobId)) {
-                            result = new JSONObject();
-                            result.put("ok", true);
-                            result.put("type", jobType);
-                            result.put("deduplicated", true);
-                            result.put("message", "job interno duplicado ignorado pelo APK");
-                            result.put("jobId", jobId);
-                            result.put("duplicateOf", jobId);
-                            result.put("reason", job.optString("reason", ""));
-                            JSONObject duplicatePayload = job.optJSONObject("payload");
-                            String duplicateStage = duplicatePayload == null ? "" : duplicatePayload.optString("stage", "");
-                            if (!duplicateStage.isEmpty()) {
-                                result.put("stage", duplicateStage);
-                                result.put("state", "job_duplicate_ignored");
-                            }
-                        } else {
-                            result = executeLightJob(job);
-                        }
-                    } catch (Throwable jobError) {
-                        result = new JSONObject();
-                        result.put("ok", false);
-                        result.put("type", jobType);
-                        result.put("error", shortThrowable(jobError));
-                        result.put("message", "job interno falhou no APK");
-                    }
-                    result.put("durationMs", Math.max(0L, System.currentTimeMillis() - startedAt));
-                    result.put("attempt", job.optInt("attempt", 1));
-                    if (result.optBoolean("ok", false)) okCount++;
-                    postLightJobResult(serverUrl, job, result);
-                    rememberCompletedJob(jobId);
-                    recordInternalJobHistory(jobType, result.optBoolean("ok", false), result.optString("message", result.optString("error", "")));
-                }
-                internalLightJobsState = "executados " + okCount + "/" + count;
-                internalLightJobsRunningCount = 0;
-                internalLightJobsPendingCount = Math.max(0, internalLightJobsPendingCount);
-                internalLightJobsQueueSummary = internalLightJobsPendingCount > 0 ? (internalLightJobsPendingCount + " pendentes") : "fila vazia";
-                internalLightJobsLastSummary = summarizeLightJobs(jobs, okCount, count);
-                if (okCount > 0) {
-                    clearTransientApkNetworkError();
-                }
-                updateSystemChecklistText();
-                if (showResult) show("Jobs internos do APK executados: " + okCount + "/" + count);
-            } catch (Throwable exc) {
-                internalLightJobsState = "falha · " + shortThrowable(exc);
-                internalLightJobsLastSummary = "falha: " + shortThrowable(exc);
-                internalRuntimeLastError = shortThrowable(exc);
-                internalLightJobsLastFetchError = internalRuntimeLastError;
-                appStatusLastError = internalRuntimeLastError;
-                updateSystemChecklistText();
-            } finally {
-                internalLightJobsFetchRunning.set(false);
-            }
-        }, "core-worker-apk-light-jobs").start();
     }
+
 
     private boolean shouldForceLightJobFetch(String reason, boolean showResult) {
         if (showResult) return true;
@@ -5091,54 +4988,7 @@ public class MainActivity extends Activity {
     }
 
     private JSONArray supportedLightJobsArray() {
-        // Core Linux Runtime v1: anuncie apenas jobs que o APK realmente executa
-        // sem Termux, sem shell livre e sem iniciar Bedrock. O painel da VPS usa
-        // esta lista para esconder ações antigas/pesadas que ainda são futuro.
-        return new JSONArray()
-                .put("apk_ping")
-                .put("apk_status_refresh")
-                .put("apk_upload_app_logs")
-                .put("apk_diagnostic")
-                .put("apk_check_update")
-                .put("apk_test_vps_connection")
-                .put("apk_sync_runtime_state")
-                .put("apk_job_history")
-                .put("apk_device_diagnostic")
-                .put("apk_push_diagnostic")
-                .put("apk_update_diagnostic")
-                .put("apk_runtime_diagnostic")
-                .put("apk_worker_bridge_status")
-                .put("apk_test_notification")
-                .put("apk_repair_local_state")
-                .put("apk_reset_job_history")
-                .put("apk_trim_cache")
-                .put("apk_update_storage_cleanup")
-                .put("apk_sync_profile")
-                .put("apk_sync_profile_now")
-                .put("apk_verify_update_state")
-                .put("apk_native_worker_status")
-                .put("apk_native_boot_status")
-                .put("apk_local_shell_probe")
-                .put("apk_core_linux_native_executor_probe")
-                .put("apk_core_linux_native_executor_test")
-                .put("apk_core_linux_native_runtime_status")
-                .put("apk_core_linux_rootfs_status")
-                .put("apk_core_linux_rootfs_prepare")
-                .put("apk_core_linux_rootfs_validate")
-                .put("apk_core_linux_rootfs_preflight")
-                .put("apk_core_linux_rootfs_clean_staging")
-                .put("apk_core_linux_rootfs_import_status")
-                .put("apk_core_linux_rootfs_import_validate")
-                .put("apk_core_linux_rootfs_import_abort")
-                .put("apk_core_linux_rootfs_real_status")
-                .put("apk_core_linux_rootfs_glibc_preflight")
-                .put("apk_core_linux_runner_status")
-                .put("apk_core_linux_runner_preflight")
-                .put("apk_core_linux_runner_requirements")
-                .put("apk_core_linux_runtime_smoke_test")
-                .put("apk_core_linux_rootfs_smoke_test")
-                .put("apk_core_linux_box64_preflight")
-                .put("apk_core_linux_box64_smoke_test");
+        return CoreWorkerJobCatalog.supportedJobs();
     }
 
     private boolean isCoreLinuxRuntimeV1JobType(String type) {
@@ -5305,888 +5155,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private JSONObject executeLightJob(JSONObject job) throws Exception {
-        String type = job == null ? "" : job.optString("type", "");
-        JSONObject jobPayload = job == null ? null : job.optJSONObject("payload");
-        if (jobPayload == null) jobPayload = new JSONObject();
-        String serverUrl = normalizedServerUrl();
-        JSONObject result = new JSONObject();
-        result.put("ok", true);
-        result.put("type", type);
-        result.put("executedBy", "core-worker-apk-internal-runtime");
-        result.put("safety", "fila interna allowlist · shell controlado no sandbox · sem Termux obrigatório");
-        result.put("appVersion", APP_VERSION);
-        result.put("appVersionCode", BuildConfig.VERSION_CODE);
-        result.put("installId", installId());
-        result.put("workerId", emptyFallback(localAgentWorkerId, prefs.getString("worker_id", "")));
-        if (isPausedRootfsBedrockJobType(type)) {
-            return pausedRootfsBedrockJobResult(type, result);
-        }
-        if ("apk_ping".equals(type)) {
-            result.put("message", "pong");
-            result.put("runtime", runtimeStatusLabel());
-            return result;
-        }
-        if ("apk_status_refresh".equals(type) || "apk_refresh_runtime".equals(type)) {
-            prepareInternalRuntimePreview();
-            sendInternalRuntimeHeartbeat(false, "apk_refresh_runtime".equals(type) ? "job_refresh_runtime" : "job_status_refresh");
-            safePutPayload(result, "status", statusSnapshot());
-            safePutPayload(result, "runtime", runtimeSnapshot());
-            result.put("message", "runtime e status atualizados pelo APK");
-            return result;
-        }
-        if ("apk_report_logs".equals(type)) {
-            JSONObject logs = new JSONObject();
-            logs.put("lastAppError", appStatusLastError == null ? "" : appStatusLastError);
-            logs.put("internalRuntimeLastError", internalRuntimeLastError == null ? "" : internalRuntimeLastError);
-            logs.put("fcmState", fcmStatusLabel());
-            logs.put("lightJobs", internalLightJobsState == null ? "" : internalLightJobsState);
-            logs.put("lastLightJob", internalLightJobsLastSummary == null ? "" : internalLightJobsLastSummary);
-            logs.put("queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
-            logs.put("historyText", internalJobHistoryText());
-            safePutPayload(logs, "history", internalJobHistoryJson());
-            safePutPayload(result, "logs", logs);
-            result.put("message", "logs internos reportados pelo APK");
-            return result;
-        }
-        if ("apk_upload_app_logs".equals(type)) {
-            JSONObject logs = new JSONObject();
-            logs.put("lastAppError", appStatusLastError == null ? "" : appStatusLastError);
-            logs.put("internalRuntimeLastError", internalRuntimeLastError == null ? "" : internalRuntimeLastError);
-            logs.put("fcmState", fcmStatusLabel());
-            logs.put("queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
-            logs.put("historyText", internalJobHistoryText());
-            safePutPayload(logs, "history", internalJobHistoryJson());
-            safePutPayload(logs, "status", statusSnapshot());
-            result.put("reportKind", "app-internal-logs-lightweight");
-            safePutPayload(result, "logs", logs);
-            result.put("message", "logs leves do APK enviados sem Python/Termux");
-            return result;
-        }
-        if ("apk_diagnostic".equals(type)) {
-            safePutPayload(result, "diagnostic", diagnosticSnapshot(serverUrl));
-            result.put("message", "diagnóstico interno do APK concluído");
-            return result;
-        }
-        if ("apk_check_update".equals(type) || "apk_verify_update_state".equals(type)) {
-            JSONObject update = checkUpdateForJob(serverUrl);
-            safePutPayload(result, "update", update);
-            if (!update.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", update.optString("error", "checagem de atualização falhou"));
-            }
-            result.put("message", update.optBoolean("ok", false) ? "checagem de atualização concluída pelo APK" : "checagem de atualização falhou");
-            return result;
-        }
-        if ("apk_test_vps_connection".equals(type)) {
-            JSONObject connection = vpsConnectionTest(serverUrl);
-            safePutPayload(result, "connection", connection);
-            if (!connection.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", connection.optString("error", "teste de conexão falhou"));
-            }
-            result.put("message", connection.optBoolean("ok", false) ? "teste de conexão VPS concluído pelo APK" : "teste de conexão VPS falhou");
-            return result;
-        }
-        if ("apk_upload_report".equals(type)) {
-            JSONObject report = new JSONObject();
-            safePutPayload(report, "status", statusSnapshot());
-            safePutPayload(report, "diagnostic", diagnosticSnapshot(serverUrl));
-            result.put("reportKind", "internal-status-report");
-            safePutPayload(result, "report", report);
-            result.put("message", "relatório interno enviado pelo APK");
-            return result;
-        }
-        if ("apk_sync_runtime_state".equals(type)) {
-            safePutPayload(result, "runtime", runtimeSnapshot());
-            safePutPayload(result, "status", statusSnapshot());
-            result.put("queue", internalLightJobsQueueSummary == null ? "" : internalLightJobsQueueSummary);
-            result.put("message", "estado do runtime interno sincronizado");
-            return result;
-        }
-        if ("apk_job_history".equals(type)) {
-            safePutPayload(result, "history", internalJobHistoryJson());
-            result.put("historyText", internalJobHistoryText());
-            result.put("message", "histórico local de jobs internos enviado");
-            return result;
-        }
-        if ("apk_device_diagnostic".equals(type)) {
-            JSONObject device = deviceDiagnosticSnapshot();
-            safePutPayload(result, "device", device);
-            internalDiagnosticsSummary = "aparelho ok · " + quickBatteryLabel();
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "diagnóstico do aparelho concluído pelo APK");
-            return result;
-        }
-        if ("apk_network_diagnostic".equals(type)) {
-            JSONObject network = networkDiagnosticSnapshot(serverUrl);
-            JSONObject python = pythonNetworkDiagnosticSnapshot(serverUrl);
-            safePutPayload(result, "network", network);
-            safePutPayload(result, "python", python);
-            boolean ok = network.optBoolean("ok", false) && python.optBoolean("ok", false);
-            internalDiagnosticsSummary = ok ? "rede ok · Python interno" : "rede com atenção";
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!ok) {
-                result.put("ok", false);
-                result.put("error", network.optString("error", python.optString("error", "rede indisponível")));
-            }
-            result.put("message", ok ? "diagnóstico de rede concluído pelo Python interno" : "diagnóstico de rede encontrou problema");
-            return result;
-        }
-        if ("apk_push_diagnostic".equals(type)) {
-            JSONObject push = pushDiagnosticSnapshot();
-            safePutPayload(result, "push", push);
-            internalDiagnosticsSummary = "push " + fcmCompactLabel();
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "diagnóstico de push concluído pelo APK");
-            return result;
-        }
-        if ("apk_update_diagnostic".equals(type)) {
-            JSONObject update = checkUpdateForJob(serverUrl);
-            safePutPayload(result, "update", update);
-            internalDiagnosticsSummary = "update " + updateChecklistLabel();
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!update.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", update.optString("error", "checagem de atualização falhou"));
-            }
-            result.put("message", update.optBoolean("ok", false) ? "diagnóstico de atualização concluído" : "diagnóstico de atualização falhou");
-            return result;
-        }
-        if ("apk_runtime_diagnostic".equals(type)) {
-            JSONObject runtime = runtimeDiagnosticSnapshot();
-            safePutPayload(result, "runtime", runtime);
-            internalDiagnosticsSummary = "runtime interno ok";
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "diagnóstico do runtime interno concluído");
-            return result;
-        }
-        if ("apk_storage_diagnostic".equals(type)) {
-            JSONObject storage = storageSnapshot();
-            JSONObject python = pythonStorageCheckSnapshot();
-            safePutPayload(result, "storage", storage);
-            safePutPayload(result, "python", python);
-            internalStorageSummary = python.optBoolean("ok", false) ? python.optString("summary", storageSummary(storage)) : storageSummary(storage);
-            internalDiagnosticsSummary = "armazenamento " + internalStorageSummary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", python.optBoolean("ok", false) ? "armazenamento verificado pelo Python interno" : "diagnóstico de armazenamento interno concluído");
-            return result;
-        }
-        if ("apk_worker_bridge_status".equals(type)) {
-            JSONObject bridge = workerBridgeStatusSnapshot();
-            safePutPayload(result, "bridge", bridge);
-            internalBridgeSummary = bridge.optString("summary", "ponte atualizada");
-            internalDiagnosticsSummary = internalBridgeSummary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "estado da ponte APK/Termux reportado");
-            return result;
-        }
-        if ("apk_collect_status_bundle".equals(type) || "apk_force_status_bundle".equals(type)) {
-            JSONObject bundle = collectStatusBundle(serverUrl);
-            JSONObject python = pythonStatusBundleSnapshot(serverUrl);
-            safePutPayload(result, "bundle", bundle);
-            safePutPayload(result, "python", python);
-            internalDiagnosticsSummary = python.optBoolean("ok", false) ? "pacote de status Python enviado" : "pacote de status enviado";
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", python.optBoolean("ok", false) ? "pacote completo gerado com Python interno" : "pacote completo de status do APK enviado para a VPS");
-            return result;
-        }
-        if ("apk_test_notification".equals(type)) {
-            String state = showInternalTestNotification();
-            result.put("notificationState", state);
-            result.put("permission", hasNotificationPermission() ? "granted" : "missing");
-            if (!"displayed".equals(state)) {
-                result.put("ok", false);
-                result.put("error", notificationDetail(state));
-            }
-            result.put("message", "displayed".equals(state) ? "notificação de teste exibida pelo APK" : "notificação de teste não exibida: " + notificationDetail(state));
-            return result;
-        }
-        if ("apk_repair_local_state".equals(type)) {
-            clearTransientApkNetworkError();
-            prepareInternalRuntimePreview();
-            internalRuntimeOnline = true;
-            internalRuntimeHeartbeatState = "reparado por job interno";
-            internalRuntimeLastHeartbeatAt = System.currentTimeMillis();
-            internalDiagnosticsSummary = "estado local reparado";
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            prefs.edit()
-                    .remove("fcm_disabled_until")
-                    .remove("internal_jobs_wake_requested_at")
-                    .putString("internal_runtime_repair_at", String.valueOf(System.currentTimeMillis()))
-                    .apply();
-            sendInternalRuntimeHeartbeat(false, "job_repair_local_state");
-            safePutPayload(result, "status", statusSnapshot());
-            result.put("message", "estado local seguro reparado pelo APK");
-            return result;
-        }
-        if ("apk_reset_job_history".equals(type)) {
-            prefs.edit()
-                    .putString("internal_job_history", "[]")
-                    .putString("internal_completed_job_ids", "[]")
-                    .apply();
-            internalLightJobsLastSummary = "histórico local limpo";
-            result.put("message", "histórico local de jobs internos limpo");
-            return result;
-        }
-        if ("apk_clear_app_cache".equals(type) || "apk_cache_cleanup".equals(type) || "apk_cleanup_runtime_cache".equals(type) || "apk_trim_cache".equals(type)) {
-            long bytes = clearInternalJobCache();
-            result.put("bytesCleared", bytes);
-            result.put("message", "cache interno do APK limpo");
-            return result;
-        }
-        if ("apk_update_storage_cleanup".equals(type)) {
-            JSONObject cleanup = cleanupUpdateArtifacts(false, "job_update_storage_cleanup");
-            safePutPayload(result, "cleanup", cleanup);
-            safePutPayload(result, "storage", storageSnapshot());
-            result.put("ok", cleanup.optBoolean("ok", true));
-            if (!cleanup.optBoolean("ok", true)) {
-                result.put("error", cleanup.optString("error", "limpeza de updates falhou"));
-            }
-            result.put("message", cleanup.optString("summary", "limpeza segura de updates concluída"));
-            return result;
-        }
-        if ("apk_sync_profile".equals(type) || "apk_sync_profile_now".equals(type)) {
-            String requested = normalizeProfile(jobPayload.optString("profile", appliedProfile()));
-            boolean localSynced = syncProfileToLocalAgent(requested);
-            saveLocalFields(requested);
-            result.put("profile", requested);
-            result.put("profileLabel", profileLabel(requested));
-            result.put("localAgentSynced", localSynced);
-            result.put("message", localSynced ? "perfil sincronizado pelo APK" : "perfil salvo no APK; Termux ainda não confirmou");
-            return result;
-        }
-        if ("apk_native_worker_status".equals(type)) {
-            JSONObject nativeStatus = nativeWorkerStatusSnapshot();
-            safePutPayload(result, "nativeWorker", nativeStatus);
-            sendNativeWorkerHeartbeat(false, "job_native_worker_status");
-            result.put("message", "estado do worker nativo enviado pelo APK");
-            return result;
-        }
-        if ("apk_native_boot_status".equals(type)) {
-            JSONObject boot = nativeBootSnapshot();
-            safePutPayload(result, "boot", boot);
-            nativeBootSummary = boot.optString("summary", "boot nativo verificado");
-            internalDiagnosticsSummary = nativeBootSummary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "boot nativo verificado pelo APK");
-            return result;
-        }
-        if ("apk_local_shell_probe".equals(type)) {
-            JSONObject shell = localShellProbeSnapshot();
-            safePutPayload(result, "shell", shell);
-            nativeShellSummary = shell.optString("summary", "shell controlado verificado");
-            internalDiagnosticsSummary = nativeShellSummary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "shell controlado do APK verificado");
-            return result;
-        }
-        if ("apk_python_runtime_probe".equals(type) || "apk_python_health_check".equals(type)) {
-            JSONObject python = pythonRuntimeProbeSnapshot();
-            safePutPayload(result, "python", python);
-            nativePythonSummary = python.optString("summary", "Python interno verificado");
-            internalDiagnosticsSummary = nativePythonSummary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!python.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", python.optString("error", "Python interno falhou"));
-            }
-            result.put("message", python.optBoolean("ok", false) ? "Python interno real verificado pelo APK" : "Python interno falhou no APK");
-            return result;
-        }
-        if ("apk_python_runtime_info".equals(type)) {
-            JSONObject python = pythonRuntimeInfoSnapshot();
-            safePutPayload(result, "python", python);
-            nativePythonSummary = python.optString("summary", "runtime Python reportado");
-            internalDiagnosticsSummary = nativePythonSummary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!python.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", python.optString("error", "runtime Python falhou"));
-            }
-            result.put("message", python.optBoolean("ok", false) ? "informações do runtime Python enviadas" : "runtime Python indisponível");
-            return result;
-        }
-        if ("apk_python_status_bundle".equals(type)) {
-            JSONObject python = pythonStatusBundleSnapshot(serverUrl);
-            safePutPayload(result, "python", python);
-            internalDiagnosticsSummary = python.optString("summary", "status Python enviado");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!python.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", python.optString("error", "status Python falhou"));
-            }
-            result.put("message", python.optBoolean("ok", false) ? "bundle de status gerado pelo Python interno" : "bundle Python falhou");
-            return result;
-        }
-        if ("apk_python_storage_check".equals(type)) {
-            JSONObject python = pythonStorageCheckSnapshot();
-            safePutPayload(result, "python", python);
-            internalStorageSummary = python.optString("summary", "storage Python verificado");
-            internalDiagnosticsSummary = internalStorageSummary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!python.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", python.optString("error", "storage Python falhou"));
-            }
-            result.put("message", python.optBoolean("ok", false) ? "armazenamento verificado pelo Python interno" : "checagem Python de armazenamento falhou");
-            return result;
-        }
-        if ("apk_python_log_summary".equals(type)) {
-            JSONObject python = pythonLogSummarySnapshot();
-            safePutPayload(result, "python", python);
-            internalDiagnosticsSummary = python.optString("summary", "resumo Python de logs enviado");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!python.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", python.optString("error", "resumo Python falhou"));
-            }
-            result.put("message", python.optBoolean("ok", false) ? "histórico resumido pelo Python interno" : "resumo Python de logs falhou");
-            return result;
-        }
-        if ("apk_python_network_diagnostic".equals(type)) {
-            JSONObject python = pythonNetworkDiagnosticSnapshot(serverUrl);
-            safePutPayload(result, "python", python);
-            internalDiagnosticsSummary = python.optString("summary", "diagnóstico Python de rede enviado");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!python.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", python.optString("error", "diagnóstico Python de rede falhou"));
-            }
-            result.put("message", python.optBoolean("ok", false) ? "rede diagnosticada pelo Python interno" : "diagnóstico Python de rede falhou");
-            return result;
-        }
-        if ("apk_python_runtime_files_check".equals(type)) {
-            JSONObject python = pythonRuntimeFilesCheckSnapshot();
-            safePutPayload(result, "python", python);
-            internalDiagnosticsSummary = python.optString("summary", "arquivos runtime verificados pelo Python");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!python.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", python.optString("error", "verificação Python de arquivos falhou"));
-            }
-            result.put("message", python.optBoolean("ok", false) ? "arquivos do runtime verificados pelo Python interno" : "verificação Python de arquivos falhou");
-            return result;
-        }
-
-        if ("apk_runtime_foreground_probe".equals(type)) {
-            JSONObject foreground = foregroundRuntimeSnapshot("probe");
-            safePutPayload(result, "foregroundRuntime", foreground);
-            internalDiagnosticsSummary = foreground.optString("summary", "serviço persistente verificado");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "runtime persistente do APK verificado");
-            return result;
-        }
-        if ("apk_runtime_foreground_start".equals(type)) {
-            JSONObject foreground = startForegroundRuntime("job");
-            safePutPayload(result, "foregroundRuntime", foreground);
-            internalDiagnosticsSummary = foreground.optString("summary", "serviço persistente iniciado");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "runtime persistente iniciado pelo APK");
-            return result;
-        }
-        if ("apk_runtime_foreground_stop".equals(type)) {
-            JSONObject foreground = stopForegroundRuntime("job");
-            safePutPayload(result, "foregroundRuntime", foreground);
-            internalDiagnosticsSummary = foreground.optString("summary", "serviço persistente parado");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "runtime persistente parado pelo APK");
-            return result;
-        }
-        if ("apk_linux_strategy_plan".equals(type) || "apk_linux_manifest_plan".equals(type) || "apk_minecraft_bedrock_assisted_install_plan".equals(type)) {
-            String focus = "strategy";
-            if ("apk_linux_manifest_plan".equals(type)) focus = "manifest";
-            if ("apk_minecraft_bedrock_assisted_install_plan".equals(type)) focus = "bedrock_assisted";
-            JSONObject plan = linuxAssistedInstallSnapshot(focus);
-            safePutPayload(result, "linuxAssistedInstall", plan);
-            internalDiagnosticsSummary = plan.optString("summary", "plano assistido Linux gerado");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!plan.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", plan.optString("error", "plano assistido pendente"));
-            }
-            result.put("message", plan.optBoolean("ok", false) ? "plano assistido Linux/Bedrock gerado sem baixar nada" : "plano assistido Linux/Bedrock pendente");
-            return result;
-        }
-
-        if ("apk_core_linux_rootfs_import_status".equals(type)
-                || "apk_core_linux_rootfs_real_status".equals(type)
-                || "apk_core_linux_rootfs_glibc_preflight".equals(type)
-                || "apk_core_linux_rootfs_import_validate".equals(type)
-                || "apk_core_linux_rootfs_import_abort".equals(type)) {
-            JSONObject rootfsImport;
-            if ("apk_core_linux_rootfs_import_abort".equals(type)) {
-                rootfsImport = CoreLinuxRootfsImportManager.abort(this, coreLinuxDir());
-            } else if ("apk_core_linux_rootfs_glibc_preflight".equals(type)) {
-                rootfsImport = CoreLinuxRootfsImportManager.glibcPreflight(this, coreLinuxDir());
-            } else if ("apk_core_linux_rootfs_import_validate".equals(type) || "apk_core_linux_rootfs_real_status".equals(type)) {
-                rootfsImport = CoreLinuxRootfsImportManager.validateActive(this, coreLinuxDir());
-            } else {
-                rootfsImport = CoreLinuxRootfsImportManager.status(this, coreLinuxDir());
-            }
-            safePutPayload(result, "rootfsImport", rootfsImport);
-            if ("apk_core_linux_rootfs_glibc_preflight".equals(type)) {
-                // V16.2: expor telemetria no nome esperado pela VPS/monitor.
-                // O V16 já retornava a mensagem correta, mas o payload ficava em
-                // rootfsImport; os monitores olham coreLinuxRootfsGlibcPreflight.
-                // Mantém também stage/state no topo para registros espelhados.
-                safePutPayload(result, "coreLinuxRootfsGlibcPreflight", rootfsImport);
-                result.put("stage", rootfsImport.optString("stage", "core-linux-rootfs-glibc-intake-preflight-v16.2"));
-                result.put("state", rootfsImport.optString("state", "rootfs_glibc_preflight"));
-                result.put("glibcRuntime", rootfsImport.optJSONObject("glibcRuntime") == null ? new JSONObject() : rootfsImport.optJSONObject("glibcRuntime"));
-                result.put("missing", rootfsImport.optJSONArray("missing") == null ? new JSONArray() : rootfsImport.optJSONArray("missing"));
-                result.put("checks", rootfsImport.optJSONObject("checks") == null ? new JSONObject() : rootfsImport.optJSONObject("checks"));
-                result.put("validationLevel", rootfsImport.optString("validationLevel", ""));
-                result.put("readyForBox64Smoke", rootfsImport.optBoolean("readyForBox64Smoke", false));
-            }
-            JSONObject rootfsState = rootfsImport.optJSONObject("rootfs");
-            coreLinuxSummary = rootfsImport.optString("summary", "rootfs import em modo seguro");
-            coreLinuxState = rootfsImport.optString("state", "rootfs_import");
-            coreLinuxPrepared = rootfsImport.optBoolean("rootfsReady", coreLinuxPrepared)
-                    || (rootfsState != null && rootfsState.optBoolean("rootfsReady", false));
-            coreLinuxLastCheckAt = System.currentTimeMillis();
-            internalDiagnosticsSummary = coreLinuxSummary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!rootfsImport.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", rootfsImport.optString("summary", "rootfs import pendente"));
-            }
-            result.put("message", rootfsImport.optString("summary", "rootfs import verificado"));
-            return result;
-        }
-
-        if ("apk_core_linux_rootfs_status".equals(type)
-                || "apk_core_linux_rootfs_preflight".equals(type)
-                || "apk_core_linux_rootfs_prepare".equals(type)
-                || "apk_core_linux_rootfs_validate".equals(type)
-                || "apk_core_linux_rootfs_repair".equals(type)
-                || "apk_core_linux_rootfs_clean_staging".equals(type)) {
-            String action = "status";
-            if ("apk_core_linux_rootfs_preflight".equals(type)) action = "preflight";
-            if ("apk_core_linux_rootfs_prepare".equals(type)) action = "prepare";
-            if ("apk_core_linux_rootfs_validate".equals(type)) action = "validate";
-            if ("apk_core_linux_rootfs_repair".equals(type)) action = "repair";
-            if ("apk_core_linux_rootfs_clean_staging".equals(type)) action = "clean_staging";
-            JSONObject rootfs = CoreLinuxRuntimeManager.rootfsSnapshot(this, coreLinuxDir(), action);
-            safePutPayload(result, "rootfs", rootfs);
-            JSONObject rootfsState = rootfs.optJSONObject("rootfs");
-            coreLinuxSummary = rootfs.optString("summary", "rootfs interno em modo seguro");
-            coreLinuxState = rootfs.optString("state", "rootfs");
-            coreLinuxPrepared = rootfs.optBoolean("rootfsReady", false);
-            coreLinuxLastCheckAt = System.currentTimeMillis();
-            internalDiagnosticsSummary = coreLinuxSummary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!rootfs.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", rootfs.optString("summary", "rootfs interno pendente"));
-            }
-            result.put("message", rootfs.optString("summary", "rootfs interno verificado sem Python/Termux"));
-            if (rootfsState != null) safePutPayload(result, "rootfsState", rootfsState);
-            return result;
-        }
-
-        if ("apk_core_linux_runner_status".equals(type)
-                || "apk_core_linux_runner_preflight".equals(type)
-                || "apk_core_linux_runner_requirements".equals(type)) {
-            String action = "status";
-            if ("apk_core_linux_runner_preflight".equals(type)) action = "preflight";
-            if ("apk_core_linux_runner_requirements".equals(type)) action = "requirements";
-            JSONObject runner = CoreLinuxRunnerPreflightManager.preflight(this, coreLinuxDir(), action);
-            safePutPayload(result, "coreLinuxRunner", runner);
-            try {
-                JSONObject core = coreLinuxPublicSnapshot();
-                safePutPayload(result, "coreLinux", core);
-                coreLinuxSummary = firstNonEmpty(core.optString("summary", ""), coreLinuxSummary);
-                coreLinuxState = firstNonEmpty(core.optString("state", ""), coreLinuxState);
-                coreLinuxPrepared = core.optBoolean("prepared", coreLinuxPrepared);
-            } catch (Throwable ignored) {
-            }
-            internalDiagnosticsSummary = runner.optString("summary", "runner preflight verificado");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", runner.optString("summary", "Runner preflight verificado sem iniciar Bedrock"));
-            result.put("runnerReady", runner.optBoolean("runnerReady", false));
-            result.put("runnerBlocked", runner.optBoolean("runnerBlocked", true));
-            result.put("bedrockStarted", false);
-            result.put("shellOpened", false);
-            return result;
-        }
-
-        if ("apk_core_linux_runtime_smoke_test".equals(type)) {
-            JSONObject nativeExecutor = coreLinuxNativeExecutorSnapshot("test");
-            JSONObject smoke = CoreLinuxRuntimeManager.smokeTest(this, coreLinuxDir(), nativeExecutor);
-            safePutPayload(result, "coreLinuxSmokeTest", smoke);
-            coreLinuxSummary = smoke.optString("summary", "smoke test Core Linux executado");
-            coreLinuxState = smoke.optString("state", "smoke_test");
-            coreLinuxPrepared = smoke.optBoolean("ok", false);
-            coreLinuxLastCheckAt = System.currentTimeMillis();
-            internalDiagnosticsSummary = coreLinuxSummary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!smoke.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", smoke.optString("summary", "smoke test Core Linux pendente"));
-            }
-            result.put("message", smoke.optString("summary", "Core Linux smoke test executado sem Termux"));
-            return result;
-        }
-
-
-
-        if ("apk_core_linux_rootfs_smoke_test".equals(type)) {
-            JSONObject nativeExecutor = coreLinuxNativeExecutorSnapshot("test");
-            JSONObject smoke = CoreLinuxRuntimeManager.rootfsProotSmokeTest(this, coreLinuxDir(), nativeExecutor);
-            safePutPayload(result, "coreLinuxRootfsSmokeTest", smoke);
-            coreLinuxSummary = smoke.optString("summary", "smoke rootfs Core Linux executado");
-            coreLinuxState = smoke.optString("state", "rootfs_smoke_test");
-            coreLinuxPrepared = smoke.optBoolean("ok", false);
-            coreLinuxLastCheckAt = System.currentTimeMillis();
-            internalDiagnosticsSummary = coreLinuxSummary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!smoke.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", smoke.optString("summary", "smoke rootfs Core Linux pendente"));
-            }
-            result.put("message", smoke.optString("summary", "Core Linux rootfs smoke executado sem Termux"));
-            return result;
-        }
-
-        if ("apk_core_linux_box64_preflight".equals(type)) {
-            JSONObject nativeExecutor = coreLinuxNativeExecutorSnapshot("test");
-            JSONObject box64 = CoreLinuxRuntimeManager.box64IntakePreflight(this, coreLinuxDir(), nativeExecutor);
-            safePutPayload(result, "coreLinuxBox64Preflight", box64);
-            coreLinuxSummary = box64.optString("summary", "preflight Box64 Core Linux executado");
-            coreLinuxState = box64.optString("state", "box64_intake_preflight");
-            coreLinuxPrepared = box64.optBoolean("ok", coreLinuxPrepared);
-            coreLinuxLastCheckAt = System.currentTimeMillis();
-            internalDiagnosticsSummary = coreLinuxSummary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!box64.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", box64.optString("summary", "Box64 pendente"));
-            }
-            result.put("message", box64.optString("summary", "Box64 intake/preflight executado sem iniciar Bedrock"));
-            return result;
-        }
-
-        if ("apk_core_linux_box64_smoke_test".equals(type)) {
-            // V15.3.1 hard guard: não chamar helper genérico do CoreLinuxRuntimeManager
-            // aqui. Os testes V15.1/V15.2/V15.3 provaram que qualquer caminho que
-            // passa por snapshot/intake/asset Box64 pode acionar alocação gigante no
-            // Android antes de termos um erro útil. Esta etapa só faz File.exists()
-            // em caminhos pequenos do rootfs e retorna JSON curto.
-            File core = coreLinuxDir();
-            File rootfs = new File(core, "rootfs");
-            File loader = new File(rootfs, "lib/ld-linux-aarch64.so.1");
-            File libc1 = new File(rootfs, "lib/aarch64-linux-gnu/libc.so.6");
-            File libc2 = new File(rootfs, "usr/lib/aarch64-linux-gnu/libc.so.6");
-            File libm1 = new File(rootfs, "lib/aarch64-linux-gnu/libm.so.6");
-            File libm2 = new File(rootfs, "usr/lib/aarch64-linux-gnu/libm.so.6");
-            File libresolv1 = new File(rootfs, "lib/aarch64-linux-gnu/libresolv.so.2");
-            File libresolv2 = new File(rootfs, "usr/lib/aarch64-linux-gnu/libresolv.so.2");
-            File marker = new File(rootfs, ".core-worker-rootfs-ready");
-            File osRelease = new File(rootfs, "etc/os-release");
-
-            boolean rootfsDir = rootfs.exists() && rootfs.isDirectory();
-            boolean rootfsMinimalReady = rootfsDir && marker.exists() && osRelease.exists();
-            boolean loaderOk = loader.exists() && loader.isFile();
-            boolean libcOk = (libc1.exists() && libc1.isFile()) || (libc2.exists() && libc2.isFile());
-            boolean libmOk = (libm1.exists() && libm1.isFile()) || (libm2.exists() && libm2.isFile());
-            boolean libresolvOk = (libresolv1.exists() && libresolv1.isFile()) || (libresolv2.exists() && libresolv2.isFile());
-            boolean glibcReady = loaderOk && libcOk && libmOk && libresolvOk;
-            boolean ok = rootfsMinimalReady && glibcReady;
-            String state = !rootfsMinimalReady
-                    ? "box64_glibc_preflight_blocked_rootfs"
-                    : (!glibcReady ? "box64_smoke_blocked_missing_glibc_runtime" : "box64_glibc_preflight_ready");
-            String summary = ok
-                    ? "Box64 V15.3.1 pronto · runtime glibc arm64 presente; próxima etapa pode tocar no asset Box64"
-                    : (!rootfsMinimalReady
-                        ? "Box64 V15.3.1 bloqueado · rootfs mínimo ainda não validado"
-                        : "Box64 V15.3.1 bloqueado · rootfs sem runtime glibc arm64 necessário");
-
-            JSONArray missing = new JSONArray();
-            if (!rootfsDir) missing.put("rootfs_dir");
-            if (!marker.exists()) missing.put(".core-worker-rootfs-ready");
-            if (!osRelease.exists()) missing.put("etc/os-release");
-            if (!loaderOk) missing.put("/lib/ld-linux-aarch64.so.1");
-            if (!libcOk) missing.put("libc.so.6");
-            if (!libmOk) missing.put("libm.so.6");
-            if (!libresolvOk) missing.put("libresolv.so.2");
-
-            JSONObject glibc = new JSONObject()
-                    .put("ok", glibcReady)
-                    .put("loader", loaderOk)
-                    .put("libc", libcOk)
-                    .put("libm", libmOk)
-                    .put("libresolv", libresolvOk)
-                    .put("missing", missing);
-
-            JSONObject checks = new JSONObject()
-                    .put("rootfsDir", rootfsDir)
-                    .put("readyMarker", marker.exists())
-                    .put("osRelease", osRelease.exists())
-                    .put("loader", loaderOk)
-                    .put("libc", libcOk)
-                    .put("libm", libmOk)
-                    .put("libresolv", libresolvOk)
-                    .put("box64AssetOpened", false)
-                    .put("box64Extracted", false)
-                    .put("box64Executed", false)
-                    .put("nativeExecutorSnapshotCalled", false)
-                    .put("genericRuntimeSnapshotCalled", false);
-
-            JSONObject smoke = new JSONObject()
-                    .put("ok", ok)
-                    .put("type", "core_linux_box64_glibc_hard_guard")
-                    .put("stage", "core-linux-box64-glibc-preflight-v15.3.1")
-                    .put("state", state)
-                    .put("summary", summary)
-                    .put("termuxTouched", false)
-                    .put("pythonTouched", false)
-                    .put("serviceStarted", false)
-                    .put("bedrockStarted", false)
-                    .put("box64Started", false)
-                    .put("shellOpened", false)
-                    .put("remoteCommandAllowed", false)
-                    .put("x86_64UserBinaryAllowed", false)
-                    .put("rootfsDir", rootfs.getAbsolutePath())
-                    .put("rootfsMinimalReady", rootfsMinimalReady)
-                    .put("glibcRuntime", glibc)
-                    .put("missing", missing)
-                    .put("checks", checks)
-                    .put("memoryPolicy", new JSONObject()
-                            .put("stage", "v15.3.1")
-                            .put("hardGuardInMainActivity", true)
-                            .put("doesNotCallCoreLinuxRuntimeManagerBox64Smoke", true)
-                            .put("doesNotOpenBox64Asset", true)
-                            .put("doesNotExtractBox64", true)
-                            .put("doesNotHashBox64", true)
-                            .put("largeJsonPayloads", false))
-                    .put("nextStep", ok ? "v15.4-extrair-box64-e-rodar-version-help" : "importar/preparar rootfs Linux arm64 com glibc")
-                    .put("updatedAt", System.currentTimeMillis());
-
-            result.put("ok", ok);
-            safePutPayload(result, "coreLinuxBox64SmokeTest", smoke);
-            coreLinuxSummary = summary;
-            coreLinuxState = state;
-            coreLinuxPrepared = ok;
-            coreLinuxLastCheckAt = System.currentTimeMillis();
-            internalDiagnosticsSummary = summary;
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!ok) {
-                result.put("error", summary);
-            }
-            result.put("message", summary);
-            return result;
-        }
-
-        if ("apk_core_linux_native_executor_probe".equals(type)
-                || "apk_core_linux_native_executor_test".equals(type)
-                || "apk_core_linux_native_runtime_status".equals(type)
-                || "apk_core_linux_internal_repair".equals(type)) {
-            String action = "probe";
-            if ("apk_core_linux_native_executor_test".equals(type)) action = "test";
-            if ("apk_core_linux_native_runtime_status".equals(type)) action = "status";
-            if ("apk_core_linux_internal_repair".equals(type)) action = "repair";
-            JSONObject nativeExecutor = coreLinuxNativeExecutorSnapshot(action);
-            safePutPayload(result, "nativeExecutor", nativeExecutor);
-            try {
-                JSONObject runtime = CoreLinuxRuntimeManager.runtimeSnapshot(this, coreLinuxDir(), "executor", nativeExecutor);
-                safePutPayload(result, "coreLinuxInternal", runtime);
-                coreLinuxSummary = runtime.optString("summary", coreLinuxSummary);
-                coreLinuxState = runtime.optString("state", coreLinuxState);
-                coreLinuxPrepared = runtime.optBoolean("ok", coreLinuxPrepared);
-                coreLinuxLastCheckAt = System.currentTimeMillis();
-            } catch (Throwable ignored) {
-            }
-            internalDiagnosticsSummary = nativeExecutor.optString("summary", "executor nativo interno atualizado");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!nativeExecutor.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", nativeExecutor.optString("summary", "executor nativo interno pendente"));
-            }
-            result.put("message", nativeExecutor.optString("summary", "executor nativo interno atualizado"));
-            return result;
-        }
-
-        if ("apk_core_linux_internal_probe".equals(type)
-                || "apk_core_linux_internal_bootstrap".equals(type)
-                || "apk_core_linux_executor_probe".equals(type)
-                || "apk_core_linux_rootfs_manifest".equals(type)
-                || "apk_core_linux_box64_manifest".equals(type)
-                || "apk_core_linux_bedrock_preflight".equals(type)) {
-            String action = "probe";
-            if ("apk_core_linux_internal_bootstrap".equals(type)) action = "bootstrap";
-            if ("apk_core_linux_executor_probe".equals(type)) action = "executor";
-            if ("apk_core_linux_rootfs_manifest".equals(type)) action = "rootfs";
-            if ("apk_core_linux_box64_manifest".equals(type)) action = "box64";
-            if ("apk_core_linux_bedrock_preflight".equals(type)) action = "bedrock_preflight";
-            JSONObject core = coreLinuxStaticSnapshot(action);
-            safePutPayload(result, "coreLinuxInternal", core);
-            internalDiagnosticsSummary = core.optString("summary", "Core Linux interno em modo seguro");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", core.optString("summary", "Core Linux interno verificado sem Python/Termux"));
-            return result;
-        }
-
-        if ("apk_linux_runtime_probe".equals(type) || "apk_linux_rootfs_probe".equals(type) || "apk_linux_box64_probe".equals(type)) {
-            String focus = "runtime";
-            if ("apk_linux_rootfs_probe".equals(type)) focus = "rootfs";
-            if ("apk_linux_box64_probe".equals(type)) focus = "box64";
-            JSONObject linux = coreLinuxStaticSnapshot(focus);
-            safePutPayload(result, "linuxRuntime", linux);
-            internalDiagnosticsSummary = linux.optString("summary", "runtime Linux verificado em modo seguro");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", linux.optString("summary", "Core Linux Runtime verificado sem Python/Termux"));
-            return result;
-        }
-        if ("apk_linux_prepare_directories".equals(type)) {
-            prepareCoreLinuxRuntimeState();
-            JSONObject linux = coreLinuxProvisionPlanSnapshot("prepare_directories");
-            safePutPayload(result, "linuxProvision", linux);
-            internalDiagnosticsSummary = linux.optString("summary", "provisioner preparado");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "diretórios e planos do Core Linux Runtime preparados sem instalar nada");
-            return result;
-        }
-        if ("apk_linux_provisioner_probe".equals(type) || "apk_linux_generate_setup_plan".equals(type)) {
-            JSONObject linux = coreLinuxProvisionPlanSnapshot("apk_linux_generate_setup_plan".equals(type) ? "setup_plan" : "provisioner");
-            safePutPayload(result, "linuxProvision", linux);
-            internalDiagnosticsSummary = linux.optString("summary", "plano Linux gerado");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!linux.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", linux.optString("error", "provisioner Linux pendente"));
-            }
-            result.put("message", linux.optBoolean("ok", false) ? "plano do Core Linux Runtime gerado pelo APK" : "provisioner Linux ainda pendente");
-            return result;
-        }
-        if ("apk_minecraft_bedrock_install_plan".equals(type) || "apk_minecraft_bedrock_properties_template".equals(type)) {
-            JSONObject plan = bedrockInstallPlanSnapshot("apk_minecraft_bedrock_properties_template".equals(type) ? "properties_template" : "install_plan");
-            safePutPayload(result, "bedrockPlan", plan);
-            internalDiagnosticsSummary = plan.optString("summary", "plano Bedrock gerado");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!plan.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", plan.optString("error", "plano Bedrock pendente"));
-            }
-            result.put("message", plan.optBoolean("ok", false) ? "plano Bedrock gerado sem iniciar servidor" : "plano Bedrock pendente");
-            return result;
-        }
-        if ("apk_minecraft_bedrock_requirements".equals(type)) {
-            JSONObject requirements = bedrockServerLightweightTestSnapshot();
-            safePutPayload(result, "bedrock", requirements);
-            internalDiagnosticsSummary = requirements.optString("summary", "requisitos Bedrock avaliados");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!requirements.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", requirements.optString("error", "requisitos Bedrock pendentes"));
-            }
-            result.put("message", "requisitos do Bedrock avaliados sem instalar nada");
-            return result;
-        }
-        if ("apk_minecraft_bedrock_probe".equals(type) || "apk_minecraft_bedrock_status".equals(type)) {
-            JSONObject bedrock = bedrockServerLightweightTestSnapshot();
-            safePutPayload(result, "bedrock", bedrock);
-            internalDiagnosticsSummary = bedrock.optString("summary", "Bedrock diagnosticado");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            if (!bedrock.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", bedrock.optString("error", "Bedrock não configurado"));
-            }
-            result.put("message", bedrock.optBoolean("ok", false) ? "Bedrock Manager diagnosticado pelo APK" : "Bedrock Manager ainda não configurado");
-            return result;
-        }
-        if ("apk_minecraft_bedrock_prepare_files".equals(type)
-                || "apk_minecraft_bedrock_start_plan".equals(type)
-                || "apk_minecraft_bedrock_stop_plan".equals(type)
-                || "apk_minecraft_bedrock_logs_status".equals(type)) {
-            String focus = "status";
-            if ("apk_minecraft_bedrock_prepare_files".equals(type)) focus = "prepare_properties";
-            if ("apk_minecraft_bedrock_start_plan".equals(type)) focus = "start_plan";
-            if ("apk_minecraft_bedrock_stop_plan".equals(type)) focus = "stop_plan";
-            if ("apk_minecraft_bedrock_logs_status".equals(type)) focus = "logs_status";
-            JSONObject manager = bedrockServerLightweightTestSnapshot();
-            manager.put("focus", focus);
-            safePutPayload(result, "bedrockManager", manager);
-            internalDiagnosticsSummary = manager.optString("summary", "Bedrock Manager em modo seguro");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", manager.optString("summary", "Bedrock Manager verificado sem Python/Termux"));
-            return result;
-        }
-        if ("apk_minecraft_bedrock_installer_status".equals(type)
-                || "apk_minecraft_bedrock_validate_device".equals(type)
-                || "apk_minecraft_bedrock_choose_strategy_plan".equals(type)
-                || "apk_minecraft_bedrock_prepare_environment_plan".equals(type)
-                || "apk_minecraft_bedrock_download_manifest".equals(type)
-                || "apk_minecraft_bedrock_final_preflight".equals(type)) {
-            String focus = "status";
-            if ("apk_minecraft_bedrock_validate_device".equals(type)) focus = "validate_device";
-            if ("apk_minecraft_bedrock_choose_strategy_plan".equals(type)) focus = "choose_strategy";
-            if ("apk_minecraft_bedrock_prepare_environment_plan".equals(type)) focus = "prepare_environment";
-            if ("apk_minecraft_bedrock_download_manifest".equals(type)) focus = "download_manifest";
-            if ("apk_minecraft_bedrock_final_preflight".equals(type)) focus = "final_preflight";
-            JSONObject wizard = bedrockServerLightweightTestSnapshot();
-            wizard.put("focus", focus);
-            wizard.put("installerIsolated", true);
-            safePutPayload(result, "bedrockInstaller", wizard);
-            internalDiagnosticsSummary = wizard.optString("summary", "instalador Bedrock em modo seguro");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", wizard.optString("summary", "instalador Bedrock verificado sem Python/Termux"));
-            return result;
-        }
-        if ("apk_minecraft_bedrock_runtime_status".equals(type)
-                || "apk_minecraft_bedrock_runtime_start".equals(type)
-                || "apk_minecraft_bedrock_runtime_stop".equals(type)
-                || "apk_minecraft_bedrock_runtime_logs".equals(type)
-                || "apk_minecraft_bedrock_runner_status".equals(type)
-                || "apk_minecraft_bedrock_runner_preflight".equals(type)
-                || "apk_minecraft_bedrock_runner_start".equals(type)
-                || "apk_minecraft_bedrock_runner_stop".equals(type)
-                || "apk_minecraft_bedrock_console_tail".equals(type)
-                || "apk_minecraft_bedrock_console_command".equals(type)
-                || "apk_minecraft_bedrock_runtime_repair".equals(type)) {
-            String action = "status";
-            if ("apk_minecraft_bedrock_runtime_start".equals(type) || "apk_minecraft_bedrock_runner_start".equals(type)) action = "start";
-            if ("apk_minecraft_bedrock_runtime_stop".equals(type) || "apk_minecraft_bedrock_runner_stop".equals(type)) action = "stop";
-            if ("apk_minecraft_bedrock_runtime_logs".equals(type) || "apk_minecraft_bedrock_console_tail".equals(type)) action = "console_tail";
-            if ("apk_minecraft_bedrock_runner_preflight".equals(type)) action = "preflight";
-            if ("apk_minecraft_bedrock_console_command".equals(type)) action = "console_command_remote_blocked";
-            if ("apk_minecraft_bedrock_runtime_repair".equals(type)) action = "repair";
-            if ("stop".equals(action)) {
-                try { stopBedrockService("job-stop-safe"); } catch (Throwable ignored) {}
-            }
-            JSONObject runtime = bedrockRuntimeStaticSnapshot(action);
-            runtime.put("startBlocked", "start".equals(action));
-            runtime.put("isolationMode", BEDROCK_RUNTIME_ISOLATED);
-            safePutPayload(result, "bedrockRuntime", runtime);
-            internalDiagnosticsSummary = runtime.optString("summary", "runtime Bedrock em modo seguro");
-            internalDiagnosticsLastAt = System.currentTimeMillis();
-            result.put("message", "start".equals(action) ? "runtime Bedrock bloqueado com segurança pelo APK" : runtime.optString("summary", "runtime Bedrock verificado sem Python/Termux"));
-            return result;
-        }
-        if ("apk_download_small".equals(type)) {
-            JSONObject download = downloadSmallJobPayload(serverUrl, jobPayload);
-            safePutPayload(result, "download", download);
-            if (!download.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", download.optString("error", "download pequeno falhou"));
-            }
-            result.put("message", download.optBoolean("ok", false) ? "download pequeno concluído pelo APK" : "download pequeno falhou");
-            return result;
-        }
-        if ("apk_verify_file".equals(type)) {
-            JSONObject verify = verifyCachedJobFile(jobPayload);
-            safePutPayload(result, "verify", verify);
-            if (!verify.optBoolean("ok", false)) {
-                result.put("ok", false);
-                result.put("error", verify.optString("error", "verificação de arquivo falhou"));
-            }
-            result.put("message", verify.optBoolean("ok", false) ? "arquivo interno verificado" : "verificação de arquivo falhou");
-            return result;
-        }
-        result.put("ok", false);
-        result.put("error", "job interno não permitido pelo APK: " + type);
-        return result;
-    }
 
     private JSONObject permissionsSnapshot() throws Exception {
         JSONObject permissions = new JSONObject();
@@ -6625,20 +5593,6 @@ public class MainActivity extends Activity {
         return builder.toString();
     }
 
-    private void postLightJobResult(String serverUrl, JSONObject job, JSONObject result) {
-        try {
-            JSONObject payload = new JSONObject();
-            payload.put("jobId", job == null ? "" : job.optString("id", ""));
-            payload.put("type", job == null ? "" : job.optString("type", ""));
-            payload.put("installId", installId());
-            payload.put("workerId", effectiveWorkerId());
-            payload.put("appVersion", APP_VERSION);
-            payload.put("appVersionCode", BuildConfig.VERSION_CODE);
-            safePutPayload(payload, "result", result);
-            request("POST", serverUrl + "/core-worker/app/jobs/result", payload, null);
-        } catch (Throwable ignored) {
-        }
-    }
 
     private void reportFcmToken(String serverUrl, String token, String reason) {
         if (serverUrl == null || serverUrl.trim().isEmpty() || token == null || token.trim().isEmpty()) {

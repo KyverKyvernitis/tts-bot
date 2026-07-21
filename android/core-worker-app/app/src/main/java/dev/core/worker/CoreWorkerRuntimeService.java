@@ -14,6 +14,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -21,6 +22,7 @@ import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -28,25 +30,39 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class CoreWorkerRuntimeService extends Service {
     public static final String ACTION_START = "dev.core.worker.action.RUNTIME_START";
     public static final String ACTION_STOP = "dev.core.worker.action.RUNTIME_STOP";
     public static final String ACTION_TICK = "dev.core.worker.action.RUNTIME_TICK";
+    public static final String ACTION_POLL_NOW = "dev.core.worker.action.AGENT_POLL_NOW";
 
     private static final String PREFS = "core_worker_private";
     private static final String CHANNEL_ID = "core_worker_runtime";
     private static final int NOTIFICATION_ID = 4107;
-    private static final long TICK_MS = 180L * 1000L;
+    private static final long TICK_MS = 30L * 1000L;
     private static final long HEARTBEAT_MIN_MS = 120L * 1000L;
+    private static final long POLL_ERROR_BACKOFF_MIN_MS = 15L * 1000L;
+    private static final long POLL_ERROR_BACKOFF_MAX_MS = 5L * 60L * 1000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean running = false;
     private NativeTtsManager nativeTtsManager;
     private LocalNativeTtsHttpServer nativeTtsServer;
     private final AtomicBoolean heartbeatRunning = new AtomicBoolean(false);
+    private final AtomicBoolean pollRunning = new AtomicBoolean(false);
+    private final ExecutorService agentExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread thread = new Thread(r, "core-worker-agent");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private CoreWorkerJobExecutor jobExecutor;
     private volatile long lastHeartbeatStartedAt = 0L;
+    private volatile long nextPollAllowedAt = 0L;
+    private volatile long pollErrorBackoffMs = POLL_ERROR_BACKOFF_MIN_MS;
 
     private final Runnable tickRunnable = new Runnable() {
         @Override
@@ -54,7 +70,8 @@ public class CoreWorkerRuntimeService extends Service {
             if (!running) {
                 return;
             }
-            markTick("serviço persistente ativo");
+            markTick("agente autônomo ativo");
+            pollJobs("foreground_tick", false);
             reportHeartbeat("foreground_tick");
             handler.postDelayed(this, TICK_MS);
         }
@@ -64,36 +81,83 @@ public class CoreWorkerRuntimeService extends Service {
     public void onCreate() {
         super.onCreate();
         createChannel();
+        jobExecutor = new CoreWorkerJobExecutor(getApplicationContext());
         startNativeTtsBridge();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? ACTION_START : String.valueOf(intent.getAction());
+        String reason = intent == null ? "foreground_start" : intent.getStringExtra("reason");
         if (ACTION_STOP.equals(action)) {
             running = false;
             handler.removeCallbacks(tickRunnable);
             prefs().edit()
+                    .putBoolean("agent_enabled", false)
+                    .putBoolean("job_executor_ready", false)
                     .putBoolean("foreground_runtime_active", false)
-                    .putString("foreground_runtime_state", "serviço persistente parado")
+                    .putString("foreground_runtime_state", "agente autônomo parado")
                     .putLong("foreground_runtime_last_tick_at", System.currentTimeMillis())
                     .apply();
             stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
         }
+
         running = true;
-        startForeground(NOTIFICATION_ID, buildNotification("Runtime persistente ativo"));
+        startForeground(NOTIFICATION_ID, buildNotification("Agente autônomo ativo"));
         prefs().edit()
+                .putBoolean("agent_enabled", true)
+                .putBoolean("job_executor_ready", true)
                 .putBoolean("foreground_runtime_active", true)
-                .putString("foreground_runtime_state", "serviço persistente ativo")
+                .putString("foreground_runtime_state", "agente autônomo ativo")
                 .putLong("foreground_runtime_started_at", System.currentTimeMillis())
                 .apply();
-        markTick("serviço persistente ativo");
-        reportHeartbeat(intent == null ? "foreground_start" : intent.getStringExtra("reason"));
+        markTick("agente autônomo ativo");
+        reportHeartbeat(reason);
+        pollJobs(reason == null ? "foreground_start" : reason, ACTION_POLL_NOW.equals(action));
         handler.removeCallbacks(tickRunnable);
         handler.postDelayed(tickRunnable, TICK_MS);
         return START_STICKY;
+    }
+
+    static boolean shouldRunAgent(Context context) {
+        if (context == null) return false;
+        try {
+            SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+            if (prefs.contains("agent_enabled")) {
+                return prefs.getBoolean("agent_enabled", false);
+            }
+            boolean paired = prefs.getBoolean("paired_via_native_apk", false)
+                    && !prefs.getString("worker_token", "").trim().isEmpty();
+            return prefs.getBoolean("foreground_runtime_active", false) || paired;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public static void requestStart(Context context, String reason) {
+        if (context == null) return;
+        try {
+            Intent intent = new Intent(context, CoreWorkerRuntimeService.class);
+            intent.setAction(ACTION_START);
+            intent.putExtra("reason", reason == null ? "request_start" : reason);
+            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent);
+            else context.startService(intent);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static void requestPoll(Context context, String reason) {
+        if (context == null || !shouldRunAgent(context)) return;
+        try {
+            Intent intent = new Intent(context, CoreWorkerRuntimeService.class);
+            intent.setAction(ACTION_POLL_NOW);
+            intent.putExtra("reason", reason == null ? "request_poll" : reason);
+            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent);
+            else context.startService(intent);
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override
@@ -101,9 +165,11 @@ public class CoreWorkerRuntimeService extends Service {
         running = false;
         handler.removeCallbacks(tickRunnable);
         stopNativeTtsBridge();
+        try { agentExecutor.shutdownNow(); } catch (Throwable ignored) { }
         prefs().edit()
+                .putBoolean("job_executor_ready", false)
                 .putBoolean("foreground_runtime_active", false)
-                .putString("foreground_runtime_state", "serviço persistente encerrado")
+                .putString("foreground_runtime_state", "agente autônomo encerrado")
                 .putLong("foreground_runtime_last_tick_at", System.currentTimeMillis())
                 .apply();
         super.onDestroy();
@@ -179,7 +245,7 @@ public class CoreWorkerRuntimeService extends Service {
                 NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
                 if (manager != null) {
                     NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Runtime persistente Core Worker", NotificationManager.IMPORTANCE_LOW);
-                    channel.setDescription("Mantém o Core Worker acordado para jobs locais e servidor futuro.");
+                    channel.setDescription("Mantém o agente do Core Worker ativo para buscar e executar jobs com a interface fechada.");
                     manager.createNotificationChannel(channel);
                 }
             }
@@ -199,12 +265,381 @@ public class CoreWorkerRuntimeService extends Service {
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
         builder.setSmallIcon(android.R.drawable.stat_sys_upload_done)
-                .setContentTitle("Core Worker ativo")
+                .setContentTitle("Core Worker autônomo")
                 .setContentText(text == null ? "Runtime persistente ativo" : text)
                 .setContentIntent(pending)
                 .setOngoing(true)
                 .setShowWhen(false);
         return builder.build();
+    }
+
+    private void pollJobs(String reason, boolean force) {
+        if (!running || jobExecutor == null) return;
+        long now = System.currentTimeMillis();
+        if (!force && now < nextPollAllowedAt) return;
+        if (!pollRunning.compareAndSet(false, true)) return;
+        agentExecutor.execute(() -> {
+            PowerManager.WakeLock wakeLock = null;
+            try {
+                PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+                if (power != null) {
+                    wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CoreWorker:AgentCycle");
+                    wakeLock.setReferenceCounted(false);
+                    wakeLock.acquire(10L * 60L * 1000L);
+                }
+                runAgentCycle(reason == null ? "background" : reason, force);
+                pollErrorBackoffMs = POLL_ERROR_BACKOFF_MIN_MS;
+            } catch (Throwable error) {
+                long failedAt = System.currentTimeMillis();
+                nextPollAllowedAt = failedAt + pollErrorBackoffMs;
+                pollErrorBackoffMs = Math.min(POLL_ERROR_BACKOFF_MAX_MS, Math.max(POLL_ERROR_BACKOFF_MIN_MS, pollErrorBackoffMs * 2L));
+                prefs().edit()
+                        .putString("internal_light_jobs_state", "falha · " + shortThrowable(error))
+                        .putString("internal_light_jobs_last_summary", "falha: " + shortThrowable(error))
+                        .putString("internal_light_jobs_last_fetch_error", shortThrowable(error))
+                        .putString("agent_last_error", shortThrowable(error))
+                        .putLong("internal_light_jobs_last_check_at", failedAt)
+                        .apply();
+            } finally {
+                try {
+                    if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+                } catch (Throwable ignored) {
+                }
+                pollRunning.set(false);
+            }
+        });
+    }
+
+    private void runAgentCycle(String reason, boolean force) throws Exception {
+        String serverUrl = normalizedServerUrl();
+        if (serverUrl.isEmpty()) {
+            prefs().edit().putString("internal_light_jobs_state", "VPS não configurada").apply();
+            return;
+        }
+
+        flushResultOutbox(serverUrl);
+        long startedAt = System.currentTimeMillis();
+        JSONObject payload = jobExecutor.buildFetchStatus(serverUrl);
+        payload.put("installId", installId());
+        payload.put("workerId", prefs().getString("worker_id", ""));
+        payload.put("appVersion", BuildConfig.VERSION_NAME);
+        payload.put("appVersionCode", BuildConfig.VERSION_CODE);
+        payload.put("versionName", BuildConfig.VERSION_NAME);
+        payload.put("versionCode", BuildConfig.VERSION_CODE);
+        payload.put("source", "core-worker-apk-agent-service-v1");
+        payload.put("reason", reason);
+        payload.put("fetchStage", "autonomous-agent-v1");
+        payload.put("force", force || shouldForcePoll(reason));
+        payload.put("supportedJobs", CoreWorkerJobCatalog.supportedJobs());
+        payload.put("supported_tasks", CoreWorkerJobCatalog.supportedJobs());
+        payload.put("supportedTasks", CoreWorkerJobCatalog.supportedJobs());
+        payload.put("capabilities", CoreWorkerJobCatalog.capabilities());
+
+        prefs().edit()
+                .putLong("internal_light_jobs_last_fetch_started_at", startedAt)
+                .putString("internal_light_jobs_last_fetch_reason", reason)
+                .putString("internal_light_jobs_last_fetch_app_version", BuildConfig.VERSION_NAME)
+                .putInt("internal_light_jobs_last_fetch_app_version_code", BuildConfig.VERSION_CODE)
+                .putString("internal_light_jobs_last_fetch_error", "")
+                .apply();
+
+        HttpResult response = request("POST", serverUrl + "/core-worker/app/jobs/fetch", payload);
+        long checkedAt = System.currentTimeMillis();
+        SharedPreferences.Editor state = prefs().edit()
+                .putLong("internal_light_jobs_last_check_at", checkedAt)
+                .putInt("internal_light_jobs_last_fetch_http_status", response.status);
+        if (!response.ok()) {
+            String error = compact(response.body);
+            state.putString("internal_light_jobs_state", "falha HTTP " + response.status)
+                    .putString("internal_light_jobs_last_fetch_error", error)
+                    .putString("agent_last_error", error)
+                    .apply();
+            throw new IllegalStateException("HTTP " + response.status + (error.isEmpty() ? "" : ": " + error));
+        }
+
+        JSONObject body = new JSONObject(response.body);
+        if (!body.optBoolean("ok", false)) {
+            String error = compact(body.optString("error", response.body));
+            state.putString("internal_light_jobs_state", "VPS recusou a busca")
+                    .putString("internal_light_jobs_last_fetch_error", error)
+                    .putString("agent_last_error", error)
+                    .apply();
+            throw new IllegalStateException(error.isEmpty() ? "VPS recusou a busca de jobs" : error);
+        }
+        if (body.optBoolean("throttled", false)) {
+            int retryAfter = Math.max(1, body.optInt("retryAfterSeconds", 10));
+            nextPollAllowedAt = checkedAt + retryAfter * 1000L;
+            updateQueueState(body.optJSONObject("queue"));
+            state.putString("internal_light_jobs_state", "fila em cooldown")
+                    .putString("internal_light_jobs_last_summary", "VPS pediu nova checagem em " + retryAfter + "s")
+                    .apply();
+            return;
+        }
+
+        updateQueueState(body.optJSONObject("queue"));
+        updateCatalogState(body.optJSONObject("catalog"));
+        JSONArray jobs = body.optJSONArray("jobs");
+        int count = jobs == null ? 0 : jobs.length();
+        state.putInt("internal_light_jobs_last_count", count)
+                .putInt("internal_light_jobs_last_returned_count", count)
+                .apply();
+        if (count == 0) {
+            prefs().edit()
+                    .putString("internal_light_jobs_state", "fila vazia")
+                    .putString("internal_light_jobs_last_summary", "fila vazia")
+                    .putInt("internal_jobs_running_count", 0)
+                    .putString("agent_last_error", "")
+                    .apply();
+            return;
+        }
+
+        int okCount = 0;
+        int pendingResultCount = 0;
+        prefs().edit().putInt("internal_jobs_running_count", 1).apply();
+        for (int i = 0; i < count; i++) {
+            JSONObject job = jobs.optJSONObject(i);
+            if (job == null) continue;
+            String jobId = job.optString("id", "").trim();
+            String jobType = job.optString("type", "job");
+            JSONObject result;
+            long jobStartedAt = System.currentTimeMillis();
+            File pending = outboxFile(jobId);
+            if (pending != null && pending.isFile()) {
+                JSONObject envelope = readJsonFile(pending);
+                if (postResultEnvelope(serverUrl, envelope)) {
+                    pending.delete();
+                    rememberCompletedJob(jobId);
+                    JSONObject queuedResult = envelope.optJSONObject("result");
+                    if (queuedResult != null && queuedResult.optBoolean("ok", false)) okCount++;
+                } else {
+                    pendingResultCount++;
+                }
+                continue;
+            }
+            if (wasJobRecentlyCompleted(jobId)) {
+                result = new JSONObject()
+                        .put("ok", true)
+                        .put("type", jobType)
+                        .put("deduplicated", true)
+                        .put("message", "job duplicado ignorado pelo agente")
+                        .put("jobId", jobId);
+            } else {
+                try {
+                    result = jobExecutor.execute(job, serverUrl);
+                } catch (Throwable jobError) {
+                    result = new JSONObject()
+                            .put("ok", false)
+                            .put("type", jobType)
+                            .put("error", shortThrowable(jobError))
+                            .put("message", "job falhou no agente do APK");
+                }
+            }
+            result.put("durationMs", Math.max(0L, System.currentTimeMillis() - jobStartedAt));
+            result.put("attempt", job.optInt("attempt", 1));
+            if (result.optBoolean("ok", false)) okCount++;
+
+            JSONObject envelope = buildResultEnvelope(job, result);
+            File stored = persistOutbox(jobId, envelope);
+            if (postResultEnvelope(serverUrl, envelope)) {
+                if (stored != null) stored.delete();
+                rememberCompletedJob(jobId);
+            } else {
+                pendingResultCount++;
+            }
+            recordJobHistory(jobType, result.optBoolean("ok", false), result.optString("message", result.optString("error", "")));
+        }
+
+        String executionState = "executados " + okCount + "/" + count;
+        String executionSummary = summarizeJobs(jobs, okCount, count);
+        if (pendingResultCount > 0) {
+            executionState += " · " + pendingResultCount + " resultado(s) pendente(s)";
+            executionSummary += " · confirmação pendente: " + pendingResultCount;
+        }
+        SharedPreferences.Editor completedState = prefs().edit()
+                .putString("internal_light_jobs_state", executionState)
+                .putString("internal_light_jobs_last_summary", executionSummary)
+                .putInt("internal_jobs_running_count", 0);
+        if (pendingResultCount == 0) completedState.putString("agent_last_error", "");
+        completedState.apply();
+    }
+
+    private void updateQueueState(JSONObject queue) {
+        int pending = queue == null ? 0 : queue.optInt("pending", 0);
+        int runningJobs = queue == null ? 0 : queue.optInt("running", 0);
+        prefs().edit()
+                .putInt("internal_jobs_pending_count", pending)
+                .putInt("internal_jobs_running_count", runningJobs)
+                .putString("internal_jobs_queue_summary", runningJobs + " rodando · " + pending + " pendentes")
+                .apply();
+    }
+
+    private void updateCatalogState(JSONObject catalog) {
+        if (catalog == null) return;
+        JSONArray automatic = catalog.optJSONArray("automatic");
+        JSONArray manual = catalog.optJSONArray("manual");
+        int autoCount = automatic == null ? 0 : automatic.length();
+        int manualCount = manual == null ? 0 : manual.length();
+        prefs().edit()
+                .putInt("internal_jobs_auto_total", autoCount)
+                .putInt("internal_jobs_manual_total", manualCount)
+                .putString("internal_jobs_catalog_summary", autoCount + " automáticos · " + manualCount + " manuais")
+                .apply();
+    }
+
+    private boolean shouldForcePoll(String reason) {
+        String value = reason == null ? "" : reason.toLowerCase(java.util.Locale.ROOT);
+        return value.contains("manual") || value.contains("fcm") || value.contains("resume")
+                || value.contains("opened") || value.contains("status") || value.contains("diagnostic");
+    }
+
+    private JSONObject buildResultEnvelope(JSONObject job, JSONObject result) throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("jobId", job == null ? "" : job.optString("id", ""));
+        payload.put("type", job == null ? "" : job.optString("type", ""));
+        payload.put("installId", installId());
+        payload.put("workerId", prefs().getString("worker_id", ""));
+        payload.put("appVersion", BuildConfig.VERSION_NAME);
+        payload.put("appVersionCode", BuildConfig.VERSION_CODE);
+        payload.put("result", result == null ? new JSONObject() : result);
+        payload.put("queuedAt", System.currentTimeMillis());
+        return payload;
+    }
+
+    private File persistOutbox(String jobId, JSONObject envelope) {
+        try {
+            File target = outboxFile(jobId);
+            if (target == null) return null;
+            File temp = new File(target.getParentFile(), target.getName() + ".tmp");
+            FileOutputStream output = new FileOutputStream(temp, false);
+            output.write(envelope.toString().getBytes(StandardCharsets.UTF_8));
+            output.flush();
+            output.close();
+            if (!temp.renameTo(target)) {
+                FileOutputStream direct = new FileOutputStream(target, false);
+                direct.write(envelope.toString().getBytes(StandardCharsets.UTF_8));
+                direct.flush();
+                direct.close();
+                temp.delete();
+            }
+            return target;
+        } catch (Throwable error) {
+            prefs().edit().putString("agent_last_error", "outbox: " + shortThrowable(error)).apply();
+            return null;
+        }
+    }
+
+    private void flushResultOutbox(String serverUrl) {
+        File dir = jobExecutor == null ? null : jobExecutor.outboxDir();
+        File[] files = dir == null ? null : dir.listFiles();
+        if (files == null) return;
+        for (File file : files) {
+            if (file == null || !file.isFile() || !file.getName().endsWith(".json")) continue;
+            try {
+                JSONObject envelope = readJsonFile(file);
+                if (postResultEnvelope(serverUrl, envelope)) {
+                    rememberCompletedJob(envelope.optString("jobId", ""));
+                    file.delete();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private boolean postResultEnvelope(String serverUrl, JSONObject envelope) {
+        try {
+            HttpResult response = request("POST", serverUrl + "/core-worker/app/jobs/result", envelope);
+            if (!response.ok()) return false;
+            JSONObject body = new JSONObject(response.body);
+            return body.optBoolean("ok", false);
+        } catch (Throwable error) {
+            prefs().edit().putString("agent_last_error", "resultado: " + shortThrowable(error)).apply();
+            return false;
+        }
+    }
+
+    private File outboxFile(String jobId) {
+        if (jobExecutor == null) return null;
+        String safe = jobId == null ? "" : jobId.trim().replaceAll("[^a-zA-Z0-9._-]", "_");
+        if (safe.isEmpty()) safe = "job-" + System.currentTimeMillis();
+        return new File(jobExecutor.outboxDir(), safe + ".json");
+    }
+
+    private JSONObject readJsonFile(File file) throws Exception {
+        if (file == null || !file.isFile()) return new JSONObject();
+        FileInputStream input = new FileInputStream(file);
+        byte[] data = new byte[(int) Math.min(file.length(), 1024L * 1024L)];
+        int read = input.read(data);
+        input.close();
+        return read <= 0 ? new JSONObject() : new JSONObject(new String(data, 0, read, StandardCharsets.UTF_8));
+    }
+
+    private boolean wasJobRecentlyCompleted(String jobId) {
+        if (jobId == null || jobId.trim().isEmpty()) return false;
+        try {
+            JSONArray recent = new JSONArray(prefs().getString("internal_completed_job_ids", "[]"));
+            for (int i = 0; i < recent.length(); i++) if (jobId.equals(recent.optString(i, ""))) return true;
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private void rememberCompletedJob(String jobId) {
+        if (jobId == null || jobId.trim().isEmpty()) return;
+        try {
+            JSONArray old = new JSONArray(prefs().getString("internal_completed_job_ids", "[]"));
+            JSONArray next = new JSONArray().put(jobId);
+            for (int i = 0; i < old.length() && next.length() < 32; i++) {
+                String value = old.optString(i, "");
+                if (!value.isEmpty() && !jobId.equals(value)) next.put(value);
+            }
+            prefs().edit().putString("internal_completed_job_ids", next.toString()).apply();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void recordJobHistory(String type, boolean ok, String message) {
+        try {
+            JSONArray old = new JSONArray(prefs().getString("internal_job_history", "[]"));
+            JSONArray next = new JSONArray();
+            next.put(new JSONObject()
+                    .put("at", System.currentTimeMillis())
+                    .put("type", type == null ? "job" : type)
+                    .put("ok", ok)
+                    .put("message", message == null ? "" : message));
+            for (int i = 0; i < old.length() && next.length() < 12; i++) {
+                JSONObject item = old.optJSONObject(i);
+                if (item != null) next.put(item);
+            }
+            prefs().edit().putString("internal_job_history", next.toString()).apply();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private String summarizeJobs(JSONArray jobs, int okCount, int count) {
+        StringBuilder out = new StringBuilder();
+        int limit = Math.min(count, 3);
+        for (int i = 0; i < limit; i++) {
+            JSONObject job = jobs == null ? null : jobs.optJSONObject(i);
+            if (job == null) continue;
+            if (out.length() > 0) out.append(", ");
+            out.append(job.optString("type", "job"));
+        }
+        if (count > limit) out.append(" +").append(count - limit);
+        if (out.length() == 0) out.append("jobs internos");
+        return out.append(" · ").append(okCount).append('/').append(count).append(" ok").toString();
+    }
+
+
+    private String compact(String value) {
+        String clean = value == null ? "" : value.replaceAll("\\s+", " ").trim();
+        return clean.length() <= 600 ? clean : clean.substring(0, 600);
+    }
+
+    private String shortThrowable(Throwable error) {
+        if (error == null) return "erro desconhecido";
+        String message = error.getMessage() == null ? "" : error.getMessage().trim();
+        String text = error.getClass().getSimpleName() + (message.isEmpty() ? "" : ": " + message);
+        return text.length() <= 180 ? text : text.substring(0, 180);
     }
 
     private void reportHeartbeat(String reason) {
@@ -225,7 +660,13 @@ public class CoreWorkerRuntimeService extends Service {
                     return;
                 }
                 JSONObject payload = buildForegroundHeartbeatPayload(safeReason);
-                request("POST", serverUrl + "/core-worker/app/heartbeat", payload);
+                HttpResult heartbeat = request("POST", serverUrl + "/core-worker/app/heartbeat", payload);
+                if (heartbeat.ok()) {
+                    prefs().edit()
+                            .putLong("native_worker_last_heartbeat_at", System.currentTimeMillis())
+                            .putString("native_worker_state", "agente autônomo online")
+                            .apply();
+                }
             } catch (Throwable ignored) {
             } finally {
                 heartbeatRunning.set(false);
@@ -242,7 +683,7 @@ public class CoreWorkerRuntimeService extends Service {
         runtime.put("mode", "apk-native-python-linux-assisted-runtime");
         runtime.put("internal_runtime", "apk-foreground-service");
         runtime.put("internal_runtime_state", "foreground-service-visible-runtime");
-        runtime.put("jobs_runtime", "foreground-service-visible-runtime");
+        runtime.put("jobs_runtime", "foreground-service-autonomous-agent");
         runtime.put("capabilities", capabilities);
         runtime.put("supported_tasks", supported);
         runtime.put("supportedTasks", supported);
@@ -254,11 +695,13 @@ public class CoreWorkerRuntimeService extends Service {
         runtime.put("termux_required_now", false);
         runtime.put("termux_fallback_available", false);
         runtime.put("advanced_jobs_require_termux", false);
+        runtime.put("job_executor_ready", prefs().getBoolean("job_executor_ready", false));
         runtime.put("coreLinux", coreLinux);
         runtime.put("nativeRuntime", nativeRuntime);
 
         JSONObject status = new JSONObject();
-        status.put("app", "foreground-service");
+        status.put("app", "foreground-agent-service");
+        status.put("job_executor_ready", prefs().getBoolean("job_executor_ready", false));
         status.put("foreground_runtime_active", true);
         status.put("foreground_runtime_summary", "serviço persistente ativo");
         status.put("notification_permission", hasNotificationPermission() ? "granted" : "missing");
@@ -291,7 +734,7 @@ public class CoreWorkerRuntimeService extends Service {
         payload.put("installId", installId());
         payload.put("deviceName", prefs().getString("device_name", ""));
         payload.put("runtime_mode", "apk-native-python-linux-assisted-runtime");
-        payload.put("jobsRuntime", "foreground-service-visible-runtime");
+        payload.put("jobsRuntime", "foreground-service-autonomous-agent");
         payload.put("internal_runtime", "apk-foreground-service");
         payload.put("internal_runtime_state", "foreground-service-visible-runtime");
         payload.put("capabilities", capabilities);
@@ -306,103 +749,11 @@ public class CoreWorkerRuntimeService extends Service {
     }
 
     private JSONArray coreWorkerApkCapabilitiesArray() {
-        return new JSONArray()
-                .put("apk-native")
-                .put("android-status")
-                .put("native-boot")
-                .put("safe-shell-probe")
-                .put("python-embedded")
-                .put("internal-jobs")
-                .put("core-linux-runtime")
-                .put("core-linux-rootfs-manager")
-                .put("core-linux-rootfs-import-v1")
-                .put("core-linux-runner-preflight-v1")
-                .put("core-linux-runner-preflight-v2")
-                .put("core-linux-runner-preflight-v3")
-                .put("core-linux-runner-preflight-v4")
-                .put("core-linux-runner-preflight-v5")
-                .put("core-linux-runner-preflight-v6")
-                .put("core-linux-runner-preflight-v7")
-                .put("core-linux-runner-preflight-v8")
-                .put("core-linux-runner-preflight-v10")
-                .put("core-linux-runner-preflight-v11")
-                .put("core-linux-base-tools-smoke-v12")
-                .put("core-linux-rootfs-proot-smoke-v13")
-                .put("core-linux-rootfs-proot-smoke-v13.1")
-                .put("core-linux-rootfs-proot-smoke-v13.2")
-                .put("core-linux-rootfs-proot-smoke-v13.3")
-                .put("core-linux-box64-intake-preflight-v14.2.1")
-                .put("core-linux-box64-version-smoke-v15")
-                .put("core-linux-box64-version-smoke-v15.2")
-                .put("core-linux-box64-glibc-preflight-v15.3")
-                .put("core-linux-box64-glibc-preflight-v15.3.1")
-                .put("core-linux-rootfs-glibc-intake-preflight-v16.1")
-                .put("core-linux-embedded-binaries-intake-v1")
-                .put("core-linux-embedded-binaries-intake-v2")
-                .put("core-linux-embedded-binaries-intake-v3")
-                .put("core-linux-embedded-binaries-intake-v4")
-                .put("core-linux-embedded-binaries-intake-v5")
-                .put("core-linux-embedded-binaries-intake-v6")
-                .put("core-linux-embedded-binaries-intake-v7")
-                .put("core-linux-embedded-binaries-intake-v8")
-                .put("core-linux-embedded-binaries-intake-v10")
-                .put("core-linux-embedded-binaries-intake-v11")
-                .put("core-linux-embedded-binaries-build-pipeline-v1")
-                .put("core-linux-embedded-binaries-build-pipeline-v2")
-                .put("core-linux-embedded-binaries-build-pipeline-v3")
-                .put("core-linux-embedded-binaries-build-pipeline-v4")
-                .put("core-linux-embedded-binaries-build-pipeline-v5")
-                .put("core-linux-embedded-binaries-build-pipeline-v6")
-                .put("core-linux-runtime-v1")
-                .put("minecraft-bedrock-manager-safe-plan");
+        return CoreWorkerJobCatalog.capabilities();
     }
 
     private JSONArray supportedLightJobsArray() {
-        return new JSONArray()
-                .put("apk_ping")
-                .put("apk_status_refresh")
-                .put("apk_upload_app_logs")
-                .put("apk_diagnostic")
-                .put("apk_check_update")
-                .put("apk_test_vps_connection")
-                .put("apk_sync_runtime_state")
-                .put("apk_job_history")
-                .put("apk_device_diagnostic")
-                .put("apk_push_diagnostic")
-                .put("apk_update_diagnostic")
-                .put("apk_runtime_diagnostic")
-                .put("apk_worker_bridge_status")
-                .put("apk_test_notification")
-                .put("apk_repair_local_state")
-                .put("apk_reset_job_history")
-                .put("apk_trim_cache")
-                .put("apk_update_storage_cleanup")
-                .put("apk_sync_profile")
-                .put("apk_sync_profile_now")
-                .put("apk_verify_update_state")
-                .put("apk_native_worker_status")
-                .put("apk_native_boot_status")
-                .put("apk_local_shell_probe")
-                .put("apk_core_linux_native_executor_probe")
-                .put("apk_core_linux_native_executor_test")
-                .put("apk_core_linux_native_runtime_status")
-                .put("apk_core_linux_rootfs_status")
-                .put("apk_core_linux_rootfs_prepare")
-                .put("apk_core_linux_rootfs_validate")
-                .put("apk_core_linux_rootfs_preflight")
-                .put("apk_core_linux_rootfs_clean_staging")
-                .put("apk_core_linux_rootfs_import_status")
-                .put("apk_core_linux_rootfs_import_validate")
-                .put("apk_core_linux_rootfs_import_abort")
-                .put("apk_core_linux_rootfs_real_status")
-                .put("apk_core_linux_rootfs_glibc_preflight")
-                .put("apk_core_linux_runner_status")
-                .put("apk_core_linux_runner_preflight")
-                .put("apk_core_linux_runner_requirements")
-                .put("apk_core_linux_runtime_smoke_test")
-                .put("apk_core_linux_rootfs_smoke_test")
-                .put("apk_core_linux_box64_preflight")
-                .put("apk_core_linux_box64_smoke_test");
+        return CoreWorkerJobCatalog.supportedJobs();
     }
 
     private JSONObject coreLinuxPublicSnapshot() {
@@ -515,17 +866,27 @@ public class CoreWorkerRuntimeService extends Service {
         return id;
     }
 
-    private static String normalizedServerUrl() {
-        String url = BuildConfig.CORE_WORKER_VPS_URL == null ? "" : BuildConfig.CORE_WORKER_VPS_URL.trim();
+    private String normalizedServerUrl() {
+        String url = prefs().getString("server_url", "").trim();
+        if (url.isEmpty()) {
+            url = BuildConfig.CORE_WORKER_VPS_URL == null ? "" : BuildConfig.CORE_WORKER_VPS_URL.trim();
+        }
         return url.replaceAll("/+$", "");
     }
 
     private HttpResult request(String method, String url, JSONObject payload) throws Exception {
+        return request(method, url, payload, null);
+    }
+
+    private HttpResult request(String method, String url, JSONObject payload, String token) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setRequestMethod(method);
         conn.setConnectTimeout(7000);
-        conn.setReadTimeout(9000);
+        conn.setReadTimeout(12000);
         conn.setRequestProperty("Accept", "application/json");
+        if (token != null && !token.trim().isEmpty()) {
+            conn.setRequestProperty("Authorization", "Bearer " + token.trim());
+        }
         if (payload != null) {
             conn.setDoOutput(true);
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
@@ -561,6 +922,10 @@ public class CoreWorkerRuntimeService extends Service {
         HttpResult(int status, String body) {
             this.status = status;
             this.body = body;
+        }
+
+        boolean ok() {
+            return status >= 200 && status < 300;
         }
     }
 }

@@ -22,15 +22,13 @@ public class CoreWorkerBootReceiver extends BroadcastReceiver {
             CoreWorkerUpdateJobService.schedule(context, action);
             try {
                 SharedPreferences prefs = context.getSharedPreferences("core_worker_private", Context.MODE_PRIVATE);
-                if (prefs.getBoolean("foreground_runtime_active", false)) {
-                    Intent service = new Intent(context, CoreWorkerRuntimeService.class);
-                    service.setAction(CoreWorkerRuntimeService.ACTION_START);
-                    service.putExtra("reason", action == null ? "boot" : action);
-                    if (android.os.Build.VERSION.SDK_INT >= 26) {
-                        context.startForegroundService(service);
-                    } else {
-                        context.startService(service);
+                boolean shouldRun = CoreWorkerRuntimeService.shouldRunAgent(context);
+                if (shouldRun) {
+                    // Persiste a migração de instalações antigas que ainda não tinham agent_enabled.
+                    if (!prefs.contains("agent_enabled")) {
+                        prefs.edit().putBoolean("agent_enabled", true).apply();
                     }
+                    CoreWorkerRuntimeService.requestStart(context, action == null ? "boot" : action);
                 }
             } catch (Throwable ignored) {
             }
