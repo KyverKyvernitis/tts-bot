@@ -9,6 +9,11 @@ import config
 log = logging.getLogger(__name__)
 
 
+def _safe_display_text(value: object, *, fallback: str) -> str:
+    raw = str(value or fallback).strip() or fallback
+    return discord.utils.escape_mentions(discord.utils.escape_markdown(raw, as_needed=True))
+
+
 def _label(text: str, component: discord.ui.Item, description: str | None = None) -> discord.ui.Label:
     return discord.ui.Label(
         text=str(text)[:45],
@@ -45,7 +50,7 @@ class _EconomyStaffModal(discord.ui.Modal, title="Cargo da staff"):
             _label(
                 "Remover cargo atual",
                 self.clear_checkbox,
-                "Mantém o acesso do dono do servidor, dono do bot e permissões nativas.",
+                "Sem cargo definido, apenas o dono do bot mantém acesso.",
             )
         )
 
@@ -83,7 +88,7 @@ class _EconomyStaffModal(discord.ui.Modal, title="Cargo da staff"):
                 await interaction.response.send_message(
                     view=self.cog._make_v2_notice(
                         "Cargo inválido",
-                        ["O cargo @everyone não pode ser usado como staff."],
+                        ["O cargo padrão do servidor não pode ser usado como staff."],
                         ok=False,
                     ),
                     ephemeral=True,
@@ -327,8 +332,16 @@ class _EconomyPanelView(discord.ui.LayoutView):
         )
         reset_server_button.callback = self._reset_server
 
-        staff_text = staff_role.mention if staff_role is not None else "Não definido"
-        channel_text = getattr(channel, "mention", None) or "Todos os canais"
+        staff_text = (
+            _safe_display_text(getattr(staff_role, "name", None), fallback="Cargo")
+            if staff_role is not None
+            else "Não definido"
+        )
+        channel_text = (
+            f"#{_safe_display_text(getattr(channel, 'name', None), fallback='canal')}"
+            if channel is not None
+            else "Todos os canais"
+        )
         mode_text = "Comandos" if mode == "commands" else "Triggers"
         if mode == "commands":
             mode_example = f"Use `{prefix}roleta`, `{prefix}daily` e `{prefix}race`."
@@ -457,14 +470,15 @@ class GincanaCommandMixin:
     async def _economy_user_allowed(self, guild: discord.Guild, user: discord.abc.User) -> bool:
         if await self._economy_is_bot_owner(user):
             return True
-        if int(getattr(user, "id", 0) or 0) == int(guild.owner_id or 0):
-            return True
-        return isinstance(user, discord.Member) and self._is_staff_member(user)
+        if not isinstance(user, discord.Member):
+            return False
+        staff_role = self._get_staff_role(guild)
+        return staff_role is not None and staff_role in getattr(user, "roles", [])
 
     async def _economy_validate_interaction(self, interaction: discord.Interaction, *, opener_id: int) -> bool:
         if int(getattr(interaction.user, "id", 0) or 0) != int(opener_id):
             await interaction.response.send_message(
-                view=self._make_v2_notice("Painel reservado", ["Abra seu próprio `/economia`."], ok=False),
+                view=self._make_v2_notice("Painel reservado", ["Abra seu próprio painel de economia."], ok=False),
                 ephemeral=True,
             )
             return False
@@ -514,7 +528,7 @@ class GincanaCommandMixin:
             await interaction.response.send_message(
                 view=self._make_v2_notice(
                     "Servidor inválido",
-                    ["Use `/economia` dentro de um servidor."],
+                    ["Use o comando dentro de um servidor."],
                     ok=False,
                 ),
                 ephemeral=True,
@@ -535,6 +549,38 @@ class GincanaCommandMixin:
         await interaction.response.send_message(
             view=self._make_economy_panel_view(interaction.guild, interaction.user.id),
             ephemeral=True,
+        )
+
+    async def _run_gincana_prefix_command(self, ctx):
+        guild = ctx.guild
+        if guild is None:
+            await ctx.reply(
+                view=self._make_v2_notice(
+                    "Servidor inválido",
+                    ["Use o comando dentro de um servidor."],
+                    ok=False,
+                ),
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        if not await self._economy_user_allowed(guild, ctx.author):
+            await ctx.reply(
+                view=self._make_v2_notice(
+                    "Sem permissão",
+                    ["Você não pode alterar a economia deste servidor."],
+                    ok=False,
+                ),
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        await self._normalize_economy_config(guild)
+        await ctx.reply(
+            view=self._make_economy_panel_view(guild, ctx.author.id),
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     async def _handle_gincana_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):

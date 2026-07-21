@@ -16,6 +16,11 @@ def _is_configured_owner(user_id: int) -> bool:
         return False
 
 
+def _safe_member_name(member: discord.abc.User) -> str:
+    raw = str(getattr(member, "display_name", None) or getattr(member, "name", None) or "Usuário").strip()
+    return discord.utils.escape_mentions(discord.utils.escape_markdown(raw or "Usuário", as_needed=True))
+
+
 def _modal_label(text: str, component: discord.ui.Item, description: str | None = None) -> discord.ui.Label:
     return discord.ui.Label(
         text=str(text)[:45],
@@ -107,7 +112,8 @@ class _AdminUserAdjustModal(discord.ui.Modal, title="Ajustar saldo"):
 
         chips_now = self.cog.db.get_user_chips(guild.id, member.id, default=CHIPS_INITIAL)
         bonus_now = self.cog._get_user_bonus_chips(guild.id, member.id)
-        lines = [f"{member.mention} agora tem {self.cog._chip_amount(chips_now)}"]
+        member_name = _safe_member_name(member)
+        lines = [f"{member_name} agora tem {self.cog._chip_amount(chips_now)}"]
         if bonus_now > 0:
             lines[0] += f" • {self.cog._bonus_chip_amount(bonus_now)}"
         await interaction.response.send_message(
@@ -173,7 +179,8 @@ class _AdminUserResetModal(discord.ui.Modal, title="Resetar usuário"):
             return
 
         await self.cog._force_reset_chips(guild.id, member.id)
-        lines = [f"{member.mention} voltou para {self.cog._chip_amount(CHIPS_DEFAULT)}."]
+        member_name = _safe_member_name(member)
+        lines = [f"{member_name} voltou para {self.cog._chip_amount(CHIPS_DEFAULT)}."]
         await interaction.response.send_message(
             view=self.cog._make_v2_notice("Usuário resetado", lines, ok=True),
             ephemeral=True,
@@ -194,43 +201,12 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
             max_values=1,
             required=True,
         )
-        self.operation_group = discord.ui.RadioGroup(
-            custom_id="games_chip_admin_race_operation",
-            required=True,
-        )
-        self.operation_group.add_option(
-            label="Definir raça",
-            value="set",
-            description="Aplica a raça selecionada sem cobrar fichas.",
-            default=True,
-        )
-        self.operation_group.add_option(
-            label="Sortear raça",
-            value="roll",
-            description="Sorteia uma nova raça sem cobrar fichas.",
-        )
-        self.operation_group.add_option(
-            label="Remover raça",
-            value="clear",
-            description="Remove a raça e limpa o progresso.",
-        )
-        self.operation_group.add_option(
-            label="Ativar habilidade",
-            value="activate",
-            description="Reativa a raça atual do usuário.",
-        )
-        self.operation_group.add_option(
-            label="Desativar habilidade",
-            value="deactivate",
-            description="Desativa a raça atual sem removê-la.",
-        )
-
         self.race_select = string_select_cls(
             custom_id="games_chip_admin_race_key",
-            placeholder="Selecione a raça para Definir raça",
-            min_values=0,
+            placeholder="Selecione uma raça",
+            min_values=1,
             max_values=1,
-            required=False,
+            required=True,
         )
         for race_key, info in self.cog._race_catalog().items():
             emoji = str(info.get("emoji") or "").strip()
@@ -242,35 +218,8 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
                 description=f"{effects} habilidade{'s' if effects != 1 else ''}.",
             )
 
-        self.options_group = discord.ui.CheckboxGroup(
-            custom_id="games_chip_admin_race_options",
-            required=False,
-            min_values=0,
-            max_values=3,
-        )
-        self.options_group.add_option(
-            label="Ativar raça definida",
-            value="activate_after",
-            description="A raça entra ativa após definir ou sortear.",
-            default=True,
-        )
-        self.options_group.add_option(
-            label="Reiniciar ao reaplicar a mesma raça",
-            value="reset_same",
-            description="Limpa cargas e progresso da raça atual.",
-            default=True,
-        )
-        self.options_group.add_option(
-            label="Excluir painel de raça antigo",
-            value="close_panel",
-            description="Remove o painel público salvo do usuário.",
-            default=True,
-        )
-
-        self.add_item(_modal_label("Usuário", self.target_select, "Selecione o alvo da alteração."))
-        self.add_item(_modal_label("Operação", self.operation_group, "Escolha uma única ação administrativa."))
-        self.add_item(_modal_label("Raça", self.race_select, "Obrigatória apenas para Definir raça."))
-        self.add_item(_modal_label("Opções", self.options_group, "Aplicadas após definir ou sortear."))
+        self.add_item(_modal_label("Usuário", self.target_select, "Selecione quem receberá a raça."))
+        self.add_item(_modal_label("Raça", self.race_select, "A alteração não consome fichas."))
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await self.cog._chip_admin_validate_interaction(
@@ -295,73 +244,33 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
             )
             return
 
-        operation = str(getattr(self.operation_group, "value", "") or "").strip().lower()
-        options = set(getattr(self.options_group, "values", None) or [])
         selected_races = list(getattr(self.race_select, "values", None) or [])
         selected_race = str(selected_races[0]).strip().lower() if selected_races else ""
         catalog = self.cog._race_catalog()
-
-        if operation == "set" and selected_race not in catalog:
+        if selected_race not in catalog:
             await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Raça não selecionada", ["Selecione a raça que será aplicada."], ok=False),
-                ephemeral=True,
-            )
-            return
-        if operation not in {"set", "roll", "clear", "activate", "deactivate"}:
-            await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Operação inválida", ["Escolha uma operação válida."], ok=False),
+                view=self.cog._make_v2_notice("Raça inválida", ["Selecione uma raça disponível."], ok=False),
                 ephemeral=True,
             )
             return
 
         old_key = self.cog._get_user_race_key(guild.id, member.id)
-        old_active = self.cog._is_user_race_active(guild.id, member.id)
-        reset_applied = False
-
-        if operation in {"activate", "deactivate"} and not old_key:
-            await interaction.response.send_message(
-                view=self.cog._make_v2_notice("Sem raça", [f"{member.mention} ainda não possui uma raça."], ok=False),
-                ephemeral=True,
-            )
-            return
-
         try:
             async with self.cog._race_progress_lock(guild.id, member.id):
-                if operation == "set":
-                    reset_applied = old_key != selected_race or "reset_same" in options
-                    await self.cog._set_user_race_key(
-                        guild.id,
-                        member.id,
-                        selected_race,
-                        reset_state=reset_applied,
-                    )
-                    await self.cog._set_user_race_active(
-                        guild.id,
-                        member.id,
-                        "activate_after" in options,
-                    )
-                elif operation == "roll":
-                    await self.cog._roll_user_race(guild.id, member.id, exclude_current=bool(old_key))
-                    reset_applied = True
-                    await self.cog._set_user_race_active(
-                        guild.id,
-                        member.id,
-                        "activate_after" in options,
-                    )
-                elif operation == "clear":
-                    await self.cog._clear_user_race(guild.id, member.id)
-                    reset_applied = True
-                elif operation == "activate":
-                    await self.cog._set_user_race_active(guild.id, member.id, True)
-                else:
-                    await self.cog._set_user_race_active(guild.id, member.id, False)
+                await self.cog._set_user_race_key(
+                    guild.id,
+                    member.id,
+                    selected_race,
+                    reset_state=True,
+                )
+                await self.cog._set_user_race_active(guild.id, member.id, True)
         except Exception:
             log.exception(
-                "games: falha ao alterar raça via economia guild=%s actor=%s target=%s operation=%s",
+                "games: falha ao definir raça via economia guild=%s actor=%s target=%s race=%s",
                 guild.id,
                 getattr(interaction.user, "id", 0),
                 member.id,
-                operation,
+                selected_race,
             )
             await interaction.response.send_message(
                 view=self.cog._make_v2_notice("Falha ao alterar", ["A raça não foi alterada."], ok=False),
@@ -369,42 +278,25 @@ class _AdminRaceModal(discord.ui.Modal, title="Gerenciar raça"):
             )
             return
 
-        new_key = self.cog._get_user_race_key(guild.id, member.id)
-        new_active = self.cog._is_user_race_active(guild.id, member.id)
-        old_label = self.cog._chip_admin_race_label(old_key, active=old_active)
-        new_label = self.cog._chip_admin_race_label(new_key, active=new_active)
-        operation_labels = {
-            "set": "Raça definida",
-            "roll": "Raça sorteada",
-            "clear": "Raça removida",
-            "activate": "Raça ativada",
-            "deactivate": "Raça desativada",
-        }
-        lines = [
-            f"**Usuário:** {member.mention}",
-            f"**Anterior:** {old_label}",
-            f"**Atual:** {new_label}",
-            "**Custo:** 0 fichas",
-        ]
-        if reset_applied:
-            lines.append("**Progresso:** reiniciado")
-
+        new_label = self.cog._chip_admin_race_label(selected_race, active=True)
+        member_name = _safe_member_name(member)
         log.info(
-            "games: raça alterada via economia guild=%s actor=%s target=%s operation=%s old=%s new=%s active=%s",
+            "games: raça definida via economia guild=%s actor=%s target=%s old=%s new=%s",
             guild.id,
             getattr(interaction.user, "id", 0),
             member.id,
-            operation,
             old_key or "none",
-            new_key or "none",
-            new_active,
+            selected_race,
         )
         await interaction.response.send_message(
-            view=self.cog._make_v2_notice(operation_labels[operation], lines, ok=True),
+            view=self.cog._make_v2_notice(
+                "Raça atualizada",
+                [f"{member_name} agora é {new_label}."],
+                ok=True,
+            ),
             ephemeral=True,
         )
-        if "close_panel" in options:
-            await self.cog._delete_previous_race_panel_message(guild.id, member.id, interaction.channel)
+        await self.cog._delete_previous_race_panel_message(guild.id, member.id, interaction.channel)
 
 
 class _AdminServerResetModal(discord.ui.Modal, title="Resetar servidor"):
@@ -556,9 +448,6 @@ class GincanaChipAdminMixin:
                 allowed = bool(await economy_allowed(guild, user))
             except Exception:
                 allowed = False
-        if not allowed:
-            member = user if isinstance(user, discord.Member) else guild.get_member(user.id) if guild else None
-            allowed = member is not None and self._is_staff_member(member)
         if not allowed:
             if send_response and not interaction.response.is_done():
                 await interaction.response.send_message(

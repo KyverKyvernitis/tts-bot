@@ -25,7 +25,7 @@ from .constants import (
 
 _CALL_COMMAND_NAME = str(TRIGGER_WORD or "pinto").strip().casefold()
 if not re.fullmatch(r"[a-z0-9_-]{1,32}", _CALL_COMMAND_NAME) or _CALL_COMMAND_NAME in {
-    "ficha", "daily", "recarga", "painelficha", "rank", "poker", "truco", "roubar",
+    "ficha", "daily", "recarga", "economia", "rank", "poker", "truco", "roubar",
     "pay", "race", "roleta", "carta", "corrida", "alvo", "buckshot", "mendigar",
     "focus", "pica", "rola", "dj",
 }:
@@ -586,6 +586,10 @@ class GamesCog(dcommands.Cog, GamesCore):
     @economia.error
     async def economia_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         await self._handle_gincana_error(interaction, error)
+
+    @dcommands.command(name="economia")
+    async def economia_prefix(self, ctx: dcommands.Context):
+        await self._run_gincana_prefix_command(ctx)
 
     @dcommands.command(name="ficha", aliases=["fichas"])
     async def ficha(self, ctx: dcommands.Context):
