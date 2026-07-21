@@ -12,7 +12,6 @@ from discord.ext import commands
 from pymongo import ReturnDocument
 
 from .components import (
-    build_active_status_view,
     build_additional_message_view,
     build_delivery_failure_view,
     build_feedback_created_dm,
@@ -27,8 +26,6 @@ from .constants import (
     DESCRIPTION_MAX_LENGTH,
     DESCRIPTION_MIN_LENGTH,
     DM_MESSAGE_PREFIX,
-    DM_STATUS_COMMAND,
-    DM_SWITCH_COMMAND,
     FEEDBACK_COUNTER_COLLECTION_SUFFIX,
     FEEDBACK_DOC_COLLECTION_SUFFIX,
     FEEDBACK_FORUM_CHANNEL_ID,
@@ -43,7 +40,7 @@ from .constants import (
     STATUS_RESOLVING,
 )
 from .modals import FeedbackModal
-from .views import FeedbackSwitchView, FeedbackThreadView, ResolveConfirmationView
+from .views import FeedbackRouteView, FeedbackThreadView, ResolveConfirmationView
 
 
 log = logging.getLogger("bot.feedback")
@@ -54,6 +51,7 @@ class FeedbackCog(commands.Cog):
         self.bot = bot
         self._locks: dict[str, asyncio.Lock] = {}
         self._registered_views: set[tuple[str, int]] = set()
+        self._routed_dm_message_ids: set[int] = set()
         self._restore_lock = asyncio.Lock()
 
     @property
@@ -237,25 +235,6 @@ class FeedbackCog(commands.Cog):
             feedback["dm_active"] = True
             feedback["updated_at"] = now
             return feedback
-
-    async def _active_feedback_for_user(self, user_id: int) -> dict[str, Any] | None:
-        feedback = await self.feedbacks.find_one(
-            {
-                "author_id": int(user_id),
-                "dm_active": True,
-                "status": {"$in": list(OPEN_STATUSES)},
-            },
-            sort=[("updated_at", -1)],
-        )
-        if feedback is not None:
-            return feedback
-        fallback = await self.feedbacks.find_one(
-            {"author_id": int(user_id), "status": {"$in": list(OPEN_STATUSES)}},
-            sort=[("updated_at", -1)],
-        )
-        if fallback is None:
-            return None
-        return await self._set_active_feedback(int(user_id), protocol_of(fallback))
 
     async def _activate_fallback_after_resolution(self, user_id: int) -> None:
         fallback = await self.feedbacks.find_one(
@@ -814,12 +793,13 @@ class FeedbackCog(commands.Cog):
                 view=notice_view("Feedback resolvido", lines, ok=deleted)
             )
 
-    async def switch_active_feedback(
+    async def route_additional_feedback(
         self,
         interaction: discord.Interaction,
         protocol: str,
         *,
         owner_id: int,
+        source_message_id: int,
     ) -> None:
         if int(interaction.user.id) != int(owner_id):
             await self._send_interaction_view(
@@ -831,66 +811,102 @@ class FeedbackCog(commands.Cog):
                 ),
             )
             return
-        feedback = await self._set_active_feedback(owner_id, protocol)
-        if feedback is None:
-            await interaction.response.edit_message(
-                view=notice_view(
-                    "Atendimento indisponível",
-                    "Este feedback não está mais aberto.",
-                    ok=False,
+
+        await interaction.response.defer()
+        async with self._lock_for(
+            f"feedback-route:{int(owner_id)}:{int(source_message_id)}"
+        ):
+            feedback = await self.feedbacks.find_one(
+                {
+                    "author_id": int(owner_id),
+                    "protocol": str(protocol),
+                    "status": {"$in": list(OPEN_STATUSES)},
+                }
+            )
+            if feedback is None:
+                await interaction.edit_original_response(
+                    view=notice_view(
+                        "Atendimento indisponível",
+                        "Este feedback não está mais aberto. Envie a informação novamente.",
+                        ok=False,
+                    )
                 )
-            )
-            return
-        count = len(await self._open_feedbacks_for_user(owner_id))
-        await interaction.response.edit_message(
-            view=build_active_status_view(feedback, open_count=count)
-        )
+                return
 
-    async def _handle_dm_status(self, message: discord.Message) -> None:
-        feedbacks = await self._open_feedbacks_for_user(message.author.id)
-        active = await self._active_feedback_for_user(message.author.id)
-        await message.channel.send(
-            view=build_active_status_view(active, open_count=len(feedbacks)),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+            channel = interaction.channel
+            if channel is None or not hasattr(channel, "fetch_message"):
+                await interaction.edit_original_response(
+                    view=notice_view(
+                        "Mensagem indisponível",
+                        "Não consegui recuperar a informação enviada. Envie-a novamente.",
+                        ok=False,
+                    )
+                )
+                return
+            try:
+                source_message = await channel.fetch_message(int(source_message_id))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                await interaction.edit_original_response(
+                    view=notice_view(
+                        "Mensagem indisponível",
+                        "Não consegui recuperar a informação enviada. Envie-a novamente.",
+                        ok=False,
+                    )
+                )
+                return
 
-    async def _handle_dm_switch(self, message: discord.Message) -> None:
-        feedbacks = await self._open_feedbacks_for_user(message.author.id)
-        if not feedbacks:
-            await message.channel.send(
-                view=build_active_status_view(None),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-        if len(feedbacks) == 1:
-            active = await self._set_active_feedback(
-                message.author.id, protocol_of(feedbacks[0])
-            )
-            await message.channel.send(
-                view=build_active_status_view(active or feedbacks[0], open_count=1),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-        await message.channel.send(
-            view=FeedbackSwitchView(
-                self, owner_id=message.author.id, feedbacks=feedbacks
-            ),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+            if (
+                int(source_message.author.id) != int(owner_id)
+                or not str(source_message.content or "").startswith(DM_MESSAGE_PREFIX)
+            ):
+                await interaction.edit_original_response(
+                    view=notice_view(
+                        "Mensagem inválida",
+                        "A informação original não está mais disponível para encaminhamento.",
+                        ok=False,
+                    )
+                )
+                return
+            if int(source_message.id) in self._routed_dm_message_ids:
+                await interaction.edit_original_response(
+                    view=notice_view(
+                        "Informação já enviada",
+                        "Esta mensagem já foi encaminhada para um atendimento.",
+                        ok=True,
+                    )
+                )
+                return
 
-    async def _handle_additional_dm(self, message: discord.Message) -> None:
-        feedback = await self._active_feedback_for_user(message.author.id)
-        if feedback is None:
-            await message.channel.send(
-                view=notice_view(
-                    "Nenhum feedback ativo",
-                    "Use `/feedback` em um servidor antes de enviar informações adicionais.",
-                    ok=False,
-                ),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
+            await self._set_active_feedback(owner_id, protocol_of(feedback))
+            delivered = await self._forward_additional_dm(source_message, feedback)
+            if not delivered:
+                try:
+                    await interaction.delete_original_response()
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
+                return
 
+            if len(self._routed_dm_message_ids) >= 2048:
+                self._routed_dm_message_ids.clear()
+            self._routed_dm_message_ids.add(int(source_message.id))
+            try:
+                await interaction.delete_original_response()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                with contextlib.suppress(
+                    discord.NotFound, discord.Forbidden, discord.HTTPException
+                ):
+                    await interaction.edit_original_response(
+                        view=notice_view(
+                            "Informação enviada",
+                            f"A mensagem foi adicionada a `{protocol_of(feedback)}`.",
+                            ok=True,
+                            accent_color=category_info(feedback)["accent"],
+                        )
+                    )
+
+    async def _forward_additional_dm(
+        self, message: discord.Message, feedback: dict[str, Any]
+    ) -> bool:
         content = str(message.content or "")
         content = (
             content[1:].lstrip()
@@ -902,12 +918,12 @@ class FeedbackCog(commands.Cog):
             await message.channel.send(
                 view=notice_view(
                     "Mensagem vazia",
-                    "Escreva algo depois de `_` ou envie um arquivo junto.",
+                    "Escreva algo depois do sublinhado ou envie um arquivo junto.",
                     ok=False,
                 ),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-            return
+            return False
 
         protocol = protocol_of(feedback)
         async with self._lock_for(f"feedback:{protocol}"):
@@ -921,7 +937,7 @@ class FeedbackCog(commands.Cog):
                     ),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-                return
+                return False
             thread = await self._fetch_thread(fresh)
             if thread is None or not await self._ensure_thread_writable(thread):
                 await message.channel.send(
@@ -932,7 +948,7 @@ class FeedbackCog(commands.Cog):
                     ),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-                return
+                return False
             try:
                 await thread.send(
                     view=build_additional_message_view(
@@ -951,13 +967,14 @@ class FeedbackCog(commands.Cog):
                     ),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-                return
+                return False
+            now = datetime.now(timezone.utc)
             await self.feedbacks.update_one(
                 {"_id": fresh["_id"]},
                 {
                     "$set": {
-                        "updated_at": datetime.now(timezone.utc),
-                        "last_user_message_at": datetime.now(timezone.utc),
+                        "updated_at": now,
+                        "last_user_message_at": now,
                     },
                     "$inc": {"user_message_count": 1},
                 },
@@ -966,6 +983,56 @@ class FeedbackCog(commands.Cog):
                 discord.HTTPException, discord.Forbidden, discord.NotFound
             ):
                 await message.add_reaction("✅")
+            return True
+
+    async def _handle_additional_dm(self, message: discord.Message) -> None:
+        content = str(message.content or "")
+        stripped = (
+            content[1:].lstrip()
+            if content.startswith(DM_MESSAGE_PREFIX)
+            else content.strip()
+        )
+        if not stripped and not message.attachments:
+            await message.channel.send(
+                view=notice_view(
+                    "Mensagem vazia",
+                    "Escreva algo depois do sublinhado ou envie um arquivo junto.",
+                    ok=False,
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        feedbacks = await self._open_feedbacks_for_user(message.author.id)
+        if not feedbacks:
+            await message.channel.send(
+                view=notice_view(
+                    "Nenhum feedback aberto",
+                    "Use `/feedback` em um servidor antes de enviar informações adicionais.",
+                    ok=False,
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        if len(feedbacks) == 1:
+            feedback = feedbacks[0]
+            await self._set_active_feedback(
+                message.author.id, protocol_of(feedback)
+            )
+            await self._forward_additional_dm(message, feedback)
+            return
+
+        route_view = FeedbackRouteView(
+            self,
+            owner_id=message.author.id,
+            source_message_id=message.id,
+            feedbacks=feedbacks,
+        )
+        route_view.message = await message.channel.send(
+            view=route_view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     async def _forward_owner_message(
         self, message: discord.Message, feedback: dict[str, Any]
@@ -1036,11 +1103,15 @@ class FeedbackCog(commands.Cog):
         if message.guild is None:
             content = str(message.content or "")
             normalized = content.strip().casefold()
-            if normalized == DM_STATUS_COMMAND:
-                await self._handle_dm_status(message)
-                return
-            if normalized == DM_SWITCH_COMMAND:
-                await self._handle_dm_switch(message)
+            if normalized in {"_status", "_trocar"}:
+                await message.channel.send(
+                    view=notice_view(
+                        "Roteamento automático",
+                        "Esses atalhos não são mais necessários. Envie a informação começando com um sublinhado.",
+                        ok=True,
+                    ),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
                 return
             if content.startswith(DM_MESSAGE_PREFIX):
                 await self._handle_additional_dm(message)

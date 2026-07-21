@@ -139,9 +139,9 @@ class ResolveConfirmationView(discord.ui.LayoutView):
         return False
 
 
-class _FeedbackSwitchSelect(discord.ui.Select):
+class _FeedbackRouteSelect(discord.ui.Select):
     def __init__(
-        self, owner_view: "FeedbackSwitchView", feedbacks: list[dict[str, Any]]
+        self, owner_view: "FeedbackRouteView", feedbacks: list[dict[str, Any]]
     ):
         self.owner_view = owner_view
         options: list[discord.SelectOption] = []
@@ -161,35 +161,48 @@ class _FeedbackSwitchSelect(discord.ui.Select):
                 )
             )
         super().__init__(
-            placeholder="Selecione o atendimento que receberá suas mensagens",
+            placeholder="Selecione onde enviar esta mensagem",
             min_values=1,
             max_values=1,
             options=options,
-            custom_id=f"feedback:switch:{owner_view.owner_id}",
+            custom_id=(
+                f"feedback:route:{owner_view.owner_id}:"
+                f"{owner_view.source_message_id}"
+            ),
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
         selected = str(self.values[0]) if self.values else ""
-        await self.owner_view.cog.switch_active_feedback(
-            interaction, selected, owner_id=self.owner_view.owner_id
+        await self.owner_view.cog.route_additional_feedback(
+            interaction,
+            selected,
+            owner_id=self.owner_view.owner_id,
+            source_message_id=self.owner_view.source_message_id,
         )
 
 
-class FeedbackSwitchView(discord.ui.LayoutView):
+class FeedbackRouteView(discord.ui.LayoutView):
     def __init__(
-        self, cog: "FeedbackCog", *, owner_id: int, feedbacks: list[dict[str, Any]]
+        self,
+        cog: "FeedbackCog",
+        *,
+        owner_id: int,
+        source_message_id: int,
+        feedbacks: list[dict[str, Any]],
     ):
         super().__init__(timeout=300)
         self.cog = cog
         self.owner_id = int(owner_id)
+        self.source_message_id = int(source_message_id)
+        self.message: discord.Message | None = None
         self.add_item(
             discord.ui.Container(
                 discord.ui.TextDisplay(
-                    "# Trocar atendimento\n"
-                    "Escolha para qual feedback as próximas mensagens iniciadas com `_` serão enviadas."
+                    "# Escolha o atendimento\n"
+                    "Você possui mais de um feedback aberto. Selecione onde esta mensagem deve ser enviada."
                 ),
                 discord.ui.Separator(),
-                discord.ui.ActionRow(_FeedbackSwitchSelect(self, feedbacks)),
+                discord.ui.ActionRow(_FeedbackRouteSelect(self, feedbacks)),
                 accent_color=discord.Color.blurple(),
             )
         )
@@ -204,3 +217,17 @@ class FeedbackSwitchView(discord.ui.LayoutView):
             ephemeral=True,
         )
         return False
+
+    async def on_timeout(self) -> None:
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(
+                view=notice_view(
+                    "Seleção expirada",
+                    "Envie a informação novamente para escolher o atendimento.",
+                    ok=False,
+                )
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass

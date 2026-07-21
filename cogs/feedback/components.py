@@ -101,19 +101,11 @@ def build_feedback_created_dm(feedback: dict[str, Any]) -> discord.ui.LayoutView
     )
     instructions = (
         "## Adicionar informações\n"
-        "Comece sua mensagem com um sublinhado.\n"
+        "Para continuar o atendimento, comece a mensagem com um sublinhado.\n"
         "\n"
-        "```text\n"
-        "_ O problema também acontece em outro comando.\n"
-        "```\n"
+        "Você também pode incluir imagens, vídeos e arquivos.\n"
+        "\n"
         "As respostas do dono do bot chegarão por esta conversa."
-    )
-    shortcuts = (
-        "**Atalhos**\n"
-        "```text\n"
-        "_status  Ver o destino atual\n"
-        "_trocar  Trocar de atendimento\n"
-        "```"
     )
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(
@@ -121,8 +113,6 @@ def build_feedback_created_dm(feedback: dict[str, Any]) -> discord.ui.LayoutView
             discord.ui.TextDisplay(_trim(body)),
             discord.ui.Separator(),
             discord.ui.TextDisplay(_trim(instructions)),
-            discord.ui.Separator(),
-            discord.ui.TextDisplay(_trim(shortcuts)),
             accent_color=info["accent"],
         )
     )
@@ -193,11 +183,7 @@ def build_owner_update_dm(
     )
     instructions = (
         "## Como responder\n"
-        "Comece sua mensagem com um sublinhado.\n"
-        "\n"
-        "```text\n"
-        "_ Sua resposta\n"
-        "```"
+        "Comece a mensagem com um sublinhado. Você também pode incluir arquivos."
     )
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(
@@ -222,31 +208,6 @@ def build_resolved_dm(feedback: dict[str, Any]) -> discord.ui.LayoutView:
         ok=True,
         accent_color=discord.Color.green(),
     )
-
-
-def build_active_status_view(
-    feedback: dict[str, Any] | None, *, open_count: int = 0
-) -> discord.ui.LayoutView:
-    if feedback is None:
-        return notice_view(
-            "Nenhum feedback ativo",
-            "Use `/feedback` em um servidor para iniciar um atendimento.",
-            ok=False,
-        )
-    info = category_info(feedback)
-    lines = [
-        f"**Protocolo**\n`{protocol_of(feedback)}`",
-        f"**Servidor**\n{display_name(feedback.get('guild_name') or 'Servidor', limit=100)}",
-        f"**Tipo**\n{info['label']}",
-        f"**Status**\n{status_label(str(feedback.get('status') or STATUS_OPEN))}",
-    ]
-    if open_count > 1:
-        lines.append(
-            f"Você possui {open_count} atendimentos abertos.\n"
-            "Para mudar o destino, envie:\n"
-            "```text\n_trocar\n```"
-        )
-    return notice_view("Destino ativo", lines, ok=True, accent_color=info["accent"])
 
 
 def build_delivery_failure_view(feedback: dict[str, Any]) -> discord.ui.LayoutView:
