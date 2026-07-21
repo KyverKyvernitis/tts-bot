@@ -2537,27 +2537,42 @@ SettingsDB.set_forms_config = _settingsdb_set_forms_config
 
 _TTS_SYNT_ENGINE_ALIASES = {
     "edge": "edge",
-    "edge-tts": "edge",
+    "edge_tts": "edge",
     "microsoft": "edge",
+    "microsoft_edge": "edge",
     "gtts": "gtts",
     "google": "gtts",
     "gcloud": "gtts",
     "google_cloud": "gtts",
-    "google-cloud": "gtts",
     "googlecloud": "gtts",
+    "google_tts": "gtts",
+    "google_translate": "gtts",
+    "google_translate_tts": "gtts",
+    "android_native": "android_native",
+    "android": "android_native",
+    "android_tts": "android_native",
+    "native_android": "android_native",
+    "atts": "android_native",
+    "piper": "piper",
+    "piper_tts": "piper",
 }
+_TTS_SYNT_ENGINE_KEYS = ("android_native", "edge", "gtts", "piper", "other")
 
 
 def _normalize_tts_synt_engine(engine: object) -> str:
-    value = str(engine or "gtts").strip().lower().replace(" ", "_")
-    return _TTS_SYNT_ENGINE_ALIASES.get(value, "gtts")
+    value = str(engine or "gtts").strip().lower().replace("-", "_").replace(" ", "_")
+    if value.startswith("tts_agent:"):
+        value = value.split(":", 1)[1] or "other"
+    return _TTS_SYNT_ENGINE_ALIASES.get(value, "other")
 
 
 def _normalize_tts_synt_stats(raw: object) -> Dict[str, int]:
     data = raw if isinstance(raw, dict) else {}
     engines = data.get("engines") if isinstance(data.get("engines"), dict) else data
-    result = {"edge": 0, "google": 0, "gtts": 0}
+    result = {key: 0 for key in _TTS_SYNT_ENGINE_KEYS}
     for key, value in dict(engines or {}).items():
+        if str(key).strip().lower() in {"total", "updated_at"}:
+            continue
         engine = _normalize_tts_synt_engine(key)
         try:
             amount = max(0, int(value or 0))
@@ -2590,7 +2605,7 @@ async def _settingsdb_increment_tts_synt_count(self, guild_id: int, engine: str,
 
         current = _normalize_tts_synt_stats(doc.get("tts_synts"))
         current[engine_key] = int(current.get(engine_key, 0) or 0) + delta
-        total = sum(int(current.get(key, 0) or 0) for key in ("edge", "google", "gtts"))
+        total = sum(int(current.get(key, 0) or 0) for key in _TTS_SYNT_ENGINE_KEYS)
         doc["tts_synts"] = {
             "engines": current,
             "total": total,
@@ -2618,7 +2633,7 @@ def _settingsdb_get_tts_synt_stats(self, guild_id: int) -> Dict[str, int]:
     try:
         gid = int(guild_id)
     except Exception:
-        return {"edge": 0, "google": 0, "gtts": 0}
+        return {key: 0 for key in _TTS_SYNT_ENGINE_KEYS}
     doc = self.guild_cache.get(gid, {})
     return _normalize_tts_synt_stats(doc.get("tts_synts"))
 

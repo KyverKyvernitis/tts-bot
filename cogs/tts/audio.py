@@ -3283,7 +3283,14 @@ class TTSAudioMixin:
             if inflight.get(key) is task:
                 inflight.pop(key, None)
 
-    async def _run_timed_generation(self, engine: str, factory, *, guild_id: int | None = None) -> str:
+    async def _run_timed_generation(
+        self,
+        engine: str,
+        factory,
+        *,
+        guild_id: int | None = None,
+        persistent_engine: Any = None,
+    ) -> str:
         started_at = time.monotonic()
         try:
             result = await factory()
@@ -3293,7 +3300,14 @@ class TTSAudioMixin:
             raise
         duration_ms = (time.monotonic() - started_at) * 1000.0
         self._record_engine_success(engine, duration_ms)
-        await self._record_persistent_synt_success(guild_id, engine)
+
+        engine_to_persist = engine
+        if callable(persistent_engine):
+            with contextlib.suppress(Exception):
+                engine_to_persist = str(persistent_engine() or engine)
+        elif persistent_engine not in (None, ""):
+            engine_to_persist = str(persistent_engine)
+        await self._record_persistent_synt_success(guild_id, engine_to_persist)
         return result
 
     def _tts_agent_payload_for_item(self, item: QueueItem) -> dict[str, Any]:
@@ -3334,6 +3348,7 @@ class TTSAudioMixin:
         ))
 
     async def _generate_tts_agent_worker_file(self, item: QueueItem) -> str:
+        setattr(item, "_tts_agent_selected_engine", "")
         if not self._tts_agent_route_available():
             raise RuntimeError("TTS Agent indisponível pela rota cacheada")
         text = str(item.text or "").strip()
@@ -3386,6 +3401,7 @@ class TTSAudioMixin:
                 total_ms = (time.monotonic() - started) * 1000.0
                 self._record_tts_agent_synth_success(total_ms=total_ms, data=data)
                 selected_engine = str(data.get("selected_engine") or data.get("engine") or "").strip().lower()
+                setattr(item, "_tts_agent_selected_engine", selected_engine or str(item.engine or "gtts"))
                 worker_timing = data.get("timing_ms") if isinstance(data.get("timing_ms"), dict) else {}
                 timing_bits = [
                     f"worker_http={float(data.get('_vps_worker_request_ms') or request_ms):.1f}ms",
@@ -3488,6 +3504,7 @@ class TTSAudioMixin:
                     f"tts_agent:{item.engine}",
                     lambda: self._generate_tts_agent_worker_file(item),
                     guild_id=item.guild_id,
+                    persistent_engine=lambda: getattr(item, "_tts_agent_selected_engine", "") or item.engine,
                 )
             except Exception as e:
                 logger.warning("[tts_agent] TTS no worker falhou; usando fallback local/VPS | guild=%s engine=%s erro=%s", item.guild_id, item.engine, e)

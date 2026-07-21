@@ -108,7 +108,7 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
                     options=[
                         discord.SelectOption(
                             label="Base Git leve",
-                            description="Código rastreado pelo Git, sem assets, binários e manifestos.",
+                            description="Código rastreado pelo Git, sem assets, binários ou arquivos sensíveis.",
                             value="base_git",
                             emoji="📦",
                             default=True,
@@ -127,7 +127,7 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
                         ),
                         discord.SelectOption(
                             label="Snapshot da VPS",
-                            description="Configs sanitizadas, services, DB musicnode e logs filtradas.",
+                            description="Configs sanitizadas, serviços, banco musical e logs filtrados.",
                             value="snapshot",
                             emoji="🧰",
                         ),
@@ -145,21 +145,21 @@ class VpsModal(discord.ui.Modal, title="Painel da VPS"):
                         ),
                         discord.SelectOption(
                             label="Servidores",
-                            description="Guilds, membros e TTS sintetizados por engine.",
+                            description="Uso do bot por servidor, membros e sínteses por engine.",
                             value="servers",
                             emoji="🌐",
                         ),
                         discord.SelectOption(
                             label="TTS",
-                            description="Engines, fila, cache e synts desde o último restart.",
+                            description="Rota ativa, engines, filas, cache e sínteses de voz.",
                             value="tts",
                             emoji="🔊",
                         ),
                     ],
                 )
                 self.add_item(label_cls(
-                    text="O que enviar?",
-                    description="Marque uma ou mais opções no seletor.",
+                    text="Relatórios para enviar",
+                    description="Escolha uma ou mais opções.",
                     component=self.items_select,
                 ))
                 self._ui_mode = "select"
@@ -391,6 +391,32 @@ class VpsCommandMixin:
             text = discord.utils.escape_markdown(text)
         return text
 
+    @staticmethod
+    def _fit_vps_sections(sections: list[list[str]], *, limit: int, omitted_label: str = "detalhes") -> str:
+        """Monta um relatório sem cortar Markdown no meio de linhas ou seções."""
+        selected: list[str] = []
+        omitted = 0
+        for section in sections:
+            block = "\n".join(str(line) for line in section if line is not None).strip()
+            if not block:
+                continue
+            candidate = "\n\n".join([*selected, block]).strip()
+            if len(candidate) <= limit:
+                selected.append(block)
+            else:
+                omitted += 1
+
+        if omitted:
+            note = f"-# {omitted} seção(ões) de {omitted_label} omitida(s) para manter o painel legível."
+            while selected and len("\n\n".join([*selected, note])) > limit:
+                selected.pop()
+                omitted += 1
+                note = f"-# {omitted} seção(ões) de {omitted_label} omitida(s) para manter o painel legível."
+            if len(note) <= limit:
+                selected.append(note)
+
+        return "\n\n".join(selected).strip()
+
     async def _collect_tts_synt_stats(self) -> dict[int, dict[str, int]]:
         db = getattr(self.bot, "settings_db", None)
         getter = getattr(db, "get_all_tts_synt_stats", None)
@@ -401,7 +427,7 @@ class VpsCommandMixin:
             if asyncio.iscoroutine(raw):
                 raw = await raw
         except Exception:
-            logger.exception("[utility/vps] falha ao ler estatísticas persistentes de synts")
+            logger.exception("[utility/vps] falha ao ler estatísticas persistentes de sínteses")
             return {}
 
         result: dict[int, dict[str, int]] = {}
@@ -413,79 +439,86 @@ class VpsCommandMixin:
             if not isinstance(stats, dict):
                 continue
             normalized: dict[str, int] = {}
-            for engine in ("edge", "gtts"):
+            for engine, value in stats.items():
+                key = self._vps_engine_key(engine)
                 try:
-                    normalized[engine] = max(0, int(stats.get(engine, 0) or 0))
+                    amount = max(0, int(value or 0))
                 except Exception:
-                    normalized[engine] = 0
+                    amount = 0
+                if amount:
+                    normalized[key] = int(normalized.get(key, 0) or 0) + amount
             result[gid] = normalized
         return result
 
     async def _build_vps_servers_report(self) -> str:
         synt_stats = await self._collect_tts_synt_stats()
         guilds = list(getattr(self.bot, "guilds", []) or [])
-        guilds.sort(key=lambda guild: (-(int(getattr(guild, "member_count", 0) or 0)), str(getattr(guild, "name", "")).casefold()))
+        guilds.sort(
+            key=lambda guild: (
+                -(int(getattr(guild, "member_count", 0) or 0)),
+                str(getattr(guild, "name", "")).casefold(),
+            )
+        )
 
         total_members = 0
         total_synts = 0
-        rows: list[str] = []
-        for index, guild in enumerate(guilds[:18], start=1):
+        guild_rows: list[tuple[str, str]] = []
+        engine_order = {"android_native": 0, "edge": 1, "gtts": 2, "piper": 3, "other": 9}
+
+        for guild in guilds:
             guild_id = int(getattr(guild, "id", 0) or 0)
             member_count = int(getattr(guild, "member_count", 0) or 0)
             if member_count <= 0:
                 with contextlib.suppress(Exception):
                     member_count = len(getattr(guild, "members", []) or [])
-            total_members += member_count
+            total_members += max(0, member_count)
 
             stats = synt_stats.get(guild_id, {})
-            edge = int(stats.get("edge", 0) or 0)
-            gtts = int(stats.get("gtts", 0) or 0)
-            guild_synts = edge + gtts
+            guild_synts = sum(max(0, int(value or 0)) for value in stats.values())
             total_synts += guild_synts
 
-            engine_parts: list[str] = []
-            if edge:
-                engine_parts.append(f"Edge: {self._format_vps_int(edge)}")
-            if gtts:
-                engine_parts.append(f"gTTS: {self._format_vps_int(gtts)}")
-
-            synt_line = f"Synts: {self._format_vps_int(guild_synts)}"
-            if engine_parts:
-                synt_line += " · " + " · ".join(engine_parts)
-
-            rows.append(
-                f"**{index}. {self._shorten_vps_name(getattr(guild, 'name', None))}**\n"
-                f"Membros: {self._format_vps_int(member_count)} · {synt_line}"
+            engine_parts = [
+                f"{self._vps_engine_label(engine)} {self._format_vps_int(amount)}"
+                for engine, amount in sorted(stats.items(), key=lambda item: (engine_order.get(item[0], 99), item[0]))
+                if int(amount or 0) > 0
+            ]
+            detail = (
+                f"{self._format_vps_int(member_count)} membros · "
+                f"{self._format_vps_int(guild_synts)} sínteses"
             )
+            if engine_parts:
+                detail += " · " + " · ".join(engine_parts)
+            guild_rows.append((self._shorten_vps_name(getattr(guild, "name", None)), detail))
 
-        # Soma membros/synts de guilds que não couberam no painel também.
-        for guild in guilds[18:]:
-            guild_id = int(getattr(guild, "id", 0) or 0)
-            member_count = int(getattr(guild, "member_count", 0) or 0)
-            if member_count <= 0:
-                with contextlib.suppress(Exception):
-                    member_count = len(getattr(guild, "members", []) or [])
-            total_members += member_count
-            stats = synt_stats.get(guild_id, {})
-            total_synts += int(stats.get("edge", 0) or 0) + int(stats.get("gtts", 0) or 0)
-
-        lines = [
+        header = [
             "## 🌐 Servidores",
-            f"Total: {self._format_vps_int(len(guilds))} servidor(es)",
-            f"Membros somados: {self._format_vps_int(total_members)}",
-            f"Synts totais: {self._format_vps_int(total_synts)}",
+            (
+                f"**{self._format_vps_int(len(guilds))}** servidores · "
+                f"**{self._format_vps_int(total_members)}** membros · "
+                f"**{self._format_vps_int(total_synts)}** sínteses"
+            ),
         ]
-        if rows:
-            lines.extend(["", *rows])
-        else:
-            lines.append("Nenhum servidor encontrado no cache do bot.")
-        if len(guilds) > 18:
-            lines.append(f"… +{self._format_vps_int(len(guilds) - 18)} servidor(es) oculto(s) para manter o painel compacto.")
+        if not guild_rows:
+            return "\n".join([*header, "", "Nenhum servidor encontrado no cache do bot."])
 
-        report = "\n".join(lines).strip()
-        if len(report) > 3500:
-            report = report[:3500].rstrip() + "\n[cortado por tamanho]"
-        return report
+        lines = list(header)
+        visible = 0
+        for index, (name, detail) in enumerate(guild_rows, start=1):
+            row = f"**{index}. {name}**\n{detail}"
+            hidden_after = len(guild_rows) - index
+            note = f"-# +{self._format_vps_int(hidden_after)} servidor(es) fora da lista." if hidden_after else ""
+            candidate_lines = [*lines, "", row]
+            if note:
+                candidate_lines.extend(["", note])
+            if len("\n".join(candidate_lines).strip()) > 3500:
+                break
+            lines.extend(["", row])
+            visible = index
+
+        hidden = len(guild_rows) - visible
+        if hidden:
+            lines.extend(["", f"-# +{self._format_vps_int(hidden)} servidor(es) fora da lista."])
+        return "\n".join(lines).strip()
 
 
     @staticmethod
@@ -499,6 +532,8 @@ class VpsCommandMixin:
             return "ATTS"
         if key in {"piper", "piper_tts"}:
             return "Piper legado"
+        if key in {"other", "unknown", "desconhecida"}:
+            return "Outras"
         if key.startswith("tts_agent:"):
             requested = key.split(":", 1)[1] or "auto"
             return f"TTS Agent → {VpsCommandMixin._vps_engine_label(requested)}"
@@ -507,7 +542,14 @@ class VpsCommandMixin:
     @staticmethod
     def _vps_engine_key(engine: object) -> str:
         label = VpsCommandMixin._vps_engine_label(engine)
-        return {"ATTS": "android_native", "Android nativo": "android_native", "Edge": "edge", "gTTS": "gtts", "Piper legado": "piper"}.get(label, label.casefold())
+        return {
+            "ATTS": "android_native",
+            "Android nativo": "android_native",
+            "Edge": "edge",
+            "gTTS": "gtts",
+            "Piper legado": "piper",
+            "Outras": "other",
+        }.get(label, label.casefold())
 
     def _vps_format_ms(self, value: Any) -> str:
         formatter = getattr(self, "_format_ms", None)
@@ -591,9 +633,7 @@ class VpsCommandMixin:
 
         def _engine_label(value: Any) -> str:
             text = str(value or "").strip()
-            if not text:
-                return "—"
-            return self._vps_engine_label(text)
+            return self._vps_engine_label(text) if text else "—"
 
         def _split_agent_engine(raw_engine: object) -> tuple[bool, str]:
             key = str(raw_engine or "").strip().lower().replace("-", "_").replace(" ", "_")
@@ -603,16 +643,13 @@ class VpsCommandMixin:
                 return True, "auto"
             return False, str(raw_engine or "gtts").strip()
 
-        def _combine_engine_lines(entries: list[tuple[str, dict[str, Any]]], *, worker: bool) -> tuple[list[str], int]:
+        def _combine_engine_lines(entries: list[tuple[str, dict[str, Any]]]) -> tuple[list[str], int]:
             combined: dict[str, dict[str, Any]] = {}
             for raw_engine, raw_data in entries:
                 key = self._vps_engine_key(raw_engine)
-                label = _engine_label(raw_engine)
-                if worker:
-                    label = f"Pedido {_engine_label(raw_engine)}"
                 data = dict(raw_data or {})
                 target = combined.setdefault(key, {
-                    "label": label,
+                    "label": _engine_label(raw_engine),
                     "synth_count": 0,
                     "synth_failures": 0,
                     "consecutive_failures": 0,
@@ -634,76 +671,97 @@ class VpsCommandMixin:
                 elif avg_ms > 0:
                     target["avg_synth_ms"] = max(float(target.get("avg_synth_ms", 0.0) or 0.0), avg_ms)
 
-            engine_order = {"android_native": 0, "edge": 1, "gtts": 3, "piper": 9, "auto": 5}
+            order = {"android_native": 0, "edge": 1, "gtts": 2, "piper": 3, "auto": 5}
             lines: list[str] = []
             total = 0
-            for key, data in sorted(combined.items(), key=lambda item: (engine_order.get(item[0], 99), item[0])):
+            for key, data in sorted(combined.items(), key=lambda item: (order.get(item[0], 99), item[0])):
                 synth_count = int(data.get("synth_count", 0) or 0)
                 failures = int(data.get("synth_failures", 0) or 0)
                 consecutive = int(data.get("consecutive_failures", 0) or 0)
+                if synth_count <= 0 and failures <= 0 and consecutive <= 0:
+                    continue
                 total += synth_count
                 samples = int(data.get("samples", 0) or 0)
-                if samples > 0:
-                    avg_value = float(data.get("synth_total_ms", 0.0) or 0.0) / samples
-                else:
-                    avg_value = float(data.get("avg_synth_ms", 0.0) or 0.0)
-                dot = "🟢" if failures == 0 and consecutive == 0 else ("🟡" if consecutive == 0 else "🔴")
-                lines.append(
-                    f"{dot} **{data.get('label', key)}** · synts {self._format_vps_int(synth_count)}"
-                    f" · falhas {self._format_vps_int(failures)}"
-                    f" · seguidas {self._format_vps_int(consecutive)}"
-                    f" · média {self._vps_format_ms(avg_value)}"
+                avg_value = (
+                    float(data.get("synth_total_ms", 0.0) or 0.0) / samples
+                    if samples > 0
+                    else float(data.get("avg_synth_ms", 0.0) or 0.0)
                 )
+                dot = "🟢" if failures == 0 and consecutive == 0 else ("🟡" if consecutive == 0 else "🔴")
+                line = f"{dot} **{data.get('label', key)}** · {self._format_vps_int(synth_count)} sínteses"
+                if failures or consecutive:
+                    line += f" · {self._format_vps_int(failures)} falhas"
+                    if consecutive:
+                        line += f" · {self._format_vps_int(consecutive)} seguidas"
+                if avg_value > 0:
+                    line += f" · média {self._vps_format_ms(avg_value)}"
+                lines.append(line)
             return lines, total
 
         local_entries: list[tuple[str, dict[str, Any]]] = []
         worker_entries: list[tuple[str, dict[str, Any]]] = []
         for raw_engine, raw_data in raw_engine_metrics.items():
             is_worker, clean_engine = _split_agent_engine(raw_engine)
-            if is_worker:
-                worker_entries.append((clean_engine, dict(raw_data or {})))
-            else:
-                local_entries.append((str(raw_engine), dict(raw_data or {})))
+            target = worker_entries if is_worker else local_entries
+            target.append((clean_engine if is_worker else str(raw_engine), dict(raw_data or {})))
 
-        local_engine_lines, local_total_synts = _combine_engine_lines(local_entries, worker=False)
-        worker_engine_lines, worker_total_synts = _combine_engine_lines(worker_entries, worker=True)
-
-        if not local_engine_lines:
-            local_engine_lines.append("Ainda não há sínteses da VPS/fallback local desde o último restart.")
-        if not worker_engine_lines:
-            worker_engine_lines.append("Ainda não há sínteses pelo TTS Agent desde o último restart.")
-
-        cache_hits = max(0, int(tts_metrics.get("cache_hits", 0) or 0))
-        cache_misses = max(0, int(tts_metrics.get("cache_misses", 0) or 0))
-        cache_stores = max(0, int(tts_metrics.get("cache_stores", 0) or 0))
-        total_cache_lookups = cache_hits + cache_misses
-        cache_hit_rate = (cache_hits / total_cache_lookups * 100.0) if total_cache_lookups else 0.0
-
-        worker_cache_hits = max(0, int(tts_metrics.get("worker_cache_lookup_hits", 0) or 0))
-        worker_cache_misses = max(0, int(tts_metrics.get("worker_cache_lookup_misses", 0) or 0))
-        worker_cache_skipped = max(0, int(tts_metrics.get("worker_cache_lookup_skipped", 0) or 0))
-        worker_cache_errors = max(0, int(tts_metrics.get("worker_cache_lookup_errors", 0) or 0))
+        local_engine_lines, local_total_synts = _combine_engine_lines(local_entries)
+        worker_engine_lines, worker_total_synts = _combine_engine_lines(worker_entries)
 
         route = str(tts_agent.get("route") or "vps").strip().lower()
         agent_enabled = bool(tts_agent.get("enabled"))
         agent_ok = bool(tts_agent.get("ok"))
-        cooldown = float(tts_agent.get("cooldown_remaining_seconds") or 0.0)
+        cooldown = max(0.0, float(tts_agent.get("cooldown_remaining_seconds") or 0.0))
         route_reason = str(tts_agent.get("reason") or "").strip()
+        route_reason_labels = {
+            "disabled_or_unconfigured": "worker desativado ou não configurado",
+            "worker_base_unavailable": "endereço do worker indisponível",
+            "worker_offline_or_not_ready": "worker offline ou ainda não pronto",
+            "tts_agent_not_ready": "TTS Agent ainda não está pronto",
+            "health_error": "health check do worker falhou",
+            "health_error_degraded": "health check instável; rota anterior preservada",
+            "health_ok": "worker saudável",
+            "adaptive_disabled": "roteamento adaptativo desativado",
+            "always_worker_engine": "engine configurada para usar sempre o worker",
+            "gtts_short_text_vps_fastpath": "texto curto processado mais rápido na VPS",
+            "worker_ready": "worker pronto",
+        }
+        if route_reason.startswith("vps_faster:"):
+            route_reason_display = "VPS apresentou menor latência que o worker"
+        else:
+            route_reason_display = route_reason_labels.get(route_reason, route_reason)
         adaptive_vps = route == "worker" and agent_ok and (
             route_reason.startswith("vps_faster") or route_reason in {"gtts_short_text_vps_fastpath"}
         )
-        route_label = "VPS fast-path" if adaptive_vps else ("Worker" if route == "worker" and agent_ok else "VPS")
-        route_dot = "🔵" if adaptive_vps else ("🟢" if route == "worker" and agent_ok else ("🟡" if agent_enabled and cooldown > 0 else "🔵"))
-        worker_id = str(tts_agent.get("worker_id") or "nenhum").strip() or "nenhum"
+        if route == "worker" and agent_ok and not adaptive_vps:
+            route_dot, route_label = "🟢", "Worker ativo"
+        elif adaptive_vps:
+            route_dot, route_label = "🔵", "VPS escolhida por desempenho"
+        elif agent_enabled:
+            route_dot, route_label = "🟠", "Fallback da VPS em uso"
+        else:
+            route_dot, route_label = "⚪", "VPS local"
+
+        worker_id = str(tts_agent.get("worker_id") or "não identificado").strip() or "não identificado"
         worker_version = str(tts_agent.get("worker_version") or "").strip()
-        worker_suffix = f" · versão {worker_version}" if worker_version else ""
-        available_engines = ", ".join(_engine_label(value) for value in list(tts_agent.get("available_engines") or [])[:6]) or "nenhuma"
-        last_requested = str(tts_agent.get("last_requested_engine") or tts_metrics.get("tts_agent_last_requested_engine") or "").strip()
-        last_selected = str(tts_agent.get("last_selected_engine") or tts_metrics.get("tts_agent_last_selected_engine") or "").strip()
-        last_format = str(tts_agent.get("last_audio_format") or tts_metrics.get("tts_agent_last_audio_format") or "").strip()
-        last_bytes = int(tts_agent.get("last_audio_bytes") or tts_metrics.get("tts_agent_last_audio_bytes") or 0)
-        last_cache_hit = bool(tts_agent.get("last_cache_hit") or tts_metrics.get("tts_agent_last_cache_hit"))
-        last_synth_ms = float(tts_agent.get("last_synth_ms") or tts_metrics.get("tts_agent_last_synth_ms") or tts_metrics.get("avg_tts_agent_synth_ms") or 0.0)
+        available_engines = ", ".join(_engine_label(value) for value in list(tts_agent.get("available_engines") or [])[:6])
+        last_error = str(tts_agent.get("last_error") or "").strip()[:160]
+
+        route_section = [
+            "## 🔊 TTS",
+            "-# Estado e métricas desde o último reinício do bot.",
+            "",
+            "### 🧭 Rota atual",
+            f"{route_dot} **{route_label}**",
+            f"Worker: `{worker_id}`" + (f" · versão `{worker_version}`" if worker_version else ""),
+        ]
+        if route_reason_display and route_reason_display not in {"—", "none", "nenhum"}:
+            route_section.append(f"Motivo: {route_reason_display[:140]}")
+        if cooldown > 0:
+            route_section.append(f"Nova tentativa em {self._vps_format_ms(cooldown * 1000.0)}.")
+        if last_error:
+            route_section.append(f"Último erro: `{last_error}`")
+
         raw_voice_state = str(voice_agent.get("state") or "sem health").strip() or "sem health"
         voice_state_labels = {
             "voice_handoff_received_waiting_transfer": "handoff recebido · aguardando posse da voz",
@@ -713,166 +771,223 @@ class VpsCommandMixin:
             "shared_voice_session_registered": "sessão compartilhada registrada",
             "voice_connection_dry_run_ready": "conexão dry-run pronta",
             "not_ready": "preparando",
+            "sem health": "sem resposta de health",
         }
         voice_state = voice_state_labels.get(raw_voice_state, raw_voice_state)
-        voice_dot = "🟢" if voice_agent.get("direct_tts_ready") else ("🟡" if voice_agent.get("shared_session_ready") or voice_agent.get("ok") or voice_agent.get("available") else "🔵")
-        voice_missing = ", ".join(str(item) for item in list(voice_agent.get("missing") or [])[:3]) or "nenhum"
-        voice_tts_direct = "pronto" if voice_agent.get("direct_tts_ready") else ("preparação" if voice_agent.get("available") or voice_agent.get("ok") else "não pronto")
-        voice_music_ready = "sim" if voice_agent.get("music_ready") else "não"
-        voice_tts_ready = "sim" if voice_agent.get("tts_ready") else "não"
-        voice_session_count = int(voice_agent.get("session_count") or 0)
-        voice_handoff_count = int(voice_agent.get("handoff_count") or 0)
-        voice_connection_count = int(voice_agent.get("connection_count") or 0)
-        voice_shared_ready = "sim" if voice_agent.get("shared_session_ready") else "não"
-        voice_handoff_ready = "sim" if voice_agent.get("handoff_ready") else "não"
-        voice_connection_ready = "sim" if voice_agent.get("connection_ready") else "não"
+        direct_ready = bool(voice_agent.get("direct_tts_ready"))
+        voice_available = bool(voice_agent.get("shared_session_ready") or voice_agent.get("ok") or voice_agent.get("available"))
+        voice_dot = "🟢" if direct_ready else ("🟡" if voice_available else "🔴")
+        voice_session_count = max(0, int(voice_agent.get("session_count") or 0))
+        voice_handoff_count = max(0, int(voice_agent.get("handoff_count") or 0))
+        voice_transfer_count = max(0, int(voice_agent.get("transfer_count") or 0))
+        voice_connection_count = max(0, int(voice_agent.get("connection_count") or 0))
         last_voice_session = voice_agent.get("last_session") if isinstance(voice_agent.get("last_session"), dict) else {}
         last_handoff = voice_agent.get("last_handoff") if isinstance(voice_agent.get("last_handoff"), dict) else {}
-        last_connection = voice_agent.get("last_connection") if isinstance(voice_agent.get("last_connection"), dict) else {}
         last_transfer = voice_agent.get("last_transfer") if isinstance(voice_agent.get("last_transfer"), dict) else {}
-        voice_transfer_count = int(voice_agent.get("transfer_count") or 0)
-        raw_transfer_state = str(voice_agent.get("transfer_state") or "").strip()
-        if voice_agent.get("transfer_ready"):
-            voice_transfer_ready = "ativa"
-        elif raw_transfer_state.startswith("transfer_staged"):
-            voice_transfer_ready = "preparada"
-        elif voice_transfer_count > 0:
-            voice_transfer_ready = "pendente"
-        else:
-            voice_transfer_ready = "não"
-        if last_voice_session:
-            voice_session_line = (
-                f"Sessão lógica: `{self._format_vps_int(voice_session_count)}` · compartilhada `{voice_shared_ready}` · "
-                f"guild `{str(last_voice_session.get('guild_id') or '?')}` canal `{str(last_voice_session.get('channel_id') or '?')}` "
-                f"· TTL `{str(last_voice_session.get('ttl_seconds') or 0)}s`"
-            )
-        else:
-            voice_session_line = f"Sessão lógica: `{self._format_vps_int(voice_session_count)}` · compartilhada `{voice_shared_ready}` · aguardando primeira sessão da VPS"
-        if last_handoff:
-            handoff_owner = str(last_handoff.get('voice_owner') or last_handoff.get('transport_owner') or 'vps')[:30]
-            voice_handoff_line = (
-                f"Handoff voz: `{voice_handoff_ready}` · dono atual `{handoff_owner}` · registros `{self._format_vps_int(voice_handoff_count)}` · "
-                f"session `{ 'sim' if last_handoff.get('session_id_present') else 'não' }` · endpoint `{ 'sim' if last_handoff.get('endpoint_present') else 'não' }` · "
-                f"token temp `{ 'sim' if last_handoff.get('voice_token_present') else 'não' }` · TTL `{str(last_handoff.get('ttl_seconds') or 0)}s`"
-            )
-        else:
-            voice_handoff_line = f"Handoff voz: `{voice_handoff_ready}` · registros `{self._format_vps_int(voice_handoff_count)}` · aguardando session_id/endpoint/token temporário"
-        if last_transfer:
-            transfer_state = str(last_transfer.get('state') or voice_agent.get('transfer_state') or '—')[:70]
-            current_owner = str(last_transfer.get('voice_owner') or last_transfer.get('current_owner') or voice_agent.get('current_voice_owner') or 'vps')[:30]
-            requested_owner = str(last_transfer.get('requested_owner') or voice_agent.get('requested_voice_owner') or 'worker')[:30]
-            transfer_ttl = str(last_transfer.get('ttl_seconds') or 0)
-            voice_transfer_line = (
-                f"Transferência: `{voice_transfer_ready}` · registros `{self._format_vps_int(voice_transfer_count)}` · "
-                f"dono `{current_owner}` → pedido `{requested_owner}` · estado `{transfer_state}` · TTL `{transfer_ttl}s`"
-            )
-        else:
-            voice_transfer_line = f"Transferência: `{voice_transfer_ready}` · registros `{self._format_vps_int(voice_transfer_count)}` · preparada só depois do handoff"
+        last_connection = voice_agent.get("last_connection") if isinstance(voice_agent.get("last_connection"), dict) else {}
 
-        if last_connection:
-            conn_state = str(last_connection.get('state') or '—')[:60]
-            conn_stage = str(last_connection.get('stage') or '—')[:60]
-            conn_latency = last_connection.get('latency_ms')
-            conn_error = str(last_connection.get('error') or '')[:100]
-            voice_connection_line = (
-                f"Conexão direta: `{voice_connection_ready}` · registros `{self._format_vps_int(voice_connection_count)}` · "
-                f"estado `{conn_state}` · etapa `{conn_stage}` · WS ready `{ 'sim' if last_connection.get('ready_received') else 'não' }` · "
-                f"UDP `{ 'sim' if last_connection.get('udp_probe_ok') else 'não' }` · {self._vps_format_ms(conn_latency or 0)}"
-            )
-            if conn_error:
-                voice_connection_line += f" · erro `{conn_error}`"
-        else:
-            voice_connection_line = f"Conexão direta: `{voice_connection_ready}` · registros `{self._format_vps_int(voice_connection_count)}` · aguardando transferência de posse da voz"
-        voice_report_ok = int(tts_metrics.get("worker_voice_session_reports_ok", 0) or 0)
-        voice_report_failed = int(tts_metrics.get("worker_voice_session_reports_failed", 0) or 0)
-        voice_report_skipped = int(tts_metrics.get("worker_voice_session_skipped", 0) or 0)
-        voice_handoff_ok = int(tts_metrics.get("worker_voice_session_handoff_ok", 0) or 0)
-        voice_handoff_failed = int(tts_metrics.get("worker_voice_session_handoff_failed", 0) or 0)
-        voice_handoff_skipped = int(tts_metrics.get("worker_voice_session_handoff_skipped", 0) or 0)
-        voice_connection_probe_ok = int(tts_metrics.get("worker_voice_session_connection_probe_ok", 0) or 0)
-        voice_connection_probe_failed = int(tts_metrics.get("worker_voice_session_connection_probe_failed", 0) or 0)
-        voice_connection_probe_skipped = int(tts_metrics.get("worker_voice_session_connection_probe_skipped", 0) or 0)
-        voice_transfer_prepare_ok = int(tts_metrics.get("worker_voice_session_transfer_prepare_ok", 0) or 0)
-        voice_transfer_prepare_failed = int(tts_metrics.get("worker_voice_session_transfer_prepare_failed", 0) or 0)
-        voice_transfer_prepare_skipped = int(tts_metrics.get("worker_voice_session_transfer_prepare_skipped", 0) or 0)
-        voice_transfer_begin_ok = int(tts_metrics.get("worker_voice_session_transfer_begin_ok", 0) or 0)
-        voice_transfer_begin_failed = int(tts_metrics.get("worker_voice_session_transfer_begin_failed", 0) or 0)
-        voice_direct_tts_ok = int(tts_metrics.get("worker_voice_session_direct_tts_ok", 0) or 0)
-        voice_direct_tts_failed = int(tts_metrics.get("worker_voice_session_direct_tts_failed", 0) or 0)
-        voice_direct_tts_skipped = int(tts_metrics.get("worker_voice_session_direct_tts_skipped", 0) or 0)
-        tts_busy_retries = int(tts_metrics.get("tts_agent_busy_retries", 0) or 0)
-        tts_last_failure = str(tts_metrics.get("tts_agent_last_failure_reason") or "")[:120]
+        counter_specs = [
+            ("sessões", "worker_voice_session_reports_ok", "worker_voice_session_reports_failed", "worker_voice_session_skipped"),
+            ("handoffs", "worker_voice_session_handoff_ok", "worker_voice_session_handoff_failed", "worker_voice_session_handoff_skipped"),
+            ("preparos", "worker_voice_session_transfer_prepare_ok", "worker_voice_session_transfer_prepare_failed", "worker_voice_session_transfer_prepare_skipped"),
+            ("transferências", "worker_voice_session_transfer_begin_ok", "worker_voice_session_transfer_begin_failed", None),
+            ("TTS direto", "worker_voice_session_direct_tts_ok", "worker_voice_session_direct_tts_failed", "worker_voice_session_direct_tts_skipped"),
+            ("probes", "worker_voice_session_connection_probe_ok", "worker_voice_session_connection_probe_failed", "worker_voice_session_connection_probe_skipped"),
+        ]
+        voice_counter_lines: list[str] = []
+        for label, ok_key, fail_key, skip_key in counter_specs:
+            ok = max(0, int(tts_metrics.get(ok_key, 0) or 0))
+            failed = max(0, int(tts_metrics.get(fail_key, 0) or 0))
+            skipped = max(0, int(tts_metrics.get(skip_key, 0) or 0)) if skip_key else 0
+            if not (ok or failed or skipped):
+                continue
+            line = f"{label.capitalize()}: {self._format_vps_int(ok)} ok · {self._format_vps_int(failed)} falhas"
+            if skip_key:
+                line += f" · {self._format_vps_int(skipped)} ignorados"
+            voice_counter_lines.append(line)
 
+        voice_section = [
+            "### 🎛️ Worker Voice Agent",
+            f"{voice_dot} **{voice_state}** · áudio direto `{'pronto' if direct_ready else 'em preparação' if voice_available else 'indisponível'}`",
+            (
+                "Recursos: "
+                f"música `{'sim' if voice_agent.get('music_ready') else 'não'}` · "
+                f"TTS `{'sim' if voice_agent.get('tts_ready') else 'não'}` · "
+                f"ducking `{'sim' if voice_agent.get('ducking_ready') else 'não'}`"
+            ),
+        ]
+        if not any((voice_session_count, voice_handoff_count, voice_transfer_count, voice_connection_count, voice_counter_lines)):
+            voice_section.append("Nenhuma sessão, handoff, transferência ou conexão foi registrada desde o reinício.")
+        else:
+            voice_section.append(
+                "Atividade: "
+                f"{self._format_vps_int(voice_session_count)} sessões · "
+                f"{self._format_vps_int(voice_handoff_count)} handoffs · "
+                f"{self._format_vps_int(voice_transfer_count)} transferências · "
+                f"{self._format_vps_int(voice_connection_count)} conexões"
+            )
+            if last_voice_session:
+                voice_section.append(
+                    "Última sessão: "
+                    f"guild `{str(last_voice_session.get('guild_id') or '?')}` · "
+                    f"canal `{str(last_voice_session.get('channel_id') or '?')}` · "
+                    f"TTL `{str(last_voice_session.get('ttl_seconds') or 0)}s`"
+                )
+            if last_handoff:
+                voice_section.append(
+                    "Último handoff: "
+                    f"dono `{str(last_handoff.get('voice_owner') or last_handoff.get('transport_owner') or 'vps')[:30]}` · "
+                    f"sessão `{'sim' if last_handoff.get('session_id_present') else 'não'}` · "
+                    f"endpoint `{'sim' if last_handoff.get('endpoint_present') else 'não'}` · "
+                    f"token `{'sim' if last_handoff.get('voice_token_present') else 'não'}`"
+                )
+            if last_transfer:
+                voice_section.append(
+                    "Última transferência: "
+                    f"`{str(last_transfer.get('voice_owner') or last_transfer.get('current_owner') or 'vps')[:30]}` → "
+                    f"`{str(last_transfer.get('requested_owner') or 'worker')[:30]}` · "
+                    f"estado `{str(last_transfer.get('state') or '—')[:70]}`"
+                )
+            if last_connection:
+                connection_line = (
+                    "Última conexão: "
+                    f"estado `{str(last_connection.get('state') or '—')[:60]}` · "
+                    f"etapa `{str(last_connection.get('stage') or '—')[:60]}` · "
+                    f"WS `{'ok' if last_connection.get('ready_received') else 'pendente'}` · "
+                    f"UDP `{'ok' if last_connection.get('udp_probe_ok') else 'pendente'}`"
+                )
+                connection_error = str(last_connection.get("error") or "").strip()[:100]
+                if connection_error:
+                    connection_line += f" · erro `{connection_error}`"
+                voice_section.append(connection_line)
+            voice_section.extend(voice_counter_lines)
+
+        voice_missing = [str(item) for item in list(voice_agent.get("missing") or [])[:3] if str(item).strip()]
+        if voice_missing:
+            voice_section.append("Pendências: `" + ", ".join(voice_missing)[:140] + "`")
+
+        queue_active = max(0, int(tts_agent.get("queue_active", 0) or 0))
+        queue_limit = max(0, int(tts_agent.get("queue_limit", 0) or 0))
+        health_ok = max(0, int(tts_metrics.get("tts_agent_health_ok", 0) or 0))
+        health_fail = max(0, int(tts_metrics.get("tts_agent_health_fail", 0) or 0))
+        synth_attempts = max(0, int(tts_metrics.get("tts_agent_synth_attempts", 0) or 0))
+        synth_ok = max(0, int(tts_metrics.get("tts_agent_synth_ok", 0) or 0))
+        synth_failed = max(0, int(tts_metrics.get("tts_agent_synth_failed", 0) or 0))
+        busy_retries = max(0, int(tts_metrics.get("tts_agent_busy_retries", 0) or 0))
+        route_worker_samples = max(0, int(tts_metrics.get("tts_agent_route_worker_samples", 0) or 0))
+        route_vps_samples = max(0, int(tts_metrics.get("tts_agent_route_vps_samples", 0) or 0))
+        tts_last_failure = str(tts_metrics.get("tts_agent_last_failure_reason") or "").strip()[:120]
+        last_requested = str(tts_agent.get("last_requested_engine") or tts_metrics.get("tts_agent_last_requested_engine") or "").strip()
+        last_selected = str(tts_agent.get("last_selected_engine") or tts_metrics.get("tts_agent_last_selected_engine") or "").strip()
+        last_format = str(tts_agent.get("last_audio_format") or tts_metrics.get("tts_agent_last_audio_format") or "").strip()
+        last_bytes = max(0, int(tts_agent.get("last_audio_bytes") or tts_metrics.get("tts_agent_last_audio_bytes") or 0))
+        last_cache_hit = bool(tts_agent.get("last_cache_hit") or tts_metrics.get("tts_agent_last_cache_hit"))
+        last_synth_ms = max(0.0, float(tts_agent.get("last_synth_ms") or tts_metrics.get("tts_agent_last_synth_ms") or tts_metrics.get("avg_tts_agent_synth_ms") or 0.0))
+
+        worker_status = "pronto" if agent_ok and route == "worker" else ("em fallback" if agent_enabled else "desativado")
+        worker_section = [
+            "### 📱 TTS Agent",
+            f"Estado: **{worker_status}**" + (f" · engines: {available_engines}" if available_engines else " · nenhuma engine anunciada"),
+        ]
+        if queue_active or queue_limit:
+            worker_section.append(f"Fila: {self._format_vps_int(queue_active)}/{self._format_vps_int(queue_limit)}")
+        if health_ok or health_fail:
+            worker_section.append(f"Health: {self._format_vps_int(health_ok)} ok · {self._format_vps_int(health_fail)} falhas")
+        if synth_attempts or synth_ok or synth_failed or busy_retries:
+            synth_line = (
+                f"Sínteses: {self._format_vps_int(synth_attempts)} tentativas · "
+                f"{self._format_vps_int(synth_ok)} concluídas · {self._format_vps_int(synth_failed)} falhas"
+            )
+            if busy_retries:
+                synth_line += f" · {self._format_vps_int(busy_retries)} retries por ocupação"
+            worker_section.append(synth_line)
+        if route_worker_samples or route_vps_samples:
+            worker_section.append(
+                f"Decisões de rota: {self._format_vps_int(route_worker_samples)} worker · "
+                f"{self._format_vps_int(route_vps_samples)} VPS"
+            )
+        if tts_last_failure:
+            worker_section.append(f"Última falha: `{tts_last_failure}`")
         if last_requested or last_selected:
-            last_worker_line = (
-                f"Última síntese worker: {_engine_label(last_requested)} pedido → {_engine_label(last_selected)} usado"
-                f" · {last_format or 'formato ?'} · {self._vps_format_bytes_human(last_bytes)}"
+            worker_section.append(
+                f"Última síntese: {_engine_label(last_requested)} solicitado → {_engine_label(last_selected)} usado"
+                f" · {last_format or 'formato desconhecido'} · {self._vps_format_bytes_human(last_bytes)}"
                 f" · cache {'hit' if last_cache_hit else 'miss'} · {self._vps_format_ms(last_synth_ms)}"
             )
-        else:
-            last_worker_line = "Última síntese worker: ainda sem registro."
+        if worker_engine_lines:
+            worker_section.extend(worker_engine_lines)
+        elif not (synth_attempts or synth_ok or synth_failed):
+            worker_section.append("Nenhuma síntese foi processada pelo worker desde o reinício.")
 
-        lines = [
-            "## 🔊 TTS",
-            "-# Métricas desde o último restart do bot. Agora separa rota worker e fallback/VPS.",
-            "",
-            "### 🧭 Rota atual",
-            f"{route_dot} **Modo em uso:** {route_label}",
-            f"Worker selecionado: `{worker_id}`{worker_suffix}",
-            f"Motivo/estado: `{str(tts_agent.get('reason') or '—')[:80]}` · cooldown: {self._vps_format_ms(cooldown * 1000.0)}",
-            f"Último erro do Agent: `{str(tts_agent.get('last_error') or 'nenhum')[:160]}`",
-            "",
-            "### 🎛️ Worker Voice Agent",
-            f"{voice_dot} Estado: `{voice_state}` · direto worker→Discord: `{voice_tts_direct}` · handoff: `{voice_handoff_ready}`",
-            f"Plano: VPS controla comandos/UI; worker controla só áudio/voz quando pronto · sessão compartilhada: `{'sim' if voice_agent.get('shared_session_enabled') else 'não'}`",
-            f"Music `{voice_music_ready}` · TTS `{voice_tts_ready}` · ducking `{'sim' if voice_agent.get('ducking_ready') else 'não'}`",
-            voice_session_line,
-            voice_handoff_line,
-            voice_transfer_line,
-            voice_connection_line,
-            f"Registro sessão: `{self._format_vps_int(voice_report_ok)}` ok · `{self._format_vps_int(voice_report_failed)}` falhas · `{self._format_vps_int(voice_report_skipped)}` pulados",
-            f"Registro handoff: `{self._format_vps_int(voice_handoff_ok)}` ok · `{self._format_vps_int(voice_handoff_failed)}` falhas · `{self._format_vps_int(voice_handoff_skipped)}` pulados",
-            f"Prep. transferência: `{self._format_vps_int(voice_transfer_prepare_ok)}` ok · `{self._format_vps_int(voice_transfer_prepare_failed)}` falhas · `{self._format_vps_int(voice_transfer_prepare_skipped)}` pulados",
-            f"Início transferência: `{self._format_vps_int(voice_transfer_begin_ok)}` ok · `{self._format_vps_int(voice_transfer_begin_failed)}` falhas",
-            f"TTS direto worker→Discord: `{self._format_vps_int(voice_direct_tts_ok)}` ok · `{self._format_vps_int(voice_direct_tts_failed)}` falhas · `{self._format_vps_int(voice_direct_tts_skipped)}` pulados",
-            f"Probe conexão: `{self._format_vps_int(voice_connection_probe_ok)}` start ok · `{self._format_vps_int(voice_connection_probe_failed)}` falhas · `{self._format_vps_int(voice_connection_probe_skipped)}` aguardando posse",
-            f"Pendências: `{voice_missing[:140]}`",
-            "",
-            "### 📱 TTS do Worker / TTS Agent",
-            f"Estado: `{'pronto' if agent_ok and route == 'worker' else 'fallback/VPS' if agent_enabled else 'desativado'}` · engines disponíveis: {available_engines}",
-            f"Fila worker: {self._format_vps_int(int(tts_agent.get('queue_active', 0) or 0))}/{self._format_vps_int(int(tts_agent.get('queue_limit', 0) or 0))}",
-            f"Health ok/falha: {self._format_vps_int(int(tts_metrics.get('tts_agent_health_ok', 0) or 0))}/{self._format_vps_int(int(tts_metrics.get('tts_agent_health_fail', 0) or 0))}",
-            f"Synth tentadas/ok/falhas: {self._format_vps_int(int(tts_metrics.get('tts_agent_synth_attempts', 0) or 0))}/"
-            f"{self._format_vps_int(int(tts_metrics.get('tts_agent_synth_ok', 0) or 0))}/"
-            f"{self._format_vps_int(int(tts_metrics.get('tts_agent_synth_failed', 0) or 0))} · retries ocupado {self._format_vps_int(tts_busy_retries)}",
-            f"Última falha Agent: `{tts_last_failure or 'nenhuma'}`",
-            f"Média Agent: {self._vps_format_ms(tts_metrics.get('avg_tts_agent_synth_ms'))} · rota worker/VPS: "
-            f"{self._format_vps_int(int(tts_metrics.get('tts_agent_route_worker_samples', 0) or 0))}/"
-            f"{self._format_vps_int(int(tts_metrics.get('tts_agent_route_vps_samples', 0) or 0))}",
-            last_worker_line,
-            *worker_engine_lines,
-            "",
-            "### 🖥️ TTS da VPS / fallback local",
-            *local_engine_lines,
-            f"Fila agora: {self._format_vps_int(int(tts_metrics.get('queued_items_current', 0) or 0))} · guild states: {self._format_vps_int(int(tts_metrics.get('guild_states_current', 0) or 0))}",
-            "Enfileiradas / deduplicadas / descartadas: "
-            f"{self._format_vps_int(int(tts_metrics.get('queue_enqueued', 0) or 0))} / "
-            f"{self._format_vps_int(int(tts_metrics.get('queue_deduplicated', 0) or 0))} / "
-            f"{self._format_vps_int(int(tts_metrics.get('queue_dropped', 0) or 0))}",
-            f"Espera média: {self._vps_format_ms(tts_metrics.get('avg_queue_wait_ms'))} · despacho médio: {self._vps_format_ms(tts_metrics.get('avg_dispatch_ms'))}",
-            "",
-            "### 📦 Cache e armazenamento",
-            f"Cache VPS: {self._format_vps_int(cache_hits)} hits · {self._format_vps_int(cache_misses)} misses · {self._format_vps_int(cache_stores)} stores · {cache_hit_rate:.1f}% hit rate",
-            f"Cache worker lookup: {self._format_vps_int(worker_cache_hits)} hits · {self._format_vps_int(worker_cache_misses)} misses · {self._format_vps_int(worker_cache_skipped)} skips · {self._format_vps_int(worker_cache_errors)} erros",
-            f"tmp_audio: {self._vps_format_bytes_human(snapshot.get('total_tmp_bytes'))} · runtime/cache/cred {snapshot.get('runtime_files', 0)}/{snapshot.get('cache_files', 0)}/{snapshot.get('cred_files', 0)}",
-            "",
+        queued_current = max(0, int(tts_metrics.get("queued_items_current", 0) or 0))
+        guild_states = max(0, int(tts_metrics.get("guild_states_current", 0) or 0))
+        queue_enqueued = max(0, int(tts_metrics.get("queue_enqueued", 0) or 0))
+        queue_deduplicated = max(0, int(tts_metrics.get("queue_deduplicated", 0) or 0))
+        queue_dropped = max(0, int(tts_metrics.get("queue_dropped", 0) or 0))
+        avg_queue_wait = max(0.0, float(tts_metrics.get("avg_queue_wait_ms", 0) or 0))
+        avg_dispatch = max(0.0, float(tts_metrics.get("avg_dispatch_ms", 0) or 0))
+        local_section = ["### 🖥️ VPS local / fallback"]
+        if local_engine_lines:
+            local_section.extend(local_engine_lines)
+        else:
+            local_section.append("Nenhuma síntese local foi registrada desde o reinício.")
+        if queued_current or guild_states:
+            local_section.append(
+                f"Agora: {self._format_vps_int(queued_current)} na fila · "
+                f"{self._format_vps_int(guild_states)} servidores com estado ativo"
+            )
+        if queue_enqueued or queue_deduplicated or queue_dropped:
+            local_section.append(
+                f"Fila acumulada: {self._format_vps_int(queue_enqueued)} enfileiradas · "
+                f"{self._format_vps_int(queue_deduplicated)} deduplicadas · "
+                f"{self._format_vps_int(queue_dropped)} descartadas"
+            )
+        if avg_queue_wait or avg_dispatch:
+            local_section.append(
+                f"Tempos médios: espera {self._vps_format_ms(avg_queue_wait)} · "
+                f"despacho {self._vps_format_ms(avg_dispatch)}"
+            )
+
+        cache_hits = max(0, int(tts_metrics.get("cache_hits", 0) or 0))
+        cache_misses = max(0, int(tts_metrics.get("cache_misses", 0) or 0))
+        cache_stores = max(0, int(tts_metrics.get("cache_stores", 0) or 0))
+        cache_lookups = cache_hits + cache_misses
+        cache_hit_rate = (cache_hits / cache_lookups * 100.0) if cache_lookups else 0.0
+        worker_cache_hits = max(0, int(tts_metrics.get("worker_cache_lookup_hits", 0) or 0))
+        worker_cache_misses = max(0, int(tts_metrics.get("worker_cache_lookup_misses", 0) or 0))
+        worker_cache_skipped = max(0, int(tts_metrics.get("worker_cache_lookup_skipped", 0) or 0))
+        worker_cache_errors = max(0, int(tts_metrics.get("worker_cache_lookup_errors", 0) or 0))
+        cache_section = ["### 📦 Cache e armazenamento"]
+        if cache_lookups or cache_stores:
+            cache_section.append(
+                f"VPS: {self._format_vps_int(cache_hits)} hits · {self._format_vps_int(cache_misses)} misses · "
+                f"{self._format_vps_int(cache_stores)} gravações · {cache_hit_rate:.1f}% de acerto"
+            )
+        if worker_cache_hits or worker_cache_misses or worker_cache_skipped or worker_cache_errors:
+            cache_section.append(
+                f"Worker: {self._format_vps_int(worker_cache_hits)} hits · {self._format_vps_int(worker_cache_misses)} misses · "
+                f"{self._format_vps_int(worker_cache_skipped)} ignoradas · {self._format_vps_int(worker_cache_errors)} erros"
+            )
+        if not (cache_lookups or cache_stores or worker_cache_hits or worker_cache_misses or worker_cache_skipped or worker_cache_errors):
+            cache_section.append("Sem consultas de cache desde o reinício.")
+        cache_section.append(
+            f"Temporários: {self._vps_format_bytes_human(snapshot.get('total_tmp_bytes'))} · "
+            f"runtime/cache/credenciais "
+            f"{self._format_vps_int(snapshot.get('runtime_files', 0))}/"
+            f"{self._format_vps_int(snapshot.get('cache_files', 0))}/"
+            f"{self._format_vps_int(snapshot.get('cred_files', 0))}"
+        )
+
+        total_section = [
             "### 🧮 Total de sínteses",
-            f"Worker Agent: {self._format_vps_int(worker_total_synts)} · VPS/fallback: {self._format_vps_int(local_total_synts)}",
+            f"Worker: **{self._format_vps_int(worker_total_synts)}** · VPS/fallback: **{self._format_vps_int(local_total_synts)}**",
         ]
-        report = "\n".join(lines).strip()
-        if len(report) > 3800:
-            report = report[:3800].rstrip() + "\n[cortado por tamanho]"
-        return report
+
+        return self._fit_vps_sections(
+            [route_section, voice_section, worker_section, local_section, cache_section, total_section],
+            limit=3800,
+            omitted_label="diagnóstico técnico",
+        )
 
     async def _run_vps_action(self, interaction: discord.Interaction, *, selected_items: list[VpsItem]) -> None:
         if interaction.guild is None or int(getattr(interaction.guild, "id", 0) or 0) != VPS_COMMAND_GUILD_ID:
