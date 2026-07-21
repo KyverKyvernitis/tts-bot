@@ -458,7 +458,7 @@ class GincanaChipAdminMixin:
         if owner_only and not is_owner:
             if send_response and not interaction.response.is_done():
                 await interaction.response.send_message(
-                    view=self._make_v2_notice("Sem permissão", ["Essa ação é exclusiva do dono do bot."], ok=False),
+                    view=self._make_v2_notice("Sem permissão", ["Você não pode usar esta ação."], ok=False),
                     ephemeral=True,
                 )
             return False

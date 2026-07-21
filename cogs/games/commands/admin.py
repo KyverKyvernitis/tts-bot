@@ -50,7 +50,7 @@ class _EconomyStaffModal(discord.ui.Modal, title="Cargo da staff"):
             _label(
                 "Remover cargo atual",
                 self.clear_checkbox,
-                "Sem cargo definido, apenas o dono do bot mantém acesso.",
+                "Sem cargo definido, o acesso fica restrito.",
             )
         )
 
