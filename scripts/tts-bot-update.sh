@@ -188,7 +188,6 @@ UPDATER_STEP_LAST=0
 UPDATER_TIMINGS=""
 UPDATE_STATUS_OUTBOX_DIR="$REPO_DIR/data/runtime/update-status-outbox"
 UPDATE_ALERT_OUTBOX_DIR="$REPO_DIR/data/runtime/update-alert-outbox"
-UPDATE_DELIVERY_RECEIPTS_DIR="$REPO_DIR/data/runtime/update-delivery-receipts"
 : > "$RUN_LOG_FILE"
 chmod 0644 "$RUN_LOG_FILE" 2>/dev/null || true
 
@@ -340,127 +339,29 @@ LAST_ERROR_SERVICE_UNIT=""
 LAST_ERROR_STDERR=""
 LAST_ERROR_LOGS=""
 
-prepare_update_delivery_dirs() {
-  mkdir -p "$UPDATE_STATUS_OUTBOX_DIR" "$UPDATE_ALERT_OUTBOX_DIR" "$UPDATE_DELIVERY_RECEIPTS_DIR" 2>/dev/null || return 1
-  chown ubuntu:ubuntu "$UPDATE_STATUS_OUTBOX_DIR" "$UPDATE_ALERT_OUTBOX_DIR" "$UPDATE_DELIVERY_RECEIPTS_DIR" 2>/dev/null || true
-  chmod 0775 "$UPDATE_STATUS_OUTBOX_DIR" "$UPDATE_ALERT_OUTBOX_DIR" "$UPDATE_DELIVERY_RECEIPTS_DIR" 2>/dev/null || true
-}
-
-send_alert_reliably() {
-  local alert_type="${1:-info}"
-  local title="${2:-Auto update}"
-  local body="${3:-}"
-  local attach="${4:-}"
-  local attach_name="${5:-}"
-  local event_id="${6:-}"
-  local receipt="" receipt_safe=""
-
-  prepare_update_delivery_dirs || true
-  if [[ -n "${event_id//[[:space:]]/}" ]]; then
-    receipt_safe="$(printf '%s' "$event_id" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120)"
-    receipt="$UPDATE_DELIVERY_RECEIPTS_DIR/${receipt_safe}.alert.done"
-    [[ -f "$receipt" ]] && return 0
-  fi
-
-  if sudo -u ubuntu /usr/bin/env bash "$REPO_DIR/alert.sh" "$alert_type" "$title" "$body" "$attach" "$attach_name"; then
-    if [[ -n "$receipt" ]]; then
-      local receipt_tmp="$receipt.tmp.$$"
-      if printf '%s\n' "$(date -Iseconds)" > "$receipt_tmp"; then
-        chown ubuntu:ubuntu "$receipt_tmp" 2>/dev/null || true
-        chmod 0664 "$receipt_tmp" 2>/dev/null || true
-        if ! mv -f "$receipt_tmp" "$receipt"; then
-          rm -f "$receipt_tmp" 2>/dev/null || true
-          logger -t "$LOG_TAG" "alerta entregue, mas recibo não pôde ser persistido: ${event_id:-$title}" 2>/dev/null || true
-        fi
-      else
-        rm -f "$receipt_tmp" 2>/dev/null || true
-        logger -t "$LOG_TAG" "alerta entregue, mas recibo não pôde ser criado: ${event_id:-$title}" 2>/dev/null || true
-      fi
-    fi
-    return 0
-  fi
-
-  local queued_rc=0
-  if ALERT_TYPE_VALUE="$alert_type" ALERT_TITLE_VALUE="$title" ALERT_BODY_VALUE="$body" \
-  ALERT_ATTACH_VALUE="$attach" ALERT_ATTACH_NAME_VALUE="$attach_name" ALERT_EVENT_ID_VALUE="$event_id" \
-  UPDATE_ALERT_OUTBOX_DIR="$UPDATE_ALERT_OUTBOX_DIR" python3 - <<'PYQUEUEALERT'
-import datetime, hashlib, json, os, pathlib, shutil, time, uuid
-
-root = pathlib.Path(os.environ['UPDATE_ALERT_OUTBOX_DIR'])
-root.mkdir(parents=True, exist_ok=True)
-event_id = (os.environ.get('ALERT_EVENT_ID_VALUE') or '').strip()
-if event_id:
-    safe = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in event_id)[:120]
-else:
-    digest = hashlib.sha256(
-        ((os.environ.get('ALERT_TITLE_VALUE') or '') + '\0' + (os.environ.get('ALERT_BODY_VALUE') or '')).encode('utf-8', errors='ignore')
-    ).hexdigest()[:16]
-    safe = f"{int(time.time() * 1000)}-{digest}-{uuid.uuid4().hex[:8]}"
-job_path = root / f"{safe}.json"
-attachment = ''
-source = pathlib.Path(os.environ.get('ALERT_ATTACH_VALUE') or '')
-if source.is_file() and source.stat().st_size > 0:
-    attachment = str(root / f"{safe}.attachment")
-    shutil.copy2(source, attachment)
-payload = {
-    'schema_version': 1,
-    'event_id': event_id or safe,
-    'type': os.environ.get('ALERT_TYPE_VALUE') or 'info',
-    'title': os.environ.get('ALERT_TITLE_VALUE') or 'Auto update',
-    'body': os.environ.get('ALERT_BODY_VALUE') or '',
-    'attachment': attachment,
-    'attachment_name': os.environ.get('ALERT_ATTACH_NAME_VALUE') or '',
-    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'attempts': 0,
-    'last_error': 'falha no envio direto',
-}
-tmp = job_path.with_name('.' + job_path.name + f'.{os.getpid()}.tmp')
-tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
-os.replace(tmp, job_path)
-for path in (job_path, pathlib.Path(attachment) if attachment else None):
-    if path:
-        try:
-            os.chmod(path, 0o664)
-        except OSError:
-            pass
-PYQUEUEALERT
-  then
-    queued_rc=0
-  else
-    queued_rc=$?
-  fi
-  chown ubuntu:ubuntu "$UPDATE_ALERT_OUTBOX_DIR" 2>/dev/null || true
-  if (( queued_rc == 0 )); then
-    logger -t "$LOG_TAG" "alerta enfileirado para reenvio: ${event_id:-$title}" 2>/dev/null || true
-    return 0
-  fi
-  logger -t "$LOG_TAG" "falha ao enviar e ao persistir alerta: ${event_id:-$title}" 2>/dev/null || true
-  return 1
-}
-
 send_info() {
   local title="${1:-Auto update}"
   local body="${2:-}"
-  send_alert_reliably info "$title" "$body" "" "" "${3:-}" || true
+  local key="${LOCAL_CANDIDATE_ID:-${ROLLBACK_REQUEST_ID:-${REMOTE_COMMIT:-runtime}}}:info:${STAGE// /-}"
+  enqueue_update_alert info "$title" "$body" "$key" || true
 }
 
 send_warn() {
   local title="${1:-Auto update}"
   local body="${2:-}"
-  send_alert_reliably warn "$title" "$body" "" "" "${3:-}" || true
+  local key="${LOCAL_CANDIDATE_ID:-${ROLLBACK_REQUEST_ID:-${REMOTE_COMMIT:-runtime}}}:warning:${STAGE// /-}"
+  enqueue_update_alert warn "$title" "$body" "$key" || true
 }
 
 send_error() {
   local title="${1:-Falha no auto update}"
   local body="${2:-}"
   local attach=""
+  local key="${LOCAL_CANDIDATE_ID:-${ROLLBACK_REQUEST_ID:-${REMOTE_COMMIT:-runtime}}}:error:${STAGE// /-}"
   if [[ -f "$RUN_LOG_FILE" && -s "$RUN_LOG_FILE" ]]; then
     attach="$RUN_LOG_FILE"
   fi
-  local incident_id="${LOCAL_CANDIDATE_ID:-${ROLLBACK_REQUEST_ID:-${REMOTE_COMMIT:-${CURRENT_COMMIT:-}}}}"
-  [[ -n "${incident_id//[[:space:]]/}" ]] || incident_id="$(date +%Y%m%d%H%M%S)-$$"
-  local event_id="${3:-error-${incident_id}-${FAILED_STAGE:-$STAGE}}"
-  send_alert_reliably error "$title" "$body" "$attach" "tts-bot-updater.log" "$event_id" || true
+  enqueue_update_alert error "$title" "$body" "$key" "$attach" "tts-bot-updater.log" || true
 }
 
 human_duration() {
@@ -1194,7 +1095,7 @@ mark_remote_commit_rejected() {
   [[ -n "$commit" ]] || return 0
   mkdir -p "$(dirname "$REMOTE_REJECTED_FILE")" 2>/dev/null || true
   python3 - "$REMOTE_REJECTED_FILE" "$commit" "$reason" "$CURRENT_COMMIT" <<'PYREJ' 2>/dev/null || true
-import datetime, json, os, pathlib, sys
+import json, pathlib, sys, datetime
 path = pathlib.Path(sys.argv[1])
 commit, reason, live = sys.argv[2:5]
 try:
@@ -1349,26 +1250,7 @@ load_pending_local_candidate() {
   fi
 
   manifest="$LOCAL_CANDIDATE_DIR/manifest.json"
-  if [[ ! -f "$manifest" ]] || ! python3 - "$manifest" <<'PYVALIDMANIFEST' >/dev/null 2>&1
-import json, pathlib, sys
-path = pathlib.Path(sys.argv[1])
-data = json.loads(path.read_text(encoding='utf-8'))
-if not isinstance(data, dict) or not str(data.get('id') or '').strip():
-    raise SystemExit(1)
-PYVALIDMANIFEST
-  then
-    logger -t "$LOG_TAG" "Candidato ativo inválido: manifest ausente ou corrompido em $LOCAL_CANDIDATE_DIR" 2>/dev/null || true
-    LOCAL_CANDIDATE_MODE=1
-    LOCAL_CANDIDATE_VERIFY_ERROR="manifest ausente ou corrompido"
-    archive_local_candidate "failed"
-    send_error "Candidato de update corrompido" "Resumo: Um item da fila tinha manifest ausente ou inválido e foi arquivado sem alterar a VPS.
-Candidato: $(basename "$LOCAL_CANDIDATE_DIR")
-Hora: $(date '+%d/%m/%Y %H:%M:%S')" "candidate-corrupt-$(basename "$LOCAL_CANDIDATE_DIR")" || true
-    LOCAL_CANDIDATE_MODE=0
-    LOCAL_CANDIDATE_DIR=""
-    LOCAL_CANDIDATE_PENDING_FILE=""
-    return 1
-  fi
+  [[ -f "$manifest" ]] || return 1
   LOCAL_CANDIDATE_MODE=1
   LOCAL_CANDIDATE_ID="$(json_field_from_file "$manifest" id 2>/dev/null || true)"
   LOCAL_CANDIDATE_DISPLAY_ID="$(json_field_from_file "$manifest" display_id 2>/dev/null || true)"
@@ -1631,8 +1513,7 @@ conflicts = sorted(candidate & remote)
 if conflicts:
     shown = ', '.join(conflicts[:8])
     if len(conflicts) > 8:
-        extra = len(conflicts) - 8
-        shown += f', +{extra} ' + ('arquivo' if extra == 1 else 'arquivos')
+        shown += f', +{len(conflicts)-8} arquivos'
     print(f'conflito com update anterior em: {shown}')
 PYBASE
 }
@@ -1709,22 +1590,22 @@ prune_update_artifacts() {
   local failed_days="${DISCORD_AUTO_UPDATE_FAILED_RETENTION_DAYS:-30}"
   local cancelled_days="${DISCORD_AUTO_UPDATE_CANCELLED_RETENTION_DAYS:-7}"
   local outbox_days="${DISCORD_AUTO_UPDATE_OUTBOX_RETENTION_DAYS:-7}"
-  local receipt_days="${DISCORD_AUTO_UPDATE_DELIVERY_RECEIPT_RETENTION_DAYS:-30}"
   [[ "$done_days" =~ ^[0-9]+$ ]] || done_days=7
   [[ "$failed_days" =~ ^[0-9]+$ ]] || failed_days=30
   [[ "$cancelled_days" =~ ^[0-9]+$ ]] || cancelled_days=7
   [[ "$outbox_days" =~ ^[0-9]+$ ]] || outbox_days=7
-  [[ "$receipt_days" =~ ^[0-9]+$ ]] || receipt_days=30
   find "$CANDIDATE_ROOT/done" -mindepth 1 -maxdepth 1 -mtime "+$done_days" -exec rm -rf -- {} + 2>/dev/null || true
   find "$CANDIDATE_ROOT/failed" -mindepth 1 -maxdepth 1 -mtime "+$failed_days" -exec rm -rf -- {} + 2>/dev/null || true
   find "$CANDIDATE_ROOT/cancelled" -mindepth 1 -maxdepth 1 -mtime "+$cancelled_days" -exec rm -rf -- {} + 2>/dev/null || true
   find "$CANDIDATE_QUEUE_DONE_DIR" -type f -mtime "+$done_days" -delete 2>/dev/null || true
   find "$CANDIDATE_QUEUE_FAILED_DIR" -type f -mtime "+$failed_days" -delete 2>/dev/null || true
   find "$CANDIDATE_QUEUE_CANCELLED_DIR" -type f -mtime "+$cancelled_days" -delete 2>/dev/null || true
-  find "$UPDATE_STATUS_OUTBOX_DIR" -type f -name '*.json' -mtime "+$outbox_days" -delete 2>/dev/null || true
-  find "$UPDATE_ALERT_OUTBOX_DIR" -type f -name '*.json' -mtime "+$outbox_days" -delete 2>/dev/null || true
-  find "$UPDATE_ALERT_OUTBOX_DIR" -type f -name '*.attachment' -mtime "+$outbox_days" -delete 2>/dev/null || true
-  find "$UPDATE_DELIVERY_RECEIPTS_DIR" -type f -mtime "+$receipt_days" -delete 2>/dev/null || true
+  local delivery_py
+  delivery_py="$(update_delivery_python 2>/dev/null || true)"
+  if [[ -n "$delivery_py" ]]; then
+    PYTHONPATH="$REPO_DIR" "$delivery_py" -m utility.update_delivery prune --root "$UPDATE_STATUS_OUTBOX_DIR" >/dev/null 2>&1 || true
+    PYTHONPATH="$REPO_DIR" "$delivery_py" -m utility.update_delivery prune --root "$UPDATE_ALERT_OUTBOX_DIR" >/dev/null 2>&1 || true
+  fi
 }
 
 git_add_changed_files_or_reject() {
@@ -1766,7 +1647,7 @@ write_local_candidate_state() {
   local state_name="${1:-state}"
   local extra_commit="${2:-}"
   python3 - "$LOCAL_CANDIDATE_DIR" "$state_name" "$extra_commit" <<'PYSTATE' 2>/dev/null || true
-import datetime, json, os, pathlib, sys
+import json, os, pathlib, sys, datetime
 root = pathlib.Path(sys.argv[1])
 state = sys.argv[2]
 commit = sys.argv[3]
@@ -1782,39 +1663,101 @@ data.update({
     "commit": commit,
     "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
 })
-tmp = path.with_name('.' + path.name + f'.{os.getpid()}.tmp')
+tmp = path.with_name(f".{path.name}.{os.getpid()}.{datetime.datetime.now().timestamp():.0f}.tmp")
 tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 os.replace(tmp, path)
 PYSTATE
 }
 
-send_update_status_payload() {
-  # `${1:-{}}` acrescenta uma chave `}` ao argumento em Bash, produzindo JSON
-  # inválido e fazendo toda edição via /internal/update/zip-status ser descartada.
-  local payload_json="${1:-}"
-  [[ -n "${payload_json//[[:space:]]/}" ]] || payload_json='{}'
-  local final_delivery="${2:-0}"
-  prepare_update_delivery_dirs || true
-  local rc=0
-  if UPDATE_PAYLOAD_JSON="$payload_json" FINAL_DELIVERY="$final_delivery" \
-  BOT_HEALTH_URL="$BOT_HEALTH_URL" REPO_DIR="$REPO_DIR" UPDATE_STATUS_OUTBOX_DIR="$UPDATE_STATUS_OUTBOX_DIR" python3 - <<'PYSENDSTATUS'
-import datetime, hashlib, json, os, pathlib, time, urllib.error, urllib.request, uuid
+update_delivery_python() {
+  local py="$REPO_DIR/.venv/bin/python"
+  [[ -x "$py" ]] || py="$(command -v python3 || true)"
+  [[ -n "$py" && -f "$REPO_DIR/utility/update_delivery.py" ]] || return 1
+  printf '%s' "$py"
+}
 
+flush_update_delivery_outboxes() {
+  local py status_url
+  py="$(update_delivery_python 2>/dev/null || true)"
+  [[ -n "$py" ]] || return 0
+  status_url="${BOT_HEALTH_URL/\/health//internal/update/zip-status}"
+  PYTHONPATH="$REPO_DIR" "$py" -m utility.update_delivery flush-status \
+    --root "$UPDATE_STATUS_OUTBOX_DIR" --url "$status_url" --repo-dir "$REPO_DIR" --limit 30 >/dev/null 2>&1 || true
+  PYTHONPATH="$REPO_DIR" "$py" -m utility.update_delivery flush-alert \
+    --root "$UPDATE_ALERT_OUTBOX_DIR" --alert-script "$REPO_DIR/alert.sh" --limit 30 >/dev/null 2>&1 || true
+}
+
+enqueue_update_alert() {
+  local alert_type="${1:-info}"
+  local title="${2:-Atualização}"
+  local body="${3:-}"
+  local event_key="${4:-}"
+  local attachment="${5:-}"
+  local attachment_name="${6:-}"
+  local py data
+  py="$(update_delivery_python 2>/dev/null || true)"
+  if [[ -z "$py" || -z "${event_key//[[:space:]]/}" ]]; then
+    "$REPO_DIR/alert.sh" "$alert_type" "$title" "$body" "$attachment" "$attachment_name" || true
+    return 0
+  fi
+  data="$(ALERT_TYPE_VALUE="$alert_type" ALERT_TITLE_VALUE="$title" ALERT_BODY_VALUE="$body" ALERT_ATTACHMENT_VALUE="$attachment" ALERT_ATTACHMENT_NAME_VALUE="$attachment_name" python3 - <<'PYALERTJOB'
+import json, os
+print(json.dumps({
+    'type': os.environ.get('ALERT_TYPE_VALUE') or 'info',
+    'title': os.environ.get('ALERT_TITLE_VALUE') or 'Atualização',
+    'body': os.environ.get('ALERT_BODY_VALUE') or '',
+    'attachment': os.environ.get('ALERT_ATTACHMENT_VALUE') or '',
+    'attachment_name': os.environ.get('ALERT_ATTACHMENT_NAME_VALUE') or '',
+}, ensure_ascii=False))
+PYALERTJOB
+)"
+  if ! PYTHONPATH="$REPO_DIR" "$py" -m utility.update_delivery enqueue \
+    --root "$UPDATE_ALERT_OUTBOX_DIR" --kind alert --event-key "$event_key" --data-json "$data" >/dev/null 2>&1; then
+    "$REPO_DIR/alert.sh" "$alert_type" "$title" "$body" "$attachment" "$attachment_name" || true
+    return 0
+  fi
+  flush_update_delivery_outboxes || true
+}
+
+send_update_status_payload() {
+  local payload_json="${1:-{}}"
+  local final_delivery="${2:-0}"
+  local py event_key
+  if [[ "$final_delivery" == "1" ]]; then
+    py="$(update_delivery_python 2>/dev/null || true)"
+    if [[ -n "$py" ]]; then
+      event_key="$(UPDATE_PAYLOAD_JSON="$payload_json" python3 - <<'PYEVENTKEY' 2>/dev/null || true
+import json, os
 try:
     payload = json.loads(os.environ.get('UPDATE_PAYLOAD_JSON') or '{}')
 except Exception:
-    raise SystemExit(2)
+    payload = {}
+key = str(payload.get('event_key') or '').strip()
+if not key:
+    candidate = str(payload.get('candidate_id') or payload.get('display_id') or '').strip()
+    status = str(payload.get('status') or 'final').strip()
+    message = str(payload.get('message_id') or '').strip()
+    key = f'{candidate or message}:final-status:{status}'
+print(key)
+PYEVENTKEY
+)"
+      if [[ -n "${event_key//[[:space:]]/}" ]]; then
+        if PYTHONPATH="$REPO_DIR" "$py" -m utility.update_delivery enqueue \
+          --root "$UPDATE_STATUS_OUTBOX_DIR" --kind status --event-key "$event_key" --data-json "$payload_json" >/dev/null 2>&1; then
+          flush_update_delivery_outboxes || true
+          return 0
+        fi
+      fi
+    fi
+  fi
+  UPDATE_PAYLOAD_JSON="$payload_json" BOT_HEALTH_URL="$BOT_HEALTH_URL" REPO_DIR="$REPO_DIR" python3 - <<'PYSENDSTATUS' 2>/dev/null || true
+import json, os, pathlib, urllib.request
+try:
+    payload = json.loads(os.environ.get('UPDATE_PAYLOAD_JSON') or '{}')
+except Exception:
+    raise SystemExit(0)
 if not isinstance(payload, dict) or not payload.get('channel_id') or not payload.get('message_id'):
-    raise SystemExit(2)
-
-payload.setdefault('event_at', datetime.datetime.now(datetime.timezone.utc).isoformat())
-delivery_seed = '\0'.join(
-    str(payload.get(key) or '')
-    for key in ('channel_id', 'message_id', 'candidate_id', 'status', 'title', 'event_at')
-)
-delivery_id = str(payload.get('delivery_id') or '').strip() or hashlib.sha256(delivery_seed.encode('utf-8')).hexdigest()[:24]
-payload['delivery_id'] = delivery_id
-
+    raise SystemExit(0)
 url = (os.environ.get('BOT_HEALTH_URL') or 'http://127.0.0.1:10000/health').replace('/health', '/internal/update/zip-status')
 headers = {'Content-Type': 'application/json'}
 try:
@@ -1828,298 +1771,19 @@ try:
                 break
 except Exception:
     pass
-
-body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
-final_delivery = str(os.environ.get('FINAL_DELIVERY') or '0').lower() in {'1', 'true', 'yes'}
 try:
-    attempts = max(1, min(10, int(os.environ.get('DISCORD_AUTO_UPDATE_DELIVERY_ATTEMPTS') or (5 if final_delivery else 1))))
-except (TypeError, ValueError):
-    attempts = 5 if final_delivery else 1
-try:
-    base_delay = max(0.0, min(10.0, float(os.environ.get('DISCORD_AUTO_UPDATE_DELIVERY_RETRY_DELAY_SECONDS') or 1.5)))
-except (TypeError, ValueError):
-    base_delay = 1.5
-try:
-    request_timeout = max(1.0, min(30.0, float(os.environ.get('DISCORD_AUTO_UPDATE_DELIVERY_TIMEOUT_SECONDS') or 10)))
-except (TypeError, ValueError):
-    request_timeout = 10.0
-last_error = ''
-for attempt in range(attempts):
-    try:
-        req = urllib.request.Request(url, data=body, headers=headers, method='POST')
-        with urllib.request.urlopen(req, timeout=request_timeout) as response:
-            parsed = json.loads(response.read().decode('utf-8', errors='ignore') or '{}')
-        if parsed.get('ok') and (parsed.get('delivered') or parsed.get('ignored')):
-            raise SystemExit(0)
-        last_error = str(parsed.get('error') or parsed or 'resposta sem confirmação')[:500]
-    except urllib.error.HTTPError as exc:
-        try:
-            detail = exc.read().decode('utf-8', errors='ignore')
-        except Exception:
-            detail = ''
-        last_error = f'HTTP {exc.code}: {detail[:400]}'
-    except Exception as exc:
-        last_error = f'{type(exc).__name__}: {exc}'[:500]
-    if attempt + 1 < attempts:
-        time.sleep(min(8.0, base_delay * (2 ** attempt)))
-
-if not final_delivery:
-    raise SystemExit(0)
-
-outbox = pathlib.Path(os.environ.get('UPDATE_STATUS_OUTBOX_DIR') or '/tmp/update-status-outbox')
-try:
-    outbox.mkdir(parents=True, exist_ok=True)
-    safe_id = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in delivery_id)[:120]
-    path = outbox / f'{safe_id}.json'
-    existing = {}
-    if path.is_file():
-        try:
-            existing = json.loads(path.read_text(encoding='utf-8'))
-        except Exception:
-            existing = {}
-    if not isinstance(existing, dict):
-        existing = {}
-    job = {
-        'schema_version': 2,
-        'delivery_id': delivery_id,
-        'payload': payload,
-        'created_at': existing.get('created_at') or datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        'updated_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        'attempts': int(existing.get('attempts') or 0),
-        'last_error': last_error or 'entrega indisponível',
-        'next_attempt_at': 0,
-    }
-    tmp = path.with_name('.' + path.name + f'.{os.getpid()}.{uuid.uuid4().hex}.tmp')
-    tmp.write_text(json.dumps(job, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
-    os.replace(tmp, path)
-    os.chmod(path, 0o664)
-except Exception as exc:
-    print(f'falha ao persistir status final: {type(exc).__name__}: {exc}', file=os.sys.stderr)
-    raise SystemExit(2)
-raise SystemExit(0)
+    request = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode('utf-8'), headers=headers, method='POST')
+    with urllib.request.urlopen(request, timeout=6) as response:
+        result = json.loads(response.read().decode('utf-8', errors='ignore') or '{}')
+    if not result.get('ok'):
+        raise RuntimeError(result.get('error') or 'resposta inválida')
+except Exception:
+    pass
 PYSENDSTATUS
-  then
-    rc=0
-  else
-    rc=$?
-  fi
-  chown ubuntu:ubuntu "$UPDATE_STATUS_OUTBOX_DIR" 2>/dev/null || true
-  if (( rc != 0 )); then
-    logger -t "$LOG_TAG" "falha ao entregar ou persistir status final do update (rc=$rc)" 2>/dev/null || true
-  fi
-  return "$rc"
 }
 
 flush_update_status_outbox() {
-  prepare_update_delivery_dirs || true
-  BOT_HEALTH_URL="$BOT_HEALTH_URL" REPO_DIR="$REPO_DIR" UPDATE_STATUS_OUTBOX_DIR="$UPDATE_STATUS_OUTBOX_DIR" python3 - <<'PYFLUSHSTATUS'
-import datetime, json, os, pathlib, time, urllib.error, urllib.request
-
-root = pathlib.Path(os.environ.get('UPDATE_STATUS_OUTBOX_DIR') or '/tmp/update-status-outbox')
-if not root.is_dir():
-    raise SystemExit(0)
-url = (os.environ.get('BOT_HEALTH_URL') or 'http://127.0.0.1:10000/health').replace('/health', '/internal/update/zip-status')
-headers = {'Content-Type': 'application/json'}
-try:
-    env_path = pathlib.Path(os.environ.get('REPO_DIR', '/home/ubuntu/bot')) / '.env'
-    if env_path.exists():
-        for line in env_path.read_text(encoding='utf-8', errors='ignore').splitlines():
-            if line.startswith('BOT_INTERNAL_UPDATE_TOKEN='):
-                token = line.split('=', 1)[1].strip().strip('"').strip("'")
-                if token:
-                    headers['X-Update-Token'] = token
-                break
-except Exception:
-    pass
-
-now = time.time()
-
-# Um processo pode morrer depois de renomear o job para .sending.*. Nesse caso,
-# o glob normal não o encontra mais e a entrega ficava presa para sempre.
-# Recoloque claims antigos na fila antes de buscar novos trabalhos.
-for stale_claim in root.glob('.sending.*.json'):
-    try:
-        if now - stale_claim.stat().st_mtime < 120:
-            continue
-        parts = stale_claim.name.split('.', 3)
-        original_name = parts[3] if len(parts) == 4 and parts[3] else f'recovered-{int(now)}.json'
-        target = root / original_name
-        if target.exists():
-            target = root / f'recovered-{int(now)}-{os.getpid()}-{original_name}'
-        os.replace(stale_claim, target)
-    except OSError:
-        pass
-
-for path in sorted(root.glob('*.json'), key=lambda item: item.stat().st_mtime)[:100]:
-    claim = path.with_name(f'.sending.{os.getpid()}.{path.name}')
-    try:
-        os.replace(path, claim)
-    except OSError:
-        continue
-    data = {}
-    try:
-        data = json.loads(claim.read_text(encoding='utf-8'))
-        payload = data.get('payload') if isinstance(data, dict) else None
-        if not isinstance(payload, dict):
-            raise ValueError('job de status sem payload válido')
-        attempts = int(data.get('attempts') or 0)
-        next_attempt_at = float(data.get('next_attempt_at') or 0)
-        if next_attempt_at > now:
-            os.replace(claim, path)
-            continue
-        req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode('utf-8'), headers=headers, method='POST')
-        with urllib.request.urlopen(req, timeout=10) as response:
-            result = json.loads(response.read().decode('utf-8', errors='ignore') or '{}')
-        if result.get('ok') and (result.get('delivered') or result.get('ignored')):
-            claim.unlink(missing_ok=True)
-            continue
-        raise RuntimeError(str(result.get('error') or result or 'sem confirmação'))
-    except Exception as exc:
-        try:
-            permanent = isinstance(exc, (json.JSONDecodeError, ValueError, TypeError, AttributeError))
-            attempts = 20 if permanent else (int(data.get('attempts') or 0) + 1 if isinstance(data, dict) else 1)
-            if attempts >= 20:
-                dead = root / 'failed'
-                dead.mkdir(parents=True, exist_ok=True)
-                failed_path = dead / path.name
-                if isinstance(data, dict):
-                    data['attempts'] = attempts
-                    data['last_error'] = f'{type(exc).__name__}: {exc}'[:600]
-                    data['failed_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                    claim.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
-                os.replace(claim, failed_path)
-                continue
-            if not isinstance(data, dict):
-                data = {}
-            data['attempts'] = attempts
-            data['last_error'] = f'{type(exc).__name__}: {exc}'[:600]
-            data['updated_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            data['next_attempt_at'] = now + min(300, 5 * (2 ** min(attempts, 6)))
-            claim.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
-            os.replace(claim, path)
-        except Exception:
-            try:
-                os.replace(claim, path)
-            except Exception:
-                pass
-PYFLUSHSTATUS
-  local rc=$?
-  chown -R ubuntu:ubuntu "$UPDATE_STATUS_OUTBOX_DIR" 2>/dev/null || true
-  return "$rc"
-}
-
-flush_update_alert_outbox() {
-  prepare_update_delivery_dirs || true
-  UPDATE_ALERT_OUTBOX_DIR="$UPDATE_ALERT_OUTBOX_DIR" UPDATE_DELIVERY_RECEIPTS_DIR="$UPDATE_DELIVERY_RECEIPTS_DIR" \
-  REPO_DIR="$REPO_DIR" python3 - <<'PYFLUSHALERT'
-import datetime, json, os, pathlib, subprocess, time
-
-root = pathlib.Path(os.environ['UPDATE_ALERT_OUTBOX_DIR'])
-receipts = pathlib.Path(os.environ['UPDATE_DELIVERY_RECEIPTS_DIR'])
-repo = pathlib.Path(os.environ.get('REPO_DIR') or '/home/ubuntu/bot')
-if not root.is_dir():
-    raise SystemExit(0)
-receipts.mkdir(parents=True, exist_ok=True)
-now = time.time()
-
-# Um processo pode morrer depois de renomear o job para .sending.*. Nesse caso,
-# o glob normal não o encontra mais e a entrega ficava presa para sempre.
-# Recoloque claims antigos na fila antes de buscar novos trabalhos.
-for stale_claim in root.glob('.sending.*.json'):
-    try:
-        if now - stale_claim.stat().st_mtime < 120:
-            continue
-        parts = stale_claim.name.split('.', 3)
-        original_name = parts[3] if len(parts) == 4 and parts[3] else f'recovered-{int(now)}.json'
-        target = root / original_name
-        if target.exists():
-            target = root / f'recovered-{int(now)}-{os.getpid()}-{original_name}'
-        os.replace(stale_claim, target)
-    except OSError:
-        pass
-
-for path in sorted(root.glob('*.json'), key=lambda item: item.stat().st_mtime)[:100]:
-    claim = path.with_name(f'.sending.{os.getpid()}.{path.name}')
-    try:
-        os.replace(path, claim)
-    except OSError:
-        continue
-    attachment = ''
-    data = {}
-    try:
-        data = json.loads(claim.read_text(encoding='utf-8'))
-        event_id = str(data.get('event_id') or path.stem)
-        safe_id = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in event_id)[:120]
-        receipt = receipts / f'{safe_id}.alert.done'
-        attachment = str(data.get('attachment') or '')
-        attachment_path = None
-        if attachment:
-            candidate_attachment = pathlib.Path(attachment).resolve(strict=False)
-            try:
-                candidate_attachment.relative_to(root.resolve())
-            except ValueError as exc:
-                raise ValueError('anexo do alerta fora do outbox') from exc
-            attachment_path = candidate_attachment
-            attachment = str(candidate_attachment)
-        if receipt.is_file():
-            claim.unlink(missing_ok=True)
-            if attachment_path is not None:
-                attachment_path.unlink(missing_ok=True)
-            continue
-        attempts = int(data.get('attempts') or 0)
-        next_attempt_at = float(data.get('next_attempt_at') or 0)
-        if next_attempt_at > now:
-            os.replace(claim, path)
-            continue
-        args = [
-            'sudo', '-u', 'ubuntu', '/usr/bin/env', 'bash', str(repo / 'alert.sh'),
-            str(data.get('type') or 'info'),
-            str(data.get('title') or 'Auto update'),
-            str(data.get('body') or ''),
-            attachment,
-            str(data.get('attachment_name') or ''),
-        ]
-        completed = subprocess.run(args, cwd=str(repo), text=True, capture_output=True, timeout=35, check=False)
-        if completed.returncode != 0:
-            raise RuntimeError((completed.stderr or completed.stdout or f'return {completed.returncode}')[-800:])
-        tmp = receipt.with_name('.' + receipt.name + f'.{os.getpid()}.tmp')
-        tmp.write_text(datetime.datetime.now(datetime.timezone.utc).isoformat() + '\n', encoding='utf-8')
-        os.replace(tmp, receipt)
-        claim.unlink(missing_ok=True)
-        if attachment_path is not None:
-            attachment_path.unlink(missing_ok=True)
-    except Exception as exc:
-        try:
-            permanent = isinstance(exc, (json.JSONDecodeError, ValueError, TypeError, AttributeError))
-            attempts = 20 if permanent else (int(data.get('attempts') or 0) + 1 if isinstance(data, dict) else 1)
-            if attempts >= 20:
-                dead = root / 'failed'
-                dead.mkdir(parents=True, exist_ok=True)
-                if not isinstance(data, dict):
-                    data = {}
-                data['attempts'] = attempts
-                data['last_error'] = f'{type(exc).__name__}: {exc}'[:800]
-                data['failed_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                claim.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
-                os.replace(claim, dead / path.name)
-                continue
-            if not isinstance(data, dict):
-                data = {}
-            data['attempts'] = attempts
-            data['last_error'] = f'{type(exc).__name__}: {exc}'[:800]
-            data['updated_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            data['next_attempt_at'] = now + min(300, 5 * (2 ** min(attempts, 6)))
-            claim.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
-            os.replace(claim, path)
-        except Exception:
-            try:
-                os.replace(claim, path)
-            except Exception:
-                pass
-PYFLUSHALERT
-  local rc=$?
-  chown -R ubuntu:ubuntu "$UPDATE_ALERT_OUTBOX_DIR" "$UPDATE_DELIVERY_RECEIPTS_DIR" 2>/dev/null || true
-  return "$rc"
+  flush_update_delivery_outboxes || true
 }
 
 notify_zip_status_message() {
@@ -2149,7 +1813,11 @@ payload = {
     'candidate_id': os.environ.get('CANDIDATE_ID_VALUE') or '',
     'display_id': os.environ.get('DISPLAY_ID_VALUE') or '',
     'event_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'terminal': (os.environ.get('STATUS_VALUE') or '').lower() in {'success', 'ok', 'warn', 'error', 'done', 'failed'},
 }
+if payload['terminal']:
+    candidate = payload.get('candidate_id') or payload.get('display_id') or payload.get('message_id')
+    payload['event_key'] = f"{candidate}:final-status:{payload.get('status')}"
 try:
     control = json.loads(os.environ.get('CONTROL_VALUE') or '')
     if isinstance(control, dict):
@@ -2181,6 +1849,7 @@ payload = {
     'title': os.environ.get('TITLE_VALUE') or 'Atualização',
     'description': os.environ.get('DESCRIPTION_VALUE') or '',
     'event_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'terminal': (os.environ.get('STATUS_VALUE') or '').lower() in {'success', 'ok', 'warn', 'error', 'done', 'failed'},
 }
 try:
     control = json.loads(os.environ.get('CONTROL_VALUE') or '')
@@ -2188,6 +1857,12 @@ try:
         payload['control'] = control
 except Exception:
     pass
+if payload['terminal']:
+    control = payload.get('control') if isinstance(payload.get('control'), dict) else {}
+    action = str(control.get('mode') or '').strip()
+    target = str(control.get('expected_head') or control.get('head_commit') or '').strip()
+    candidate = payload.get('message_id') or payload.get('channel_id')
+    payload['event_key'] = f"direct:{candidate}:final-status:{payload.get('status')}:{action}:{target}:{payload.get('title')}"
 print(json.dumps(payload, ensure_ascii=False))
 PYDIRECTPAYLOAD
 )"
@@ -2649,7 +2324,7 @@ prepare_rollback_request_update() {
     local retry_control
     retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
     logger -t "$LOG_TAG" "commit de rollback/redo não encontrado: action=$ROLLBACK_REQUEST_ACTION expected=$ROLLBACK_EXPECTED_HEAD revert=$ROLLBACK_REVERT_COMMIT current=$CURRENT_COMMIT remote=$REMOTE_COMMIT"
-    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "Não encontrei o commit de destino. Nenhuma alteração foi aplicada." "$retry_control" || true
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "Não encontrei o commit de destino. Nenhuma alteração foi aplicada." "$retry_control"
     archive_rollback_request "failed"
     exit 0
   fi
@@ -2671,7 +2346,7 @@ prepare_rollback_request_update() {
     sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
     local retry_control
     retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
-    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "warn" "Nenhuma alteração" "O estado já estava equivalente." "$retry_control" || true
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "warn" "Nenhuma alteração" "O estado já estava equivalente." "$retry_control"
     archive_rollback_request "done"
     exit 0
   fi
@@ -2720,13 +2395,10 @@ publish_rollback_request_after_validation() {
 
 finalize_rollback_request_success() {
   (( ROLLBACK_CONTROL_MODE == 1 )) || return 1
-  local duration changed_files diff_summary apply_mode control_json title summary next_mode status_title file_count file_label altered_label
+  local duration changed_files diff_summary apply_mode control_json title summary next_mode status_title
   duration="$(human_duration "$SECONDS")"
   changed_files="$(format_changed_files)"
   diff_summary="$(format_diff_total_summary)"
-  file_count="$(printf '%s\n' "$CHANGED_FILES_RAW" | awk 'NF {c++} END {print c+0}')"
-  file_label="$(format_update_file_count "$file_count")"
-  if (( file_count == 1 )); then altered_label="alterado"; else altered_label="alterados"; fi
   if [[ "$FAST_RELOAD_STATUS" == OK* ]]; then
     apply_mode="recarga controlada de cog"
   elif (( BOT_CHANGED == 0 )); then
@@ -2745,25 +2417,32 @@ finalize_rollback_request_success() {
   fi
   control_json="$(rollback_control_json "$next_mode" "$REMOTE_COMMIT" "$REMOTE_COMMIT" "$ROLLBACK_UPDATE_FROM" "$ROLLBACK_UPDATE_TO" "$ROLLBACK_ROLLBACK_COMMIT" "$ROLLBACK_REDO_COMMIT")"
   local desc
+  local rollback_file_count rollback_file_label
+  rollback_file_count="$(printf '%s\n' "$CHANGED_FILES_RAW" | awk 'NF {c++} END {print c+0}')"
+  if (( rollback_file_count == 1 )); then
+    rollback_file_label="1 arquivo alterado"
+  else
+    rollback_file_label="$rollback_file_count arquivos alterados"
+  fi
   desc="$summary
 
 ${SHORT_FROM} → ${SHORT_TO}
-$file_label $altered_label · $diff_summary
+${rollback_file_label} · $diff_summary
 Aplicação: $apply_mode
 Tempo total: $duration"
-  post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "success" "$title" "$desc" "$control_json" || true
+  post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "success" "$title" "$desc" "$control_json"
   local body
   body="Resumo: $summary
 Branch: $BRANCH
 Commit: ${SHORT_FROM} → ${SHORT_TO}
-Update: $file_label · $diff_summary
+Update: $rollback_file_label · $diff_summary
 Aplicação: $apply_mode
 Processos alterados: $(format_changed_processes)
 Arquivos:
 $changed_files
 Duração: $duration
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
-  send_alert_reliably success "$title" "$body" "" "" "rollback-${ROLLBACK_REQUEST_ID:-unknown}-${SHORT_TO:-unknown}" || true
+  enqueue_update_alert success "$title" "$body" "${ROLLBACK_REQUEST_ID:-rollback}:status-log:success" || true
   archive_rollback_request "done"
   logger -t "$LOG_TAG" "$title"
   exit 0
@@ -2957,8 +2636,15 @@ git_add_changed_files() {
     return 0
   fi
 
-  # mktemp roda no usuário do updater (normalmente root), enquanto o Git roda
-  # como ubuntu. Torne o pathspec legível antes de entregá-lo ao git add.
+  # mktemp roda no usuário do updater (normalmente root). O git add roda como
+  # ubuntu; se o arquivo temporário ficar 0600/root, o Git não consegue ler a
+  # lista e falha com: could not open /tmp/tts-bot-git-pathspec.* Permission denied.
+  # Deixe o pathspec legível antes de entregar para o git executado como ubuntu.
+  chown ubuntu:ubuntu "$pathspec_file" 2>/dev/null || true
+  chmod 0644 "$pathspec_file" 2>/dev/null || true
+
+  # O script roda como root, mas o git add roda como ubuntu.
+  # mktemp cria o pathspec como root/0600; deixe legível para o usuário do git.
   chown ubuntu:ubuntu "$pathspec_file" 2>/dev/null || true
   chmod 0644 "$pathspec_file" 2>/dev/null || true
   sudo -u ubuntu -H git add -A --pathspec-from-file="$pathspec_file" --pathspec-file-nul
@@ -3188,8 +2874,7 @@ for line in lines[:limit]:
     print(line)
 if len(lines) > limit:
     remaining = len(lines) - limit
-    label = 'arquivo restante' if remaining == 1 else 'arquivos restantes'
-    print(f"+{remaining} {label}")
+    print(f"+{remaining} arquivo restante" if remaining == 1 else f"+{remaining} arquivos restantes")
 if not lines:
     print("• nenhum arquivo listado")
 PYDIFF
@@ -3198,12 +2883,7 @@ PYDIFF
     local total
     total="$(printf '%s\n' "$CHANGED_FILES_RAW" | awk 'NF {c++} END {print c+0}')"
     if [[ "$total" =~ ^[0-9]+$ && "$total" -gt 20 ]]; then
-      local remaining=$((total - 20))
-      if (( remaining == 1 )); then
-        printf '+1 arquivo restante\n'
-      else
-        printf '+%s arquivos restantes\n' "$remaining"
-      fi
+      if (( total - 20 == 1 )); then printf '+1 arquivo restante\n'; else printf '+%s arquivos restantes\n' "$((total - 20))"; fi
     fi
   else
     printf '• nenhum arquivo listado'
@@ -3231,7 +2911,7 @@ for item in raw.splitlines():
     removed += int(rem or 0)
 out = f"+{added} -{removed}"
 if binaries:
-    out += f" · {binaries} " + ('binário' if binaries == 1 else 'binários')
+    out += f" · {binaries} binário(s)"
 print(out)
 PYDIFF
 }
@@ -4393,11 +4073,9 @@ trap 'on_error' ERR
 
 SECONDS=0
 cd "$REPO_DIR"
-prepare_update_delivery_dirs || true
-mkdir -p "$CANDIDATE_QUEUE_CANCELLED_DIR" "$CANDIDATE_ROOT/cancelled" 2>/dev/null || true
+mkdir -p "$UPDATE_STATUS_OUTBOX_DIR" "$UPDATE_ALERT_OUTBOX_DIR" "$CANDIDATE_QUEUE_CANCELLED_DIR" "$CANDIDATE_ROOT/cancelled" 2>/dev/null || true
 prune_update_artifacts || true
-flush_update_status_outbox || true
-flush_update_alert_outbox || true
+flush_update_delivery_outboxes || true
 refresh_pending_queue_messages || true
 
 if load_pending_rollback_request; then
@@ -4523,6 +4201,9 @@ if (( ROLLBACK_CONTROL_MODE == 1 )); then
 fi
 
 publish_local_candidate_after_validation
+if (( LOCAL_CANDIDATE_MODE == 1 )); then
+  write_local_candidate_state "completed" "$REMOTE_COMMIT"
+fi
 
 DURATION="$(human_duration "$SECONDS")"
 ROLLBACK_STATUS="não foi necessário"
@@ -4667,13 +4348,12 @@ if (( (LOCAL_CANDIDATE_MODE == 1 || REMOTE_CANDIDATE_MODE == 1) && OVERALL_FATAL
   if (( LOCAL_CANDIDATE_MODE == 1 )) && [[ -f "$LOCAL_CANDIDATE_DIR/manifest.json" ]]; then
     source_author_id="$(json_field_from_file "$LOCAL_CANDIDATE_DIR/manifest.json" discord_status.source_author_id 2>/dev/null || true)"
   fi
-  ZIP_STATUS_CONTROL_JSON="$(python3 - "$BRANCH" "$REMOTE_COMMIT" "$PREVIOUS_COMMIT" "$source_author_id" "$UPDATE_DISPLAY_ID" <<'PYCTRL'
-import hashlib, json, sys
-branch, head, previous, author, display_id = sys.argv[1:6]
+  ZIP_STATUS_CONTROL_JSON="$(python3 - "$BRANCH" "$REMOTE_COMMIT" "$PREVIOUS_COMMIT" "$source_author_id" <<'PYCTRL'
+import json, sys
+branch, head, previous, author = sys.argv[1:5]
 print(json.dumps({
     "enabled": True,
     "mode": "rollback",
-    "token": hashlib.sha256(f"{display_id}:{head}".encode()).hexdigest()[:16],
     "branch": branch or "main",
     "expected_head": head,
     "revert_commit": head,
@@ -4685,27 +4365,13 @@ print(json.dumps({
 PYCTRL
 )"
 fi
-if (( LOCAL_CANDIDATE_MODE == 1 )); then
-  write_local_candidate_state "finalizing_delivery" "$REMOTE_COMMIT"
-fi
-FINAL_STATUS_DELIVERY_RC=0
-notify_zip_status_message "$ALERT_TYPE" "$ALERT_TITLE" "$ZIP_STATUS_DESCRIPTION" || FINAL_STATUS_DELIVERY_RC=$?
+notify_zip_status_message "$ALERT_TYPE" "$ALERT_TITLE" "$ZIP_STATUS_DESCRIPTION" || true
 flush_update_status_outbox || true
 
-FINAL_ALERT_EVENT_ID="${UPDATE_DISPLAY_ID:-update}-final-${SHORT_TO:-unknown}"
-FINAL_ALERT_DELIVERY_RC=0
-send_alert_reliably "$ALERT_TYPE" "$ALERT_TITLE" "$BODY" "" "" "$FINAL_ALERT_EVENT_ID" || FINAL_ALERT_DELIVERY_RC=$?
-flush_update_alert_outbox || true
+FINAL_ALERT_EVENT_KEY="${LOCAL_CANDIDATE_ID:-${ROLLBACK_REQUEST_ID:-github-${REMOTE_COMMIT:-unknown}}}:status-log:${ALERT_TYPE}"
+enqueue_update_alert "$ALERT_TYPE" "$ALERT_TITLE" "$BODY" "$FINAL_ALERT_EVENT_KEY" || true
+flush_update_delivery_outboxes || true
 if (( LOCAL_CANDIDATE_MODE == 1 )); then
-  # "delivery_scheduled" significa que cada saída foi entregue ou persistida
-  # em outbox. Se nem a entrega nem a persistência funcionarem, o candidato é
-  # arquivado como degradado para o reconciliador do bot reconstruir a saída.
-  if (( FINAL_STATUS_DELIVERY_RC == 0 && FINAL_ALERT_DELIVERY_RC == 0 )); then
-    write_local_candidate_state "delivery_scheduled" "$REMOTE_COMMIT"
-  else
-    write_local_candidate_state "delivery_degraded" "$REMOTE_COMMIT"
-    logger -t "$LOG_TAG" "entrega final degradada: status_rc=$FINAL_STATUS_DELIVERY_RC alert_rc=$FINAL_ALERT_DELIVERY_RC" 2>/dev/null || true
-  fi
   archive_local_candidate "done"
   trigger_updater_if_queue_pending
 fi
