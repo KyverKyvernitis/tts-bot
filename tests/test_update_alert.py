@@ -122,3 +122,93 @@ printf 'FORMAT=%s\n' "$(format_update_duration_ms 2450)"
     assert "<a:loading:test> **Aplicando na VPS**" in text
     assert "UPD-TEST1234 · 2 etapas concluídas" in text
     assert "FORMAT=2,5s" in text
+
+
+def test_site_progress_uses_real_build_stage_instead_of_generic_restart() -> None:
+    harness = r'''
+source <(awk '/^human_duration\(\)/{flag=1} /^mark_update_timing\(\)/{flag=0} flag' scripts/tts-bot-update.sh)
+source <(awk '/^zip_progress_title\(\)/{flag=1} /^rollback_request_roots\(\)/{flag=0} flag' scripts/tts-bot-update.sh)
+fast_reload_modules_for_changed_files(){ :; }
+FRONT_CHANGED=1
+BACK_CHANGED=0
+BOT_CHANGED=0
+FAST_RELOAD_STATUS='não usado'
+ROLLBACK_CONTROL_MODE=0
+printf 'STAGE=%s\n' "$(zip_progress_next_apply_stage)"
+printf 'TITLE=%s\n' "$(zip_progress_title 'Compilando o site')"
+'''
+    result = subprocess.run(
+        ["bash", "-eu", "-o", "pipefail", "-c", harness],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "STAGE=Instalando dependências do site" in result.stdout
+    assert "TITLE=🌐 Atualizando site" in result.stdout
+    assert "Reiniciando processo: atividade" not in result.stdout
+
+
+def test_progress_history_does_not_repeat_completed_microsteps() -> None:
+    harness = r'''
+source <(awk '/^human_duration\(\)/{flag=1} /^mark_update_timing\(\)/{flag=0} flag' scripts/tts-bot-update.sh)
+source <(awk '/^zip_progress_title\(\)/{flag=1} /^rollback_request_roots\(\)/{flag=0} flag' scripts/tts-bot-update.sh)
+ZIP_PROGRESS_HISTORY=''
+ZIP_PROGRESS_COMPLETED_COUNT=0
+ZIP_PROGRESS_HIDDEN_COUNT=0
+ZIP_PROGRESS_MAX_VISIBLE_STEPS=10
+ZIP_PROGRESS_STAGE_LABEL='Compilando o site'
+ZIP_PROGRESS_STAGE_STARTED_MS="$(update_now_ms)"
+ZIP_PROGRESS_DONE_LABELS=''
+zip_progress_done 'Site compilado'
+ZIP_PROGRESS_STAGE_LABEL='Compilando o site'
+ZIP_PROGRESS_STAGE_STARTED_MS="$(update_now_ms)"
+zip_progress_done 'Site compilado'
+printf 'COUNT=%s\n%s\n' "$ZIP_PROGRESS_COMPLETED_COUNT" "$ZIP_PROGRESS_HISTORY"
+'''
+    result = subprocess.run(
+        ["bash", "-eu", "-o", "pipefail", "-c", harness],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "COUNT=1" in result.stdout
+    assert result.stdout.count("Site compilado") == 1
+
+
+def test_final_status_does_not_render_bare_ok_line() -> None:
+    harness = r'''
+source <(awk '/^build_final_status_description\(\)/{flag=1} /^deploy_bot\(\)/{flag=0} flag' scripts/tts-bot-update.sh)
+build_final_status_description 'Tudo certo.' 'UPD-TEST' '1111111' '2222222' 3 '+10 -2' 'sem reinício do bot' '42s' 'OK'
+printf '%s\n---\n' "$ZIP_STATUS_DESCRIPTION"
+build_final_status_description 'Com aviso.' 'UPD-TEST' '1111111' '2222222' 3 '+10 -2' 'sem reinício do bot' '42s' 'OK com avisos'
+printf '%s\n' "$ZIP_STATUS_DESCRIPTION"
+'''
+    result = subprocess.run(
+        ["bash", "-eu", "-o", "pipefail", "-c", harness],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    success, warning = result.stdout.split("\n---\n", 1)
+    assert "\nOK\n" not in f"\n{success}\n"
+    assert "Saúde:" not in success
+    assert "Saúde: OK com avisos" in warning
+
+
+def test_frontend_deploy_reports_dependency_build_publish_and_validation_stages() -> None:
+    source = (ROOT / "scripts" / "tts-bot-update.sh").read_text(encoding="utf-8")
+    frontend = source[source.index("deploy_frontend() {") : source.index("\ndeploy_backend() {")]
+    backend = source[source.index("deploy_backend() {") : source.index("\n\nrollback_after_failure() {")]
+
+    for expected in (
+        '"Instalando dependências do site"',
+        '"Compilando o site"',
+        '"Publicando o site"',
+        '"Validando o site"',
+    ):
+        assert expected in frontend + backend
+    assert "Reiniciando processo: atividade" not in frontend + backend
+    assert "zip_progress_run_as_ubuntu" in frontend

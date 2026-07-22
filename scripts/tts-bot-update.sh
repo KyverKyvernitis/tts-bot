@@ -193,6 +193,7 @@ ZIP_PROGRESS_MAX_VISIBLE_STEPS=10
 ZIP_PROGRESS_STAGE_LABEL=""
 ZIP_PROGRESS_STAGE_STARTED_MS=0
 ZIP_PROGRESS_STARTED_MS=0
+ZIP_PROGRESS_DONE_LABELS=""
 UPDATER_STEP_LAST=0
 UPDATER_TIMINGS=""
 UPDATE_STATUS_OUTBOX_DIR="$REPO_DIR/data/runtime/update-status-outbox"
@@ -562,7 +563,7 @@ format_changed_processes() {
     fi
   fi
   if (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )); then
-    items+=("atividade")
+    items+=("site")
   fi
   if (( PHONE_WORKER_SYNC_REQUIRED == 1 || PHONE_WORKER_WATCH_CHANGED == 1 || PHONE_LAVALINK_WATCH_CHANGED == 1 || CORE_WORKER_APK_CHANGED == 1 || CORE_WORKER_AUTOMATION_REQUIRED == 1 )); then
     items+=("worker")
@@ -2260,6 +2261,8 @@ zip_progress_title() {
   fi
   if [[ "$lowered" == *"fila"* || "$lowered" == *"aguard"* ]]; then
     printf '📦 Atualização na fila'
+  elif [[ "$lowered" == *"site"* || "$lowered" == *"frontend"* || "$lowered" == *"backend"* || "$lowered" == *"painel web"* ]]; then
+    printf '🌐 Atualizando site'
   elif [[ "$lowered" == *"reinici"* || "$lowered" == *"recarreg"* ]]; then
     printf '♻️ Reiniciando serviços'
   elif [[ "$lowered" == *"public"* || "$lowered" == *"github"* || "$lowered" == *"commit"* ]]; then
@@ -2356,6 +2359,16 @@ zip_progress_publish() {
 zip_progress_done() {
   local done_label="${1:-}"
   [[ -n "${done_label//[[:space:]]/}" ]] || return 0
+  # Uma retomada ou uma transição repetida não pode recolocar a mesma microetapa
+  # no histórico. O painel sempre avança de forma monotônica.
+  if [[ -n "${ZIP_PROGRESS_DONE_LABELS:-}" ]] \
+    && printf '%s\n' "${ZIP_PROGRESS_DONE_LABELS:-}" | grep -Fxq -- "$done_label"; then
+    return 0
+  fi
+  if [[ -n "${ZIP_PROGRESS_DONE_LABELS:-}" ]]; then
+    ZIP_PROGRESS_DONE_LABELS+=$'\n'
+  fi
+  ZIP_PROGRESS_DONE_LABELS="${ZIP_PROGRESS_DONE_LABELS:-}${done_label}"
   local now_ms elapsed_ms elapsed_text line
   now_ms="$(update_now_ms)"
   if (( ZIP_PROGRESS_STAGE_STARTED_MS > 0 )); then
@@ -2382,6 +2395,72 @@ zip_progress_done_and_publish() {
   local detail="${3:-}"
   zip_progress_done "$done_label"
   zip_progress_publish "$next_label" "$detail"
+}
+
+zip_progress_heartbeat_seconds() {
+  local interval="${DISCORD_AUTO_UPDATE_PROGRESS_HEARTBEAT_SECONDS:-12}"
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=12
+  (( interval < 5 )) && interval=5
+  (( interval > 60 )) && interval=60
+  printf '%s' "$interval"
+}
+
+zip_progress_run_as_ubuntu() {
+  local stage_label="${1:?}"
+  local detail="${2:-Em andamento}"
+  local command="${3:?}"
+  local pid rc started_ms now_ms elapsed_ms interval next_publish_ms
+
+  zip_progress_publish "$stage_label" "$detail"
+  interval="$(zip_progress_heartbeat_seconds)"
+  started_ms="$(update_now_ms)"
+  next_publish_ms=$((started_ms + interval * 1000))
+
+  # O comando roda em um shell filho sem herdar o trap ERR transacional. Assim,
+  # o pai pode acompanhar o PID, publicar heartbeats e tratar o status uma vez.
+  sudo -u ubuntu -H bash -lc "$command" &
+  pid=$!
+
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    kill -0 "$pid" 2>/dev/null || break
+    now_ms="$(update_now_ms)"
+    if (( now_ms >= next_publish_ms )); then
+      elapsed_ms=$((now_ms - started_ms))
+      (( elapsed_ms < 0 )) && elapsed_ms=0
+      zip_progress_publish "$stage_label" "$detail · $(format_update_duration_ms "$elapsed_ms")"
+      next_publish_ms=$((now_ms + interval * 1000))
+    fi
+  done
+
+  local restore_errexit=0
+  [[ $- == *e* ]] && restore_errexit=1
+  set +e
+  wait "$pid"
+  rc=$?
+  if (( restore_errexit == 1 )); then
+    set -e
+  else
+    set +e
+  fi
+  return "$rc"
+}
+
+zip_progress_only_site_changed() {
+  (( FRONT_CHANGED == 1 || BACK_CHANGED == 1 )) || return 1
+  (( BOT_CHANGED == 0 )) || return 1
+  (( REQUIREMENTS_CHANGED == 0 )) || return 1
+  (( AUDIO_SYSTEMD_CHANGED == 0 )) || return 1
+  (( CLEANUP_CHANGED == 0 )) || return 1
+  (( PHONE_LAVALINK_WATCH_CHANGED == 0 )) || return 1
+  (( PHONE_WORKER_WATCH_CHANGED == 0 )) || return 1
+  (( VPS_SYSTEMD_UNITS_CHANGED == 0 )) || return 1
+  (( ALERT_CHANGED == 0 )) || return 1
+  (( PHONE_WORKER_SYNC_REQUIRED == 0 )) || return 1
+  (( CORE_WORKER_APK_CHANGED == 0 )) || return 1
+  (( CORE_WORKER_AUTOMATION_REQUIRED == 0 )) || return 1
+  (( CALLKEEPER_CHANGED == 0 )) || return 1
+  return 0
 }
 
 zip_progress_process_detail() {
@@ -2430,6 +2509,16 @@ zip_progress_next_apply_stage() {
     fast_reload_stage_label "$fast_modules"
     return 0
   fi
+  # Mostre a primeira operação real, não um reinício genérico. Em patches do
+  # site, npm ci/build é normalmente a parte mais longa e precisa ficar visível.
+  if (( BOT_CHANGED == 0 && FRONT_CHANGED == 1 )); then
+    printf 'Instalando dependências do site'
+    return 0
+  fi
+  if (( BOT_CHANGED == 0 && FRONT_CHANGED == 0 && BACK_CHANGED == 1 )); then
+    printf 'Instalando dependências do servidor do site'
+    return 0
+  fi
   process_detail="$(zip_progress_process_detail)"
   if [[ -n "${process_detail//[[:space:]]/}" ]]; then
     if [[ "$process_detail" == *,* ]]; then
@@ -2443,6 +2532,12 @@ zip_progress_next_apply_stage() {
 }
 
 zip_progress_done_apply_stage() {
+  # Frontend/backend já publicam suas próprias fases e health check. Não acrescente
+  # depois uma etapa genérica de “processo reiniciado”, que fazia o painel parecer
+  # voltar ao início justamente quando o build terminava.
+  if zip_progress_only_site_changed; then
+    return 0
+  fi
   local process_detail names count
   if [[ "${FAST_RELOAD_STATUS:-}" == "OK"* && -n "${FAST_RELOAD_MODULES//[[:space:]]/}" ]]; then
     names="$(format_cog_module_names "$FAST_RELOAD_MODULES")"
@@ -4039,9 +4134,14 @@ build_final_status_description() {
 
   # A string de formato é literal; IDs e commits são somente argumentos. Isso
   # impede que crases de Markdown virem substituição de comando do Bash.
-  printf -v ZIP_STATUS_DESCRIPTION '%s\n\nAtualização `%s`\n`%s` → `%s`\n%s · %s\n%s · duração total: %s\n\n%s' \
+  printf -v ZIP_STATUS_DESCRIPTION '%s\n\nAtualização `%s`\n`%s` → `%s`\n%s · %s\n%s · duração total: %s' \
     "$summary" "$display_id" "$short_from" "$short_to" "$file_count_text" \
-    "$diff_summary" "$apply_mode" "$duration" "$health_status"
+    "$diff_summary" "$apply_mode" "$duration"
+  # “OK” isolado não comunica nada e aparecia como uma linha solta no cartão.
+  # Só acrescente saúde quando houver informação diferente do sucesso padrão.
+  if [[ -n "${health_status//[[:space:]]/}" && "$health_status" != "OK" ]]; then
+    ZIP_STATUS_DESCRIPTION+=$'\n\n'"Saúde: $health_status"
+  fi
 }
 
 deploy_bot() {
@@ -4180,10 +4280,24 @@ deploy_frontend() {
   fi
 
   STAGE="dependências do frontend"
-  run_as_ubuntu "cd \"$FRONT_DIR\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi"
+  zip_progress_run_as_ubuntu \
+    "Instalando dependências do site" \
+    "Baixando e verificando os pacotes" \
+    "cd \"$FRONT_DIR\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi"
+  zip_progress_done_and_publish \
+    "Dependências do site instaladas" \
+    "Compilando o site" \
+    "Gerando os arquivos de produção"
 
   STAGE="build do frontend"
-  run_as_ubuntu "cd \"$FRONT_DIR\" && npm run build"
+  zip_progress_run_as_ubuntu \
+    "Compilando o site" \
+    "Gerando os arquivos de produção" \
+    "cd \"$FRONT_DIR\" && npm run build"
+  zip_progress_done_and_publish \
+    "Site compilado" \
+    "Publicando o site" \
+    "Atualizando os arquivos servidos"
 
   STAGE="publicação do frontend"
   mkdir -p "$FRONT_PUBLISH_DIR"
@@ -4191,7 +4305,11 @@ deploy_frontend() {
   cp -r "$FRONT_DIR/dist/." "$FRONT_PUBLISH_DIR/"
 
   STAGE="limpeza do frontend"
-  run_as_ubuntu "cd \"$FRONT_DIR\" && rm -rf node_modules && npm cache clean --force >/dev/null 2>&1 || true"
+  zip_progress_run_as_ubuntu \
+    "Publicando o site" \
+    "Removendo arquivos temporários" \
+    "cd \"$FRONT_DIR\" && rm -rf node_modules && { npm cache clean --force >/dev/null 2>&1 || true; }"
+  zip_progress_done "Site publicado"
 
   FRONT_STATUS="frontend publicado em $FRONT_PUBLISH_DIR; node_modules removido após build"
   return 0
@@ -4207,10 +4325,13 @@ deploy_backend() {
   if (( BACK_CHANGED == 0 )); then
     BACK_STATUS="não alterado"
     STAGE="healthcheck informativo do painel web"
+    zip_progress_publish "Validando o site" "Confirmando que o painel continua disponível"
     if wait_for_health "$BACK_HEALTH_URL" 3 2; then
       ACTIVITY_HEALTHCHECK_STATUS="OK"
+      zip_progress_done "Site validado"
     else
       ACTIVITY_HEALTHCHECK_STATUS="indisponível; backend não foi alterado"
+      zip_progress_done "Publicação concluída; servidor não respondeu ao health informativo"
     fi
     return 0
   fi
@@ -4221,24 +4342,40 @@ deploy_backend() {
   fi
 
   STAGE="dependências do backend"
-  run_as_ubuntu "cd \"$BACK_DIR\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi"
+  zip_progress_run_as_ubuntu \
+    "Instalando dependências do servidor do site" \
+    "Baixando e verificando os pacotes" \
+    "cd \"$BACK_DIR\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi"
+  zip_progress_done_and_publish \
+    "Dependências do servidor instaladas" \
+    "Compilando o servidor do site" \
+    "Gerando o backend de produção"
 
   STAGE="build do backend"
-  run_as_ubuntu "cd \"$BACK_DIR\" && npm run build"
-
-  STAGE="limpeza do backend"
-  run_as_ubuntu "cd \"$BACK_DIR\" && npm prune --omit=dev && npm cache clean --force >/dev/null 2>&1 || true"
+  zip_progress_run_as_ubuntu \
+    "Compilando o servidor do site" \
+    "Gerando o backend de produção" \
+    "cd \"$BACK_DIR\" && npm run build && npm prune --omit=dev && { npm cache clean --force >/dev/null 2>&1 || true; }"
+  zip_progress_done_and_publish \
+    "Servidor do site compilado" \
+    "Reiniciando o servidor do site" \
+    "Subindo a nova versão"
 
   STAGE="reinício do backend"
   fuser -k "${BACK_PORT}/tcp" >/dev/null 2>&1 || true
   run_as_ubuntu "cd \"$BACK_DIR\"; set -a; [ -f \"$REPO_DIR/.env\" ] && . \"$REPO_DIR/.env\" || true; [ -f .env ] && . ./.env || true; set +a; nohup node dist/index.js >> osaka-dashboard-server.log 2>&1 &"
   sleep 3
   BACK_STATUS="backend reiniciado na porta $BACK_PORT"
+  zip_progress_done_and_publish \
+    "Servidor do site reiniciado" \
+    "Validando o site" \
+    "Aguardando a resposta do health check"
 
   STAGE="healthcheck do painel web"
   if wait_for_health "$BACK_HEALTH_URL" 8 3; then
     ACTIVITY_HEALTHCHECK_STATUS="OK"
     BACK_STATUS="backend publicado e validado em $BACK_HEALTH_URL"
+    zip_progress_done "Site validado"
     return 0
   fi
 
