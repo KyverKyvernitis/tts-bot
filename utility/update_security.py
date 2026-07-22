@@ -13,6 +13,38 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable, Mapping
 
 
+SAFE_ENV_TEMPLATE_NAMES = frozenset({".env.example", ".env.sample", ".env.template"})
+
+
+def is_safe_env_template_path(path: Path | PurePosixPath | str) -> bool:
+    """Retorna True apenas para modelos de ambiente sem credenciais reais."""
+    name = PurePosixPath(str(path).replace("\\", "/")).name.casefold()
+    return name in SAFE_ENV_TEMPLATE_NAMES
+
+
+def is_forbidden_update_path(path: Path | PurePosixPath | str) -> bool:
+    """Política central de caminhos que um ZIP comum nunca pode sobrescrever."""
+    rel = PurePosixPath(str(path).replace("\\", "/"))
+    parts = tuple(part for part in rel.parts if part not in ("", "."))
+    if not parts:
+        return True
+
+    lowered = tuple(part.casefold() for part in parts)
+    first = lowered[0]
+    name = lowered[-1]
+
+    if first in {".git", "data", "logs", "node_modules", "secrets", "__pycache__"}:
+        return True
+    if first == ".github" and len(lowered) >= 2 and lowered[1] == "workflows":
+        return True
+
+    if name == ".env" or (name.startswith(".env.") and name not in SAFE_ENV_TEMPLATE_NAMES):
+        return True
+    if "google-credentials" in name or "youtube-cookies" in name:
+        return True
+    return False
+
+
 class UpdateSecurityError(ValueError):
     """Raised when an update package or candidate fails a security check."""
 
@@ -67,6 +99,8 @@ def normalize_member_parts(raw_name: str) -> tuple[str, ...]:
         raise UpdateSecurityError("caminho absoluto ou traversal")
     if parts and parts[0].endswith(":"):
         raise UpdateSecurityError("caminho com unidade do Windows")
+    if any(part != part.strip() for part in parts):
+        raise UpdateSecurityError("componente com espaço no início ou no fim")
     return parts
 
 

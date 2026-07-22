@@ -156,6 +156,7 @@ from utility.update_security import (
     build_file_integrity,
     canonical_path_key,
     inspect_zip_archive,
+    is_forbidden_update_path,
     sha256_file,
 )
 from utility.application_bio import ApplicationBioService
@@ -1760,21 +1761,7 @@ class BotLocal(commands.Bot):
         return False
 
     def _zip_update_is_forbidden_path(self, rel_path: Path | str) -> bool:
-        parts = tuple(str(part) for part in Path(str(rel_path)).parts)
-        if not parts:
-            return True
-        lowered = tuple(part.casefold() for part in parts)
-        first = lowered[0]
-        name = lowered[-1]
-        if first in {".git", "data", "logs", "node_modules", "secrets", "__pycache__"}:
-            return True
-        if first == ".github" and len(lowered) >= 2 and lowered[1] == "workflows":
-            return True
-        if name == ".env" or name.startswith(".env."):
-            return True
-        if "google-credentials" in name or "youtube-cookies" in name:
-            return True
-        return False
+        return is_forbidden_update_path(rel_path)
 
     def _prepare_update_staging_clone(self, origin_url: str, branch_name: str, env: dict[str, str]) -> Path:
         """Mantém um clone staging reutilizável para não clonar o repositório inteiro a cada ZIP."""

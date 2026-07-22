@@ -2098,12 +2098,12 @@ def _quick_disk_line() -> str:
 def _quick_folder_lines() -> list[str]:
     labels = {
         ".": "Bot",
-        "activity ": "Activity",
+        "activity": "Painel web",
         "logs": "Logs",
         "tmp_audio": "Temp áudio",
         ".venv": ".venv",
     }
-    cmd = "for p in . 'activity ' logs tmp_audio .venv; do [ -e \"$p\" ] && du -sh \"$p\"; done"
+    cmd = "for p in . activity logs tmp_audio .venv; do [ -e \"$p\" ] && du -sh \"$p\"; done"
     raw = _run_cmd_body(["bash", "-lc", cmd], timeout=8.0, max_chars=500)
     values: dict[str, str] = {}
     for line in raw.splitlines():
@@ -2115,7 +2115,7 @@ def _quick_folder_lines() -> list[str]:
         if label:
             values[label] = _pretty_space_size(size)
 
-    primary = [f"{label}: {values[label]}" for label in ("Bot", "Activity", ".venv") if label in values]
+    primary = [f"{label}: {values[label]}" for label in ("Bot", "Painel web", ".venv") if label in values]
     secondary = [f"{label}: {values[label]}" for label in ("Logs", "Temp áudio") if label in values]
     result: list[str] = []
     if primary:

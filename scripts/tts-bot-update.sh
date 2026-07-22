@@ -61,8 +61,8 @@ if ! flock -n 9; then
   exit 0
 fi
 
-FRONT_DIR="$REPO_DIR/activity /sinuca"
-BACK_DIR="$REPO_DIR/activity /sinuca-server"
+FRONT_DIR="$REPO_DIR/activity/sinuca"
+BACK_DIR="$REPO_DIR/activity/sinuca-server"
 FRONT_PUBLISH_DIR="/var/www/sinuca"
 BACK_PORT="8787"
 BACK_HEALTH_URL="http://127.0.0.1:${BACK_PORT}/health"
@@ -772,7 +772,7 @@ run_preflight_checks() {
       [[ -f "$REPO_DIR/$file" ]] || continue
       checked_py=1
       sudo -u ubuntu -H "$py" -m py_compile "$REPO_DIR/$file"
-    done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.py$' | grep -v '^activity ' || true)
+    done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.py$' | grep -v '^activity/' || true)
 
     if (( checked_py == 1 )); then
       PREFLIGHT_PY_STATUS="OK"
@@ -1240,7 +1240,7 @@ run_preflight_checks_in_dir() {
     if ! sudo -u ubuntu -H "$py" -m py_compile "$root/$file"; then
       rc=1
     fi
-  done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.py$' | grep -v '^activity ' || true)
+  done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.py$' | grep -v '^activity/' || true)
   if (( checked_py == 1 && rc == 0 )); then
     PREFLIGHT_PY_STATUS="OK"
   elif (( checked_py == 1 )); then
@@ -1567,8 +1567,9 @@ zip_name = str(data.get('zip_name') or '').strip().lower()
 changed = [str(x).strip() for x in (data.get('changed_files') or []) if str(x).strip()]
 protected_prefixes = (
     '.git/', '.github/workflows/', 'data/', 'logs/', 'node_modules/',
-    'secrets/', '.env', 'google-credentials', 'youtube-cookies',
+    'secrets/', 'google-credentials', 'youtube-cookies',
 )
+safe_env_templates = {'.env.example', '.env.sample', '.env.template'}
 reasons = []
 if zip_name.startswith('repo-') or zip_name.startswith('tts-bot-main') or zip_name.startswith('tts-bot-base'):
     reasons.append('o arquivo parece uma base completa, não um patch')
@@ -1576,10 +1577,13 @@ if len(changed) > 120:
     reasons.append(f'muitos arquivos alterados para um patch normal ({len(changed)})')
 for path in changed:
     low = path.lower()
-    if path == 'activity /A' or path.endswith(' /A'):
+    parts = pathlib.PurePosixPath(path.replace('\\', '/')).parts
+    if any(part != part.strip() for part in parts):
         reasons.append(f'caminho suspeito ou inválido: {path}')
         break
-    if low.startswith(protected_prefixes) or '/node_modules/' in low or '/.git/' in low:
+    basename = parts[-1].lower() if parts else ''
+    protected_env = basename == '.env' or (basename.startswith('.env.') and basename not in safe_env_templates)
+    if protected_env or low.startswith(protected_prefixes) or '/node_modules/' in low or '/.git/' in low:
         reasons.append(f'caminho protegido/suspeito no ZIP: {path}')
         break
 lockfiles = [p for p in changed if p.endswith('package-lock.json')]
@@ -3274,10 +3278,10 @@ classify_changed_files() {
     APP_COMMANDS_MAY_HAVE_CHANGED=1
   fi
 
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity /sinuca/'; then
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity/sinuca/'; then
     FRONT_CHANGED=1
   fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity /sinuca-server/'; then
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity/sinuca-server/'; then
     BACK_CHANGED=1
   fi
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(bot\.py|webserver\.py|config\.py|db\.py|start\.sh|requirements\.txt|cogs/|music_system/|utility/)'; then
@@ -4202,7 +4206,7 @@ deploy_backend() {
 
   if (( BACK_CHANGED == 0 )); then
     BACK_STATUS="não alterado"
-    STAGE="healthcheck informativo da activity"
+    STAGE="healthcheck informativo do painel web"
     if wait_for_health "$BACK_HEALTH_URL" 3 2; then
       ACTIVITY_HEALTHCHECK_STATUS="OK"
     else
@@ -4227,11 +4231,11 @@ deploy_backend() {
 
   STAGE="reinício do backend"
   fuser -k "${BACK_PORT}/tcp" >/dev/null 2>&1 || true
-  run_as_ubuntu "cd \"$BACK_DIR\"; set -a; [ -f \"$REPO_DIR/.env\" ] && . \"$REPO_DIR/.env\" || true; [ -f .env ] && . ./.env || true; set +a; nohup node dist/index.js >> activity-dashboard-server.log 2>&1 &"
+  run_as_ubuntu "cd \"$BACK_DIR\"; set -a; [ -f \"$REPO_DIR/.env\" ] && . \"$REPO_DIR/.env\" || true; [ -f .env ] && . ./.env || true; set +a; nohup node dist/index.js >> osaka-dashboard-server.log 2>&1 &"
   sleep 3
   BACK_STATUS="backend reiniciado na porta $BACK_PORT"
 
-  STAGE="healthcheck da activity"
+  STAGE="healthcheck do painel web"
   if wait_for_health "$BACK_HEALTH_URL" 8 3; then
     ACTIVITY_HEALTHCHECK_STATUS="OK"
     BACK_STATUS="backend publicado e validado em $BACK_HEALTH_URL"
@@ -4387,7 +4391,7 @@ Serviços:
 • CallKeeper: $rollback_callkeeper_status
 • Frontend: $rollback_front_status
 • Backend: $rollback_back_status
-• Activity: $rollback_activity_status
+• Painel web: $rollback_activity_status
 Rollback: $ROLLBACK_STATUS
 Commit sujo: $commit_dirty
 Ação sugerida: Se o rollback falhou, verifique o serviço manualmente antes de aplicar outro update. Se foi aplicado, faça um novo commit corrigido para liberar o updater novamente.

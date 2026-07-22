@@ -612,3 +612,41 @@ apply_service_policy
     assert "disable --now tts-bot-updater.timer" in logged
     assert "enable tts-bot-updater.timer" not in logged
     assert "start tts-bot-updater.timer" not in logged
+
+
+def _run_candidate_suspicion_check(tmp_path: Path, changed_files: list[str]) -> str:
+    candidate = tmp_path / f"candidate-{abs(hash(tuple(changed_files)))}"
+    candidate.mkdir()
+    (candidate / "manifest.json").write_text(
+        json.dumps({"zip_name": "patch.zip", "changed_files": changed_files}),
+        encoding="utf-8",
+    )
+    harness = f"""
+source <(awk '/^local_candidate_suspicion_reason[(][)]/{{flag=1}} /^reject_local_candidate_safely[(][)]/{{flag=0}} flag' {UPDATER!s})
+LOCAL_CANDIDATE_MODE=1
+LOCAL_CANDIDATE_DIR={candidate!s}
+DISCORD_AUTO_UPDATE_ALLOW_FULL_REPO_ZIP=0
+local_candidate_suspicion_reason
+"""
+    return _run_bash(harness).stdout.strip()
+
+
+def test_candidate_suspicion_allows_only_safe_env_templates(tmp_path: Path) -> None:
+    assert _run_candidate_suspicion_check(
+        tmp_path,
+        ["activity/sinuca-server/.env.example"],
+    ) == ""
+
+    blocked = _run_candidate_suspicion_check(
+        tmp_path,
+        ["activity/sinuca-server/.env.production"],
+    )
+    assert "caminho protegido" in blocked
+
+
+def test_candidate_suspicion_rejects_legacy_directory_with_trailing_space(tmp_path: Path) -> None:
+    blocked = _run_candidate_suspicion_check(
+        tmp_path,
+        ["activity /sinuca/index.html"],
+    )
+    assert "caminho suspeito ou inválido" in blocked

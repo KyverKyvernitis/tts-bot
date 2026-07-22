@@ -1,0 +1,347 @@
+import type { Express, Request, Response } from "express";
+import type { DashboardConfigService } from "../services/dashboardConfigService.js";
+import type { DashboardOAuthTokenResult, DashboardSessionService } from "../services/dashboardSessionService.js";
+import {
+  createDashboardInviteUrl,
+  getDiscordUserIdentity,
+  listDashboardServers,
+  listGuildChannelsAndRoles,
+  verifyDashboardAccess,
+} from "../services/discordAuthService.js";
+
+export interface RegisterDashboardRoutesOptions {
+  app: Express;
+  configService: DashboardConfigService;
+  sessionService: DashboardSessionService;
+  discordClientId: string;
+  publicOrigin: string;
+  allowedOrigins: Set<string>;
+  exchangeDiscordCode(code: string, redirectUri: string): Promise<DashboardOAuthTokenResult>;
+}
+
+type SessionAuth = {
+  accessToken: string;
+  user: {
+    id: string;
+    username?: string | null;
+    global_name?: string | null;
+    avatar?: string | null;
+    avatarUrl?: string | null;
+  };
+};
+
+type GuildAuth = SessionAuth & { guildId: string };
+
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function sendNoStoreJson(res: Response, status: number, payload: unknown) {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.type("application/json");
+  res.status(status).json(payload);
+}
+
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" || typeof value === "bigint") return String(value).trim();
+  }
+  return "";
+}
+
+function dashboardGuildId(req: Request): string {
+  const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {};
+  return firstString(req.params.guildId, req.query.guild_id, body.guild_id, body.guildId);
+}
+
+function isSecureRequest(req: Request): boolean {
+  return req.secure || firstString(req.headers["x-forwarded-proto"]).split(",")[0].trim().toLowerCase() === "https";
+}
+
+function requestOrigin(req: Request, configuredOrigin: string): string {
+  if (configuredOrigin) return configuredOrigin;
+  const protocol = isSecureRequest(req) ? "https" : "http";
+  const host = firstString(req.headers["x-forwarded-host"], req.headers.host);
+  return host ? `${protocol}://${host}` : "";
+}
+
+function callbackUrl(req: Request, configuredOrigin: string): string {
+  const origin = requestOrigin(req, configuredOrigin);
+  return origin ? `${origin}/api/auth/callback` : "";
+}
+
+function mutationOriginAllowed(req: Request, configuredOrigin: string, allowedOrigins: Set<string>): boolean {
+  const origin = firstString(req.headers.origin);
+  if (!origin) return true;
+  try {
+    const normalized = new URL(origin).origin;
+    const expected = requestOrigin(req, configuredOrigin);
+    return normalized === expected || allowedOrigins.has(normalized);
+  } catch {
+    return false;
+  }
+}
+
+function takeRateLimit(req: Request, bucket: string, limit: number, windowMs: number): boolean {
+  const key = `${bucket}:${req.ip || req.socket.remoteAddress || "unknown"}`;
+  const now = Date.now();
+  const current = rateBuckets.get(key);
+  if (!current || current.resetAt <= now) {
+    rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+    return true;
+  }
+  if (current.count >= limit) return false;
+  current.count += 1;
+  return true;
+}
+
+function appendCookie(res: Response, value: string) {
+  res.append("Set-Cookie", value);
+}
+
+function authErrorRedirect(req: Request, publicOrigin: string, code: string): string {
+  const origin = requestOrigin(req, publicOrigin);
+  const url = new URL(origin || "http://localhost");
+  url.pathname = "/";
+  url.searchParams.set("auth_error", code);
+  return `${url.pathname}${url.search}`;
+}
+
+async function requireSession(
+  req: Request,
+  res: Response,
+  sessionService: DashboardSessionService,
+): Promise<SessionAuth | null> {
+  let session;
+  try {
+    session = await sessionService.getSession(req.headers.cookie);
+  } catch (error) {
+    console.error("[dashboard-session] falha ao ler sessão", error instanceof Error ? error.message : String(error));
+    sendNoStoreJson(res, 503, { ok: false, authenticated: false, error: "session_store_unavailable" });
+    return null;
+  }
+  if (!session) {
+    sendNoStoreJson(res, 401, { ok: false, authenticated: false, error: "session_required" });
+    return null;
+  }
+  const identity = await getDiscordUserIdentity(session.accessToken);
+  if (!identity.ok || !identity.user) {
+    if (identity.status === 401 || identity.status === 403) {
+      await sessionService.destroySession(req.headers.cookie).catch(() => undefined);
+      appendCookie(res, sessionService.clearSessionCookie(isSecureRequest(req)));
+      sendNoStoreJson(res, 401, { ok: false, authenticated: false, error: "session_invalid" });
+    } else {
+      sendNoStoreJson(res, 502, { ok: false, authenticated: false, error: "discord_unavailable" });
+    }
+    return null;
+  }
+  return { accessToken: session.accessToken, user: identity.user };
+}
+
+async function requireDashboardAccess(
+  req: Request,
+  res: Response,
+  sessionService: DashboardSessionService,
+): Promise<GuildAuth | null> {
+  const session = await requireSession(req, res, sessionService);
+  if (!session) return null;
+  const guildId = dashboardGuildId(req);
+  const access = await verifyDashboardAccess(session.accessToken, guildId, session.user);
+  if (!access.ok || !access.user) {
+    sendNoStoreJson(res, access.status, { ok: false, error: access.reason || "access_denied", detail: access.detail ?? null });
+    return null;
+  }
+  return { ...session, guildId, user: access.user };
+}
+
+export function registerDashboardRoutes({
+  app,
+  configService,
+  sessionService,
+  discordClientId,
+  exchangeDiscordCode,
+  publicOrigin,
+  allowedOrigins,
+}: RegisterDashboardRoutesOptions) {
+  app.get(["/health", "/api/health"], (_req, res) => {
+    sendNoStoreJson(res, 200, {
+      ok: true,
+      service: "osaka-dashboard",
+      version: "2.0.0",
+      runtime: "web",
+      time: new Date().toISOString(),
+    });
+  });
+
+  app.get("/api/auth/login", (req, res) => {
+    if (!takeRateLimit(req, "auth-login", 20, 10 * 60 * 1000)) {
+      sendNoStoreJson(res, 429, { ok: false, error: "rate_limited" });
+      return;
+    }
+    const redirectUri = callbackUrl(req, publicOrigin);
+    if (!discordClientId || !redirectUri) {
+      sendNoStoreJson(res, 503, { ok: false, error: "oauth_not_configured" });
+      return;
+    }
+    const issued = sessionService.issueOAuthState(req.query.return_to, isSecureRequest(req));
+    appendCookie(res, issued.setCookie);
+    const params = new URLSearchParams({
+      client_id: discordClientId,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      scope: "identify guilds",
+      state: issued.state,
+      prompt: "consent",
+    });
+    res.setHeader("Cache-Control", "no-store");
+    res.redirect(302, `https://discord.com/oauth2/authorize?${params.toString()}`);
+  });
+
+  app.get("/api/auth/callback", async (req, res) => {
+    if (!takeRateLimit(req, "auth-callback", 30, 10 * 60 * 1000)) {
+      res.redirect(302, authErrorRedirect(req, publicOrigin, "rate_limited"));
+      return;
+    }
+    const secure = isSecureRequest(req);
+    appendCookie(res, sessionService.clearOAuthCookie(secure));
+    const state = sessionService.validateOAuthState(req.query.state, req.headers.cookie);
+    if (!state.ok) {
+      res.redirect(302, authErrorRedirect(req, publicOrigin, state.reason));
+      return;
+    }
+    const oauthError = firstString(req.query.error);
+    if (oauthError) {
+      res.redirect(302, authErrorRedirect(req, publicOrigin, oauthError));
+      return;
+    }
+    const code = firstString(req.query.code);
+    const redirectUri = callbackUrl(req, publicOrigin);
+    const exchanged = await exchangeDiscordCode(code, redirectUri);
+    if (!exchanged.ok || !exchanged.accessToken) {
+      res.redirect(302, authErrorRedirect(req, publicOrigin, exchanged.error || "oauth_exchange_failed"));
+      return;
+    }
+    try {
+      const created = await sessionService.createSession(exchanged, secure);
+      appendCookie(res, created.setCookie);
+      res.setHeader("Cache-Control", "no-store");
+      res.redirect(302, state.returnTo);
+    } catch (error) {
+      console.error("[dashboard-session] falha ao criar sessão", error instanceof Error ? error.message : String(error));
+      res.redirect(302, authErrorRedirect(req, publicOrigin, "session_create_failed"));
+    }
+  });
+
+  app.get("/api/auth/session", async (req, res) => {
+    const session = await requireSession(req, res, sessionService);
+    if (!session) return;
+    sendNoStoreJson(res, 200, { ok: true, authenticated: true, user: session.user });
+  });
+
+  app.post("/api/auth/logout", async (req, res) => {
+    if (!mutationOriginAllowed(req, publicOrigin, allowedOrigins)) {
+      sendNoStoreJson(res, 403, { ok: false, error: "origin_denied" });
+      return;
+    }
+    await sessionService.destroySession(req.headers.cookie).catch(() => undefined);
+    appendCookie(res, sessionService.clearSessionCookie(isSecureRequest(req)));
+    sendNoStoreJson(res, 200, { ok: true });
+  });
+
+  app.get("/api/dashboard/servers", async (req, res) => {
+    const session = await requireSession(req, res, sessionService);
+    if (!session) return;
+    const result = await listDashboardServers(session.accessToken, session.user);
+    sendNoStoreJson(res, result.status, result.ok
+      ? { ok: true, user: result.user, manageable: result.manageable, needsInvite: result.needsInvite }
+      : { ok: false, user: result.user, manageable: [], needsInvite: [], error: result.error || "servers_failed" });
+  });
+
+  app.get("/api/dashboard/guild/:guildId/invite", async (req, res) => {
+    const session = await requireSession(req, res, sessionService);
+    if (!session) return;
+    const guildId = dashboardGuildId(req);
+    if (!/^\d{15,25}$/.test(guildId)) {
+      sendNoStoreJson(res, 400, { ok: false, error: "invalid_guild_id" });
+      return;
+    }
+    const inviteUrl = createDashboardInviteUrl(guildId);
+    if (!inviteUrl) {
+      sendNoStoreJson(res, 500, { ok: false, error: "invite_not_configured" });
+      return;
+    }
+    sendNoStoreJson(res, 200, { ok: true, guild_id: guildId, invite_url: inviteUrl });
+  });
+
+  app.get("/api/dashboard/bootstrap", async (req, res) => {
+    const auth = await requireDashboardAccess(req, res, sessionService);
+    if (!auth) return;
+    sendNoStoreJson(res, 200, {
+      ok: true,
+      user: auth.user,
+      guild_id: auth.guildId,
+      sections: configService.listSections().map(({ id, label, emoji, description }) => ({ id, label, emoji, description })),
+    });
+  });
+
+  app.get("/api/dashboard/guild/:guildId/summary", async (req, res) => {
+    const auth = await requireDashboardAccess(req, res, sessionService);
+    if (!auth) return;
+    try {
+      sendNoStoreJson(res, 200, { ok: true, ...await configService.getSummary(auth.guildId) });
+    } catch (error) {
+      sendNoStoreJson(res, 500, { ok: false, error: error instanceof Error ? error.message : "summary_failed" });
+    }
+  });
+
+  app.get("/api/dashboard/guild/:guildId/settings", async (req, res) => {
+    const auth = await requireDashboardAccess(req, res, sessionService);
+    if (!auth) return;
+    try {
+      sendNoStoreJson(res, 200, { ok: true, ...await configService.getSettings(auth.guildId) });
+    } catch (error) {
+      sendNoStoreJson(res, 500, { ok: false, error: error instanceof Error ? error.message : "settings_failed" });
+    }
+  });
+
+  app.get("/api/dashboard/guild/:guildId/options", async (req, res) => {
+    const auth = await requireDashboardAccess(req, res, sessionService);
+    if (!auth) return;
+    const result = await listGuildChannelsAndRoles(auth.guildId);
+    sendNoStoreJson(res, result.ok ? 200 : 502, {
+      ok: result.ok,
+      guildId: auth.guildId,
+      channels: result.channels,
+      roles: result.roles,
+      error: result.error ?? null,
+    });
+  });
+
+  app.patch("/api/dashboard/guild/:guildId/settings", async (req, res) => {
+    if (!mutationOriginAllowed(req, publicOrigin, allowedOrigins)) {
+      sendNoStoreJson(res, 403, { ok: false, error: "origin_denied" });
+      return;
+    }
+    if (!takeRateLimit(req, "settings-save", 120, 10 * 60 * 1000)) {
+      sendNoStoreJson(res, 429, { ok: false, error: "rate_limited" });
+      return;
+    }
+    const auth = await requireDashboardAccess(req, res, sessionService);
+    if (!auth) return;
+    try {
+      const updates = req.body && typeof req.body.updates === "object" && !Array.isArray(req.body.updates)
+        ? req.body.updates as Record<string, unknown>
+        : {};
+      sendNoStoreJson(res, 200, await configService.updateSettings(auth.guildId, updates));
+    } catch (error) {
+      sendNoStoreJson(res, 500, { ok: false, error: error instanceof Error ? error.message : "save_failed" });
+    }
+  });
+
+  app.all(["/token", "/api/token", "/session", "/api/session"], (_req, res) => {
+    sendNoStoreJson(res, 410, { ok: false, error: "legacy_api_removed" });
+  });
+
+  app.use("/api", (req, res) => {
+    sendNoStoreJson(res, 404, { ok: false, error: "api_route_not_found", detail: `${req.method} ${req.path}` });
+  });
+}

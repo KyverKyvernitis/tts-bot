@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -u
 
-HEALTH_URL="${ACTIVITY_HEALTH_URL:-http://127.0.0.1:8787/health}"
-SERVICE_NAME="${ACTIVITY_SERVICE_NAME:-activity-dashboard-server}"
-ATTEMPTS="${ACTIVITY_NOTIFY_ATTEMPTS:-12}"
-SLEEP_SECONDS="${ACTIVITY_NOTIFY_SLEEP_SECONDS:-2}"
-STABLE_RECHECK_DELAY="${ACTIVITY_NOTIFY_STABLE_RECHECK_DELAY:-2}"
-COOLDOWN_SECONDS="${ACTIVITY_NOTIFY_COOLDOWN_SECONDS:-900}"
-STATE_FILE="${ACTIVITY_NOTIFY_STATE_FILE:-/tmp/activity-dashboard-online.state}"
+# DASHBOARD_* é o nome atual; ACTIVITY_* permanece como fallback durante a migração.
+HEALTH_URL="${DASHBOARD_HEALTH_URL:-${ACTIVITY_HEALTH_URL:-http://127.0.0.1:8787/health}}"
+SERVICE_NAME="${DASHBOARD_SERVICE_NAME:-${ACTIVITY_SERVICE_NAME:-sinuca-activity-server.service}}"
+ATTEMPTS="${DASHBOARD_NOTIFY_ATTEMPTS:-${ACTIVITY_NOTIFY_ATTEMPTS:-12}}"
+SLEEP_SECONDS="${DASHBOARD_NOTIFY_SLEEP_SECONDS:-${ACTIVITY_NOTIFY_SLEEP_SECONDS:-2}}"
+STABLE_RECHECK_DELAY="${DASHBOARD_NOTIFY_STABLE_RECHECK_DELAY:-${ACTIVITY_NOTIFY_STABLE_RECHECK_DELAY:-2}}"
+COOLDOWN_SECONDS="${DASHBOARD_NOTIFY_COOLDOWN_SECONDS:-${ACTIVITY_NOTIFY_COOLDOWN_SECONDS:-900}}"
+STATE_FILE="${DASHBOARD_NOTIFY_STATE_FILE:-${ACTIVITY_NOTIFY_STATE_FILE:-/tmp/osaka-dashboard-online.state}}"
 
 read_state() {
   LAST_NOTIFIED_AT=0
@@ -112,9 +113,9 @@ for _ in $(seq 1 "$ATTEMPTS"); do
 
     CURRENT_PID="$(current_pid)"
     if service_active && health_ok; then
-      BODY="Backend do Activity Dashboard respondeu com sucesso no /health.
+      BODY="Backend do painel web da Osaka respondeu com sucesso no /health.
 URL de verificação: $HEALTH_URL"
-      /home/ubuntu/bot/alert.sh success "Activity Dashboard online" "$BODY"
+      /home/ubuntu/bot/alert.sh success "Painel da Osaka online" "$BODY"
       write_state
       exit 0
     fi

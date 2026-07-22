@@ -13,6 +13,8 @@ from utility.update_security import (
     ZipLimits,
     build_file_integrity,
     inspect_zip_archive,
+    is_forbidden_update_path,
+    is_safe_env_template_path,
     sha256_file,
     verify_candidate,
 )
@@ -39,6 +41,35 @@ def test_inspect_zip_rejects_unsafe_paths(tmp_path: Path, name: str) -> None:
     archive = _write_zip(tmp_path / "unsafe.zip", [(name, b"x")])
     with pytest.raises(UpdateSecurityError):
         inspect_zip_archive(archive)
+
+
+@pytest.mark.parametrize("name", ["activity /sinuca/index.html", "activity/sinuca /index.html", " activity/sinuca/index.html"])
+def test_inspect_zip_rejects_path_components_with_edge_whitespace(tmp_path: Path, name: str) -> None:
+    archive = _write_zip(tmp_path / "whitespace.zip", [(name, b"x")])
+    with pytest.raises(UpdateSecurityError, match="espaço"):
+        inspect_zip_archive(archive)
+
+
+@pytest.mark.parametrize("name", [".env.example", ".env.sample", ".env.template", "activity/sinuca-server/.env.example"])
+def test_env_templates_are_allowed(name: str) -> None:
+    assert is_safe_env_template_path(name)
+    assert not is_forbidden_update_path(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        ".env",
+        ".env.local",
+        ".env.production",
+        ".env.example.local",
+        "activity/sinuca-server/.env",
+        "activity/sinuca-server/.env.production",
+    ],
+)
+def test_real_env_files_remain_forbidden(name: str) -> None:
+    assert not is_safe_env_template_path(name)
+    assert is_forbidden_update_path(name)
 
 
 def test_inspect_zip_rejects_casefold_duplicate(tmp_path: Path) -> None:
