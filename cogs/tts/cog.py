@@ -2987,7 +2987,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             description = "Ajustes salvos só para você."
         member = self.bot.get_guild(guild_id).get_member(user_id) if (not server and self.bot.get_guild(guild_id)) else None
         spoken_name_text = None
-        if not server:
+        if not server and self._guild_announce_author_enabled(guild_defaults):
             spoken_name_text, _ = self._spoken_name_status_text(guild_id, member, resolved=resolved)
         history_text = self._format_history_entries(last_changes or [], viewer_user_id=viewer_user_id or user_id, message_id=message_id)
         return build_settings_embed(
@@ -3588,7 +3588,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             history_text = self._format_history_entries(initial_history, viewer_user_id=None, message_id=None)
             embed = self._make_embed(
                 "TTS",
-                "Cada prefixo escolhe um modo de voz. Use o menu para abrir seus ajustes.",
+                "Cada prefixo escolhe um modo de voz. Use os botões para abrir seus ajustes.",
                 ok=True,
             )
             view = self._build_public_tts_launcher_view(message.guild.id, timeout=300, history_text=history_text)

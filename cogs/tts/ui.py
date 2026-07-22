@@ -2100,7 +2100,6 @@ class AndroidSettingsModal(discord.ui.Modal, title="Editar ATTS"):
 
 class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
     bot_prefix = discord.ui.TextInput(label="Prefixo do bot", placeholder="Ex.: _", required=False, max_length=8)
-    atts_prefix = discord.ui.TextInput(label="Prefixo do ATTS", placeholder="Ex.: %", required=False, max_length=8)
     gtts_prefix = discord.ui.TextInput(label="Prefixo do gTTS", placeholder="Ex.: .", required=False, max_length=8)
     edge_prefix = discord.ui.TextInput(label="Prefixo do Edge", placeholder="Ex.: ,", required=False, max_length=8)
 
@@ -2115,7 +2114,6 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
         except Exception:
             defaults = {}
         self.bot_prefix.default = str((defaults or {}).get("bot_prefix") or getattr(config, "PREFIX", "_") or "_")[:8]
-        self.atts_prefix.default = str((defaults or {}).get("atts_prefix") or getattr(config, "TTS_ATTS_PREFIX", "%") or "%")[:8]
         self.gtts_prefix.default = str((defaults or {}).get("tts_prefix") or (defaults or {}).get("gtts_prefix") or getattr(config, "TTS_PREFIX", ".") or ".")[:8]
         self.edge_prefix.default = str((defaults or {}).get("edge_prefix") or getattr(config, "EDGE_TTS_PREFIX", ",") or ",")[:8]
 
@@ -2124,7 +2122,6 @@ class ServerPrefixesModal(discord.ui.Modal, title="Prefixos do servidor"):
         parts = []
         for field_name, label, keys in [
             ("bot_prefix", "bot", ("bot_prefix",)),
-            ("atts_prefix", "ATTS", ("atts_prefix",)),
             ("gtts_prefix", "gTTS", ("gtts_prefix", "tts_prefix")),
             ("edge_prefix", "Edge", ("edge_prefix",)),
         ]:
@@ -2454,62 +2451,17 @@ async def _reset_public_launcher_select(interaction: discord.Interaction, panel)
         traceback.print_exception(type(e), e, e.__traceback__)
 
 
-class TTSPublicLauncherSelect(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(label="ATTS", description="Idioma, voz, velocidade e tom do Android TTS", value="atts", emoji="📱"),
-            discord.SelectOption(label="Edge", description="Idioma, voz, velocidade e tom do Edge", value="edge", emoji="🔊"),
-            discord.SelectOption(label="gTTS", description="Idioma do gTTS", value="gtts", emoji="🔤"),
-            discord.SelectOption(label="Apelido", description="Nome que o bot fala por você", value="spoken_name", emoji="🪪"),
-        ]
-        super().__init__(
-            placeholder="Abrir ajuste",
-            min_values=1,
-            max_values=1,
-            options=options,
-            custom_id=f"tts_public_launcher:{time.monotonic_ns()}",
-        )
+class TTSPublicLauncherButton(discord.ui.Button):
+    def __init__(self, *, action: str, label: str, emoji: str):
+        super().__init__(label=label, emoji=emoji, style=discord.ButtonStyle.secondary)
+        self.action = str(action)
 
     async def callback(self, interaction: discord.Interaction):
         panel = getattr(self, "view", None)
         if panel is None or interaction.guild is None:
             await interaction.response.send_message("Esse painel não está disponível agora.", ephemeral=True)
             return
-        value = self.values[0]
-        target_name = panel.cog._member_panel_name(interaction.user)
-        # Limpa a opção marcada sem consumir a resposta da interação;
-        # a resposta principal continua sendo o modal.
-        asyncio.create_task(_reset_public_launcher_select(interaction, panel))
-        if value == "atts":
-            await _send_atts_settings_modal(
-                interaction,
-                panel.cog,
-                getattr(interaction, "message", None),
-                server=False,
-                target_user_id=interaction.user.id,
-                target_user_name=target_name,
-                context="public-atts",
-            )
-        elif value == "edge":
-            await _send_settings_modal_with_fallback(
-                interaction,
-                lambda: EdgeSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name),
-                lambda: EdgeSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name, force_text_fallback=True),
-                context="public-edge",
-            )
-        elif value == "gtts":
-            await _send_settings_modal_with_fallback(
-                interaction,
-                lambda: GTTSSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name),
-                lambda: GTTSSettingsModal(panel.cog, getattr(interaction, "message", None), server=False, target_user_id=interaction.user.id, target_user_name=target_name, force_text_fallback=True),
-                context="public-gtts",
-            )
-        elif value == "spoken_name":
-            current_value = panel.cog._get_saved_spoken_name(interaction.guild.id, interaction.user.id)
-            await interaction.response.send_modal(SpokenNameModal(panel.cog, getattr(interaction, "message", None), target_user_id=interaction.user.id, target_user_name=target_name, current_value=current_value))
-        else:
-            await interaction.response.send_message("Opção indisponível.", ephemeral=True)
-
+        await panel._open_action(interaction, self.action)
 
 
 _TTS_LAYOUT_VIEW_CLS = getattr(discord.ui, "LayoutView", discord.ui.View)
@@ -2619,51 +2571,33 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
             and hasattr(discord.ui, "ActionRow")
         )
 
-    def _launcher_text(self) -> str:
-        history = self.history_text or "• Nada recente."
-        lines = [
-            "### TTS",
-            "**Como funciona**",
-            "Cada prefixo escolhe um modo de voz.",
-            "",
-            "**ATTS**",
-            "Android nativo do celular. Use: `%texto`",
-            "",
-            "**Edge**",
-            "Voz natural. Use: `,texto`",
-            "",
-            "**gTTS**",
-            "Voz simples. Use: `.texto`",
-            "",
-            "**Últimas alterações**",
-            history,
-        ]
-        return "\n".join(lines).strip()
+    def _spoken_name_enabled(self) -> bool:
+        try:
+            db = self.cog._get_db()
+            defaults = db.get_guild_tts_defaults(self.guild_id) if db is not None else {}
+            return bool((defaults or {}).get("announce_author", False))
+        except Exception as e:
+            print(f"[tts_panel] falha ao verificar apelido falado do launcher: {e!r}")
+            return False
 
-    def _make_button(self, label: str, callback: Callable[[discord.Interaction], object], *, emoji: str | None = None, style: discord.ButtonStyle = discord.ButtonStyle.secondary) -> discord.ui.Button:
-        button = discord.ui.Button(label=label, emoji=emoji, style=style)
-        async def wrapped(interaction: discord.Interaction):
-            result = callback(interaction)
-            if inspect.isawaitable(result):
-                await result
-        button.callback = wrapped
-        return button
+    @staticmethod
+    def _separator():
+        try:
+            return discord.ui.Separator(visible=True)
+        except TypeError:
+            return discord.ui.Separator()
 
-    def _make_action_row(self, *buttons: discord.ui.Button):
-        if self.is_components_v2_panel():
-            row = discord.ui.ActionRow()
-            for button in buttons:
-                row.add_item(button)
-            return row
-        return list(buttons)
+    @staticmethod
+    def _button_row(button: discord.ui.Button):
+        row = discord.ui.ActionRow()
+        row.add_item(button)
+        return row
 
-    def _add_control_row(self, container, *buttons: discord.ui.Button) -> None:
-        row = self._make_action_row(*buttons)
-        if self.is_components_v2_panel():
-            container.add_item(row)
-        else:
-            for button in row:
-                self.add_item(button)
+    def _intro_text(self) -> str:
+        return "### TTS\n**Como funciona**\nCada prefixo escolhe um modo de voz."
+
+    def _history_text(self) -> str:
+        return f"**Últimas alterações**\n{self.history_text or '• Nada recente.'}"
 
     def _rebuild_items(self) -> None:
         try:
@@ -2671,21 +2605,103 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
         except Exception:
             pass
 
-        launcher_select = TTSPublicLauncherSelect()
+        edge_button = TTSPublicLauncherButton(action="edge", label="Configurar Edge", emoji="🔊")
+        gtts_button = TTSPublicLauncherButton(action="gtts", label="Configurar gTTS", emoji="🔤")
+        spoken_button = TTSPublicLauncherButton(action="spoken_name", label="Alterar apelido", emoji="🪪")
+        spoken_name_enabled = self._spoken_name_enabled()
 
         if self.is_components_v2_panel():
-            container = discord.ui.Container(discord.ui.TextDisplay(self._launcher_text()), accent_color=discord.Color.blurple())
-            try:
-                container.add_item(discord.ui.Separator(visible=True))
-            except TypeError:
-                container.add_item(discord.ui.Separator())
-            row = discord.ui.ActionRow()
-            row.add_item(launcher_select)
-            container.add_item(row)
+            container = discord.ui.Container(
+                discord.ui.TextDisplay(self._intro_text()),
+                self._separator(),
+                discord.ui.TextDisplay("**Edge**\nVoz natural. Use: `,texto`"),
+                self._button_row(edge_button),
+                self._separator(),
+                discord.ui.TextDisplay("**gTTS**\nVoz simples. Use: `.texto`"),
+                self._button_row(gtts_button),
+                accent_color=discord.Color.blurple(),
+            )
+            if spoken_name_enabled:
+                container.add_item(self._separator())
+                container.add_item(discord.ui.TextDisplay(
+                    "**Apelido falado**\nEscolha o nome anunciado antes das suas mensagens."
+                ))
+                container.add_item(self._button_row(spoken_button))
+            container.add_item(self._separator())
+            container.add_item(discord.ui.TextDisplay(self._history_text()))
             self.add_item(container)
             return
 
-        self.add_item(launcher_select)
+        self.add_item(edge_button)
+        self.add_item(gtts_button)
+        if spoken_name_enabled:
+            self.add_item(spoken_button)
+
+    async def _open_action(self, interaction: discord.Interaction, action: str) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Esse painel só pode ser usado dentro de um servidor.", ephemeral=True)
+            return
+
+        target_name = self.cog._member_panel_name(interaction.user)
+        panel_message = getattr(interaction, "message", None)
+        if action == "edge":
+            await _send_settings_modal_with_fallback(
+                interaction,
+                lambda: EdgeSettingsModal(
+                    self.cog,
+                    panel_message,
+                    server=False,
+                    target_user_id=interaction.user.id,
+                    target_user_name=target_name,
+                ),
+                lambda: EdgeSettingsModal(
+                    self.cog,
+                    panel_message,
+                    server=False,
+                    target_user_id=interaction.user.id,
+                    target_user_name=target_name,
+                    force_text_fallback=True,
+                ),
+                context="public-edge",
+            )
+            return
+
+        if action == "gtts":
+            await _send_settings_modal_with_fallback(
+                interaction,
+                lambda: GTTSSettingsModal(
+                    self.cog,
+                    panel_message,
+                    server=False,
+                    target_user_id=interaction.user.id,
+                    target_user_name=target_name,
+                ),
+                lambda: GTTSSettingsModal(
+                    self.cog,
+                    panel_message,
+                    server=False,
+                    target_user_id=interaction.user.id,
+                    target_user_name=target_name,
+                    force_text_fallback=True,
+                ),
+                context="public-gtts",
+            )
+            return
+
+        if action == "spoken_name" and self._spoken_name_enabled():
+            current_value = self.cog._get_saved_spoken_name(interaction.guild.id, interaction.user.id)
+            await interaction.response.send_modal(
+                SpokenNameModal(
+                    self.cog,
+                    panel_message,
+                    target_user_id=interaction.user.id,
+                    target_user_name=target_name,
+                    current_value=current_value,
+                )
+            )
+            return
+
+        await interaction.response.send_message("Opção indisponível.", ephemeral=True)
 
     async def _open_my_tts(self, interaction: discord.Interaction):
         if interaction.guild is None:
@@ -2741,9 +2757,8 @@ class TTSPublicLauncherView(_BaseTTSLayoutView):
         await interaction.response.send_message(
             embed=self.cog._make_embed(
                 "Ajuda do TTS",
-                "ATTS, Edge e gTTS são modos de voz. O prefixo é só o símbolo digitado antes da frase.\n\n"
+                "Edge e gTTS são modos de voz. O prefixo é só o símbolo digitado antes da frase.\n\n"
                 "Exemplos:\n"
-                "• `%bom dia` usa ATTS.\n"
                 "• `,bom dia` usa Edge.\n"
                 "• `.bom dia` usa gTTS.",
                 ok=True,
@@ -3207,12 +3222,41 @@ class TTSMainPanelView(_BaseTTSLayoutView):
             for button in row:
                 self.add_item(button)
 
+    def _spoken_name_enabled(self) -> bool:
+        if self.server:
+            return False
+        try:
+            db = self.cog._get_db()
+            defaults = db.get_guild_tts_defaults(self.guild_id) if db is not None else {}
+            return bool((defaults or {}).get("announce_author", False))
+        except Exception as e:
+            print(f"[tts_panel] falha ao verificar apelido falado do painel: {e!r}")
+            return False
+
+    def _panel_buttons(self) -> list[discord.ui.Button]:
+        if self.server:
+            return [
+                self._make_button("Configurar prefixos", self._open_prefixes_panel, emoji="⌨️"),
+                self._make_button("Configurar Edge", self._open_edge_panel, emoji="🔊"),
+                self._make_button("Configurar gTTS", self._open_gtts_panel, emoji="🔤"),
+                self._make_button("Configurar regras", self._open_rules_panel, emoji="☑️"),
+            ]
+
+        buttons = [
+            self._make_button("Configurar Edge", self._open_edge_panel, emoji="🔊"),
+            self._make_button("Configurar gTTS", self._open_gtts_panel, emoji="🔤"),
+        ]
+        if self._spoken_name_enabled():
+            buttons.append(self._make_button("Alterar apelido", self._open_spoken_name_modal, emoji="🪪"))
+        return buttons
+
     def _rebuild_items(self) -> None:
         try:
             self.clear_items()
         except Exception:
             pass
 
+        buttons = self._panel_buttons()
         if self.is_components_v2_panel():
             container = discord.ui.Container(
                 discord.ui.TextDisplay(self._panel_text()),
@@ -3222,15 +3266,15 @@ class TTSMainPanelView(_BaseTTSLayoutView):
                 container.add_item(discord.ui.Separator(visible=True))
             except TypeError:
                 container.add_item(discord.ui.Separator())
-
-            row = discord.ui.ActionRow()
-            row.add_item(TTSMainPanelSelect(server=self.server))
-            container.add_item(row)
+            container.add_item(discord.ui.TextDisplay("**Ajustes**\nEscolha o que deseja configurar."))
+            for button in buttons:
+                self._add_control_row(container, button)
             self.add_item(container)
             return
 
         # Fallback se a lib em produção ainda não tiver LayoutView/Components V2.
-        self.add_item(TTSMainPanelSelect(server=self.server))
+        for button in buttons:
+            self.add_item(button)
 
     async def _open_mode_panel(self, interaction: discord.Interaction, mode: str):
         print(f"[tts_panel] mode_select | mode={mode} user={interaction.user.id} guild={interaction.guild.id if interaction.guild else None} server={self.server}")
@@ -3348,7 +3392,7 @@ class TTSMainPanelView(_BaseTTSLayoutView):
         await interaction.response.send_message(
             embed=self.cog._make_embed(
                 "Opção removida",
-                "Esse painel foi simplificado. Use ATTS, Edge, gTTS, Apelido ou o comando separado do TTS do servidor.",
+                "Esse painel foi simplificado. Use Edge, gTTS, Apelido ou o comando separado do TTS do servidor.",
                 ok=True,
             ),
             ephemeral=True,

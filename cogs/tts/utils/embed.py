@@ -92,6 +92,11 @@ def _field_value(embed: discord.Embed, *names: str, default: str = "Não definid
     return default
 
 
+def _has_field(embed: discord.Embed, *names: str) -> bool:
+    wanted = {name.lower() for name in names}
+    return any(str(getattr(field, "name", "") or "").lower() in wanted for field in (getattr(embed, "fields", []) or []))
+
+
 def _history_value(embed: discord.Embed) -> str:
     value = _field_value(embed, "Últimas alterações", "🕘 Últimas alterações", default="")
     return "" if value == "Não definido" else value
@@ -120,52 +125,34 @@ def _atts_factor(value: object, default: str = "1.0") -> str:
 
 
 def build_settings_panel_text_from_embed(embed: discord.Embed, *, server: bool) -> str:
-    """Renderiza o conteúdo principal do painel em texto para Components V2.
-
-    O embed ainda existe como fallback interno, mas o painel principal usa este texto
-    dentro de um Container/TextDisplay para ficar mais limpo no Discord.
-    """
+    """Renderiza o conteúdo principal do painel em texto para Components V2."""
     title = _clean_display_value(getattr(embed, "title", ""), fallback="TTS do servidor" if server else "TTS")
     description = _clean_display_value(getattr(embed, "description", ""), fallback="")
 
-    atts_prefix = _field_value(embed, "Prefixo do ATTS", default="%")
     edge_prefix = _field_value(embed, "Prefixo do modo Edge", default=",")
     gtts_prefix = _field_value(embed, "Prefixo do modo gTTS", default=".")
-
-    atts_language = _field_value(embed, "Idioma do ATTS", default="pt-BR")
-    atts_voice = _field_value(embed, "Voz do ATTS", default="auto")
-    if atts_voice == "Não definido":
-        atts_voice = "auto"
-    atts_rate = _atts_factor(_field_value(embed, "Velocidade do ATTS", default="1.0"))
-    atts_pitch = _atts_factor(_field_value(embed, "Tom do ATTS", default="1.0"))
     edge_voice = human_voice_name(_field_value(embed, "Voz do Edge"))
     edge_reading = _human_reading(
         _field_value(embed, "Velocidade do Edge", default="+0%"),
         _field_value(embed, "Tom do Edge", default="+0Hz"),
     )
-    gtts_language = _field_value(embed, "Idioma do gTTS", default="pt-br")
+    gtts_language = human_language_name(_field_value(embed, "Idioma do gTTS", default="pt-br"))
 
     lines: list[str] = [f"### {title}"]
     if description:
         lines.append(description)
-    lines.append("")
-    lines.append("Cada prefixo usa seus próprios ajustes.")
-    lines.append("")
     lines.extend([
-        "**ATTS**",
-        f"Prefixo: {_prefix_example(atts_prefix)}",
-        f"Idioma ATTS: {atts_language}",
-        f"Voz ATTS: {atts_voice}",
-        f"Leitura ATTS: velocidade {atts_rate}x · tom {atts_pitch}x",
+        "",
+        "Cada prefixo usa seus próprios ajustes.",
         "",
         "**Edge**",
-        f"Prefixo: {_prefix_example(edge_prefix)}",
-        f"Voz Edge: {edge_voice}",
-        f"Leitura Edge: {edge_reading}",
+        f"Use: {_prefix_example(edge_prefix)}",
+        f"Voz: {edge_voice}",
+        f"Leitura: {edge_reading}",
         "",
         "**gTTS**",
-        f"Prefixo: {_prefix_example(gtts_prefix)}",
-        f"Idioma gTTS: {gtts_language}",
+        f"Use: {_prefix_example(gtts_prefix)}",
+        f"Idioma: {gtts_language}",
     ])
 
     if server:
@@ -178,10 +165,10 @@ def build_settings_panel_text_from_embed(embed: discord.Embed, *, server: bool) 
             "",
             "**Servidor**",
             f"Prefixo do bot: `{bot_prefix}`",
-            f"Autor antes da frase: {author}",
+            f"Apelido falado: {author}",
             f"Cargo ignorado: {ignored_role}",
         ])
-    else:
+    elif _has_field(embed, "Apelido falado"):
         spoken_name = _field_value(embed, "Apelido falado", default="padrão")
         lines.extend([
             "",
@@ -279,15 +266,10 @@ def build_status_embed(*, member: discord.abc.User | None, target_name: str, use
 
 def build_settings_embed(*, title: str, description: str, resolved: dict, guild_defaults: dict, history_text: str, server: bool, panel_kind: str, spoken_name_text: str | None, google_language_default: str = "", google_voice_default: str = "", google_rate_default: str = "", google_pitch_default: str = "", google_prefix_default: str = "", ignored_tts_role_text: str | None = None) -> discord.Embed:
     embed = discord.Embed(title=title, description=description, color=discord.Color.blurple())
-    embed.add_field(name="Idioma do ATTS", value=f"`{resolved.get('android_language', 'pt-BR')}`", inline=True)
-    embed.add_field(name="Voz do ATTS", value=f"`{resolved.get('android_voice') or 'auto'}`", inline=True)
-    embed.add_field(name="Velocidade do ATTS", value=f"`{resolved.get('android_rate', '1.0')}`", inline=True)
-    embed.add_field(name="Tom do ATTS", value=f"`{resolved.get('android_pitch', '1.0')}`", inline=True)
     embed.add_field(name="Voz do Edge", value=f"`{resolved.get('edge_voice', resolved.get('voice', 'Não definido'))}`", inline=True)
     embed.add_field(name="Idioma do gTTS", value=f"`{resolved.get('gtts_language', resolved.get('language', 'Não definido'))}`", inline=True)
     embed.add_field(name="Velocidade do Edge", value=f"`{resolved.get('edge_rate', resolved.get('rate', '+0%'))}`", inline=True)
     embed.add_field(name="Tom do Edge", value=f"`{resolved.get('edge_pitch', resolved.get('pitch', '+0Hz'))}`", inline=True)
-    embed.add_field(name="Prefixo do ATTS", value=f"`{guild_defaults.get('atts_prefix', '%')}`", inline=True)
     embed.add_field(name="Prefixo do modo gTTS", value=f"`{guild_defaults.get('gtts_prefix', guild_defaults.get('tts_prefix', '.'))}`", inline=True)
     embed.add_field(name="Prefixo do modo Edge", value=f"`{guild_defaults.get('edge_prefix', ',')}`", inline=True)
     if not server and spoken_name_text is not None:
