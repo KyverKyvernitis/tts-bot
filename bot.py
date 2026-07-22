@@ -1845,7 +1845,12 @@ class BotLocal(commands.Bot):
             changed_files.append(rel_path.as_posix())
         return changed_files
 
-    def _process_zip_update_sync(self, zip_path: Path, status_context: dict[str, object] | None = None) -> dict[str, object]:
+    def _process_zip_update_sync(
+        self,
+        zip_path: Path,
+        status_context: dict[str, object] | None = None,
+        progress_callback=None,
+    ) -> dict[str, object]:
         self._update_temp_root.mkdir(parents=True, exist_ok=True)
         env = self._git_env()
         origin_result = self._run_cmd(["git", "remote", "get-url", "origin"], self._repo_root, env=env)
@@ -1867,16 +1872,34 @@ class BotLocal(commands.Bot):
         t0 = time.monotonic()
         last = t0
 
-        def mark(label: str) -> None:
+        def publish_progress(current: str, completed: str = "", elapsed_ms: int | None = None) -> None:
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(
+                    {
+                        "current": str(current or "").strip(),
+                        "completed": str(completed or "").strip(),
+                        "elapsed_ms": max(0, int(elapsed_ms or 0)),
+                    }
+                )
+            except Exception:
+                logging.getLogger("zip_update").debug("falha ao publicar microetapa de preparação", exc_info=True)
+
+        def mark(label: str) -> int:
             nonlocal last
             now = time.monotonic()
-            timings[label] = int((now - last) * 1000)
+            elapsed_ms = max(0, int((now - last) * 1000))
+            timings[label] = elapsed_ms
             last = now
+            return elapsed_ms
 
         try:
             repo_name_hint = self._guess_repo_name(origin_url)
+            publish_progress("Inspecionando pacote")
             worker_zip_validation = self._phone_worker_validate_zip_sync(zip_path)
-            mark("phone_worker_zip_validate_ms")
+            elapsed = mark("phone_worker_zip_validate_ms")
+            publish_progress("Conferindo estrutura do ZIP", "Pacote inspecionado", elapsed)
             if worker_zip_validation and not bool(worker_zip_validation.get("ok", True)):
                 errors = worker_zip_validation.get("errors") or []
                 if isinstance(errors, list) and errors:
@@ -1884,13 +1907,16 @@ class BotLocal(commands.Bot):
                 raise RuntimeError("ZIP bloqueado pelo phone-worker")
 
             extracted_files, zip_inspection = self._safe_extract_patch(zip_path, extract_dir, repo_name_hint, branch_name)
-            mark("extract_ms")
+            elapsed = mark("extract_ms")
+            publish_progress("Preparando base de comparação", "Estrutura do ZIP conferida", elapsed)
 
             clone_dir = self._prepare_update_staging_clone(origin_url, branch_name, env)
-            mark("staging_prepare_ms")
+            elapsed = mark("staging_prepare_ms")
+            publish_progress("Comparando arquivos", "Base de comparação preparada", elapsed)
 
             changed_files = self._apply_patch_to_clone(extracted_files, clone_dir)
-            mark("apply_patch_ms")
+            elapsed = mark("apply_patch_ms")
+            publish_progress("Calculando alterações", "Arquivos comparados", elapsed)
             if not changed_files:
                 timings["total_ms"] = int((time.monotonic() - t0) * 1000)
                 return {
@@ -1935,7 +1961,8 @@ class BotLocal(commands.Bot):
             protected_changed = [path for path in changed_files if self._zip_update_is_callkeeper_protected_path(path)]
             if protected_changed:
                 raise RuntimeError("Patch bloqueado: arquivos do CallKeeper são protegidos pelo updater comum: " + ", ".join(protected_changed[:5]))
-            mark("diff_ms")
+            elapsed = mark("diff_ms")
+            publish_progress("Montando candidato seguro", "Alterações calculadas", elapsed)
 
             base_result = self._run_cmd(["git", "rev-parse", f"origin/{branch_name}"], clone_dir, env=env)
             base_commit = (base_result.stdout or "").strip() if base_result.returncode == 0 else None
@@ -1951,10 +1978,8 @@ class BotLocal(commands.Bot):
                 patch_diff_text=patch_diff_text,
                 status_context=status_context,
             )
-            mark("candidate_write_ms")
-
-            triggered_update, trigger_detail = self._trigger_updater_service_sync()
-            mark("trigger_updater_ms")
+            elapsed = mark("candidate_write_ms")
+            publish_progress("Finalizando preparação", "Candidato seguro preparado", elapsed)
             timings["total_ms"] = int((time.monotonic() - t0) * 1000)
 
             return {
@@ -1966,8 +1991,8 @@ class BotLocal(commands.Bot):
                 "candidate_dir": candidate.get("candidate_dir"),
                 "queue_position": candidate.get("queue_position"),
                 "queue_pending_count": candidate.get("queue_pending_count"),
-                "triggered_update": triggered_update,
-                "trigger_detail": trigger_detail,
+                "triggered_update": False,
+                "trigger_detail": "aguardando acionamento após publicar a fila",
                 "branch": branch_name,
                 "phone_worker_zip_validation": worker_zip_validation,
                 "zip_inspection": zip_inspection,
@@ -2590,13 +2615,13 @@ class BotLocal(commands.Bot):
                         raise UpdateSecurityError(
                             f"ZIP excede o limite de {limits.max_archive_bytes // (1024 * 1024)} MB"
                         )
-                    await self._edit_zip_update_message(
+                    status_message = await self._edit_zip_update_message(
                         message,
                         status_message,
                         "🔎 Preparando atualização",
                         (
                             "<a:loading:1510065277868445796> **Validando pacote**\n"
-                            "Conferindo caminhos, tamanhos, integridade e alterações." + zip_hint
+                            "-# A mensagem será atualizada em cada etapa." + zip_hint
                         ),
                         discord.Color.blurple(),
                     )
@@ -2608,10 +2633,77 @@ class BotLocal(commands.Bot):
                         "source_message_id": getattr(message, "id", None),
                         "source_author_id": getattr(message.author, "id", None),
                     }
-                    result = await asyncio.to_thread(self._process_zip_update_sync, zip_path, status_context)
-                    changed_files = list(result.get("changed_files") or [])
-                    triggered_update = bool(result.get("triggered_update"))
+                    progress_queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
+                    preparation_history: list[str] = []
 
+                    def format_elapsed_ms(value: object) -> str:
+                        try:
+                            elapsed_ms = max(0, int(value or 0))
+                        except (TypeError, ValueError):
+                            elapsed_ms = 0
+                        if elapsed_ms <= 0:
+                            return "<1ms"
+                        if elapsed_ms < 1000:
+                            return f"{elapsed_ms}ms"
+                        if elapsed_ms < 60000:
+                            seconds = elapsed_ms / 1000
+                            text = f"{seconds:.1f}".rstrip("0").rstrip(".").replace(".", ",")
+                            return f"{text}s"
+                        total_seconds = round(elapsed_ms / 1000)
+                        minutes, seconds = divmod(total_seconds, 60)
+                        return f"{minutes}min {seconds:02d}s"
+
+                    async def consume_preparation_progress() -> None:
+                        progress_edits_enabled = True
+                        while True:
+                            event = await progress_queue.get()
+                            if event is None:
+                                return
+                            completed = str(event.get("completed") or "").strip()
+                            current = str(event.get("current") or "Processando pacote").strip()
+                            if completed:
+                                preparation_history.append(
+                                    f"-# ✅ {completed} · {format_elapsed_ms(event.get('elapsed_ms'))}"
+                                )
+                            visible_history = preparation_history[-8:]
+                            hidden_count = max(0, len(preparation_history) - len(visible_history))
+                            lines: list[str] = []
+                            if hidden_count:
+                                noun = "etapa anterior concluída" if hidden_count == 1 else "etapas anteriores concluídas"
+                                lines.append(f"-# … {hidden_count} {noun}")
+                            lines.extend(visible_history)
+                            lines.append(f"<a:loading:1510065277868445796> **{current}**")
+                            if prefix:
+                                lines.append(f"-# {prefix}")
+                            view = self._make_zip_update_view(
+                                "🔎 Preparando atualização",
+                                "\n".join(lines),
+                                discord.Color.blurple(),
+                            )
+                            try:
+                                await asyncio.wait_for(
+                                    status_message.edit(view=view, allowed_mentions=discord.AllowedMentions.none()),
+                                    timeout=15,
+                                )
+                            except Exception:
+                                UPDATE_LOG.warning("falha ao editar microetapa de preparação", exc_info=True)
+
+                    progress_consumer = asyncio.create_task(consume_preparation_progress())
+
+                    def report_preparation_progress(event: dict[str, object]) -> None:
+                        self.loop.call_soon_threadsafe(progress_queue.put_nowait, event)
+
+                    try:
+                        result = await asyncio.to_thread(
+                            self._process_zip_update_sync,
+                            zip_path,
+                            status_context,
+                            report_preparation_progress,
+                        )
+                    finally:
+                        progress_queue.put_nowait(None)
+                        await progress_consumer
+                    changed_files = list(result.get("changed_files") or [])
                     if not changed_files:
                         await self._edit_zip_update_message(
                             message,
@@ -2629,19 +2721,20 @@ class BotLocal(commands.Bot):
                     display_id = str(result.get("display_id") or candidate_id).strip()
 
                     if queue_position <= 1:
-                        queue_detail = "Será iniciada assim que o updater assumir o pacote."
+                        queue_detail = "Posição na fila: **1**\nSerá iniciada em seguida."
                     else:
                         before = queue_position - 1
-                        queue_detail = f"Posição atual: **{queue_position}** · {before} atualização(ões) antes desta."
-                    if not triggered_update:
-                        queue_detail += "\nO timer do updater continuará automaticamente."
+                        before_text = "1 atualização antes desta" if before == 1 else f"{before} atualizações antes desta"
+                        queue_detail = f"Posição na fila: **{queue_position}**\n{before_text}."
 
-                    details = [f"`{display_id}`", queue_detail]
-                    file_summary = f"{len(changed_files)} arquivo(s) · {diff_summary}" if diff_summary else f"{len(changed_files)} arquivo(s)"
+                    details = [f"Atualização `{display_id}`", queue_detail]
+                    file_count = len(changed_files)
+                    file_text = "1 arquivo preparado" if file_count == 1 else f"{file_count} arquivos preparados"
+                    file_summary = f"{file_text} · {diff_summary}" if diff_summary else file_text
                     details.append(f"-# {file_summary}")
                     if prefix:
                         details.append(f"-# {prefix}")
-                    await self._edit_zip_update_message(
+                    status_message = await self._edit_zip_update_message(
                         message,
                         status_message,
                         "📦 Atualização na fila",
@@ -2649,6 +2742,7 @@ class BotLocal(commands.Bot):
                         discord.Color.blurple(),
                         control=self._zip_update_cancel_control(candidate_id),
                     )
+                    await asyncio.to_thread(self._trigger_updater_service_sync)
                 except zipfile.BadZipFile:
                     await self._edit_zip_update_message(
                         message,

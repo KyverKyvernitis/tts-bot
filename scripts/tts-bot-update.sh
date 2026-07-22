@@ -179,8 +179,11 @@ UPDATE_TITLE_EMOJI="<a:areia:1496606578395189473>"
 UPDATE_STAGE_EMOJI="<a:loading:1510065277868445796>"
 ZIP_PROGRESS_HISTORY=""
 ZIP_PROGRESS_COMPLETED_COUNT=0
-ZIP_PROGRESS_TOTAL_STEPS=8
+ZIP_PROGRESS_HIDDEN_COUNT=0
+ZIP_PROGRESS_MAX_VISIBLE_STEPS=10
+ZIP_PROGRESS_STAGE_LABEL=""
 ZIP_PROGRESS_STAGE_STARTED_MS=0
+ZIP_PROGRESS_STARTED_MS=0
 UPDATER_STEP_LAST=0
 UPDATER_TIMINGS=""
 UPDATE_STATUS_OUTBOX_DIR="$REPO_DIR/data/runtime/update-status-outbox"
@@ -362,9 +365,60 @@ human_duration() {
   local m=$((total / 60))
   local s=$((total % 60))
   if (( m > 0 )); then
-    printf "%dm %02ds" "$m" "$s"
+    printf "%dmin %02ds" "$m" "$s"
   else
     printf "%ds" "$s"
+  fi
+}
+
+update_now_ms() {
+  local value
+  value="$(date +%s%3N 2>/dev/null || true)"
+  if [[ "$value" =~ ^[0-9]{13}$ ]]; then
+    printf '%s' "$value"
+    return 0
+  fi
+  python3 - <<'PYMS'
+import time
+print(time.time_ns() // 1_000_000)
+PYMS
+}
+
+format_update_duration_ms() {
+  local total_ms="${1:-0}"
+  [[ "$total_ms" =~ ^[0-9]+$ ]] || total_ms=0
+  if (( total_ms <= 0 )); then
+    printf '<1ms'
+    return 0
+  fi
+  if (( total_ms < 1000 )); then
+    printf '%dms' "$total_ms"
+    return 0
+  fi
+  if (( total_ms < 60000 )); then
+    local tenths=$(((total_ms + 50) / 100))
+    local seconds=$((tenths / 10))
+    local decimal=$((tenths % 10))
+    if (( decimal == 0 )); then
+      printf '%ds' "$seconds"
+    else
+      printf '%d,%ds' "$seconds" "$decimal"
+    fi
+    return 0
+  fi
+  local rounded_seconds=$(((total_ms + 500) / 1000))
+  local minutes=$((rounded_seconds / 60))
+  local seconds=$((rounded_seconds % 60))
+  printf '%dmin %02ds' "$minutes" "$seconds"
+}
+
+format_update_file_count() {
+  local count="${1:-0}"
+  [[ "$count" =~ ^[0-9]+$ ]] || count=0
+  if (( count == 1 )); then
+    printf '1 arquivo'
+  else
+    printf '%d arquivos' "$count"
   fi
 }
 
@@ -1505,10 +1559,10 @@ for index, queue_path in enumerate(sorted(pending_root.glob('*.json')), start=1)
         tmp = queue_path.with_name('.' + queue_path.name + '.tmp')
         tmp.write_text(json.dumps(queue, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
         os.replace(tmp, queue_path)
-        detail = 'Será iniciada em seguida.' if position == 1 else f'{position - 1} atualização(ões) antes desta.'
-        lines = [f'`{display_id}`', f'Posição atual: **{position}**', detail]
+        detail = 'Será iniciada em seguida.' if position == 1 else (f'1 atualização antes desta.' if position == 2 else f'{position - 1} atualizações antes desta.')
+        lines = [f'Atualização `{display_id}`', f'Posição na fila: **{position}**', detail]
         if count:
-            lines.append(f'{count} arquivo(s) preparado(s)' + (f' · {summary}' if summary else ''))
+            lines.append((f'1 arquivo preparado' if count == 1 else f'{count} arquivos preparados') + (f' · {summary}' if summary else ''))
         payload = {
             'channel_id': channel_id,
             'message_id': message_id,
@@ -1821,11 +1875,11 @@ zip_progress_title() {
     printf '📦 Atualização na fila'
   elif [[ "$lowered" == *"reinici"* || "$lowered" == *"recarreg"* ]]; then
     printf '♻️ Reiniciando serviços'
-  elif [[ "$lowered" == *"public"* || "$lowered" == *"github"* || "$lowered" == *"commit"* || "$lowered" == *"finaliz"* ]]; then
+  elif [[ "$lowered" == *"public"* || "$lowered" == *"github"* || "$lowered" == *"commit"* ]]; then
     printf '🚀 Publicando atualização'
-  elif [[ "$lowered" == *"verific"* || "$lowered" == *"health"* || "$lowered" == *"comando"* ]]; then
+  elif [[ "$lowered" == *"finaliz"* || "$lowered" == *"estabil"* || "$lowered" == *"health"* || "$lowered" == *"comando"* ]]; then
     printf '🩺 Verificando atualização'
-  elif [[ "$lowered" == *"valid"* || "$lowered" == *"confer"* || "$lowered" == *"segurança"* || "$lowered" == *"integridade"* ]]; then
+  elif [[ "$lowered" == *"valid"* || "$lowered" == *"confer"* || "$lowered" == *"segurança"* || "$lowered" == *"integridade"* || "$lowered" == *"analis"* ]]; then
     printf '🔎 Validando atualização'
   else
     printf '⚙️ Aplicando atualização'
@@ -1852,31 +1906,62 @@ zip_progress_identifier() {
   fi
 }
 
+zip_progress_trim_history() {
+  local line_count
+  line_count="$(printf '%s\n' "$ZIP_PROGRESS_HISTORY" | awk 'NF {c++} END {print c+0}')"
+  while (( line_count > ZIP_PROGRESS_MAX_VISIBLE_STEPS )); do
+    ZIP_PROGRESS_HISTORY="$(printf '%s\n' "$ZIP_PROGRESS_HISTORY" | awk 'BEGIN{removed=0} {if (!removed && NF) {removed=1; next} print}')"
+    ZIP_PROGRESS_HIDDEN_COUNT=$((ZIP_PROGRESS_HIDDEN_COUNT + 1))
+    line_count=$((line_count - 1))
+  done
+}
+
 zip_progress_publish() {
   local stage_label="${1:-Processando atualização}"
   local detail="${2:-}"
-  local title status description identifier step
+  local title status description identifier now_ms elapsed_ms elapsed_text footer stage_changed=0
+  now_ms="$(update_now_ms)"
+  if (( ZIP_PROGRESS_STARTED_MS <= 0 )); then
+    ZIP_PROGRESS_STARTED_MS="$now_ms"
+  fi
+  if [[ "$ZIP_PROGRESS_STAGE_LABEL" != "$stage_label" || "$ZIP_PROGRESS_STAGE_STARTED_MS" -le 0 ]]; then
+    ZIP_PROGRESS_STAGE_LABEL="$stage_label"
+    stage_changed=1
+  fi
   title="$(zip_progress_title "$stage_label")"
   status="$(zip_progress_status)"
   description=""
+  if (( ZIP_PROGRESS_HIDDEN_COUNT > 0 )); then
+    if (( ZIP_PROGRESS_HIDDEN_COUNT == 1 )); then
+      description+="-# … 1 etapa anterior concluída"$'\n'
+    else
+      description+="-# … $ZIP_PROGRESS_HIDDEN_COUNT etapas anteriores concluídas"$'\n'
+    fi
+  fi
   if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
-    description="$ZIP_PROGRESS_HISTORY"$'
-'
+    description+="$ZIP_PROGRESS_HISTORY"$'\n'
   fi
   description+="$UPDATE_STAGE_EMOJI **$stage_label**"
   if [[ -n "${detail//[[:space:]]/}" ]]; then
-    description+=$'
-'"$detail"
+    description+=$'\n'"-# $detail"
   fi
   identifier="$(zip_progress_identifier)"
-  step=$((ZIP_PROGRESS_COMPLETED_COUNT + 1))
-  (( step > ZIP_PROGRESS_TOTAL_STEPS )) && step="$ZIP_PROGRESS_TOTAL_STEPS"
-  description+=$'
-'"-# $identifier · etapa $step/$ZIP_PROGRESS_TOTAL_STEPS"
+  elapsed_ms=$((now_ms - ZIP_PROGRESS_STARTED_MS))
+  (( elapsed_ms < 0 )) && elapsed_ms=0
+  elapsed_text="$(format_update_duration_ms "$elapsed_ms")"
+  if (( ZIP_PROGRESS_COMPLETED_COUNT == 1 )); then
+    footer="$identifier · 1 etapa concluída · $elapsed_text"
+  else
+    footer="$identifier · $ZIP_PROGRESS_COMPLETED_COUNT etapas concluídas · $elapsed_text"
+  fi
+  description+=$'\n'"-# $footer"
   if (( ROLLBACK_CONTROL_MODE == 1 )); then
     post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "$status" "$title" "$description" || true
   else
     notify_zip_status_message "$status" "$title" "$description" || true
+  fi
+  if (( stage_changed == 1 )); then
+    ZIP_PROGRESS_STAGE_STARTED_MS="$(update_now_ms)"
   fi
   update_local_candidate_heartbeat "active" "" "$stage_label"
 }
@@ -1884,14 +1969,24 @@ zip_progress_publish() {
 zip_progress_done() {
   local done_label="${1:-}"
   [[ -n "${done_label//[[:space:]]/}" ]] || return 0
-  ZIP_PROGRESS_COMPLETED_COUNT=$((ZIP_PROGRESS_COMPLETED_COUNT + 1))
-  if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
-    ZIP_PROGRESS_HISTORY+=$'
-'
+  local now_ms elapsed_ms elapsed_text line
+  now_ms="$(update_now_ms)"
+  if (( ZIP_PROGRESS_STAGE_STARTED_MS > 0 )); then
+    elapsed_ms=$((now_ms - ZIP_PROGRESS_STAGE_STARTED_MS))
+  else
+    elapsed_ms=0
   fi
-  ZIP_PROGRESS_HISTORY+="✅ $done_label"
-  ZIP_PROGRESS_HISTORY="$(printf '%s
-' "$ZIP_PROGRESS_HISTORY" | tail -n 4)"
+  (( elapsed_ms < 0 )) && elapsed_ms=0
+  elapsed_text="$(format_update_duration_ms "$elapsed_ms")"
+  ZIP_PROGRESS_COMPLETED_COUNT=$((ZIP_PROGRESS_COMPLETED_COUNT + 1))
+  line="-# ✅ $done_label · $elapsed_text"
+  if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
+    ZIP_PROGRESS_HISTORY+=$'\n'
+  fi
+  ZIP_PROGRESS_HISTORY+="$line"
+  zip_progress_trim_history
+  ZIP_PROGRESS_STAGE_LABEL=""
+  ZIP_PROGRESS_STAGE_STARTED_MS=0
 }
 
 zip_progress_done_and_publish() {
@@ -1962,7 +2057,7 @@ zip_progress_next_apply_stage() {
 
 zip_progress_done_apply_stage() {
   local process_detail names count
-  if [[ "${FAST_RELOAD_STATUS:-}" == "OK" && -n "${FAST_RELOAD_MODULES//[[:space:]]/}" ]]; then
+  if [[ "${FAST_RELOAD_STATUS:-}" == "OK"* && -n "${FAST_RELOAD_MODULES//[[:space:]]/}" ]]; then
     names="$(format_cog_module_names "$FAST_RELOAD_MODULES")"
     count="$(printf '%s\n' "$FAST_RELOAD_MODULES" | awk 'NF {c++} END {print c+0}')"
     if [[ "$count" =~ ^[0-9]+$ && "$count" -gt 1 ]]; then
@@ -4151,7 +4246,7 @@ BODY="Resumo: $ALERT_SUMMARY
 Identificador: $UPDATE_DISPLAY_ID
 Branch: $BRANCH
 Commit: ${SHORT_FROM} → ${SHORT_TO}
-Update: ${CHANGED_FILES_COUNT} arquivo(s) · $DIFF_TOTAL_SUMMARY
+Update: $(format_update_file_count "$CHANGED_FILES_COUNT") · $DIFF_TOTAL_SUMMARY
 Aplicação: $APPLY_MODE
 Processos alterados: $CHANGED_PROCESSES
 Duração: $DURATION
@@ -4180,10 +4275,10 @@ fi
 
 ZIP_STATUS_DESCRIPTION="$ALERT_SUMMARY
 
-$UPDATE_DISPLAY_ID
-${SHORT_FROM} → ${SHORT_TO}
-${CHANGED_FILES_COUNT} arquivo(s) alterado(s) · ${DIFF_TOTAL_SUMMARY}
-${APPLY_MODE} · ${DURATION}
+Atualização `$UPDATE_DISPLAY_ID`
+`${SHORT_FROM}` → `${SHORT_TO}`
+$(if (( CHANGED_FILES_COUNT == 1 )); then printf "1 arquivo alterado"; else printf "%d arquivos alterados" "$CHANGED_FILES_COUNT"; fi) · ${DIFF_TOTAL_SUMMARY}
+${APPLY_MODE} · duração total: ${DURATION}
 
 ${BOT_HEALTHCHECK_STATUS}"
 if (( UPDATE_HAS_WARNINGS == 1 || OVERALL_FATAL == 1 )); then
