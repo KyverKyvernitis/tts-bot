@@ -281,6 +281,7 @@ class BotLocal(commands.Bot):
         self._event_loop_last_task_summary: str = ""
         self._event_loop_recent_lags_ms: deque[float] = deque(maxlen=12)
         self._zip_update_lock = asyncio.Lock()
+        self._zip_update_reconcile_task: asyncio.Task | None = None
         self._phone_worker_unavailable_until_by_task: dict[str, float] = {}
         self._phone_worker_unavailable_last_log_by_task: dict[str, float] = {}
         self._repo_root = Path(__file__).resolve().parent
@@ -1045,14 +1046,337 @@ class BotLocal(commands.Bot):
             logging.getLogger("zip_update").warning("falha ao ler estado de rollback do updater", exc_info=True)
         return {}
 
-    def _zip_update_state_save(self, data: dict[str, object]) -> None:
+    def _zip_update_state_save(self, data: dict[str, object]) -> bool:
+        tmp: Path | None = None
+        for attempt in range(3):
+            try:
+                self._zip_rollback_state_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self._zip_rollback_state_path.with_name(
+                    f".{self._zip_rollback_state_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+                )
+                tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+                os.replace(tmp, self._zip_rollback_state_path)
+                return True
+            except Exception:
+                if tmp is not None:
+                    with contextlib.suppress(Exception):
+                        tmp.unlink()
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                logging.getLogger("zip_update").warning(
+                    "falha ao salvar estado de rollback do updater após 3 tentativas",
+                    exc_info=True,
+                )
+        return False
+
+    def _zip_update_component_text(self, message: discord.Message) -> str:
+        """Extrai texto visível dos Components V2 sem depender de uma versão específica do discord.py."""
+        parts: list[str] = []
+        visited: set[int] = set()
+
+        def visit(value: object, depth: int = 0) -> None:
+            if value is None or depth > 8:
+                return
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    parts.append(text)
+                return
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    visit(item, depth + 1)
+                return
+            if isinstance(value, dict):
+                for key in ("content", "text", "label", "description", "components", "children", "items"):
+                    if key in value:
+                        visit(value.get(key), depth + 1)
+                return
+
+            identity = id(value)
+            if identity in visited:
+                return
+            visited.add(identity)
+            for attr in ("content", "text", "label", "description", "components", "children", "items"):
+                with contextlib.suppress(Exception):
+                    visit(getattr(value, attr), depth + 1)
+
+        visit(getattr(message, "components", None))
+        visit(getattr(message, "content", None))
+        return "\n".join(dict.fromkeys(parts))
+
+    def _zip_update_recovery_receipt_load(self, candidate_dir: Path) -> dict[str, object]:
+        path = candidate_dir / "delivery.json"
         try:
-            self._zip_rollback_state_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._zip_rollback_state_path.with_name(f".{self._zip_rollback_state_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-            os.replace(tmp, self._zip_rollback_state_path)
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
         except Exception:
-            logging.getLogger("zip_update").warning("falha ao salvar estado de rollback do updater", exc_info=True)
+            return {}
+
+    def _zip_update_recovery_receipt_save(self, candidate_dir: Path, data: dict[str, object]) -> None:
+        try:
+            path = candidate_dir / "delivery.json"
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception:
+            UPDATE_LOG.warning("falha ao salvar recibo de recuperação do update em %s", candidate_dir, exc_info=True)
+
+    def _zip_update_current_head_sync(self) -> str:
+        try:
+            completed = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(self._repo_root),
+                env=self._git_env(),
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            if completed.returncode == 0:
+                return completed.stdout.strip()
+        except Exception:
+            UPDATE_LOG.debug("falha ao consultar HEAD durante reconciliação de update", exc_info=True)
+        return ""
+
+    def _zip_update_recent_archives_sync(self) -> list[dict[str, object]]:
+        """Localiza candidatos recentes que podem ter sido aplicados sem confirmação visual."""
+        root = self._update_staging_root / "candidates"
+        try:
+            max_age = max(900, int(os.getenv("DISCORD_AUTO_UPDATE_RECONCILE_MAX_AGE_SECONDS", "172800") or 172800))
+        except (TypeError, ValueError):
+            max_age = 172800
+        cutoff = time.time() - max_age
+        records: list[dict[str, object]] = []
+        for archive_state in ("done", "failed"):
+            state_root = root / archive_state
+            if not state_root.is_dir():
+                continue
+            def candidate_mtime(path: Path) -> float:
+                try:
+                    return path.stat().st_mtime
+                except OSError:
+                    return 0.0
+
+            try:
+                candidates = sorted(
+                    (path for path in state_root.iterdir() if path.is_dir()),
+                    key=candidate_mtime,
+                    reverse=True,
+                )
+            except OSError:
+                continue
+            for candidate_dir in candidates[:25]:
+                try:
+                    if candidate_dir.stat().st_mtime < cutoff:
+                        continue
+                    manifest = json.loads((candidate_dir / "manifest.json").read_text(encoding="utf-8"))
+                    if not isinstance(manifest, dict):
+                        continue
+                    status_ref = manifest.get("discord_status")
+                    if not isinstance(status_ref, dict):
+                        continue
+                    channel_id = int(str(status_ref.get("channel_id") or "0"))
+                    message_id = int(str(status_ref.get("message_id") or "0"))
+                    if not channel_id or not message_id:
+                        continue
+                    state_data: dict[str, object] = {}
+                    state_path = candidate_dir / "state.json"
+                    if state_path.is_file():
+                        loaded = json.loads(state_path.read_text(encoding="utf-8"))
+                        if isinstance(loaded, dict):
+                            state_data = loaded
+                    records.append(
+                        {
+                            "candidate_dir": str(candidate_dir),
+                            "archive_state": archive_state,
+                            "manifest": manifest,
+                            "state": state_data,
+                            "channel_id": channel_id,
+                            "message_id": message_id,
+                        }
+                    )
+                except Exception:
+                    UPDATE_LOG.debug("candidato arquivado inválido ignorado: %s", candidate_dir, exc_info=True)
+        return records[:30]
+
+    async def _zip_update_reconcile_archived_messages_once(self) -> None:
+        final_markers = (
+            "atualização concluída",
+            "atualização concluida",
+            "nenhuma alteração",
+            "nenhuma alteracao",
+            "atualização bloqueada",
+            "atualizacao bloqueada",
+            "atualização rejeitada",
+            "atualizacao rejeitada",
+            "falha ao aplicar",
+            "falha na atualização",
+            "update aplicado",
+            "update revertido",
+            "reversão concluída",
+            "reaplicação concluída",
+        )
+        records = await asyncio.to_thread(self._zip_update_recent_archives_sync)
+        live_head = await asyncio.to_thread(self._zip_update_current_head_sync)
+        for record in records:
+            candidate_dir = Path(str(record.get("candidate_dir") or ""))
+            receipt = await asyncio.to_thread(self._zip_update_recovery_receipt_load, candidate_dir)
+            if bool(receipt.get("status_delivered")) and bool(receipt.get("log_delivered")):
+                continue
+
+            channel_id = int(record.get("channel_id") or 0)
+            message_id = int(record.get("message_id") or 0)
+            message = await self._zip_update_fetch_message(channel_id, message_id)
+            if message is None:
+                continue
+            visible_text = self._zip_update_component_text(message).casefold()
+            already_final = any(marker in visible_text for marker in final_markers)
+            if already_final:
+                receipt.update(
+                    {
+                        "status_delivered": True,
+                        # Não há como consultar retroativamente o canal de webhook
+                        # de forma confiável sem guardar o ID da mensagem. Quando a
+                        # mensagem pública já está finalizada, trate o log legado
+                        # como resolvido para não criar duplicatas em cada reconnect.
+                        "log_delivered": True,
+                        "status_detected_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                await asyncio.to_thread(self._zip_update_recovery_receipt_save, candidate_dir, receipt)
+                continue
+
+            manifest = record.get("manifest") if isinstance(record.get("manifest"), dict) else {}
+            state_data = record.get("state") if isinstance(record.get("state"), dict) else {}
+            display_id = str(manifest.get("display_id") or manifest.get("id") or candidate_dir.name)
+            branch = str(manifest.get("branch") or "main")
+            base_commit = str(manifest.get("base_commit") or "").strip()
+            applied_commit = str(state_data.get("commit") or "").strip()
+            changed_files = [str(item) for item in (manifest.get("changed_files") or []) if str(item).strip()]
+            diff_stats = manifest.get("diff_stats") if isinstance(manifest.get("diff_stats"), dict) else {}
+            diff_summary = str(diff_stats.get("summary") or "").strip()
+            source_author_id = str((manifest.get("discord_status") or {}).get("source_author_id") or "")
+            archive_state = str(record.get("archive_state") or "failed")
+
+            if archive_state == "done" and applied_commit:
+                title = "✅ Atualização concluída"
+                commit_line = ""
+                if base_commit:
+                    commit_line = f"`{base_commit[:7]}` → `{applied_commit[:7]}`\n"
+                count_text = "1 arquivo alterado" if len(changed_files) == 1 else f"{len(changed_files)} arquivos alterados"
+                description = (
+                    "A atualização foi aplicada; a confirmação visual foi recuperada automaticamente após o reinício.\n\n"
+                    f"Atualização `{display_id}`\n"
+                    f"{commit_line}{count_text}{f' · {diff_summary}' if diff_summary else ''}\n"
+                    "Processo ativo e bot conectado ao Discord."
+                )
+                # Só a versão atualmente instalada pode receber controle de
+                # rollback. Recuperar um candidato antigo não pode desativar o
+                # botão da atualização mais nova nem apontar o estado global para
+                # um commit que já não é o HEAD.
+                if live_head and applied_commit == live_head:
+                    control = {
+                        "enabled": True,
+                        "mode": "rollback",
+                        "token": hashlib.sha256(f"{display_id}:{applied_commit}".encode()).hexdigest()[:16],
+                        "branch": branch,
+                        "expected_head": applied_commit,
+                        "revert_commit": applied_commit,
+                        "head_commit": applied_commit,
+                        "update_from": base_commit,
+                        "update_to": applied_commit,
+                        "source_author_id": source_author_id,
+                    }
+                else:
+                    control = None
+                status = "success"
+                log_title = title
+                log_summary = "Confirmação final recuperada após o bot reiniciar durante a atualização."
+            elif archive_state == "done":
+                title = "ℹ️ Nenhuma alteração necessária"
+                description = f"A atualização `{display_id}` já correspondia ao estado atual. Nenhum arquivo foi modificado."
+                control = None
+                status = "success"
+                log_title = title
+                log_summary = "Candidato concluído sem diferenças no repositório."
+            else:
+                error_text = str(state_data.get("last_error") or "A atualização não foi concluída.").strip()
+                title = "❌ Falha ao aplicar atualização"
+                description = f"A confirmação de falha foi recuperada automaticamente.\n\nAtualização `{display_id}`\n{error_text[:900]}"
+                control = None
+                status = "error"
+                log_title = title
+                log_summary = error_text[:1200]
+
+            result = await self._edit_zip_status_from_update(
+                {
+                    "channel_id": str(channel_id),
+                    "message_id": str(message_id),
+                    "status": status,
+                    "title": title,
+                    "description": description,
+                    "candidate_id": str(manifest.get("id") or ""),
+                    "display_id": display_id,
+                    "event_at": datetime.now(timezone.utc).isoformat(),
+                    "preserve_existing_control": control is None,
+                    **({"control": control} if control else {}),
+                }
+            )
+            if not result.get("ok"):
+                continue
+
+            receipt.update(
+                {
+                    "status_delivered": True,
+                    "status_recovered_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            await asyncio.to_thread(self._zip_update_recovery_receipt_save, candidate_dir, receipt)
+
+            if bool(receipt.get("log_delivered")):
+                continue
+            body_lines = [
+                f"Resumo: {log_summary}",
+                f"Identificador: {display_id}",
+                f"Branch: {branch}",
+            ]
+            if applied_commit:
+                body_lines.append(f"Commit: {base_commit[:7] if base_commit else 'desconhecido'} → {applied_commit[:7]}")
+            body_lines.append(f"Update: {'1 arquivo' if len(changed_files) == 1 else f'{len(changed_files)} arquivos'}{f' · {diff_summary}' if diff_summary else ''}")
+            body_lines.append("Resultado: confirmação recuperada automaticamente")
+            body_lines.append(f"Hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+            alert_type = "success" if archive_state == "done" else "error"
+            try:
+                completed = await asyncio.to_thread(
+                    subprocess.run,
+                    ["bash", str(self._repo_root / "alert.sh"), alert_type, log_title, "\n".join(body_lines)],
+                    cwd=str(self._repo_root),
+                    env=self._git_env(),
+                    text=True,
+                    capture_output=True,
+                    timeout=25,
+                    check=False,
+                )
+                if completed.returncode == 0:
+                    receipt["log_delivered"] = True
+                    receipt["log_recovered_at"] = datetime.now(timezone.utc).isoformat()
+                    await asyncio.to_thread(self._zip_update_recovery_receipt_save, candidate_dir, receipt)
+                else:
+                    UPDATE_LOG.warning("falha ao recuperar log final de %s: %s", display_id, (completed.stderr or completed.stdout or "")[-500:])
+            except Exception:
+                UPDATE_LOG.warning("falha ao executar recuperação do log final de %s", display_id, exc_info=True)
+
+    async def _zip_update_reconcile_loop(self) -> None:
+        await asyncio.sleep(4)
+        while not self.is_closed():
+            try:
+                await self._zip_update_reconcile_archived_messages_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                UPDATE_LOG.warning("falha na reconciliação de confirmações de update", exc_info=True)
+            await asyncio.sleep(60)
 
     def _zip_update_rollback_request_roots(self) -> list[Path]:
         roots: list[Path] = []
@@ -2082,7 +2406,10 @@ class BotLocal(commands.Bot):
         now_event = datetime.now(timezone.utc)
         incoming_event = parse_event_at(payload.get("event_at")) or now_event
         previous_event = parse_event_at(previous.get("event_at") or previous.get("updated_at")) if isinstance(previous, dict) else None
-        stale_event = bool(previous_event and incoming_event <= previous_event)
+        # Eventos com o mesmo timestamp são retries idempotentes. Eles precisam
+        # tentar editar novamente caso a chamada anterior tenha falhado depois de
+        # preparar o estado. Somente eventos estritamente mais antigos são stale.
+        stale_event = bool(previous_event and incoming_event < previous_event)
         same_message = bool(
             isinstance(previous, dict)
             and str(previous.get("channel_id") or "") == str(channel_id)
@@ -2118,17 +2445,17 @@ class BotLocal(commands.Bot):
                 for key in ("update_from", "update_to", "rollback_commit", "redo_commit"):
                     if control_raw.get(key):
                         state_record[key] = str(control_raw.get(key))
-                if stale_event:
-                    control = self._zip_update_control_for_record(state_record, disabled=True)
-                else:
-                    await self._zip_update_clear_previous_control(previous, keep_message_id=message_id)
-                    self._zip_update_state_save({"latest": state_record})
-                    control = self._zip_update_control_for_record(state_record)
-        elif status in {"success", "ok", "warn", "error", "done", "failed"} and not stale_event:
-            # Um estado finalizado sem controle explícito deixa controles antigos
-            # inativos, mas uma entrega atrasada nunca apaga um controle mais novo.
-            await self._zip_update_clear_previous_control(previous, keep_message_id=message_id)
-            self._zip_update_state_save({})
+                control = self._zip_update_control_for_record(state_record, disabled=stale_event)
+
+        clear_previous_control = bool(payload.get("clear_previous_control"))
+        preserve_existing_control = bool(payload.get("preserve_existing_control"))
+        final_without_control = bool(
+            status in {"success", "ok", "warn", "error", "done", "failed"}
+            and state_record is None
+            and not stale_event
+            and clear_previous_control
+            and not preserve_existing_control
+        )
 
         try:
             status_message = await self._zip_update_fetch_message(channel_id, message_id)
@@ -2136,7 +2463,32 @@ class BotLocal(commands.Bot):
                 return {"ok": False, "error": "mensagem não encontrada"}
             view = self._make_zip_update_view(title, description, color, control=control)
             await status_message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
-            return {"ok": True}
+            # O estado persistente só pode avançar depois que o Discord confirmou
+            # a edição. A ordem antiga salvava antes do await; uma falha tornava o
+            # retry "antigo" e o outbox removia a notificação sem nunca publicá-la.
+            if state_record is not None and not stale_event:
+                await self._zip_update_clear_previous_control(previous, keep_message_id=message_id)
+                state_record["delivery_state"] = "delivered"
+                state_record["delivered_at"] = datetime.now(timezone.utc).isoformat()
+                if not self._zip_update_state_save({"latest": state_record}):
+                    # Não deixe um botão ativo que o bot não conseguirá resolver
+                    # depois de um restart. A confirmação final continua visível,
+                    # porém sem oferecer uma ação de rollback inconsistente.
+                    await status_message.edit(
+                        view=self._make_zip_update_view(title, description, color),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    return {
+                        "ok": True,
+                        "delivered": True,
+                        "warning": "controle de rollback indisponível",
+                    }
+            elif final_without_control:
+                # Um estado finalizado sem controle explícito deixa controles
+                # antigos inativos, mas somente após a nova mensagem existir.
+                await self._zip_update_clear_previous_control(previous, keep_message_id=message_id)
+                self._zip_update_state_save({})
+            return {"ok": True, "delivered": True}
         except Exception:
             logging.getLogger("zip_update").warning("falha ao finalizar mensagem do ZIP pelo updater", exc_info=True)
             return {"ok": False, "error": "falha ao editar mensagem"}
@@ -2778,6 +3130,8 @@ class BotLocal(commands.Bot):
                     shutil.rmtree(work_dir, ignore_errors=True)
 
     async def close(self):
+        if self._zip_update_reconcile_task is not None:
+            self._zip_update_reconcile_task.cancel()
         if self._event_loop_watchdog_task is not None:
             self._event_loop_watchdog_task.cancel()
         if self._health_task is not None:
@@ -2858,6 +3212,8 @@ class BotLocal(commands.Bot):
             self._health_task = asyncio.create_task(self._health_monitor_loop())
         if self._event_loop_watchdog_task is None or self._event_loop_watchdog_task.done():
             self._event_loop_watchdog_task = asyncio.create_task(self._event_loop_watchdog_loop())
+        if self._zip_update_reconcile_task is None or self._zip_update_reconcile_task.done():
+            self._zip_update_reconcile_task = asyncio.create_task(self._zip_update_reconcile_loop())
         application_bio = getattr(self, "application_bio", None)
         if application_bio is not None:
             application_bio.start()

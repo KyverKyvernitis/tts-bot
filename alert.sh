@@ -590,11 +590,18 @@ case "$WEBHOOK_URL" in
   *\?*) WEBHOOK_URL="${WEBHOOK_URL}&with_components=true" ;;
   *) WEBHOOK_URL="${WEBHOOK_URL}?with_components=true" ;;
 esac
+case "$WEBHOOK_URL" in
+  *wait=*) ;;
+  *\?*) WEBHOOK_URL="${WEBHOOK_URL}&wait=true" ;;
+  *) WEBHOOK_URL="${WEBHOOK_URL}?wait=true" ;;
+esac
 
 TMP_RESP="$(mktemp)"
 
 SEND_ARGS=(
   -sS
+  --connect-timeout 8
+  --max-time 35
   -o "$TMP_RESP"
   -w '%{http_code}'
 )
