@@ -21,7 +21,7 @@ import uuid
 import zipfile
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 # -----------------------------------------------------------------------------
@@ -150,6 +150,14 @@ from db import SettingsDB
 from webserver import run_webserver, set_health_provider, set_update_action_provider
 from music_system import AudioRouter
 from utility.interaction_safety import is_unknown_interaction, safe_send_interaction_message
+from utility.update_security import (
+    UpdateSecurityError,
+    ZipLimits,
+    build_file_integrity,
+    canonical_path_key,
+    inspect_zip_archive,
+    sha256_file,
+)
 from utility.application_bio import ApplicationBioService
 from utility.application_presence import ApplicationPresenceService
 
@@ -965,19 +973,66 @@ class BotLocal(commands.Bot):
             text = text[:3897].rstrip() + "..."
         children: list[discord.ui.Item] = [discord.ui.TextDisplay(text)]
         if isinstance(control, dict) and control.get("enabled"):
-            emoji = str(control.get("emoji") or "◀️")
+            emoji = str(control.get("emoji") or "").strip() or None
+            label = str(control.get("label") or "").strip()[:80] or None
             custom_id = str(control.get("custom_id") or "")[:100]
             disabled = bool(control.get("disabled"))
-            if custom_id:
+            style_name = str(control.get("style") or "secondary").strip().lower()
+            style = {
+                "primary": discord.ButtonStyle.primary,
+                "success": discord.ButtonStyle.success,
+                "danger": discord.ButtonStyle.danger,
+            }.get(style_name, discord.ButtonStyle.secondary)
+            if custom_id and (label or emoji):
                 button = discord.ui.Button(
+                    label=label,
                     emoji=emoji,
-                    style=discord.ButtonStyle.secondary,
+                    style=style,
                     custom_id=custom_id,
                     disabled=disabled,
                 )
                 children.append(discord.ui.Separator())
                 children.append(discord.ui.ActionRow(button))
         view.add_item(discord.ui.Container(*children, accent_color=color))
+        return view
+
+    def _make_zip_update_confirmation_view(
+        self,
+        *,
+        mode: str,
+        token: str,
+        current_commit: str,
+        target_commit: str,
+    ) -> discord.ui.LayoutView:
+        action = "reaplicação" if mode == "redo" else "reversão"
+        style = discord.ButtonStyle.success if mode == "redo" else discord.ButtonStyle.danger
+        current = current_commit[:12] or "desconhecido"
+        target = target_commit[:12] or "desconhecido"
+        view = discord.ui.LayoutView(timeout=90)
+        text = (
+            f"# Confirmar {action}\n"
+            "A ação criará um novo commit e poderá reiniciar processos.\n\n"
+            f"`{current}` → `{target}`\n"
+            "-# Nenhuma alteração será feita antes da confirmação."
+        )
+        confirm = discord.ui.Button(
+            label=f"Confirmar {action}",
+            style=style,
+            custom_id=f"zip_update_confirm:{mode}:{token}"[:100],
+        )
+        cancel = discord.ui.Button(
+            label="Cancelar",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"zip_update_confirm:cancel:{token}"[:100],
+        )
+        view.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(text),
+                discord.ui.Separator(),
+                discord.ui.ActionRow(confirm, cancel),
+                accent_color=discord.Color.gold(),
+            )
+        )
         return view
 
     def _zip_update_state_load(self) -> dict[str, object]:
@@ -1055,14 +1110,58 @@ class BotLocal(commands.Bot):
             return None
         return {
             "enabled": True,
-            "emoji": "▶️" if mode == "redo" else "◀️",
+            "emoji": "↪️" if mode == "redo" else "↩️",
+            "label": "Reaplicar atualização" if mode == "redo" else "Reverter atualização",
+            "style": "success" if mode == "redo" else "danger",
             "custom_id": f"zip_update:{mode}:{token}"[:100],
             "disabled": disabled,
         }
 
+    def _zip_update_cancel_control(self, candidate_id: str, *, disabled: bool = False) -> dict[str, object] | None:
+        candidate_id = str(candidate_id or "").strip()
+        if not candidate_id:
+            return None
+        return {
+            "enabled": True,
+            "emoji": "✖️",
+            "label": "Cancelar atualização",
+            "style": "secondary",
+            "custom_id": f"zip_update:cancel:{candidate_id}"[:100],
+            "disabled": disabled,
+        }
+
+    def _zip_update_limits(self) -> ZipLimits:
+        defaults = ZipLimits()
+
+        def env_int(name: str, default: int, *, minimum: int = 1) -> int:
+            try:
+                return max(minimum, int(str(os.getenv(name, default)).strip()))
+            except (TypeError, ValueError):
+                return default
+
+        def env_float(name: str, default: float, *, minimum: float = 1.0) -> float:
+            try:
+                return max(minimum, float(str(os.getenv(name, default)).strip()))
+            except (TypeError, ValueError):
+                return default
+
+        return ZipLimits(
+            max_archive_bytes=env_int("DISCORD_AUTO_UPDATE_MAX_ZIP_BYTES", defaults.max_archive_bytes),
+            max_uncompressed_bytes=env_int("DISCORD_AUTO_UPDATE_MAX_UNCOMPRESSED_BYTES", defaults.max_uncompressed_bytes),
+            max_entries=env_int("DISCORD_AUTO_UPDATE_MAX_ENTRIES", defaults.max_entries),
+            max_file_bytes=env_int("DISCORD_AUTO_UPDATE_MAX_FILE_BYTES", defaults.max_file_bytes),
+            max_compression_ratio=env_float("DISCORD_AUTO_UPDATE_MAX_COMPRESSION_RATIO", defaults.max_compression_ratio),
+        )
+
     def _zip_update_authorized_user_ids(self, record: dict[str, object] | None = None) -> set[int]:
         ids: set[int] = set()
-        raw_values = [os.getenv("DISCORD_AUTO_UPDATE_USER_IDS", ""), os.getenv("BOT_OWNER_IDS", "")]
+        raw_values = [
+            os.getenv("DISCORD_AUTO_UPDATE_USER_IDS", ""),
+            os.getenv("BOT_OWNER_IDS", ""),
+            os.getenv("OWNER_IDS", ""),
+            os.getenv("BOT_OWNER_ID", ""),
+            os.getenv("OWNER_ID", ""),
+        ]
         if isinstance(record, dict):
             raw_values.extend([
                 str(record.get("source_author_id") or ""),
@@ -1083,6 +1182,19 @@ class BotLocal(commands.Bot):
         if perms and (getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)):
             return True
         return False
+
+    def _zip_update_can_submit(self, message: discord.Message) -> bool:
+        author = getattr(message, "author", None)
+        user_id = int(getattr(author, "id", 0) or 0)
+        allowed = self._zip_update_authorized_user_ids()
+        allowed.update(int(value) for value in (getattr(self, "owner_ids", None) or set()) if str(value).isdigit())
+        owner_id = int(getattr(self, "owner_id", 0) or 0)
+        if owner_id:
+            allowed.add(owner_id)
+        if user_id and user_id in allowed:
+            return True
+        perms = getattr(author, "guild_permissions", None)
+        return bool(perms and (getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)))
 
     async def _send_zip_update_message(
         self,
@@ -1163,14 +1275,22 @@ class BotLocal(commands.Bot):
         return discord.Color.blurple()
 
     def _zip_update_normalize_title(self, title: str, status: str = "") -> str:
-        title = str(title or "").strip() or "Update"
+        title = str(title or "").strip() or "Atualização"
         normalized = re.sub(r"\s+", " ", title).strip()
         lowered = normalized.casefold()
         status = str(status or "").lower().strip()
-        if re.fullmatch(r"(?:✅\s*)?update aplicado", lowered):
-            return "✅ Update aplicado"
-        if status in {"success", "ok", "done"} and lowered == "update":
-            return "✅ Update aplicado"
+        replacements = {
+            "update": "Atualização",
+            "aplicando update...": "⚙️ Aplicando atualização",
+            "revertendo update...": "↩️ Revertendo atualização",
+            "reaplicando update...": "↪️ Reaplicando atualização",
+            "update aplicado": "✅ Atualização concluída",
+            "✅ update aplicado": "✅ Atualização concluída",
+        }
+        if lowered in replacements:
+            return replacements[lowered]
+        if status in {"success", "ok", "done"} and lowered in {"atualização", "update"}:
+            return "✅ Atualização concluída"
         return normalized
 
     def _zip_update_latest_message_ref(self, interaction: discord.Interaction, record: dict[str, object]) -> tuple[str, str]:
@@ -1252,6 +1372,23 @@ class BotLocal(commands.Bot):
             return True
         return False
 
+    def _zip_update_is_forbidden_path(self, rel_path: Path | str) -> bool:
+        parts = tuple(str(part) for part in Path(str(rel_path)).parts)
+        if not parts:
+            return True
+        lowered = tuple(part.casefold() for part in parts)
+        first = lowered[0]
+        name = lowered[-1]
+        if first in {".git", "data", "logs", "node_modules", "secrets", "__pycache__"}:
+            return True
+        if first == ".github" and len(lowered) >= 2 and lowered[1] == "workflows":
+            return True
+        if name == ".env" or name.startswith(".env."):
+            return True
+        if "google-credentials" in name or "youtube-cookies" in name:
+            return True
+        return False
+
     def _prepare_update_staging_clone(self, origin_url: str, branch_name: str, env: dict[str, str]) -> Path:
         """Mantém um clone staging reutilizável para não clonar o repositório inteiro a cada ZIP."""
         self._update_staging_root.mkdir(parents=True, exist_ok=True)
@@ -1322,96 +1459,122 @@ class BotLocal(commands.Bot):
         diff_stats: dict[str, object],
         extracted_files: list[tuple[Path, Path]],
         zip_name: str,
+        zip_inspection: dict[str, object],
         patch_diff_text: str = "",
         status_context: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        """Grava um candidato local para o updater testar na VPS antes do push.
-
-        O GitHub só recebe commit depois que scripts/tts-bot-update.sh aplica o
-        candidato, valida reload/restart/health e confirma que o estado ficou bom.
-        """
+        """Grava um candidato íntegro para validação e aplicação na VPS."""
         candidate_root = self._update_staging_root / "candidates"
         candidate_root.mkdir(parents=True, exist_ok=True)
-        candidate_id = f"zip-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        unique = uuid.uuid4().hex
+        created_at = datetime.now(timezone.utc)
+        candidate_id = f"zip-{created_at.strftime('%Y%m%d%H%M%S')}-{unique[:8]}"
+        display_id = f"UPD-{unique[:8].upper()}"
         candidate_dir = candidate_root / candidate_id
         files_dir = candidate_dir / "files"
         files_dir.mkdir(parents=True, exist_ok=False)
 
-        written_files: list[str] = []
-        for extracted_path, rel_path in extracted_files:
-            rel_posix = rel_path.as_posix()
-            if rel_posix not in changed_files:
-                continue
-            if self._zip_update_is_callkeeper_protected_path(rel_path):
-                raise RuntimeError(f"Arquivo protegido do CallKeeper não pode ser alterado pelo updater comum: {rel_posix}")
-            target = files_dir / rel_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(extracted_path, target)
-            written_files.append(rel_posix)
+        try:
+            written_files: list[str] = []
+            expected_changed = set(changed_files)
+            for extracted_path, rel_path in extracted_files:
+                rel_posix = rel_path.as_posix()
+                if rel_posix not in expected_changed:
+                    continue
+                if self._zip_update_is_callkeeper_protected_path(rel_path):
+                    raise RuntimeError(f"Arquivo protegido do CallKeeper não pode ser alterado pelo updater comum: {rel_posix}")
+                if self._zip_update_is_forbidden_path(rel_path):
+                    raise RuntimeError(f"Caminho protegido não pode ser alterado: {rel_posix}")
+                target = files_dir / rel_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(extracted_path, target)
+                written_files.append(rel_posix)
 
-        if not written_files:
-            shutil.rmtree(candidate_dir, ignore_errors=True)
-            raise RuntimeError("O candidato local não trouxe nenhum arquivo alterado.")
+            if not written_files:
+                raise RuntimeError("O candidato local não trouxe nenhum arquivo alterado.")
+            if set(written_files) != expected_changed:
+                missing = sorted(expected_changed - set(written_files))
+                raise RuntimeError("Candidato incompleto; arquivo(s) ausente(s): " + ", ".join(missing[:5]))
 
-        manifest = {
-            "id": candidate_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "branch": branch_name,
-            "base_commit": base_commit,
-            "source": "discord_zip",
-            "zip_name": zip_name,
-            "commit_message": f"auto update from discord zip ({len(changed_files)} arquivo(s))",
-            "changed_files": changed_files,
-            "diff_stats": diff_stats,
-        }
-        if isinstance(status_context, dict) and status_context.get("message_id") and status_context.get("channel_id"):
-            manifest["discord_status"] = {
-                "guild_id": str(status_context.get("guild_id") or ""),
-                "channel_id": str(status_context.get("channel_id") or ""),
-                "message_id": str(status_context.get("message_id") or ""),
-                "source_message_id": str(status_context.get("source_message_id") or ""),
-                "source_author_id": str(status_context.get("source_author_id") or ""),
+            patch_path = candidate_dir / "patch.diff"
+            if patch_diff_text.strip():
+                patch_path.write_text(patch_diff_text, encoding="utf-8")
+
+            max_age_seconds = max(300, int(os.getenv("DISCORD_AUTO_UPDATE_CANDIDATE_MAX_AGE_SECONDS", "86400") or 86400))
+            expires_at = created_at + timedelta(seconds=max_age_seconds)
+            file_integrity = build_file_integrity(files_dir, written_files)
+            manifest: dict[str, object] = {
+                "schema_version": 2,
+                "id": candidate_id,
+                "display_id": display_id,
+                "created_at": created_at.isoformat(),
+                "expires_at": expires_at.isoformat(),
+                "branch": branch_name,
+                "base_commit": base_commit,
+                "source": "discord_zip",
+                "zip_name": zip_name,
+                "zip_sha256": str(zip_inspection.get("sha256") or ""),
+                "zip_stats": zip_inspection,
+                "commit_message": f"update: aplicar {display_id}",
+                "changed_files": written_files,
+                "diff_stats": diff_stats,
+                "file_integrity": file_integrity,
+                "patch_sha256": sha256_file(patch_path) if patch_path.is_file() else "",
+                "patch_size": patch_path.stat().st_size if patch_path.is_file() else 0,
             }
-        (candidate_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        if patch_diff_text.strip():
-            (candidate_dir / "patch.diff").write_text(patch_diff_text, encoding="utf-8")
+            if isinstance(status_context, dict) and status_context.get("message_id") and status_context.get("channel_id"):
+                manifest["discord_status"] = {
+                    "guild_id": str(status_context.get("guild_id") or ""),
+                    "channel_id": str(status_context.get("channel_id") or ""),
+                    "message_id": str(status_context.get("message_id") or ""),
+                    "source_message_id": str(status_context.get("source_message_id") or ""),
+                    "source_author_id": str(status_context.get("source_author_id") or ""),
+                }
+            manifest_tmp = candidate_dir / ".manifest.json.tmp"
+            manifest_tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(manifest_tmp, candidate_dir / "manifest.json")
 
-        queue_root = candidate_root / "queue"
-        pending_dir = queue_root / "pending"
-        active_dir = queue_root / "active"
-        pending_dir.mkdir(parents=True, exist_ok=True)
-        active_dir.mkdir(parents=True, exist_ok=True)
-        for path in (queue_root, pending_dir, active_dir):
-            with contextlib.suppress(Exception):
-                path.chmod(0o775)
+            queue_root = candidate_root / "queue"
+            pending_dir = queue_root / "pending"
+            active_dir = queue_root / "active"
+            pending_dir.mkdir(parents=True, exist_ok=True)
+            active_dir.mkdir(parents=True, exist_ok=True)
+            for path in (queue_root, pending_dir, active_dir):
+                with contextlib.suppress(Exception):
+                    path.chmod(0o775)
 
-        active_count = len([p for p in active_dir.glob("*.json") if p.is_file()])
-        pending_count = len([p for p in pending_dir.glob("*.json") if p.is_file()])
-        # Compatibilidade: versões antigas do bot/updater usavam um único
-        # candidates/pending.json. Conte-o para não prometer uma posição errada
-        # durante uma transição de patch.
-        if (candidate_root / "pending.json").exists():
-            pending_count += 1
-        queue_position = active_count + pending_count + 1
+            active_count = len([item for item in active_dir.glob("*.json") if item.is_file()])
+            pending_count = len([item for item in pending_dir.glob("*.json") if item.is_file()])
+            if (candidate_root / "pending.json").exists():
+                pending_count += 1
+            queue_position = active_count + pending_count + 1
 
-        queue_name = f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}-{candidate_id}.json"
-        pending_path = pending_dir / queue_name
-        tmp_pending = pending_dir / f".{queue_name}.tmp"
-        queue_payload = {
-            "candidate_dir": str(candidate_dir),
-            "id": candidate_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "queue_position_at_enqueue": queue_position,
-        }
-        tmp_pending.write_text(json.dumps(queue_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp_pending, pending_path)
-        return {
-            "candidate_id": candidate_id,
-            "candidate_dir": str(candidate_dir),
-            "pending_path": str(pending_path),
-            "queue_position": queue_position,
-            "queue_pending_count": pending_count + 1,
-        }
+            queue_name = f"{created_at.strftime('%Y%m%d%H%M%S%f')}-{candidate_id}.json"
+            pending_path = pending_dir / queue_name
+            tmp_pending = pending_dir / f".{queue_name}.tmp"
+            queue_payload = {
+                "candidate_dir": str(candidate_dir),
+                "id": candidate_id,
+                "display_id": display_id,
+                "state": "queued",
+                "attempt": 0,
+                "created_at": created_at.isoformat(),
+                "expires_at": expires_at.isoformat(),
+                "queue_position_at_enqueue": queue_position,
+            }
+            tmp_pending.write_text(json.dumps(queue_payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(tmp_pending, pending_path)
+            return {
+                "candidate_id": candidate_id,
+                "display_id": display_id,
+                "candidate_dir": str(candidate_dir),
+                "pending_path": str(pending_path),
+                "queue_position": queue_position,
+                "queue_pending_count": pending_count + 1,
+            }
+        except Exception:
+            shutil.rmtree(candidate_dir, ignore_errors=True)
+            raise
 
     def _trigger_updater_service_sync(self) -> tuple[bool, str]:
         service = Path("/etc/systemd/system/tts-bot-updater.service")
@@ -1569,8 +1732,21 @@ class BotLocal(commands.Bot):
             logging.getLogger("zip_update").info("falha ao preparar validação phone-worker do ZIP: %r", exc)
             return None
 
-    def _safe_extract_patch(self, zip_path: Path, extract_dir: Path, repo_name_hint: str, branch_name: str) -> list[tuple[Path, Path]]:
+    def _safe_extract_patch(
+        self,
+        zip_path: Path,
+        extract_dir: Path,
+        repo_name_hint: str,
+        branch_name: str,
+    ) -> tuple[list[tuple[Path, Path]], dict[str, object]]:
+        limits = self._zip_update_limits()
+        inspection = inspect_zip_archive(zip_path, limits)
         accepted: list[tuple[Path, Path]] = []
+        mapped_entries: dict[str, str] = {}
+        mapped_files: set[str] = set()
+        mapped_dirs: set[str] = set()
+        extract_root = extract_dir.resolve()
+
         with zipfile.ZipFile(zip_path) as zf:
             file_members: list[tuple[str, ...]] = []
             prepared_infos: list[tuple[zipfile.ZipInfo, tuple[str, ...]]] = []
@@ -1579,13 +1755,10 @@ class BotLocal(commands.Bot):
                 raw_parts = self._normalize_zip_member_parts(info.filename)
                 if not raw_parts:
                     continue
-                if raw_parts[0] == "__MACOSX":
-                    continue
-                if raw_parts[-1] == ".DS_Store":
+                if raw_parts[0] == "__MACOSX" or raw_parts[-1] == ".DS_Store":
                     continue
                 if any(part == ".." for part in raw_parts):
                     raise RuntimeError(f"Caminho inválido no ZIP: {info.filename}")
-
                 prepared_infos.append((info, raw_parts))
                 if not info.is_dir():
                     file_members.append(raw_parts)
@@ -1596,32 +1769,62 @@ class BotLocal(commands.Bot):
                 normalized_parts = raw_parts[strip_count:]
                 if not normalized_parts:
                     continue
-
                 normalized = PurePosixPath(*normalized_parts)
-                if normalized.is_absolute() or any(part == ".." for part in normalized.parts):
+                if normalized.is_absolute() or any(part in ("", ".", "..") for part in normalized.parts):
                     raise RuntimeError(f"Caminho inválido no ZIP: {info.filename}")
-
-                mode = (info.external_attr >> 16) & 0o170000
-                if mode == stat.S_IFLNK:
-                    raise RuntimeError(f"Symlink não é permitido no ZIP: {info.filename}")
 
                 target_rel = Path(*normalized.parts)
                 if self._zip_update_should_ignore_generated_file(target_rel):
                     continue
+                if self._zip_update_is_forbidden_path(target_rel):
+                    raise RuntimeError(f"Caminho protegido não pode ser alterado: {target_rel.as_posix()}")
+
+                key = canonical_path_key(normalized.parts)
+                previous = mapped_entries.get(key)
+                if previous is not None:
+                    raise RuntimeError(
+                        f"Caminho duplicado ou ambíguo após normalização: {previous} e {info.filename}"
+                    )
+                mapped_entries[key] = info.filename
+
+                ancestor_keys = [canonical_path_key(normalized.parts[:idx]) for idx in range(1, len(normalized.parts))]
+                if any(ancestor in mapped_files for ancestor in ancestor_keys):
+                    raise RuntimeError(f"Conflito entre arquivo e diretório no ZIP: {info.filename}")
+
                 if info.is_dir():
-                    (extract_dir / target_rel).mkdir(parents=True, exist_ok=True)
+                    if key in mapped_files:
+                        raise RuntimeError(f"Conflito entre arquivo e diretório no ZIP: {info.filename}")
+                    mapped_dirs.add(key)
+                    target_dir = (extract_dir / target_rel).resolve()
+                    if extract_root not in target_dir.parents and target_dir != extract_root:
+                        raise RuntimeError(f"Arquivo fora da extração: {target_rel.as_posix()}")
+                    target_dir.mkdir(parents=True, exist_ok=True)
                     continue
 
-                extract_path = extract_dir / target_rel
+                if key in mapped_dirs or any(existing.startswith(key + "/") for existing in mapped_files | mapped_dirs):
+                    raise RuntimeError(f"Conflito entre arquivo e diretório no ZIP: {info.filename}")
+                mapped_files.add(key)
+                extract_path = (extract_dir / target_rel).resolve()
+                if extract_root not in extract_path.parents:
+                    raise RuntimeError(f"Arquivo fora da extração: {target_rel.as_posix()}")
                 extract_path.parent.mkdir(parents=True, exist_ok=True)
+                written = 0
                 with zf.open(info, "r") as src, open(extract_path, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > limits.max_file_bytes or written > int(info.file_size):
+                            raise RuntimeError(f"Tamanho descompactado inválido: {info.filename}")
+                        dst.write(chunk)
+                if written != int(info.file_size):
+                    raise RuntimeError(f"Tamanho descompactado divergente: {info.filename}")
                 accepted.append((extract_path, target_rel))
 
         if not accepted:
             raise RuntimeError("O ZIP não trouxe nenhum arquivo aplicável.")
-        return accepted
+        return accepted, inspection.as_dict()
 
     def _apply_patch_to_clone(self, extracted_files: list[tuple[Path, Path]], clone_dir: Path) -> list[str]:
         changed_files: list[str] = []
@@ -1680,7 +1883,7 @@ class BotLocal(commands.Bot):
                     raise RuntimeError("ZIP bloqueado pelo phone-worker: " + "; ".join(str(item) for item in errors[:3]))
                 raise RuntimeError("ZIP bloqueado pelo phone-worker")
 
-            extracted_files = self._safe_extract_patch(zip_path, extract_dir, repo_name_hint, branch_name)
+            extracted_files, zip_inspection = self._safe_extract_patch(zip_path, extract_dir, repo_name_hint, branch_name)
             mark("extract_ms")
 
             clone_dir = self._prepare_update_staging_clone(origin_url, branch_name, env)
@@ -1744,6 +1947,7 @@ class BotLocal(commands.Bot):
                 diff_stats=diff_stats,
                 extracted_files=extracted_files,
                 zip_name=zip_path.name,
+                zip_inspection=zip_inspection,
                 patch_diff_text=patch_diff_text,
                 status_context=status_context,
             )
@@ -1758,6 +1962,7 @@ class BotLocal(commands.Bot):
                 "diff_stats": diff_stats,
                 "commit_hash": None,
                 "candidate_id": candidate.get("candidate_id"),
+                "display_id": candidate.get("display_id"),
                 "candidate_dir": candidate.get("candidate_dir"),
                 "queue_position": candidate.get("queue_position"),
                 "queue_pending_count": candidate.get("queue_pending_count"),
@@ -1765,6 +1970,7 @@ class BotLocal(commands.Bot):
                 "trigger_detail": trigger_detail,
                 "branch": branch_name,
                 "phone_worker_zip_validation": worker_zip_validation,
+                "zip_inspection": zip_inspection,
                 "timings": timings,
                 "staging_dir": str(clone_dir),
             }
@@ -1798,7 +2004,7 @@ class BotLocal(commands.Bot):
         return future.result(timeout=90 if check_app_commands else 25)
 
     async def _create_zip_status_from_update(self, payload: dict[str, object]) -> dict[str, object]:
-        title = str(payload.get("title") or "Update").strip() or "Update"
+        title = str(payload.get("title") or "Atualização").strip() or "Atualização"
         description = str(payload.get("description") or "").strip()
         status = str(payload.get("status") or "info").lower().strip()
         title = self._zip_update_normalize_title(title, status)
@@ -1825,7 +2031,7 @@ class BotLocal(commands.Bot):
         if not channel_id or not message_id:
             return {"ok": False, "error": "channel_id/message_id ausente"}
 
-        title = str(payload.get("title") or "Update").strip() or "Update"
+        title = str(payload.get("title") or "Atualização").strip() or "Atualização"
         description = str(payload.get("description") or "").strip()
         status = str(payload.get("status") or "info").lower().strip()
         title = self._zip_update_normalize_title(title, status)
@@ -1833,40 +2039,69 @@ class BotLocal(commands.Bot):
         control_raw = payload.get("control") if isinstance(payload, dict) else None
         control: dict[str, object] | None = None
         state_record: dict[str, object] | None = None
+        old_state = self._zip_update_state_load()
+        previous = old_state.get("latest") if isinstance(old_state.get("latest"), dict) else None
+
+        def parse_event_at(value: object) -> datetime | None:
+            text = str(value or "").strip()
+            if not text:
+                return None
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+
+        now_event = datetime.now(timezone.utc)
+        incoming_event = parse_event_at(payload.get("event_at")) or now_event
+        previous_event = parse_event_at(previous.get("event_at") or previous.get("updated_at")) if isinstance(previous, dict) else None
+        stale_event = bool(previous_event and incoming_event <= previous_event)
+        same_message = bool(
+            isinstance(previous, dict)
+            and str(previous.get("channel_id") or "") == str(channel_id)
+            and str(previous.get("message_id") or "") == str(message_id)
+        )
+        if stale_event and same_message:
+            return {"ok": True, "ignored": "estado final antigo"}
 
         if isinstance(control_raw, dict) and control_raw.get("enabled"):
-            old_state = self._zip_update_state_load()
-            previous = old_state.get("latest") if isinstance(old_state.get("latest"), dict) else None
-            token = str(control_raw.get("token") or uuid.uuid4().hex[:16])[:24]
             mode = str(control_raw.get("mode") or "rollback").lower().strip()
-            if mode not in {"rollback", "redo"}:
-                mode = "rollback"
-            state_record = {
-                "token": token,
-                "mode": mode,
-                "channel_id": str(channel_id),
-                "message_id": str(message_id),
-                "title": title,
-                "description": description,
-                "status": status,
-                "branch": str(control_raw.get("branch") or payload.get("branch") or "main"),
-                "expected_head": str(control_raw.get("expected_head") or control_raw.get("head_commit") or ""),
-                "revert_commit": str(control_raw.get("revert_commit") or control_raw.get("head_commit") or ""),
-                "source_author_id": str(control_raw.get("source_author_id") or ""),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-            for key in ("update_from", "update_to", "rollback_commit", "redo_commit"):
-                if control_raw.get(key):
-                    state_record[key] = str(control_raw.get(key))
-            await self._zip_update_clear_previous_control(previous, keep_message_id=message_id)
-            self._zip_update_state_save({"latest": state_record})
-            control = self._zip_update_control_for_record(state_record)
-        elif status in {"success", "ok", "warn", "error"}:
+            if mode == "cancel":
+                candidate_id = str(control_raw.get("candidate_id") or payload.get("candidate_id") or "").strip()
+                control = self._zip_update_cancel_control(candidate_id, disabled=bool(control_raw.get("disabled")))
+            else:
+                token = str(control_raw.get("token") or uuid.uuid4().hex[:16])[:24]
+                if mode not in {"rollback", "redo"}:
+                    mode = "rollback"
+                state_record = {
+                    "token": token,
+                    "mode": mode,
+                    "channel_id": str(channel_id),
+                    "message_id": str(message_id),
+                    "title": title,
+                    "description": description,
+                    "status": status,
+                    "branch": str(control_raw.get("branch") or payload.get("branch") or "main"),
+                    "expected_head": str(control_raw.get("expected_head") or control_raw.get("head_commit") or ""),
+                    "revert_commit": str(control_raw.get("revert_commit") or control_raw.get("head_commit") or ""),
+                    "source_author_id": str(control_raw.get("source_author_id") or ""),
+                    "event_at": incoming_event.isoformat(),
+                    "updated_at": now_event.isoformat(),
+                }
+                for key in ("update_from", "update_to", "rollback_commit", "redo_commit"):
+                    if control_raw.get(key):
+                        state_record[key] = str(control_raw.get(key))
+                if stale_event:
+                    control = self._zip_update_control_for_record(state_record, disabled=True)
+                else:
+                    await self._zip_update_clear_previous_control(previous, keep_message_id=message_id)
+                    self._zip_update_state_save({"latest": state_record})
+                    control = self._zip_update_control_for_record(state_record)
+        elif status in {"success", "ok", "warn", "error", "done", "failed"} and not stale_event:
             # Um estado finalizado sem controle explícito deixa controles antigos
-            # inativos. Isso evita que rollback/redo indisponível mantenha estado
-            # interno de processamento depois que a própria mensagem já ficou sem botão.
-            old_state = self._zip_update_state_load()
-            previous = old_state.get("latest") if isinstance(old_state.get("latest"), dict) else None
+            # inativos, mas uma entrega atrasada nunca apaga um controle mais novo.
             await self._zip_update_clear_previous_control(previous, keep_message_id=message_id)
             self._zip_update_state_save({})
 
@@ -1881,30 +2116,196 @@ class BotLocal(commands.Bot):
             logging.getLogger("zip_update").warning("falha ao finalizar mensagem do ZIP pelo updater", exc_info=True)
             return {"ok": False, "error": "falha ao editar mensagem"}
 
+    def _zip_update_find_candidate_sync(self, candidate_id: str) -> dict[str, object]:
+        candidate_id = str(candidate_id or "").strip()
+        queue_root = self._update_staging_root / "candidates" / "queue"
+        for state in ("pending", "active"):
+            state_dir = queue_root / state
+            for queue_file in sorted(state_dir.glob("*.json")) if state_dir.is_dir() else []:
+                try:
+                    payload = json.loads(queue_file.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if str(payload.get("id") or "") != candidate_id:
+                    continue
+                candidate_dir = Path(str(payload.get("candidate_dir") or ""))
+                manifest: dict[str, object] = {}
+                try:
+                    raw = json.loads((candidate_dir / "manifest.json").read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        manifest = raw
+                except Exception:
+                    pass
+                return {
+                    "state": state,
+                    "queue_file": str(queue_file),
+                    "candidate_dir": str(candidate_dir),
+                    "manifest": manifest,
+                }
+        return {"state": "missing"}
+
+    def _zip_update_cancel_candidate_sync(self, candidate_id: str) -> dict[str, object]:
+        found = self._zip_update_find_candidate_sync(candidate_id)
+        if found.get("state") != "pending":
+            return found
+        queue_file = Path(str(found.get("queue_file") or ""))
+        candidate_dir = Path(str(found.get("candidate_dir") or ""))
+        queue_cancelled = queue_file.parent.parent / "cancelled"
+        candidate_cancelled = self._update_staging_root / "candidates" / "cancelled"
+        queue_cancelled.mkdir(parents=True, exist_ok=True)
+        candidate_cancelled.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        stamp = now.strftime("%Y%m%d%H%M%S")
+        destination = candidate_cancelled / f"{candidate_dir.name}.{stamp}"
+        cancelled_queue = queue_cancelled / f"{queue_file.name}.cancelled.{stamp}"
+
+        try:
+            queue_payload = json.loads(queue_file.read_text(encoding="utf-8"))
+            if not isinstance(queue_payload, dict):
+                queue_payload = {}
+        except Exception:
+            queue_payload = {}
+        queue_payload.update(
+            {
+                "state": "cancelled",
+                "cancelled_at": now.isoformat(),
+                "archived_candidate_dir": str(destination),
+            }
+        )
+        tmp_queue = queue_file.with_name(f".{queue_file.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp_queue.write_text(json.dumps(queue_payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(tmp_queue, queue_file)
+            os.replace(queue_file, cancelled_queue)
+        except FileNotFoundError:
+            with contextlib.suppress(Exception):
+                tmp_queue.unlink(missing_ok=True)
+            return self._zip_update_find_candidate_sync(candidate_id)
+        except OSError as exc:
+            with contextlib.suppress(Exception):
+                tmp_queue.unlink(missing_ok=True)
+            return {"state": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+        if candidate_dir.is_dir():
+            try:
+                state_path = candidate_dir / "state.json"
+                state_tmp = candidate_dir / f".state.json.{uuid.uuid4().hex}.tmp"
+                state_tmp.write_text(
+                    json.dumps({"state": "cancelled", "updated_at": now.isoformat()}, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                os.replace(state_tmp, state_path)
+                os.replace(candidate_dir, destination)
+                found["candidate_dir"] = str(destination)
+            except OSError:
+                shutil.rmtree(candidate_dir, ignore_errors=True)
+        found["state"] = "cancelled"
+        found["queue_file"] = str(cancelled_queue)
+        return found
+
+
     async def _on_zip_update_control_click(self, interaction: discord.Interaction) -> None:
-        custom_id = str(getattr(getattr(interaction, "data", None), "get", lambda *_: "")("custom_id") or "")
+        data = getattr(interaction, "data", None)
+        custom_id = str(data.get("custom_id") or "") if isinstance(data, dict) else ""
         if not custom_id.startswith("zip_update:"):
             return
         parts = custom_id.split(":", 2)
         if len(parts) != 3:
             return
         requested_mode, token = parts[1], parts[2]
+
+        if requested_mode == "cancel":
+            found = await asyncio.to_thread(self._zip_update_find_candidate_sync, token)
+            manifest = found.get("manifest") if isinstance(found.get("manifest"), dict) else {}
+            if found.get("state") == "active":
+                await interaction.response.send_message(
+                    "Essa atualização já começou e não pode mais ser cancelada.", ephemeral=True
+                )
+                return
+            if found.get("state") != "pending":
+                await interaction.response.send_message(
+                    "Essa atualização não está mais aguardando na fila.", ephemeral=True
+                )
+                return
+            if not self._zip_update_can_control(interaction, manifest):
+                await interaction.response.send_message("Você não pode cancelar esta atualização.", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True, thinking=False)
+            cancelled = await asyncio.to_thread(self._zip_update_cancel_candidate_sync, token)
+            if cancelled.get("state") != "cancelled":
+                await interaction.followup.send(
+                    "A atualização já foi assumida pelo updater e não pôde ser cancelada.", ephemeral=True
+                )
+                return
+            display_id = str(manifest.get("display_id") or token)
+            try:
+                if interaction.message is not None:
+                    await interaction.message.edit(
+                        view=self._make_zip_update_view(
+                            "✖️ Atualização cancelada",
+                            f"`{display_id}`\nO pacote foi removido da fila antes de alterar a VPS.",
+                            discord.Color.dark_grey(),
+                        ),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+            except Exception:
+                UPDATE_LOG.warning("falha ao atualizar mensagem de candidato cancelado", exc_info=True)
+            await asyncio.to_thread(self._trigger_updater_service_sync)
+            await interaction.followup.send("Atualização cancelada.", ephemeral=True)
+            return
+
+        if requested_mode not in {"rollback", "redo"}:
+            return
         state = self._zip_update_state_load()
         record = state.get("latest") if isinstance(state.get("latest"), dict) else None
         if not isinstance(record, dict) or str(record.get("token") or "") != token:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Esse controle não está mais disponível.", ephemeral=True)
+            await interaction.response.send_message("Esse controle não está mais disponível.", ephemeral=True)
             return
         if str(record.get("mode") or "") != requested_mode:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Esse controle não está mais disponível.", ephemeral=True)
+            await interaction.response.send_message("Esse controle não está mais disponível.", ephemeral=True)
             return
         if not self._zip_update_can_control(interaction, record):
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Você não pode controlar este update.", ephemeral=True)
+            await interaction.response.send_message("Você não pode controlar esta atualização.", ephemeral=True)
             return
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True, thinking=False)
+
+        if requested_mode == "redo":
+            current_commit = str(record.get("rollback_commit") or record.get("expected_head") or "")
+            target_commit = str(record.get("update_to") or record.get("redo_commit") or "")
+        else:
+            current_commit = str(record.get("expected_head") or record.get("update_to") or "")
+            target_commit = str(record.get("update_from") or "")
+        await interaction.response.send_message(
+            view=self._make_zip_update_confirmation_view(
+                mode=requested_mode,
+                token=token,
+                current_commit=current_commit,
+                target_commit=target_commit,
+            ),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _on_zip_update_confirmation_click(self, interaction: discord.Interaction) -> None:
+        data = getattr(interaction, "data", None)
+        custom_id = str(data.get("custom_id") or "") if isinstance(data, dict) else ""
+        parts = custom_id.split(":", 2)
+        if len(parts) != 3 or parts[0] != "zip_update_confirm":
+            return
+        requested_mode, token = parts[1], parts[2]
+        if requested_mode == "cancel":
+            await interaction.response.send_message("Ação cancelada.", ephemeral=True)
+            return
+        if requested_mode not in {"rollback", "redo"}:
+            return
+        state = self._zip_update_state_load()
+        record = state.get("latest") if isinstance(state.get("latest"), dict) else None
+        if not isinstance(record, dict) or str(record.get("token") or "") != token:
+            await interaction.response.send_message("Esse controle não está mais disponível.", ephemeral=True)
+            return
+        if str(record.get("mode") or "") != requested_mode or not self._zip_update_can_control(interaction, record):
+            await interaction.response.send_message("Você não pode executar esta ação.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=False)
         await self._start_zip_update_rollback_flow(interaction, record, requested_mode)
 
     async def _start_zip_update_rollback_flow(self, interaction: discord.Interaction, record: dict[str, object], mode: str) -> None:
@@ -2024,7 +2425,7 @@ class BotLocal(commands.Bot):
         self._zip_update_state_save(state)
 
         try:
-            msg = interaction.message
+            msg = await self._zip_update_fetch_message(int(channel_id), int(message_id))
             if msg is not None:
                 view = self._make_zip_update_view(
                     title,
@@ -2081,7 +2482,9 @@ class BotLocal(commands.Bot):
             data = getattr(interaction, "data", None)
             if isinstance(data, dict):
                 custom_id = str(data.get("custom_id") or "")
-            if custom_id.startswith("zip_update:"):
+            if custom_id.startswith("zip_update_confirm:"):
+                await self._on_zip_update_confirmation_click(interaction)
+            elif custom_id.startswith("zip_update:"):
                 await self._on_zip_update_control_click(interaction)
         except Exception:
             UPDATE_LOG.exception("falha ao processar controle de update")
@@ -2125,12 +2528,20 @@ class BotLocal(commands.Bot):
 
 
     async def _handle_zip_update_message(self, message: discord.Message):
+        if not self._zip_update_can_submit(message):
+            await self._send_zip_update_message(
+                message,
+                "❌ Atualização não autorizada",
+                "Você não tem permissão para enviar atualizações por este canal.\n-# Nenhum arquivo foi processado.",
+                discord.Color.red(),
+            )
+            return
+
         zip_attachments = [
             attachment
             for attachment in message.attachments
             if str(getattr(attachment, "filename", "")).lower().endswith(".zip")
         ]
-
         if not zip_attachments:
             await self._send_zip_update_message(
                 message,
@@ -2140,16 +2551,30 @@ class BotLocal(commands.Bot):
             )
             return
 
+        limits = self._zip_update_limits()
         total_zips = len(zip_attachments)
         for index, zip_attachment in enumerate(zip_attachments, start=1):
-            prefix = f"ZIP {index}/{total_zips} · " if total_zips > 1 else ""
-            zip_hint = f"\n-# {prefix.rstrip(' · ')}" if prefix else ""
+            prefix = f"ZIP {index}/{total_zips}" if total_zips > 1 else ""
+            zip_hint = f"\n-# {prefix}" if prefix else ""
+            attachment_size = int(getattr(zip_attachment, "size", 0) or 0)
+            if attachment_size > limits.max_archive_bytes:
+                await self._send_zip_update_message(
+                    message,
+                    "❌ Arquivo muito grande",
+                    (
+                        f"O ZIP excede o limite de {limits.max_archive_bytes // (1024 * 1024)} MB."
+                        + zip_hint
+                    ),
+                    discord.Color.red(),
+                )
+                continue
+
             status_message: discord.Message | None = await self._send_zip_update_message(
                 message,
-                "<a:areia:1496606578395189473> Aplicando update...",
+                "📦 Atualização recebida",
                 (
-                    "<a:loading:1510065277868445796> **Aguardando preparação**\n"
-                    "O update vai entrar no queue." + zip_hint
+                    f"**Conferindo o anexo**\n"
+                    f"A estrutura e a segurança serão validadas antes de alterar a VPS.{zip_hint}"
                 ),
                 discord.Color.blurple(),
             )
@@ -2161,13 +2586,17 @@ class BotLocal(commands.Bot):
                 zip_path = work_dir / safe_zip_name
                 try:
                     await zip_attachment.save(zip_path)
+                    if zip_path.stat().st_size > limits.max_archive_bytes:
+                        raise UpdateSecurityError(
+                            f"ZIP excede o limite de {limits.max_archive_bytes // (1024 * 1024)} MB"
+                        )
                     await self._edit_zip_update_message(
                         message,
                         status_message,
-                        "<a:areia:1496606578395189473> Aplicando update...",
+                        "🔎 Preparando atualização",
                         (
-                            "<a:loading:1510065277868445796> **Preparando update**\n"
-                            "Lendo anexo e preparando candidato." + zip_hint
+                            "<a:loading:1510065277868445796> **Validando pacote**\n"
+                            "Conferindo caminhos, tamanhos, integridade e alterações." + zip_hint
                         ),
                         discord.Color.blurple(),
                     )
@@ -2188,61 +2617,67 @@ class BotLocal(commands.Bot):
                             message,
                             status_message,
                             "ℹ️ Nenhuma alteração",
-                            f"{prefix}ZIP válido. Nenhuma mudança no repositório.",
+                            f"O pacote é válido, mas não altera o repositório.{zip_hint}",
                             discord.Color.gold(),
                         )
                         continue
 
                     diff_stats = result.get("diff_stats") if isinstance(result.get("diff_stats"), dict) else {}
-                    diff_summary = str(diff_stats.get("summary") or "").strip() if isinstance(diff_stats, dict) else ""
+                    diff_summary = str(diff_stats.get("summary") or "").strip()
+                    queue_position = max(1, int(result.get("queue_position") or 1))
+                    candidate_id = str(result.get("candidate_id") or "").strip()
+                    display_id = str(result.get("display_id") or candidate_id).strip()
 
-                    queue_position = int(result.get("queue_position") or 0)
                     if queue_position <= 1:
-                        stage_label = "Aguardando updater"
-                        queue_detail = "Update preparado e colocado no queue."
+                        queue_detail = "Será iniciada assim que o updater assumir o pacote."
                     else:
                         before = queue_position - 1
-                        stage_label = "Aguardando no queue"
-                        queue_detail = f"Posição {queue_position} · {before} update(s) antes deste."
+                        queue_detail = f"Posição atual: **{queue_position}** · {before} atualização(ões) antes desta."
                     if not triggered_update:
-                        queue_detail += "\nVai continuar automaticamente."
+                        queue_detail += "\nO timer do updater continuará automaticamente."
 
-                    details = [queue_detail]
+                    details = [f"`{display_id}`", queue_detail]
+                    file_summary = f"{len(changed_files)} arquivo(s) · {diff_summary}" if diff_summary else f"{len(changed_files)} arquivo(s)"
+                    details.append(f"-# {file_summary}")
                     if prefix:
-                        details.append(f"-# {prefix.rstrip(' · ')}")
-                    if diff_summary:
-                        details.append(f"-# {len(changed_files)} arquivo(s) preparado(s) · {diff_summary}")
-                    else:
-                        details.append(f"-# {len(changed_files)} arquivo(s) preparado(s)")
-                    desc = f"<a:loading:1510065277868445796> **{stage_label}**\n" + "\n".join(details)
-
+                        details.append(f"-# {prefix}")
                     await self._edit_zip_update_message(
                         message,
                         status_message,
-                        "<a:areia:1496606578395189473> Aplicando update...",
-                        desc,
+                        "📦 Atualização na fila",
+                        "\n".join(details),
                         discord.Color.blurple(),
+                        control=self._zip_update_cancel_control(candidate_id),
                     )
                 except zipfile.BadZipFile:
                     await self._edit_zip_update_message(
                         message,
                         status_message,
                         "❌ ZIP inválido",
-                        f"{prefix}O arquivo não pôde ser aberto como ZIP válido.",
+                        f"O arquivo não pôde ser aberto como um ZIP válido.{zip_hint}",
                         discord.Color.red(),
                     )
-                except Exception as e:
-                    logging.getLogger("zip_update").exception(
-                        "Falha no auto-update via ZIP do Discord"
-                    )
-                    reason = str(e).strip() or type(e).__name__
+                except (UpdateSecurityError, RuntimeError) as exc:
+                    reason = str(exc).strip() or type(exc).__name__
                     if len(reason) > 600:
                         reason = reason[:597].rstrip() + "..."
                     await self._edit_zip_update_message(
                         message,
                         status_message,
-                        "❌ Falha no update",
-                        f"{prefix}Nada foi aplicado. Motivo: **{reason}**",
+                        "❌ Atualização rejeitada",
+                        f"Nenhuma alteração foi aplicada.\n**Motivo:** {reason}{zip_hint}",
+                        discord.Color.red(),
+                    )
+                except Exception as exc:
+                    UPDATE_LOG.exception("Falha no auto-update via ZIP do Discord")
+                    reason = str(exc).strip() or type(exc).__name__
+                    if len(reason) > 600:
+                        reason = reason[:597].rstrip() + "..."
+                    await self._edit_zip_update_message(
+                        message,
+                        status_message,
+                        "❌ Falha ao preparar atualização",
+                        f"Nenhuma alteração foi aplicada.\n**Motivo:** {reason}{zip_hint}",
                         discord.Color.red(),
                     )
                 finally:

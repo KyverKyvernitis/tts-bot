@@ -18,7 +18,7 @@ BODY="${3:-}"
 ATTACH_FILE="${4:-}"
 ATTACH_NAME="${5:-}"
 
-if [ -z "${ALERT_WEBHOOK_URL:-}" ]; then
+if [ -z "${ALERT_WEBHOOK_URL:-}" ] && [ "${ALERT_DRY_RUN:-0}" != "1" ]; then
   exit 1
 fi
 
@@ -26,7 +26,7 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v curl >/dev/null 2>&1; then
+if [ "${ALERT_DRY_RUN:-0}" != "1" ] && ! command -v curl >/dev/null 2>&1; then
   exit 1
 fi
 
@@ -146,6 +146,13 @@ LABEL_MAP = {
     "core worker": "Core Worker",
     "processos alterados": "Processos alterados",
     "processo alterado": "Processos alterados",
+    "identificador": "Identificador",
+    "id da atualização": "Identificador",
+    "id da atualizacao": "Identificador",
+    "verificações": "Verificações",
+    "verificacoes": "Verificações",
+    "tempos": "Tempos",
+    "tentativa": "Tentativa",
 }
 
 HEADER_FIELDS = {
@@ -169,10 +176,13 @@ HEADER_FIELDS = {
     "Status",
     "Estado ativo",
     "Subestado",
+    "Identificador",
+    "Tentativa",
 }
 STATUS_FIELDS = {"Bot health", "Health", "Serviços de áudio", "Limpeza de áudio", "Watcher Lavalink celular", "Phone-worker", "Phone-worker sync", "CallKeeper", "Frontend", "Backend", "Activity", "Cogs", "Avisos"}
-DETAIL_FIELDS = {"Etapa", "Motivo", "URL", "Diagnóstico", "Análise phone-worker", "Validações", "Serviços", "Core Worker"}
+DETAIL_FIELDS = {"Etapa", "Motivo", "URL", "Diagnóstico", "Análise phone-worker", "Validações", "Verificações", "Tempos", "Serviços", "Core Worker"}
 BULLET_FIELDS = {"Arquivos"}
+CHECK_FIELDS = {"Verificações", "Validações"}
 CODE_FIELDS = {"Últimas linhas", "Comando", "Stderr", "Status git", "Arquivos locais", "Log", "Log completo"}
 MAX_TEXT = 1800
 MAX_TOTAL_TEXT = 3800
@@ -252,6 +262,9 @@ def format_field_value(name: str, value: str) -> str:
     value = clean_field_text(value) or "—"
     if name in BULLET_FIELDS:
         return format_multiline_bullets(value)
+    if name in CHECK_FIELDS:
+        lines = [line.strip() for line in value.splitlines() if line.strip()]
+        return trunc("\n".join(lines) if lines else "—", 1500)
     if name in CODE_FIELDS:
         return format_code_block(value)
     if "\n" in value and len([line for line in value.splitlines() if line.strip()]) >= 3:
@@ -352,14 +365,14 @@ def make_separator():
 def render_field_block(title: str, pairs):
     if not pairs:
         return []
-    parts = [f"## {title}"]
+    lines = [f"## {title}"]
     for name, value in pairs:
         value = (value or "—").strip() or "—"
         if value.startswith("```") or "\n" in value:
-            parts.append(f"### {name}\n{value}")
+            lines.extend(["", f"### {name}", value])
         else:
-            parts.append(f"- **{name}:** {value}")
-    joined = "\n\n".join(parts)
+            lines.append(f"- **{name}:** {value}")
+    joined = "\n".join(lines)
     return [make_text(chunk) for chunk in split_text(joined)]
 
 
@@ -383,6 +396,90 @@ def append_container(components, color, children):
             normalized.append(child)
     if normalized:
         components.append({"type": CONTAINER, "accent_color": color, "components": normalized[:10]})
+
+
+def is_update_notification(title: str, fields) -> bool:
+    lowered = (title or "").casefold()
+    names = {field.get("name") for field in fields}
+    return ("update" in lowered or "atualiza" in lowered) and bool(names & {"Update", "Aplicação", "Identificador", "Commit"})
+
+
+def build_update_containers(title: str, summary: str, fields, footer: str, color: int):
+    field_map = OrderedDict((field["name"], field["value"]) for field in fields)
+    identifier = field_map.pop("Identificador", "")
+    branch = field_map.pop("Branch", "")
+    commit = field_map.pop("Commit", "")
+    field_map.pop("Host", None)
+    update_value = field_map.pop("Update", "")
+    application = field_map.pop("Aplicação", "")
+    processes = field_map.pop("Processos alterados", "")
+    duration = field_map.pop("Duração", "")
+    checks = field_map.pop("Verificações", "") or field_map.pop("Validações", "")
+    timings = field_map.pop("Tempos", "")
+    files = field_map.pop("Arquivos", "")
+    warnings = field_map.pop("Avisos", "")
+
+    meta = []
+    if identifier and identifier != "—":
+        meta.append(f"`{identifier.strip('`')}`")
+    if branch and branch != "—":
+        meta.append(f"branch `{branch.strip('`')}`")
+    if commit and commit != "—":
+        meta.append(f"commit `{commit.strip('`')}`")
+    meta.append(footer)
+
+    result_pairs = []
+    for name, value in (("Alterações", update_value), ("Aplicação", application), ("Processos", processes), ("Duração", duration)):
+        if value and value != "—":
+            result_pairs.append((name, value))
+
+    primary = [make_text(f"# {title}"), make_text("-# " + " • ".join(part for part in meta if part))]
+    if summary and summary != "—":
+        primary.append(make_separator())
+        primary.extend(make_text(chunk) for chunk in split_text(summary, 1000))
+    if result_pairs:
+        primary.append(make_separator())
+        primary.extend(render_field_block("Resultado", result_pairs))
+    if checks and checks != "—":
+        primary.append(make_separator())
+        primary.extend(make_text(chunk) for chunk in split_text(f"## Verificações\n{checks}"))
+
+    components = []
+    append_container(components, color, primary)
+
+    details = []
+    if warnings and warnings != "—" and warnings.casefold() not in {"sem avisos", "nenhum"}:
+        details.extend(make_text(chunk) for chunk in split_text(f"## Avisos\n{warnings}"))
+    status_pairs = [(name, field_map.pop(name)) for name in list(field_map) if name in STATUS_FIELDS]
+    if status_pairs:
+        if details:
+            details.append(make_separator())
+        details.extend(render_field_block("Estado final", status_pairs))
+    remaining = [(name, value) for name, value in field_map.items() if value and value != "—"]
+    if remaining:
+        if details:
+            details.append(make_separator())
+        details.extend(render_field_block("Detalhes", remaining))
+    append_container(components, color, details)
+
+    technical = []
+    if files and files != "—":
+        technical.extend(make_text(chunk) for chunk in split_text(f"## Arquivos alterados\n{files}"))
+    if timings and timings != "—":
+        if technical:
+            technical.append(make_separator())
+        technical.extend(make_text(chunk) for chunk in split_text(f"## Tempos\n{timings}"))
+    append_container(components, color, technical)
+
+    total_chars = 0
+    for container in components:
+        for child in container["components"]:
+            if child["type"] != TEXT_DISPLAY:
+                continue
+            remaining_chars = max(400, MAX_TOTAL_TEXT - total_chars)
+            child["content"] = trunc(child["content"], remaining_chars)
+            total_chars += len(child["content"])
+    return components[:4]
 
 
 def build_containers(title: str, summary: str, fields, footer: str, color: int):
@@ -412,6 +509,7 @@ def build_containers(title: str, summary: str, fields, footer: str, color: int):
     if commit and commit != "—":
         header_meta.append(f"commit `{commit}`")
     header_meta.append(footer)
+    header_pairs = [(name, value) for name, value in header_pairs if name not in {"Host", "Branch", "Commit"}]
 
     components = []
     primary_children = [make_text(f"# {title}"), make_text("-# " + " • ".join(part for part in header_meta if part))]
@@ -470,15 +568,21 @@ emoji = EMOJI_MAP.get(TYPE, "ℹ️")
 color = COLOR_MAP.get(TYPE, COLOR_MAP["info"])
 full_title = TITLE if TITLE.startswith(("❌", "⚠️", "✅", "🔄", "ℹ️")) else f"{emoji} {TITLE}"
 
+renderer = build_update_containers if is_update_notification(full_title, fields) else build_containers
 payload = {
     "allowed_mentions": {"parse": []},
     "flags": COMPONENTS_V2_FLAG,
-    "components": build_containers(trunc(full_title, 120), description, fields, trunc(footer, 200), color),
+    "components": renderer(trunc(full_title, 120), description, fields, trunc(footer, 200), color),
 }
 
 print(json.dumps(payload, ensure_ascii=False))
 PY
 })" || exit 1
+
+if [ "${ALERT_DRY_RUN:-0}" = "1" ]; then
+  printf '%s\n' "$PAYLOAD_JSON"
+  exit 0
+fi
 
 WEBHOOK_URL="$ALERT_WEBHOOK_URL"
 case "$WEBHOOK_URL" in

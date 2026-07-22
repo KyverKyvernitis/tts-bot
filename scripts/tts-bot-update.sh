@@ -18,6 +18,7 @@ CANDIDATE_QUEUE_PENDING_DIR="$CANDIDATE_QUEUE_ROOT/pending"
 CANDIDATE_QUEUE_ACTIVE_DIR="$CANDIDATE_QUEUE_ROOT/active"
 CANDIDATE_QUEUE_DONE_DIR="$CANDIDATE_QUEUE_ROOT/done"
 CANDIDATE_QUEUE_FAILED_DIR="$CANDIDATE_QUEUE_ROOT/failed"
+CANDIDATE_QUEUE_CANCELLED_DIR="$CANDIDATE_QUEUE_ROOT/cancelled"
 UPDATER_LOCK_FILE="${DISCORD_AUTO_UPDATE_LOCK_FILE:-/run/lock/tts-bot-updater.lock}"
 REMOTE_REJECTED_FILE="${DISCORD_AUTO_UPDATE_REJECTED_REMOTE_FILE:-$REPO_DIR/data/updater/rejected_remote_commits.json}"
 ROLLBACK_REQUEST_DEFAULT_ROOT="$CANDIDATE_ROOT/rollback"
@@ -79,10 +80,15 @@ ROLLBACK_DONE=0
 MANUAL_FAILURE_ALERT_SENT=0
 LOCAL_CANDIDATE_MODE=0
 LOCAL_CANDIDATE_ID=""
+LOCAL_CANDIDATE_DISPLAY_ID=""
 LOCAL_CANDIDATE_DIR=""
 LOCAL_CANDIDATE_BASE_COMMIT=""
 LOCAL_CANDIDATE_COMMIT_MESSAGE=""
 LOCAL_CANDIDATE_ZIP_NAME=""
+LOCAL_CANDIDATE_ZIP_SHA256=""
+LOCAL_CANDIDATE_SOURCE_AUTHOR_ID=""
+LOCAL_CANDIDATE_ATTEMPT=0
+LOCAL_CANDIDATE_VERIFY_ERROR=""
 LOCAL_CANDIDATE_PENDING_FILE=""
 LOCAL_CANDIDATE_FILES_DIR=""
 LOCAL_CANDIDATE_PATCH_FILE=""
@@ -172,9 +178,12 @@ ZIP_STATUS_CONTROL_JSON=""
 UPDATE_TITLE_EMOJI="<a:areia:1496606578395189473>"
 UPDATE_STAGE_EMOJI="<a:loading:1510065277868445796>"
 ZIP_PROGRESS_HISTORY=""
+ZIP_PROGRESS_COMPLETED_COUNT=0
+ZIP_PROGRESS_TOTAL_STEPS=8
 ZIP_PROGRESS_STAGE_STARTED_MS=0
 UPDATER_STEP_LAST=0
 UPDATER_TIMINGS=""
+UPDATE_STATUS_OUTBOX_DIR="$REPO_DIR/data/runtime/update-status-outbox"
 : > "$RUN_LOG_FILE"
 chmod 0644 "$RUN_LOG_FILE" 2>/dev/null || true
 
@@ -662,14 +671,22 @@ PYIMPORT
 verify_bot_after_restart() {
   local restart_epoch="${1:?}"
   local restarts_before="${2:-0}"
-  local timeout="${UPDATE_BOT_RESTART_TIMEOUT_SECONDS:-35}"
+  local allowed_restart_delta="${3:-1}"
+  local timeout="${UPDATE_BOT_RESTART_TIMEOUT_SECONDS:-45}"
   local interval="${UPDATE_BOT_RESTART_POLL_SECONDS:-1}"
+  local required_successes="${UPDATE_BOT_HEALTH_CONSECUTIVE_SUCCESSES:-3}"
+  local stability_seconds="${UPDATE_BOT_HEALTH_STABILITY_SECONDS:-10}"
   local waited=0 restarts_after health_ok=0 last_log_check=0
+  local consecutive=0 healthy_since=0 now_epoch stable_for=0
 
-  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=35
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=45
   [[ "$interval" =~ ^[0-9]+$ ]] || interval=1
-  (( timeout < 8 )) && timeout=8
+  [[ "$required_successes" =~ ^[0-9]+$ ]] || required_successes=3
+  [[ "$stability_seconds" =~ ^[0-9]+$ ]] || stability_seconds=10
+  [[ "$allowed_restart_delta" =~ ^[0-9]+$ ]] || allowed_restart_delta=1
+  (( timeout < stability_seconds + 8 )) && timeout=$((stability_seconds + 8))
   (( interval < 1 )) && interval=1
+  (( required_successes < 2 )) && required_successes=2
 
   while (( waited <= timeout )); do
     if systemctl is-failed --quiet "$SERVICE"; then
@@ -680,29 +697,39 @@ verify_bot_after_restart() {
     if systemctl is-active --quiet "$SERVICE"; then
       restarts_after="$(service_restart_count "$SERVICE")"
       if [[ "$restarts_after" =~ ^[0-9]+$ && "$restarts_before" =~ ^[0-9]+$ ]]; then
-        if (( restarts_after > restarts_before + 1 )); then
-          BOT_HEALTHCHECK_STATUS="falhou: restart loop detectado (${restarts_before}→${restarts_after})"
+        if (( restarts_after > restarts_before + allowed_restart_delta )); then
+          BOT_HEALTHCHECK_STATUS="falhou: restart inesperado detectado (${restarts_before}→${restarts_after})"
           return 1
         fi
       fi
 
-      # journalctl é útil, mas não deve ser consultado em loop fechado.
-      if (( waited == 0 || waited - last_log_check >= 5 )); then
+      if (( waited == 0 || waited - last_log_check >= 4 )); then
         last_log_check="$waited"
         if has_fatal_boot_logs "$SERVICE" "$restart_epoch"; then
-          BOT_HEALTHCHECK_STATUS="falhou: erro fatal de boot nas logs"
+          BOT_HEALTHCHECK_STATUS="falhou: erro fatal de inicialização nos logs"
           return 1
         fi
       fi
 
-      if refresh_bot_health_status; then
-        if bot_health_python is_ready_healthy >/dev/null; then
+      if refresh_bot_health_status && bot_health_python is_ready_healthy >/dev/null; then
+        now_epoch="$(date +%s)"
+        if (( consecutive == 0 )); then
+          healthy_since="$now_epoch"
+        fi
+        consecutive=$((consecutive + 1))
+        stable_for=$((now_epoch - healthy_since))
+        BOT_HEALTHCHECK_STATUS="confirmando estabilidade (${stable_for}s/${stability_seconds}s; ${consecutive}/${required_successes})"
+        if (( consecutive >= required_successes && stable_for >= stability_seconds )); then
           health_ok=1
           break
         fi
-        logger -t "$LOG_TAG" "Health respondeu, aguardando ready real (${waited}s): $BOT_HEALTH_DETAIL_STATUS"
-      elif [[ -n "${BOT_HEALTH_DETAIL_STATUS//[[:space:]]/}" && "$BOT_HEALTH_DETAIL_STATUS" != "HTTP sem resposta" ]]; then
-        logger -t "$LOG_TAG" "Health ainda não saudável (${waited}s): $BOT_HEALTH_DETAIL_STATUS"
+      else
+        consecutive=0
+        healthy_since=0
+        stable_for=0
+        if [[ -n "${BOT_HEALTH_DETAIL_STATUS//[[:space:]]/}" ]]; then
+          logger -t "$LOG_TAG" "Health ainda não estável (${waited}s): $BOT_HEALTH_DETAIL_STATUS"
+        fi
       fi
     elif (( waited >= 5 )); then
       BOT_HEALTHCHECK_STATUS="falhou: serviço não ficou active"
@@ -714,29 +741,30 @@ verify_bot_after_restart() {
   done
 
   if (( health_ok == 1 )); then
-    if has_real_warning_text "$BOT_WARNINGS_STATUS" || cogs_have_failures "$BOT_COGS_STATUS"; then
-      BOT_HEALTHCHECK_STATUS="OK com avisos"
-      UPDATE_HAS_WARNINGS=1
-    else
-      BOT_HEALTHCHECK_STATUS="OK"
-    fi
-  else
-    # Última checagem fatal antes de aceitar qualquer estado parcial.
     if has_fatal_boot_logs "$SERVICE" "$restart_epoch"; then
-      BOT_HEALTHCHECK_STATUS="falhou: erro fatal de boot nas logs"
+      BOT_HEALTHCHECK_STATUS="falhou: erro fatal durante a janela de estabilidade"
       return 1
     fi
-    if [[ "$BOT_HEALTH_DETAIL_STATUS" == "HTTP sem resposta" ]]; then
-      BOT_HEALTHCHECK_STATUS="ativo; health HTTP sem resposta"
+    if has_real_warning_text "$BOT_WARNINGS_STATUS" || cogs_have_failures "$BOT_COGS_STATUS"; then
+      BOT_HEALTHCHECK_STATUS="estável com avisos"
       UPDATE_HAS_WARNINGS=1
-      return 0
+    else
+      BOT_HEALTHCHECK_STATUS="estável (${stability_seconds}s)"
     fi
-    BOT_HEALTHCHECK_STATUS="falhou: health não ficou pronto em ${timeout}s ($BOT_HEALTH_DETAIL_STATUS)"
+    return 0
+  fi
+
+  if has_fatal_boot_logs "$SERVICE" "$restart_epoch"; then
+    BOT_HEALTHCHECK_STATUS="falhou: erro fatal de inicialização nos logs"
     return 1
   fi
-  return 0
+  if [[ "$BOT_HEALTH_DETAIL_STATUS" == "HTTP sem resposta" ]]; then
+    BOT_HEALTHCHECK_STATUS="falhou: health HTTP sem resposta após ${timeout}s"
+  else
+    BOT_HEALTHCHECK_STATUS="falhou: não permaneceu saudável por ${stability_seconds}s ($BOT_HEALTH_DETAIL_STATUS)"
+  fi
+  return 1
 }
-
 
 is_placeholder_status_text() {
   local text="${1:-}"
@@ -1095,8 +1123,8 @@ Motivo: $reason
 Arquivos:
 $(format_changed_files)
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
-  notify_zip_status_message "error" "❌ Update rejeitado" $'O commit do GitHub não passou na validação local.\nA VPS continuou no último estado saudável.' || true
-  send_error "Update do GitHub rejeitado" "$body"
+  notify_zip_status_message "error" "❌ Atualização rejeitada" $'O commit do GitHub não passou na validação local.\nA VPS continuou no último estado saudável.' || true
+  send_error "Atualização do GitHub rejeitada" "$body"
   logger -t "$LOG_TAG" "Commit remoto $(short_commit "$REMOTE_COMMIT") rejeitado antes do live: $reason"
   exit 0
 }
@@ -1106,9 +1134,9 @@ load_pending_local_candidate() {
   LOCAL_CANDIDATE_PENDING_FILE=""
   LOCAL_CANDIDATE_DIR=""
 
-  mkdir -p "$CANDIDATE_QUEUE_PENDING_DIR" "$CANDIDATE_QUEUE_ACTIVE_DIR" "$CANDIDATE_QUEUE_DONE_DIR" "$CANDIDATE_QUEUE_FAILED_DIR" 2>/dev/null || true
+  mkdir -p "$CANDIDATE_QUEUE_PENDING_DIR" "$CANDIDATE_QUEUE_ACTIVE_DIR" "$CANDIDATE_QUEUE_DONE_DIR" "$CANDIDATE_QUEUE_FAILED_DIR" "$CANDIDATE_QUEUE_CANCELLED_DIR" 2>/dev/null || true
   chown -R ubuntu:ubuntu "$CANDIDATE_QUEUE_ROOT" 2>/dev/null || true
-  chmod 0775 "$CANDIDATE_QUEUE_ROOT" "$CANDIDATE_QUEUE_PENDING_DIR" "$CANDIDATE_QUEUE_ACTIVE_DIR" "$CANDIDATE_QUEUE_DONE_DIR" "$CANDIDATE_QUEUE_FAILED_DIR" 2>/dev/null || true
+  chmod 0775 "$CANDIDATE_QUEUE_ROOT" "$CANDIDATE_QUEUE_PENDING_DIR" "$CANDIDATE_QUEUE_ACTIVE_DIR" "$CANDIDATE_QUEUE_DONE_DIR" "$CANDIDATE_QUEUE_FAILED_DIR" "$CANDIDATE_QUEUE_CANCELLED_DIR" 2>/dev/null || true
 
   # Recuperação primeiro: se uma execução caiu com item ativo, retome esse item
   # antes de pegar outro pending. Isso evita aplicar fora de ordem.
@@ -1122,7 +1150,7 @@ load_pending_local_candidate() {
       LOCAL_CANDIDATE_DIR=""
       return 1
     fi
-    logger -t "$LOG_TAG" "Retomando item ativo do queue: $(basename "$active_file")"
+    logger -t "$LOG_TAG" "Retomando item ativo da fila: $(basename "$active_file")"
   else
     # Compatibilidade com o formato antigo candidates/*/active.json.
     legacy_active="$(find "$CANDIDATE_ROOT" -mindepth 2 -maxdepth 2 -type f -name active.json 2>/dev/null | grep -v '/queue/' | sort | head -n 1 || true)"
@@ -1159,7 +1187,7 @@ load_pending_local_candidate() {
         LOCAL_CANDIDATE_DIR=""
         return 1
       fi
-      logger -t "$LOG_TAG" "Candidato local recebido do queue: $(basename "$LOCAL_CANDIDATE_DIR")"
+      logger -t "$LOG_TAG" "Candidato local recebido da fila: $(basename "$LOCAL_CANDIDATE_DIR")"
     fi
   fi
 
@@ -1167,16 +1195,43 @@ load_pending_local_candidate() {
   [[ -f "$manifest" ]] || return 1
   LOCAL_CANDIDATE_MODE=1
   LOCAL_CANDIDATE_ID="$(json_field_from_file "$manifest" id 2>/dev/null || true)"
+  LOCAL_CANDIDATE_DISPLAY_ID="$(json_field_from_file "$manifest" display_id 2>/dev/null || true)"
   LOCAL_CANDIDATE_BASE_COMMIT="$(json_field_from_file "$manifest" base_commit 2>/dev/null || true)"
   LOCAL_CANDIDATE_COMMIT_MESSAGE="$(json_field_from_file "$manifest" commit_message 2>/dev/null || true)"
   LOCAL_CANDIDATE_ZIP_NAME="$(json_field_from_file "$manifest" zip_name 2>/dev/null || true)"
+  LOCAL_CANDIDATE_ZIP_SHA256="$(json_field_from_file "$manifest" zip_sha256 2>/dev/null || true)"
+  LOCAL_CANDIDATE_SOURCE_AUTHOR_ID="$(json_field_from_file "$manifest" discord_status.source_author_id 2>/dev/null || true)"
   LOCAL_CANDIDATE_FILES_DIR="$LOCAL_CANDIDATE_DIR/files"
   LOCAL_CANDIDATE_PATCH_FILE="$LOCAL_CANDIDATE_DIR/patch.diff"
   LOCAL_CANDIDATE_USE_PATCH=0
   BRANCH="$(json_field_from_file "$manifest" branch 2>/dev/null || true)"
   [[ -n "${BRANCH//[[:space:]]/}" ]] || BRANCH="main"
   [[ -n "${LOCAL_CANDIDATE_ID//[[:space:]]/}" ]] || LOCAL_CANDIDATE_ID="$(basename "$LOCAL_CANDIDATE_DIR")"
-  [[ -n "${LOCAL_CANDIDATE_COMMIT_MESSAGE//[[:space:]]/}" ]] || LOCAL_CANDIDATE_COMMIT_MESSAGE="auto update from discord zip"
+  [[ -n "${LOCAL_CANDIDATE_DISPLAY_ID//[[:space:]]/}" ]] || LOCAL_CANDIDATE_DISPLAY_ID="$LOCAL_CANDIDATE_ID"
+  [[ -n "${LOCAL_CANDIDATE_COMMIT_MESSAGE//[[:space:]]/}" ]] || LOCAL_CANDIDATE_COMMIT_MESSAGE="update: aplicar $LOCAL_CANDIDATE_DISPLAY_ID"
+  if [[ -f "$LOCAL_CANDIDATE_PENDING_FILE" ]]; then
+    LOCAL_CANDIDATE_ATTEMPT="$(python3 - "$LOCAL_CANDIDATE_PENDING_FILE" <<'PYATTEMPT' 2>/dev/null || echo 1
+import datetime, json, os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    data = {}
+attempt = int(data.get('attempt') or 0) + 1
+data.update({
+    'state': 'active',
+    'attempt': attempt,
+    'started_at': data.get('started_at') or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'heartbeat_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'last_error': None,
+})
+tmp = path.with_name('.' + path.name + '.tmp')
+tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+os.replace(tmp, path)
+print(attempt)
+PYATTEMPT
+)"
+  fi
 
   CHANGED_FILES_RAW="$(python3 - "$manifest" <<'PYFILES'
 import json, sys
@@ -1208,20 +1263,107 @@ PYDIFF
 )"
   return 0
 }
+verify_local_candidate_integrity() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 1
+  local py output rc max_age
+  py="$REPO_DIR/.venv/bin/python"
+  [[ -x "$py" ]] || py="$(command -v python3 || true)"
+  [[ -n "$py" ]] || { LOCAL_CANDIDATE_VERIFY_ERROR="Python indisponível para validar o candidato"; return 1; }
+  max_age="${DISCORD_AUTO_UPDATE_CANDIDATE_MAX_AGE_SECONDS:-86400}"
+  [[ "$max_age" =~ ^[0-9]+$ ]] || max_age=86400
+  set +e
+  output="$(cd "$REPO_DIR" && sudo -u ubuntu -H "$py" -m utility.update_security verify-candidate "$LOCAL_CANDIDATE_DIR" --max-age-seconds "$max_age" 2>&1)"
+  rc=$?
+  set -e
+  if (( rc == 0 )); then
+    LOCAL_CANDIDATE_VERIFY_ERROR=""
+    logger -t "$LOG_TAG" "Integridade confirmada para $LOCAL_CANDIDATE_DISPLAY_ID: $output"
+    return 0
+  fi
+  LOCAL_CANDIDATE_VERIFY_ERROR="$(VERIFY_OUTPUT="$output" python3 - <<'PYVERIFY'
+import json, os
+raw = os.environ.get('VERIFY_OUTPUT') or ''
+for line in reversed(raw.splitlines()):
+    try:
+        data = json.loads(line)
+    except Exception:
+        continue
+    if isinstance(data, dict) and data.get('error'):
+        print(str(data['error'])[:900])
+        break
+else:
+    print(raw.strip()[-900:] or 'falha de integridade sem detalhes')
+PYVERIFY
+)"
+  return 1
+}
+
+update_local_candidate_heartbeat() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 0
+  [[ -f "${LOCAL_CANDIDATE_PENDING_FILE:-}" ]] || return 0
+  local state_name="${1:-active}"
+  local error_text="${2:-}"
+  local stage_name="${3:-}"
+  STATE_NAME="$state_name" ERROR_TEXT="$error_text" STAGE_NAME="$stage_name" python3 - "$LOCAL_CANDIDATE_PENDING_FILE" <<'PYHEART' 2>/dev/null || true
+import datetime, json, os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    data = {}
+data['state'] = os.environ.get('STATE_NAME') or 'active'
+data['heartbeat_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+if os.environ.get('STAGE_NAME'):
+    data['stage'] = os.environ['STAGE_NAME'][:300]
+if os.environ.get('ERROR_TEXT'):
+    data['last_error'] = os.environ['ERROR_TEXT'][:1200]
+tmp = path.with_name('.' + path.name + '.tmp')
+tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+os.replace(tmp, path)
+PYHEART
+}
+
 archive_local_candidate() {
-  local status="${1:-done}"
+  local status="${1:-done}" queue_archive_dir archived_candidate_dir stamp
+  case "$status" in
+    done) queue_archive_dir="$CANDIDATE_QUEUE_DONE_DIR" ;;
+    cancelled) queue_archive_dir="$CANDIDATE_QUEUE_CANCELLED_DIR" ;;
+    *) status="failed"; queue_archive_dir="$CANDIDATE_QUEUE_FAILED_DIR" ;;
+  esac
   if [[ -z "${LOCAL_CANDIDATE_DIR:-}" ]]; then
     return 0
   fi
-  mkdir -p "$CANDIDATE_ROOT/$status" 2>/dev/null || true
-  chown ubuntu:ubuntu "$CANDIDATE_ROOT" "$CANDIDATE_ROOT/$status" 2>/dev/null || true
-  chmod 0775 "$CANDIDATE_ROOT" "$CANDIDATE_ROOT/$status" 2>/dev/null || true
-  if [[ -f "$LOCAL_CANDIDATE_PENDING_FILE" ]]; then
-    rm -f "$LOCAL_CANDIDATE_PENDING_FILE" 2>/dev/null || true
+  stamp="$(date +%Y%m%d%H%M%S)"
+  archived_candidate_dir="$CANDIDATE_ROOT/$status/$(basename "$LOCAL_CANDIDATE_DIR").$stamp"
+  mkdir -p "$CANDIDATE_ROOT/$status" "$queue_archive_dir" 2>/dev/null || true
+  chown ubuntu:ubuntu "$CANDIDATE_ROOT" "$CANDIDATE_ROOT/$status" "$queue_archive_dir" 2>/dev/null || true
+  chmod 0775 "$CANDIDATE_ROOT" "$CANDIDATE_ROOT/$status" "$queue_archive_dir" 2>/dev/null || true
+
+  update_local_candidate_heartbeat "$status" "${LOCAL_CANDIDATE_VERIFY_ERROR:-}" || true
+  if [[ -f "${LOCAL_CANDIDATE_PENDING_FILE:-}" ]]; then
+    ARCHIVE_STATUS="$status" ARCHIVED_CANDIDATE_DIR="$archived_candidate_dir" python3 - "$LOCAL_CANDIDATE_PENDING_FILE" <<'PYARCHIVEQUEUE' 2>/dev/null || true
+import datetime, json, os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    data = {}
+data.update({
+    'state': os.environ.get('ARCHIVE_STATUS') or 'failed',
+    'archived_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'archived_candidate_dir': os.environ.get('ARCHIVED_CANDIDATE_DIR') or '',
+})
+tmp = path.with_name('.' + path.name + '.tmp')
+tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+os.replace(tmp, path)
+PYARCHIVEQUEUE
+    mv "$LOCAL_CANDIDATE_PENDING_FILE" "$queue_archive_dir/$(basename "$LOCAL_CANDIDATE_PENDING_FILE").$stamp" 2>/dev/null || rm -f "$LOCAL_CANDIDATE_PENDING_FILE" 2>/dev/null || true
   fi
   if [[ -d "$LOCAL_CANDIDATE_DIR" ]]; then
-    mv "$LOCAL_CANDIDATE_DIR" "$CANDIDATE_ROOT/$status/$(basename "$LOCAL_CANDIDATE_DIR").$(date +%Y%m%d%H%M%S)" 2>/dev/null || rm -rf "$LOCAL_CANDIDATE_DIR" 2>/dev/null || true
+    mv "$LOCAL_CANDIDATE_DIR" "$archived_candidate_dir" 2>/dev/null || rm -rf "$LOCAL_CANDIDATE_DIR" 2>/dev/null || true
+    [[ -d "$archived_candidate_dir" ]] && touch "$archived_candidate_dir" 2>/dev/null || true
   fi
+  refresh_pending_queue_messages || true
 }
 
 local_candidate_suspicion_reason() {
@@ -1262,7 +1404,7 @@ PYSUSPECT
 }
 
 reject_local_candidate_safely() {
-  local title="${1:-Update bloqueado}"
+  local title="${1:-Atualização bloqueada}"
   local summary="${2:-O candidato foi arquivado sem alterar a VPS.}"
   local reason="${3:-candidato rejeitado}"
   MANUAL_FAILURE_ALERT_SENT=1
@@ -1273,8 +1415,9 @@ reject_local_candidate_safely() {
   cleanup_local_candidate_new_files_after_reset
   sudo -u ubuntu -H git reset --hard "${PREVIOUS_COMMIT:-HEAD}" >/dev/null 2>&1 || true
   cleanup_local_candidate_new_files_after_reset
-  archive_local_candidate "failed"
+  update_local_candidate_heartbeat "failed" "$reason" || true
   notify_zip_status_message "error" "$title" "$summary" || true
+  archive_local_candidate "failed"
   send_error "$title" "Resumo: $summary
 Motivo: $reason
 Candidato: ${LOCAL_CANDIDATE_ID:-desconhecido}
@@ -1327,6 +1470,81 @@ trigger_updater_if_queue_pending() {
   fi
 }
 
+refresh_pending_queue_messages() {
+  [[ -d "$CANDIDATE_QUEUE_PENDING_DIR" ]] || return 0
+  local payload
+  while IFS= read -r payload; do
+    [[ -n "${payload//[[:space:]]/}" ]] || continue
+    send_update_status_payload "$payload" 0
+  done < <(CANDIDATE_QUEUE_PENDING_DIR="$CANDIDATE_QUEUE_PENDING_DIR" CANDIDATE_QUEUE_ACTIVE_DIR="$CANDIDATE_QUEUE_ACTIVE_DIR" python3 - <<'PYQUEUESTATUS' 2>/dev/null || true
+import datetime, json, os, pathlib
+pending_root = pathlib.Path(os.environ['CANDIDATE_QUEUE_PENDING_DIR'])
+active_root = pathlib.Path(os.environ['CANDIDATE_QUEUE_ACTIVE_DIR'])
+active_count = sum(1 for p in active_root.glob('*.json') if p.is_file()) if active_root.is_dir() else 0
+for index, queue_path in enumerate(sorted(pending_root.glob('*.json')), start=1):
+    try:
+        queue = json.loads(queue_path.read_text(encoding='utf-8'))
+        candidate_dir = pathlib.Path(str(queue.get('candidate_dir') or ''))
+        manifest = json.loads((candidate_dir / 'manifest.json').read_text(encoding='utf-8'))
+        status = manifest.get('discord_status') or {}
+        channel_id = str(status.get('channel_id') or '')
+        message_id = str(status.get('message_id') or '')
+        candidate_id = str(manifest.get('id') or queue.get('id') or '')
+        display_id = str(manifest.get('display_id') or queue.get('display_id') or candidate_id)
+        if not channel_id or not message_id or not candidate_id:
+            continue
+        position = active_count + index
+        diff = manifest.get('diff_stats') or {}
+        count = len(manifest.get('changed_files') or [])
+        summary = str(diff.get('summary') or '').strip()
+        queue.update({
+            'state': 'queued',
+            'current_position': position,
+            'position_updated_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        })
+        tmp = queue_path.with_name('.' + queue_path.name + '.tmp')
+        tmp.write_text(json.dumps(queue, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+        os.replace(tmp, queue_path)
+        detail = 'Será iniciada em seguida.' if position == 1 else f'{position - 1} atualização(ões) antes desta.'
+        lines = [f'`{display_id}`', f'Posição atual: **{position}**', detail]
+        if count:
+            lines.append(f'{count} arquivo(s) preparado(s)' + (f' · {summary}' if summary else ''))
+        payload = {
+            'channel_id': channel_id,
+            'message_id': message_id,
+            'status': 'queued',
+            'title': '📦 Atualização na fila',
+            'description': '\n'.join(lines),
+            'candidate_id': candidate_id,
+            'display_id': display_id,
+            'event_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'control': {'enabled': True, 'mode': 'cancel', 'candidate_id': candidate_id},
+        }
+        print(json.dumps(payload, ensure_ascii=False, separators=(',', ':')))
+    except Exception:
+        continue
+PYQUEUESTATUS
+  )
+}
+
+prune_update_artifacts() {
+  local done_days="${DISCORD_AUTO_UPDATE_DONE_RETENTION_DAYS:-7}"
+  local failed_days="${DISCORD_AUTO_UPDATE_FAILED_RETENTION_DAYS:-30}"
+  local cancelled_days="${DISCORD_AUTO_UPDATE_CANCELLED_RETENTION_DAYS:-7}"
+  local outbox_days="${DISCORD_AUTO_UPDATE_OUTBOX_RETENTION_DAYS:-7}"
+  [[ "$done_days" =~ ^[0-9]+$ ]] || done_days=7
+  [[ "$failed_days" =~ ^[0-9]+$ ]] || failed_days=30
+  [[ "$cancelled_days" =~ ^[0-9]+$ ]] || cancelled_days=7
+  [[ "$outbox_days" =~ ^[0-9]+$ ]] || outbox_days=7
+  find "$CANDIDATE_ROOT/done" -mindepth 1 -maxdepth 1 -mtime "+$done_days" -exec rm -rf -- {} + 2>/dev/null || true
+  find "$CANDIDATE_ROOT/failed" -mindepth 1 -maxdepth 1 -mtime "+$failed_days" -exec rm -rf -- {} + 2>/dev/null || true
+  find "$CANDIDATE_ROOT/cancelled" -mindepth 1 -maxdepth 1 -mtime "+$cancelled_days" -exec rm -rf -- {} + 2>/dev/null || true
+  find "$CANDIDATE_QUEUE_DONE_DIR" -type f -mtime "+$done_days" -delete 2>/dev/null || true
+  find "$CANDIDATE_QUEUE_FAILED_DIR" -type f -mtime "+$failed_days" -delete 2>/dev/null || true
+  find "$CANDIDATE_QUEUE_CANCELLED_DIR" -type f -mtime "+$cancelled_days" -delete 2>/dev/null || true
+  find "$UPDATE_STATUS_OUTBOX_DIR" -type f -name '*.json' -mtime "+$outbox_days" -delete 2>/dev/null || true
+}
+
 git_add_changed_files_or_reject() {
   local context="${1:-git add}"
   [[ -n "${CHANGED_FILES_RAW//[[:space:]]/}" ]] || return 0
@@ -1355,7 +1573,7 @@ git_add_changed_files_or_reject() {
   fi
 
   reject_local_candidate_safely \
-    "Falha ao aplicar update" \
+    "Falha ao aplicar atualização" \
     "Não consegui preparar os arquivos do ZIP. A VPS foi restaurada e o candidato foi arquivado." \
     "$context: ${LAST_ERROR_STDERR:-git add falhou}"
 }
@@ -1386,124 +1604,173 @@ path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
 PYSTATE
 }
 
+send_update_status_payload() {
+  local payload_json="${1:-{}}"
+  local final_delivery="${2:-0}"
+  UPDATE_PAYLOAD_JSON="$payload_json" FINAL_DELIVERY="$final_delivery" \
+  BOT_HEALTH_URL="$BOT_HEALTH_URL" REPO_DIR="$REPO_DIR" UPDATE_STATUS_OUTBOX_DIR="$UPDATE_STATUS_OUTBOX_DIR" python3 - <<'PYSENDSTATUS' 2>/dev/null || true
+import json, os, pathlib, time, urllib.request
+try:
+    payload = json.loads(os.environ.get('UPDATE_PAYLOAD_JSON') or '{}')
+except Exception:
+    raise SystemExit(0)
+if not isinstance(payload, dict) or not payload.get('channel_id') or not payload.get('message_id'):
+    raise SystemExit(0)
+url = (os.environ.get('BOT_HEALTH_URL') or 'http://127.0.0.1:10000/health').replace('/health', '/internal/update/zip-status')
+headers = {'Content-Type': 'application/json'}
+try:
+    env_path = pathlib.Path(os.environ.get('REPO_DIR', '/home/ubuntu/bot')) / '.env'
+    if env_path.exists():
+        for line in env_path.read_text(encoding='utf-8', errors='ignore').splitlines():
+            if line.startswith('BOT_INTERNAL_UPDATE_TOKEN='):
+                token = line.split('=', 1)[1].strip().strip('"').strip("'")
+                if token:
+                    headers['X-Update-Token'] = token
+                break
+except Exception:
+    pass
+body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+final_delivery = str(os.environ.get('FINAL_DELIVERY') or '0').lower() in {'1', 'true', 'yes'}
+attempts = 4 if final_delivery else 1
+ok = False
+for attempt in range(attempts):
+    try:
+        req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+        with urllib.request.urlopen(req, timeout=6) as response:
+            parsed = json.loads(response.read().decode('utf-8', errors='ignore') or '{}')
+        if parsed.get('ok'):
+            ok = True
+            break
+    except Exception:
+        pass
+    if attempt + 1 < attempts:
+        time.sleep(1.5 * (attempt + 1))
+if ok or not final_delivery:
+    raise SystemExit(0)
+outbox = pathlib.Path(os.environ.get('UPDATE_STATUS_OUTBOX_DIR') or '/tmp/update-status-outbox')
+try:
+    outbox.mkdir(parents=True, exist_ok=True)
+    name = f"{int(time.time() * 1000)}-{payload.get('channel_id')}-{payload.get('message_id')}.json"
+    tmp = outbox / ('.' + name + '.tmp')
+    tmp.write_text(json.dumps({'payload': payload, 'created_at': time.time()}, ensure_ascii=False, indent=2), encoding='utf-8')
+    os.replace(tmp, outbox / name)
+except Exception:
+    pass
+PYSENDSTATUS
+}
+
+flush_update_status_outbox() {
+  mkdir -p "$UPDATE_STATUS_OUTBOX_DIR" 2>/dev/null || true
+  BOT_HEALTH_URL="$BOT_HEALTH_URL" REPO_DIR="$REPO_DIR" UPDATE_STATUS_OUTBOX_DIR="$UPDATE_STATUS_OUTBOX_DIR" python3 - <<'PYFLUSHSTATUS' 2>/dev/null || true
+import json, os, pathlib, urllib.request
+root = pathlib.Path(os.environ.get('UPDATE_STATUS_OUTBOX_DIR') or '/tmp/update-status-outbox')
+if not root.is_dir():
+    raise SystemExit(0)
+url = (os.environ.get('BOT_HEALTH_URL') or 'http://127.0.0.1:10000/health').replace('/health', '/internal/update/zip-status')
+headers = {'Content-Type': 'application/json'}
+try:
+    env_path = pathlib.Path(os.environ.get('REPO_DIR', '/home/ubuntu/bot')) / '.env'
+    if env_path.exists():
+        for line in env_path.read_text(encoding='utf-8', errors='ignore').splitlines():
+            if line.startswith('BOT_INTERNAL_UPDATE_TOKEN='):
+                token = line.split('=', 1)[1].strip().strip('"').strip("'")
+                if token:
+                    headers['X-Update-Token'] = token
+                break
+except Exception:
+    pass
+for path in sorted(root.glob('*.json'))[:20]:
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        payload = data.get('payload') if isinstance(data, dict) else None
+        if not isinstance(payload, dict):
+            path.unlink(missing_ok=True)
+            continue
+        req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode('utf-8'), headers=headers, method='POST')
+        with urllib.request.urlopen(req, timeout=5) as response:
+            result = json.loads(response.read().decode('utf-8', errors='ignore') or '{}')
+        if result.get('ok'):
+            path.unlink(missing_ok=True)
+    except Exception:
+        continue
+PYFLUSHSTATUS
+}
+
 notify_zip_status_message() {
   local status="${1:-info}"
-  local title="${2:-Update}"
+  local title="${2:-Atualização}"
   local description="${3:-}"
+  local final_delivery=0
+  [[ "$status" =~ ^(success|ok|warn|error|done|failed)$ ]] && final_delivery=1
   if (( REMOTE_CANDIDATE_MODE == 1 )); then
-    post_direct_update_message "$REMOTE_STATUS_CHANNEL_ID" "$REMOTE_STATUS_MESSAGE_ID" "$status" "$title" "$description" "${ZIP_STATUS_CONTROL_JSON:-}" || true
+    post_direct_update_message "$REMOTE_STATUS_CHANNEL_ID" "$REMOTE_STATUS_MESSAGE_ID" "$status" "$title" "$description" "${ZIP_STATUS_CONTROL_JSON:-}"
     return 0
   fi
   (( LOCAL_CANDIDATE_MODE == 1 )) || return 0
   [[ -n "${LOCAL_CANDIDATE_DIR:-}" && -f "$LOCAL_CANDIDATE_DIR/manifest.json" ]] || return 0
-  MANIFEST_PATH="$LOCAL_CANDIDATE_DIR/manifest.json" \
-  STATUS_VALUE="$status" TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" \
-  ZIP_STATUS_CONTROL_JSON="${ZIP_STATUS_CONTROL_JSON:-}" \
-  BOT_HEALTH_URL="$BOT_HEALTH_URL" REPO_DIR="$REPO_DIR" python3 - <<'PYSTATUS' 2>/dev/null || true
-import json, os, urllib.request, urllib.error
-from pathlib import Path
-manifest_path = Path(os.environ["MANIFEST_PATH"])
-try:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-except Exception:
-    raise SystemExit(0)
-info = manifest.get("discord_status") or {}
-channel_id = info.get("channel_id")
-message_id = info.get("message_id")
-if not channel_id or not message_id:
-    raise SystemExit(0)
+  local channel_id message_id payload
+  channel_id="$(json_field_from_file "$LOCAL_CANDIDATE_DIR/manifest.json" discord_status.channel_id 2>/dev/null || true)"
+  message_id="$(json_field_from_file "$LOCAL_CANDIDATE_DIR/manifest.json" discord_status.message_id 2>/dev/null || true)"
+  [[ -n "$channel_id" && -n "$message_id" ]] || return 0
+  payload="$(CHANNEL_ID_VALUE="$channel_id" MESSAGE_ID_VALUE="$message_id" STATUS_VALUE="$status" TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" CONTROL_VALUE="${ZIP_STATUS_CONTROL_JSON:-}" CANDIDATE_ID_VALUE="${LOCAL_CANDIDATE_ID:-}" DISPLAY_ID_VALUE="${LOCAL_CANDIDATE_DISPLAY_ID:-}" python3 - <<'PYBUILDPAYLOAD'
+import datetime, json, os
 payload = {
-    "channel_id": str(channel_id),
-    "message_id": str(message_id),
-    "status": os.environ.get("STATUS_VALUE") or "info",
-    "title": os.environ.get("TITLE_VALUE") or "Update",
-    "description": os.environ.get("DESCRIPTION_VALUE") or "",
+    'channel_id': os.environ.get('CHANNEL_ID_VALUE') or '',
+    'message_id': os.environ.get('MESSAGE_ID_VALUE') or '',
+    'status': os.environ.get('STATUS_VALUE') or 'info',
+    'title': os.environ.get('TITLE_VALUE') or 'Atualização',
+    'description': os.environ.get('DESCRIPTION_VALUE') or '',
+    'candidate_id': os.environ.get('CANDIDATE_ID_VALUE') or '',
+    'display_id': os.environ.get('DISPLAY_ID_VALUE') or '',
+    'event_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }
 try:
-    control_raw = os.environ.get("ZIP_STATUS_CONTROL_JSON") or ""
-    if control_raw.strip():
-        control = json.loads(control_raw)
-        if isinstance(control, dict):
-            payload["control"] = control
+    control = json.loads(os.environ.get('CONTROL_VALUE') or '')
+    if isinstance(control, dict):
+        payload['control'] = control
 except Exception:
     pass
-url = (os.environ.get("BOT_HEALTH_URL") or "http://127.0.0.1:10000/health").replace("/health", "/internal/update/zip-status")
-headers = {"Content-Type": "application/json"}
-# Mesmo token do endpoint interno de reload, quando configurado.
-try:
-    env_path = Path(os.environ.get("REPO_DIR", "/home/ubuntu/bot")) / ".env"
-    if env_path.exists():
-        for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            if line.startswith("BOT_INTERNAL_UPDATE_TOKEN="):
-                token = line.split("=", 1)[1].strip().strip('"').strip("'")
-                if token:
-                    headers["X-Update-Token"] = token
-                break
-except Exception:
-    pass
-req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-try:
-    with urllib.request.urlopen(req, timeout=4) as resp:
-        resp.read()
-except Exception:
-    # Notificação visual é best-effort; nunca pode quebrar o updater.
-    pass
-PYSTATUS
+print(json.dumps(payload, ensure_ascii=False))
+PYBUILDPAYLOAD
+)"
+  send_update_status_payload "$payload" "$final_delivery"
 }
 
 post_direct_update_message() {
   local channel_id="${1:-}"
   local message_id="${2:-}"
   local status="${3:-info}"
-  local title="${4:-Update}"
+  local title="${4:-Atualização}"
   local description="${5:-}"
   local control_json="${6:-}"
+  local final_delivery=0 payload
   [[ -n "$channel_id" && -n "$message_id" ]] || return 0
-  CHANNEL_ID_VALUE="$channel_id" MESSAGE_ID_VALUE="$message_id" STATUS_VALUE="$status" \
-  TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" ZIP_STATUS_CONTROL_JSON="$control_json" \
-  BOT_HEALTH_URL="$BOT_HEALTH_URL" REPO_DIR="$REPO_DIR" python3 - <<'PYDIRECT' 2>/dev/null || true
-import json, os, urllib.request
+  [[ "$status" =~ ^(success|ok|warn|error|done|failed)$ ]] && final_delivery=1
+  payload="$(CHANNEL_ID_VALUE="$channel_id" MESSAGE_ID_VALUE="$message_id" STATUS_VALUE="$status" TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" CONTROL_VALUE="$control_json" python3 - <<'PYDIRECTPAYLOAD'
+import datetime, json, os
 payload = {
-    "channel_id": os.environ.get("CHANNEL_ID_VALUE") or "",
-    "message_id": os.environ.get("MESSAGE_ID_VALUE") or "",
-    "status": os.environ.get("STATUS_VALUE") or "info",
-    "title": os.environ.get("TITLE_VALUE") or "Update",
-    "description": os.environ.get("DESCRIPTION_VALUE") or "",
+    'channel_id': os.environ.get('CHANNEL_ID_VALUE') or '',
+    'message_id': os.environ.get('MESSAGE_ID_VALUE') or '',
+    'status': os.environ.get('STATUS_VALUE') or 'info',
+    'title': os.environ.get('TITLE_VALUE') or 'Atualização',
+    'description': os.environ.get('DESCRIPTION_VALUE') or '',
+    'event_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }
 try:
-    raw = os.environ.get("ZIP_STATUS_CONTROL_JSON") or ""
-    if raw.strip():
-        control = json.loads(raw)
-        if isinstance(control, dict):
-            payload["control"] = control
+    control = json.loads(os.environ.get('CONTROL_VALUE') or '')
+    if isinstance(control, dict):
+        payload['control'] = control
 except Exception:
     pass
-url = (os.environ.get("BOT_HEALTH_URL") or "http://127.0.0.1:10000/health").replace("/health", "/internal/update/zip-status")
-headers = {"Content-Type": "application/json"}
-try:
-    from pathlib import Path
-    env_path = Path(os.environ.get("REPO_DIR", "/home/ubuntu/bot")) / ".env"
-    if env_path.exists():
-        for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            if line.startswith("BOT_INTERNAL_UPDATE_TOKEN="):
-                token = line.split("=", 1)[1].strip().strip('"').strip("'")
-                if token:
-                    headers["X-Update-Token"] = token
-                break
-except Exception:
-    pass
-req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-try:
-    with urllib.request.urlopen(req, timeout=4) as resp:
-        resp.read()
-except Exception:
-    pass
-PYDIRECT
+print(json.dumps(payload, ensure_ascii=False))
+PYDIRECTPAYLOAD
+)"
+  send_update_status_payload "$payload" "$final_delivery"
 }
 
 create_direct_update_message() {
   local status="${1:-applying}"
-  local title="${2:-$UPDATE_TITLE_EMOJI Aplicando update...}"
+  local title="${2:-$UPDATE_TITLE_EMOJI Aplicando atualização...}"
   local description="${3:-}"
   STATUS_VALUE="$status" TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" \
   BOT_HEALTH_URL="$BOT_HEALTH_URL" REPO_DIR="$REPO_DIR" python3 - <<'PYCREATE' 2>/dev/null || true
@@ -1511,7 +1778,7 @@ import json, os, shlex, urllib.request
 from pathlib import Path
 payload = {
     "status": os.environ.get("STATUS_VALUE") or "applying",
-    "title": os.environ.get("TITLE_VALUE") or "Update",
+    "title": os.environ.get("TITLE_VALUE") or "Atualização",
     "description": os.environ.get("DESCRIPTION_VALUE") or "",
 }
 url = (os.environ.get("BOT_HEALTH_URL") or "http://127.0.0.1:10000/health").replace("/health", "/internal/update/create-zip-status")
@@ -1539,42 +1806,30 @@ except Exception:
 PYCREATE
 }
 
-zip_progress_now_ms() {
-  date +%s%3N 2>/dev/null || python3 - <<'PYMS'
-import time
-print(int(time.time() * 1000))
-PYMS
-}
-
-zip_progress_format_ms() {
-  local ms="${1:-0}"
-  python3 - "$ms" <<'PYFMT'
-import sys
-try:
-    ms = int(str(sys.argv[1] or "0"))
-except Exception:
-    ms = 0
-if ms < 0:
-    ms = 0
-if ms >= 60000:
-    minutes = ms // 60000
-    seconds = (ms % 60000) / 1000
-    print(f"{minutes}m {seconds:04.1f}s")
-else:
-    print(f"{ms / 1000:.1f}s")
-PYFMT
-}
-
 zip_progress_title() {
+  local stage_label="${1:-Processando atualização}"
+  local lowered="${stage_label,,}"
   if (( ROLLBACK_CONTROL_MODE == 1 )); then
     if [[ "${ROLLBACK_REQUEST_ACTION:-rollback}" == "redo" ]]; then
-      printf '%s Reaplicando update...' "$UPDATE_TITLE_EMOJI"
+      printf '↪️ Reaplicando atualização'
     else
-      printf '%s Revertendo update...' "$UPDATE_TITLE_EMOJI"
+      printf '↩️ Revertendo atualização'
     fi
     return 0
   fi
-  printf '%s Aplicando update...' "$UPDATE_TITLE_EMOJI"
+  if [[ "$lowered" == *"fila"* || "$lowered" == *"aguard"* ]]; then
+    printf '📦 Atualização na fila'
+  elif [[ "$lowered" == *"reinici"* || "$lowered" == *"recarreg"* ]]; then
+    printf '♻️ Reiniciando serviços'
+  elif [[ "$lowered" == *"public"* || "$lowered" == *"github"* || "$lowered" == *"commit"* || "$lowered" == *"finaliz"* ]]; then
+    printf '🚀 Publicando atualização'
+  elif [[ "$lowered" == *"verific"* || "$lowered" == *"health"* || "$lowered" == *"comando"* ]]; then
+    printf '🩺 Verificando atualização'
+  elif [[ "$lowered" == *"valid"* || "$lowered" == *"confer"* || "$lowered" == *"segurança"* || "$lowered" == *"integridade"* ]]; then
+    printf '🔎 Validando atualização'
+  else
+    printf '⚙️ Aplicando atualização'
+  fi
 }
 
 zip_progress_status() {
@@ -1585,50 +1840,63 @@ zip_progress_status() {
   fi
 }
 
-zip_progress_publish() {
-  local stage_label="${1:-Preparando}"
-  local detail="${2:-}"
-  local title status description
-  if (( ZIP_PROGRESS_STAGE_STARTED_MS <= 0 )); then
-    ZIP_PROGRESS_STAGE_STARTED_MS="$(zip_progress_now_ms)"
+zip_progress_identifier() {
+  if (( LOCAL_CANDIDATE_MODE == 1 )); then
+    printf '%s' "${LOCAL_CANDIDATE_DISPLAY_ID:-$LOCAL_CANDIDATE_ID}"
+  elif (( ROLLBACK_CONTROL_MODE == 1 )); then
+    printf '%s' "${ROLLBACK_REQUEST_ID:-controle}"
+  elif [[ -n "${SHORT_TO:-}" ]]; then
+    printf 'commit %s' "$SHORT_TO"
+  else
+    printf 'atualização'
   fi
-  title="$(zip_progress_title)"
+}
+
+zip_progress_publish() {
+  local stage_label="${1:-Processando atualização}"
+  local detail="${2:-}"
+  local title status description identifier step
+  title="$(zip_progress_title "$stage_label")"
   status="$(zip_progress_status)"
   description=""
   if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
-    description="$ZIP_PROGRESS_HISTORY"$'\n'
+    description="$ZIP_PROGRESS_HISTORY"$'
+'
   fi
   description+="$UPDATE_STAGE_EMOJI **$stage_label**"
   if [[ -n "${detail//[[:space:]]/}" ]]; then
-    description+=$'\n'"$detail"
+    description+=$'
+'"$detail"
   fi
+  identifier="$(zip_progress_identifier)"
+  step=$((ZIP_PROGRESS_COMPLETED_COUNT + 1))
+  (( step > ZIP_PROGRESS_TOTAL_STEPS )) && step="$ZIP_PROGRESS_TOTAL_STEPS"
+  description+=$'
+'"-# $identifier · etapa $step/$ZIP_PROGRESS_TOTAL_STEPS"
   if (( ROLLBACK_CONTROL_MODE == 1 )); then
     post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "$status" "$title" "$description" || true
   else
     notify_zip_status_message "$status" "$title" "$description" || true
   fi
+  update_local_candidate_heartbeat "active" "" "$stage_label"
 }
 
 zip_progress_done() {
   local done_label="${1:-}"
-  local now elapsed suffix
   [[ -n "${done_label//[[:space:]]/}" ]] || return 0
-  suffix=""
-  if (( ZIP_PROGRESS_STAGE_STARTED_MS > 0 )); then
-    now="$(zip_progress_now_ms)"
-    elapsed=$((now - ZIP_PROGRESS_STAGE_STARTED_MS))
-    suffix=" ($(zip_progress_format_ms "$elapsed"))"
-  fi
+  ZIP_PROGRESS_COMPLETED_COUNT=$((ZIP_PROGRESS_COMPLETED_COUNT + 1))
   if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
-    ZIP_PROGRESS_HISTORY+=$'\n'
+    ZIP_PROGRESS_HISTORY+=$'
+'
   fi
-  ZIP_PROGRESS_HISTORY+="-# ✅ $done_label$suffix"
-  ZIP_PROGRESS_STAGE_STARTED_MS=0
+  ZIP_PROGRESS_HISTORY+="✅ $done_label"
+  ZIP_PROGRESS_HISTORY="$(printf '%s
+' "$ZIP_PROGRESS_HISTORY" | tail -n 4)"
 }
 
 zip_progress_done_and_publish() {
   local done_label="${1:-}"
-  local next_label="${2:-Preparando}"
+  local next_label="${2:-Processando atualização}"
   local detail="${3:-}"
   zip_progress_done "$done_label"
   zip_progress_publish "$next_label" "$detail"
@@ -1945,7 +2213,7 @@ prepare_rollback_request_update() {
     sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
     local retry_control
     retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
-    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Update bloqueado" "CallKeeper é protegido e não foi tocado." "$retry_control" || true
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "Atualização bloqueada" "CallKeeper é protegido e não foi tocado." "$retry_control" || true
     archive_rollback_request "failed"
     exit 0
   fi
@@ -1989,20 +2257,20 @@ finalize_rollback_request_success() {
   duration="$(human_duration "$SECONDS")"
   changed_files="$(format_changed_files)"
   diff_summary="$(format_diff_total_summary)"
-  if [[ "$FAST_RELOAD_STATUS" == "OK" ]]; then
-    apply_mode="cog recarregada"
+  if [[ "$FAST_RELOAD_STATUS" == OK* ]]; then
+    apply_mode="recarga controlada de cog"
   elif (( BOT_CHANGED == 0 )); then
-    apply_mode="sem restart do bot"
+    apply_mode="sem reinício do bot"
   else
-    apply_mode="restart completo"
+    apply_mode="reinício completo"
   fi
   if [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]]; then
-    title="↪️ Update reaplicado"
-    summary="Update reaplicado e tudo está saudável."
+    title="↪️ Atualização reaplicada"
+    summary="Atualização reaplicada e estabilidade confirmada."
     next_mode="rollback"
   else
-    title="↩️ Update revertido"
-    summary="Reversão aplicada e tudo está saudável."
+    title="↩️ Atualização revertida"
+    summary="Reversão aplicada e estabilidade confirmada."
     next_mode="redo"
   fi
   control_json="$(rollback_control_json "$next_mode" "$REMOTE_COMMIT" "$REMOTE_COMMIT" "$ROLLBACK_UPDATE_FROM" "$ROLLBACK_UPDATE_TO" "$ROLLBACK_ROLLBACK_COMMIT" "$ROLLBACK_REDO_COMMIT")"
@@ -2248,18 +2516,35 @@ prepare_local_candidate_update() {
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
   SHORT_TO="local"
   mark_update_timing "fetch"
-  zip_progress_done_and_publish "Base conferida" "Validando segurança do ZIP"
+  zip_progress_done_and_publish "Base conferida" "Validando integridade do pacote"
+
+  local max_attempts="${DISCORD_AUTO_UPDATE_MAX_ATTEMPTS:-3}"
+  [[ "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts=3
+  (( max_attempts < 1 )) && max_attempts=1
+  if [[ "${LOCAL_CANDIDATE_ATTEMPT:-0}" =~ ^[0-9]+$ ]] && (( LOCAL_CANDIDATE_ATTEMPT > max_attempts )); then
+    reject_local_candidate_safely       "Atualização arquivada"       "O pacote excedeu o limite de tentativas automáticas e não foi aplicado."       "tentativa ${LOCAL_CANDIDATE_ATTEMPT}/${max_attempts}; reenvie o patch após revisar a falha anterior"
+  fi
+
+  STAGE="validação de integridade do candidato"
+  if ! verify_local_candidate_integrity; then
+    reject_local_candidate_safely \
+      "Atualização bloqueada" \
+      "O pacote não passou pela verificação de integridade ou expirou. Nenhuma alteração foi aplicada." \
+      "$LOCAL_CANDIDATE_VERIFY_ERROR"
+  fi
+  update_local_candidate_heartbeat "validated"
+  zip_progress_done_and_publish "Integridade confirmada" "Analisando segurança"
 
   STAGE="validação de segurança do ZIP"
   local suspicion_reason=""
   suspicion_reason="$(local_candidate_suspicion_reason 2>/dev/null || true)"
   if [[ -n "${suspicion_reason//[[:space:]]/}" ]]; then
     reject_local_candidate_safely \
-      "Update bloqueado" \
+      "Atualização bloqueada" \
       "Esse arquivo parece uma base completa ou contém caminhos suspeitos. Nenhuma alteração foi aplicada." \
       "$suspicion_reason"
   fi
-  zip_progress_done_and_publish "Segurança conferida" "Validando estado local"
+  zip_progress_done_and_publish "Segurança confirmada" "Validando estado local"
 
   if [[ -n "$LOCAL_CANDIDATE_BASE_COMMIT" && "$LOCAL_CANDIDATE_BASE_COMMIT" != "$REMOTE_COMMIT" ]]; then
     if [[ -f "${LOCAL_CANDIDATE_PATCH_FILE:-}" ]]; then
@@ -2269,7 +2554,7 @@ prepare_local_candidate_update() {
       base_conflict_reason="$(local_candidate_base_conflict_reason 2>/dev/null || true)"
       if [[ -n "${base_conflict_reason//[[:space:]]/}" ]]; then
         MANUAL_FAILURE_ALERT_SENT=1
-        notify_zip_status_message "error" "Update com conflito" "Esse update ficou incompatível com outro update aplicado antes dele. Nada foi aplicado para este item; os próximos continuam no queue." || true
+        notify_zip_status_message "error" "Atualização com conflito" "Esta atualização ficou incompatível com outra aplicada antes dela. Nada foi aplicado neste item; os próximos permanecem na fila." || true
         archive_local_candidate "failed"
         send_error "Update com conflito na fila" "Resumo: O ZIP foi preparado sobre outro commit e conflitou com mudanças já aplicadas. Nada foi aplicado e nada foi enviado ao GitHub para este item.
 Branch: $BRANCH
@@ -2308,16 +2593,19 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   zip_progress_done_and_publish "Estado local validado" "Preparando arquivos"
 
   if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
+    notify_zip_status_message "success" "Nenhuma alteração necessária" "O pacote já corresponde ao estado atual da VPS. Nenhum arquivo foi modificado." || true
     archive_local_candidate "done"
     logger -t "$LOG_TAG" "Candidato local sem arquivos alterados"
+    trigger_updater_if_queue_pending
     exit 0
   fi
 
   classify_changed_files
   if (( CALLKEEPER_CHANGED == 1 )) && [[ "${UPDATE_TOUCH_CALLKEEPER:-}" != "1" || "${CALLKEEPER_UPDATE_ALLOWED:-}" != "1" ]]; then
     CHANGED_FILES="$(format_changed_files)"
+    notify_zip_status_message "error" "Atualização bloqueada" "O pacote contém arquivos protegidos do CallKeeper. Nenhuma alteração foi aplicada." || true
     archive_local_candidate "failed"
-    send_error "Update bloqueado: CallKeeper protegido" "Resumo: Update bloqueado antes de aplicar porque contém arquivo protegido do CallKeeper.
+    send_error "Atualização bloqueada: CallKeeper protegido" "Resumo: Atualização bloqueada antes de aplicar porque contém arquivo protegido do CallKeeper.
 Branch: $BRANCH
 Arquivos:
 $CHANGED_FILES
@@ -2339,7 +2627,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
       normalize_changed_file_permissions "falha no patch 3-way" || true
       sudo -u ubuntu -H git reset --hard "${PREVIOUS_COMMIT:-HEAD}" >/dev/null 2>&1 || true
       cleanup_local_candidate_new_files_after_reset
-      notify_zip_status_message "error" "Update com conflito" "Esse update não conseguiu ser mesclado com os updates anteriores. Nada foi aplicado para este item; os próximos continuam no queue." || true
+      notify_zip_status_message "error" "Atualização com conflito" "Esta atualização não pôde ser mesclada com as anteriores. Nada foi aplicado neste item; os próximos permanecem na fila." || true
       archive_local_candidate "failed"
       send_error "Update com conflito na fila" "Resumo: O updater tentou mesclar esse ZIP sobre a base atual usando 3-way, mas encontrou conflito. Nada foi aplicado e nada foi enviado ao GitHub para este item.
 Branch: $BRANCH
@@ -2363,9 +2651,10 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only || true)"
   CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --cached --numstat || true)"
   if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
-    local head_subject=""
-    head_subject="$(sudo -u ubuntu -H git log -1 --pretty=%s HEAD 2>/dev/null || true)"
-    if [[ "$CURRENT_COMMIT" == "$REMOTE_COMMIT" && "$head_subject" == "$LOCAL_CANDIDATE_COMMIT_MESSAGE" ]]; then
+    local head_message=""
+    head_message="$(sudo -u ubuntu -H git log -1 --pretty=%B HEAD 2>/dev/null || true)"
+    if [[ "$CURRENT_COMMIT" == "$REMOTE_COMMIT" ]] && printf '%s
+' "$head_message" | grep -Fqx "Candidate-ID: $LOCAL_CANDIDATE_ID"; then
       LOCAL_CANDIDATE_PUBLISHED=1
       REMOTE_COMMIT="$CURRENT_COMMIT"
       SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
@@ -2373,8 +2662,10 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
       logger -t "$LOG_TAG" "Candidato local já publicado; retomando finalização visual/webhook."
       return 0
     fi
+    notify_zip_status_message "success" "Nenhuma alteração necessária" "O pacote já corresponde ao estado atual da VPS. Nenhum arquivo foi modificado." || true
     archive_local_candidate "done"
     logger -t "$LOG_TAG" "Candidato local não mudou o repositório"
+    trigger_updater_if_queue_pending
     exit 0
   fi
   classify_changed_files
@@ -2392,7 +2683,12 @@ publish_local_candidate_after_validation() {
   STAGE="commit local validado"
   zip_progress_publish "Fazendo commit..."
   git_add_changed_files_or_reject "git add antes do commit"
-  sudo -u ubuntu -H git commit -m "$LOCAL_CANDIDATE_COMMIT_MESSAGE"
+  local commit_body
+  commit_body="Candidate-ID: $LOCAL_CANDIDATE_ID
+Update-ID: $LOCAL_CANDIDATE_DISPLAY_ID
+Discord-Author-ID: ${LOCAL_CANDIDATE_SOURCE_AUTHOR_ID:-desconhecido}
+Source-ZIP-SHA256: ${LOCAL_CANDIDATE_ZIP_SHA256:-indisponível}"
+  sudo -u ubuntu -H git commit -m "$LOCAL_CANDIDATE_COMMIT_MESSAGE" -m "$commit_body"
   REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
   SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
   mark_update_timing "commit"
@@ -2542,19 +2838,29 @@ classify_changed_files() {
 }
 
 fast_reload_modules_for_changed_files() {
-  CHANGED_FILES_RAW_INPUT="$CHANGED_FILES_RAW" python3 - <<'PYFAST'
-import os, pathlib, sys
+  CHANGED_FILES_RAW_INPUT="$CHANGED_FILES_RAW" \
+  HOT_RELOAD_ALLOW="${DISCORD_AUTO_UPDATE_HOT_RELOAD_ALLOW:-}" \
+  HOT_RELOAD_DENY="${DISCORD_AUTO_UPDATE_HOT_RELOAD_DENY:-call_keeper,music,dashboard_sync,terminal_cmd}" \
+  python3 - <<'PYFAST'
+import os, pathlib, re
 raw = [line.strip() for line in (os.environ.get("CHANGED_FILES_RAW_INPUT") or "").splitlines() if line.strip()]
 if not raw:
     raise SystemExit(1)
+
+def names(value):
+    return {part.strip().removeprefix("cogs.").removesuffix(".py") for part in re.split(r"[,;\s]+", value or "") if part.strip()}
+
+allow = names(os.environ.get("HOT_RELOAD_ALLOW") or "")
+deny = names(os.environ.get("HOT_RELOAD_DENY") or "") | {"__init__", "call_keeper"}
 modules = []
 for path in raw:
     parts = pathlib.PurePosixPath(path).parts
     if len(parts) != 2 or parts[0] != "cogs" or not parts[1].endswith(".py"):
         raise SystemExit(1)
-    if parts[1] in {"__init__.py", "call_keeper.py"}:
+    name = parts[1][:-3]
+    if name in deny or (allow and name not in allow):
         raise SystemExit(1)
-    modules.append("cogs." + parts[1][:-3])
+    modules.append("cogs." + name)
 print("\n".join(dict.fromkeys(modules)))
 PYFAST
 }
@@ -2563,7 +2869,9 @@ try_fast_cog_reload() {
   local modules_text="${1:-}"
   local check_app_commands="${2:-0}"
   [[ -n "${modules_text//[[:space:]]/}" ]] || return 1
-  local payload token header_args=() response http_code
+  local payload token header_args=() response http_code verification_epoch restarts_before
+  verification_epoch="$(date +%s)"
+  restarts_before="$(service_restart_count "$SERVICE")"
   payload="$(MODULES_TEXT="$modules_text" CHECK_APP_COMMANDS="$check_app_commands" python3 - <<'PYPAYLOAD'
 import json, os
 mods = [line.strip() for line in (os.environ.get("MODULES_TEXT") or "").splitlines() if line.strip()]
@@ -2598,18 +2906,12 @@ PYOK
     return 1
   fi
   rm -f "$response"
-  STAGE="healthcheck pós reload rápido"
-  if refresh_bot_health_status; then
-    if has_real_warning_text "$BOT_WARNINGS_STATUS" || cogs_have_failures "$BOT_COGS_STATUS"; then
-      BOT_HEALTHCHECK_STATUS="OK com avisos"
-      UPDATE_HAS_WARNINGS=1
-    else
-      BOT_HEALTHCHECK_STATUS="OK (reload rápido)"
-    fi
-    FAST_RELOAD_STATUS="OK"
+  STAGE="estabilidade após reload rápido"
+  if verify_bot_after_restart "$verification_epoch" "$restarts_before" 0; then
+    FAST_RELOAD_STATUS="OK; estabilidade confirmada"
     return 0
   fi
-  FAST_RELOAD_STATUS="reload executado; health falhou; fallback restart"
+  FAST_RELOAD_STATUS="reload executado; estabilidade falhou; fallback restart"
   return 1
 }
 
@@ -2750,7 +3052,7 @@ Ação sugerida: deixe o repo limpo antes do updater. Normalmente: git restore <
 Duração: $duration
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
-  send_error "Falha no auto update: alterações locais" "$body"
+  send_error "Falha na atualização automática: alterações locais" "$body"
   exit 1
 }
 
@@ -3428,7 +3730,7 @@ rollback_after_failure() {
     cleanup_local_candidate_new_files_after_reset
     rollback_git_status="OK: repositório voltou para $(short_commit "$PREVIOUS_COMMIT")"
     if (( LOCAL_CANDIDATE_MODE == 1 )); then
-      archive_local_candidate "failed"
+      update_local_candidate_heartbeat "failed" "rollback após falha em $FAILED_STAGE" || true
       ROLLBACK_STATUS="aplicado para $(short_commit "$PREVIOUS_COMMIT"); GitHub não foi alterado"
     elif (( REMOTE_CANDIDATE_MODE == 1 )); then
       mark_remote_commit_rejected "$REMOTE_COMMIT" "health falhou após aplicar; rollback para $(short_commit "$PREVIOUS_COMMIT")"
@@ -3560,7 +3862,7 @@ on_error() {
   fi
   if (( LOCAL_CANDIDATE_MODE == 1 )); then
     cleanup_local_candidate_new_files_after_reset || true
-    archive_local_candidate "failed"
+    update_local_candidate_heartbeat "failed" "falha em $FAILED_STAGE" || true
   fi
 
   local dirty_status dirty_files
@@ -3606,12 +3908,13 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     archive_rollback_request "failed"
   else
     if (( LOCAL_CANDIDATE_MODE == 1 )); then
-      notify_zip_status_message "error" "Falha ao aplicar update" "A VPS foi restaurada quando possível e o candidato foi arquivado. Verifique o webhook/log interno." || true
+      notify_zip_status_message "error" "Falha ao aplicar atualização" "A VPS foi restaurada quando possível e o candidato foi arquivado. Verifique o canal de logs." || true
+      archive_local_candidate "failed"
     else
-      notify_zip_status_message "error" "Falha no update" "O updater falhou antes de concluir a finalização. Verifique o webhook/log interno." || true
+      notify_zip_status_message "error" "Falha na atualização" "O updater falhou antes de concluir a finalização. Verifique o webhook/log interno." || true
     fi
   fi
-  send_error "Falha no auto update" "$body"
+  send_error "Falha na atualização automática" "$body"
   exit "$exit_code"
 }
 
@@ -3620,6 +3923,10 @@ trap 'on_error' ERR
 
 SECONDS=0
 cd "$REPO_DIR"
+mkdir -p "$UPDATE_STATUS_OUTBOX_DIR" "$CANDIDATE_QUEUE_CANCELLED_DIR" "$CANDIDATE_ROOT/cancelled" 2>/dev/null || true
+prune_update_artifacts || true
+flush_update_status_outbox || true
+refresh_pending_queue_messages || true
 
 if load_pending_rollback_request; then
   logger -t "$LOG_TAG" "Controle de update recebido: $ROLLBACK_REQUEST_ACTION $ROLLBACK_REQUEST_ID"
@@ -3677,7 +3984,7 @@ $CHANGED_FILES
 Ação sugerida: Remova arquivos do CallKeeper ou faça um patch CallKeeper explícito e isolado.
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     mark_remote_commit_rejected "$REMOTE_COMMIT" "alteração protegida de CallKeeper"
-    send_error "Update bloqueado: CallKeeper protegido" "$body"
+    send_error "Atualização bloqueada: CallKeeper protegido" "$body"
     exit 0
   fi
 
@@ -3785,23 +4092,23 @@ fi
 
 if (( OVERALL_FATAL == 0 && UPDATE_HAS_WARNINGS == 0 )); then
   ALERT_TYPE="success"
-  ALERT_TITLE="✅ Update aplicado"
-  ALERT_SUMMARY="Update aplicado e tudo está saudável."
+  ALERT_TITLE="✅ Atualização concluída"
+  ALERT_SUMMARY="Atualização aplicada; processo ativo, extensões carregadas e estabilidade confirmada."
 elif (( OVERALL_FATAL == 0 )); then
   ALERT_TYPE="warn"
-  ALERT_TITLE="⚠️ Update aplicado com avisos"
-  ALERT_SUMMARY="Update aplicado, mas há avisos para revisar."
+  ALERT_TITLE="⚠️ Atualização concluída com avisos"
+  ALERT_SUMMARY="A atualização foi aplicada, mas há avisos que precisam de revisão."
 else
   ALERT_TYPE="warn"
-  ALERT_TITLE="⚠️ Update aplicado com alerta"
-  ALERT_SUMMARY="Update concluído com alerta. Verifique os pontos abaixo."
+  ALERT_TITLE="⚠️ Atualização concluída com alerta"
+  ALERT_SUMMARY="A atualização terminou com um alerta. Verifique os pontos abaixo."
 fi
 
-APPLY_MODE="restart completo"
-if [[ "$FAST_RELOAD_STATUS" == "OK" ]]; then
-  APPLY_MODE="cog recarregada"
+APPLY_MODE="reinício completo"
+if [[ "$FAST_RELOAD_STATUS" == OK* ]]; then
+  APPLY_MODE="recarga controlada de cog"
 elif (( BOT_CHANGED == 0 )); then
-  APPLY_MODE="sem restart do bot"
+  APPLY_MODE="sem reinício do bot"
 fi
 
 PUBLIC_WARNINGS=""
@@ -3826,34 +4133,46 @@ fi
 
 read_app_command_sync_status
 CHANGED_PROCESSES="$(format_changed_processes)"
+UPDATE_DISPLAY_ID="${LOCAL_CANDIDATE_DISPLAY_ID:-}"
+if [[ -z "${UPDATE_DISPLAY_ID//[[:space:]]/}" ]]; then
+  if (( ROLLBACK_CONTROL_MODE == 1 )); then
+    UPDATE_DISPLAY_ID="REV-$(short_commit "${REMOTE_COMMIT:-$ROLLBACK_NEW_COMMIT}")"
+  else
+    UPDATE_DISPLAY_ID="UPD-$(short_commit "${REMOTE_COMMIT:-$CURRENT_COMMIT}" | tr '[:lower:]' '[:upper:]')"
+  fi
+fi
+CHECKS_TEXT="✓ Bot — ${BOT_HEALTHCHECK_STATUS}
+✓ Python — ${PREFLIGHT_PY_STATUS}
+✓ Bash — ${PREFLIGHT_BASH_STATUS}
+✓ Cogs — ${PREFLIGHT_COG_IMPORT_STATUS}
+✓ Comandos — ${APP_COMMAND_SYNC_SUMMARY}"
+TIMINGS_TEXT="${UPDATER_TIMINGS:-sem etapas}, total=${DURATION}"
 BODY="Resumo: $ALERT_SUMMARY
+Identificador: $UPDATE_DISPLAY_ID
 Branch: $BRANCH
 Commit: ${SHORT_FROM} → ${SHORT_TO}
 Update: ${CHANGED_FILES_COUNT} arquivo(s) · $DIFF_TOTAL_SUMMARY
 Aplicação: $APPLY_MODE
 Processos alterados: $CHANGED_PROCESSES
+Duração: $DURATION
+Verificações:
+$CHECKS_TEXT
+Tempos: $TIMINGS_TEXT
 Arquivos:
-$CHANGED_FILES
-Duração: $DURATION"
+$CHANGED_FILES"
 
 if (( UPDATE_HAS_WARNINGS == 1 || OVERALL_FATAL == 1 )); then
-  BODY+=$'
-'"Bot: $BOT_HEALTHCHECK_STATUS"
-  BODY+=$'
-'"Cogs: $BOT_COGS_STATUS"
-  BODY+=$'
-'"Health: $BOT_HEALTH_DETAIL_STATUS"
+  BODY+=$'\n'"Bot: $BOT_HEALTHCHECK_STATUS"
+  BODY+=$'\n'"Cogs: $BOT_COGS_STATUS"
+  BODY+=$'\n'"Health: $BOT_HEALTH_DETAIL_STATUS"
 fi
 if (( UPDATE_HAS_WARNINGS == 1 )); then
-  BODY+=$'
-'"Avisos: $PUBLIC_WARNINGS"
+  BODY+=$'\n'"Avisos: $PUBLIC_WARNINGS"
 fi
 if [[ -n "${APP_COMMAND_SYNC_WEBHOOK_BLOCK//[[:space:]]/}" ]]; then
-  BODY+=$'
-'"$APP_COMMAND_SYNC_WEBHOOK_BLOCK"
+  BODY+=$'\n'"$APP_COMMAND_SYNC_WEBHOOK_BLOCK"
 fi
-BODY+=$'
-'"Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+BODY+=$'\n'"Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 logger -t "$LOG_TAG" "timings: ${UPDATER_TIMINGS:-sem etapas}; total=$DURATION"
 if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
   zip_progress_publish "Finalizando..."
@@ -3861,12 +4180,14 @@ fi
 
 ZIP_STATUS_DESCRIPTION="$ALERT_SUMMARY
 
+$UPDATE_DISPLAY_ID
 ${SHORT_FROM} → ${SHORT_TO}
 ${CHANGED_FILES_COUNT} arquivo(s) alterado(s) · ${DIFF_TOTAL_SUMMARY}
-Aplicação: ${APPLY_MODE}
-Tempo total: ${DURATION}"
+${APPLY_MODE} · ${DURATION}
+
+${BOT_HEALTHCHECK_STATUS}"
 if (( UPDATE_HAS_WARNINGS == 1 || OVERALL_FATAL == 1 )); then
-  ZIP_STATUS_DESCRIPTION+=$'\n\nDetalhes enviados no logs.'
+  ZIP_STATUS_DESCRIPTION+=$'\n\nDetalhes enviados no canal de logs.'
 fi
 ZIP_STATUS_CONTROL_JSON=""
 if (( (LOCAL_CANDIDATE_MODE == 1 || REMOTE_CANDIDATE_MODE == 1) && OVERALL_FATAL == 0 )); then
@@ -3892,6 +4213,7 @@ PYCTRL
 )"
 fi
 notify_zip_status_message "$ALERT_TYPE" "$ALERT_TITLE" "$ZIP_STATUS_DESCRIPTION" || true
+flush_update_status_outbox || true
 
 /home/ubuntu/bot/alert.sh "$ALERT_TYPE" "$ALERT_TITLE" "$BODY" || true
 if (( LOCAL_CANDIDATE_MODE == 1 )); then
