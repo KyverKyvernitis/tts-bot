@@ -4,7 +4,6 @@ import type {
   DashboardFieldDefinition,
   DashboardOptionsPayload,
   DashboardSectionDefinition,
-  DashboardSectionSummary,
 } from "../types/dashboard";
 import type { DashboardVisualModule } from "../moduleCatalog";
 import { DashboardFieldControl, displayDashboardValue } from "./DashboardFieldControl";
@@ -13,7 +12,6 @@ import { MessageEditor } from "./message-editor";
 interface SectionEditorProps {
   section: DashboardSectionDefinition;
   module: DashboardVisualModule | null;
-  summary: DashboardSectionSummary | undefined;
   values: Record<string, unknown>;
   draft: Record<string, unknown>;
   guildOptions: DashboardOptionsPayload | null;
@@ -33,7 +31,7 @@ function valuesEqual(a: unknown, b: unknown) {
 }
 
 export function SectionEditor({
-  section, module, summary, values, draft, guildOptions, previewBotName, previewBotAvatarUrl,
+  section, module, values, draft, guildOptions, previewBotName, previewBotAvatarUrl,
   hasUnsavedChanges, applying, onChange, onApply, onMessageEditorActiveChange, onBack,
 }: SectionEditorProps) {
   const Icon = module?.icon ?? Settings;
@@ -72,26 +70,25 @@ export function SectionEditor({
   }
 
   return <section className="osk-dashboard-page osk-section-page">
-    <button className="osk-page-back" onClick={() => insideGroup ? setActiveGroup(null) : onBack()}><ArrowLeft size={15} />{insideGroup ? section.label : "Visão geral"}</button>
-    <header className="osk-section-header">
-      <span className="osk-section-header-icon"><Icon size={24} /></span>
-      <div><span className="osk-kicker">{insideGroup ? section.label : "Módulo"}</span><h1>{insideGroup ? activeGroup : section.label}</h1><p>{insideGroup ? `${fieldsToShow.length} configurações nesta categoria.` : module?.description || section.description}</p></div>
-      {!insideGroup && summary && <span className="osk-section-status" data-enabled={summary.enabled !== false || undefined}><strong>{summary.status}</strong><small>{summary.configured}/{summary.total} configurados</small></span>}
+    <button className="osk-page-back" onClick={() => insideGroup ? setActiveGroup(null) : onBack()}><ArrowLeft size={15} />{insideGroup ? section.label : "Início"}</button>
+    <header className="osk-section-header osk-section-header--simple">
+      <span className="osk-section-header-icon"><Icon size={23} /></span>
+      <div>
+        <span className="osk-kicker">{insideGroup ? section.label : "Configuração"}</span>
+        <h1>{insideGroup ? activeGroup : section.label}</h1>
+        <p>{insideGroup ? "Ajuste somente as opções que quiser usar." : module?.description || section.description}</p>
+      </div>
     </header>
 
     {groups && !insideGroup ? (
-      <div className="osk-group-grid">
+      <div className="osk-group-grid osk-group-grid--simple">
         {groups.map((group) => {
           const groupFields = section.fields.filter((field) => field.group === group);
           const changed = groupFields.filter((field) => !valuesEqual(values[field.id], draft[field.id])).length;
-          const configured = groupFields.filter((field) => {
-            const value = draft[field.id];
-            return value !== null && value !== undefined && value !== "" && value !== false && (!Array.isArray(value) || value.length > 0);
-          }).length;
-          return <button key={group} className="osk-group-card" onClick={() => setActiveGroup(group)}>
+          return <button key={group} className="osk-group-card osk-group-card--simple" onClick={() => setActiveGroup(group)}>
             <span className="osk-group-card-icon"><Icon size={19} /></span>
-            <span><strong>{group}</strong><small>{configured}/{groupFields.length} configurados</small></span>
-            {changed > 0 && <em>{changed} alterado{changed === 1 ? "" : "s"}</em>}
+            <span><strong>{group}</strong><small>Abrir ajustes</small></span>
+            {changed > 0 && <em>{changed} pendente{changed === 1 ? "" : "s"}</em>}
             <ChevronRight size={18} />
           </button>;
         })}
@@ -103,7 +100,7 @@ export function SectionEditor({
           return <article key={field.id} className="osk-field-card" data-changed={changed || undefined} data-wide={["textarea", "role_multi", "string_list", "form_fields", "color_slots"].includes(field.type) || undefined}>
             <header><div><strong>{field.label}</strong>{field.description && <small>{field.description}</small>}</div>{changed && <span>Alterado</span>}</header>
             <DashboardFieldControl field={field} value={draft[field.id]} guildOptions={guildOptions} onChange={onChange} />
-            <footer>Valor salvo: <strong>{displayDashboardValue(field, values[field.id], guildOptions)}</strong></footer>
+            {changed && <footer>Valor atual: <strong>{displayDashboardValue(field, values[field.id], guildOptions)}</strong></footer>}
           </article>;
         })}
       </div>

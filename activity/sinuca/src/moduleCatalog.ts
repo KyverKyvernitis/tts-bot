@@ -14,13 +14,13 @@ export interface ModuleVisualMeta {
 }
 
 export const MODULE_CATALOG: ModuleVisualMeta[] = [
-  { id: "welcome", label: "Boas-vindas", description: "Mensagens, aparência, cargos automáticos e envio por webhook.", icon: DoorOpen, group: "main" },
-  { id: "forms", label: "Formulários", description: "Painel, perguntas, respostas e fluxo de aprovação.", icon: ClipboardList, group: "main", aliases: ["form", "formularios"] },
-  { id: "tickets", label: "Tickets", description: "Atendimentos, denúncias, sugestões, equipe e permissões.", icon: Ticket, group: "main", aliases: ["ticket"] },
-  { id: "color_roles", label: "Cargos de cor", description: "Painel visual de cores e cargos personalizados.", icon: Palette, group: "main", aliases: ["colors", "colorroles", "color-roles"] },
-  { id: "birthday", label: "Aniversários", description: "Cadastro, calendário, anúncios e mensagens personalizadas.", icon: Cake, group: "main", aliases: ["birthdays"] },
-  { id: "tts", label: "TTS", description: "Voz, idioma, velocidade, canais e regras de leitura.", icon: Volume2, group: "main" },
-  { id: "general", label: "Geral", description: "Preferências globais realmente usadas pelo bot.", icon: Settings, group: "system", aliases: ["guild"] },
+  { id: "welcome", label: "Boas-vindas", description: "Mensagens, cargos automáticos e aparência.", icon: DoorOpen, group: "main" },
+  { id: "forms", label: "Formulários", description: "Perguntas, respostas e fluxo de aprovação.", icon: ClipboardList, group: "main", aliases: ["form", "formularios"] },
+  { id: "tickets", label: "Tickets", description: "Atendimento, equipe e permissões.", icon: Ticket, group: "main", aliases: ["ticket"] },
+  { id: "color_roles", label: "Cargos de cor", description: "Painéis e cargos personalizados.", icon: Palette, group: "main", aliases: ["colors", "colorroles", "color-roles"] },
+  { id: "birthday", label: "Aniversários", description: "Cadastro, calendário e anúncios.", icon: Cake, group: "main", aliases: ["birthdays"] },
+  { id: "tts", label: "TTS", description: "Voz, idioma, canais e regras de leitura.", icon: Volume2, group: "main" },
+  { id: "general", label: "Geral", description: "Preferências básicas do bot neste servidor.", icon: Settings, group: "system", aliases: ["guild"] },
 ];
 
 export type DashboardVisualModule = DashboardSectionSummary & {

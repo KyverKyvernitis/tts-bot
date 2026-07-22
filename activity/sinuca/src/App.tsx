@@ -101,9 +101,6 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : "Ocorreu uma falha inesperada.";
 }
 
-function userDisplayName(user: DashboardUserPayload | null) {
-  return user?.global_name || user?.username || "Administrador";
-}
 
 export default function App() {
   const [route, setRoute] = useState<Route>(() => parseRoute());
@@ -129,7 +126,6 @@ export default function App() {
   const visualModules = useMemo(() => mergeDashboardModules(summary), [summary]);
   const selectedSectionId = route.page === "dashboard" ? route.sectionId : null;
   const selectedSection = useMemo(() => sections.find((section) => section.id === selectedSectionId) ?? null, [sections, selectedSectionId]);
-  const selectedSummary = useMemo(() => summary.find((item) => item.id === selectedSectionId), [summary, selectedSectionId]);
   const selectedModule = useMemo(() => visualModules.find((item) => item.id === selectedSectionId) ?? null, [visualModules, selectedSectionId]);
   const changedFields = useMemo(() => selectedSection?.fields.filter((field) => !valuesEqual(values[field.id], draft[field.id])) ?? [], [draft, selectedSection, values]);
   const hasUnsavedChanges = changedFields.length > 0;
@@ -347,10 +343,10 @@ export default function App() {
     return <div className="osk-dashboard-shell">
       <Sidebar modules={visualModules} selectedSectionId={selectedSectionId || ""} view={selectedSection ? "section" : "home"} mobileOpen={mobileMenuOpen} onCloseMobile={() => setMobileMenuOpen(false)} onHome={() => navigate({ page: "dashboard", guildId: route.guildId, sectionId: null })} onSelect={openSection} onLogout={() => void handleLogout()} />
       <div className="osk-dashboard-main">
-        <Topbar guildName={guildName} guildIcon={guildIcon} userName={userDisplayName(user)} userAvatar={user?.avatarUrl} busy={loadingDashboard} onRefresh={() => void loadDashboard(route.guildId, true)} onChangeServer={() => navigate({ page: "servers" })} onOpenMenu={() => setMobileMenuOpen(true)} />
+        <Topbar guildName={guildName} guildIcon={guildIcon} busy={loadingDashboard} onRefresh={() => void loadDashboard(route.guildId, true)} onChangeServer={() => navigate({ page: "servers" })} onOpenMenu={() => setMobileMenuOpen(true)} />
         <main className="osk-dashboard-content">
           {loadingDashboard && sections.length === 0 ? <DashboardLoading /> : selectedSection ? (
-            <SectionEditor section={selectedSection} module={selectedModule} summary={selectedSummary} values={values} draft={draft} guildOptions={guildOptions} previewBotName="Osaka" previewBotAvatarUrl={null} hasUnsavedChanges={hasUnsavedChanges} applying={saving} onChange={handleFieldChange} onApply={handleSave} onMessageEditorActiveChange={setMessageEditorActive} onBack={() => navigate({ page: "dashboard", guildId: route.guildId, sectionId: null })} />
+            <SectionEditor section={selectedSection} module={selectedModule} values={values} draft={draft} guildOptions={guildOptions} previewBotName="Osaka" previewBotAvatarUrl={null} hasUnsavedChanges={hasUnsavedChanges} applying={saving} onChange={handleFieldChange} onApply={handleSave} onMessageEditorActiveChange={setMessageEditorActive} onBack={() => navigate({ page: "dashboard", guildId: route.guildId, sectionId: null })} />
           ) : <HomePage guildName={guildName} modules={visualModules} onOpen={openSection} />}
         </main>
       </div>
@@ -364,7 +360,7 @@ function FullPageLoading() {
 }
 
 function DashboardLoading() {
-  return <div className="osk-dashboard-loading"><LoaderCircle size={28} className="osk-spin" /><strong>Carregando configurações</strong><span>Buscando módulos, canais e cargos do servidor.</span></div>;
+  return <div className="osk-dashboard-loading"><LoaderCircle size={28} className="osk-spin" /><strong>Carregando configurações</strong><span>Buscando funções, canais e cargos do servidor.</span></div>;
 }
 
 function LoginRequired({ onLogin, onHome }: { onLogin(): void; onHome(): void }) {
