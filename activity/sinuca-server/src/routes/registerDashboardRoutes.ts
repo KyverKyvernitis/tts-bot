@@ -3,6 +3,7 @@ import type { DashboardConfigService } from "../services/dashboardConfigService.
 import type { DashboardOAuthTokenResult, DashboardSessionService } from "../services/dashboardSessionService.js";
 import {
   createDashboardInviteUrl,
+  getDiscordBotIdentity,
   getDiscordUserIdentity,
   listDashboardServers,
   listGuildChannelsAndRoles,
@@ -275,9 +276,11 @@ export function registerDashboardRoutes({
   app.get("/api/dashboard/bootstrap", async (req, res) => {
     const auth = await requireDashboardAccess(req, res, sessionService);
     if (!auth) return;
+    const bot = await getDiscordBotIdentity().catch(() => null);
     sendNoStoreJson(res, 200, {
       ok: true,
       user: auth.user,
+      bot,
       guild_id: auth.guildId,
       sections: configService.listSections().map(({ id, label, emoji, description }) => ({ id, label, emoji, description })),
     });

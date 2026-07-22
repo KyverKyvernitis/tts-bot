@@ -72,7 +72,17 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange }: 
     : null;
 
   if (field.type === "boolean") {
-    return <label className="osk-switch"><input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(field, event.target.checked)} /><span className="osk-switch-track" /><span className="osk-switch-label">{Boolean(value) ? "Ligado" : "Desligado"}</span></label>;
+    return <label className="osk-switch"><input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(field, event.target.checked)} /><span className="osk-switch-track" /><span className="osk-switch-state">{Boolean(value) ? "Ativado" : "Desativado"}</span></label>;
+  }
+
+  if (field.id === "tts.rate") {
+    const numeric = Math.max(-100, Math.min(100, Number.parseInt(currentValue, 10) || 0));
+    return <div className="osk-range-control"><input type="range" min={-100} max={100} step={5} value={numeric} onChange={(event) => { const next = Number(event.target.value); onChange(field, `${next >= 0 ? "+" : ""}${next}%`); }} /><output>{numeric >= 0 ? "+" : ""}{numeric}%</output></div>;
+  }
+
+  if (field.id === "tts.pitch") {
+    const numeric = Math.max(-100, Math.min(100, Number.parseInt(currentValue, 10) || 0));
+    return <div className="osk-range-control"><input type="range" min={-100} max={100} step={5} value={numeric} onChange={(event) => { const next = Number(event.target.value); onChange(field, `${next >= 0 ? "+" : ""}${next}Hz`); }} /><output>{numeric >= 0 ? "+" : ""}{numeric}Hz</output></div>;
   }
 
   if (field.type === "select") {
@@ -80,11 +90,11 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange }: 
   }
 
   if (field.type === "channel" && channelOptions) {
-    return <SmartSelect id={`field-${field.id}`} value={currentValue} options={channelOptions} onChange={(next) => onChange(field, next === currentValue ? "" : next)} placeholder="Selecione um canal" emptyLabel="Nenhum canal compatível encontrado" />;
+    return <SmartSelect id={`field-${field.id}`} value={currentValue} options={[{ value: "", label: "Nenhum" }, ...channelOptions]} onChange={(next) => onChange(field, next)} placeholder="Selecione um canal" emptyLabel="Nenhum canal compatível encontrado" />;
   }
 
   if (field.type === "role" && roleOptions) {
-    return <SmartSelect id={`field-${field.id}`} value={currentValue} options={roleOptions} onChange={(next) => onChange(field, next === currentValue ? "" : next)} placeholder="Selecione um cargo" emptyLabel="Nenhum cargo encontrado" />;
+    return <SmartSelect id={`field-${field.id}`} value={currentValue} options={[{ value: "", label: "Nenhum" }, ...roleOptions]} onChange={(next) => onChange(field, next)} placeholder="Selecione um cargo" emptyLabel="Nenhum cargo encontrado" />;
   }
 
   if (field.type === "role_multi") {
@@ -93,7 +103,7 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange }: 
 
   if (field.type === "string_list") {
     const lines = Array.isArray(value) ? value.map(String).join("\n") : stringifyDashboardValue(value);
-    return <textarea className="osk-list-textarea" value={lines} maxLength={field.maxLength} placeholder={field.placeholder || "Um item por linha"} onChange={(event) => onChange(field, event.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean))} />;
+    return <textarea className="osk-list-textarea" value={lines} maxLength={field.maxLength} placeholder={field.placeholder || "Um item por linha"} onChange={(event) => onChange(field, event.target.value.split(/\r?\n/).map((item: string) => item.trim()).filter(Boolean))} />;
   }
 
   if (field.type === "form_fields") {
@@ -108,7 +118,8 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange }: 
     return <textarea value={currentValue} maxLength={field.maxLength} placeholder={field.placeholder} onChange={(event) => onChange(field, event.target.value)} />;
   }
 
-  return <div className={field.type === "color" ? "osk-color-input" : undefined}>
+  const suffix = field.id === "tts.speech_limit_seconds" ? "segundos" : null;
+  return <div className={`${field.type === "color" ? "osk-color-input" : ""}${suffix ? " osk-input-suffix" : ""}`.trim()}>
     {field.type === "color" && <input type="color" value={/^#[0-9a-f]{6}$/i.test(currentValue) ? currentValue : "#5865f2"} onChange={(event) => onChange(field, event.target.value)} aria-label={field.label} />}
     <input
       type={field.type === "number" ? "number" : field.type === "url" ? "url" : "text"}
@@ -119,6 +130,7 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange }: 
       placeholder={field.placeholder ?? (field.type === "channel" ? "ID do canal" : field.type === "role" ? "ID do cargo" : field.type === "url" ? "https://..." : "")}
       onChange={(event) => onChange(field, event.target.value)}
     />
+    {suffix && <span>{suffix}</span>}
   </div>;
 }
 

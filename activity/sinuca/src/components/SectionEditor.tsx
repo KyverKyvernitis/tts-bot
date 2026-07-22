@@ -1,5 +1,29 @@
-import { ArrowLeft, ChevronRight, Settings } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  AudioLines,
+  Bell,
+  CalendarDays,
+  ChevronDown,
+  FileText,
+  Image,
+  ListChecks,
+  LockKeyhole,
+  Mail,
+  MessageSquare,
+  Palette,
+  PencilLine,
+  Route,
+  Send,
+  Settings,
+  Settings2,
+  ShieldCheck,
+  SlidersHorizontal,
+  Type,
+  Users,
+  Webhook,
+} from "lucide-react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import type {
   DashboardFieldDefinition,
   DashboardOptionsPayload,
@@ -25,6 +49,59 @@ interface SectionEditorProps {
   onBack(): void;
 }
 
+const GROUP_DESCRIPTIONS: Record<string, string> = {
+  "Mensagem de entrada": "Canal, formato e conteúdo enviado quando alguém entra.",
+  "Embed": "Aparência e conteúdo do embed público.",
+  "Mensagem privada": "Mensagem enviada diretamente ao novo membro.",
+  "Aparência": "Cores, imagem e detalhes visuais.",
+  "Cargos": "Cargos entregues automaticamente na entrada.",
+  "Webhook": "Nome, avatar e canal usados no envio.",
+  "Canais": "Escolha onde esta função será usada.",
+  "Painel": "Texto e aparência da mensagem pública.",
+  "Perguntas": "Campos exibidos no formulário.",
+  "Resposta": "Como as respostas chegam para a equipe.",
+  "Aprovação": "Ações após aprovar ou rejeitar uma resposta.",
+  "Canais e cargos": "Categoria, equipe e destinos do atendimento.",
+  "Comportamento": "Limites e regras automáticas da função.",
+  "Fluxos": "Tipos de atendimento e o que cada opção faz.",
+  "Textos": "Mensagens usadas durante o atendimento.",
+  "Denúncias": "Categorias disponíveis para denúncias.",
+  "Permissões": "Acesso da equipe, do autor e dos demais membros.",
+  "Mensagens": "Respostas mostradas ao aplicar ou remover cores.",
+  "Cores": "Lista visual de cores e cargos vinculados.",
+  "Geral": "Ativação e preferências principais.",
+  "Registro de datas": "Mensagens e regras usadas no cadastro.",
+  "Avisos": "Horário e textos dos anúncios automáticos.",
+  "Calendário": "Conteúdo do calendário de aniversários.",
+  "Voz": "Mecanismo, idioma, voz e ritmo da leitura.",
+  "Prefixos": "Caracteres que iniciam cada mecanismo de voz.",
+};
+
+function groupIcon(group: string) {
+  const normalized = group.toLocaleLowerCase("pt-BR");
+  if (normalized.includes("webhook")) return Webhook;
+  if (normalized.includes("mensagem privada")) return Mail;
+  if (normalized.includes("mensagem") || normalized.includes("textos")) return MessageSquare;
+  if (normalized.includes("embed") || normalized.includes("aparência")) return Image;
+  if (normalized.includes("cargo") || normalized.includes("permiss")) return ShieldCheck;
+  if (normalized.includes("canal")) return Users;
+  if (normalized.includes("painel")) return FileText;
+  if (normalized.includes("pergunta")) return ListChecks;
+  if (normalized.includes("resposta")) return Send;
+  if (normalized.includes("aprovação")) return LockKeyhole;
+  if (normalized.includes("fluxo")) return Route;
+  if (normalized.includes("denúncia")) return AlertTriangle;
+  if (normalized.includes("cor")) return Palette;
+  if (normalized.includes("registro")) return CalendarDays;
+  if (normalized.includes("aviso")) return Bell;
+  if (normalized.includes("calendário")) return CalendarDays;
+  if (normalized.includes("voz")) return AudioLines;
+  if (normalized.includes("prefix")) return Type;
+  if (normalized.includes("comport")) return SlidersHorizontal;
+  if (normalized.includes("geral")) return Settings2;
+  return Settings;
+}
+
 function valuesEqual(a: unknown, b: unknown) {
   if (Object.is(a, b)) return true;
   try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
@@ -36,74 +113,142 @@ export function SectionEditor({
 }: SectionEditorProps) {
   const Icon = module?.icon ?? Settings;
   const groups = section.groups?.length ? section.groups : null;
-  const [activeGroup, setActiveGroup] = useState<string | null>(null);
-
-  useEffect(() => setActiveGroup(null), [section.id]);
-  const insideGroup = Boolean(groups && activeGroup);
-  const fieldsToShow = useMemo(() => groups ? section.fields.filter((field) => field.group === activeGroup) : section.fields, [activeGroup, groups, section.fields]);
-  const groupMetadata = activeGroup ? section.groupMetadata?.[activeGroup] : undefined;
-  const isMessageGroup = insideGroup && groupMetadata?.kind === "message";
+  const [openGroups, setOpenGroups] = useState<string[]>([]);
+  const [messageGroup, setMessageGroup] = useState<string | null>(null);
 
   useEffect(() => {
-    onMessageEditorActiveChange?.(isMessageGroup);
-    return () => onMessageEditorActiveChange?.(false);
-  }, [isMessageGroup, onMessageEditorActiveChange]);
+    setOpenGroups(groups?.[0] ? [groups[0]] : []);
+    setMessageGroup(null);
+  }, [section.id, groups]);
 
-  if (isMessageGroup && activeGroup) {
+  const messageFields = useMemo(
+    () => messageGroup ? section.fields.filter((field) => field.group === messageGroup) : [],
+    [messageGroup, section.fields],
+  );
+  const messageMetadata = messageGroup ? section.groupMetadata?.[messageGroup] : undefined;
+
+  useEffect(() => {
+    onMessageEditorActiveChange?.(Boolean(messageGroup));
+    return () => onMessageEditorActiveChange?.(false);
+  }, [messageGroup, onMessageEditorActiveChange]);
+
+  if (messageGroup) {
     return <MessageEditor
       sectionId={section.id}
       sectionLabel={section.label}
-      groupLabel={activeGroup}
-      fields={fieldsToShow}
+      groupLabel={messageGroup}
+      fields={messageFields}
       values={values}
       draft={draft}
       guildOptions={guildOptions}
       botName={previewBotName}
       botAvatarUrl={previewBotAvatarUrl}
-      variables={groupMetadata?.variables}
+      variables={messageMetadata?.variables}
       hasUnsavedChanges={hasUnsavedChanges}
       applying={applying}
       onChange={onChange}
       onApply={onApply}
-      onBack={() => setActiveGroup(null)}
+      onBack={() => setMessageGroup(null)}
     />;
   }
 
+  const toggleGroup = (group: string) => {
+    setOpenGroups((current) => current.includes(group) ? current.filter((item) => item !== group) : [...current, group]);
+  };
+
   return <section className="osk-dashboard-page osk-section-page">
-    <button className="osk-page-back" onClick={() => insideGroup ? setActiveGroup(null) : onBack()}><ArrowLeft size={15} />{insideGroup ? section.label : "Início"}</button>
-    <header className="osk-section-header osk-section-header--simple">
-      <span className="osk-section-header-icon"><Icon size={23} /></span>
-      <div>
-        <span className="osk-kicker">{insideGroup ? section.label : "Configuração"}</span>
-        <h1>{insideGroup ? activeGroup : section.label}</h1>
-        <p>{insideGroup ? "Ajuste somente as opções que quiser usar." : module?.description || section.description}</p>
-      </div>
+    <button className="osk-page-back" onClick={onBack}><ArrowLeft size={16} />Funções</button>
+    <header className="osk-function-heading">
+      <span className="osk-function-heading-icon"><Icon size={24} /></span>
+      <div><h1>{section.label}</h1><p>{module?.description || section.description}</p></div>
     </header>
 
-    {groups && !insideGroup ? (
-      <div className="osk-group-grid osk-group-grid--simple">
-        {groups.map((group) => {
+    {groups ? (
+      <div className="osk-accordion-list">
+        {groups.map((group, index) => {
+          const GroupIcon = groupIcon(group);
           const groupFields = section.fields.filter((field) => field.group === group);
           const changed = groupFields.filter((field) => !valuesEqual(values[field.id], draft[field.id])).length;
-          return <button key={group} className="osk-group-card osk-group-card--simple" onClick={() => setActiveGroup(group)}>
-            <span className="osk-group-card-icon"><Icon size={19} /></span>
-            <span><strong>{group}</strong><small>Abrir ajustes</small></span>
-            {changed > 0 && <em>{changed} pendente{changed === 1 ? "" : "s"}</em>}
-            <ChevronRight size={18} />
-          </button>;
-        })}
-      </div>
-    ) : (
-      <div className="osk-fields-grid">
-        {fieldsToShow.map((field) => {
-          const changed = !valuesEqual(draft[field.id], values[field.id]);
-          return <article key={field.id} className="osk-field-card" data-changed={changed || undefined} data-wide={["textarea", "role_multi", "string_list", "form_fields", "color_slots"].includes(field.type) || undefined}>
-            <header><div><strong>{field.label}</strong>{field.description && <small>{field.description}</small>}</div>{changed && <span>Alterado</span>}</header>
-            <DashboardFieldControl field={field} value={draft[field.id]} guildOptions={guildOptions} onChange={onChange} />
-            {changed && <footer>Valor atual: <strong>{displayDashboardValue(field, values[field.id], guildOptions)}</strong></footer>}
+          const open = openGroups.includes(group);
+          const isMessageGroup = section.groupMetadata?.[group]?.kind === "message";
+          return <article key={group} className="osk-accordion" data-open={open || undefined} style={{ "--osk-card-index": index } as CSSProperties}>
+            <button type="button" className="osk-accordion-trigger" onClick={() => toggleGroup(group)} aria-expanded={open}>
+              <span className="osk-accordion-icon"><GroupIcon size={19} /></span>
+              <span className="osk-accordion-copy"><strong>{group}</strong><small>{GROUP_DESCRIPTIONS[group] || "Ajustes desta função."}</small></span>
+              {changed > 0 && <em>{changed} pendente{changed === 1 ? "" : "s"}</em>}
+              <ChevronDown size={18} className="osk-accordion-chevron" />
+            </button>
+            <div className="osk-accordion-panel" aria-hidden={!open}>
+              <div className="osk-accordion-panel-inner">
+                {isMessageGroup ? (
+                  <div className="osk-message-group-launcher">
+                    <div><PencilLine size={19} /><span><strong>Editor visual</strong><small>Edite conteúdo, embed, variáveis e confira a prévia.</small></span></div>
+                    <button type="button" className="osk-primary-button osk-primary-button--small" onClick={() => setMessageGroup(group)}>Editar mensagem</button>
+                  </div>
+                ) : (
+                  <FieldsPanel sectionId={section.id} fields={groupFields} values={values} draft={draft} guildOptions={guildOptions} onChange={onChange} />
+                )}
+              </div>
+            </div>
           </article>;
         })}
       </div>
+    ) : (
+      <div className="osk-settings-panel">
+        <FieldsPanel sectionId={section.id} fields={section.fields} values={values} draft={draft} guildOptions={guildOptions} onChange={onChange} />
+      </div>
     )}
   </section>;
+}
+
+function FieldsPanel({
+  sectionId,
+  fields,
+  values,
+  draft,
+  guildOptions,
+  onChange,
+}: {
+  sectionId: string;
+  fields: DashboardFieldDefinition[];
+  values: Record<string, unknown>;
+  draft: Record<string, unknown>;
+  guildOptions: DashboardOptionsPayload | null;
+  onChange(field: DashboardFieldDefinition, raw: unknown): void;
+}) {
+  const engine = String(draft["tts.engine"] || "edge");
+  const ignoredEnabledField = fields.find((field) => field.id === "tts.ignored_tts_role_enabled");
+
+  const visibleFields = fields.filter((field) => {
+    if (field.id === "tts.ignored_tts_role_enabled") return false;
+    if (sectionId === "tts" && field.id === "tts.language") return engine === "gtts";
+    if (sectionId === "tts" && ["tts.voice", "tts.rate", "tts.pitch"].includes(field.id)) return engine === "edge";
+    return true;
+  });
+
+  return <div className="osk-compact-fields">
+    {visibleFields.map((field) => {
+      const isIgnoredRole = field.id === "tts.ignored_tts_role_id" && Boolean(ignoredEnabledField);
+      const changed = !valuesEqual(draft[field.id], values[field.id])
+        || (isIgnoredRole && !valuesEqual(draft[ignoredEnabledField!.id], values[ignoredEnabledField!.id]));
+      const isComplex = ["textarea", "role_multi", "string_list", "form_fields", "color_slots"].includes(field.type);
+      const displayField = isIgnoredRole
+        ? { ...field, label: "Ignorar mensagens deste cargo", description: "Selecione Nenhum para desativar esta regra." }
+        : field;
+      const controlValue = isIgnoredRole && !Boolean(draft[ignoredEnabledField!.id]) ? "" : draft[field.id];
+      const handleChange = (changedField: DashboardFieldDefinition, raw: unknown) => {
+        onChange(changedField, raw);
+        if (changedField.id === "tts.ignored_tts_role_id" && ignoredEnabledField) onChange(ignoredEnabledField, Boolean(String(raw || "").trim()));
+      };
+
+      return <div key={field.id} className="osk-compact-field" data-changed={changed || undefined} data-complex={isComplex || undefined}>
+        <div className="osk-compact-field-copy">
+          <strong>{displayField.label}</strong>
+          {displayField.description && <small>{displayField.description}</small>}
+          {changed && <span>Alterado · antes: {displayDashboardValue(field, values[field.id], guildOptions)}</span>}
+        </div>
+        <div className="osk-compact-field-control"><DashboardFieldControl field={displayField} value={controlValue} guildOptions={guildOptions} onChange={handleChange} /></div>
+      </div>;
+    })}
+  </div>;
 }

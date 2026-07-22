@@ -106,6 +106,7 @@ export default function App() {
   const [route, setRoute] = useState<Route>(() => parseRoute());
   const [sessionState, setSessionState] = useState<SessionState>("loading");
   const [user, setUser] = useState<DashboardUserPayload | null>(null);
+  const [botIdentity, setBotIdentity] = useState<DashboardUserPayload | null>(null);
   const [manageable, setManageable] = useState<DashboardServerCard[]>([]);
   const [needsInvite, setNeedsInvite] = useState<DashboardServerCard[]>([]);
   const [serversLoaded, setServersLoaded] = useState(false);
@@ -223,6 +224,7 @@ export default function App() {
         fetchDashboardOptions(guildId).catch((error) => ({ ok: false, channels: [], roles: [], error: errorText(error) } as DashboardOptionsPayload)),
       ]);
       if (bootstrapPayload.user) setUser(bootstrapPayload.user);
+      if (bootstrapPayload.bot) setBotIdentity(bootstrapPayload.bot);
       setSections(settingsPayload.sections || []);
       setValues(settingsPayload.values || {});
       setDraft(settingsPayload.values || {});
@@ -341,13 +343,15 @@ export default function App() {
     const guildName = selectedServer?.name || `Servidor ${route.guildId.slice(-6)}`;
     const guildIcon = selectedServer?.icon || null;
     return <div className="osk-dashboard-shell">
-      <Sidebar modules={visualModules} selectedSectionId={selectedSectionId || ""} view={selectedSection ? "section" : "home"} mobileOpen={mobileMenuOpen} onCloseMobile={() => setMobileMenuOpen(false)} onHome={() => navigate({ page: "dashboard", guildId: route.guildId, sectionId: null })} onSelect={openSection} onLogout={() => void handleLogout()} />
+      <Sidebar modules={visualModules} selectedSectionId={selectedSectionId || ""} view={selectedSection ? "section" : "home"} mobileOpen={mobileMenuOpen} botName={botIdentity?.global_name || botIdentity?.username || "Osaka"} botAvatarUrl={botIdentity?.avatarUrl} onCloseMobile={() => setMobileMenuOpen(false)} onHome={() => navigate({ page: "dashboard", guildId: route.guildId, sectionId: null })} onSelect={openSection} onLogout={() => void handleLogout()} />
       <div className="osk-dashboard-main">
         <Topbar guildName={guildName} guildIcon={guildIcon} busy={loadingDashboard} onRefresh={() => void loadDashboard(route.guildId, true)} onChangeServer={() => navigate({ page: "servers" })} onOpenMenu={() => setMobileMenuOpen(true)} />
         <main className="osk-dashboard-content">
-          {loadingDashboard && sections.length === 0 ? <DashboardLoading /> : selectedSection ? (
-            <SectionEditor section={selectedSection} module={selectedModule} values={values} draft={draft} guildOptions={guildOptions} previewBotName="Osaka" previewBotAvatarUrl={null} hasUnsavedChanges={hasUnsavedChanges} applying={saving} onChange={handleFieldChange} onApply={handleSave} onMessageEditorActiveChange={setMessageEditorActive} onBack={() => navigate({ page: "dashboard", guildId: route.guildId, sectionId: null })} />
-          ) : <HomePage guildName={guildName} modules={visualModules} onOpen={openSection} />}
+          <div key={selectedSection?.id || "home"} className="osk-page-motion">
+            {loadingDashboard && sections.length === 0 ? <DashboardLoading /> : selectedSection ? (
+              <SectionEditor section={selectedSection} module={selectedModule} values={values} draft={draft} guildOptions={guildOptions} previewBotName={botIdentity?.global_name || botIdentity?.username || "Osaka"} previewBotAvatarUrl={botIdentity?.avatarUrl} hasUnsavedChanges={hasUnsavedChanges} applying={saving} onChange={handleFieldChange} onApply={handleSave} onMessageEditorActiveChange={setMessageEditorActive} onBack={() => navigate({ page: "dashboard", guildId: route.guildId, sectionId: null })} />
+            ) : <HomePage guildName={guildName} modules={visualModules} onOpen={openSection} />}
+          </div>
         </main>
       </div>
       {!messageEditorActive && selectedSection && <SaveDock changedCount={changedFields.length} sectionLabel={selectedSection.label} saving={saving} onDiscard={() => setDraft(values)} onSave={() => void handleSave()} />}

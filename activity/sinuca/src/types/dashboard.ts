@@ -91,6 +91,7 @@ export interface DashboardBootstrapPayload {
   ok: boolean;
   guild_id?: string;
   user?: DashboardUserPayload;
+  bot?: DashboardUserPayload | null;
   sections?: Array<{ id: string; label: string; emoji: string; description: string }>;
   error?: string;
 }

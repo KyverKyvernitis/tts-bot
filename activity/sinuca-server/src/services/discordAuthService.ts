@@ -113,6 +113,29 @@ function withAvatarUrl<T extends { id: string; avatar?: string | null }>(user: T
   return { ...user, avatarUrl: discordAvatarUrl(user.id, user.avatar) };
 }
 
+
+
+let botIdentityCache: { expiresAt: number; value: DiscordUserIdentity | null } | null = null;
+
+export async function getDiscordBotIdentity(): Promise<DiscordUserIdentity | null> {
+  const token = botToken();
+  if (!token) return null;
+
+  const now = Date.now();
+  if (botIdentityCache && botIdentityCache.expiresAt > now) return botIdentityCache.value;
+
+  const response = await fetchDiscordJson<DiscordUserIdentity>(
+    "https://discord.com/api/v10/users/@me",
+    `Bot ${token}`,
+  );
+  const value = response.ok && response.data && /^\d{15,25}$/.test(String(response.data.id ?? ""))
+    ? withAvatarUrl(response.data)
+    : null;
+
+  botIdentityCache = { expiresAt: now + 10 * 60 * 1000, value };
+  return value;
+}
+
 export function createDashboardInviteUrl(guildId?: string | null): string | null {
   const appClientId = clientId();
   if (!appClientId) return null;
