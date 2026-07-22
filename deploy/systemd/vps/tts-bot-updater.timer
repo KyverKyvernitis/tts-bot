@@ -3,7 +3,13 @@ Description=Verifica updates do tts-bot periodicamente
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=1min
+# Conte o intervalo a partir do fim da execução anterior. OnUnitActiveSec podia
+# deixar uma nova rodada pendente enquanto o updater ainda trabalhava e iniciá-la
+# imediatamente ao terminar.
+OnUnitInactiveSec=1min
+AccuracySec=5s
+RandomizedDelaySec=5s
+Persistent=false
 Unit=tts-bot-updater.service
 
 [Install]

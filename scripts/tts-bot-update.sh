@@ -76,9 +76,18 @@ REMOTE_COMMIT=""
 PREVIOUS_COMMIT=""
 COMMIT_SUBJECT=""
 UPDATE_APPLIED=0
+# Limite transacional: depois que o deploy foi validado e, quando aplicável,
+# publicado no GitHub, falhas de formatação/Discord/log não podem mais acionar
+# rollback do código nem reiniciar o bot.
+DEPLOYMENT_COMMITTED=0
+DELIVERY_PHASE=0
 ROLLBACK_DONE=0
+ROLLBACK_IN_PROGRESS=0
+BOT_RESTARTS_DEPLOY=0
+BOT_RESTARTS_ROLLBACK=0
 MANUAL_FAILURE_ALERT_SENT=0
 LOCAL_CANDIDATE_MODE=0
+LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY=0
 LOCAL_CANDIDATE_ID=""
 LOCAL_CANDIDATE_DISPLAY_ID=""
 LOCAL_CANDIDATE_DIR=""
@@ -339,6 +348,8 @@ LAST_ERROR_COMMAND=""
 LAST_ERROR_SERVICE_UNIT=""
 LAST_ERROR_STDERR=""
 LAST_ERROR_LOGS=""
+LAST_ERROR_LINE=""
+LAST_ERROR_FUNCTION=""
 
 prepare_update_delivery_dirs() {
   mkdir -p "$UPDATE_STATUS_OUTBOX_DIR" "$UPDATE_ALERT_OUTBOX_DIR" "$UPDATE_DELIVERY_RECEIPTS_DIR" 2>/dev/null || return 1
@@ -2714,6 +2725,9 @@ publish_rollback_request_after_validation() {
   STAGE="push GitHub"
   zip_progress_publish "Publicando no GitHub..."
   sudo -u ubuntu -H git push origin "HEAD:$BRANCH"
+  # O commit de reversão/reaplicação já está remoto; a notificação posterior
+  # não pode transformar isso em rollback automático do rollback.
+  mark_deployment_committed
   mark_update_timing "push"
   zip_progress_done "GitHub atualizado"
 }
@@ -3119,10 +3133,11 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     if [[ "$CURRENT_COMMIT" == "$REMOTE_COMMIT" ]] && printf '%s
 ' "$head_message" | grep -Fqx "Candidate-ID: $LOCAL_CANDIDATE_ID"; then
       LOCAL_CANDIDATE_PUBLISHED=1
+      LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY=1
       REMOTE_COMMIT="$CURRENT_COMMIT"
       SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
-      write_local_candidate_state "published" "$REMOTE_COMMIT"
-      logger -t "$LOG_TAG" "Candidato local já publicado; retomando finalização visual/webhook."
+      mark_deployment_committed
+      logger -t "$LOG_TAG" "Candidato local já publicado e validado; retomando somente a entrega final, sem novo restart." 2>/dev/null || true
       return 0
     fi
     notify_zip_status_message "success" "Nenhuma alteração necessária" "O pacote já corresponde ao estado atual da VPS. Nenhum arquivo foi modificado." || true
@@ -3163,7 +3178,9 @@ Source-ZIP-SHA256: ${LOCAL_CANDIDATE_ZIP_SHA256:-indisponível}"
   zip_progress_publish "Publicando no GitHub..."
   sudo -u ubuntu -H git push origin "HEAD:$BRANCH"
   LOCAL_CANDIDATE_PUBLISHED=1
-  write_local_candidate_state "published" "$REMOTE_COMMIT"
+  # A partir daqui o remoto já contém o commit validado. Qualquer falha
+  # subsequente é de finalização e não pode resetar somente a VPS.
+  mark_deployment_committed
   mark_update_timing "push"
   zip_progress_done "GitHub atualizado"
 }
@@ -3279,11 +3296,10 @@ classify_changed_files() {
     ALERT_CHANGED=1
   fi
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(deploy/systemd/vps/|deploy/sudoers\.d/|scripts/install-vps-systemd-units\.sh$)'; then
+    # O instalador sincroniza as units em uma única passagem. Não marque todos os
+    # subsistemas como alterados: isso repetia rotinas específicas e podia
+    # reiniciar serviços sem relação com o update atual.
     VPS_SYSTEMD_UNITS_CHANGED=1
-    AUDIO_SYSTEMD_CHANGED=1
-    CLEANUP_CHANGED=1
-    PHONE_LAVALINK_WATCH_CHANGED=1
-    PHONE_WORKER_WATCH_CHANGED=1
   fi
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(cleanup-audio-temp\.sh|deploy/systemd/cleanup-audio-temp\.(service|timer))$'; then
     CLEANUP_CHANGED=1
@@ -3956,6 +3972,74 @@ PYJSON
 }
 
 
+restart_bot_service_once() {
+  local phase="deploy"
+  local count=0
+  if (( ROLLBACK_IN_PROGRESS == 1 )); then
+    phase="rollback"
+    count="$BOT_RESTARTS_ROLLBACK"
+  else
+    count="$BOT_RESTARTS_DEPLOY"
+  fi
+
+  if (( count >= 1 )); then
+    LAST_ERROR_STDERR="restart do bot bloqueado: limite de 1 reinício na fase $phase já foi consumido"
+    logger -t "$LOG_TAG" "$LAST_ERROR_STDERR" 2>/dev/null || true
+    return 75
+  fi
+
+  # Consuma o orçamento antes da chamada: mesmo uma tentativa que pare o
+  # processo e falhe ao subir não pode ser repetida indefinidamente.
+  if [[ "$phase" == "rollback" ]]; then
+    BOT_RESTARTS_ROLLBACK=$((BOT_RESTARTS_ROLLBACK + 1))
+  else
+    BOT_RESTARTS_DEPLOY=$((BOT_RESTARTS_DEPLOY + 1))
+  fi
+
+  # Um start-limit-hit anterior não deve impedir um único reinício legítimo.
+  # O limite por execução acima evita transformar reset-failed em loop.
+  systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+  systemctl restart "$SERVICE" || return $?
+  logger -t "$LOG_TAG" "restart do bot executado: fase=$phase deploy=$BOT_RESTARTS_DEPLOY rollback=$BOT_RESTARTS_ROLLBACK" 2>/dev/null || true
+  return 0
+}
+
+mark_deployment_committed() {
+  DEPLOYMENT_COMMITTED=1
+  STAGE="finalização pós-deploy"
+  if (( LOCAL_CANDIDATE_MODE == 1 )); then
+    write_local_candidate_state "deployment_completed" "${REMOTE_COMMIT:-}"
+  fi
+  logger -t "$LOG_TAG" "limite transacional concluído em $(short_commit "${REMOTE_COMMIT:-${CURRENT_COMMIT:-}}")" 2>/dev/null || true
+}
+
+build_final_status_description() {
+  local summary="${1:-}"
+  local display_id="${2:-}"
+  local short_from="${3:-}"
+  local short_to="${4:-}"
+  local changed_count="${5:-0}"
+  local diff_summary="${6:-diff indisponível}"
+  local apply_mode="${7:-aplicação concluída}"
+  local duration="${8:-tempo indisponível}"
+  local health_status="${9:-health não informado}"
+  local file_count_text=""
+
+  if [[ "$changed_count" =~ ^[0-9]+$ ]] && (( changed_count == 1 )); then
+    file_count_text="1 arquivo alterado"
+  elif [[ "$changed_count" =~ ^[0-9]+$ ]]; then
+    file_count_text="$changed_count arquivos alterados"
+  else
+    file_count_text="arquivos alterados"
+  fi
+
+  # A string de formato é literal; IDs e commits são somente argumentos. Isso
+  # impede que crases de Markdown virem substituição de comando do Bash.
+  printf -v ZIP_STATUS_DESCRIPTION '%s\n\nAtualização `%s`\n`%s` → `%s`\n%s · %s\n%s · duração total: %s\n\n%s' \
+    "$summary" "$display_id" "$short_from" "$short_to" "$file_count_text" \
+    "$diff_summary" "$apply_mode" "$duration" "$health_status"
+}
+
 deploy_bot() {
   # Caminho rápido: não reinstale systemd/watchers/áudio em todo update.
   # Cada rotina só roda quando os arquivos dela mudaram; isso reduz bastante
@@ -4011,7 +4095,7 @@ deploy_bot() {
 
     STAGE="reinício do bot"
     restart_epoch="$(date +%s)"
-    systemctl restart "$SERVICE"
+    restart_bot_service_once
 
     if env_truthy LAVALINK_ENABLED; then
       STAGE="espera curta do Lavalink"
@@ -4182,6 +4266,7 @@ rollback_after_failure() {
     exit "$exit_code"
   fi
   ROLLBACK_DONE=1
+  ROLLBACK_IN_PROGRESS=1
 
   if (( LOCAL_CANDIDATE_MODE == 1 )); then
     logger -t "$LOG_TAG" "Erro fatal no candidato local. Tentando rollback para $(short_commit "$PREVIOUS_COMMIT") antes de push GitHub"
@@ -4318,14 +4403,83 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   exit "$exit_code"
 }
 
+handle_post_deploy_failure() {
+  local exit_code="${1:-1}"
+  local failed_command="${2:-desconhecido}"
+  local failed_line="${3:-?}"
+  local failed_function="${4:-main}"
+  local display_id="${LOCAL_CANDIDATE_DISPLAY_ID:-}"
+  local current_head="${REMOTE_COMMIT:-${CURRENT_COMMIT:-}}"
+  local previous_head="${PREVIOUS_COMMIT:-${CURRENT_COMMIT:-}}"
+  local safe_description="" body="" event_id=""
+
+  trap - ERR
+  set +e
+  DELIVERY_PHASE=1
+  [[ -n "${display_id//[[:space:]]/}" ]] || display_id="UPD-$(short_commit "$current_head" | tr '[:lower:]' '[:upper:]')"
+  printf -v safe_description '%s\n\nIdentificador: %s\nCommit: %s → %s\n\nA confirmação detalhada será reenviada automaticamente.' \
+    'A atualização foi aplicada e validada. Uma falha ocorreu somente na etapa de notificação; o código não foi revertido.' \
+    "$display_id" "$(short_commit "$previous_head")" "$(short_commit "$current_head")"
+
+  logger -t "$LOG_TAG" "falha pós-deploy ignorada para rollback: etapa=$STAGE função=$failed_function linha=$failed_line comando=$failed_command rc=$exit_code" 2>/dev/null || true
+
+  if (( LOCAL_CANDIDATE_MODE == 1 )); then
+    write_local_candidate_state "delivery_degraded" "$current_head" || true
+    notify_zip_status_message "success" "✅ Atualização concluída" "$safe_description" || true
+  elif (( ROLLBACK_CONTROL_MODE == 1 )); then
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "success" "✅ Alteração concluída" "$safe_description" "" || true
+  else
+    notify_zip_status_message "success" "✅ Atualização concluída" "$safe_description" || true
+  fi
+
+  body="Resumo: A atualização foi aplicada e permaneceu ativa; somente a finalização visual/log falhou.
+Identificador: $display_id
+Branch: $BRANCH
+Commit: $(short_commit "$previous_head") → $(short_commit "$current_head")
+Etapa: $STAGE
+Função: $failed_function
+Linha: $failed_line
+Comando: $failed_command
+Código: $exit_code
+Rollback: bloqueado porque o deploy já havia sido validado/publicado
+Stderr:
+${LAST_ERROR_STDERR:-nenhuma saída adicional capturada}
+Hora: $(date '+%d/%m/%Y %H:%M:%S')"
+  event_id="${display_id}-delivery-degraded-$(short_commit "$current_head")"
+  send_alert_reliably "warn" "⚠️ Confirmação final pendente" "$body" "" "" "$event_id" || true
+  flush_update_status_outbox || true
+  flush_update_alert_outbox || true
+
+  if (( LOCAL_CANDIDATE_MODE == 1 )); then
+    archive_local_candidate "done" || true
+    trigger_updater_if_queue_pending || true
+  elif (( ROLLBACK_CONTROL_MODE == 1 )); then
+    archive_rollback_request "done" || true
+  fi
+
+  logger -t "$LOG_TAG" "deploy preservado apesar de falha pós-deploy: $display_id" 2>/dev/null || true
+  exit 0
+}
+
 on_error() {
   local exit_code="$?"
+  local failed_line="${1:-${BASH_LINENO[0]:-?}}"
+  local failed_function="${2:-${FUNCNAME[1]:-main}}"
   if (( MANUAL_FAILURE_ALERT_SENT == 1 )); then
     exit "$exit_code"
   fi
   local failed_command="${BASH_COMMAND:-desconhecido}"
   FAILED_STAGE="$STAGE"
+  LAST_ERROR_LINE="$failed_line"
+  LAST_ERROR_FUNCTION="$failed_function"
   register_error_context "$exit_code" "$failed_command"
+
+  # Depois do limite transacional, qualquer falha restante pertence apenas à
+  # entrega da confirmação. Nunca faça git reset, restart ou marque o commit
+  # remoto como rejeitado nessa fase.
+  if (( DEPLOYMENT_COMMITTED == 1 )); then
+    handle_post_deploy_failure "$exit_code" "$failed_command" "$failed_line" "$failed_function"
+  fi
 
   if (( UPDATE_APPLIED == 1 )) && [[ -n "$PREVIOUS_COMMIT" ]]; then
     rollback_after_failure "$exit_code" "$failed_command"
@@ -4356,6 +4510,8 @@ Commit alvo: $(short_commit "$REMOTE_COMMIT")
 Commit: $(short_commit "$CURRENT_COMMIT") → $(short_commit "$REMOTE_COMMIT")
 Update: ${COMMIT_SUBJECT:-sem mensagem}
 Etapa: $STAGE
+Função: $failed_function
+Linha: $failed_line
 Comando: $failed_command
 Código: $exit_code
 Rollback: $ROLLBACK_STATUS
@@ -4381,7 +4537,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
       notify_zip_status_message "error" "Falha ao aplicar atualização" "A VPS foi restaurada quando possível e o candidato foi arquivado. Verifique o canal de logs." || true
       archive_local_candidate "failed"
     else
-      notify_zip_status_message "error" "Falha na atualização" "O updater falhou antes de concluir a finalização. Verifique o webhook/log interno." || true
+      notify_zip_status_message "error" "Falha na atualização" "O updater falhou antes de concluir a aplicação. Verifique o webhook/log interno." || true
     fi
   fi
   send_error "Falha na atualização automática" "$body"
@@ -4389,7 +4545,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 }
 
 trap 'cleanup_runtime_artifacts' EXIT
-trap 'on_error' ERR
+trap 'on_error "$LINENO" "${FUNCNAME[0]:-main}"' ERR
 
 SECONDS=0
 cd "$REPO_DIR"
@@ -4488,41 +4644,63 @@ fi
 
 FAILED_STAGE=""
 
-if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
-  zip_progress_publish "Validando arquivos"
-fi
-run_preflight_checks
-mark_update_timing "preflight"
-if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
-  zip_progress_done "Arquivos validados"
-  zip_progress_publish "$(zip_progress_next_apply_stage)"
-fi
+if (( LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY == 1 )); then
+  # O commit já foi validado e publicado numa execução anterior. Repetir o
+  # pipeline aqui reiniciava o bot novamente apenas porque a confirmação final
+  # tinha falhado. Nesta retomada, apenas confirmamos o estado atual e seguimos
+  # para a entrega idempotente.
+  mark_deployment_committed
+  zip_progress_publish "Recuperando confirmação final"
+  PREFLIGHT_PY_STATUS="validado na execução anterior"
+  PREFLIGHT_BASH_STATUS="validado na execução anterior"
+  PREFLIGHT_COG_IMPORT_STATUS="validado na execução anterior"
+  if refresh_bot_health_status; then
+    BOT_HEALTHCHECK_STATUS="OK"
+  else
+    BOT_HEALTHCHECK_STATUS="commit publicado; health indisponível na recuperação"
+    UPDATE_HAS_WARNINGS=1
+  fi
+  read_app_command_sync_status
+  zip_progress_done "Estado publicado confirmado"
+else
+  if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
+    zip_progress_publish "Validando arquivos"
+  fi
+  run_preflight_checks
+  mark_update_timing "preflight"
+  if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
+    zip_progress_done "Arquivos validados"
+    zip_progress_publish "$(zip_progress_next_apply_stage)"
+  fi
 
-deploy_bot
-mark_update_timing "bot"
-deploy_callkeeper
-mark_update_timing "callkeeper"
-deploy_frontend
-mark_update_timing "frontend"
-deploy_backend
-mark_update_timing "backend"
-run_core_worker_post_update_automation
-mark_update_timing "worker"
-if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
-  zip_progress_done_apply_stage
-  zip_progress_publish "Verificando comandos"
-fi
-read_app_command_sync_status
-if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
-  zip_progress_done "$APP_COMMAND_SYNC_SUMMARY"
-fi
+  deploy_bot
+  mark_update_timing "bot"
+  deploy_callkeeper
+  mark_update_timing "callkeeper"
+  deploy_frontend
+  mark_update_timing "frontend"
+  deploy_backend
+  mark_update_timing "backend"
+  run_core_worker_post_update_automation
+  mark_update_timing "worker"
+  if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
+    zip_progress_done_apply_stage
+    zip_progress_publish "Verificando comandos"
+  fi
+  read_app_command_sync_status
+  if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
+    zip_progress_done "$APP_COMMAND_SYNC_SUMMARY"
+  fi
 
-publish_rollback_request_after_validation
-if (( ROLLBACK_CONTROL_MODE == 1 )); then
-  finalize_rollback_request_success
-fi
+  publish_rollback_request_after_validation
+  if (( ROLLBACK_CONTROL_MODE == 1 )); then
+    mark_deployment_committed
+    finalize_rollback_request_success
+  fi
 
-publish_local_candidate_after_validation
+  publish_local_candidate_after_validation
+  mark_deployment_committed
+fi
 
 DURATION="$(human_duration "$SECONDS")"
 ROLLBACK_STATUS="não foi necessário"
@@ -4649,15 +4827,18 @@ logger -t "$LOG_TAG" "timings: ${UPDATER_TIMINGS:-sem etapas}; total=$DURATION"
 if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
   zip_progress_publish "Finalizando..."
 fi
+DELIVERY_PHASE=1
 
-ZIP_STATUS_DESCRIPTION="$ALERT_SUMMARY
-
-Atualização `$UPDATE_DISPLAY_ID`
-`${SHORT_FROM}` → `${SHORT_TO}`
-$(if (( CHANGED_FILES_COUNT == 1 )); then printf "1 arquivo alterado"; else printf "%d arquivos alterados" "$CHANGED_FILES_COUNT"; fi) · ${DIFF_TOTAL_SUMMARY}
-${APPLY_MODE} · duração total: ${DURATION}
-
-${BOT_HEALTHCHECK_STATUS}"
+build_final_status_description \
+  "$ALERT_SUMMARY" \
+  "$UPDATE_DISPLAY_ID" \
+  "$SHORT_FROM" \
+  "$SHORT_TO" \
+  "$CHANGED_FILES_COUNT" \
+  "$DIFF_TOTAL_SUMMARY" \
+  "$APPLY_MODE" \
+  "$DURATION" \
+  "$BOT_HEALTHCHECK_STATUS"
 if (( UPDATE_HAS_WARNINGS == 1 || OVERALL_FATAL == 1 )); then
   ZIP_STATUS_DESCRIPTION+=$'\n\nDetalhes enviados no canal de logs.'
 fi

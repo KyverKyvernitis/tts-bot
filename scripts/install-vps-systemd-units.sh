@@ -16,6 +16,8 @@ BACKUP_DIR="$BACKUP_ROOT/$NOW"
 CHANGED=0
 ACTIONS=()
 WARNINGS=()
+UPDATER_TIMER_WAS_ENABLED=0
+UPDATER_TIMER_WAS_ACTIVE=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -353,6 +355,15 @@ install_units() {
   install_dir_files "tts-bot.service.d"
 }
 
+capture_updater_timer_state() {
+  if systemctl is-enabled --quiet tts-bot-updater.timer 2>/dev/null; then
+    UPDATER_TIMER_WAS_ENABLED=1
+  fi
+  if systemctl is-active --quiet tts-bot-updater.timer 2>/dev/null; then
+    UPDATER_TIMER_WAS_ACTIVE=1
+  fi
+}
+
 apply_service_policy() {
   if [[ "$DRY_RUN" == "1" ]]; then
     return 0
@@ -360,7 +371,21 @@ apply_service_policy() {
   systemctl daemon-reload || true
   systemctl reset-failed tts-bot.service tts-bot-updater.service tts-bot-alert@tts-bot.service >/dev/null 2>&1 || true
   systemctl enable tts-bot.service >/dev/null 2>&1 || true
-  systemctl enable --now tts-bot-updater.timer >/dev/null 2>&1 || true
+
+  # Uma manutenção pode desativar o updater de propósito. Ao sincronizar units
+  # de dentro do próprio updater, preserve esse estado em vez de reativar o
+  # timer silenciosamente no meio de uma recuperação.
+  if [[ "$FROM_UPDATER" == "1" && "$UPDATER_TIMER_WAS_ENABLED" != "1" ]]; then
+    systemctl disable --now tts-bot-updater.timer >/dev/null 2>&1 || true
+    action "tts-bot-updater.timer permaneceu desativado"
+  else
+    systemctl enable tts-bot-updater.timer >/dev/null 2>&1 || true
+    if [[ "$FROM_UPDATER" != "1" || "$UPDATER_TIMER_WAS_ACTIVE" == "1" ]]; then
+      systemctl start tts-bot-updater.timer >/dev/null 2>&1 || true
+    fi
+    action "tts-bot-updater.timer habilitado"
+  fi
+
   systemctl enable --now cleanup-audio-temp.timer >/dev/null 2>&1 || true
   systemctl start cleanup-audio-temp.service >/dev/null 2>&1 || true
 
@@ -495,6 +520,7 @@ main() {
     log "auditoria concluída; nenhuma alteração aplicada"
     return 0
   fi
+  capture_updater_timer_state
   chmod_scripts
   install_units
   install_sudoers_files

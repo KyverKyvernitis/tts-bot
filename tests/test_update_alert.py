@@ -75,7 +75,11 @@ def test_generic_alert_still_uses_generic_renderer() -> None:
 
 
 def test_changed_shell_scripts_pass_bash_syntax_check() -> None:
-    for path in (ROOT / "alert.sh", ROOT / "scripts" / "tts-bot-update.sh"):
+    for path in (
+        ROOT / "alert.sh",
+        ROOT / "scripts" / "tts-bot-update.sh",
+        ROOT / "scripts" / "install-vps-systemd-units.sh",
+    ):
         subprocess.run(["bash", "-n", str(path)], check=True, cwd=ROOT)
 
 

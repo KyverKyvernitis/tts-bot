@@ -382,3 +382,233 @@ write_local_candidate_state delivery_scheduled abcdef123456
     assert state["commit"] == "abcdef123456"
     assert state["updated_at"]
     assert not list(candidate.glob(".state.json.*.tmp"))
+
+
+def test_final_status_markdown_is_built_without_command_substitution(tmp_path: Path) -> None:
+    marker = tmp_path / "must-not-exist"
+    harness = f"""
+source <(awk '/^build_final_status_description[(][)]/{{flag=1}} /^deploy_bot[(][)]/{{flag=0}} flag' {UPDATER!s})
+ZIP_STATUS_DESCRIPTION=''
+build_final_status_description \\
+  'Atualização aplicada.' \\
+  '`touch {marker!s}`' \\
+  '1111111' \\
+  '2222222' \\
+  '1' \\
+  '+10 -2' \\
+  'reinício completo' \\
+  '12s' \\
+  'OK'
+printf '%s' "$ZIP_STATUS_DESCRIPTION"
+"""
+    result = _run_bash(harness)
+    assert not marker.exists()
+    assert "Atualização ``touch" in result.stdout
+    assert "1 arquivo alterado" in result.stdout
+    assert "`1111111` → `2222222`" in result.stdout
+
+
+def test_post_deploy_error_is_handled_before_any_rollback() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    start = source.index("on_error() {")
+    end = source.index("\ntrap 'cleanup_runtime_artifacts' EXIT", start)
+    block = source[start:end]
+
+    committed_at = block.index("if (( DEPLOYMENT_COMMITTED == 1 ))")
+    preserve_at = block.index("handle_post_deploy_failure", committed_at)
+    rollback_at = block.index("rollback_after_failure", preserve_at)
+    assert committed_at < preserve_at < rollback_at
+    assert "git reset" not in source[source.index("handle_post_deploy_failure() {"):start]
+
+
+def test_deployment_is_committed_before_final_status_formatting() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    regular_publish = source.index("publish_local_candidate_after_validation")
+    committed = source.index("mark_deployment_committed", regular_publish)
+    delivery = source.index("build_final_status_description", committed)
+    assert regular_publish < committed < delivery
+    assert 'write_local_candidate_state "deployment_completed"' in source
+
+
+def test_resume_after_published_candidate_does_not_restart_bot() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    assert "LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY=1" in source
+    branch_start = source.index("if (( LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY == 1 )); then")
+    branch_end = source.index("\nelse", branch_start)
+    branch = source[branch_start:branch_end]
+    assert "mark_deployment_committed" in branch
+    assert "refresh_bot_health_status" in branch
+    assert "deploy_bot" not in branch
+    assert "systemctl restart" not in branch
+
+
+def test_bot_restart_budget_allows_only_one_attempt_per_phase(tmp_path: Path) -> None:
+    calls = tmp_path / "systemctl-calls"
+    harness = f"""
+source <(awk '/^restart_bot_service_once[(][)]/{{flag=1}} /^build_final_status_description[(][)]/{{flag=0}} flag' {UPDATER!s})
+ROLLBACK_IN_PROGRESS=0
+BOT_RESTARTS_DEPLOY=0
+BOT_RESTARTS_ROLLBACK=0
+SERVICE=tts-bot
+LOG_TAG=test
+LAST_ERROR_STDERR=''
+systemctl() {{ printf '%s\\n' "$*" >> {calls!s}; return 0; }}
+logger() {{ :; }}
+restart_bot_service_once
+set +e
+restart_bot_service_once
+rc=$?
+set -e
+printf 'RC=%s DEPLOY=%s ROLLBACK=%s\\n' "$rc" "$BOT_RESTARTS_DEPLOY" "$BOT_RESTARTS_ROLLBACK"
+"""
+    result = _run_bash(harness)
+    lines = calls.read_text(encoding="utf-8").splitlines()
+    assert lines.count("restart tts-bot") == 1
+    assert "RC=75 DEPLOY=1 ROLLBACK=0" in result.stdout
+
+
+def test_reconciler_skips_active_updater_and_never_confirms_mismatched_head() -> None:
+    source = BOT.read_text(encoding="utf-8")
+    assert "DISCORD_AUTO_UPDATE_RECONCILE_MAX_AGE_SECONDS\", \"1800" in source
+    reconcile_start = source.index("    async def _zip_update_reconcile_archived_messages_once")
+    reconcile_end = source.index("\n    async def _zip_update_reconcile_loop", reconcile_start)
+    block = source[reconcile_start:reconcile_end]
+    assert "_zip_update_updater_active_sync" in block
+    assert "applied_commit == live_head" in block
+    assert "if not current_matches" in block
+    assert "Estado da atualização divergente" in block
+    assert 'status = "warn"' in block
+
+
+def test_systemd_installer_preserves_disabled_updater_timer_during_update() -> None:
+    installer = (ROOT / "scripts" / "install-vps-systemd-units.sh").read_text(encoding="utf-8")
+    assert "capture_updater_timer_state" in installer
+    assert '"$FROM_UPDATER" == "1" && "$UPDATER_TIMER_WAS_ENABLED" != "1"' in installer
+    assert 'action "tts-bot-updater.timer permaneceu desativado"' in installer
+
+
+def test_post_deploy_failure_path_preserves_code_and_archives_candidate(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.log"
+    source = UPDATER.read_text(encoding="utf-8")
+    block_start = source.index("handle_post_deploy_failure() {")
+    block_end = source.index("\ntrap 'cleanup_runtime_artifacts' EXIT", block_start)
+    functions = source[block_start:block_end]
+    harness = functions + f"""
+DEPLOYMENT_COMMITTED=1
+MANUAL_FAILURE_ALERT_SENT=0
+UPDATE_APPLIED=1
+PREVIOUS_COMMIT=1111111111111111111111111111111111111111
+CURRENT_COMMIT="$PREVIOUS_COMMIT"
+REMOTE_COMMIT=2222222222222222222222222222222222222222
+LOCAL_CANDIDATE_MODE=1
+LOCAL_CANDIDATE_DISPLAY_ID=UPD-TEST
+ROLLBACK_CONTROL_MODE=0
+BRANCH=main
+STAGE='mensagem final'
+LOG_TAG=test
+LAST_ERROR_STDERR='erro visual'
+BOT_RESTARTS_DEPLOY=1
+BOT_RESTARTS_ROLLBACK=0
+ROLLBACK_STATUS='não foi necessário'
+UPDATER_UNIT='tts-bot-updater.service'
+HOSTNAME=test-host
+short_commit() {{ printf '%s' "${{1:0:7}}"; }}
+register_error_context() {{ :; }}
+write_local_candidate_state() {{ printf 'STATE:%s\n' "$1" >> {trace!s}; }}
+notify_zip_status_message() {{ printf 'STATUS:%s:%s\n' "$1" "$2" >> {trace!s}; }}
+send_alert_reliably() {{ printf 'ALERT:%s:%s\n' "$1" "$2" >> {trace!s}; }}
+flush_update_status_outbox() {{ :; }}
+flush_update_alert_outbox() {{ :; }}
+archive_local_candidate() {{ printf 'ARCHIVE:%s\n' "$1" >> {trace!s}; }}
+trigger_updater_if_queue_pending() {{ :; }}
+logger() {{ :; }}
+rollback_after_failure() {{ printf 'ROLLBACK\n' >> {trace!s}; exit 91; }}
+cleanup_local_candidate_new_files_after_reset() {{ :; }}
+update_local_candidate_heartbeat() {{ :; }}
+collect_local_tracked_changes() {{ :; }}
+send_error() {{ :; }}
+false
+on_error 999 main
+"""
+    result = subprocess.run(
+        ["bash", "-u", "-o", "pipefail", "-c", harness],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = trace.read_text(encoding="utf-8").splitlines()
+    assert "STATE:delivery_degraded" in lines
+    assert "ARCHIVE:done" in lines
+    assert any(line.startswith("STATUS:success:") for line in lines)
+    assert "ROLLBACK" not in lines
+
+
+def test_final_public_message_does_not_hide_missing_log_delivery() -> None:
+    source = BOT.read_text(encoding="utf-8")
+    reconcile_start = source.index("    async def _zip_update_reconcile_archived_messages_once")
+    reconcile_end = source.index("\n    async def _zip_update_reconcile_loop", reconcile_start)
+    block = source[reconcile_start:reconcile_end]
+    assert "update-delivery-receipts" in block
+    assert "if alert_receipt.is_file()" in block
+    assert 'receipt["log_delivered"] = True' in block
+    assert "_zip_update_alert_receipt_save_sync" in block
+    assert 'receipt["global_log_receipt_saved"] = global_receipt_saved' in block
+    assert 'if not already_final or status == "warn"' in block
+
+
+def test_updater_timer_waits_until_previous_run_is_inactive() -> None:
+    for path in (
+        ROOT / "deploy" / "systemd" / "tts-bot-updater.timer",
+        ROOT / "deploy" / "systemd" / "vps" / "tts-bot-updater.timer",
+    ):
+        text = path.read_text(encoding="utf-8")
+        assert "OnUnitInactiveSec=1min" in text
+        assert "OnUnitActiveSec=" not in text
+        assert "Persistent=false" in text
+
+
+def test_systemd_installer_change_does_not_restart_unrelated_subsystems() -> None:
+    harness = f"""
+source <(awk '/^classify_changed_files[(][)]/{{flag=1}} /^fast_reload_modules_for_changed_files[(][)]/{{flag=0}} flag' {UPDATER!s})
+CHANGED_FILES_RAW='scripts/install-vps-systemd-units.sh'
+classify_changed_files
+printf '%s %s %s %s %s\n' \
+  "$VPS_SYSTEMD_UNITS_CHANGED" \
+  "$AUDIO_SYSTEMD_CHANGED" \
+  "$CLEANUP_CHANGED" \
+  "$PHONE_LAVALINK_WATCH_CHANGED" \
+  "$PHONE_WORKER_WATCH_CHANGED"
+"""
+    result = _run_bash(harness)
+    assert result.stdout.strip() == "1 0 0 0 0"
+
+
+def test_installer_dynamically_keeps_disabled_updater_timer_disabled(tmp_path: Path) -> None:
+    installer = ROOT / "scripts" / "install-vps-systemd-units.sh"
+    calls = tmp_path / "systemctl.log"
+    harness = f"""
+source <(awk '/^capture_updater_timer_state[(][)]/{{flag=1}} /^write_status[(][)]/{{flag=0}} flag' {installer!s})
+DRY_RUN=0
+FROM_UPDATER=1
+UPDATER_TIMER_WAS_ENABLED=0
+UPDATER_TIMER_WAS_ACTIVE=0
+ACTIONS=()
+action() {{ :; }}
+truthy_env() {{ return 1; }}
+systemctl() {{
+  if [[ "${{1:-}}" == "is-enabled" || "${{1:-}}" == "is-active" ]]; then
+    return 1
+  fi
+  printf '%s\n' "$*" >> {calls!s}
+  return 0
+}}
+capture_updater_timer_state
+apply_service_policy
+"""
+    _run_bash(harness)
+    logged = calls.read_text(encoding="utf-8").splitlines()
+    assert "disable --now tts-bot-updater.timer" in logged
+    assert "enable tts-bot-updater.timer" not in logged
+    assert "start tts-bot-updater.timer" not in logged

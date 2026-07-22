@@ -1122,6 +1122,29 @@ class BotLocal(commands.Bot):
         except Exception:
             UPDATE_LOG.warning("falha ao salvar recibo de recuperação do update em %s", candidate_dir, exc_info=True)
 
+    def _zip_update_alert_receipt_save_sync(self, path: Path, event_id: str) -> bool:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            tmp.write_text(
+                json.dumps(
+                    {
+                        "event_id": event_id,
+                        "delivered_at": datetime.now(timezone.utc).isoformat(),
+                        "source": "bot_reconcile",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+            return True
+        except Exception:
+            UPDATE_LOG.warning("falha ao salvar recibo global do log de update em %s", path, exc_info=True)
+            return False
+
     def _zip_update_current_head_sync(self) -> str:
         try:
             completed = subprocess.run(
@@ -1139,13 +1162,28 @@ class BotLocal(commands.Bot):
             UPDATE_LOG.debug("falha ao consultar HEAD durante reconciliação de update", exc_info=True)
         return ""
 
+    def _zip_update_updater_active_sync(self) -> bool:
+        """Evita reconciliar enquanto o updater ainda está finalizando o candidato."""
+        try:
+            completed = subprocess.run(
+                ["systemctl", "is-active", "--quiet", "tts-bot-updater.service"],
+                text=True,
+                capture_output=True,
+                timeout=3,
+                check=False,
+            )
+            return completed.returncode == 0
+        except Exception:
+            UPDATE_LOG.debug("falha ao consultar estado do updater durante reconciliação", exc_info=True)
+            return False
+
     def _zip_update_recent_archives_sync(self) -> list[dict[str, object]]:
         """Localiza candidatos recentes que podem ter sido aplicados sem confirmação visual."""
         root = self._update_staging_root / "candidates"
         try:
-            max_age = max(900, int(os.getenv("DISCORD_AUTO_UPDATE_RECONCILE_MAX_AGE_SECONDS", "172800") or 172800))
+            max_age = max(60, int(os.getenv("DISCORD_AUTO_UPDATE_RECONCILE_MAX_AGE_SECONDS", "1800") or 1800))
         except (TypeError, ValueError):
-            max_age = 172800
+            max_age = 1800
         cutoff = time.time() - max_age
         records: list[dict[str, object]] = []
         for archive_state in ("done", "failed"):
@@ -1217,6 +1255,8 @@ class BotLocal(commands.Bot):
             "reversão concluída",
             "reaplicação concluída",
         )
+        if await asyncio.to_thread(self._zip_update_updater_active_sync):
+            return
         records = await asyncio.to_thread(self._zip_update_recent_archives_sync)
         live_head = await asyncio.to_thread(self._zip_update_current_head_sync)
         for record in records:
@@ -1224,6 +1264,18 @@ class BotLocal(commands.Bot):
             receipt = await asyncio.to_thread(self._zip_update_recovery_receipt_load, candidate_dir)
             if bool(receipt.get("status_delivered")) and bool(receipt.get("log_delivered")):
                 continue
+
+            manifest = record.get("manifest") if isinstance(record.get("manifest"), dict) else {}
+            state_data = record.get("state") if isinstance(record.get("state"), dict) else {}
+            display_id = str(manifest.get("display_id") or manifest.get("id") or candidate_dir.name)
+            branch = str(manifest.get("branch") or "main")
+            base_commit = str(manifest.get("base_commit") or "").strip()
+            applied_commit = str(state_data.get("commit") or "").strip()
+            alert_event_id = f"{display_id}-final-{applied_commit[:7] if applied_commit else 'unknown'}"
+            safe_alert_event_id = re.sub(r"[^A-Za-z0-9._-]", "_", alert_event_id)[:120]
+            alert_receipt = self._repo_root / "data" / "runtime" / "update-delivery-receipts" / f"{safe_alert_event_id}.alert.done"
+            if alert_receipt.is_file():
+                receipt["log_delivered"] = True
 
             channel_id = int(record.get("channel_id") or 0)
             message_id = int(record.get("message_id") or 0)
@@ -1236,23 +1288,16 @@ class BotLocal(commands.Bot):
                 receipt.update(
                     {
                         "status_delivered": True,
-                        # Não há como consultar retroativamente o canal de webhook
-                        # de forma confiável sem guardar o ID da mensagem. Quando a
-                        # mensagem pública já está finalizada, trate o log legado
-                        # como resolvido para não criar duplicatas em cada reconnect.
-                        "log_delivered": True,
                         "status_detected_at": datetime.now(timezone.utc).isoformat(),
                     }
                 )
+                # A mensagem pública final não prova que o webhook/log também
+                # chegou. O recibo global é compartilhado com a outbox do shell,
+                # evitando que uma recuperação do bot e um replay posterior
+                # publiquem o mesmo log duas vezes.
                 await asyncio.to_thread(self._zip_update_recovery_receipt_save, candidate_dir, receipt)
-                continue
-
-            manifest = record.get("manifest") if isinstance(record.get("manifest"), dict) else {}
-            state_data = record.get("state") if isinstance(record.get("state"), dict) else {}
-            display_id = str(manifest.get("display_id") or manifest.get("id") or candidate_dir.name)
-            branch = str(manifest.get("branch") or "main")
-            base_commit = str(manifest.get("base_commit") or "").strip()
-            applied_commit = str(state_data.get("commit") or "").strip()
+                if bool(receipt.get("log_delivered")):
+                    continue
             changed_files = [str(item) for item in (manifest.get("changed_files") or []) if str(item).strip()]
             diff_stats = manifest.get("diff_stats") if isinstance(manifest.get("diff_stats"), dict) else {}
             diff_summary = str(diff_stats.get("summary") or "").strip()
@@ -1260,22 +1305,35 @@ class BotLocal(commands.Bot):
             archive_state = str(record.get("archive_state") or "failed")
 
             if archive_state == "done" and applied_commit:
-                title = "✅ Atualização concluída"
                 commit_line = ""
                 if base_commit:
                     commit_line = f"`{base_commit[:7]}` → `{applied_commit[:7]}`\n"
                 count_text = "1 arquivo alterado" if len(changed_files) == 1 else f"{len(changed_files)} arquivos alterados"
-                description = (
-                    "A atualização foi aplicada; a confirmação visual foi recuperada automaticamente após o reinício.\n\n"
-                    f"Atualização `{display_id}`\n"
-                    f"{commit_line}{count_text}{f' · {diff_summary}' if diff_summary else ''}\n"
-                    "Processo ativo e bot conectado ao Discord."
-                )
-                # Só a versão atualmente instalada pode receber controle de
-                # rollback. Recuperar um candidato antigo não pode desativar o
-                # botão da atualização mais nova nem apontar o estado global para
-                # um commit que já não é o HEAD.
-                if live_head and applied_commit == live_head:
+                current_matches = bool(live_head and applied_commit == live_head)
+                if not current_matches:
+                    # Um diretório arquivado como done não é prova suficiente de
+                    # sucesso se o HEAD já voltou para outro commit. Publicar verde
+                    # nesse caso criava o falso positivo visto durante rollback.
+                    title = "⚠️ Estado da atualização divergente"
+                    description = (
+                        "O registro da atualização indica conclusão, mas o commit atualmente instalado é diferente.\n\n"
+                        f"Atualização `{display_id}`\n"
+                        f"Registrado: `{applied_commit[:7]}`\n"
+                        f"Instalado: `{live_head[:7] if live_head else 'desconhecido'}`\n"
+                        "Nenhum controle de reversão foi disponibilizado."
+                    )
+                    control = None
+                    status = "warn"
+                    log_title = title
+                    log_summary = "A reconciliação detectou divergência entre o candidato concluído e o HEAD local."
+                else:
+                    title = "✅ Atualização concluída"
+                    description = (
+                        "A atualização foi aplicada; a confirmação visual foi recuperada automaticamente após o reinício.\n\n"
+                        f"Atualização `{display_id}`\n"
+                        f"{commit_line}{count_text}{f' · {diff_summary}' if diff_summary else ''}\n"
+                        "Processo ativo e bot conectado ao Discord."
+                    )
                     control = {
                         "enabled": True,
                         "mode": "rollback",
@@ -1288,11 +1346,9 @@ class BotLocal(commands.Bot):
                         "update_to": applied_commit,
                         "source_author_id": source_author_id,
                     }
-                else:
-                    control = None
-                status = "success"
-                log_title = title
-                log_summary = "Confirmação final recuperada após o bot reiniciar durante a atualização."
+                    status = "success"
+                    log_title = title
+                    log_summary = "Confirmação final recuperada após o bot reiniciar durante a atualização."
             elif archive_state == "done":
                 title = "ℹ️ Nenhuma alteração necessária"
                 description = f"A atualização `{display_id}` já correspondia ao estado atual. Nenhum arquivo foi modificado."
@@ -1309,30 +1365,31 @@ class BotLocal(commands.Bot):
                 log_title = title
                 log_summary = error_text[:1200]
 
-            result = await self._edit_zip_status_from_update(
-                {
-                    "channel_id": str(channel_id),
-                    "message_id": str(message_id),
-                    "status": status,
-                    "title": title,
-                    "description": description,
-                    "candidate_id": str(manifest.get("id") or ""),
-                    "display_id": display_id,
-                    "event_at": datetime.now(timezone.utc).isoformat(),
-                    "preserve_existing_control": control is None,
-                    **({"control": control} if control else {}),
-                }
-            )
-            if not result.get("ok"):
-                continue
+            if not already_final or status == "warn":
+                result = await self._edit_zip_status_from_update(
+                    {
+                        "channel_id": str(channel_id),
+                        "message_id": str(message_id),
+                        "status": status,
+                        "title": title,
+                        "description": description,
+                        "candidate_id": str(manifest.get("id") or ""),
+                        "display_id": display_id,
+                        "event_at": datetime.now(timezone.utc).isoformat(),
+                        "preserve_existing_control": control is None,
+                        **({"control": control} if control else {}),
+                    }
+                )
+                if not result.get("ok"):
+                    continue
 
-            receipt.update(
-                {
-                    "status_delivered": True,
-                    "status_recovered_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-            await asyncio.to_thread(self._zip_update_recovery_receipt_save, candidate_dir, receipt)
+                receipt.update(
+                    {
+                        "status_delivered": True,
+                        "status_recovered_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                await asyncio.to_thread(self._zip_update_recovery_receipt_save, candidate_dir, receipt)
 
             if bool(receipt.get("log_delivered")):
                 continue
@@ -1346,7 +1403,7 @@ class BotLocal(commands.Bot):
             body_lines.append(f"Update: {'1 arquivo' if len(changed_files) == 1 else f'{len(changed_files)} arquivos'}{f' · {diff_summary}' if diff_summary else ''}")
             body_lines.append("Resultado: confirmação recuperada automaticamente")
             body_lines.append(f"Hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-            alert_type = "success" if archive_state == "done" else "error"
+            alert_type = "success" if status == "success" else ("warn" if status == "warn" else "error")
             try:
                 completed = await asyncio.to_thread(
                     subprocess.run,
@@ -1359,8 +1416,14 @@ class BotLocal(commands.Bot):
                     check=False,
                 )
                 if completed.returncode == 0:
+                    global_receipt_saved = await asyncio.to_thread(
+                        self._zip_update_alert_receipt_save_sync,
+                        alert_receipt,
+                        alert_event_id,
+                    )
                     receipt["log_delivered"] = True
                     receipt["log_recovered_at"] = datetime.now(timezone.utc).isoformat()
+                    receipt["global_log_receipt_saved"] = global_receipt_saved
                     await asyncio.to_thread(self._zip_update_recovery_receipt_save, candidate_dir, receipt)
                 else:
                     UPDATE_LOG.warning("falha ao recuperar log final de %s: %s", display_id, (completed.stderr or completed.stdout or "")[-500:])
