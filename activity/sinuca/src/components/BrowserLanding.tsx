@@ -53,10 +53,7 @@ export function BrowserLanding({ loggedIn, onLogin, onDashboard, onNavigate }: B
 
       <main className="osk-minimal-main">
         <section className="osk-minimal-hero">
-          <h1>
-            <span>Configure a Osaka.</span>
-            <strong>Sem comandos.</strong>
-          </h1>
+          <h1><strong>Dashboard</strong></h1>
           <p>Escolha um servidor, ajuste as funções e salve.</p>
           <button className="osk-primary-button osk-minimal-primary-action" onClick={primaryAction}>
             {loggedIn ? "Abrir painel" : "Entrar com Discord"}
@@ -76,14 +73,6 @@ export function BrowserLanding({ loggedIn, onLogin, onDashboard, onNavigate }: B
           </div>
         </section>
       </main>
-
-      <footer className="osk-minimal-footer">
-        <Brand compact />
-        <nav aria-label="Links legais">
-          <button onClick={() => onNavigate("/privacy")}>Privacidade</button>
-          <button onClick={() => onNavigate("/terms")}>Termos</button>
-        </nav>
-      </footer>
     </div>
   );
 }

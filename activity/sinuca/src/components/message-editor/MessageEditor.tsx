@@ -139,6 +139,7 @@ export function MessageEditor(props: MessageEditorProps) {
   const jsonDirtyRef = useRef(jsonDirty);
   const onApplyRef = useRef(onApply);
   const onDiscardRef = useRef(onDiscard);
+  const applyActionRef = useRef<() => void>(() => undefined);
 
   localDirtyRef.current = localDirty;
   jsonDirtyRef.current = jsonDirty;
@@ -160,7 +161,7 @@ export function MessageEditor(props: MessageEditorProps) {
       window.clearTimeout(closeTimerRef.current);
       closeTimerRef.current = null;
     }
-    const intent = finalIntent.current ?? "discard";
+    const intent = finalIntent.current ?? "apply";
     finalIntent.current = null;
     if (intent === "apply") onApplyRef.current();
     else onDiscardRef.current();
@@ -180,9 +181,10 @@ export function MessageEditor(props: MessageEditorProps) {
   }, [finalizeClose, restoreHistoryMarker]);
 
   const handleHistoryClose = useCallback(() => {
-    const intent = closeIntent.current ?? "discard";
+    const intent = closeIntent.current;
     closeIntent.current = null;
-    beginClose(intent);
+    if (intent) beginClose(intent);
+    else applyActionRef.current();
   }, [beginClose]);
 
   const requestClose = useCallback((intent: "apply" | "discard") => {
@@ -251,7 +253,7 @@ export function MessageEditor(props: MessageEditorProps) {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        requestClose("discard");
+        applyActionRef.current();
         return;
       }
       if (event.key !== "Tab" || !dialogRef.current) return;
@@ -310,6 +312,8 @@ export function MessageEditor(props: MessageEditorProps) {
     requestClose("apply");
   }
 
+  applyActionRef.current = handleApply;
+
   const activeTextField = fields.find((field) => field.id === activeTextFieldId && (field.type === "text" || field.type === "textarea"))
     ?? categorizedFields.content.find((field) => field.type === "text" || field.type === "textarea")
     ?? null;
@@ -336,7 +340,7 @@ export function MessageEditor(props: MessageEditorProps) {
   const editor = <div ref={dialogRef} className="osk-root osk-message-editor" data-visible={visible || undefined} data-mobile-view={mobileView} role="dialog" aria-modal="true" aria-label={`Editar ${groupLabel}`} onTransitionEnd={handleTransitionEnd}>
     <div className="osk-message-editor__shell">
       <header className="osk-message-editor__header">
-        <button type="button" className="osk-message-editor__back" onClick={() => requestClose("discard")}>
+        <button type="button" className="osk-message-editor__back" onClick={handleApply}>
           <ChevronLeft size={18} />
           <span>{sectionLabel}</span>
         </button>
@@ -345,7 +349,6 @@ export function MessageEditor(props: MessageEditorProps) {
           <strong>{groupLabel}</strong>
           {description && <p>{description}</p>}
         </div>
-        <span className="osk-message-editor__dirty" data-visible={localDirty || jsonDirty || undefined}>Não salvo</span>
       </header>
 
       <nav className="osk-message-editor__mobile-tabs" aria-label="Visualização do editor">

@@ -17,7 +17,7 @@ type InlineToken =
   | { type: "channelMention"; raw: string; id: string }
   | { type: "templateVariable"; raw: string; key: string; mentionKind?: "user" | "channel" };
 
-const DISCORD_TOKEN_RE = /(<a?:[A-Za-z0-9_~]+:\d{15,25}>|<@!?\d{15,25}>|<@&\d{15,25}>|<#\d{15,25}>|\$\{[A-Za-z0-9_]+\}|\{[A-Za-z0-9_]+\})/g;
+const DISCORD_TOKEN_RE = /(<a?:[^:\s>]+:\d{15,25}>|<@!?\d{15,25}>|<@&\d{15,25}>|<#\d{15,25}>|\$\{[A-Za-z0-9_]+\}|\{[A-Za-z0-9_]+\})/g;
 const INLINE_MARKDOWN_RE = /(\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|`[^`]+`|\*[^*]+\*|https?:\/\/[^\s<]+)/g;
 
 function tokenizeDiscordText(text: string): InlineToken[] {
@@ -25,7 +25,7 @@ function tokenizeDiscordText(text: string): InlineToken[] {
   let cursor = 0;
   text.replace(DISCORD_TOKEN_RE, (match, _token, offset: number) => {
     if (offset > cursor) tokens.push({ type: "text", value: text.slice(cursor, offset) });
-    const emoji = match.match(/^<(a?):([A-Za-z0-9_~]+):(\d{15,25})>$/);
+    const emoji = match.match(/^<(a?):([^:\s>]+):(\d{15,25})>$/);
     if (emoji) {
       tokens.push({ type: "emoji", raw: match, animated: emoji[1] === "a", name: emoji[2], id: emoji[3] });
     } else if (/^<@!?\d{15,25}>$/.test(match)) {
@@ -76,16 +76,28 @@ function renderInlineMarkdown(text: string, prefix: string): ReactNode[] {
 }
 
 function DiscordEmoji({ token }: { token: Extract<InlineToken, { type: "emoji" }> }) {
+  const primaryExtension = token.animated ? "gif" : "webp";
+  const fallbackExtension = token.animated ? "webp" : "png";
+  const [extension, setExtension] = useState(primaryExtension);
   const [failed, setFailed] = useState(false);
-  if (failed) return <span>{token.raw}</span>;
-  const extension = token.animated ? "gif" : "webp";
+
+  if (failed) {
+    return <span className="osk-discord-emoji-fallback" title={token.raw}>:{token.name}:</span>;
+  }
+
   return (
     <img
       className="osk-discord-emoji"
       src={`https://cdn.discordapp.com/emojis/${token.id}.${extension}?size=44&quality=lossless`}
       alt={`:${token.name}:`}
+      title={`:${token.name}:`}
       loading="lazy"
-      onError={() => setFailed(true)}
+      decoding="async"
+      draggable={false}
+      onError={() => {
+        if (extension !== fallbackExtension) setExtension(fallbackExtension);
+        else setFailed(true);
+      }}
     />
   );
 }
@@ -128,7 +140,7 @@ function renderTextToken(value: string, keyPrefix: string): ReactNode[] {
 export function DiscordRichText({ text, guildOptions, compact, className }: DiscordRichTextProps) {
   if (!text.trim()) return null;
   const nodes = tokenizeDiscordText(text).flatMap((token, index): ReactNode[] => {
-    const key = `discord-token-${index}`;
+    const key = `discord-token-${index}-${token.type === "text" ? "text" : token.raw}`;
     if (token.type === "text") return renderTextToken(token.value, key);
     if (token.type === "emoji") return [<DiscordEmoji key={key} token={token} />];
     if (token.type === "roleMention" || token.type === "channelMention" || token.type === "userMention") {

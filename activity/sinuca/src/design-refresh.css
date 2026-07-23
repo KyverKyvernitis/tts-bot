@@ -1430,14 +1430,15 @@
 
 /* ============================================================
    Landing mínima
-   Um CTA, uma frase, uma grade compacta e o rodapé.
+   Um CTA, uma frase e uma grade compacta.
    ============================================================ */
 .osk-minimal-landing {
   position: relative;
   z-index: 1;
   width: min(980px, calc(100% - 40px));
-  min-height: 100dvh;
+  min-height: auto;
   margin: 0 auto;
+  padding-bottom: max(30px, env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
 }
@@ -1474,7 +1475,7 @@
 }
 
 .osk-minimal-main {
-  flex: 1;
+  flex: none;
 }
 
 .osk-minimal-hero {
@@ -1501,6 +1502,7 @@
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+  filter: drop-shadow(0 10px 28px rgba(126, 91, 255, .2));
 }
 
 .osk-minimal-hero p {
@@ -1517,7 +1519,7 @@
 }
 
 .osk-minimal-features {
-  padding: 38px 0 52px;
+  padding: 38px 0 28px;
   border-top: 1px solid var(--osk-line);
 }
 
@@ -1565,31 +1567,6 @@
   line-height: 1.2;
 }
 
-.osk-minimal-footer {
-  min-height: 78px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 22px;
-  border-top: 1px solid var(--osk-line);
-}
-
-.osk-minimal-footer nav {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-}
-
-.osk-minimal-footer nav button {
-  padding: 6px 0;
-  color: var(--osk-muted);
-  background: transparent;
-  font-size: .74rem;
-}
-
-.osk-minimal-footer nav button:hover {
-  color: var(--osk-text);
-}
 
 @media (max-width: 720px) {
   .osk-minimal-landing {
@@ -1628,7 +1605,7 @@
   }
 
   .osk-minimal-features {
-    padding: 31px 0 38px;
+    padding: 31px 0 18px;
   }
 
   .osk-minimal-features > h2 {
@@ -1663,18 +1640,6 @@
     font-size: .75rem;
   }
 
-  .osk-minimal-footer {
-    min-height: 68px;
-    gap: 14px;
-  }
-
-  .osk-minimal-footer nav {
-    gap: 14px;
-  }
-
-  .osk-minimal-footer nav button {
-    font-size: .68rem;
-  }
 }
 
 @media (max-width: 380px) {
@@ -1684,5 +1649,135 @@
 
   .osk-minimal-feature-grid h3 {
     font-size: .7rem;
+  }
+}
+
+
+/* ============================================================
+   Refinamentos finais: convite, foco e estados discretos
+   ============================================================ */
+.osk-invite-shell {
+  min-height: 100dvh;
+}
+
+.osk-invite-shell > header {
+  min-height: 70px;
+}
+
+.osk-invite-back {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 13px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 11px;
+  color: var(--osk-text-soft);
+  background: rgba(255,255,255,.025);
+  font-size: .76rem;
+  font-weight: 700;
+}
+
+.osk-invite-card {
+  width: min(520px, 100%);
+  margin: clamp(24px, 6vh, 54px) auto 40px;
+  padding: clamp(26px, 5vw, 42px);
+  border-radius: 22px;
+}
+
+.osk-invite-server {
+  margin: 0 0 20px;
+}
+
+.osk-invite-card h1 {
+  max-width: 430px;
+  margin: 0;
+  font-size: clamp(1.9rem, 5vw, 2.65rem);
+  line-height: 1.08;
+  letter-spacing: -.045em;
+}
+
+.osk-invite-server-name {
+  max-width: 100%;
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 15px 0 0;
+  color: #d8ddea;
+  font-size: 1.08rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.osk-invite-card > p {
+  max-width: 430px;
+  margin-top: 14px;
+  font-size: .82rem;
+  line-height: 1.6;
+}
+
+.osk-invite-action {
+  min-width: 220px;
+  margin-top: 25px;
+}
+
+.osk-root label.osk-switch:focus-within {
+  outline: none;
+  box-shadow: none;
+}
+
+.osk-root .osk-switch input:focus-visible + .osk-switch-track {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(125, 92, 246, .32), 0 0 18px rgba(111, 76, 255, .18);
+}
+
+.osk-message-editor__header {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.osk-discord-emoji-fallback {
+  display: inline-block;
+  max-width: 12em;
+  overflow: hidden;
+  color: #b8c0d0;
+  font-size: .88em;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .osk-invite-shell {
+    width: calc(100% - 28px);
+  }
+
+  .osk-invite-shell > header {
+    min-height: 62px;
+  }
+
+  .osk-invite-card {
+    margin: 24px auto 28px;
+    padding: 25px 20px;
+    border-radius: 19px;
+  }
+
+  .osk-invite-card h1 {
+    font-size: 1.72rem;
+  }
+
+  .osk-invite-server-name {
+    font-size: .94rem;
+  }
+
+  .osk-invite-card > p {
+    font-size: .76rem;
+  }
+
+  .osk-invite-action {
+    width: 100%;
+    min-width: 0;
   }
 }

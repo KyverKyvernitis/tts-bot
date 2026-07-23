@@ -421,7 +421,7 @@ function GenericMessagePreview({
       ))}
       {isValidPreviewUrl(imageUrl) && <MessageImage src={imageUrl} alt="Imagem da mensagem" className="osk-message-preview__generic-image" placeholder="Imagem indisponível" />}
       {placeholder && <div className="osk-message-preview__select-sim"><span>{placeholder}</span><span>⌄</span></div>}
-      {buttonLabel && <div className="osk-message-preview__button-row"><span data-style={buttonStyle}>{buttonEmoji ? `${buttonEmoji} ` : ""}{buttonLabel}</span></div>}
+      {buttonLabel && <div className="osk-message-preview__button-row"><span data-style={buttonStyle}>{buttonEmoji && <><DiscordRichText text={buttonEmoji} guildOptions={guildOptions} compact /> </>}<DiscordRichText text={buttonLabel} guildOptions={guildOptions} compact /></span></div>}
       {footerEntry && (
         <EditableRegion
           field={footerEntry.field}

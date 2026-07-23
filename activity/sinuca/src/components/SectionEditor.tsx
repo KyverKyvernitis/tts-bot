@@ -252,7 +252,7 @@ export function SectionEditor({
             <button type="button" className="osk-accordion-trigger" onClick={() => toggleGroup(group)} aria-expanded={open}>
               <span className="osk-accordion-icon"><GroupIcon size={19} /></span>
               <span className="osk-accordion-copy"><strong>{group}</strong><small>{GROUP_DESCRIPTIONS[group] || "Ajustes desta função."}</small></span>
-              {changed > 0 && <em>{changed} pendente{changed === 1 ? "" : "s"}</em>}
+              {changed > 0 && <em>Alterado</em>}
               <ChevronDown size={18} className="osk-accordion-chevron" />
             </button>
             <div className="osk-accordion-panel" aria-hidden={!open}>
@@ -433,7 +433,6 @@ function FieldsPanel({
         <div className="osk-compact-field-copy">
           <strong>{displayField.label}</strong>
           {displayField.description && <small>{displayField.description}</small>}
-          {changed && <span>Alterado · antes: {displayDashboardValue(field, values[field.id], guildOptions)}</span>}
         </div>
         <div className="osk-compact-field-control"><DashboardFieldControl field={displayField} value={controlValue} guildOptions={guildOptions} onChange={handleChange} /></div>
       </div>;
