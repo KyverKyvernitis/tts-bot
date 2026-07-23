@@ -67,6 +67,7 @@ export interface DashboardGuildSummary {
     emoji: string;
     description: string;
     enabled: boolean | null;
+    state: "active" | "inactive" | "partial" | "configured" | "pending";
     configured: number;
     total: number;
     status: string;
@@ -424,7 +425,6 @@ function defaultBirthdayDoc(guildId: string): Record<string, unknown> {
   return {
     type: BIRTHDAY_DOC_CONFIG,
     guild_id: snowflakeToLong(guildId),
-    enabled: false,
     register_channel_id: 0,
     announce_channel_id: 0,
     timezone: "America/Sao_Paulo",
@@ -799,7 +799,6 @@ const sections: DashboardSectionDefinition[] = [
       },
     },
     fields: [
-      { id: "birthday.enabled", label: "Ativar aniversários", type: "boolean", scope: "birthday", path: "enabled", group: "Geral" },
       { id: "birthday.options.allow_update", label: "Permitir atualizar a própria data", type: "boolean", scope: "birthday", path: "options.allow_update", group: "Geral" },
       { id: "birthday.register_channel_id", label: "Canal do calendário/cadastro", type: "channel", scope: "birthday", path: "register_channel_id", group: "Canais" },
       { id: "birthday.announce_channel_id", label: "Canal de avisos", type: "channel", scope: "birthday", path: "announce_channel_id", group: "Canais" },
@@ -1000,6 +999,66 @@ function isConfiguredValue(value: unknown): boolean {
   return true;
 }
 
+type DashboardSectionState = {
+  enabled: boolean | null;
+  state: "active" | "inactive" | "partial" | "configured" | "pending";
+  status: string;
+};
+
+function hasValue(values: Record<string, unknown>, fieldId: string): boolean {
+  return isConfiguredValue(values[fieldId]);
+}
+
+function sectionState(sectionId: string, values: Record<string, unknown>): DashboardSectionState {
+  if (sectionId === "welcome") {
+    const enabled = Boolean(values["welcome.enabled"]);
+    const hasChannel = hasValue(values, "welcome.channel_id") || (Boolean(values["welcome.webhook.enabled"]) && hasValue(values, "welcome.webhook.channel_id"));
+    if (!enabled) return { enabled: false, state: "inactive", status: "Desativada" };
+    if (!hasChannel) return { enabled: true, state: "partial", status: "Requer canal" };
+    return { enabled: true, state: "active", status: "Ativa" };
+  }
+
+  if (sectionId === "birthday") {
+    const register = hasValue(values, "birthday.register_channel_id");
+    const announce = hasValue(values, "birthday.announce_channel_id");
+    if (register && announce) return { enabled: null, state: "active", status: "Ativa" };
+    if (register || announce) return { enabled: null, state: "partial", status: "Configuração parcial" };
+    return { enabled: null, state: "pending", status: "Não configurada" };
+  }
+
+  if (sectionId === "forms") {
+    const formChannel = hasValue(values, "forms.form_channel_id");
+    const responseChannel = hasValue(values, "forms.responses_channel_id");
+    if (formChannel && responseChannel) return { enabled: null, state: "active", status: "Ativa" };
+    if (formChannel || responseChannel) return { enabled: null, state: "partial", status: "Configuração parcial" };
+    return { enabled: null, state: "pending", status: "Não configurada" };
+  }
+
+  if (sectionId === "tickets") {
+    const panel = hasValue(values, "tickets.panel.channel_id");
+    const category = hasValue(values, "tickets.channels.category_id");
+    const staff = hasValue(values, "tickets.roles.staff_role_id");
+    const enabledFlow = ["partnership", "report", "suggestion", "other"].some((flow) => Boolean(values[`tickets.enabled.${flow}`]));
+    if (panel && category && staff && enabledFlow) return { enabled: null, state: "active", status: "Ativa" };
+    // Fluxos possuem padrões habilitados; sozinhos não significam que o módulo foi configurado.
+    if (panel || category || staff) return { enabled: null, state: "partial", status: "Configuração parcial" };
+    return { enabled: null, state: "pending", status: "Não configurada" };
+  }
+
+  if (sectionId === "color_roles") {
+    const panel = hasValue(values, "color_roles.channel_id");
+    const slots = values["color_roles.slots"];
+    const hasLinkedRole = isPlainObject(slots) && Object.values(slots).some((slot) => isPlainObject(slot) && isConfiguredValue(slot.role_id));
+    if (panel && hasLinkedRole) return { enabled: null, state: "active", status: "Ativa" };
+    if (panel || hasLinkedRole) return { enabled: null, state: "partial", status: "Configuração parcial" };
+    return { enabled: null, state: "pending", status: "Não configurada" };
+  }
+
+  if (sectionId === "tts") return { enabled: null, state: "configured", status: "Disponível" };
+  if (sectionId === "general") return { enabled: null, state: "configured", status: "Configurado" };
+  return { enabled: null, state: "configured", status: "Configurado" };
+}
+
 export function createDashboardConfigService(options: CreateDashboardConfigServiceOptions): DashboardConfigService {
   let client: MongoClient | null = null;
   let db: Db | null = null;
@@ -1062,13 +1121,12 @@ export function createDashboardConfigService(options: CreateDashboardConfigServi
       return {
         guildId,
         sections: sections.map((section) => {
-          const enabledField = section.fields.find((field) => field.id === `${section.id}.enabled`);
-          const enabled = enabledField ? Boolean(values[enabledField.id]) : null;
+          const semantic = sectionState(section.id, values);
           const configured = section.fields.filter((field) => isConfiguredValue(values[field.id])).length;
           return {
             id: section.id, label: section.label, emoji: section.emoji, description: section.description,
-            enabled, configured, total: section.fields.length,
-            status: enabled === false ? "desativado" : configured > 0 ? "configurado" : "pendente",
+            enabled: semantic.enabled, state: semantic.state, configured, total: section.fields.length,
+            status: semantic.status,
           };
         }),
       };

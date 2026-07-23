@@ -1,5 +1,5 @@
 import { Home, LogOut, X } from "lucide-react";
-import { useEffect, useRef, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type TransitionEvent } from "react";
 import type { DashboardVisualModule } from "../moduleCatalog";
 import { SmartAvatar } from "./SmartAvatar";
 
@@ -16,6 +16,8 @@ interface SidebarProps {
   onLogout(): void;
 }
 
+const DRAWER_TRANSITION_MS = 260;
+
 export function Sidebar({
   modules,
   selectedSectionId,
@@ -31,16 +33,47 @@ export function Sidebar({
   const main = modules.filter((item) => item.group === "main");
   const system = modules.filter((item) => item.group === "system");
   const closeRef = useRef<HTMLButtonElement>(null);
-  const select = (id: string) => { onSelect(id); onCloseMobile(); };
-  const goHome = () => { onHome(); onCloseMobile(); };
+  const closeTimerRef = useRef<number | null>(null);
+  const [mobileMounted, setMobileMounted] = useState(mobileOpen);
+  const [mobileVisible, setMobileVisible] = useState(false);
 
   useEffect(() => {
-    if (!mobileOpen) return;
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+
+    let firstFrame = 0;
+    let secondFrame = 0;
+    if (mobileOpen) {
+      setMobileMounted(true);
+      firstFrame = window.requestAnimationFrame(() => {
+        secondFrame = window.requestAnimationFrame(() => setMobileVisible(true));
+      });
+    } else {
+      setMobileVisible(false);
+      closeTimerRef.current = window.setTimeout(() => {
+        setMobileMounted(false);
+        closeTimerRef.current = null;
+      }, DRAWER_TRANSITION_MS + 60);
+    }
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
+  }, [mobileOpen]);
+
+  useEffect(() => {
+    if (!mobileMounted || !mobileVisible) return;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const focusTimer = window.setTimeout(() => closeRef.current?.focus(), 80);
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onCloseMobile();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseMobile();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
@@ -48,18 +81,36 @@ export function Sidebar({
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [mobileOpen, onCloseMobile]);
+  }, [mobileMounted, mobileVisible, onCloseMobile]);
+
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
+  }, []);
+
+  const finishClose = (event: TransitionEvent<HTMLElement>) => {
+    if (event.target !== event.currentTarget || event.propertyName !== "transform" || mobileOpen) return;
+    setMobileMounted(false);
+  };
+
+  const select = (id: string) => onSelect(id);
+  const goHome = () => onHome();
 
   return <>
-    <button
+    {mobileMounted && <button
       type="button"
       className="osk-sidebar-backdrop"
-      data-open={mobileOpen || undefined}
+      data-open={mobileVisible || undefined}
       onClick={onCloseMobile}
       aria-label="Fechar menu"
-      tabIndex={mobileOpen ? 0 : -1}
-    />
-    <aside className="osk-dashboard-sidebar" data-open={mobileOpen || undefined} aria-label="Navegação do painel">
+      tabIndex={mobileVisible ? 0 : -1}
+    />}
+    <aside
+      className="osk-dashboard-sidebar"
+      data-open={mobileVisible || undefined}
+      data-mobile-mounted={mobileMounted || undefined}
+      aria-label="Navegação do painel"
+      onTransitionEnd={finishClose}
+    >
       <div className="osk-sidebar-brand">
         <span className="osk-sidebar-bot">
           <span className="osk-sidebar-bot-glow" aria-hidden="true" />
@@ -82,5 +133,9 @@ export function Sidebar({
 
 function SidebarLink({ item, active, onClick, index }: { item: DashboardVisualModule; active: boolean; onClick(): void; index: number }) {
   const Icon = item.icon;
-  return <button className="osk-sidebar-link" style={{ "--osk-menu-index": index } as CSSProperties} data-active={active || undefined} onClick={onClick}><Icon size={18} /><span>{item.label}</span></button>;
+  return <button className="osk-sidebar-link" style={{ "--osk-menu-index": index } as CSSProperties} data-active={active || undefined} onClick={onClick}>
+    <Icon size={18} />
+    <span>{item.label}</span>
+    <i data-state={item.state || "configured"} aria-hidden="true" />
+  </button>;
 }

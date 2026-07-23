@@ -25,7 +25,7 @@ import {
   Users,
   Webhook,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type {
   DashboardFieldDefinition,
   DashboardMessageEditorDefinition,
@@ -80,7 +80,7 @@ const GROUP_DESCRIPTIONS: Record<string, string> = {
   "Permissões": "Acesso da equipe, do autor e dos demais membros.",
   "Mensagens": "Respostas mostradas ao aplicar ou remover cores.",
   "Cores": "Lista visual de cores e cargos vinculados.",
-  "Geral": "Ativação e preferências principais.",
+  "Geral": "Preferências principais desta função.",
   "Registro de datas": "Mensagens e regras usadas no cadastro.",
   "Avisos": "Horário e textos dos anúncios automáticos.",
   "Calendário": "Conteúdo do calendário de aniversários.",
@@ -122,14 +122,11 @@ function editorEnabled(sectionId: string, group: string, draft: Record<string, u
   if (sectionId === "welcome" && group === "Mensagem de entrada") return Boolean(draft["welcome.enabled"]);
   if (sectionId === "welcome" && group === "Mensagem privada") return Boolean(draft["welcome.enabled"]) && Boolean(draft["welcome.dm_enabled"]);
   if (sectionId === "forms" && group === "Aprovação") return Boolean(draft["forms.approval.enabled"]);
-  if (sectionId === "birthday" && ["Registro de datas", "Avisos", "Calendário"].includes(group)) return Boolean(draft["birthday.enabled"]);
   return true;
 }
 
 function fieldVisible(sectionId: string, field: DashboardFieldDefinition, draft: Record<string, unknown>): boolean {
   if (field.id === "tts.ignored_tts_role_enabled") return false;
-  if (sectionId === "birthday" && field.id !== "birthday.enabled" && !Boolean(draft["birthday.enabled"])) return false;
-
   if (sectionId === "tts") {
     const engine = String(draft["tts.engine"] || "edge");
     if (field.id === "tts.language") return engine === "gtts";
@@ -166,26 +163,36 @@ export function SectionEditor({
   onChange, onMessageEditorActiveChange, onBack,
 }: SectionEditorProps) {
   const Icon = module?.icon ?? Settings;
-  const groups = section.groups?.length ? section.groups : null;
-  const [openGroup, setOpenGroup] = useState<string | null>(null);
+  const groups = useMemo(() => section.groups?.length ? section.groups : null, [section.groups]);
+  const [openGroup, setOpenGroup] = useState<string | null>(() => section.groups?.[0] ?? null);
   const [activeEditor, setActiveEditor] = useState<ActiveMessageEditor | null>(null);
   const groupRefs = useRef<Record<string, HTMLElement | null>>({});
+  const pageScrollRef = useRef(0);
 
   useEffect(() => {
-    setOpenGroup(groups?.[0] ?? null);
+    setOpenGroup(section.groups?.[0] ?? null);
     setActiveEditor(null);
-  }, [section.id, groups]);
+  }, [section.id]); // Reinicializa somente ao trocar de função.
 
   useEffect(() => {
     onMessageEditorActiveChange?.(Boolean(activeEditor));
-    return () => onMessageEditorActiveChange?.(false);
   }, [activeEditor, onMessageEditorActiveChange]);
 
-  function openMessageEditor(editor: DashboardMessageEditorDefinition, fallbackVariables?: DashboardTemplateVariables) {
+  const restorePagePosition = useCallback(() => {
+    window.requestAnimationFrame(() => window.scrollTo({ top: pageScrollRef.current, behavior: "auto" }));
+  }, []);
+
+  const finishEditor = useCallback(() => {
+    setActiveEditor(null);
+    restorePagePosition();
+  }, [restorePagePosition]);
+
+  const openMessageEditor = useCallback((editor: DashboardMessageEditorDefinition, fallbackVariables?: DashboardTemplateVariables) => {
     const editorFields = editor.fieldIds
       .map((id) => section.fields.find((field) => field.id === id))
       .filter((field): field is DashboardFieldDefinition => Boolean(field));
     if (!editorFields.length) return;
+    pageScrollRef.current = window.scrollY;
     setActiveEditor({
       id: editor.id,
       label: editor.label,
@@ -194,13 +201,13 @@ export function SectionEditor({
       variables: editor.variables ?? fallbackVariables,
       baseline: Object.fromEntries(editorFields.map((field) => [field.id, draft[field.id]])),
     });
-  }
+  }, [draft, section.fields]);
 
-  function closeEditorDiscard() {
+  const closeEditorDiscard = useCallback(() => {
     if (!activeEditor) return;
     for (const field of activeEditor.fields) onChange(field, activeEditor.baseline[field.id]);
-    setActiveEditor(null);
-  }
+    finishEditor();
+  }, [activeEditor, finishEditor, onChange]);
 
   function toggleGroup(group: string, scroll = false) {
     const next = openGroup === group ? null : group;
@@ -294,7 +301,7 @@ export function SectionEditor({
     botAvatarUrl={previewBotAvatarUrl}
     variables={activeEditor.variables}
     onChange={onChange}
-    onApply={() => setActiveEditor(null)}
+    onApply={finishEditor}
     onDiscard={closeEditorDiscard}
   />}
   </>;

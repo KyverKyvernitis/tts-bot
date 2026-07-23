@@ -1,5 +1,5 @@
 import { Check, ChevronDown, Search, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type TransitionEvent } from "react";
 import { createPortal } from "react-dom";
 
 export interface SmartSelectOption {
@@ -18,8 +18,11 @@ interface SmartSelectProps {
   id?: string;
 }
 
+const SELECT_TRANSITION_MS = 220;
+
 export function SmartSelect({ value, options, onChange, placeholder, emptyLabel, disabled, id }: SmartSelectProps) {
-  const [open, setOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  const [visible, setVisible] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(-1);
   const [position, setPosition] = useState({ left: 0, top: 0, width: 220 });
@@ -27,6 +30,7 @@ export function SmartSelect({ value, options, onChange, placeholder, emptyLabel,
   const popoverRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const closeTimerRef = useRef<number | null>(null);
   const selected = options.find((option) => option.value === value) ?? null;
   const searchable = options.length > 8;
   const filteredOptions = useMemo(() => {
@@ -43,16 +47,46 @@ export function SmartSelect({ value, options, onChange, placeholder, emptyLabel,
     setPosition({ left, top: rect.bottom + 7, width });
   }, []);
 
-  useEffect(() => {
-    if (!open) return;
+  const finishClose = useCallback(() => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    setMounted(false);
+    setQuery("");
+  }, []);
+
+  const close = useCallback(() => {
+    setVisible(false);
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = window.setTimeout(finishClose, SELECT_TRANSITION_MS + 70);
+  }, [finishClose]);
+
+  const open = useCallback(() => {
+    if (disabled) return;
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
     updatePosition();
+    setMounted(true);
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => setVisible(true)));
+  }, [disabled, updatePosition]);
+
+  useEffect(() => {
+    if (!mounted) return;
     function handlePointerDown(event: MouseEvent | TouchEvent) {
       const target = event.target as Node;
-      if (!rootRef.current?.contains(target) && !popoverRef.current?.contains(target)) setOpen(false);
+      if (!rootRef.current?.contains(target) && !popoverRef.current?.contains(target)) close();
     }
-    function handleKeyDown(event: KeyboardEvent) { if (event.key === "Escape") setOpen(false); }
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+      }
+    }
     document.addEventListener("mousedown", handlePointerDown);
-    document.addEventListener("touchstart", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown, { passive: true });
     document.addEventListener("keydown", handleKeyDown);
     window.addEventListener("resize", updatePosition);
     window.addEventListener("scroll", updatePosition, true);
@@ -63,21 +97,37 @@ export function SmartSelect({ value, options, onChange, placeholder, emptyLabel,
       window.removeEventListener("resize", updatePosition);
       window.removeEventListener("scroll", updatePosition, true);
     };
-  }, [open, updatePosition]);
+  }, [close, mounted, updatePosition]);
 
   useEffect(() => {
-    if (!open) { setQuery(""); return; }
+    if (!mounted || !window.matchMedia("(max-width: 720px)").matches) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [mounted]);
+
+  useEffect(() => {
+    if (!visible) return;
     const idx = filteredOptions.findIndex((option) => option.value === value);
     setActiveIndex(idx >= 0 ? idx : 0);
-    window.setTimeout(() => searchable ? searchRef.current?.focus() : listRef.current?.focus(), 30);
-  }, [filteredOptions, open, searchable, value]);
+    const focusTimer = window.setTimeout(() => {
+      if (searchable) searchRef.current?.focus();
+      else listRef.current?.focus();
+      listRef.current?.querySelector<HTMLElement>('[data-selected="true"]')?.scrollIntoView({ block: "nearest" });
+    }, 40);
+    return () => window.clearTimeout(focusTimer);
+  }, [filteredOptions, searchable, value, visible]);
+
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
+  }, []);
 
   function commit(optionValue: string) {
     onChange(optionValue);
-    setOpen(false);
+    close();
   }
 
-  function handleListKeyDown(event: React.KeyboardEvent<HTMLUListElement>) {
+  function handleListKeyDown(event: KeyboardEvent<HTMLUListElement>) {
     if (event.key === "ArrowDown") {
       event.preventDefault();
       setActiveIndex((idx) => Math.min(filteredOptions.length - 1, idx + 1));
@@ -91,18 +141,28 @@ export function SmartSelect({ value, options, onChange, placeholder, emptyLabel,
     }
   }
 
+  function handleTransitionEnd(event: TransitionEvent<HTMLDivElement>) {
+    if (event.target !== event.currentTarget || visible) return;
+    if (event.propertyName === "opacity" || event.propertyName === "transform") finishClose();
+  }
+
   const listboxId = id ? `${id}-listbox` : undefined;
   const layerStyle = {
     "--osk-select-left": `${position.left}px`,
     "--osk-select-top": `${position.top}px`,
     "--osk-select-width": `${position.width}px`,
   } as CSSProperties;
-  const layer = open ? <div className="osk-select-layer" style={layerStyle}>
-    <button type="button" className="osk-select-backdrop" onClick={() => setOpen(false)} aria-label="Fechar opções" />
+
+  const layer = mounted ? <div className="osk-select-layer" data-visible={visible || undefined} style={layerStyle} onTransitionEnd={handleTransitionEnd}>
+    <button type="button" className="osk-select-backdrop" onClick={close} aria-label="Fechar opções" tabIndex={visible ? 0 : -1} />
     <div className="osk-select-popover" ref={popoverRef} role="presentation">
-      <header className="osk-select-mobile-header"><strong>Escolha uma opção</strong><button type="button" onClick={() => setOpen(false)} aria-label="Fechar"><X size={18} /></button></header>
+      <span className="osk-select-sheet-handle" aria-hidden="true" />
+      <header className="osk-select-mobile-header">
+        <strong>Escolha uma opção</strong>
+        <button type="button" className="osk-select-close" onClick={close} aria-label="Fechar"><X size={18} /></button>
+      </header>
       {searchable && <label className="osk-select-search"><Search size={15} /><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar..." /></label>}
-      <ul className="osk-select-menu" role="listbox" id={listboxId} ref={listRef} tabIndex={-1} aria-activedescendant={activeIndex >= 0 && filteredOptions[activeIndex] ? `${id}-opt-${activeIndex}` : undefined} onKeyDown={handleListKeyDown}>
+      <ul className="osk-select-menu" role="listbox" id={listboxId} ref={listRef} tabIndex={-1} aria-activedescendant={id && activeIndex >= 0 && filteredOptions[activeIndex] ? `${id}-opt-${activeIndex}` : undefined} onKeyDown={handleListKeyDown}>
         {filteredOptions.length === 0 && <li className="osk-select-empty" role="presentation">{emptyLabel ?? "Nenhuma opção disponível"}</li>}
         {filteredOptions.map((option, index) => <li key={option.value || "__empty"} id={id ? `${id}-opt-${index}` : undefined} role="option" aria-selected={option.value === value} className="osk-select-option" data-active={index === activeIndex || undefined} data-selected={option.value === value || undefined} onMouseEnter={() => setActiveIndex(index)} onClick={() => commit(option.value)}>
           <span className="osk-select-option-text"><span>{option.label}</span>{option.hint && <small>{option.hint}</small>}</span>
@@ -112,8 +172,8 @@ export function SmartSelect({ value, options, onChange, placeholder, emptyLabel,
     </div>
   </div> : null;
 
-  return <div className="osk-select" data-open={open || undefined} data-disabled={disabled || undefined} ref={rootRef}>
-    <button type="button" id={id} className="osk-select-trigger" aria-haspopup="listbox" aria-expanded={open} aria-controls={listboxId} disabled={disabled} onClick={() => { updatePosition(); setOpen((current) => !current); }}>
+  return <div className="osk-select" data-open={visible || undefined} data-disabled={disabled || undefined} ref={rootRef}>
+    <button type="button" id={id} className="osk-select-trigger" aria-haspopup="listbox" aria-expanded={visible} aria-controls={listboxId} disabled={disabled} onClick={() => visible ? close() : open()}>
       <span className="osk-select-value">{selected ? selected.label : <span className="osk-select-placeholder">{placeholder ?? "Selecione"}</span>}</span>
       <ChevronDown size={16} className="osk-select-chev" aria-hidden="true" />
     </button>

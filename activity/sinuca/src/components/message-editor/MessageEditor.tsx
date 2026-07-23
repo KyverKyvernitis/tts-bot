@@ -8,7 +8,7 @@ import {
   MessageSquareText,
   Variable,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type TransitionEvent } from "react";
 import { createPortal } from "react-dom";
 import { MessageJsonEditor } from "./MessageJsonEditor";
 import { MessagePreview } from "./MessagePreview";
@@ -113,6 +113,7 @@ export function MessageEditor(props: MessageEditorProps) {
     return modes;
   }, [categorizedFields, variables]);
 
+  const [visible, setVisible] = useState(false);
   const [mode, setMode] = useState<MessageEditorMode>(availableModes[0] ?? "content");
   const [mobileView, setMobileView] = useState<MessageEditorMobileView>("edit");
   const [jsonText, setJsonText] = useState(serializedDraft);
@@ -124,7 +125,10 @@ export function MessageEditor(props: MessageEditorProps) {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const closeIntent = useRef<"apply" | "discard" | null>(null);
+  const finalIntent = useRef<"apply" | "discard" | null>(null);
   const closing = useRef(false);
+  const closeTimerRef = useRef<number | null>(null);
+  const scrollPositionRef = useRef(0);
   const historyMarker = useRef(`osk-editor-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
   const localDirty = useMemo(
@@ -150,19 +154,36 @@ export function MessageEditor(props: MessageEditorProps) {
     );
   }, []);
 
-  const handleHistoryClose = useCallback(() => {
+  const finalizeClose = useCallback(() => {
+    if (!closing.current) return;
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    const intent = finalIntent.current ?? "discard";
+    finalIntent.current = null;
+    if (intent === "apply") onApplyRef.current();
+    else onDiscardRef.current();
+  }, []);
+
+  const beginClose = useCallback((intent: "apply" | "discard") => {
     if (closing.current) return;
-    const intent = closeIntent.current ?? "discard";
-    closeIntent.current = null;
     if (intent === "discard" && (localDirtyRef.current || jsonDirtyRef.current)
       && !window.confirm("Descartar as alterações feitas neste editor?")) {
       restoreHistoryMarker();
       return;
     }
     closing.current = true;
-    if (intent === "apply") onApplyRef.current();
-    else onDiscardRef.current();
-  }, [restoreHistoryMarker]);
+    finalIntent.current = intent;
+    setVisible(false);
+    closeTimerRef.current = window.setTimeout(finalizeClose, 300);
+  }, [finalizeClose, restoreHistoryMarker]);
+
+  const handleHistoryClose = useCallback(() => {
+    const intent = closeIntent.current ?? "discard";
+    closeIntent.current = null;
+    beginClose(intent);
+  }, [beginClose]);
 
   const requestClose = useCallback((intent: "apply" | "discard") => {
     if (closing.current) return;
@@ -184,6 +205,12 @@ export function MessageEditor(props: MessageEditorProps) {
       ?? null);
     closing.current = false;
     closeIntent.current = null;
+    finalIntent.current = null;
+    setVisible(false);
+    const firstFrame = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => setVisible(true));
+    });
+    return () => window.cancelAnimationFrame(firstFrame);
   }, [editorKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -209,8 +236,15 @@ export function MessageEditor(props: MessageEditorProps) {
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
+    const previousPosition = document.body.style.position;
+    const previousTop = document.body.style.top;
+    const previousWidth = document.body.style.width;
+    scrollPositionRef.current = window.scrollY;
     returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     document.body.style.overflow = "hidden";
+    document.body.style.position = "fixed";
+    document.body.style.top = `-${scrollPositionRef.current}px`;
+    document.body.style.width = "100%";
     restoreHistoryMarker();
     window.setTimeout(() => dialogRef.current?.querySelector<HTMLElement>("button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled)")?.focus(), 0);
     const onBackRequest = () => handleHistoryClose();
@@ -233,7 +267,12 @@ export function MessageEditor(props: MessageEditorProps) {
     window.addEventListener("osk:message-editor-back", onBackRequest as EventListener);
     window.addEventListener("keydown", onKeyDown);
     return () => {
+      if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
       document.body.style.overflow = previousOverflow;
+      document.body.style.position = previousPosition;
+      document.body.style.top = previousTop;
+      document.body.style.width = previousWidth;
+      window.scrollTo({ top: scrollPositionRef.current, behavior: "auto" });
       window.removeEventListener("osk:message-editor-back", onBackRequest as EventListener);
       window.removeEventListener("keydown", onKeyDown);
       window.setTimeout(() => returnFocusRef.current?.focus(), 0);
@@ -289,7 +328,12 @@ export function MessageEditor(props: MessageEditorProps) {
   const currentFields = mode === "content" || mode === "appearance" || mode === "components" ? categorizedFields[mode] : [];
   const applyDisabled = Boolean(pendingJsonChanges) || (!localDirty && !jsonDirty);
 
-  const editor = <div ref={dialogRef} className="osk-root osk-message-editor" data-mobile-view={mobileView} role="dialog" aria-modal="true" aria-label={`Editar ${groupLabel}`}>
+  function handleTransitionEnd(event: TransitionEvent<HTMLDivElement>) {
+    if (event.target !== event.currentTarget || visible || !closing.current) return;
+    if (event.propertyName === "opacity") finalizeClose();
+  }
+
+  const editor = <div ref={dialogRef} className="osk-root osk-message-editor" data-visible={visible || undefined} data-mobile-view={mobileView} role="dialog" aria-modal="true" aria-label={`Editar ${groupLabel}`} onTransitionEnd={handleTransitionEnd}>
     <div className="osk-message-editor__shell">
       <header className="osk-message-editor__header">
         <button type="button" className="osk-message-editor__back" onClick={() => requestClose("discard")}>

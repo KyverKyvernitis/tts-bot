@@ -42,14 +42,13 @@ function FunctionGroup({
     <div className="osk-function-grid">
       {items.map((item, index) => {
         const Icon = item.icon;
-        const hasExplicitState = item.enabled !== null;
-        return <button key={item.id} className="osk-function-card" style={{ "--osk-card-index": index } as CSSProperties} onClick={() => onOpen(item.id)}>
+        return <button key={item.id} className="osk-function-card" style={{ "--osk-card-index": index } as CSSProperties} data-state={item.state || "configured"} onClick={() => onOpen(item.id)}>
           <span className="osk-function-icon"><Icon size={21} /></span>
           <span className="osk-function-copy">
             <strong>{item.label}</strong>
             <small>{item.description}</small>
           </span>
-          {hasExplicitState && <span className="osk-function-state" data-enabled={item.enabled || undefined}>{item.enabled ? "Ativada" : "Desativada"}</span>}
+          <span className="osk-function-state" data-state={item.state || "configured"}>{item.status || (item.enabled === false ? "Desativada" : "Configurada")}</span>
           <span className="osk-function-arrow"><ArrowRight size={18} /></span>
         </button>;
       })}

@@ -87,13 +87,13 @@ class DashboardSync(commands.Cog):
             last_revision = self._last_seen_revision.get(guild_id)
             if last_revision is None:
                 # Guild nova ou não cacheada ainda. Recarrega só ela para evitar
-                # drift, mas não toca em cogs nem em mensagens públicas.
-                await self._reload_guild(db, guild_id, revision, doc.get("dashboard_changed_sections"))
+                # efeitos retroativos durante a inicialização do sincronizador.
+                await self._reload_guild(db, guild_id, revision, doc.get("dashboard_changed_sections"), apply_changes=False)
                 continue
             if revision > last_revision:
-                await self._reload_guild(db, guild_id, revision, doc.get("dashboard_changed_sections"))
+                await self._reload_guild(db, guild_id, revision, doc.get("dashboard_changed_sections"), apply_changes=True)
 
-    async def _reload_guild(self, db: Any, guild_id: int, revision: int, sections: Any):
+    async def _reload_guild(self, db: Any, guild_id: int, revision: int, sections: Any, *, apply_changes: bool):
         try:
             reload_one = getattr(db, "reload_guild_cache", None)
             if callable(reload_one):
@@ -101,14 +101,49 @@ class DashboardSync(commands.Cog):
             else:
                 await db.load_cache()
             self._last_seen_revision[guild_id] = revision
+            changed_sections = [str(item) for item in sections] if isinstance(sections, list) else []
+            if apply_changes and changed_sections:
+                await self._apply_section_changes(guild_id, changed_sections)
             log.info(
                 "[dashboard_sync] guild=%s revision=%s sections=%s cache recarregado",
                 guild_id,
                 revision,
-                sections if isinstance(sections, list) else [],
+                changed_sections,
             )
         except Exception:
             log.exception("[dashboard_sync] falha ao recarregar cache guild=%s revision=%s", guild_id, revision)
+
+
+    async def _apply_section_changes(self, guild_id: int, sections: list[str]):
+        """Aplica efeitos seguros em mensagens persistentes após recarregar o cache."""
+        guild = self.bot.get_guild(int(guild_id))
+        if guild is None:
+            return
+
+        async def run(cog_name: str, method_name: str, *args: Any):
+            cog = self.bot.get_cog(cog_name)
+            method = getattr(cog, method_name, None) if cog is not None else None
+            if not callable(method):
+                return
+            try:
+                await method(*args)
+            except Exception:
+                log.exception(
+                    "[dashboard_sync] falha ao aplicar seção guild=%s cog=%s método=%s",
+                    guild_id,
+                    cog_name,
+                    method_name,
+                )
+
+        changed = set(sections)
+        if "birthday" in changed:
+            await run("BirthdayCog", "_sync_public_calendar", guild)
+        if "forms" in changed:
+            await run("FormsCog", "_refresh_published_form", int(guild_id))
+        if "tickets" in changed:
+            await run("TicketsCog", "_refresh_public_panel", int(guild_id))
+        if "color_roles" in changed:
+            await run("ColorRolesCog", "_refresh_public_panel_messages", int(guild_id))
 
     @dashboard_sync_loop.before_loop
     async def before_dashboard_sync_loop(self):

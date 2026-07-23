@@ -475,6 +475,30 @@ class FormsCog(commands.Cog):
 
         await self._post_form_message(guild_id, message.channel)
 
+    async def _refresh_published_form(self, guild_id: int) -> tuple[bool, str]:
+        """Atualiza o painel persistente após mudanças vindas do dashboard."""
+        cfg = self._get_config(int(guild_id))
+        channel_id = int(cfg.get("form_channel_id") or 0)
+        message_id = int(cfg.get("active_message_id") or 0)
+        if not (channel_id and message_id):
+            return False, "Nenhum formulário publicado para atualizar."
+        channel = self.bot.get_channel(channel_id)
+        if channel is None or not hasattr(channel, "fetch_message"):
+            return False, "Canal do formulário não encontrado."
+        try:
+            message = await channel.fetch_message(message_id)
+            view = FormView(self, int(guild_id))
+            await message.edit(view=view)
+            try:
+                self.bot.add_view(view, message_id=message_id)
+            except Exception:
+                pass
+            self._registered_persistent_views.add((int(guild_id), message_id))
+            return True, "Formulário publicado atualizado."
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+            log.warning("[forms] falha ao atualizar formulário publicado gid=%s: %r", guild_id, exc)
+            return False, "Não consegui atualizar o formulário publicado."
+
     async def _post_form_message(
         self,
         guild_id: int,

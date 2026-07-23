@@ -9,7 +9,7 @@ import { SectionEditor } from "./components/SectionEditor";
 import { ServerPicker } from "./components/ServerPicker";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
-import { mergeDashboardModules } from "./moduleCatalog";
+import { mergeDashboardModules, type DashboardVisualModule } from "./moduleCatalog";
 import {
   fetchDashboardBootstrap,
   fetchDashboardInvite,
@@ -38,6 +38,7 @@ type Route =
   | { page: "invite"; guildId: string }
   | { page: "dashboard"; guildId: string; sectionId: string | null };
 
+type DashboardRoute = Extract<Route, { page: "dashboard" }>;
 type SessionState = "loading" | "authenticated" | "anonymous";
 
 function isSnowflake(value: string | undefined | null): value is string {
@@ -101,7 +102,6 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : "Ocorreu uma falha inesperada.";
 }
 
-
 export default function App() {
   const [route, setRoute] = useState<Route>(() => parseRoute());
   const [sessionState, setSessionState] = useState<SessionState>("loading");
@@ -130,6 +130,9 @@ export default function App() {
   const selectedModule = useMemo(() => visualModules.find((item) => item.id === selectedSectionId) ?? null, [visualModules, selectedSectionId]);
   const changedFields = useMemo(() => selectedSection?.fields.filter((field) => !valuesEqual(values[field.id], draft[field.id])) ?? [], [draft, selectedSection, values]);
   const hasUnsavedChanges = changedFields.length > 0;
+
+  const closeMobileMenu = useCallback(() => setMobileMenuOpen(false), []);
+  const openMobileMenu = useCallback(() => setMobileMenuOpen(true), []);
 
   const navigate = useCallback((next: Route, replace = false, bypassGuard = false) => {
     if (!bypassGuard && hasUnsavedChanges) {
@@ -198,6 +201,10 @@ export default function App() {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [hasUnsavedChanges]);
 
+  useEffect(() => {
+    setMessageEditorActive(false);
+  }, [selectedSectionId]);
+
   const loadServers = useCallback(async (force = false) => {
     if (sessionState !== "authenticated" || (serversLoaded && !force)) return;
     setLoadingServers(true);
@@ -240,7 +247,7 @@ export default function App() {
       setDraft(settingsPayload.values || {});
       setSummary(summaryPayload.sections || []);
       setGuildOptions(optionsResult);
-      setNotice(quiet ? { type: "success", text: "Dados atualizados." } : null);
+      setNotice(quiet ? { type: "success", text: "Dados atualizados com os valores persistidos." } : null);
     } catch (error) {
       if (error instanceof DashboardHttpError && error.status === 401) {
         setSessionState("anonymous");
@@ -264,7 +271,7 @@ export default function App() {
     if (server) setSelectedServer(server);
   }, [manageable, route, serversLoaded]);
 
-  async function handleLogout() {
+  const handleLogout = useCallback(async () => {
     if (hasUnsavedChanges && !window.confirm("Sair e descartar as alterações que ainda não foram salvas?")) return;
     try { await logoutDashboard(); } catch { /* O cookie também expira no servidor. */ }
     setUser(null);
@@ -273,17 +280,17 @@ export default function App() {
     setNeedsInvite([]);
     setServersLoaded(false);
     navigate({ page: "landing" }, true, true);
-  }
+  }, [hasUnsavedChanges, navigate]);
 
-  function handleLogin() {
+  const handleLogin = useCallback(() => {
     openDiscordLogin(route.page === "landing" || route.page === "privacy" || route.page === "terms" ? "/dashboard" : routePath(route));
-  }
+  }, [route]);
 
-  function handleFieldChange(field: DashboardFieldDefinition, raw: unknown) {
+  const handleFieldChange = useCallback((field: DashboardFieldDefinition, raw: unknown) => {
     setDraft((current) => ({ ...current, [field.id]: normalizeInputValue(field, raw) }));
-  }
+  }, []);
 
-  async function handleSave() {
+  const handleSave = useCallback(async () => {
     if (route.page !== "dashboard" || !selectedSection || changedFields.length === 0) return;
     setSaving(true);
     setNotice(null);
@@ -295,37 +302,24 @@ export default function App() {
       setDraft(mergedValues);
       const refreshedSummary = await fetchDashboardSummary(route.guildId);
       setSummary(refreshedSummary.sections || []);
-      setNotice({ type: "success", text: `${result.saved.length} alteração${result.saved.length === 1 ? "" : "ões"} salva${result.saved.length === 1 ? "" : "s"} com sucesso.` });
+      const count = result.saved.length;
+      setNotice({
+        type: "success",
+        text: `${count} alteração${count === 1 ? "" : "ões"} salva${count === 1 ? "" : "s"}. O bot sincronizará os módulos compatíveis automaticamente.`,
+      });
     } catch (error) {
       setNotice({ type: "error", text: errorText(error) });
     } finally {
       setSaving(false);
     }
-  }
+  }, [changedFields, draft, route, selectedSection, values]);
 
-  function openSection(sectionId: string) {
+  const openSection = useCallback((sectionId: string) => {
     if (route.page !== "dashboard") return;
     navigate({ page: "dashboard", guildId: route.guildId, sectionId });
-  }
+  }, [navigate, route]);
 
-  if (sessionState === "loading") return <FullPageLoading />;
-
-  const protectedRoute = route.page === "servers" || route.page === "invite" || route.page === "dashboard";
-  if (protectedRoute && sessionState !== "authenticated") {
-    return <LoginRequired onLogin={handleLogin} onHome={() => navigate({ page: "landing" }, true, true)} />;
-  }
-
-  return <>
-    {notice && <Notice type={notice.type} text={notice.text} onClose={() => setNotice(null)} />}
-    {route.page === "landing" && <BrowserLanding loggedIn={sessionState === "authenticated"} user={user} onLogin={handleLogin} onDashboard={() => navigate({ page: "servers" })} onNavigate={(path) => navigate(parseRoute(path))} />}
-    {route.page === "privacy" && <LegalPage kind="privacy" onBack={() => navigate({ page: "landing" })} />}
-    {route.page === "terms" && <LegalPage kind="terms" onBack={() => navigate({ page: "landing" })} />}
-    {route.page === "servers" && <ServerPicker user={user} manageable={manageable} needsInvite={needsInvite} loading={loadingServers} onSelect={(server) => { setSelectedServer(server); navigate({ page: "dashboard", guildId: server.id, sectionId: null }); }} onInvite={(server) => { setSelectedServer(server); navigate({ page: "invite", guildId: server.id }); }} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onHome={() => navigate({ page: "landing" })} />}
-    {route.page === "invite" && <InviteScreen server={selectedServer || needsInvite.find((item) => item.id === route.guildId) || null} busy={inviteBusy} onBack={() => navigate({ page: "servers" })} onOpenInvite={() => void openInvite(route.guildId)} />}
-    {route.page === "dashboard" && <DashboardShell />}
-  </>;
-
-  async function openInvite(guildId: string) {
+  const openInvite = useCallback(async (guildId: string) => {
     if (inviteBusy) return;
     const popup = window.open("about:blank", "_blank");
     if (popup) {
@@ -346,27 +340,165 @@ export default function App() {
     } finally {
       setInviteBusy(false);
     }
+  }, [inviteBusy]);
+
+  const handleDashboardHome = useCallback(() => {
+    if (route.page === "dashboard") navigate({ page: "dashboard", guildId: route.guildId, sectionId: null });
+  }, [navigate, route]);
+
+  const handleChangeServer = useCallback(() => navigate({ page: "servers" }), [navigate]);
+  const handleDiscard = useCallback(() => setDraft(values), [values]);
+  const handleRefreshDashboard = useCallback(() => {
+    if (route.page !== "dashboard") return;
+    if (hasUnsavedChanges && !window.confirm("Recarregar os valores persistidos e descartar as alterações locais?")) return;
+    void loadDashboard(route.guildId, true);
+  }, [hasUnsavedChanges, loadDashboard, route]);
+
+  if (sessionState === "loading") return <FullPageLoading />;
+
+  const protectedRoute = route.page === "servers" || route.page === "invite" || route.page === "dashboard";
+  if (protectedRoute && sessionState !== "authenticated") {
+    return <LoginRequired onLogin={handleLogin} onHome={() => navigate({ page: "landing" }, true, true)} />;
   }
 
-  function DashboardShell() {
-    if (route.page !== "dashboard") return null;
-    const guildName = selectedServer?.name || `Servidor ${route.guildId.slice(-6)}`;
-    const guildIcon = selectedServer?.icon || null;
-    return <div className="osk-dashboard-shell">
-      <Sidebar modules={visualModules} selectedSectionId={selectedSectionId || ""} view={selectedSection ? "section" : "home"} mobileOpen={mobileMenuOpen} botName={botIdentity?.global_name || botIdentity?.username || "Osaka"} botAvatarUrl={botIdentity?.avatarUrl} onCloseMobile={() => setMobileMenuOpen(false)} onHome={() => navigate({ page: "dashboard", guildId: route.guildId, sectionId: null })} onSelect={openSection} onLogout={() => void handleLogout()} />
-      <div className="osk-dashboard-main">
-        <Topbar guildName={guildName} guildIcon={guildIcon} busy={loadingDashboard} onRefresh={() => void loadDashboard(route.guildId, true)} onChangeServer={() => navigate({ page: "servers" })} onOpenMenu={() => setMobileMenuOpen(true)} />
-        <main className="osk-dashboard-content">
-          <div key={selectedSection?.id || "home"} className="osk-page-motion">
-            {loadingDashboard && sections.length === 0 ? <DashboardLoading /> : selectedSection ? (
-              <SectionEditor section={selectedSection} module={selectedModule} values={values} draft={draft} guildOptions={guildOptions} previewBotName={botIdentity?.global_name || botIdentity?.username || "Osaka"} previewBotAvatarUrl={botIdentity?.avatarUrl} onChange={handleFieldChange} onMessageEditorActiveChange={setMessageEditorActive} onBack={() => navigate({ page: "dashboard", guildId: route.guildId, sectionId: null })} />
-            ) : <HomePage guildName={guildName} modules={visualModules} onOpen={openSection} />}
-          </div>
-        </main>
-      </div>
-      {!messageEditorActive && selectedSection && <SaveDock changedCount={changedFields.length} sectionLabel={selectedSection.label} saving={saving} onDiscard={() => setDraft(values)} onSave={() => void handleSave()} />}
-    </div>;
-  }
+  return <>
+    {notice && <Notice type={notice.type} text={notice.text} onClose={() => setNotice(null)} />}
+    {route.page === "landing" && <BrowserLanding loggedIn={sessionState === "authenticated"} user={user} onLogin={handleLogin} onDashboard={() => navigate({ page: "servers" })} onNavigate={(path) => navigate(parseRoute(path))} />}
+    {route.page === "privacy" && <LegalPage kind="privacy" onBack={() => navigate({ page: "landing" })} />}
+    {route.page === "terms" && <LegalPage kind="terms" onBack={() => navigate({ page: "landing" })} />}
+    {route.page === "servers" && <ServerPicker user={user} manageable={manageable} needsInvite={needsInvite} loading={loadingServers} onSelect={(server) => { setSelectedServer(server); navigate({ page: "dashboard", guildId: server.id, sectionId: null }); }} onInvite={(server) => { setSelectedServer(server); navigate({ page: "invite", guildId: server.id }); }} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onHome={() => navigate({ page: "landing" })} />}
+    {route.page === "invite" && <InviteScreen server={selectedServer || needsInvite.find((item) => item.id === route.guildId) || null} busy={inviteBusy} onBack={() => navigate({ page: "servers" })} onOpenInvite={() => void openInvite(route.guildId)} />}
+    {route.page === "dashboard" && <DashboardShell
+      route={route}
+      selectedServer={selectedServer}
+      botIdentity={botIdentity}
+      modules={visualModules}
+      selectedSectionId={selectedSectionId}
+      selectedSection={selectedSection}
+      selectedModule={selectedModule}
+      sectionsLoaded={sections.length > 0}
+      values={values}
+      draft={draft}
+      guildOptions={guildOptions}
+      loading={loadingDashboard}
+      saving={saving}
+      changedCount={changedFields.length}
+      mobileMenuOpen={mobileMenuOpen}
+      messageEditorActive={messageEditorActive}
+      onCloseMenu={closeMobileMenu}
+      onOpenMenu={openMobileMenu}
+      onHome={handleDashboardHome}
+      onSelect={openSection}
+      onLogout={() => void handleLogout()}
+      onRefresh={handleRefreshDashboard}
+      onChangeServer={handleChangeServer}
+      onFieldChange={handleFieldChange}
+      onMessageEditorActiveChange={setMessageEditorActive}
+      onDiscard={handleDiscard}
+      onSave={() => void handleSave()}
+    />}
+  </>;
+}
+
+interface DashboardShellProps {
+  route: DashboardRoute;
+  selectedServer: DashboardServerCard | null;
+  botIdentity: DashboardUserPayload | null;
+  modules: DashboardVisualModule[];
+  selectedSectionId: string | null;
+  selectedSection: DashboardSectionDefinition | null;
+  selectedModule: DashboardVisualModule | null;
+  sectionsLoaded: boolean;
+  values: Record<string, unknown>;
+  draft: Record<string, unknown>;
+  guildOptions: DashboardOptionsPayload | null;
+  loading: boolean;
+  saving: boolean;
+  changedCount: number;
+  mobileMenuOpen: boolean;
+  messageEditorActive: boolean;
+  onCloseMenu(): void;
+  onOpenMenu(): void;
+  onHome(): void;
+  onSelect(sectionId: string): void;
+  onLogout(): void;
+  onRefresh(): void;
+  onChangeServer(): void;
+  onFieldChange(field: DashboardFieldDefinition, raw: unknown): void;
+  onMessageEditorActiveChange(active: boolean): void;
+  onDiscard(): void;
+  onSave(): void;
+}
+
+function DashboardShell({
+  route,
+  selectedServer,
+  botIdentity,
+  modules,
+  selectedSectionId,
+  selectedSection,
+  selectedModule,
+  sectionsLoaded,
+  values,
+  draft,
+  guildOptions,
+  loading,
+  saving,
+  changedCount,
+  mobileMenuOpen,
+  messageEditorActive,
+  onCloseMenu,
+  onOpenMenu,
+  onHome,
+  onSelect,
+  onLogout,
+  onRefresh,
+  onChangeServer,
+  onFieldChange,
+  onMessageEditorActiveChange,
+  onDiscard,
+  onSave,
+}: DashboardShellProps) {
+  const guildName = selectedServer?.name || `Servidor ${route.guildId.slice(-6)}`;
+  const guildIcon = selectedServer?.icon || null;
+  const botName = botIdentity?.global_name || botIdentity?.username || "Osaka";
+
+  return <div className="osk-dashboard-shell">
+    <Sidebar
+      modules={modules}
+      selectedSectionId={selectedSectionId || ""}
+      view={selectedSection ? "section" : "home"}
+      mobileOpen={mobileMenuOpen}
+      botName={botName}
+      botAvatarUrl={botIdentity?.avatarUrl}
+      onCloseMobile={onCloseMenu}
+      onHome={onHome}
+      onSelect={onSelect}
+      onLogout={onLogout}
+    />
+    <div className="osk-dashboard-main">
+      <Topbar guildName={guildName} guildIcon={guildIcon} busy={loading} onRefresh={onRefresh} onChangeServer={onChangeServer} onOpenMenu={onOpenMenu} />
+      <main className="osk-dashboard-content">
+        <div key={selectedSection?.id || "home"} className="osk-page-motion">
+          {loading && !sectionsLoaded ? <DashboardLoading /> : selectedSection ? (
+            <SectionEditor
+              section={selectedSection}
+              module={selectedModule}
+              values={values}
+              draft={draft}
+              guildOptions={guildOptions}
+              previewBotName={botName}
+              previewBotAvatarUrl={botIdentity?.avatarUrl}
+              onChange={onFieldChange}
+              onMessageEditorActiveChange={onMessageEditorActiveChange}
+              onBack={onHome}
+            />
+          ) : <HomePage guildName={guildName} modules={modules} onOpen={onSelect} />}
+        </div>
+      </main>
+    </div>
+    {!messageEditorActive && selectedSection && <SaveDock changedCount={changedCount} sectionLabel={selectedSection.label} saving={saving} onDiscard={onDiscard} onSave={onSave} />}
+  </div>;
 }
 
 function FullPageLoading() {

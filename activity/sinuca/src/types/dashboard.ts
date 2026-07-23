@@ -77,6 +77,7 @@ export interface DashboardSectionSummary {
   emoji: string;
   description: string;
   enabled: boolean | null;
+  state?: "active" | "inactive" | "partial" | "configured" | "pending";
   configured: number;
   total: number;
   status: string;
