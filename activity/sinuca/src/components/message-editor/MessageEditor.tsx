@@ -29,11 +29,11 @@ import {
 } from "./messageEditorUtils";
 
 const MODE_LABELS: Record<MessageEditorMode, string> = {
-  content: "Conteúdo",
-  appearance: "Aparência",
-  components: "Componentes",
+  content: "Texto",
+  appearance: "Visual",
+  components: "Botões",
   variables: "Variáveis",
-  json: "Avançado",
+  json: "JSON",
 };
 
 function valuesEqual(a: unknown, b: unknown) {
@@ -345,7 +345,7 @@ export function MessageEditor(props: MessageEditorProps) {
           <strong>{groupLabel}</strong>
           {description && <p>{description}</p>}
         </div>
-        <span className="osk-message-editor__dirty" data-visible={localDirty || jsonDirty || undefined}>Alterado</span>
+        <span className="osk-message-editor__dirty" data-visible={localDirty || jsonDirty || undefined}>Não salvo</span>
       </header>
 
       <nav className="osk-message-editor__mobile-tabs" aria-label="Visualização do editor">
@@ -380,8 +380,8 @@ export function MessageEditor(props: MessageEditorProps) {
       </div>
 
       <footer className="osk-message-editor__footer">
-        <button type="button" className="osk-secondary-button" onClick={() => requestClose("discard")}>Cancelar</button>
-        <button type="button" className="osk-primary-button" disabled={applyDisabled} onClick={handleApply}>Aplicar alterações</button>
+        <button type="button" className="osk-secondary-button" onClick={() => requestClose("discard")}>Descartar</button>
+        <button type="button" className="osk-primary-button" disabled={applyDisabled} onClick={handleApply}>Concluir edição</button>
       </footer>
     </div>
   </div>;

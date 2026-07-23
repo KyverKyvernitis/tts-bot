@@ -1,12 +1,11 @@
 import { ArrowRight, ChevronDown, LogOut, Plus, RefreshCw, Search, ServerCrash, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { ChangeEvent } from "react";
-import type { DashboardServerCard, DashboardUserPayload } from "../types/dashboard";
+import type { DashboardServerCard } from "../types/dashboard";
 import { Brand } from "./BrowserLanding";
 import { SmartAvatar } from "./SmartAvatar";
 
 interface ServerPickerProps {
-  user: DashboardUserPayload | null;
   manageable: DashboardServerCard[];
   needsInvite: DashboardServerCard[];
   loading: boolean;
@@ -17,8 +16,7 @@ interface ServerPickerProps {
   onHome(): void;
 }
 
-export function ServerPicker({ user, manageable, needsInvite, loading, onSelect, onInvite, onRefresh, onLogout, onHome }: ServerPickerProps) {
-  const name = user?.global_name || user?.username || "sua conta";
+export function ServerPicker({ manageable, needsInvite, loading, onSelect, onInvite, onRefresh, onLogout, onHome }: ServerPickerProps) {
   const [query, setQuery] = useState("");
   const [showInvites, setShowInvites] = useState(false);
   const normalizedQuery = query.trim().toLocaleLowerCase("pt-BR");
@@ -37,8 +35,9 @@ export function ServerPicker({ user, manageable, needsInvite, loading, onSelect,
 
       <main className="osk-picker-main">
         <header className="osk-picker-heading osk-picker-heading--simple">
-          <div><span className="osk-kicker">Olá, {name}</span><h1>Escolha um servidor.</h1><p>Você verá apenas servidores que pode administrar.</p></div>
-          {user && <SmartAvatar className="osk-picker-user" src={user.avatarUrl} name={name} type="user" alt={name} size={52} />}
+          <span className="osk-kicker">Seus servidores</span>
+          <h1>Onde você quer configurar a Osaka?</h1>
+          <p>São exibidos somente os servidores que sua conta pode administrar.</p>
         </header>
 
         <label className="osk-server-search">
@@ -47,7 +46,7 @@ export function ServerPicker({ user, manageable, needsInvite, loading, onSelect,
           {query && <button type="button" onClick={() => setQuery("")} aria-label="Limpar busca"><X size={16} /></button>}
         </label>
 
-        <ServerGroup title="Com a Osaka" count={filteredManageable.length}>
+        <ServerGroup title="Prontos para configurar" count={filteredManageable.length}>
           {filteredManageable.map((server) => <ServerCard key={server.id} server={server} action="Configurar" onClick={() => onSelect(server)} />)}
           {!loading && filteredManageable.length === 0 && <EmptyState text={query ? "Nenhum servidor encontrado." : "Nenhum servidor com a Osaka foi encontrado."} />}
           {loading && <ServerSkeletons />}
@@ -55,7 +54,7 @@ export function ServerPicker({ user, manageable, needsInvite, loading, onSelect,
 
         {needsInvite.length > 0 && <section className="osk-picker-invite-section">
           <button className="osk-picker-invite-toggle" data-open={showInvites || undefined} onClick={() => setShowInvites((value) => !value)}>
-            <span><strong>Outros servidores</strong><small>Instale a Osaka para começar</small></span>
+            <span><strong>Instalar em outro servidor</strong><small>Servidores administráveis sem a Osaka</small></span>
             <em>{filteredInvites.length}</em>
             <ChevronDown size={18} />
           </button>
@@ -80,9 +79,9 @@ function ServerGroup({ title, count, children }: { title: string; count: number;
 
 function ServerCard({ server, action, invite = false, onClick }: { server: DashboardServerCard; action: string; invite?: boolean; onClick(): void }) {
   return <button className="osk-picker-card" data-invite={invite || undefined} onClick={onClick}>
-    <SmartAvatar className="osk-picker-server-avatar" src={server.icon} name={server.name} type="server" alt={server.name} size={50} />
-    <span className="osk-picker-server-copy"><strong>{server.name}</strong><small>{invite ? "A Osaka ainda não está neste servidor" : "Pronto para configurar"}</small></span>
-    <span className="osk-picker-card-action">{invite ? <Plus size={15} /> : null}<span>{action}</span>{!invite ? <ArrowRight size={15} /> : null}</span>
+    <SmartAvatar className="osk-picker-server-avatar" src={server.icon} name={server.name} type="server" alt={server.name} size={48} />
+    <span className="osk-picker-server-copy"><strong>{server.name}</strong><small>{invite ? "Adicionar a Osaka" : "Abrir configurações"}</small></span>
+    <span className="osk-picker-card-action">{invite ? <Plus size={15} /> : <ArrowRight size={15} />}<span>{action}</span></span>
   </button>;
 }
 

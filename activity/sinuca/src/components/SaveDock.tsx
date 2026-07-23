@@ -10,8 +10,14 @@ interface SaveDockProps {
 
 export function SaveDock({ changedCount, sectionLabel, saving, onDiscard, onSave }: SaveDockProps) {
   if (changedCount <= 0) return null;
-  return <div className="osk-save-dock" role="region" aria-label="Alterações pendentes">
-    <div><span className="osk-save-dot" /><span><strong>{changedCount} alteração{changedCount === 1 ? "" : "ões"} pendente{changedCount === 1 ? "" : "s"}</strong><small>{sectionLabel}</small></span></div>
-    <div><button className="osk-secondary-button osk-secondary-button--small" onClick={onDiscard} disabled={saving}><RotateCcw size={14} />Descartar</button><button className="osk-primary-button osk-primary-button--small" onClick={onSave} disabled={saving}><Save size={14} />{saving ? "Salvando..." : "Salvar mudanças"}</button></div>
+  return <div className="osk-save-dock" role="region" aria-label="Alterações não salvas" aria-live="polite">
+    <div className="osk-save-dock-copy">
+      <span className="osk-save-dot" />
+      <span><strong>Alterações não salvas</strong><small>{changedCount} campo{changedCount === 1 ? "" : "s"} em {sectionLabel}</small></span>
+    </div>
+    <div className="osk-save-dock-actions">
+      <button className="osk-secondary-button osk-secondary-button--small" onClick={onDiscard} disabled={saving}><RotateCcw size={14} />Desfazer</button>
+      <button className="osk-primary-button osk-primary-button--small" onClick={onSave} disabled={saving}><Save size={14} />{saving ? "Salvando..." : "Salvar"}</button>
+    </div>
   </div>;
 }

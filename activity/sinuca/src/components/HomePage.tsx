@@ -1,27 +1,34 @@
 import { ArrowRight, LayoutGrid, Settings2 } from "lucide-react";
-import type { CSSProperties } from "react";
 import type { DashboardVisualModule } from "../moduleCatalog";
 
 interface HomePageProps {
-  guildName: string;
   modules: DashboardVisualModule[];
   onOpen(id: string): void;
 }
 
-export function HomePage({ guildName, modules, onOpen }: HomePageProps) {
+export function HomePage({ modules, onOpen }: HomePageProps) {
   const main = modules.filter((item) => item.group === "main");
   const system = modules.filter((item) => item.group === "system");
 
   return <section className="osk-dashboard-page osk-home-page">
     <header className="osk-home-intro">
-      <span className="osk-kicker">{guildName}</span>
-      <h1>Configure a Osaka do seu jeito.</h1>
-      <p>Escolha uma função abaixo. Todas são opcionais e independentes.</p>
+      <span className="osk-kicker">Visão geral</span>
+      <h1>Configure seu servidor.</h1>
+      <p>Escolha uma função. Cada área salva apenas as próprias alterações.</p>
     </header>
 
-    <FunctionGroup title="Funções do servidor" icon={LayoutGrid} items={main} onOpen={onOpen} />
-    <FunctionGroup title="Configurações do bot" icon={Settings2} items={system} onOpen={onOpen} />
+    <FunctionGroup title="Funções" icon={LayoutGrid} items={main} onOpen={onOpen} />
+    <FunctionGroup title="Configurações" icon={Settings2} items={system} onOpen={onOpen} />
   </section>;
+}
+
+function compactStatus(item: DashboardVisualModule): string {
+  if (item.state === "active") return "Ativa";
+  if (item.state === "inactive") return "Desativada";
+  if (item.state === "partial") return "Parcial";
+  if (item.state === "pending") return "Pendente";
+  if (item.state === "configured") return "Pronta";
+  return item.enabled === false ? "Desativada" : "Disponível";
 }
 
 function FunctionGroup({
@@ -38,18 +45,17 @@ function FunctionGroup({
   if (!items.length) return null;
 
   return <section className="osk-function-group">
-    <header><GroupIcon size={16} /><h2>{title}</h2></header>
+    <header><span><GroupIcon size={15} /><h2>{title}</h2></span><small>{items.length}</small></header>
     <div className="osk-function-grid">
-      {items.map((item, index) => {
+      {items.map((item) => {
         const Icon = item.icon;
-        return <button key={item.id} className="osk-function-card" style={{ "--osk-card-index": index } as CSSProperties} data-state={item.state || "configured"} onClick={() => onOpen(item.id)}>
-          <span className="osk-function-icon"><Icon size={21} /></span>
+        return <button key={item.id} className="osk-function-card" data-state={item.state || "configured"} onClick={() => onOpen(item.id)}>
+          <span className="osk-function-icon"><Icon size={20} /></span>
           <span className="osk-function-copy">
-            <strong>{item.label}</strong>
+            <span className="osk-function-title"><strong>{item.label}</strong><span className="osk-function-state" data-state={item.state || "configured"}>{compactStatus(item)}</span></span>
             <small>{item.description}</small>
           </span>
-          <span className="osk-function-state" data-state={item.state || "configured"}>{item.status || (item.enabled === false ? "Desativada" : "Configurada")}</span>
-          <span className="osk-function-arrow"><ArrowRight size={18} /></span>
+          <span className="osk-function-arrow"><ArrowRight size={17} /></span>
         </button>;
       })}
     </div>

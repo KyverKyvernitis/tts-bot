@@ -366,7 +366,7 @@ export default function App() {
     {route.page === "landing" && <BrowserLanding loggedIn={sessionState === "authenticated"} user={user} onLogin={handleLogin} onDashboard={() => navigate({ page: "servers" })} onNavigate={(path) => navigate(parseRoute(path))} />}
     {route.page === "privacy" && <LegalPage kind="privacy" onBack={() => navigate({ page: "landing" })} />}
     {route.page === "terms" && <LegalPage kind="terms" onBack={() => navigate({ page: "landing" })} />}
-    {route.page === "servers" && <ServerPicker user={user} manageable={manageable} needsInvite={needsInvite} loading={loadingServers} onSelect={(server) => { setSelectedServer(server); navigate({ page: "dashboard", guildId: server.id, sectionId: null }); }} onInvite={(server) => { setSelectedServer(server); navigate({ page: "invite", guildId: server.id }); }} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onHome={() => navigate({ page: "landing" })} />}
+    {route.page === "servers" && <ServerPicker manageable={manageable} needsInvite={needsInvite} loading={loadingServers} onSelect={(server) => { setSelectedServer(server); navigate({ page: "dashboard", guildId: server.id, sectionId: null }); }} onInvite={(server) => { setSelectedServer(server); navigate({ page: "invite", guildId: server.id }); }} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onHome={() => navigate({ page: "landing" })} />}
     {route.page === "invite" && <InviteScreen server={selectedServer || needsInvite.find((item) => item.id === route.guildId) || null} busy={inviteBusy} onBack={() => navigate({ page: "servers" })} onOpenInvite={() => void openInvite(route.guildId)} />}
     {route.page === "dashboard" && <DashboardShell
       route={route}
@@ -493,7 +493,7 @@ function DashboardShell({
               onMessageEditorActiveChange={onMessageEditorActiveChange}
               onBack={onHome}
             />
-          ) : <HomePage guildName={guildName} modules={modules} onOpen={onSelect} />}
+          ) : <HomePage modules={modules} onOpen={onSelect} />}
         </div>
       </main>
     </div>

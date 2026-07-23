@@ -22,12 +22,12 @@ interface BrowserLandingProps {
 }
 
 const features = [
-  { icon: DoorOpen, title: "Boas-vindas", text: "Mensagens, cargos automáticos e aparência." },
+  { icon: DoorOpen, title: "Boas-vindas", text: "Mensagens, cargos e aparência." },
   { icon: Ticket, title: "Tickets", text: "Atendimento, equipe e permissões." },
   { icon: ClipboardList, title: "Formulários", text: "Perguntas, respostas e aprovação." },
   { icon: Palette, title: "Cargos de cor", text: "Painéis e cargos personalizados." },
-  { icon: Cake, title: "Aniversários", text: "Cadastro, calendário e anúncios." },
-  { icon: Volume2, title: "TTS", text: "Voz, idioma, canais e regras de leitura." },
+  { icon: Cake, title: "Aniversários", text: "Cadastro, calendário e avisos." },
+  { icon: Volume2, title: "TTS", text: "Voz, canais e regras de leitura." },
 ];
 
 export function Brand({ compact = false }: { compact?: boolean }) {
@@ -54,12 +54,12 @@ export function BrowserLanding({ loggedIn, user, onLogin, onDashboard, onNavigat
         </nav>
         {loggedIn ? (
           <button className="osk-account-button" onClick={onDashboard}>
-            <SmartAvatar src={user?.avatarUrl} name={name} type="user" alt={name} size={30} />
+            <SmartAvatar src={user?.avatarUrl} name={name} type="user" alt={name} size={28} />
             <span>Abrir painel</span>
             <ArrowRight size={15} />
           </button>
         ) : (
-          <button className="osk-primary-button osk-primary-button--small" onClick={onLogin}>Entrar com Discord</button>
+          <button className="osk-primary-button osk-primary-button--small" onClick={onLogin}>Entrar</button>
         )}
       </header>
 
@@ -67,48 +67,18 @@ export function BrowserLanding({ loggedIn, user, onLogin, onDashboard, onNavigat
         <section className="osk-public-hero osk-public-hero--simple">
           <div className="osk-public-hero-copy">
             <span className="osk-kicker"><ShieldCheck size={14} /> Painel oficial da Osaka</span>
-            <h1>Configure seu servidor <span>sem usar comandos.</span></h1>
-            <p>Escolha o servidor, abra uma função e salve. A Osaka aplica as mudanças diretamente no bot.</p>
+            <h1>Configure a Osaka <span>sem comandos.</span></h1>
+            <p>Escolha um servidor, ajuste somente o que precisa e salve. O painel mantém tudo organizado em um só lugar.</p>
             <div className="osk-public-actions">
               <button className="osk-primary-button" onClick={primaryAction}>
                 {loggedIn ? "Abrir meu painel" : "Entrar com Discord"}<ArrowRight size={17} />
               </button>
-              <a className="osk-secondary-button" href="#funcoes">Ver funções</a>
+              <a className="osk-secondary-button" href="#funcoes">Explorar funções</a>
             </div>
-            <div className="osk-trust-row">
-              <span><Check size={14} /> Login seguro pelo Discord</span>
-              <span><Check size={14} /> Feito para celular</span>
-              <span><Check size={14} /> Alterações sincronizadas</span>
-            </div>
-          </div>
-
-          <div className="osk-product-showcase" aria-label="Prévia do painel">
-            <div className="osk-showcase-glow" />
-            <div className="osk-showcase-window">
-              <div className="osk-showcase-top">
-                <span className="osk-showcase-dots"><i /><i /><i /></span>
-                <span>painel.osaka</span>
-                <span className="osk-showcase-live">online</span>
-              </div>
-              <div className="osk-showcase-layout">
-                <aside>
-                  <Brand compact />
-                  {[DoorOpen, Ticket, ClipboardList, Volume2].map((Icon, index) => (
-                    <span key={index} data-active={index === 0}><Icon size={15} /><i /></span>
-                  ))}
-                </aside>
-                <section>
-                  <div className="osk-showcase-heading">
-                    <strong>Funções do servidor</strong>
-                    <small>Escolha uma opção para configurar</small>
-                  </div>
-                  <div className="osk-showcase-list">
-                    <ShowcaseItem icon={DoorOpen} title="Boas-vindas" text="Mensagens e cargos" />
-                    <ShowcaseItem icon={Ticket} title="Tickets" text="Atendimento e equipe" />
-                    <ShowcaseItem icon={Volume2} title="TTS" text="Voz e canais" />
-                  </div>
-                </section>
-              </div>
+            <div className="osk-trust-row" aria-label="Vantagens do painel">
+              <span><Check size={14} /> Login pelo Discord</span>
+              <span><Check size={14} /> Otimizado para celular</span>
+              <span><Check size={14} /> Configurações sincronizadas</span>
             </div>
           </div>
         </section>
@@ -116,8 +86,8 @@ export function BrowserLanding({ loggedIn, user, onLogin, onDashboard, onNavigat
         <section id="funcoes" className="osk-public-features osk-public-features--simple">
           <header>
             <span className="osk-kicker">Funções disponíveis</span>
-            <h2>O essencial, sem complicação.</h2>
-            <p>Cada função é opcional e pode ser ajustada separadamente.</p>
+            <h2>Tudo em um só painel.</h2>
+            <p>Abra uma função, altere os campos necessários e continue de onde parou.</p>
           </header>
           <div className="osk-feature-grid">
             {features.map((feature) => (
@@ -130,24 +100,18 @@ export function BrowserLanding({ loggedIn, user, onLogin, onDashboard, onNavigat
         </section>
 
         <section className="osk-public-cta osk-public-cta--simple">
-          <div><span className="osk-kicker">Começar agora</span><h2>Entre com o Discord e escolha um servidor.</h2></div>
+          <div>
+            <span className="osk-kicker">Pronto para começar?</span>
+            <h2>Escolha seu servidor e configure a Osaka.</h2>
+          </div>
           <button className="osk-primary-button" onClick={primaryAction}>{loggedIn ? "Abrir painel" : "Continuar com Discord"}<ArrowRight size={17} /></button>
         </section>
       </main>
 
       <footer className="osk-public-footer">
         <Brand compact />
-        <p>Painel oficial de configuração da Osaka.</p>
         <nav><button onClick={() => onNavigate("/privacy")}>Privacidade</button><button onClick={() => onNavigate("/terms")}>Termos</button></nav>
       </footer>
     </div>
   );
-}
-
-function ShowcaseItem({ icon: Icon, title, text }: { icon: typeof DoorOpen; title: string; text: string }) {
-  return <div className="osk-showcase-card">
-    <span className="osk-showcase-card-icon"><Icon size={18} /></span>
-    <span><strong>{title}</strong><small>{text}</small></span>
-    <ArrowRight size={15} />
-  </div>;
 }
