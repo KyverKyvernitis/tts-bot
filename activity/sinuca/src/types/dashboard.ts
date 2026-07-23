@@ -30,9 +30,19 @@ export interface DashboardTemplateVariables {
   items: DashboardTemplateVariable[];
 }
 
+export interface DashboardMessageEditorDefinition {
+  id: string;
+  label: string;
+  description?: string;
+  fieldIds: string[];
+  variables?: DashboardTemplateVariables;
+}
+
 export interface DashboardGroupMetadata {
   kind?: "message";
   variables?: DashboardTemplateVariables;
+  settingsFieldIds?: string[];
+  editors?: DashboardMessageEditorDefinition[];
 }
 
 export interface DashboardFieldDefinition {
@@ -150,6 +160,9 @@ export interface DashboardRoleOption {
   id: string;
   name: string;
   color?: number;
+  managed?: boolean;
+  position?: number;
+  assignable?: boolean;
 }
 
 export interface DashboardOptionsPayload {

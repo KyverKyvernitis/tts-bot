@@ -1,10 +1,12 @@
-import { Check, Copy, Search } from "lucide-react";
+import { Check, Copy, Plus, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { DashboardTemplateVariables } from "../../types/dashboard";
 import { formatTemplateVariable } from "./messageEditorUtils";
 
 interface MessageVariablesPanelProps {
   variables?: DashboardTemplateVariables;
+  insertTargetLabel?: string;
+  onInsert?(key: string): void;
 }
 
 async function copyText(value: string): Promise<void> {
@@ -22,7 +24,7 @@ async function copyText(value: string): Promise<void> {
   textarea.remove();
 }
 
-export function MessageVariablesPanel({ variables }: MessageVariablesPanelProps) {
+export function MessageVariablesPanel({ variables, insertTargetLabel, onInsert }: MessageVariablesPanelProps) {
   const [query, setQuery] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
 
@@ -67,6 +69,8 @@ export function MessageVariablesPanel({ variables }: MessageVariablesPanelProps)
         />
       </label>
 
+      {insertTargetLabel && <div className="osk-message-variables__target">As variáveis serão inseridas em <strong>{insertTargetLabel}</strong>.</div>}
+
       <div className="osk-message-variables__list">
         {filtered.map((item) => {
           const formatted = formatTemplateVariable(variables.syntax, item.key);
@@ -76,13 +80,21 @@ export function MessageVariablesPanel({ variables }: MessageVariablesPanelProps)
               type="button"
               key={item.key}
               className="osk-message-variable"
-              onClick={() => void handleCopy(item.key)}
+              onClick={() => {
+                if (onInsert) {
+                  onInsert(item.key);
+                  setCopied(item.key);
+                  window.setTimeout(() => setCopied((current) => current === item.key ? null : current), 1400);
+                } else {
+                  void handleCopy(item.key);
+                }
+              }}
             >
               <span>
                 <code>{formatted}</code>
                 <small>{item.label}</small>
               </span>
-              {wasCopied ? <Check size={16} /> : <Copy size={16} />}
+              {wasCopied ? <Check size={16} /> : onInsert ? <Plus size={16} /> : <Copy size={16} />}
             </button>
           );
         })}

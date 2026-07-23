@@ -132,14 +132,17 @@ export default function App() {
   const hasUnsavedChanges = changedFields.length > 0;
 
   const navigate = useCallback((next: Route, replace = false, bypassGuard = false) => {
-    if (!bypassGuard && hasUnsavedChanges && !window.confirm("Descartar as alterações que ainda não foram salvas?")) return false;
+    if (!bypassGuard && hasUnsavedChanges) {
+      if (!window.confirm("Descartar as alterações que ainda não foram salvas?")) return false;
+      setDraft(values);
+    }
     const path = routePath(next);
     window.history[replace ? "replaceState" : "pushState"]({}, "", path);
     setRoute(next);
     setMobileMenuOpen(false);
     setNotice(null);
     return true;
-  }, [hasUnsavedChanges]);
+  }, [hasUnsavedChanges, values]);
 
   useEffect(() => {
     const authError = new URLSearchParams(window.location.search).get("auth_error");
@@ -166,9 +169,16 @@ export default function App() {
 
   useEffect(() => {
     const onPopState = () => {
-      if (hasUnsavedChanges && !window.confirm("Descartar as alterações que ainda não foram salvas?")) {
-        window.history.pushState({}, "", routePath(route));
+      if (messageEditorActive) {
+        window.dispatchEvent(new Event("osk:message-editor-back"));
         return;
+      }
+      if (hasUnsavedChanges) {
+        if (!window.confirm("Descartar as alterações que ainda não foram salvas?")) {
+          window.history.pushState({}, "", routePath(route));
+          return;
+        }
+        setDraft(values);
       }
       setRoute(parseRoute());
       setNotice(null);
@@ -176,7 +186,7 @@ export default function App() {
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [hasUnsavedChanges, route]);
+  }, [hasUnsavedChanges, messageEditorActive, route, values]);
 
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -349,7 +359,7 @@ export default function App() {
         <main className="osk-dashboard-content">
           <div key={selectedSection?.id || "home"} className="osk-page-motion">
             {loadingDashboard && sections.length === 0 ? <DashboardLoading /> : selectedSection ? (
-              <SectionEditor section={selectedSection} module={selectedModule} values={values} draft={draft} guildOptions={guildOptions} previewBotName={botIdentity?.global_name || botIdentity?.username || "Osaka"} previewBotAvatarUrl={botIdentity?.avatarUrl} hasUnsavedChanges={hasUnsavedChanges} applying={saving} onChange={handleFieldChange} onApply={handleSave} onMessageEditorActiveChange={setMessageEditorActive} onBack={() => navigate({ page: "dashboard", guildId: route.guildId, sectionId: null })} />
+              <SectionEditor section={selectedSection} module={selectedModule} values={values} draft={draft} guildOptions={guildOptions} previewBotName={botIdentity?.global_name || botIdentity?.username || "Osaka"} previewBotAvatarUrl={botIdentity?.avatarUrl} onChange={handleFieldChange} onMessageEditorActiveChange={setMessageEditorActive} onBack={() => navigate({ page: "dashboard", guildId: route.guildId, sectionId: null })} />
             ) : <HomePage guildName={guildName} modules={visualModules} onOpen={openSection} />}
           </div>
         </main>

@@ -337,7 +337,11 @@ function GenericMessagePreview({
   selectedFieldId,
   onSelectField,
 }: Omit<MessagePreviewProps, "groupLabel" | "botName" | "botAvatarUrl">) {
-  const textFields = fields.filter((field) => field.type === "text" || field.type === "textarea");
+  const textFields = fields.filter((field) => {
+    if (field.type !== "text" && field.type !== "textarea") return false;
+    const hint = `${field.id} ${field.label}`.toLocaleLowerCase("pt-BR");
+    return !/(button_label|button_emoji|button_style|approve_label|approve_emoji|approve_style|reject_label|reject_emoji|reject_style|placeholder|emoji do botão|cor do botão)/.test(hint);
+  });
   const explicitMessageFields = textFields.filter((field) =>
     field.id.includes(".templates.")
     || field.id.includes(".public.")
@@ -349,8 +353,18 @@ function GenericMessagePreview({
     .filter(({ value }) => value.trim() || interactive);
   const accent = previewColor(fields, draft);
   const style = accent ? ({ "--osk-message-accent": accent } as CSSProperties) : undefined;
+  const imageField = fields.find((field) => field.type === "url" && /(image|imagem|media|mídia|banner)/i.test(`${field.id} ${field.label}`));
+  const buttonLabelField = fields.find((field) => /(button_label|approve_label|reject_label)/i.test(field.id));
+  const buttonEmojiField = fields.find((field) => /(button_emoji|approve_emoji|reject_emoji)/i.test(field.id));
+  const buttonStyleField = fields.find((field) => /(button_style|approve_style|reject_style)/i.test(field.id));
+  const placeholderField = fields.find((field) => /placeholder/i.test(field.id));
+  const imageUrl = fieldString(imageField, draft);
+  const buttonLabel = fieldString(buttonLabelField, draft);
+  const buttonEmoji = fieldString(buttonEmojiField, draft);
+  const buttonStyle = fieldString(buttonStyleField, draft) || "primary";
+  const placeholder = fieldString(placeholderField, draft);
 
-  if (visible.length === 0) {
+  if (visible.length === 0 && !isValidPreviewUrl(imageUrl) && !buttonLabel && !placeholder) {
     return <div className="osk-message-preview__placeholder">Preencha uma mensagem para visualizar o resultado.</div>;
   }
 
@@ -405,6 +419,9 @@ function GenericMessagePreview({
           <p>{value ? <DiscordRichText text={value} guildOptions={guildOptions} /> : <span className="osk-message-preview__ghost">Clique para editar</span>}</p>
         </EditableRegion>
       ))}
+      {isValidPreviewUrl(imageUrl) && <MessageImage src={imageUrl} alt="Imagem da mensagem" className="osk-message-preview__generic-image" placeholder="Imagem indisponível" />}
+      {placeholder && <div className="osk-message-preview__select-sim"><span>{placeholder}</span><span>⌄</span></div>}
+      {buttonLabel && <div className="osk-message-preview__button-row"><span data-style={buttonStyle}>{buttonEmoji ? `${buttonEmoji} ` : ""}{buttonLabel}</span></div>}
       {footerEntry && (
         <EditableRegion
           field={footerEntry.field}
@@ -425,13 +442,17 @@ export function MessagePreview({
   fields,
   draft,
   guildOptions,
-  botName = "Core",
+  botName = "Osaka",
   botAvatarUrl,
   interactive,
   selectedFieldId,
   onSelectField,
 }: MessagePreviewProps) {
-  const isEmbed = fields.some((field) => field.id.includes(".embed."));
+  const hasEmbedFields = fields.some((field) => field.id.includes(".embed."));
+  const hasPublicFields = fields.some((field) => field.id.includes(".public."));
+  const welcomeMode = String(draft["welcome.render_mode"] || "");
+  const isEmbed = hasEmbedFields && (!hasPublicFields || welcomeMode === "embed");
+  const previewFields = hasPublicFields && welcomeMode !== "embed" ? fields.filter((field) => !field.id.includes(".embed.")) : fields;
   return (
     <div className="osk-message-preview" data-interactive={interactive ? "true" : "false"}>
       <div className="osk-message-preview__header">
@@ -450,7 +471,7 @@ export function MessagePreview({
       <div className="osk-message-preview__canvas" aria-label={`Prévia de ${groupLabel}`}>
         {isEmbed ? (
           <EmbedPreview
-            fields={fields}
+            fields={previewFields}
             draft={draft}
             guildOptions={guildOptions}
             interactive={interactive}
@@ -459,7 +480,7 @@ export function MessagePreview({
           />
         ) : (
           <GenericMessagePreview
-            fields={fields}
+            fields={previewFields}
             draft={draft}
             guildOptions={guildOptions}
             interactive={interactive}

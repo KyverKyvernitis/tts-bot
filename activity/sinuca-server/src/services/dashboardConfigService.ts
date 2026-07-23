@@ -20,7 +20,19 @@ export interface DashboardFieldOption { value: string; label: string }
 export type DashboardTemplateSyntax = "curly" | "dollar_curly";
 export interface DashboardTemplateVariable { key: string; label: string }
 export interface DashboardTemplateVariables { syntax: DashboardTemplateSyntax; items: DashboardTemplateVariable[] }
-export interface DashboardGroupMetadata { kind?: "message"; variables?: DashboardTemplateVariables }
+export interface DashboardMessageEditorDefinition {
+  id: string;
+  label: string;
+  description?: string;
+  fieldIds: string[];
+  variables?: DashboardTemplateVariables;
+}
+export interface DashboardGroupMetadata {
+  kind?: "message";
+  variables?: DashboardTemplateVariables;
+  settingsFieldIds?: string[];
+  editors?: DashboardMessageEditorDefinition[];
+}
 
 export interface DashboardFieldDefinition {
   id: string;
@@ -80,6 +92,34 @@ const BIRTHDAY_DOC_CONFIG = "birthday_config";
 const TTS_ENGINE_OPTIONS = [
   { value: "gtts", label: "gTTS" },
   { value: "edge", label: "Microsoft Edge" },
+];
+const TTS_LANGUAGE_OPTIONS = [
+  { value: "pt-BR", label: "Português — Brasil" },
+  { value: "pt-PT", label: "Português — Portugal" },
+  { value: "en-US", label: "Inglês — Estados Unidos" },
+  { value: "en-GB", label: "Inglês — Reino Unido" },
+  { value: "es-ES", label: "Espanhol — Espanha" },
+  { value: "es-MX", label: "Espanhol — México" },
+  { value: "fr-FR", label: "Francês — França" },
+  { value: "de-DE", label: "Alemão — Alemanha" },
+  { value: "it-IT", label: "Italiano — Itália" },
+  { value: "ja-JP", label: "Japonês" },
+  { value: "ko-KR", label: "Coreano" },
+];
+const TTS_VOICE_OPTIONS = [
+  { value: "pt-BR-FranciscaNeural", label: "Francisca — feminina" },
+  { value: "pt-BR-AntonioNeural", label: "Antônio — masculina" },
+  { value: "pt-BR-BrendaNeural", label: "Brenda — feminina" },
+  { value: "pt-BR-DonatoNeural", label: "Donato — masculina" },
+  { value: "pt-BR-ElzaNeural", label: "Elza — feminina" },
+  { value: "pt-BR-FabioNeural", label: "Fábio — masculina" },
+  { value: "pt-BR-GiovannaNeural", label: "Giovanna — feminina" },
+  { value: "pt-BR-HumbertoNeural", label: "Humberto — masculina" },
+  { value: "pt-BR-LeilaNeural", label: "Leila — feminina" },
+  { value: "pt-BR-LeticiaNeural", label: "Letícia — feminina" },
+  { value: "pt-BR-ManuelaNeural", label: "Manuela — feminina" },
+  { value: "pt-BR-NicolauNeural", label: "Nicolau — masculina" },
+  { value: "pt-BR-YaraNeural", label: "Yara — feminina" },
 ];
 const BUTTON_STYLE_OPTIONS = [
   { value: "primary", label: "Azul" },
@@ -187,6 +227,18 @@ function templateVariables(syntax: DashboardTemplateSyntax, keys: string[], labe
   return { syntax, items: keys.map((key) => ({ key, label: labels[key] ?? key })) };
 }
 const WELCOME_TEMPLATE_VARIABLES = templateVariables("curly", Object.keys(WELCOME_VARIABLE_HELP), WELCOME_VARIABLE_HELP);
+const FORM_VARIABLE_HELP: Record<string, string> = {
+  user: "menção do membro",
+  user_name: "nome exibido do membro",
+  user_id: "ID do membro",
+  guild: "nome do servidor",
+  field1: "resposta da primeira pergunta",
+  field2: "resposta da segunda pergunta",
+  field3: "resposta da terceira pergunta",
+  field4: "resposta da quarta pergunta",
+  field5: "resposta da quinta pergunta",
+};
+const FORM_TEMPLATE_VARIABLES = templateVariables("curly", Object.keys(FORM_VARIABLE_HELP), FORM_VARIABLE_HELP);
 const BIRTHDAY_REGISTER_VARIABLES = templateVariables("dollar_curly", [
   "usermention", "userid", "username", "userdisplayname", "birthdayday", "birthdaymonth", "birthdayyear",
   "birthdaydate", "birthdayage", "nowtimestamp", "usermessage", "validexample",
@@ -423,11 +475,39 @@ const sections: DashboardSectionDefinition[] = [
   },
   {
     id: "welcome", label: "Boas-vindas", emoji: "👋", description: "Mensagem pública, DM, cargos automáticos e identidade do webhook.",
-    groups: ["Mensagem de entrada", "Embed", "Mensagem privada", "Aparência", "Cargos", "Webhook"],
+    groups: ["Mensagem de entrada", "Mensagem privada", "Aparência", "Cargos", "Webhook"],
     groupMetadata: {
-      "Mensagem de entrada": { kind: "message", variables: WELCOME_TEMPLATE_VARIABLES },
-      Embed: { kind: "message", variables: WELCOME_TEMPLATE_VARIABLES },
-      "Mensagem privada": { kind: "message", variables: WELCOME_TEMPLATE_VARIABLES },
+      "Mensagem de entrada": {
+        kind: "message",
+        variables: WELCOME_TEMPLATE_VARIABLES,
+        settingsFieldIds: [
+          "welcome.enabled", "welcome.channel_id", "welcome.render_mode", "welcome.style", "welcome.delete_on_leave_enabled",
+        ],
+        editors: [{
+          id: "welcome-public",
+          label: "Mensagem pública",
+          description: "Conteúdo, embed, imagens, cor e prévia da mensagem enviada no servidor.",
+          fieldIds: [
+            "welcome.public.title", "welcome.public.body", "welcome.public.footer",
+            "welcome.embed.content", "welcome.embed.author_name", "welcome.embed.author_icon_mode", "welcome.embed.author_icon_url",
+            "welcome.embed.author_url", "welcome.embed.title", "welcome.embed.title_url", "welcome.embed.description",
+            "welcome.embed.color", "welcome.embed.color_mode", "welcome.embed.thumbnail_mode", "welcome.embed.thumbnail_url",
+            "welcome.embed.image_mode", "welcome.embed.image_url", "welcome.embed.footer_text",
+            "welcome.embed.footer_icon_mode", "welcome.embed.footer_icon_url",
+          ],
+        }],
+      },
+      "Mensagem privada": {
+        kind: "message",
+        variables: WELCOME_TEMPLATE_VARIABLES,
+        settingsFieldIds: ["welcome.dm_enabled", "welcome.dm_render_mode"],
+        editors: [{
+          id: "welcome-dm",
+          label: "Mensagem privada",
+          description: "Conteúdo e prévia da mensagem enviada diretamente ao novo membro.",
+          fieldIds: ["welcome.dm.title", "welcome.dm.body", "welcome.dm.footer"],
+        }],
+      },
     },
     fields: [
       { id: "welcome.enabled", label: "Ativar boas-vindas", type: "boolean", scope: "welcome", path: "enabled", group: "Mensagem de entrada" },
@@ -438,23 +518,23 @@ const sections: DashboardSectionDefinition[] = [
       messageField("welcome.public.title", "Título público", "welcome", "public.title", "Mensagem de entrada", 256),
       messageField("welcome.public.body", "Mensagem pública", "welcome", "public.body", "Mensagem de entrada"),
       messageField("welcome.public.footer", "Rodapé público", "welcome", "public.footer", "Mensagem de entrada", 300),
-      messageField("welcome.embed.content", "Texto acima do embed", "welcome", "embed.content", "Embed"),
-      messageField("welcome.embed.author_name", "Autor", "welcome", "embed.author_name", "Embed", 256),
-      { id: "welcome.embed.author_icon_mode", label: "Ícone do autor", type: "select", scope: "welcome", path: "embed.author_icon_mode", options: WELCOME_EMBED_IMAGE_MODE_OPTIONS, group: "Embed" },
-      { id: "welcome.embed.author_icon_url", label: "URL do ícone do autor", type: "url", scope: "welcome", path: "embed.author_icon_url", maxLength: 1000, group: "Embed" },
-      { id: "welcome.embed.author_url", label: "URL do autor", type: "url", scope: "welcome", path: "embed.author_url", maxLength: 1000, group: "Embed" },
-      messageField("welcome.embed.title", "Título do embed", "welcome", "embed.title", "Embed", 256),
-      { id: "welcome.embed.title_url", label: "URL do título", type: "url", scope: "welcome", path: "embed.title_url", maxLength: 1000, group: "Embed" },
-      messageField("welcome.embed.description", "Descrição do embed", "welcome", "embed.description", "Embed"),
-      { id: "welcome.embed.color", label: "Cor do embed", type: "color", scope: "welcome", path: "embed.color", group: "Embed" },
-      { id: "welcome.embed.color_mode", label: "Modo da cor", type: "select", scope: "welcome", path: "embed.color_mode", options: WELCOME_COLOR_MODE_OPTIONS, group: "Embed" },
-      { id: "welcome.embed.thumbnail_mode", label: "Thumbnail", type: "select", scope: "welcome", path: "embed.thumbnail_mode", options: WELCOME_EMBED_IMAGE_MODE_OPTIONS, group: "Embed" },
-      { id: "welcome.embed.thumbnail_url", label: "URL da thumbnail", type: "url", scope: "welcome", path: "embed.thumbnail_url", maxLength: 1000, group: "Embed" },
-      { id: "welcome.embed.image_mode", label: "Imagem principal", type: "select", scope: "welcome", path: "embed.image_mode", options: WELCOME_EMBED_MAIN_IMAGE_MODE_OPTIONS, group: "Embed" },
-      { id: "welcome.embed.image_url", label: "URL da imagem", type: "url", scope: "welcome", path: "embed.image_url", maxLength: 1000, group: "Embed" },
-      messageField("welcome.embed.footer_text", "Rodapé do embed", "welcome", "embed.footer_text", "Embed", 1000),
-      { id: "welcome.embed.footer_icon_mode", label: "Ícone do rodapé", type: "select", scope: "welcome", path: "embed.footer_icon_mode", options: WELCOME_EMBED_IMAGE_MODE_OPTIONS, group: "Embed" },
-      { id: "welcome.embed.footer_icon_url", label: "URL do ícone do rodapé", type: "url", scope: "welcome", path: "embed.footer_icon_url", maxLength: 1000, group: "Embed" },
+      messageField("welcome.embed.content", "Texto acima do embed", "welcome", "embed.content", "Mensagem de entrada"),
+      messageField("welcome.embed.author_name", "Autor", "welcome", "embed.author_name", "Mensagem de entrada", 256),
+      { id: "welcome.embed.author_icon_mode", label: "Ícone do autor", type: "select", scope: "welcome", path: "embed.author_icon_mode", options: WELCOME_EMBED_IMAGE_MODE_OPTIONS, group: "Mensagem de entrada" },
+      { id: "welcome.embed.author_icon_url", label: "URL do ícone do autor", type: "url", scope: "welcome", path: "embed.author_icon_url", maxLength: 1000, group: "Mensagem de entrada" },
+      { id: "welcome.embed.author_url", label: "URL do autor", type: "url", scope: "welcome", path: "embed.author_url", maxLength: 1000, group: "Mensagem de entrada" },
+      messageField("welcome.embed.title", "Título do embed", "welcome", "embed.title", "Mensagem de entrada", 256),
+      { id: "welcome.embed.title_url", label: "URL do título", type: "url", scope: "welcome", path: "embed.title_url", maxLength: 1000, group: "Mensagem de entrada" },
+      messageField("welcome.embed.description", "Descrição do embed", "welcome", "embed.description", "Mensagem de entrada"),
+      { id: "welcome.embed.color", label: "Cor do embed", type: "color", scope: "welcome", path: "embed.color", group: "Mensagem de entrada" },
+      { id: "welcome.embed.color_mode", label: "Modo da cor", type: "select", scope: "welcome", path: "embed.color_mode", options: WELCOME_COLOR_MODE_OPTIONS, group: "Mensagem de entrada" },
+      { id: "welcome.embed.thumbnail_mode", label: "Thumbnail", type: "select", scope: "welcome", path: "embed.thumbnail_mode", options: WELCOME_EMBED_IMAGE_MODE_OPTIONS, group: "Mensagem de entrada" },
+      { id: "welcome.embed.thumbnail_url", label: "URL da thumbnail", type: "url", scope: "welcome", path: "embed.thumbnail_url", maxLength: 1000, group: "Mensagem de entrada" },
+      { id: "welcome.embed.image_mode", label: "Imagem principal", type: "select", scope: "welcome", path: "embed.image_mode", options: WELCOME_EMBED_MAIN_IMAGE_MODE_OPTIONS, group: "Mensagem de entrada" },
+      { id: "welcome.embed.image_url", label: "URL da imagem", type: "url", scope: "welcome", path: "embed.image_url", maxLength: 1000, group: "Mensagem de entrada" },
+      messageField("welcome.embed.footer_text", "Rodapé do embed", "welcome", "embed.footer_text", "Mensagem de entrada", 1000),
+      { id: "welcome.embed.footer_icon_mode", label: "Ícone do rodapé", type: "select", scope: "welcome", path: "embed.footer_icon_mode", options: WELCOME_EMBED_IMAGE_MODE_OPTIONS, group: "Mensagem de entrada" },
+      { id: "welcome.embed.footer_icon_url", label: "URL do ícone do rodapé", type: "url", scope: "welcome", path: "embed.footer_icon_url", maxLength: 1000, group: "Mensagem de entrada" },
       { id: "welcome.dm_enabled", label: "Enviar mensagem no privado", type: "boolean", scope: "welcome", path: "dm_enabled", group: "Mensagem privada" },
       { id: "welcome.dm_render_mode", label: "Formato da DM", type: "select", scope: "welcome", path: "dm_render_mode", options: WELCOME_MODE_OPTIONS, group: "Mensagem privada" },
       messageField("welcome.dm.title", "Título da DM", "welcome", "dm.title", "Mensagem privada", 256),
@@ -463,8 +543,8 @@ const sections: DashboardSectionDefinition[] = [
       { id: "welcome.decorative_emoji_enabled", label: "Emojis decorativos", type: "boolean", scope: "welcome", path: "decorative_emoji_enabled", group: "Aparência" },
       { id: "welcome.accent_color", label: "Cor de destaque", type: "color", scope: "welcome", path: "accent_color", group: "Aparência" },
       { id: "welcome.accent_color_mode", label: "Modo da cor", type: "select", scope: "welcome", path: "accent_color_mode", options: WELCOME_COLOR_MODE_OPTIONS, group: "Aparência" },
-      { id: "welcome.media_mode", label: "Imagem/banner", type: "select", scope: "welcome", path: "media_mode", options: WELCOME_MEDIA_MODE_OPTIONS, group: "Aparência" },
-      { id: "welcome.media_url", label: "URL da imagem/banner", type: "url", scope: "welcome", path: "media_url", maxLength: 1000, group: "Aparência" },
+      { id: "welcome.media_mode", label: "Imagem ou banner", type: "select", scope: "welcome", path: "media_mode", options: WELCOME_MEDIA_MODE_OPTIONS, group: "Aparência" },
+      { id: "welcome.media_url", label: "URL da imagem ou banner", type: "url", scope: "welcome", path: "media_url", maxLength: 1000, group: "Aparência" },
       { id: "welcome.auto_role_ids", label: "Cargos automáticos", description: "Cargos aplicados quando um membro entra.", type: "role_multi", scope: "welcome", path: "auto_role_ids", group: "Cargos" },
       { id: "welcome.webhook.enabled", label: "Usar webhook", type: "boolean", scope: "welcome", path: "webhook.enabled", group: "Webhook" },
       { id: "welcome.webhook.channel_id", label: "Canal do webhook", type: "channel", scope: "welcome", path: "webhook.channel_id", group: "Webhook" },
@@ -477,6 +557,56 @@ const sections: DashboardSectionDefinition[] = [
   {
     id: "forms", label: "Formulários", emoji: "📝", description: "Painel, perguntas, respostas e aprovação da verificação.",
     groups: ["Canais", "Painel", "Perguntas", "Resposta", "Aprovação"],
+    groupMetadata: {
+      Painel: {
+        kind: "message",
+        editors: [{
+          id: "forms-panel",
+          label: "Painel público",
+          description: "Título, descrição, botão, imagem, cor e prévia do painel.",
+          fieldIds: [
+            "forms.panel.title", "forms.panel.description", "forms.panel.button_label", "forms.panel.button_emoji",
+            "forms.panel.button_style", "forms.panel.media_url", "forms.panel.accent_color",
+          ],
+        }],
+      },
+      Resposta: {
+        kind: "message",
+        variables: FORM_TEMPLATE_VARIABLES,
+        editors: [{
+          id: "forms-response",
+          label: "Resposta enviada à equipe",
+          description: "Conteúdo, imagem, cor e prévia do resumo recebido pela equipe.",
+          fieldIds: [
+            "forms.response.title", "forms.response.intro", "forms.response.footer",
+            "forms.response.media_url", "forms.response.accent_color",
+          ],
+        }],
+      },
+      Aprovação: {
+        kind: "message",
+        variables: FORM_TEMPLATE_VARIABLES,
+        settingsFieldIds: [
+          "forms.approval.enabled", "forms.approval.role_id", "forms.approval.approve_label",
+          "forms.approval.approve_emoji", "forms.approval.approve_style", "forms.approval.reject_label",
+          "forms.approval.reject_emoji", "forms.approval.reject_style",
+        ],
+        editors: [
+          {
+            id: "forms-approve-dm",
+            label: "Mensagem ao aprovar",
+            description: "Mensagem privada enviada após a aprovação.",
+            fieldIds: ["forms.approval.approve_dm"],
+          },
+          {
+            id: "forms-reject-dm",
+            label: "Mensagem ao rejeitar",
+            description: "Mensagem privada enviada após a rejeição.",
+            fieldIds: ["forms.approval.reject_dm"],
+          },
+        ],
+      },
+    },
     fields: [
       { id: "forms.form_channel_id", label: "Canal do formulário", type: "channel", scope: "guild", path: "forms.form_channel_id", group: "Canais" },
       { id: "forms.responses_channel_id", label: "Canal de respostas", type: "channel", scope: "guild", path: "forms.responses_channel_id", group: "Canais" },
@@ -508,7 +638,32 @@ const sections: DashboardSectionDefinition[] = [
   },
   {
     id: "tickets", label: "Tickets", emoji: "🎫", description: "Painel, fluxos de atendimento, permissões e transcrições.",
-    groups: ["Painel", "Canais e cargos", "Comportamento", "Fluxos", "Textos", "Denúncias", "Permissões"],
+    groups: ["Painel", "Atendimento", "Comportamento", "Fluxos", "Textos", "Denúncias", "Permissões"],
+    groupMetadata: {
+      Painel: {
+        kind: "message",
+        settingsFieldIds: ["tickets.panel.channel_id"],
+        editors: [{
+          id: "tickets-panel",
+          label: "Painel público",
+          description: "Título, descrição, seletor, imagens, cor e prévia do painel de atendimento.",
+          fieldIds: [
+            "tickets.panel.title", "tickets.panel.description", "tickets.panel.placeholder",
+            "tickets.panel.accent_color", "tickets.panel.image_url", "tickets.panel.side_image_url",
+          ],
+        }],
+      },
+      Textos: {
+        kind: "message",
+        editors: [
+          { id: "tickets-partnership-texts", label: "Parceria", description: "Confirmação e mensagem de abertura.", fieldIds: ["tickets.texts.partnership_confirm", "tickets.texts.partnership_opening"] },
+          { id: "tickets-report-texts", label: "Denúncia", description: "Aviso do formulário e mensagem de abertura.", fieldIds: ["tickets.texts.report_modal_notice", "tickets.texts.report_opening"] },
+          { id: "tickets-other-texts", label: "Outros", description: "Mensagem de abertura do atendimento geral.", fieldIds: ["tickets.texts.other_opening"] },
+          { id: "tickets-suggestion-texts", label: "Sugestão", description: "Mensagem após publicar uma sugestão.", fieldIds: ["tickets.texts.suggestion_published"] },
+          { id: "tickets-close-texts", label: "Encerramento", description: "Aviso exibido ao fechar o ticket.", fieldIds: ["tickets.texts.close_notice"] },
+        ],
+      },
+    },
     fields: [
       { id: "tickets.panel.channel_id", label: "Canal do painel", type: "channel", scope: "guild", path: "tickets.panel.channel_id", group: "Painel" },
       { id: "tickets.panel.title", label: "Título", type: "text", scope: "guild", path: "tickets.panel.title", maxLength: 250, group: "Painel" },
@@ -517,16 +672,16 @@ const sections: DashboardSectionDefinition[] = [
       { id: "tickets.panel.accent_color", label: "Cor de destaque", type: "color", scope: "guild", path: "tickets.panel.accent_color", group: "Painel" },
       { id: "tickets.panel.image_url", label: "Imagem principal", type: "url", scope: "guild", path: "tickets.panel.image_url", maxLength: 1000, group: "Painel" },
       { id: "tickets.panel.side_image_url", label: "Imagem lateral", type: "url", scope: "guild", path: "tickets.panel.side_image_url", maxLength: 1000, group: "Painel" },
-      { id: "tickets.channels.category_id", label: "Categoria dos tickets", type: "channel", scope: "guild", path: "tickets.channels.category_id", group: "Canais e cargos" },
-      { id: "tickets.channels.logs_channel_id", label: "Canal de logs", type: "channel", scope: "guild", path: "tickets.channels.logs_channel_id", group: "Canais e cargos" },
-      { id: "tickets.channels.suggestions_channel_id", label: "Canal de sugestões", type: "channel", scope: "guild", path: "tickets.channels.suggestions_channel_id", group: "Canais e cargos" },
-      { id: "tickets.roles.staff_role_id", label: "Staff geral", type: "role", scope: "guild", path: "tickets.roles.staff_role_id", group: "Canais e cargos" },
-      { id: "tickets.roles.partnership_staff_role_id", label: "Staff de parcerias", type: "role", scope: "guild", path: "tickets.roles.partnership_staff_role_id", group: "Canais e cargos" },
-      { id: "tickets.roles.report_staff_role_id", label: "Staff de denúncias", type: "role", scope: "guild", path: "tickets.roles.report_staff_role_id", group: "Canais e cargos" },
-      { id: "tickets.roles.other_staff_role_id", label: "Staff de outros", type: "role", scope: "guild", path: "tickets.roles.other_staff_role_id", group: "Canais e cargos" },
+      { id: "tickets.channels.category_id", label: "Categoria dos tickets", type: "channel", scope: "guild", path: "tickets.channels.category_id", group: "Atendimento" },
+      { id: "tickets.channels.logs_channel_id", label: "Canal de logs", type: "channel", scope: "guild", path: "tickets.channels.logs_channel_id", group: "Atendimento" },
+      { id: "tickets.channels.suggestions_channel_id", label: "Canal de sugestões", type: "channel", scope: "guild", path: "tickets.channels.suggestions_channel_id", group: "Atendimento" },
+      { id: "tickets.roles.staff_role_id", label: "Staff geral", type: "role", scope: "guild", path: "tickets.roles.staff_role_id", group: "Atendimento" },
+      { id: "tickets.roles.partnership_staff_role_id", label: "Staff de parcerias", type: "role", scope: "guild", path: "tickets.roles.partnership_staff_role_id", group: "Atendimento" },
+      { id: "tickets.roles.report_staff_role_id", label: "Staff de denúncias", type: "role", scope: "guild", path: "tickets.roles.report_staff_role_id", group: "Atendimento" },
+      { id: "tickets.roles.other_staff_role_id", label: "Staff de outros", type: "role", scope: "guild", path: "tickets.roles.other_staff_role_id", group: "Atendimento" },
       { id: "tickets.options.allow_multiple_open_tickets", label: "Permitir vários tickets por usuário", type: "boolean", scope: "guild", path: "tickets.options.allow_multiple_open_tickets", group: "Comportamento" },
-      { id: "tickets.options.transcript_on_close", label: "Gerar transcript ao fechar", type: "boolean", scope: "guild", path: "tickets.options.transcript_on_close", group: "Comportamento" },
-      { id: "tickets.options.use_server_webhook", label: "Usar webhook do servidor", type: "boolean", scope: "guild", path: "tickets.options.use_server_webhook", group: "Comportamento" },
+      { id: "tickets.options.transcript_on_close", label: "Gerar transcrição ao fechar", type: "boolean", scope: "guild", path: "tickets.options.transcript_on_close", group: "Comportamento" },
+      { id: "tickets.options.use_server_webhook", label: "Usar identidade do servidor", type: "boolean", scope: "guild", path: "tickets.options.use_server_webhook", group: "Comportamento" },
       { id: "tickets.enabled.partnership", label: "Ativar Parceria", type: "boolean", scope: "guild", path: "tickets.enabled.partnership", group: "Fluxos" },
       { id: "tickets.enabled.report", label: "Ativar Denúncia", type: "boolean", scope: "guild", path: "tickets.enabled.report", group: "Fluxos" },
       { id: "tickets.enabled.suggestion", label: "Ativar Sugestão", type: "boolean", scope: "guild", path: "tickets.enabled.suggestion", group: "Fluxos" },
@@ -546,7 +701,17 @@ const sections: DashboardSectionDefinition[] = [
         ...(scope === "creator" ? ["mention_everyone"] : []),
       ].map((permission) => ({
         id: `tickets.permissions.${scope}.${permission}`,
-        label: `${scope === "everyone" ? "@everyone" : scope === "staff" ? "Staff" : "Criador"}: ${permission.split("_").join(" ")}`,
+        label: `${scope === "everyone" ? "Demais membros" : scope === "staff" ? "Equipe" : "Autor"}: ${({
+          view_channel: "ver o canal",
+          send_messages: "enviar mensagens",
+          read_message_history: "ler o histórico",
+          attach_files: "enviar arquivos",
+          embed_links: "incorporar links",
+          add_reactions: "adicionar reações",
+          manage_messages: "gerenciar mensagens",
+          manage_channels: "gerenciar o canal",
+          mention_everyone: "mencionar todos",
+        } as Record<string, string>)[permission] || permission}`,
         type: "boolean" as const, scope: "guild" as const, path: `tickets.permissions.${scope}.${permission}`, group: "Permissões",
       }))),
     ],
@@ -554,6 +719,31 @@ const sections: DashboardSectionDefinition[] = [
   {
     id: "color_roles", label: "Cargos de cor", emoji: "🎨", description: "Painéis, textos e trinta cores vinculadas aos cargos do servidor.",
     groups: ["Painel", "Mensagens", "Cores"],
+    groupMetadata: {
+      Painel: {
+        kind: "message",
+        settingsFieldIds: ["color_roles.channel_id", "color_roles.panel_count"],
+        editors: [
+          { id: "color-panel-1", label: "Painel 1", description: "Título, subtítulo e rodapé do painel 1.", fieldIds: ["color_roles.messages.1.title", "color_roles.messages.1.subtitle", "color_roles.messages.1.footer"] },
+          { id: "color-panel-2", label: "Painel 2", description: "Título, subtítulo e rodapé do painel 2.", fieldIds: ["color_roles.messages.2.title", "color_roles.messages.2.subtitle", "color_roles.messages.2.footer"] },
+          { id: "color-panel-3", label: "Painel 3", description: "Título, subtítulo e rodapé do painel 3.", fieldIds: ["color_roles.messages.3.title", "color_roles.messages.3.subtitle", "color_roles.messages.3.footer"] },
+          { id: "color-panel-4", label: "Painel 4", description: "Título, subtítulo e rodapé do painel 4.", fieldIds: ["color_roles.messages.4.title", "color_roles.messages.4.subtitle", "color_roles.messages.4.footer"] },
+          { id: "color-panel-5", label: "Painel 5", description: "Título, subtítulo e rodapé do painel 5.", fieldIds: ["color_roles.messages.5.title", "color_roles.messages.5.subtitle", "color_roles.messages.5.footer"] },
+        ],
+      },
+      Mensagens: {
+        kind: "message",
+        editors: [{
+          id: "color-role-feedback",
+          label: "Mensagens de resultado",
+          description: "Respostas exibidas ao aplicar, remover ou trocar uma cor.",
+          fieldIds: [
+            "color_roles.templates.apply", "color_roles.templates.remove", "color_roles.templates.switch",
+            "color_roles.templates.no_role", "color_roles.templates.hierarchy", "color_roles.templates.missing_panel",
+          ],
+        }],
+      },
+    },
     fields: [
       { id: "color_roles.channel_id", label: "Canal do painel", type: "channel", scope: "guild", path: "color_roles.channel_id", group: "Painel" },
       { id: "color_roles.panel_count", label: "Quantidade de painéis", type: "number", scope: "guild", path: "color_roles.panel_count", min: 3, max: 5, group: "Painel" },
@@ -572,9 +762,41 @@ const sections: DashboardSectionDefinition[] = [
     id: "birthday", label: "Aniversários", emoji: "🎂", description: "Cadastro, calendário e avisos automáticos de aniversário.",
     groups: ["Geral", "Canais", "Registro de datas", "Avisos", "Calendário"],
     groupMetadata: {
-      "Registro de datas": { kind: "message", variables: BIRTHDAY_REGISTER_VARIABLES },
-      Avisos: { kind: "message", variables: BIRTHDAY_ANNOUNCE_VARIABLES },
-      Calendário: { kind: "message", variables: BIRTHDAY_CALENDAR_VARIABLES },
+      "Registro de datas": {
+        kind: "message",
+        variables: BIRTHDAY_REGISTER_VARIABLES,
+        settingsFieldIds: ["birthday.options.leap_day_mode", "birthday.options.valid_reaction"],
+        editors: [{
+          id: "birthday-register-messages",
+          label: "Mensagens de cadastro",
+          description: "Respostas ao salvar, atualizar ou informar uma data inválida.",
+          fieldIds: ["birthday.templates.saved", "birthday.templates.updated", "birthday.templates.invalid"],
+        }],
+      },
+      Avisos: {
+        kind: "message",
+        variables: BIRTHDAY_ANNOUNCE_VARIABLES,
+        settingsFieldIds: [
+          "birthday.timezone", "birthday.announce_hour", "birthday.announce_minute",
+          "birthday.options.show_age", "birthday.options.group_announcements", "birthday.options.delete_on_leave",
+        ],
+        editors: [{
+          id: "birthday-announcements",
+          label: "Mensagens de aniversário",
+          description: "Avisos individuais e agrupados enviados automaticamente.",
+          fieldIds: ["birthday.templates.announce_single", "birthday.templates.announce_group"],
+        }],
+      },
+      Calendário: {
+        kind: "message",
+        variables: BIRTHDAY_CALENDAR_VARIABLES,
+        editors: [{
+          id: "birthday-calendar",
+          label: "Calendário",
+          description: "Conteúdo do calendário e estado sem aniversários cadastrados.",
+          fieldIds: ["birthday.templates.calendar", "birthday.templates.empty_calendar"],
+        }],
+      },
     },
     fields: [
       { id: "birthday.enabled", label: "Ativar aniversários", type: "boolean", scope: "birthday", path: "enabled", group: "Geral" },
@@ -602,11 +824,11 @@ const sections: DashboardSectionDefinition[] = [
     id: "tts", label: "TTS", emoji: "🔊", description: "Engine, voz, idioma, prefixos e comportamento do leitor.",
     groups: ["Voz", "Prefixos", "Comportamento"],
     fields: [
-      { id: "tts.engine", label: "Engine padrão", type: "select", scope: "guild", path: "tts_defaults.engine", options: TTS_ENGINE_OPTIONS, group: "Voz" },
-      { id: "tts.voice", label: "Voz do Edge", description: "Nome técnico da voz usada pelo Microsoft Edge.", type: "text", scope: "guild", path: "tts_defaults.voice", maxLength: 120, placeholder: "pt-BR-FranciscaNeural", group: "Voz" },
-      { id: "tts.language", label: "Idioma do gTTS", description: "Código do idioma usado pelo Google TTS.", type: "text", scope: "guild", path: "tts_defaults.language", maxLength: 32, placeholder: "pt-BR", group: "Voz" },
-      { id: "tts.rate", label: "Velocidade do Edge", description: "Ajuste de -100% a +100%.", type: "text", scope: "guild", path: "tts_defaults.rate", maxLength: 16, placeholder: "+0%", group: "Voz" },
-      { id: "tts.pitch", label: "Tom do Edge", description: "Ajuste de -100Hz a +100Hz.", type: "text", scope: "guild", path: "tts_defaults.pitch", maxLength: 16, placeholder: "+0Hz", group: "Voz" },
+      { id: "tts.engine", label: "Mecanismo de voz", type: "select", scope: "guild", path: "tts_defaults.engine", options: TTS_ENGINE_OPTIONS, group: "Voz" },
+      { id: "tts.voice", label: "Voz", description: "Voz usada pelo Microsoft Edge.", type: "select", scope: "guild", path: "tts_defaults.voice", options: TTS_VOICE_OPTIONS, group: "Voz" },
+      { id: "tts.language", label: "Idioma", description: "Idioma usado pelo Google TTS.", type: "select", scope: "guild", path: "tts_defaults.language", options: TTS_LANGUAGE_OPTIONS, group: "Voz" },
+      { id: "tts.rate", label: "Velocidade", description: "Ajuste de -100% a +100%.", type: "text", scope: "guild", path: "tts_defaults.rate", maxLength: 16, placeholder: "+0%", group: "Voz" },
+      { id: "tts.pitch", label: "Tom", description: "Ajuste de -100Hz a +100Hz.", type: "text", scope: "guild", path: "tts_defaults.pitch", maxLength: 16, placeholder: "+0Hz", group: "Voz" },
       { id: "tts.voice_channel_id", label: "Canal de voz preferido", description: "Canal usado como referência quando configurado.", type: "channel", scope: "guild", path: "tts_voice_channel_id", group: "Voz" },
       { id: "tts.gtts_prefix", label: "Prefixo gTTS", type: "text", scope: "guild", path: "gtts_prefix", maxLength: 8, placeholder: ".", group: "Prefixos" },
       { id: "tts.edge_prefix", label: "Prefixo Edge", type: "text", scope: "guild", path: "edge_prefix", maxLength: 8, placeholder: ",", group: "Prefixos" },

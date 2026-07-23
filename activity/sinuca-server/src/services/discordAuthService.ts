@@ -215,6 +215,9 @@ export interface DashboardRoleOption {
   id: string;
   name: string;
   color: number;
+  managed: boolean;
+  position: number;
+  assignable: boolean;
 }
 
 export interface DashboardGuildOptionsResult {
@@ -235,9 +238,13 @@ export async function listGuildChannelsAndRoles(guildId: string): Promise<Dashbo
   if (!token) return { ok: false, channels: [], roles: [], error: "bot_token_missing" };
 
   const auth = `Bot ${token}`;
-  const [channelsResp, rolesResp] = await Promise.all([
+  const botIdentity = await getDiscordBotIdentity();
+  const [channelsResp, rolesResp, botMemberResp] = await Promise.all([
     fetchDiscordJson<Array<Record<string, unknown>>>(`https://discord.com/api/v10/guilds/${guildId}/channels`, auth),
     fetchDiscordJson<Array<Record<string, unknown>>>(`https://discord.com/api/v10/guilds/${guildId}/roles`, auth),
+    botIdentity?.id
+      ? fetchDiscordJson<Record<string, unknown>>(`https://discord.com/api/v10/guilds/${guildId}/members/${botIdentity.id}`, auth)
+      : Promise.resolve({ ok: false, status: 0, data: null }),
   ]);
 
   if (!channelsResp.ok || !Array.isArray(channelsResp.data)) {
@@ -256,12 +263,26 @@ export async function listGuildChannelsAndRoles(guildId: string): Promise<Dashbo
     }))
     .filter((channel) => /^\d{15,25}$/.test(channel.id) && channel.name);
 
+  const botRoleIds = botMemberResp.ok && botMemberResp.data && Array.isArray(botMemberResp.data.roles)
+    ? new Set(botMemberResp.data.roles.map((roleId) => String(roleId)))
+    : null;
+  const botHighestPosition = botRoleIds
+    ? rolesResp.data.reduce((highest, role) => botRoleIds.has(String(role.id ?? "")) ? Math.max(highest, Number(role.position ?? 0)) : highest, 0)
+    : null;
+
   const roles: DashboardRoleOption[] = rolesResp.data
-    .map((role) => ({
-      id: String(role.id ?? ""),
-      name: String(role.name ?? ""),
-      color: Number(role.color ?? 0),
-    }))
+    .map((role) => {
+      const managed = Boolean(role.managed);
+      const position = Number(role.position ?? 0);
+      return {
+        id: String(role.id ?? ""),
+        name: String(role.name ?? ""),
+        color: Number(role.color ?? 0),
+        managed,
+        position,
+        assignable: !managed && (botHighestPosition === null || position < botHighestPosition),
+      };
+    })
     .filter((role) => /^\d{15,25}$/.test(role.id) && role.id !== guildId && role.name !== "@everyone");
 
   return { ok: true, channels, roles };

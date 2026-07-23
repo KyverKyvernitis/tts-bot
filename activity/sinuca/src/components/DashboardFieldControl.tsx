@@ -1,4 +1,17 @@
-import { GripVertical, Plus, Trash2 } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Check,
+  ChevronDown,
+  Copy,
+  GripVertical,
+  Plus,
+  Search,
+  Trash2,
+  X,
+} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import type {
   DashboardChannelOption,
   DashboardColorSlot,
@@ -32,7 +45,11 @@ function channelOptionsForField(field: DashboardFieldDefinition, channels: Dashb
     if (kind === "category") return channel.type === CATEGORY_CHANNEL_TYPE;
     if (kind === "voice") return VOICE_CHANNEL_TYPES.has(channel.type);
     return TEXT_LIKE_CHANNEL_TYPES.has(channel.type);
-  }).map((channel) => ({ value: channel.id, label: kind === "category" ? `📁 ${channel.name}` : kind === "voice" ? `🔊 ${channel.name}` : `# ${channel.name}` }));
+  }).map((channel) => ({
+    value: channel.id,
+    label: kind === "category" ? `📁 ${channel.name}` : kind === "voice" ? `🔊 ${channel.name}` : `# ${channel.name}`,
+    hint: channel.parentId ? "Canal organizado em uma categoria" : undefined,
+  }));
 }
 
 export function stringifyDashboardValue(value: unknown): string {
@@ -68,7 +85,19 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange }: 
   const currentValue = stringifyDashboardValue(value);
   const channelOptions = field.type === "channel" && guildOptions?.ok ? channelOptionsForField(field, guildOptions.channels) : null;
   const roleOptions = (field.type === "role" || field.type === "role_multi") && guildOptions?.ok
-    ? guildOptions.roles.map((role) => ({ value: role.id, label: `@${role.name}` }))
+    ? (() => {
+      const available = guildOptions.roles
+        .filter((role) => !role.managed && role.assignable !== false)
+        .map((role) => ({ value: role.id, label: `@${role.name}`, hint: role.color ? `Cor do cargo: #${role.color.toString(16).padStart(6, "0")}` : undefined }));
+      const currentIds = field.type === "role_multi" && Array.isArray(value) ? value.map(String) : currentValue ? [currentValue] : [];
+      const unavailable = currentIds
+        .filter((id) => !available.some((option) => option.value === id))
+        .map((id) => {
+          const role = guildOptions.roles.find((item) => item.id === id);
+          return { value: id, label: role ? `@${role.name}` : `Cargo ${id}`, hint: "Cargo atual indisponível para atribuição" };
+        });
+      return [...unavailable, ...available];
+    })()
     : null;
 
   if (field.type === "boolean") {
@@ -86,7 +115,11 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange }: 
   }
 
   if (field.type === "select") {
-    return <SmartSelect id={`field-${field.id}`} value={currentValue} options={field.options ?? []} onChange={(next) => onChange(field, next)} placeholder="Selecione uma opção" />;
+    const configuredOptions = field.options ?? [];
+    const options = currentValue && !configuredOptions.some((option) => option.value === currentValue)
+      ? [{ value: currentValue, label: `${currentValue} — valor atual` }, ...configuredOptions]
+      : configuredOptions;
+    return <SmartSelect id={`field-${field.id}`} value={currentValue} options={options} onChange={(next) => onChange(field, next)} placeholder="Selecione uma opção" />;
   }
 
   if (field.type === "channel" && channelOptions) {
@@ -102,8 +135,7 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange }: 
   }
 
   if (field.type === "string_list") {
-    const lines = Array.isArray(value) ? value.map(String).join("\n") : stringifyDashboardValue(value);
-    return <textarea className="osk-list-textarea" value={lines} maxLength={field.maxLength} placeholder={field.placeholder || "Um item por linha"} onChange={(event) => onChange(field, event.target.value.split(/\r?\n/).map((item: string) => item.trim()).filter(Boolean))} />;
+    return <StringListEditor field={field} value={value} onChange={onChange} />;
   }
 
   if (field.type === "form_fields") {
@@ -111,11 +143,11 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange }: 
   }
 
   if (field.type === "color_slots") {
-    return <ColorSlotsEditor field={field} value={value} roles={guildOptions?.ok ? guildOptions.roles.map((role) => ({ value: role.id, label: `@${role.name}` })) : []} onChange={onChange} />;
+    return <ColorSlotsEditor field={field} value={value} roles={guildOptions?.ok ? guildOptions.roles.filter((role) => !role.managed && role.assignable !== false).map((role) => ({ value: role.id, label: `@${role.name}` })) : []} onChange={onChange} />;
   }
 
   if (field.type === "textarea") {
-    return <textarea value={currentValue} maxLength={field.maxLength} placeholder={field.placeholder} onChange={(event) => onChange(field, event.target.value)} />;
+    return <textarea value={currentValue} maxLength={field.maxLength} placeholder={field.placeholder} rows={Math.min(8, Math.max(3, currentValue.split("\n").length + 1))} onChange={(event) => onChange(field, event.target.value)} />;
   }
 
   const suffix = field.id === "tts.speech_limit_seconds" ? "segundos" : null;
@@ -136,28 +168,140 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange }: 
 
 function RoleMultiEditor({ field, value, options, onChange }: { field: DashboardFieldDefinition; value: unknown; options: SmartSelectOption[]; onChange(field: DashboardFieldDefinition, raw: unknown): void }) {
   const selected = Array.isArray(value) ? value.map(String) : [];
-  const toggle = (roleId: string) => onChange(field, selected.includes(roleId) ? selected.filter((id) => id !== roleId) : [...selected, roleId]);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [working, setWorking] = useState<string[]>(selected);
+
+  useEffect(() => { if (!open) setWorking(selected); }, [open, value]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!open) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => { document.body.style.overflow = previousOverflow; window.removeEventListener("keydown", onKey); };
+  }, [open]);
+
   if (!options.length) return <input value={selected.join(", ")} placeholder="IDs separados por vírgula" onChange={(event) => onChange(field, event.target.value.split(/[\s,]+/).filter(Boolean))} />;
-  return <div className="osk-multi-options">{options.map((option) => <label key={option.value} data-selected={selected.includes(option.value) || undefined}><input type="checkbox" checked={selected.includes(option.value)} onChange={() => toggle(option.value)} /><span>{option.label}</span></label>)}</div>;
+
+  const selectedOptions = selected.map((id) => options.find((option) => option.value === id) ?? { value: id, label: `Cargo ${id}` });
+  const needle = query.trim().toLocaleLowerCase("pt-BR");
+  const filtered = needle ? options.filter((option) => `${option.label} ${option.hint || ""}`.toLocaleLowerCase("pt-BR").includes(needle)) : options;
+  const toggle = (roleId: string) => setWorking((current) => current.includes(roleId) ? current.filter((id) => id !== roleId) : [...current, roleId]);
+
+  const modal = open ? <div className="osk-root osk-multi-sheet" role="dialog" aria-modal="true" aria-label={`Selecionar ${field.label}`}>
+    <button type="button" className="osk-multi-sheet__backdrop" onClick={() => setOpen(false)} aria-label="Fechar" />
+    <div className="osk-multi-sheet__panel">
+      <header><div><strong>{field.label}</strong><small>{working.length} selecionado{working.length === 1 ? "" : "s"}</small></div><button type="button" onClick={() => setOpen(false)} aria-label="Fechar"><X size={18} /></button></header>
+      <label className="osk-multi-sheet__search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar cargo" /></label>
+      <div className="osk-multi-sheet__list">
+        {filtered.map((option) => <button key={option.value} type="button" data-selected={working.includes(option.value) || undefined} onClick={() => toggle(option.value)}>
+          <span><strong>{option.label}</strong>{option.hint && <small>{option.hint}</small>}</span>{working.includes(option.value) && <Check size={17} />}
+        </button>)}
+        {!filtered.length && <div className="osk-message-empty">Nenhum cargo encontrado.</div>}
+      </div>
+      <footer><button type="button" className="osk-secondary-button" onClick={() => { setWorking([]); }}>Limpar</button><button type="button" className="osk-primary-button" onClick={() => { onChange(field, working); setOpen(false); }}>Concluir</button></footer>
+    </div>
+  </div> : null;
+
+  return <div className="osk-role-multi">
+    <div className="osk-role-multi__chips">
+      {selectedOptions.map((option) => <span key={option.value}>{option.label}<button type="button" onClick={() => onChange(field, selected.filter((id) => id !== option.value))} aria-label={`Remover ${option.label}`}><X size={13} /></button></span>)}
+      {!selectedOptions.length && <small>Nenhum cargo selecionado.</small>}
+    </div>
+    <button type="button" className="osk-secondary-button osk-role-multi__open" onClick={() => { setWorking(selected); setOpen(true); }}><Plus size={15} />Selecionar cargos</button>
+    {modal && createPortal(modal, document.body)}
+  </div>;
+}
+
+function StringListEditor({ field, value, onChange }: { field: DashboardFieldDefinition; value: unknown; onChange(field: DashboardFieldDefinition, raw: unknown): void }) {
+  const items = Array.isArray(value) ? value.map(String) : stringifyDashboardValue(value).split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+  const update = (index: number, next: string) => onChange(field, items.map((item, itemIndex) => itemIndex === index ? next : item));
+  const remove = (index: number) => onChange(field, items.filter((_, itemIndex) => itemIndex !== index));
+  const move = (index: number, direction: -1 | 1) => {
+    const nextIndex = index + direction;
+    if (nextIndex < 0 || nextIndex >= items.length) return;
+    const next = [...items];
+    [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+    onChange(field, next);
+  };
+  return <div className="osk-string-list-editor">
+    {items.map((item, index) => <div key={index}>
+      <GripVertical size={15} />
+      <input value={item} onChange={(event) => update(index, event.target.value)} placeholder={`Item ${index + 1}`} />
+      <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label="Mover para cima"><ArrowUp size={14} /></button>
+      <button type="button" onClick={() => move(index, 1)} disabled={index === items.length - 1} aria-label="Mover para baixo"><ArrowDown size={14} /></button>
+      <button type="button" data-danger onClick={() => remove(index)} aria-label="Remover item"><Trash2 size={14} /></button>
+    </div>)}
+    <button type="button" className="osk-add-row" onClick={() => onChange(field, [...items, ""])}><Plus size={15} />Adicionar item</button>
+  </div>;
 }
 
 function FormFieldsEditor({ field, value, onChange }: { field: DashboardFieldDefinition; value: unknown; onChange(field: DashboardFieldDefinition, raw: unknown): void }) {
   const fields = Array.isArray(value) ? value.map((item, index) => normalizeFormField(item, index)) : [];
+  const [openId, setOpenId] = useState<string | null>(fields[0]?.id ?? null);
   const update = (index: number, patch: Partial<DashboardFormField>) => onChange(field, fields.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
-  const remove = (index: number) => onChange(field, fields.filter((_, itemIndex) => itemIndex !== index));
+  const remove = (index: number) => {
+    const target = fields[index];
+    if ((target.label || target.placeholder) && !window.confirm(`Excluir “${target.label || `Pergunta ${index + 1}`}”?`)) return;
+    onChange(field, fields.filter((_, itemIndex) => itemIndex !== index));
+  };
   const add = () => {
     if (fields.length >= 5) return;
-    onChange(field, [...fields, normalizeFormField({}, fields.length)]);
+    const next = normalizeFormField({ id: `field-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}` }, fields.length);
+    onChange(field, [...fields, next]);
+    setOpenId(next.id);
   };
+  const duplicate = (index: number) => {
+    if (fields.length >= 5) return;
+    const copy = { ...fields[index], id: `${fields[index].id}-copy-${Date.now().toString(36)}`, label: `${fields[index].label} (cópia)` };
+    onChange(field, [...fields.slice(0, index + 1), copy, ...fields.slice(index + 1)]);
+    setOpenId(copy.id);
+  };
+  const move = (index: number, direction: -1 | 1) => {
+    const nextIndex = index + direction;
+    if (nextIndex < 0 || nextIndex >= fields.length) return;
+    const next = [...fields];
+    [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+    onChange(field, next);
+  };
+
   return <div className="osk-form-fields-editor">
-    {fields.map((item, index) => <article key={item.id || index}>
-      <header><span><GripVertical size={16} /> Pergunta {index + 1}</span><button type="button" onClick={() => remove(index)} aria-label="Remover pergunta"><Trash2 size={15} /></button></header>
-      <div className="osk-inline-grid"><label><span>Rótulo</span><input value={item.label} maxLength={45} onChange={(event) => update(index, { label: event.target.value })} /></label><label><span>Nome na resposta</span><input value={item.response_label} maxLength={80} onChange={(event) => update(index, { response_label: event.target.value })} /></label></div>
-      <label><span>Exemplo ou instrução</span><input value={item.placeholder} maxLength={100} onChange={(event) => update(index, { placeholder: event.target.value })} /></label>
-      <div className="osk-check-row"><label><input type="checkbox" checked={item.enabled} onChange={(event) => update(index, { enabled: event.target.checked })} />Ativa</label><label><input type="checkbox" checked={item.required} onChange={(event) => update(index, { required: event.target.checked })} />Obrigatória</label><label><input type="checkbox" checked={item.long} onChange={(event) => update(index, { long: event.target.checked })} />Texto longo</label><label><input type="checkbox" checked={item.show_in_response} onChange={(event) => update(index, { show_in_response: event.target.checked })} />Mostrar na resposta</label></div>
-    </article>)}
-    <button type="button" className="osk-add-row" onClick={add} disabled={fields.length >= 5}><Plus size={15} />Adicionar pergunta ({fields.length}/5)</button>
+    <div className="osk-form-fields-limit"><strong>{fields.length} de 5 perguntas</strong><small>O Discord aceita no máximo cinco campos por formulário.</small></div>
+    {fields.map((item, index) => {
+      const open = openId === item.id;
+      return <article key={item.id || index} data-open={open || undefined} data-enabled={item.enabled || undefined}>
+        <div className="osk-form-question-head">
+          <button type="button" className="osk-form-question-summary" onClick={() => setOpenId((current) => current === item.id ? null : item.id)} aria-expanded={open}>
+            <GripVertical size={16} /><span><strong>{item.label || `Pergunta ${index + 1}`}</strong><small>{item.enabled ? "Ativa" : "Desativada"} · {item.required ? "Obrigatória" : "Opcional"} · {item.long ? "Resposta longa" : "Resposta curta"}</small></span><ChevronDown size={16} />
+          </button>
+          <div className="osk-form-question-actions">
+            <button type="button" onClick={() => duplicate(index)} disabled={fields.length >= 5} aria-label="Duplicar pergunta"><Copy size={14} /></button>
+            <button type="button" onClick={() => move(index, -1)} disabled={index === 0} aria-label="Mover para cima"><ArrowUp size={14} /></button>
+            <button type="button" onClick={() => move(index, 1)} disabled={index === fields.length - 1} aria-label="Mover para baixo"><ArrowDown size={14} /></button>
+            <button type="button" data-danger onClick={() => remove(index)} aria-label="Remover pergunta"><Trash2 size={14} /></button>
+          </div>
+        </div>
+        <div className="osk-form-question-panel">
+          <div className="osk-form-question-panel-inner">
+            <div className="osk-inline-grid"><label><span>Rótulo</span><input value={item.label} maxLength={45} onChange={(event) => update(index, { label: event.target.value })} /></label><label><span>Nome no resumo</span><input value={item.response_label} maxLength={80} onChange={(event) => update(index, { response_label: event.target.value })} /></label></div>
+            <label><span>Exemplo ou instrução</span><input value={item.placeholder} maxLength={100} onChange={(event) => update(index, { placeholder: event.target.value })} /></label>
+            <div className="osk-form-question-switches">
+              <SwitchRow label="Pergunta ativa" description="Exibe este campo no formulário." checked={item.enabled} onChange={(checked) => update(index, { enabled: checked })} />
+              <SwitchRow label="Resposta obrigatória" description="Impede o envio sem preencher." checked={item.required} onChange={(checked) => update(index, { required: checked })} />
+              <SwitchRow label="Resposta longa" description="Usa uma área maior para textos extensos." checked={item.long} onChange={(checked) => update(index, { long: checked, max_length: checked ? Math.max(item.max_length, 1000) : Math.min(item.max_length, 120) })} />
+              <SwitchRow label="Mostrar no resumo" description="Inclui a resposta na mensagem enviada à equipe." checked={item.show_in_response} onChange={(checked) => update(index, { show_in_response: checked })} />
+            </div>
+          </div>
+        </div>
+      </article>;
+    })}
+    <button type="button" className="osk-add-row" onClick={add} disabled={fields.length >= 5}><Plus size={15} />Adicionar pergunta</button>
   </div>;
+}
+
+function SwitchRow({ label, description, checked, onChange }: { label: string; description: string; checked: boolean; onChange(value: boolean): void }) {
+  return <label className="osk-inline-switch-row"><span><strong>{label}</strong><small>{description}</small></span><span className="osk-switch"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span className="osk-switch-track" /></span></label>;
 }
 
 function normalizeFormField(value: unknown, index: number): DashboardFormField {
@@ -179,7 +323,7 @@ function ColorSlotsEditor({ field, value, roles, onChange }: { field: DashboardF
       <span className="osk-color-slot-swatch" style={{ background: color }}><b>{slot.number || key}</b></span>
       <label><span>Nome</span><input value={String(slot.name || "")} maxLength={40} onChange={(event) => update(key, { name: event.target.value, role_name: event.target.value, managed: false })} /></label>
       <label><span>Cor</span><span className="osk-color-slot-color"><input type="color" value={color} onChange={(event) => update(key, { role_hex: event.target.value, text_hex: event.target.value, managed: false })} /><input value={color} onChange={(event) => update(key, { role_hex: event.target.value, text_hex: event.target.value, managed: false })} /></span></label>
-      <label className="osk-color-slot-role"><span>Cargo</span>{roles.length ? <SmartSelect id={`color-slot-${key}`} value={String(slot.role_id || "")} options={roles} onChange={(next) => update(key, { role_id: next, managed: false })} placeholder="Selecione o cargo" /> : <input value={String(slot.role_id || "")} placeholder="ID do cargo" onChange={(event) => update(key, { role_id: event.target.value, managed: false })} />}</label>
+      <label className="osk-color-slot-role"><span>Cargo</span>{roles.length ? <SmartSelect id={`color-slot-${key}`} value={String(slot.role_id || "")} options={[{ value: "", label: "Nenhum" }, ...roles]} onChange={(next) => update(key, { role_id: next, managed: false })} placeholder="Selecione o cargo" /> : <input value={String(slot.role_id || "")} placeholder="ID do cargo" onChange={(event) => update(key, { role_id: event.target.value, managed: false })} />}</label>
     </article>;
   })}</div>;
 }
