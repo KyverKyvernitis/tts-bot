@@ -349,7 +349,7 @@ function MessageGroupPanel({
         return <article key={editor.id} className="osk-message-launcher" data-changed={changed || undefined} data-disabled={!enabled || undefined}>
           <span className="osk-message-launcher__icon"><PencilLine size={19} /></span>
           <div><strong>{editor.label}</strong><small>{editor.description || "Edite a mensagem e confira a prévia antes de aplicar."}</small>{summary && <em>{summary}</em>}</div>
-          <button type="button" className="osk-primary-button osk-primary-button--small" disabled={!enabled} onClick={() => onOpenEditor(editor, metadata.variables)}>Editar</button>
+          <button type="button" className="osk-message-launcher__action" disabled={!enabled} onClick={() => onOpenEditor(editor, metadata.variables)}>Editar</button>
         </article>;
       })}
     </div>
@@ -429,7 +429,7 @@ function FieldsPanel({
         if (changedField.id === "tts.ignored_tts_role_id" && ignoredEnabledField) onChange(ignoredEnabledField, Boolean(String(raw || "").trim()));
       };
 
-      return <div key={field.id} className="osk-compact-field" data-changed={changed || undefined} data-complex={isComplex || undefined}>
+      return <div key={field.id} className="osk-compact-field" data-type={field.type} data-changed={changed || undefined} data-complex={isComplex || undefined}>
         <div className="osk-compact-field-copy">
           <strong>{displayField.label}</strong>
           {displayField.description && <small>{displayField.description}</small>}

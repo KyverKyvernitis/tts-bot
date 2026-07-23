@@ -134,6 +134,21 @@ export default function App() {
   const closeMobileMenu = useCallback(() => setMobileMenuOpen(false), []);
   const openMobileMenu = useCallback(() => setMobileMenuOpen(true), []);
 
+  const currentRoutePath = routePath(route);
+
+  useEffect(() => {
+    const previous = window.history.scrollRestoration;
+    window.history.scrollRestoration = "manual";
+    return () => { window.history.scrollRestoration = previous; };
+  }, []);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [currentRoutePath]);
+
   const navigate = useCallback((next: Route, replace = false, bypassGuard = false) => {
     if (!bypassGuard && hasUnsavedChanges) {
       if (!window.confirm("Descartar as alterações que ainda não foram salvas?")) return false;
@@ -463,7 +478,7 @@ function DashboardShell({
   const guildIcon = selectedServer?.icon || null;
   const botName = botIdentity?.global_name || botIdentity?.username || "Osaka";
 
-  return <div className="osk-dashboard-shell">
+  return <div className="osk-dashboard-shell" data-has-draft={changedCount > 0 || undefined}>
     <Sidebar
       modules={modules}
       selectedSectionId={selectedSectionId || ""}

@@ -54,7 +54,7 @@ export function BrowserLanding({ loggedIn, user, onLogin, onDashboard, onNavigat
         </nav>
         {loggedIn ? (
           <button className="osk-account-button" onClick={onDashboard}>
-            <SmartAvatar src={user?.avatarUrl} name={name} type="user" alt={name} size={28} />
+            <SmartAvatar className="osk-account-avatar" src={user?.avatarUrl} name={name} type="user" alt={name} size={28} />
             <span>Abrir painel</span>
             <ArrowRight size={15} />
           </button>
@@ -73,12 +73,11 @@ export function BrowserLanding({ loggedIn, user, onLogin, onDashboard, onNavigat
               <button className="osk-primary-button" onClick={primaryAction}>
                 {loggedIn ? "Abrir meu painel" : "Entrar com Discord"}<ArrowRight size={17} />
               </button>
-              <a className="osk-secondary-button" href="#funcoes">Explorar funções</a>
             </div>
             <div className="osk-trust-row" aria-label="Vantagens do painel">
-              <span><Check size={14} /> Login pelo Discord</span>
-              <span><Check size={14} /> Otimizado para celular</span>
-              <span><Check size={14} /> Configurações sincronizadas</span>
+              <span><Check size={14} /> Login seguro</span>
+              <span><Check size={14} /> Feito para celular</span>
+              <span><Check size={14} /> Sincronização automática</span>
             </div>
           </div>
         </section>
