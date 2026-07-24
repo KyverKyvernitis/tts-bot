@@ -1,7 +1,12 @@
-import { ArrowRight, ChevronDown, LogOut, Plus, RefreshCw, Search, ServerCrash, X } from "lucide-react";
+import { ArrowRight, ChevronDown, Plus, Search, ServerCrash, X } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { ChangeEvent } from "react";
-import type { DashboardServerCard } from "../types/dashboard";
+import type { ChangeEvent, ReactNode } from "react";
+import type {
+  DashboardServerCard,
+  DashboardSupportServerPayload,
+  DashboardUserPayload,
+} from "../types/dashboard";
+import { AccountMenu } from "./AccountMenu";
 import { Brand } from "./BrowserLanding";
 import { SmartAvatar } from "./SmartAvatar";
 
@@ -9,6 +14,9 @@ interface ServerPickerProps {
   manageable: DashboardServerCard[];
   needsInvite: DashboardServerCard[];
   loading: boolean;
+  user: DashboardUserPayload;
+  bot: DashboardUserPayload | null;
+  supportServer: DashboardSupportServerPayload | null;
   onSelect(server: DashboardServerCard): void;
   onInvite(server: DashboardServerCard): void;
   onRefresh(): void;
@@ -16,7 +24,19 @@ interface ServerPickerProps {
   onHome(): void;
 }
 
-export function ServerPicker({ manageable, needsInvite, loading, onSelect, onInvite, onRefresh, onLogout, onHome }: ServerPickerProps) {
+export function ServerPicker({
+  manageable,
+  needsInvite,
+  loading,
+  user,
+  bot,
+  supportServer,
+  onSelect,
+  onInvite,
+  onRefresh,
+  onLogout,
+  onHome,
+}: ServerPickerProps) {
   const [query, setQuery] = useState("");
   const [showInvites, setShowInvites] = useState(false);
   const normalizedQuery = query.trim().toLocaleLowerCase("pt-BR");
@@ -26,11 +46,16 @@ export function ServerPicker({ manageable, needsInvite, loading, onSelect, onInv
   return (
     <div className="osk-picker-shell">
       <header className="osk-picker-nav">
-        <button className="osk-brand-button" onClick={onHome}><Brand /></button>
-        <div>
-          <button className="osk-icon-text-button" onClick={onRefresh} disabled={loading} aria-label="Atualizar servidores"><RefreshCw size={16} className={loading ? "osk-spin" : undefined} /><span>Atualizar</span></button>
-          <button className="osk-icon-text-button" onClick={onLogout} aria-label="Sair"><LogOut size={16} /><span>Sair</span></button>
-        </div>
+        <button className="osk-brand-button" onClick={onHome}><Brand bot={bot} /></button>
+        <AccountMenu
+          user={user}
+          busy={loading}
+          supportInviteUrl={supportServer?.inviteUrl}
+          showServersAction={false}
+          onServers={() => undefined}
+          onRefresh={onRefresh}
+          onLogout={onLogout}
+        />
       </header>
 
       <main className="osk-picker-main">
@@ -73,7 +98,7 @@ function filterServers(servers: DashboardServerCard[], query: string) {
   return servers.filter((server) => server.name.toLocaleLowerCase("pt-BR").includes(query));
 }
 
-function ServerGroup({ title, count, children }: { title: string; count: number; children: React.ReactNode }) {
+function ServerGroup({ title, count, children }: { title: string; count: number; children: ReactNode }) {
   return <section className="osk-picker-group"><header><h2>{title}</h2><span>{count}</span></header><div className="osk-picker-grid">{children}</div></section>;
 }
 

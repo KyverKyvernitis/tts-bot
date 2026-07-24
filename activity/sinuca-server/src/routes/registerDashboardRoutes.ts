@@ -4,6 +4,7 @@ import type { DashboardOAuthTokenResult, DashboardSessionService } from "../serv
 import {
   createDashboardInviteUrl,
   getDiscordBotIdentity,
+  getDiscordSupportServerIdentity,
   getDiscordUserIdentity,
   listDashboardServers,
   listGuildChannelsAndRoles,
@@ -233,8 +234,13 @@ export function registerDashboardRoutes({
   });
 
   app.get("/api/public/identity", async (_req, res) => {
-    const bot = await getDiscordBotIdentity().catch(() => null);
-    sendNoStoreJson(res, 200, { ok: true, bot });
+    const [bot, supportServer] = await Promise.all([
+      getDiscordBotIdentity().catch(() => null),
+      getDiscordSupportServerIdentity().catch(() => null),
+    ]);
+    res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=900");
+    res.type("application/json");
+    res.status(200).json({ ok: true, bot, supportServer });
   });
 
   app.get("/api/auth/session", async (req, res) => {

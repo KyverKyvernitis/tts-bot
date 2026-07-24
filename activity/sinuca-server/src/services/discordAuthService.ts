@@ -6,6 +6,13 @@ export interface DiscordUserIdentity {
   avatarUrl?: string | null;
 }
 
+export interface DiscordSupportServerIdentity {
+  id: string;
+  name: string;
+  icon: string | null;
+  inviteUrl: string;
+}
+
 export interface DashboardAccessResult {
   ok: boolean;
   status: number;
@@ -55,6 +62,27 @@ function parseAllowedOwners(): Set<string> {
 async function fetchDiscordJson<T>(url: string, authorization: string): Promise<{ ok: boolean; status: number; data: T | null }> {
   try {
     const response = await fetch(url, { headers: { Authorization: authorization } });
+    const text = await response.text();
+    let data: T | null = null;
+    try {
+      data = text ? JSON.parse(text) as T : null;
+    } catch {
+      data = null;
+    }
+    return { ok: response.ok, status: response.status, data };
+  } catch {
+    return { ok: false, status: 0, data: null };
+  }
+}
+
+async function fetchDiscordPublicJson<T>(url: string): Promise<{ ok: boolean; status: number; data: T | null }> {
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "OsakaDashboard/2.0",
+      },
+    });
     const text = await response.text();
     let data: T | null = null;
     try {
@@ -133,6 +161,49 @@ export async function getDiscordBotIdentity(): Promise<DiscordUserIdentity | nul
     : null;
 
   botIdentityCache = { expiresAt: now + 10 * 60 * 1000, value };
+  return value;
+}
+
+function supportInviteUrl(): string {
+  return String(process.env.DASHBOARD_SUPPORT_INVITE_URL || "https://discord.gg/RckuzJbvVk").trim() || "https://discord.gg/RckuzJbvVk";
+}
+
+function supportInviteCode(): string {
+  const configured = String(process.env.DASHBOARD_SUPPORT_INVITE_CODE || "").trim();
+  if (configured) return configured;
+  try {
+    const url = new URL(/^https?:\/\//i.test(supportInviteUrl()) ? supportInviteUrl() : `https://${supportInviteUrl()}`);
+    const parts = url.pathname.split("/").filter(Boolean);
+    return parts[parts.length - 1] || "RckuzJbvVk";
+  } catch {
+    return "RckuzJbvVk";
+  }
+}
+
+let supportServerCache: { expiresAt: number; value: DiscordSupportServerIdentity | null } | null = null;
+
+export async function getDiscordSupportServerIdentity(): Promise<DiscordSupportServerIdentity | null> {
+  const now = Date.now();
+  if (supportServerCache && supportServerCache.expiresAt > now) return supportServerCache.value;
+
+  const code = supportInviteCode();
+  const response = await fetchDiscordPublicJson<{ guild?: Record<string, unknown> }>(
+    `https://discord.com/api/v10/invites/${encodeURIComponent(code)}?with_counts=true&with_expiration=true`,
+  );
+  const guild = response.ok && response.data?.guild && typeof response.data.guild === "object"
+    ? response.data.guild
+    : null;
+  const id = guild ? String(guild.id ?? "") : "";
+  const value = guild && /^\d{15,25}$/.test(id)
+    ? {
+        id,
+        name: String(guild.name ?? "Servidor de suporte"),
+        icon: guildIconUrl(id, guild.icon),
+        inviteUrl: supportInviteUrl(),
+      }
+    : null;
+
+  supportServerCache = { expiresAt: now + 30 * 60 * 1000, value };
   return value;
 }
 

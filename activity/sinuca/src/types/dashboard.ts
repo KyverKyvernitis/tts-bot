@@ -115,6 +115,14 @@ export interface DashboardUserPayload {
   avatarUrl?: string | null;
 }
 
+
+export interface DashboardSupportServerPayload {
+  id: string;
+  name: string;
+  icon: string | null;
+  inviteUrl: string;
+}
+
 export interface DashboardSessionPayload {
   ok: boolean;
   authenticated?: boolean;

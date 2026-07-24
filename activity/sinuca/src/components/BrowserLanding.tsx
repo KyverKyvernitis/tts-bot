@@ -1,7 +1,6 @@
 import {
   ArrowRight,
   Cake,
-  ChevronRight,
   ClipboardList,
   DoorOpen,
   LogIn,
@@ -11,15 +10,20 @@ import {
   Ticket,
   Volume2,
 } from "lucide-react";
-import type { DashboardUserPayload } from "../types/dashboard";
+import type { DashboardSupportServerPayload, DashboardUserPayload } from "../types/dashboard";
+import { AccountMenu } from "./AccountMenu";
 import { SmartAvatar } from "./SmartAvatar";
 
 interface BrowserLandingProps {
   loggedIn: boolean;
   user: DashboardUserPayload | null;
   bot: DashboardUserPayload | null;
+  supportServer: DashboardSupportServerPayload | null;
+  refreshing?: boolean;
   onLogin(): void;
   onDashboard(): void;
+  onRefresh(): void;
+  onLogout(): void;
   onNavigate(path: string): void;
 }
 
@@ -61,9 +65,20 @@ export function Brand({
   );
 }
 
-export function BrowserLanding({ loggedIn, user, bot, onLogin, onDashboard, onNavigate }: BrowserLandingProps) {
+export function BrowserLanding({
+  loggedIn,
+  user,
+  bot,
+  supportServer,
+  refreshing = false,
+  onLogin,
+  onDashboard,
+  onRefresh,
+  onLogout,
+  onNavigate,
+}: BrowserLandingProps) {
   const primaryAction = loggedIn ? onDashboard : onLogin;
-  const userName = displayName(user, "Conta");
+  const supportInviteUrl = supportServer?.inviteUrl || "https://discord.gg/RckuzJbvVk";
 
   return (
     <div className="osk-minimal-landing">
@@ -71,28 +86,22 @@ export function BrowserLanding({ loggedIn, user, bot, onLogin, onDashboard, onNa
         <button className="osk-brand-button" onClick={() => onNavigate("/")} aria-label="Página inicial">
           <Brand bot={bot} />
         </button>
-        <button
-          className="osk-minimal-account"
-          data-logged-in={loggedIn || undefined}
-          onClick={primaryAction}
-          aria-label={loggedIn ? `Abrir painel como ${userName}` : "Entrar com Discord"}
-        >
-          {loggedIn && user ? (
-            <SmartAvatar
-              className="osk-minimal-account-avatar"
-              src={user.avatarUrl}
-              name={userName}
-              type="user"
-              alt={`Avatar de ${userName}`}
-              size={32}
-            />
-          ) : <span className="osk-minimal-account-login" aria-hidden="true"><LogIn size={16} /></span>}
-          <span className="osk-minimal-account-copy">
-            <small>{loggedIn ? "Conectado" : "Discord"}</small>
-            <strong>{loggedIn ? userName : "Entrar"}</strong>
-          </span>
-          <ChevronRight size={15} aria-hidden="true" />
-        </button>
+        {loggedIn && user ? (
+          <AccountMenu
+            user={user}
+            variant="landing"
+            busy={refreshing}
+            supportInviteUrl={supportInviteUrl}
+            serversLabel="Meus servidores"
+            onServers={onDashboard}
+            onRefresh={onRefresh}
+            onLogout={onLogout}
+          />
+        ) : (
+          <button className="osk-minimal-login" onClick={onLogin} aria-label="Entrar com Discord">
+            <LogIn size={16} /><span>Entrar</span>
+          </button>
+        )}
       </header>
 
       <main className="osk-minimal-main">
@@ -119,16 +128,28 @@ export function BrowserLanding({ loggedIn, user, bot, onLogin, onDashboard, onNa
 
         <a
           className="osk-support-card"
-          href="https://discord.gg/RckuzJbvVk"
+          href={supportInviteUrl}
           target="_blank"
           rel="noreferrer noopener"
+          aria-label="Entrar no servidor de suporte da Osaka"
         >
-          <span className="osk-support-card-icon" aria-hidden="true"><MessagesSquare size={20} /></span>
+          {supportServer?.icon ? (
+            <SmartAvatar
+              className="osk-support-card-avatar"
+              src={supportServer.icon}
+              name={supportServer.name}
+              type="server"
+              alt={`Ícone do ${supportServer.name}`}
+              size={42}
+            />
+          ) : (
+            <span className="osk-support-card-icon" aria-hidden="true"><MessagesSquare size={20} /></span>
+          )}
           <span className="osk-support-card-copy">
             <strong>Servidor de suporte</strong>
             <small>Dúvidas, problemas e novidades da Osaka.</small>
           </span>
-          <span className="osk-support-card-action">Entrar <ArrowRight size={15} /></span>
+          <span className="osk-support-card-action"><span>Entrar</span> <ArrowRight size={15} /></span>
         </a>
       </main>
     </div>

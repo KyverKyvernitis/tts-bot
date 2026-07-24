@@ -28,6 +28,7 @@ import type {
   DashboardSectionDefinition,
   DashboardSectionSummary,
   DashboardServerCard,
+  DashboardSupportServerPayload,
   DashboardUserPayload,
 } from "./types/dashboard";
 
@@ -108,6 +109,7 @@ export default function App() {
   const [sessionState, setSessionState] = useState<SessionState>("loading");
   const [user, setUser] = useState<DashboardUserPayload | null>(null);
   const [botIdentity, setBotIdentity] = useState<DashboardUserPayload | null>(null);
+  const [supportServer, setSupportServer] = useState<DashboardSupportServerPayload | null>(null);
   const [manageable, setManageable] = useState<DashboardServerCard[]>([]);
   const [needsInvite, setNeedsInvite] = useState<DashboardServerCard[]>([]);
   const [serversLoaded, setServersLoaded] = useState(false);
@@ -170,7 +172,10 @@ export default function App() {
       window.history.replaceState({}, "", window.location.pathname);
     }
     void fetchDashboardIdentity()
-      .then((payload) => setBotIdentity(payload.bot || null))
+      .then((payload) => {
+        setBotIdentity(payload.bot || null);
+        setSupportServer(payload.supportServer || null);
+      })
       .catch(() => undefined);
     void (async () => {
       try {
@@ -382,15 +387,17 @@ export default function App() {
 
   return <>
     {notice && <Notice type={notice.type} text={notice.text} onClose={() => setNotice(null)} />}
-    {route.page === "landing" && <BrowserLanding loggedIn={sessionState === "authenticated"} user={user} bot={botIdentity} onLogin={handleLogin} onDashboard={() => navigate({ page: "servers" })} onNavigate={(path) => navigate(parseRoute(path))} />}
+    {route.page === "landing" && <BrowserLanding loggedIn={sessionState === "authenticated"} user={user} bot={botIdentity} supportServer={supportServer} refreshing={loadingServers} onLogin={handleLogin} onDashboard={() => navigate({ page: "servers" })} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onNavigate={(path) => navigate(parseRoute(path))} />}
     {route.page === "privacy" && <LegalPage kind="privacy" onBack={() => navigate({ page: "landing" })} />}
     {route.page === "terms" && <LegalPage kind="terms" onBack={() => navigate({ page: "landing" })} />}
-    {route.page === "servers" && <ServerPicker manageable={manageable} needsInvite={needsInvite} loading={loadingServers} onSelect={(server) => { setSelectedServer(server); navigate({ page: "dashboard", guildId: server.id, sectionId: null }); }} onInvite={(server) => { setSelectedServer(server); navigate({ page: "invite", guildId: server.id }); }} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onHome={() => navigate({ page: "landing" })} />}
+    {route.page === "servers" && user && <ServerPicker manageable={manageable} needsInvite={needsInvite} loading={loadingServers} user={user} bot={botIdentity} supportServer={supportServer} onSelect={(server) => { setSelectedServer(server); navigate({ page: "dashboard", guildId: server.id, sectionId: null }); }} onInvite={(server) => { setSelectedServer(server); navigate({ page: "invite", guildId: server.id }); }} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onHome={() => navigate({ page: "landing" })} />}
     {route.page === "invite" && <InviteScreen server={selectedServer || needsInvite.find((item) => item.id === route.guildId) || null} busy={inviteBusy} onBack={() => navigate({ page: "servers" })} onOpenInvite={() => void openInvite(route.guildId)} />}
     {route.page === "dashboard" && <DashboardShell
       route={route}
       selectedServer={selectedServer}
+      user={user!}
       botIdentity={botIdentity}
+      supportServer={supportServer}
       modules={visualModules}
       selectedSectionId={selectedSectionId}
       selectedSection={selectedSection}
@@ -422,7 +429,9 @@ export default function App() {
 interface DashboardShellProps {
   route: DashboardRoute;
   selectedServer: DashboardServerCard | null;
+  user: DashboardUserPayload;
   botIdentity: DashboardUserPayload | null;
+  supportServer: DashboardSupportServerPayload | null;
   modules: DashboardVisualModule[];
   selectedSectionId: string | null;
   selectedSection: DashboardSectionDefinition | null;
@@ -452,7 +461,9 @@ interface DashboardShellProps {
 function DashboardShell({
   route,
   selectedServer,
+  user,
   botIdentity,
+  supportServer,
   modules,
   selectedSectionId,
   selectedSection,
@@ -485,59 +496,84 @@ function DashboardShell({
   useEffect(() => {
     if (mobileMenuOpen || messageEditorActive) return;
 
-    let tracking = false;
-    let horizontalIntent = false;
-    let startX = 0;
-    let startY = 0;
-    let latestX = 0;
-    let latestY = 0;
+    let gesture: {
+      pointerId: number;
+      startX: number;
+      startY: number;
+      latestX: number;
+      latestAt: number;
+      velocityX: number;
+      horizontal: boolean;
+    } | null = null;
 
     const shouldIgnoreTarget = (target: EventTarget | null) => {
       if (!(target instanceof Element)) return false;
       return Boolean(target.closest("input, textarea, select, [contenteditable='true'], .osk-message-editor, [data-no-drawer-gesture]"));
     };
 
-    const onTouchStart = (event: TouchEvent) => {
-      if (window.innerWidth > 980 || event.touches.length !== 1 || shouldIgnoreTarget(event.target)) return;
-      const touch = event.touches[0];
-      // A faixa esquerda é reservada ao drawer no painel móvel.
-      if (touch.clientX > 104) return;
-      tracking = true;
-      horizontalIntent = false;
-      startX = latestX = touch.clientX;
-      startY = latestY = touch.clientY;
+    const onPointerDown = (event: PointerEvent) => {
+      if (window.innerWidth > 980 || !event.isPrimary || event.pointerType === "mouse" || shouldIgnoreTarget(event.target)) return;
+      // A borda extrema continua reservada ao gesto nativo de voltar do navegador.
+      if (event.clientX < 28 || event.clientX > 112) return;
+      gesture = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        latestX: event.clientX,
+        latestAt: event.timeStamp,
+        velocityX: 0,
+        horizontal: false,
+      };
     };
 
-    const onTouchMove = (event: TouchEvent) => {
-      if (!tracking || event.touches.length !== 1) return;
-      const touch = event.touches[0];
-      latestX = touch.clientX;
-      latestY = touch.clientY;
-      const deltaX = latestX - startX;
-      const deltaY = latestY - startY;
-      if (!horizontalIntent && deltaX > 12 && Math.abs(deltaX) > Math.abs(deltaY) * 1.25) horizontalIntent = true;
-      if (horizontalIntent && event.cancelable) event.preventDefault();
+    const onPointerMove = (event: PointerEvent) => {
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      const deltaX = event.clientX - gesture.startX;
+      const deltaY = event.clientY - gesture.startY;
+
+      if (!gesture.horizontal) {
+        if (Math.abs(deltaY) > 15 && Math.abs(deltaY) > Math.abs(deltaX) * 1.15) {
+          gesture = null;
+          return;
+        }
+        if (deltaX >= 10 && deltaX > Math.abs(deltaY) * 1.2) gesture.horizontal = true;
+      }
+      if (!gesture.horizontal) return;
+
+      if (event.cancelable) event.preventDefault();
+      const elapsed = Math.max(1, event.timeStamp - gesture.latestAt);
+      gesture.velocityX = (event.clientX - gesture.latestX) / elapsed;
+      gesture.latestX = event.clientX;
+      gesture.latestAt = event.timeStamp;
     };
 
-    const finishGesture = () => {
-      if (!tracking) return;
-      const deltaX = latestX - startX;
-      const deltaY = latestY - startY;
-      tracking = false;
-      if (horizontalIntent && deltaX >= 62 && Math.abs(deltaY) <= Math.max(44, deltaX * .58)) onOpenMenu();
+    const finishGesture = (event: PointerEvent) => {
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      const deltaX = event.clientX - gesture.startX;
+      const deltaY = event.clientY - gesture.startY;
+      const shouldOpen = gesture.horizontal
+        && (deltaX >= 64 || gesture.velocityX >= .5)
+        && Math.abs(deltaY) <= Math.max(48, Math.abs(deltaX) * .62);
+      gesture = null;
+      if (shouldOpen) {
+        if (event.cancelable) event.preventDefault();
+        onOpenMenu();
+      }
     };
 
-    const cancelGesture = () => { tracking = false; horizontalIntent = false; };
+    const cancelGesture = (event: PointerEvent) => {
+      if (gesture?.pointerId === event.pointerId) gesture = null;
+    };
 
-    document.addEventListener("touchstart", onTouchStart, { capture: true, passive: true });
-    document.addEventListener("touchmove", onTouchMove, { capture: true, passive: false });
-    document.addEventListener("touchend", finishGesture, { capture: true, passive: true });
-    document.addEventListener("touchcancel", cancelGesture, { capture: true, passive: true });
+    document.addEventListener("pointerdown", onPointerDown, { capture: true, passive: true });
+    document.addEventListener("pointermove", onPointerMove, { capture: true, passive: false });
+    document.addEventListener("pointerup", finishGesture, { capture: true, passive: false });
+    document.addEventListener("pointercancel", cancelGesture, { capture: true, passive: true });
     return () => {
-      document.removeEventListener("touchstart", onTouchStart, true);
-      document.removeEventListener("touchmove", onTouchMove, true);
-      document.removeEventListener("touchend", finishGesture, true);
-      document.removeEventListener("touchcancel", cancelGesture, true);
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("pointermove", onPointerMove, true);
+      document.removeEventListener("pointerup", finishGesture, true);
+      document.removeEventListener("pointercancel", cancelGesture, true);
     };
   }, [messageEditorActive, mobileMenuOpen, onOpenMenu]);
 
@@ -555,7 +591,7 @@ function DashboardShell({
       onLogout={onLogout}
     />
     <div className="osk-dashboard-main">
-      <Topbar guildName={guildName} guildIcon={guildIcon} busy={loading} onRefresh={onRefresh} onChangeServer={onChangeServer} onOpenMenu={onOpenMenu} />
+      <Topbar guildName={guildName} guildIcon={guildIcon} user={user} supportServer={supportServer} busy={loading} onRefresh={onRefresh} onChangeServer={onChangeServer} onLogout={onLogout} onOpenMenu={onOpenMenu} />
       <main className="osk-dashboard-content">
         <div key={selectedSection?.id || "home"} className="osk-page-motion">
           {loading && !sectionsLoaded ? <DashboardLoading /> : selectedSection ? (
