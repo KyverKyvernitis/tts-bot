@@ -1,17 +1,22 @@
+import { Pencil } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type {
+  DashboardColorSlot,
   DashboardFieldDefinition,
   DashboardOptionsPayload,
 } from "../../types/dashboard";
 import { SmartAvatar } from "../SmartAvatar";
 import { DiscordRichText } from "./DiscordRichText";
+import { MessageInlineTextEditor } from "./MessageInlineTextEditor";
 import {
   isValidPreviewUrl,
   readableFieldLabel,
 } from "./messageEditorUtils";
 
 interface MessagePreviewProps {
+  sectionId?: string;
+  editorId?: string;
   groupLabel: string;
   fields: DashboardFieldDefinition[];
   draft: Record<string, unknown>;
@@ -20,7 +25,15 @@ interface MessagePreviewProps {
   botAvatarUrl?: string | null;
   interactive?: boolean;
   selectedFieldId?: string | null;
+  editingFieldId?: string | null;
+  selectedColorSlot?: number | null;
+  textSelection?: { fieldId: string; start: number; end: number } | null;
   onSelectField?(field: DashboardFieldDefinition): void;
+  onEditField?(field: DashboardFieldDefinition): void;
+  onFinishEdit?(): void;
+  onChange?(field: DashboardFieldDefinition, raw: unknown): void;
+  onTextSelection?(field: DashboardFieldDefinition, start: number, end: number): void;
+  onSelectColorSlot?(slotNumber: number): void;
 }
 
 function findField(
@@ -62,26 +75,31 @@ function EditableRegion({
   interactive,
   selectedFieldId,
   onSelectField,
+  onEditField,
   className,
   children,
   placeholder,
+  textEditable = false,
 }: {
   field?: DashboardFieldDefinition;
   interactive?: boolean;
   selectedFieldId?: string | null;
   onSelectField?(field: DashboardFieldDefinition): void;
+  onEditField?(field: DashboardFieldDefinition): void;
   className?: string;
   children?: ReactNode;
   placeholder?: string;
+  textEditable?: boolean;
 }) {
   if (!children && !interactive) return null;
   if (!interactive || !field || !onSelectField) {
     return <div className={className}>{children}</div>;
   }
-  const editableField = field;
-  const selectField = onSelectField;
-  function select() {
-    selectField(editableField);
+
+  const selected = selectedFieldId === field.id;
+  function selectOrEdit() {
+    if (selected && textEditable && onEditField) onEditField(field!);
+    else onSelectField!(field!);
   }
 
   return (
@@ -89,20 +107,30 @@ function EditableRegion({
       role="button"
       tabIndex={0}
       className={className ? `osk-message-editable ${className}` : "osk-message-editable"}
-      data-selected={selectedFieldId === field.id}
+      data-selected={selected || undefined}
+      data-text-editable={textEditable || undefined}
       onClick={(event) => {
+        event.preventDefault();
         event.stopPropagation();
-        select();
+        selectOrEdit();
+      }}
+      onDoubleClick={(event) => {
+        if (!textEditable || !onEditField) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onSelectField(field);
+        onEditField(field);
       }}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
-          select();
+          selectOrEdit();
         }
       }}
-      title={`Editar ${field.label}`}
+      title={selected && textEditable ? `Editar ${field.label}` : `Selecionar ${field.label}`}
     >
-      {children ?? <span className="osk-message-preview__ghost">{placeholder ?? readableFieldLabel(field)}</span>}
+      {children ?? <span className="osk-message-preview__ghost">+ {placeholder ?? readableFieldLabel(field)}</span>}
+      {selected && textEditable && <span className="osk-message-editable__pencil" aria-hidden="true"><Pencil size={11} /></span>}
     </div>
   );
 }
@@ -113,7 +141,13 @@ function FieldText({
   guildOptions,
   interactive,
   selectedFieldId,
+  editingFieldId,
+  textSelection,
   onSelectField,
+  onEditField,
+  onFinishEdit,
+  onChange,
+  onTextSelection,
   className,
   placeholder,
 }: {
@@ -122,11 +156,34 @@ function FieldText({
   guildOptions?: DashboardOptionsPayload | null;
   interactive?: boolean;
   selectedFieldId?: string | null;
+  editingFieldId?: string | null;
+  textSelection?: { fieldId: string; start: number; end: number } | null;
   onSelectField?(field: DashboardFieldDefinition): void;
+  onEditField?(field: DashboardFieldDefinition): void;
+  onFinishEdit?(): void;
+  onChange?(field: DashboardFieldDefinition, raw: unknown): void;
+  onTextSelection?(field: DashboardFieldDefinition, start: number, end: number): void;
   className?: string;
   placeholder?: string;
 }) {
   const value = fieldString(field, draft);
+  const editing = Boolean(field && editingFieldId === field.id && onChange && onTextSelection && onFinishEdit);
+
+  if (editing && field) {
+    return (
+      <div className={className ? `osk-message-editable osk-message-editable--editing ${className}` : "osk-message-editable osk-message-editable--editing"} data-selected="true">
+        <MessageInlineTextEditor
+          field={field}
+          value={value}
+          selection={textSelection?.fieldId === field.id ? textSelection : null}
+          onChange={(next) => onChange!(field, next)}
+          onSelection={(start, end) => onTextSelection!(field, start, end)}
+          onFinish={onFinishEdit!}
+        />
+      </div>
+    );
+  }
+
   const content = value.trim()
     ? <DiscordRichText text={value} guildOptions={guildOptions} />
     : undefined;
@@ -136,8 +193,10 @@ function FieldText({
       interactive={interactive}
       selectedFieldId={selectedFieldId}
       onSelectField={onSelectField}
+      onEditField={onEditField}
       className={className}
       placeholder={placeholder}
+      textEditable={Boolean(field && (field.type === "text" || field.type === "textarea"))}
     >
       {content}
     </EditableRegion>
@@ -156,6 +215,7 @@ function MessageImage({
   placeholder: string;
 }) {
   const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [src]);
   if (failed || !isValidPreviewUrl(src)) {
     return <div className={`${className} osk-message-preview__image-placeholder`}>{placeholder}</div>;
   }
@@ -193,7 +253,8 @@ function ImageSlot({
   fallbackLabel: string;
 }) {
   const url = fieldString(urlField, draft);
-  const targetField = urlField ?? modeField;
+  const modeValue = fieldString(modeField, draft);
+  const targetField = modeValue === "custom" && urlField ? urlField : modeField ?? urlField;
   const label = modeLabel(modeField, draft) ?? fallbackLabel;
   const shouldRender = isValidPreviewUrl(url) || interactive || Boolean(modeLabel(modeField, draft));
   if (!shouldRender) return null;
@@ -215,25 +276,72 @@ function ImageSlot({
   );
 }
 
-function EmbedPreview({
-  fields,
+function IconSlot({
+  urlField,
+  modeField,
   draft,
-  guildOptions,
   interactive,
   selectedFieldId,
   onSelectField,
-}: Omit<MessagePreviewProps, "groupLabel" | "botName" | "botAvatarUrl">) {
+  alt,
+  fallbackLabel,
+}: {
+  urlField?: DashboardFieldDefinition;
+  modeField?: DashboardFieldDefinition;
+  draft: Record<string, unknown>;
+  interactive?: boolean;
+  selectedFieldId?: string | null;
+  onSelectField?(field: DashboardFieldDefinition): void;
+  alt: string;
+  fallbackLabel: string;
+}) {
+  const url = fieldString(urlField, draft);
+  const modeValue = fieldString(modeField, draft);
+  const targetField = modeValue === "custom" && urlField ? urlField : modeField ?? urlField;
+  const label = modeLabel(modeField, draft) ?? fallbackLabel;
+  const shouldRender = isValidPreviewUrl(url) || Boolean(modeLabel(modeField, draft));
+  if (!shouldRender) return null;
+  return (
+    <EditableRegion
+      field={targetField}
+      interactive={interactive}
+      selectedFieldId={selectedFieldId}
+      onSelectField={onSelectField}
+      className="osk-message-preview__icon-wrap"
+      placeholder={label}
+    >
+      {isValidPreviewUrl(url) ? (
+        <MessageImage src={url} alt={alt} className="osk-message-preview__icon" placeholder={label} />
+      ) : (
+        <span className="osk-message-preview__icon-placeholder" title={label}>{label.slice(0, 1).toUpperCase()}</span>
+      )}
+    </EditableRegion>
+  );
+}
+
+function EmbedPreview(props: Omit<MessagePreviewProps, "groupLabel" | "botName" | "botAvatarUrl" | "sectionId" | "editorId" | "selectedColorSlot" | "onSelectColorSlot">) {
+  const {
+    fields, draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection,
+    onSelectField, onEditField, onFinishEdit, onChange, onTextSelection,
+  } = props;
   const contentField = findField(fields, [".embed.content"]);
   const authorField = findField(fields, [".embed.author_name"]);
+  const authorIconUrlField = findField(fields, [".embed.author_icon_url"]);
+  const authorIconModeField = findField(fields, [".embed.author_icon_mode"]);
   const titleField = findField(fields, [".embed.title"]);
   const descriptionField = findField(fields, [".embed.description"]);
   const footerField = findField(fields, [".embed.footer_text"]);
+  const footerIconUrlField = findField(fields, [".embed.footer_icon_url"]);
+  const footerIconModeField = findField(fields, [".embed.footer_icon_mode"]);
   const imageUrlField = findField(fields, [".embed.image_url"]);
   const imageModeField = findField(fields, [".embed.image_mode"]);
   const thumbnailUrlField = findField(fields, [".embed.thumbnail_url"]);
   const thumbnailModeField = findField(fields, [".embed.thumbnail_mode"]);
+  const colorField = findField(fields, [".embed.color"]);
+  const colorModeField = findField(fields, [".embed.color_mode"]);
   const accent = previewColor(fields, draft);
   const style = accent ? ({ "--osk-message-accent": accent } as CSSProperties) : undefined;
+  const colorTargetField = fieldString(colorModeField, draft) === "fixed" && colorField ? colorField : colorModeField ?? colorField;
 
   const hasEmbedContent = [authorField, titleField, descriptionField, footerField]
     .map((field) => fieldString(field, draft))
@@ -241,102 +349,56 @@ function EmbedPreview({
     || isValidPreviewUrl(fieldString(imageUrlField, draft))
     || isValidPreviewUrl(fieldString(thumbnailUrlField, draft))
     || Boolean(modeLabel(imageModeField, draft))
-    || Boolean(modeLabel(thumbnailModeField, draft));
+    || Boolean(modeLabel(thumbnailModeField, draft))
+    || Boolean(modeLabel(authorIconModeField, draft))
+    || Boolean(modeLabel(footerIconModeField, draft));
+
+  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection };
 
   return (
     <div className="osk-message-preview__message">
-      <FieldText
-        field={contentField}
-        draft={draft}
-        guildOptions={guildOptions}
-        interactive={interactive}
-        selectedFieldId={selectedFieldId}
-        onSelectField={onSelectField}
-        className="osk-message-preview__content"
-        placeholder="Texto acima do embed"
-      />
+      <FieldText {...textProps} field={contentField} className="osk-message-preview__content" placeholder="Conteúdo da mensagem" />
       {hasEmbedContent || interactive ? (
         <div className="osk-message-preview__embed" style={style}>
+          {interactive && colorTargetField && (
+            <button
+              type="button"
+              className="osk-message-preview__accent-control"
+              data-selected={selectedFieldId === colorTargetField.id || undefined}
+              aria-label="Editar cor do embed"
+              onClick={(event) => {
+                event.stopPropagation();
+                onSelectField?.(colorTargetField);
+              }}
+            />
+          )}
           <div className="osk-message-preview__embed-main">
-            <FieldText
-              field={authorField}
-              draft={draft}
-              guildOptions={guildOptions}
-              interactive={interactive}
-              selectedFieldId={selectedFieldId}
-              onSelectField={onSelectField}
-              className="osk-message-preview__author"
-              placeholder="Autor"
-            />
-            <FieldText
-              field={titleField}
-              draft={draft}
-              guildOptions={guildOptions}
-              interactive={interactive}
-              selectedFieldId={selectedFieldId}
-              onSelectField={onSelectField}
-              className="osk-message-preview__title"
-              placeholder="Título"
-            />
-            <FieldText
-              field={descriptionField}
-              draft={draft}
-              guildOptions={guildOptions}
-              interactive={interactive}
-              selectedFieldId={selectedFieldId}
-              onSelectField={onSelectField}
-              className="osk-message-preview__description"
-              placeholder="Descrição"
-            />
-            <ImageSlot
-              urlField={imageUrlField}
-              modeField={imageModeField}
-              draft={draft}
-              interactive={interactive}
-              selectedFieldId={selectedFieldId}
-              onSelectField={onSelectField}
-              className="osk-message-preview__image"
-              alt="Imagem da mensagem"
-              fallbackLabel="Imagem principal"
-            />
-            <FieldText
-              field={footerField}
-              draft={draft}
-              guildOptions={guildOptions}
-              interactive={interactive}
-              selectedFieldId={selectedFieldId}
-              onSelectField={onSelectField}
-              className="osk-message-preview__footer"
-              placeholder="Rodapé"
-            />
+            <div className="osk-message-preview__author-row">
+              <IconSlot urlField={authorIconUrlField} modeField={authorIconModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} alt="Ícone do autor" fallbackLabel="Ícone do autor" />
+              <FieldText {...textProps} field={authorField} className="osk-message-preview__author" placeholder="Autor" />
+            </div>
+            <FieldText {...textProps} field={titleField} className="osk-message-preview__title" placeholder="Título" />
+            <FieldText {...textProps} field={descriptionField} className="osk-message-preview__description" placeholder="Descrição" />
+            <ImageSlot urlField={imageUrlField} modeField={imageModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} className="osk-message-preview__image" alt="Imagem da mensagem" fallbackLabel="Imagem principal" />
+            <div className="osk-message-preview__footer-row">
+              <IconSlot urlField={footerIconUrlField} modeField={footerIconModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} alt="Ícone do rodapé" fallbackLabel="Ícone do rodapé" />
+              <FieldText {...textProps} field={footerField} className="osk-message-preview__footer" placeholder="Rodapé" />
+            </div>
           </div>
-          <ImageSlot
-            urlField={thumbnailUrlField}
-            modeField={thumbnailModeField}
-            draft={draft}
-            interactive={interactive}
-            selectedFieldId={selectedFieldId}
-            onSelectField={onSelectField}
-            className="osk-message-preview__thumbnail"
-            alt="Thumbnail da mensagem"
-            fallbackLabel="Thumbnail"
-          />
+          <ImageSlot urlField={thumbnailUrlField} modeField={thumbnailModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} className="osk-message-preview__thumbnail" alt="Thumbnail da mensagem" fallbackLabel="Thumbnail" />
         </div>
       ) : (
-        <div className="osk-message-preview__placeholder">Preencha os campos do embed para visualizar a mensagem.</div>
+        <div className="osk-message-preview__placeholder">Adicione conteúdo ao embed para começar.</div>
       )}
     </div>
   );
 }
 
-function GenericMessagePreview({
-  fields,
-  draft,
-  guildOptions,
-  interactive,
-  selectedFieldId,
-  onSelectField,
-}: Omit<MessagePreviewProps, "groupLabel" | "botName" | "botAvatarUrl">) {
+function GenericMessagePreview(props: Omit<MessagePreviewProps, "groupLabel" | "botName" | "botAvatarUrl" | "sectionId" | "editorId" | "selectedColorSlot" | "onSelectColorSlot">) {
+  const {
+    fields, draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection,
+    onSelectField, onEditField, onFinishEdit, onChange, onTextSelection,
+  } = props;
   const textFields = fields.filter((field) => {
     if (field.type !== "text" && field.type !== "textarea") return false;
     const hint = `${field.id} ${field.label}`.toLocaleLowerCase("pt-BR");
@@ -353,37 +415,33 @@ function GenericMessagePreview({
     .filter(({ value }) => value.trim() || interactive);
   const accent = previewColor(fields, draft);
   const style = accent ? ({ "--osk-message-accent": accent } as CSSProperties) : undefined;
-  const imageField = fields.find((field) => field.type === "url" && /(image|imagem|media|mídia|banner)/i.test(`${field.id} ${field.label}`));
+  const imageFields = fields.filter((field) => field.type === "url" && /(image|imagem|media|mídia|banner)/i.test(`${field.id} ${field.label}`));
+  const colorField = fields.find((field) => field.type === "color");
   const buttonLabelField = fields.find((field) => /(button_label|approve_label|reject_label)/i.test(field.id));
   const buttonEmojiField = fields.find((field) => /(button_emoji|approve_emoji|reject_emoji)/i.test(field.id));
   const buttonStyleField = fields.find((field) => /(button_style|approve_style|reject_style)/i.test(field.id));
   const placeholderField = fields.find((field) => /placeholder/i.test(field.id));
-  const imageUrl = fieldString(imageField, draft);
+  const imageEntries = imageFields.map((field) => ({ field, url: fieldString(field, draft) }));
   const buttonLabel = fieldString(buttonLabelField, draft);
   const buttonEmoji = fieldString(buttonEmojiField, draft);
   const buttonStyle = fieldString(buttonStyleField, draft) || "primary";
   const placeholder = fieldString(placeholderField, draft);
+  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection };
 
-  if (visible.length === 0 && !isValidPreviewUrl(imageUrl) && !buttonLabel && !placeholder) {
-    return <div className="osk-message-preview__placeholder">Preencha uma mensagem para visualizar o resultado.</div>;
+  if (visible.length === 0 && !imageEntries.some(({ url }) => isValidPreviewUrl(url)) && !buttonLabel && !placeholder && !interactive) {
+    return <div className="osk-message-preview__placeholder">Adicione conteúdo para começar.</div>;
   }
 
-  const shouldSeparate = visible.length > 1 && fields.some((field) => field.id.startsWith("birthday.templates."));
+  const shouldSeparate = visible.length > 1 && visible.every(({ field }) => field.id.includes(".templates.") || field.id.includes(".texts."));
   if (shouldSeparate) {
     return (
       <div className="osk-message-preview__templates">
         {visible.map(({ field, value }) => (
-          <EditableRegion
-            key={field.id}
-            field={field}
-            interactive={interactive}
-            selectedFieldId={selectedFieldId}
-            onSelectField={onSelectField}
-            className="osk-message-preview__template"
-          >
+          <div key={field.id} className="osk-message-preview__template-block">
             <span>{readableFieldLabel(field)}</span>
-            {value.trim() ? <p><DiscordRichText text={value} guildOptions={guildOptions} /></p> : <p className="osk-message-preview__ghost">Clique para editar</p>}
-          </EditableRegion>
+            <FieldText {...textProps} field={field} className="osk-message-preview__template" placeholder="Mensagem" />
+            {!value.trim() && !interactive && <p className="osk-message-preview__ghost">Sem conteúdo</p>}
+          </div>
         ))}
       </div>
     );
@@ -395,49 +453,112 @@ function GenericMessagePreview({
 
   return (
     <div className="osk-message-preview__message-card" style={style}>
-      {titleEntry && (
-        <EditableRegion
-          field={titleEntry.field}
-          interactive={interactive}
-          selectedFieldId={selectedFieldId}
-          onSelectField={onSelectField}
-          className="osk-message-preview__card-title"
-        >
-          <h3>{titleEntry.value ? <DiscordRichText text={titleEntry.value} guildOptions={guildOptions} /> : "Título"}</h3>
+      {interactive && colorField && <button type="button" className="osk-message-preview__accent-control" data-selected={selectedFieldId === colorField.id || undefined} aria-label="Editar cor da mensagem" onClick={(event) => { event.stopPropagation(); onSelectField?.(colorField); }} />}
+      {titleEntry && <FieldText {...textProps} field={titleEntry.field} className="osk-message-preview__card-title" placeholder="Título" />}
+      {bodyEntries.map(({ field }) => (
+        <div key={field.id} className="osk-message-preview__body-wrap">
+          {bodyEntries.length > 1 && <small>{readableFieldLabel(field)}</small>}
+          <FieldText {...textProps} field={field} className="osk-message-preview__body" placeholder="Mensagem" />
+        </div>
+      ))}
+      {imageEntries.length > 0 && <div className="osk-message-preview__generic-media">
+        {imageEntries.map(({ field, url }, index) => {
+          const side = /(side|lateral|thumbnail)/i.test(`${field.id} ${field.label}`);
+          if (!isValidPreviewUrl(url) && !interactive) return null;
+          return <EditableRegion key={field.id} field={field} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} className={`osk-message-preview__generic-image-wrap${side ? " osk-message-preview__generic-image-wrap--side" : ""}`} placeholder={field.label || `Imagem ${index + 1}`}>
+            {isValidPreviewUrl(url) ? <MessageImage src={url} alt={field.label || "Imagem da mensagem"} className="osk-message-preview__generic-image" placeholder="Imagem indisponível" /> : <span className="osk-message-preview__image-placeholder">{field.label || "Imagem"}</span>}
+          </EditableRegion>;
+        })}
+      </div>}
+      {(placeholder || (interactive && placeholderField)) && (
+        <EditableRegion field={placeholderField} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} className="osk-message-preview__component-wrap" placeholder="Menu de seleção">
+          <div className="osk-message-preview__select-sim"><span>{placeholder || "Placeholder do seletor"}</span><span>⌄</span></div>
         </EditableRegion>
       )}
-      {bodyEntries.map(({ field, value }) => (
-        <EditableRegion
-          key={field.id}
-          field={field}
-          interactive={interactive}
-          selectedFieldId={selectedFieldId}
-          onSelectField={onSelectField}
-          className="osk-message-preview__body"
-        >
-          {bodyEntries.length > 1 && <small>{readableFieldLabel(field)}</small>}
-          <p>{value ? <DiscordRichText text={value} guildOptions={guildOptions} /> : <span className="osk-message-preview__ghost">Clique para editar</span>}</p>
+      {(buttonLabel || (interactive && buttonLabelField)) && (
+        <EditableRegion field={buttonLabelField ?? buttonStyleField} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} className="osk-message-preview__component-wrap" placeholder="Botão">
+          <div className="osk-message-preview__button-row"><span data-style={buttonStyle}>{buttonEmoji && <><DiscordRichText text={buttonEmoji} guildOptions={guildOptions} compact /> </>}<DiscordRichText text={buttonLabel || "Texto do botão"} guildOptions={guildOptions} compact /></span></div>
         </EditableRegion>
-      ))}
-      {isValidPreviewUrl(imageUrl) && <MessageImage src={imageUrl} alt="Imagem da mensagem" className="osk-message-preview__generic-image" placeholder="Imagem indisponível" />}
-      {placeholder && <div className="osk-message-preview__select-sim"><span>{placeholder}</span><span>⌄</span></div>}
-      {buttonLabel && <div className="osk-message-preview__button-row"><span data-style={buttonStyle}>{buttonEmoji && <><DiscordRichText text={buttonEmoji} guildOptions={guildOptions} compact /> </>}<DiscordRichText text={buttonLabel} guildOptions={guildOptions} compact /></span></div>}
-      {footerEntry && (
-        <EditableRegion
-          field={footerEntry.field}
-          interactive={interactive}
-          selectedFieldId={selectedFieldId}
-          onSelectField={onSelectField}
-          className="osk-message-preview__card-footer"
-        >
-          {footerEntry.value ? <DiscordRichText text={footerEntry.value} guildOptions={guildOptions} /> : "Rodapé"}
-        </EditableRegion>
+      )}
+      {footerEntry && <FieldText {...textProps} field={footerEntry.field} className="osk-message-preview__card-footer" placeholder="Rodapé" />}
+    </div>
+  );
+}
+
+function ColorRolesPanelPreview({
+  editorId,
+  fields,
+  draft,
+  guildOptions,
+  interactive,
+  selectedFieldId,
+  editingFieldId,
+  selectedColorSlot,
+  textSelection,
+  onSelectField,
+  onEditField,
+  onFinishEdit,
+  onChange,
+  onTextSelection,
+  onSelectColorSlot,
+}: Omit<MessagePreviewProps, "groupLabel" | "botName" | "botAvatarUrl" | "sectionId">) {
+  const panelNumber = Math.max(1, Math.min(5, Number(editorId?.match(/color-panel-(\d+)/)?.[1] || 1)));
+  const titleField = fields.find((field) => field.id === `color_roles.messages.${panelNumber}.title`);
+  const subtitleField = fields.find((field) => field.id === `color_roles.messages.${panelNumber}.subtitle`);
+  const footerField = fields.find((field) => field.id === `color_roles.messages.${panelNumber}.footer`);
+  const slotsField = fields.find((field) => field.id === "color_roles.slots");
+  const rawSlots = draft["color_roles.slots"];
+  const slots = rawSlots && typeof rawSlots === "object" ? rawSlots as Record<string, DashboardColorSlot> : {};
+  const start = (panelNumber - 1) * 10 + 1;
+  const panelSlots = Array.from({ length: 10 }, (_, index) => {
+    const number = start + index;
+    const value = slots[String(number)] || ({ number, name: `Cor ${number}`, text_hex: "#ffffff", role_hex: "#ffffff" } as DashboardColorSlot);
+    return { ...value, number };
+  });
+  const textProps = { draft, guildOptions, interactive, selectedFieldId, editingFieldId, textSelection, onSelectField, onEditField, onFinishEdit, onChange, onTextSelection };
+
+  return (
+    <div className="osk-color-panel-canvas" data-panel={panelNumber}>
+      <div className="osk-color-panel-canvas__copy">
+        <FieldText {...textProps} field={titleField} className="osk-color-panel-canvas__title" placeholder="Título do painel" />
+        <FieldText {...textProps} field={subtitleField} className="osk-color-panel-canvas__subtitle" placeholder="Subtítulo" />
+        <FieldText {...textProps} field={footerField} className="osk-color-panel-canvas__footer" placeholder="Rodapé" />
+      </div>
+      {panelNumber <= 3 && (
+        <>
+          <div className="osk-color-panel-canvas__image" aria-label={`Cores ${start} a ${start + 9}`}>
+            {panelSlots.map((slot) => {
+              const color = /^#[0-9a-f]{6}$/i.test(String(slot.text_hex || "")) ? String(slot.text_hex) : "#ffffff";
+              return (
+                <button
+                  type="button"
+                  key={slot.number}
+                  className="osk-color-panel-canvas__slot"
+                  data-selected={selectedColorSlot === slot.number || undefined}
+                  style={{ "--osk-slot-color": color } as CSSProperties}
+                  disabled={!interactive || !slotsField}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (!slotsField) return;
+                    onSelectField?.(slotsField);
+                    onSelectColorSlot?.(slot.number);
+                  }}
+                >
+                  <b>{slot.number}.</b><span>{String(slot.name || `Cor ${slot.number}`)}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="osk-message-preview__select-sim osk-color-panel-canvas__select"><span>Selecione uma cor</span><span>⌄</span></div>
+        </>
       )}
     </div>
   );
 }
 
 export function MessagePreview({
+  sectionId,
+  editorId,
   groupLabel,
   fields,
   draft,
@@ -446,47 +567,52 @@ export function MessagePreview({
   botAvatarUrl,
   interactive,
   selectedFieldId,
+  editingFieldId,
+  selectedColorSlot,
+  textSelection,
   onSelectField,
+  onEditField,
+  onFinishEdit,
+  onChange,
+  onTextSelection,
+  onSelectColorSlot,
 }: MessagePreviewProps) {
   const hasEmbedFields = fields.some((field) => field.id.includes(".embed."));
   const hasPublicFields = fields.some((field) => field.id.includes(".public."));
   const welcomeMode = String(draft["welcome.render_mode"] || "");
   const isEmbed = hasEmbedFields && (!hasPublicFields || welcomeMode === "embed");
   const previewFields = hasPublicFields && welcomeMode !== "embed" ? fields.filter((field) => !field.id.includes(".embed.")) : fields;
+  const isColorPanel = sectionId === "color_roles" && /^color-panel-\d+$/.test(editorId || "");
+  const shared = {
+    fields: previewFields,
+    draft,
+    guildOptions,
+    interactive,
+    selectedFieldId,
+    editingFieldId,
+    selectedColorSlot,
+    textSelection,
+    onSelectField,
+    onEditField,
+    onFinishEdit,
+    onChange,
+    onTextSelection,
+    onSelectColorSlot,
+  };
+
   return (
-    <div className="osk-message-preview" data-interactive={interactive ? "true" : "false"}>
+    <div className="osk-message-preview" data-interactive={interactive ? "true" : "false"} data-editor-kind={isColorPanel ? "color-panel" : isEmbed ? "embed" : "generic"}>
       <div className="osk-message-preview__header">
-        <SmartAvatar
-          name={botName}
-          src={botAvatarUrl}
-          type="server"
-          size={34}
-          className="osk-message-preview__avatar"
-        />
-        <div>
-          <strong>{botName}</strong>
-          <span>BOT</span>
-        </div>
+        <SmartAvatar name={botName} src={botAvatarUrl} type="server" size={34} className="osk-message-preview__avatar" />
+        <div><strong>{botName}</strong><span>BOT</span></div>
       </div>
-      <div className="osk-message-preview__canvas" aria-label={`Prévia de ${groupLabel}`}>
-        {isEmbed ? (
-          <EmbedPreview
-            fields={previewFields}
-            draft={draft}
-            guildOptions={guildOptions}
-            interactive={interactive}
-            selectedFieldId={selectedFieldId}
-            onSelectField={onSelectField}
-          />
+      <div className="osk-message-preview__canvas" aria-label={`Mensagem editável de ${groupLabel}`}>
+        {isColorPanel ? (
+          <ColorRolesPanelPreview {...shared} editorId={editorId} />
+        ) : isEmbed ? (
+          <EmbedPreview {...shared} />
         ) : (
-          <GenericMessagePreview
-            fields={previewFields}
-            draft={draft}
-            guildOptions={guildOptions}
-            interactive={interactive}
-            selectedFieldId={selectedFieldId}
-            onSelectField={onSelectField}
-          />
+          <GenericMessagePreview {...shared} />
         )}
       </div>
     </div>

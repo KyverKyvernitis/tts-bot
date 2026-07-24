@@ -10,7 +10,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type {
   DashboardChannelOption,
@@ -27,6 +27,9 @@ interface DashboardFieldControlProps {
   guildOptions: DashboardOptionsPayload | null;
   onChange(field: DashboardFieldDefinition, raw: unknown): void;
   onTextSelection?(field: DashboardFieldDefinition, start: number, end: number): void;
+  selectedColorSlot?: number | null;
+  colorSlotRange?: { start: number; end: number } | null;
+  onColorSlotSelect?(slotNumber: number): void;
 }
 
 const TEXT_LIKE_CHANNEL_TYPES = new Set([0, 5]);
@@ -104,7 +107,7 @@ export function displayDashboardValue(field: DashboardFieldDefinition, value: un
   return text || "Não configurado";
 }
 
-export function DashboardFieldControl({ field, value, guildOptions, onChange, onTextSelection }: DashboardFieldControlProps) {
+export function DashboardFieldControl({ field, value, guildOptions, onChange, onTextSelection, selectedColorSlot, colorSlotRange, onColorSlotSelect }: DashboardFieldControlProps) {
   const currentValue = stringifyDashboardValue(value);
   const channelOptions = field.type === "channel" && guildOptions?.ok
     ? (() => {
@@ -182,7 +185,15 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange, on
   }
 
   if (field.type === "color_slots") {
-    return <ColorSlotsEditor field={field} value={value} roles={guildOptions?.ok ? guildOptions.roles.filter((role) => !role.managed && role.assignable !== false).map((role) => ({ value: role.id, label: `@${role.name}` })) : []} onChange={onChange} />;
+    return <ColorSlotsEditor
+      field={field}
+      value={value}
+      roles={guildOptions?.ok ? guildOptions.roles.filter((role) => !role.managed && role.assignable !== false).map((role) => ({ value: role.id, label: `@${role.name}` })) : []}
+      selectedSlot={selectedColorSlot}
+      visibleRange={colorSlotRange}
+      onSelectSlot={onColorSlotSelect}
+      onChange={onChange}
+    />;
   }
 
   if (field.type === "textarea") {
@@ -370,17 +381,118 @@ function normalizeFormField(value: unknown, index: number): DashboardFormField {
   };
 }
 
-function ColorSlotsEditor({ field, value, roles, onChange }: { field: DashboardFieldDefinition; value: unknown; roles: SmartSelectOption[]; onChange(field: DashboardFieldDefinition, raw: unknown): void }) {
+function normalizeHexColor(value: unknown, fallback = "#5865f2") {
+  const raw = String(value ?? "").trim();
+  const prefixed = raw.startsWith("#") ? raw : `#${raw}`;
+  return /^#[0-9a-f]{6}$/i.test(prefixed) ? prefixed.toUpperCase() : fallback.toUpperCase();
+}
+
+function ColorHexControl({ value, onCommit }: { value: unknown; onCommit(value: string): void }) {
+  const normalized = normalizeHexColor(value);
+  const [text, setText] = useState(normalized);
+  const focusedRef = useRef(false);
+
+  useEffect(() => {
+    if (!focusedRef.current) setText(normalized);
+  }, [normalized]);
+
+  function commit(next: string) {
+    const complete = normalizeHexColor(next, "");
+    if (!complete) return false;
+    setText(complete);
+    onCommit(complete);
+    return true;
+  }
+
+  return <span className="osk-color-slot-color">
+    <input type="color" value={normalized.toLowerCase()} aria-label="Selecionar cor" onChange={(event) => commit(event.target.value)} />
+    <input
+      value={text}
+      maxLength={7}
+      inputMode="text"
+      autoCapitalize="characters"
+      spellCheck={false}
+      aria-label="Cor hexadecimal"
+      onFocus={() => { focusedRef.current = true; }}
+      onChange={(event) => {
+        const next = event.target.value.toUpperCase();
+        setText(next);
+        if (/^#[0-9A-F]{6}$/.test(next)) onCommit(next);
+      }}
+      onBlur={() => {
+        focusedRef.current = false;
+        if (!commit(text)) setText(normalized);
+      }}
+    />
+  </span>;
+}
+
+function ColorSlotsEditor({
+  field,
+  value,
+  roles,
+  selectedSlot,
+  visibleRange,
+  onSelectSlot,
+  onChange,
+}: {
+  field: DashboardFieldDefinition;
+  value: unknown;
+  roles: SmartSelectOption[];
+  selectedSlot?: number | null;
+  visibleRange?: { start: number; end: number } | null;
+  onSelectSlot?(slotNumber: number): void;
+  onChange(field: DashboardFieldDefinition, raw: unknown): void;
+}) {
   const slots = value && typeof value === "object" ? value as Record<string, DashboardColorSlot> : {};
-  const ordered = Object.entries(slots).sort(([a], [b]) => Number(a) - Number(b));
+  const ordered = Object.entries(slots)
+    .filter(([key, slot]) => {
+      if (!visibleRange) return true;
+      const number = Number(slot.number || key);
+      return number >= visibleRange.start && number <= visibleRange.end;
+    })
+    .sort(([a], [b]) => Number(a) - Number(b));
+  const [expandedKey, setExpandedKey] = useState<string | null>(() => selectedSlot ? String(selectedSlot) : null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!selectedSlot) return;
+    setExpandedKey(String(selectedSlot));
+    window.requestAnimationFrame(() => {
+      const target = Array.from(containerRef.current?.querySelectorAll<HTMLElement>("[data-slot-number]") ?? [])
+        .find((element) => Number(element.dataset.slotNumber) === selectedSlot);
+      target?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+  }, [selectedSlot]);
+
   const update = (key: string, patch: Partial<DashboardColorSlot>) => onChange(field, { ...slots, [key]: { ...slots[key], ...patch } });
-  return <div className="osk-color-slots-editor">{ordered.map(([key, slot]) => {
+  const toggle = (key: string, slotNumber: number) => {
+    setExpandedKey((current) => current === key ? null : key);
+    onSelectSlot?.(slotNumber);
+  };
+
+  return <div ref={containerRef} className="osk-color-slots-editor">{ordered.map(([key, slot]) => {
+    const slotNumber = Number(slot.number || key);
     const color = /^#[0-9a-f]{6}$/i.test(String(slot.role_hex || "")) ? String(slot.role_hex) : "#5865f2";
-    return <article key={key}>
-      <span className="osk-color-slot-swatch" style={{ background: color }}><b>{slot.number || key}</b></span>
-      <label><span>Nome</span><input value={String(slot.name || "")} maxLength={40} onChange={(event) => update(key, { name: event.target.value, role_name: event.target.value, managed: false })} /></label>
-      <label><span>Cor</span><span className="osk-color-slot-color"><input type="color" value={color} onChange={(event) => update(key, { role_hex: event.target.value, text_hex: event.target.value, managed: false })} /><input value={color} onChange={(event) => update(key, { role_hex: event.target.value, text_hex: event.target.value, managed: false })} /></span></label>
-      <label className="osk-color-slot-role"><span>Cargo</span>{roles.length ? <SmartSelect id={`color-slot-${key}`} value={String(slot.role_id || "")} options={[{ value: "", label: "Nenhum" }, ...roles]} onChange={(next) => update(key, { role_id: next, managed: false })} placeholder="Selecione o cargo" /> : <input value={String(slot.role_id || "")} placeholder="ID do cargo" onChange={(event) => update(key, { role_id: event.target.value, managed: false })} />}</label>
+    const expanded = expandedKey === key;
+    const selectedRole = roles.find((role) => role.value === String(slot.role_id || ""));
+    const roleLabel = selectedRole?.label || (slot.role_id ? `@${String(slot.role_name || slot.role_id)}` : "Nenhum cargo");
+    return <article key={key} data-slot-number={slotNumber} data-expanded={expanded || undefined} data-selected={selectedSlot === slotNumber || undefined}>
+      <button type="button" className="osk-color-slot-summary" onClick={() => toggle(key, slotNumber)} aria-expanded={expanded}>
+        <span className="osk-color-slot-swatch" style={{ background: color }}><b>{slotNumber}</b></span>
+        <span className="osk-color-slot-summary__copy"><strong>{String(slot.name || `Cor ${slotNumber}`)}</strong><small>{color.toUpperCase()} · {roleLabel}</small></span>
+        <ChevronDown size={17} />
+      </button>
+      <div className="osk-color-slot-panel" aria-hidden={!expanded}>
+        <div className="osk-color-slot-panel__inner">
+          <label><span>Nome</span><input value={String(slot.name || "")} maxLength={40} onChange={(event) => update(key, { name: event.target.value, role_name: event.target.value, managed: false })} /></label>
+          <label><span>Cor</span><ColorHexControl value={slot.role_hex || slot.text_hex || color} onCommit={(next) => update(key, { role_hex: next, text_hex: next, managed: false })} /></label>
+          <label className="osk-color-slot-role"><span>Cargo</span>{roles.length ? <SmartSelect id={`color-slot-${key}`} value={String(slot.role_id || "")} options={[{ value: "", label: "Nenhum" }, ...roles]} onChange={(next) => {
+            const selected = roles.find((role) => role.value === next);
+            update(key, { role_id: next, role_name: selected?.label.replace(/^@/, "") || String(slot.name || ""), managed: false });
+          }} placeholder="Selecione o cargo" /> : <input value={String(slot.role_id || "")} placeholder="ID do cargo" onChange={(event) => update(key, { role_id: event.target.value, managed: false })} />}</label>
+        </div>
+      </div>
     </article>;
   })}</div>;
 }

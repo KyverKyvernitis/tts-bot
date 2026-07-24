@@ -12,6 +12,10 @@ interface MessageVisualEditorProps {
   onChange(field: DashboardFieldDefinition, raw: unknown): void;
   onFocusField?(field: DashboardFieldDefinition): void;
   onTextSelection?(field: DashboardFieldDefinition, start: number, end: number): void;
+  selectedFieldId?: string | null;
+  selectedColorSlot?: number | null;
+  colorSlotRange?: { start: number; end: number } | null;
+  onColorSlotSelect?(slotNumber: number): void;
 }
 
 function valuesEqual(a: unknown, b: unknown) {
@@ -27,6 +31,10 @@ export function MessageVisualEditor({
   onChange,
   onFocusField,
   onTextSelection,
+  selectedFieldId,
+  selectedColorSlot,
+  colorSlotRange,
+  onColorSlotSelect,
 }: MessageVisualEditorProps) {
   if (!fields.length) {
     return <div className="osk-message-empty">Nenhum campo está disponível nesta área.</div>;
@@ -36,12 +44,12 @@ export function MessageVisualEditor({
     {fields.map((field) => {
       const changed = !valuesEqual(baseline[field.id], draft[field.id]);
       const currentText = typeof draft[field.id] === "string" ? String(draft[field.id]) : "";
-      return <section key={field.id} className="osk-message-form__field" data-changed={changed || undefined} data-type={field.type} onFocusCapture={() => onFocusField?.(field)}>
+      return <section key={field.id} className="osk-message-form__field" data-changed={changed || undefined} data-selected={selectedFieldId === field.id || undefined} data-type={field.type} onFocusCapture={() => onFocusField?.(field)}>
         <header>
           <div><strong>{field.label}</strong>{field.description && <small>{field.description}</small>}</div>
           {field.maxLength && ["text", "textarea", "url"].includes(field.type) && <span>{currentText.length}/{field.maxLength}</span>}
         </header>
-        <DashboardFieldControl field={field} value={draft[field.id]} guildOptions={guildOptions} onChange={onChange} onTextSelection={onTextSelection} />
+        <DashboardFieldControl field={field} value={draft[field.id]} guildOptions={guildOptions} onChange={onChange} onTextSelection={onTextSelection} selectedColorSlot={selectedColorSlot} colorSlotRange={colorSlotRange} onColorSlotSelect={onColorSlotSelect} />
       </section>;
     })}
   </div>;

@@ -153,7 +153,7 @@ function createLegacyEditor(group: string, fields: DashboardFieldDefinition[]): 
   return {
     id: `legacy-${group.toLocaleLowerCase("pt-BR").replace(/[^a-z0-9]+/g, "-")}`,
     label: group,
-    description: "Conteúdo e prévia desta mensagem.",
+    description: "Conteúdo e aparência desta mensagem.",
     fieldIds: fields.map((field) => field.id),
   };
 }
@@ -191,6 +191,11 @@ export function SectionEditor({
     const editorFields = editor.fieldIds
       .map((id) => section.fields.find((field) => field.id === id))
       .filter((field): field is DashboardFieldDefinition => Boolean(field));
+    const colorPanelMatch = section.id === "color_roles" ? editor.id.match(/^color-panel-([1-3])$/) : null;
+    if (colorPanelMatch) {
+      const slotsField = section.fields.find((field) => field.id === "color_roles.slots");
+      if (slotsField && !editorFields.some((field) => field.id === slotsField.id)) editorFields.push(slotsField);
+    }
     if (!editorFields.length) return;
     pageScrollRef.current = window.scrollY;
     setActiveEditor({
@@ -348,7 +353,7 @@ function MessageGroupPanel({
         const summary = summaryFields.map((field) => `${field.label}: ${displayDashboardValue(field, draft[field.id], guildOptions)}`).join(" · ");
         return <article key={editor.id} className="osk-message-launcher" data-changed={changed || undefined} data-disabled={!enabled || undefined}>
           <span className="osk-message-launcher__icon"><PencilLine size={19} /></span>
-          <div><strong>{editor.label}</strong><small>{editor.description || "Edite a mensagem e confira a prévia antes de aplicar."}</small>{summary && <em>{summary}</em>}</div>
+          <div><strong>{editor.label}</strong><small>{editor.description || "Edite a mensagem diretamente e aplique ao painel."}</small>{summary && <em>{summary}</em>}</div>
           <button type="button" className="osk-message-launcher__action" disabled={!enabled} onClick={() => onOpenEditor(editor, metadata.variables)}>Editar</button>
         </article>;
       })}

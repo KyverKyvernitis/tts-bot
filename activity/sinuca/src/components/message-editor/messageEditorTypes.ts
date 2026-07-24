@@ -5,7 +5,6 @@ import type {
 } from "../../types/dashboard";
 
 export type MessageEditorMode = "content" | "appearance" | "components" | "variables" | "json";
-export type MessageEditorMobileView = "edit" | "preview";
 
 export interface MessageEditorProps {
   editorId: string;
