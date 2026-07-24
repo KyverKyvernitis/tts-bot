@@ -12,6 +12,7 @@ import { Topbar } from "./components/Topbar";
 import { mergeDashboardModules, type DashboardVisualModule } from "./moduleCatalog";
 import {
   fetchDashboardBootstrap,
+  fetchDashboardIdentity,
   fetchDashboardInvite,
   fetchDashboardOptions,
   fetchDashboardServers,
@@ -168,6 +169,9 @@ export default function App() {
       setNotice({ type: "error", text: `Não foi possível concluir o login (${authError}).` });
       window.history.replaceState({}, "", window.location.pathname);
     }
+    void fetchDashboardIdentity()
+      .then((payload) => setBotIdentity(payload.bot || null))
+      .catch(() => undefined);
     void (async () => {
       try {
         const session = await fetchDashboardSession();
@@ -378,7 +382,7 @@ export default function App() {
 
   return <>
     {notice && <Notice type={notice.type} text={notice.text} onClose={() => setNotice(null)} />}
-    {route.page === "landing" && <BrowserLanding loggedIn={sessionState === "authenticated"} user={user} onLogin={handleLogin} onDashboard={() => navigate({ page: "servers" })} onNavigate={(path) => navigate(parseRoute(path))} />}
+    {route.page === "landing" && <BrowserLanding loggedIn={sessionState === "authenticated"} user={user} bot={botIdentity} onLogin={handleLogin} onDashboard={() => navigate({ page: "servers" })} onNavigate={(path) => navigate(parseRoute(path))} />}
     {route.page === "privacy" && <LegalPage kind="privacy" onBack={() => navigate({ page: "landing" })} />}
     {route.page === "terms" && <LegalPage kind="terms" onBack={() => navigate({ page: "landing" })} />}
     {route.page === "servers" && <ServerPicker manageable={manageable} needsInvite={needsInvite} loading={loadingServers} onSelect={(server) => { setSelectedServer(server); navigate({ page: "dashboard", guildId: server.id, sectionId: null }); }} onInvite={(server) => { setSelectedServer(server); navigate({ page: "invite", guildId: server.id }); }} onRefresh={() => void loadServers(true)} onLogout={() => void handleLogout()} onHome={() => navigate({ page: "landing" })} />}
@@ -477,6 +481,65 @@ function DashboardShell({
   const guildName = selectedServer?.name || `Servidor ${route.guildId.slice(-6)}`;
   const guildIcon = selectedServer?.icon || null;
   const botName = botIdentity?.global_name || botIdentity?.username || "Osaka";
+
+  useEffect(() => {
+    if (mobileMenuOpen || messageEditorActive) return;
+
+    let tracking = false;
+    let horizontalIntent = false;
+    let startX = 0;
+    let startY = 0;
+    let latestX = 0;
+    let latestY = 0;
+
+    const shouldIgnoreTarget = (target: EventTarget | null) => {
+      if (!(target instanceof Element)) return false;
+      return Boolean(target.closest("input, textarea, select, [contenteditable='true'], .osk-message-editor, [data-no-drawer-gesture]"));
+    };
+
+    const onTouchStart = (event: TouchEvent) => {
+      if (window.innerWidth > 980 || event.touches.length !== 1 || shouldIgnoreTarget(event.target)) return;
+      const touch = event.touches[0];
+      // A faixa esquerda é reservada ao drawer no painel móvel.
+      if (touch.clientX > 104) return;
+      tracking = true;
+      horizontalIntent = false;
+      startX = latestX = touch.clientX;
+      startY = latestY = touch.clientY;
+    };
+
+    const onTouchMove = (event: TouchEvent) => {
+      if (!tracking || event.touches.length !== 1) return;
+      const touch = event.touches[0];
+      latestX = touch.clientX;
+      latestY = touch.clientY;
+      const deltaX = latestX - startX;
+      const deltaY = latestY - startY;
+      if (!horizontalIntent && deltaX > 12 && Math.abs(deltaX) > Math.abs(deltaY) * 1.25) horizontalIntent = true;
+      if (horizontalIntent && event.cancelable) event.preventDefault();
+    };
+
+    const finishGesture = () => {
+      if (!tracking) return;
+      const deltaX = latestX - startX;
+      const deltaY = latestY - startY;
+      tracking = false;
+      if (horizontalIntent && deltaX >= 62 && Math.abs(deltaY) <= Math.max(44, deltaX * .58)) onOpenMenu();
+    };
+
+    const cancelGesture = () => { tracking = false; horizontalIntent = false; };
+
+    document.addEventListener("touchstart", onTouchStart, { capture: true, passive: true });
+    document.addEventListener("touchmove", onTouchMove, { capture: true, passive: false });
+    document.addEventListener("touchend", finishGesture, { capture: true, passive: true });
+    document.addEventListener("touchcancel", cancelGesture, { capture: true, passive: true });
+    return () => {
+      document.removeEventListener("touchstart", onTouchStart, true);
+      document.removeEventListener("touchmove", onTouchMove, true);
+      document.removeEventListener("touchend", finishGesture, true);
+      document.removeEventListener("touchcancel", cancelGesture, true);
+    };
+  }, [messageEditorActive, mobileMenuOpen, onOpenMenu]);
 
   return <div className="osk-dashboard-shell" data-has-draft={changedCount > 0 || undefined}>
     <Sidebar

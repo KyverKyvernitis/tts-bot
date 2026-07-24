@@ -1,5 +1,5 @@
 import { Home, LogOut, X } from "lucide-react";
-import { useEffect, useRef, useState, type CSSProperties, type TransitionEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type TouchEvent as ReactTouchEvent, type TransitionEvent } from "react";
 import type { DashboardVisualModule } from "../moduleCatalog";
 import { SmartAvatar } from "./SmartAvatar";
 
@@ -34,6 +34,7 @@ export function Sidebar({
   const system = modules.filter((item) => item.group === "system");
   const closeRef = useRef<HTMLButtonElement>(null);
   const closeTimerRef = useRef<number | null>(null);
+  const closeSwipeRef = useRef<{ x: number; y: number } | null>(null);
   const [mobileMounted, setMobileMounted] = useState(mobileOpen);
   const [mobileVisible, setMobileVisible] = useState(false);
 
@@ -92,6 +93,20 @@ export function Sidebar({
     setMobileMounted(false);
   };
 
+  const beginCloseSwipe = (event: ReactTouchEvent<HTMLElement>) => {
+    if (!mobileOpen || event.touches.length !== 1) return;
+    closeSwipeRef.current = { x: event.touches[0].clientX, y: event.touches[0].clientY };
+  };
+
+  const finishCloseSwipe = (event: ReactTouchEvent<HTMLElement>) => {
+    const start = closeSwipeRef.current;
+    closeSwipeRef.current = null;
+    if (!start || event.changedTouches.length !== 1) return;
+    const deltaX = event.changedTouches[0].clientX - start.x;
+    const deltaY = event.changedTouches[0].clientY - start.y;
+    if (deltaX <= -58 && Math.abs(deltaY) <= Math.max(44, Math.abs(deltaX) * .62)) onCloseMobile();
+  };
+
   const select = (id: string) => onSelect(id);
   const goHome = () => onHome();
 
@@ -110,6 +125,9 @@ export function Sidebar({
       data-mobile-mounted={mobileMounted || undefined}
       aria-label="Navegação do painel"
       onTransitionEnd={finishClose}
+      onTouchStart={beginCloseSwipe}
+      onTouchEnd={finishCloseSwipe}
+      onTouchCancel={() => { closeSwipeRef.current = null; }}
     >
       <div className="osk-sidebar-brand">
         <span className="osk-sidebar-bot">
@@ -136,6 +154,5 @@ function SidebarLink({ item, active, onClick, index }: { item: DashboardVisualMo
   return <button className="osk-sidebar-link" style={{ "--osk-menu-index": index } as CSSProperties} data-active={active || undefined} onClick={onClick}>
     <Icon size={18} />
     <span>{item.label}</span>
-    <i data-state={item.state || "configured"} aria-hidden="true" />
   </button>;
 }

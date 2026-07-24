@@ -5,8 +5,14 @@ import type {
   DashboardServersPayload,
   DashboardSettingsPayload,
   DashboardSummaryPayload,
+  DashboardUserPayload,
 } from "../types/dashboard";
 import { fetchDashboardJson } from "./httpClient";
+
+
+export async function fetchDashboardIdentity(): Promise<{ ok: boolean; bot?: DashboardUserPayload | null }> {
+  return await fetchDashboardJson<{ ok: boolean; bot?: DashboardUserPayload | null }>("/public/identity", { method: "GET" }, 10000);
+}
 
 export async function fetchDashboardServers(): Promise<DashboardServersPayload> {
   return await fetchDashboardJson<DashboardServersPayload>("/dashboard/servers");

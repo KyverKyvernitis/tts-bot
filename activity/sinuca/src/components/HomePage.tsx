@@ -22,15 +22,6 @@ export function HomePage({ modules, onOpen }: HomePageProps) {
   </section>;
 }
 
-function compactStatus(item: DashboardVisualModule): string {
-  if (item.state === "active") return "Ativa";
-  if (item.state === "inactive") return "Desativada";
-  if (item.state === "partial") return "Parcial";
-  if (item.state === "pending") return "Pendente";
-  if (item.state === "configured") return "Pronta";
-  return item.enabled === false ? "Desativada" : "Disponível";
-}
-
 function FunctionGroup({
   title,
   icon: GroupIcon,
@@ -49,10 +40,10 @@ function FunctionGroup({
     <div className="osk-function-grid">
       {items.map((item) => {
         const Icon = item.icon;
-        return <button key={item.id} className="osk-function-card" data-state={item.state || "configured"} onClick={() => onOpen(item.id)}>
+        return <button key={item.id} className="osk-function-card" onClick={() => onOpen(item.id)}>
           <span className="osk-function-icon"><Icon size={20} /></span>
           <span className="osk-function-copy">
-            <span className="osk-function-title"><strong>{item.label}</strong><span className="osk-function-state" data-state={item.state || "configured"}>{compactStatus(item)}</span></span>
+            <span className="osk-function-title"><strong>{item.label}</strong></span>
             <small>{item.description}</small>
           </span>
           <span className="osk-function-arrow"><ArrowRight size={17} /></span>

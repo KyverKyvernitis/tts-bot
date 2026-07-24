@@ -232,6 +232,11 @@ export function registerDashboardRoutes({
     }
   });
 
+  app.get("/api/public/identity", async (_req, res) => {
+    const bot = await getDiscordBotIdentity().catch(() => null);
+    sendNoStoreJson(res, 200, { ok: true, bot });
+  });
+
   app.get("/api/auth/session", async (req, res) => {
     const session = await requireSession(req, res, sessionService);
     if (!session) return;

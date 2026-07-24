@@ -1781,3 +1781,246 @@
     min-width: 0;
   }
 }
+
+/* ============================================================
+   Ajustes finais — identidade, suporte, drawer e visão geral
+   ============================================================ */
+.osk-brand-symbol.osk-brand-bot-avatar {
+  overflow: hidden;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid rgba(161, 139, 255, .34);
+  color: #d7d0ff;
+  background: #141826;
+  box-shadow: 0 10px 28px rgba(78, 57, 190, .22);
+}
+
+.osk-brand-symbol.osk-brand-bot-avatar .osk-avatar-img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.osk-brand-symbol.osk-brand-bot-avatar > span:not(.osk-avatar-img) {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+}
+
+.osk-minimal-account {
+  min-height: 42px;
+  max-width: 220px;
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 10px 4px 5px;
+  border: 1px solid rgba(255, 255, 255, .09);
+  border-radius: 14px;
+  color: var(--osk-text-soft);
+  background: rgba(255, 255, 255, .035);
+  text-align: left;
+  transition: color .16s ease, border-color .16s ease, background .16s ease, transform .16s ease;
+}
+
+.osk-minimal-account:hover {
+  color: #fff;
+  border-color: rgba(155, 130, 255, .28);
+  background: rgba(124, 92, 255, .085);
+  transform: translateY(-1px);
+}
+
+.osk-minimal-account-avatar,
+.osk-minimal-account-login {
+  width: 32px;
+  height: 32px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: #c9beff;
+  background: rgba(124, 92, 255, .13);
+}
+
+.osk-minimal-account-avatar .osk-avatar-img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.osk-minimal-account-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+  line-height: 1.05;
+}
+
+.osk-minimal-account-copy small {
+  color: #737e92;
+  font-size: .51rem;
+  font-weight: 720;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.osk-minimal-account-copy strong {
+  overflow: hidden;
+  color: #e9ecf4;
+  font-size: .71rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.osk-support-card {
+  min-height: 74px;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 13px;
+  margin: 28px 0 6px;
+  padding: 13px 15px;
+  border: 1px solid rgba(133, 106, 255, .19);
+  border-radius: 16px;
+  color: inherit;
+  background: linear-gradient(110deg, rgba(104, 76, 225, .09), rgba(25, 31, 46, .38));
+  text-decoration: none;
+  transition: transform .16s ease, border-color .16s ease, background .16s ease;
+}
+
+.osk-support-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(155, 130, 255, .34);
+  background: linear-gradient(110deg, rgba(104, 76, 225, .14), rgba(25, 31, 46, .48));
+}
+
+.osk-support-card-icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  color: #c9beff;
+  background: rgba(112, 83, 255, .14);
+}
+
+.osk-support-card-copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.osk-support-card-copy strong {
+  color: #eef0f7;
+  font-size: .82rem;
+}
+
+.osk-support-card-copy small {
+  overflow: hidden;
+  color: #818b9f;
+  font-size: .65rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.osk-support-card-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #bfb3ff;
+  font-size: .69rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+/* A visão geral deixa de exibir estado como decoração. */
+.osk-function-card::before,
+.osk-function-state {
+  display: none !important;
+}
+
+.osk-function-card {
+  grid-template-columns: 42px minmax(0, 1fr) 30px;
+  border-color: var(--osk-line);
+  background: rgba(255, 255, 255, .025);
+}
+
+.osk-function-title {
+  justify-content: flex-start;
+}
+
+.osk-sidebar-link {
+  grid-template-columns: 18px minmax(0, 1fr);
+}
+
+.osk-sidebar-link i {
+  display: none !important;
+}
+
+@media (max-width: 720px) {
+  .osk-minimal-account {
+    min-height: 38px;
+    max-width: 150px;
+    gap: 7px;
+    padding: 3px 8px 3px 4px;
+    border-radius: 12px;
+  }
+
+  .osk-minimal-account-avatar,
+  .osk-minimal-account-login {
+    width: 30px !important;
+    height: 30px !important;
+    border-radius: 9px;
+  }
+
+  .osk-minimal-account[data-logged-in] .osk-minimal-account-copy {
+    display: none;
+  }
+
+  .osk-minimal-account[data-logged-in] {
+    grid-template-columns: auto auto;
+  }
+
+  .osk-minimal-account:not([data-logged-in]) .osk-minimal-account-copy small {
+    display: none;
+  }
+
+  .osk-support-card {
+    min-height: 70px;
+    grid-template-columns: 38px minmax(0, 1fr) auto;
+    gap: 10px;
+    margin-top: 22px;
+    padding: 11px 12px;
+    border-radius: 14px;
+  }
+
+  .osk-support-card-icon {
+    width: 38px;
+    height: 38px;
+    border-radius: 11px;
+  }
+
+  .osk-support-card-copy strong { font-size: .75rem; }
+  .osk-support-card-copy small { font-size: .58rem; }
+  .osk-support-card-action { font-size: .62rem; }
+
+  .osk-function-card {
+    grid-template-columns: 40px minmax(0, 1fr) 28px;
+  }
+}
+
+@media (max-width: 390px) {
+  .osk-support-card-copy small { white-space: normal; line-height: 1.35; }
+}
+
+@media (max-width: 980px) {
+  html,
+  body,
+  .osk-root,
+  .osk-dashboard-shell {
+    overscroll-behavior-x: none;
+  }
+}
