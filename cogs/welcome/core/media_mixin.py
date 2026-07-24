@@ -381,8 +381,11 @@ class WelcomeMediaMixin:
         return await asyncio.to_thread(self._recolor_emoji_bytes_local_sync, raw, animated=animated, color_hex=color_hex, palette=palette)
 
     def _phone_worker_base_url(self) -> str:
-        enabled = str(os.getenv("PHONE_WORKER_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on", "sim"}
+        replacement_enabled = str(os.getenv("CORE_WORKER_APK_REPLACES_TERMUX") or "true").strip().lower() not in {"0", "false", "no", "off"}
+        configured_enabled = str(os.getenv("PHONE_WORKER_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on", "sim"}
         host = str(os.getenv("PHONE_WORKER_HOST") or "").strip()
+        token = str(os.getenv("PHONE_WORKER_TOKEN") or "").strip()
+        enabled = configured_enabled or (replacement_enabled and bool(host and token))
         if not enabled or not host:
             return ""
         scheme = str(os.getenv("PHONE_WORKER_SCHEME") or "http").strip() or "http"

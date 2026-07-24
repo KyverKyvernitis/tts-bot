@@ -1,3 +1,13 @@
+# Core Worker 0.7.0 — runtime móvel sem Termux
+
+A versão `0.7.0` substitui o Termux no worker móvel. O APK mantém o serviço foreground autônomo, consome a fila autenticada `/core-worker/jobs/poll`, confirma resultados em `/core-worker/jobs/result` e expõe na porta `8766` uma API compatível, autenticada e restrita por allowlist para os consumidores atuais do bot.
+
+O APK assume diagnósticos, hashes, ZIP, mídia curta, FFmpeg/FFprobe quando os binários estiverem presentes no APK final, cache e TTS nativo. Não existe shell remoto livre, execução arbitrária, download automático de binários ou build Android na VPS. Música e voz Discord permanecem no processo principal da VPS; o APK fornece TTS e offload de tarefas, sem depender do `phone_worker.py`.
+
+O build e a assinatura do APK continuam externos ao runtime da VPS. Esta base não inclui os binários pesados nem os arquivos privados de assinatura/Firebase. Bedrock só pode iniciar depois que rootfs glibc ARM64, runner allowlist, PRoot, BusyBox, Box64, `bedrock_server`, `server.properties` e `eula=true` forem validados no aparelho.
+
+> As seções abaixo registram patches antigos e podem citar o fluxo legado com Termux. Elas são mantidas apenas como histórico; o comportamento atual é o descrito nesta seção 0.7.0.
+
 ## Patch 86: Core Linux Runtime v1 sem Termux
 
 A versão `0.5.55` transforma o Core Linux interno em uma etapa validável de ponta a ponta sem Termux: o APK agora anuncia `supported_tasks` reais para a VPS, prepara/valida um rootfs scaffold controlado em `files/core-linux/rootfs/` e executa um smoke test seguro combinando executor JNI allowlist + rootfs + estado persistente.

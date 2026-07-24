@@ -677,6 +677,8 @@ def _worker_needs_boot_repair(worker: dict[str, Any]) -> bool:
 
 
 def queue_boot_repairs(*, only_worker_id: str = "") -> dict[str, Any]:
+    if _env_bool("CORE_WORKER_APK_REPLACES_TERMUX", True):
+        return {"ok": True, "skipped": "android_boot_receiver", "queued": 0, "workers": []}
     registry = get_core_workers_registry()
     snapshot = _load_registry_snapshot()
     workers = [w for w in snapshot.get("workers") or [] if isinstance(w, dict)]
@@ -720,6 +722,11 @@ def queue_boot_repairs(*, only_worker_id: str = "") -> dict[str, Any]:
 
 
 def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dict[str, Any]:
+    if _env_bool("CORE_WORKER_APK_REPLACES_TERMUX", True):
+        pending = _load_pending()
+        pending.pop("agent_update", None)
+        _save_pending(pending)
+        return {"ok": True, "skipped": "termux_replaced", "queued": 0, "workers": []}
     registry = get_core_workers_registry()
     snapshot = _load_registry_snapshot()
     workers = [w for w in snapshot.get("workers") or [] if isinstance(w, dict)]
@@ -1038,6 +1045,16 @@ def _pending_apk_build_recently_queued(pending: dict[str, Any], version_code: in
 
 
 def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
+    if _env_bool("CORE_WORKER_APK_REPLACES_TERMUX", True):
+        pending = _load_pending()
+        pending.pop("apk_build", None)
+        _save_pending(pending)
+        return {
+            "ok": True,
+            "pending": False,
+            "skipped": "external_build_required",
+            "message": "build automático desativado: compile e assine o APK fora da VPS e publique o arquivo pronto",
+        }
     registry = get_core_workers_registry()
     version_name, version_code = _read_android_version()
     source = _prepare_apk_source_zip()
@@ -1222,6 +1239,17 @@ def process_pending(*, worker_id: str = "") -> dict[str, Any]:
     started = time.monotonic()
     pending = _load_pending()
     result: dict[str, Any] = {"ok": True, "worker_id": worker_id, "processed_at": time.time()}
+    if _env_bool("CORE_WORKER_APK_REPLACES_TERMUX", True):
+        for key in ("agent_update", "apk_build"):
+            pending.pop(key, None)
+        _save_pending(pending)
+        result["agent_update"] = {"ok": True, "skipped": "termux_replaced"}
+        result["apk_build"] = {"ok": True, "skipped": "external_build_required"}
+        result["boot_repair"] = {"ok": True, "skipped": "android_boot_receiver"}
+        result["elapsed_ms"] = round((time.monotonic() - started) * 1000.0, 1)
+        write_status({"process_pending": result, "pending": pending, "finished_at": time.time()})
+        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        return result
     snapshot = _load_registry_snapshot()
     # process-pending roda a partir de heartbeat/poll/result e precisa ser barato.
     # Não calcule hash_tree do Android a cada heartbeat: em VPS de 1 GB isso gerou
@@ -1305,17 +1333,27 @@ def after_update(force_agent: bool = False) -> int:
         "started_at": time.time(),
         "base_url": _public_base_url(),
     }
-    if phone_changed and _env_bool("CORE_WORKER_AUTO_AGENT_UPDATE_ENABLED", True):
-        status["agent_update"] = queue_agent_updates(force=force_agent)
-    elif phone_changed:
-        status["agent_update"] = {"ok": True, "skipped": ["desativado por CORE_WORKER_AUTO_AGENT_UPDATE_ENABLED=false"]}
+    replacement_mode = _env_bool("CORE_WORKER_APK_REPLACES_TERMUX", True)
+    if replacement_mode:
+        pending = _load_pending()
+        pending.pop("agent_update", None)
+        pending.pop("apk_build", None)
+        _save_pending(pending)
+        status["agent_update"] = {"ok": True, "skipped": "termux_replaced"}
+        status["apk_build"] = {"ok": True, "skipped": "external_build_required", "changed": apk_changed}
+        status["boot_repair"] = {"ok": True, "skipped": "android_boot_receiver"}
+    else:
+        if phone_changed and _env_bool("CORE_WORKER_AUTO_AGENT_UPDATE_ENABLED", True):
+            status["agent_update"] = queue_agent_updates(force=force_agent)
+        elif phone_changed:
+            status["agent_update"] = {"ok": True, "skipped": ["desativado por CORE_WORKER_AUTO_AGENT_UPDATE_ENABLED=false"]}
 
-    if apk_changed and _env_bool("CORE_WORKER_AUTO_APK_BUILD_ENABLED", True):
-        status["apk_build"] = queue_apk_build()
-    elif apk_changed:
-        status["apk_build"] = {"ok": True, "skipped": ["desativado por CORE_WORKER_AUTO_APK_BUILD_ENABLED=false"]}
+        if apk_changed and _env_bool("CORE_WORKER_AUTO_APK_BUILD_ENABLED", True):
+            status["apk_build"] = queue_apk_build()
+        elif apk_changed:
+            status["apk_build"] = {"ok": True, "skipped": ["desativado por CORE_WORKER_AUTO_APK_BUILD_ENABLED=false"]}
 
-    status["boot_repair"] = queue_boot_repairs()
+        status["boot_repair"] = queue_boot_repairs()
 
     status["finished_at"] = time.time()
     write_status(status)

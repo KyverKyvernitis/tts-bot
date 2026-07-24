@@ -43,9 +43,9 @@ public class CoreWorkerBedrockService extends Service {
     private static final int NOTIFICATION_ID = 4108;
     private static final long TICK_MS = 15L * 1000L;
     private static final long LOG_LIMIT_BYTES = 512L * 1024L;
-    // Patch 85.6: o runner Bedrock real fica desligado até o rootfs interno ser estável.
-    private static final boolean BEDROCK_RUNTIME_ISOLATED = true;
-    private static final String BEDROCK_ISOLATION_SUMMARY = "Runtime Bedrock isolado para proteger o app; serviço não iniciado.";
+    // O serviço só inicia depois que o preflight allowlist valida todos os requisitos.
+    private static final boolean BEDROCK_RUNTIME_ISOLATED = false;
+    private static final String BEDROCK_ISOLATION_SUMMARY = "Runtime Bedrock desativado por política desta build.";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private volatile boolean active = false;
@@ -323,18 +323,18 @@ public class CoreWorkerBedrockService extends Service {
         File box64B = new File(p.coreLinuxDir, "box64/box64");
         p.box64 = p.embeddedBox64 != null ? p.embeddedBox64 : (box64A.exists() ? box64A : box64B);
         p.box64InWritableHome = p.box64 != null && isInside(p.box64, new File(getApplicationInfo() == null ? getFilesDir().getParent() : getApplicationInfo().dataDir));
-        File rootfsMarker = new File(p.coreLinuxDir, "rootfs/.core-worker-rootfs-ready");
-        JSONObject rootfsState = readJsonFile(new File(p.coreLinuxDir, "runtime/rootfs-state.json"));
-        p.rootfsReady = rootfsMarker.exists() || rootfsState.optBoolean("rootfsReady", false);
+        JSONObject runnerPreflight = CoreLinuxRunnerPreflightManager.preflight(this, p.coreLinuxDir, "bedrock_service_start");
+        p.rootfsReady = runnerPreflight.optBoolean("rootfsRealValidated", false);
         p.eulaAccepted = eulaAccepted(p.eula);
         p.bedrockDir.mkdirs();
         p.runtimeDir.mkdirs();
         new File(p.bedrockDir, "logs").mkdirs();
         if (!p.properties.exists()) p.blockers.put("server.properties ausente");
-        // Confirmação de termos permanece interna ao start real futuro e não aparece como bloqueio visível.
+        if (!p.eulaAccepted) p.blockers.put("EULA não aceita; revise os termos e grave eula=true");
         if (!p.server.exists()) p.blockers.put("bedrock_server não instalado");
         if (p.nativeExecutor == null) p.blockers.put("executor interno pendente");
-        if (!p.rootfsReady) p.blockers.put("rootfs pendente");
+        if (!p.rootfsReady) p.blockers.put("rootfs glibc real não validado");
+        if (!runnerPreflight.optBoolean("runnerExecutionAllowed", false)) p.blockers.put("runner allowlist ainda não liberado");
         if (p.box64 == null || !p.box64.exists()) p.blockers.put("Box64 pendente");
         if (p.box64InWritableHome && Build.VERSION.SDK_INT >= 29) p.blockers.put("Box64 em diretório gravável bloqueado pelo Android");
         if (p.box64 != null && p.box64.exists() && !p.box64.canExecute()) p.box64.setExecutable(true, true);
@@ -527,35 +527,9 @@ public class CoreWorkerBedrockService extends Service {
     }
 
     private void reportHeartbeat(String reason) {
-        new Thread(() -> {
-            String serverUrl = normalizedServerUrl();
-            if (serverUrl.isEmpty()) return;
-            try {
-                JSONObject payload = new JSONObject();
-                payload.put("platform", "android");
-                payload.put("source", "core-worker-apk-bedrock-service");
-                payload.put("state", "bedrock_runtime_service");
-                payload.put("reason", reason == null ? "bedrock_service" : reason);
-                payload.put("appVersion", BuildConfig.VERSION_NAME);
-                payload.put("appVersionCode", BuildConfig.VERSION_CODE);
-                payload.put("versionName", BuildConfig.VERSION_NAME);
-                payload.put("versionCode", BuildConfig.VERSION_CODE);
-                payload.put("workerId", prefs().getString("worker_id", ""));
-                payload.put("installId", installId());
-                payload.put("deviceName", prefs().getString("device_name", ""));
-                payload.put("runtime_mode", "apk-bedrock-runner-foreground-runtime");
-                payload.put("jobsRuntime", "bedrock-foreground-runner");
-                JSONObject status = new JSONObject();
-                status.put("bedrock_runtime_service_active", active);
-                status.put("bedrock_runner_active", runnerActive);
-                status.put("bedrock_server_mode", "foreground-runner-preflight");
-                status.put("notification_permission", hasNotificationPermission() ? "granted" : "missing");
-                status.put("termux_required_now", false);
-                payload.put("status", status);
-                request("POST", serverUrl + "/core-worker/app/heartbeat", payload);
-            } catch (Throwable ignored) {
-            }
-        }, "core-worker-bedrock-heartbeat").start();
+        String trigger = reason == null ? "bedrock_service" : reason;
+        CoreWorkerRuntimeService.requestStart(this, trigger);
+        CoreWorkerRuntimeService.requestPoll(this, trigger);
     }
 
     private boolean hasNotificationPermission() {
@@ -566,40 +540,11 @@ public class CoreWorkerBedrockService extends Service {
         return getSharedPreferences(PREFS, MODE_PRIVATE);
     }
 
-    private String installId() {
-        String id = prefs().getString("install_id", "");
-        if (id == null || id.trim().isEmpty()) {
-            id = UUID.randomUUID().toString();
-            prefs().edit().putString("install_id", id).apply();
-        }
-        return id;
-    }
 
-    private static String normalizedServerUrl() {
-        String url = BuildConfig.CORE_WORKER_VPS_URL == null ? "" : BuildConfig.CORE_WORKER_VPS_URL.trim();
-        return url.replaceAll("/+$", "");
-    }
 
-    private HttpResult request(String method, String url, JSONObject payload) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestMethod(method);
-        conn.setConnectTimeout(7000);
-        conn.setReadTimeout(9000);
-        conn.setRequestProperty("Accept", "application/json");
-        if (payload != null) {
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            OutputStream output = conn.getOutputStream();
-            output.write(payload.toString().getBytes(StandardCharsets.UTF_8));
-            output.flush();
-            output.close();
-        }
-        int status = conn.getResponseCode();
-        InputStream input = status >= 200 && status < 400 ? conn.getInputStream() : conn.getErrorStream();
-        String body = readAll(input);
-        conn.disconnect();
-        return new HttpResult(status, body == null ? "" : body);
-    }
+
+
+
 
     private String readAll(InputStream input) throws Exception {
         if (input == null) return "";
@@ -629,14 +574,7 @@ public class CoreWorkerBedrockService extends Service {
         return exc.getClass().getSimpleName() + (msg == null || msg.isEmpty() ? "" : ": " + sanitize(msg, 180));
     }
 
-    private static final class HttpResult {
-        final int status;
-        final String body;
-        HttpResult(int status, String body) {
-            this.status = status;
-            this.body = body;
-        }
-    }
+
 
     private static final class Preflight {
         File coreLinuxDir;

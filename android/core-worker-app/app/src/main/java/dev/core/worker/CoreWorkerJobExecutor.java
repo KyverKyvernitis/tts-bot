@@ -699,31 +699,90 @@ final class CoreWorkerJobExecutor {
         JSONObject smoke = readJson(new File(runtimeDir, "core-linux-smoke-test.json"));
         JSONObject rootfsImport = readJson(new File(runtimeDir, "rootfs-import-state.json"));
         JSONObject runner = readJson(new File(runtimeDir, "runner-preflight-state.json"));
-        String rawState = firstNonEmpty(rootfs.optString("state", ""), rootfsImport.optString("state", ""), runtime.optString("state", ""), smoke.optString("state", ""));
-        String level = firstNonEmpty(rootfs.optString("validationLevel", ""), rootfs.optString("rootfsValidationLevel", ""), rootfsImport.optString("validationLevel", ""));
-        boolean realValidated = rawState.toLowerCase(Locale.ROOT).contains("rootfs_real_validated") || "real".equalsIgnoreCase(level);
-        boolean prepared = realValidated || runtime.optBoolean("ok", false) || runtime.optBoolean("rootfsReady", false)
-                || rootfs.optBoolean("rootfsReady", false) || smoke.optBoolean("ok", false);
-        String summary = firstNonEmpty(rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), runtime.optString("summary", ""), smoke.optString("summary", ""), prepared ? "Core Linux Runtime v1 pronto" : "Core Linux Runtime v1 aguardando preparo");
-        String state = firstNonEmpty(rawState, prepared ? "runtime_v1_ready" : "runtime_v1_pending");
-        if (realValidated) {
+
+        JSONObject importAction = rootfsImport.optJSONObject("import");
+        JSONObject importValidation = importAction == null ? null : importAction.optJSONObject("validation");
+        if (importValidation == null) importValidation = rootfsImport.optJSONObject("validation");
+        JSONObject rootfsValidation = rootfs.optJSONObject("validation");
+        String importState = firstNonEmpty(
+                importAction == null ? "" : importAction.optString("state", ""),
+                rootfsImport.optString("state", "")
+        );
+        String rootfsState = rootfs.optString("state", "");
+        String level = firstNonEmpty(
+                importValidation == null ? "" : importValidation.optString("validationLevel", ""),
+                rootfsValidation == null ? "" : rootfsValidation.optString("validationLevel", ""),
+                rootfs.optString("validationLevel", ""), rootfs.optString("rootfsValidationLevel", ""),
+                rootfsImport.optString("validationLevel", "")
+        );
+        boolean strictKnown = "real".equalsIgnoreCase(level)
+                || importState.toLowerCase(Locale.ROOT).contains("glibc")
+                || importState.toLowerCase(Locale.ROOT).contains("rootfs_real")
+                || (importValidation != null && importValidation.has("glibcRuntime"));
+        boolean strictFailure = strictKnown && (
+                importState.toLowerCase(Locale.ROOT).contains("failed")
+                        || importState.toLowerCase(Locale.ROOT).contains("invalid")
+                        || (importValidation != null && !importValidation.optBoolean("ok", false))
+        );
+        boolean strictSuccess = strictKnown && !strictFailure
+                && importValidation != null && importValidation.optBoolean("ok", false)
+                && (importValidation.optJSONObject("glibcRuntime") == null
+                    || importValidation.optJSONObject("glibcRuntime").optBoolean("ok", false));
+        boolean legacyRealSuccess = !strictKnown
+                && (rootfsState.toLowerCase(Locale.ROOT).contains("rootfs_real_validated")
+                    || ("real".equalsIgnoreCase(level)
+                        && rootfsValidation != null
+                        && rootfsValidation.optBoolean("ok", false)));
+        boolean realValidated = !strictFailure && (strictSuccess || legacyRealSuccess);
+        boolean runnerReady = realValidated && runner.optBoolean("runnerReady", false)
+                && runner.optBoolean("runnerRequirementsReady", false);
+        boolean runnerExecutionAllowed = runnerReady && runner.optBoolean("runnerExecutionAllowed", false);
+        boolean bedrockStartAllowed = runnerExecutionAllowed && runner.optBoolean("bedrockRequirementsReady", false);
+
+        String state;
+        String summary;
+        if (strictFailure) {
+            state = firstNonEmpty(importState, "rootfs_real_validation_failed");
+            summary = firstNonEmpty(
+                    importAction == null ? "" : importAction.optString("summary", ""),
+                    rootfsImport.optString("summary", ""),
+                    importValidation == null ? "" : importValidation.optString("summary", ""),
+                    "Rootfs real reprovado na validação glibc"
+            );
+        } else if (realValidated) {
             state = "rootfs_real_validated";
-            summary = firstNonEmpty(rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), "Rootfs real validado · runner real ainda bloqueado");
+            summary = firstNonEmpty(rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), "Rootfs real validado");
+        } else {
+            state = firstNonEmpty(importState, rootfsState, runtime.optString("state", ""), smoke.optString("state", ""), "runtime_v1_pending");
+            summary = firstNonEmpty(rootfsImport.optString("summary", ""), rootfs.optString("summary", ""), runtime.optString("summary", ""), "Core Linux aguardando rootfs real com glibc arm64");
         }
+
+        JSONArray missing = strictFailure && importValidation != null
+                ? importValidation.optJSONArray("missing")
+                : runner.optJSONArray("missing");
+        if (missing == null) missing = new JSONArray();
+
         JSONObject out = new JSONObject();
         out.put("summary", summary);
         out.put("state", state);
-        out.put("prepared", prepared);
-        out.put("rootfsReady", realValidated || runtime.optBoolean("rootfsReady", rootfs.optBoolean("rootfsReady", false)) || smoke.optBoolean("ok", false));
-        out.put("executorReady", runtime.optBoolean("executorReady", false));
-        out.put("lastCheckAt", Math.max(Math.max(runtime.optLong("updatedAt", 0L), runner.optLong("updatedAt", 0L)), Math.max(rootfs.optLong("updatedAt", 0L), smoke.optLong("updatedAt", 0L))));
+        out.put("prepared", realValidated);
+        out.put("rootfsReady", realValidated);
+        out.put("executorReady", runnerExecutionAllowed);
+        out.put("lastCheckAt", Math.max(Math.max(runtime.optLong("updatedAt", 0L), runner.optLong("updatedAt", 0L)), Math.max(rootfs.optLong("updatedAt", 0L), rootfsImport.optLong("updatedAt", 0L))));
         out.put("termuxRequired", false);
-        out.put("bedrockStartAllowed", false);
-        out.put("rootfsValidationLevel", realValidated ? "real" : rootfs.optString("validationLevel", ""));
-        out.put("rootfsDistributionReady", realValidated || rootfs.optBoolean("distributionReady", false));
-        out.put("rootfsState", rootfs.optString("state", state));
-        out.put("rootfsSummary", rootfs.optString("summary", summary));
-        out.put("rootfsImportState", rootfsImport.optString("state", ""));
+        out.put("termuxReplaced", true);
+        out.put("bedrockStartAllowed", bedrockStartAllowed);
+        out.put("rootfsValidationLevel", strictKnown ? "real" : level);
+        out.put("rootfsDistributionReady", realValidated);
+        out.put("readyForBox64Install", realValidated);
+        out.put("readyForBox64Smoke", realValidated && runnerReady);
+        out.put("readyForBedrockStart", bedrockStartAllowed);
+        out.put("strictValidationKnown", strictKnown);
+        out.put("strictValidationFailed", strictFailure);
+        out.put("missing", missing);
+        out.put("rootfsState", state);
+        out.put("rootfsSummary", summary);
+        out.put("rootfsImportState", importState);
         out.put("rootfsImportSummary", rootfsImport.optString("summary", ""));
         if (runner.length() > 0) out.put("runnerPreflight", runner);
         out.put("supportedTasks", CoreWorkerJobCatalog.supportedJobs());

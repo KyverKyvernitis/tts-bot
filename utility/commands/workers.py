@@ -29,6 +29,8 @@ from utility.interaction_safety import (
 
 logger = logging.getLogger(__name__)
 
+CORE_WORKER_APK_REPLACES_TERMUX = str(os.getenv("CORE_WORKER_APK_REPLACES_TERMUX", "true") or "true").strip().lower() not in {"0", "false", "no", "off"}
+
 WORKERS_COMMAND_GUILD_ID = 927002914449424404
 WORKERS_COMMAND_GUILD = discord.Object(id=WORKERS_COMMAND_GUILD_ID)
 WORKERS_PANEL_TIMEOUT_SECONDS = 180.0
@@ -54,7 +56,6 @@ CORE_WORKER_IMPORTANT_WAKE_ROLES = {
     "ffmpeg",
     "ffprobe",
     "tts-convert",
-    "apk-builder",
     "vps-assist",
     "cache-worker",
     "service-control",
@@ -68,8 +69,6 @@ CORE_WORKER_IMPORTANT_WAKE_TASKS = {
     "zip_audit",
     "zip_validate",
     "maintenance_plan",
-    "apk_build_debug",
-    "apk_publish_last",
     "vps_assist_probe",
     "endpoint_probe",
     "service_status",
@@ -81,17 +80,16 @@ CORE_WORKER_IMPORTANT_WAKE_TASKS = {
 }
 
 WORKER_ROLE_PROFILES: dict[str, tuple[str, ...]] = {
-    "leve": ("phone-worker", "diagnostics", "log-summary"),
-    "midia": ("phone-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
-    "completo": ("phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
-    "builder": ("phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "apk-builder", "vps-assist", "cache-worker"),
-    "turbo": ("phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "apk-builder", "vps-assist", "cache-worker"),
+    "leve": ("apk-worker", "diagnostics", "log-summary"),
+    "midia": ("apk-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
+    "completo": ("apk-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
+    "turbo": ("apk-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "vps-assist", "cache-worker"),
     # Futuro: usar só quando o worker realmente tiver servidor Bedrock configurado.
-    "bedrock": ("phone-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup"),
+    "bedrock": ("apk-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup"),
 }
 
 WORKER_ROLE_LABELS: dict[str, str] = {
-    "phone-worker": "Base do worker",
+    "apk-worker": "Core Worker APK",
     "diagnostics": "Diagnósticos",
     "log-summary": "Resumo de logs",
     "maintenance-plan": "Plano de manutenção",
@@ -102,7 +100,6 @@ WORKER_ROLE_LABELS: dict[str, str] = {
     "bedrock": "Minecraft Bedrock",
     "bedrock-logs": "Logs Bedrock",
     "bedrock-backup": "Backup Bedrock",
-    "apk-builder": "Compilar APK",
     "vps-assist": "Ajudar VPS",
     "cache-worker": "Cache auxiliar",
     "hash-worker": "Hashes",
@@ -120,26 +117,22 @@ WORKER_ROLE_PROFILE_DESCRIPTIONS: dict[str, str] = {
     "leve": "economia, diagnósticos e logs",
     "midia": "perfil normal recomendado",
     "completo": "tarefas extras e manutenção segura",
-    "builder": "compilar APK no phone worker",
     "turbo": "máximo desempenho para acelerar a VPS",
     "bedrock": "Minecraft Bedrock futuro",
 }
 
 WORKER_EDITABLE_FEATURES: tuple[dict[str, Any], ...] = (
-    {"value": "phone-worker", "label": "Base", "description": "Obrigatório para qualquer celular", "emoji": "📱", "roles": ("phone-worker",), "capabilities": ("phone-worker",), "tasks": ("ping", "status")},
+    {"value": "apk-worker", "label": "Base APK", "description": "Runtime direto sem Termux", "emoji": "📱", "roles": ("apk-worker",), "capabilities": ("apk-worker",), "tasks": ("ping", "status")},
     {"value": "diagnostics", "label": "Diagnóstico", "description": "Saúde e checks básicos", "emoji": "🩺", "roles": ("diagnostics",), "capabilities": ("diagnostics",), "tasks": ("diagnostic_basic", "worker_self_check")},
     {"value": "log-summary", "label": "Logs", "description": "Resumo e leitura de logs", "emoji": "🧾", "roles": ("log-summary",), "capabilities": ("log-summary", "worker-logs"), "tasks": ("log_summary", "log_digest", "worker_logs", "text_stats")},
     {"value": "maintenance-plan", "label": "Manutenção", "description": "Plano seguro de limpeza/cache", "emoji": "🧹", "roles": ("maintenance-plan",), "capabilities": ("maintenance-plan", "cache-worker"), "tasks": ("maintenance_plan",)},
     {"value": "zip-validate", "label": "ZIP / patch", "description": "Validar e auditar ZIP", "emoji": "🧪", "roles": ("zip-validate",), "capabilities": ("zip-validate",), "tasks": ("zip_validate", "zip_audit")},
-    {"value": "apk-builder", "label": "APK builder", "description": "Compilar/publicar APK fora da VPS", "emoji": "🏗️", "roles": ("apk-builder",), "capabilities": ("apk-builder",), "tasks": ("apk_build_debug", "apk_publish_last")},
     {"value": "vps-assist", "label": "Ajudar VPS", "description": "Offload seguro quando disponível", "emoji": "🧠", "roles": ("vps-assist",), "capabilities": ("vps-assist", "hash-worker", "endpoint-probe"), "tasks": ("vps_assist_probe", "hash_batch", "endpoint_probe")},
     {"value": "ffmpeg", "label": "FFmpeg", "description": "Conversão de áudio curta", "emoji": "🎚️", "roles": ("ffmpeg",), "capabilities": ("ffmpeg", "audio-convert"), "tasks": ("ffmpeg_check", "audio_convert")},
     {"value": "ffprobe", "label": "FFprobe", "description": "Analisar mídia", "emoji": "🔎", "roles": ("ffprobe",), "capabilities": ("ffprobe", "media-probe"), "tasks": ("ffprobe_check", "media_probe")},
     {"value": "tts-convert", "label": "TTS/cache", "description": "Preparar áudio para TTS", "emoji": "🔊", "roles": ("tts-convert",), "capabilities": ("tts-convert", "audio-convert"), "tasks": ("audio_convert",)},
     {"value": "network-probe", "label": "Rede", "description": "Teste de rede/endpoint", "emoji": "📡", "roles": (), "capabilities": ("network-probe", "endpoint-probe"), "tasks": ("network_probe", "endpoint_probe")},
     {"value": "tailscale-status", "label": "Tailscale", "description": "Status da rede privada", "emoji": "🌐", "roles": (), "capabilities": ("tailscale-status",), "tasks": ("tailscale_status",)},
-    {"value": "service-control", "label": "Serviços", "description": "Start/stop/restart permitidos", "emoji": "🧰", "roles": (), "capabilities": ("service-control",), "tasks": ("service_status", "service_start", "service_stop", "service_restart")},
-    {"value": "boot-repair", "label": "Boot", "description": "Termux:Boot / auto-start", "emoji": "🚀", "roles": (), "capabilities": ("boot-repair",), "tasks": ("boot_status", "boot_repair")},
     {"value": "bedrock", "label": "Bedrock", "description": "Minecraft Bedrock futuro", "emoji": "🧱", "roles": ("bedrock", "bedrock-logs", "bedrock-backup"), "capabilities": ("bedrock", "bedrock-logs", "bedrock-backup"), "tasks": ()},
 )
 
@@ -163,14 +156,23 @@ WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
     {"label": "Plano de limpeza", "value": "vps_maintenance_plan", "job_type": "maintenance_plan", "payload": {"source": "vps_scan_auto"}, "summary": "planejar limpeza/caches com worker", "description": "Sugestão segura", "emoji": "🧹", "requires_declared": True, "category": "assist"},
     {"label": "Testar VPS pelo celular", "value": "endpoint_probe", "job_type": "endpoint_probe", "payload": {"targets": ["auto"]}, "summary": "testar endpoints da VPS a partir do worker", "description": "Ping HTTP real", "emoji": "📡", "requires_declared": True, "category": "assist"},
     {"label": "Reparar boot automático", "value": "boot_repair", "job_type": "boot_repair", "payload": {}, "summary": "reparar inicialização automática no Termux:Boot", "description": "Auto-start pós-reboot", "emoji": "🚀", "requires_declared": True, "category": "maintenance"},
-    {"label": "Status boot", "value": "boot_status", "job_type": "boot_status", "payload": {}, "summary": "verificar inicialização automática", "description": "Termux:Boot", "emoji": "🔎", "requires_declared": True, "category": "monitor"},
-    {"label": "Logs", "value": "worker_logs", "job_type": "worker_logs", "payload": {"lines": 140}, "summary": "logs recentes do phone-worker", "description": "Mostra logs recentes", "emoji": "📜", "category": "quick"},
+    {"label": "Status boot", "value": "boot_status", "job_type": "boot_status", "payload": {}, "summary": "verificar inicialização automática", "description": "BootReceiver do APK", "emoji": "🔎", "requires_declared": True, "category": "monitor"},
+    {"label": "Logs", "value": "worker_logs", "job_type": "worker_logs", "payload": {"lines": 140}, "summary": "logs recentes do Core Worker APK", "description": "Mostra logs recentes", "emoji": "📜", "category": "quick"},
     {"label": "Tailscale", "value": "tailscale_status", "job_type": "tailscale_status", "payload": {}, "summary": "status Tailscale e alcance da VPS", "description": "Rede privada/VPS", "emoji": "🌐", "category": "monitor"},
-    {"label": "Status serviços", "value": "service_status", "job_type": "service_status", "payload": {"service": "phone-worker"}, "summary": "status de serviços do celular", "description": "Serviços permitidos", "emoji": "🧰", "category": "monitor"},
+    {"label": "Status serviços", "value": "service_status", "job_type": "service_status", "payload": {"service": "core-worker-apk"}, "summary": "status do serviço do APK", "description": "Serviços permitidos", "emoji": "🧰", "category": "monitor"},
     {"label": "Iniciar watchdog", "value": "service_start_watch", "job_type": "service_start", "payload": {"service": "phone-worker-watch"}, "summary": "iniciar watchdog do phone-worker", "description": "Inicia watchdog", "emoji": "▶️", "category": "maintenance"},
     {"label": "Parar watchdog", "value": "service_stop_watch", "job_type": "service_stop", "payload": {"service": "phone-worker-watch"}, "summary": "parar watchdog do phone-worker", "description": "Para watchdog", "emoji": "⏹️", "category": "maintenance"},
     {"label": "Reiniciar worker", "value": "service_restart_worker", "job_type": "service_restart", "payload": {"service": "phone-worker"}, "summary": "reiniciar phone-worker no celular", "description": "Reinicia agent", "emoji": "🔁", "category": "maintenance"},
     {"label": "Parar worker", "value": "service_stop_worker", "job_type": "service_stop", "payload": {"service": "phone-worker"}, "summary": "parar phone-worker no celular", "description": "Para agent", "emoji": "🛑", "category": "maintenance"},
+ )
+
+_DISABLED_LEGACY_WORKER_ACTIONS = {
+    "worker_update", "apk_build_debug", "apk_publish_last", "boot_repair",
+    "service_start", "service_stop", "service_restart",
+}
+WORKER_ACTION_SPECS = tuple(
+    spec for spec in WORKER_ACTION_SPECS
+    if str(spec.get("job_type") or "") not in _DISABLED_LEGACY_WORKER_ACTIONS
 )
 
 
@@ -194,13 +196,7 @@ WORKER_PANEL_ACTION_ORDER: tuple[str, ...] = (
     "worker_self_check",
     "_apk_internal_test",
     "worker_logs",
-    "worker_update_quick",
-    "apk_build_debug_quick",
-    "apk_publish_last_quick",
-    "tailscale_status",
-    "boot_status",
-    "boot_repair",
-    "service_restart_worker",
+    "endpoint_probe",
     "_show_last_result",
     "_rename_worker",
     "_pause_worker",
@@ -403,10 +399,7 @@ def _normalize_worker_profile(value: object, *, default: str = "midia") -> str:
         "completo": "completo",
         "complete": "completo",
         "full": "completo",
-        "builder": "builder",
-        "build": "builder",
-        "apk-builder": "builder",
-        "turbo": "turbo",
+                "turbo": "turbo",
         "max": "turbo",
         "rapido": "turbo",
         "rápido": "turbo",
@@ -439,7 +432,6 @@ def _worker_profile_label(worker: dict[str, Any] | None) -> str:
         "leve": "Leve",
         "midia": "Normal",
         "completo": "Completo",
-        "builder": "Builder",
         "turbo": "Turbo",
         "bedrock": "Bedrock",
     }
@@ -1014,59 +1006,33 @@ def _queue_core_worker_app_internal_runtime_test(worker_id: str) -> dict[str, An
     worker_id = str(worker_id or "").strip()
     if not worker_id:
         return {"ok": False, "error": "worker não selecionado"}
-    hb = _core_worker_app_runtime_record(worker_id) or {}
-    install_id = str(hb.get("installId") or "").strip()
-    path = _repo_root() / "data" / "core_worker_app_jobs.json"
-    now = int(time.time())
-    try:
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except Exception:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    pending = data.get("pending") if isinstance(data.get("pending"), list) else []
-    running = data.get("runningByJobId") if isinstance(data.get("runningByJobId"), dict) else {}
-    def matches(item: dict[str, Any]) -> bool:
-        if not isinstance(item, dict):
-            return False
-        item_worker = str(item.get("workerId") or "")
-        item_install = str(item.get("installId") or "")
-        return (worker_id and item_worker == worker_id) or (install_id and item_install == install_id)
-    existing = {_core_worker_app_normalize_job_type(j.get("type")) for j in pending if isinstance(j, dict) and matches(j)}
-    existing.update({_core_worker_app_normalize_job_type(j.get("type")) for j in running.values() if isinstance(j, dict) and matches(j)})
+    registry = get_core_workers_registry()
     created: list[str] = []
+    errors: list[str] = []
     for typ in sorted(CORE_WORKER_APP_AUTO_JOB_TYPES):
-        if typ in existing:
-            continue
-        job_id = f"manual-{typ.replace('_', '-')}-{(install_id or worker_id)[:16]}-{now}-{len(created)}"
-        pending.append({
-            "id": job_id,
-            "type": typ,
-            "jobClass": "automatic",
-            "reason": "manual-runtime-test",
-            "issuedAt": now,
-            "title": CORE_WORKER_APP_JOB_LABELS.get(typ, typ),
-            "status": "pending",
-            "timeoutSec": 45,
-            "maxRetries": 1,
-            "installId": install_id,
-            "workerId": worker_id,
-        })
-        created.append(typ)
-    data["pending"] = pending[-160:]
-    data["runningByJobId"] = running
-    data["jobCatalog"] = {"automatic": sorted(CORE_WORKER_APP_AUTO_JOB_TYPES), "manual": sorted(CORE_WORKER_APP_MANUAL_JOB_TYPES), "aliases": CORE_WORKER_APP_JOB_ALIASES, "labels": CORE_WORKER_APP_JOB_LABELS}
-    data["updatedAt"] = now
-    data["ok"] = True
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
-    with contextlib.suppress(Exception):
-        path.chmod(0o600)
-    return {"ok": True, "created": len(created), "createdTypes": created, "workerId": worker_id, "installId": install_id}
-
-
+        try:
+            result = registry.create_job(
+                job_type=typ,
+                payload={"reason": "manual-runtime-test", "source": "workers-panel"},
+                target_worker_id=worker_id,
+                ttl_seconds=1800,
+                lease_seconds=180,
+                max_attempts=2,
+                summary=CORE_WORKER_APP_JOB_LABELS.get(typ, typ),
+            )
+            job = result.get("job") if isinstance(result, dict) else {}
+            if isinstance(job, dict) and job.get("job_id"):
+                created.append(typ)
+        except Exception as exc:
+            errors.append(f"{typ}: {type(exc).__name__}: {exc}")
+    return {
+        "ok": bool(created) and not errors,
+        "created": len(created),
+        "createdTypes": created,
+        "errors": errors[:5],
+        "workerId": worker_id,
+        "protocol": "core-worker-registry-v1",
+    }
 
 
 def _queue_core_worker_app_manual_job(worker_id: str, job_type: str, *, payload: dict[str, Any] | None = None, reason: str = "manual-apk-command") -> dict[str, Any]:
@@ -1076,61 +1042,29 @@ def _queue_core_worker_app_manual_job(worker_id: str, job_type: str, *, payload:
         return {"ok": False, "error": "worker não selecionado"}
     if job_type not in CORE_WORKER_APP_MANUAL_JOB_TYPES and job_type not in CORE_WORKER_APP_AUTO_JOB_TYPES:
         return {"ok": False, "error": f"job APK não permitido: {job_type}"}
-    hb = _core_worker_app_runtime_record(worker_id) or {}
-    install_id = str(hb.get("installId") or "").strip()
-    path = _repo_root() / "data" / "core_worker_app_jobs.json"
-    now = int(time.time())
     try:
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except Exception:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    pending = data.get("pending") if isinstance(data.get("pending"), list) else []
-    running = data.get("runningByJobId") if isinstance(data.get("runningByJobId"), dict) else {}
+        result = get_core_workers_registry().create_job(
+            job_type=job_type,
+            payload=dict(payload or {}),
+            target_worker_id=worker_id,
+            ttl_seconds=1800,
+            lease_seconds=180,
+            max_attempts=2,
+            summary=CORE_WORKER_APP_JOB_LABELS.get(job_type, job_type),
+        )
+        job = result.get("job") if isinstance(result, dict) else {}
+        return {
+            "ok": True,
+            "created": 1,
+            "type": job_type,
+            "workerId": worker_id,
+            "jobId": str((job or {}).get("job_id") or ""),
+            "protocol": "core-worker-registry-v1",
+            "reason": reason,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "type": job_type, "workerId": worker_id}
 
-    def matches(item: dict[str, Any]) -> bool:
-        if not isinstance(item, dict):
-            return False
-        item_worker = str(item.get("workerId") or "")
-        item_install = str(item.get("installId") or "")
-        return (worker_id and item_worker == worker_id) or (install_id and item_install == install_id)
-
-    for item in pending:
-        if isinstance(item, dict) and matches(item) and _core_worker_app_normalize_job_type(item.get("type")) == job_type:
-            return {"ok": True, "created": 0, "alreadyPending": True, "type": job_type, "workerId": worker_id, "installId": install_id}
-    for item in running.values():
-        if isinstance(item, dict) and matches(item) and _core_worker_app_normalize_job_type(item.get("type")) == job_type:
-            return {"ok": True, "created": 0, "alreadyRunning": True, "type": job_type, "workerId": worker_id, "installId": install_id}
-
-    clean_payload = dict(payload or {})
-    job_id = f"manual-{job_type.replace('_', '-')}-{(install_id or worker_id)[:16]}-{now}"
-    pending.append({
-        "id": job_id,
-        "type": job_type,
-        "jobClass": "manual" if job_type in CORE_WORKER_APP_MANUAL_JOB_TYPES else "automatic",
-        "reason": reason,
-        "issuedAt": now,
-        "title": CORE_WORKER_APP_JOB_LABELS.get(job_type, job_type),
-        "status": "pending",
-        "timeoutSec": 60,
-        "maxRetries": 1,
-        "installId": install_id,
-        "workerId": worker_id,
-        "payload": clean_payload,
-    })
-    data["pending"] = pending[-160:]
-    data["runningByJobId"] = running
-    data["jobCatalog"] = {"automatic": sorted(CORE_WORKER_APP_AUTO_JOB_TYPES), "manual": sorted(CORE_WORKER_APP_MANUAL_JOB_TYPES), "aliases": CORE_WORKER_APP_JOB_ALIASES, "labels": CORE_WORKER_APP_JOB_LABELS}
-    data["updatedAt"] = now
-    data["ok"] = True
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
-    with contextlib.suppress(Exception):
-        path.chmod(0o600)
-    return {"ok": True, "created": 1, "type": job_type, "workerId": worker_id, "installId": install_id}
 
 def _core_worker_app_jobs_text(worker_id: str) -> str:
     worker_id = str(worker_id or "").strip()
@@ -1298,16 +1232,14 @@ def _core_worker_app_runtime_text(worker_id: str) -> str:
     return " · ".join(str(x) for x in parts if x)
 
 def _profile_feature_values(profile: str) -> set[str]:
-    values: set[str] = {"phone-worker"}
+    values: set[str] = {"apk-worker"}
     roles = set(WORKER_ROLE_PROFILES.get(profile, WORKER_ROLE_PROFILES.get("midia", ())))
     for value, feature in _FEATURE_BY_VALUE.items():
         feature_roles = set(str(x) for x in feature.get("roles") or ())
         feature_caps = set(str(x) for x in feature.get("capabilities") or ())
-        if value == "phone-worker" or value in roles or roles.intersection(feature_roles | feature_caps):
+        if value == "apk-worker" or value in roles or roles.intersection(feature_roles | feature_caps):
             values.add(value)
-    if profile == "builder":
-        values.update({"apk-builder", "maintenance-plan", "zip-validate", "vps-assist", "log-summary", "diagnostics"})
-    elif profile == "turbo":
+    if profile == "turbo":
         values.update(str(item["value"]) for item in WORKER_EDITABLE_FEATURES if str(item.get("value")) != "bedrock")
     return values
 
@@ -1316,7 +1248,7 @@ def _feature_values_from_worker(worker: dict[str, Any]) -> set[str]:
     raw_roles = [str(x) for x in (worker.get("roles") or []) if x]
     raw_caps = [str(x) for x in (worker.get("capabilities") or []) if x]
     all_tokens = set(_unique_ordered(raw_roles + raw_caps))
-    values: set[str] = {"phone-worker"}
+    values: set[str] = {"apk-worker"}
     for value, feature in _FEATURE_BY_VALUE.items():
         tokens = {value}
         tokens.update(str(x) for x in feature.get("roles") or ())
@@ -1329,7 +1261,7 @@ def _feature_values_from_worker(worker: dict[str, Any]) -> set[str]:
 
 def _roles_caps_tasks_for_features(values: set[str], *, profile: str = "manter") -> tuple[list[str], list[str], list[str]]:
     selected = set(values or set())
-    selected.add("phone-worker")
+    selected.add("apk-worker")
     roles: list[str] = []
     caps: list[str] = []
     tasks: list[str] = []
@@ -1351,7 +1283,7 @@ def _roles_caps_tasks_for_features(values: set[str], *, profile: str = "manter")
         clean = _task_name(item)
         if clean and clean not in tasks_normalized:
             tasks_normalized.append(clean[:48])
-    return roles, caps, tasks_normalized[:64]
+    return roles, caps, tasks_normalized[:96]
 
 def _host_label(host: str) -> str:
     host = str(host or "").strip()
@@ -2564,7 +2496,6 @@ class WorkerRolesEditorView(discord.ui.LayoutView):
             discord.SelectOption(label="Leve", value="leve", description="Reserva, diagnóstico e logs", emoji="🍃", default=self.profile == "leve"),
             discord.SelectOption(label="Normal", value="midia", description="Perfil recomendado", emoji="🎧", default=self.profile == "midia"),
             discord.SelectOption(label="Completo", value="completo", description="Mídia + manutenção", emoji="🧰", default=self.profile == "completo"),
-            discord.SelectOption(label="Builder", value="builder", description="APK + ZIP + manutenção segura", emoji="🏗️", default=self.profile == "builder"),
             discord.SelectOption(label="Turbo", value="turbo", description="Ajuda máxima para acelerar a VPS", emoji="⚡", default=self.profile == "turbo"),
             discord.SelectOption(label="Bedrock", value="bedrock", description="Minecraft Bedrock futuro", emoji="🧱", default=self.profile == "bedrock"),
         ]
@@ -2654,7 +2585,7 @@ class WorkerRolesEditorView(discord.ui.LayoutView):
             with contextlib.suppress(Exception):
                 values = list(getattr(interaction, "values", []) or [])
         self.selected_features = {str(value) for value in values if str(value) in _FEATURE_BY_VALUE}
-        self.selected_features.add("phone-worker")
+        self.selected_features.add("apk-worker")
         self._rebuild()
         await interaction.response.edit_message(view=self, allowed_mentions=discord.AllowedMentions.none())
 
@@ -2790,8 +2721,8 @@ class WorkersPanelView(discord.ui.LayoutView):
         return workers
 
     def _has_legacy_worker(self) -> bool:
-        # O phone-worker direto é só fallback. Quando há worker registrado online,
-        # o painel deve focar no registry para evitar duplicidade visual.
+        if CORE_WORKER_APK_REPLACES_TERMUX:
+            return False
         return bool(self.snapshot.configured and self.snapshot.online and not _has_online_registry_worker(self.snapshot))
 
     def _worker_choices_exist(self) -> bool:
@@ -2938,7 +2869,7 @@ class WorkersPanelView(discord.ui.LayoutView):
                 {"label": "Limpar histórico", "value": "_apk_reset_job_history", "description": "Histórico local de jobs", "emoji": "🧾", "panel_action": "apk_reset_job_history", "category": "apk", "apk_job_type": "apk_reset_job_history"},
                 {"label": "Limpar cache APK", "value": "_apk_trim_cache", "description": "Cache interno pequeno", "emoji": "🧹", "panel_action": "apk_trim_cache", "category": "apk", "apk_job_type": "apk_trim_cache"},
                 {"label": "Limpar updates APK", "value": "_apk_update_storage_cleanup", "description": "Instaladores/staging antigos", "emoji": "🗑️", "panel_action": "apk_update_storage_cleanup", "category": "apk", "apk_job_type": "apk_update_storage_cleanup"},
-                {"label": "Sincronizar perfil", "value": "_apk_sync_profile_now", "description": "Perfil APK/Termux", "emoji": "👤", "panel_action": "apk_sync_profile_now", "category": "apk", "apk_job_type": "apk_sync_profile_now"},
+                {"label": "Sincronizar perfil", "value": "_apk_sync_profile_now", "description": "Perfil do APK", "emoji": "👤", "panel_action": "apk_sync_profile_now", "category": "apk", "apk_job_type": "apk_sync_profile_now"},
                 {"label": "Verificar update", "value": "_apk_verify_update_state", "description": "Manifesto/latest.json", "emoji": "⬆️", "panel_action": "apk_verify_update_state", "category": "apk", "apk_job_type": "apk_verify_update_state"},
                 {"label": "Worker nativo", "value": "_apk_native_worker_status", "description": "Heartbeat direto do APK", "emoji": "📡", "panel_action": "apk_native_worker_status", "category": "apk", "apk_job_type": "apk_native_worker_status"},
                 {"label": "Boot nativo", "value": "_apk_native_boot_status", "description": "Sem Termux:Boot", "emoji": "🚀", "panel_action": "apk_native_boot_status", "category": "apk", "apk_job_type": "apk_native_boot_status"},
@@ -3086,7 +3017,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         online = int((summary or {}).get('online') or 0)
         pairings = int((summary or {}).get('pairings_active') or 0)
         if registered <= 0:
-            workers_label = "phone-worker direto online" if snapshot.online else "nenhum celular pareado"
+            workers_label = "APK direto online" if snapshot.online else "nenhum celular pareado"
         else:
             workers_label = f"{online}/{registered} online"
         if pairings:
@@ -3139,7 +3070,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         refresh = discord.ui.Button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.primary)
         refresh.callback = self._refresh_panel
 
-        pairing = discord.ui.Button(label="Parear worker", emoji="🔐", style=discord.ButtonStyle.success)
+        pairing = discord.ui.Button(label="Adicionar celular", emoji="🔐", style=discord.ButtonStyle.success)
         pairing.callback = self._create_pairing
 
         wake = discord.ui.Button(
@@ -3167,7 +3098,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             components.append(discord.ui.ActionRow(refresh, pairing, cleanup_jobs))
         else:
             components.append(discord.ui.ActionRow(refresh, pairing, cleanup_jobs))
-        if not _snapshot_has_online_worker(snapshot):
+        if not CORE_WORKER_APK_REPLACES_TERMUX and not _snapshot_has_online_worker(snapshot):
             components.append(discord.ui.ActionRow(wake))
         container = discord.ui.Container(*components, accent_color=snapshot.accent)
         self.add_item(container)
@@ -3472,7 +3403,7 @@ class WorkersPanelView(discord.ui.LayoutView):
             )
             profile = discord.ui.TextInput(
                 label="Perfil",
-                placeholder="leve, midia, completo, builder ou bedrock",
+                placeholder="leve, midia, completo, turbo ou bedrock",
                 default="midia",
                 min_length=3,
                 max_length=16,
@@ -3497,19 +3428,18 @@ class WorkersPanelView(discord.ui.LayoutView):
             base_url = _public_base_url()
             default_name = _shorten(worker_name or "Core Worker 2", limit=48)
             default_profile = _normalize_worker_profile(profile)
-            bootstrap_cmd = f'cd ~/phone-worker && bash ./bootstrap-phone-worker.sh {code} {base_url} "{default_name}" {default_profile}'
-            pair_cmd = f'~/phone-worker/pair-phone-worker.sh {code} {base_url} "{default_name}" {default_profile}'
             profile_roles = ", ".join(_role_label(role) for role in WORKER_ROLE_PROFILES.get(default_profile, ()))
             msg = (
                 "## 🔐 Código para adicionar celular\n"
                 f"**Código:** `{code}` · expira em `{expires}`\n"
-                f"**Nome:** `{default_name}` · **perfil:** `{default_profile}`\n"
-                "-# Temporário via Termux. No APK Core Worker, isso vira um botão/QR.\n\n"
-                "**No Termux do celular novo, cole:**\n"
-                f"{_termux_command_block(bootstrap_cmd)}"
-                "Depois espere aparecer `pareado` e toque **Atualizar** no painel.\n\n"
+                f"**Nome:** `{default_name}` · **perfil:** `{default_profile}`\n\n"
+                "**No APK Core Worker:**\n"
+                "1. Abra **Conexão**.\n"
+                f"2. Confirme a VPS `{base_url}`.\n"
+                f"3. Informe o código `{code}` e o nome `{default_name}`.\n"
+                "4. Toque em **Conectar** e volte a este painel.\n\n"
                 f"Funções desse perfil: `{_shorten(profile_roles, limit=220)}`\n"
-                "-# Se o worker já estiver instalado, use `pair-phone-worker.sh` no lugar do bootstrap."
+                "-# O APK assume heartbeat, fila e execução; Termux não é necessário."
             )
             self.snapshot = await self.cog._collect_workers_snapshot(action_note=f"código de pareamento gerado: {code}")
             self._ensure_selected_worker()
@@ -3527,18 +3457,19 @@ class WorkersPanelView(discord.ui.LayoutView):
         base_url = _public_base_url()
         msg = (
             "## 📲 Como adicionar um celular\n"
-            "Este é o modo temporário via **Termux**. No futuro, o APK Core Worker fará estes passos sozinho com um botão ou QR.\n\n"
-            "**Antes de começar no celular novo:**\n"
-            "1. Instale o **Termux**.\n"
-            "2. Conecte o **Tailscale** na mesma rede da VPS.\n"
-            "3. Tenha a pasta `~/phone-worker` no Termux.\n\n"
+            "O Core Worker funciona diretamente pelo APK.\n\n"
+            "**Antes de começar:**\n"
+            "1. Instale o APK privado no celular.\n"
+            "2. Conecte o Tailscale na mesma rede da VPS.\n"
+            "3. Permita notificações, inicialização automática e bateria sem restrições.\n\n"
             "**Depois, neste painel:**\n"
-            "1. Escolha a categoria **Adicionar celular**.\n"
-            "2. Use **Gerar código**.\n"
-            "3. Copie o comando pronto e cole no Termux do celular novo.\n"
-            "4. Quando terminar, toque **Atualizar**.\n\n"
+            "1. Toque em **Adicionar celular**.\n"
+            "2. Escolha nome e perfil.\n"
+            "3. Digite o código na tela **Conexão** do APK.\n"
+            "4. Toque em **Atualizar** após o APK confirmar a conexão.\n\n"
             f"VPS detectada: `{base_url}`\n"
-            "Perfis: `leve` (economia), `midia`/Normal (recomendado), `completo` (tarefas extras), `builder` (compila APK no phone worker), `turbo` (máximo desempenho), `bedrock` (futuro)."
+            "Perfis: `leve`, `midia`/Normal, `completo`, `turbo` e `bedrock`.\n"
+            "-# O APK não é compilado pela VPS e não depende do Termux."
         )
         await interaction.response.send_message(msg[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
@@ -4012,6 +3943,8 @@ class WorkersCommandMixin:
 
     async def _run_legacy_worker_action(self, *, job_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         kind = str(job_type or "").strip().lower().replace("-", "_")
+        if CORE_WORKER_APK_REPLACES_TERMUX and kind in _DISABLED_LEGACY_WORKER_ACTIONS:
+            raise RuntimeError("ação legada do Termux desativada; use o Core Worker APK")
         if kind in {"ping", "status", "diagnostic_basic", "worker_self_check"}:
             timeout = max(1.0, _env_float("WORKERS_PANEL_STATUS_TIMEOUT_SECONDS", 3.0))
             result = await asyncio.to_thread(self._request_worker_status_sync, timeout=timeout)
@@ -4314,6 +4247,8 @@ class WorkersCommandMixin:
         registry = get_core_workers_registry()
         task = _task_name(job_type)
         is_apk_build = task in {"apk_build_debug", "apk_publish_last"}
+        if CORE_WORKER_APK_REPLACES_TERMUX and is_apk_build:
+            raise RuntimeError("build/publicação de APK não fazem parte do worker móvel; compile externamente e publique o APK pronto")
         assist_tasks = {"vps_assist_probe", "hash_batch", "endpoint_probe", "media_probe", "audio_convert", "log_digest", "zip_audit", "maintenance_plan"}
         # Não use uma capacidade genérica como trava para todos os assist jobs.
         # O registry já valida supported_tasks/target. Isso evita oferecer uma ação

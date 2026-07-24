@@ -51,6 +51,7 @@ public final class CoreLinuxRunnerPreflightManager {
             File bedrockAltDir = new File(base, "bedrock");
             File bedrockServer = firstExisting(new File(bedrockDir, "bedrock_server"), new File(bedrockAltDir, "bedrock_server"));
             File properties = firstExisting(new File(bedrockDir, "server.properties"), new File(bedrockAltDir, "server.properties"));
+            File eula = firstExisting(new File(bedrockDir, "eula.txt"), new File(bedrockAltDir, "eula.txt"));
 
             String[] executorNames = new String[]{"libcoreworker_executor.so"};
             String[] runnerNames = new String[]{"libcoreworker_runner.so"};
@@ -125,6 +126,7 @@ public final class CoreLinuxRunnerPreflightManager {
             boolean box64Ready = box64Info.optBoolean("allowedForFutureExecution", false);
             boolean bedrockServerReady = bedrockServer != null && bedrockServer.exists();
             boolean propertiesReady = properties != null && properties.exists();
+            boolean eulaReady = eulaAccepted(eula);
             boolean prootNeedsLibtalloc = prootReady && metadataNeedsDependency(prootInfo, "libtalloc");
             boolean prootDependencyReady = !prootNeedsLibtalloc || libtallocReady;
             boolean baseToolsReady = prootReady && busyboxReady && prootDependencyReady;
@@ -160,6 +162,7 @@ public final class CoreLinuxRunnerPreflightManager {
             addCheck(futureChecks, futureMissing, "box64_embedded", "Box64 embutido no APK", box64Ready, "embutir Box64 arm64 auditado com metadata aprovada; não usar binário baixado executável");
             addCheck(futureChecks, futureMissing, "bedrock_server", "bedrock_server presente", bedrockServerReady, "preparar arquivos do servidor Bedrock");
             addCheck(futureChecks, futureMissing, "server_properties", "server.properties presente", propertiesReady, "gerar ou revisar server.properties");
+            addCheck(futureChecks, futureMissing, "eula_accepted", "EULA do Bedrock aceita", eulaReady, "revise os termos e grave eula=true em eula.txt");
             copyChecks(checks, baseChecks);
             copyChecks(checks, futureChecks);
 
@@ -182,10 +185,8 @@ public final class CoreLinuxRunnerPreflightManager {
             if (Build.VERSION.SDK_INT >= 29) {
                 warnings.put("execução futura deve usar componentes embutidos no APK/native libs; binários importados não são executados");
             }
-            blockers.put("runner real permanece bloqueado no preflight v11");
-            blockers.put("Bedrock start real permanece bloqueado");
-            blockers.put("shell livre permanece bloqueado");
-            blockers.put("comando remoto arbitrário permanece bloqueado");
+            for (int i = 0; i < missing.length(); i++) blockers.put(missing.opt(i));
+            warnings.put("shell livre e comando remoto arbitrário permanecem bloqueados; apenas fluxos allowlist são permitidos");
 
             for (int i = 0; i < missing.length(); i++) {
                 String item = missing.optString(i, "");
@@ -199,16 +200,16 @@ public final class CoreLinuxRunnerPreflightManager {
             }
 
             boolean runnerBaseRequirementsReady = rootfsReal && nativeExecutorReady && runnerAssetReady && baseToolsReady && !writableBox64Blocked;
-            boolean bedrockRequirementsReady = runnerBaseRequirementsReady && box64Ready && bedrockServerReady && propertiesReady;
+            boolean bedrockRequirementsReady = runnerBaseRequirementsReady && box64Ready && bedrockServerReady && propertiesReady && eulaReady;
             boolean requirementsReady = runnerBaseRequirementsReady;
-            boolean runnerReady = false;
-            String phase = runnerBaseRequirementsReady ? "rootfs_smoke_next" : "base_tools";
-            String state = runnerBaseRequirementsReady ? "runner_base_tools_ready_but_blocked" : "runner_preflight_blocked";
+            boolean runnerReady = runnerBaseRequirementsReady;
+            String phase = runnerBaseRequirementsReady ? "allowlist_ready" : "base_tools";
+            String state = runnerBaseRequirementsReady ? "runner_allowlist_ready" : "runner_preflight_blocked";
             String summary = runnerBaseRequirementsReady
-                    ? "Core Linux base pronto · smoke test real é o próximo passo"
+                    ? "Core Linux pronto para execução allowlist sem Termux"
                     : "Runner preflight concluído · " + missing.length() + " pendência(s) base";
             String phaseSummary = runnerBaseRequirementsReady
-                    ? "Rootfs + executor + runner + PRoot + BusyBox prontos; execução real segue bloqueada até smoke test allowlist"
+                    ? "Rootfs + executor + runner + PRoot + BusyBox prontos para tarefas allowlist"
                     : "Preparando base para substituir Termux: falta validar/importar ferramentas base";
 
             JSONObject out = new JSONObject();
@@ -231,13 +232,13 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("shellOpened", false);
             out.put("remoteCommandAllowed", false);
             out.put("runnerReady", runnerReady);
-            out.put("runnerBlocked", true);
-            out.put("runnerExecutionAllowed", false);
+            out.put("runnerBlocked", !runnerReady);
+            out.put("runnerExecutionAllowed", runnerReady);
             out.put("runnerRequirementsReady", requirementsReady);
             out.put("runnerBaseRequirementsReady", runnerBaseRequirementsReady);
             out.put("bedrockRequirementsReady", bedrockRequirementsReady);
             out.put("termuxReductionReady", runnerBaseRequirementsReady);
-            out.put("bedrockStartAllowed", false);
+            out.put("bedrockStartAllowed", bedrockRequirementsReady);
             out.put("rootfsRealValidated", rootfsReal);
             out.put("nativeExecutorReady", nativeExecutorReady);
             out.put("coreRunnerEmbedded", runnerAssetReady);
@@ -258,6 +259,7 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("writableBox64Blocked", writableBox64Blocked);
             out.put("bedrockServerPresent", bedrockServerReady);
             out.put("serverPropertiesPresent", propertiesReady);
+            out.put("eulaAccepted", eulaReady);
             out.put("checks", checks);
             out.put("baseChecks", baseChecks);
             out.put("futureChecks", futureChecks);
@@ -268,14 +270,14 @@ public final class CoreLinuxRunnerPreflightManager {
             out.put("blockers", blockers);
             out.put("warnings", warnings);
             out.put("nextActions", nextActions);
-            out.put("rootfs", compactRootfs(rootfsState, importState));
+            out.put("rootfs", compactRootfs(rootfsState, importState, rootfsReal));
             out.put("nativeExecutor", compactNative(nativeExecutor));
             out.put("coreRunnerNativeBridge", runnerGuard);
             out.put("assetManifest", assetManifest(executorNames, runnerNames, prootNames, prootLoaderNames, busyboxNames, libtallocNames, libBusyboxNames, libAndroidSelinuxNames, libPcre2Names, box64Names, localManifest, sourcePlan));
             out.put("embedded", embeddedAssets);
             out.put("writableCandidates", writableSnapshot(writableBox64, dataDir));
             out.put("bedrockFiles", bedrockFilesSnapshot(bedrockServer, properties));
-            out.put("safety", "preflight apenas detecta requisitos; sem start real, sem shell livre, sem comando remoto, sem executar binários importados");
+            out.put("safety", "preflight detecta requisitos; execução posterior continua restrita a fluxos allowlist, sem shell livre ou comando remoto arbitrário");
             out.put("updatedAt", System.currentTimeMillis());
 
             writeJson(new File(layout.runtime, "runner-preflight-state.json"), out);
@@ -293,7 +295,7 @@ public final class CoreLinuxRunnerPreflightManager {
                 err.put("runnerBlocked", true);
                 err.put("runnerExecutionAllowed", false);
                 err.put("bedrockStartAllowed", false);
-                err.put("preflightVersion", 9);
+                err.put("preflightVersion", 11);
                 err.put("updatedAt", System.currentTimeMillis());
             } catch (Throwable ignored) {}
             return err;
@@ -302,6 +304,18 @@ public final class CoreLinuxRunnerPreflightManager {
 
     public static JSONObject status(Context context, File coreLinuxDir) {
         return preflight(context, coreLinuxDir, "status");
+    }
+
+    private static boolean eulaAccepted(File file) {
+        if (file == null || !file.isFile()) return false;
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.toLowerCase(Locale.ROOT).replace(" ", "").contains("eula=true")) return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     private static void addCheck(JSONArray checks, JSONArray missing, String key, String label, boolean ok, String nextAction) throws Exception {
@@ -322,28 +336,60 @@ public final class CoreLinuxRunnerPreflightManager {
     }
 
     private static boolean isRootfsRealValidated(JSONObject rootfsState, JSONObject importState, File rootfsDir) {
-        String state = lower(firstNonEmpty(
-                rootfsState.optString("state", ""),
+        JSONObject importValidation = importState.optJSONObject("validation");
+        JSONObject nestedImport = importState.optJSONObject("import");
+        if (importValidation == null && nestedImport != null) importValidation = nestedImport.optJSONObject("validation");
+        String importStateName = lower(firstNonEmpty(
+                nestedImport == null ? "" : nestedImport.optString("state", ""),
                 importState.optString("state", "")));
+        boolean strictFailure = importStateName.contains("failed")
+                || importStateName.contains("invalid")
+                || importStateName.contains("missing_runtime")
+                || (importValidation != null && !importValidation.optBoolean("ok", false));
+        if (strictFailure) return false;
+
+        String state = lower(rootfsState.optString("state", ""));
         String level = lower(firstNonEmpty(
+                importValidation == null ? "" : importValidation.optString("validationLevel", ""),
                 rootfsState.optString("validationLevel", ""),
                 rootfsState.optString("rootfsValidationLevel", ""),
                 importState.optString("validationLevel", "")));
-        boolean marker = new File(rootfsDir, ".core-worker-rootfs-ready").exists();
-        boolean manifest = new File(rootfsDir, ".core-worker-rootfs-manifest.json").exists();
-        boolean osRelease = new File(rootfsDir, "etc/os-release").exists();
-        return (state.contains("rootfs_real_validated") || "real".equals(level)) && marker && manifest && osRelease;
+        boolean stateReady = state.contains("rootfs_real_validated")
+                || state.contains("rootfs_glibc_ready")
+                || (importValidation != null && importValidation.optBoolean("ok", false));
+        boolean layoutReady = new File(rootfsDir, ".core-worker-rootfs-ready").isFile()
+                && new File(rootfsDir, ".core-worker-rootfs-manifest.json").isFile()
+                && new File(rootfsDir, "etc/os-release").isFile()
+                && new File(rootfsDir, "bin/sh").isFile();
+        boolean glibcReady = new File(rootfsDir, "lib/ld-linux-aarch64.so.1").isFile()
+                && firstFile(rootfsDir,
+                    "lib/aarch64-linux-gnu/libc.so.6", "usr/lib/aarch64-linux-gnu/libc.so.6", "lib/libc.so.6")
+                && firstFile(rootfsDir,
+                    "lib/aarch64-linux-gnu/libm.so.6", "usr/lib/aarch64-linux-gnu/libm.so.6", "lib/libm.so.6")
+                && firstFile(rootfsDir,
+                    "lib/aarch64-linux-gnu/libresolv.so.2", "usr/lib/aarch64-linux-gnu/libresolv.so.2", "lib/libresolv.so.2");
+        return stateReady && level.startsWith("real") && layoutReady && glibcReady;
     }
 
-    private static JSONObject compactRootfs(JSONObject rootfsState, JSONObject importState) throws Exception {
+    private static boolean firstFile(File root, String... relativePaths) {
+        if (root == null || relativePaths == null) return false;
+        for (String relative : relativePaths) {
+            if (new File(root, relative).isFile()) return true;
+        }
+        return false;
+    }
+
+    private static JSONObject compactRootfs(JSONObject rootfsState, JSONObject importState, boolean strictReady) throws Exception {
         JSONObject out = new JSONObject();
-        String summary = firstNonEmpty(rootfsState.optString("summary", ""), importState.optString("summary", ""));
-        String state = firstNonEmpty(rootfsState.optString("state", ""), importState.optString("state", ""));
+        String summary = firstNonEmpty(importState.optString("summary", ""), rootfsState.optString("summary", ""));
+        String state = strictReady ? "rootfs_real_validated" : firstNonEmpty(importState.optString("state", ""), rootfsState.optString("state", ""));
         out.put("state", state);
         out.put("summary", summary);
-        out.put("rootfsReady", rootfsState.optBoolean("rootfsReady", importState.optBoolean("rootfsReady", false)));
-        out.put("validationLevel", firstNonEmpty(rootfsState.optString("validationLevel", ""), importState.optString("validationLevel", "")));
-        out.put("distributionReady", rootfsState.optBoolean("distributionReady", importState.optBoolean("distributionReady", false)));
+        out.put("rootfsReady", strictReady);
+        out.put("validationLevel", strictReady ? "real-glibc" : firstNonEmpty(importState.optString("validationLevel", ""), rootfsState.optString("validationLevel", "")));
+        out.put("distributionReady", strictReady);
+        out.put("readyForBox64Install", strictReady);
+        out.put("readyForBedrockStart", false);
         out.put("updatedAt", Math.max(rootfsState.optLong("updatedAt", 0L), importState.optLong("updatedAt", 0L)));
         return out;
     }

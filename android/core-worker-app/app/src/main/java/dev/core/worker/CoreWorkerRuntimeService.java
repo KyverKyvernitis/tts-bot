@@ -52,6 +52,7 @@ public class CoreWorkerRuntimeService extends Service {
     private boolean running = false;
     private NativeTtsManager nativeTtsManager;
     private LocalNativeTtsHttpServer nativeTtsServer;
+    private CoreWorkerDirectHttpServer directHttpServer;
     private final AtomicBoolean heartbeatRunning = new AtomicBoolean(false);
     private final AtomicBoolean pollRunning = new AtomicBoolean(false);
     private final ExecutorService agentExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -71,6 +72,7 @@ public class CoreWorkerRuntimeService extends Service {
                 return;
             }
             markTick("agente autônomo ativo");
+            ensureDirectHttpServer();
             pollJobs("foreground_tick", false);
             reportHeartbeat("foreground_tick");
             handler.postDelayed(this, TICK_MS);
@@ -83,6 +85,7 @@ public class CoreWorkerRuntimeService extends Service {
         createChannel();
         jobExecutor = new CoreWorkerJobExecutor(getApplicationContext());
         startNativeTtsBridge();
+        ensureDirectHttpServer();
     }
 
     @Override
@@ -92,6 +95,7 @@ public class CoreWorkerRuntimeService extends Service {
         if (ACTION_STOP.equals(action)) {
             running = false;
             handler.removeCallbacks(tickRunnable);
+            stopDirectHttpServer();
             prefs().edit()
                     .putBoolean("agent_enabled", false)
                     .putBoolean("job_executor_ready", false)
@@ -164,6 +168,7 @@ public class CoreWorkerRuntimeService extends Service {
     public void onDestroy() {
         running = false;
         handler.removeCallbacks(tickRunnable);
+        stopDirectHttpServer();
         stopNativeTtsBridge();
         try { agentExecutor.shutdownNow(); } catch (Throwable ignored) { }
         prefs().edit()
@@ -225,6 +230,34 @@ public class CoreWorkerRuntimeService extends Service {
                     .putLong("native_tts_bridge_stopped_at", System.currentTimeMillis())
                     .apply();
         } catch (Throwable ignored) {
+        }
+    }
+
+    private void ensureDirectHttpServer() {
+        try {
+            if (nativeTtsManager == null) startNativeTtsBridge();
+            if (directHttpServer != null && directHttpServer.isRunning()) return;
+            if (prefs().getString("worker_token", "").trim().isEmpty()) {
+                prefs().edit().putBoolean("direct_http_active", false)
+                        .putString("direct_http_error", "aguardando pareamento direto").apply();
+                return;
+            }
+            directHttpServer = new CoreWorkerDirectHttpServer(getApplicationContext(), prefs(), nativeTtsManager);
+            directHttpServer.start();
+        } catch (Throwable error) {
+            directHttpServer = null;
+            prefs().edit().putBoolean("direct_http_active", false)
+                    .putString("direct_http_error", "porta 8766: " + shortThrowable(error))
+                    .putLong("direct_http_last_failure_at", System.currentTimeMillis()).apply();
+        }
+    }
+
+    private void stopDirectHttpServer() {
+        try {
+            if (directHttpServer != null) directHttpServer.stop();
+        } catch (Throwable ignored) {
+        } finally {
+            directHttpServer = null;
         }
     }
 
@@ -312,28 +345,19 @@ public class CoreWorkerRuntimeService extends Service {
 
     private void runAgentCycle(String reason, boolean force) throws Exception {
         String serverUrl = normalizedServerUrl();
-        if (serverUrl.isEmpty()) {
-            prefs().edit().putString("internal_light_jobs_state", "VPS não configurada").apply();
+        String token = prefs().getString("worker_token", "").trim();
+        String workerId = prefs().getString("worker_id", "").trim();
+        if (serverUrl.isEmpty() || token.isEmpty() || workerId.isEmpty()) {
+            prefs().edit().putString("internal_light_jobs_state", "aguardando pareamento direto").apply();
             return;
         }
 
         flushResultOutbox(serverUrl);
         long startedAt = System.currentTimeMillis();
-        JSONObject payload = jobExecutor.buildFetchStatus(serverUrl);
-        payload.put("installId", installId());
-        payload.put("workerId", prefs().getString("worker_id", ""));
-        payload.put("appVersion", BuildConfig.VERSION_NAME);
-        payload.put("appVersionCode", BuildConfig.VERSION_CODE);
-        payload.put("versionName", BuildConfig.VERSION_NAME);
-        payload.put("versionCode", BuildConfig.VERSION_CODE);
-        payload.put("source", "core-worker-apk-agent-service-v1");
-        payload.put("reason", reason);
-        payload.put("fetchStage", "autonomous-agent-v1");
+        JSONObject payload = buildForegroundHeartbeatPayload(reason);
+        payload.put("worker_id", workerId);
         payload.put("force", force || shouldForcePoll(reason));
-        payload.put("supportedJobs", CoreWorkerJobCatalog.supportedJobs());
-        payload.put("supported_tasks", CoreWorkerJobCatalog.supportedJobs());
-        payload.put("supportedTasks", CoreWorkerJobCatalog.supportedJobs());
-        payload.put("capabilities", CoreWorkerJobCatalog.capabilities());
+        payload.put("source", "core-worker-apk-agent-service-v2");
 
         prefs().edit()
                 .putLong("internal_light_jobs_last_fetch_started_at", startedAt)
@@ -343,7 +367,7 @@ public class CoreWorkerRuntimeService extends Service {
                 .putString("internal_light_jobs_last_fetch_error", "")
                 .apply();
 
-        HttpResult response = request("POST", serverUrl + "/core-worker/app/jobs/fetch", payload);
+        HttpResult response = request("POST", serverUrl + "/core-worker/jobs/poll", payload, token);
         long checkedAt = System.currentTimeMillis();
         SharedPreferences.Editor state = prefs().edit()
                 .putLong("internal_light_jobs_last_check_at", checkedAt)
@@ -352,8 +376,7 @@ public class CoreWorkerRuntimeService extends Service {
             String error = compact(response.body);
             state.putString("internal_light_jobs_state", "falha HTTP " + response.status)
                     .putString("internal_light_jobs_last_fetch_error", error)
-                    .putString("agent_last_error", error)
-                    .apply();
+                    .putString("agent_last_error", error).apply();
             throw new IllegalStateException("HTTP " + response.status + (error.isEmpty() ? "" : ": " + error));
         }
 
@@ -362,128 +385,89 @@ public class CoreWorkerRuntimeService extends Service {
             String error = compact(body.optString("error", response.body));
             state.putString("internal_light_jobs_state", "VPS recusou a busca")
                     .putString("internal_light_jobs_last_fetch_error", error)
-                    .putString("agent_last_error", error)
-                    .apply();
+                    .putString("agent_last_error", error).apply();
             throw new IllegalStateException(error.isEmpty() ? "VPS recusou a busca de jobs" : error);
         }
-        if (body.optBoolean("throttled", false)) {
-            int retryAfter = Math.max(1, body.optInt("retryAfterSeconds", 10));
-            nextPollAllowedAt = checkedAt + retryAfter * 1000L;
-            updateQueueState(body.optJSONObject("queue"));
-            state.putString("internal_light_jobs_state", "fila em cooldown")
-                    .putString("internal_light_jobs_last_summary", "VPS pediu nova checagem em " + retryAfter + "s")
-                    .apply();
-            return;
-        }
 
-        updateQueueState(body.optJSONObject("queue"));
-        updateCatalogState(body.optJSONObject("catalog"));
-        JSONArray jobs = body.optJSONArray("jobs");
-        int count = jobs == null ? 0 : jobs.length();
-        state.putInt("internal_light_jobs_last_count", count)
-                .putInt("internal_light_jobs_last_returned_count", count)
-                .apply();
-        if (count == 0) {
-            prefs().edit()
-                    .putString("internal_light_jobs_state", "fila vazia")
-                    .putString("internal_light_jobs_last_summary", "fila vazia")
+        JSONObject remoteJob = body.optJSONObject("job");
+        if (remoteJob == null || remoteJob.optString("job_id", "").trim().isEmpty()) {
+            state.putInt("internal_light_jobs_last_count", 0)
+                    .putInt("internal_light_jobs_last_returned_count", 0)
+                    .putInt("internal_jobs_pending_count", 0)
                     .putInt("internal_jobs_running_count", 0)
-                    .putString("agent_last_error", "")
-                    .apply();
+                    .putString("internal_jobs_queue_summary", "fila autenticada vazia")
+                    .putString("internal_jobs_catalog_summary", CoreWorkerJobCatalog.size() + " jobs APK · protocolo direto")
+                    .putString("internal_light_jobs_state", "fila vazia")
+                    .putString("internal_light_jobs_last_summary", "fila autenticada vazia")
+                    .putString("agent_last_error", "").apply();
             return;
         }
 
-        int okCount = 0;
-        int pendingResultCount = 0;
-        prefs().edit().putInt("internal_jobs_running_count", 1).apply();
-        for (int i = 0; i < count; i++) {
-            JSONObject job = jobs.optJSONObject(i);
-            if (job == null) continue;
-            String jobId = job.optString("id", "").trim();
-            String jobType = job.optString("type", "job");
-            JSONObject result;
-            long jobStartedAt = System.currentTimeMillis();
-            File pending = outboxFile(jobId);
-            if (pending != null && pending.isFile()) {
-                JSONObject envelope = readJsonFile(pending);
-                if (postResultEnvelope(serverUrl, envelope)) {
-                    pending.delete();
-                    rememberCompletedJob(jobId);
-                    JSONObject queuedResult = envelope.optJSONObject("result");
-                    if (queuedResult != null && queuedResult.optBoolean("ok", false)) okCount++;
-                } else {
-                    pendingResultCount++;
-                }
-                continue;
-            }
-            if (wasJobRecentlyCompleted(jobId)) {
-                result = new JSONObject()
-                        .put("ok", true)
-                        .put("type", jobType)
-                        .put("deduplicated", true)
-                        .put("message", "job duplicado ignorado pelo agente")
-                        .put("jobId", jobId);
-            } else {
-                try {
-                    result = jobExecutor.execute(job, serverUrl);
-                } catch (Throwable jobError) {
-                    result = new JSONObject()
-                            .put("ok", false)
-                            .put("type", jobType)
-                            .put("error", shortThrowable(jobError))
-                            .put("message", "job falhou no agente do APK");
-                }
-            }
-            result.put("durationMs", Math.max(0L, System.currentTimeMillis() - jobStartedAt));
-            result.put("attempt", job.optInt("attempt", 1));
-            if (result.optBoolean("ok", false)) okCount++;
+        String jobId = remoteJob.optString("job_id", "").trim();
+        String jobType = remoteJob.optString("type", "job").trim();
+        JSONObject job = new JSONObject()
+                .put("id", jobId)
+                .put("job_id", jobId)
+                .put("type", jobType)
+                .put("attempt", remoteJob.optInt("attempts", 1))
+                .put("payload", remoteJob.optJSONObject("payload") == null ? new JSONObject() : remoteJob.optJSONObject("payload"));
+        state.putInt("internal_light_jobs_last_count", 1)
+                .putInt("internal_light_jobs_last_returned_count", 1)
+                .putInt("internal_jobs_running_count", 1)
+                .putString("internal_jobs_queue_summary", "1 job autenticado em execução").apply();
 
-            JSONObject envelope = buildResultEnvelope(job, result);
-            File stored = persistOutbox(jobId, envelope);
-            if (postResultEnvelope(serverUrl, envelope)) {
-                if (stored != null) stored.delete();
+        File existing = outboxFile(jobId);
+        if (existing != null && existing.isFile()) {
+            JSONObject pending = normalizeStoredEnvelope(readJsonFile(existing));
+            if (postResultEnvelope(serverUrl, pending)) {
                 rememberCompletedJob(jobId);
-            } else {
-                pendingResultCount++;
+                existing.delete();
             }
-            recordJobHistory(jobType, result.optBoolean("ok", false), result.optString("message", result.optString("error", "")));
+            prefs().edit().putInt("internal_jobs_running_count", 0).apply();
+            return;
         }
 
-        String executionState = "executados " + okCount + "/" + count;
-        String executionSummary = summarizeJobs(jobs, okCount, count);
-        if (pendingResultCount > 0) {
-            executionState += " · " + pendingResultCount + " resultado(s) pendente(s)";
-            executionSummary += " · confirmação pendente: " + pendingResultCount;
+        JSONObject result;
+        long jobStartedAt = System.currentTimeMillis();
+        if (wasJobRecentlyCompleted(jobId)) {
+            result = new JSONObject().put("ok", true).put("type", jobType)
+                    .put("deduplicated", true).put("message", "job duplicado ignorado pelo agente")
+                    .put("jobId", jobId);
+        } else {
+            try {
+                if (CoreWorkerJobCatalog.supports(jobType)) {
+                    result = jobExecutor.execute(job, serverUrl);
+                } else if (CoreWorkerDirectTaskExecutor.supports(jobType)) {
+                    JSONObject directPayload = new JSONObject(job.optJSONObject("payload").toString());
+                    directPayload.put("task", jobType);
+                    result = new CoreWorkerDirectTaskExecutor(getApplicationContext(), prefs(), nativeTtsManager).execute(directPayload);
+                } else {
+                    result = new JSONObject().put("ok", false).put("type", jobType)
+                            .put("error", "job não anunciado pelo APK").put("message", "job recusado pela allowlist");
+                }
+            } catch (Throwable jobError) {
+                result = new JSONObject().put("ok", false).put("type", jobType)
+                        .put("error", shortThrowable(jobError)).put("message", "job falhou no agente do APK");
+            }
         }
-        SharedPreferences.Editor completedState = prefs().edit()
-                .putString("internal_light_jobs_state", executionState)
-                .putString("internal_light_jobs_last_summary", executionSummary)
-                .putInt("internal_jobs_running_count", 0);
-        if (pendingResultCount == 0) completedState.putString("agent_last_error", "");
-        completedState.apply();
-    }
-
-    private void updateQueueState(JSONObject queue) {
-        int pending = queue == null ? 0 : queue.optInt("pending", 0);
-        int runningJobs = queue == null ? 0 : queue.optInt("running", 0);
+        result.put("durationMs", Math.max(0L, System.currentTimeMillis() - jobStartedAt));
+        result.put("attempt", remoteJob.optInt("attempts", 1));
+        JSONObject envelope = buildResultEnvelope(job, result);
+        File stored = persistOutbox(jobId, envelope);
+        boolean sent = postResultEnvelope(serverUrl, envelope);
+        if (sent) {
+            if (stored != null) stored.delete();
+            rememberCompletedJob(jobId);
+        }
+        boolean ok = result.optBoolean("ok", false);
+        String summary = compact(result.optString("message", result.optString("error", ok ? "concluído" : "falhou")));
+        recordJobHistory(jobType, ok, summary);
         prefs().edit()
-                .putInt("internal_jobs_pending_count", pending)
-                .putInt("internal_jobs_running_count", runningJobs)
-                .putString("internal_jobs_queue_summary", runningJobs + " rodando · " + pending + " pendentes")
-                .apply();
-    }
-
-    private void updateCatalogState(JSONObject catalog) {
-        if (catalog == null) return;
-        JSONArray automatic = catalog.optJSONArray("automatic");
-        JSONArray manual = catalog.optJSONArray("manual");
-        int autoCount = automatic == null ? 0 : automatic.length();
-        int manualCount = manual == null ? 0 : manual.length();
-        prefs().edit()
-                .putInt("internal_jobs_auto_total", autoCount)
-                .putInt("internal_jobs_manual_total", manualCount)
-                .putString("internal_jobs_catalog_summary", autoCount + " automáticos · " + manualCount + " manuais")
-                .apply();
+                .putString("internal_light_jobs_state", (ok ? "concluído" : "falhou") + (sent ? "" : " · resultado pendente"))
+                .putString("internal_light_jobs_last_summary", jobType + " · " + summary)
+                .putInt("internal_jobs_running_count", 0)
+                .putString("internal_jobs_queue_summary", sent ? "resultado confirmado" : "resultado salvo na outbox")
+                .putString("agent_last_error", sent ? "" : "resultado aguardando confirmação").apply();
     }
 
     private boolean shouldForcePoll(String reason) {
@@ -493,16 +477,34 @@ public class CoreWorkerRuntimeService extends Service {
     }
 
     private JSONObject buildResultEnvelope(JSONObject job, JSONObject result) throws Exception {
+        boolean ok = result != null && result.optBoolean("ok", false);
+        String summary = result == null ? "resultado vazio" : compact(result.optString("message", result.optString("summary", result.optString("error", ok ? "concluído" : "falhou"))));
         JSONObject payload = new JSONObject();
-        payload.put("jobId", job == null ? "" : job.optString("id", ""));
-        payload.put("type", job == null ? "" : job.optString("type", ""));
-        payload.put("installId", installId());
-        payload.put("workerId", prefs().getString("worker_id", ""));
-        payload.put("appVersion", BuildConfig.VERSION_NAME);
-        payload.put("appVersionCode", BuildConfig.VERSION_CODE);
+        payload.put("worker_id", prefs().getString("worker_id", ""));
+        payload.put("job_id", job == null ? "" : firstNonEmpty(job.optString("job_id", ""), job.optString("id", "")));
+        payload.put("status", ok ? "succeeded" : "failed");
+        payload.put("summary", summary);
+        payload.put("error", ok || result == null ? "" : compact(result.optString("error", summary)));
         payload.put("result", result == null ? new JSONObject() : result);
-        payload.put("queuedAt", System.currentTimeMillis());
+        payload.put("queued_at", System.currentTimeMillis());
+        payload.put("protocol", "core-worker-registry-v1");
         return payload;
+    }
+
+    private JSONObject normalizeStoredEnvelope(JSONObject envelope) throws Exception {
+        if (envelope == null) return new JSONObject();
+        if (envelope.has("worker_id") && envelope.has("job_id")) return envelope;
+        JSONObject result = envelope.optJSONObject("result");
+        if (result == null) result = new JSONObject().put("ok", false).put("error", "resultado legado inválido");
+        JSONObject migrated = new JSONObject();
+        migrated.put("worker_id", firstNonEmpty(envelope.optString("workerId", ""), prefs().getString("worker_id", "")));
+        migrated.put("job_id", envelope.optString("jobId", ""));
+        migrated.put("status", result.optBoolean("ok", false) ? "succeeded" : "failed");
+        migrated.put("summary", compact(result.optString("message", result.optString("error", "resultado legado"))));
+        migrated.put("error", result.optBoolean("ok", false) ? "" : compact(result.optString("error", "falha legada")));
+        migrated.put("result", result);
+        migrated.put("protocol", "core-worker-registry-v1-migrated");
+        return migrated;
     }
 
     private File persistOutbox(String jobId, JSONObject envelope) {
@@ -535,9 +537,9 @@ public class CoreWorkerRuntimeService extends Service {
         for (File file : files) {
             if (file == null || !file.isFile() || !file.getName().endsWith(".json")) continue;
             try {
-                JSONObject envelope = readJsonFile(file);
+                JSONObject envelope = normalizeStoredEnvelope(readJsonFile(file));
                 if (postResultEnvelope(serverUrl, envelope)) {
-                    rememberCompletedJob(envelope.optString("jobId", ""));
+                    rememberCompletedJob(envelope.optString("job_id", ""));
                     file.delete();
                 }
             } catch (Throwable ignored) {
@@ -547,7 +549,9 @@ public class CoreWorkerRuntimeService extends Service {
 
     private boolean postResultEnvelope(String serverUrl, JSONObject envelope) {
         try {
-            HttpResult response = request("POST", serverUrl + "/core-worker/app/jobs/result", envelope);
+            String token = prefs().getString("worker_token", "").trim();
+            if (token.isEmpty()) return false;
+            HttpResult response = request("POST", serverUrl + "/core-worker/jobs/result", envelope, token);
             if (!response.ok()) return false;
             JSONObject body = new JSONObject(response.body);
             return body.optBoolean("ok", false);
@@ -660,12 +664,20 @@ public class CoreWorkerRuntimeService extends Service {
                     return;
                 }
                 JSONObject payload = buildForegroundHeartbeatPayload(safeReason);
-                HttpResult heartbeat = request("POST", serverUrl + "/core-worker/app/heartbeat", payload);
+                String token = prefs().getString("worker_token", "").trim();
+                if (token.isEmpty()) return;
+                payload.put("worker_id", prefs().getString("worker_id", ""));
+                HttpResult heartbeat = request("POST", serverUrl + "/core-worker/heartbeat", payload, token);
                 if (heartbeat.ok()) {
-                    prefs().edit()
-                            .putLong("native_worker_last_heartbeat_at", System.currentTimeMillis())
-                            .putString("native_worker_state", "agente autônomo online")
-                            .apply();
+                    JSONObject body = new JSONObject(heartbeat.body);
+                    if (body.optBoolean("ok", false)) {
+                        SharedPreferences.Editor editor = prefs().edit()
+                                .putLong("native_worker_last_heartbeat_at", System.currentTimeMillis())
+                                .putString("native_worker_state", "agente autônomo online");
+                        String directHttpToken = body.optString("direct_http_token", "").trim();
+                        if (!directHttpToken.isEmpty()) editor.putString("direct_http_token", directHttpToken);
+                        editor.apply();
+                    }
                 }
             } catch (Throwable ignored) {
             } finally {
@@ -677,13 +689,13 @@ public class CoreWorkerRuntimeService extends Service {
     private JSONObject buildForegroundHeartbeatPayload(String reason) throws Exception {
         JSONObject coreLinux = coreLinuxPublicSnapshot();
         JSONObject nativeRuntime = nativeRuntimePublicSnapshot();
-        JSONArray supported = supportedLightJobsArray();
+        JSONArray supported = CoreWorkerJobCatalog.remoteSupportedTasks();
         JSONArray capabilities = coreWorkerApkCapabilitiesArray();
         JSONObject runtime = new JSONObject();
-        runtime.put("mode", "apk-native-python-linux-assisted-runtime");
+        runtime.put("mode", "apk-native-direct-runtime");
         runtime.put("internal_runtime", "apk-foreground-service");
         runtime.put("internal_runtime_state", "foreground-service-visible-runtime");
-        runtime.put("jobs_runtime", "foreground-service-autonomous-agent");
+        runtime.put("jobs_runtime", "authenticated-registry-agent");
         runtime.put("capabilities", capabilities);
         runtime.put("supported_tasks", supported);
         runtime.put("supportedTasks", supported);
@@ -707,8 +719,11 @@ public class CoreWorkerRuntimeService extends Service {
         status.put("notification_permission", hasNotificationPermission() ? "granted" : "missing");
         status.put("termux_required_now", false);
         status.put("bedrock_server_mode", "future-foreground-service");
-        status.put("bedrock_start_allowed", false);
+        status.put("bedrock_start_allowed", coreLinux.optBoolean("bedrockStartAllowed", false));
         status.put("native_tts_bridge_active", nativeTtsServer != null);
+        status.put("direct_http_active", directHttpServer != null && directHttpServer.isRunning());
+        status.put("direct_http_port", prefs().getInt("direct_http_port", 8766));
+        status.put("termux_replaced", true);
         status.put("capabilities", capabilities);
         status.put("supported_tasks", supported);
         status.put("supportedTasks", supported);
@@ -722,6 +737,11 @@ public class CoreWorkerRuntimeService extends Service {
         }
 
         JSONObject payload = new JSONObject();
+        payload.put("worker_id", prefs().getString("worker_id", ""));
+        payload.put("name", prefs().getString("device_name", Build.MANUFACTURER + " " + Build.MODEL));
+        payload.put("version", BuildConfig.VERSION_NAME);
+        payload.put("endpoint", prefs().getString("direct_worker_endpoint", ""));
+        payload.put("roles", CoreWorkerJobCatalog.roles());
         payload.put("platform", "android");
         payload.put("source", "core-worker-apk-foreground-service");
         payload.put("state", "foreground_runtime");
@@ -753,7 +773,7 @@ public class CoreWorkerRuntimeService extends Service {
     }
 
     private JSONArray supportedLightJobsArray() {
-        return CoreWorkerJobCatalog.supportedJobs();
+        return CoreWorkerJobCatalog.remoteSupportedTasks();
     }
 
     private JSONObject coreLinuxPublicSnapshot() {
@@ -763,51 +783,114 @@ public class CoreWorkerRuntimeService extends Service {
         JSONObject smoke = readJson(new File(runtimeDir, "core-linux-smoke-test.json"));
         JSONObject rootfsImport = readJson(new File(runtimeDir, "rootfs-import-state.json"));
         JSONObject runner = readJson(new File(runtimeDir, "runner-preflight-state.json"));
-        String rawState = firstNonEmpty(rootfs.optString("state", ""), rootfsImport.optString("state", ""), runtime.optString("state", ""), smoke.optString("state", ""));
-        String level = firstNonEmpty(rootfs.optString("validationLevel", ""), rootfs.optString("rootfsValidationLevel", ""), rootfsImport.optString("validationLevel", ""));
-        boolean realValidated = rawState.toLowerCase().contains("rootfs_real_validated") || "real".equalsIgnoreCase(level);
-        boolean prepared = realValidated || runtime.optBoolean("ok", false) || runtime.optBoolean("rootfsReady", false) || rootfs.optBoolean("rootfsReady", false) || smoke.optBoolean("ok", false);
-        String summary = firstNonEmpty(rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), runtime.optString("summary", ""), smoke.optString("summary", ""), prepared ? "Core Linux Runtime v1 pronto" : "Core Linux Runtime v1 aguardando preparo");
-        String state = firstNonEmpty(rawState, prepared ? "runtime_v1_ready" : "runtime_v1_pending");
-        if (realValidated) {
-            state = "rootfs_real_validated";
-            summary = firstNonEmpty(rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), "Rootfs real validado · runner real ainda bloqueado");
+
+        JSONObject importAction = rootfsImport.optJSONObject("import");
+        JSONObject importValidation = importAction == null ? null : importAction.optJSONObject("validation");
+        if (importValidation == null) importValidation = rootfsImport.optJSONObject("validation");
+        JSONObject rootfsValidation = rootfs.optJSONObject("validation");
+
+        String importState = firstNonEmpty(
+                importAction == null ? "" : importAction.optString("state", ""),
+                rootfsImport.optString("state", "")
+        );
+        String rootfsState = rootfs.optString("state", "");
+        String level = firstNonEmpty(
+                importValidation == null ? "" : importValidation.optString("validationLevel", ""),
+                rootfsValidation == null ? "" : rootfsValidation.optString("validationLevel", ""),
+                rootfs.optString("validationLevel", ""), rootfs.optString("rootfsValidationLevel", ""),
+                rootfsImport.optString("validationLevel", "")
+        );
+        boolean strictKnown = "real".equalsIgnoreCase(level)
+                || importState.toLowerCase(java.util.Locale.ROOT).contains("glibc")
+                || importState.toLowerCase(java.util.Locale.ROOT).contains("rootfs_real")
+                || (importValidation != null && importValidation.has("glibcRuntime"));
+        boolean strictFailure = strictKnown && (
+                importState.toLowerCase(java.util.Locale.ROOT).contains("failed")
+                || importState.toLowerCase(java.util.Locale.ROOT).contains("invalid")
+                || (importValidation != null && !importValidation.optBoolean("ok", false))
+        );
+        boolean strictSuccess = strictKnown && !strictFailure
+                && importValidation != null && importValidation.optBoolean("ok", false)
+                && (importValidation.optJSONObject("glibcRuntime") == null
+                    || importValidation.optJSONObject("glibcRuntime").optBoolean("ok", false));
+        boolean legacyRealSuccess = !strictKnown
+                && (rootfsState.toLowerCase(java.util.Locale.ROOT).contains("rootfs_real_validated")
+                    || ("real".equalsIgnoreCase(level) && rootfsValidation != null && rootfsValidation.optBoolean("ok", false)));
+        boolean realValidated = !strictFailure && (strictSuccess || legacyRealSuccess);
+
+        boolean prepared = realValidated;
+        boolean rootfsReady = realValidated;
+        boolean distributionReady = realValidated;
+        boolean runnerReady = realValidated && runner.optBoolean("runnerReady", false)
+                && runner.optBoolean("runnerRequirementsReady", false);
+        boolean runnerExecutionAllowed = runnerReady && runner.optBoolean("runnerExecutionAllowed", false);
+        boolean bedrockStartAllowed = runnerExecutionAllowed && runner.optBoolean("bedrockRequirementsReady", false);
+        JSONArray missing = new JSONArray();
+        if (strictFailure && importValidation != null && importValidation.optJSONArray("missing") != null) {
+            JSONArray source = importValidation.optJSONArray("missing");
+            for (int i = 0; i < source.length(); i++) missing.put(source.opt(i));
+        } else if (runner.optJSONArray("missing") != null) {
+            JSONArray source = runner.optJSONArray("missing");
+            for (int i = 0; i < source.length(); i++) missing.put(source.opt(i));
         }
+
+        String state;
+        String summary;
+        if (strictFailure) {
+            state = firstNonEmpty(importState, "rootfs_real_validation_failed");
+            summary = firstNonEmpty(
+                    importAction == null ? "" : importAction.optString("summary", ""),
+                    rootfsImport.optString("summary", ""),
+                    importValidation == null ? "" : importValidation.optString("summary", ""),
+                    "Rootfs real reprovado na validação glibc"
+            );
+        } else if (realValidated) {
+            state = "rootfs_real_validated";
+            summary = firstNonEmpty(rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), "Rootfs real validado");
+        } else {
+            state = firstNonEmpty(importState, rootfsState, runtime.optString("state", ""), smoke.optString("state", ""), "runtime_v1_pending");
+            summary = firstNonEmpty(rootfsImport.optString("summary", ""), rootfs.optString("summary", ""), runtime.optString("summary", ""), "Core Linux aguardando rootfs real com glibc arm64");
+        }
+
         JSONObject out = new JSONObject();
         try {
             out.put("summary", summary);
             out.put("state", state);
             out.put("prepared", prepared);
-            out.put("rootfsReady", realValidated || runtime.optBoolean("rootfsReady", rootfs.optBoolean("rootfsReady", false)) || smoke.optBoolean("ok", false));
-            out.put("executorReady", runtime.optBoolean("executorReady", false));
-            out.put("lastCheckAt", Math.max(Math.max(runtime.optLong("updatedAt", 0L), runner.optLong("updatedAt", 0L)), Math.max(rootfs.optLong("updatedAt", 0L), smoke.optLong("updatedAt", 0L))));
+            out.put("rootfsReady", rootfsReady);
+            out.put("executorReady", runnerExecutionAllowed);
+            out.put("lastCheckAt", Math.max(Math.max(runtime.optLong("updatedAt", 0L), runner.optLong("updatedAt", 0L)), Math.max(rootfs.optLong("updatedAt", 0L), rootfsImport.optLong("updatedAt", 0L))));
             out.put("termuxRequired", false);
-            out.put("bedrockStartAllowed", false);
-            out.put("rootfsValidationLevel", realValidated ? "real" : rootfs.optString("validationLevel", ""));
-            out.put("rootfsDistributionReady", realValidated || rootfs.optBoolean("distributionReady", false));
-            out.put("rootfsState", rootfs.optString("state", state));
-            out.put("rootfsSummary", rootfs.optString("summary", summary));
-            out.put("rootfsImportState", rootfsImport.optString("state", ""));
+            out.put("termuxReplaced", true);
+            out.put("bedrockStartAllowed", bedrockStartAllowed);
+            out.put("rootfsValidationLevel", strictKnown ? "real" : level);
+            out.put("rootfsDistributionReady", distributionReady);
+            out.put("readyForBox64Install", realValidated);
+            out.put("readyForBox64Smoke", realValidated && runnerReady);
+            out.put("readyForBedrockStart", bedrockStartAllowed);
+            out.put("strictValidationKnown", strictKnown);
+            out.put("strictValidationFailed", strictFailure);
+            out.put("rootfsState", state);
+            out.put("rootfsSummary", summary);
+            out.put("rootfsImportState", importState);
             out.put("rootfsImportSummary", rootfsImport.optString("summary", ""));
-            if (runner.length() > 0) {
-                out.put("runnerPreflightState", runner.optString("state", ""));
-                out.put("runnerPreflightSummary", runner.optString("summary", ""));
-                out.put("runnerPreflightVersion", runner.optInt("preflightVersion", 1));
-                out.put("runnerReady", runner.optBoolean("runnerReady", false));
-                out.put("runnerBlocked", runner.optBoolean("runnerBlocked", true));
-                out.put("runnerExecutionAllowed", runner.optBoolean("runnerExecutionAllowed", false));
-                out.put("runnerRequirementsReady", runner.optBoolean("runnerRequirementsReady", false));
-                out.put("runnerMissing", runner.optJSONArray("missing") == null ? new JSONArray() : runner.optJSONArray("missing"));
-                out.put("runnerPreflight", runner);
-            }
-            out.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v11" : (realValidated || rootfs.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
+            out.put("blockers", missing);
+            out.put("runnerPreflightState", runner.optString("state", ""));
+            out.put("runnerPreflightSummary", runner.optString("summary", ""));
+            out.put("runnerPreflightVersion", runner.optInt("preflightVersion", 1));
+            out.put("runnerReady", runnerReady);
+            out.put("runnerBlocked", !runnerExecutionAllowed);
+            out.put("runnerExecutionAllowed", runnerExecutionAllowed);
+            out.put("runnerRequirementsReady", realValidated && runner.optBoolean("runnerRequirementsReady", false));
+            out.put("runnerMissing", missing);
+            if (runner.length() > 0) out.put("runnerPreflight", runner);
+            out.put("supportedStage", strictFailure ? "core-linux-rootfs-glibc-intake-preflight-v17" : (realValidated ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
             out.put("supportedTasks", supportedLightJobsArray());
             if (runtime.length() > 0) out.put("runtime", runtime);
             if (rootfs.length() > 0) out.put("rootfs", rootfs);
             if (rootfsImport.length() > 0) out.put("rootfsImport", rootfsImport);
             if (smoke.length() > 0) out.put("smoke", smoke);
-        } catch (Throwable ignored) {
-        }
+        } catch (Throwable ignored) { }
         return out;
     }
 

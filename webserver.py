@@ -3619,6 +3619,8 @@ def _kick_core_worker_pending_automation(worker_id: str = "") -> None:
     tem lock/cooldown por worker e mata execuções claramente antigas antes de
     abrir outra. O script também possui lock próprio como segunda linha de defesa.
     """
+    if _env_bool_web("CORE_WORKER_APK_REPLACES_TERMUX", True):
+        return
     if not _env_bool_web("CORE_WORKER_PENDING_AUTOMATION_ENABLED", True):
         return
     worker_id = str(worker_id or "").strip()
@@ -3689,6 +3691,34 @@ def _kick_core_worker_pending_automation(worker_id: str = "") -> None:
             app.logger.info("core-worker automation started | worker=%s pid=%s", key, getattr(process, "pid", ""))
 
 
+def _core_worker_apk_http_token() -> str:
+    """Token privado usado apenas pela API direta do APK na porta 8766."""
+    return str(
+        os.getenv("CORE_WORKER_APK_HTTP_TOKEN")
+        or os.getenv("PHONE_WORKER_TOKEN")
+        or ""
+    ).strip()
+
+
+def _core_worker_is_apk_payload(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    source = str(payload.get("source") or "").strip().lower()
+    platform = str(payload.get("platform") or "").strip().lower()
+    return source.startswith("core-worker-apk") or platform == "android"
+
+
+def _attach_core_worker_apk_http_token(status: int, body: object, payload: object) -> None:
+    # Só devolve o segredo em uma resposta já autorizada de pareamento/heartbeat do APK.
+    if status != 200 or not isinstance(body, dict) or not body.get("ok"):
+        return
+    if not _core_worker_is_apk_payload(payload):
+        return
+    token = _core_worker_apk_http_token()
+    if token:
+        body["direct_http_token"] = token
+
+
 @app.post("/core-worker/pair")
 def core_worker_pair():
     from utility.commands.workers_registry import redeem_core_worker_pairing_http
@@ -3697,6 +3727,7 @@ def core_worker_pair():
     if not isinstance(payload, dict):
         payload = {}
     status, body = redeem_core_worker_pairing_http(payload, remote_addr=request.remote_addr or "")
+    _attach_core_worker_apk_http_token(status, body, payload)
     return jsonify(body), status
 
 
@@ -3708,6 +3739,7 @@ def core_worker_heartbeat():
     if not isinstance(payload, dict):
         payload = {}
     status, body = core_worker_heartbeat_http(request.headers, payload, remote_addr=request.remote_addr or "")
+    _attach_core_worker_apk_http_token(status, body, payload)
     if status == 200 and isinstance(body, dict):
         worker = body.get("worker") if isinstance(body.get("worker"), dict) else {}
         worker_id = str(worker.get("worker_id") or payload.get("worker_id") or payload.get("id") or "")

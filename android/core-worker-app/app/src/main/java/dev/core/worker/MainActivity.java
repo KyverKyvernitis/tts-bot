@@ -87,10 +87,6 @@ public class MainActivity extends Activity {
     private static final String APP_VERSION = BuildConfig.VERSION_NAME;
     private static final String DEFAULT_VPS_URL = BuildConfig.CORE_WORKER_VPS_URL;
     private static final String DEFAULT_VPS_LABEL = BuildConfig.CORE_WORKER_VPS_LABEL;
-    private static final String LOCAL_AGENT_STATUS_URL = "http://127.0.0.1:8766/local/status";
-    private static final String LOCAL_AGENT_PROFILE_URL = "http://127.0.0.1:8766/local/profile";
-    private static final String LOCAL_AGENT_PAIR_URL = "http://127.0.0.1:8766/local/pair";
-    private static final String LOCAL_AGENT_HEARTBEAT_URL = "http://127.0.0.1:8766/local/heartbeat";
     private static final String PREFS = "core_worker_private";
     // Patch 52: FCM volta em modo seguro e em camadas.
     // A tela principal nunca depende do Firebase; token/push ficam em fluxo isolado e tolerante a falhas.
@@ -121,10 +117,9 @@ public class MainActivity extends Activity {
     private static final long PERMISSION_GATE_STABILIZE_MS = 1200L;
     private static final long BEDROCK_SAFE_TEST_LOG_LIMIT_BYTES = 256L * 1024L;
     private static final long BEDROCK_TEST_MIN_INTERVAL_MS = 2500L;
-    // Patch 85.6: Bedrock/rootfs ficam isolados do fluxo visual até o runtime interno ser validado.
-    // Nenhum botão da aba Bedrock deve iniciar Python pesado, rootfs real, Termux, Box64 ou serviço Bedrock.
-    private static final boolean BEDROCK_RUNTIME_ISOLATED = true;
-    private static final String BEDROCK_ISOLATION_SUMMARY = "Runtime Bedrock isolado para proteger o app; diagnóstico leve apenas.";
+    // Bedrock usa serviço foreground e somente inicia após preflight allowlist completo.
+    private static final boolean BEDROCK_RUNTIME_ISOLATED = false;
+    private static final String BEDROCK_ISOLATION_SUMMARY = "Runtime Bedrock desativado por política desta build.";
     private static final int REQUEST_CORE_LINUX_ROOTFS_IMPORT = 8601;
     private LinearLayout connectCard;
     private TextView connectTitleText;
@@ -904,7 +899,7 @@ public class MainActivity extends Activity {
 
         LinearLayout technicalCard = cardWithTopMargin(mainContent);
         technicalCard.addView(sectionTitle("Avançado"));
-        technicalCard.addView(smallText("Diagnósticos, logs e fallback legado ficam escondidos aqui."));
+        technicalCard.addView(smallText("Diagnósticos, logs e detalhes do runtime direto ficam escondidos aqui."));
         technicalToggleButton = secondaryButton("Abrir avançado");
         technicalToggleButton.setOnClickListener(v -> toggleTechnicalDetails());
         technicalCard.addView(technicalToggleButton);
@@ -918,14 +913,14 @@ public class MainActivity extends Activity {
         technicalDeviceText = technicalInfoBlock(technicalDetailsContent, "Aparelho");
         technicalRuntimeText = technicalInfoBlock(technicalDetailsContent, "Runtime");
         technicalDiagnosticsText = technicalInfoBlock(technicalDetailsContent, "Diagnósticos APK");
-        technicalTermuxText = technicalInfoBlock(technicalDetailsContent, "Fallback Termux");
-        technicalDependenciesText = technicalInfoBlock(technicalDetailsContent, "Migração sem Termux");
+        technicalTermuxText = technicalInfoBlock(technicalDetailsContent, "Runtime direto");
+        technicalDependenciesText = technicalInfoBlock(technicalDetailsContent, "Dependências internas");
 
         systemChecklistText = smallText(prepareChecklistText());
         systemChecklistText.setVisibility(View.GONE);
         technicalDetailsContent.addView(systemChecklistText);
 
-        termuxButton = secondaryButton("Abrir Termux (fallback)");
+        termuxButton = secondaryButton("Ver runtime direto");
         termuxButton.setOnClickListener(v -> openTermux());
         technicalDetailsContent.addView(termuxButton);
 
@@ -1980,76 +1975,49 @@ public class MainActivity extends Activity {
             return;
         }
         saveLocalFields(profile);
-
         runBusy("Conectando este celular à VPS...", () -> {
             JSONObject nativePair = pairNativeWorkerDirect(serverUrl, code, name, profile);
-            if (nativePair.optBoolean("ok", false)) {
-                String workerId = nativePair.optString("worker_id", nativeWorkerId());
-                prefs.edit()
-                        .putString("server_url", serverUrl)
-                        .putString("device_name", name)
-                        .putString("profile", profile)
-                        .putString("worker_id", workerId)
-                        .putString("native_worker_id", workerId)
-                        .putString("worker_token", nativePair.optString("token", ""))
-                        .putBoolean("paired_via_native_apk", true)
-                        .putBoolean("agent_enabled", true)
-                        .remove("paired_via_local_agent")
-                        .apply();
-                nativeWorkerOnline = true;
-                nativeWorkerState = "pareado direto na VPS";
-                nativeWorkerLastHeartbeatAt = System.currentTimeMillis();
-                localAgentWorkerId = workerId;
-                updatePairingUi();
-                registerFcmTokenAsync("native_pair_success");
-                sendInternalRuntimeHeartbeat(false, "native_pair_success");
-                sendNativeWorkerHeartbeat(false, "native_pair_success");
-                CoreWorkerRuntimeService.requestStart(this, "native_pair_success");
-                vpsState = "ok";
-                show("Celular conectado direto pelo APK.\nPerfil: " + profileLabel(profile) + "\nWorker: " + emptyFallback(workerId, "apk") + "\nTermux ficou apenas como fallback temporário.");
+            if (!nativePair.optBoolean("ok", false)) {
+                show("Pareamento direto pelo APK falhou: "
+                        + nativePair.optString("error", "sem resposta")
+                        + "\n\nGere outro código e confirme a conexão com a VPS.");
                 return;
             }
-
-            if (!updateLocalAgentStatus(true)) {
-                show("Pareamento direto pelo APK falhou: " + nativePair.optString("error", "sem resposta") + "\n\nTermux também está offline. Gere outro código e tente novamente quando a rede estiver estável.");
+            String workerId = nativePair.optString("worker_id", nativeWorkerId());
+            String token = nativePair.optString("token", "").trim();
+            String directHttpToken = nativePair.optString("direct_http_token", "").trim();
+            if (token.isEmpty()) {
+                show("A VPS não retornou o token do worker. O pareamento não foi salvo.");
                 return;
             }
-
-            JSONObject payload = new JSONObject();
-            payload.put("code", code);
-            payload.put("vps_url", serverUrl);
-            payload.put("name", name);
-            payload.put("device_name", name);
-            putProfilePayload(payload, profile);
-            payload.put("source", "core-worker-apk-companion-fallback");
-            payload.put("apk_version", APP_VERSION);
-
-            HttpResult result = request("POST", LOCAL_AGENT_PAIR_URL, payload, null);
-            if (!result.ok()) {
-                show("Falha no fallback pelo worker local: HTTP " + result.status + "\n\n" + compactResultBody(result.body));
-                return;
-            }
-            JSONObject body = new JSONObject(result.body);
-            if (!body.optBoolean("ok", false)) {
-                show("O fallback local não conseguiu parear.\n\n" + compactResultBody(result.body));
-                return;
-            }
-            String workerId = body.optString("worker_id", localAgentWorkerId);
             prefs.edit()
                     .putString("server_url", serverUrl)
                     .putString("device_name", name)
                     .putString("profile", profile)
                     .putString("worker_id", workerId)
-                    .putBoolean("paired_via_local_agent", true)
-                    .remove("paired_via_native_apk")
-                    .remove("worker_token")
+                    .putString("native_worker_id", workerId)
+                    .putString("worker_token", token)
+                    .putString("direct_http_token", directHttpToken.isEmpty() ? token : directHttpToken)
+                    .putBoolean("paired_via_native_apk", true)
+                    .putBoolean("agent_enabled", true)
+                    .remove("paired_via_local_agent")
+                    .remove("legacy_termux_online")
                     .apply();
-            applyLocalAgentStatus(body);
-            showLocalAgentText();
+            nativeWorkerOnline = true;
+            nativeWorkerState = "pareado direto na VPS";
+            nativeWorkerLastHeartbeatAt = System.currentTimeMillis();
+            localAgentOnline = false;
+            localAgentWorkerId = "";
             updatePairingUi();
-            registerFcmTokenAsync("pair_success_fallback");
+            registerFcmTokenAsync("native_pair_success");
+            CoreWorkerRuntimeService.requestStart(this, "native_pair_success");
+            CoreWorkerRuntimeService.requestPoll(this, "native_pair_success");
+            sendNativeWorkerHeartbeat(false, "native_pair_success");
             vpsState = "ok";
-            show("Celular conectado pelo fallback Termux.\nPerfil: " + profileLabel(profile) + "\nWorker: " + emptyFallback(workerId, "local"));
+            show("Celular conectado diretamente pelo APK.\nPerfil: "
+                    + profileLabel(profile)
+                    + "\nWorker: " + emptyFallback(workerId, "apk")
+                    + "\nTermux não é necessário.");
         });
     }
 
@@ -2059,27 +2027,27 @@ public class MainActivity extends Activity {
         updateProfileHint(profile);
         collapseProfileDetails();
         runBusy("Aplicando perfil...", () -> {
-            boolean localSynced = syncProfileToLocalAgent(profile);
-            String prefix = localSynced
-                    ? "Perfil aplicado: " + profileLabel(profile)
-                    : "Perfil salvo no APK. Worker local offline; abra o Termux por enquanto para sincronizar.";
-            sendInternalRuntimeHeartbeat(false, "profile_apply");
-            sendNativeWorkerHeartbeat(false, "profile_apply");
-            if (hasPairing()) {
-                sendHeartbeatInternal(true, prefix);
-            } else {
-                show(prefix + "\n\nEste celular ainda não está pareado com a VPS.");
+            if (!hasPairing()) {
+                show("Perfil salvo no APK. Este celular ainda não está pareado com a VPS.");
+                return;
             }
+            CoreWorkerRuntimeService.requestStart(this, "profile_apply");
+            CoreWorkerRuntimeService.requestPoll(this, "profile_apply");
+            sendNativeWorkerHeartbeat(false, "profile_apply");
+            show("Perfil aplicado: " + profileLabel(profile) + "\nO APK sincronizará o painel diretamente.");
         });
     }
 
     private void sendHeartbeat() {
         saveLocalFields(appliedProfile());
         runBusy("Atualizando status no painel...", () -> {
-            updateLocalAgentStatus(false);
-            sendInternalRuntimeHeartbeat(false, "manual_sync");
-            sendNativeWorkerHeartbeat(false, "manual_sync");
-            sendHeartbeatInternal(true);
+            if (!hasPairing()) {
+                show("Este celular ainda não está pareado com a VPS.");
+                return;
+            }
+            CoreWorkerRuntimeService.requestStart(this, "manual_sync");
+            CoreWorkerRuntimeService.requestPoll(this, "manual_sync");
+            sendNativeWorkerHeartbeat(true, "manual_sync");
         });
     }
 
@@ -2088,30 +2056,15 @@ public class MainActivity extends Activity {
     }
 
     private void sendHeartbeatInternal(boolean showResult, String successPrefix) throws Exception {
-        if (!updateLocalAgentStatus(true)) {
-            sendInternalRuntimeHeartbeat(showResult, "termux_offline_sync");
-            if (showResult) {
-                show("Termux offline. Runtime nativo do APK sincronizado; Termux é apenas fallback temporário.");
-            }
+        if (!hasPairing()) {
+            if (showResult) show("Este celular ainda não está pareado com a VPS.");
             return;
         }
-        HttpResult result = request("POST", LOCAL_AGENT_HEARTBEAT_URL, new JSONObject(), null);
-        if (!result.ok()) {
-            vpsState = "falha HTTP " + result.status;
-            show("Falha ao pedir status ao worker local: HTTP " + result.status + "\n\n" + compactResultBody(result.body));
-            return;
-        }
-        JSONObject body = new JSONObject(result.body);
-        applyLocalAgentStatus(body);
-        showLocalAgentText();
-        boolean synced = body.optBoolean("synced_to_vps", false);
-        vpsState = synced ? "ok" : "pendente";
-        if (showResult) {
-            String message = successPrefix == null ? "Status solicitado ao worker local." : successPrefix;
-            message += synced ? "\nVPS recebeu heartbeat do fallback Termux." : "\nWorker local respondeu, mas ainda não confirmou heartbeat na VPS.";
-            show(message);
-        } else {
-            show("Worker local sincronizado. Confira o painel workers no Discord.");
+        CoreWorkerRuntimeService.requestStart(this, "manual_sync");
+        CoreWorkerRuntimeService.requestPoll(this, "manual_sync");
+        sendNativeWorkerHeartbeat(showResult, "manual_sync");
+        if (showResult && successPrefix != null && !successPrefix.trim().isEmpty()) {
+            show(successPrefix + "\nSincronização direta solicitada ao APK.");
         }
     }
 
@@ -3098,6 +3051,7 @@ public class MainActivity extends Activity {
         File logs = new File(core, "logs");
         File serverProperties = new File(bedrock, "server.properties");
         File serverPropertiesTemplate = new File(bedrock, "server.properties.template");
+        File eula = new File(bedrock, "eula.txt");
         File server = new File(bedrock, "bedrock_server");
         File box64A = new File(core, "bin/box64");
         File box64B = new File(core, "box64/box64");
@@ -3106,13 +3060,15 @@ public class MainActivity extends Activity {
         File nativeExecutorState = new File(runtime, "native-executor-state.json");
         File appNativeExecutor = new File(getApplicationInfo() == null || getApplicationInfo().nativeLibraryDir == null ? "" : getApplicationInfo().nativeLibraryDir, "libcoreworker_executor.so");
 
+        JSONObject runnerPreflight = CoreLinuxRunnerPreflightManager.preflight(this, core, "bedrock_ui_preflight");
         boolean rootfsDir = safeDirectoryExists(rootfs);
-        boolean rootfsReady = safeFileExists(rootfsReadyMarker) || safeTextContains(rootfsState, "\"rootfsReady\"", "true");
+        boolean rootfsReady = runnerPreflight.optBoolean("rootfsRealValidated", false);
         boolean executorBundled = safeFileExists(appNativeExecutor);
         boolean executorStateOk = safeTextContains(nativeExecutorState, "\"ok\"", "true") || safeTextContains(nativeExecutorState, "readyForRootfs", "true");
         boolean serverPropertiesReady = safeFileExists(serverProperties) || safeFileExists(serverPropertiesTemplate);
         boolean serverInstalled = safeFileExists(server);
-        boolean box64Ready = safeFileExists(box64A) || safeFileExists(box64B);
+        boolean box64Ready = runnerPreflight.optBoolean("box64Embedded", false) || safeFileExists(box64A) || safeFileExists(box64B);
+        boolean eulaReady = safeTextContains(eula, "eula=true");
 
         JSONArray blockers = new JSONArray();
         if (!rootfsDir) blockers.put("rootfs ausente");
@@ -3121,17 +3077,18 @@ public class MainActivity extends Activity {
         if (!serverPropertiesReady) blockers.put("server.properties ainda não preparado");
         if (!serverInstalled) blockers.put("bedrock_server não instalado");
         if (!box64Ready) blockers.put("Box64 pendente");
-        if (BEDROCK_RUNTIME_ISOLATED) blockers.put("runtime Bedrock isolado nesta versão para evitar crash/ANR");
+        if (!eulaReady) blockers.put("EULA não aceita; revise os termos e grave eula=true");
+        if (!runnerPreflight.optBoolean("runnerExecutionAllowed", false)) blockers.put("runner allowlist ainda não liberado");
 
-        boolean filesReady = blockers.length() == (BEDROCK_RUNTIME_ISOLATED ? 1 : 0);
+        boolean filesReady = blockers.length() == 0;
         boolean ready = !BEDROCK_RUNTIME_ISOLATED && filesReady;
         String rootfsStateLabel = !rootfsDir ? "rootfs_missing" : (rootfsReady ? "rootfs_ready" : "rootfs_detected");
-        String bedrockStateLabel = ready ? "bedrock_ready" : "bedrock_runtime_isolated";
+        String bedrockStateLabel = ready ? "bedrock_ready" : "bedrock_blocked";
         String nextAction = BEDROCK_RUNTIME_ISOLATED
-                ? "corrigir estabilidade antes de reativar runtime Bedrock"
+                ? "habilitar runtime Bedrock nesta build"
                 : (ready ? "ativar runtime Bedrock" : bedrockNextAction(rootfsReady, executorBundled || executorStateOk, serverPropertiesReady, serverInstalled, box64Ready));
         String summary = BEDROCK_RUNTIME_ISOLATED
-                ? "Diagnóstico parcial concluído. Runtime Bedrock ainda não está pronto."
+                ? "Runtime Bedrock desativado por política desta build."
                 : (ready ? "Bedrock pronto para preflight do runner." : "Diagnóstico parcial concluído. Runtime Bedrock ainda não está pronto.");
 
         JSONObject rootfsJson = new JSONObject();
@@ -3156,6 +3113,9 @@ public class MainActivity extends Activity {
         bedrockJson.put("dir", bedrock.getAbsolutePath());
         bedrockJson.put("properties", safeFileStatus(serverProperties));
         bedrockJson.put("propertiesTemplate", safeFileStatus(serverPropertiesTemplate));
+        bedrockJson.put("eula", safeFileStatus(eula));
+        bedrockJson.put("eulaAccepted", eulaReady);
+        bedrockJson.put("runnerPreflight", runnerPreflight);
         bedrockJson.put("server", safeFileStatus(server));
         bedrockJson.put("box64", safeFileExists(box64A) ? safeFileStatus(box64A) : safeFileStatus(box64B));
         bedrockJson.put("ready", ready);
@@ -3772,21 +3732,35 @@ public class MainActivity extends Activity {
     }
 
     private void startBedrockRuntimeFromUi() {
-        bedrockRuntimeServiceActive = false;
-        bedrockRuntimeState = "isolated";
-        bedrockRuntimeSummary = BEDROCK_ISOLATION_SUMMARY;
-        if (prefs != null) {
-            prefs.edit()
-                    .putBoolean("bedrock_runtime_service_active", false)
-                    .putString("bedrock_runtime_service_state", BEDROCK_ISOLATION_SUMMARY)
-                    .putLong("bedrock_runtime_service_last_tick_at", System.currentTimeMillis())
-                    .apply();
-        }
-        appendBedrockTerminal("start", "bloqueado: runtime Bedrock isolado até a estabilidade do rootfs ser validada");
-        refreshLocalStatus("Start Bedrock bloqueado com segurança. Primeiro vamos estabilizar rootfs/runtime interno.");
-        refreshBedrockVisualState();
-        exportBedrockDebugSnapshot("start-blocked", null);
+        runBusy("Validando ambiente Bedrock...", () -> {
+            try {
+                JSONObject snapshot = bedrockServerLightweightTestSnapshot();
+                if (!snapshot.optBoolean("ready", false)) {
+                    JSONArray blockers = snapshot.optJSONArray("blockers");
+                    String reason = blockers == null || blockers.length() == 0
+                            ? snapshot.optString("summary", "ambiente ainda incompleto")
+                            : blockers.optString(0, "ambiente ainda incompleto");
+                    appendBedrockTerminal("start", "bloqueado: " + reason);
+                    refreshLocalStatus("Bedrock não iniciado: " + reason);
+                    exportBedrockDebugSnapshot("start-blocked", snapshot);
+                    return;
+                }
+                runOnUiThread(() -> startBedrockService("manual-start"));
+                bedrockRuntimeServiceActive = true;
+                bedrockRuntimeState = "starting";
+                bedrockRuntimeSummary = "serviço Bedrock solicitado";
+                appendBedrockTerminal("start", "serviço foreground solicitado após preflight completo");
+                refreshLocalStatus("Runtime Bedrock iniciando em serviço foreground.");
+                refreshBedrockVisualState();
+            } catch (Throwable exc) {
+                String message = "Falha no preflight Bedrock: " + shortThrowable(exc);
+                appendBedrockTerminal("start", message);
+                refreshLocalStatus(message);
+                exportBedrockDebugSnapshot("start-failed", null);
+            }
+        });
     }
+
 
 
     private void stopBedrockRuntimeFromUi() {
@@ -4215,10 +4189,10 @@ public class MainActivity extends Activity {
             payload.put("device_name", name);
             payload.put("worker_id", nativeWorkerId());
             payload.put("version", APP_VERSION);
-            payload.put("source", "core-worker-apk-native");
+            payload.put("source", "core-worker-apk-direct");
             payload.put("endpoint", "apk://" + installId());
             putProfilePayload(payload, profile);
-            payload.put("roles", new JSONArray().put("apk-native").put("diagnostics").put("internal-jobs").put("linux-runtime").put("rootfs-manager").put("bedrock-manager"));
+            payload.put("roles", CoreWorkerJobCatalog.roles());
             payload.put("capabilities", coreWorkerApkCapabilitiesArray());
             payload.put("supported_tasks", supportedLightJobsArray());
             payload.put("supportedTasks", supportedLightJobsArray());
@@ -4229,7 +4203,7 @@ public class MainActivity extends Activity {
             if (status == null) status = new JSONObject();
             status.put("apk_native_worker", true);
             status.put("termux_required_now", false);
-            status.put("termux_role", "fallback-legado");
+            status.put("termux_replaced", true);
             status.put("migration_stage", "apk-native-runtime-python-linux-rootfs-bedrock-installer");
             status.put("native_shell", "allowlist-probe");
             status.put("python_runtime", nativePythonAvailable ? "embedded-ok" : "embedded-pending");
@@ -4291,8 +4265,8 @@ public class MainActivity extends Activity {
             payload.put("id", workerId);
             payload.put("name", prefs.getString("device_name", defaultDeviceName()));
             payload.put("version", APP_VERSION);
-            payload.put("source", "core-worker-apk-native");
-            payload.put("roles", new JSONArray().put("apk-native").put("diagnostics").put("internal-jobs").put("linux-runtime").put("rootfs-manager").put("bedrock-manager"));
+            payload.put("source", "core-worker-apk-direct");
+            payload.put("roles", CoreWorkerJobCatalog.roles());
             payload.put("capabilities", coreWorkerApkCapabilitiesArray());
             payload.put("supported_tasks", supportedLightJobsArray());
             payload.put("supportedTasks", supportedLightJobsArray());
@@ -4313,6 +4287,10 @@ public class MainActivity extends Activity {
             if (result.ok()) {
                 JSONObject body = new JSONObject(result.body);
                 if (body.optBoolean("ok", false)) {
+                    String directHttpToken = body.optString("direct_http_token", "").trim();
+                    if (!directHttpToken.isEmpty()) {
+                        prefs.edit().putString("direct_http_token", directHttpToken).apply();
+                    }
                     nativeWorkerOnline = true;
                     nativeWorkerState = "online direto na VPS";
                     nativeWorkerLastHeartbeatAt = System.currentTimeMillis();
@@ -4472,9 +4450,9 @@ public class MainActivity extends Activity {
         ctx.put("foregroundRuntimeActive", foregroundRuntimeActive);
         ctx.put("foregroundRuntimeSummary", foregroundRuntimeSummary == null ? "" : foregroundRuntimeSummary);
         ctx.put("linuxInstallStrategySummary", linuxInstallStrategySummary == null ? "" : linuxInstallStrategySummary);
-        ctx.put("termuxInstalled", isPackageInstalled("com.termux"));
-        ctx.put("termuxApiInstalled", isPackageInstalled("com.termux.api"));
-        ctx.put("termuxBootInstalled", isPackageInstalled("com.termux.boot"));
+        ctx.put("termuxInstalled", false);
+        ctx.put("termuxApiInstalled", false);
+        ctx.put("termuxBootInstalled", false);
         safePutPayload(ctx, "battery", batterySnapshot());
         safePutPayload(ctx, "network", networkSnapshot(normalizedServerUrl()));
         safePutPayload(ctx, "runtime", runtimeSnapshot());
@@ -4597,7 +4575,7 @@ public class MainActivity extends Activity {
             meta.put("apk_version", APP_VERSION);
             meta.put("version_code", BuildConfig.VERSION_CODE);
             meta.put("created_by", "core-worker-apk");
-            meta.put("summary", "Runtime interno ativo para status, boot, jobs seguros, Python, shell controlado, Foreground Service e Core Linux Runtime Manager. Termux fica só como fallback legado.");
+            meta.put("summary", "Runtime interno ativo para status, boot, fila autenticada, TTS, jobs seguros, Foreground Service e Core Linux Runtime Manager.");
             meta.put("migration_stage", "apk-native-bedrock-installer-phase");
             writeTextFile(state, meta.toString());
             internalRuntimeState = "preparado · heartbeat ativo";
@@ -4624,110 +4602,121 @@ public class MainActivity extends Activity {
     }
 
     private JSONArray coreWorkerApkCapabilitiesArray() {
-        return new JSONArray()
-                .put("apk-native")
-                .put("android-status")
-                .put("native-boot")
-                .put("safe-shell-probe")
-                .put("python-embedded")
-                .put("internal-jobs")
-                .put("core-linux-runtime")
-                .put("core-linux-rootfs-manager")
-                .put("core-linux-rootfs-import-v1")
-                .put("core-linux-runner-preflight-v1")
-                .put("core-linux-runner-preflight-v2")
-                .put("core-linux-runner-preflight-v3")
-                .put("core-linux-runner-preflight-v4")
-                .put("core-linux-runner-preflight-v5")
-                .put("core-linux-runner-preflight-v6")
-                .put("core-linux-runner-preflight-v7")
-                .put("core-linux-runner-preflight-v8")
-                .put("core-linux-runner-preflight-v10")
-                .put("core-linux-runner-preflight-v11")
-                .put("core-linux-base-tools-smoke-v12")
-                .put("core-linux-rootfs-proot-smoke-v13")
-                .put("core-linux-rootfs-proot-smoke-v13.1")
-                .put("core-linux-rootfs-proot-smoke-v13.2")
-                .put("core-linux-rootfs-proot-smoke-v13.3")
-                .put("core-linux-box64-intake-preflight-v14.2.1")
-                .put("core-linux-box64-version-smoke-v15")
-                .put("core-linux-box64-version-smoke-v15.2")
-                .put("core-linux-box64-glibc-preflight-v15.3")
-                .put("core-linux-box64-glibc-preflight-v15.3.1")
-                .put("core-linux-rootfs-glibc-intake-preflight-v16.2")
-                .put("core-linux-embedded-binaries-intake-v1")
-                .put("core-linux-embedded-binaries-intake-v2")
-                .put("core-linux-embedded-binaries-intake-v3")
-                .put("core-linux-embedded-binaries-intake-v4")
-                .put("core-linux-embedded-binaries-intake-v5")
-                .put("core-linux-embedded-binaries-intake-v6")
-                .put("core-linux-embedded-binaries-intake-v7")
-                .put("core-linux-embedded-binaries-intake-v8")
-                .put("core-linux-embedded-binaries-intake-v10")
-                .put("core-linux-embedded-binaries-intake-v11")
-                .put("core-linux-embedded-binaries-build-pipeline-v1")
-                .put("core-linux-embedded-binaries-build-pipeline-v2")
-                .put("core-linux-embedded-binaries-build-pipeline-v3")
-                .put("core-linux-embedded-binaries-build-pipeline-v4")
-                .put("core-linux-embedded-binaries-build-pipeline-v5")
-                .put("core-linux-embedded-binaries-build-pipeline-v6")
-                .put("core-linux-runtime-v1")
-                .put("minecraft-bedrock-manager-safe-plan");
+        return CoreWorkerJobCatalog.capabilities();
     }
 
     private JSONObject coreLinuxPublicSnapshot() throws Exception {
-        JSONObject rootfsState = readJsonFile(new File(new File(coreLinuxDir(), "runtime"), "rootfs-state.json"));
-        JSONObject importState = readJsonFile(new File(new File(coreLinuxDir(), "runtime"), "rootfs-import-state.json"));
-        String summary = firstNonEmpty(
-                rootfsState.optString("summary", ""),
-                importState.optString("summary", ""),
-                coreLinuxSummary
+        File runtimeDir = new File(coreLinuxDir(), "runtime");
+        JSONObject rootfs = readJsonFile(new File(runtimeDir, "rootfs-state.json"));
+        JSONObject rootfsImport = readJsonFile(new File(runtimeDir, "rootfs-import-state.json"));
+        JSONObject runner = readJsonFile(new File(runtimeDir, "runner-preflight-state.json"));
+
+        JSONObject importAction = rootfsImport.optJSONObject("import");
+        JSONObject importValidation = importAction == null ? null : importAction.optJSONObject("validation");
+        if (importValidation == null) importValidation = rootfsImport.optJSONObject("validation");
+        JSONObject rootfsValidation = rootfs.optJSONObject("validation");
+
+        String importState = firstNonEmpty(
+                importAction == null ? "" : importAction.optString("state", ""),
+                rootfsImport.optString("state", "")
         );
-        String state = firstNonEmpty(
-                rootfsState.optString("state", ""),
-                importState.optString("state", ""),
-                coreLinuxState
+        String rootfsState = rootfs.optString("state", "");
+        String level = firstNonEmpty(
+                importValidation == null ? "" : importValidation.optString("validationLevel", ""),
+                rootfsValidation == null ? "" : rootfsValidation.optString("validationLevel", ""),
+                rootfs.optString("validationLevel", ""),
+                rootfs.optString("rootfsValidationLevel", ""),
+                rootfsImport.optString("validationLevel", "")
         );
-        boolean realValidated = state.toLowerCase(Locale.ROOT).contains("rootfs_real_validated")
-                || "real".equalsIgnoreCase(rootfsState.optString("validationLevel", ""));
-        if (realValidated) {
+        boolean strictKnown = "real".equalsIgnoreCase(level)
+                || importState.toLowerCase(Locale.ROOT).contains("glibc")
+                || importState.toLowerCase(Locale.ROOT).contains("rootfs_real")
+                || (importValidation != null && importValidation.has("glibcRuntime"));
+        boolean strictFailure = strictKnown && (
+                importState.toLowerCase(Locale.ROOT).contains("failed")
+                        || importState.toLowerCase(Locale.ROOT).contains("invalid")
+                        || (importValidation != null && !importValidation.optBoolean("ok", false))
+        );
+        boolean strictSuccess = strictKnown && !strictFailure
+                && importValidation != null && importValidation.optBoolean("ok", false)
+                && (importValidation.optJSONObject("glibcRuntime") == null
+                    || importValidation.optJSONObject("glibcRuntime").optBoolean("ok", false));
+        boolean legacyRealSuccess = !strictKnown
+                && (rootfsState.toLowerCase(Locale.ROOT).contains("rootfs_real_validated")
+                    || ("real".equalsIgnoreCase(level)
+                        && rootfsValidation != null
+                        && rootfsValidation.optBoolean("ok", false)));
+        boolean realValidated = !strictFailure && (strictSuccess || legacyRealSuccess);
+        boolean runnerReady = realValidated
+                && runner.optBoolean("runnerReady", false)
+                && runner.optBoolean("runnerRequirementsReady", false);
+        boolean runnerExecutionAllowed = runnerReady && runner.optBoolean("runnerExecutionAllowed", false);
+        boolean bedrockStartAllowed = runnerExecutionAllowed && runner.optBoolean("bedrockRequirementsReady", false);
+
+        JSONArray blockers = new JSONArray();
+        JSONArray missing = strictFailure && importValidation != null
+                ? importValidation.optJSONArray("missing")
+                : runner.optJSONArray("missing");
+        if (missing != null) {
+            for (int i = 0; i < missing.length(); i++) blockers.put(missing.opt(i));
+        }
+
+        String state;
+        String summary;
+        if (strictFailure) {
+            state = firstNonEmpty(importState, "rootfs_real_validation_failed");
+            summary = firstNonEmpty(
+                    importAction == null ? "" : importAction.optString("summary", ""),
+                    rootfsImport.optString("summary", ""),
+                    importValidation == null ? "" : importValidation.optString("summary", ""),
+                    "Rootfs real reprovado na validação glibc"
+            );
+        } else if (realValidated) {
             state = "rootfs_real_validated";
-            summary = firstNonEmpty(summary, "Rootfs real validado · runner real ainda bloqueado");
-            coreLinuxState = state;
-            coreLinuxSummary = summary;
-            rootfsState = rootfsState.length() > 0 ? rootfsState : importState.optJSONObject("rootfs");
+            summary = firstNonEmpty(rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), "Rootfs real validado");
+        } else {
+            state = firstNonEmpty(importState, rootfsState, coreLinuxState, "runtime_v1_pending");
+            summary = firstNonEmpty(rootfsImport.optString("summary", ""), rootfs.optString("summary", ""), coreLinuxSummary, "Core Linux aguardando rootfs real com glibc arm64");
         }
-        boolean prepared = coreLinuxPrepared || realValidated || (rootfsState != null && rootfsState.optBoolean("rootfsReady", false));
-        if (rootfsState == null) rootfsState = new JSONObject();
+
         JSONObject out = new JSONObject();
-        out.put("summary", summary == null ? "" : summary);
-        out.put("state", state == null ? "" : state);
-        out.put("prepared", prepared);
-        out.put("lastCheckAt", Math.max(coreLinuxLastCheckAt, Math.max(rootfsState.optLong("updatedAt", 0L), importState.optLong("updatedAt", 0L))));
+        out.put("summary", summary);
+        out.put("state", state);
+        out.put("prepared", realValidated);
+        out.put("rootfsReady", realValidated);
+        out.put("executorReady", runnerExecutionAllowed);
+        out.put("lastCheckAt", Math.max(coreLinuxLastCheckAt,
+                Math.max(Math.max(rootfs.optLong("updatedAt", 0L), rootfsImport.optLong("updatedAt", 0L)), runner.optLong("updatedAt", 0L))));
         out.put("termuxRequired", false);
-        out.put("bedrockStartAllowed", false);
-        out.put("rootfsReady", rootfsState.optBoolean("rootfsReady", prepared));
-        out.put("rootfsValidationLevel", rootfsState.optString("validationLevel", ""));
-        out.put("rootfsDistributionReady", rootfsState.optBoolean("distributionReady", false));
-        out.put("rootfsSummary", rootfsState.optString("summary", ""));
-        out.put("rootfsState", rootfsState.optString("state", ""));
-        out.put("rootfsImportState", importState.optString("state", ""));
-        out.put("rootfsImportSummary", importState.optString("summary", ""));
-        JSONObject runnerPreflight = readJsonFile(new File(new File(coreLinuxDir(), "runtime"), "runner-preflight-state.json"));
-        if (runnerPreflight.length() > 0) {
-            out.put("runnerPreflightState", runnerPreflight.optString("state", ""));
-            out.put("runnerPreflightSummary", runnerPreflight.optString("summary", ""));
-            out.put("runnerPreflightVersion", runnerPreflight.optInt("preflightVersion", 1));
-            out.put("runnerReady", runnerPreflight.optBoolean("runnerReady", false));
-            out.put("runnerBlocked", runnerPreflight.optBoolean("runnerBlocked", true));
-            out.put("runnerExecutionAllowed", runnerPreflight.optBoolean("runnerExecutionAllowed", false));
-            out.put("runnerRequirementsReady", runnerPreflight.optBoolean("runnerRequirementsReady", false));
-            safePutPayload(out, "runnerPreflight", runnerPreflight);
-        }
-        out.put("supportedStage", runnerPreflight.length() > 0 ? "core-linux-runner-preflight-v11" : (rootfsState.optBoolean("distributionReady", false) ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
+        out.put("termuxReplaced", true);
+        out.put("bedrockStartAllowed", bedrockStartAllowed);
+        out.put("rootfsValidationLevel", strictKnown ? "real" : level);
+        out.put("rootfsDistributionReady", realValidated);
+        out.put("readyForBox64Install", realValidated);
+        out.put("readyForBox64Smoke", realValidated && runnerReady);
+        out.put("readyForBedrockStart", bedrockStartAllowed);
+        out.put("strictValidationKnown", strictKnown);
+        out.put("strictValidationFailed", strictFailure);
+        out.put("rootfsState", state);
+        out.put("rootfsSummary", summary);
+        out.put("rootfsImportState", importState);
+        out.put("rootfsImportSummary", rootfsImport.optString("summary", ""));
+        out.put("blockers", blockers);
+        out.put("runnerPreflightState", runner.optString("state", ""));
+        out.put("runnerPreflightSummary", runner.optString("summary", ""));
+        out.put("runnerPreflightVersion", runner.optInt("preflightVersion", 1));
+        out.put("runnerReady", runnerReady);
+        out.put("runnerBlocked", !runnerExecutionAllowed);
+        out.put("runnerExecutionAllowed", runnerExecutionAllowed);
+        out.put("runnerRequirementsReady", realValidated && runner.optBoolean("runnerRequirementsReady", false));
+        out.put("runnerMissing", blockers);
+        out.put("supportedStage", strictFailure
+                ? "core-linux-rootfs-glibc-intake-preflight-v17"
+                : (realValidated ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
         out.put("supportedTasks", supportedLightJobsArray());
-        if (rootfsState.length() > 0) safePutPayload(out, "rootfs", rootfsState);
-        if (importState.length() > 0) safePutPayload(out, "rootfsImport", importState);
+        if (runner.length() > 0) out.put("runnerPreflight", runner);
+        if (rootfs.length() > 0) out.put("rootfs", rootfs);
+        if (rootfsImport.length() > 0) out.put("rootfsImport", rootfsImport);
         return out;
     }
 
@@ -4747,7 +4736,7 @@ public class MainActivity extends Activity {
     private JSONObject runtimeSnapshot() throws Exception {
         JSONObject runtime = new JSONObject();
         runtime.put("mode", runtimeMode == null || runtimeMode.trim().isEmpty() ? "apk-native-python-linux-bedrock-installer" : runtimeMode.trim());
-        runtime.put("current_worker", nativeWorkerOnline ? "apk-native-worker" : (localAgentOnline ? "termux-fallback" : "apk-internal-heartbeat"));
+        runtime.put("current_worker", nativeWorkerOnline ? "apk-native-worker" : "apk-internal-heartbeat");
         runtime.put("internal_runtime", "apk-native-runtime");
         runtime.put("capabilities", coreWorkerApkCapabilitiesArray());
         runtime.put("supported_tasks", supportedLightJobsArray());
@@ -4766,7 +4755,7 @@ public class MainActivity extends Activity {
         runtime.put("bedrock_installer_state", bedrockInstallerState == null ? "" : bedrockInstallerState);
         runtime.put("bedrock_installer_next_action", bedrockInstallerNextAction == null ? "" : bedrockInstallerNextAction);
         runtime.put("termux_required_now", false);
-        runtime.put("termux_fallback_available", localAgentOnline);
+        runtime.put("termux_fallback_available", false);
         runtime.put("advanced_jobs_require_termux", false);
         runtime.put("jobs_runtime", "apk-native-python-linux-bedrock-installer");
         runtime.put("migration_stage", "apk-native-bedrock-installer-phase");
@@ -4810,7 +4799,7 @@ public class MainActivity extends Activity {
         runtime.put("bedrock_last_check_at", bedrockLastCheckAt);
         safePutPayload(runtime, "coreLinux", corePublicForRuntime);
         safePutPayload(runtime, "nativeRuntime", nativeRuntimePublicSnapshot());
-        runtime.put("summary", "APK assume status, boot, jobs internos e Core Linux Runtime v1; Termux fica como fallback legado.");
+        runtime.put("summary", "APK assume status, boot, fila autenticada, TTS e jobs seguros diretamente.");
         return runtime;
     }
 
@@ -4821,99 +4810,24 @@ public class MainActivity extends Activity {
     }
 
     private void sendInternalRuntimeHeartbeat(boolean showResult, String reason) {
-        if (!internalRuntimeHeartbeatRunning.compareAndSet(false, true)) {
-            internalRuntimeHeartbeatState = "heartbeat já em andamento";
-            return;
-        }
-        new Thread(() -> {
-            try {
-                sendInternalRuntimeHeartbeatInternal(showResult, reason);
-            } finally {
-                internalRuntimeHeartbeatRunning.set(false);
-            }
-        }, "core-worker-apk-heartbeat").start();
-    }
-
-    private void sendInternalRuntimeHeartbeatInternal(boolean showResult, String reason) {
-        String serverUrl = normalizedServerUrl();
-        if (serverUrl.isEmpty()) {
+        String trigger = reason == null || reason.trim().isEmpty() ? "internal_sync" : reason.trim();
+        if (!hasPairing()) {
             internalRuntimeOnline = false;
-            internalRuntimeHeartbeatState = "VPS não configurada";
+            internalRuntimeHeartbeatState = "aguardando pareamento direto";
+            if (showResult) show("Este celular ainda não está pareado com a VPS.");
             updateSystemChecklistText();
             return;
         }
-        try {
-            JSONObject payload = statusSnapshot();
-            payload.put("state", "internal_heartbeat");
-            payload.put("reason", reason == null ? "manual" : reason);
-            payload.put("source", "core-worker-apk-internal-runtime");
-            payload.put("runtime_mode", "apk-native-python-linux-bedrock-installer");
-            payload.put("internal_runtime", "apk-native-runtime");
-            payload.put("internal_runtime_state", internalRuntimeState == null ? "" : internalRuntimeState);
-            payload.put("internal_runtime_path", internalRuntimePath == null ? "" : internalRuntimePath);
-            payload.put("workerId", effectiveWorkerId());
-            payload.put("installId", installId());
-            payload.put("deviceName", deviceNameInput == null ? defaultDeviceName() : deviceNameInput.getText().toString().trim());
-            payload.put("appVersion", APP_VERSION);
-            payload.put("appVersionCode", BuildConfig.VERSION_CODE);
-            payload.put("capabilities", coreWorkerApkCapabilitiesArray());
-            payload.put("supported_tasks", supportedLightJobsArray());
-            payload.put("supportedTasks", supportedLightJobsArray());
-            payload.put("app_jobs", supportedLightJobsArray());
-            safePutPayload(payload, "runtime", runtimeSnapshot());
-            safePutPayload(payload, "coreLinux", coreLinuxPublicSnapshot());
-            safePutPayload(payload, "nativeRuntime", nativeRuntimePublicSnapshot());
-            payload.put("profile", appliedProfile());
-            payload.put("profileLabel", profileLabel(appliedProfile()));
-            payload.put("localAgentOnline", localAgentOnline);
-            payload.put("termuxWorkerOnline", localAgentOnline);
-            payload.put("nativeWorkerOnline", nativeWorkerOnline);
-            payload.put("jobsRuntime", "apk-native-python-linux-bedrock-installer");
-            safePutPayload(payload, "battery", batterySnapshot());
-            safePutPayload(payload, "network", networkSnapshot(serverUrl));
-            safePutPayload(payload, "update", updateSnapshot());
-            safePutPayload(payload, "app_status", appStatusSnapshot());
-            HttpResult result = request("POST", serverUrl + "/core-worker/app/heartbeat", payload, null);
-            boolean accepted = false;
-            if (result.ok()) {
-                try {
-                    accepted = new JSONObject(result.body).optBoolean("ok", false);
-                } catch (Throwable ignored) {
-                    accepted = false;
-                }
-            }
-            if (result.ok() && accepted) {
-                internalRuntimeOnline = true;
-                internalRuntimeHeartbeatState = "online";
-                internalRuntimeLastError = "";
-                appStatusLastError = "";
-                internalRuntimeLastHeartbeatAt = System.currentTimeMillis();
-                appStatusLastSentAt = internalRuntimeLastHeartbeatAt;
-                vpsState = "ok";
-                reportAppState("internal_runtime_heartbeat", "APK enviou heartbeat direto para a VPS");
-                if (showResult) {
-                    show("Runtime nativo do APK sincronizado com a VPS.\nTermux fica só como fallback para jobs avançados enquanto a migração continua.");
-                }
-            } else {
-                internalRuntimeOnline = false;
-                internalRuntimeHeartbeatState = "falha HTTP " + result.status;
-                internalRuntimeLastError = compactResultBody(result.body);
-                if (showResult) {
-                    show("Runtime interno não confirmou heartbeat: HTTP " + result.status + "\n" + compactResultBody(result.body));
-                }
-            }
-        } catch (Throwable exc) {
-            internalRuntimeOnline = false;
-            internalRuntimeHeartbeatState = "falha";
-            internalRuntimeLastError = shortThrowable(exc);
-            appStatusLastError = internalRuntimeLastError;
-            if (showResult) {
-                show("Runtime interno não confirmou heartbeat: " + shortThrowable(exc));
-            }
-        }
+        CoreWorkerRuntimeService.requestStart(this, trigger);
+        CoreWorkerRuntimeService.requestPoll(this, trigger);
+        internalRuntimeOnline = true;
+        internalRuntimeHeartbeatState = "agente autenticado solicitado";
+        internalRuntimeLastHeartbeatAt = System.currentTimeMillis();
+        if (showResult) show("Runtime direto do APK sincronizando com a VPS.");
         updateSystemChecklistText();
-        showLocalAgentText();
     }
+
+
 
     private void ensureAutonomousAgentRunning(String reason) {
         try {
@@ -4988,7 +4902,7 @@ public class MainActivity extends Activity {
     }
 
     private JSONArray supportedLightJobsArray() {
-        return CoreWorkerJobCatalog.supportedJobs();
+        return CoreWorkerJobCatalog.remoteSupportedTasks();
     }
 
     private boolean isCoreLinuxRuntimeV1JobType(String type) {
@@ -5279,17 +5193,17 @@ public class MainActivity extends Activity {
         bridge.put("mode", "apk-native-python-linux-bedrock-installer");
         bridge.put("apk_internal_online", internalRuntimeOnline);
         bridge.put("apk_native_worker_online", nativeWorkerOnline);
-        bridge.put("termux_worker_online", localAgentOnline);
+        bridge.put("termux_worker_online", false);
         bridge.put("termux_agent_version", localAgentVersion == null ? "" : localAgentVersion);
         bridge.put("termux_profile", localAgentProfile == null ? "" : localAgentProfile);
         bridge.put("jobs_real_runtime", nativeWorkerOnline ? "apk-native-worker" : "apk-internal-queue");
         bridge.put("jobs_internal_runtime", "apk-native-safe-queue");
-        bridge.put("termux_role", "fallback-legado");
+        bridge.put("termux_role", "substituido");
         bridge.put("core_linux_summary", coreLinuxSummary == null ? "" : coreLinuxSummary);
         bridge.put("bedrock_summary", bedrockSummary == null ? "" : bedrockSummary);
         bridge.put("ready_for_termux_reduction", internalRuntimeOnline && hasPairing());
         String summary = nativeWorkerOnline ? "APK nativo pareado" : (internalRuntimeOnline ? "APK interno online" : "APK aguardando");
-        summary += localAgentOnline ? " · Termux fallback online" : " · Termux fallback offline";
+        summary += " · runtime direto APK";
         bridge.put("summary", summary);
         return bridge;
     }
@@ -6095,9 +6009,9 @@ public class MainActivity extends Activity {
         status.put("bedrock_installer_summary", bedrockInstallerSummary == null ? "" : bedrockInstallerSummary);
         status.put("bedrock_installer_state", bedrockInstallerState == null ? "" : bedrockInstallerState);
         status.put("bedrock_installer_next_action", bedrockInstallerNextAction == null ? "" : bedrockInstallerNextAction);
-        status.put("termux_installed", isPackageInstalled("com.termux"));
-        status.put("termux_api_installed", isPackageInstalled("com.termux.api"));
-        status.put("termux_boot_installed", isPackageInstalled("com.termux.boot"));
+        status.put("termux_installed", false);
+        status.put("termux_api_installed", false);
+        status.put("termux_boot_installed", false);
         status.put("tailscale_installed", isPackageInstalled("com.tailscale.ipn"));
         status.put("fcm_state", fcmState);
         status.put("fcm_token_preview", fcmTokenPreview);
@@ -6274,121 +6188,33 @@ public class MainActivity extends Activity {
     }
 
     private void checkLocalAgent(boolean userVisible) {
-        runBusy(userVisible ? "Verificando este celular..." : "Verificando este celular...", () -> {
-            boolean ok = updateLocalAgentStatus(true);
-            sendInternalRuntimeHeartbeat(false, userVisible ? "manual_check" : "background_check");
-            fetchAndRunLightJobs(false, userVisible ? "manual_check" : "background_check");
-            updateSystemChecklistText();
-            if (userVisible) {
-                if (ok) {
-                    show("Tudo pronto.\nWorker online · perfil " + profileLabel(appliedProfile()));
-                } else {
-                    show("Worker local offline. Abra o Termux por enquanto para acordar este celular.");
-                }
-            }
-        });
-    }
-
-    private boolean updateLocalAgentStatus(boolean updateText) {
-        try {
-            HttpResult result = request("GET", LOCAL_AGENT_STATUS_URL, null, null);
-            if (!result.ok()) {
-                throw new Exception("HTTP " + result.status);
-            }
-            JSONObject body = new JSONObject(result.body);
-            applyLocalAgentStatus(body);
-            if (updateText) {
-                showLocalAgentText();
-            }
-            return true;
-        } catch (Throwable exc) {
+        runBusy("Verificando este celular...", () -> {
             localAgentOnline = false;
             localAgentVersion = "";
             localAgentProfile = "";
             localAgentWorkerId = "";
             localAgentVpsConfigured = false;
             localAgentJobsConfigured = false;
-            localAgentMessage = "offline";
-            runOnUiThread(this::updatePairingUi);
-            if (updateText) {
-                showLocalAgentText();
+            localAgentMessage = "substituído pelo APK";
+            if (hasPairing()) {
+                CoreWorkerRuntimeService.requestStart(this, userVisible ? "manual_check" : "background_check");
+                CoreWorkerRuntimeService.requestPoll(this, userVisible ? "manual_check" : "background_check");
+                sendNativeWorkerHeartbeat(false, userVisible ? "manual_check" : "background_check");
+                if (userVisible) {
+                    show("APK ativo · perfil " + profileLabel(appliedProfile()) + "\nSincronização direta solicitada.");
+                }
+            } else if (userVisible) {
+                show("Este celular ainda não está pareado com a VPS.");
             }
-            return false;
-        }
+            updateSystemChecklistText();
+        });
     }
 
-    private boolean syncProfileToLocalAgent(String profile) {
-        try {
-            JSONObject payload = new JSONObject();
-            payload.put("profile", profile);
-            payload.put("profile_label", profileLabel(profile));
-            payload.put("roles", jsonArray(profileRoles(profile)));
-            payload.put("capabilities", jsonArray(profileRoles(profile)));
-            payload.put("source", "core-worker-apk-companion");
-            payload.put("apk_version", APP_VERSION);
-            HttpResult result = request("POST", LOCAL_AGENT_PROFILE_URL, payload, null);
-            if (!result.ok()) {
-                throw new Exception("HTTP " + result.status);
-            }
-            JSONObject body = new JSONObject(result.body);
-            applyLocalAgentStatus(body);
-            showLocalAgentText();
-            runOnUiThread(this::updatePairingUi);
-            updateSystemChecklistText();
-            return true;
-        } catch (Throwable exc) {
-            localAgentOnline = false;
-            localAgentVersion = "";
-            localAgentProfile = "";
-            localAgentMessage = "offline ao aplicar perfil";
-            runOnUiThread(this::updatePairingUi);
-            showLocalAgentText();
-            updateSystemChecklistText();
-            return false;
-        }
-    }
 
-    private void applyLocalAgentStatus(JSONObject body) {
-        localAgentOnline = body.optBoolean("ok", true);
-        localAgentVersion = body.optString("version", "");
-        String reportedProfile = normalizeProfileOrEmpty(body.optString("profile", ""));
-        if (reportedProfile.isEmpty()) {
-            reportedProfile = normalizeProfileOrEmpty(body.optString("profile_label", ""));
-        }
-        localAgentProfile = reportedProfile;
-        if (!reportedProfile.isEmpty()) {
-            final String finalReportedProfile = reportedProfile;
-            prefs.edit().putString("profile", finalReportedProfile).apply();
-            runOnUiThread(() -> {
-                updateProfileRadioSelection(finalReportedProfile);
-                updateProfileHint(finalReportedProfile);
-            });
-        }
-        localAgentWorkerId = body.optString("worker_id", localAgentWorkerId);
-        localAgentVpsConfigured = body.optBoolean("vps_configured", false);
-        localAgentJobsConfigured = body.optBoolean("jobs_configured", false);
-        JSONObject statusObj = body.optJSONObject("status");
-        if (statusObj != null) {
-            String reportedMode = statusObj.optString("runtime_mode", "");
-            if (!reportedMode.trim().isEmpty()) {
-                runtimeMode = reportedMode.trim();
-            }
-        }
-        String bodyMode = body.optString("runtime_mode", "");
-        if (!bodyMode.trim().isEmpty()) {
-            runtimeMode = bodyMode.trim();
-        }
-        localAgentSshdSummary = body.optString("sshd_summary", "");
-        if (localAgentOnline) {
-            String jobs = localAgentJobsConfigured ? "jobs ok" : "jobs pendentes";
-            String vps = localAgentVpsConfigured ? "VPS ok" : "VPS pendente";
-            String paired = autoPairFromLocalAgent() ? "pareado" : "pareamento local pendente";
-            String sshd = localAgentSshdSummary == null || localAgentSshdSummary.trim().isEmpty() ? "wake ?" : localAgentSshdSummary.trim();
-            localAgentMessage = "online · " + vps + " · " + jobs + " · " + paired + " · " + sshd;
-        } else {
-            localAgentMessage = "offline";
-        }
-    }
+
+
+
+
 
     private void showLocalAgentText() {
         runOnUiThread(() -> {
@@ -6450,78 +6276,45 @@ public class MainActivity extends Activity {
     private String localAgentLine() {
         String profile = appliedProfile();
         String internal = internalRuntimeOnline ? "Runtime APK online" : "Runtime APK aguardando";
-        if (nativeWorkerOnline || prefs.getBoolean("paired_via_native_apk", false)) {
-            return "✅ APK pronto para trabalhar\n" + profileLabel(profile) + " · Push " + fcmCompactLabel() + " · " + internal + " · " + emptyFallback(nativeWorkerState, "worker nativo");
-        }
-        if (!localAgentOnline) {
-            return (internalRuntimeOnline ? "✅ APK conectado à VPS" : "⚠️ Aguardando pareamento")
-                    + "\n" + internal + " · Termux é apenas fallback temporário.";
-        }
         if (hasPairing()) {
-            return "✅ Pronto para trabalhar\n" + profileLabel(profile) + " · Push " + fcmCompactLabel() + " · " + internal + " · APK " + updateChecklistLabel();
+            return "✅ APK pronto para trabalhar\n"
+                    + profileLabel(profile) + " · Push " + fcmCompactLabel()
+                    + " · " + internal + " · " + emptyFallback(nativeWorkerState, "worker direto");
         }
-        return "⚠️ Fallback Termux detectado\nConecte este celular direto pelo APK quando possível.";
+        return (internalRuntimeOnline ? "✅ Runtime APK preparado" : "⚠️ Aguardando pareamento")
+                + "\n" + internal + " · conexão direta com a VPS.";
     }
 
 
     private boolean hasPairing() {
-        boolean pairedViaLocal = prefs.getBoolean("paired_via_local_agent", false);
         boolean pairedViaNative = prefs.getBoolean("paired_via_native_apk", false);
         String serverUrl = prefs.getString("server_url", DEFAULT_VPS_URL);
         String workerId = prefs.getString("worker_id", "");
         String token = prefs.getString("worker_token", "");
-        boolean nativeSaved = pairedViaNative && serverUrl != null && !serverUrl.isEmpty() && workerId != null && !workerId.isEmpty() && token != null && !token.isEmpty();
-        boolean saved = pairedViaLocal && serverUrl != null && !serverUrl.isEmpty() && workerId != null && !workerId.isEmpty();
-        boolean local = localAgentOnline && localAgentVpsConfigured && localAgentWorkerId != null && !localAgentWorkerId.trim().isEmpty();
-        return nativeSaved || saved || local;
+        return pairedViaNative
+                && serverUrl != null && !serverUrl.trim().isEmpty()
+                && workerId != null && !workerId.trim().isEmpty()
+                && token != null && !token.trim().isEmpty();
     }
 
-    private boolean autoPairFromLocalAgent() {
-        if (!localAgentOnline || !localAgentVpsConfigured || localAgentWorkerId == null || localAgentWorkerId.trim().isEmpty()) {
-            return false;
-        }
-        String serverUrl = normalizedServerUrl();
-        prefs.edit()
-                .putString("server_url", serverUrl)
-                .putString("worker_id", localAgentWorkerId)
-                .putBoolean("paired_via_local_agent", true)
-                .apply();
-        registerFcmTokenAsync("local_agent_pair_detected");
-        return true;
-    }
+
 
     private void autoVerifySavedPairing() {
-        new Thread(() -> {
-            try {
-                if (prefs.getBoolean("paired_via_native_apk", false)) {
-                    sendNativeWorkerHeartbeat(false, "auto_verify_saved_native_pairing");
-                    show(null);
-                }
-                boolean ok = updateLocalAgentStatus(false);
-                if (ok && autoPairFromLocalAgent()) {
-                    vpsState = localAgentVpsConfigured ? "ok" : "pendente";
-                    reportAppState("local_agent_seen", "APK detectou worker local já pareado: " + localAgentMessage);
-                    show("Pareamento existente detectado automaticamente pelo worker local. Nenhum novo código é necessário.");
-                } else {
-                    reportAppState(ok ? "local_agent_unpaired" : "local_agent_offline", ok ? localAgentMessage : "worker local offline/inacessível pelo APK");
-                    show(null);
-                }
-            } catch (Throwable ignored) {
-                show(null);
-            }
-        }).start();
+        if (!hasPairing()) {
+            nativeWorkerOnline = false;
+            nativeWorkerState = "aguardando pareamento direto";
+            showLocalAgentText();
+            return;
+        }
+        CoreWorkerRuntimeService.requestStart(this, "auto_verify_saved_pairing");
+        CoreWorkerRuntimeService.requestPoll(this, "auto_verify_saved_pairing");
+        sendNativeWorkerHeartbeat(false, "auto_verify_saved_pairing");
     }
 
     private void openTermux() {
-        try {
-            Intent launch = getPackageManager().getLaunchIntentForPackage("com.termux");
-            if (launch == null) {
-                throw new ActivityNotFoundException("Termux não encontrado");
-            }
-            startActivity(launch);
-        } catch (Throwable exc) {
-            refreshLocalStatus("Não consegui abrir o Termux automaticamente. Abra o Termux por enquanto; o runtime interno ainda está em preparação.");
-        }
+        CoreWorkerRuntimeService.requestStart(this, "runtime_status_ui");
+        CoreWorkerRuntimeService.requestPoll(this, "runtime_status_ui");
+        refreshLocalStatus("Termux foi removido do fluxo. O Core Worker opera diretamente pelo APK.");
     }
 
     private void openTailscale() {
@@ -6543,10 +6336,12 @@ public class MainActivity extends Activity {
                 .setPositiveButton("Esquecer", (dialog, which) -> {
                     prefs.edit()
                             .remove("worker_token")
+                            .remove("direct_http_token")
                             .remove("server_url")
                             .remove("profile")
                             .remove("paired_via_local_agent")
                             .remove("paired_via_native_apk")
+                            .remove("legacy_termux_online")
                             .remove("native_worker_id")
                             .remove("worker_id")
                             .apply();

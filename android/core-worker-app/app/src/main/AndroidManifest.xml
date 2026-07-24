@@ -12,9 +12,6 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <queries>
-        <package android:name="com.termux" />
-        <package android:name="com.termux.api" />
-        <package android:name="com.termux.boot" />
         <package android:name="com.tailscale.ipn" />
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />

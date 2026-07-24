@@ -58,8 +58,8 @@ android {
         applicationId "dev.core.worker"
         minSdk 26
         targetSdk 34
-        versionCode 117
-        versionName "0.6.2"
+        versionCode 118
+        versionName "0.7.0"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -111,10 +111,9 @@ android {
 
     packaging {
         jniLibs {
-            // O builder roda dentro do Termux/Android. O llvm-strip do NDK instalado
-            // pelo SDK Manager é binário de host Linux x86_64 e gera ruído/falhas de
-            // strip nesse ambiente. As libs são privadas/debug e podem ser empacotadas
-            // sem strip para manter o build confiável no phone worker.
+            // O build privado pode ocorrer em ambientes sem suporte confiável ao
+            // llvm-strip do NDK. As libs são privadas/debug e podem ser empacotadas
+            // sem strip; o runtime da VPS não executa este build.
             keepDebugSymbols += ["**/*.so"]
 
             // V14.2.1: Box64 é executável Linux/glibc. Se uma base antiga ainda

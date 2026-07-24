@@ -22,37 +22,90 @@ DEFAULT_JOB_HISTORY_LIMIT = 8
 DEFAULT_JOB_PAYLOAD_MAX_STRING = 256 * 1024
 
 CORE_WORKER_JOB_TYPES = {
-    "ping",
-    "status",
-    "diagnostic_basic",
-    "worker_self_check",
-    "worker_logs",
-    "network_probe",
-    "tailscale_status",
-    "service_status",
-    "service_start",
-    "service_stop",
-    "service_restart",
-    "ffmpeg_check",
-    "ffprobe_check",
-    "zip_validate",
-    "log_summary",
-    "text_stats",
-    "maintenance_plan",
-    "worker_update",
-    "apk_build_debug",
-    "apk_publish_last",
-    "vps_assist_probe",
-    "hash_batch",
-    "endpoint_probe",
-    "emoji_recolor",
-    "media_probe",
-    "audio_convert",
-    "log_digest",
-    "zip_audit",
-    "boot_status",
-    "boot_repair",
+    'ping',
+    'status',
+    'diagnostic_basic',
+    'worker_self_check',
+    'worker_logs',
+    'network_probe',
+    'endpoint_probe',
+    'emoji_recolor',
+    'sha256',
+    'hash_batch',
+    'text_stats',
+    'log_extract',
+    'log_summary',
+    'zip',
+    'zip_validate',
+    'ffmpeg_check',
+    'ffprobe_check',
+    'ffmpeg_convert',
+    'ffprobe_media',
+    'tts_agent_status',
+    'tts_agent_synthesize',
+    'health',
+    'tailscale_status',
+    'vps_assist_probe',
+    'log_digest',
+    'zip_audit',
+    'maintenance_plan',
+    'media_probe',
+    'audio_convert',
+    'tts_android_voices',
+    'tts_atts_voices',
+    'android_tts_voices',
+    'tts_synthesize_benchmark',
+    'tts_synthesize_piper',
+    'tts_cache_lookup',
+    'tts_cache_store',
+    'boot_status',
+    'service_status',
+    'apk_ping',
+    'apk_status_refresh',
+    'apk_upload_app_logs',
+    'apk_diagnostic',
+    'apk_check_update',
+    'apk_test_vps_connection',
+    'apk_sync_runtime_state',
+    'apk_job_history',
+    'apk_device_diagnostic',
+    'apk_push_diagnostic',
+    'apk_update_diagnostic',
+    'apk_runtime_diagnostic',
+    'apk_worker_bridge_status',
+    'apk_test_notification',
+    'apk_repair_local_state',
+    'apk_reset_job_history',
+    'apk_trim_cache',
+    'apk_update_storage_cleanup',
+    'apk_sync_profile',
+    'apk_sync_profile_now',
+    'apk_verify_update_state',
+    'apk_native_worker_status',
+    'apk_native_boot_status',
+    'apk_local_shell_probe',
+    'apk_core_linux_native_executor_probe',
+    'apk_core_linux_native_executor_test',
+    'apk_core_linux_native_runtime_status',
+    'apk_core_linux_rootfs_status',
+    'apk_core_linux_rootfs_prepare',
+    'apk_core_linux_rootfs_validate',
+    'apk_core_linux_rootfs_preflight',
+    'apk_core_linux_rootfs_clean_staging',
+    'apk_core_linux_rootfs_import_status',
+    'apk_core_linux_rootfs_import_validate',
+    'apk_core_linux_rootfs_import_abort',
+    'apk_core_linux_rootfs_real_status',
+    'apk_core_linux_rootfs_glibc_preflight',
+    'apk_core_linux_runner_status',
+    'apk_core_linux_runner_preflight',
+    'apk_core_linux_runner_requirements',
+    'apk_core_linux_runtime_smoke_test',
+    'apk_core_linux_rootfs_smoke_test',
+    'apk_core_linux_box64_preflight',
+    'apk_core_linux_box64_smoke_test',
 }
+
 
 _ROLE_RE = re.compile(r"[^a-z0-9_.:-]+")
 _CODE_RE = re.compile(r"[^A-Z0-9]+")
@@ -155,7 +208,7 @@ def normalize_roles(value: object, *, default: list[str] | None = None, limit: i
 
 
 
-def normalize_job_types(value: object, *, default: list[str] | None = None, limit: int = 64) -> list[str]:
+def normalize_job_types(value: object, *, default: list[str] | None = None, limit: int = 96) -> list[str]:
     """Normaliza tipos de jobs/tasks preservando underscore.
 
     `normalize_roles()` troca `_` por `-`, o que é correto para roles, mas
@@ -304,7 +357,7 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
     online = enabled and age is not None and age <= offline_after
     roles = _merge_unique(normalize_roles(record.get("roles"), limit=16), normalize_roles(record.get("manual_roles"), limit=16), limit=16)
     capabilities = _merge_unique(normalize_roles(record.get("capabilities"), limit=24), normalize_roles(record.get("manual_capabilities"), limit=24), limit=24)
-    supported_tasks = _merge_unique(normalize_job_types(record.get("supported_tasks"), limit=64), normalize_job_types(record.get("manual_supported_tasks"), limit=64), limit=64)
+    supported_tasks = _merge_unique(normalize_job_types(record.get("supported_tasks"), limit=96), normalize_job_types(record.get("manual_supported_tasks"), limit=96), limit=96)
     status = record.get("status") if isinstance(record.get("status"), Mapping) else {}
     runtime = status.get("runtime") if isinstance(status.get("runtime"), Mapping) else {}
     runtime_mode = _short_text(record.get("runtime_mode") or status.get("runtime_mode") or runtime.get("mode") or "", limit=32)
@@ -545,7 +598,7 @@ class CoreWorkersRegistry:
                 "paired_by_name": _short_text(match.get("created_by_name"), limit=80),
                 "roles": roles,
                 "capabilities": capabilities,
-                "supported_tasks": normalize_job_types(payload.get("supported_tasks"), limit=64),
+                "supported_tasks": normalize_job_types(payload.get("supported_tasks"), limit=96),
                 "endpoint": endpoint,
                 "version": version,
                 "source": source,
@@ -570,7 +623,7 @@ class CoreWorkersRegistry:
         }
 
     def ensure_direct_worker(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
-        """Registra/renova um phone-worker direto confiável.
+        """Registra/renova o Core Worker APK direto confiável.
 
         Esse caminho cobre o modo legado/direto usado pelo painel da VPS. Ele não
         substitui o pareamento normal do APK: só aceita tokens explicitamente
@@ -600,8 +653,8 @@ class CoreWorkersRegistry:
                     "registered_at": ts,
                     "paired_by_id": 0,
                     "paired_by_name": "VPS direct",
-                    "manual_roles": ["phone-worker", "apk-builder"],
-                    "manual_capabilities": ["phone-worker", "apk-builder"],
+                    "manual_roles": ["apk-worker", "diagnostics"],
+                    "manual_capabilities": ["apk-worker", "diagnostics"],
                 }
             record.update({
                 "worker_id": worker_id,
@@ -611,16 +664,16 @@ class CoreWorkersRegistry:
                 "last_heartbeat_at": ts,
                 "remote_addr": _short_text(remote_addr, limit=64),
                 "direct": True,
-                "source": _short_text(payload.get("source") or "phone-worker-direct", limit=32),
+                "source": _short_text(payload.get("source") or "core-worker-apk-direct", limit=32),
                 "name": _short_text(payload.get("name") or record.get("name") or "Core Phone Worker", limit=64),
             })
             if payload.get("endpoint") or payload.get("base_url") or payload.get("url"):
                 record["endpoint"] = _short_text(payload.get("endpoint") or payload.get("base_url") or payload.get("url"), limit=160)
             if payload.get("version"):
                 record["version"] = _short_text(payload.get("version"), limit=48)
-            roles = normalize_roles(payload.get("roles"), default=normalize_roles(record.get("roles"), default=["phone-worker", "diagnostics", "apk-builder"]), limit=16)
+            roles = normalize_roles(payload.get("roles"), default=normalize_roles(record.get("roles"), default=["apk-worker", "diagnostics"]), limit=16)
             capabilities = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities"), default=roles), limit=24)
-            tasks = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=64)
+            tasks = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=96)
             record["roles"] = _merge_unique(roles, normalize_roles(record.get("manual_roles"), limit=16), limit=16)
             record["capabilities"] = _merge_unique(capabilities, normalize_roles(record.get("manual_capabilities"), limit=24), limit=24)
             if tasks:
@@ -660,7 +713,7 @@ class CoreWorkersRegistry:
             if "capabilities" in payload:
                 record["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(record.get("capabilities")), limit=24)
             if "supported_tasks" in payload:
-                record["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=64)
+                record["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(record.get("supported_tasks")), limit=96)
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
                 if key not in payload:
                     continue
@@ -910,7 +963,7 @@ class CoreWorkersRegistry:
             if "capabilities" in payload:
                 worker["capabilities"] = normalize_roles(payload.get("capabilities"), default=normalize_roles(worker.get("capabilities")), limit=24)
             if "supported_tasks" in payload:
-                worker["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(worker.get("supported_tasks")), limit=64)
+                worker["supported_tasks"] = normalize_job_types(payload.get("supported_tasks"), default=normalize_job_types(worker.get("supported_tasks")), limit=96)
             for key, max_items in (("battery", 16), ("network", 16), ("health", 24), ("status", 24)):
                 if key not in payload:
                     continue
@@ -1197,7 +1250,7 @@ class CoreWorkersRegistry:
         if not new_roles:
             raise CoreWorkerRegistryError("roles ausentes", status=400)
         new_capabilities = normalize_roles(capabilities if capabilities is not None else new_roles, default=new_roles, limit=24)
-        manual_tasks = normalize_job_types(supported_tasks, limit=64) if supported_tasks is not None else []
+        manual_tasks = normalize_job_types(supported_tasks, limit=96) if supported_tasks is not None else []
         ts = _now()
         with self._lock:
             data = self._load_unlocked()
@@ -1215,7 +1268,7 @@ class CoreWorkersRegistry:
             worker["roles"] = _merge_unique(normalize_roles(worker.get("roles"), limit=16), new_roles, limit=16)
             worker["capabilities"] = _merge_unique(normalize_roles(worker.get("capabilities"), limit=24), new_capabilities, limit=24)
             if manual_tasks:
-                worker["supported_tasks"] = _merge_unique(normalize_job_types(worker.get("supported_tasks"), limit=64), manual_tasks, limit=64)
+                worker["supported_tasks"] = _merge_unique(normalize_job_types(worker.get("supported_tasks"), limit=96), manual_tasks, limit=96)
             worker["updated_at"] = ts
             workers[safe_worker_id] = worker
             data["workers"] = workers

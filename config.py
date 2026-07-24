@@ -337,10 +337,14 @@ MUSIC_REJECT_WEAK_LINK_MATCHES = _parse_bool(os.getenv("MUSIC_REJECT_WEAK_LINK_M
 # Spotify direto/spsearch fica fora do padrão porque o LavaSrc 4.8.x pode falhar com 403.
 MUSIC_LAVASRC_MIRROR_PREFIXES = (os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "scsearch") or "scsearch").strip()
 
+# Migração definitiva: o APK assume o worker móvel e o Termux não participa do runtime.
+# O build do APK continua externo/manual; a VPS apenas publica APKs já compilados.
+CORE_WORKER_APK_REPLACES_TERMUX = _parse_bool(os.getenv("CORE_WORKER_APK_REPLACES_TERMUX", "true"), True)
+
 # Lavalink/phone worker — música agora deve rodar fora da VPS.
 # MUSIC_BACKEND fica aceitando valor antigo por compatibilidade, mas o fluxo
 # musical usa MUSIC_WORKER_ONLY_ENABLED para bloquear fallback local pesado.
-MUSIC_BACKEND = (os.getenv("MUSIC_BACKEND", "worker") or "worker").strip().lower()
+MUSIC_BACKEND = "local" if CORE_WORKER_APK_REPLACES_TERMUX else (os.getenv("MUSIC_BACKEND", "worker") or "worker").strip().lower()
 LAVALINK_ENABLED = _parse_bool(os.getenv("LAVALINK_ENABLED", "false"), False)
 LAVALINK_MODE = (os.getenv("LAVALINK_MODE", "off") or "off").strip().lower()
 LAVALINK_HOST = (os.getenv("LAVALINK_HOST", "") or "").strip()
@@ -365,7 +369,7 @@ AUX_LAVALINK_COOLDOWN_SECONDS = max(10.0, _parse_float(os.getenv("AUX_LAVALINK_C
 
 # Music Agent no phone worker — padrão da música. A VPS fica como plano de UI/status
 # e o worker assume voz/player/Lavalink/yt-dlp quando disponível.
-MUSIC_AGENT_ENABLED = _parse_bool(os.getenv("MUSIC_AGENT_ENABLED", "true"), True)
+MUSIC_AGENT_ENABLED = (not CORE_WORKER_APK_REPLACES_TERMUX) and _parse_bool(os.getenv("MUSIC_AGENT_ENABLED", "true"), True)
 MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", "18.0"), 18.0))
 MUSIC_AGENT_STATUS_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", "5.0"), 5.0))
 MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS = max(5.0, _parse_float(os.getenv("MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", "30.0"), 30.0))
@@ -396,7 +400,7 @@ MUSIC_AGENT_MISSING_TOKEN_MESSAGE = (
 # Phone-worker auxiliar — celular via Tailscale.
 # Para música, o modo atual é worker-only: a VPS não deve usar yt-dlp/FFmpeg local
 # nem fallback pesado. O worker turbo/phone-lavalink precisa estar online.
-MUSIC_WORKER_ONLY_ENABLED = _parse_bool(os.getenv("MUSIC_WORKER_ONLY_ENABLED", "true"), True)
+MUSIC_WORKER_ONLY_ENABLED = (not CORE_WORKER_APK_REPLACES_TERMUX) and _parse_bool(os.getenv("MUSIC_WORKER_ONLY_ENABLED", "true"), True)
 MUSIC_WORKER_UNAVAILABLE_MESSAGE = (
     os.getenv("MUSIC_WORKER_UNAVAILABLE_MESSAGE", "Sistema de música indisponível no momento: Nenhum worker online")
     or "Sistema de música indisponível no momento: Nenhum worker online"
@@ -409,7 +413,7 @@ MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE = (
     os.getenv("MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE", "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta")
     or "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta"
 ).strip()
-MUSIC_WORKER_REQUIRE_TURBO = _parse_bool(os.getenv("MUSIC_WORKER_REQUIRE_TURBO", "true"), True)
+MUSIC_WORKER_REQUIRE_TURBO = (not CORE_WORKER_APK_REPLACES_TERMUX) and _parse_bool(os.getenv("MUSIC_WORKER_REQUIRE_TURBO", "true"), True)
 MUSIC_WORKER_REQUIRED_ROLES = (os.getenv("MUSIC_WORKER_REQUIRED_ROLES", "phone-worker") or "phone-worker").strip()
 MUSIC_WORKER_REQUIRED_CAPABILITIES = (os.getenv("MUSIC_WORKER_REQUIRED_CAPABILITIES", "ffmpeg,ffprobe") or "ffmpeg,ffprobe").strip()
 # Segredos/cookies do yt-dlp em modo worker-only ficam no phone worker, não na VPS.
@@ -448,11 +452,16 @@ MUSIC_WORKER_CONFIGURED_HEALTH_TIMEOUT_SECONDS = max(0.3, _parse_float(os.getenv
 # quando AUX_LAVALINK_* estiver configurado. Sem AUX, usa LAVALINK_* como node do worker.
 MUSIC_WORKER_LAVALINK_USE_AUX = _parse_bool(os.getenv("MUSIC_WORKER_LAVALINK_USE_AUX", "true"), True)
 
-PHONE_WORKER_ENABLED = _parse_bool(os.getenv("PHONE_WORKER_ENABLED", "false"), False)
 PHONE_WORKER_HOST = (os.getenv("PHONE_WORKER_HOST", "") or "").strip()
 PHONE_WORKER_PORT = _parse_int(os.getenv("PHONE_WORKER_PORT", "8766"), 8766)
 PHONE_WORKER_SCHEME = (os.getenv("PHONE_WORKER_SCHEME", "http") or "http").strip().lower() or "http"
 PHONE_WORKER_TOKEN = (os.getenv("PHONE_WORKER_TOKEN", "") or "").strip()
+# Mantém os consumidores existentes apontando para a API compatível do APK.
+# Uma configuração antiga PHONE_WORKER_ENABLED=false não deve desligar o APK
+# quando host e token diretos já estão presentes.
+PHONE_WORKER_ENABLED = (
+    CORE_WORKER_APK_REPLACES_TERMUX and bool(PHONE_WORKER_HOST and PHONE_WORKER_TOKEN)
+) or _parse_bool(os.getenv("PHONE_WORKER_ENABLED", "false"), False)
 PHONE_WORKER_ZIP_VALIDATE_ENABLED = _parse_bool(os.getenv("PHONE_WORKER_ZIP_VALIDATE_ENABLED", "true"), True)
 PHONE_WORKER_ZIP_VALIDATE_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("PHONE_WORKER_ZIP_VALIDATE_TIMEOUT_SECONDS", "5.0"), 5.0))
 PHONE_WORKER_ZIP_VALIDATE_MAX_MB = max(1, _parse_int(os.getenv("PHONE_WORKER_ZIP_VALIDATE_MAX_MB", "24"), 24))
@@ -523,7 +532,7 @@ TTS_WORKER_AGENT_WORKER_MIN_ADVANTAGE_MS = max(0.0, _parse_float(os.getenv("TTS_
 
 # Worker Voice Agent roadmap: the VPS remains the bot/control plane, while the
 # turbo worker becomes the direct audio/voice plane when this staged path is ready.
-WORKER_VOICE_AGENT_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_AGENT_ENABLED", "true"), True)
+WORKER_VOICE_AGENT_ENABLED = (not CORE_WORKER_APK_REPLACES_TERMUX) and _parse_bool(os.getenv("WORKER_VOICE_AGENT_ENABLED", "true"), True)
 WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_ENABLED", "true"), True)
 WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED = _parse_bool(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_AUTO_ENABLED", "true"), True)
 WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS = max(16, _parse_int(os.getenv("WORKER_VOICE_AGENT_DIRECT_TTS_MAX_CHARS", "600"), 600))

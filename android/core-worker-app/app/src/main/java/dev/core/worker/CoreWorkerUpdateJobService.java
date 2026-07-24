@@ -161,179 +161,26 @@ public class CoreWorkerUpdateJobService extends JobService {
     }
 
     private org.json.JSONArray supportedLightJobsArray() {
-        return CoreWorkerJobCatalog.supportedJobs();
-    }
-
-    private JSONObject backgroundCoreLinuxSnapshot() throws Exception {
-        File runtimeDir = new File(getFilesDir(), "core-linux/runtime");
-        JSONObject rootfs = readJsonFile(new File(runtimeDir, "rootfs-state.json"));
-        JSONObject rootfsImport = readJsonFile(new File(runtimeDir, "rootfs-import-state.json"));
-        JSONObject smoke = readJsonFile(new File(runtimeDir, "core-linux-smoke-test.json"));
-        JSONObject runner = readJsonFile(new File(runtimeDir, "runner-preflight-state.json"));
-        JSONObject core = new JSONObject();
-
-        String rawState = firstNonEmpty(rootfs.optString("state", ""), rootfsImport.optString("state", ""), smoke.optString("state", ""));
-        String level = firstNonEmpty(rootfs.optString("validationLevel", ""), rootfs.optString("rootfsValidationLevel", ""), rootfsImport.optString("validationLevel", ""));
-        boolean realValidated = rawState.toLowerCase().contains("rootfs_real_validated") || "real".equalsIgnoreCase(level);
-        boolean prepared = realValidated || rootfs.optBoolean("rootfsReady", false) || rootfsImport.optBoolean("rootfsReady", false) || smoke.optBoolean("ok", false);
-        String summary = firstNonEmpty(rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), smoke.optString("summary", ""), prepared ? "Core Linux Runtime v1 pronto" : "Core Linux Runtime v1 disponível no APK; heartbeat em background não inicia Bedrock");
-        String state = firstNonEmpty(rawState, prepared ? "runtime_v1_ready" : "background-safe-runtime");
-        if (realValidated) {
-            state = "rootfs_real_validated";
-            summary = firstNonEmpty(rootfs.optString("summary", ""), rootfsImport.optString("summary", ""), "Rootfs real validado · runner real ainda bloqueado");
-        }
-
-        core.put("state", state);
-        core.put("summary", summary);
-        core.put("prepared", prepared);
-        core.put("rootfsReady", realValidated || rootfs.optBoolean("rootfsReady", prepared));
-        core.put("rootfsValidationLevel", realValidated ? "real" : level);
-        core.put("rootfsDistributionReady", realValidated || rootfs.optBoolean("distributionReady", rootfsImport.optBoolean("distributionReady", false)));
-        core.put("rootfsState", rootfs.optString("state", state));
-        core.put("rootfsSummary", rootfs.optString("summary", summary));
-        core.put("rootfsImportState", rootfsImport.optString("state", ""));
-        core.put("rootfsImportSummary", rootfsImport.optString("summary", ""));
-        if (runner.length() > 0) {
-            core.put("runnerPreflightState", runner.optString("state", ""));
-            core.put("runnerPreflightSummary", runner.optString("summary", ""));
-            core.put("runnerPreflightVersion", runner.optInt("preflightVersion", 1));
-            core.put("runnerReady", runner.optBoolean("runnerReady", false));
-            core.put("runnerBlocked", runner.optBoolean("runnerBlocked", true));
-            core.put("runnerExecutionAllowed", runner.optBoolean("runnerExecutionAllowed", false));
-            core.put("runnerRequirementsReady", runner.optBoolean("runnerRequirementsReady", false));
-            core.put("runnerMissing", runner.optJSONArray("missing") == null ? new org.json.JSONArray() : runner.optJSONArray("missing"));
-            core.put("runnerPreflight", runner);
-        }
-        core.put("termuxRequired", false);
-        core.put("bedrockStartAllowed", false);
-        core.put("supportedStage", runner.length() > 0 ? "core-linux-runner-preflight-v3" : (prepared ? "core-linux-rootfs-import-v1" : "core-linux-runtime-v1-smoke"));
-        core.put("supportedTasks", supportedLightJobsArray());
-        return core;
-    }
-
-    private JSONObject backgroundNativeRuntimeSnapshot() throws Exception {
-        JSONObject executor = readJsonFile(new File(new File(getFilesDir(), "core-linux/runtime"), "native-executor-state.json"));
-        JSONObject runtime = new JSONObject();
-        runtime.put("state", executor.optString("state", "background-heartbeat"));
-        runtime.put("summary", firstNonEmpty(executor.optString("summary", ""), "APK nativo em background; jobs internos seguros declarados"));
-        boolean agentRunning = prefs().getBoolean("foreground_runtime_active", false)
-                && prefs().getBoolean("job_executor_ready", false);
-        runtime.put("workerOnline", agentRunning);
-        runtime.put("workerState", agentRunning ? "ready" : "stopped");
-        runtime.put("jobExecutorReady", prefs().getBoolean("job_executor_ready", false));
-        runtime.put("pythonAvailable", false);
-        runtime.put("lastHeartbeatAt", executor.optLong("updatedAt", 0L));
-        runtime.put("supportedTasks", supportedLightJobsArray());
-        if (executor.length() > 0) runtime.put("executor", executor);
-        return runtime;
+        return CoreWorkerJobCatalog.remoteSupportedTasks();
     }
 
 
-    private JSONObject readJsonFile(File file) {
-        try {
-            if (file == null || !file.isFile()) return new JSONObject();
-            FileInputStream input = new FileInputStream(file);
-            byte[] data = new byte[(int) Math.min(file.length(), 512L * 1024L)];
-            int read = input.read(data);
-            input.close();
-            if (read <= 0) return new JSONObject();
-            return new JSONObject(new String(data, 0, read, StandardCharsets.UTF_8));
-        } catch (Throwable ignored) {
-            return new JSONObject();
-        }
-    }
 
-    private String firstNonEmpty(String... values) {
-        if (values == null) return "";
-        for (String value : values) {
-            if (value != null && !value.trim().isEmpty()) return value.trim();
-        }
-        return "";
-    }
+
+
+
+
+
+
 
     private void reportRuntimeHeartbeat(String serverUrl, String reason) {
-        try {
-            JSONObject payload = baseRuntimePayload(reason);
-            request("POST", serverUrl + "/core-worker/app/heartbeat", payload);
-        } catch (Throwable ignored) {
-        }
-        try {
-            String token = prefs().getString("worker_token", "").trim();
-            String workerId = prefs().getString("worker_id", "").trim();
-            if (token.isEmpty() || workerId.isEmpty()) {
-                return;
-            }
-            JSONObject payload = new JSONObject();
-            payload.put("worker_id", workerId);
-            payload.put("id", workerId);
-            payload.put("name", prefs().getString("device_name", "Core Worker APK"));
-            payload.put("version", BuildConfig.VERSION_NAME);
-            payload.put("source", "core-worker-apk-native-background");
-            payload.put("roles", new org.json.JSONArray().put("apk-native").put("diagnostics").put("internal-jobs").put("linux-runtime").put("rootfs-manager"));
-            payload.put("capabilities", coreWorkerApkCapabilitiesArray());
-            payload.put("supported_tasks", supportedLightJobsArray());
-            payload.put("supportedTasks", supportedLightJobsArray());
-            payload.put("app_jobs", supportedLightJobsArray());
-            JSONObject status = new JSONObject();
-            boolean agentRunning = prefs().getBoolean("foreground_runtime_active", false)
-                    && prefs().getBoolean("job_executor_ready", false);
-            status.put("apk_native_worker", agentRunning);
-            status.put("job_executor_ready", prefs().getBoolean("job_executor_ready", false));
-            status.put("jobs_runtime", "foreground-service-autonomous-agent");
-            status.put("background", true);
-            status.put("termux_required_now", false);
-            status.put("termux_role", "fallback-legado");
-            status.put("native_heartbeat_reason", reason == null ? "scheduled" : reason);
-            status.put("runtime_mode", "apk-native-python-linux-assisted-runtime");
-            status.put("python_runtime", "embedded-background-linux-aware");
-            status.put("supported_tasks", supportedLightJobsArray());
-            status.put("coreLinux", backgroundCoreLinuxSnapshot());
-            status.put("nativeRuntime", backgroundNativeRuntimeSnapshot());
-            payload.put("status", status);
-            request("POST", serverUrl + "/core-worker/heartbeat", payload, token);
-        } catch (Throwable ignored) {
-        }
+        if (!CoreWorkerRuntimeService.shouldRunAgent(this)) return;
+        String trigger = "job_scheduler:" + (reason == null ? "scheduled" : reason);
+        CoreWorkerRuntimeService.requestStart(this, trigger);
+        CoreWorkerRuntimeService.requestPoll(this, trigger);
     }
 
-    private JSONObject baseRuntimePayload(String reason) throws Exception {
-        JSONObject payload = new JSONObject();
-        payload.put("platform", "android");
-        payload.put("source", "core-worker-apk-native-background");
-        payload.put("state", "background_heartbeat");
-        payload.put("reason", reason == null ? "scheduled" : reason);
-        payload.put("appVersion", BuildConfig.VERSION_NAME);
-        payload.put("appVersionCode", BuildConfig.VERSION_CODE);
-        payload.put("versionName", BuildConfig.VERSION_NAME);
-        payload.put("versionCode", BuildConfig.VERSION_CODE);
-        payload.put("capabilities", coreWorkerApkCapabilitiesArray());
-        payload.put("supported_tasks", supportedLightJobsArray());
-        payload.put("supportedTasks", supportedLightJobsArray());
-        payload.put("app_jobs", supportedLightJobsArray());
-        payload.put("coreLinux", backgroundCoreLinuxSnapshot());
-        payload.put("nativeRuntime", backgroundNativeRuntimeSnapshot());
-        payload.put("workerId", prefs().getString("worker_id", ""));
-        payload.put("installId", installId());
-        payload.put("deviceName", prefs().getString("device_name", ""));
-        payload.put("runtime_mode", "apk-native-python-linux-assisted-runtime");
-        payload.put("internal_runtime", "apk-native-background-python-linux-aware");
-        payload.put("jobsRuntime", "foreground-service-autonomous-agent");
-        JSONObject status = new JSONObject();
-        status.put("app", "background-recovery");
-        status.put("apk_companion", true);
-        status.put("android_sdk", Build.VERSION.SDK_INT);
-        status.put("native_boot", true);
-        status.put("job_executor_ready", prefs().getBoolean("job_executor_ready", false));
-        status.put("jobs_runtime", "foreground-service-autonomous-agent");
-        status.put("python_runtime", "embedded-background-linux-aware");
-        status.put("supported_tasks", supportedLightJobsArray());
-        status.put("coreLinux", backgroundCoreLinuxSnapshot());
-        status.put("nativeRuntime", backgroundNativeRuntimeSnapshot());
-        status.put("termux_required_now", false);
-        status.put("termux_role", "fallback-legado");
-        status.put("notification_permission", hasNotificationPermission() ? "granted" : "missing");
-        payload.put("status", status);
-        return payload;
-    }
+
 
     private JSONObject fetchLatestManifest(String serverUrl) throws Exception {
         String[] paths = new String[]{"/core-worker/app/latest.json", "/core-worker/latest.json"};
