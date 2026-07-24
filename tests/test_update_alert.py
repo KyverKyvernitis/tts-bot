@@ -145,7 +145,7 @@ printf 'TITLE=%s\n' "$(zip_progress_title 'Compilando o site')"
         text=True,
     )
     assert "STAGE=Instalando dependências" in result.stdout
-    assert "TITLE=⚙️ Atualizando" in result.stdout
+    assert "TITLE=🛠️ Compilando atualização" in result.stdout
     assert "Reiniciando processo: atividade" not in result.stdout
 
 
@@ -216,12 +216,42 @@ def test_frontend_deploy_reports_dependency_build_publish_and_validation_stages(
     assert "zip_progress_run_as_ubuntu" in frontend
 
 
-def test_update_progress_uses_short_generic_copy() -> None:
+def test_update_progress_titles_follow_each_phase_without_naming_the_subsystem() -> None:
+    harness = r'''
+source <(awk '/^zip_progress_title\(\)/{flag=1} /^zip_progress_status\(\)/{flag=0} flag' scripts/tts-bot-update.sh)
+ROLLBACK_CONTROL_MODE=0
+printf 'CHECK=%s\n' "$(zip_progress_title 'Conferindo ZIP')"
+printf 'PREPARE=%s\n' "$(zip_progress_title 'Instalando dependências')"
+printf 'BUILD=%s\n' "$(zip_progress_title 'Compilando interface')"
+printf 'PUBLISH=%s\n' "$(zip_progress_title 'Publicando interface')"
+printf 'RESTART=%s\n' "$(zip_progress_title 'Reiniciando servidor')"
+printf 'COMMIT=%s\n' "$(zip_progress_title 'Fazendo commit...')"
+printf 'GITHUB=%s\n' "$(zip_progress_title 'Publicando no GitHub...')"
+printf 'FINAL=%s\n' "$(zip_progress_title 'Finalizando...')"
+'''
+    result = subprocess.run(
+        ["bash", "-eu", "-o", "pipefail", "-c", harness],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "CHECK=🔎 Verificando atualização" in result.stdout
+    assert "PREPARE=📦 Preparando atualização" in result.stdout
+    assert "BUILD=🛠️ Compilando atualização" in result.stdout
+    assert "PUBLISH=🚀 Publicando atualização" in result.stdout
+    assert "RESTART=🔄 Reiniciando serviços" in result.stdout
+    assert "COMMIT=📝 Registrando atualização" in result.stdout
+    assert "GITHUB=☁️ Publicando atualização" in result.stdout
+    assert "FINAL=✅ Finalizando atualização" in result.stdout
+    assert "site" not in result.stdout.lower()
+
+
+def test_update_copy_remains_short_and_does_not_name_the_site() -> None:
     source = (ROOT / "scripts" / "tts-bot-update.sh").read_text(encoding="utf-8")
     title_block = source[source.index("zip_progress_title() {") : source.index("\nzip_progress_status() {")]
     deploy_block = source[source.index("deploy_frontend() {") : source.index("\n\nrollback_after_failure() {")]
 
-    assert "⚙️ Atualizando" in title_block
     assert "Atualizando site" not in title_block
     assert "dependências do site" not in deploy_block
     assert "servidor do site" not in deploy_block
@@ -238,3 +268,140 @@ def test_update_runtime_state_marker_is_transactional() -> None:
     assert "heartbeat_epoch" in source[write_at:clear_at]
     assert write_at < publish_at
     assert clear_at < cleanup_at
+
+
+def test_update_installs_root_systemd_templates_and_treats_install_failure_as_fatal() -> None:
+    source = (ROOT / "scripts" / "tts-bot-update.sh").read_text(encoding="utf-8")
+    classify = source[source.index("classify_changed_files() {") : source.index("\ndeploy_audio_services() {")]
+    deploy = source[source.index("deploy_vps_systemd_units() {") : source.index("\ndeploy_alert_unit() {")]
+
+    assert r"tts-bot-updater\.(service|timer)" in classify
+    assert r"sinuca-activity-server\.service" in classify
+    assert "deploy/systemd/(vps/)?" in classify
+    assert 'return "$rc"' in deploy
+    assert 'UPDATE_HAS_WARNINGS=1' not in deploy
+
+
+def test_frontend_publish_removes_hidden_stale_files_and_checks_build_output() -> None:
+    source = (ROOT / "scripts" / "tts-bot-update.sh").read_text(encoding="utf-8")
+    frontend = source[source.index("deploy_frontend() {") : source.index("\ndeploy_backend() {")]
+
+    assert 'dist/index.html' in frontend
+    assert 'rsync -a --delete' in frontend
+    assert 'find "$FRONT_PUBLISH_DIR" -mindepth 1 -maxdepth 1' in frontend
+    assert 'rm -rf "${FRONT_PUBLISH_DIR:?}/"*' not in frontend
+
+
+def test_backend_restart_is_owned_by_systemd_instead_of_detached_nohup() -> None:
+    source = (ROOT / "scripts" / "tts-bot-update.sh").read_text(encoding="utf-8")
+    backend = source[source.index("deploy_backend() {") : source.index("\n\nrollback_after_failure() {")]
+
+    assert 'systemctl restart "$BACK_SERVICE"' in backend
+    assert 'systemctl is-active --quiet "$BACK_SERVICE"' in backend
+    assert 'nohup node dist/index.js' not in backend
+    assert 'fuser -k "${BACK_PORT}/tcp"' not in backend
+
+
+def test_build_cannot_silently_dirty_tracked_files_before_commit() -> None:
+    source = (ROOT / "scripts" / "tts-bot-update.sh").read_text(encoding="utf-8")
+    guard_at = source.index("ensure_no_unstaged_tracked_changes() {")
+    deploy_at = source.index("run_core_worker_post_update_automation", guard_at)
+    check_at = source.index("ensure_no_unstaged_tracked_changes", deploy_at)
+    publish_at = source.index("publish_local_candidate_after_validation", check_at)
+
+    assert guard_at < deploy_at < check_at < publish_at
+    guard = source[guard_at : source.index("\nfail_local_changes_before_pull() {", guard_at)]
+    assert "git diff --name-only" in guard
+    assert "return 1" in guard
+
+
+def test_candidate_dirty_check_uses_ubuntu_git_and_fails_closed(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        "#!/usr/bin/env bash\necho 'git indisponível' >&2\nexit 42\n",
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+
+    harness = r'''
+source <(awk '/^candidate_local_changes_are_expected\(\)/{flag=1} /^ensure_no_unstaged_tracked_changes\(\)/{flag=0} flag' scripts/tts-bot-update.sh)
+LOCAL_CANDIDATE_MODE=1
+CHANGED_FILES_RAW='bot.py'
+REPO_DIR="$PWD"
+set +e
+candidate_local_changes_are_expected
+rc=$?
+set -e
+printf 'RC=%s\n' "$rc"
+'''
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    result = subprocess.run(
+        ["bash", "-eu", "-o", "pipefail", "-c", harness],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "RC=2" in result.stdout
+    assert "git indisponível" in result.stderr
+
+
+def test_systemd_overlay_uses_the_template_path_that_changed(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    root_templates = repo / "deploy" / "systemd"
+    vps_templates = root_templates / "vps"
+    vps_templates.mkdir(parents=True)
+    (root_templates / "sinuca-activity-server.service").write_text("ROOT\n", encoding="utf-8")
+    (vps_templates / "sinuca-activity-server.service").write_text("VPS\n", encoding="utf-8")
+
+    harness = r'''
+source <(awk '/^managed_systemd_template_source\(\)/{flag=1} /^deploy_vps_systemd_units\(\)/{flag=0} flag' scripts/tts-bot-update.sh)
+REPO_DIR="$TEST_REPO"
+CHANGED_FILES_RAW='deploy/systemd/sinuca-activity-server.service'
+overlay="$TEST_REPO/overlay-root"
+build_vps_systemd_template_overlay "$overlay"
+printf 'ROOT=%s\n' "$(cat "$overlay/sinuca-activity-server.service")"
+CHANGED_FILES_RAW=$'deploy/systemd/sinuca-activity-server.service\ndeploy/systemd/vps/sinuca-activity-server.service'
+overlay="$TEST_REPO/overlay-vps"
+build_vps_systemd_template_overlay "$overlay"
+printf 'VPS=%s\n' "$(cat "$overlay/sinuca-activity-server.service")"
+'''
+    env = os.environ.copy()
+    env["TEST_REPO"] = str(repo)
+    result = subprocess.run(
+        ["bash", "-eu", "-o", "pipefail", "-c", harness],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "ROOT=ROOT" in result.stdout
+    assert "VPS=VPS" in result.stdout
+
+
+def test_critical_git_diff_results_are_not_silently_replaced_with_empty_output() -> None:
+    source = (ROOT / "scripts" / "tts-bot-update.sh").read_text(encoding="utf-8")
+
+    forbidden = (
+        'git diff --cached --name-only || true',
+        'git diff --cached --numstat || true',
+        'git diff --name-only "$CURRENT_COMMIT" "$REMOTE_COMMIT" || true',
+        'git diff --numstat "$CURRENT_COMMIT" "$REMOTE_COMMIT" || true',
+    )
+    for fragment in forbidden:
+        assert fragment not in source
+
+    candidate = source[
+        source.index("candidate_local_changes_are_expected() {") :
+        source.index("\nensure_no_unstaged_tracked_changes() {")
+    ]
+    assert '["sudo", "-u", "ubuntu", "-H", "git", *args]' in candidate
+    assert "cp.returncode != 0" in candidate
+    assert "raise SystemExit(2)" in candidate

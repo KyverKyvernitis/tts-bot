@@ -67,6 +67,7 @@ FRONT_DIR="$REPO_DIR/activity/sinuca"
 BACK_DIR="$REPO_DIR/activity/sinuca-server"
 FRONT_PUBLISH_DIR="/var/www/sinuca"
 BACK_PORT="8787"
+BACK_SERVICE="${DASHBOARD_SYSTEMD_SERVICE:-sinuca-activity-server.service}"
 BACK_HEALTH_URL="http://127.0.0.1:${BACK_PORT}/health"
 BOT_HEALTH_URL="http://127.0.0.1:10000/health"
 APP_COMMAND_SYNC_STATUS_FILE="$REPO_DIR/data/app_commands_sync_status.json"
@@ -1692,7 +1693,10 @@ local_candidate_base_conflict_reason() {
   fi
 
   local remote_changed
-  remote_changed="$(sudo -u ubuntu -H git diff --name-only "$LOCAL_CANDIDATE_BASE_COMMIT" "$REMOTE_COMMIT" -- 2>/dev/null || true)"
+  if ! remote_changed="$(sudo -u ubuntu -H git diff --name-only "$LOCAL_CANDIDATE_BASE_COMMIT" "$REMOTE_COMMIT" -- 2>/dev/null)"; then
+    printf 'não foi possível comparar a base original do ZIP com o GitHub atual'
+    return 0
+  fi
   CANDIDATE_CHANGED="$CHANGED_FILES_RAW" REMOTE_CHANGED="$remote_changed" python3 - <<'PYBASE'
 import os
 candidate = {line.strip() for line in os.environ.get('CANDIDATE_CHANGED', '').splitlines() if line.strip()}
@@ -2334,11 +2338,47 @@ zip_progress_title() {
     fi
     return 0
   fi
-  if [[ "$lowered" == *"fila"* || "$lowered" == *"aguard"* ]]; then
-    printf '📦 Atualização na fila'
-  else
-    printf '⚙️ Atualizando'
-  fi
+
+  # O título acompanha a fase sem expor o subsistema alterado. A etapa detalhada
+  # continua logo abaixo, enquanto o cabeçalho deixa claro que o painel avançou.
+  case "$lowered" in
+    *fila*|*aguard*)
+      printf '📦 Atualização na fila'
+      ;;
+    *finalizando*)
+      printf '✅ Finalizando atualização'
+      ;;
+    *fazendo\ commit*|*commit\ criado*|*registrando*)
+      printf '📝 Registrando atualização'
+      ;;
+    *publicando\ no\ github*|*github*)
+      printf '☁️ Publicando atualização'
+      ;;
+    *publicando*|*enviando*)
+      printf '🚀 Publicando atualização'
+      ;;
+    *compilando*|*build*)
+      printf '🛠️ Compilando atualização'
+      ;;
+    *instalando*|*preparando\ servidor*|*dependências*)
+      printf '📦 Preparando atualização'
+      ;;
+    *reiniciando*)
+      printf '🔄 Reiniciando serviços'
+      ;;
+    *recarregando*|*reload*)
+      printf '🔄 Aplicando atualização'
+      ;;
+    *conferindo*|*validando*|*verificando*|*analisando*|*recuperando*)
+      printf '🔎 Verificando atualização'
+      ;;
+    *aplicando*|*preparando\ arquivos*)
+      printf '⚙️ Aplicando atualização'
+      ;;
+    *)
+      printf '⚙️ Atualizando'
+      ;;
+  esac
 }
 
 zip_progress_status() {
@@ -2843,8 +2883,14 @@ prepare_rollback_request_update() {
     exit 0
   fi
   UPDATE_APPLIED=1
-  CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only || true)"
-  CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --cached --numstat || true)"
+  if ! CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only)"; then
+    LAST_ERROR_STDERR="falha ao listar arquivos staged da reversão"
+    return 1
+  fi
+  if ! CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --cached --numstat)"; then
+    LAST_ERROR_STDERR="falha ao calcular o diff staged da reversão"
+    return 1
+  fi
   if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
     sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
     local retry_control
@@ -3223,6 +3269,11 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   if candidate_local_changes_are_expected; then
     logger -t "$LOG_TAG" "Alterações locais correspondem ao candidato ativo; retomando aplicação segura."
   else
+    local candidate_dirty_rc=$?
+    if (( candidate_dirty_rc == 2 )); then
+      LAST_ERROR_STDERR="não foi possível conferir as alterações locais do candidato como usuário ubuntu"
+      return 1
+    fi
     fail_local_changes_before_pull
   fi
 
@@ -3292,8 +3343,14 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     copy_local_candidate_files
     git_add_changed_files_or_reject "git add do candidato local"
   fi
-  CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only || true)"
-  CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --cached --numstat || true)"
+  if ! CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only)"; then
+    LAST_ERROR_STDERR="falha ao listar arquivos staged do candidato"
+    return 1
+  fi
+  if ! CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --cached --numstat)"; then
+    LAST_ERROR_STDERR="falha ao calcular o diff staged do candidato"
+    return 1
+  fi
   if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
     local head_message=""
     head_message="$(sudo -u ubuntu -H git log -1 --pretty=%B HEAD 2>/dev/null || true)"
@@ -3462,10 +3519,10 @@ classify_changed_files() {
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(alert\.sh|deploy/systemd(/vps)?/tts-bot-alert@\.service)$'; then
     ALERT_CHANGED=1
   fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(deploy/systemd/vps/|deploy/sudoers\.d/|scripts/install-vps-systemd-units\.sh$)'; then
-    # O instalador sincroniza as units em uma única passagem. Não marque todos os
-    # subsistemas como alterados: isso repetia rotinas específicas e podia
-    # reiniciar serviços sem relação com o update atual.
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(deploy/systemd/(vps/)?(tts-bot\.service|tts-bot-updater\.(service|timer)|tts-bot-alert@\.service|cleanup-audio-temp\.(service|timer)|sinuca-activity-server\.service|phone-worker-watch\.(service|timer)|tts-bot\.service\.d/)|deploy/sudoers\.d/|scripts/install-vps-systemd-units\.sh$)'; then
+    # O instalador sincroniza as units gerenciadas em uma única passagem. Inclua
+    # também os templates na raiz deploy/systemd; ignorá-los deixava a VPS usando
+    # uma unit antiga mesmo depois do commit ter sido aplicado.
     VPS_SYSTEMD_UNITS_CHANGED=1
   fi
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(cleanup-audio-temp\.sh|deploy/systemd/cleanup-audio-temp\.(service|timer))$'; then
@@ -3632,20 +3689,40 @@ candidate_local_changes_are_expected() {
   (( LOCAL_CANDIDATE_MODE == 1 )) || return 1
   [[ -n "${CHANGED_FILES_RAW//[[:space:]]/}" ]] || return 1
   CHANGED_FILES_RAW="$CHANGED_FILES_RAW" REPO_DIR="$REPO_DIR" python3 - <<'PYCANDIDATE_DIRTY'
-import subprocess, sys, os
-expected = {line.strip() for line in os.environ.get('CHANGED_FILES_RAW', '').splitlines() if line.strip()}
+import os
+import subprocess
+import sys
+
+expected = {
+    line.strip()
+    for line in os.environ.get("CHANGED_FILES_RAW", "").splitlines()
+    if line.strip()
+}
 if not expected:
     raise SystemExit(1)
 
-def git_lines(*args):
-    cp = subprocess.run(['git', *args], cwd=os.environ.get('REPO_DIR', '/home/ubuntu/bot'), text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+repo = os.environ.get("REPO_DIR", "/home/ubuntu/bot")
+
+def git_lines(*args: str) -> set[str]:
+    cp = subprocess.run(
+        ["sudo", "-u", "ubuntu", "-H", "git", *args],
+        cwd=repo,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if cp.returncode != 0:
+        message = (cp.stderr or "git falhou sem stderr").strip()
+        print(message, file=sys.stderr)
+        raise SystemExit(2)
     return {line.strip() for line in cp.stdout.splitlines() if line.strip()}
 
 dirty = set()
-dirty |= git_lines('diff', '--name-only')
-dirty |= git_lines('diff', '--name-only', '--cached')
+dirty |= git_lines("diff", "--name-only")
+dirty |= git_lines("diff", "--name-only", "--cached")
 if not dirty:
     raise SystemExit(0)
+
 extra = dirty - expected
 if extra:
     for item in sorted(extra):
@@ -3654,6 +3731,23 @@ if extra:
 raise SystemExit(0)
 PYCANDIDATE_DIRTY
 }
+
+ensure_no_unstaged_tracked_changes() {
+  local dirty
+  if ! dirty="$(sudo -u ubuntu -H git diff --name-only 2>/dev/null)"; then
+    LAST_ERROR_STDERR="não foi possível verificar alterações rastreadas após o build"
+    return 1
+  fi
+  if [[ -z "${dirty//[[:space:]]/}" ]]; then
+    return 0
+  fi
+
+  LAST_ERROR_STDERR="arquivos rastreados foram alterados durante build/deploy:
+$(printf '%s\n' "$dirty" | trim_alert_text 1500)"
+  logger -t "$LOG_TAG" "$LAST_ERROR_STDERR" 2>/dev/null || true
+  return 1
+}
+
 
 fail_local_changes_before_pull() {
   local status_text files_text duration body
@@ -3845,6 +3939,71 @@ PY_CRON
   rm -f "$tmp" "$current" 2>/dev/null || true
 }
 
+managed_systemd_template_source() {
+  local rel="${1:-}"
+  local root_src="$REPO_DIR/deploy/systemd/$rel"
+  local vps_src="$REPO_DIR/deploy/systemd/vps/$rel"
+
+  # Quando o mesmo template existe nos dois diretórios, respeite o caminho que
+  # realmente mudou. A preferência fixa por vps/ fazia patches na raiz serem
+  # aceitos e commitados, mas a unit antiga continuava instalada na VPS.
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Fxq "deploy/systemd/vps/$rel"; then
+    [[ -f "$vps_src" ]] && printf '%s' "$vps_src"
+    return 0
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Fxq "deploy/systemd/$rel"; then
+    [[ -f "$root_src" ]] && printf '%s' "$root_src"
+    return 0
+  fi
+
+  if [[ -f "$vps_src" ]]; then
+    printf '%s' "$vps_src"
+  elif [[ -f "$root_src" ]]; then
+    printf '%s' "$root_src"
+  fi
+}
+
+build_vps_systemd_template_overlay() {
+  local overlay="${1:?overlay obrigatório}"
+  local rel src changed_path
+  local -a managed_units=(
+    tts-bot.service
+    tts-bot-updater.service
+    tts-bot-updater.timer
+    tts-bot-alert@.service
+    cleanup-audio-temp.service
+    cleanup-audio-temp.timer
+    sinuca-activity-server.service
+    phone-worker-watch.service
+    phone-worker-watch.timer
+    callkeeper.service
+  )
+
+  mkdir -p "$overlay"
+  for rel in "${managed_units[@]}"; do
+    src="$(managed_systemd_template_source "$rel")"
+    [[ -n "$src" && -f "$src" ]] || continue
+    mkdir -p "$overlay/$(dirname "$rel")"
+    cp -a "$src" "$overlay/$rel"
+  done
+
+  # Os drop-ins vivem normalmente em vps/. Mantenha a árvore completa e
+  # sobreponha apenas arquivos da raiz explicitamente alterados no patch.
+  if [[ -d "$REPO_DIR/deploy/systemd/vps/tts-bot.service.d" ]]; then
+    mkdir -p "$overlay/tts-bot.service.d"
+    cp -a "$REPO_DIR/deploy/systemd/vps/tts-bot.service.d/." "$overlay/tts-bot.service.d/"
+  fi
+  while IFS= read -r changed_path; do
+    [[ "$changed_path" == deploy/systemd/tts-bot.service.d/* ]] || continue
+    rel="${changed_path#deploy/systemd/}"
+    src="$REPO_DIR/$changed_path"
+    [[ -f "$src" ]] || continue
+    mkdir -p "$overlay/$(dirname "$rel")"
+    cp -a "$src" "$overlay/$rel"
+  done <<< "$CHANGED_FILES_RAW"
+}
+
+
 deploy_vps_systemd_units() {
   if (( VPS_SYSTEMD_UNITS_CHANGED == 0 )); then
     VPS_SYSTEMD_UNITS_STATUS="não alterado"
@@ -3854,26 +4013,38 @@ deploy_vps_systemd_units() {
   STAGE="sincronização dos units systemd da VPS"
   if [[ ! -x "$REPO_DIR/scripts/install-vps-systemd-units.sh" && ! -f "$REPO_DIR/scripts/install-vps-systemd-units.sh" ]]; then
     VPS_SYSTEMD_UNITS_STATUS="script ausente"
-    UPDATE_HAS_WARNINGS=1
-    return 0
+    LAST_ERROR_STDERR="scripts/install-vps-systemd-units.sh não foi encontrado"
+    return 1
   fi
 
-  if REPO_DIR="$REPO_DIR" bash "$REPO_DIR/scripts/install-vps-systemd-units.sh" --from-updater; then
-    VPS_SYSTEMD_UNITS_STATUS="sincronizados"
-  else
-    VPS_SYSTEMD_UNITS_STATUS="falha ao sincronizar"
-    UPDATE_HAS_WARNINGS=1
+  local rc=0 template_overlay
+  template_overlay="$(mktemp -d "${TMPDIR:-/tmp}/tts-bot-systemd-overlay.XXXXXX")"
+  if ! build_vps_systemd_template_overlay "$template_overlay"; then
+    rm -rf "$template_overlay"
+    VPS_SYSTEMD_UNITS_STATUS="falha ao preparar templates"
+    LAST_ERROR_STDERR="não foi possível preparar os templates systemd do patch"
+    return 1
   fi
+
+  if REPO_DIR="$REPO_DIR" TEMPLATE_DIR="$template_overlay" \
+      bash "$REPO_DIR/scripts/install-vps-systemd-units.sh" --from-updater; then
+    VPS_SYSTEMD_UNITS_STATUS="sincronizados"
+    rm -rf "$template_overlay"
+    return 0
+  else
+    rc=$?
+  fi
+  rm -rf "$template_overlay"
+
+  VPS_SYSTEMD_UNITS_STATUS="falha ao sincronizar"
+  LAST_ERROR_STDERR="o instalador das units systemd falhou; a VPS não foi deixada com templates parcialmente atualizados"
+  return "$rc"
 }
 
 deploy_alert_unit() {
   STAGE="configuração do alerta systemd"
   local src=""
-  if [[ -f "$REPO_DIR/deploy/systemd/vps/tts-bot-alert@.service" ]]; then
-    src="$REPO_DIR/deploy/systemd/vps/tts-bot-alert@.service"
-  elif [[ -f "$REPO_DIR/deploy/systemd/tts-bot-alert@.service" ]]; then
-    src="$REPO_DIR/deploy/systemd/tts-bot-alert@.service"
-  fi
+  src="$(managed_systemd_template_source "tts-bot-alert@.service")"
   if [[ -n "$src" ]]; then
     cp "$src" /etc/systemd/system/tts-bot-alert@.service
     systemctl daemon-reload || true
@@ -3939,10 +4110,9 @@ deploy_cleanup_timer() {
   STAGE="configuração da limpeza de temporários"
   local installed=0
 
-  local cleanup_service_src="$REPO_DIR/deploy/systemd/vps/cleanup-audio-temp.service"
-  local cleanup_timer_src="$REPO_DIR/deploy/systemd/vps/cleanup-audio-temp.timer"
-  [[ -f "$cleanup_service_src" ]] || cleanup_service_src="$REPO_DIR/deploy/systemd/cleanup-audio-temp.service"
-  [[ -f "$cleanup_timer_src" ]] || cleanup_timer_src="$REPO_DIR/deploy/systemd/cleanup-audio-temp.timer"
+  local cleanup_service_src="" cleanup_timer_src=""
+  cleanup_service_src="$(managed_systemd_template_source "cleanup-audio-temp.service")"
+  cleanup_timer_src="$(managed_systemd_template_source "cleanup-audio-temp.timer")"
 
   if [[ -f "$cleanup_service_src" ]]; then
     cp "$cleanup_service_src" /etc/systemd/system/cleanup-audio-temp.service
@@ -3996,10 +4166,9 @@ deploy_phone_worker_watch() {
   local installed=0
 
   # Não chmod em script rastreado: systemd usa /usr/bin/env bash e isso evita repo sujo.
-  local phone_worker_service_src="$REPO_DIR/deploy/systemd/vps/phone-worker-watch.service"
-  local phone_worker_timer_src="$REPO_DIR/deploy/systemd/vps/phone-worker-watch.timer"
-  [[ -f "$phone_worker_service_src" ]] || phone_worker_service_src="$REPO_DIR/deploy/systemd/phone-worker-watch.service"
-  [[ -f "$phone_worker_timer_src" ]] || phone_worker_timer_src="$REPO_DIR/deploy/systemd/phone-worker-watch.timer"
+  local phone_worker_service_src="" phone_worker_timer_src=""
+  phone_worker_service_src="$(managed_systemd_template_source "phone-worker-watch.service")"
+  phone_worker_timer_src="$(managed_systemd_template_source "phone-worker-watch.timer")"
 
   if [[ -f "$phone_worker_service_src" ]]; then
     cp "$phone_worker_service_src" /etc/systemd/system/phone-worker-watch.service
@@ -4368,9 +4537,20 @@ deploy_frontend() {
     "Atualizando arquivos"
 
   STAGE="publicação do frontend"
+  if [[ ! -s "$FRONT_DIR/dist/index.html" ]]; then
+    FRONT_STATUS="build do frontend não produziu dist/index.html"
+    LAST_ERROR_STDERR="$FRONT_STATUS"
+    return 1
+  fi
   mkdir -p "$FRONT_PUBLISH_DIR"
-  rm -rf "${FRONT_PUBLISH_DIR:?}/"*
-  cp -r "$FRONT_DIR/dist/." "$FRONT_PUBLISH_DIR/"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete "$FRONT_DIR/dist/" "$FRONT_PUBLISH_DIR/"
+  else
+    # O glob antigo não removia dotfiles e podia deixar arquivos ocultos de uma
+    # versão anterior publicados. O find limpa todo o conteúdo, inclusive eles.
+    find "$FRONT_PUBLISH_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    cp -a "$FRONT_DIR/dist/." "$FRONT_PUBLISH_DIR/"
+  fi
 
   STAGE="limpeza do frontend"
   zip_progress_run_as_ubuntu \
@@ -4430,10 +4610,20 @@ deploy_backend() {
     "Aplicando nova versão"
 
   STAGE="reinício do backend"
-  fuser -k "${BACK_PORT}/tcp" >/dev/null 2>&1 || true
-  run_as_ubuntu "cd \"$BACK_DIR\"; set -a; [ -f \"$REPO_DIR/.env\" ] && . \"$REPO_DIR/.env\" || true; [ -f .env ] && . ./.env || true; set +a; nohup node dist/index.js >> osaka-dashboard-server.log 2>&1 &"
+  if ! systemctl cat "$BACK_SERVICE" >/dev/null 2>&1; then
+    BACK_STATUS="serviço systemd ausente: $BACK_SERVICE"
+    LAST_ERROR_STDERR="$BACK_STATUS"
+    return 1
+  fi
+  systemctl reset-failed "$BACK_SERVICE" >/dev/null 2>&1 || true
+  systemctl restart "$BACK_SERVICE"
   sleep 3
-  BACK_STATUS="backend reiniciado na porta $BACK_PORT"
+  if ! systemctl is-active --quiet "$BACK_SERVICE"; then
+    BACK_STATUS="serviço não ficou ativo: $BACK_SERVICE"
+    LAST_ERROR_STDERR="$(journalctl -u "$BACK_SERVICE" -n 30 --no-pager 2>/dev/null | trim_alert_text 1800)"
+    return 1
+  fi
+  BACK_STATUS="backend reiniciado pelo systemd na porta $BACK_PORT"
   zip_progress_done_and_publish \
     "Servidor reiniciado" \
     "Validando" \
@@ -4805,8 +4995,8 @@ else
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
   SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
 
-  CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --name-only "$CURRENT_COMMIT" "$REMOTE_COMMIT" || true)"
-  CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --numstat "$CURRENT_COMMIT" "$REMOTE_COMMIT" || true)"
+  CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --name-only "$CURRENT_COMMIT" "$REMOTE_COMMIT")"
+  CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --numstat "$CURRENT_COMMIT" "$REMOTE_COMMIT")"
   mark_update_timing "diff"
 
   classify_changed_files
@@ -4825,7 +5015,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     exit 0
   fi
 
-  eval "$(create_direct_update_message "applying" "$(zip_progress_title)" "$UPDATE_STAGE_EMOJI **Conferindo commit do GitHub**")"
+  eval "$(create_direct_update_message "applying" "$(zip_progress_title "Conferindo commit do GitHub")" "$UPDATE_STAGE_EMOJI **Conferindo commit do GitHub**")"
   zip_progress_publish "Conferindo commit do GitHub"
 
   STAGE="validação do commit remoto em staging"
@@ -4892,6 +5082,8 @@ else
   mark_update_timing "backend"
   run_core_worker_post_update_automation
   mark_update_timing "worker"
+  STAGE="verificação pós-build do repositório"
+  ensure_no_unstaged_tracked_changes
   if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
     zip_progress_done_apply_stage
     zip_progress_publish "Verificando comandos"
@@ -5100,4 +5292,3 @@ if (( LOCAL_CANDIDATE_MODE == 1 )); then
   trigger_updater_if_queue_pending
 fi
 logger -t "$LOG_TAG" "$ALERT_TITLE"
-
