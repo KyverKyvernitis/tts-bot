@@ -77,7 +77,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.36"
+PHONE_WORKER_VERSION = "1.10.37"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -409,10 +409,29 @@ def _core_worker_profile_capabilities(profile: Any) -> list[str]:
     return list(CORE_WORKER_PROFILE_PRESETS[normalized].get("capabilities") or CORE_WORKER_PROFILE_PRESETS["midia"]["capabilities"])
 
 
+def _merge_profile_contract(configured: list[str], required: list[str]) -> list[str]:
+    """Preserva extensões locais sem deixar o perfil perder capacidades-base.
+
+    Instalações antigas persistiram CORE_WORKER_ROLES/CAPABILITIES no env. Quando
+    um preset ganhou uma capacidade nova, esse snapshot antigo continuava
+    substituindo o preset inteiro e o painel mostrava Turbo enquanto o registry
+    não recebia apk-builder. O perfil escolhido passa a ser o contrato mínimo;
+    valores do env continuam aceitos como extensões.
+    """
+    merged: list[str] = []
+    for item in list(required or []) + list(configured or []):
+        clean = str(item or "").strip().lower()
+        if clean and clean not in merged:
+            merged.append(clean)
+    return merged
+
+
 def _current_core_worker_roles_and_capabilities() -> tuple[list[str], list[str]]:
     profile = _current_core_worker_profile()
-    roles = _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))
-    capabilities = _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))
+    preset_roles = _core_worker_profile_roles(profile)
+    preset_capabilities = _core_worker_profile_capabilities(profile)
+    roles = _merge_profile_contract(_env_list("CORE_WORKER_ROLES", []), preset_roles)
+    capabilities = _merge_profile_contract(_env_list("CORE_WORKER_CAPABILITIES", []), preset_capabilities)
     return roles, capabilities
 
 
@@ -1549,8 +1568,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
     if not endpoint and host not in {"", "0.0.0.0", "::"}:
         endpoint = f"http://{host}:{port}"
     profile = _current_core_worker_profile()
-    roles = _env_list("CORE_WORKER_ROLES", _core_worker_profile_roles(profile))
-    capabilities = _env_list("CORE_WORKER_CAPABILITIES", _core_worker_profile_capabilities(profile))
+    roles, capabilities = _current_core_worker_roles_and_capabilities()
     safe_mode = _phone_worker_safe_mode_enabled()
     if safe_mode:
         blocked_prefixes = ("music",)

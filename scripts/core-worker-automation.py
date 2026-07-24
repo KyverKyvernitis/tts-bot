@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from utility.commands.workers_registry import get_core_workers_registry  # noqa: E402
+from utility.commands.workers_registry import CoreWorkerRegistryError, get_core_workers_registry  # noqa: E402
 from utility.apk_identity import assert_expected_apk_identity, inspect_apk_identity  # noqa: E402
 
 PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
@@ -1431,14 +1431,33 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
     except Exception as exc:
         pending = _load_pending()
         item = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
-        item.update({
-            "ok": False,
-            "pending": False,
-            "phase": "enqueue_blocked",
-            "error": f"{type(exc).__name__}: {exc}",
-            "updated_at": time.time(),
-            "message": "build do APK não foi enfileirado; nenhum worker apk-builder online compatível agora",
-        })
+        transient_no_builder = (
+            isinstance(exc, CoreWorkerRegistryError)
+            and int(getattr(exc, "status", 0) or 0) == 409
+            and "nenhum worker online compatível" in str(exc).lower()
+        )
+        if transient_no_builder:
+            for stale_key in ("blocked_by_recent_failure", "permanent_failure", "retry_after_seconds", "last_failure_detail", "last_failed_job_id"):
+                item.pop(stale_key, None)
+            item.update({
+                "ok": True,
+                "pending": True,
+                "phase": "waiting_builder",
+                "transient": True,
+                "error": "",
+                "last_enqueue_error": f"{type(exc).__name__}: {exc}",
+                "updated_at": time.time(),
+                "message": "build do APK aguardando worker apk-builder online compatível",
+            })
+        else:
+            item.update({
+                "ok": False,
+                "pending": False,
+                "phase": "enqueue_failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "updated_at": time.time(),
+                "message": "falha ao enfileirar o build do APK",
+            })
         pending["apk_build"] = item
         _save_pending(pending)
         return item
@@ -1493,11 +1512,36 @@ def process_pending(*, worker_id: str = "") -> dict[str, Any]:
         apk_source_hash = _hash_tree(ROOT / "android" / "core-worker-app", exclude_dirs={"build", ".gradle", "releases"})
         current["apk_source_hash"] = apk_source_hash
         apk_needed = _apk_needs_build(apk_version_code, apk_source_hash)
-    if not _budget_exceeded(started) and (pending.get("apk_build") or apk_needed):
+    apk_requested = bool(pending.get("apk_build") or apk_needed)
+    compatible_builder_online = any(
+        _worker_supports(worker, "apk_build_debug", "apk-builder")
+        for worker in snapshot.get("workers") or []
+        if isinstance(worker, dict)
+    )
+    waiting_for_agent_upgrade = bool(agent_needed and not compatible_builder_online)
+    if not _budget_exceeded(started) and apk_requested and waiting_for_agent_upgrade:
+        current_pending = _load_pending()
+        item = current_pending.get("apk_build") if isinstance(current_pending.get("apk_build"), dict) else {}
+        for stale_key in ("blocked_by_recent_failure", "permanent_failure", "retry_after_seconds", "last_failure_detail", "last_failed_job_id"):
+            item.pop(stale_key, None)
+        item.update({
+            "ok": True,
+            "pending": True,
+            "phase": "waiting_worker_update",
+            "transient": True,
+            "error": "",
+            "targetWorkerVersion": target_agent,
+            "updated_at": time.time(),
+            "message": f"build do APK aguardando o worker atualizar para {target_agent}",
+        })
+        current_pending["apk_build"] = item
+        _save_pending(current_pending)
+        result["apk_build"] = item
+    elif not _budget_exceeded(started) and apk_requested:
         result["apk_build"] = queue_apk_build()
         if apk_needed:
             result["apk_build_detected"] = {"versionCode": apk_version_code, "reason": "latest.json ausente/antigo ou source divergente"}
-    elif pending.get("apk_build") or apk_needed:
+    elif apk_requested:
         result["apk_build"] = {"ok": True, "skipped": "time_budget_exceeded"}
 
     result["elapsed_ms"] = round((time.monotonic() - started) * 1000.0, 1)

@@ -1,6 +1,6 @@
 ## Patch 86.0: self-builder e publicação de APK validados
 
-A versão `1.10.36` mantém o Termux como builder bootstrap e não move o Gradle para a VPS. O bundle privado passa a registrar todos os arquivos executáveis em `executablePaths` (manifesto v4), incluindo `jdk/lib/jspawnhelper`, para o APK restaurar permissões após extrair ou copiar o toolchain.
+A versão `1.10.37` mantém o Termux como builder bootstrap e não move o Gradle para a VPS. Além da restauração de todos os executáveis do bundle, o pipeline agora aguarda a atualização do runtime antes de tentar o APK, trata ausência temporária de builder como pendência e recompõe as capacidades mínimas do perfil Turbo/Builder mesmo quando existe um snapshot antigo no arquivo de ambiente.
 
 Antes de persistir, recuperar ou publicar um artefato, o worker lê `packageName`, `versionName` e `versionCode` do `AndroidManifest.xml` contido no APK. Um arquivo antigo não pode mais ser anunciado como versão nova por metadados do job.
 

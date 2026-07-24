@@ -174,7 +174,7 @@ def test_automation_routes_apk_trigger_to_termux_bootstrap() -> None:
     assert "def _bootstrap_worker_id_for_runtime" in automation
     assert "runtime APK não recebe worker_update" in automation
     assert "worker_update continua reservado ao Termux bootstrap" in automation
-    assert 'PHONE_WORKER_VERSION = "1.10.36"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.10.37"' in phone_worker
     assert '"runtime_kind": "termux"' in phone_worker
     assert '"platform": "android-termux"' in phone_worker
 
@@ -432,3 +432,109 @@ def test_shared_runtime_switches_future_builds_to_apk_after_real_preflight(tmp_p
         lease_seconds=300,
     )
     assert created["job"]["preferred_worker_id"] == child_id
+
+
+def test_apk_build_waits_for_worker_update_instead_of_recording_false_failure(monkeypatch) -> None:
+    import importlib.util
+
+    path = ROOT / "scripts/core-worker-automation.py"
+    spec = importlib.util.spec_from_file_location("core_worker_automation_update_gate_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    pending = {
+        "agent_update": {"target_version": "1.10.37", "pending": True},
+        "apk_build": {"versionName": "0.7.4", "versionCode": 122, "pending": True},
+    }
+    snapshot = {
+        "workers": [{
+            "worker_id": "phone-test",
+            "online": True,
+            "version": "1.10.35",
+            "source": "termux-phone-worker",
+            "runtime_kind": "termux",
+            "roles": ["phone-worker"],
+            "capabilities": ["phone-worker"],
+            "supported_tasks": ["worker_update"],
+        }]
+    }
+
+    monkeypatch.setattr(module, "_load_pending", lambda: dict(pending))
+    monkeypatch.setattr(module, "_save_pending", lambda value: (pending.clear(), pending.update(value)))
+    monkeypatch.setattr(module, "_load_registry_snapshot", lambda: snapshot)
+    monkeypatch.setattr(module, "_read_phone_worker_version", lambda: "1.10.37")
+    monkeypatch.setattr(module, "_read_android_version", lambda: ("0.7.4", 122))
+    monkeypatch.setattr(module, "_workers_need_agent_version", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(module, "queue_agent_updates", lambda **_kwargs: {
+        "ok": True,
+        "pending": True,
+        "target_version": "1.10.37",
+        "queued": ["teste:job-update"],
+    })
+    monkeypatch.setattr(module, "queue_apk_build", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("APK não deve ser enfileirado antes do upgrade")))
+    monkeypatch.setattr(module, "write_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module, "_env_bool", lambda *_args, **_kwargs: False)
+
+    result = module.process_pending(worker_id="phone-test")
+
+    assert result["apk_build"]["phase"] == "waiting_worker_update"
+    assert result["apk_build"]["pending"] is True
+    assert result["apk_build"]["ok"] is True
+    assert pending["apk_build"]["targetWorkerVersion"] == "1.10.37"
+    assert not pending["apk_build"].get("error")
+
+
+def test_no_compatible_builder_is_transient_pending_not_build_failure(monkeypatch) -> None:
+    import importlib.util
+
+    path = ROOT / "scripts/core-worker-automation.py"
+    spec = importlib.util.spec_from_file_location("core_worker_automation_builder_wait_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    pending: dict = {}
+
+    class Registry:
+        def create_job(self, **_kwargs):
+            raise module.CoreWorkerRegistryError("nenhum worker online compatível para este job", status=409)
+
+    monkeypatch.setattr(module, "get_core_workers_registry", lambda: Registry())
+    monkeypatch.setattr(module, "_read_android_version", lambda: ("0.7.4", 122))
+    monkeypatch.setattr(module, "_prepare_apk_source_zip", lambda: {
+        "url": "https://example.invalid/source.zip",
+        "sha256": "a" * 64,
+        "bytes": 123,
+        "firebase_config_delivery": "job_payload",
+    })
+    monkeypatch.setattr(module, "_current_fingerprints", lambda: {"apk_source_hash": "b" * 64})
+    monkeypatch.setattr(module, "_load_google_services_payload_for_apk_build", lambda: {})
+    monkeypatch.setattr(module, "_load_apk_signing_payload_for_worker_build", lambda: {})
+    monkeypatch.setattr(module, "_load_pending", lambda: dict(pending))
+    monkeypatch.setattr(module, "_save_pending", lambda value: (pending.clear(), pending.update(value)))
+    monkeypatch.setattr(module, "_reconcile_apk_build_pending_job", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(module, "_apk_needs_build", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(module, "_recent_built_unpublished_apk", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(module, "_stale_running_apk_build_for_source", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(module, "_pending_apk_build_recently_queued", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(module, "_recent_failed_apk_build", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(module, "_active_job_exists", lambda **_kwargs: False)
+    monkeypatch.setattr(module, "_public_base_url", lambda: "https://example.invalid")
+
+    result = module.queue_apk_build()
+
+    assert result["ok"] is True
+    assert result["pending"] is True
+    assert result["phase"] == "waiting_builder"
+    assert result["transient"] is True
+    assert result["error"] == ""
+    assert "nenhum worker online compatível" in result["last_enqueue_error"]
+
+
+def test_turbo_profile_contract_cannot_lose_apk_builder_to_stale_env() -> None:
+    phone_worker = _read(ROOT / "deploy/termux/phone-worker/phone_worker.py")
+    assert "def _merge_profile_contract" in phone_worker
+    assert "valores do env continuam aceitos como extensões" in phone_worker
+    assert "roles, capabilities = _current_core_worker_roles_and_capabilities()" in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.10.37"' in phone_worker
