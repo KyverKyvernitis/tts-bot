@@ -70,25 +70,30 @@ export function Sidebar({
     let secondFrame = 0;
     if (mobileOpen) {
       setMobileMounted(true);
+      setMobileVisible(false);
+      setDragging(false);
       setDragOffset(0);
+
       firstFrame = window.requestAnimationFrame(() => {
+        // Força o estado inicial fora da tela a ser calculado antes da abertura.
+        void asideRef.current?.getBoundingClientRect().width;
         secondFrame = window.requestAnimationFrame(() => setMobileVisible(true));
       });
-    } else {
+    } else if (mobileMounted) {
       setDragging(false);
       setMobileVisible(false);
       closeTimerRef.current = window.setTimeout(() => {
         setMobileMounted(false);
         setDragOffset(0);
         closeTimerRef.current = null;
-      }, DRAWER_TRANSITION_MS + 80);
+      }, DRAWER_TRANSITION_MS + 90);
     }
 
     return () => {
       window.cancelAnimationFrame(firstFrame);
       window.cancelAnimationFrame(secondFrame);
     };
-  }, [mobileOpen]);
+  }, [mobileMounted, mobileOpen]);
 
   useEffect(() => {
     if (!mobileMounted) return;
@@ -130,57 +135,99 @@ export function Sidebar({
       velocityX: 0,
       horizontal: false,
     };
-    event.currentTarget.setPointerCapture?.(event.pointerId);
+    asideRef.current?.setPointerCapture?.(event.pointerId);
   };
 
-  const moveCloseSwipe = (event: ReactPointerEvent<HTMLElement>) => {
-    const pointer = pointerRef.current;
-    if (!pointer || pointer.pointerId !== event.pointerId) return;
-    const deltaX = event.clientX - pointer.startX;
-    const deltaY = event.clientY - pointer.startY;
+  useEffect(() => {
+    const resetGesture = (pointerId?: number) => {
+      pointerRef.current = null;
+      if (pointerId !== undefined && asideRef.current?.hasPointerCapture?.(pointerId)) {
+        asideRef.current.releasePointerCapture?.(pointerId);
+      }
+      setDragging(false);
+      setDragOffset(0);
+    };
 
-    if (!pointer.horizontal) {
-      if (Math.abs(deltaY) > 14 && Math.abs(deltaY) > Math.abs(deltaX) * 1.15) {
-        pointerRef.current = null;
+    const onPointerMove = (event: PointerEvent) => {
+      const pointer = pointerRef.current;
+      if (!pointer || pointer.pointerId !== event.pointerId || !mobileOpen) return;
+      const deltaX = event.clientX - pointer.startX;
+      const deltaY = event.clientY - pointer.startY;
+
+      if (!pointer.horizontal) {
+        if (Math.abs(deltaY) > 14 && Math.abs(deltaY) > Math.abs(deltaX) * 1.12) {
+          resetGesture(event.pointerId);
+          return;
+        }
+        if (deltaX <= -7 && Math.abs(deltaX) > Math.abs(deltaY) * 1.12) {
+          pointer.horizontal = true;
+          suppressClickRef.current = true;
+          setDragging(true);
+        }
+      }
+      if (!pointer.horizontal) return;
+
+      if (event.cancelable) event.preventDefault();
+      const elapsed = Math.max(1, event.timeStamp - pointer.latestAt);
+      pointer.velocityX = (event.clientX - pointer.latestX) / elapsed;
+      pointer.latestX = event.clientX;
+      pointer.latestAt = event.timeStamp;
+      const width = asideRef.current?.getBoundingClientRect().width || 280;
+      setDragOffset(Math.max(-width, Math.min(0, deltaX)));
+    };
+
+    const finishGesture = (event: PointerEvent, cancelled = false) => {
+      const pointer = pointerRef.current;
+      if (!pointer || pointer.pointerId !== event.pointerId) return;
+      pointerRef.current = null;
+
+      if (asideRef.current?.hasPointerCapture?.(event.pointerId)) {
+        asideRef.current.releasePointerCapture?.(event.pointerId);
+      }
+
+      const deltaX = event.clientX - pointer.startX;
+      const deltaY = event.clientY - pointer.startY;
+      const horizontalSwipe = pointer.horizontal
+        || (deltaX <= -42 && Math.abs(deltaX) > Math.abs(deltaY) * 1.12);
+      if (!horizontalSwipe) {
+        setDragging(false);
+        setDragOffset(0);
         return;
       }
-      if (deltaX <= -9 && Math.abs(deltaX) > Math.abs(deltaY) * 1.15) {
-        pointer.horizontal = true;
-        setDragging(true);
+
+      suppressClickRef.current = true;
+      window.setTimeout(() => { suppressClickRef.current = false; }, 120);
+      if (cancelled) {
+        setDragging(false);
+        setDragOffset(0);
+        return;
       }
-    }
-    if (!pointer.horizontal) return;
 
-    event.preventDefault();
-    const elapsed = Math.max(1, event.timeStamp - pointer.latestAt);
-    pointer.velocityX = (event.clientX - pointer.latestX) / elapsed;
-    pointer.latestX = event.clientX;
-    pointer.latestAt = event.timeStamp;
-    const width = asideRef.current?.getBoundingClientRect().width || 280;
-    setDragOffset(Math.max(-width, Math.min(0, deltaX)));
-  };
+      const width = asideRef.current?.getBoundingClientRect().width || 280;
+      const finalOffset = Math.max(-width, Math.min(0, deltaX));
+      const shouldClose = finalOffset <= -Math.min(72, width * .22) || pointer.velocityX <= -.42;
+      setDragging(false);
 
-  const finishCloseSwipe = (event: ReactPointerEvent<HTMLElement>) => {
-    const pointer = pointerRef.current;
-    if (!pointer || pointer.pointerId !== event.pointerId) return;
-    pointerRef.current = null;
-    if (!pointer.horizontal) return;
+      if (shouldClose) {
+        setDragOffset(finalOffset);
+        onCloseMobile();
+      } else {
+        setDragOffset(0);
+      }
+    };
 
-    suppressClickRef.current = true;
-    window.setTimeout(() => { suppressClickRef.current = false; }, 80);
-    const width = asideRef.current?.getBoundingClientRect().width || 280;
-    const finalOffset = Math.max(-width, Math.min(0, event.clientX - pointer.startX));
-    const shouldClose = finalOffset <= -Math.min(88, width * .26) || pointer.velocityX <= -.48;
-    setDragging(false);
-    if (shouldClose) onCloseMobile();
-    else setDragOffset(0);
-  };
+    const onPointerUp = (event: PointerEvent) => finishGesture(event);
+    const onPointerCancel = (event: PointerEvent) => finishGesture(event, true);
 
-  const cancelCloseSwipe = () => {
-    pointerRef.current = null;
-    setDragging(false);
-    setDragOffset(0);
-  };
+    window.addEventListener("pointermove", onPointerMove, { capture: true, passive: false });
+    window.addEventListener("pointerup", onPointerUp, { capture: true, passive: true });
+    window.addEventListener("pointercancel", onPointerCancel, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("pointerup", onPointerUp, true);
+      window.removeEventListener("pointercancel", onPointerCancel, true);
+    };
+  }, [mobileOpen, onCloseMobile]);
 
   const preventClickAfterDrag = (event: ReactMouseEvent<HTMLElement>) => {
     if (!suppressClickRef.current) return;
@@ -212,10 +259,7 @@ export function Sidebar({
       style={{ "--osk-drawer-drag-x": `${dragOffset}px` } as CSSProperties}
       aria-label="Navegação do painel"
       onTransitionEnd={finishClose}
-      onPointerDown={beginCloseSwipe}
-      onPointerMove={moveCloseSwipe}
-      onPointerUp={finishCloseSwipe}
-      onPointerCancel={cancelCloseSwipe}
+      onPointerDownCapture={beginCloseSwipe}
       onClickCapture={preventClickAfterDrag}
     >
       <div className="osk-sidebar-brand">

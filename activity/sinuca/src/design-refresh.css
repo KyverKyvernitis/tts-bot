@@ -2284,19 +2284,30 @@
 .osk-picker-nav > .osk-account-trigger { flex: 0 0 auto; }
 
 @media (max-width: 980px) {
-  .osk-dashboard-sidebar {
-    --osk-drawer-drag-x: 0px;
-    transform: translate3d(-102%,0,0) !important;
+  .osk-dashboard-main {
+    /* Mantém a rolagem vertical e deixa os gestos horizontais sob controle do painel. */
     touch-action: pan-y;
-    will-change: transform;
-    transition: transform 280ms cubic-bezier(.2,.8,.2,1), visibility 0s linear 280ms, box-shadow 280ms ease !important;
   }
 
-  .osk-dashboard-sidebar[data-mobile-mounted] { visibility: visible; }
+  .osk-dashboard-sidebar {
+    --osk-drawer-drag-x: 0px;
+    z-index: 61;
+    visibility: hidden !important;
+    pointer-events: none;
+    transform: translate3d(calc(-100% - 4px),0,0) !important;
+    touch-action: pan-y;
+    will-change: transform;
+    transition: transform 300ms cubic-bezier(.2,.82,.2,1), box-shadow 300ms ease !important;
+  }
+
+  .osk-dashboard-sidebar[data-mobile-mounted] {
+    visibility: visible !important;
+  }
 
   .osk-dashboard-sidebar[data-open] {
+    pointer-events: auto;
     transform: translate3d(var(--osk-drawer-drag-x),0,0) !important;
-    transition-delay: 0s !important;
+    box-shadow: 28px 0 75px rgba(0,0,0,.62);
   }
 
   .osk-dashboard-sidebar[data-dragging] {
@@ -2304,9 +2315,17 @@
     user-select: none;
   }
 
+  .osk-sidebar-backdrop {
+    z-index: 60;
+    visibility: visible !important;
+    pointer-events: none;
+    opacity: 0 !important;
+    transition: opacity 240ms ease !important;
+  }
+
   .osk-sidebar-backdrop[data-open] {
+    pointer-events: auto;
     opacity: calc(.68 * var(--osk-drawer-progress, 1)) !important;
-    transition: opacity 220ms ease, visibility 0s !important;
   }
 }
 
