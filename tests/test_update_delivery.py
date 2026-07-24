@@ -701,3 +701,34 @@ def test_updater_service_has_lower_cpu_and_io_priority() -> None:
         assert "Nice=10" in text
         assert "CPUWeight=20" in text
         assert "IOWeight=20" in text
+
+
+def test_bot_persists_preparation_progress_before_enqueuing_candidate() -> None:
+    source = BOT.read_text(encoding="utf-8")
+    writer_start = source.index("    def _write_local_update_candidate_sync(")
+    writer_end = source.index("    def _trigger_updater_service_sync", writer_start)
+    writer = source[writer_start:writer_end]
+    process_start = source.index("    def _process_zip_update_sync(")
+    process_end = source.index("    def handle_internal_update_action", process_start)
+    process = source[process_start:process_end]
+
+    assert '"progress_handoff": {' in writer
+    assert '"completed_steps": handoff_steps' in writer
+    assert '"preparation_total_ms": preparation_total_ms' in writer
+    assert writer.index('"progress_handoff": {') < writer.index("os.replace(manifest_tmp")
+    assert writer.index("os.replace(manifest_tmp") < writer.index("os.replace(tmp_pending")
+    assert "preparation_steps=list(preparation_steps)" in process
+    assert 'publish_progress("Finalizando preparação", "Candidato seguro preparado", elapsed)' in process
+
+
+def test_local_candidate_load_hydrates_progress_before_first_updater_stage() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    load_start = source.index("load_pending_local_candidate() {")
+    load_end = source.index("\nverify_local_candidate_integrity() {", load_start)
+    load_block = source[load_start:load_end]
+    prepare_start = source.index("prepare_local_candidate_update() {")
+    prepare_end = source.index("\npublish_local_candidate_after_validation() {", prepare_start)
+    prepare_block = source[prepare_start:prepare_end]
+
+    assert "zip_progress_hydrate_from_candidate || true" in load_block
+    assert 'zip_progress_publish "Conferindo ZIP"' in prepare_block

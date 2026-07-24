@@ -197,6 +197,7 @@ ZIP_PROGRESS_STAGE_LABEL=""
 ZIP_PROGRESS_STAGE_STARTED_MS=0
 ZIP_PROGRESS_STARTED_MS=0
 ZIP_PROGRESS_DONE_LABELS=""
+ZIP_PROGRESS_HANDOFF_LOADED=0
 UPDATER_STEP_LAST=0
 UPDATER_TIMINGS=""
 UPDATE_STATUS_OUTBOX_DIR="$REPO_DIR/data/runtime/update-status-outbox"
@@ -1504,6 +1505,7 @@ for item in ((data.get('diff_stats') or {}).get('entries') or []):
         print(f"{int(item.get('added') or 0)}\t{int(item.get('removed') or 0)}\t{path}")
 PYDIFF
 )"
+  zip_progress_hydrate_from_candidate || true
   return 0
 }
 verify_local_candidate_integrity() {
@@ -2399,6 +2401,105 @@ zip_progress_identifier() {
   else
     printf 'atualização'
   fi
+}
+
+zip_progress_hydrate_from_candidate() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 0
+  (( ZIP_PROGRESS_HANDOFF_LOADED == 0 )) || return 0
+  [[ -f "${LOCAL_CANDIDATE_DIR:-}/manifest.json" ]] || return 0
+
+  local record_kind elapsed_ms encoded_label label total_ms=0 summed_ms=0 now_ms line index
+  local -a handoff_labels=()
+  local -a handoff_elapsed=()
+
+  while IFS=$'\t' read -r record_kind elapsed_ms encoded_label; do
+    case "$record_kind" in
+      META)
+        [[ "$elapsed_ms" =~ ^[0-9]+$ ]] && total_ms="$elapsed_ms"
+        ;;
+      STEP)
+        [[ "$elapsed_ms" =~ ^[0-9]+$ ]] || elapsed_ms=0
+        label="$(printf '%s' "$encoded_label" | base64 --decode 2>/dev/null || true)"
+        label="$(printf '%s' "$label" | tr '\r\n\t' '   ' | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-120)"
+        [[ -n "${label//[[:space:]]/}" ]] || continue
+        if [[ -n "${ZIP_PROGRESS_DONE_LABELS:-}" ]] \
+          && printf '%s\n' "$ZIP_PROGRESS_DONE_LABELS" | grep -Fxq -- "$label"; then
+          continue
+        fi
+        handoff_labels+=("$label")
+        handoff_elapsed+=("$elapsed_ms")
+        summed_ms=$((summed_ms + elapsed_ms))
+        ;;
+    esac
+  done < <(python3 - "${LOCAL_CANDIDATE_DIR}/manifest.json" <<'PYHANDOFF' 2>/dev/null || true
+import base64
+import json
+import pathlib
+import sys
+
+try:
+    data = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+
+handoff = data.get("progress_handoff")
+if not isinstance(handoff, dict) or int(handoff.get("schema_version") or 0) != 1:
+    raise SystemExit(0)
+
+try:
+    total_ms = max(0, min(int(handoff.get("preparation_total_ms") or 0), 15 * 60 * 1000))
+except (TypeError, ValueError):
+    total_ms = 0
+print(f"META\t{total_ms}\t")
+
+seen: set[str] = set()
+steps = handoff.get("completed_steps")
+if not isinstance(steps, list):
+    steps = []
+for raw in steps[:20]:
+    if not isinstance(raw, dict):
+        continue
+    label = " ".join(str(raw.get("label") or "").split())[:120]
+    if not label or label in seen:
+        continue
+    try:
+        elapsed_ms = max(0, min(int(raw.get("elapsed_ms") or 0), 10 * 60 * 1000))
+    except (TypeError, ValueError):
+        elapsed_ms = 0
+    seen.add(label)
+    encoded = base64.b64encode(label.encode("utf-8")).decode("ascii")
+    print(f"STEP\t{elapsed_ms}\t{encoded}")
+PYHANDOFF
+  )
+
+  ((${#handoff_labels[@]} > 0)) || return 0
+  (( total_ms < summed_ms )) && total_ms="$summed_ms"
+  (( total_ms > 900000 )) && total_ms=900000
+
+  for ((index=0; index<${#handoff_labels[@]}; index++)); do
+    label="${handoff_labels[$index]}"
+    elapsed_ms="${handoff_elapsed[$index]}"
+    if [[ -n "${ZIP_PROGRESS_DONE_LABELS:-}" ]]; then
+      ZIP_PROGRESS_DONE_LABELS+=$'\n'
+    fi
+    ZIP_PROGRESS_DONE_LABELS="${ZIP_PROGRESS_DONE_LABELS:-}${label}"
+    line="-# ✅ $label · $(format_update_duration_ms "$elapsed_ms")"
+    if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
+      ZIP_PROGRESS_HISTORY+=$'\n'
+    fi
+    ZIP_PROGRESS_HISTORY+="$line"
+    ZIP_PROGRESS_COMPLETED_COUNT=$((ZIP_PROGRESS_COMPLETED_COUNT + 1))
+  done
+  zip_progress_trim_history
+
+  now_ms="$(update_now_ms)"
+  if [[ "$now_ms" =~ ^[0-9]+$ ]] && (( ZIP_PROGRESS_STARTED_MS <= 0 )); then
+    ZIP_PROGRESS_STARTED_MS=$((now_ms - total_ms))
+    (( ZIP_PROGRESS_STARTED_MS < 0 )) && ZIP_PROGRESS_STARTED_MS=0
+  fi
+  ZIP_PROGRESS_STAGE_LABEL=""
+  ZIP_PROGRESS_STAGE_STARTED_MS=0
+  ZIP_PROGRESS_HANDOFF_LOADED=1
 }
 
 zip_progress_trim_history() {

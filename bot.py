@@ -1840,6 +1840,9 @@ class BotLocal(commands.Bot):
         zip_inspection: dict[str, object],
         patch_diff_text: str = "",
         status_context: dict[str, object] | None = None,
+        preparation_steps: list[dict[str, object]] | None = None,
+        preparation_started_monotonic: float | None = None,
+        candidate_step_started_monotonic: float | None = None,
     ) -> dict[str, object]:
         """Grava um candidato íntegro para validação e aplicação na VPS."""
         candidate_root = self._update_staging_root / "candidates"
@@ -1881,6 +1884,39 @@ class BotLocal(commands.Bot):
             max_age_seconds = max(300, int(os.getenv("DISCORD_AUTO_UPDATE_CANDIDATE_MAX_AGE_SECONDS", "86400") or 86400))
             expires_at = created_at + timedelta(seconds=max_age_seconds)
             file_integrity = build_file_integrity(files_dir, written_files)
+
+            prepared_at = time.monotonic()
+            candidate_prepare_elapsed_ms = max(
+                0,
+                int((prepared_at - float(candidate_step_started_monotonic or prepared_at)) * 1000),
+            )
+            preparation_total_ms = max(
+                candidate_prepare_elapsed_ms,
+                int((prepared_at - float(preparation_started_monotonic or prepared_at)) * 1000),
+            )
+            handoff_steps: list[dict[str, object]] = []
+            seen_handoff_labels: set[str] = set()
+            for raw_step in list(preparation_steps or []):
+                if not isinstance(raw_step, dict):
+                    continue
+                label = " ".join(str(raw_step.get("label") or "").split())[:120]
+                if not label or label in seen_handoff_labels:
+                    continue
+                try:
+                    elapsed_ms = max(0, int(raw_step.get("elapsed_ms") or 0))
+                except (TypeError, ValueError):
+                    elapsed_ms = 0
+                seen_handoff_labels.add(label)
+                handoff_steps.append({"label": label, "elapsed_ms": elapsed_ms})
+            final_preparation_label = "Candidato seguro preparado"
+            if final_preparation_label not in seen_handoff_labels:
+                handoff_steps.append(
+                    {
+                        "label": final_preparation_label,
+                        "elapsed_ms": candidate_prepare_elapsed_ms,
+                    }
+                )
+
             manifest: dict[str, object] = {
                 "schema_version": 2,
                 "id": candidate_id,
@@ -1899,6 +1935,12 @@ class BotLocal(commands.Bot):
                 "file_integrity": file_integrity,
                 "patch_sha256": sha256_file(patch_path) if patch_path.is_file() else "",
                 "patch_size": patch_path.stat().st_size if patch_path.is_file() else 0,
+                "progress_handoff": {
+                    "schema_version": 1,
+                    "completed_steps": handoff_steps,
+                    "completed_count": len(handoff_steps),
+                    "preparation_total_ms": preparation_total_ms,
+                },
             }
             if isinstance(status_context, dict) and status_context.get("message_id") and status_context.get("channel_id"):
                 manifest["discord_status"] = {
@@ -1949,6 +1991,8 @@ class BotLocal(commands.Bot):
                 "pending_path": str(pending_path),
                 "queue_position": queue_position,
                 "queue_pending_count": pending_count + 1,
+                "candidate_prepare_elapsed_ms": candidate_prepare_elapsed_ms,
+                "preparation_total_ms": preparation_total_ms,
             }
         except Exception:
             shutil.rmtree(candidate_dir, ignore_errors=True)
@@ -2249,16 +2293,25 @@ class BotLocal(commands.Bot):
         timings: dict[str, int] = {}
         t0 = time.monotonic()
         last = t0
+        preparation_steps: list[dict[str, object]] = []
 
         def publish_progress(current: str, completed: str = "", elapsed_ms: int | None = None) -> None:
+            completed_label = " ".join(str(completed or "").split())[:120]
+            safe_elapsed_ms = max(0, int(elapsed_ms or 0))
+            if completed_label and not any(
+                str(step.get("label") or "") == completed_label for step in preparation_steps
+            ):
+                preparation_steps.append(
+                    {"label": completed_label, "elapsed_ms": safe_elapsed_ms}
+                )
             if progress_callback is None:
                 return
             try:
                 progress_callback(
                     {
                         "current": str(current or "").strip(),
-                        "completed": str(completed or "").strip(),
-                        "elapsed_ms": max(0, int(elapsed_ms or 0)),
+                        "completed": completed_label,
+                        "elapsed_ms": safe_elapsed_ms,
                     }
                 )
             except Exception:
@@ -2355,8 +2408,13 @@ class BotLocal(commands.Bot):
                 zip_inspection=zip_inspection,
                 patch_diff_text=patch_diff_text,
                 status_context=status_context,
+                preparation_steps=list(preparation_steps),
+                preparation_started_monotonic=t0,
+                candidate_step_started_monotonic=last,
             )
-            elapsed = mark("candidate_write_ms")
+            measured_elapsed = mark("candidate_write_ms")
+            elapsed = max(0, int(candidate.get("candidate_prepare_elapsed_ms") or measured_elapsed))
+            timings["candidate_write_ms"] = elapsed
             publish_progress("Finalizando preparação", "Candidato seguro preparado", elapsed)
             timings["total_ms"] = int((time.monotonic() - t0) * 1000)
 

@@ -405,3 +405,65 @@ def test_critical_git_diff_results_are_not_silently_replaced_with_empty_output()
     assert '["sudo", "-u", "ubuntu", "-H", "git", *args]' in candidate
     assert "cp.returncode != 0" in candidate
     assert "raise SystemExit(2)" in candidate
+
+
+def test_updater_hydrates_preparation_microsteps_without_resetting_counter(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "manifest.json").write_text(
+        json.dumps(
+            {
+                "progress_handoff": {
+                    "schema_version": 1,
+                    "preparation_total_ms": 7000,
+                    "completed_steps": [
+                        {"label": "Pacote inspecionado", "elapsed_ms": 5000},
+                        {"label": "Estrutura do ZIP conferida", "elapsed_ms": 44},
+                        {"label": "Base de comparação preparada", "elapsed_ms": 1500},
+                        {"label": "Arquivos comparados", "elapsed_ms": 8},
+                        {"label": "Alterações calculadas", "elapsed_ms": 146},
+                        {"label": "Candidato seguro preparado", "elapsed_ms": 20},
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    harness = rf'''
+source <(awk '/^human_duration\(\)/{{flag=1}} /^mark_update_timing\(\)/{{flag=0}} flag' scripts/tts-bot-update.sh)
+source <(awk '/^zip_progress_title\(\)/{{flag=1}} /^rollback_request_roots\(\)/{{flag=0}} flag' scripts/tts-bot-update.sh)
+ROLLBACK_CONTROL_MODE=0
+LOCAL_CANDIDATE_MODE=1
+LOCAL_CANDIDATE_DIR={candidate!s}
+LOCAL_CANDIDATE_DISPLAY_ID=UPD-HANDOFF
+LOCAL_CANDIDATE_ID=zip-handoff
+UPDATE_STAGE_EMOJI='<a:loading:test>'
+ZIP_PROGRESS_HISTORY=''
+ZIP_PROGRESS_COMPLETED_COUNT=0
+ZIP_PROGRESS_HIDDEN_COUNT=0
+ZIP_PROGRESS_MAX_VISIBLE_STEPS=10
+ZIP_PROGRESS_STAGE_LABEL=''
+ZIP_PROGRESS_STAGE_STARTED_MS=0
+ZIP_PROGRESS_STARTED_MS=0
+ZIP_PROGRESS_DONE_LABELS=''
+ZIP_PROGRESS_HANDOFF_LOADED=0
+update_now_ms(){{ printf '100000'; }}
+notify_zip_status_message(){{ printf '%s\n' "$3"; }}
+update_local_candidate_heartbeat(){{ :; }}
+zip_progress_hydrate_from_candidate
+zip_progress_publish 'Conferindo ZIP' 'Checando arquivo recebido e base local.'
+printf 'COUNT=%s START=%s\n' "$ZIP_PROGRESS_COMPLETED_COUNT" "$ZIP_PROGRESS_STARTED_MS"
+'''
+    result = subprocess.run(
+        ["bash", "-eu", "-o", "pipefail", "-c", harness],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    text = result.stdout
+    assert "✅ Pacote inspecionado · 5s" in text
+    assert "✅ Candidato seguro preparado · 20ms" in text
+    assert "<a:loading:test> **Conferindo ZIP**" in text
+    assert "UPD-HANDOFF · 6 etapas concluídas · 7s" in text
+    assert "COUNT=6 START=93000" in text
