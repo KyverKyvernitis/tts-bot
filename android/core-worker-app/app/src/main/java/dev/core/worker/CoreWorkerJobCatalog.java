@@ -1,12 +1,14 @@
 package dev.core.worker;
 
+import android.content.Context;
+
 import org.json.JSONArray;
 
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
-/** Catálogo único do worker Android, sem dependência de Termux. */
+/** Catálogo único do worker Android, sem dependência operacional de Termux. */
 public final class CoreWorkerJobCatalog {
     private static final String[] APK_JOBS = new String[] {
             "apk_ping", "apk_status_refresh", "apk_upload_app_logs", "apk_diagnostic",
@@ -29,7 +31,6 @@ public final class CoreWorkerJobCatalog {
             "apk_core_linux_box64_preflight", "apk_core_linux_box64_smoke_test"
     };
 
-    /* 44 jobs internos + contratos diretos; o registry aceita até 96 tasks. */
     private static final String[] DIRECT_REGISTRY_TASKS = new String[] {
             "ping", "health", "status", "diagnostic_basic", "worker_self_check",
             "network_probe", "endpoint_probe", "tailscale_status", "vps_assist_probe",
@@ -52,7 +53,8 @@ public final class CoreWorkerJobCatalog {
             "core-linux-rootfs-proot-smoke-v13.3", "core-linux-box64-intake-preflight-v14.2.1",
             "core-linux-box64-glibc-preflight-v15.3.1",
             "core-linux-rootfs-glibc-intake-preflight-v17",
-            "core-linux-embedded-binaries-intake-v11", "termux-free-runtime"
+            "core-linux-embedded-binaries-intake-v11", "termux-free-runtime",
+            "termux-bootstrap-builder-compatible"
     };
 
     private static final String[] ROLES = new String[] {
@@ -74,9 +76,12 @@ public final class CoreWorkerJobCatalog {
     }
 
     public static JSONArray remoteSupportedTasks() {
-        JSONArray out = new JSONArray();
-        for (String value : APK_JOBS) out.put(value);
-        for (String value : DIRECT_REGISTRY_TASKS) out.put(value);
+        return combine(array(APK_JOBS), array(DIRECT_REGISTRY_TASKS));
+    }
+
+    public static JSONArray remoteSupportedTasks(Context context) {
+        JSONArray out = remoteSupportedTasks();
+        appendUnique(out, CoreWorkerApkBuildManager.availableTasks(context));
         return out;
     }
 
@@ -88,8 +93,20 @@ public final class CoreWorkerJobCatalog {
         return array(CAPABILITIES);
     }
 
+    public static JSONArray capabilities(Context context) {
+        JSONArray out = capabilities();
+        appendUnique(out, CoreWorkerApkBuildManager.dynamicCapabilities(context));
+        return out;
+    }
+
     public static JSONArray roles() {
         return array(ROLES);
+    }
+
+    public static JSONArray roles(Context context) {
+        JSONArray out = roles();
+        appendUnique(out, CoreWorkerApkBuildManager.dynamicRoles(context));
+        return out;
     }
 
     public static boolean supports(String type) {
@@ -104,5 +121,25 @@ public final class CoreWorkerJobCatalog {
         JSONArray out = new JSONArray();
         for (String value : values) out.put(value);
         return out;
+    }
+
+    private static JSONArray combine(JSONArray first, JSONArray second) {
+        JSONArray out = new JSONArray();
+        appendUnique(out, first);
+        appendUnique(out, second);
+        return out;
+    }
+
+    private static void appendUnique(JSONArray target, JSONArray source) {
+        if (target == null || source == null) return;
+        LinkedHashSet<String> values = new LinkedHashSet<>();
+        for (int i = 0; i < target.length(); i++) {
+            String value = target.optString(i, "").trim();
+            if (!value.isEmpty()) values.add(value);
+        }
+        for (int i = 0; i < source.length(); i++) {
+            String value = source.optString(i, "").trim();
+            if (!value.isEmpty() && values.add(value)) target.put(value);
+        }
     }
 }

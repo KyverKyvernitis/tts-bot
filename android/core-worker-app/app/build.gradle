@@ -28,6 +28,7 @@ def coreWorkerSigningEnabled = coreWorkerSigningStoreFile &&
 def coreWorkerRequireCompatSigning = ((project.findProperty("CORE_WORKER_REQUIRE_COMPAT_SIGNING") ?: System.getenv("CORE_WORKER_REQUIRE_COMPAT_SIGNING") ?: "false").toString().toLowerCase() in ["1", "true", "yes", "on", "sim"])
 
 def coreWorkerExpectedPackage = "dev.core.worker"
+def coreWorkerSelfBuilderTargetSdk = 28
 tasks.register("verifyCoreWorkerGoogleServices") {
     description = "Valida o google-services.json local antes do build do Core Worker."
     doLast {
@@ -57,9 +58,13 @@ android {
     defaultConfig {
         applicationId "dev.core.worker"
         minSdk 26
-        targetSdk 34
-        versionCode 118
-        versionName "0.7.0"
+        // APK privado/autohospedado: o self-builder executa JDK/Gradle dentro
+        // do armazenamento privado. Android 10+ bloqueia execve nesse local para
+        // apps target 29+, então esta variante operacional permanece em target 28.
+        // compileSdk continua moderno e a distribuição não ocorre pelo Google Play.
+        targetSdk coreWorkerSelfBuilderTargetSdk
+        versionCode 119
+        versionName "0.7.1"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -95,7 +100,7 @@ android {
     androidResources {
         // V15.3.1: Box64 é asset executável Linux/glibc grande. Mantê-lo sem
         // compressão evita alocação gigante do AssetManager durante extração.
-        noCompress += ["box64"]
+        noCompress += ["box64", "zip"]
     }
 
     sourceSets {
@@ -299,6 +304,94 @@ tasks.named("preBuild").configure {
 }
 
 
+
+tasks.register("verifyCoreWorkerSelfBuilderTargetSdk") {
+    description = "Impede publicar uma variante self-builder sujeita ao bloqueio W^X do Android 10+."
+    doLast {
+        if (coreWorkerSelfBuilderTargetSdk > 28) {
+            throw new GradleException("self-builder exige targetSdk <= 28 para executar o toolchain privado; valor atual=${coreWorkerSelfBuilderTargetSdk}")
+        }
+    }
+}
+
+// Toolchain privado usado pelo próprio APK para compilar as próximas versões.
+// O primeiro build continua no Termux; depois, o APK extrai este ZIP no seu
+// armazenamento interno e executa o toolchain Bionic diretamente.
+def coreWorkerSelfBuilderAsset = file("${projectDir}/src/main/assets/core-linux/android-builder/android-builder-toolchain.zip")
+
+tasks.register("verifyCoreWorkerSelfBuilderToolchain") {
+    description = "Valida o toolchain privado de autobuild do APK sem executá-lo."
+    doLast {
+        def strict = ((project.findProperty("CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN") ?: System.getenv("CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN") ?: "false").toString().toLowerCase() in ["1", "true", "yes", "on", "sim"])
+        if (!coreWorkerSelfBuilderAsset.exists()) {
+            if (strict) {
+                throw new GradleException("toolchain de autobuild ausente: app/src/main/assets/core-linux/android-builder/android-builder-toolchain.zip")
+            }
+            println("Core Worker self-builder: toolchain ausente; Termux permanece como builder bootstrap")
+            return
+        }
+        if (coreWorkerSelfBuilderAsset.length() < 1024L * 1024L) {
+            throw new GradleException("toolchain de autobuild pequeno/inválido: ${coreWorkerSelfBuilderAsset.length()} bytes")
+        }
+        def archive = new java.util.zip.ZipFile(coreWorkerSelfBuilderAsset)
+        try {
+            def manifestEntry = archive.getEntry("manifest.json")
+            if (manifestEntry == null || manifestEntry.directory) {
+                throw new GradleException("toolchain de autobuild sem manifest.json")
+            }
+            def parsed = new groovy.json.JsonSlurper().parse(archive.getInputStream(manifestEntry))
+            if (parsed?.schema != "core-worker-android-builder-v1") {
+                throw new GradleException("schema inválido no toolchain de autobuild")
+            }
+            def arch = (parsed?.arch ?: "").toString().toLowerCase()
+            if (!(arch in ["aarch64", "arm64", "arm64-v8a"])) {
+                throw new GradleException("arquitetura inválida no toolchain de autobuild: ${arch}")
+            }
+            def paths = parsed?.paths instanceof Map ? parsed.paths : [:]
+            def normalizeToolchainPath = { raw ->
+                (raw ?: "").toString().replace('\\', '/').replaceAll('^/+', '').replaceAll('/+$', '')
+            }
+            def jdkPath = normalizeToolchainPath(paths.jdk ?: "jdk")
+            def sdkPath = normalizeToolchainPath(paths.androidSdk ?: paths.android_sdk ?: "android-sdk")
+            def required = [
+                [(jdkPath + "/bin/java"): 64L * 1024L],
+                [(jdkPath + "/bin/javac"): 8L * 1024L],
+                [(jdkPath + "/bin/jar"): 8L * 1024L],
+                [(normalizeToolchainPath(paths.gradle ?: "gradle/bin/gradle")): 100L],
+                [(sdkPath + "/platforms/android-34/android.jar"): 1024L * 1024L],
+                [(normalizeToolchainPath(paths.aapt2 ?: "bin/aapt2")): 64L * 1024L],
+            ]
+            required.each { requirement ->
+                requirement.each { name, minBytes ->
+                    def entry = archive.getEntry(name)
+                    if (!name || name.startsWith("/") || name.split('/').contains("..") || entry == null || entry.directory || entry.size < minBytes) {
+                        throw new GradleException("arquivo obrigatório ausente/inseguro/pequeno no toolchain: ${name}")
+                    }
+                }
+            }
+            def unsafe = null
+            def entries = archive.entries()
+            while (entries.hasMoreElements() && unsafe == null) {
+                def entry = entries.nextElement()
+                def name = (entry.name ?: "").replace('\\', '/')
+                if (!name || name.startsWith('/') || name.split('/').contains('..')) unsafe = entry
+            }
+            if (unsafe != null) {
+                throw new GradleException("caminho inseguro no toolchain: ${unsafe.name}")
+            }
+            println("Core Worker self-builder: toolchain validado · bytes=${coreWorkerSelfBuilderAsset.length()} · strict=${strict}")
+        } finally {
+            archive.close()
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn("verifyCoreWorkerSelfBuilderTargetSdk")
+    dependsOn("verifyCoreWorkerSelfBuilderToolchain")
+}
+
+
 tasks.register("coreLinuxEmbeddedBinariesPlan") {
     description = "Mostra o plano local de build/import dos binários Core Linux sem baixar ou executar nada."
     doLast {
@@ -321,7 +414,11 @@ chaquopy {
         // A versão padrão do Chaquopy 17.0.0 é usada para evitar exigir configuração extra
         // no phone worker; scripts atuais usam somente biblioteca padrão.
         pyc {
+            // O APK não precisa de um Python externo no Termux nem no self-builder.
+            // Chaquopy inclui as fontes internas e compila o necessário no runtime.
             src = false
+            pip = false
+            stdlib = false
         }
     }
 }

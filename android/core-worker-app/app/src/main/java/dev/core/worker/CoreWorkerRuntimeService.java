@@ -84,6 +84,7 @@ public class CoreWorkerRuntimeService extends Service {
         super.onCreate();
         createChannel();
         jobExecutor = new CoreWorkerJobExecutor(getApplicationContext());
+        CoreWorkerApkBuildManager.refreshAsync(getApplicationContext());
         startNativeTtsBridge();
         ensureDirectHttpServer();
     }
@@ -435,7 +436,10 @@ public class CoreWorkerRuntimeService extends Service {
                     .put("jobId", jobId);
         } else {
             try {
-                if (CoreWorkerJobCatalog.supports(jobType)) {
+                if (CoreWorkerApkBuildManager.supports(jobType)) {
+                    result = CoreWorkerApkBuildManager.execute(
+                            getApplicationContext(), jobType, job.optJSONObject("payload"), serverUrl);
+                } else if (CoreWorkerJobCatalog.supports(jobType)) {
                     result = jobExecutor.execute(job, serverUrl);
                 } else if (CoreWorkerDirectTaskExecutor.supports(jobType)) {
                     JSONObject directPayload = new JSONObject(job.optJSONObject("payload").toString());
@@ -689,7 +693,7 @@ public class CoreWorkerRuntimeService extends Service {
     private JSONObject buildForegroundHeartbeatPayload(String reason) throws Exception {
         JSONObject coreLinux = coreLinuxPublicSnapshot();
         JSONObject nativeRuntime = nativeRuntimePublicSnapshot();
-        JSONArray supported = CoreWorkerJobCatalog.remoteSupportedTasks();
+        JSONArray supported = CoreWorkerJobCatalog.remoteSupportedTasks(getApplicationContext());
         JSONArray capabilities = coreWorkerApkCapabilitiesArray();
         JSONObject runtime = new JSONObject();
         runtime.put("mode", "apk-native-direct-runtime");
@@ -707,6 +711,8 @@ public class CoreWorkerRuntimeService extends Service {
         runtime.put("termux_required_now", false);
         runtime.put("termux_fallback_available", false);
         runtime.put("advanced_jobs_require_termux", false);
+        runtime.put("termux_bootstrap_builder_supported", true);
+        runtime.put("apk_self_builder", CoreWorkerApkBuildManager.preflight(getApplicationContext(), false));
         runtime.put("job_executor_ready", prefs().getBoolean("job_executor_ready", false));
         runtime.put("coreLinux", coreLinux);
         runtime.put("nativeRuntime", nativeRuntime);
@@ -724,6 +730,8 @@ public class CoreWorkerRuntimeService extends Service {
         status.put("direct_http_active", directHttpServer != null && directHttpServer.isRunning());
         status.put("direct_http_port", prefs().getInt("direct_http_port", 8766));
         status.put("termux_replaced", true);
+        status.put("termux_bootstrap_builder_supported", true);
+        status.put("apk_self_builder", CoreWorkerApkBuildManager.preflight(getApplicationContext(), false));
         status.put("capabilities", capabilities);
         status.put("supported_tasks", supported);
         status.put("supportedTasks", supported);
@@ -741,7 +749,7 @@ public class CoreWorkerRuntimeService extends Service {
         payload.put("name", prefs().getString("device_name", Build.MANUFACTURER + " " + Build.MODEL));
         payload.put("version", BuildConfig.VERSION_NAME);
         payload.put("endpoint", prefs().getString("direct_worker_endpoint", ""));
-        payload.put("roles", CoreWorkerJobCatalog.roles());
+        payload.put("roles", CoreWorkerJobCatalog.roles(getApplicationContext()));
         payload.put("platform", "android");
         payload.put("source", "core-worker-apk-foreground-service");
         payload.put("state", "foreground_runtime");
@@ -769,11 +777,11 @@ public class CoreWorkerRuntimeService extends Service {
     }
 
     private JSONArray coreWorkerApkCapabilitiesArray() {
-        return CoreWorkerJobCatalog.capabilities();
+        return CoreWorkerJobCatalog.capabilities(getApplicationContext());
     }
 
     private JSONArray supportedLightJobsArray() {
-        return CoreWorkerJobCatalog.remoteSupportedTasks();
+        return CoreWorkerJobCatalog.remoteSupportedTasks(getApplicationContext());
     }
 
     private JSONObject coreLinuxPublicSnapshot() {

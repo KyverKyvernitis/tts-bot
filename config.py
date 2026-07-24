@@ -337,9 +337,12 @@ MUSIC_REJECT_WEAK_LINK_MATCHES = _parse_bool(os.getenv("MUSIC_REJECT_WEAK_LINK_M
 # Spotify direto/spsearch fica fora do padrão porque o LavaSrc 4.8.x pode falhar com 403.
 MUSIC_LAVASRC_MIRROR_PREFIXES = (os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "scsearch") or "scsearch").strip()
 
-# Migração definitiva: o APK assume o worker móvel e o Termux não participa do runtime.
-# O build do APK continua externo/manual; a VPS apenas publica APKs já compilados.
+# O APK assume o runtime móvel. O Termux pode continuar temporariamente apenas
+# como builder bootstrap do primeiro APK com toolchain interno; nunca buildamos na VPS.
 CORE_WORKER_APK_REPLACES_TERMUX = _parse_bool(os.getenv("CORE_WORKER_APK_REPLACES_TERMUX", "true"), True)
+CORE_WORKER_TERMUX_BOOTSTRAP_BUILDER_ENABLED = _parse_bool(
+    os.getenv("CORE_WORKER_TERMUX_BOOTSTRAP_BUILDER_ENABLED", "true"), True
+)
 
 # Lavalink/phone worker — música agora deve rodar fora da VPS.
 # MUSIC_BACKEND fica aceitando valor antigo por compatibilidade, mas o fluxo

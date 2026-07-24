@@ -63,7 +63,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.32"
+PHONE_WORKER_VERSION = "1.10.33"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -7473,6 +7473,17 @@ def _run_service_action(service: str, action: str) -> dict[str, Any]:
 
 
 
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            block = handle.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _safe_extract_zip_file(zip_path: Path, target_dir: Path, *, max_members: int = 6000) -> int:
     target_root = target_dir.resolve()
     count = 0
@@ -7500,6 +7511,283 @@ def _safe_extract_zip_file(zip_path: Path, target_dir: Path, *, max_members: int
 def _is_termux_runtime() -> bool:
     prefix = os.getenv("PREFIX") or ""
     return "com.termux" in prefix or Path("/data/data/com.termux/files/usr").exists()
+
+
+def _apk_self_builder_bundle_asset(project_dir: Path) -> Path:
+    return project_dir / "app/src/main/assets/core-linux/android-builder/android-builder-toolchain.zip"
+
+
+def _apk_self_builder_bundle_valid(path: Path) -> dict[str, Any]:
+    result: dict[str, Any] = {"ok": False, "path": str(path), "bytes": 0, "sha256": ""}
+    if not path.is_file() or path.stat().st_size < 1024 * 1024:
+        result["error"] = "bundle ausente ou pequeno"
+        return result
+    try:
+        with zipfile.ZipFile(path) as archive:
+            bad = archive.testzip()
+            if bad:
+                raise ValueError(f"entrada corrompida: {bad}")
+            names = set(archive.namelist())
+            if "manifest.json" not in names:
+                raise ValueError("manifest.json ausente")
+            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+            if not isinstance(manifest, dict) or manifest.get("schema") != "core-worker-android-builder-v1":
+                raise ValueError("schema inválido")
+            arch = str(manifest.get("arch") or "").strip().lower()
+            if arch not in {"aarch64", "arm64", "arm64-v8a"}:
+                raise ValueError("arquitetura inválida")
+            paths = manifest.get("paths") if isinstance(manifest.get("paths"), dict) else {}
+            jdk = str(paths.get("jdk") or "jdk").strip("/")
+            gradle = str(paths.get("gradle") or "gradle/bin/gradle").strip("/")
+            sdk = str(paths.get("androidSdk") or paths.get("android_sdk") or "android-sdk").strip("/")
+            aapt2 = str(paths.get("aapt2") or "bin/aapt2").strip("/")
+            required = {
+                f"{jdk}/bin/java": 64 * 1024,
+                f"{jdk}/bin/javac": 8 * 1024,
+                f"{jdk}/bin/jar": 8 * 1024,
+                gradle: 100,
+                f"{sdk}/platforms/android-34/android.jar": 1024 * 1024,
+                aapt2: 64 * 1024,
+            }
+            for name, minimum in required.items():
+                info = archive.getinfo(name) if name in names else None
+                if info is None or info.is_dir() or int(info.file_size or 0) < minimum:
+                    raise ValueError(f"arquivo obrigatório ausente/pequeno: {name}")
+            for info in archive.infolist():
+                name = str(info.filename or "").replace("\\", "/")
+                if not name or name.startswith("/") or ".." in name.split("/"):
+                    raise ValueError("caminho inseguro no bundle")
+        result.update({
+            "ok": True,
+            "bytes": path.stat().st_size,
+            "sha256": _sha256_path(path),
+            "manifest": manifest,
+        })
+        return result
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {_short_text(exc, limit=240)}"
+        return result
+
+
+def _copy_tree_dereferenced(source: Path, target: Path) -> None:
+    if not source.is_dir():
+        raise FileNotFoundError(str(source))
+    target.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        source,
+        target,
+        symlinks=False,
+        dirs_exist_ok=True,
+        ignore_dangling_symlinks=True,
+        copy_function=shutil.copy2,
+    )
+
+
+def _find_termux_java_home(env: dict[str, str]) -> Path:
+    candidates: list[Path] = []
+    if env.get("JAVA_HOME"):
+        candidates.append(Path(env["JAVA_HOME"]).expanduser())
+    java_cmd = shutil.which("java", path=env.get("PATH")) or shutil.which("java")
+    if java_cmd:
+        resolved = Path(java_cmd).resolve()
+        if resolved.parent.name == "bin":
+            candidates.append(resolved.parent.parent)
+    prefix = Path(env.get("PREFIX") or os.getenv("PREFIX") or "/data/data/com.termux/files/usr")
+    for root in (prefix / "lib/jvm", prefix / "opt"):
+        if root.is_dir():
+            candidates.extend(path for path in sorted(root.glob("*"), reverse=True) if path.is_dir())
+    for candidate in candidates:
+        if all((candidate / f"bin/{name}").is_file() for name in ("java", "javac", "jar")):
+            return candidate.resolve()
+    raise FileNotFoundError("JDK completo não encontrado no Termux (java/javac/jar)")
+
+
+def _find_termux_gradle_home(env: dict[str, str]) -> Path:
+    candidates: list[Path] = []
+    if env.get("GRADLE_HOME"):
+        candidates.append(Path(env["GRADLE_HOME"]).expanduser())
+    prefix = Path(env.get("PREFIX") or os.getenv("PREFIX") or "/data/data/com.termux/files/usr")
+    candidates.extend((prefix / "share/gradle", prefix / "opt/gradle"))
+    gradle_cmd = shutil.which("gradle", path=env.get("PATH")) or shutil.which("gradle")
+    if gradle_cmd:
+        resolved = Path(gradle_cmd).resolve()
+        if resolved.parent.name == "bin":
+            candidates.append(resolved.parent.parent)
+    for candidate in candidates:
+        launcher = candidate / "bin/gradle"
+        libs = list((candidate / "lib").glob("gradle-launcher-*.jar")) if (candidate / "lib").is_dir() else []
+        if launcher.is_file() and libs:
+            return candidate.resolve()
+    raise FileNotFoundError("distribuição completa do Gradle não encontrada no Termux")
+
+
+def _find_android_sdk_home(env: dict[str, str]) -> Path:
+    candidates = [
+        Path(str(env.get("ANDROID_HOME") or "")).expanduser(),
+        Path(str(env.get("ANDROID_SDK_ROOT") or "")).expanduser(),
+        Path.home() / "android-sdk",
+    ]
+    for candidate in candidates:
+        if str(candidate) in {"", "."}:
+            continue
+        android_jar = candidate / "platforms/android-34/android.jar"
+        if android_jar.is_file() and android_jar.stat().st_size > 1024 * 1024:
+            return candidate.resolve()
+    raise FileNotFoundError("Android SDK 34 não encontrado no Termux")
+
+
+def _latest_android_build_tools(sdk: Path) -> Path | None:
+    root = sdk / "build-tools"
+    if not root.is_dir():
+        return None
+    candidates = [path for path in root.iterdir() if path.is_dir()]
+    candidates.sort(key=lambda path: tuple(int(part) if part.isdigit() else 0 for part in re.split(r"[.-]", path.name)), reverse=True)
+    return candidates[0] if candidates else None
+
+
+def _zip_directory_deterministic(source: Path, target: Path) -> dict[str, Any]:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_suffix(target.suffix + ".tmp")
+    entries = 0
+    expanded = 0
+    with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as archive:
+        for path in sorted(source.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(source).as_posix()
+            if not rel or rel.startswith("/") or ".." in rel.split("/"):
+                raise ValueError("caminho inseguro ao gerar toolchain")
+            entries += 1
+            expanded += path.stat().st_size
+            if entries > 50_000:
+                raise ValueError("toolchain contém arquivos demais")
+            if expanded > 4 * 1024 * 1024 * 1024:
+                raise ValueError("toolchain expandido excede 4 GiB")
+            already_compressed = path.suffix.lower() in {".zip", ".jar", ".apk", ".so", ".gz", ".xz", ".zst", ".7z", ".jmod"}
+            archive.write(
+                path,
+                rel,
+                compress_type=zipfile.ZIP_STORED if already_compressed else zipfile.ZIP_DEFLATED,
+                compresslevel=None if already_compressed else 6,
+            )
+    if target.exists():
+        target.unlink()
+    temp.replace(target)
+    return {"entries": entries, "expandedBytes": expanded, "bytes": target.stat().st_size, "sha256": _sha256_path(target)}
+
+
+def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) -> dict[str, Any]:
+    """Gera no Termux o bundle que o APK usará nos builds seguintes.
+
+    A VPS nunca executa essa preparação. O bundle é criado dentro do workspace
+    temporário do phone-worker, entra no APK bootstrap e depois é retido pelo app.
+    """
+    asset = _apk_self_builder_bundle_asset(project_dir)
+    existing = _apk_self_builder_bundle_valid(asset)
+    rebuild = _env_bool("PHONE_WORKER_APK_SELF_BUILDER_REBUILD", False)
+    if existing.get("ok") and not rebuild:
+        return {**existing, "generated": False, "source": "project_asset"}
+    if not _is_termux_runtime():
+        raise RuntimeError("toolchain self-builder ausente e geração bootstrap só é permitida no Termux")
+
+    jdk_home = _find_termux_java_home(env)
+    gradle_home = _find_termux_gradle_home(env)
+    sdk_home = _find_android_sdk_home(env)
+    aapt2_cmd = shutil.which("aapt2", path=env.get("PATH")) or shutil.which("aapt2")
+    if not aapt2_cmd or not Path(aapt2_cmd).is_file():
+        raise FileNotFoundError("aapt2 compatível com Termux não encontrado")
+
+    stage_root = project_dir / "app/build/core-worker-self-builder-toolchain"
+    bundle_root = stage_root / "bundle"
+    shutil.rmtree(stage_root, ignore_errors=True)
+    bundle_root.mkdir(parents=True, exist_ok=True)
+    try:
+        _copy_tree_dereferenced(jdk_home, bundle_root / "jdk")
+        _copy_tree_dereferenced(gradle_home, bundle_root / "gradle")
+
+        sdk_target = bundle_root / "android-sdk"
+        _copy_tree_dereferenced(sdk_home / "platforms/android-34", sdk_target / "platforms/android-34")
+        build_tools = _latest_android_build_tools(sdk_home)
+        if build_tools is not None:
+            _copy_tree_dereferenced(build_tools, sdk_target / "build-tools" / build_tools.name)
+        for optional in ("platform-tools", "licenses"):
+            source = sdk_home / optional
+            if source.is_dir():
+                _copy_tree_dereferenced(source, sdk_target / optional)
+
+        bin_dir = bundle_root / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(Path(aapt2_cmd).resolve(), bin_dir / "aapt2")
+
+        prefix = Path(env.get("PREFIX") or os.getenv("PREFIX") or "/data/data/com.termux/files/usr")
+        runtime_libs = bundle_root / "runtime-libs"
+        runtime_libs.mkdir(parents=True, exist_ok=True)
+        copied_runtime_libs = 0
+        runtime_lib_bytes = 0
+        lib_root = prefix / "lib"
+        if lib_root.is_dir():
+            for source in sorted(lib_root.glob("*.so*")):
+                if not source.is_file():
+                    continue
+                resolved = source.resolve()
+                target = runtime_libs / source.name
+                if target.exists():
+                    continue
+                size = resolved.stat().st_size
+                runtime_lib_bytes += size
+                if runtime_lib_bytes > 768 * 1024 * 1024:
+                    raise ValueError("bibliotecas runtime do Termux excedem 768 MiB")
+                shutil.copy2(resolved, target)
+                copied_runtime_libs += 1
+
+        manifest = {
+            "schema": "core-worker-android-builder-v1",
+            "version": 2,
+            "arch": "aarch64",
+            "runtime": "termux-bionic-direct",
+            "generatedBy": f"phone-worker-{PHONE_WORKER_VERSION}",
+            "createdAt": int(time.time()),
+            "paths": {
+                "jdk": "jdk",
+                "gradle": "gradle/bin/gradle",
+                "androidSdk": "android-sdk",
+                "aapt2": "bin/aapt2",
+                "runtimeLibs": "runtime-libs",
+            },
+            "sdk": {
+                "compileSdk": 34,
+                "buildTools": build_tools.name if build_tools is not None else "",
+            },
+            "runtimeLibraries": {
+                "count": copied_runtime_libs,
+                "bytes": runtime_lib_bytes,
+            },
+            "safety": {
+                "generatedOnTermux": True,
+                "vpsBuild": False,
+                "noRemoteShell": True,
+                "privateApkOnly": True,
+                "targetSdkMax": 28,
+            },
+        }
+        (bundle_root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        generated = _zip_directory_deterministic(bundle_root, asset)
+        validated = _apk_self_builder_bundle_valid(asset)
+        if not validated.get("ok"):
+            raise RuntimeError("bundle self-builder gerado mas inválido: " + str(validated.get("error") or "erro desconhecido"))
+        return {
+            **validated,
+            **generated,
+            "generated": True,
+            "source": "termux_bootstrap",
+            "jdk": str(jdk_home),
+            "gradle": str(gradle_home),
+            "androidSdk": str(sdk_home),
+            "aapt2": str(aapt2_cmd),
+            "runtimeLibraries": copied_runtime_libs,
+        }
+    finally:
+        shutil.rmtree(stage_root, ignore_errors=True)
 
 
 def _prepare_termux_android_build(project_dir: Path, env: dict[str, str]) -> dict[str, Any]:
@@ -8375,7 +8663,7 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
     build_root = Path(os.getenv("PHONE_WORKER_APK_BUILD_DIR") or (Path.home() / "core-worker-apk-builds")).expanduser()
     build_root.mkdir(parents=True, exist_ok=True)
     timeout_seconds = max(60, _env_int("PHONE_WORKER_APK_BUILD_TIMEOUT_SECONDS", 3600))
-    max_source_bytes = max(1024 * 1024, _env_int("PHONE_WORKER_APK_BUILD_SOURCE_MAX_BYTES", 220 * 1024 * 1024))
+    max_source_bytes = max(1024 * 1024, _env_int("PHONE_WORKER_APK_BUILD_SOURCE_MAX_BYTES", 1024 * 1024 * 1024))
     keep_workdir = _env_bool("PHONE_WORKER_APK_BUILD_KEEP_WORKDIR", False)
     keep_failed_workdir = _env_bool("PHONE_WORKER_APK_BUILD_KEEP_FAILED_WORKDIR", False)
     started = time.time()
@@ -8503,6 +8791,8 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
         apk_signing = _install_apk_signing_from_payload(project_dir, payload)
         env = os.environ.copy()
         env["CORE_WORKER_REQUIRE_COMPAT_SIGNING"] = "true"
+        if bool(payload.get("selfBuilderRequired", True)):
+            env["CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN"] = "true"
         base_url, _token, _worker_id = _core_worker_auth_parts()
         injected_vps_url = str(payload.get("coreWorkerVpsUrl") or payload.get("core_worker_vps_url") or payload.get("vps_url") or base_url or "").strip().rstrip("/")
         injected_vps_label = str(payload.get("coreWorkerVpsLabel") or payload.get("core_worker_vps_label") or ("VPS privada configurada" if injected_vps_url else "VPS não configurada no build")).strip()
@@ -8510,6 +8800,8 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             env["CORE_WORKER_VPS_URL"] = injected_vps_url
             env["CORE_WORKER_VPS_LABEL"] = injected_vps_label
         builder_environment = _prepare_termux_android_build(project_dir, env)
+        if bool(payload.get("selfBuilderRequired", True)):
+            builder_environment["self_builder_toolchain"] = _prepare_apk_self_builder_toolchain(project_dir, env)
         native_environment = _inspect_android_native_build_environment(project_dir, env)
         builder_environment["native_build"] = native_environment
         builder_environment["gradle_log_path"] = str(gradle_log)

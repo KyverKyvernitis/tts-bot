@@ -60,6 +60,14 @@ CORE_WORKER_JOB_TYPES = {
     'tts_cache_store',
     'boot_status',
     'service_status',
+    'apk_build_debug',
+    'apk_publish_last',
+    'apk_builder_status',
+    'worker_update',
+    'boot_repair',
+    'service_start',
+    'service_stop',
+    'service_restart',
     'apk_ping',
     'apk_status_refresh',
     'apk_upload_app_logs',
@@ -337,6 +345,8 @@ def _compact_job_public(record: Mapping[str, Any], *, include_result: bool = Fal
         "age_seconds": round(max(0.0, ts - created_at), 3) if created_at else None,
         "worker_id": _short_text(record.get("worker_id"), limit=64),
         "target_worker_id": _short_text(record.get("target_worker_id"), limit=64),
+        "preferred_worker_id": _short_text(record.get("preferred_worker_id"), limit=64),
+        "preferred_until": record.get("preferred_until"),
         "attempts": int(record.get("attempts") or 0),
         "max_attempts": int(record.get("max_attempts") or 1),
         "expires_at": record.get("expires_at"),
@@ -437,6 +447,26 @@ def _public_worker_sort_key(worker: Mapping[str, Any]) -> tuple[Any, ...]:
         -(battery if battery is not None else -1.0),
         name,
     )
+
+
+def _worker_apk_self_builder_state(worker: Mapping[str, Any]) -> tuple[bool, bool]:
+    """Retorna (build_ready, publish_ready) somente para o runtime Android real."""
+    roles = set(normalize_roles(worker.get("roles"), limit=32)) | set(normalize_roles(worker.get("manual_roles"), limit=32))
+    source = str(worker.get("source") or "").strip().lower()
+    platform = str(worker.get("platform") or "").strip().lower()
+    is_apk = source.startswith("core-worker-apk") or platform == "android" or "apk-worker" in roles
+    if not is_apk:
+        return False, False
+    status = worker.get("status") if isinstance(worker.get("status"), Mapping) else {}
+    builder = status.get("apk_self_builder") if isinstance(status.get("apk_self_builder"), Mapping) else {}
+    return bool(builder.get("ready")), bool(builder.get("publishReady") or builder.get("publish_ready"))
+
+
+def _public_worker_builder_preference(worker: Mapping[str, Any], job_type: str) -> tuple[Any, ...]:
+    """APK self-builder validado vem antes; Termux permanece como fallback bootstrap."""
+    build_ready, publish_ready = _worker_apk_self_builder_state(worker)
+    preferred = build_ready if job_type == "apk_build_debug" else (build_ready or publish_ready)
+    return (0 if preferred else 1, *_public_worker_sort_key(worker))
 
 
 def _sanitize_finished_job_for_storage(job: dict[str, Any]) -> None:
@@ -891,7 +921,12 @@ class CoreWorkersRegistry:
                         compatible_online.append(public_worker)
                 if not compatible_online:
                     raise CoreWorkerRegistryError("nenhum worker online compatível para este job", status=409)
-                compatible_online.sort(key=_public_worker_sort_key)
+                if kind in {"apk_build_debug", "apk_publish_last"}:
+                    compatible_online.sort(key=lambda item: _public_worker_builder_preference(item, kind))
+                    grace = max(30, min(300, _env_int("CORE_WORKER_APK_SELF_BUILDER_PREFERENCE_SECONDS", 90)))
+                    record["preferred_until"] = ts + grace
+                else:
+                    compatible_online.sort(key=_public_worker_sort_key)
                 record["preferred_worker_id"] = str(compatible_online[0].get("worker_id") or "")
             jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
             jobs[job_id] = record
@@ -945,6 +980,18 @@ class CoreWorkersRegistry:
         job_type = _normalize_job_type(job.get("type"))
         if supported_tasks and job_type and job_type not in supported_tasks:
             return False
+        # Overrides manuais não podem liberar autobuild antes do preflight real.
+        # O phone-worker/Termux bootstrap continua elegível pelo source legado;
+        # workers Android precisam anunciar o estado dinâmico do self-builder.
+        builder_ready, publish_ready = _worker_apk_self_builder_state(worker)
+        source = str(worker.get("source") or "").strip().lower()
+        platform = str(worker.get("platform") or "").strip().lower()
+        is_apk = source.startswith("core-worker-apk") or platform == "android" or "apk-worker" in roles
+        if is_apk and job_type in {"apk_build_debug", "apk_publish_last"}:
+            if job_type == "apk_build_debug" and not builder_ready:
+                return False
+            if job_type == "apk_publish_last" and not (builder_ready or publish_ready):
+                return False
         return True
 
     def poll_job(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
@@ -973,6 +1020,7 @@ class CoreWorkersRegistry:
                     worker[key] = _safe_dict(payload.get(key), max_items=max_items)
 
             self._reconcile_jobs_from_worker_status_unlocked(data, now=ts)
+            workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
             jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
             candidates = sorted(
                 [job for job in jobs.values() if isinstance(job, dict) and str(job.get("status") or "queued") == "queued"],
@@ -985,8 +1033,24 @@ class CoreWorkersRegistry:
                 if expires_at and expires_at <= ts:
                     skipped_reasons.append(f"{job.get('job_id')}:expirado")
                     continue
+                job_type = _normalize_job_type(job.get("type"))
+                preferred_worker_id = str(job.get("preferred_worker_id") or "").strip()
+                preferred_until = float(job.get("preferred_until") or 0.0)
+                if (
+                    job_type in {"apk_build_debug", "apk_publish_last"}
+                    and preferred_worker_id
+                    and preferred_worker_id != worker_id
+                    and preferred_until > ts
+                ):
+                    preferred_record = workers.get(preferred_worker_id)
+                    preferred_online = False
+                    if isinstance(preferred_record, Mapping):
+                        preferred_online = bool(_compact_worker_public(preferred_record, now=ts).get("online"))
+                    if preferred_online and self._job_matches_worker(job, preferred_worker_id, preferred_record):
+                        skipped_reasons.append(f"{job.get('job_id')}:{job_type} reservado para {preferred_worker_id}")
+                        continue
                 if not self._job_matches_worker(job, worker_id, worker):
-                    skipped_reasons.append(f"{job.get('job_id')}:{_normalize_job_type(job.get('type')) or 'job'} incompatível")
+                    skipped_reasons.append(f"{job.get('job_id')}:{job_type or 'job'} incompatível")
                     continue
                 selected = job
                 break

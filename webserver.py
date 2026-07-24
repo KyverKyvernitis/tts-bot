@@ -3172,7 +3172,7 @@ def core_worker_app_publish():
     expected_sha = str(form.get("sha256") or "").strip().lower()
     digest = hashlib.sha256()
     upload_total = 0
-    max_bytes = int(os.getenv("CORE_WORKER_APK_UPLOAD_MAX_BYTES", str(220 * 1024 * 1024)))
+    max_bytes = int(os.getenv("CORE_WORKER_APK_UPLOAD_MAX_BYTES", str(1024 * 1024 * 1024)))
     signing_info: dict[str, object] = {"signedByVps": False, "signingMode": "not-run"}
     try:
         with open(tmp, "wb") as fh:
@@ -3221,9 +3221,16 @@ def core_worker_app_publish():
             "hint": "latest.json foi preservado; corrija o build no phone worker antes de publicar.",
         }), 500
 
-    final_raw = open(target, "rb").read()
-    actual_sha = hashlib.sha256(final_raw).hexdigest()
-    total = len(final_raw)
+    final_digest = hashlib.sha256()
+    total = 0
+    with open(target, "rb") as final_fh:
+        while True:
+            final_chunk = final_fh.read(1024 * 1024)
+            if not final_chunk:
+                break
+            final_digest.update(final_chunk)
+            total += len(final_chunk)
+    actual_sha = final_digest.hexdigest()
 
     changelog = _json_field(form.get("changelog") or "", ["APK compilado por worker builder"])
     if not isinstance(changelog, list):
@@ -3619,8 +3626,6 @@ def _kick_core_worker_pending_automation(worker_id: str = "") -> None:
     tem lock/cooldown por worker e mata execuções claramente antigas antes de
     abrir outra. O script também possui lock próprio como segunda linha de defesa.
     """
-    if _env_bool_web("CORE_WORKER_APK_REPLACES_TERMUX", True):
-        return
     if not _env_bool_web("CORE_WORKER_PENDING_AUTOMATION_ENABLED", True):
         return
     worker_id = str(worker_id or "").strip()

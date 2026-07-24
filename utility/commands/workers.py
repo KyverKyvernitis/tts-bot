@@ -56,6 +56,7 @@ CORE_WORKER_IMPORTANT_WAKE_ROLES = {
     "ffmpeg",
     "ffprobe",
     "tts-convert",
+    "apk-builder",
     "vps-assist",
     "cache-worker",
     "service-control",
@@ -69,6 +70,8 @@ CORE_WORKER_IMPORTANT_WAKE_TASKS = {
     "zip_audit",
     "zip_validate",
     "maintenance_plan",
+    "apk_build_debug",
+    "apk_publish_last",
     "vps_assist_probe",
     "endpoint_probe",
     "service_status",
@@ -83,13 +86,16 @@ WORKER_ROLE_PROFILES: dict[str, tuple[str, ...]] = {
     "leve": ("apk-worker", "diagnostics", "log-summary"),
     "midia": ("apk-worker", "diagnostics", "log-summary", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
     "completo": ("apk-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert"),
+    # Bootstrap: o primeiro APK self-builder ainda é compilado pelo phone-worker/Termux.
+    "builder": ("phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "apk-builder", "vps-assist", "cache-worker"),
+    # Após o toolchain interno ficar pronto, o próprio APK anuncia apk-builder dinamicamente.
     "turbo": ("apk-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "vps-assist", "cache-worker"),
-    # Futuro: usar só quando o worker realmente tiver servidor Bedrock configurado.
     "bedrock": ("apk-worker", "diagnostics", "log-summary", "bedrock", "bedrock-logs", "bedrock-backup"),
 }
 
 WORKER_ROLE_LABELS: dict[str, str] = {
     "apk-worker": "Core Worker APK",
+    "phone-worker": "Termux bootstrap",
     "diagnostics": "Diagnósticos",
     "log-summary": "Resumo de logs",
     "maintenance-plan": "Plano de manutenção",
@@ -100,6 +106,7 @@ WORKER_ROLE_LABELS: dict[str, str] = {
     "bedrock": "Minecraft Bedrock",
     "bedrock-logs": "Logs Bedrock",
     "bedrock-backup": "Backup Bedrock",
+    "apk-builder": "Compilar APK",
     "vps-assist": "Ajudar VPS",
     "cache-worker": "Cache auxiliar",
     "hash-worker": "Hashes",
@@ -117,6 +124,7 @@ WORKER_ROLE_PROFILE_DESCRIPTIONS: dict[str, str] = {
     "leve": "economia, diagnósticos e logs",
     "midia": "perfil normal recomendado",
     "completo": "tarefas extras e manutenção segura",
+    "builder": "bootstrap no Termux até o APK assumir o autobuild",
     "turbo": "máximo desempenho para acelerar a VPS",
     "bedrock": "Minecraft Bedrock futuro",
 }
@@ -127,6 +135,7 @@ WORKER_EDITABLE_FEATURES: tuple[dict[str, Any], ...] = (
     {"value": "log-summary", "label": "Logs", "description": "Resumo e leitura de logs", "emoji": "🧾", "roles": ("log-summary",), "capabilities": ("log-summary", "worker-logs"), "tasks": ("log_summary", "log_digest", "worker_logs", "text_stats")},
     {"value": "maintenance-plan", "label": "Manutenção", "description": "Plano seguro de limpeza/cache", "emoji": "🧹", "roles": ("maintenance-plan",), "capabilities": ("maintenance-plan", "cache-worker"), "tasks": ("maintenance_plan",)},
     {"value": "zip-validate", "label": "ZIP / patch", "description": "Validar e auditar ZIP", "emoji": "🧪", "roles": ("zip-validate",), "capabilities": ("zip-validate",), "tasks": ("zip_validate", "zip_audit")},
+    {"value": "apk-builder", "label": "APK builder", "description": "Termux bootstrap ou autobuild interno", "emoji": "🏗️", "roles": ("apk-builder",), "capabilities": ("apk-builder",), "tasks": ("apk_build_debug", "apk_publish_last")},
     {"value": "vps-assist", "label": "Ajudar VPS", "description": "Offload seguro quando disponível", "emoji": "🧠", "roles": ("vps-assist",), "capabilities": ("vps-assist", "hash-worker", "endpoint-probe"), "tasks": ("vps_assist_probe", "hash_batch", "endpoint_probe")},
     {"value": "ffmpeg", "label": "FFmpeg", "description": "Conversão de áudio curta", "emoji": "🎚️", "roles": ("ffmpeg",), "capabilities": ("ffmpeg", "audio-convert"), "tasks": ("ffmpeg_check", "audio_convert")},
     {"value": "ffprobe", "label": "FFprobe", "description": "Analisar mídia", "emoji": "🔎", "roles": ("ffprobe",), "capabilities": ("ffprobe", "media-probe"), "tasks": ("ffprobe_check", "media_probe")},
@@ -166,15 +175,6 @@ WORKER_ACTION_SPECS: tuple[dict[str, Any], ...] = (
     {"label": "Parar worker", "value": "service_stop_worker", "job_type": "service_stop", "payload": {"service": "phone-worker"}, "summary": "parar phone-worker no celular", "description": "Para agent", "emoji": "🛑", "category": "maintenance"},
  )
 
-_DISABLED_LEGACY_WORKER_ACTIONS = {
-    "worker_update", "apk_build_debug", "apk_publish_last", "boot_repair",
-    "service_start", "service_stop", "service_restart",
-}
-WORKER_ACTION_SPECS = tuple(
-    spec for spec in WORKER_ACTION_SPECS
-    if str(spec.get("job_type") or "") not in _DISABLED_LEGACY_WORKER_ACTIONS
-)
-
 
 WORKER_ACTION_CATEGORIES: tuple[dict[str, str], ...] = (
     {"label": "Ações rápidas", "value": "quick", "description": "Teste, saúde, logs", "emoji": "⚡"},
@@ -194,6 +194,8 @@ WORKER_PANEL_ACTION_ORDER: tuple[str, ...] = (
     "_worker_details",
     "ping",
     "worker_self_check",
+    "apk_build_debug_quick",
+    "apk_publish_last_quick",
     "_apk_internal_test",
     "worker_logs",
     "endpoint_probe",
@@ -3943,8 +3945,6 @@ class WorkersCommandMixin:
 
     async def _run_legacy_worker_action(self, *, job_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         kind = str(job_type or "").strip().lower().replace("-", "_")
-        if CORE_WORKER_APK_REPLACES_TERMUX and kind in _DISABLED_LEGACY_WORKER_ACTIONS:
-            raise RuntimeError("ação legada do Termux desativada; use o Core Worker APK")
         if kind in {"ping", "status", "diagnostic_basic", "worker_self_check"}:
             timeout = max(1.0, _env_float("WORKERS_PANEL_STATUS_TIMEOUT_SECONDS", 3.0))
             result = await asyncio.to_thread(self._request_worker_status_sync, timeout=timeout)
@@ -4200,13 +4200,24 @@ class WorkersCommandMixin:
                 if any(name.endswith(suffix) for suffix in excluded_suffixes):
                     continue
                 arcname = Path("android/core-worker-app") / rel_project
-                zf.write(path, arcname.as_posix())
-        raw = zip_path.read_bytes()
+                already_compressed = path.suffix.lower() in {".zip", ".jar", ".apk", ".so", ".gz", ".xz", ".zst", ".7z"}
+                zf.write(
+                    path,
+                    arcname.as_posix(),
+                    compress_type=zipfile.ZIP_STORED if already_compressed else zipfile.ZIP_DEFLATED,
+                    compresslevel=None if already_compressed else 6,
+                )
+        digest = hashlib.sha256()
+        source_bytes = 0
+        with zip_path.open("rb") as source_file:
+            for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                source_bytes += len(chunk)
+                digest.update(chunk)
         return {
             "path": str(zip_path),
             "filename": zip_path.name,
-            "bytes": len(raw),
-            "sha256": hashlib.sha256(raw).hexdigest(),
+            "bytes": source_bytes,
+            "sha256": digest.hexdigest(),
             "url": f"{_public_base_url()}/core-worker/app/{zip_path.name}",
             "firebase_config_delivery": "job_payload",
         }
@@ -4225,13 +4236,14 @@ class WorkersCommandMixin:
             **firebase_config,
             **signing_config,
             "project_subdir": "android/core-worker-app",
+            "selfBuilderRequired": True,
             "publish": True,
             "versionName": version_name,
             "versionCode": version_code,
             "filename": f"CoreWorker-v{version_name}-debug.apk",
             "coreWorkerVpsUrl": _public_base_url(),
             "coreWorkerVpsLabel": f"VPS privada · {_host_label(_public_base_url().replace('http://', '').replace('https://', '').split(':')[0])}:" + str(os.getenv("CORE_WORKER_PUBLIC_PORT") or os.getenv("PORT") or "10000"),
-            "changelog": ["APK compilado por worker builder", "Phone worker assinou com a chave compatível; VPS só publicou o resultado", "URL da VPS injetada no build privado"],
+            "changelog": ["APK bootstrap compilado no Termux ou atualização compilada pelo próprio APK", "VPS apenas publicou o APK pronto", "Toolchain interno validado para os próximos autobuilds"],
         })
         return payload
 
@@ -4247,8 +4259,6 @@ class WorkersCommandMixin:
         registry = get_core_workers_registry()
         task = _task_name(job_type)
         is_apk_build = task in {"apk_build_debug", "apk_publish_last"}
-        if CORE_WORKER_APK_REPLACES_TERMUX and is_apk_build:
-            raise RuntimeError("build/publicação de APK não fazem parte do worker móvel; compile externamente e publique o APK pronto")
         assist_tasks = {"vps_assist_probe", "hash_batch", "endpoint_probe", "media_probe", "audio_convert", "log_digest", "zip_audit", "maintenance_plan"}
         # Não use uma capacidade genérica como trava para todos os assist jobs.
         # O registry já valida supported_tasks/target. Isso evita oferecer uma ação

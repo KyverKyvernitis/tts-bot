@@ -157,11 +157,11 @@ public class CoreWorkerUpdateJobService extends JobService {
 
 
     private org.json.JSONArray coreWorkerApkCapabilitiesArray() {
-        return CoreWorkerJobCatalog.capabilities();
+        return CoreWorkerJobCatalog.capabilities(getApplicationContext());
     }
 
     private org.json.JSONArray supportedLightJobsArray() {
-        return CoreWorkerJobCatalog.remoteSupportedTasks();
+        return CoreWorkerJobCatalog.remoteSupportedTasks(getApplicationContext());
     }
 
 

@@ -155,8 +155,8 @@ final class CoreWorkerDirectTaskExecutor {
         out.put("profile", prefs.getString("profile", "midia"));
         out.put("uptime_seconds", Math.max(0L, (System.currentTimeMillis() - prefs.getLong("foreground_runtime_started_at", System.currentTimeMillis())) / 1000L));
         out.put("supported_tasks", directSupportedTasks());
-        out.put("capabilities", CoreWorkerJobCatalog.capabilities());
-        out.put("roles", CoreWorkerJobCatalog.roles());
+        out.put("capabilities", CoreWorkerJobCatalog.capabilities(context));
+        out.put("roles", CoreWorkerJobCatalog.roles(context));
         out.put("tts_agent", ttsStatus());
         out.put("music_agent", new JSONObject()
                 .put("ok", false)
@@ -164,6 +164,7 @@ final class CoreWorkerDirectTaskExecutor {
                 .put("state", "vps-local-runtime")
                 .put("reason", "música e voz permanecem no processo principal da VPS"));
         out.put("agent", agentStatus());
+        out.put("apk_self_builder", CoreWorkerApkBuildManager.preflight(context, false));
         return out;
     }
 

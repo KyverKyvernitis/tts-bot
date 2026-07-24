@@ -418,7 +418,7 @@ final class CoreWorkerJobExecutor {
         status.put("battery", batterySnapshot());
         status.put("agent", agentSnapshot());
         status.put("supported_tasks", CoreWorkerJobCatalog.supportedJobs());
-        status.put("capabilities", CoreWorkerJobCatalog.capabilities());
+        status.put("capabilities", CoreWorkerJobCatalog.capabilities(context));
         status.put("termux_required_now", false);
         status.put("termux_role", "fallback-legado");
         return status;
@@ -434,7 +434,7 @@ final class CoreWorkerJobExecutor {
         runtime.put("foreground_runtime_last_tick_at", prefs.getLong("foreground_runtime_last_tick_at", 0L));
         runtime.put("native_tts_bridge_active", prefs.getBoolean("native_tts_bridge_active", false));
         runtime.put("supported_tasks", CoreWorkerJobCatalog.supportedJobs());
-        runtime.put("capabilities", CoreWorkerJobCatalog.capabilities());
+        runtime.put("capabilities", CoreWorkerJobCatalog.capabilities(context));
         runtime.put("coreLinux", coreLinuxPublicSnapshot());
         runtime.put("termux_required_now", false);
         runtime.put("advanced_jobs_require_termux", false);

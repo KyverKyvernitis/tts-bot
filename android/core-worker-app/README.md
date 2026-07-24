@@ -1,12 +1,77 @@
-# Core Worker 0.7.0 — runtime móvel sem Termux
+# Core Worker 0.7.1 — bootstrap no Termux e autobuild no APK
 
-A versão `0.7.0` substitui o Termux no worker móvel. O APK mantém o serviço foreground autônomo, consome a fila autenticada `/core-worker/jobs/poll`, confirma resultados em `/core-worker/jobs/result` e expõe na porta `8766` uma API compatível, autenticada e restrita por allowlist para os consumidores atuais do bot.
+A versão `0.7.1` usa o Termux somente como **builder bootstrap**. O primeiro APK dessa transição é compilado e assinado pelo `phone_worker.py` no celular, com a mesma keystore das versões já instaladas. A VPS não executa Gradle, Android SDK, NDK ou `aapt2`: ela prepara o ZIP de fontes, entrega segredos temporários por job autenticado e publica o APK pronto recebido do celular.
 
-O APK assume diagnósticos, hashes, ZIP, mídia curta, FFmpeg/FFprobe quando os binários estiverem presentes no APK final, cache e TTS nativo. Não existe shell remoto livre, execução arbitrária, download automático de binários ou build Android na VPS. Música e voz Discord permanecem no processo principal da VPS; o APK fornece TTS e offload de tarefas, sem depender do `phone_worker.py`.
+Durante esse primeiro build, o próprio `phone_worker.py` monta automaticamente um bundle privado com o JDK, Gradle, Android SDK 34, `aapt2` compatível com Termux e bibliotecas Bionic necessárias. Esse bundle entra no APK bootstrap. Depois da instalação, o APK extrai e retém o toolchain no armazenamento interno, executa smoke tests reais de Java, Gradle e `aapt2` e somente então anuncia:
 
-O build e a assinatura do APK continuam externos ao runtime da VPS. Esta base não inclui os binários pesados nem os arquivos privados de assinatura/Firebase. Bedrock só pode iniciar depois que rootfs glibc ARM64, runner allowlist, PRoot, BusyBox, Box64, `bedrock_server`, `server.properties` e `eula=true` forem validados no aparelho.
+- role/capability `apk-builder`;
+- job `apk_build_debug`;
+- job `apk_publish_last`;
+- estado `apk_self_builder.ready=true` no heartbeat.
 
-> As seções abaixo registram patches antigos e podem citar o fluxo legado com Termux. Elas são mantidas apenas como histórico; o comportamento atual é o descrito nesta seção 0.7.0.
+A partir desse momento, os jobs de build preferem o APK. O Termux continua disponível como fallback controlado até que um build completo feito pelo próprio APK seja homologado. Se o bundle estiver ausente, incompleto ou não executar no aparelho, o APK não anuncia capacidade de build e o job permanece no Termux, sem falso positivo.
+
+## Compatibilidade de execução do self-builder
+
+Esta distribuição privada mantém `compileSdk 34`, `minSdk 26` e **`targetSdk 28`** intencionalmente. Aplicações destinadas à API 29 ou superior não podem executar binários extraídos no diretório gravável do próprio app em Android 10+. Como o self-builder precisa executar o toolchain privado criado no bootstrap, o gate de build impede publicar essa variante com `targetSdk` acima de 28.
+
+O APK não é destinado ao Google Play. A capacidade só é anunciada depois de executar no próprio aparelho:
+
+```text
+java -version
+gradle --version
+aapt2 version
+```
+
+Se o Android ou o fabricante bloquear qualquer etapa, o APK permanece sem a capability `apk-builder` e o Termux continua responsável pelo build.
+
+## Fluxo de build
+
+```text
+Primeira transição
+VPS prepara fonte/segredos → Termux gera o bundle e compila/assina → VPS publica → APK 0.7.1 é instalado
+
+Atualizações seguintes
+VPS prepara fonte/segredos → APK compila/assina com o bundle retido → VPS publica → APK atualiza
+```
+
+A base de código pode omitir o arquivo pesado:
+
+```text
+app/src/main/assets/core-linux/android-builder/android-builder-toolchain.zip
+```
+
+No bootstrap, o Termux gera esse ZIP automaticamente com o layout mínimo:
+
+```text
+manifest.json
+jdk/bin/java
+jdk/bin/javac
+jdk/bin/jar
+gradle/bin/gradle
+android-sdk/platforms/android-34/android.jar
+bin/aapt2
+runtime-libs/*.so*
+```
+
+O manifesto usa o schema `core-worker-android-builder-v1`, arquitetura ARM64 e runtime `termux-bionic-direct`. O Gradle valida o ZIP antes de empacotá-lo. O APK executa uma validação mais forte após extrair o bundle e não depende do rootfs de Bedrock, PRoot ou de Python externo para buildar.
+
+O APK continua substituindo o Termux no runtime normal: serviço foreground autônomo, fila autenticada `/core-worker/jobs/poll`, resultados em `/core-worker/jobs/result`, API compatível na porta `8766`, TTS nativo e tarefas allowlist. Não existe shell remoto livre nem comando arbitrário. Bedrock continua condicionado aos binários e preflights próprios.
+
+Configuração de transição:
+
+```text
+CORE_WORKER_APK_REPLACES_TERMUX=true
+CORE_WORKER_TERMUX_BOOTSTRAP_BUILDER_ENABLED=true
+CORE_WORKER_APK_SELF_BUILDER_PREFERENCE_SECONDS=90
+CORE_WORKER_APK_UPLOAD_MAX_BYTES=1073741824
+PHONE_WORKER_APK_BUILD_SOURCE_MAX_BYTES=1073741824
+PHONE_WORKER_APK_SELF_BUILDER_REBUILD=false
+```
+
+Após homologar um autobuild completo, `CORE_WORKER_TERMUX_BOOTSTRAP_BUILDER_ENABLED=false` desativa apenas a manutenção automática do bootstrap. O registry continua preferindo o APK validado e ainda pode usar o Termux manualmente como recuperação enquanto ele estiver registrado.
+
+> As seções abaixo registram patches antigos e podem citar fluxos anteriores. O comportamento atual é o descrito nesta seção 0.7.1.
 
 ## Patch 86: Core Linux Runtime v1 sem Termux
 

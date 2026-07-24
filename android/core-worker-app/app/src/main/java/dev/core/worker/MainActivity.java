@@ -4192,7 +4192,7 @@ public class MainActivity extends Activity {
             payload.put("source", "core-worker-apk-direct");
             payload.put("endpoint", "apk://" + installId());
             putProfilePayload(payload, profile);
-            payload.put("roles", CoreWorkerJobCatalog.roles());
+            payload.put("roles", CoreWorkerJobCatalog.roles(getApplicationContext()));
             payload.put("capabilities", coreWorkerApkCapabilitiesArray());
             payload.put("supported_tasks", supportedLightJobsArray());
             payload.put("supportedTasks", supportedLightJobsArray());
@@ -4266,7 +4266,7 @@ public class MainActivity extends Activity {
             payload.put("name", prefs.getString("device_name", defaultDeviceName()));
             payload.put("version", APP_VERSION);
             payload.put("source", "core-worker-apk-direct");
-            payload.put("roles", CoreWorkerJobCatalog.roles());
+            payload.put("roles", CoreWorkerJobCatalog.roles(getApplicationContext()));
             payload.put("capabilities", coreWorkerApkCapabilitiesArray());
             payload.put("supported_tasks", supportedLightJobsArray());
             payload.put("supportedTasks", supportedLightJobsArray());
@@ -4602,7 +4602,7 @@ public class MainActivity extends Activity {
     }
 
     private JSONArray coreWorkerApkCapabilitiesArray() {
-        return CoreWorkerJobCatalog.capabilities();
+        return CoreWorkerJobCatalog.capabilities(getApplicationContext());
     }
 
     private JSONObject coreLinuxPublicSnapshot() throws Exception {
@@ -4902,7 +4902,7 @@ public class MainActivity extends Activity {
     }
 
     private JSONArray supportedLightJobsArray() {
-        return CoreWorkerJobCatalog.remoteSupportedTasks();
+        return CoreWorkerJobCatalog.remoteSupportedTasks(getApplicationContext());
     }
 
     private boolean isCoreLinuxRuntimeV1JobType(String type) {

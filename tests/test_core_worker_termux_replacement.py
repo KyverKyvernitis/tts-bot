@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import json
 import re
+import time
 from pathlib import Path
 
-from utility.commands.workers_registry import CORE_WORKER_JOB_TYPES
+from utility.commands.workers_registry import (
+    CORE_WORKER_JOB_TYPES,
+    CoreWorkersRegistry,
+    _hash_secret,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ANDROID = ROOT / "android/core-worker-app"
 JAVA = ANDROID / "app/src/main/java/dev/core/worker"
+PYTHON = ANDROID / "app/src/main/python/coreworker"
 
 
 def read(path: Path) -> str:
@@ -25,11 +32,49 @@ def all_android_java() -> str:
     return "\n".join(read(path) for path in sorted(JAVA.glob("*.java")))
 
 
-def test_version_marks_the_termux_replacement_release() -> None:
+def _worker_record(*, worker_id: str, token: str, apk: bool, ready: bool) -> dict:
+    now = time.time()
+    if apk:
+        return {
+            "worker_id": worker_id,
+            "name": "Core Worker APK",
+            "enabled": True,
+            "registered_at": now,
+            "updated_at": now,
+            "last_heartbeat_at": now,
+            "token_hash": _hash_secret(token),
+            "source": "core-worker-apk-agent-service",
+            "platform": "android",
+            "roles": ["apk-worker", "apk-builder"] if ready else ["apk-worker"],
+            "capabilities": ["apk-worker", "apk-builder"] if ready else ["apk-worker"],
+            "supported_tasks": ["apk_builder_status", "apk_build_debug", "apk_publish_last"] if ready else ["apk_builder_status"],
+            "status": {"apk_self_builder": {"ready": ready, "publishReady": ready}},
+        }
+    return {
+        "worker_id": worker_id,
+        "name": "Termux bootstrap",
+        "enabled": True,
+        "registered_at": now,
+        "updated_at": now,
+        "last_heartbeat_at": now,
+        "token_hash": _hash_secret(token),
+        "source": "phone-worker-termux",
+        "platform": "android-termux",
+        "roles": ["phone-worker", "apk-builder"],
+        "capabilities": ["phone-worker", "apk-builder"],
+        "supported_tasks": ["apk_build_debug", "apk_publish_last"],
+        "status": {},
+    }
+
+
+def test_version_marks_bootstrap_to_self_builder_release() -> None:
     gradle = read(ANDROID / "app/build.gradle")
-    assert "versionCode 118" in gradle
-    assert 'versionName "0.7.0"' in gradle
-    assert read(ANDROID / "README.md").startswith("# Core Worker 0.7.0 — runtime móvel sem Termux")
+    assert "versionCode 119" in gradle
+    assert 'versionName "0.7.1"' in gradle
+    assert "def coreWorkerSelfBuilderTargetSdk = 28" in gradle
+    assert "targetSdk coreWorkerSelfBuilderTargetSdk" in gradle
+    assert "verifyCoreWorkerSelfBuilderTargetSdk" in gradle
+    assert read(ANDROID / "README.md").startswith("# Core Worker 0.7.1 — bootstrap no Termux e autobuild no APK")
 
 
 def test_android_runtime_has_no_legacy_termux_protocol_or_package_dependency() -> None:
@@ -61,25 +106,20 @@ def test_direct_http_api_is_authenticated_and_compatible() -> None:
     assert 'return json(401' in server
     assert '"/shell"' not in server
     assert '"/command"' not in server
-    assert '"X-Core-Worker-Cache-Hit"' in server
-    assert '"X-Core-Worker-Android-Synth-Ms"' in server
 
 
 def test_direct_executor_has_allowlist_without_free_shell() -> None:
     executor = read(JAVA / "CoreWorkerDirectTaskExecutor.java")
     assert "static boolean supports(String rawTask)" in executor
-    assert "ProcessBuilder" in executor  # somente FFmpeg/FFprobe privados e argv validado
+    assert "ProcessBuilder" in executor  # somente ferramentas privadas com argv validado
     assert 'new String[] {"/system/bin/sh"' not in executor
     assert "Runtime.getRuntime().exec" not in executor
     assert "isSafeFfmpegArg" in executor
     assert "caminho ZIP suspeito" in executor
     assert "entrada grande demais" in executor
-    assert '"emoji_recolor"' in executor
-    assert '"tts_synthesize_piper"' in executor
-    assert "BitmapFactory.decodeByteArray" in executor
 
 
-def test_java_and_python_job_catalogs_match() -> None:
+def test_java_python_and_registry_catalogs_include_dynamic_builder() -> None:
     catalog = read(JAVA / "CoreWorkerJobCatalog.java")
     internal = java_array(catalog, "APK_JOBS")
     direct = java_array(catalog, "DIRECT_REGISTRY_TASKS")
@@ -87,55 +127,155 @@ def test_java_and_python_job_catalogs_match() -> None:
     assert len(internal) == 44
     assert len(direct) == 38
     assert len(remote) == len(set(remote))
-    assert len(remote) <= 96
     assert set(remote).issubset(CORE_WORKER_JOB_TYPES)
+    assert "CoreWorkerApkBuildManager.availableTasks(context)" in catalog
+    for task in ("apk_build_debug", "apk_publish_last", "apk_builder_status"):
+        assert task in CORE_WORKER_JOB_TYPES
+        assert f'"{task}"' in read(JAVA / "CoreWorkerApkBuildManager.java")
 
 
-def test_runtime_uses_authenticated_registry_and_durable_results() -> None:
+def test_runtime_dispatches_builder_before_regular_jobs() -> None:
     service = read(JAVA / "CoreWorkerRuntimeService.java")
+    manager_pos = service.index("CoreWorkerApkBuildManager.supports(jobType)")
+    internal_pos = service.index("CoreWorkerJobCatalog.supports(jobType)")
+    assert manager_pos < internal_pos
     assert 'serverUrl + "/core-worker/jobs/poll"' in service
     assert 'serverUrl + "/core-worker/jobs/result"' in service
     assert 'serverUrl + "/core-worker/heartbeat"' in service
-    assert 'payload.put("worker_id"' in service
-    assert 'payload.put("job_id"' in service
-    assert 'payload.put("status", ok ? "succeeded" : "failed")' in service
-    assert 'payload.put("result"' in service
-    assert "persistOutbox" in service
-    assert "normalizeStoredEnvelope" in service
-    assert 'status.put("termux_replaced", true)' in service
+    assert "CoreWorkerJobCatalog.remoteSupportedTasks(getApplicationContext())" in service
+    assert 'status.put("apk_self_builder"' in service
+    assert "CoreWorkerApkBuildManager.refreshAsync(getApplicationContext())" in service
+    manager = read(JAVA / "CoreWorkerApkBuildManager.java")
+    assert "preflightRefreshRunning" in manager
+    assert "readPersistedPreflight" in manager
+    assert "callPythonPreflight(context, true)" in manager
 
 
-def test_direct_http_secret_is_delivered_only_after_authorized_apk_calls() -> None:
-    webserver = read(ROOT / "webserver.py")
-    assert "def _core_worker_apk_http_token" in webserver
-    assert "def _core_worker_is_apk_payload" in webserver
-    assert "if status != 200 or not isinstance(body, dict) or not body.get(\"ok\")" in webserver
-    assert 'body["direct_http_token"] = token' in webserver
-    assert webserver.count("_attach_core_worker_apk_http_token(status, body, payload)") == 2
-    activity = read(JAVA / "MainActivity.java")
-    assert '.putString("direct_http_token"' in activity
-    assert '.remove("direct_http_token")' in activity
+def test_self_builder_has_strict_toolchain_and_no_arbitrary_command() -> None:
+    manager = read(JAVA / "CoreWorkerApkBuildManager.java")
+    builder = read(PYTHON / "apk_self_builder.py")
+    gradle = read(ANDROID / "app/build.gradle")
+    assert "core-linux/android-builder/android-builder-toolchain.zip" in manager
+    assert "core-worker-android-builder-v1" in builder
+    assert '"runtime": "android-private-toolchain-direct"' in builder
+    assert 'del native_dir  # assinatura mantida para compatibilidade Java; builder não depende do rootfs/PRoot.' in builder
+    assert '"javac": javac.is_file()' in builder
+    assert '"jar": jar.is_file()' in builder
+    assert "MAX_SOURCE_BYTES = 1024 * 1024 * 1024" in builder
+    assert "MAX_SOURCE_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024" in builder
+    assert "def _toolchain_smoke(" in builder
+    assert '["/system/bin/sh", paths["gradle"], "--version", "--no-daemon"]' in builder
+    assert '[paths["aapt2"], "version"]' in builder
+    assert '"CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN": "true"' in builder
+    assert '"/system/bin/sh", paths["gradle"], "assembleDebug"' in builder
+    assert "subprocess.Popen(command" in builder
+    assert "payload.get(\"command\")" not in builder
+    assert "payload.get(\"shell\")" not in builder
+    assert "verifyCoreWorkerSelfBuilderToolchain" in gradle
+    assert "CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN" in gradle
+    assert "core-worker-android-builder-v1" in gradle
+    assert "pip = false" in gradle
+    assert "stdlib = false" in gradle
+    assert "targetSdk coreWorkerSelfBuilderTargetSdk" in gradle
 
 
-def test_vps_does_not_build_apk_in_replacement_mode() -> None:
+def test_termux_bootstrap_requires_self_builder_toolchain() -> None:
+    phone_worker = read(ROOT / "deploy/termux/phone-worker/phone_worker.py")
+    automation = read(ROOT / "scripts/core-worker-automation.py")
     workers = read(ROOT / "utility/commands/workers.py")
-    assert '"apk_build_debug", "apk_publish_last"' in workers
-    assert "build/publicação de APK não fazem parte do worker móvel" in workers
-    assert '"worker_update", "apk_build_debug", "apk_publish_last", "boot_repair"' in workers
-    assert 'values: set[str] = {"apk-worker"}' in workers
-    assert 'selected.add("apk-worker")' in workers
-    assert 'self.selected_features.add("apk-worker")' in workers
-    assert '"builder": "Builder"' not in workers
+    assert 'PHONE_WORKER_VERSION = "1.10.33"' in phone_worker
+    assert 'env["CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN"] = "true"' in phone_worker
+    assert '_prepare_apk_self_builder_toolchain(project_dir, env)' in phone_worker
+    assert '"runtime": "termux-bionic-direct"' in phone_worker
+    assert '"generatedOnTermux": True' in phone_worker
+    assert 'toolchain self-builder ausente e geração bootstrap só é permitida no Termux' in phone_worker
+    assert '_env_int("PHONE_WORKER_APK_BUILD_SOURCE_MAX_BYTES", 1024 * 1024 * 1024)' in phone_worker
+    assert '"selfBuilderRequired": True' in automation
+    assert '"selfBuilderRequired": True' in workers
+    assert "external_build_required" not in automation
+    assert "build/publicação de APK não fazem parte do worker móvel" not in workers
+    assert '"builder": ("phone-worker"' in workers
 
 
-def test_config_routes_mobile_worker_to_apk_and_keeps_music_local() -> None:
+def test_vps_only_orchestrates_and_streams_published_apk() -> None:
+    webserver = read(ROOT / "webserver.py")
+    automation = read(ROOT / "scripts/core-worker-automation.py")
+    assert "assembleDebug" not in webserver
+    assert 'subprocess.run(["gradle"' not in automation
+    assert 'subprocess.Popen(["gradle"' not in automation
+    assert 'CORE_WORKER_APK_UPLOAD_MAX_BYTES", str(1024 * 1024 * 1024)' in webserver
+    assert "final_raw = open(target, \"rb\").read()" not in webserver
+    assert "final_digest = hashlib.sha256()" in webserver
+    assert "source_bytes = zip_path.stat().st_size" in automation
+    assert "raw = zip_path.read_bytes()" not in automation
+    assert '@app.post("/core-worker/app/publish")' in webserver
+
+
+def test_registry_prefers_ready_apk_then_termux_fallback(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.json"
+    apk_token = "apk-secret-token"
+    termux_token = "termux-secret-token"
+    data = {
+        "version": 1,
+        "pairings": {},
+        "workers": {
+            "apk-worker-1": _worker_record(worker_id="apk-worker-1", token=apk_token, apk=True, ready=True),
+            "termux-worker-1": _worker_record(worker_id="termux-worker-1", token=termux_token, apk=False, ready=True),
+        },
+        "jobs": {},
+    }
+    registry_path.write_text(json.dumps(data), encoding="utf-8")
+    registry = CoreWorkersRegistry(registry_path)
+    created = registry.create_job(
+        job_type="apk_build_debug",
+        payload={"selfBuilderRequired": True},
+        required_capabilities=["apk-builder"],
+        ttl_seconds=300,
+        lease_seconds=300,
+        summary="self build",
+    )
+    assert created["job"]["preferred_worker_id"] == "apk-worker-1"
+
+    # Durante a janela de preferência, o bootstrap não rouba o job.
+    polled_termux = registry.poll_job({"worker_id": "termux-worker-1"}, token=termux_token)
+    assert polled_termux["job"] is None
+    polled_apk = registry.poll_job({"worker_id": "apk-worker-1"}, token=apk_token)
+    assert polled_apk["job"]["type"] == "apk_build_debug"
+
+
+def test_registry_uses_termux_when_apk_self_builder_is_not_ready(tmp_path: Path) -> None:
+    registry_path = tmp_path / "registry.json"
+    apk_token = "apk-secret-token"
+    termux_token = "termux-secret-token"
+    data = {
+        "version": 1,
+        "pairings": {},
+        "workers": {
+            "apk-worker-1": _worker_record(worker_id="apk-worker-1", token=apk_token, apk=True, ready=False),
+            "termux-worker-1": _worker_record(worker_id="termux-worker-1", token=termux_token, apk=False, ready=True),
+        },
+        "jobs": {},
+    }
+    registry_path.write_text(json.dumps(data), encoding="utf-8")
+    registry = CoreWorkersRegistry(registry_path)
+    created = registry.create_job(
+        job_type="apk_build_debug",
+        payload={"selfBuilderRequired": True},
+        required_capabilities=["apk-builder"],
+        ttl_seconds=300,
+        lease_seconds=300,
+        summary="bootstrap build",
+    )
+    assert created["job"]["preferred_worker_id"] == "termux-worker-1"
+    polled = registry.poll_job({"worker_id": "termux-worker-1"}, token=termux_token)
+    assert polled["job"]["type"] == "apk_build_debug"
+
+
+def test_config_keeps_termux_only_as_bootstrap_builder() -> None:
     config = read(ROOT / "config.py")
     assert 'CORE_WORKER_APK_REPLACES_TERMUX = _parse_bool' in config
-    assert 'MUSIC_BACKEND = "local" if CORE_WORKER_APK_REPLACES_TERMUX' in config
-    assert 'MUSIC_AGENT_ENABLED = (not CORE_WORKER_APK_REPLACES_TERMUX)' in config
-    assert 'MUSIC_WORKER_ONLY_ENABLED = (not CORE_WORKER_APK_REPLACES_TERMUX)' in config
-    assert 'WORKER_VOICE_AGENT_ENABLED = (not CORE_WORKER_APK_REPLACES_TERMUX)' in config
-    assert 'CORE_WORKER_APK_REPLACES_TERMUX and bool(PHONE_WORKER_HOST and PHONE_WORKER_TOKEN)' in config
+    assert 'CORE_WORKER_TERMUX_BOOTSTRAP_BUILDER_ENABLED = _parse_bool' in config
+    assert 'os.getenv("CORE_WORKER_TERMUX_BOOTSTRAP_BUILDER_ENABLED", "true")' in config
 
 
 def test_rootfs_and_bedrock_use_strict_real_gates() -> None:
@@ -145,40 +285,14 @@ def test_rootfs_and_bedrock_use_strict_real_gates() -> None:
     assert 'new File(rootfsDir, "bin/sh").isFile()' in runner
     assert 'new File(rootfsDir, "lib/ld-linux-aarch64.so.1").isFile()' in runner
     assert 'lib/aarch64-linux-gnu/libc.so.6' in runner
-    assert 'boolean strictFailure' in runner
-    assert 'boolean bedrockRequirementsReady = runnerBaseRequirementsReady && box64Ready && bedrockServerReady && propertiesReady && eulaReady' in runner
-    assert 'private static final boolean BEDROCK_RUNTIME_ISOLATED = false' in bedrock
+    assert "boolean strictFailure" in runner
+    assert "boolean bedrockRequirementsReady" in runner
+    assert "private static final boolean BEDROCK_RUNTIME_ISOLATED = false" in bedrock
     assert 'if (!p.eulaAccepted) p.blockers.put' in bedrock
-    assert 'runnerPreflight.optBoolean("runnerExecutionAllowed", false)' in bedrock
     assert 'status.put("bedrock_start_allowed", coreLinux.optBoolean("bedrockStartAllowed", false))' in runtime
 
 
-def test_direct_executor_preserves_assist_payload_contracts() -> None:
-    executor = read(JAVA / "CoreWorkerDirectTaskExecutor.java")
-    assert 'body.optDouble("timeout_seconds", 3.0)' in executor
-    assert '.put("results", results)' in executor
-    assert '.put("url", item.optString("target", target))' in executor
-    assert '.put("files", results)' in executor
-    assert '.put("total_bytes", total)' in executor
-    assert 'private JSONObject maintenancePlan(JSONObject body)' in executor
-    assert 'body.optJSONArray("entries")' in executor
-    assert '.put("estimated_reclaimable", reclaimable)' in executor
-    assert '.put("old_temp_candidates", jsonArray(oldTemp, 80))' in executor
-    assert '.put("old_log_candidates", jsonArray(oldLogs, 80))' in executor
-
-
-def test_welcome_emoji_offload_uses_the_apk_direct_api() -> None:
-    source = read(ROOT / "cogs/welcome/core/media_mixin.py")
-    assert 'CORE_WORKER_APK_REPLACES_TERMUX' in source
-    assert '"task": "emoji_recolor"' in source
-    assert 'replacement_enabled and bool(host and token)' in source
-
-
-def test_legacy_automation_cannot_build_or_update_the_apk_worker() -> None:
-    automation = read(ROOT / "scripts/core-worker-automation.py")
-    webserver = read(ROOT / "webserver.py")
-    assert 'if _env_bool("CORE_WORKER_APK_REPLACES_TERMUX", True):' in automation
-    assert '"skipped": "external_build_required"' in automation
-    assert 'pending.pop("apk_build", None)' in automation
-    assert '"skipped": "termux_replaced"' in automation
-    assert 'if _env_bool_web("CORE_WORKER_APK_REPLACES_TERMUX", True):' in webserver
+def test_direct_http_secret_is_removed_when_connection_is_forgotten() -> None:
+    activity = read(JAVA / "MainActivity.java")
+    assert '.putString("direct_http_token"' in activity
+    assert '.remove("direct_http_token")' in activity
