@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowRight, LoaderCircle, LogIn, RefreshCw, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { BrowserLanding } from "./components/BrowserLanding";
 import { HomePage } from "./components/HomePage";
 import { InviteScreen } from "./components/InviteScreen";
@@ -493,112 +493,6 @@ function DashboardShell({
   const guildIcon = selectedServer?.icon || null;
   const botName = botIdentity?.global_name || botIdentity?.username || "Osaka";
 
-  const openGestureRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    latestX: number;
-    latestAt: number;
-    velocityX: number;
-    horizontal: boolean;
-  } | null>(null);
-  const suppressOpenSwipeClickRef = useRef(false);
-
-  const ignoreDrawerGestureTarget = (target: EventTarget | null) => {
-    if (!(target instanceof Element)) return false;
-    return Boolean(target.closest(
-      "input, textarea, select, [contenteditable='true'], .osk-message-editor, .osk-account-layer, .osk-select-layer, [data-no-drawer-gesture]",
-    ));
-  };
-
-  const beginOpenSwipe = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (mobileMenuOpen || messageEditorActive || window.innerWidth > 980 || !event.isPrimary || event.pointerType === "mouse") return;
-    if (ignoreDrawerGestureTarget(event.target)) return;
-    // Mantém os primeiros pixels livres para o gesto nativo de voltar do Android.
-    if (event.clientX < 24 || event.clientX > 112) return;
-
-    openGestureRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      latestX: event.clientX,
-      latestAt: event.timeStamp,
-      velocityX: 0,
-      horizontal: false,
-    };
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-  };
-
-  const moveOpenSwipe = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const gesture = openGestureRef.current;
-    if (!gesture || gesture.pointerId !== event.pointerId) return;
-    const deltaX = event.clientX - gesture.startX;
-    const deltaY = event.clientY - gesture.startY;
-
-    if (!gesture.horizontal) {
-      if (Math.abs(deltaY) > 14 && Math.abs(deltaY) > Math.abs(deltaX) * 1.12) {
-        openGestureRef.current = null;
-        if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-          event.currentTarget.releasePointerCapture?.(event.pointerId);
-        }
-        return;
-      }
-      if (deltaX >= 9 && deltaX > Math.abs(deltaY) * 1.12) {
-        gesture.horizontal = true;
-        suppressOpenSwipeClickRef.current = true;
-      }
-    }
-    if (!gesture.horizontal) return;
-
-    event.preventDefault();
-    const elapsed = Math.max(1, event.timeStamp - gesture.latestAt);
-    gesture.velocityX = (event.clientX - gesture.latestX) / elapsed;
-    gesture.latestX = event.clientX;
-    gesture.latestAt = event.timeStamp;
-  };
-
-  const finishOpenSwipe = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const gesture = openGestureRef.current;
-    if (!gesture || gesture.pointerId !== event.pointerId) return;
-    openGestureRef.current = null;
-
-    const deltaX = event.clientX - gesture.startX;
-    const deltaY = event.clientY - gesture.startY;
-    const horizontalSwipe = gesture.horizontal
-      || (deltaX >= 42 && deltaX > Math.abs(deltaY) * 1.12);
-    const shouldOpen = horizontalSwipe
-      && (deltaX >= 58 || gesture.velocityX >= .46)
-      && Math.abs(deltaY) <= Math.max(44, Math.abs(deltaX) * .68);
-
-    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-      event.currentTarget.releasePointerCapture?.(event.pointerId);
-    }
-    if (horizontalSwipe) {
-      suppressOpenSwipeClickRef.current = true;
-      window.setTimeout(() => { suppressOpenSwipeClickRef.current = false; }, 120);
-    }
-    if (!shouldOpen) return;
-    event.preventDefault();
-    onOpenMenu();
-  };
-
-  const cancelOpenSwipe = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const gesture = openGestureRef.current;
-    if (!gesture || gesture.pointerId !== event.pointerId) return;
-    openGestureRef.current = null;
-    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-      event.currentTarget.releasePointerCapture?.(event.pointerId);
-    }
-    if (gesture.horizontal) {
-      window.setTimeout(() => { suppressOpenSwipeClickRef.current = false; }, 120);
-    }
-  };
-
-  const preventClickAfterOpenSwipe = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (!suppressOpenSwipeClickRef.current) return;
-    event.preventDefault();
-    event.stopPropagation();
-  };
 
   return <div className="osk-dashboard-shell" data-has-draft={changedCount > 0 || undefined}>
     <Sidebar
@@ -609,18 +503,13 @@ function DashboardShell({
       botName={botName}
       botAvatarUrl={botIdentity?.avatarUrl}
       onCloseMobile={onCloseMenu}
+      onOpenMobile={onOpenMenu}
+      gestureDisabled={messageEditorActive}
       onHome={onHome}
       onSelect={onSelect}
       onLogout={onLogout}
     />
-    <div
-      className="osk-dashboard-main"
-      onPointerDownCapture={beginOpenSwipe}
-      onPointerMoveCapture={moveOpenSwipe}
-      onPointerUpCapture={finishOpenSwipe}
-      onPointerCancelCapture={cancelOpenSwipe}
-      onClickCapture={preventClickAfterOpenSwipe}
-    >
+    <div className="osk-dashboard-main">
       <Topbar guildName={guildName} guildIcon={guildIcon} user={user} supportServer={supportServer} busy={loading} onRefresh={onRefresh} onChangeServer={onChangeServer} onLogout={onLogout} onOpenMenu={onOpenMenu} />
       <main className="osk-dashboard-content">
         <div key={selectedSection?.id || "home"} className="osk-page-motion">
