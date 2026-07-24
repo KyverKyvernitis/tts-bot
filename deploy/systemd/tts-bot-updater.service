@@ -6,4 +6,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=root
+Nice=10
+CPUWeight=20
+IOWeight=20
 ExecStart=/usr/bin/env bash /home/ubuntu/bot/scripts/tts-bot-update.sh

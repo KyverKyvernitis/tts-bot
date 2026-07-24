@@ -294,7 +294,11 @@ class BotLocal(commands.Bot):
         self._removed_slash_cleanup_state_path = self._repo_root / "data" / "removed_slash_cleanup_state.json"
         self.audio_router = AudioRouter(self)
         self.application_bio = ApplicationBioService(self, self._repo_root / "data" / "application_bio.json")
-        self.application_presence = ApplicationPresenceService(self)
+        self.application_presence = ApplicationPresenceService(
+            self,
+            self._update_staging_root / "candidates" / "runtime-state.json",
+        )
+        self._update_notice_by_user: dict[int, float] = {}
         self._music_bitrate_reconciled = False
         self._music_voice_status_reconciled = False
         self._music_startup_reconcile_task: asyncio.Task | None = None
@@ -2903,7 +2907,61 @@ class BotLocal(commands.Bot):
 
         asyncio.create_task(_rollback_start_watchdog())
 
+    def _schedule_update_interaction_notice(self, interaction: discord.Interaction) -> None:
+        presence = getattr(self, "application_presence", None)
+        if presence is None or not bool(getattr(presence, "maintenance_active", False)):
+            return
+        interaction_type = getattr(discord.InteractionType, "application_command", None)
+        if interaction_type is None or getattr(interaction, "type", None) != interaction_type:
+            return
+
+        user_id = int(getattr(getattr(interaction, "user", None), "id", 0) or 0)
+        if user_id <= 0:
+            return
+        try:
+            cooldown = max(30.0, min(600.0, float(os.getenv("UPDATE_NOTICE_COOLDOWN_SECONDS", "120") or 120)))
+        except (TypeError, ValueError):
+            cooldown = 120.0
+        now = time.monotonic()
+        if now - self._update_notice_by_user.get(user_id, 0.0) < cooldown:
+            return
+        self._update_notice_by_user[user_id] = now
+        asyncio.create_task(
+            self._send_update_interaction_notice(interaction, user_id, now),
+            name=f"update-notice-{user_id}",
+        )
+
+    async def _send_update_interaction_notice(
+        self,
+        interaction: discord.Interaction,
+        user_id: int,
+        reservation: float,
+    ) -> None:
+        try:
+            for _ in range(25):
+                if interaction.response.is_done():
+                    break
+                await asyncio.sleep(0.1)
+            if not interaction.response.is_done():
+                if self._update_notice_by_user.get(user_id) == reservation:
+                    self._update_notice_by_user.pop(user_id, None)
+                return
+            presence = getattr(self, "application_presence", None)
+            if presence is None or not bool(getattr(presence, "maintenance_active", False)):
+                return
+            await interaction.followup.send(
+                "⚠️ Atualização em andamento. A resposta pode demorar.",
+                ephemeral=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if self._update_notice_by_user.get(user_id) == reservation:
+                self._update_notice_by_user.pop(user_id, None)
+            UPDATE_LOG.debug("falha ao enviar aviso curto de atualização", exc_info=True)
+
     async def on_interaction(self, interaction: discord.Interaction):
+        self._schedule_update_interaction_notice(interaction)
         try:
             custom_id = ""
             data = getattr(interaction, "data", None)
@@ -3122,28 +3180,51 @@ class BotLocal(commands.Bot):
                     candidate_id = str(result.get("candidate_id") or "").strip()
                     display_id = str(result.get("display_id") or candidate_id).strip()
 
-                    if queue_position <= 1:
-                        queue_detail = "Posição na fila: **1**\nSerá iniciada em seguida."
-                    else:
-                        before = queue_position - 1
-                        before_text = "1 atualização antes desta" if before == 1 else f"{before} atualizações antes desta"
-                        queue_detail = f"Posição na fila: **{queue_position}**\n{before_text}."
-
-                    details = [f"Atualização `{display_id}`", queue_detail]
                     file_count = len(changed_files)
                     file_text = "1 arquivo preparado" if file_count == 1 else f"{file_count} arquivos preparados"
                     file_summary = f"{file_text} · {diff_summary}" if diff_summary else file_text
-                    details.append(f"-# {file_summary}")
-                    if prefix:
-                        details.append(f"-# {prefix}")
-                    status_message = await self._edit_zip_update_message(
-                        message,
-                        status_message,
-                        "📦 Atualização na fila",
-                        "\n".join(details),
-                        discord.Color.blurple(),
-                        control=self._zip_update_cancel_control(candidate_id),
-                    )
+
+                    if queue_position <= 1:
+                        # O primeiro item não está esperando outro update. Mantenha o
+                        # painel de microetapas e faça a transição direta para o updater.
+                        visible_history = preparation_history[-8:]
+                        hidden_count = max(0, len(preparation_history) - len(visible_history))
+                        details: list[str] = []
+                        if hidden_count:
+                            noun = "etapa anterior concluída" if hidden_count == 1 else "etapas anteriores concluídas"
+                            details.append(f"-# … {hidden_count} {noun}")
+                        details.extend(visible_history)
+                        details.append("<a:loading:1510065277868445796> **Iniciando atualização**")
+                        details.append(f"-# `{display_id}` · {file_summary}")
+                        if prefix:
+                            details.append(f"-# {prefix}")
+                        status_message = await self._edit_zip_update_message(
+                            message,
+                            status_message,
+                            "🔎 Preparando atualização",
+                            "\n".join(details),
+                            discord.Color.blurple(),
+                            control=self._zip_update_cancel_control(candidate_id),
+                        )
+                    else:
+                        before = queue_position - 1
+                        before_text = "1 atualização antes desta" if before == 1 else f"{before} atualizações antes desta"
+                        details = [
+                            f"Atualização `{display_id}`",
+                            f"Posição na fila: **{queue_position}**",
+                            f"{before_text}.",
+                            f"-# {file_summary}",
+                        ]
+                        if prefix:
+                            details.append(f"-# {prefix}")
+                        status_message = await self._edit_zip_update_message(
+                            message,
+                            status_message,
+                            "📦 Atualização na fila",
+                            "\n".join(details),
+                            discord.Color.blurple(),
+                            control=self._zip_update_cancel_control(candidate_id),
+                        )
                     await asyncio.to_thread(self._trigger_updater_service_sync)
                 except zipfile.BadZipFile:
                     await self._edit_zip_update_message(

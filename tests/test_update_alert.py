@@ -144,8 +144,8 @@ printf 'TITLE=%s\n' "$(zip_progress_title 'Compilando o site')"
         capture_output=True,
         text=True,
     )
-    assert "STAGE=Instalando dependências do site" in result.stdout
-    assert "TITLE=🌐 Atualizando site" in result.stdout
+    assert "STAGE=Instalando dependências" in result.stdout
+    assert "TITLE=⚙️ Atualizando" in result.stdout
     assert "Reiniciando processo: atividade" not in result.stdout
 
 
@@ -157,13 +157,13 @@ ZIP_PROGRESS_HISTORY=''
 ZIP_PROGRESS_COMPLETED_COUNT=0
 ZIP_PROGRESS_HIDDEN_COUNT=0
 ZIP_PROGRESS_MAX_VISIBLE_STEPS=10
-ZIP_PROGRESS_STAGE_LABEL='Compilando o site'
+ZIP_PROGRESS_STAGE_LABEL='Compilando interface'
 ZIP_PROGRESS_STAGE_STARTED_MS="$(update_now_ms)"
 ZIP_PROGRESS_DONE_LABELS=''
-zip_progress_done 'Site compilado'
-ZIP_PROGRESS_STAGE_LABEL='Compilando o site'
+zip_progress_done 'Interface compilada'
+ZIP_PROGRESS_STAGE_LABEL='Compilando interface'
 ZIP_PROGRESS_STAGE_STARTED_MS="$(update_now_ms)"
-zip_progress_done 'Site compilado'
+zip_progress_done 'Interface compilada'
 printf 'COUNT=%s\n%s\n' "$ZIP_PROGRESS_COMPLETED_COUNT" "$ZIP_PROGRESS_HISTORY"
 '''
     result = subprocess.run(
@@ -174,7 +174,7 @@ printf 'COUNT=%s\n%s\n' "$ZIP_PROGRESS_COMPLETED_COUNT" "$ZIP_PROGRESS_HISTORY"
         text=True,
     )
     assert "COUNT=1" in result.stdout
-    assert result.stdout.count("Site compilado") == 1
+    assert result.stdout.count("Interface compilada") == 1
 
 
 def test_final_status_does_not_render_bare_ok_line() -> None:
@@ -204,11 +204,37 @@ def test_frontend_deploy_reports_dependency_build_publish_and_validation_stages(
     backend = source[source.index("deploy_backend() {") : source.index("\n\nrollback_after_failure() {")]
 
     for expected in (
-        '"Instalando dependências do site"',
-        '"Compilando o site"',
-        '"Publicando o site"',
-        '"Validando o site"',
+        '"Instalando dependências"',
+        '"Compilando interface"',
+        '"Publicando interface"',
+        '"Preparando servidor"',
+        '"Compilando servidor"',
+        '"Validando"',
     ):
         assert expected in frontend + backend
     assert "Reiniciando processo: atividade" not in frontend + backend
     assert "zip_progress_run_as_ubuntu" in frontend
+
+
+def test_update_progress_uses_short_generic_copy() -> None:
+    source = (ROOT / "scripts" / "tts-bot-update.sh").read_text(encoding="utf-8")
+    title_block = source[source.index("zip_progress_title() {") : source.index("\nzip_progress_status() {")]
+    deploy_block = source[source.index("deploy_frontend() {") : source.index("\n\nrollback_after_failure() {")]
+
+    assert "⚙️ Atualizando" in title_block
+    assert "Atualizando site" not in title_block
+    assert "dependências do site" not in deploy_block
+    assert "servidor do site" not in deploy_block
+    assert "Atualização aplicada e validada." in source
+
+
+def test_update_runtime_state_marker_is_transactional() -> None:
+    source = (ROOT / "scripts" / "tts-bot-update.sh").read_text(encoding="utf-8")
+    write_at = source.index("write_update_runtime_state() {")
+    publish_at = source.index('write_update_runtime_state "$stage_label"', write_at)
+    clear_at = source.index("clear_update_runtime_state() {", write_at)
+    cleanup_at = source.index("clear_update_runtime_state || true", clear_at)
+
+    assert "heartbeat_epoch" in source[write_at:clear_at]
+    assert write_at < publish_at
+    assert clear_at < cleanup_at

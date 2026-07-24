@@ -19,6 +19,7 @@ CANDIDATE_QUEUE_ACTIVE_DIR="$CANDIDATE_QUEUE_ROOT/active"
 CANDIDATE_QUEUE_DONE_DIR="$CANDIDATE_QUEUE_ROOT/done"
 CANDIDATE_QUEUE_FAILED_DIR="$CANDIDATE_QUEUE_ROOT/failed"
 CANDIDATE_QUEUE_CANCELLED_DIR="$CANDIDATE_QUEUE_ROOT/cancelled"
+UPDATE_RUNTIME_STATE_FILE="${DISCORD_AUTO_UPDATE_RUNTIME_STATE_FILE:-$CANDIDATE_ROOT/runtime-state.json}"
 UPDATER_LOCK_FILE="${DISCORD_AUTO_UPDATE_LOCK_FILE:-/run/lock/tts-bot-updater.lock}"
 REMOTE_REJECTED_FILE="${DISCORD_AUTO_UPDATE_REJECTED_REMOTE_FILE:-$REPO_DIR/data/updater/rejected_remote_commits.json}"
 ROLLBACK_REQUEST_DEFAULT_ROOT="$CANDIDATE_ROOT/rollback"
@@ -60,6 +61,7 @@ if ! flock -n 9; then
   logger -t "$LOG_TAG" "updater já está em execução; mantendo fila para o próximo ciclo" 2>/dev/null || true
   exit 0
 fi
+UPDATE_RUNTIME_RUN_ID="$(date +%Y%m%d%H%M%S)-$$-${RANDOM:-0}"
 
 FRONT_DIR="$REPO_DIR/activity/sinuca"
 BACK_DIR="$REPO_DIR/activity/sinuca-server"
@@ -224,7 +226,59 @@ fi
 # o tmpfile continua existindo pra `collect_run_log_excerpt`.
 exec > >(tee -a "$RUN_LOG_FILE" "$PERSISTENT_LOG_FILE") 2>&1
 
+write_update_runtime_state() {
+  local phase="${1:-Atualizando}"
+  if (( LOCAL_CANDIDATE_MODE == 0 && ROLLBACK_CONTROL_MODE == 0 && REMOTE_CANDIDATE_MODE == 0 )); then
+    return 0
+  fi
+  mkdir -p "$(dirname "$UPDATE_RUNTIME_STATE_FILE")" 2>/dev/null || return 0
+  UPDATE_PHASE="$phase" \
+  UPDATE_RUNTIME_RUN_ID_VALUE="$UPDATE_RUNTIME_RUN_ID" \
+  UPDATE_RUNTIME_STATE_FILE_VALUE="$UPDATE_RUNTIME_STATE_FILE" \
+  UPDATE_ID_VALUE="${LOCAL_CANDIDATE_DISPLAY_ID:-${ROLLBACK_REQUEST_ID:-${SHORT_TO:-atualização}}}" \
+  UPDATE_RESTART_EXPECTED="$BOT_CHANGED" \
+  python3 - <<'PYUPDATESTATE' 2>/dev/null || true
+import datetime, json, os, pathlib, time
+path = pathlib.Path(os.environ['UPDATE_RUNTIME_STATE_FILE_VALUE'])
+payload = {
+    'active': True,
+    'run_id': os.environ.get('UPDATE_RUNTIME_RUN_ID_VALUE') or '',
+    'update_id': os.environ.get('UPDATE_ID_VALUE') or 'atualização',
+    'phase': (os.environ.get('UPDATE_PHASE') or 'Atualizando')[:200],
+    'restart_expected': os.environ.get('UPDATE_RESTART_EXPECTED') == '1',
+    'heartbeat_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'heartbeat_epoch': time.time(),
+    'pid': os.getppid(),
+}
+tmp = path.with_name('.' + path.name + '.tmp')
+tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+os.replace(tmp, path)
+PYUPDATESTATE
+  chown ubuntu:ubuntu "$UPDATE_RUNTIME_STATE_FILE" 2>/dev/null || true
+  chmod 0644 "$UPDATE_RUNTIME_STATE_FILE" 2>/dev/null || true
+}
+
+clear_update_runtime_state() {
+  [[ -f "$UPDATE_RUNTIME_STATE_FILE" ]] || return 0
+  UPDATE_RUNTIME_RUN_ID_VALUE="$UPDATE_RUNTIME_RUN_ID" \
+  UPDATE_RUNTIME_STATE_FILE_VALUE="$UPDATE_RUNTIME_STATE_FILE" \
+  python3 - <<'PYCLEARUPDATESTATE' 2>/dev/null || true
+import json, os, pathlib
+path = pathlib.Path(os.environ['UPDATE_RUNTIME_STATE_FILE_VALUE'])
+try:
+    payload = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    payload = {}
+if not isinstance(payload, dict) or payload.get('run_id') == os.environ.get('UPDATE_RUNTIME_RUN_ID_VALUE'):
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+PYCLEARUPDATESTATE
+}
+
 cleanup_runtime_artifacts() {
+  clear_update_runtime_state || true
   rm -f "$RUN_LOG_FILE"
   if [[ -n "${REMOTE_WORKTREE_DIR:-}" && -d "$REMOTE_WORKTREE_DIR" ]]; then
     sudo -u ubuntu -H git -C "$REPO_DIR" worktree remove --force "$REMOTE_WORKTREE_DIR" >/dev/null 2>&1 || rm -rf "$REMOTE_WORKTREE_DIR" 2>/dev/null || true
@@ -1690,6 +1744,7 @@ for index, queue_path in enumerate(sorted(pending_root.glob('*.json')), start=1)
         diff = manifest.get('diff_stats') or {}
         count = len(manifest.get('changed_files') or [])
         summary = str(diff.get('summary') or '').strip()
+        position_at_enqueue = int(queue.get('queue_position_at_enqueue') or position)
         queue.update({
             'state': 'queued',
             'current_position': position,
@@ -1698,15 +1753,35 @@ for index, queue_path in enumerate(sorted(pending_root.glob('*.json')), start=1)
         tmp = queue_path.with_name('.' + queue_path.name + '.tmp')
         tmp.write_text(json.dumps(queue, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
         os.replace(tmp, queue_path)
-        detail = 'Será iniciada em seguida.' if position == 1 else (f'1 atualização antes desta.' if position == 2 else f'{position - 1} atualizações antes desta.')
-        lines = [f'Atualização `{display_id}`', f'Posição na fila: **{position}**', detail]
-        if count:
-            lines.append((f'1 arquivo preparado' if count == 1 else f'{count} arquivos preparados') + (f' · {summary}' if summary else ''))
+
+        # O primeiro candidato recém-preparado já está com a animação ativa no
+        # Discord. Não substitua esse painel por uma fila que não existe.
+        if position == 1 and active_count == 0 and position_at_enqueue <= 1:
+            continue
+
+        file_line = (f'1 arquivo preparado' if count == 1 else f'{count} arquivos preparados') if count else ''
+        if file_line and summary:
+            file_line += f' · {summary}'
+
+        if position == 1 and active_count == 0:
+            lines = [f'Atualização `{display_id}`', 'Iniciando agora.']
+            if file_line:
+                lines.append(f'-# {file_line}')
+            payload_status = 'applying'
+            payload_title = '⚙️ Iniciando atualização'
+        else:
+            detail = f'1 atualização antes desta.' if position == 2 else f'{position - 1} atualizações antes desta.'
+            lines = [f'Atualização `{display_id}`', f'Posição na fila: **{position}**', detail]
+            if file_line:
+                lines.append(f'-# {file_line}')
+            payload_status = 'queued'
+            payload_title = '📦 Atualização na fila'
+
         payload = {
             'channel_id': channel_id,
             'message_id': message_id,
-            'status': 'queued',
-            'title': '📦 Atualização na fila',
+            'status': payload_status,
+            'title': payload_title,
             'description': '\n'.join(lines),
             'candidate_id': candidate_id,
             'display_id': display_id,
@@ -2261,18 +2336,8 @@ zip_progress_title() {
   fi
   if [[ "$lowered" == *"fila"* || "$lowered" == *"aguard"* ]]; then
     printf '📦 Atualização na fila'
-  elif [[ "$lowered" == *"site"* || "$lowered" == *"frontend"* || "$lowered" == *"backend"* || "$lowered" == *"painel web"* ]]; then
-    printf '🌐 Atualizando site'
-  elif [[ "$lowered" == *"reinici"* || "$lowered" == *"recarreg"* ]]; then
-    printf '♻️ Reiniciando serviços'
-  elif [[ "$lowered" == *"public"* || "$lowered" == *"github"* || "$lowered" == *"commit"* ]]; then
-    printf '🚀 Publicando atualização'
-  elif [[ "$lowered" == *"finaliz"* || "$lowered" == *"estabil"* || "$lowered" == *"health"* || "$lowered" == *"comando"* ]]; then
-    printf '🩺 Verificando atualização'
-  elif [[ "$lowered" == *"valid"* || "$lowered" == *"confer"* || "$lowered" == *"segurança"* || "$lowered" == *"integridade"* || "$lowered" == *"analis"* ]]; then
-    printf '🔎 Validando atualização'
   else
-    printf '⚙️ Aplicando atualização'
+    printf '⚙️ Atualizando'
   fi
 }
 
@@ -2317,6 +2382,9 @@ zip_progress_publish() {
   if [[ "$ZIP_PROGRESS_STAGE_LABEL" != "$stage_label" || "$ZIP_PROGRESS_STAGE_STARTED_MS" -le 0 ]]; then
     ZIP_PROGRESS_STAGE_LABEL="$stage_label"
     stage_changed=1
+  fi
+  if declare -F write_update_runtime_state >/dev/null 2>&1; then
+    write_update_runtime_state "$stage_label"
   fi
   title="$(zip_progress_title "$stage_label")"
   status="$(zip_progress_status)"
@@ -2512,11 +2580,11 @@ zip_progress_next_apply_stage() {
   # Mostre a primeira operação real, não um reinício genérico. Em patches do
   # site, npm ci/build é normalmente a parte mais longa e precisa ficar visível.
   if (( BOT_CHANGED == 0 && FRONT_CHANGED == 1 )); then
-    printf 'Instalando dependências do site'
+    printf 'Instalando dependências'
     return 0
   fi
   if (( BOT_CHANGED == 0 && FRONT_CHANGED == 0 && BACK_CHANGED == 1 )); then
-    printf 'Instalando dependências do servidor do site'
+    printf 'Preparando servidor'
     return 0
   fi
   process_detail="$(zip_progress_process_detail)"
@@ -4281,23 +4349,23 @@ deploy_frontend() {
 
   STAGE="dependências do frontend"
   zip_progress_run_as_ubuntu \
-    "Instalando dependências do site" \
-    "Baixando e verificando os pacotes" \
+    "Instalando dependências" \
+    "Verificando pacotes" \
     "cd \"$FRONT_DIR\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi"
   zip_progress_done_and_publish \
-    "Dependências do site instaladas" \
-    "Compilando o site" \
+    "Dependências instaladas" \
+    "Compilando interface" \
     "Gerando os arquivos de produção"
 
   STAGE="build do frontend"
   zip_progress_run_as_ubuntu \
-    "Compilando o site" \
+    "Compilando interface" \
     "Gerando os arquivos de produção" \
     "cd \"$FRONT_DIR\" && npm run build"
   zip_progress_done_and_publish \
-    "Site compilado" \
-    "Publicando o site" \
-    "Atualizando os arquivos servidos"
+    "Interface compilada" \
+    "Publicando interface" \
+    "Atualizando arquivos"
 
   STAGE="publicação do frontend"
   mkdir -p "$FRONT_PUBLISH_DIR"
@@ -4306,10 +4374,10 @@ deploy_frontend() {
 
   STAGE="limpeza do frontend"
   zip_progress_run_as_ubuntu \
-    "Publicando o site" \
-    "Removendo arquivos temporários" \
+    "Publicando interface" \
+    "Limpando temporários" \
     "cd \"$FRONT_DIR\" && rm -rf node_modules && { npm cache clean --force >/dev/null 2>&1 || true; }"
-  zip_progress_done "Site publicado"
+  zip_progress_done "Interface publicada"
 
   FRONT_STATUS="frontend publicado em $FRONT_PUBLISH_DIR; node_modules removido após build"
   return 0
@@ -4325,13 +4393,13 @@ deploy_backend() {
   if (( BACK_CHANGED == 0 )); then
     BACK_STATUS="não alterado"
     STAGE="healthcheck informativo do painel web"
-    zip_progress_publish "Validando o site" "Confirmando que o painel continua disponível"
+    zip_progress_publish "Validando" "Confirmando disponibilidade"
     if wait_for_health "$BACK_HEALTH_URL" 3 2; then
       ACTIVITY_HEALTHCHECK_STATUS="OK"
-      zip_progress_done "Site validado"
+      zip_progress_done "Validação concluída"
     else
       ACTIVITY_HEALTHCHECK_STATUS="indisponível; backend não foi alterado"
-      zip_progress_done "Publicação concluída; servidor não respondeu ao health informativo"
+      zip_progress_done "Publicação concluída; validação indisponível"
     fi
     return 0
   fi
@@ -4343,23 +4411,23 @@ deploy_backend() {
 
   STAGE="dependências do backend"
   zip_progress_run_as_ubuntu \
-    "Instalando dependências do servidor do site" \
-    "Baixando e verificando os pacotes" \
+    "Preparando servidor" \
+    "Verificando pacotes" \
     "cd \"$BACK_DIR\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi"
   zip_progress_done_and_publish \
-    "Dependências do servidor instaladas" \
-    "Compilando o servidor do site" \
-    "Gerando o backend de produção"
+    "Servidor preparado" \
+    "Compilando servidor" \
+    "Gerando arquivos"
 
   STAGE="build do backend"
   zip_progress_run_as_ubuntu \
-    "Compilando o servidor do site" \
-    "Gerando o backend de produção" \
+    "Compilando servidor" \
+    "Gerando arquivos" \
     "cd \"$BACK_DIR\" && npm run build && npm prune --omit=dev && { npm cache clean --force >/dev/null 2>&1 || true; }"
   zip_progress_done_and_publish \
-    "Servidor do site compilado" \
-    "Reiniciando o servidor do site" \
-    "Subindo a nova versão"
+    "Servidor compilado" \
+    "Reiniciando servidor" \
+    "Aplicando nova versão"
 
   STAGE="reinício do backend"
   fuser -k "${BACK_PORT}/tcp" >/dev/null 2>&1 || true
@@ -4367,15 +4435,15 @@ deploy_backend() {
   sleep 3
   BACK_STATUS="backend reiniciado na porta $BACK_PORT"
   zip_progress_done_and_publish \
-    "Servidor do site reiniciado" \
-    "Validando o site" \
-    "Aguardando a resposta do health check"
+    "Servidor reiniciado" \
+    "Validando" \
+    "Aguardando resposta"
 
   STAGE="healthcheck do painel web"
   if wait_for_health "$BACK_HEALTH_URL" 8 3; then
     ACTIVITY_HEALTHCHECK_STATUS="OK"
     BACK_STATUS="backend publicado e validado em $BACK_HEALTH_URL"
-    zip_progress_done "Site validado"
+    zip_progress_done "Validação concluída"
     return 0
   fi
 
@@ -4884,7 +4952,7 @@ fi
 if (( OVERALL_FATAL == 0 && UPDATE_HAS_WARNINGS == 0 )); then
   ALERT_TYPE="success"
   ALERT_TITLE="✅ Atualização concluída"
-  ALERT_SUMMARY="Atualização aplicada; processo ativo, extensões carregadas e estabilidade confirmada."
+  ALERT_SUMMARY="Atualização aplicada e validada."
 elif (( OVERALL_FATAL == 0 )); then
   ALERT_TYPE="warn"
   ALERT_TITLE="⚠️ Atualização concluída com avisos"

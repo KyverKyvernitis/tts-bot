@@ -650,3 +650,54 @@ def test_candidate_suspicion_rejects_legacy_directory_with_trailing_space(tmp_pa
         ["activity /sinuca/index.html"],
     )
     assert "caminho suspeito ou inválido" in blocked
+
+
+def test_first_candidate_keeps_preparation_microsteps_instead_of_fake_queue() -> None:
+    source = BOT.read_text(encoding="utf-8")
+    start = source.index("                    queue_position = max(1")
+    end = source.index("                    await asyncio.to_thread(self._trigger_updater_service_sync)", start)
+    block = source[start:end]
+
+    first_at = block.index("if queue_position <= 1:")
+    direct_at = block.index("**Iniciando atualização**", first_at)
+    queue_at = block.index('"📦 Atualização na fila"', direct_at)
+    assert first_at < direct_at < queue_at
+    assert '"🔎 Preparando atualização"' in block[first_at:queue_at]
+    assert 'f"Posição na fila: **{queue_position}**"' in block[first_at:queue_at]
+
+
+def test_queue_refresher_preserves_new_first_candidate_animation() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    start = source.index("refresh_pending_queue_messages() {")
+    end = source.index("\nprune_update_artifacts() {", start)
+    block = source[start:end]
+
+    assert "position_at_enqueue" in block
+    assert "if position == 1 and active_count == 0 and position_at_enqueue <= 1:" in block
+    assert "continue" in block
+    assert "⚙️ Iniciando atualização" in block
+    assert "📦 Atualização na fila" in block
+
+
+def test_update_presence_and_short_user_notice_are_connected_to_runtime_state() -> None:
+    bot_source = BOT.read_text(encoding="utf-8")
+    presence_source = (ROOT / "utility" / "application_presence.py").read_text(encoding="utf-8")
+
+    assert '"candidates" / "runtime-state.json"' in bot_source
+    assert '"⚠️ Atualização em andamento. A resposta pode demorar."' in bot_source
+    assert "UPDATE_NOTICE_COOLDOWN_SECONDS" in bot_source
+    assert 'self._build_custom_activity("Atualizando")' in presence_source
+    assert "discord.Status.idle" in presence_source
+    assert "heartbeat_epoch" in presence_source
+    assert "APPLICATION_PRESENCE_UPDATE_STALE_SECONDS" in presence_source
+
+
+def test_updater_service_has_lower_cpu_and_io_priority() -> None:
+    for path in (
+        ROOT / "deploy" / "systemd" / "tts-bot-updater.service",
+        ROOT / "deploy" / "systemd" / "vps" / "tts-bot-updater.service",
+    ):
+        text = path.read_text(encoding="utf-8")
+        assert "Nice=10" in text
+        assert "CPUWeight=20" in text
+        assert "IOWeight=20" in text
