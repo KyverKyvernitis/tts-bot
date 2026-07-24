@@ -1904,6 +1904,43 @@ def _apk_build_effectively_published(apk: dict[str, Any]) -> tuple[bool, str]:
     return True, label
 
 
+def _automation_failure_hint(item: dict[str, Any]) -> str:
+    detail = _shorten(_redact(item.get("last_failure_detail") or item.get("error") or ""), limit=72)
+    if not detail:
+        return ""
+    detail = re.sub(r"^(RuntimeError|ValueError|FileNotFoundError|Exception):\s*", "", detail, flags=re.IGNORECASE)
+    return detail
+
+
+def _dedupe_automation_parts(parts: list[str]) -> list[str]:
+    """Mantém um único estado por pipeline e evita o APK aparecer duas vezes."""
+    selected: dict[str, tuple[int, int, str]] = {}
+    order: list[str] = []
+    for index, raw in enumerate(parts):
+        value = re.sub(r"\s+", " ", str(raw or "")).strip(" ·")
+        if not value:
+            continue
+        prefix = value.split(":", 1)[0].strip().lower() if ":" in value else value.lower()
+        key = prefix if prefix in {"apk", "worker", "push"} else value.lower()
+        lowered = value.lower()
+        priority = 0
+        if any(token in lowered for token in ("falhou", "erro", "correção necessária")):
+            priority = 4
+        elif any(token in lowered for token in ("em andamento", "na fila", "publicação pendente")):
+            priority = 3
+        elif "pendente" in lowered:
+            priority = 2
+        elif any(token in lowered for token in ("publicado", "em dia", "ativo")):
+            priority = 1
+        previous = selected.get(key)
+        if previous is None:
+            selected[key] = (priority, index, value)
+            order.append(key)
+        elif priority > previous[0] or (priority == previous[0] and len(value) > len(previous[2])):
+            selected[key] = (priority, previous[1], value)
+    return [selected[key][2] for key in sorted(order, key=lambda item: selected[item][1])]
+
+
 def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None) -> str:
     """Resumo curto e humano do pipeline agent/APK para o painel.
 
@@ -1938,7 +1975,8 @@ def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None
                     extra = " · correção necessária"
                 else:
                     extra = f" · retry em {int(retry)}s" if retry else ""
-                parts.append(f"APK: build falhou ({apk.get('versionName') or '?'}){extra}")
+                hint = _automation_failure_hint(apk)
+                parts.append(f"APK: {apk.get('versionName') or '?'} falhou{extra}{f' · {hint}' if hint else ''}")
             else:
                 parts.append(f"APK: build pendente ({apk.get('versionName') or '?'})")
     if not parts:
@@ -1963,7 +2001,8 @@ def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None
                     parts.append(f"APK: publicado {label or apk.get('versionName') or '?'}")
                 elif apk.get("blocked_by_recent_failure") or (apk.get("ok") is False and not apk.get("pending")):
                     suffix = " · correção necessária" if apk.get("permanent_failure") else ""
-                    parts.append(f"APK: build falhou ({apk.get('versionName') or '?'}){suffix}")
+                    hint = _automation_failure_hint(apk)
+                    parts.append(f"APK: {apk.get('versionName') or '?'} falhou{suffix}{f' · {hint}' if hint else ''}")
                 elif apk.get("job"):
                     parts.append(f"APK: build em andamento ({apk.get('versionName') or '?'})")
                 else:
@@ -1981,7 +2020,8 @@ def _automation_status_text(snapshot_workers: list[dict[str, Any]] | None = None
         push = ""
     if push and "aguardando APK" not in push:
         parts.append(push)
-    return " · ".join(parts[:5]) if parts else "tudo em dia"
+    parts = _dedupe_automation_parts(parts)
+    return " · ".join(parts[:3]) if parts else "tudo em dia"
 
 def _worker_wake_tokens(worker: dict[str, Any]) -> set[str]:
     tokens: set[str] = set()
@@ -2441,14 +2481,15 @@ class WorkerSnapshot:
     def state_label(self) -> str:
         registered_online = int(((self.registry_snapshot or {}).get("summary") or {}).get("online") or 0)
         if registered_online > 0:
-            return f"🟢 {registered_online} worker(s) online"
+            noun = "celular" if registered_online == 1 else "celulares"
+            return f"🟢 **Operacional** · {registered_online} {noun} online"
         if self.online:
-            return "🟢 phone-worker online"
+            return "🟢 **Operacional** · runtime direto online"
         if not self.enabled:
-            return "⚫ phone-worker desativado"
+            return "⚫ **Desativado**"
         if not self.configured:
-            return "🟠 phone-worker incompleto"
-        return "🔴 nenhum worker online"
+            return "🟠 **Configuração incompleta**"
+        return "🔴 **Offline** · nenhum celular disponível"
 
     @property
     def accent(self) -> discord.Color:
@@ -3018,29 +3059,23 @@ class WorkersPanelView(discord.ui.LayoutView):
         registered = int((summary or {}).get('registered') or 0)
         online = int((summary or {}).get('online') or 0)
         pairings = int((summary or {}).get('pairings_active') or 0)
-        if registered <= 0:
-            workers_label = "APK direto online" if snapshot.online else "nenhum celular pareado"
-        else:
-            workers_label = f"{online}/{registered} online"
-        if pairings:
-            workers_label += f" · {pairings} código(s) ativo(s)"
-        queue_label = "sem tarefas na fila"
+        queue_label = "livre"
         if queued or running:
-            queue_label = f"{queued} pendente(s) · {running} rodando"
+            queue_label = f"{queued} na fila · {running} em execução"
             if queued and not online and not self._has_legacy_worker():
                 queue_label += " · sem celular online"
         registry_workers = []
         if isinstance(snapshot.registry_snapshot, dict):
             registry_workers = [w for w in (snapshot.registry_snapshot.get("workers") or []) if isinstance(w, dict)]
-        automation_label = _shorten(_automation_status_text(registry_workers), limit=140)
+        automation_label = _shorten(_automation_status_text(registry_workers), limit=190)
         if snapshot.registry_error:
-            automation_label = _shorten(f"{automation_label} · registry: {snapshot.registry_error}", limit=140)
+            automation_label = _shorten(f"{automation_label} · registry: {snapshot.registry_error}", limit=190)
+        pairing_note = f" · {pairings} código{'s' if pairings != 1 else ''} de pareamento ativo{'s' if pairings != 1 else ''}" if pairings else ""
         header = discord.ui.TextDisplay(
             "# 📱 Core Workers\n"
-            f"**Estado:** {snapshot.state_label}\n"
-            f"**Celulares:** {workers_label}\n"
+            f"{snapshot.state_label}{pairing_note}\n"
             f"**Fila:** {queue_label}\n"
-            f"-# Atualizações: {automation_label}"
+            f"**Atualização:** {automation_label}"
         )
 
 
@@ -3049,7 +3084,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         action_select = None
         if worker_options:
             worker_select = self._new_select(
-                placeholder="Escolha um celular",
+                placeholder="Selecionar celular",
                 min_values=1,
                 max_values=1,
                 options=worker_options,
@@ -3059,7 +3094,7 @@ class WorkersPanelView(discord.ui.LayoutView):
 
             action_options = self._action_select_options()
             action_disabled = bool(action_options and str(action_options[0].value) == "_unsupported")
-            action_placeholder = "Ações do celular" if not action_disabled else "Sem ações disponíveis"
+            action_placeholder = "Escolher ação" if not action_disabled else "Sem ações disponíveis"
             action_select = self._new_select(
                 placeholder=action_placeholder,
                 min_values=1,
@@ -3072,7 +3107,7 @@ class WorkersPanelView(discord.ui.LayoutView):
         refresh = discord.ui.Button(label="Atualizar", emoji="🔄", style=discord.ButtonStyle.primary)
         refresh.callback = self._refresh_panel
 
-        pairing = discord.ui.Button(label="Adicionar celular", emoji="🔐", style=discord.ButtonStyle.success)
+        pairing = discord.ui.Button(label="Parear celular", emoji="🔐", style=discord.ButtonStyle.success)
         pairing.callback = self._create_pairing
 
         wake = discord.ui.Button(
@@ -3082,9 +3117,6 @@ class WorkersPanelView(discord.ui.LayoutView):
             disabled=not snapshot.configured,
         )
         wake.callback = self._wake_worker
-
-        cleanup_jobs = discord.ui.Button(label="Limpar jobs", emoji="🧹", style=discord.ButtonStyle.secondary)
-        cleanup_jobs.callback = self._cleanup_jobs
 
         components: list[Any] = [
             header,
@@ -3097,9 +3129,9 @@ class WorkersPanelView(discord.ui.LayoutView):
                 discord.ui.ActionRow(worker_select),
                 discord.ui.ActionRow(action_select),
             ])
-            components.append(discord.ui.ActionRow(refresh, pairing, cleanup_jobs))
+            components.append(discord.ui.ActionRow(refresh, pairing))
         else:
-            components.append(discord.ui.ActionRow(refresh, pairing, cleanup_jobs))
+            components.append(discord.ui.ActionRow(refresh, pairing))
         if not CORE_WORKER_APK_REPLACES_TERMUX and not _snapshot_has_online_worker(snapshot):
             components.append(discord.ui.ActionRow(wake))
         container = discord.ui.Container(*components, accent_color=snapshot.accent)
@@ -3135,25 +3167,27 @@ class WorkersPanelView(discord.ui.LayoutView):
             seen = _format_age(worker.get("last_seen_age_seconds"))
             version = _agent_version_label(worker.get("version"))
             ready = "online" if worker.get("online") and not _worker_stale_note(worker) else ("sem resposta recente" if worker.get("online") else "offline")
-            lines.append(f"{icon} **{name}**")
+            lines[0] = f"## {icon} {name}"
             stale_note = _worker_stale_note(worker)
             if stale_note:
                 lines.append(f"-# {stale_note}")
-            lines.append(f"-# {ready} · visto {seen} · versão `{version}` · perfil {_worker_profile_label(worker)}")
-            lines.append(f"-# {_battery_text(worker)} · {_simple_network_text(worker)}")
+            lines.append(f"**Status:** {ready} · visto {seen}")
+            lines.append(f"**Runtime:** `{version}` · {_worker_profile_label(worker)}")
+            lines.append(f"**Aparelho:** {_battery_text(worker)} · {_simple_network_text(worker)}")
             queue_text = _queue_status_text(worker)
             if queue_text:
-                lines.append(f"-# Fila: {queue_text}")
+                lines.append(f"**Fila:** {queue_text}")
             push = _core_worker_push_status_text(str(worker.get("worker_id") or ""))
-            if push:
+            if push and not push.lower().startswith("apk:"):
                 lines.append(f"-# {push}")
-            lines.append("-# O restante fica em **Detalhes do celular** para não poluir o painel.")
+            lines.append("-# Diagnóstico completo em **Detalhes do celular**.")
         elif self._selected_is_legacy():
             version = _shorten((snapshot.status or {}).get("version") or "sem versão", limit=24)
-            lines.append(f"🟢 **{_shorten(snapshot.name or 'phone-worker direto', limit=36)}**")
+            lines[0] = f"## 🟢 {_shorten(snapshot.name or 'phone-worker direto', limit=36)}"
             status = snapshot.status if isinstance(snapshot.status, dict) else {}
-            lines.append(f"-# direto online · versão `{version}` · {_script_health_label({'status': status})}")
-            lines.append("-# O restante fica em **Detalhes do celular** para não poluir o painel.")
+            lines.append("**Status:** online direto")
+            lines.append(f"**Runtime:** `{version}` · {_script_health_label({'status': status})}")
+            lines.append("-# Diagnóstico completo em **Detalhes do celular**.")
         elif workers:
             lines.append("Selecione um worker.")
         elif snapshot.configured:

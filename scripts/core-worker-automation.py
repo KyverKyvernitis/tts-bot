@@ -906,6 +906,13 @@ def _apk_build_failure_detail(job: dict[str, Any]) -> str:
 
 
 def _apk_build_failure_is_permanent(job: dict[str, Any]) -> bool:
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    if result.get("permanent_failure") is True:
+        return True
+    if result.get("retryable") is False and str(result.get("stage") or "").strip():
+        # Falha determinística para esta mesma fonte/toolchain. Uma alteração de
+        # código ou retry manual após correção continua podendo gerar outro job.
+        return True
     detail = _apk_build_failure_detail(job)
     return bool(detail and _APK_BUILD_PERMANENT_ERROR_RE.search(detail))
 
@@ -1091,6 +1098,111 @@ def _queue_apk_publish_last_from_build(found: dict[str, Any], *, version_name: s
     _save_pending(pending)
     return {"ok": True, "pending": True, "versionName": version_name, "versionCode": version_code, "job": result.get("job"), "message": "republicação do APK enfileirada"}
 
+def _registry_job_by_id(job_id: str) -> dict[str, Any]:
+    clean = str(job_id or "").strip()
+    if not clean:
+        return {}
+    try:
+        raw = _registry_raw()
+        jobs = raw.get("jobs") if isinstance(raw.get("jobs"), dict) else {}
+        job = jobs.get(clean)
+        return job if isinstance(job, dict) else {}
+    except Exception:
+        return {}
+
+
+def _reconcile_apk_build_pending_job(
+    pending: dict[str, Any],
+    *,
+    version_name: str,
+    version_code: int,
+    source_fingerprint: str,
+) -> dict[str, Any]:
+    """Converte o estado visual pendente no estado real do último job.
+
+    O painel não pode continuar exibindo "aguardando worker" depois que o registry
+    já marcou o build como failed/succeeded. A reconciliação ocorre antes dos
+    cooldowns para uma falha encerrada nunca parecer job ativo.
+    """
+    item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
+    job_id = str(item.get("last_job_id") or "").strip()
+    job = _registry_job_by_id(job_id)
+    if not job or not _apk_build_job_matches_source(job, version_name, source_fingerprint):
+        return item
+    status = str(job.get("status") or "").strip().lower()
+    item["job_status"] = status
+    item["last_job_id"] = str(job.get("job_id") or job_id)
+    item["last_job_updated_at"] = float(job.get("updated_at") or job.get("finished_at") or job.get("created_at") or 0.0)
+    item.pop("blocked_by_recent_queue", None)
+
+    if status in {"queued", "running"}:
+        item.update({
+            "ok": True,
+            "pending": True,
+            "phase": "running" if status == "running" else "queued",
+            "message": "build do APK em execução no worker builder" if status == "running" else "build do APK na fila do worker builder",
+            "updated_at": time.time(),
+        })
+        item.pop("blocked_by_recent_failure", None)
+        item.pop("last_failure_detail", None)
+        item.pop("permanent_failure", None)
+        item.pop("retry_after_seconds", None)
+        item.pop("error", None)
+        return item
+
+    if status == "failed":
+        detail = _short(_apk_build_failure_detail(job), 360)
+        updated = float(job.get("updated_at") or job.get("finished_at") or job.get("created_at") or time.time())
+        cooldown = max(60, int(os.getenv("CORE_WORKER_APK_BUILD_FAILURE_COOLDOWN_SECONDS", "1800") or 1800))
+        retry_after = max(0, int(cooldown - max(0.0, time.time() - updated)))
+        item.update({
+            "ok": False,
+            "pending": False,
+            "phase": "failed",
+            "blocked_by_recent_failure": True,
+            "last_failed_job_id": str(job.get("job_id") or job_id),
+            "last_failure_detail": detail,
+            "error": detail,
+            "permanent_failure": _apk_build_failure_is_permanent(job),
+            "retry_after_seconds": retry_after,
+            "message": "build do APK falhou no worker; veja o detalhe e use retry manual após a correção",
+            "updated_at": time.time(),
+        })
+        return item
+
+    if status == "succeeded":
+        if _latest_apk_matches(version_code, source_fingerprint):
+            pending.pop("apk_build", None)
+            _save_pending(pending)
+            return {}
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        publish_ok = result.get("publish_ok") is True
+        item.update({
+            "ok": True,
+            "pending": not publish_ok,
+            "phase": "published" if publish_ok else "publish_pending",
+            "message": "APK compilado e publicado" if publish_ok else "APK compilado; publicação na VPS ainda pendente",
+            "updated_at": time.time(),
+        })
+        item.pop("blocked_by_recent_failure", None)
+        item.pop("last_failure_detail", None)
+        item.pop("permanent_failure", None)
+        item.pop("retry_after_seconds", None)
+        item.pop("error", None)
+        return item
+
+    if status in {"cancelled", "expired"}:
+        item.update({
+            "ok": False,
+            "pending": False,
+            "phase": status,
+            "error": f"job de build {status}",
+            "message": f"build do APK {status}; use retry manual",
+            "updated_at": time.time(),
+        })
+    return item
+
+
 def _pending_apk_build_recently_queued(pending: dict[str, Any], version_code: int, source_fingerprint: str, *, cooldown_seconds: int | None = None) -> dict[str, Any]:
     item = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
     if not item:
@@ -1100,6 +1212,10 @@ def _pending_apk_build_recently_queued(pending: dict[str, Any], version_code: in
     last_code = int(item.get("last_queued_versionCode") or item.get("versionCode") or 0)
     last_at = float(item.get("last_queued_at") or 0)
     if not last_at or last_fp != str(source_fingerprint or "") or last_code != int(version_code or 0):
+        return {}
+    last_job = _registry_job_by_id(str(item.get("last_job_id") or ""))
+    last_status = str(last_job.get("status") or "").strip().lower() if last_job else ""
+    if last_status in {"failed", "succeeded", "cancelled", "expired"}:
         return {}
     age = time.time() - last_at
     if age < cooldown:
@@ -1183,6 +1299,14 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
             if key in previous_apk_pending:
                 pending_item[key] = previous_apk_pending[key]
     pending["apk_build"] = pending_item
+    reconciled = _reconcile_apk_build_pending_job(
+        pending,
+        version_name=version_name,
+        version_code=version_code,
+        source_fingerprint=source_fingerprint,
+    )
+    if reconciled:
+        pending["apk_build"] = reconciled
     _save_pending(pending)
 
     if not _apk_needs_build(version_code, source_fingerprint):
@@ -1241,7 +1365,17 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
         _save_pending(pending)
         return item
     if _active_job_exists(job_type="apk_build_debug", summary_contains=version_name):
-        return {"ok": True, "versionName": version_name, "versionCode": version_code, "pending": True, "message": "build do APK já está na fila"}
+        item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
+        item.update({
+            "ok": True,
+            "pending": True,
+            "phase": "queued",
+            "updated_at": time.time(),
+            "message": "build do APK já está na fila ou em execução",
+        })
+        pending["apk_build"] = item
+        _save_pending(pending)
+        return item
     try:
         result = registry.create_job(
             job_type="apk_build_debug",
@@ -1273,9 +1407,11 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
         item = pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {}
         item.update({
             "ok": False,
+            "pending": False,
+            "phase": "enqueue_blocked",
             "error": f"{type(exc).__name__}: {exc}",
             "updated_at": time.time(),
-            "message": "build do APK pendente; nenhum worker apk-builder online compatível agora",
+            "message": "build do APK não foi enfileirado; nenhum worker apk-builder online compatível agora",
         })
         pending["apk_build"] = item
         _save_pending(pending)

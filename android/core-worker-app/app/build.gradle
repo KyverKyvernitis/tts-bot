@@ -63,8 +63,8 @@ android {
         // apps target 29+, então esta variante operacional permanece em target 28.
         // compileSdk continua moderno e a distribuição não ocorre pelo Google Play.
         targetSdk coreWorkerSelfBuilderTargetSdk
-        versionCode 120
-        versionName "0.7.2"
+        versionCode 121
+        versionName "0.7.3"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -342,6 +342,16 @@ tasks.register("verifyCoreWorkerSelfBuilderToolchain") {
             def parsed = new groovy.json.JsonSlurper().parse(archive.getInputStream(manifestEntry))
             if (parsed?.schema != "core-worker-android-builder-v1") {
                 throw new GradleException("schema inválido no toolchain de autobuild")
+            }
+            def manifestVersion = (parsed?.version ?: 0) as int
+            if (manifestVersion < 3) {
+                throw new GradleException("toolchain antigo: regenere o bundle mínimo DT_NEEDED v3")
+            }
+            if (parsed?.runtimeLibraries?.strategy != "dt-needed-transitive-v1") {
+                throw new GradleException("estratégia de bibliotecas inválida no toolchain de autobuild")
+            }
+            if (parsed?.bootstrapSmoke?.ok != true) {
+                throw new GradleException("smoke bootstrap ausente ou reprovado no toolchain de autobuild")
             }
             def arch = (parsed?.arch ?: "").toString().toLowerCase()
             if (!(arch in ["aarch64", "arm64", "arm64-v8a"])) {

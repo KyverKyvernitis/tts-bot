@@ -63,7 +63,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.34"
+PHONE_WORKER_VERSION = "1.10.35"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -7542,6 +7542,18 @@ def _apk_self_builder_bundle_valid(path: Path) -> dict[str, Any]:
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
             if not isinstance(manifest, dict) or manifest.get("schema") != "core-worker-android-builder-v1":
                 raise ValueError("schema inválido")
+            try:
+                manifest_version = int(manifest.get("version") or 0)
+            except Exception:
+                manifest_version = 0
+            if manifest_version < 3:
+                raise ValueError("bundle antigo: regenere com coleta mínima DT_NEEDED v3")
+            runtime_libraries = manifest.get("runtimeLibraries") if isinstance(manifest.get("runtimeLibraries"), dict) else {}
+            if runtime_libraries.get("strategy") != "dt-needed-transitive-v1":
+                raise ValueError("estratégia de bibliotecas do autobuilder inválida")
+            bootstrap_smoke = manifest.get("bootstrapSmoke") if isinstance(manifest.get("bootstrapSmoke"), dict) else {}
+            if bootstrap_smoke.get("ok") is not True:
+                raise ValueError("smoke bootstrap do autobuilder ausente ou reprovado")
             arch = str(manifest.get("arch") or "").strip().lower()
             if arch not in {"aarch64", "arm64", "arm64-v8a"}:
                 raise ValueError("arquitetura inválida")
@@ -7685,6 +7697,522 @@ def _zip_directory_deterministic(source: Path, target: Path) -> dict[str, Any]:
     return {"entries": entries, "expandedBytes": expanded, "bytes": target.stat().st_size, "sha256": _sha256_path(target)}
 
 
+
+_TERMUX_ANDROID_SYSTEM_LIBRARIES = frozenset({
+    "libandroid.so",
+    "libbinder_ndk.so",
+    "libc.so",
+    "libdl.so",
+    "libEGL.so",
+    "libGLESv2.so",
+    "libjnigraphics.so",
+    "liblog.so",
+    "libm.so",
+    "libmediandk.so",
+    "libnativewindow.so",
+    "libOpenSLES.so",
+    "libstdc++.so",
+    "libsync.so",
+    "libvulkan.so",
+    "libz.so",
+})
+_ELF_NEEDED_RE = re.compile(r"\(NEEDED\).*?\[([^\]]+)\]")
+_ELF_SONAME_RE = re.compile(r"\(SONAME\).*?\[([^\]]+)\]")
+
+
+def _elf_header(path: Path) -> dict[str, Any]:
+    try:
+        raw = path.read_bytes()[:64]
+    except Exception:
+        return {"ok": False, "aarch64": False}
+    if len(raw) < 20 or raw[:4] != b"\x7fELF":
+        return {"ok": False, "aarch64": False}
+    endian = "little" if raw[5] == 1 else "big"
+    try:
+        machine = int.from_bytes(raw[18:20], endian)
+    except Exception:
+        machine = -1
+    return {
+        "ok": True,
+        "class": int(raw[4]),
+        "machine": machine,
+        "aarch64": int(raw[4]) == 2 and machine == 183,
+    }
+
+
+def _find_elf_inspector(env: dict[str, str]) -> list[str]:
+    configured = str(env.get("PHONE_WORKER_ELF_INSPECTOR") or os.getenv("PHONE_WORKER_ELF_INSPECTOR") or "").strip()
+    candidates: list[list[str]] = []
+    if configured:
+        candidates.append(shlex.split(configured))
+    path_value = env.get("PATH") or os.getenv("PATH")
+    for name in ("readelf", "llvm-readelf"):
+        found = shutil.which(name, path=path_value) or shutil.which(name)
+        if found:
+            candidates.append([found])
+    for candidate in candidates:
+        try:
+            completed = subprocess.run(
+                [*candidate, "--version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+            if completed.returncode == 0:
+                return candidate
+        except Exception:
+            continue
+    # O bootstrap não deve depender de um pacote adicional do Termux. Quando
+    # readelf não estiver instalado, o parser ELF64 abaixo lê DT_NEEDED/SONAME
+    # diretamente com a biblioteca padrão do Python.
+    return []
+
+
+def _read_elf_dynamic_python(path: Path) -> dict[str, Any]:
+    import struct
+
+    header = _elf_header(path)
+    if not header.get("aarch64"):
+        return {"ok": False, "needed": [], "soname": "", "error": "não é ELF64 AArch64"}
+    try:
+        with path.open("rb") as handle:
+            ident = handle.read(16)
+            if len(ident) != 16 or ident[:4] != b"\x7fELF" or ident[4] != 2:
+                raise ValueError("cabeçalho ELF64 inválido")
+            endian = "<" if ident[5] == 1 else ">" if ident[5] == 2 else ""
+            if not endian:
+                raise ValueError("endianness ELF inválida")
+            rest = handle.read(48)
+            if len(rest) != 48:
+                raise ValueError("cabeçalho ELF truncado")
+            values = struct.unpack(endian + "HHIQQQIHHHHHH", rest)
+            phoff = int(values[4])
+            phentsize = int(values[8])
+            phnum = int(values[9])
+            if phentsize < 56 or phnum <= 0 or phnum > 4096:
+                raise ValueError("tabela de program headers inválida")
+
+            loads: list[tuple[int, int, int, int]] = []
+            dynamic: tuple[int, int] | None = None
+            for index in range(phnum):
+                handle.seek(phoff + index * phentsize)
+                raw = handle.read(56)
+                if len(raw) != 56:
+                    raise ValueError("program header truncado")
+                p_type, _flags, p_offset, p_vaddr, _paddr, p_filesz, p_memsz, _align = struct.unpack(
+                    endian + "IIQQQQQQ", raw
+                )
+                if p_type == 1:  # PT_LOAD
+                    loads.append((int(p_vaddr), int(p_memsz), int(p_offset), int(p_filesz)))
+                elif p_type == 2:  # PT_DYNAMIC
+                    dynamic = (int(p_offset), int(p_filesz))
+            if dynamic is None:
+                return {"ok": True, "needed": [], "soname": "", "inspector": "python-elf64-dynamic-v1"}
+
+            dynamic_offset, dynamic_size = dynamic
+            if dynamic_size <= 0 or dynamic_size > 64 * 1024 * 1024:
+                raise ValueError("seção dinâmica ELF inválida")
+            handle.seek(dynamic_offset)
+            raw_dynamic = handle.read(dynamic_size)
+            if len(raw_dynamic) != dynamic_size:
+                raise ValueError("seção dinâmica ELF truncada")
+
+            needed_offsets: list[int] = []
+            soname_offset: int | None = None
+            string_vaddr: int | None = None
+            string_size = 0
+            entry_size = 16
+            for offset in range(0, len(raw_dynamic) - entry_size + 1, entry_size):
+                tag, value = struct.unpack_from(endian + "qQ", raw_dynamic, offset)
+                if tag == 0:  # DT_NULL
+                    break
+                if tag == 1:  # DT_NEEDED
+                    needed_offsets.append(int(value))
+                elif tag == 5:  # DT_STRTAB
+                    string_vaddr = int(value)
+                elif tag == 10:  # DT_STRSZ
+                    string_size = int(value)
+                elif tag == 14:  # DT_SONAME
+                    soname_offset = int(value)
+            if string_vaddr is None:
+                raise ValueError("DT_STRTAB ausente")
+
+            string_file_offset: int | None = None
+            for vaddr, memsz, file_offset, filesz in loads:
+                if vaddr <= string_vaddr < vaddr + memsz:
+                    delta = string_vaddr - vaddr
+                    if delta >= filesz:
+                        continue
+                    string_file_offset = file_offset + delta
+                    break
+            if string_file_offset is None:
+                raise ValueError("DT_STRTAB não pertence a segmento carregável")
+            if string_size <= 0:
+                string_size = 16 * 1024 * 1024
+            string_size = min(string_size, 16 * 1024 * 1024)
+            handle.seek(string_file_offset)
+            string_table = handle.read(string_size)
+            if not string_table:
+                raise ValueError("tabela de strings ELF vazia")
+
+            def read_string(offset: int | None) -> str:
+                if offset is None or offset < 0 or offset >= len(string_table):
+                    return ""
+                end = string_table.find(b"\0", offset)
+                if end < 0:
+                    end = len(string_table)
+                return string_table[offset:end].decode("utf-8", errors="replace").strip()
+
+            needed: list[str] = []
+            for offset in needed_offsets:
+                value = read_string(offset)
+                if value and value not in needed:
+                    needed.append(value)
+            return {
+                "ok": True,
+                "needed": needed,
+                "soname": read_string(soname_offset),
+                "inspector": "python-elf64-dynamic-v1",
+            }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "needed": [],
+            "soname": "",
+            "error": f"{type(exc).__name__}: {_short_text(exc, limit=220)}",
+        }
+
+
+def _read_elf_dynamic(path: Path, inspector: list[str]) -> dict[str, Any]:
+    if not inspector:
+        return _read_elf_dynamic_python(path)
+    if not _elf_header(path).get("aarch64"):
+        return {"ok": False, "needed": [], "soname": "", "error": "não é ELF64 AArch64"}
+    last_error = ""
+    for flags in (("-dW",), ("-d",)):
+        try:
+            completed = subprocess.run(
+                [*inspector, *flags, str(path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                timeout=20,
+                check=False,
+            )
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {_short_text(exc, limit=180)}"
+            continue
+        output = completed.stdout or ""
+        if completed.returncode != 0:
+            last_error = _short_text(output, limit=240) or f"readelf rc={completed.returncode}"
+            continue
+        needed = []
+        for value in _ELF_NEEDED_RE.findall(output):
+            clean = str(value or "").strip()
+            if clean and clean not in needed:
+                needed.append(clean)
+        soname_match = _ELF_SONAME_RE.search(output)
+        return {
+            "ok": True,
+            "needed": needed,
+            "soname": str(soname_match.group(1) if soname_match else "").strip(),
+            "inspector": " ".join(inspector),
+        }
+    fallback = _read_elf_dynamic_python(path)
+    if fallback.get("ok"):
+        return fallback
+    return {
+        "ok": False,
+        "needed": [],
+        "soname": "",
+        "error": last_error or fallback.get("error") or "falha lendo seção dinâmica ELF",
+    }
+
+
+def _elf_index(roots: list[Path], *, max_files: int = 30_000) -> dict[str, list[Path]]:
+    """Indexa bibliotecas ELF por SONAME esperado sem varrer arquivos irrelevantes.
+
+    O diretório ``$PREFIX/lib`` também contém Python, pkgconfig, fontes e outros
+    milhares de arquivos. Priorizar ``*.so*`` evita atingir o limite antes das
+    bibliotecas de topo que realmente podem aparecer em ``DT_NEEDED``.
+    """
+    index: dict[str, list[Path]] = {}
+    seen_paths: set[str] = set()
+    scanned = 0
+    for root in roots:
+        if not root.is_dir():
+            continue
+        candidates: list[Path] = []
+        try:
+            candidates.extend(sorted(root.glob("*.so*")))
+            candidates.extend(sorted(root.rglob("*.so*")))
+        except Exception:
+            continue
+        for path in candidates:
+            if scanned >= max_files:
+                raise ValueError(f"índice ELF excedeu {max_files} bibliotecas candidatas em {root}")
+            try:
+                if not path.is_file():
+                    continue
+            except OSError:
+                continue
+            key = str(path.absolute())
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            scanned += 1
+            if not _elf_header(path).get("aarch64"):
+                continue
+            index.setdefault(path.name, []).append(path)
+    for values in index.values():
+        values.sort(key=lambda item: (len(item.parts), len(str(item)), str(item)))
+    return index
+
+
+def _required_jdk_elf_seeds(jdk_home: Path) -> list[Path]:
+    """Retorna todos os ELF AArch64 do JDK, com binários essenciais primeiro.
+
+    O JDK carrega algumas bibliotecas por ``dlopen`` somente durante compilação
+    (fontes, ZIP, NIO, instrumentação etc.). Inspecionar apenas ``java`` e
+    ``javac`` passaria no smoke de versão, mas poderia falhar no primeiro
+    ``assembleDebug``. Ainda assim, o escopo permanece mínimo: auditamos apenas
+    arquivos nativos dentro do JDK efetivamente empacotado, nunca todo PREFIX/lib.
+    """
+    required = tuple(jdk_home / f"bin/{name}" for name in ("java", "javac", "jar"))
+    for path in required:
+        if not path.is_file():
+            raise FileNotFoundError(f"arquivo obrigatório ausente no JDK do self-builder: {path}")
+
+    seeds: list[Path] = []
+    seen: set[str] = set()
+
+    def add(candidate: Path) -> None:
+        if not candidate.is_file() or not _elf_header(candidate).get("aarch64"):
+            return
+        try:
+            key = str(candidate.resolve())
+        except Exception:
+            key = str(candidate.absolute())
+        if key in seen:
+            return
+        seen.add(key)
+        seeds.append(candidate)
+
+    for path in required:
+        add(path)
+    scanned = 0
+    for candidate in sorted(jdk_home.rglob("*")):
+        if scanned >= 12_000:
+            raise ValueError("JDK do self-builder contém arquivos demais para auditoria ELF segura")
+        try:
+            if not candidate.is_file():
+                continue
+        except OSError:
+            continue
+        scanned += 1
+        add(candidate)
+
+    if not seeds:
+        raise ValueError("JDK encontrado, mas nenhum executável ELF64 AArch64 foi detectado")
+    return seeds
+
+
+def _collect_minimal_termux_runtime_libraries(
+    *,
+    jdk_home: Path,
+    aapt2_path: Path,
+    prefix: Path,
+    target: Path,
+    env: dict[str, str],
+) -> dict[str, Any]:
+    """Copia apenas dependências DT_NEEDED externas do JDK/aapt2.
+
+    A implementação anterior copiava todo o ``$PREFIX/lib``. Além de incluir LLVM,
+    FFmpeg, Python e bibliotecas de outros pacotes, links simbólicos podiam duplicar
+    o mesmo arquivo. O self-builder precisa somente das dependências transitivas dos
+    executáveis que realmente roda.
+    """
+    inspector = _find_elf_inspector(env)
+    internal_index = _elf_index([jdk_home], max_files=12_000)
+    external_roots = [prefix / "lib", prefix / "lib64"]
+    external_index = _elf_index(external_roots, max_files=30_000)
+    target.mkdir(parents=True, exist_ok=True)
+
+    seeds = _required_jdk_elf_seeds(jdk_home)
+    if not aapt2_path.is_file() or not _elf_header(aapt2_path).get("aarch64"):
+        raise ValueError("aapt2 do bootstrap não é ELF64 AArch64 válido")
+    seeds.append(aapt2_path)
+
+    queue: list[tuple[Path, str]] = [(path, "seed") for path in seeds]
+    visited_files: set[str] = set()
+    copied_names: dict[str, Path] = {}
+    dependency_parents: dict[str, set[str]] = {}
+    system_provided: set[str] = set()
+    inspect_errors: list[str] = []
+
+    while queue:
+        current, origin = queue.pop(0)
+        try:
+            canonical = current.resolve()
+        except Exception:
+            canonical = current.absolute()
+        visit_key = str(canonical)
+        if visit_key in visited_files:
+            continue
+        visited_files.add(visit_key)
+        dynamic = _read_elf_dynamic(current, inspector)
+        if not dynamic.get("ok"):
+            inspect_errors.append(f"{current.name}: {dynamic.get('error') or 'falha ELF'}")
+            continue
+        for needed in dynamic.get("needed") or []:
+            name = str(needed or "").strip()
+            if not name or "/" in name or "\\" in name:
+                continue
+            dependency_parents.setdefault(name, set()).add(current.name)
+            internal_candidates = internal_index.get(name) or []
+            if internal_candidates:
+                queue.append((internal_candidates[0], "jdk"))
+                continue
+            external_candidates = external_index.get(name) or []
+            if external_candidates:
+                source = external_candidates[0]
+                if name not in copied_names:
+                    resolved = source.resolve()
+                    destination = target / name
+                    shutil.copy2(resolved, destination)
+                    destination.chmod(0o644)
+                    copied_names[name] = resolved
+                queue.append((source, "termux-lib"))
+                continue
+            if name in _TERMUX_ANDROID_SYSTEM_LIBRARIES:
+                system_provided.add(name)
+                continue
+
+    unresolved = sorted(
+        name for name in dependency_parents
+        if name not in copied_names
+        and name not in system_provided
+        and not (internal_index.get(name) or [])
+    )
+    if inspect_errors:
+        raise ValueError("não consegui auditar todas as dependências ELF do self-builder: " + "; ".join(inspect_errors[:5]))
+    if unresolved:
+        detail = ", ".join(
+            f"{name} (usada por {', '.join(sorted(dependency_parents.get(name) or []))})"
+            for name in unresolved[:12]
+        )
+        raise FileNotFoundError("bibliotecas necessárias ao self-builder não foram encontradas no Termux: " + detail)
+
+    copied = []
+    total_bytes = 0
+    for name, source in sorted(copied_names.items()):
+        destination = target / name
+        size = destination.stat().st_size
+        total_bytes += size
+        copied.append({"name": name, "bytes": size, "source": str(source)})
+    max_bytes = max(64 * 1024 * 1024, _env_int("PHONE_WORKER_APK_SELF_BUILDER_RUNTIME_LIB_MAX_BYTES", 384 * 1024 * 1024))
+    if total_bytes > max_bytes:
+        largest = ", ".join(f"{item['name']}={item['bytes'] // (1024 * 1024)}MiB" for item in sorted(copied, key=lambda row: row["bytes"], reverse=True)[:8])
+        raise ValueError(
+            f"dependências mínimas do self-builder excedem {max_bytes // (1024 * 1024)} MiB "
+            f"({total_bytes // (1024 * 1024)} MiB); maiores: {largest}"
+        )
+    return {
+        "strategy": "dt-needed-transitive-v1",
+        "inspector": " ".join(inspector) or "python-elf64-dynamic-v1",
+        "count": len(copied),
+        "bytes": total_bytes,
+        "names": [item["name"] for item in copied],
+        "systemProvided": sorted(system_provided),
+        "seeds": [str(path.relative_to(jdk_home)) if _is_inside_path(path, jdk_home) else path.name for path in seeds],
+        "largest": [
+            {"name": item["name"], "bytes": item["bytes"]}
+            for item in sorted(copied, key=lambda row: row["bytes"], reverse=True)[:12]
+        ],
+        "candidateLibraries": sum(len(values) for values in external_index.values()),
+    }
+
+
+def _is_inside_path(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _smoke_apk_self_builder_bundle(bundle_root: Path) -> dict[str, Any]:
+    if not _env_bool("PHONE_WORKER_APK_SELF_BUILDER_SMOKE", True):
+        return {"ok": True, "skipped": True, "reason": "disabled_by_env"}
+    jdk = bundle_root / "jdk"
+    sdk = bundle_root / "android-sdk"
+    gradle = bundle_root / "gradle/bin/gradle"
+    aapt2 = bundle_root / "bin/aapt2"
+    shell = Path("/system/bin/sh") if Path("/system/bin/sh").is_file() else Path("/bin/sh")
+    runtime = bundle_root.parent / "smoke-runtime"
+    shutil.rmtree(runtime, ignore_errors=True)
+    home = runtime / "home"
+    temp = runtime / "tmp"
+    gradle_home = runtime / "gradle-home"
+    for path in (home, temp, gradle_home):
+        path.mkdir(parents=True, exist_ok=True)
+    library_paths = [
+        bundle_root / "runtime-libs",
+        jdk / "lib",
+        jdk / "lib/server",
+        jdk / "lib/jli",
+    ]
+    clean_env = {
+        "HOME": str(home),
+        "TMPDIR": str(temp),
+        "GRADLE_USER_HOME": str(gradle_home),
+        "JAVA_HOME": str(jdk),
+        "ANDROID_HOME": str(sdk),
+        "ANDROID_SDK_ROOT": str(sdk),
+        "PATH": os.pathsep.join((str(jdk / "bin"), str(sdk / "platform-tools"), "/system/bin", "/system/xbin")),
+        "LD_LIBRARY_PATH": os.pathsep.join(str(path) for path in library_paths if path.is_dir()),
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
+    commands = [
+        ("java", [str(jdk / "bin/java"), "-version"], 60),
+        ("javac", [str(jdk / "bin/javac"), "-version"], 60),
+        ("jar", [str(jdk / "bin/jar"), "--version"], 60),
+        ("gradle", [str(shell), str(gradle), "--version", "--no-daemon"], 120),
+        ("aapt2", [str(aapt2), "version"], 60),
+    ]
+    checks: list[dict[str, Any]] = []
+    try:
+        for name, command, timeout in commands:
+            started = time.time()
+            completed = subprocess.run(
+                command,
+                env=clean_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
+            output = _short_text(completed.stdout, limit=1800)
+            check = {
+                "name": name,
+                "ok": completed.returncode == 0,
+                "returncode": int(completed.returncode),
+                "durationMs": int((time.time() - started) * 1000),
+                "output": output,
+            }
+            checks.append(check)
+            if not check["ok"]:
+                raise RuntimeError(f"smoke {name} falhou (rc={completed.returncode}): {output}")
+        return {"ok": True, "checks": checks}
+    finally:
+        shutil.rmtree(runtime, ignore_errors=True)
+
+
 def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) -> dict[str, Any]:
     """Gera no Termux o bundle que o APK usará nos builds seguintes.
 
@@ -7730,28 +8258,18 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
 
         prefix = Path(env.get("PREFIX") or os.getenv("PREFIX") or "/data/data/com.termux/files/usr")
         runtime_libs = bundle_root / "runtime-libs"
-        runtime_libs.mkdir(parents=True, exist_ok=True)
-        copied_runtime_libs = 0
-        runtime_lib_bytes = 0
-        lib_root = prefix / "lib"
-        if lib_root.is_dir():
-            for source in sorted(lib_root.glob("*.so*")):
-                if not source.is_file():
-                    continue
-                resolved = source.resolve()
-                target = runtime_libs / source.name
-                if target.exists():
-                    continue
-                size = resolved.stat().st_size
-                runtime_lib_bytes += size
-                if runtime_lib_bytes > 768 * 1024 * 1024:
-                    raise ValueError("bibliotecas runtime do Termux excedem 768 MiB")
-                shutil.copy2(resolved, target)
-                copied_runtime_libs += 1
+        runtime_library_report = _collect_minimal_termux_runtime_libraries(
+            jdk_home=jdk_home,
+            aapt2_path=Path(aapt2_cmd),
+            prefix=prefix,
+            target=runtime_libs,
+            env=env,
+        )
+        smoke = _smoke_apk_self_builder_bundle(bundle_root)
 
         manifest = {
             "schema": "core-worker-android-builder-v1",
-            "version": 2,
+            "version": 3,
             "arch": "aarch64",
             "runtime": "termux-bionic-direct",
             "generatedBy": f"phone-worker-{PHONE_WORKER_VERSION}",
@@ -7767,10 +8285,8 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
                 "compileSdk": 34,
                 "buildTools": build_tools.name if build_tools is not None else "",
             },
-            "runtimeLibraries": {
-                "count": copied_runtime_libs,
-                "bytes": runtime_lib_bytes,
-            },
+            "runtimeLibraries": runtime_library_report,
+            "bootstrapSmoke": smoke,
             "safety": {
                 "generatedOnTermux": True,
                 "vpsBuild": False,
@@ -7793,7 +8309,8 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
             "gradle": str(gradle_home),
             "androidSdk": str(sdk_home),
             "aapt2": str(aapt2_cmd),
-            "runtimeLibraries": copied_runtime_libs,
+            "runtimeLibraries": runtime_library_report,
+            "bootstrapSmoke": smoke,
         }
     finally:
         shutil.rmtree(stage_root, ignore_errors=True)
@@ -8810,7 +9327,33 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
             env["CORE_WORKER_VPS_LABEL"] = injected_vps_label
         builder_environment = _prepare_termux_android_build(project_dir, env)
         if bool(payload.get("selfBuilderRequired", True)):
-            builder_environment["self_builder_toolchain"] = _prepare_apk_self_builder_toolchain(project_dir, env)
+            try:
+                builder_environment["self_builder_toolchain"] = _prepare_apk_self_builder_toolchain(project_dir, env)
+            except Exception as exc:
+                preserve_workdir = keep_failed_workdir
+                detail = f"{type(exc).__name__}: {_short_text(exc, limit=360)}"
+                builder_environment["self_builder_toolchain"] = {
+                    "ok": False,
+                    "stage": "self_builder_toolchain_prepare",
+                    "error": detail,
+                }
+                return _apk_build_failure_result(
+                    summary="preparação do autobuilder do APK falhou: " + _short_text(exc, limit=180),
+                    version_name=version_name,
+                    version_code=version_code,
+                    source_fingerprint=source_fingerprint,
+                    source_sha256=expected_source_sha,
+                    notification_id=notification_id,
+                    work_dir=work_dir,
+                    gradle_log=gradle_log,
+                    builder_environment=builder_environment,
+                    extra={
+                        "stage": "self_builder_toolchain_prepare",
+                        "retryable": False,
+                        "permanent_failure": True,
+                        "self_builder_error": detail,
+                    },
+                )
         native_environment = _inspect_android_native_build_environment(project_dir, env)
         builder_environment["native_build"] = native_environment
         builder_environment["gradle_log_path"] = str(gradle_log)

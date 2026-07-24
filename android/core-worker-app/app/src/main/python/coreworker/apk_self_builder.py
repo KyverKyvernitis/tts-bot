@@ -104,6 +104,12 @@ def _resolve_toolchain(toolchain_dir: Path) -> dict[str, Any]:
     manifest = _safe_json_load(manifest_path)
     schema = str(manifest.get("schema") or "").strip()
     arch = str(manifest.get("arch") or "").strip().lower()
+    try:
+        manifest_version = int(manifest.get("version") or 0)
+    except Exception:
+        manifest_version = 0
+    runtime_libraries = manifest.get("runtimeLibraries") if isinstance(manifest.get("runtimeLibraries"), dict) else {}
+    bootstrap_smoke = manifest.get("bootstrapSmoke") if isinstance(manifest.get("bootstrapSmoke"), dict) else {}
 
     paths = manifest.get("paths") if isinstance(manifest.get("paths"), dict) else {}
     jdk_rel = _safe_rel(paths.get("jdk") or "jdk")
@@ -123,6 +129,9 @@ def _resolve_toolchain(toolchain_dir: Path) -> dict[str, Any]:
     checks = {
         "manifest": manifest_path.is_file(),
         "schema": schema == TOOLCHAIN_SCHEMA,
+        "manifestVersion": manifest_version >= 3,
+        "runtimeLibraries": runtime_libraries.get("strategy") == "dt-needed-transitive-v1",
+        "bootstrapSmoke": bootstrap_smoke.get("ok") is True,
         "arch": arch in {"aarch64", "arm64", "arm64-v8a"},
         "java": java.is_file() and java.stat().st_size > 64 * 1024,
         "javac": javac.is_file() and javac.stat().st_size > 8 * 1024,

@@ -159,6 +159,7 @@ public class MainActivity extends Activity {
     private TextView coreHeroHeadlineText;
     private TextView rootfsHeroText;
     private TextView runnerHeroText;
+    private TextView builderHeroText;
     private TextView rootfsImportProgressText;
     private TextView rootfsAdvancedStatusText;
     private TextView bedrockTerminalText;
@@ -538,7 +539,7 @@ public class MainActivity extends Activity {
             text.setText(logText);
             text.setTextIsSelectable(true);
             text.setTextColor(TEXT);
-            text.setTextSize(12);
+            text.setTextSize(13);
             text.setTypeface(Typeface.MONOSPACE);
             text.setPadding(dp(12), dp(12), dp(12), dp(12));
             text.setBackgroundColor(BG);
@@ -652,26 +653,37 @@ public class MainActivity extends Activity {
     private void buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(16), dp(18), dp(16), dp(12));
+        root.setPadding(dp(14), dp(14), dp(14), dp(10));
         root.setBackgroundColor(BG);
         root.setLayoutParams(new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.MATCH_PARENT
         ));
 
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(titleRow, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+
         TextView title = new TextView(this);
         title.setText("Core Worker");
         title.setTextColor(TEXT);
-        title.setTextSize(31);
+        title.setTextSize(28);
         title.setGravity(Gravity.START);
-        title.setTypeface(null, 1);
-        root.addView(title);
+        title.setTypeface(null, Typeface.BOLD);
+        titleRow.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView versionBadge = pillText("v" + APP_VERSION, Color.rgb(33, 55, 94), ACCENT);
+        titleRow.addView(versionBadge);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Painel limpo do worker local. Detalhes ficam em Avançado.");
+        subtitle.setText("Worker autônomo · build local protegido · sem Gradle na VPS");
         subtitle.setTextColor(MUTED);
-        subtitle.setTextSize(14);
-        subtitle.setPadding(0, dp(5), 0, dp(12));
+        subtitle.setTextSize(13);
+        subtitle.setPadding(0, dp(4), 0, dp(12));
         root.addView(subtitle);
 
         buildPermissionGate(root);
@@ -715,10 +727,10 @@ public class MainActivity extends Activity {
 
         statusText = new TextView(this);
         statusText.setTextColor(TEXT);
-        statusText.setTextSize(12);
+        statusText.setTextSize(13);
         statusText.setSingleLine(false);
         statusText.setPadding(dp(12), dp(10), dp(12), dp(10));
-        statusText.setBackground(cardBackground(CARD));
+        statusText.setBackground(cardBackground(CARD_SOFT));
         LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -729,14 +741,14 @@ public class MainActivity extends Activity {
         bottomNavBar = new LinearLayout(this);
         bottomNavBar.setOrientation(LinearLayout.HORIZONTAL);
         bottomNavBar.setGravity(Gravity.CENTER);
-        bottomNavBar.setPadding(dp(4), dp(6), dp(4), dp(4));
+        bottomNavBar.setPadding(dp(5), dp(5), dp(5), dp(5));
         bottomNavBar.setBackground(cardBackground(Color.rgb(10, 16, 31)));
         root.addView(bottomNavBar, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         ));
-        corePageButton = bottomNavButton("⌂\nCore");
-        bedrockPageButton = bottomNavButton("▣\nBedrock");
+        corePageButton = bottomNavButton("⚙  Core");
+        bedrockPageButton = bottomNavButton("▣  Bedrock");
         bottomNavBar.addView(corePageButton, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         LinearLayout.LayoutParams bedrockNavParams = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
         bedrockNavParams.setMargins(dp(8), 0, 0, 0);
@@ -748,14 +760,20 @@ public class MainActivity extends Activity {
         mainContent = coreContent;
 
         updateBanner = card();
+        updateBanner.setOrientation(LinearLayout.HORIZONTAL);
+        updateBanner.setGravity(Gravity.CENTER_VERTICAL);
         updateBanner.setVisibility(View.GONE);
-        updateBanner.setBackground(cardBackground(Color.rgb(38, 55, 93)));
+        updateBanner.setBackground(cardBackground(Color.rgb(31, 52, 91)));
         updateBannerText = smallText("Atualização disponível.");
         updateBannerText.setTextColor(TEXT);
-        updateBanner.addView(updateBannerText);
-        updateInstallButton = button("Atualizar");
+        updateBannerText.setPadding(0, 0, dp(10), 0);
+        updateBanner.addView(updateBannerText, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        updateInstallButton = compactButton("Atualizar");
         updateInstallButton.setOnClickListener(v -> downloadAndInstallUpdate());
-        updateBanner.addView(updateInstallButton);
+        updateBanner.addView(updateInstallButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
         LinearLayout.LayoutParams updateBannerParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -765,8 +783,8 @@ public class MainActivity extends Activity {
 
         LinearLayout prepareCard = card();
         mainContent.addView(prepareCard);
-        prepareCard.addView(sectionTitle("Visão geral"));
-        prepareCard.addView(smallText("Estado essencial do worker. O resto fica em Avançado."));
+        prepareCard.addView(sectionTitle("Status do worker"));
+        prepareCard.addView(smallText("Conexão, execução em segundo plano e autobuild local."));
 
         localAgentText = smallText("Este celular ainda não foi verificado.");
         localAgentText.setTextColor(TEXT);
@@ -788,14 +806,20 @@ public class MainActivity extends Activity {
         runnerHeroText.setPadding(0, dp(8), 0, dp(4));
         prepareCard.addView(runnerHeroText);
 
-        prepareButton = primaryButton("Verificar status");
+        builderHeroText = smallText("Autobuild: verificando toolchain local");
+        builderHeroText.setTextColor(TEXT);
+        builderHeroText.setBackground(cardBackground(Color.rgb(29, 42, 70)));
+        builderHeroText.setPadding(dp(12), dp(10), dp(12), dp(10));
+        prepareCard.addView(builderHeroText);
+
+        prepareButton = primaryButton("Sincronizar agora");
         prepareButton.setOnClickListener(v -> checkLocalAgent(true));
         prepareCard.addView(prepareButton);
 
         connectCard = cardWithTopMargin(mainContent);
-        connectTitleText = sectionTitle("Conexão");
+        connectTitleText = sectionTitle("Vínculo com a VPS");
         connectCard.addView(connectTitleText);
-        connectHintText = smallText("Conexão salva com a VPS principal.");
+        connectHintText = smallText("Pareamento autenticado e identidade deste aparelho.");
         connectCard.addView(connectHintText);
 
         pairingStatusText = smallText("");
@@ -839,7 +863,7 @@ public class MainActivity extends Activity {
         pairingForm.addView(pairButton);
 
         LinearLayout profileCard = cardWithTopMargin(mainContent);
-        profileCard.addView(sectionTitle("Perfil"));
+        profileCard.addView(sectionTitle("Modo de operação"));
         profileCard.addView(smallText("Quanto este celular pode ajudar quando estiver livre."));
 
         profileSummaryText = smallText("");
@@ -881,8 +905,8 @@ public class MainActivity extends Activity {
         profileDetailsContent.addView(saveProfileButton);
 
         LinearLayout updateCard = cardWithTopMargin(mainContent);
-        updateCard.addView(sectionTitle("Atualizações"));
-        updateCard.addView(smallText("Versão instalada e publicação na VPS."));
+        updateCard.addView(sectionTitle("Versão e atualizações"));
+        updateCard.addView(smallText("Versão instalada, disponibilidade e instalação segura."));
         updateText = smallText("APK " + APP_VERSION + " · ainda não verificado.");
         updateText.setTextColor(TEXT);
         updateText.setBackground(cardBackground(CARD_SOFT));
@@ -899,9 +923,9 @@ public class MainActivity extends Activity {
         updateCard.addView(updateCleanupButton);
 
         LinearLayout technicalCard = cardWithTopMargin(mainContent);
-        technicalCard.addView(sectionTitle("Avançado"));
+        technicalCard.addView(sectionTitle("Diagnóstico e manutenção"));
         technicalCard.addView(smallText("Diagnósticos, logs e detalhes do runtime direto ficam escondidos aqui."));
-        technicalToggleButton = secondaryButton("Abrir avançado");
+        technicalToggleButton = secondaryButton("Abrir diagnóstico avançado");
         technicalToggleButton.setOnClickListener(v -> toggleTechnicalDetails());
         technicalCard.addView(technicalToggleButton);
 
@@ -921,7 +945,7 @@ public class MainActivity extends Activity {
         systemChecklistText.setVisibility(View.GONE);
         technicalDetailsContent.addView(systemChecklistText);
 
-        termuxButton = secondaryButton("Ver runtime direto");
+        termuxButton = secondaryButton("Ver runtime de bootstrap");
         termuxButton.setOnClickListener(v -> openTermux());
         technicalDetailsContent.addView(termuxButton);
 
@@ -1334,13 +1358,28 @@ public class MainActivity extends Activity {
     private LinearLayout pageContent() {
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(0, 0, 0, dp(12));
+        content.setPadding(0, 0, 0, dp(20));
         return content;
     }
 
+    private TextView pillText(String value, int backgroundColor, int textColor) {
+        TextView text = new TextView(this);
+        text.setText(value);
+        text.setTextColor(textColor);
+        text.setTextSize(12);
+        text.setTypeface(null, Typeface.BOLD);
+        text.setGravity(Gravity.CENTER);
+        text.setPadding(dp(10), dp(5), dp(10), dp(5));
+        GradientDrawable background = rounded(backgroundColor);
+        background.setCornerRadius(dp(999));
+        background.setStroke(dp(1), Color.rgb(49, 72, 113));
+        text.setBackground(background);
+        return text;
+    }
+
     private Button bottomNavButton(String text) {
-        Button button = styledButton(text, Color.rgb(18, 27, 48), TEXT, dp(54));
-        button.setTextSize(12);
+        Button button = styledButton(text, Color.rgb(18, 27, 48), TEXT, dp(46));
+        button.setTextSize(13);
         button.setGravity(Gravity.CENTER);
         button.setPadding(dp(8), dp(6), dp(8), dp(6));
         return button;
@@ -1671,7 +1710,7 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        params.setMargins(0, dp(8), 0, 0);
+        params.setMargins(0, dp(10), 0, 0);
         root.addView(card, params);
         return card;
     }
@@ -1679,14 +1718,15 @@ public class MainActivity extends Activity {
     private LinearLayout card() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(13), dp(12), dp(13), dp(12));
+        card.setPadding(dp(16), dp(14), dp(16), dp(14));
         card.setBackground(cardBackground(CARD));
         return card;
     }
 
     private GradientDrawable cardBackground(int color) {
         GradientDrawable drawable = rounded(color);
-        drawable.setStroke(dp(1), Color.rgb(34, 45, 72));
+        drawable.setCornerRadius(dp(20));
+        drawable.setStroke(dp(1), Color.rgb(38, 52, 82));
         return drawable;
     }
 
@@ -1694,7 +1734,7 @@ public class MainActivity extends Activity {
         TextView title = new TextView(this);
         title.setText(value);
         title.setTextColor(TEXT);
-        title.setTextSize(18);
+        title.setTextSize(17);
         title.setTypeface(null, 1);
         title.setPadding(0, 0, 0, dp(3));
         return title;
@@ -1704,7 +1744,8 @@ public class MainActivity extends Activity {
         TextView text = new TextView(this);
         text.setText(value);
         text.setTextColor(MUTED);
-        text.setTextSize(12);
+        text.setTextSize(13);
+        text.setLineSpacing(dp(1), 1.02f);
         text.setPadding(0, dp(1), 0, dp(4));
         return text;
     }
@@ -1745,7 +1786,14 @@ public class MainActivity extends Activity {
         edit.setTextSize(15);
         edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         edit.setSelectAllOnFocus(false);
-        edit.setPadding(dp(10), dp(7), dp(10), dp(7));
+        edit.setPadding(dp(12), dp(10), dp(12), dp(10));
+        edit.setBackground(cardBackground(CARD_SOFT));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        params.setMargins(0, dp(4), 0, 0);
+        edit.setLayoutParams(params);
         return edit;
     }
 
@@ -1809,7 +1857,7 @@ public class MainActivity extends Activity {
     private GradientDrawable rounded(int color) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(color);
-        drawable.setCornerRadius(dp(16));
+        drawable.setCornerRadius(dp(14));
         return drawable;
     }
 
@@ -1819,6 +1867,10 @@ public class MainActivity extends Activity {
         radio.setTag(tag);
         radio.setTextColor(TEXT);
         radio.setTextSize(14);
+        radio.setButtonTintList(new ColorStateList(
+                new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
+                new int[]{ACCENT, MUTED}
+        ));
         radio.setId(View.generateViewId());
         profileGroup.addView(radio);
         if ("midia".equals(tag)) {
@@ -6459,8 +6511,74 @@ public class MainActivity extends Activity {
         if (localAgentText != null) {
             localAgentText.setText(localAgentLine());
         }
+        refreshBuilderHeroStatus();
         updateSystemChecklistText();
         updatePairingUi();
+    }
+
+    private void refreshBuilderHeroStatus() {
+        if (builderHeroText == null || prefs == null) return;
+        try {
+            JSONObject state = CoreWorkerApkBuildManager.preflight(getApplicationContext(), false);
+            boolean ready = state.optBoolean("ready", false);
+            boolean publishReady = state.optBoolean("publishReady", false);
+            boolean refreshing = state.optBoolean("refreshing", false);
+            String summary = state.optString("summary", "Autobuild aguardando preflight");
+            String text;
+            int background;
+            if (ready) {
+                String detail = apkBuilderRuntimeDetail(state);
+                text = "✅ Autobuild pronto · próximos APKs serão compilados neste celular"
+                        + (detail.isEmpty() ? "" : "\n" + detail);
+                background = Color.rgb(24, 67, 55);
+            } else if (refreshing) {
+                text = "⏳ Autobuild verificando JDK, Gradle, SDK e aapt2";
+                background = Color.rgb(65, 54, 31);
+            } else if (publishReady) {
+                text = "📦 Autobuild bloqueado · último APK ainda pode ser republicado";
+                background = Color.rgb(65, 54, 31);
+            } else {
+                text = "⚠️ " + compactUiMessage(emptyFallback(summary, "Autobuild aguardando toolchain do bootstrap"), 190);
+                background = Color.rgb(67, 42, 47);
+            }
+            builderHeroText.setText(text);
+            builderHeroText.setBackground(cardBackground(background));
+        } catch (Throwable error) {
+            builderHeroText.setText("⚠️ Autobuild indisponível: " + shortThrowable(error));
+            builderHeroText.setBackground(cardBackground(Color.rgb(67, 42, 47)));
+        }
+    }
+
+    private String apkBuilderRuntimeDetail(JSONObject state) {
+        try {
+            JSONObject toolchain = state == null ? null : state.optJSONObject("toolchain");
+            JSONObject manifest = toolchain == null ? null : toolchain.optJSONObject("manifestData");
+            JSONObject runtime = manifest == null ? null : manifest.optJSONObject("runtimeLibraries");
+            if (runtime == null) return "";
+            int count = runtime.optInt("count", 0);
+            long bytes = runtime.optLong("bytes", 0L);
+            if (count <= 0 && bytes <= 0L) return "";
+            StringBuilder detail = new StringBuilder();
+            if (count > 0) detail.append(count).append(count == 1 ? " biblioteca auditada" : " bibliotecas auditadas");
+            if (bytes > 0L) detail.append(detail.length() == 0 ? "" : " · ").append(formatBytes(bytes));
+            return detail.toString();
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private String compactUiMessage(String value, int limit) {
+        String clean = value == null ? "" : value.replace('\n', ' ').replace('\r', ' ').replaceAll("\\s+", " ").trim();
+        int safeLimit = Math.max(40, limit);
+        return clean.length() <= safeLimit ? clean : clean.substring(0, safeLimit - 1) + "…";
+    }
+
+    private String apkBuilderChecklistLabel() {
+        if (prefs == null) return "aguardando";
+        if (prefs.getBoolean("apk_self_builder_ready", false)) return "pronto no APK";
+        if (prefs.getBoolean("apk_self_builder_publish_ready", false)) return "republicação disponível";
+        String summary = prefs.getString("apk_self_builder_summary", "");
+        return summary == null || summary.trim().isEmpty() ? "bootstrap pendente" : summary.trim();
     }
 
     private String checkLine(String label, String value) {
@@ -6560,6 +6678,7 @@ public class MainActivity extends Activity {
                 + checkLine("Cobertura", emptyFallback(internalLightJobsCatalogSummary, "catálogo aguardando")) + "\n"
                 + checkLine("Fila", emptyFallback(internalLightJobsQueueSummary, "aguardando")) + "\n"
                 + checkLine("Persistente", emptyFallback(foregroundRuntimeSummary, "serviço aguardando")) + "\n"
+                + checkLine("Autobuild", apkBuilderChecklistLabel()) + "\n"
                 + checkLine("Jobs reais", nativePythonAvailable ? "APK Python interno" : (nativeWorkerOnline ? "APK nativo" : "APK interno · fallback legado")) + "\n"
                 + checkLine("Shell", emptyFallback(nativeShellSummary, "controlado aguardando")) + "\n"
                 + checkLine("Python", emptyFallback(nativePythonSummary, "aguardando health check")) + "\n"
