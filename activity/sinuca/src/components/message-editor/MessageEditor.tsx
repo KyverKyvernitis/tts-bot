@@ -129,6 +129,7 @@ export function MessageEditor(props: MessageEditorProps) {
   const closing = useRef(false);
   const closeTimerRef = useRef<number | null>(null);
   const scrollPositionRef = useRef(0);
+  const textSelectionRef = useRef<{ fieldId: string; start: number; end: number } | null>(null);
   const historyMarker = useRef(`osk-editor-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
   const localDirty = useMemo(
@@ -202,9 +203,11 @@ export function MessageEditor(props: MessageEditorProps) {
     setJsonDirty(false);
     setJsonError(null);
     setPendingJsonChanges(null);
-    setActiveTextFieldId(visualFields.find((field) => (field.type === "text" || field.type === "textarea") && fieldMode(field.id, field.label, field.type) === "content")?.id
+    const initialTextFieldId = visualFields.find((field) => (field.type === "text" || field.type === "textarea") && fieldMode(field.id, field.label, field.type) === "content")?.id
       ?? visualFields.find((field) => field.type === "text" || field.type === "textarea")?.id
-      ?? null);
+      ?? null;
+    setActiveTextFieldId(initialTextFieldId);
+    textSelectionRef.current = null;
     closing.current = false;
     closeIntent.current = null;
     finalIntent.current = null;
@@ -247,6 +250,17 @@ export function MessageEditor(props: MessageEditorProps) {
     document.body.style.position = "fixed";
     document.body.style.top = `-${scrollPositionRef.current}px`;
     document.body.style.width = "100%";
+
+    const syncVisualViewport = () => {
+      const viewport = window.visualViewport;
+      const height = Math.max(1, Math.round(viewport?.height ?? window.innerHeight));
+      dialogRef.current?.style.setProperty("--osk-message-editor-viewport-height", `${height}px`);
+    };
+    syncVisualViewport();
+    window.visualViewport?.addEventListener("resize", syncVisualViewport);
+    window.visualViewport?.addEventListener("scroll", syncVisualViewport);
+    window.addEventListener("resize", syncVisualViewport);
+
     restoreHistoryMarker();
     window.setTimeout(() => dialogRef.current?.querySelector<HTMLElement>("button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled)")?.focus(), 0);
     const onBackRequest = () => handleHistoryClose();
@@ -277,6 +291,9 @@ export function MessageEditor(props: MessageEditorProps) {
       window.scrollTo({ top: scrollPositionRef.current, behavior: "auto" });
       window.removeEventListener("osk:message-editor-back", onBackRequest as EventListener);
       window.removeEventListener("keydown", onKeyDown);
+      window.visualViewport?.removeEventListener("resize", syncVisualViewport);
+      window.visualViewport?.removeEventListener("scroll", syncVisualViewport);
+      window.removeEventListener("resize", syncVisualViewport);
       window.setTimeout(() => returnFocusRef.current?.focus(), 0);
     };
   }, [editorKey, handleHistoryClose, requestClose, restoreHistoryMarker]);
@@ -322,11 +339,28 @@ export function MessageEditor(props: MessageEditorProps) {
     if (!variables || !activeTextField) return;
     const token = formatTemplateVariable(variables.syntax, key);
     const current = String(draft[activeTextField.id] ?? "");
-    const separator = current && !/\s$/.test(current) ? " " : "";
-    onChange(activeTextField, `${current}${separator}${token}`);
+    const savedSelection = textSelectionRef.current?.fieldId === activeTextField.id ? textSelectionRef.current : null;
+    const start = savedSelection ? Math.max(0, Math.min(current.length, savedSelection.start)) : current.length;
+    const end = savedSelection ? Math.max(start, Math.min(current.length, savedSelection.end)) : current.length;
+    const separator = !savedSelection && current && !/\s$/.test(current) ? " " : "";
+    const insertion = `${separator}${token}`;
+    const next = `${current.slice(0, start)}${insertion}${current.slice(end)}`;
+    const nextCursor = start + insertion.length;
+    onChange(activeTextField, next);
+    textSelectionRef.current = { fieldId: activeTextField.id, start: nextCursor, end: nextCursor };
     setActiveTextFieldId(activeTextField.id);
     setMode(fieldMode(activeTextField.id, activeTextField.label, activeTextField.type));
     setMobileView("edit");
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const control = Array.from(dialogRef.current?.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("[data-message-field-id]") ?? [])
+          .find((element) => element.dataset.messageFieldId === activeTextField.id);
+        if (!control) return;
+        control.focus({ preventScroll: true });
+        control.setSelectionRange(nextCursor, nextCursor);
+        control.scrollIntoView({ block: "center", behavior: "smooth" });
+      });
+    });
   }
 
   const currentFields = mode === "content" || mode === "appearance" || mode === "components" ? categorizedFields[mode] : [];
@@ -349,6 +383,9 @@ export function MessageEditor(props: MessageEditorProps) {
           <strong>{groupLabel}</strong>
           {description && <p>{description}</p>}
         </div>
+        <span className="osk-message-editor__dirty" data-visible={localDirty || jsonDirty || undefined} aria-live="polite" aria-hidden={!(localDirty || jsonDirty)}>
+          Alterado
+        </span>
       </header>
 
       <nav className="osk-message-editor__mobile-tabs" aria-label="Visualização do editor">
@@ -371,7 +408,22 @@ export function MessageEditor(props: MessageEditorProps) {
             ) : mode === "json" ? (
               <MessageJsonEditor value={jsonText} error={jsonError} dirty={jsonDirty} onChange={handleJsonChange} />
             ) : (
-              <MessageVisualEditor fields={currentFields} baseline={baseline} draft={draft} guildOptions={guildOptions} onChange={onChange} onFocusField={(field) => { if (field.type === "text" || field.type === "textarea") setActiveTextFieldId(field.id); }} />
+              <MessageVisualEditor
+                fields={currentFields}
+                baseline={baseline}
+                draft={draft}
+                guildOptions={guildOptions}
+                onChange={onChange}
+                onFocusField={(field) => {
+                  if (field.type !== "text" && field.type !== "textarea") return;
+                  setActiveTextFieldId(field.id);
+                  if (textSelectionRef.current?.fieldId !== field.id) textSelectionRef.current = null;
+                }}
+                onTextSelection={(field, start, end) => {
+                  setActiveTextFieldId(field.id);
+                  textSelectionRef.current = { fieldId: field.id, start, end };
+                }}
+              />
             )}
           </div>
         </section>
@@ -384,7 +436,7 @@ export function MessageEditor(props: MessageEditorProps) {
 
       <footer className="osk-message-editor__footer">
         <button type="button" className="osk-secondary-button" onClick={() => requestClose("discard")}>Descartar</button>
-        <button type="button" className="osk-primary-button" disabled={applyDisabled} onClick={handleApply}>Concluir edição</button>
+        <button type="button" className="osk-primary-button" disabled={applyDisabled} onClick={handleApply}>Aplicar alterações</button>
       </footer>
     </div>
   </div>;

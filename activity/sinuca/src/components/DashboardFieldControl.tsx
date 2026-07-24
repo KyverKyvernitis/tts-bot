@@ -26,9 +26,10 @@ interface DashboardFieldControlProps {
   value: unknown;
   guildOptions: DashboardOptionsPayload | null;
   onChange(field: DashboardFieldDefinition, raw: unknown): void;
+  onTextSelection?(field: DashboardFieldDefinition, start: number, end: number): void;
 }
 
-const TEXT_LIKE_CHANNEL_TYPES = new Set([0, 5, 15, 16]);
+const TEXT_LIKE_CHANNEL_TYPES = new Set([0, 5]);
 const VOICE_CHANNEL_TYPES = new Set([2, 13]);
 const CATEGORY_CHANNEL_TYPE = 4;
 
@@ -45,11 +46,33 @@ function channelOptionsForField(field: DashboardFieldDefinition, channels: Dashb
     if (kind === "category") return channel.type === CATEGORY_CHANNEL_TYPE;
     if (kind === "voice") return VOICE_CHANNEL_TYPES.has(channel.type);
     return TEXT_LIKE_CHANNEL_TYPES.has(channel.type);
-  }).map((channel) => ({
-    value: channel.id,
-    label: kind === "category" ? `📁 ${channel.name}` : kind === "voice" ? `🔊 ${channel.name}` : `# ${channel.name}`,
-    hint: channel.parentId ? "Canal organizado em uma categoria" : undefined,
-  }));
+  }).map((channel) => {
+    const permissionKnown = channel.permissionsKnown === true;
+    const isWebhookChannel = field.id.includes("webhook.channel_id");
+    const permissionAllowed = isWebhookChannel
+      ? channel.webhookManageable !== false
+      : kind === "category"
+      ? channel.manageable !== false
+      : kind === "voice"
+        ? channel.connectable !== false
+        : channel.sendable !== false;
+    const permissionHint = !permissionKnown || permissionAllowed
+      ? null
+      : isWebhookChannel
+        ? "A Osaka não pode gerenciar webhooks neste canal"
+        : kind === "category"
+        ? "A Osaka não pode gerenciar canais nesta categoria"
+        : kind === "voice"
+          ? "A Osaka não pode visualizar ou conectar neste canal"
+          : "A Osaka não pode visualizar ou enviar mensagens neste canal";
+    const organizationHint = channel.parentId ? "Canal organizado em uma categoria" : null;
+    return {
+      value: channel.id,
+      label: kind === "category" ? `📁 ${channel.name}` : kind === "voice" ? `🔊 ${channel.name}` : `# ${channel.name}`,
+      hint: permissionHint ?? organizationHint ?? undefined,
+      disabled: Boolean(permissionHint),
+    };
+  });
 }
 
 export function stringifyDashboardValue(value: unknown): string {
@@ -81,9 +104,25 @@ export function displayDashboardValue(field: DashboardFieldDefinition, value: un
   return text || "Não configurado";
 }
 
-export function DashboardFieldControl({ field, value, guildOptions, onChange }: DashboardFieldControlProps) {
+export function DashboardFieldControl({ field, value, guildOptions, onChange, onTextSelection }: DashboardFieldControlProps) {
   const currentValue = stringifyDashboardValue(value);
-  const channelOptions = field.type === "channel" && guildOptions?.ok ? channelOptionsForField(field, guildOptions.channels) : null;
+  const channelOptions = field.type === "channel" && guildOptions?.ok
+    ? (() => {
+      const available = channelOptionsForField(field, guildOptions.channels);
+      if (!currentValue || available.some((option) => option.value === currentValue)) return available;
+      const channel = guildOptions.channels.find((item) => item.id === currentValue);
+      const kind = channelKindForField(field);
+      const label = channel
+        ? kind === "category" ? `📁 ${channel.name}` : kind === "voice" ? `🔊 ${channel.name}` : `# ${channel.name}`
+        : `Canal ${currentValue}`;
+      return [{
+        value: currentValue,
+        label,
+        hint: "Canal atual indisponível para esta configuração",
+        disabled: true,
+      }, ...available];
+    })()
+    : null;
   const roleOptions = (field.type === "role" || field.type === "role_multi") && guildOptions?.ok
     ? (() => {
       const available = guildOptions.roles
@@ -147,20 +186,38 @@ export function DashboardFieldControl({ field, value, guildOptions, onChange }: 
   }
 
   if (field.type === "textarea") {
-    return <textarea value={currentValue} maxLength={field.maxLength} placeholder={field.placeholder} rows={Math.min(8, Math.max(3, currentValue.split("\n").length + 1))} onChange={(event) => onChange(field, event.target.value)} />;
+    return <textarea
+      data-message-field-id={field.id}
+      value={currentValue}
+      maxLength={field.maxLength}
+      placeholder={field.placeholder}
+      rows={Math.min(8, Math.max(3, currentValue.split("\n").length + 1))}
+      onFocus={(event) => onTextSelection?.(field, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)}
+      onSelect={(event) => onTextSelection?.(field, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)}
+      onChange={(event) => {
+        onTextSelection?.(field, event.currentTarget.selectionStart, event.currentTarget.selectionEnd);
+        onChange(field, event.target.value);
+      }}
+    />;
   }
 
   const suffix = field.id === "tts.speech_limit_seconds" ? "segundos" : null;
   return <div className={`${field.type === "color" ? "osk-color-input" : ""}${suffix ? " osk-input-suffix" : ""}`.trim()}>
     {field.type === "color" && <input type="color" value={/^#[0-9a-f]{6}$/i.test(currentValue) ? currentValue : "#5865f2"} onChange={(event) => onChange(field, event.target.value)} aria-label={field.label} />}
     <input
+      data-message-field-id={field.type === "text" ? field.id : undefined}
       type={field.type === "number" ? "number" : field.type === "url" ? "url" : "text"}
       min={field.min}
       max={field.max}
       maxLength={field.maxLength}
       value={currentValue}
       placeholder={field.placeholder ?? (field.type === "channel" ? "ID do canal" : field.type === "role" ? "ID do cargo" : field.type === "url" ? "https://..." : "")}
-      onChange={(event) => onChange(field, event.target.value)}
+      onFocus={field.type === "text" ? (event) => onTextSelection?.(field, event.currentTarget.selectionStart ?? currentValue.length, event.currentTarget.selectionEnd ?? currentValue.length) : undefined}
+      onSelect={field.type === "text" ? (event) => onTextSelection?.(field, event.currentTarget.selectionStart ?? currentValue.length, event.currentTarget.selectionEnd ?? currentValue.length) : undefined}
+      onChange={(event) => {
+        if (field.type === "text") onTextSelection?.(field, event.currentTarget.selectionStart ?? event.currentTarget.value.length, event.currentTarget.selectionEnd ?? event.currentTarget.value.length);
+        onChange(field, event.target.value);
+      }}
     />
     {suffix && <span>{suffix}</span>}
   </div>;
@@ -273,7 +330,7 @@ function FormFieldsEditor({ field, value, onChange }: { field: DashboardFieldDef
       return <article key={item.id || index} data-open={open || undefined} data-enabled={item.enabled || undefined}>
         <div className="osk-form-question-head">
           <button type="button" className="osk-form-question-summary" onClick={() => setOpenId((current) => current === item.id ? null : item.id)} aria-expanded={open}>
-            <GripVertical size={16} /><span><strong>{item.label || `Pergunta ${index + 1}`}</strong><small>{item.enabled ? "Ativa" : "Desativada"} · {item.required ? "Obrigatória" : "Opcional"} · {item.long ? "Resposta longa" : "Resposta curta"}</small></span><ChevronDown size={16} />
+            <span><strong>{item.label || `Pergunta ${index + 1}`}</strong><small>{item.enabled ? "Ativa" : "Desativada"} · {item.required ? "Obrigatória" : "Opcional"} · {item.long ? "Resposta longa" : "Resposta curta"}</small></span><ChevronDown size={16} />
           </button>
           <div className="osk-form-question-actions">
             <button type="button" onClick={() => duplicate(index)} disabled={fields.length >= 5} aria-label="Duplicar pergunta"><Copy size={14} /></button>
@@ -284,12 +341,12 @@ function FormFieldsEditor({ field, value, onChange }: { field: DashboardFieldDef
         </div>
         <div className="osk-form-question-panel">
           <div className="osk-form-question-panel-inner">
-            <div className="osk-inline-grid"><label><span>Rótulo</span><input value={item.label} maxLength={45} onChange={(event) => update(index, { label: event.target.value })} /></label><label><span>Nome no resumo</span><input value={item.response_label} maxLength={80} onChange={(event) => update(index, { response_label: event.target.value })} /></label></div>
+            <div className="osk-inline-grid"><label><span>Rótulo</span><input value={item.label} maxLength={45} onChange={(event) => update(index, { label: event.target.value })} /></label><label><span>Título na resposta da equipe</span><input value={item.response_label} maxLength={80} onChange={(event) => update(index, { response_label: event.target.value })} /></label></div>
             <label><span>Exemplo ou instrução</span><input value={item.placeholder} maxLength={100} onChange={(event) => update(index, { placeholder: event.target.value })} /></label>
             <div className="osk-form-question-switches">
-              <SwitchRow label="Pergunta ativa" description="Exibe este campo no formulário." checked={item.enabled} onChange={(checked) => update(index, { enabled: checked })} />
+              <SwitchRow label="Exibir pergunta" description="Exibe este campo no formulário." checked={item.enabled} onChange={(checked) => update(index, { enabled: checked })} />
               <SwitchRow label="Resposta obrigatória" description="Impede o envio sem preencher." checked={item.required} onChange={(checked) => update(index, { required: checked })} />
-              <SwitchRow label="Resposta longa" description="Usa uma área maior para textos extensos." checked={item.long} onChange={(checked) => update(index, { long: checked, max_length: checked ? Math.max(item.max_length, 1000) : Math.min(item.max_length, 120) })} />
+              <SwitchRow label="Campo de resposta longa" description="Usa uma área maior para textos extensos." checked={item.long} onChange={(checked) => update(index, { long: checked, max_length: checked ? Math.max(item.max_length, 1000) : Math.min(item.max_length, 120) })} />
               <SwitchRow label="Mostrar no resumo" description="Inclui a resposta na mensagem enviada à equipe." checked={item.show_in_response} onChange={(checked) => update(index, { show_in_response: checked })} />
             </div>
           </div>

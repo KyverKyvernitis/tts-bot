@@ -163,6 +163,12 @@ export interface DashboardChannelOption {
   name: string;
   type: number;
   parentId?: string | null;
+  permissionsKnown?: boolean;
+  viewable?: boolean;
+  sendable?: boolean;
+  connectable?: boolean;
+  manageable?: boolean;
+  webhookManageable?: boolean;
 }
 
 export interface DashboardRoleOption {

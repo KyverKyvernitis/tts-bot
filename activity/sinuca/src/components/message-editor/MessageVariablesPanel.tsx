@@ -69,7 +69,7 @@ export function MessageVariablesPanel({ variables, insertTargetLabel, onInsert }
         />
       </label>
 
-      {insertTargetLabel && <div className="osk-message-variables__target">As variáveis serão inseridas em <strong>{insertTargetLabel}</strong>.</div>}
+      {insertTargetLabel && <div className="osk-message-variables__target">A variável será inserida na posição do cursor em <strong>{insertTargetLabel}</strong>.</div>}
 
       <div className="osk-message-variables__list">
         {filtered.map((item) => {

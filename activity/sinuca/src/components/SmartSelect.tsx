@@ -6,6 +6,7 @@ export interface SmartSelectOption {
   value: string;
   label: string;
   hint?: string;
+  disabled?: boolean;
 }
 
 interface SmartSelectProps {
@@ -38,6 +39,19 @@ export function SmartSelect({ value, options, onChange, placeholder, emptyLabel,
     if (!normalized) return options;
     return options.filter((option) => `${option.label} ${option.hint || ""}`.toLocaleLowerCase("pt-BR").includes(normalized));
   }, [options, query]);
+
+  const firstEnabledIndex = useCallback((items: SmartSelectOption[]) => items.findIndex((option) => !option.disabled), []);
+
+  const adjacentEnabledIndex = useCallback((items: SmartSelectOption[], current: number, direction: -1 | 1) => {
+    if (!items.length) return -1;
+    let index = current;
+    for (let attempts = 0; attempts < items.length; attempts += 1) {
+      index += direction;
+      if (index < 0 || index >= items.length) return current;
+      if (!items[index]?.disabled) return index;
+    }
+    return current;
+  }, []);
 
   const updatePosition = useCallback(() => {
     const rect = rootRef.current?.getBoundingClientRect();
@@ -109,20 +123,21 @@ export function SmartSelect({ value, options, onChange, placeholder, emptyLabel,
   useEffect(() => {
     if (!visible) return;
     const idx = filteredOptions.findIndex((option) => option.value === value);
-    setActiveIndex(idx >= 0 ? idx : 0);
+    setActiveIndex(idx >= 0 && !filteredOptions[idx]?.disabled ? idx : firstEnabledIndex(filteredOptions));
     const focusTimer = window.setTimeout(() => {
       if (searchable) searchRef.current?.focus();
       else listRef.current?.focus();
       listRef.current?.querySelector<HTMLElement>('[data-selected="true"]')?.scrollIntoView({ block: "nearest" });
     }, 40);
     return () => window.clearTimeout(focusTimer);
-  }, [filteredOptions, searchable, value, visible]);
+  }, [filteredOptions, firstEnabledIndex, searchable, value, visible]);
 
   useEffect(() => () => {
     if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current);
   }, []);
 
   function commit(optionValue: string) {
+    if (options.find((option) => option.value === optionValue)?.disabled) return;
     onChange(optionValue);
     close();
   }
@@ -130,14 +145,14 @@ export function SmartSelect({ value, options, onChange, placeholder, emptyLabel,
   function handleListKeyDown(event: KeyboardEvent<HTMLUListElement>) {
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      setActiveIndex((idx) => Math.min(filteredOptions.length - 1, idx + 1));
+      setActiveIndex((idx) => adjacentEnabledIndex(filteredOptions, idx < 0 ? -1 : idx, 1));
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
-      setActiveIndex((idx) => Math.max(0, idx - 1));
+      setActiveIndex((idx) => adjacentEnabledIndex(filteredOptions, idx < 0 ? filteredOptions.length : idx, -1));
     } else if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       const option = filteredOptions[activeIndex];
-      if (option) commit(option.value);
+      if (option && !option.disabled) commit(option.value);
     }
   }
 
@@ -164,7 +179,7 @@ export function SmartSelect({ value, options, onChange, placeholder, emptyLabel,
       {searchable && <label className="osk-select-search"><Search size={15} /><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar..." /></label>}
       <ul className="osk-select-menu" role="listbox" id={listboxId} ref={listRef} tabIndex={-1} aria-activedescendant={id && activeIndex >= 0 && filteredOptions[activeIndex] ? `${id}-opt-${activeIndex}` : undefined} onKeyDown={handleListKeyDown}>
         {filteredOptions.length === 0 && <li className="osk-select-empty" role="presentation">{emptyLabel ?? "Nenhuma opção disponível"}</li>}
-        {filteredOptions.map((option, index) => <li key={option.value || "__empty"} id={id ? `${id}-opt-${index}` : undefined} role="option" aria-selected={option.value === value} className="osk-select-option" data-active={index === activeIndex || undefined} data-selected={option.value === value || undefined} onMouseEnter={() => setActiveIndex(index)} onClick={() => commit(option.value)}>
+        {filteredOptions.map((option, index) => <li key={option.value || "__empty"} id={id ? `${id}-opt-${index}` : undefined} role="option" aria-selected={option.value === value} aria-disabled={option.disabled || undefined} className="osk-select-option" data-active={!option.disabled && index === activeIndex || undefined} data-selected={option.value === value || undefined} data-disabled={option.disabled || undefined} onMouseEnter={() => { if (!option.disabled) setActiveIndex(index); }} onClick={() => { if (!option.disabled) commit(option.value); }}>
           <span className="osk-select-option-text"><span>{option.label}</span>{option.hint && <small>{option.hint}</small>}</span>
           {option.value === value && <Check size={14} aria-hidden="true" />}
         </li>)}

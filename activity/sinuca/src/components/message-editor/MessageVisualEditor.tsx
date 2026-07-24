@@ -11,6 +11,7 @@ interface MessageVisualEditorProps {
   guildOptions: DashboardOptionsPayload | null;
   onChange(field: DashboardFieldDefinition, raw: unknown): void;
   onFocusField?(field: DashboardFieldDefinition): void;
+  onTextSelection?(field: DashboardFieldDefinition, start: number, end: number): void;
 }
 
 function valuesEqual(a: unknown, b: unknown) {
@@ -25,6 +26,7 @@ export function MessageVisualEditor({
   guildOptions,
   onChange,
   onFocusField,
+  onTextSelection,
 }: MessageVisualEditorProps) {
   if (!fields.length) {
     return <div className="osk-message-empty">Nenhum campo está disponível nesta área.</div>;
@@ -39,7 +41,7 @@ export function MessageVisualEditor({
           <div><strong>{field.label}</strong>{field.description && <small>{field.description}</small>}</div>
           {field.maxLength && ["text", "textarea", "url"].includes(field.type) && <span>{currentText.length}/{field.maxLength}</span>}
         </header>
-        <DashboardFieldControl field={field} value={draft[field.id]} guildOptions={guildOptions} onChange={onChange} />
+        <DashboardFieldControl field={field} value={draft[field.id]} guildOptions={guildOptions} onChange={onChange} onTextSelection={onTextSelection} />
       </section>;
     })}
   </div>;

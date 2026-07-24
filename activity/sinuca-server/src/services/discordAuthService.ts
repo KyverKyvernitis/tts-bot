@@ -45,6 +45,65 @@ export interface DashboardServerListResult {
 
 const PERMISSION_ADMINISTRATOR = 0x0000000000000008n;
 const PERMISSION_MANAGE_GUILD = 0x0000000000000020n;
+const PERMISSION_MANAGE_CHANNELS = 1n << 4n;
+const PERMISSION_VIEW_CHANNEL = 1n << 10n;
+const PERMISSION_SEND_MESSAGES = 1n << 11n;
+const PERMISSION_CONNECT = 1n << 20n;
+const PERMISSION_MANAGE_WEBHOOKS = 1n << 29n;
+const PERMISSION_CREATE_PUBLIC_THREADS = 1n << 35n;
+const PERMISSION_SEND_MESSAGES_IN_THREADS = 1n << 38n;
+
+function permissionBits(value: unknown): bigint {
+  try {
+    return BigInt(String(value ?? "0"));
+  } catch {
+    return 0n;
+  }
+}
+
+function botBasePermissions(guildId: string, botRoleIds: Set<string>, roles: Array<Record<string, unknown>>): bigint {
+  let permissions = 0n;
+  for (const role of roles) {
+    const roleId = String(role.id ?? "");
+    if (roleId !== guildId && !botRoleIds.has(roleId)) continue;
+    permissions |= permissionBits(role.permissions);
+  }
+  return permissions;
+}
+
+function applyPermissionOverwrite(permissions: bigint, overwrite: Record<string, unknown>): bigint {
+  return (permissions & ~permissionBits(overwrite.deny)) | permissionBits(overwrite.allow);
+}
+
+function botChannelPermissions(
+  channel: Record<string, unknown>,
+  guildId: string,
+  botId: string,
+  botRoleIds: Set<string>,
+  basePermissions: bigint,
+): bigint {
+  if ((basePermissions & PERMISSION_ADMINISTRATOR) === PERMISSION_ADMINISTRATOR) return basePermissions;
+  const overwrites = Array.isArray(channel.permission_overwrites)
+    ? channel.permission_overwrites.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    : [];
+
+  let permissions = basePermissions;
+  const everyone = overwrites.find((overwrite) => String(overwrite.id ?? "") === guildId && Number(overwrite.type ?? 0) === 0);
+  if (everyone) permissions = applyPermissionOverwrite(permissions, everyone);
+
+  let roleAllow = 0n;
+  let roleDeny = 0n;
+  for (const overwrite of overwrites) {
+    if (Number(overwrite.type ?? 0) !== 0 || !botRoleIds.has(String(overwrite.id ?? ""))) continue;
+    roleAllow |= permissionBits(overwrite.allow);
+    roleDeny |= permissionBits(overwrite.deny);
+  }
+  permissions = (permissions & ~roleDeny) | roleAllow;
+
+  const member = overwrites.find((overwrite) => String(overwrite.id ?? "") === botId && Number(overwrite.type ?? 0) === 1);
+  if (member) permissions = applyPermissionOverwrite(permissions, member);
+  return permissions;
+}
 
 function botToken(): string {
   return String(process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN || process.env.BOT_TOKEN || process.env.TOKEN || "").trim();
@@ -280,6 +339,12 @@ export interface DashboardChannelOption {
   name: string;
   type: number;
   parentId: string | null;
+  permissionsKnown: boolean;
+  viewable: boolean;
+  sendable: boolean;
+  connectable: boolean;
+  manageable: boolean;
+  webhookManageable: boolean;
 }
 
 export interface DashboardRoleOption {
@@ -325,18 +390,39 @@ export async function listGuildChannelsAndRoles(guildId: string): Promise<Dashbo
     return { ok: false, channels: [], roles: [], error: `roles_fetch_failed_${rolesResp.status}` };
   }
 
+  const botRoleIds: Set<string> | null = botMemberResp.ok && botMemberResp.data && Array.isArray(botMemberResp.data.roles)
+    ? new Set<string>(botMemberResp.data.roles.map((roleId) => String(roleId)))
+    : null;
+  const botId = botIdentity?.id && /^\d{15,25}$/.test(botIdentity.id) ? botIdentity.id : null;
+  const basePermissions = botRoleIds ? botBasePermissions(guildId, botRoleIds, rolesResp.data) : null;
+
   const channels: DashboardChannelOption[] = channelsResp.data
-    .map((channel) => ({
-      id: String(channel.id ?? ""),
-      name: String(channel.name ?? ""),
-      type: Number(channel.type ?? -1),
-      parentId: channel.parent_id ? String(channel.parent_id) : null,
-    }))
+    .map((channel) => {
+      const type = Number(channel.type ?? -1);
+      const permissions = botRoleIds && botId && basePermissions !== null
+        ? botChannelPermissions(channel, guildId, botId, botRoleIds, basePermissions)
+        : null;
+      const administrator = permissions !== null && (permissions & PERMISSION_ADMINISTRATOR) === PERMISSION_ADMINISTRATOR;
+      const viewable = administrator || permissions !== null && (permissions & PERMISSION_VIEW_CHANNEL) === PERMISSION_VIEW_CHANNEL;
+      const textSendable = administrator || permissions !== null && (permissions & PERMISSION_SEND_MESSAGES) === PERMISSION_SEND_MESSAGES;
+      const threadSendable = administrator || permissions !== null
+        && (permissions & PERMISSION_CREATE_PUBLIC_THREADS) === PERMISSION_CREATE_PUBLIC_THREADS
+        && (permissions & PERMISSION_SEND_MESSAGES_IN_THREADS) === PERMISSION_SEND_MESSAGES_IN_THREADS;
+      return {
+        id: String(channel.id ?? ""),
+        name: String(channel.name ?? ""),
+        type,
+        parentId: channel.parent_id ? String(channel.parent_id) : null,
+        permissionsKnown: permissions !== null,
+        viewable,
+        sendable: viewable && ([15, 16].includes(type) ? threadSendable : textSendable),
+        connectable: viewable && (administrator || permissions !== null && (permissions & PERMISSION_CONNECT) === PERMISSION_CONNECT),
+        manageable: viewable && (administrator || permissions !== null && (permissions & PERMISSION_MANAGE_CHANNELS) === PERMISSION_MANAGE_CHANNELS),
+        webhookManageable: viewable && (administrator || permissions !== null && (permissions & PERMISSION_MANAGE_WEBHOOKS) === PERMISSION_MANAGE_WEBHOOKS),
+      };
+    })
     .filter((channel) => /^\d{15,25}$/.test(channel.id) && channel.name);
 
-  const botRoleIds = botMemberResp.ok && botMemberResp.data && Array.isArray(botMemberResp.data.roles)
-    ? new Set(botMemberResp.data.roles.map((roleId) => String(roleId)))
-    : null;
   const botHighestPosition = botRoleIds
     ? rolesResp.data.reduce((highest, role) => botRoleIds.has(String(role.id ?? "")) ? Math.max(highest, Number(role.position ?? 0)) : highest, 0)
     : null;
