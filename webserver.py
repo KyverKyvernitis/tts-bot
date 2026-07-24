@@ -3763,7 +3763,7 @@ def core_worker_jobs_poll():
         payload = {}
     status, body = core_worker_poll_job_http(request.headers, payload, remote_addr=request.remote_addr or "")
     if status == 200 and isinstance(body, dict):
-        worker_id = str(payload.get("worker_id") or payload.get("id") or "")
+        worker_id = str(body.get("worker_id") or payload.get("worker_id") or payload.get("id") or "")
         if worker_id:
             _kick_core_worker_pending_automation(worker_id)
     return jsonify(body), status
@@ -3778,7 +3778,7 @@ def core_worker_jobs_result():
         payload = {}
     status, body = core_worker_job_result_http(request.headers, payload, remote_addr=request.remote_addr or "")
     if status == 200 and isinstance(body, dict):
-        worker_id = str(payload.get("worker_id") or payload.get("id") or "")
+        worker_id = str(body.get("worker_id") or payload.get("worker_id") or payload.get("id") or "")
         _kick_core_worker_pending_automation(worker_id)
     return jsonify(body), status
 

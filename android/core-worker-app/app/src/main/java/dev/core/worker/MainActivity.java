@@ -324,6 +324,7 @@ public class MainActivity extends Activity {
         startupLog("onCreate:start v" + APP_VERSION + " code=" + BuildConfig.VERSION_CODE);
         try {
             prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+            CoreWorkerRuntimeIdentity.migrate(getApplicationContext());
             renderStartupFallbackUi(
                     "Core Worker iniciando",
                     "Abrindo tela segura antes de carregar runtime, rootfs, Python ou Bedrock.",
@@ -2003,6 +2004,7 @@ public class MainActivity extends Activity {
                     .remove("paired_via_local_agent")
                     .remove("legacy_termux_online")
                     .apply();
+            CoreWorkerRuntimeIdentity.markDedicatedApkPair(prefs, workerId);
             nativeWorkerOnline = true;
             nativeWorkerState = "pareado direto na VPS";
             nativeWorkerLastHeartbeatAt = System.currentTimeMillis();
@@ -2017,7 +2019,7 @@ public class MainActivity extends Activity {
             show("Celular conectado diretamente pelo APK.\nPerfil: "
                     + profileLabel(profile)
                     + "\nWorker: " + emptyFallback(workerId, "apk")
-                    + "\nTermux não é necessário.");
+                    + "\nPareamento dedicado: o APK usa a porta 8766 sem disputar com o Termux.");
         });
     }
 
@@ -4172,10 +4174,8 @@ public class MainActivity extends Activity {
     }
 
     private String effectiveWorkerId() {
-        String nativeId = prefs == null ? "" : prefs.getString("native_worker_id", "");
-        if (nativeId != null && !nativeId.trim().isEmpty()) return nativeId.trim();
-        String saved = prefs == null ? "" : prefs.getString("worker_id", "");
-        if (saved != null && !saved.trim().isEmpty()) return saved.trim();
+        String runtimeId = CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext());
+        if (!runtimeId.isEmpty()) return runtimeId;
         if (localAgentWorkerId != null && !localAgentWorkerId.trim().isEmpty()) return localAgentWorkerId.trim();
         return nativeWorkerId();
     }
@@ -4188,6 +4188,9 @@ public class MainActivity extends Activity {
             payload.put("name", name);
             payload.put("device_name", name);
             payload.put("worker_id", nativeWorkerId());
+            payload.put("physical_worker_id", nativeWorkerId());
+            payload.put("runtime_kind", "apk");
+            payload.put("platform", "android");
             payload.put("version", APP_VERSION);
             payload.put("source", "core-worker-apk-direct");
             payload.put("endpoint", "apk://" + installId());
@@ -4225,6 +4228,7 @@ public class MainActivity extends Activity {
             out.put("ok", true);
             out.put("worker_id", body.optString("worker_id", nativeWorkerId()));
             out.put("token", body.optString("token", ""));
+            out.put("direct_http_token", body.optString("direct_http_token", ""));
             return out;
         } catch (Throwable exc) {
             try {
@@ -4261,8 +4265,7 @@ public class MainActivity extends Activity {
                 return;
             }
             JSONObject payload = new JSONObject();
-            payload.put("worker_id", workerId);
-            payload.put("id", workerId);
+            CoreWorkerRuntimeIdentity.putRuntimeFields(getApplicationContext(), payload);
             payload.put("name", prefs.getString("device_name", defaultDeviceName()));
             payload.put("version", APP_VERSION);
             payload.put("source", "core-worker-apk-direct");
@@ -4288,9 +4291,11 @@ public class MainActivity extends Activity {
                 JSONObject body = new JSONObject(result.body);
                 if (body.optBoolean("ok", false)) {
                     String directHttpToken = body.optString("direct_http_token", "").trim();
-                    if (!directHttpToken.isEmpty()) {
-                        prefs.edit().putString("direct_http_token", directHttpToken).apply();
-                    }
+                    String scopedWorkerId = body.optString("worker_id", "").trim();
+                    SharedPreferences.Editor heartbeatEditor = prefs.edit();
+                    if (!directHttpToken.isEmpty()) heartbeatEditor.putString("direct_http_token", directHttpToken);
+                    if (!scopedWorkerId.isEmpty()) heartbeatEditor.putString("runtime_worker_id", scopedWorkerId);
+                    heartbeatEditor.apply();
                     nativeWorkerOnline = true;
                     nativeWorkerState = "online direto na VPS";
                     nativeWorkerLastHeartbeatAt = System.currentTimeMillis();
@@ -4754,8 +4759,12 @@ public class MainActivity extends Activity {
         runtime.put("bedrock_installer_summary", bedrockInstallerSummary == null ? "" : bedrockInstallerSummary);
         runtime.put("bedrock_installer_state", bedrockInstallerState == null ? "" : bedrockInstallerState);
         runtime.put("bedrock_installer_next_action", bedrockInstallerNextAction == null ? "" : bedrockInstallerNextAction);
-        runtime.put("termux_required_now", false);
-        runtime.put("termux_fallback_available", false);
+        boolean bootstrap = CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(getApplicationContext());
+        runtime.put("termux_required_now", bootstrap);
+        runtime.put("termux_fallback_available", bootstrap);
+        runtime.put("termux_bootstrap_builder", bootstrap);
+        runtime.put("parent_worker_id", CoreWorkerRuntimeIdentity.parentWorkerId(getApplicationContext()));
+        runtime.put("runtime_worker_id", CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext()));
         runtime.put("advanced_jobs_require_termux", false);
         runtime.put("jobs_runtime", "apk-native-python-linux-bedrock-installer");
         runtime.put("migration_stage", "apk-native-bedrock-installer-phase");
@@ -6314,7 +6323,9 @@ public class MainActivity extends Activity {
     private void openTermux() {
         CoreWorkerRuntimeService.requestStart(this, "runtime_status_ui");
         CoreWorkerRuntimeService.requestPoll(this, "runtime_status_ui");
-        refreshLocalStatus("Termux foi removido do fluxo. O Core Worker opera diretamente pelo APK.");
+        refreshLocalStatus(CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(getApplicationContext())
+                ? "Bootstrap ativo: o Termux mantém a porta 8766 e compila o primeiro APK; o runtime APK usa a porta 8767."
+                : "Runtime APK dedicado ativo. O Termux não participa deste pareamento.");
     }
 
     private void openTailscale() {
@@ -6334,7 +6345,7 @@ public class MainActivity extends Activity {
                 .setTitle("Esquecer conexão local?")
                 .setMessage("Isso remove a conexão salva neste APK. O registro na VPS não é apagado automaticamente.")
                 .setPositiveButton("Esquecer", (dialog, which) -> {
-                    prefs.edit()
+                    SharedPreferences.Editor editor = prefs.edit()
                             .remove("worker_token")
                             .remove("direct_http_token")
                             .remove("server_url")
@@ -6343,8 +6354,9 @@ public class MainActivity extends Activity {
                             .remove("paired_via_native_apk")
                             .remove("legacy_termux_online")
                             .remove("native_worker_id")
-                            .remove("worker_id")
-                            .apply();
+                            .remove("worker_id");
+                    CoreWorkerRuntimeIdentity.clear(editor);
+                    editor.apply();
                     loadInputs();
                     updatePairingUi();
                     refreshLocalStatus("Conexão local removida.");
@@ -6583,12 +6595,20 @@ public class MainActivity extends Activity {
         if (sshd.toLowerCase(Locale.ROOT).contains("porta configurada não apareceu")) {
             sshd = "ativo · porta não detectada";
         }
-        String termuxBlock = "Fallback legado Termux\n"
-                + checkLine("Status", localAgentOnline ? "online, mas não principal" : "offline") + "\n"
-                + checkLine("Jobs avançados", localAgentJobsConfigured ? "fallback disponível" : "não exigido para runtime APK") + "\n"
+        boolean bootstrapIdentity = CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(getApplicationContext());
+        String termuxBlock = (bootstrapIdentity ? "Bootstrap Termux\n" : "Runtime legado Termux\n")
+                + checkLine("Status", localAgentOnline
+                        ? (bootstrapIdentity ? "online · builder inicial" : "online, mas não principal")
+                        : (bootstrapIdentity ? "offline · bootstrap indisponível" : "offline")) + "\n"
+                + checkLine("Build APK", bootstrapIdentity
+                        ? "primeiro build reservado ao Termux"
+                        : "autobuilder do APK após preflight") + "\n"
+                + checkLine("Jobs", localAgentJobsConfigured
+                        ? (bootstrapIdentity ? "update/build bootstrap disponíveis" : "fallback disponível")
+                        : (bootstrapIdentity ? "aguardando phone-worker" : "não exigido para runtime APK")) + "\n"
                 + checkLine("SSHD", sshd);
 
-        String depsBlock = "Migração sem Termux\n"
+        String depsBlock = (bootstrapIdentity ? "Transição Termux → APK\n" : "Runtime APK autônomo\n")
                 + checkLine("Status aparelho", "APK nativo") + "\n"
                 + checkLine("Boot/autostart", emptyFallback(nativeBootSummary, "APK nativo")) + "\n"
                 + checkLine("Jobs internos", "APK nativo") + "\n"
@@ -6599,7 +6619,9 @@ public class MainActivity extends Activity {
                 + checkLine("Instalador Bedrock", emptyFallback(bedrockInstallerSummary, "aguardando validação")) + "\n"
                 + checkLine("Bedrock", emptyFallback(bedrockSummary, "diagnóstico pendente")) + "\n"
                 + checkLine("Runtime Bedrock", emptyFallback(bedrockRuntimeSummary, "parado")) + "\n"
-                + checkLine("Termux", localAgentOnline ? "fallback legado online" : "fallback legado opcional") + "\n"
+                + checkLine("Termux", bootstrapIdentity
+                        ? (localAgentOnline ? "bootstrap builder online" : "bootstrap builder aguardando")
+                        : (localAgentOnline ? "fallback legado online" : "não necessário")) + "\n"
                 + checkLine("Rede privada", isPackageInstalled("com.tailscale.ipn") ? networkChecklistLabel(server) : "VPN externa ainda é etapa futura") + "\n"
                 + checkLine("VPS", hasPairing() ? "conexão direta salva" : "pareamento pendente");
 

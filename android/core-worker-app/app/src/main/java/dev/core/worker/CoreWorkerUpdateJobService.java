@@ -203,7 +203,7 @@ public class CoreWorkerUpdateJobService extends JobService {
             payload.put("versionCode", versionCode);
             payload.put("appVersion", BuildConfig.VERSION_NAME);
             payload.put("appVersionCode", BuildConfig.VERSION_CODE);
-            payload.put("workerId", prefs().getString("worker_id", ""));
+            payload.put("workerId", CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext()));
             payload.put("installId", installId());
             payload.put("permission", hasNotificationPermission() ? "granted" : "missing");
             payload.put("detail", detail == null ? "" : detail);

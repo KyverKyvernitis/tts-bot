@@ -152,6 +152,10 @@ final class CoreWorkerDirectTaskExecutor {
         out.put("version", BuildConfig.VERSION_NAME);
         out.put("version_code", BuildConfig.VERSION_CODE);
         out.put("worker_id", workerId());
+        out.put("runtime_kind", "apk");
+        out.put("parent_worker_id", CoreWorkerRuntimeIdentity.parentWorkerId(context));
+        out.put("physical_worker_id", CoreWorkerRuntimeIdentity.canonicalWorkerId(context));
+        out.put("bootstrap_shared_worker_identity", CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(context));
         out.put("profile", prefs.getString("profile", "midia"));
         out.put("uptime_seconds", Math.max(0L, (System.currentTimeMillis() - prefs.getLong("foreground_runtime_started_at", System.currentTimeMillis())) / 1000L));
         out.put("supported_tasks", directSupportedTasks());
@@ -173,7 +177,9 @@ final class CoreWorkerDirectTaskExecutor {
         out.put("device", deviceStatus());
         out.put("network", networkStatus());
         out.put("storage", storageStatus());
-        out.put("summary", "diagnóstico coletado pelo APK sem Termux");
+        out.put("summary", CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(context)
+                ? "diagnóstico coletado pelo runtime APK; Termux reservado ao bootstrap"
+                : "diagnóstico coletado diretamente pelo APK");
         return out;
     }
 
@@ -183,7 +189,7 @@ final class CoreWorkerDirectTaskExecutor {
                 .put("executor_ready", prefs.getBoolean("job_executor_ready", false))
                 .put("foreground_active", prefs.getBoolean("foreground_runtime_active", false))
                 .put("direct_http_active", prefs.getBoolean("direct_http_active", false))
-                .put("direct_http_port", prefs.getInt("direct_http_port", 8766))
+                .put("direct_http_port", CoreWorkerRuntimeIdentity.directHttpPort(context))
                 .put("last_job", prefs.getString("internal_light_jobs_last_summary", ""))
                 .put("last_error", prefs.getString("agent_last_error", ""));
     }
@@ -251,9 +257,12 @@ final class CoreWorkerDirectTaskExecutor {
         out.put("task", "vps_assist_probe");
         out.put("vps", normalizedServerUrl());
         out.put("endpoint", prefs.getString("direct_worker_endpoint", ""));
-        out.put("direct_http_port", prefs.getInt("direct_http_port", 8766));
-        out.put("termux_required", false);
-        out.put("summary", "APK pronto para assistência direta da VPS");
+        out.put("direct_http_port", CoreWorkerRuntimeIdentity.directHttpPort(context));
+        boolean bootstrap = CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(context);
+        out.put("termux_required", bootstrap);
+        out.put("summary", bootstrap
+                ? "APK pronto para assistência; Termux permanece reservado ao primeiro build"
+                : "APK pronto para assistência direta da VPS");
         return out;
     }
 
@@ -1049,9 +1058,7 @@ final class CoreWorkerDirectTaskExecutor {
     }
 
     private String workerId() {
-        String value = prefs.getString("worker_id", "").trim();
-        if (!value.isEmpty()) return value;
-        value = prefs.getString("native_worker_id", "").trim();
+        String value = CoreWorkerRuntimeIdentity.runtimeWorkerId(context);
         if (!value.isEmpty()) return value;
         return "apk-" + prefs.getString("install_id", "unknown").replace("-", "");
     }

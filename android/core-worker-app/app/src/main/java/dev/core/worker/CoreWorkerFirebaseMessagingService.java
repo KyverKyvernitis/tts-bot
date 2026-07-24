@@ -202,7 +202,7 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
         payload.put("source", "core-worker-apk");
         payload.put("appVersion", BuildConfig.VERSION_NAME);
         payload.put("appVersionCode", BuildConfig.VERSION_CODE);
-        payload.put("workerId", prefs().getString("worker_id", ""));
+        payload.put("workerId", CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext()));
         payload.put("installId", installId());
         payload.put("deviceName", prefs().getString("device_name", ""));
         return payload;

@@ -512,6 +512,8 @@ def _workers_need_agent_version(snapshot: dict[str, Any], target_version: str) -
     for worker in workers:
         if not isinstance(worker, dict) or not worker.get("online") or worker.get("enabled") is False:
             continue
+        if not _is_termux_bootstrap_worker(worker):
+            continue
         if not _worker_supports(worker, "worker_update", "phone-worker"):
             continue
         current = str(worker.get("version") or "")
@@ -588,6 +590,38 @@ def _worker_supports(worker: dict[str, Any], task: str, required_capability: str
     return not tasks or task in tasks
 
 
+def _is_termux_bootstrap_worker(worker: dict[str, Any]) -> bool:
+    source = str(worker.get("source") or "").strip().lower()
+    runtime_kind = str(worker.get("runtime_kind") or "").strip().lower()
+    runtime_mode = str(worker.get("runtime_mode") or "").strip().lower()
+    roles = {str(item).strip().lower() for item in worker.get("roles") or []}
+    return (
+        runtime_kind == "termux"
+        or source.startswith("termux-")
+        or "termux" in source
+        or runtime_mode == "termux"
+        or ("phone-worker" in roles and not source.startswith("core-worker-apk"))
+    )
+
+
+def _bootstrap_worker_id_for_runtime(snapshot: dict[str, Any], worker_id: str) -> str:
+    """Mapeia o runtime APK filho de volta ao Termux do mesmo celular."""
+    wanted = str(worker_id or "").strip()
+    if not wanted:
+        return ""
+    workers = [item for item in snapshot.get("workers") or [] if isinstance(item, dict)]
+    selected = next((item for item in workers if str(item.get("worker_id") or "") == wanted), None)
+    if isinstance(selected, dict):
+        parent = str(selected.get("parent_worker_id") or selected.get("physical_worker_id") or "").strip()
+        if parent:
+            parent_record = next((item for item in workers if str(item.get("worker_id") or "") == parent), None)
+            if isinstance(parent_record, dict) and _is_termux_bootstrap_worker(parent_record):
+                return parent
+        if _is_termux_bootstrap_worker(selected):
+            return wanted
+    return wanted
+
+
 
 
 
@@ -646,6 +680,15 @@ def _direct_phone_worker_update_if_needed(payload: dict[str, Any], target_versio
     status = _direct_phone_worker_request("/status", timeout=2.5)
     if not bool(status.get("ok", True)):
         return {"ok": False, "skipped": True, "summary": f"phone-worker direto indisponível: {_short(status.get('summary') or status.get('error'), 160)}"}
+    source = str(status.get("source") or "").strip().lower()
+    runtime_mode = str(status.get("runtime_mode") or "").strip().lower()
+    if source.startswith("core-worker-apk") or runtime_mode.startswith("apk-"):
+        return {
+            "ok": False,
+            "skipped": True,
+            "port_conflict": True,
+            "summary": "porta direta responde ao APK; worker_update continua reservado ao Termux bootstrap",
+        }
     current_version = str(status.get("version") or "")
     supported = _task_set(status.get("supported_tasks"))
     if supported and "worker_update" not in supported:
@@ -737,10 +780,13 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
     registry = get_core_workers_registry()
     snapshot = _load_registry_snapshot()
     workers = [w for w in snapshot.get("workers") or [] if isinstance(w, dict)]
+    requested_worker_id = str(only_worker_id or "").strip()
+    bootstrap_worker_id = _bootstrap_worker_id_for_runtime(snapshot, requested_worker_id) if requested_worker_id else ""
     payload = _build_worker_update_payload()
     target_version = str(payload.get("version") or "desconhecida")
     direct_update = {}
-    if not only_worker_id:
+    direct_target = next((w for w in workers if str(w.get("worker_id") or "") == bootstrap_worker_id), None) if bootstrap_worker_id else None
+    if not requested_worker_id or (isinstance(direct_target, dict) and _is_termux_bootstrap_worker(direct_target)):
         direct_update = _direct_phone_worker_update_if_needed(payload, target_version, force=force)
 
     pending = _load_pending()
@@ -762,7 +808,10 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
         name = str(worker.get("name") or worker_id)
         if not worker_id:
             continue
-        if only_worker_id and worker_id != only_worker_id:
+        if bootstrap_worker_id and worker_id != bootstrap_worker_id:
+            continue
+        if not _is_termux_bootstrap_worker(worker):
+            skipped.append(f"{name}: runtime APK não recebe worker_update")
             continue
         if not _worker_supports(worker, "worker_update", "phone-worker"):
             skipped.append(f"{name}: incompatível/offline")
@@ -795,7 +844,18 @@ def queue_agent_updates(*, force: bool = False, only_worker_id: str = "") -> dic
     # painel não ficar preso em "agent X pendente" por causa de registros offline
     # ou duplicatas antigas. Se algum voltar online desatualizado, process-pending
     # recria o job automaticamente no heartbeat/poll.
-    if not queued and not errors and not _workers_need_agent_version(_load_registry_snapshot(), target_version):
+    refreshed_snapshot = _load_registry_snapshot()
+    termux_registered = any(
+        isinstance(item, dict) and item.get("enabled") is not False and _is_termux_bootstrap_worker(item)
+        for item in refreshed_snapshot.get("workers") or []
+    )
+    direct_confirmed = bool(direct_update.get("ok"))
+    if (
+        not queued
+        and not errors
+        and not _workers_need_agent_version(refreshed_snapshot, target_version)
+        and (not termux_registered or direct_confirmed)
+    ):
         pending = _load_pending()
         pending.pop("agent_update", None)
         _save_pending(pending)

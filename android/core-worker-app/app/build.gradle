@@ -63,8 +63,8 @@ android {
         // apps target 29+, então esta variante operacional permanece em target 28.
         // compileSdk continua moderno e a distribuição não ocorre pelo Google Play.
         targetSdk coreWorkerSelfBuilderTargetSdk
-        versionCode 119
-        versionName "0.7.1"
+        versionCode 120
+        versionName "0.7.2"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""

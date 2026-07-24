@@ -63,7 +63,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.33"
+PHONE_WORKER_VERSION = "1.10.34"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -1556,8 +1556,11 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
                 capabilities.append(capability)
     return {
         "worker_id": worker_id,
+        "physical_worker_id": worker_id,
         "name": _short_text(name, limit=64, default="Core Phone Worker"),
         "source": "termux-phone-worker",
+        "platform": "android-termux",
+        "runtime_kind": "termux",
         "runtime_mode": CORE_WORKER_RUNTIME_MODE,
         "version": PHONE_WORKER_VERSION,
         "profile": profile,
@@ -1594,7 +1597,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
                 "mode": CORE_WORKER_RUNTIME_MODE,
                 "current_worker": "termux-phone-worker",
                 "internal_runtime": CORE_WORKER_INTERNAL_RUNTIME_STATE,
-                "migration_stage": "termux-current",
+                "migration_stage": "termux-bootstrap-builder",
                 "summary": "Termux executa jobs reais; APK prepara runtime interno gradualmente.",
             },
             "profile": profile,
@@ -3784,12 +3787,15 @@ def _system_status() -> dict[str, Any]:
     return {
         "ok": True,
         "worker": "phone-worker",
+        "source": "termux-phone-worker",
+        "runtime_kind": "termux",
+        "physical_worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
         "runtime_mode": CORE_WORKER_RUNTIME_MODE,
         "runtime": {
             "mode": CORE_WORKER_RUNTIME_MODE,
             "current_worker": "termux-phone-worker",
             "internal_runtime": CORE_WORKER_INTERNAL_RUNTIME_STATE,
-            "migration_stage": "termux-current",
+            "migration_stage": "termux-bootstrap-builder",
         },
         "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
         "name": _default_worker_name(),
@@ -3845,12 +3851,15 @@ def _local_agent_status_payload(*, host: str, port: int) -> dict[str, Any]:
         "ok": True,
         "local_only": True,
         "worker": "phone-worker",
+        "source": "termux-phone-worker",
+        "runtime_kind": "termux",
+        "physical_worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
         "runtime_mode": CORE_WORKER_RUNTIME_MODE,
         "runtime": {
             "mode": CORE_WORKER_RUNTIME_MODE,
             "current_worker": "termux-phone-worker",
             "internal_runtime": CORE_WORKER_INTERNAL_RUNTIME_STATE,
-            "migration_stage": "termux-current",
+            "migration_stage": "termux-bootstrap-builder",
         },
         "worker_id": str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or _default_worker_id()).strip(),
         "name": _default_worker_name(),

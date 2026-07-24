@@ -56,7 +56,7 @@ final class CoreWorkerDirectHttpServer {
 
     synchronized void start() throws Exception {
         if (isRunning()) return;
-        int port = normalizePort(prefs.getInt("direct_http_port", DEFAULT_PORT));
+        int port = normalizePort(CoreWorkerRuntimeIdentity.directHttpPort(context));
         ServerSocket socket = new ServerSocket();
         socket.setReuseAddress(true);
         socket.bind(new InetSocketAddress("0.0.0.0", port), 16);
@@ -298,9 +298,7 @@ final class CoreWorkerDirectHttpServer {
     }
 
     private String workerId() {
-        String value = prefs.getString("worker_id", "").trim();
-        if (!value.isEmpty()) return value;
-        value = prefs.getString("native_worker_id", "").trim();
+        String value = CoreWorkerRuntimeIdentity.runtimeWorkerId(context);
         return value.isEmpty() ? "core-worker-apk" : value;
     }
 

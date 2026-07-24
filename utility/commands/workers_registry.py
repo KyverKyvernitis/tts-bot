@@ -387,6 +387,9 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "supported_tasks": supported_tasks,
         "version": _short_text(record.get("version"), limit=48),
         "source": _short_text(record.get("source"), limit=32, default="apk"),
+        "runtime_kind": _short_text(record.get("runtime_kind"), limit=24),
+        "parent_worker_id": _short_text(record.get("parent_worker_id"), limit=64),
+        "physical_worker_id": _short_text(record.get("physical_worker_id") or record.get("parent_worker_id") or record.get("worker_id"), limit=64),
         "runtime_mode": runtime_mode,
         "runtime": _safe_dict(runtime, max_items=16),
         "endpoint": _short_text(record.get("endpoint"), limit=160),
@@ -397,6 +400,39 @@ def _compact_worker_public(record: Mapping[str, Any], *, now: float | None = Non
         "remote_addr": _short_text(record.get("remote_addr"), limit=64),
     }
     return public
+
+
+def _is_apk_runtime_payload(payload: Mapping[str, Any] | None) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    source = str(payload.get("source") or "").strip().lower()
+    platform = str(payload.get("platform") or "").strip().lower()
+    runtime_kind = str(payload.get("runtime_kind") or "").strip().lower()
+    return source.startswith("core-worker-apk") or platform == "android" or runtime_kind == "apk"
+
+
+def _is_termux_runtime_record(record: Mapping[str, Any] | None) -> bool:
+    if not isinstance(record, Mapping):
+        return False
+    source = str(record.get("source") or "").strip().lower()
+    runtime_kind = str(record.get("runtime_kind") or "").strip().lower()
+    runtime_mode = str(record.get("runtime_mode") or "").strip().lower()
+    roles = set(normalize_roles(record.get("roles"), limit=32)) | set(normalize_roles(record.get("manual_roles"), limit=32))
+    return (
+        runtime_kind == "termux"
+        or source.startswith("termux-")
+        or "termux" in source
+        or runtime_mode == "termux"
+        or ("phone-worker" in roles and not source.startswith("core-worker-apk"))
+    )
+
+
+def _apk_runtime_worker_id(parent_worker_id: str) -> str:
+    parent = _safe_worker_id(parent_worker_id)
+    if parent.endswith("-apk"):
+        return parent
+    # worker_id aceita até 64 chars. Preserve o prefixo estável e reserve o sufixo.
+    return f"{parent[:60]}-apk"
 
 
 def _public_worker_ping_ms(worker: Mapping[str, Any]) -> float | None:
@@ -544,6 +580,191 @@ class CoreWorkersRegistry:
         except Exception:
             pass
 
+    def _ensure_apk_runtime_child_unlocked(
+        self,
+        data: dict[str, Any],
+        *,
+        parent_worker_id: str,
+        token: str,
+        payload: Mapping[str, Any] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Cria o runtime APK separado usando o token do worker físico.
+
+        Durante o bootstrap, Termux e APK podem ter herdado o mesmo worker_id.
+        O filho `-apk` impede que o heartbeat Android sobrescreva versão, roles e
+        tasks do phone-worker que ainda precisa compilar o primeiro APK autônomo.
+        """
+        workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+        parent_id = _safe_worker_id(parent_worker_id)
+        parent = workers.get(parent_id)
+        if not isinstance(parent, dict):
+            raise CoreWorkerRegistryError("worker pai não encontrado", status=404)
+        token_hash = _hash_secret(token)
+        if not token or str(parent.get("token_hash") or "") != token_hash:
+            raise CoreWorkerRegistryError("token inválido", status=403)
+
+        child_id = _apk_runtime_worker_id(parent_id)
+        existing = workers.get(child_id)
+        if isinstance(existing, dict):
+            existing_hash = str(existing.get("token_hash") or "")
+            if existing_hash and existing_hash != token_hash:
+                raise CoreWorkerRegistryError("runtime APK já pertence a outro token", status=403)
+            record = dict(existing)
+        else:
+            # O runtime APK é uma segunda representação do mesmo celular físico,
+            # não um novo pareamento. Portanto ele não consome uma vaga adicional
+            # do limite de celulares registrados.
+            ts = _now()
+            base_name = _short_text(parent.get("name"), limit=54, default="Core Worker")
+            record = {
+                "worker_id": child_id,
+                "name": _short_text(f"{base_name} · APK", limit=64),
+                "enabled": True,
+                "token_hash": token_hash,
+                "registered_at": ts,
+                "updated_at": ts,
+                "last_heartbeat_at": 0.0,
+                "paired_by_id": int(parent.get("paired_by_id") or 0),
+                "paired_by_name": _short_text(parent.get("paired_by_name"), limit=80),
+                "roles": ["apk-worker", "diagnostics"],
+                "capabilities": ["apk-worker", "diagnostics"],
+                "supported_tasks": [],
+                "source": "core-worker-apk-bootstrap-child",
+                "runtime_kind": "apk",
+                "parent_worker_id": parent_id,
+                "physical_worker_id": parent_id,
+                "bootstrap_shared_token": True,
+            }
+        record["token_hash"] = token_hash
+        record["runtime_kind"] = "apk"
+        record["parent_worker_id"] = parent_id
+        record["physical_worker_id"] = parent_id
+        record["bootstrap_shared_token"] = True
+        if isinstance(payload, Mapping):
+            requested_name = _short_text(payload.get("name") or payload.get("device_name"), limit=54)
+            if requested_name:
+                record["name"] = _short_text(f"{requested_name} · APK", limit=64)
+        workers[child_id] = record
+        data["workers"] = workers
+        return child_id, record
+
+    def _split_legacy_apk_collision_unlocked(
+        self,
+        data: dict[str, Any],
+        *,
+        canonical_worker_id: str,
+        token: str,
+        payload: Mapping[str, Any],
+    ) -> str:
+        """Recupera registros em que o APK 0.7.1 já sobrescreveu o Termux.
+
+        Instalações antigas usavam o mesmo worker_id nos dois runtimes. Se o
+        registro canônico já parece Android e o ID não é um pareamento dedicado
+        (`apk-*`), movemos o snapshot Android para `<id>-apk` e recriamos um
+        registro Termux offline com o mesmo token. O phone-worker volta a preencher
+        esse registro no heartbeat seguinte, sem perder o runtime APK nem criar um
+        deadlock de bootstrap.
+        """
+        workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+        parent_id = _safe_worker_id(canonical_worker_id)
+        current = workers.get(parent_id)
+        if not isinstance(current, Mapping):
+            raise CoreWorkerRegistryError("worker canônico não encontrado", status=404)
+        token_hash = _hash_secret(token)
+        if not token or str(current.get("token_hash") or "") != token_hash:
+            raise CoreWorkerRegistryError("token inválido", status=403)
+
+        child_id = _apk_runtime_worker_id(parent_id)
+        existing_child = workers.get(child_id)
+        child = dict(existing_child) if isinstance(existing_child, Mapping) else dict(current)
+        child.update({
+            "worker_id": child_id,
+            "token_hash": token_hash,
+            "runtime_kind": "apk",
+            "parent_worker_id": parent_id,
+            "physical_worker_id": parent_id,
+            "bootstrap_shared_token": True,
+            "source": _short_text(payload.get("source") or child.get("source") or "core-worker-apk-bootstrap-child", limit=32),
+        })
+        requested_name = _short_text(payload.get("name") or payload.get("device_name") or current.get("name"), limit=54, default="Core Worker")
+        child["name"] = _short_text(f"{requested_name} · APK", limit=64)
+        workers[child_id] = child
+
+        # Não finja que o Termux está online: o heartbeat real dele deve restaurar
+        # versão/status. Mantemos somente credencial, identidade e capacidades de
+        # bootstrap necessárias para que o update direto consiga recuperá-lo.
+        parent = {
+            "worker_id": parent_id,
+            "name": _short_text(current.get("name"), limit=64, default=requested_name),
+            "enabled": bool(current.get("enabled", True)),
+            "token_hash": token_hash,
+            "registered_at": float(current.get("registered_at") or _now()),
+            "updated_at": 0.0,
+            "last_heartbeat_at": 0.0,
+            "paired_by_id": int(current.get("paired_by_id") or 0),
+            "paired_by_name": _short_text(current.get("paired_by_name"), limit=80),
+            "roles": ["phone-worker", "apk-builder"],
+            "capabilities": ["phone-worker", "apk-builder", "apk-bootstrap-builder"],
+            "supported_tasks": ["worker_update", "apk_build_debug", "apk_publish_last", "apk_builder_status"],
+            "source": "termux-bootstrap-awaiting-heartbeat",
+            "platform": "android-termux",
+            "runtime_kind": "termux",
+            "physical_worker_id": parent_id,
+            "bootstrap_recovered_from_apk_collision": True,
+            "remote_addr": _short_text(current.get("remote_addr"), limit=64),
+            "endpoint": _short_text(current.get("endpoint"), limit=160),
+            "status": {
+                "bootstrap": {
+                    "state": "awaiting_termux_heartbeat",
+                    "summary": "registro Termux recuperado após colisão com runtime APK",
+                }
+            },
+        }
+        workers[parent_id] = parent
+        data["workers"] = workers
+        return child_id
+
+    def _runtime_worker_id_for_payload_unlocked(
+        self,
+        data: dict[str, Any],
+        *,
+        payload: Mapping[str, Any],
+        token: str,
+    ) -> str:
+        requested = _safe_worker_id(payload.get("worker_id") or payload.get("id"))
+        if not _is_apk_runtime_payload(payload):
+            return requested
+        workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+        existing = workers.get(requested)
+        parent_hint = _safe_worker_id(payload.get("parent_worker_id")) if payload.get("parent_worker_id") else ""
+
+        # Payload novo: o APK já usa `<pai>-apk` e informa explicitamente o pai.
+        if parent_hint and requested == _apk_runtime_worker_id(parent_hint):
+            if requested not in workers:
+                child_id, _record = self._ensure_apk_runtime_child_unlocked(
+                    data, parent_worker_id=parent_hint, token=token, payload=payload,
+                )
+                return child_id
+            return requested
+
+        # Payload legado compartilhando o ID do Termux. Se o registro ainda é
+        # Termux, basta criar o filho; se já foi sobrescrito pelo APK 0.7.1,
+        # restaure os dois registros sem marcar o pai como online.
+        if isinstance(existing, Mapping) and _is_termux_runtime_record(existing):
+            child_id, _record = self._ensure_apk_runtime_child_unlocked(
+                data, parent_worker_id=requested, token=token, payload=payload,
+            )
+            return child_id
+        if (
+            isinstance(existing, Mapping)
+            and not requested.startswith("apk-")
+            and not requested.endswith("-apk")
+        ):
+            return self._split_legacy_apk_collision_unlocked(
+                data, canonical_worker_id=requested, token=token, payload=payload,
+            )
+        return requested
+
     def _cleanup_pairings_unlocked(self, data: dict[str, Any], *, now: float | None = None) -> int:
         ts = _now() if now is None else float(now)
         pairings = data.get("pairings") if isinstance(data.get("pairings"), dict) else {}
@@ -632,6 +853,10 @@ class CoreWorkersRegistry:
                 "endpoint": endpoint,
                 "version": version,
                 "source": source,
+                "platform": _short_text(payload.get("platform"), limit=32),
+                "runtime_kind": _short_text(payload.get("runtime_kind"), limit=24),
+                "parent_worker_id": _short_text(payload.get("parent_worker_id"), limit=64),
+                "physical_worker_id": _short_text(payload.get("physical_worker_id") or payload.get("parent_worker_id") or worker_id, limit=64),
                 "remote_addr": _short_text(remote_addr, limit=64),
                 "battery": _safe_dict(payload.get("battery"), max_items=16),
                 "network": _safe_dict(payload.get("network"), max_items=16),
@@ -695,6 +920,10 @@ class CoreWorkersRegistry:
                 "remote_addr": _short_text(remote_addr, limit=64),
                 "direct": True,
                 "source": _short_text(payload.get("source") or "core-worker-apk-direct", limit=32),
+                "platform": _short_text(payload.get("platform") or record.get("platform"), limit=32),
+                "runtime_kind": _short_text(payload.get("runtime_kind") or record.get("runtime_kind"), limit=24),
+                "parent_worker_id": _short_text(payload.get("parent_worker_id") or record.get("parent_worker_id"), limit=64),
+                "physical_worker_id": _short_text(payload.get("physical_worker_id") or payload.get("parent_worker_id") or record.get("physical_worker_id") or worker_id, limit=64),
                 "name": _short_text(payload.get("name") or record.get("name") or "Core Phone Worker", limit=64),
             })
             if payload.get("endpoint") or payload.get("base_url") or payload.get("url"):
@@ -724,20 +953,23 @@ class CoreWorkersRegistry:
 
 
     def heartbeat(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
-        worker_id = _safe_worker_id(payload.get("worker_id") or payload.get("id"))
         if not token:
             raise CoreWorkerRegistryError("token ausente", status=401)
         ts = _now()
         with self._lock:
             data = self._load_unlocked()
             workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+            worker_id = self._runtime_worker_id_for_payload_unlocked(data, payload=payload, token=token)
             worker_id, record = self._authenticate_worker_unlocked(data, worker_id=worker_id, token=token)
             record["updated_at"] = ts
             record["last_heartbeat_at"] = ts
             record["remote_addr"] = _short_text(remote_addr, limit=64)
-            for key in ("name", "endpoint", "version", "source"):
+            for key in ("name", "endpoint", "version", "source", "platform", "runtime_kind", "parent_worker_id", "physical_worker_id"):
                 if key in payload:
                     record[key] = _short_text(payload.get(key), limit=160 if key == "endpoint" else 64)
+            if _is_apk_runtime_payload(payload) and record.get("parent_worker_id"):
+                record["runtime_kind"] = "apk"
+                record["physical_worker_id"] = str(record.get("parent_worker_id") or "")
             if "roles" in payload:
                 record["roles"] = normalize_roles(payload.get("roles"), default=normalize_roles(record.get("roles")), limit=16)
             if "capabilities" in payload:
@@ -756,7 +988,7 @@ class CoreWorkersRegistry:
             self._reconcile_jobs_from_worker_status_unlocked(data, now=ts)
             self._save_unlocked(data)
             public = _compact_worker_public(record, now=ts)
-        return {"ok": True, "worker": public}
+        return {"ok": True, "worker_id": worker_id, "worker": public}
 
     def _reconcile_jobs_from_worker_status_unlocked(self, data: dict[str, Any], *, now: float | None = None) -> int:
         """Fecha jobs ativos quando o worker informa último resultado no status."""
@@ -902,6 +1134,30 @@ class CoreWorkersRegistry:
             self._cleanup_jobs_unlocked(data, now=ts)
             workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
             if record["target_worker_id"]:
+                requested_target_id = str(record["target_worker_id"] or "")
+                requested_target = workers.get(requested_target_id)
+                parent_id = ""
+                if isinstance(requested_target, Mapping):
+                    candidate_parent = str(requested_target.get("parent_worker_id") or requested_target.get("physical_worker_id") or "").strip()
+                    if candidate_parent and candidate_parent != requested_target_id:
+                        parent = workers.get(candidate_parent)
+                        if isinstance(parent, Mapping) and _is_termux_runtime_record(parent):
+                            parent_id = candidate_parent
+                # Ações manuais no painel podem estar com o runtime APK
+                # selecionado. Durante o bootstrap, worker_update pertence sempre
+                # ao Termux; build/publicação também voltam ao pai enquanto o
+                # self-builder Android ainda não passou no preflight real.
+                if parent_id and kind == "worker_update":
+                    record["target_worker_id"] = parent_id
+                    record["routed_from_worker_id"] = requested_target_id
+                    record["routing_reason"] = "apk_runtime_to_termux_bootstrap"
+                elif parent_id and kind in {"apk_build_debug", "apk_publish_last"}:
+                    builder_ready, publish_ready = _worker_apk_self_builder_state(requested_target)
+                    apk_ready = builder_ready if kind == "apk_build_debug" else (builder_ready or publish_ready)
+                    if not apk_ready:
+                        record["target_worker_id"] = parent_id
+                        record["routed_from_worker_id"] = requested_target_id
+                        record["routing_reason"] = "apk_self_builder_not_ready"
                 target = workers.get(record["target_worker_id"])
                 if not isinstance(target, Mapping):
                     raise CoreWorkerRegistryError("worker alvo não encontrado", status=404)
@@ -995,11 +1251,11 @@ class CoreWorkersRegistry:
         return True
 
     def poll_job(self, payload: Mapping[str, Any], *, token: str, remote_addr: str = "") -> dict[str, Any]:
-        worker_id_from_payload = payload.get("worker_id") or payload.get("id")
         ts = _now()
         with self._lock:
             data = self._load_unlocked()
             self._cleanup_jobs_unlocked(data, now=ts)
+            worker_id_from_payload = self._runtime_worker_id_for_payload_unlocked(data, payload=payload, token=token)
             worker_id, worker = self._authenticate_worker_unlocked(data, worker_id=worker_id_from_payload, token=token)
             # Poll também conta como sinal de vida, para o painel não depender só do heartbeat separado.
             worker["updated_at"] = ts
@@ -1089,9 +1345,10 @@ class CoreWorkersRegistry:
             self._save_unlocked(data)
 
         if selected is None:
-            return {"ok": True, "job": None}
+            return {"ok": True, "worker_id": worker_id, "job": None}
         return {
             "ok": True,
+            "worker_id": worker_id,
             "job": {
                 "job_id": str(selected.get("job_id") or ""),
                 "type": str(selected.get("type") or ""),
@@ -1112,9 +1369,26 @@ class CoreWorkersRegistry:
         ts = _now()
         with self._lock:
             data = self._load_unlocked()
-            worker_id, worker = self._authenticate_worker_unlocked(data, worker_id=worker_id_from_payload, token=token)
             jobs = data.get("jobs") if isinstance(data.get("jobs"), dict) else {}
             job = jobs.get(job_id)
+            requested_worker_id = _safe_worker_id(worker_id_from_payload)
+            assigned_worker_id = str(job.get("worker_id") or "").strip() if isinstance(job, dict) else ""
+            # APKs 0.7.1 e anteriores ainda devolvem o worker_id físico mesmo
+            # quando o servidor separou o runtime como `<id>-apk`. Aceite a
+            # resposta usando o filho somente se o job foi realmente leased para
+            # ele e o token compartilhado autentica o worker físico.
+            if assigned_worker_id == _apk_runtime_worker_id(requested_worker_id):
+                workers = data.get("workers") if isinstance(data.get("workers"), dict) else {}
+                parent = workers.get(requested_worker_id)
+                child = workers.get(assigned_worker_id)
+                if (
+                    isinstance(parent, Mapping)
+                    and isinstance(child, Mapping)
+                    and str(child.get("parent_worker_id") or "") == requested_worker_id
+                    and str(parent.get("token_hash") or "") == _hash_secret(token)
+                ):
+                    worker_id_from_payload = assigned_worker_id
+            worker_id, worker = self._authenticate_worker_unlocked(data, worker_id=worker_id_from_payload, token=token)
             if not isinstance(job, dict):
                 # Resultado antigo/local de um job que a VPS já limpou. O worker
                 # precisa receber 200 para remover o pending-results local e parar
@@ -1189,7 +1463,7 @@ class CoreWorkersRegistry:
             self._cleanup_jobs_unlocked(data, now=ts)
             self._save_unlocked(data)
             public = _compact_job_public(job, include_result=True, now=ts)
-        return {"ok": True, "job": public}
+        return {"ok": True, "worker_id": worker_id, "job": public}
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         safe_id = _short_text(job_id, limit=64)
@@ -1447,6 +1721,12 @@ class CoreWorkersRegistry:
         ]
         workers.sort(key=_public_worker_sort_key)
         jobs.sort(key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0.0), reverse=True)
+        physical_workers: dict[str, list[dict[str, Any]]] = {}
+        for worker in workers:
+            physical_id = str(worker.get("physical_worker_id") or worker.get("parent_worker_id") or worker.get("worker_id") or "")
+            if not physical_id:
+                physical_id = str(worker.get("worker_id") or "unknown")
+            physical_workers.setdefault(physical_id, []).append(worker)
         queued = sum(1 for item in jobs if item.get("status") == "queued")
         running = sum(1 for item in jobs if item.get("status") == "running")
         failed = sum(1 for item in jobs if item.get("status") == "failed")
@@ -1460,9 +1740,14 @@ class CoreWorkersRegistry:
             "pairings": sorted(pairings, key=lambda item: float(item.get("expires_at") or 0.0)),
             "jobs": jobs[:12],
             "summary": {
-                "registered": len(workers),
-                "online": sum(1 for item in workers if item.get("online")),
-                "offline": sum(1 for item in workers if not item.get("online")),
+                # `registered/online` representam celulares físicos. Durante a
+                # migração, Termux e APK aparecem como runtimes separados, mas não
+                # devem inflar o contador do painel para 2 celulares.
+                "registered": len(physical_workers),
+                "online": sum(1 for items in physical_workers.values() if any(item.get("online") for item in items)),
+                "offline": sum(1 for items in physical_workers.values() if not any(item.get("online") for item in items)),
+                "runtime_registered": len(workers),
+                "runtime_online": sum(1 for item in workers if item.get("online")),
                 "pairings_active": len(pairings),
                 "jobs_total": len(jobs),
                 "jobs_queued": queued,

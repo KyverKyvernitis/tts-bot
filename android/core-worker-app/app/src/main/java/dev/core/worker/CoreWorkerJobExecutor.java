@@ -419,8 +419,10 @@ final class CoreWorkerJobExecutor {
         status.put("agent", agentSnapshot());
         status.put("supported_tasks", CoreWorkerJobCatalog.supportedJobs());
         status.put("capabilities", CoreWorkerJobCatalog.capabilities(context));
-        status.put("termux_required_now", false);
-        status.put("termux_role", "fallback-legado");
+        boolean bootstrap = CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(context);
+        status.put("termux_required_now", bootstrap);
+        status.put("termux_role", bootstrap ? "bootstrap-builder" : "desativado");
+        status.put("parent_worker_id", CoreWorkerRuntimeIdentity.parentWorkerId(context));
         return status;
     }
 
@@ -436,7 +438,8 @@ final class CoreWorkerJobExecutor {
         runtime.put("supported_tasks", CoreWorkerJobCatalog.supportedJobs());
         runtime.put("capabilities", CoreWorkerJobCatalog.capabilities(context));
         runtime.put("coreLinux", coreLinuxPublicSnapshot());
-        runtime.put("termux_required_now", false);
+        runtime.put("termux_required_now", CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(context));
+        runtime.put("termux_fallback_available", CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(context));
         runtime.put("advanced_jobs_require_termux", false);
         return runtime;
     }
@@ -1093,9 +1096,7 @@ final class CoreWorkerJobExecutor {
     }
 
     private String effectiveWorkerId() {
-        String value = prefs.getString("native_worker_id", "").trim();
-        if (!value.isEmpty()) return value;
-        value = prefs.getString("worker_id", "").trim();
+        String value = CoreWorkerRuntimeIdentity.runtimeWorkerId(context);
         if (!value.isEmpty()) return value;
         String compact = installId().replace("-", "");
         if (compact.length() > 18) compact = compact.substring(0, 18);

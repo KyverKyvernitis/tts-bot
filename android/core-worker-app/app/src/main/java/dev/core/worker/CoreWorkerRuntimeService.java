@@ -82,6 +82,7 @@ public class CoreWorkerRuntimeService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        CoreWorkerRuntimeIdentity.migrate(getApplicationContext());
         createChannel();
         jobExecutor = new CoreWorkerJobExecutor(getApplicationContext());
         CoreWorkerApkBuildManager.refreshAsync(getApplicationContext());
@@ -248,7 +249,7 @@ public class CoreWorkerRuntimeService extends Service {
         } catch (Throwable error) {
             directHttpServer = null;
             prefs().edit().putBoolean("direct_http_active", false)
-                    .putString("direct_http_error", "porta 8766: " + shortThrowable(error))
+                    .putString("direct_http_error", "porta " + CoreWorkerRuntimeIdentity.directHttpPort(getApplicationContext()) + ": " + shortThrowable(error))
                     .putLong("direct_http_last_failure_at", System.currentTimeMillis()).apply();
         }
     }
@@ -347,7 +348,7 @@ public class CoreWorkerRuntimeService extends Service {
     private void runAgentCycle(String reason, boolean force) throws Exception {
         String serverUrl = normalizedServerUrl();
         String token = prefs().getString("worker_token", "").trim();
-        String workerId = prefs().getString("worker_id", "").trim();
+        String workerId = CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext());
         if (serverUrl.isEmpty() || token.isEmpty() || workerId.isEmpty()) {
             prefs().edit().putString("internal_light_jobs_state", "aguardando pareamento direto").apply();
             return;
@@ -356,7 +357,7 @@ public class CoreWorkerRuntimeService extends Service {
         flushResultOutbox(serverUrl);
         long startedAt = System.currentTimeMillis();
         JSONObject payload = buildForegroundHeartbeatPayload(reason);
-        payload.put("worker_id", workerId);
+        CoreWorkerRuntimeIdentity.putRuntimeFields(getApplicationContext(), payload);
         payload.put("force", force || shouldForcePoll(reason));
         payload.put("source", "core-worker-apk-agent-service-v2");
 
@@ -484,7 +485,7 @@ public class CoreWorkerRuntimeService extends Service {
         boolean ok = result != null && result.optBoolean("ok", false);
         String summary = result == null ? "resultado vazio" : compact(result.optString("message", result.optString("summary", result.optString("error", ok ? "concluído" : "falhou"))));
         JSONObject payload = new JSONObject();
-        payload.put("worker_id", prefs().getString("worker_id", ""));
+        payload.put("worker_id", CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext()));
         payload.put("job_id", job == null ? "" : firstNonEmpty(job.optString("job_id", ""), job.optString("id", "")));
         payload.put("status", ok ? "succeeded" : "failed");
         payload.put("summary", summary);
@@ -497,11 +498,19 @@ public class CoreWorkerRuntimeService extends Service {
 
     private JSONObject normalizeStoredEnvelope(JSONObject envelope) throws Exception {
         if (envelope == null) return new JSONObject();
-        if (envelope.has("worker_id") && envelope.has("job_id")) return envelope;
+        if (envelope.has("worker_id") && envelope.has("job_id")) {
+            String storedWorkerId = envelope.optString("worker_id", "").trim();
+            String canonical = CoreWorkerRuntimeIdentity.canonicalWorkerId(getApplicationContext());
+            if (CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(getApplicationContext())
+                    && storedWorkerId.equals(canonical)) {
+                envelope.put("worker_id", CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext()));
+            }
+            return envelope;
+        }
         JSONObject result = envelope.optJSONObject("result");
         if (result == null) result = new JSONObject().put("ok", false).put("error", "resultado legado inválido");
         JSONObject migrated = new JSONObject();
-        migrated.put("worker_id", firstNonEmpty(envelope.optString("workerId", ""), prefs().getString("worker_id", "")));
+        migrated.put("worker_id", CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext()));
         migrated.put("job_id", envelope.optString("jobId", ""));
         migrated.put("status", result.optBoolean("ok", false) ? "succeeded" : "failed");
         migrated.put("summary", compact(result.optString("message", result.optString("error", "resultado legado"))));
@@ -670,7 +679,7 @@ public class CoreWorkerRuntimeService extends Service {
                 JSONObject payload = buildForegroundHeartbeatPayload(safeReason);
                 String token = prefs().getString("worker_token", "").trim();
                 if (token.isEmpty()) return;
-                payload.put("worker_id", prefs().getString("worker_id", ""));
+                CoreWorkerRuntimeIdentity.putRuntimeFields(getApplicationContext(), payload);
                 HttpResult heartbeat = request("POST", serverUrl + "/core-worker/heartbeat", payload, token);
                 if (heartbeat.ok()) {
                     JSONObject body = new JSONObject(heartbeat.body);
@@ -708,8 +717,8 @@ public class CoreWorkerRuntimeService extends Service {
         runtime.put("core_linux_summary", coreLinux.optString("summary", ""));
         runtime.put("core_linux_state", coreLinux.optString("state", ""));
         runtime.put("core_linux_prepared", coreLinux.optBoolean("prepared", false));
-        runtime.put("termux_required_now", false);
-        runtime.put("termux_fallback_available", false);
+        runtime.put("termux_required_now", CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(getApplicationContext()));
+        runtime.put("termux_fallback_available", CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(getApplicationContext()));
         runtime.put("advanced_jobs_require_termux", false);
         runtime.put("termux_bootstrap_builder_supported", true);
         runtime.put("apk_self_builder", CoreWorkerApkBuildManager.preflight(getApplicationContext(), false));
@@ -723,14 +732,17 @@ public class CoreWorkerRuntimeService extends Service {
         status.put("foreground_runtime_active", true);
         status.put("foreground_runtime_summary", "serviço persistente ativo");
         status.put("notification_permission", hasNotificationPermission() ? "granted" : "missing");
-        status.put("termux_required_now", false);
+        status.put("termux_required_now", CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(getApplicationContext()));
         status.put("bedrock_server_mode", "future-foreground-service");
         status.put("bedrock_start_allowed", coreLinux.optBoolean("bedrockStartAllowed", false));
         status.put("native_tts_bridge_active", nativeTtsServer != null);
         status.put("direct_http_active", directHttpServer != null && directHttpServer.isRunning());
-        status.put("direct_http_port", prefs().getInt("direct_http_port", 8766));
-        status.put("termux_replaced", true);
+        status.put("direct_http_port", CoreWorkerRuntimeIdentity.directHttpPort(getApplicationContext()));
+        status.put("termux_replaced", !CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(getApplicationContext()));
+        status.put("termux_bootstrap_active", CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(getApplicationContext()));
         status.put("termux_bootstrap_builder_supported", true);
+        status.put("parent_worker_id", CoreWorkerRuntimeIdentity.parentWorkerId(getApplicationContext()));
+        status.put("runtime_worker_id", CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext()));
         status.put("apk_self_builder", CoreWorkerApkBuildManager.preflight(getApplicationContext(), false));
         status.put("capabilities", capabilities);
         status.put("supported_tasks", supported);
@@ -745,7 +757,7 @@ public class CoreWorkerRuntimeService extends Service {
         }
 
         JSONObject payload = new JSONObject();
-        payload.put("worker_id", prefs().getString("worker_id", ""));
+        CoreWorkerRuntimeIdentity.putRuntimeFields(getApplicationContext(), payload);
         payload.put("name", prefs().getString("device_name", Build.MANUFACTURER + " " + Build.MODEL));
         payload.put("version", BuildConfig.VERSION_NAME);
         payload.put("endpoint", prefs().getString("direct_worker_endpoint", ""));
@@ -758,7 +770,7 @@ public class CoreWorkerRuntimeService extends Service {
         payload.put("appVersionCode", BuildConfig.VERSION_CODE);
         payload.put("versionName", BuildConfig.VERSION_NAME);
         payload.put("versionCode", BuildConfig.VERSION_CODE);
-        payload.put("workerId", prefs().getString("worker_id", ""));
+        payload.put("workerId", CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext()));
         payload.put("installId", installId());
         payload.put("deviceName", prefs().getString("device_name", ""));
         payload.put("runtime_mode", "apk-native-python-linux-assisted-runtime");

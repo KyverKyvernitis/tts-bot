@@ -46,14 +46,14 @@ public final class CoreWorkerJobCatalog {
     private static final String[] CAPABILITIES = new String[] {
             "apk-native", "apk-direct-worker", "android-status", "native-boot",
             "safe-shell-probe", "internal-jobs", "background-job-agent",
-            "authenticated-job-registry", "durable-job-results", "direct-http-8766",
+            "authenticated-job-registry", "durable-job-results", "direct-http-api",
             "safe-file-transfer", "safe-media-tools", "android-native-tts",
             "core-linux-runtime", "core-linux-rootfs-manager", "core-linux-rootfs-import-v1",
             "core-linux-runner-preflight-v11", "core-linux-base-tools-smoke-v12",
             "core-linux-rootfs-proot-smoke-v13.3", "core-linux-box64-intake-preflight-v14.2.1",
             "core-linux-box64-glibc-preflight-v15.3.1",
             "core-linux-rootfs-glibc-intake-preflight-v17",
-            "core-linux-embedded-binaries-intake-v11", "termux-free-runtime",
+            "core-linux-embedded-binaries-intake-v11", "apk-runtime-autonomous",
             "termux-bootstrap-builder-compatible"
     };
 
@@ -96,6 +96,11 @@ public final class CoreWorkerJobCatalog {
     public static JSONArray capabilities(Context context) {
         JSONArray out = capabilities();
         appendUnique(out, CoreWorkerApkBuildManager.dynamicCapabilities(context));
+        JSONArray runtime = new JSONArray();
+        runtime.put("direct-http-" + CoreWorkerRuntimeIdentity.directHttpPort(context));
+        runtime.put(CoreWorkerRuntimeIdentity.sharedBootstrapIdentity(context)
+                ? "termux-bootstrap-active" : "termux-replaced");
+        appendUnique(out, runtime);
         return out;
     }
 

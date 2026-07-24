@@ -69,12 +69,12 @@ def _worker_record(*, worker_id: str, token: str, apk: bool, ready: bool) -> dic
 
 def test_version_marks_bootstrap_to_self_builder_release() -> None:
     gradle = read(ANDROID / "app/build.gradle")
-    assert "versionCode 119" in gradle
-    assert 'versionName "0.7.1"' in gradle
+    assert "versionCode 120" in gradle
+    assert 'versionName "0.7.2"' in gradle
     assert "def coreWorkerSelfBuilderTargetSdk = 28" in gradle
     assert "targetSdk coreWorkerSelfBuilderTargetSdk" in gradle
     assert "verifyCoreWorkerSelfBuilderTargetSdk" in gradle
-    assert read(ANDROID / "README.md").startswith("# Core Worker 0.7.1 — bootstrap no Termux e autobuild no APK")
+    assert read(ANDROID / "README.md").startswith("# Core Worker 0.7.2 — bootstrap sem colisão e autobuild no APK")
 
 
 def test_android_runtime_has_no_legacy_termux_protocol_or_package_dependency() -> None:
@@ -183,7 +183,7 @@ def test_termux_bootstrap_requires_self_builder_toolchain() -> None:
     phone_worker = read(ROOT / "deploy/termux/phone-worker/phone_worker.py")
     automation = read(ROOT / "scripts/core-worker-automation.py")
     workers = read(ROOT / "utility/commands/workers.py")
-    assert 'PHONE_WORKER_VERSION = "1.10.33"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.10.34"' in phone_worker
     assert 'env["CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN"] = "true"' in phone_worker
     assert '_prepare_apk_self_builder_toolchain(project_dir, env)' in phone_worker
     assert '"runtime": "termux-bionic-direct"' in phone_worker

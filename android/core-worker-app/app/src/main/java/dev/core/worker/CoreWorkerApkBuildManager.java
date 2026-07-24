@@ -182,7 +182,7 @@ final class CoreWorkerApkBuildManager {
         }
 
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        String workerId = prefs.getString("worker_id", "").trim();
+        String workerId = CoreWorkerRuntimeIdentity.runtimeWorkerId(context);
         String token = prefs.getString("worker_token", "").trim();
         if (workerId.isEmpty() || token.isEmpty()) {
             return new JSONObject().put("ok", false).put("type", type)
