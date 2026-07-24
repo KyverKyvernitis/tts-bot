@@ -282,14 +282,65 @@ def test_update_installs_root_systemd_templates_and_treats_install_failure_as_fa
     assert 'UPDATE_HAS_WARNINGS=1' not in deploy
 
 
-def test_frontend_publish_removes_hidden_stale_files_and_checks_build_output() -> None:
+def test_frontend_publish_is_atomic_readable_and_self_healing() -> None:
     source = (ROOT / "scripts" / "tts-bot-update.sh").read_text(encoding="utf-8")
-    frontend = source[source.index("deploy_frontend() {") : source.index("\ndeploy_backend() {")]
+    frontend = source[source.index("frontend_publication_is_healthy() {") : source.index("\ndeploy_backend() {")]
 
     assert 'dist/index.html' in frontend
-    assert 'rsync -a --delete' in frontend
-    assert 'find "$FRONT_PUBLISH_DIR" -mindepth 1 -maxdepth 1' in frontend
-    assert 'rm -rf "${FRONT_PUBLISH_DIR:?}/"*' not in frontend
+    assert 'mktemp -d "$publish_parent/.sinuca-release.XXXXXX"' in frontend
+    assert 'mv -- "$FRONT_PUBLISH_DIR" "$backup_path"' in frontend
+    assert 'mv -- "$release_dir" "$FRONT_PUBLISH_DIR"' in frontend
+    assert 'find "$release_dir" -type d -exec chmod 0755' in frontend
+    assert 'find "$release_dir" -type f -exec chmod 0644' in frontend
+    assert 'if frontend_publication_is_healthy' in frontend
+    assert 'FRONT_CHANGED=1' in frontend
+    assert 'find "$FRONT_PUBLISH_DIR" -mindepth 1 -maxdepth 1' not in frontend
+
+
+def test_frontend_build_normalizes_dist_permissions_for_legacy_publisher() -> None:
+    package = json.loads((ROOT / "activity" / "sinuca" / "package.json").read_text(encoding="utf-8"))
+    helper = (ROOT / "activity" / "sinuca" / "scripts" / "normalize-dist-permissions.mjs").read_text(encoding="utf-8")
+
+    assert package["scripts"]["postbuild"] == "node scripts/normalize-dist-permissions.mjs"
+    assert "chmod(target, 0o755)" in helper
+    assert "chmod(target, 0o644)" in helper
+
+
+def test_frontend_atomic_publish_replaces_complete_tree_and_preserves_previous_on_invalid_source(tmp_path: Path) -> None:
+    source = (ROOT / "scripts" / "tts-bot-update.sh").read_text(encoding="utf-8")
+    start = source.index("frontend_publication_is_healthy() {")
+    end = source.index("\ndeploy_frontend() {", start)
+    functions = tmp_path / "frontend-functions.sh"
+    functions.write_text(source[start:end], encoding="utf-8")
+
+    build = tmp_path / "build"
+    publish = tmp_path / "published"
+    bad_build = tmp_path / "bad-build"
+    (build / "assets").mkdir(parents=True)
+    publish.mkdir()
+    bad_build.mkdir()
+    (build / "index.html").write_text("novo", encoding="utf-8")
+    (build / "assets" / "app.js").write_text("asset", encoding="utf-8")
+    (build / ".hidden").write_text("oculto", encoding="utf-8")
+    (publish / "index.html").write_text("antigo", encoding="utf-8")
+    (publish / "stale.js").write_text("obsoleto", encoding="utf-8")
+
+    harness = "\n".join([
+        f"source {functions}",
+        f"FRONT_PUBLISH_DIR={publish}",
+        'FRONT_STATUS=""',
+        'LAST_ERROR_STDERR=""',
+        f"publish_frontend_atomically {build}",
+        'test "$(cat \"$FRONT_PUBLISH_DIR/index.html\")" = novo',
+        'test -f "$FRONT_PUBLISH_DIR/assets/app.js"',
+        'test -f "$FRONT_PUBLISH_DIR/.hidden"',
+        'test ! -e "$FRONT_PUBLISH_DIR/stale.js"',
+        'test "$(stat -c %a \"$FRONT_PUBLISH_DIR\")" = 755',
+        'test "$(stat -c %a \"$FRONT_PUBLISH_DIR/index.html\")" = 644',
+        f"if publish_frontend_atomically {bad_build}; then exit 20; fi",
+        'test "$(cat \"$FRONT_PUBLISH_DIR/index.html\")" = novo',
+    ])
+    subprocess.run(["bash", "-eu", "-o", "pipefail", "-c", harness], check=True, cwd=ROOT)
 
 
 def test_backend_restart_is_owned_by_systemd_instead_of_detached_nohup() -> None:

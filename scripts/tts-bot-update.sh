@@ -4606,10 +4606,105 @@ deploy_callkeeper() {
   return 1
 }
 
+frontend_publication_is_healthy() {
+  [[ -d "$FRONT_PUBLISH_DIR" ]] || return 1
+  [[ -s "$FRONT_PUBLISH_DIR/index.html" ]] || return 1
+  [[ -r "$FRONT_PUBLISH_DIR/index.html" ]] || return 1
+  return 0
+}
+
+publish_frontend_atomically() {
+  local source_dir="$1"
+  local publish_parent release_dir backup_path had_previous=0
+
+  publish_parent="$(dirname "$FRONT_PUBLISH_DIR")"
+  mkdir -p "$publish_parent"
+  chmod 0755 "$publish_parent" 2>/dev/null || true
+
+  release_dir="$(mktemp -d "$publish_parent/.sinuca-release.XXXXXX")" || {
+    FRONT_STATUS="não foi possível criar a área temporária da publicação"
+    LAST_ERROR_STDERR="$FRONT_STATUS"
+    return 1
+  }
+  backup_path="$publish_parent/.sinuca-previous.$$.${RANDOM}"
+
+  if command -v rsync >/dev/null 2>&1; then
+    if ! rsync -a --delete "$source_dir/" "$release_dir/"; then
+      FRONT_STATUS="falha ao preparar a nova publicação do frontend"
+      LAST_ERROR_STDERR="$FRONT_STATUS"
+      rm -rf -- "$release_dir" 2>/dev/null || true
+      return 1
+    fi
+  elif ! cp -a "$source_dir/." "$release_dir/"; then
+    FRONT_STATUS="falha ao preparar a nova publicação do frontend"
+    LAST_ERROR_STDERR="$FRONT_STATUS"
+    rm -rf -- "$release_dir" 2>/dev/null || true
+    return 1
+  fi
+
+  if [[ ! -s "$release_dir/index.html" ]]; then
+    FRONT_STATUS="publicação temporária sem index.html"
+    LAST_ERROR_STDERR="$FRONT_STATUS"
+    rm -rf -- "$release_dir" 2>/dev/null || true
+    return 1
+  fi
+
+  # O Nginx precisa atravessar todos os diretórios e ler os arquivos. A cópia
+  # anterior preservava permissões do build e podia publicar uma árvore 0700.
+  find "$release_dir" -type d -exec chmod 0755 {} +
+  find "$release_dir" -type f -exec chmod 0644 {} +
+  chown -R root:root "$release_dir" 2>/dev/null || true
+
+  if [[ -e "$FRONT_PUBLISH_DIR" || -L "$FRONT_PUBLISH_DIR" ]]; then
+    if ! mv -- "$FRONT_PUBLISH_DIR" "$backup_path"; then
+      FRONT_STATUS="não foi possível preservar a publicação atual"
+      LAST_ERROR_STDERR="$FRONT_STATUS"
+      rm -rf -- "$release_dir" 2>/dev/null || true
+      return 1
+    fi
+    had_previous=1
+  fi
+
+  if ! mv -- "$release_dir" "$FRONT_PUBLISH_DIR"; then
+    FRONT_STATUS="não foi possível ativar a nova publicação"
+    LAST_ERROR_STDERR="$FRONT_STATUS"
+    if (( had_previous == 1 )); then
+      mv -- "$backup_path" "$FRONT_PUBLISH_DIR" 2>/dev/null || true
+    fi
+    rm -rf -- "$release_dir" 2>/dev/null || true
+    return 1
+  fi
+
+  if ! frontend_publication_is_healthy; then
+    FRONT_STATUS="a nova publicação não ficou legível para o servidor web"
+    LAST_ERROR_STDERR="$FRONT_STATUS"
+    rm -rf -- "$FRONT_PUBLISH_DIR" 2>/dev/null || true
+    if (( had_previous == 1 )); then
+      mv -- "$backup_path" "$FRONT_PUBLISH_DIR" 2>/dev/null || true
+    fi
+    return 1
+  fi
+
+  if (( had_previous == 1 )); then
+    rm -rf -- "$backup_path" 2>/dev/null || logger -t "$LOG_TAG" "aviso: backup antigo do frontend não pôde ser removido: $backup_path"
+  fi
+  return 0
+}
+
 deploy_frontend() {
+  local repair_mode=0
+
   if (( FRONT_CHANGED == 0 )); then
-    FRONT_STATUS="não alterado"
-    return 0
+    if frontend_publication_is_healthy; then
+      FRONT_STATUS="não alterado"
+      return 0
+    fi
+    # Mesmo sem arquivos do frontend no patch, restaura automaticamente uma
+    # publicação ausente/corrompida. Isso evita manter o Nginx em 403 quando o
+    # repositório está íntegro, mas /var/www/sinuca perdeu o index.html.
+    FRONT_CHANGED=1
+    repair_mode=1
+    logger -t "$LOG_TAG" "publicação do frontend inválida; reconstrução automática solicitada"
   fi
 
   if [[ ! -d "$FRONT_DIR" ]]; then
@@ -4643,14 +4738,8 @@ deploy_frontend() {
     LAST_ERROR_STDERR="$FRONT_STATUS"
     return 1
   fi
-  mkdir -p "$FRONT_PUBLISH_DIR"
-  if command -v rsync >/dev/null 2>&1; then
-    rsync -a --delete "$FRONT_DIR/dist/" "$FRONT_PUBLISH_DIR/"
-  else
-    # O glob antigo não removia dotfiles e podia deixar arquivos ocultos de uma
-    # versão anterior publicados. O find limpa todo o conteúdo, inclusive eles.
-    find "$FRONT_PUBLISH_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-    cp -a "$FRONT_DIR/dist/." "$FRONT_PUBLISH_DIR/"
+  if ! publish_frontend_atomically "$FRONT_DIR/dist"; then
+    return 1
   fi
 
   STAGE="limpeza do frontend"
@@ -4660,7 +4749,11 @@ deploy_frontend() {
     "cd \"$FRONT_DIR\" && rm -rf node_modules && { npm cache clean --force >/dev/null 2>&1 || true; }"
   zip_progress_done "Interface publicada"
 
-  FRONT_STATUS="frontend publicado em $FRONT_PUBLISH_DIR; node_modules removido após build"
+  if (( repair_mode == 1 )); then
+    FRONT_STATUS="frontend reconstruído e republicado em $FRONT_PUBLISH_DIR; node_modules removido após build"
+  else
+    FRONT_STATUS="frontend publicado em $FRONT_PUBLISH_DIR; node_modules removido após build"
+  fi
   return 0
 }
 
