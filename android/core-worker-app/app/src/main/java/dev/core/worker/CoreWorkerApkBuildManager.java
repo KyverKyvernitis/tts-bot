@@ -18,7 +18,9 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -316,11 +318,13 @@ final class CoreWorkerApkBuildManager {
             extractZip(retained, staging);
             File stagedManifest = new File(staging, "manifest.json");
             if (!stagedManifest.isFile()) throw new IllegalStateException("manifest.json ausente no toolchain do APK");
+            restoreExecutablePaths(staging, stagedManifest);
             deleteTree(toolchain);
             if (!staging.renameTo(toolchain)) {
                 copyTree(staging, toolchain);
                 deleteTree(staging);
             }
+            restoreExecutablePaths(toolchain, new File(toolchain, "manifest.json"));
             prefs.edit().putInt("apk_self_builder_asset_version_code", BuildConfig.VERSION_CODE).apply();
         }
 
@@ -415,7 +419,77 @@ final class CoreWorkerApkBuildManager {
         String value = name.toLowerCase(Locale.ROOT);
         return value.endsWith("/java") || value.endsWith("/gradle") || value.endsWith("/aapt2")
                 || value.endsWith("/adb") || value.endsWith("/zipalign") || value.endsWith("/apksigner")
+                || value.endsWith("/lib/jspawnhelper") || value.endsWith("/lib/jexec")
                 || value.contains("/bin/");
+    }
+
+    private static void restoreExecutablePaths(File root, File manifestFile) throws Exception {
+        File canonicalRoot = root.getCanonicalFile();
+        if (!manifestFile.isFile()) throw new IllegalStateException("manifest.json ausente no toolchain extraído");
+        byte[] raw = java.nio.file.Files.readAllBytes(manifestFile.toPath());
+        JSONObject manifest = new JSONObject(new String(raw, StandardCharsets.UTF_8));
+        if (!"core-worker-android-builder-v1".equals(manifest.optString("schema", ""))) {
+            throw new IllegalStateException("schema inválido no toolchain extraído");
+        }
+        if (manifest.optInt("version", 0) < 4) {
+            throw new IllegalStateException("toolchain antigo: executablePaths v4 ausente");
+        }
+        JSONArray executablePaths = manifest.optJSONArray("executablePaths");
+        if (executablePaths == null || executablePaths.length() == 0
+                || executablePaths.length() > MAX_TOOLCHAIN_ENTRIES) {
+            throw new IllegalStateException("lista executablePaths inválida no toolchain");
+        }
+
+        Set<String> declared = new HashSet<>();
+        for (int index = 0; index < executablePaths.length(); index++) {
+            String name = executablePaths.optString(index, "").replace('\\', '/');
+            if (name.isEmpty() || name.startsWith("/") || hasParentTraversal(name) || !declared.add(name)) {
+                throw new IllegalStateException("caminho executável inválido no toolchain");
+            }
+            File executable = new File(canonicalRoot, name).getCanonicalFile();
+            if (!executable.getPath().startsWith(canonicalRoot.getPath() + File.separator)
+                    || !executable.isFile()) {
+                throw new IllegalStateException("executável declarado ausente ou fora do toolchain: " + name);
+            }
+            executable.setReadable(true, true);
+            if (!executable.setExecutable(true, true) && !executable.canExecute()) {
+                throw new IllegalStateException("não consegui restaurar permissão executável: " + name);
+            }
+        }
+
+        JSONObject paths = manifest.optJSONObject("paths");
+        String jdkPath = normalizedToolchainPath(paths == null ? null : paths.optString("jdk", "jdk"), "jdk");
+        String gradlePath = normalizedToolchainPath(paths == null ? null : paths.optString("gradle", "gradle/bin/gradle"), "gradle/bin/gradle");
+        String aapt2Path = normalizedToolchainPath(paths == null ? null : paths.optString("aapt2", "bin/aapt2"), "bin/aapt2");
+        String[] mandatory = {
+                jdkPath + "/bin/java",
+                jdkPath + "/bin/javac",
+                jdkPath + "/bin/jar",
+                gradlePath,
+                aapt2Path
+        };
+        for (String name : mandatory) {
+            if (!declared.contains(name) || !new File(canonicalRoot, name).canExecute()) {
+                throw new IllegalStateException("executável obrigatório não restaurado: " + name);
+            }
+        }
+        String spawnHelperPath = jdkPath + "/lib/jspawnhelper";
+        File spawnHelper = new File(canonicalRoot, spawnHelperPath);
+        if (spawnHelper.isFile()
+                && (!declared.contains(spawnHelperPath) || !spawnHelper.canExecute())) {
+            throw new IllegalStateException("jdk/lib/jspawnhelper não foi restaurado como executável");
+        }
+    }
+
+    private static String normalizedToolchainPath(String raw, String fallback) {
+        String value = raw == null ? "" : raw.replace('\\', '/').trim();
+        while (value.startsWith("/")) value = value.substring(1);
+        while (value.endsWith("/")) value = value.substring(0, value.length() - 1);
+        if (value.isEmpty()) value = fallback;
+        if (value.startsWith("/") || hasParentTraversal(value)) {
+            throw new IllegalStateException("caminho inválido no manifest do toolchain");
+        }
+        return value;
     }
 
     private static void copyTree(File source, File target) throws Exception {

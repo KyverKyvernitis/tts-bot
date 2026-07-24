@@ -36,6 +36,20 @@ from typing import Any
 from types import SimpleNamespace
 
 try:
+    from apk_identity import assert_expected_apk_identity, inspect_apk_identity
+except ModuleNotFoundError:
+    _apk_identity_spec = importlib.util.spec_from_file_location(
+        "core_phone_worker_apk_identity",
+        Path(__file__).with_name("apk_identity.py"),
+    )
+    if _apk_identity_spec is None or _apk_identity_spec.loader is None:
+        raise
+    _apk_identity_module = importlib.util.module_from_spec(_apk_identity_spec)
+    _apk_identity_spec.loader.exec_module(_apk_identity_module)
+    assert_expected_apk_identity = _apk_identity_module.assert_expected_apk_identity
+    inspect_apk_identity = _apk_identity_module.inspect_apk_identity
+
+try:
     from PIL import Image, ImageSequence  # type: ignore
 except Exception:
     Image = None
@@ -63,7 +77,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.10.35"
+PHONE_WORKER_VERSION = "1.10.36"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -7546,8 +7560,8 @@ def _apk_self_builder_bundle_valid(path: Path) -> dict[str, Any]:
                 manifest_version = int(manifest.get("version") or 0)
             except Exception:
                 manifest_version = 0
-            if manifest_version < 3:
-                raise ValueError("bundle antigo: regenere com coleta mínima DT_NEEDED v3")
+            if manifest_version < 4:
+                raise ValueError("bundle antigo: regenere com modos executáveis preservados v4")
             runtime_libraries = manifest.get("runtimeLibraries") if isinstance(manifest.get("runtimeLibraries"), dict) else {}
             if runtime_libraries.get("strategy") != "dt-needed-transitive-v1":
                 raise ValueError("estratégia de bibliotecas do autobuilder inválida")
@@ -7574,6 +7588,18 @@ def _apk_self_builder_bundle_valid(path: Path) -> dict[str, Any]:
                 info = archive.getinfo(name) if name in names else None
                 if info is None or info.is_dir() or int(info.file_size or 0) < minimum:
                     raise ValueError(f"arquivo obrigatório ausente/pequeno: {name}")
+            executable_paths = manifest.get("executablePaths") if isinstance(manifest.get("executablePaths"), list) else []
+            executable_set = {str(item or "").replace("\\", "/").strip("/") for item in executable_paths}
+            mandatory_exec = {f"{jdk}/bin/java", f"{jdk}/bin/javac", f"{jdk}/bin/jar", gradle, aapt2}
+            missing_exec = sorted(name for name in mandatory_exec if name not in executable_set)
+            if missing_exec:
+                raise ValueError("bundle sem modos executáveis obrigatórios: " + ", ".join(missing_exec))
+            jspawn = f"{jdk}/lib/jspawnhelper"
+            if jspawn in names and jspawn not in executable_set:
+                raise ValueError("bundle não preserva execução de jdk/lib/jspawnhelper")
+            for executable in executable_set:
+                if not executable or executable.startswith("/") or ".." in executable.split("/") or executable not in names:
+                    raise ValueError(f"caminho executável inseguro/ausente no bundle: {executable}")
             for info in archive.infolist():
                 name = str(info.filename or "").replace("\\", "/")
                 if not name or name.startswith("/") or ".." in name.split("/"):
@@ -8143,6 +8169,27 @@ def _is_inside_path(path: Path, root: Path) -> bool:
         return False
 
 
+def _apk_self_builder_executable_paths(bundle_root: Path) -> list[str]:
+    paths: list[str] = []
+    for candidate in sorted(bundle_root.rglob("*")):
+        try:
+            if not candidate.is_file() or not os.access(candidate, os.X_OK):
+                continue
+            rel = candidate.relative_to(bundle_root).as_posix()
+        except Exception:
+            continue
+        if rel and not rel.startswith("/") and ".." not in rel.split("/"):
+            paths.append(rel)
+    mandatory = ["jdk/bin/java", "jdk/bin/javac", "jdk/bin/jar", "gradle/bin/gradle", "bin/aapt2"]
+    missing = [name for name in mandatory if name not in paths]
+    if missing:
+        raise ValueError("toolchain gerado perdeu modos executáveis: " + ", ".join(missing))
+    jspawn = bundle_root / "jdk/lib/jspawnhelper"
+    if jspawn.is_file() and "jdk/lib/jspawnhelper" not in paths:
+        raise ValueError("toolchain gerado perdeu modo executável de jdk/lib/jspawnhelper")
+    return paths
+
+
 def _smoke_apk_self_builder_bundle(bundle_root: Path) -> dict[str, Any]:
     if not _env_bool("PHONE_WORKER_APK_SELF_BUILDER_SMOKE", True):
         return {"ok": True, "skipped": True, "reason": "disabled_by_env"}
@@ -8266,10 +8313,11 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
             env=env,
         )
         smoke = _smoke_apk_self_builder_bundle(bundle_root)
+        executable_paths = _apk_self_builder_executable_paths(bundle_root)
 
         manifest = {
             "schema": "core-worker-android-builder-v1",
-            "version": 3,
+            "version": 4,
             "arch": "aarch64",
             "runtime": "termux-bionic-direct",
             "generatedBy": f"phone-worker-{PHONE_WORKER_VERSION}",
@@ -8287,6 +8335,7 @@ def _prepare_apk_self_builder_toolchain(project_dir: Path, env: dict[str, str]) 
             },
             "runtimeLibraries": runtime_library_report,
             "bootstrapSmoke": smoke,
+            "executablePaths": executable_paths,
             "safety": {
                 "generatedOnTermux": True,
                 "vpsBuild": False,
@@ -8809,6 +8858,19 @@ def _inspect_android_native_build_environment(project_dir: Path, env: dict[str, 
 
 
 def _upload_core_worker_apk(apk_path: Path, *, filename: str, version_name: str, version_code: int, sha256: str, publish_url: str, changelog: list[str] | None = None, source_sha256: str = "", source_fingerprint: str = "", notification_id: str = "", apk_signing_mode: str = "", apk_signing_keystore_sha256: str = "") -> dict[str, Any]:
+    identity = inspect_apk_identity(apk_path)
+    assert_expected_apk_identity(
+        identity,
+        expected_package="dev.core.worker",
+        expected_version_name=version_name,
+        expected_version_code=version_code,
+    )
+    version_name = str(identity["versionName"])
+    version_code = int(identity["versionCode"])
+    actual_sha = _sha256_path(apk_path)
+    if sha256 and str(sha256).lower() != actual_sha.lower():
+        raise ValueError("sha256 do artifact APK divergente antes da publicação")
+    sha256 = actual_sha
     base_url, token, worker_id = _core_worker_auth_parts()
     if not token or not worker_id:
         return {"ok": False, "error": "worker não pareado; não posso publicar APK"}
@@ -8936,12 +8998,15 @@ def _persist_recovered_apk_artifact(
 ) -> dict[str, Any]:
     if not apk_path.is_file():
         return {}
-    detected_name, detected_code = _read_android_version(project_dir)
-    version_name = str(version_name or detected_name or "0.0.0")
-    try:
-        version_code = int(version_code or detected_code or 0)
-    except Exception:
-        version_code = int(detected_code or 0)
+    identity = inspect_apk_identity(apk_path)
+    assert_expected_apk_identity(
+        identity,
+        expected_package="dev.core.worker",
+        expected_version_name=version_name,
+        expected_version_code=version_code,
+    )
+    version_name = str(identity["versionName"])
+    version_code = int(identity["versionCode"])
     if gradle_log is not None:
         source_sha256 = source_sha256 or _apk_build_log_value(gradle_log, "source_sha256")
         source_fingerprint = source_fingerprint or _apk_build_log_value(gradle_log, "source_fingerprint")
@@ -9069,6 +9134,16 @@ def _latest_apk_artifact_metadata(build_root: Path) -> dict[str, Any]:
             continue
         apk_path = Path(str(data.get("artifact_path") or "")).expanduser()
         if apk_path.is_file():
+            try:
+                identity = inspect_apk_identity(apk_path)
+                assert_expected_apk_identity(identity, expected_package="dev.core.worker")
+            except Exception:
+                continue
+            data["filename"] = apk_path.name
+            data["versionName"] = str(identity["versionName"])
+            data["versionCode"] = int(identity["versionCode"])
+            data["sha256"] = _sha256_path(apk_path)
+            data["bytes"] = apk_path.stat().st_size
             data["metadata_path"] = str(meta_path)
             return data
     if artifact_dir.is_dir():
@@ -9078,14 +9153,15 @@ def _latest_apk_artifact_metadata(build_root: Path) -> dict[str, Any]:
             except Exception:
                 continue
             name = apk_path.name
-            version = "0.0.0"
-            match = re.search(r"CoreWorker-v([0-9A-Za-z_.-]+)-", name)
-            if match:
-                version = match.group(1)
+            try:
+                identity = inspect_apk_identity(apk_path)
+                assert_expected_apk_identity(identity, expected_package="dev.core.worker")
+            except Exception:
+                continue
             return {
                 "filename": name,
-                "versionName": version,
-                "versionCode": 0,
+                "versionName": identity["versionName"],
+                "versionCode": int(identity["versionCode"]),
                 "sha256": hashlib.sha256(raw).hexdigest(),
                 "bytes": len(raw),
                 "artifact_path": str(apk_path),
@@ -9107,7 +9183,7 @@ def _apply_apk_publish_last(payload: dict[str, Any]) -> dict[str, Any]:
             raw = apk_path.read_bytes()
             meta = {
                 "filename": apk_path.name,
-                "versionName": str(payload.get("versionName") or payload.get("version_name") or "0.0.0"),
+                "versionName": str(payload.get("versionName") or payload.get("version_name") or ""),
                 "versionCode": int(payload.get("versionCode") or payload.get("version_code") or 0),
                 "sha256": hashlib.sha256(raw).hexdigest(),
                 "bytes": len(raw),
@@ -9132,11 +9208,20 @@ def _apply_apk_publish_last(payload: dict[str, Any]) -> dict[str, Any]:
     apk_path = Path(str(meta.get("artifact_path") or "")).expanduser()
     if not apk_path.is_file():
         return {"ok": False, "summary": "artifact APK não existe mais", "artifact_path": str(apk_path)}
-    version_name = str(payload.get("versionName") or payload.get("version_name") or meta.get("versionName") or "0.0.0")
+    identity = inspect_apk_identity(apk_path)
+    requested_name = str(payload.get("versionName") or payload.get("version_name") or meta.get("versionName") or "")
     try:
-        version_code = int(payload.get("versionCode") or payload.get("version_code") or meta.get("versionCode") or 0)
+        requested_code = int(payload.get("versionCode") or payload.get("version_code") or meta.get("versionCode") or 0)
     except Exception:
-        version_code = 0
+        requested_code = 0
+    assert_expected_apk_identity(
+        identity,
+        expected_package="dev.core.worker",
+        expected_version_name=requested_name,
+        expected_version_code=requested_code,
+    )
+    version_name = str(identity["versionName"])
+    version_code = int(identity["versionCode"])
     filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(payload.get("filename") or meta.get("filename") or apk_path.name)).strip("-._")
     publish_url = str(payload.get("publish_url") or "").strip()
     base_url, _token, _worker_id = _core_worker_auth_parts()
@@ -9406,6 +9491,7 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
                 env["ANDROID_HOME"] = str(default_sdk)
                 env.setdefault("ANDROID_SDK_ROOT", str(default_sdk))
                 env["PATH"] = f"{default_sdk}/cmdline-tools/latest/bin:{default_sdk}/platform-tools:" + env.get("PATH", "")
+        shutil.rmtree(project_dir / "app/build/outputs/apk/debug", ignore_errors=True)
         with gradle_log.open("w", encoding="utf-8", errors="replace") as log_fh:
             log_fh.write("===== Core Worker APK build =====\n")
             log_fh.write(f"phone_worker_version={PHONE_WORKER_VERSION}\n")
@@ -9462,6 +9548,15 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
                 native_environment=native_environment,
             )
         apk_path = apk_candidates[0]
+        identity = inspect_apk_identity(apk_path)
+        assert_expected_apk_identity(
+            identity,
+            expected_package="dev.core.worker",
+            expected_version_name=version_name,
+            expected_version_code=version_code,
+        )
+        version_name = str(identity["versionName"])
+        version_code = int(identity["versionCode"])
         raw = apk_path.read_bytes()
         apk_sha = hashlib.sha256(raw).hexdigest()
         filename = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(payload.get("filename") or f"CoreWorker-v{version_name}-debug.apk")).strip("-._")
@@ -9593,6 +9688,7 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
 
 _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker.py": ("worker", "phone_worker.py", 0o755),
+    "apk_identity.py": ("worker", "apk_identity.py", 0o644),
     "music_agent.py": ("worker", "music_agent.py", 0o755),
     "start-phone-worker.sh": ("worker", "start-phone-worker.sh", 0o755),
     "start-phone-music-agent.sh": ("worker", "start-phone-music-agent.sh", 0o755),

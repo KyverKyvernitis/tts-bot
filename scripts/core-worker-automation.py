@@ -23,9 +23,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from utility.commands.workers_registry import get_core_workers_registry  # noqa: E402
+from utility.apk_identity import assert_expected_apk_identity, inspect_apk_identity  # noqa: E402
 
 PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("phone_worker.py", 0o755),
+    ("apk_identity.py", 0o644),
     ("music_agent.py", 0o755),
     ("start-phone-worker.sh", 0o755),
     ("start-phone-music-agent.sh", 0o755),
@@ -455,10 +457,34 @@ def _save_pending(data: dict[str, Any]) -> None:
 
 
 def _latest_apk_manifest() -> dict[str, Any]:
-    manifest = ROOT / "android" / "core-worker-app" / "releases" / "latest.json"
+    release_dir = ROOT / "android" / "core-worker-app" / "releases"
+    manifest = release_dir / "latest.json"
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        filename = str(data.get("filename") or "").strip()
+        if not filename:
+            apk_url = str(data.get("apkUrl") or data.get("downloadUrl") or "").split("?", 1)[0].rstrip("/")
+            filename = apk_url.rsplit("/", 1)[-1]
+        if not filename or "/" in filename or "\\" in filename or not filename.lower().endswith(".apk"):
+            return {}
+        apk_path = (release_dir / filename).resolve()
+        if apk_path.parent != release_dir.resolve() or not apk_path.is_file():
+            return {}
+        identity = inspect_apk_identity(apk_path)
+        assert_expected_apk_identity(identity, expected_package="dev.core.worker")
+        actual_sha = _sha256_file(apk_path)
+        declared_sha = str(data.get("sha256") or "").strip().lower()
+        if declared_sha and declared_sha != actual_sha:
+            return {}
+        data["filename"] = filename
+        data["packageName"] = str(identity["packageName"])
+        data["versionName"] = str(identity["versionName"])
+        data["versionCode"] = int(identity["versionCode"])
+        data["sha256"] = actual_sha
+        data["compiledIdentityVerified"] = True
+        return data
     except Exception:
         return {}
 

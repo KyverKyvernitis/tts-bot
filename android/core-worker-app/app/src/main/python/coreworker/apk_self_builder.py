@@ -24,6 +24,8 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from coreworker.apk_identity import assert_expected_apk_identity, inspect_apk_identity
+
 SCHEMA = "core-worker-apk-self-builder-v1"
 TOOLCHAIN_SCHEMA = "core-worker-android-builder-v1"
 MAX_SOURCE_BYTES = 1024 * 1024 * 1024
@@ -110,6 +112,7 @@ def _resolve_toolchain(toolchain_dir: Path) -> dict[str, Any]:
         manifest_version = 0
     runtime_libraries = manifest.get("runtimeLibraries") if isinstance(manifest.get("runtimeLibraries"), dict) else {}
     bootstrap_smoke = manifest.get("bootstrapSmoke") if isinstance(manifest.get("bootstrapSmoke"), dict) else {}
+    raw_executables = manifest.get("executablePaths") if isinstance(manifest.get("executablePaths"), list) else []
 
     paths = manifest.get("paths") if isinstance(manifest.get("paths"), dict) else {}
     jdk_rel = _safe_rel(paths.get("jdk") or "jdk")
@@ -125,21 +128,42 @@ def _resolve_toolchain(toolchain_dir: Path) -> dict[str, Any]:
     sdk = toolchain_dir / sdk_rel
     aapt2 = toolchain_dir / aapt2_rel
     android_jar = sdk / "platforms/android-34/android.jar"
+    try:
+        executable_paths = {_safe_rel(item) for item in raw_executables}
+    except Exception:
+        executable_paths = set()
+    mandatory_executables = {
+        f"{jdk_rel}/bin/java",
+        f"{jdk_rel}/bin/javac",
+        f"{jdk_rel}/bin/jar",
+        gradle_rel,
+        aapt2_rel,
+    }
+    jspawn_rel = f"{jdk_rel}/lib/jspawnhelper"
+    declared_executables_valid = (
+        bool(raw_executables)
+        and len(raw_executables) == len(executable_paths)
+        and mandatory_executables.issubset(executable_paths)
+        and all((toolchain_dir / item).is_file() for item in executable_paths)
+        and (not (toolchain_dir / jspawn_rel).is_file() or jspawn_rel in executable_paths)
+    )
 
     checks = {
         "manifest": manifest_path.is_file(),
         "schema": schema == TOOLCHAIN_SCHEMA,
-        "manifestVersion": manifest_version >= 3,
+        "manifestVersion": manifest_version >= 4,
+        "executablePaths": declared_executables_valid,
         "runtimeLibraries": runtime_libraries.get("strategy") == "dt-needed-transitive-v1",
         "bootstrapSmoke": bootstrap_smoke.get("ok") is True,
         "arch": arch in {"aarch64", "arm64", "arm64-v8a"},
-        "java": java.is_file() and java.stat().st_size > 64 * 1024,
-        "javac": javac.is_file() and javac.stat().st_size > 8 * 1024,
-        "jar": jar.is_file() and jar.stat().st_size > 8 * 1024,
-        "gradle": gradle.is_file() and gradle.stat().st_size > 100,
+        "java": java.is_file() and java.stat().st_size > 64 * 1024 and os.access(java, os.X_OK),
+        "javac": javac.is_file() and javac.stat().st_size > 8 * 1024 and os.access(javac, os.X_OK),
+        "jar": jar.is_file() and jar.stat().st_size > 8 * 1024 and os.access(jar, os.X_OK),
+        "gradle": gradle.is_file() and gradle.stat().st_size > 100 and os.access(gradle, os.X_OK),
         "androidSdk": sdk.is_dir(),
         "androidJar34": android_jar.is_file() and android_jar.stat().st_size > 1024 * 1024,
-        "aapt2": aapt2.is_file() and aapt2.stat().st_size > 64 * 1024,
+        "aapt2": aapt2.is_file() and aapt2.stat().st_size > 64 * 1024 and os.access(aapt2, os.X_OK),
+        "jspawnhelper": not (toolchain_dir / jspawn_rel).is_file() or os.access(toolchain_dir / jspawn_rel, os.X_OK),
     }
     missing = [key for key, ok in checks.items() if not ok]
     return {
@@ -588,7 +612,7 @@ def _run_gradle(files: Path, native: Path, project: Path, payload: dict[str, Any
             "org.gradle.daemon=false",
             "org.gradle.workers.max=1",
             "org.gradle.parallel=false",
-            "org.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m -Dfile.encoding=UTF-8",
+            "org.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m -Dfile.encoding=UTF-8 -Djdk.lang.Process.launchMechanism=FORK",
             "",
         )), encoding="utf-8"
     )
@@ -601,6 +625,10 @@ def _run_gradle(files: Path, native: Path, project: Path, payload: dict[str, Any
         "CORE_WORKER_VPS_LABEL": vps_label,
         "CORE_WORKER_REQUIRE_COMPAT_SIGNING": "true",
         "CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN": "true",
+        # Mantém o launcher e o daemon de uso único com os mesmos argumentos e
+        # evita depender de jspawnhelper ao iniciar aapt2/Java no Android.
+        "GRADLE_OPTS": "-Xmx768m -XX:MaxMetaspaceSize=384m -Dfile.encoding=UTF-8 -Dorg.gradle.daemon=false -Djdk.lang.Process.launchMechanism=FORK",
+        "JAVA_TOOL_OPTIONS": "-Djdk.lang.Process.launchMechanism=FORK",
     })
     command = [
         "/system/bin/sh", paths["gradle"], "assembleDebug",
@@ -638,19 +666,28 @@ def _run_gradle(files: Path, native: Path, project: Path, payload: dict[str, Any
     }
 
 
-def _validate_apk(path: Path) -> dict[str, Any]:
+def _validate_apk(
+    path: Path,
+    *,
+    expected_version_name: str = "",
+    expected_version_code: int = 0,
+) -> dict[str, Any]:
     if not path.is_file() or path.stat().st_size < 1024 * 1024:
         raise FileNotFoundError("APK gerado não encontrado ou pequeno demais")
     if path.stat().st_size > MAX_APK_BYTES:
         raise ValueError("APK gerado excede o limite")
-    with zipfile.ZipFile(path) as archive:
-        names = set(archive.namelist())
-        if "AndroidManifest.xml" not in names or "classes.dex" not in names:
-            raise ValueError("artefato não parece um APK Android válido")
-        bad = archive.testzip()
-        if bad:
-            raise ValueError("APK corrompido: " + str(bad))
-    return {"bytes": path.stat().st_size, "sha256": _sha256_file(path)}
+    identity = inspect_apk_identity(path)
+    assert_expected_apk_identity(
+        identity,
+        expected_package="dev.core.worker",
+        expected_version_name=expected_version_name,
+        expected_version_code=expected_version_code,
+    )
+    return {
+        "bytes": path.stat().st_size,
+        "sha256": _sha256_file(path),
+        **identity,
+    }
 
 
 def _multipart_publish(apk_path: Path, fields: dict[str, Any], publish_url: str, token: str, worker_id: str, worker_version: str) -> dict[str, Any]:
@@ -724,9 +761,9 @@ def _publish_latest(files: Path, payload: dict[str, Any], server_url: str, worke
     fields = {
         "worker_id": worker_id,
         "workerName": "Core Worker APK self-builder",
-        "filename": meta.get("filename") or apk.name,
-        "versionName": meta.get("versionName") or "0.0.0",
-        "versionCode": int(meta.get("versionCode") or 0),
+        "filename": f"CoreWorker-v{validated['versionName']}-debug.apk",
+        "versionName": validated["versionName"],
+        "versionCode": int(validated["versionCode"]),
         "sha256": validated["sha256"],
         "requiredAgentVersion": worker_version,
         "notifyUsers": "true",
@@ -761,7 +798,7 @@ def _build(payload: dict[str, Any], files: Path, cache: Path, native: Path, serv
     expected_sha = str(payload.get("source_sha256") or payload.get("sourceSha256") or "").strip().lower()
     expected_bytes = int(payload.get("source_bytes") or payload.get("sourceBytes") or 0)
     source_fingerprint = str(payload.get("sourceFingerprint") or expected_sha).strip()
-    version_name = str(payload.get("versionName") or payload.get("version_name") or "0.0.0").strip()
+    version_name = str(payload.get("versionName") or payload.get("version_name") or "").strip()
     version_code = int(payload.get("versionCode") or payload.get("version_code") or 0)
     notification_id = str(payload.get("notificationId") or f"apk-{version_code}-{source_fingerprint[:12]}").strip()
 
@@ -785,6 +822,8 @@ def _build(payload: dict[str, Any], files: Path, cache: Path, native: Path, serv
         project = _find_project(source_root, str(payload.get("project_subdir") or "android/core-worker-app"))
         private = _inject_private_files(project, payload)
         hydrated = _hydrate_runtime_assets(project, native, repro_assets)
+        output_dir = project / "app/build/outputs/apk/debug"
+        shutil.rmtree(output_dir, ignore_errors=True)
         build = _run_gradle(files, native, project, payload, work, log_path)
         if build["returncode"] != 0:
             return {
@@ -801,8 +840,14 @@ def _build(payload: dict[str, Any], files: Path, cache: Path, native: Path, serv
         if not candidates:
             raise FileNotFoundError("Gradle terminou sem gerar app-debug.apk")
         built_apk = candidates[0]
-        validated = _validate_apk(built_apk)
-        filename = _safe_filename(payload.get("filename"), f"CoreWorker-v{version_name}-debug.apk")
+        validated = _validate_apk(
+            built_apk,
+            expected_version_name=version_name,
+            expected_version_code=version_code,
+        )
+        actual_version_name = str(validated["versionName"])
+        actual_version_code = int(validated["versionCode"])
+        filename = _safe_filename(payload.get("filename"), f"CoreWorker-v{actual_version_name}-debug.apk")
         if not filename.lower().endswith(".apk"):
             filename += ".apk"
         artifact_path = artifacts / filename
@@ -812,8 +857,8 @@ def _build(payload: dict[str, Any], files: Path, cache: Path, native: Path, serv
         meta = {
             "schema": SCHEMA,
             "filename": artifact_path.name,
-            "versionName": version_name,
-            "versionCode": version_code,
+            "versionName": actual_version_name,
+            "versionCode": actual_version_code,
             "sha256": validated["sha256"],
             "bytes": validated["bytes"],
             "artifact_path": str(artifact_path),
@@ -831,10 +876,12 @@ def _build(payload: dict[str, Any], files: Path, cache: Path, native: Path, serv
         _atomic_json(artifacts / "latest-artifact.json", meta)
         result: dict[str, Any] = {
             "ok": True,
-            "summary": f"APK {version_name} compilado pelo próprio APK",
+            "summary": f"APK {actual_version_name} compilado pelo próprio APK",
             "build_gradle_ok": True,
             "artifact_found": True,
             "apk": {"filename": artifact_path.name, "signed": True, **validated},
+            "versionName": actual_version_name,
+            "versionCode": actual_version_code,
             "artifact_meta": meta,
             "source": {**download, **extracted},
             "builder_environment": {"preflight": pre, "hydrated": hydrated},

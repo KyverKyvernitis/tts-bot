@@ -174,7 +174,7 @@ def test_automation_routes_apk_trigger_to_termux_bootstrap() -> None:
     assert "def _bootstrap_worker_id_for_runtime" in automation
     assert "runtime APK não recebe worker_update" in automation
     assert "worker_update continua reservado ao Termux bootstrap" in automation
-    assert 'PHONE_WORKER_VERSION = "1.10.35"' in phone_worker
+    assert 'PHONE_WORKER_VERSION = "1.10.36"' in phone_worker
     assert '"runtime_kind": "termux"' in phone_worker
     assert '"platform": "android-termux"' in phone_worker
 

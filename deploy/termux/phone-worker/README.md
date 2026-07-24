@@ -1,3 +1,9 @@
+## Patch 86.0: self-builder e publicação de APK validados
+
+A versão `1.10.36` mantém o Termux como builder bootstrap e não move o Gradle para a VPS. O bundle privado passa a registrar todos os arquivos executáveis em `executablePaths` (manifesto v4), incluindo `jdk/lib/jspawnhelper`, para o APK restaurar permissões após extrair ou copiar o toolchain.
+
+Antes de persistir, recuperar ou publicar um artefato, o worker lê `packageName`, `versionName` e `versionCode` do `AndroidManifest.xml` contido no APK. Um arquivo antigo não pode mais ser anunciado como versão nova por metadados do job.
+
 ## Patch 85.11: Android TTS nativo no APK
 
 A versão `1.10.28` do phone worker mantém o builder APK no worker/turbo, melhora rastreio de artifact/log e adiciona limpeza segura de artifacts antigos. A base ATTS do APK `0.5.54` mantêm a ponte ATTS rápida, adiciona catálogo de vozes Android para o painel do bot e registra métricas finas por etapa no caminho ATTS. O serviço persistente do APK mantém uma instância `TextToSpeech` aquecida e expõe somente em `127.0.0.1:8877` as rotas locais `GET /native-tts/status`, `POST /native-tts/synthesize` e `POST /native-tts/synthesize.raw`. O Termux/phone_worker usa a rota binária raw para evitar JSON/base64 gigante no caminho rápido, anuncia a engine `android_native` quando o APK estiver pronto e usa cache normal do worker depois da primeira síntese e retorna tempos de cache/Android/worker para diagnóstico de latência.

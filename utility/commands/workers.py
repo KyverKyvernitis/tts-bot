@@ -20,6 +20,7 @@ from typing import Any
 import discord
 from discord.ext import commands
 
+from utility.apk_identity import assert_expected_apk_identity, inspect_apk_identity
 from utility.commands.workers_registry import get_core_workers_registry
 from utility.interaction_safety import (
     safe_defer_interaction,
@@ -1306,6 +1307,47 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _verified_latest_apk_manifest() -> dict[str, Any]:
+    """Lê latest.json, mas substitui a versão declarada pela identidade do APK."""
+    release_dir = _repo_root() / "android" / "core-worker-app" / "releases"
+    latest_path = release_dir / "latest.json"
+    try:
+        latest = json.loads(latest_path.read_text(encoding="utf-8"))
+        if not isinstance(latest, dict):
+            return {}
+        filename = str(latest.get("filename") or "").strip()
+        if not filename:
+            apk_url = str(latest.get("apkUrl") or latest.get("downloadUrl") or "").split("?", 1)[0].rstrip("/")
+            filename = apk_url.rsplit("/", 1)[-1]
+        if not filename or "/" in filename or "\\" in filename or not filename.lower().endswith(".apk"):
+            return {}
+        apk_path = (release_dir / filename).resolve()
+        if apk_path.parent != release_dir.resolve() or not apk_path.is_file():
+            return {}
+        identity = inspect_apk_identity(apk_path)
+        assert_expected_apk_identity(identity, expected_package="dev.core.worker")
+        digest = hashlib.sha256()
+        with apk_path.open("rb") as fh:
+            while True:
+                block = fh.read(1024 * 1024)
+                if not block:
+                    break
+                digest.update(block)
+        actual_sha = digest.hexdigest()
+        declared_sha = str(latest.get("sha256") or "").strip().lower()
+        if declared_sha and declared_sha != actual_sha:
+            return {}
+        latest["filename"] = filename
+        latest["packageName"] = str(identity["packageName"])
+        latest["versionName"] = str(identity["versionName"])
+        latest["versionCode"] = int(identity["versionCode"])
+        latest["sha256"] = actual_sha
+        latest["compiledIdentityVerified"] = True
+        return latest
+    except Exception:
+        return {}
+
+
 def _public_base_url() -> str:
     """URL pública/privada que novos workers devem usar para parear.
 
@@ -1672,13 +1714,9 @@ def _compact_failure(exc: BaseException) -> str:
 
 def _core_worker_notification_status_text() -> str:
     root = _repo_root()
-    latest_path = root / "android" / "core-worker-app" / "releases" / "latest.json"
     notif_path = root / "data" / "core_worker_app_notifications.json"
     expected_name, expected_code = _expected_apk_version()
-    try:
-        latest = json.loads(latest_path.read_text(encoding="utf-8")) if latest_path.exists() else {}
-    except Exception:
-        latest = {}
+    latest = _verified_latest_apk_manifest()
     if not isinstance(latest, dict) or not latest:
         return f"APK: aguardando publicação ({expected_name or '?'})" if expected_name else ""
     version = str(latest.get("versionName") or expected_name or "?")
@@ -1859,12 +1897,7 @@ def _core_worker_push_status_text(worker_id: str = "") -> str:
 def _apk_build_effectively_published(apk: dict[str, Any]) -> tuple[bool, str]:
     if not isinstance(apk, dict) or not apk:
         return False, ""
-    root = _repo_root()
-    latest_path = root / "android" / "core-worker-app" / "releases" / "latest.json"
-    try:
-        latest = json.loads(latest_path.read_text(encoding="utf-8")) if latest_path.exists() else {}
-    except Exception:
-        latest = {}
+    latest = _verified_latest_apk_manifest()
     if not isinstance(latest, dict) or not latest:
         return False, ""
     want_version = str(apk.get("versionName") or apk.get("version_name") or "").strip()
@@ -3933,6 +3966,7 @@ class WorkersCommandMixin:
         files: list[dict[str, Any]] = []
         all_targets = (
             ("phone_worker.py", 0o755),
+            ("apk_identity.py", 0o644),
             ("music_agent.py", 0o755),
             ("start-phone-worker.sh", 0o755),
             ("start-phone-music-agent.sh", 0o755),

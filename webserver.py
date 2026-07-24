@@ -16,6 +16,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from utility.apk_identity import ApkIdentityError, assert_expected_apk_identity, inspect_apk_identity
+
 app = Flask(__name__)
 
 _health_provider = None
@@ -25,6 +27,7 @@ _core_worker_notification_lock = threading.RLock()
 _core_worker_fcm_tokens_lock = threading.RLock()
 _core_worker_app_heartbeat_lock = threading.RLock()
 _core_worker_app_jobs_lock = threading.RLock()
+_core_worker_apk_publish_lock = threading.RLock()
 _tts_audio_files: dict[str, tuple[str, float]] = {}
 _core_worker_pending_automation_lock = threading.RLock()
 _core_worker_pending_automation_processes = {}
@@ -2915,9 +2918,10 @@ def _fixed_apk_signing_config() -> dict[str, str] | None:
 def _validate_core_worker_apk(apk_path: str) -> dict[str, object]:
     """Valida o APK antes de publicar latest.json.
 
-    A validação é intencionalmente local e barata: ZIP íntegro, manifest/classes
-    presentes, assinatura verificável quando apksigner existe e alinhamento quando
-    zipalign existe. Se falhar, a VPS não deve apontar latest.json para esse APK.
+    A identidade vem sempre do AndroidManifest.xml contido no binário. Metadados
+    enviados pelo worker nunca podem renomear um APK antigo como versão nova.
+    Assinatura e alinhamento continuam sendo verificados quando as ferramentas
+    existem, sem transformar a VPS em ambiente de build.
     """
     result: dict[str, object] = {"ok": False, "checks": []}
     path = str(apk_path or "")
@@ -2940,6 +2944,15 @@ def _validate_core_worker_apk(apk_path: str) -> dict[str, object]:
             result["entries"] = len(names)
     except Exception as exc:
         result["error"] = f"ZIP inválido: {type(exc).__name__}: {exc}"
+        return result
+
+    try:
+        identity = inspect_apk_identity(path)
+        assert_expected_apk_identity(identity, expected_package="dev.core.worker")
+        result["identity"] = identity
+        result["checks"].append("compiled-identity")
+    except ApkIdentityError as exc:
+        result["error"] = f"identidade compilada inválida: {exc}"
         return result
 
     zipalign = _find_android_build_tool("zipalign")
@@ -2975,6 +2988,30 @@ def _validate_core_worker_apk(apk_path: str) -> dict[str, object]:
 
     result["ok"] = True
     return result
+
+
+def _current_core_worker_release_identity(base: str) -> dict[str, object] | None:
+    """Lê a versão real do APK atualmente apontado por latest.json, sem confiar nele."""
+    manifest_path = os.path.join(base, "latest.json")
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        if not isinstance(manifest, dict):
+            return None
+        filename = str(manifest.get("filename") or "").strip()
+        if not filename:
+            apk_url = str(manifest.get("apkUrl") or manifest.get("downloadUrl") or "").split("?", 1)[0].rstrip("/")
+            filename = apk_url.rsplit("/", 1)[-1]
+        filename = _safe_release_filename(filename, default="")
+        if not filename or not filename.lower().endswith(".apk"):
+            return None
+        path = os.path.abspath(os.path.join(base, filename))
+        if path != base and not path.startswith(base + os.sep):
+            return None
+        identity = inspect_apk_identity(path)
+        return assert_expected_apk_identity(identity, expected_package="dev.core.worker")
+    except Exception:
+        return None
 
 
 def _sign_core_worker_apk_with_vps_key(uploaded_apk: str, final_apk: str) -> dict[str, object]:
@@ -3126,10 +3163,11 @@ def internal_update_create_zip_status():
 
 @app.post("/core-worker/app/publish")
 def core_worker_app_publish():
-    """Recebe APK compilado por um worker builder e publica latest.json.
+    """Publica somente APK já compilado e com identidade binária comprovada.
 
-    Apenas workers pareados com role/capability apk-builder podem publicar.
-    O APK é salvo em CORE_WORKER_APK_DIR e o manifest latest.json é refeito.
+    A VPS pode validar e, quando configurado, reassinar o artefato recebido. Ela
+    nunca executa Gradle nem aceita versionName/versionCode externos como fonte
+    de verdade para latest.json.
     """
     from utility.commands.workers_registry import core_worker_authenticate_http
 
@@ -3155,27 +3193,39 @@ def core_worker_app_publish():
     upload = request.files.get("apk")
     if upload is None:
         return jsonify({"ok": False, "error": "arquivo apk ausente"}), 400
-    version_name = str(form.get("versionName") or form.get("version") or "0.0.0").strip()[:48]
+
+    requested_version_name = str(form.get("versionName") or form.get("version") or "").strip()[:48]
+    raw_version_code = str(form.get("versionCode") or "").strip()
     try:
-        version_code = int(str(form.get("versionCode") or 0).strip() or 0)
+        requested_version_code = int(raw_version_code or 0)
     except Exception:
-        version_code = 0
-    filename = _safe_release_filename(form.get("filename") or upload.filename or f"CoreWorker-v{version_name}-debug.apk")
-    if not filename.lower().endswith(".apk"):
+        return jsonify({"ok": False, "error": "versionCode solicitado é inválido"}), 400
+    if requested_version_code < 0:
+        return jsonify({"ok": False, "error": "versionCode solicitado é inválido"}), 400
+
+    requested_filename = _safe_release_filename(
+        form.get("filename") or upload.filename or "CoreWorker.apk",
+        default="CoreWorker.apk",
+    )
+    if not requested_filename.lower().endswith(".apk"):
         return jsonify({"ok": False, "error": "arquivo precisa terminar com .apk"}), 400
+
     base = _core_worker_apk_dir()
     os.makedirs(base, exist_ok=True)
-    target = os.path.abspath(os.path.join(base, filename))
-    if target != base and not target.startswith(base + os.sep):
-        return jsonify({"ok": False, "error": "nome de arquivo inválido"}), 400
-    tmp = target + ".upload.tmp"
     expected_sha = str(form.get("sha256") or "").strip().lower()
-    digest = hashlib.sha256()
-    upload_total = 0
     max_bytes = int(os.getenv("CORE_WORKER_APK_UPLOAD_MAX_BYTES", str(1024 * 1024 * 1024)))
+    upload_total = 0
+    upload_sha = ""
+    uploaded_stage = ""
+    signed_stage = ""
+    manifest_stage = ""
     signing_info: dict[str, object] = {"signedByVps": False, "signingMode": "not-run"}
+
     try:
-        with open(tmp, "wb") as fh:
+        fd, uploaded_stage = tempfile.mkstemp(prefix=".core-worker-upload-", suffix=".apk", dir=base)
+        os.close(fd)
+        digest = hashlib.sha256()
+        with open(uploaded_stage, "wb") as fh:
             while True:
                 chunk = upload.stream.read(128 * 1024)
                 if not chunk:
@@ -3185,96 +3235,188 @@ def core_worker_app_publish():
                     raise ValueError("APK grande demais")
                 digest.update(chunk)
                 fh.write(chunk)
+            fh.flush()
+            os.fsync(fh.fileno())
         upload_sha = digest.hexdigest()
         if expected_sha and expected_sha != upload_sha:
-            with contextlib.suppress(Exception):
-                os.remove(tmp)
             return jsonify({"ok": False, "error": "sha256 divergente", "expected": expected_sha, "actual": upload_sha}), 400
+
+        fd, signed_stage = tempfile.mkstemp(prefix=".core-worker-ready-", suffix=".apk", dir=base)
+        os.close(fd)
+        os.remove(signed_stage)
         try:
-            signing_info = _sign_core_worker_apk_with_vps_key(tmp, target)
+            signing_info = _sign_core_worker_apk_with_vps_key(uploaded_stage, signed_stage)
         except Exception as sign_exc:
-            with contextlib.suppress(Exception):
-                os.remove(tmp)
-            with contextlib.suppress(Exception):
-                os.remove(target)
             return jsonify({
                 "ok": False,
-                "error": "falha assinando APK na VPS",
+                "error": "falha preparando a assinatura do APK recebido",
                 "detail": str(sign_exc)[:500],
-                "hint": "assinatura na VPS é opcional; deixe CORE_WORKER_APK_SIGNING_MODE vazio/disabled para aceitar o APK debug já assinado pelo phone worker",
+                "hint": "a VPS não builda o APK; desative a reassinatura para aceitar o APK já assinado pelo builder no celular",
             }), 500
-        with contextlib.suppress(Exception):
-            os.remove(tmp)
-    except Exception as exc:
-        with contextlib.suppress(Exception):
-            os.remove(tmp)
-        return jsonify({"ok": False, "error": f"falha salvando APK: {type(exc).__name__}"}), 500
 
-    validation = _validate_core_worker_apk(target)
-    if not bool(validation.get("ok")):
-        with contextlib.suppress(Exception):
-            os.remove(target)
+        validation = _validate_core_worker_apk(signed_stage)
+        if not bool(validation.get("ok")):
+            return jsonify({
+                "ok": False,
+                "error": "APK recebido falhou na validação antes da publicação",
+                "validation": validation,
+                "hint": "latest.json e o APK publicado foram preservados; corrija o build no celular/Termux.",
+            }), 422
+
+        identity = validation.get("identity") if isinstance(validation.get("identity"), dict) else {}
+        try:
+            assert_expected_apk_identity(
+                identity,
+                expected_package="dev.core.worker",
+                expected_version_name=requested_version_name,
+                expected_version_code=requested_version_code,
+            )
+        except ApkIdentityError as exc:
+            return jsonify({
+                "ok": False,
+                "error": "metadados de publicação divergem do APK compilado",
+                "detail": str(exc),
+                "requested": {
+                    "versionName": requested_version_name,
+                    "versionCode": requested_version_code,
+                },
+                "compiled": identity,
+                "preservedPreviousRelease": True,
+            }), 409
+
+        version_name = str(identity.get("versionName") or "").strip()
+        version_code = int(identity.get("versionCode") or 0)
+        filename = requested_filename
+        if version_name not in filename:
+            filename = _safe_release_filename(f"CoreWorker-v{version_name}-debug.apk")
+        target = os.path.abspath(os.path.join(base, filename))
+        if target != base and not target.startswith(base + os.sep):
+            return jsonify({"ok": False, "error": "nome de arquivo inválido"}), 400
+
+        final_digest = hashlib.sha256()
+        total = 0
+        with open(signed_stage, "rb") as final_fh:
+            while True:
+                final_chunk = final_fh.read(1024 * 1024)
+                if not final_chunk:
+                    break
+                final_digest.update(final_chunk)
+                total += len(final_chunk)
+        actual_sha = final_digest.hexdigest()
+
+        changelog = _json_field(form.get("changelog") or "", ["APK compilado por worker builder"])
+        if not isinstance(changelog, list):
+            changelog = [str(changelog)[:160]]
+        required_agent = str(form.get("requiredAgentVersion") or "").strip()[:48]
+        source_sha = str(form.get("sourceFingerprint") or form.get("source_fingerprint") or form.get("sourceSha256") or form.get("source_sha256") or "").strip().lower()[:96]
+        notification_id = _safe_short_text(
+            form.get("notificationId") or _notification_event_id(version_name=version_name, version_code=version_code, sha256=actual_sha),
+            96,
+        )
+        notification_summary = _latest_core_worker_notification_summary(notification_id)
+        apk_url = _core_worker_apk_url(filename)
+        manifest = {
+            "ok": True,
+            "filename": filename,
+            "versionName": version_name,
+            "versionCode": version_code,
+            "packageName": str(identity.get("packageName") or ""),
+            "apkUrl": apk_url,
+            "downloadUrl": _external_core_worker_url(apk_url),
+            "directApkUrl": _external_core_worker_url(apk_url),
+            "sha256": actual_sha,
+            "uploadedSha256": upload_sha,
+            "requiredAgentVersion": required_agent,
+            "updateAvailable": True,
+            "notifyUsers": True,
+            "notificationRequested": True,
+            "notificationId": notification_id,
+            "notificationStatus": notification_summary,
+            "sourceSha256": source_sha,
+            "signedByVps": bool(signing_info.get("signedByVps")),
+            "signingMode": _safe_short_text(form.get("apkSigningMode") or signing_info.get("signingMode") or "phone-worker-signed", 96),
+            "signingKeystoreSha256": _safe_short_text(form.get("apkSigningKeystoreSha256") or "", 64),
+            "changelog": [str(item)[:180] for item in changelog[:8]],
+            "publishedByWorker": str(worker.get("name") or worker.get("worker_id") or "worker builder")[:80],
+            "publishedAt": int(time.time()),
+            "publishReason": "worker-builder-auto" if str(form.get("notifyUsers") or form.get("notificationRequested") or "").strip().lower() in {"1", "true", "yes", "on", "sim"} else "worker-builder",
+            "bytes": total,
+            "uploadedBytes": upload_total,
+            "validation": validation,
+        }
+
+        manifest_path = os.path.join(base, "latest.json")
+        with _core_worker_apk_publish_lock:
+            current_identity = _current_core_worker_release_identity(base)
+            if current_identity:
+                current_code = int(current_identity.get("versionCode") or 0)
+                current_name = str(current_identity.get("versionName") or "")
+                if version_code < current_code or (version_code == current_code and current_name and version_name != current_name):
+                    return jsonify({
+                        "ok": False,
+                        "error": "publicação recusada para impedir downgrade do APK",
+                        "compiled": identity,
+                        "current": current_identity,
+                        "preservedPreviousRelease": True,
+                    }), 409
+
+            fd, manifest_stage = tempfile.mkstemp(prefix=".core-worker-latest-", suffix=".json", dir=base)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(manifest, fh, ensure_ascii=False, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+
+            backup_target = ""
+            try:
+                if os.path.isfile(target):
+                    backup_target = target + ".rollback-" + uuid.uuid4().hex
+                    try:
+                        os.link(target, backup_target)
+                    except Exception:
+                        shutil.copy2(target, backup_target)
+                os.replace(signed_stage, target)
+                signed_stage = ""
+                os.replace(manifest_stage, manifest_path)
+                manifest_stage = ""
+            except Exception:
+                with contextlib.suppress(Exception):
+                    os.remove(target)
+                if backup_target and os.path.isfile(backup_target):
+                    os.replace(backup_target, target)
+                    backup_target = ""
+                raise
+            finally:
+                if backup_target:
+                    with contextlib.suppress(Exception):
+                        os.remove(backup_target)
+
+        _kick_core_worker_fcm_push(manifest, reason="apk_published")
+        _kick_core_worker_pending_automation(str(worker.get("worker_id") or ""))
+        return jsonify({
+            "ok": True,
+            "filename": filename,
+            "bytes": total,
+            "sha256": actual_sha,
+            "signedByVps": bool(signing_info.get("signedByVps")),
+            "signingMode": manifest.get("signingMode"),
+            "validation": validation,
+            "latest": manifest,
+        }), 200
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)[:240]}), 400
+    except Exception as exc:
+        app.logger.exception("falha publicando Core Worker APK")
         return jsonify({
             "ok": False,
-            "error": "APK recebido, mas falhou na validação antes da publicação",
-            "validation": validation,
-            "hint": "latest.json foi preservado; corrija o build no phone worker antes de publicar.",
+            "error": f"falha publicando APK: {type(exc).__name__}",
+            "detail": str(exc)[:300],
+            "preservedPreviousRelease": True,
         }), 500
-
-    final_digest = hashlib.sha256()
-    total = 0
-    with open(target, "rb") as final_fh:
-        while True:
-            final_chunk = final_fh.read(1024 * 1024)
-            if not final_chunk:
-                break
-            final_digest.update(final_chunk)
-            total += len(final_chunk)
-    actual_sha = final_digest.hexdigest()
-
-    changelog = _json_field(form.get("changelog") or "", ["APK compilado por worker builder"])
-    if not isinstance(changelog, list):
-        changelog = [str(changelog)[:160]]
-    required_agent = str(form.get("requiredAgentVersion") or "").strip()[:48]
-    source_sha = str(form.get("sourceFingerprint") or form.get("source_fingerprint") or form.get("sourceSha256") or form.get("source_sha256") or "").strip().lower()[:96]
-    notification_id = _safe_short_text(form.get("notificationId") or _notification_event_id(version_name=version_name, version_code=version_code, sha256=actual_sha), 96)
-    notification_summary = _latest_core_worker_notification_summary(notification_id)
-    apk_url = _core_worker_apk_url(filename)
-    manifest = {
-        "ok": True,
-        "versionName": version_name,
-        "versionCode": version_code,
-        "apkUrl": apk_url,
-        "downloadUrl": _external_core_worker_url(apk_url),
-        "directApkUrl": _external_core_worker_url(apk_url),
-        "sha256": actual_sha,
-        "uploadedSha256": upload_sha,
-        "requiredAgentVersion": required_agent,
-        "updateAvailable": True,
-        "notifyUsers": True,
-        "notificationRequested": True,
-        "notificationId": notification_id,
-        "notificationStatus": notification_summary,
-        "sourceSha256": source_sha,
-        "signedByVps": bool(signing_info.get("signedByVps")),
-        "signingMode": _safe_short_text(form.get("apkSigningMode") or signing_info.get("signingMode") or "phone-worker-signed", 96),
-        "signingKeystoreSha256": _safe_short_text(form.get("apkSigningKeystoreSha256") or "", 64),
-        "changelog": [str(item)[:180] for item in changelog[:8]],
-        "publishedByWorker": str(worker.get("name") or worker.get("worker_id") or "worker builder")[:80],
-        "publishedAt": int(time.time()),
-        "publishReason": "worker-builder-auto" if str(form.get("notifyUsers") or form.get("notificationRequested") or "").strip().lower() in {"1", "true", "yes", "on", "sim"} else "worker-builder",
-        "bytes": total,
-        "uploadedBytes": upload_total,
-        "validation": validation,
-    }
-    manifest_path = os.path.join(base, "latest.json")
-    tmp_manifest = manifest_path + ".tmp"
-    with open(tmp_manifest, "w", encoding="utf-8") as fh:
-        json.dump(manifest, fh, ensure_ascii=False, indent=2)
-    os.replace(tmp_manifest, manifest_path)
-    _kick_core_worker_fcm_push(manifest, reason="apk_published")
-    _kick_core_worker_pending_automation(str(worker.get("worker_id") or ""))
-    return jsonify({"ok": True, "filename": filename, "bytes": total, "sha256": actual_sha, "signedByVps": bool(signing_info.get("signedByVps")), "signingMode": manifest.get("signingMode"), "validation": validation, "latest": manifest}), 200
+    finally:
+        for path in (uploaded_stage, signed_stage, manifest_stage):
+            if path:
+                with contextlib.suppress(Exception):
+                    os.remove(path)
 
 
 
@@ -3476,8 +3618,52 @@ def core_worker_app_latest():
             "hint": "Crie latest.json e coloque o APK no diretório de releases.",
         }), 404
     try:
-        data = json.loads(open(manifest, "r", encoding="utf-8").read())
+        with open(manifest, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
         if isinstance(data, dict):
+            identity = _current_core_worker_release_identity(base)
+            if not identity:
+                return jsonify({
+                    "ok": False,
+                    "error": "latest.json aponta para um APK ausente ou com identidade inválida",
+                    "publicationBlocked": True,
+                }), 503
+            declared_name = str(data.get("versionName") or "").strip()
+            try:
+                declared_code = int(data.get("versionCode") or 0)
+            except Exception:
+                declared_code = 0
+            filename = str(data.get("filename") or "").strip()
+            if not filename:
+                raw_url = str(data.get("apkUrl") or data.get("url") or "").split("?", 1)[0].rstrip("/")
+                filename = raw_url.rsplit("/", 1)[-1]
+            apk_path = _safe_core_worker_apk_file(filename)
+            if not apk_path or not os.path.isfile(apk_path) or not apk_path.lower().endswith(".apk"):
+                return jsonify({"ok": False, "error": "APK de latest.json não encontrado", "publicationBlocked": True}), 503
+            digest = hashlib.sha256()
+            with open(apk_path, "rb") as apk_fh:
+                while True:
+                    block = apk_fh.read(1024 * 1024)
+                    if not block:
+                        break
+                    digest.update(block)
+            actual_sha = digest.hexdigest()
+            declared_sha = str(data.get("sha256") or "").strip().lower()
+            metadata_mismatch = (
+                declared_name != str(identity.get("versionName") or "")
+                or declared_code != int(identity.get("versionCode") or 0)
+                or (bool(declared_sha) and declared_sha != actual_sha)
+            )
+            data["filename"] = os.path.basename(apk_path)
+            data["packageName"] = str(identity.get("packageName") or "")
+            data["versionName"] = str(identity.get("versionName") or "")
+            data["versionCode"] = int(identity.get("versionCode") or 0)
+            data["sha256"] = actual_sha
+            data["compiledIdentityVerified"] = True
+            if metadata_mismatch:
+                data["metadataMismatchDetected"] = True
+                data["declaredVersionName"] = declared_name
+                data["declaredVersionCode"] = declared_code
             apk_url = str(data.get("apkUrl") or data.get("url") or "").strip()
             if apk_url:
                 data["downloadUrl"] = _external_core_worker_url(apk_url)
@@ -3487,9 +3673,13 @@ def core_worker_app_latest():
                 data["notificationStatus"] = _latest_core_worker_notification_summary(nid)
             data["pushStatus"] = _core_worker_fcm_public_summary()
             return jsonify(data), 200
-    except Exception:
-        pass
-    return send_file(manifest, mimetype="application/json", conditional=True, max_age=0)
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "error": "latest.json inválido; publicação bloqueada",
+            "detail": _safe_short_text(f"{type(exc).__name__}: {exc}", 180),
+        }), 503
+    return jsonify({"ok": False, "error": "latest.json não contém um objeto válido"}), 503
 
 
 @app.get("/core-worker/app/<path:filename>")

@@ -63,8 +63,8 @@ android {
         // apps target 29+, então esta variante operacional permanece em target 28.
         // compileSdk continua moderno e a distribuição não ocorre pelo Google Play.
         targetSdk coreWorkerSelfBuilderTargetSdk
-        versionCode 121
-        versionName "0.7.3"
+        versionCode 122
+        versionName "0.7.4"
 
         buildConfigField "String", "CORE_WORKER_VPS_URL", "\"${coreWorkerEsc(coreWorkerVpsUrl)}\""
         buildConfigField "String", "CORE_WORKER_VPS_LABEL", "\"${coreWorkerEsc(coreWorkerVpsLabel)}\""
@@ -344,8 +344,8 @@ tasks.register("verifyCoreWorkerSelfBuilderToolchain") {
                 throw new GradleException("schema inválido no toolchain de autobuild")
             }
             def manifestVersion = (parsed?.version ?: 0) as int
-            if (manifestVersion < 3) {
-                throw new GradleException("toolchain antigo: regenere o bundle mínimo DT_NEEDED v3")
+            if (manifestVersion < 4) {
+                throw new GradleException("toolchain antigo: regenere o bundle com executablePaths v4")
             }
             if (parsed?.runtimeLibraries?.strategy != "dt-needed-transitive-v1") {
                 throw new GradleException("estratégia de bibliotecas inválida no toolchain de autobuild")
@@ -377,6 +377,37 @@ tasks.register("verifyCoreWorkerSelfBuilderToolchain") {
                     if (!name || name.startsWith("/") || name.split('/').contains("..") || entry == null || entry.directory || entry.size < minBytes) {
                         throw new GradleException("arquivo obrigatório ausente/inseguro/pequeno no toolchain: ${name}")
                     }
+                }
+            }
+            def executablePaths = parsed?.executablePaths instanceof Collection
+                    ? parsed.executablePaths.collect { normalizeToolchainPath(it) }
+                    : []
+            if (executablePaths.isEmpty() || executablePaths.size() > 50000 || executablePaths.any { !it }) {
+                throw new GradleException("lista executablePaths inválida no toolchain de autobuild")
+            }
+            if (executablePaths.toSet().size() != executablePaths.size()) {
+                throw new GradleException("lista executablePaths contém caminhos duplicados")
+            }
+            def mandatoryExecutables = [
+                jdkPath + "/bin/java",
+                jdkPath + "/bin/javac",
+                jdkPath + "/bin/jar",
+                normalizeToolchainPath(paths.gradle ?: "gradle/bin/gradle"),
+                normalizeToolchainPath(paths.aapt2 ?: "bin/aapt2"),
+            ]
+            mandatoryExecutables.each { name ->
+                if (!executablePaths.contains(name)) {
+                    throw new GradleException("executável obrigatório não declarado em executablePaths: ${name}")
+                }
+            }
+            def jspawnHelper = jdkPath + "/lib/jspawnhelper"
+            if (archive.getEntry(jspawnHelper) != null && !executablePaths.contains(jspawnHelper)) {
+                throw new GradleException("jdk/lib/jspawnhelper não foi marcado como executável no bundle")
+            }
+            executablePaths.each { name ->
+                def entry = archive.getEntry(name)
+                if (!name || name.startsWith("/") || name.split('/').contains("..") || entry == null || entry.directory) {
+                    throw new GradleException("executável declarado ausente/inseguro no toolchain: ${name}")
                 }
             }
             def unsafe = null

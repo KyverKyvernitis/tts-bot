@@ -108,6 +108,14 @@ def test_python_elf_parser_works_without_termux_readelf(tmp_path: Path) -> None:
     assert all("/" not in name for name in result["needed"])
 
 def _builder_bundle(path: Path, *, version: int) -> None:
+    executable_paths = [
+        "jdk/bin/java",
+        "jdk/bin/javac",
+        "jdk/bin/jar",
+        "jdk/lib/jspawnhelper",
+        "gradle/bin/gradle",
+        "bin/aapt2",
+    ]
     manifest = {
         "schema": "core-worker-android-builder-v1",
         "version": version,
@@ -120,12 +128,14 @@ def _builder_bundle(path: Path, *, version: int) -> None:
             "androidSdk": "android-sdk",
             "aapt2": "bin/aapt2",
         },
+        "executablePaths": executable_paths,
     }
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
         archive.writestr("manifest.json", json.dumps(manifest))
         archive.writestr("jdk/bin/java", b"j" * (64 * 1024 + 1))
         archive.writestr("jdk/bin/javac", b"c" * (8 * 1024 + 1))
         archive.writestr("jdk/bin/jar", b"r" * (8 * 1024 + 1))
+        archive.writestr("jdk/lib/jspawnhelper", b"s")
         archive.writestr("gradle/bin/gradle", b"g" * 101)
         archive.writestr("android-sdk/platforms/android-34/android.jar", b"a" * (1024 * 1024 + 1))
         archive.writestr("bin/aapt2", b"p" * (64 * 1024 + 1))
@@ -135,8 +145,8 @@ def test_bundle_validation_forces_regeneration_of_old_full_runtime(tmp_path: Pat
     module = _load("phone_worker_bundle_version_test", PHONE_WORKER_PATH)
     old = tmp_path / "old.zip"
     current = tmp_path / "current.zip"
-    _builder_bundle(old, version=2)
-    _builder_bundle(current, version=3)
+    _builder_bundle(old, version=3)
+    _builder_bundle(current, version=4)
 
     rejected = module._apk_self_builder_bundle_valid(old)
     accepted = module._apk_self_builder_bundle_valid(current)
@@ -212,13 +222,13 @@ def test_ui_and_versions_expose_builder_state_without_vps_gradle() -> None:
     gradle = (ANDROID / "app/build.gradle").read_text(encoding="utf-8")
     workers = WORKERS_PATH.read_text(encoding="utf-8")
 
-    assert 'versionCode 121' in gradle
-    assert 'versionName "0.7.3"' in gradle
+    assert 'versionCode 122' in gradle
+    assert 'versionName "0.7.4"' in gradle
     assert 'builderHeroText = smallText("Autobuild: verificando toolchain local")' in activity
     assert '"✅ Autobuild pronto' in activity
     assert 'sectionTitle("Diagnóstico e manutenção")' in activity
     assert 'bottomNavButton("⚙  Core")' in activity
     assert 'runtime_libraries.get("strategy") == "dt-needed-transitive-v1"' in builder
-    assert '"manifestVersion": manifest_version >= 3' in builder
+    assert '"manifestVersion": manifest_version >= 4' in builder
     assert 'f"**Atualização:** {automation_label}"' in workers
     assert 'discord.ui.ActionRow(refresh, pairing, cleanup_jobs)' not in workers

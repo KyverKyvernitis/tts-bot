@@ -75,6 +75,7 @@ WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
 pkg install python tmux curl termux-api -y || pkg install python tmux curl -y
 mkdir -p "$WORKER_DIR"
 cp "$SRC_DIR/phone_worker.py" "$WORKER_DIR/phone_worker.py"
+cp "$SRC_DIR/apk_identity.py" "$WORKER_DIR/apk_identity.py"
 cp "$SRC_DIR/music_agent.py" "$WORKER_DIR/music_agent.py" 2>/dev/null || true
 cp "$SRC_DIR/start-phone-worker.sh" "$WORKER_DIR/start-phone-worker.sh"
 cp "$SRC_DIR/watch-phone-worker.sh" "$WORKER_DIR/watch-phone-worker.sh"
