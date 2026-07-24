@@ -357,7 +357,7 @@ function EmbedPreview(props: Omit<MessagePreviewProps, "groupLabel" | "botName" 
 
   return (
     <div className="osk-message-preview__message">
-      <FieldText {...textProps} field={contentField} className="osk-message-preview__content" placeholder="Conteúdo da mensagem" />
+      <FieldText {...textProps} field={contentField} className="osk-message-preview__content" placeholder="Adicionar conteúdo" />
       {hasEmbedContent || interactive ? (
         <div className="osk-message-preview__embed" style={style}>
           {interactive && colorTargetField && (
@@ -375,17 +375,17 @@ function EmbedPreview(props: Omit<MessagePreviewProps, "groupLabel" | "botName" 
           <div className="osk-message-preview__embed-main">
             <div className="osk-message-preview__author-row">
               <IconSlot urlField={authorIconUrlField} modeField={authorIconModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} alt="Ícone do autor" fallbackLabel="Ícone do autor" />
-              <FieldText {...textProps} field={authorField} className="osk-message-preview__author" placeholder="Autor" />
+              <FieldText {...textProps} field={authorField} className="osk-message-preview__author" placeholder="Adicionar autor" />
             </div>
-            <FieldText {...textProps} field={titleField} className="osk-message-preview__title" placeholder="Título" />
-            <FieldText {...textProps} field={descriptionField} className="osk-message-preview__description" placeholder="Descrição" />
-            <ImageSlot urlField={imageUrlField} modeField={imageModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} className="osk-message-preview__image" alt="Imagem da mensagem" fallbackLabel="Imagem principal" />
+            <FieldText {...textProps} field={titleField} className="osk-message-preview__title" placeholder="Adicionar título" />
+            <FieldText {...textProps} field={descriptionField} className="osk-message-preview__description" placeholder="Adicionar descrição" />
+            <ImageSlot urlField={imageUrlField} modeField={imageModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} className="osk-message-preview__image" alt="Imagem da mensagem" fallbackLabel="Adicionar imagem" />
             <div className="osk-message-preview__footer-row">
               <IconSlot urlField={footerIconUrlField} modeField={footerIconModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} alt="Ícone do rodapé" fallbackLabel="Ícone do rodapé" />
-              <FieldText {...textProps} field={footerField} className="osk-message-preview__footer" placeholder="Rodapé" />
+              <FieldText {...textProps} field={footerField} className="osk-message-preview__footer" placeholder="Adicionar rodapé" />
             </div>
           </div>
-          <ImageSlot urlField={thumbnailUrlField} modeField={thumbnailModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} className="osk-message-preview__thumbnail" alt="Thumbnail da mensagem" fallbackLabel="Thumbnail" />
+          <ImageSlot urlField={thumbnailUrlField} modeField={thumbnailModeField} draft={draft} interactive={interactive} selectedFieldId={selectedFieldId} onSelectField={onSelectField} className="osk-message-preview__thumbnail" alt="Thumbnail da mensagem" fallbackLabel="Adicionar thumbnail" />
         </div>
       ) : (
         <div className="osk-message-preview__placeholder">Adicione conteúdo ao embed para começar.</div>
@@ -454,7 +454,7 @@ function GenericMessagePreview(props: Omit<MessagePreviewProps, "groupLabel" | "
   return (
     <div className="osk-message-preview__message-card" style={style}>
       {interactive && colorField && <button type="button" className="osk-message-preview__accent-control" data-selected={selectedFieldId === colorField.id || undefined} aria-label="Editar cor da mensagem" onClick={(event) => { event.stopPropagation(); onSelectField?.(colorField); }} />}
-      {titleEntry && <FieldText {...textProps} field={titleEntry.field} className="osk-message-preview__card-title" placeholder="Título" />}
+      {titleEntry && <FieldText {...textProps} field={titleEntry.field} className="osk-message-preview__card-title" placeholder="Adicionar título" />}
       {bodyEntries.map(({ field }) => (
         <div key={field.id} className="osk-message-preview__body-wrap">
           {bodyEntries.length > 1 && <small>{readableFieldLabel(field)}</small>}
@@ -480,7 +480,7 @@ function GenericMessagePreview(props: Omit<MessagePreviewProps, "groupLabel" | "
           <div className="osk-message-preview__button-row"><span data-style={buttonStyle}>{buttonEmoji && <><DiscordRichText text={buttonEmoji} guildOptions={guildOptions} compact /> </>}<DiscordRichText text={buttonLabel || "Texto do botão"} guildOptions={guildOptions} compact /></span></div>
         </EditableRegion>
       )}
-      {footerEntry && <FieldText {...textProps} field={footerEntry.field} className="osk-message-preview__card-footer" placeholder="Rodapé" />}
+      {footerEntry && <FieldText {...textProps} field={footerEntry.field} className="osk-message-preview__card-footer" placeholder="Adicionar rodapé" />}
     </div>
   );
 }
@@ -522,7 +522,7 @@ function ColorRolesPanelPreview({
       <div className="osk-color-panel-canvas__copy">
         <FieldText {...textProps} field={titleField} className="osk-color-panel-canvas__title" placeholder="Título do painel" />
         <FieldText {...textProps} field={subtitleField} className="osk-color-panel-canvas__subtitle" placeholder="Subtítulo" />
-        <FieldText {...textProps} field={footerField} className="osk-color-panel-canvas__footer" placeholder="Rodapé" />
+        <FieldText {...textProps} field={footerField} className="osk-color-panel-canvas__footer" placeholder="Adicionar rodapé" />
       </div>
       {panelNumber <= 3 && (
         <>

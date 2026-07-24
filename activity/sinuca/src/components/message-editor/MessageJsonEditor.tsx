@@ -16,7 +16,7 @@ export function MessageJsonEditor({ value, error, dirty, applying, onChange, onA
       <div className="osk-message-json__head">
         <div>
           <strong>JSON avançado</strong>
-          <small>Edite os IDs completos dos campos. O canvas só muda depois de aplicar um JSON válido.</small>
+          <small>Edite os IDs completos dos campos. A mensagem só muda depois de aplicar um JSON válido.</small>
         </div>
         {dirty && <span className="osk-badge" data-state="changed">não aplicado</span>}
       </div>

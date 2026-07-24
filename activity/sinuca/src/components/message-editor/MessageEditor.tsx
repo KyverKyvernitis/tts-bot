@@ -1,20 +1,19 @@
 import {
   Bold,
   Braces,
+  Check,
   ChevronLeft,
   Code2,
-  Image,
   Italic,
   Link2,
-  ListPlus,
-  MessageSquareText,
   Pencil,
+  Settings2,
   Redo2,
   Strikethrough,
   Undo2,
   Variable,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type TransitionEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type TransitionEvent } from "react";
 import { createPortal } from "react-dom";
 import type { DashboardFieldDefinition } from "../../types/dashboard";
 import { MessageJsonEditor } from "./MessageJsonEditor";
@@ -23,7 +22,6 @@ import { MessageVariablesPanel } from "./MessageVariablesPanel";
 import { MessageVisualEditor } from "./MessageVisualEditor";
 import type {
   JsonFieldChange,
-  MessageEditorMode,
   MessageEditorProps,
 } from "./messageEditorTypes";
 import {
@@ -33,14 +31,6 @@ import {
   pendingChangesReachedDraft,
   serializeMessageFields,
 } from "./messageEditorUtils";
-
-const MODE_LABELS: Record<MessageEditorMode, string> = {
-  content: "Conteúdo",
-  appearance: "Aparência",
-  components: "Componentes",
-  variables: "Variáveis",
-  json: "Avançado",
-};
 
 interface HistoryChange {
   field: DashboardFieldDefinition;
@@ -66,13 +56,6 @@ function cloneValue<T>(value: T): T {
   }
 }
 
-function fieldMode(fieldId: string, label: string, type: string): Exclude<MessageEditorMode, "variables" | "json"> {
-  const text = `${fieldId} ${label}`.toLocaleLowerCase("pt-BR");
-  if (type === "color_slots" || type === "color" || type === "url" || /(image|imagem|media|mídia|banner|avatar|author|autor|thumbnail|ícone|icon|cor)/.test(text)) return "appearance";
-  if (/(button|botão|placeholder|seletor|select|component|style|estilo|emoji)/.test(text)) return "components";
-  return "content";
-}
-
 function editorVisualFieldVisible(editorId: string, fieldId: string, draft: Record<string, unknown>): boolean {
   if (editorId === "welcome-public") {
     const renderMode = String(draft["welcome.render_mode"] || "components_v2");
@@ -90,12 +73,38 @@ function editorVisualFieldVisible(editorId: string, fieldId: string, draft: Reco
   return true;
 }
 
-function modeIcon(mode: MessageEditorMode) {
-  if (mode === "content") return MessageSquareText;
-  if (mode === "appearance") return Image;
-  if (mode === "components") return ListPlus;
-  if (mode === "variables") return Variable;
-  return Braces;
+type MessageEditorView = "canvas" | "inspector" | "variables" | "json";
+
+function relatedContextFields(
+  selected: DashboardFieldDefinition | null,
+  fields: DashboardFieldDefinition[],
+): DashboardFieldDefinition[] {
+  if (!selected) return [];
+  const id = selected.id;
+  const groups: RegExp[] = [
+    /^(.*\.author_)(?:name|icon_mode|icon_url|url)$/,
+    /^(.*\.footer_)(?:text|icon_mode|icon_url)$/,
+    /^(.*\.image_)(?:mode|url)$/,
+    /^(.*\.thumbnail_)(?:mode|url)$/,
+    /^(.*\.color)(?:_mode)?$/,
+    /^(.*\.title)(?:_url)?$/,
+  ];
+  for (const pattern of groups) {
+    const match = id.match(pattern);
+    if (!match) continue;
+    const prefix = match[1];
+    const related = fields.filter((field) => field.id.startsWith(prefix));
+    if (related.length) return related;
+  }
+
+  const actionMatch = id.match(/^(.*?)(approve|reject|button)(?:_|$)/);
+  if (actionMatch) {
+    const prefix = `${actionMatch[1]}${actionMatch[2]}`;
+    const related = fields.filter((field) => field.id.startsWith(prefix));
+    if (related.length) return related;
+  }
+
+  return [selected];
 }
 
 export function MessageEditor(props: MessageEditorProps) {
@@ -124,25 +133,9 @@ export function MessageEditor(props: MessageEditorProps) {
     () => fields.filter((field) => editorVisualFieldVisible(editorId, field.id, draft)),
     [draft, editorId, fields],
   );
-  const categorizedFields = useMemo(() => ({
-    content: visualFields.filter((field) => fieldMode(field.id, field.label, field.type) === "content"),
-    appearance: visualFields.filter((field) => fieldMode(field.id, field.label, field.type) === "appearance"),
-    components: visualFields.filter((field) => fieldMode(field.id, field.label, field.type) === "components"),
-  }), [visualFields]);
-  const availableModes = useMemo(() => {
-    const modes: MessageEditorMode[] = [];
-    if (categorizedFields.content.length) modes.push("content");
-    if (categorizedFields.appearance.length) modes.push("appearance");
-    if (categorizedFields.components.length) modes.push("components");
-    if (variables?.items.length) modes.push("variables");
-    modes.push("json");
-    return modes;
-  }, [categorizedFields, variables]);
-
-  const initialField = visualFields.find((field) => field.type === "text" || field.type === "textarea") ?? visualFields[0] ?? null;
   const [visible, setVisible] = useState(false);
-  const [mode, setMode] = useState<MessageEditorMode>(() => initialField ? fieldMode(initialField.id, initialField.label, initialField.type) : availableModes[0] ?? "json");
-  const [selectedFieldId, setSelectedFieldId] = useState<string | null>(initialField?.id ?? null);
+  const [view, setView] = useState<MessageEditorView>("canvas");
+  const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null);
   const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
   const [selectedColorSlot, setSelectedColorSlot] = useState<number | null>(null);
   const [jsonText, setJsonText] = useState(serializedDraft);
@@ -150,7 +143,7 @@ export function MessageEditor(props: MessageEditorProps) {
   const [jsonDirty, setJsonDirty] = useState(false);
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [pendingJsonChanges, setPendingJsonChanges] = useState<JsonFieldChange[] | null>(null);
-  const [activeTextFieldId, setActiveTextFieldId] = useState<string | null>(initialField && (initialField.type === "text" || initialField.type === "textarea") ? initialField.id : null);
+  const [activeTextFieldId, setActiveTextFieldId] = useState<string | null>(null);
   const [historyStatus, setHistoryStatus] = useState({ index: 0, length: 0 });
 
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -166,6 +159,8 @@ export function MessageEditor(props: MessageEditorProps) {
   const historyIndexRef = useRef(0);
   const latestDraftRef = useRef<Record<string, unknown>>({ ...draft });
   const closeAfterJsonApplyRef = useRef(false);
+  const viewRef = useRef<MessageEditorView>(view);
+  const auxiliaryBackRef = useRef<() => void>(() => undefined);
 
   const localDirty = useMemo(
     () => fields.some((field) => !valuesEqual(baseline[field.id], draft[field.id])),
@@ -184,6 +179,7 @@ export function MessageEditor(props: MessageEditorProps) {
   jsonDirtyRef.current = jsonDirty;
   pendingJsonChangesRef.current = pendingJsonChanges;
   editingFieldIdRef.current = editingFieldId;
+  viewRef.current = view;
   onChangeRef.current = onChange;
   onApplyRef.current = onApply;
   onDiscardRef.current = onDiscard;
@@ -301,18 +297,17 @@ export function MessageEditor(props: MessageEditorProps) {
   }
 
   useEffect(() => {
-    const first = visualFields.find((field) => field.type === "text" || field.type === "textarea") ?? visualFields[0] ?? null;
-    setSelectedFieldId(first?.id ?? null);
+    setSelectedFieldId(null);
     setEditingFieldId(null);
     setSelectedColorSlot(null);
-    setMode(first ? fieldMode(first.id, first.label, first.type) : availableModes[0] ?? "json");
+    setView("canvas");
     setJsonText(serializedDraft);
     setJsonBaseline(messageFieldsObject(jsonFields, draft));
     setJsonDirty(false);
     setJsonError(null);
     setPendingJsonChanges(null);
     closeAfterJsonApplyRef.current = false;
-    setActiveTextFieldId(first && (first.type === "text" || first.type === "textarea") ? first.id : null);
+    setActiveTextFieldId(null);
     textSelectionRef.current = null;
     latestDraftRef.current = { ...draft };
     historyRef.current = [];
@@ -329,17 +324,12 @@ export function MessageEditor(props: MessageEditorProps) {
   }, [editorKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!availableModes.includes(mode)) setMode(availableModes[0] ?? "json");
-  }, [availableModes, mode]);
-
-  useEffect(() => {
-    if (selectedFieldId && visualFields.some((field) => field.id === selectedFieldId)) return;
-    const next = visualFields.find((field) => field.type === "text" || field.type === "textarea") ?? visualFields[0] ?? null;
-    setSelectedFieldId(next?.id ?? null);
+    if (!selectedFieldId || visualFields.some((field) => field.id === selectedFieldId)) return;
+    setSelectedFieldId(null);
     setEditingFieldId(null);
-    setActiveTextFieldId(next && (next.type === "text" || next.type === "textarea") ? next.id : null);
+    setView("canvas");
+    setActiveTextFieldId(null);
     textSelectionRef.current = null;
-    if (next) setMode(fieldMode(next.id, next.label, next.type));
   }, [selectedFieldId, visualFields]);
 
   useEffect(() => {
@@ -369,6 +359,8 @@ export function MessageEditor(props: MessageEditorProps) {
     if (closeAfterJsonApplyRef.current) {
       closeAfterJsonApplyRef.current = false;
       requestClose("apply");
+    } else {
+      setView("canvas");
     }
   }, [draft, jsonFields, pendingJsonChanges]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -396,7 +388,14 @@ export function MessageEditor(props: MessageEditorProps) {
 
     restoreHistoryMarker();
     window.setTimeout(() => dialogRef.current?.querySelector<HTMLElement>("button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled)")?.focus(), 0);
-    const onBackRequest = () => handleHistoryClose();
+    const onBackRequest = () => {
+      if (viewRef.current !== "canvas") {
+        auxiliaryBackRef.current();
+        restoreHistoryMarker();
+        return;
+      }
+      handleHistoryClose();
+    };
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
@@ -407,6 +406,11 @@ export function MessageEditor(props: MessageEditorProps) {
         if (editingFieldIdRef.current) {
           event.preventDefault();
           setEditingFieldId(null);
+          return;
+        }
+        if (viewRef.current !== "canvas") {
+          event.preventDefault();
+          auxiliaryBackRef.current();
           return;
         }
         event.preventDefault();
@@ -446,7 +450,7 @@ export function MessageEditor(props: MessageEditorProps) {
     setJsonDirty(true);
     setJsonError(null);
     setEditingFieldId(null);
-    setMode("json");
+    setView("json");
   }
 
   function discardJson() {
@@ -467,6 +471,7 @@ export function MessageEditor(props: MessageEditorProps) {
         setJsonText(serializedDraft);
         setJsonBaseline(messageFieldsObject(jsonFields, draft));
         if (closeAfter) requestClose("apply");
+        else setView("canvas");
         return;
       }
       closeAfterJsonApplyRef.current = closeAfter;
@@ -474,7 +479,7 @@ export function MessageEditor(props: MessageEditorProps) {
       recordChanges(changes.map((change) => ({ field: change.field, raw: change.raw })), false);
     } catch (error) {
       setJsonError(error instanceof Error ? error.message : "JSON inválido.");
-      setMode("json");
+      setView("json");
       restoreHistoryMarker();
     }
   }
@@ -497,26 +502,29 @@ export function MessageEditor(props: MessageEditorProps) {
   const colorSlotRange = colorPanelNumber ? { start: (colorPanelNumber - 1) * 10 + 1, end: colorPanelNumber * 10 } : null;
   const selectedField = fields.find((field) => field.id === selectedFieldId) ?? null;
   const activeTextField = fields.find((field) => field.id === activeTextFieldId && (field.type === "text" || field.type === "textarea"))
-    ?? categorizedFields.content.find((field) => field.type === "text" || field.type === "textarea")
     ?? null;
 
   function handleSelectField(field: DashboardFieldDefinition) {
     if (jsonDirty || pendingJsonChanges) {
-      setMode("json");
+      setView("json");
       return;
     }
     setSelectedFieldId(field.id);
     setEditingFieldId((current) => current === field.id ? current : null);
-    setMode(fieldMode(field.id, field.label, field.type));
     if (field.type === "text" || field.type === "textarea") {
       setActiveTextFieldId(field.id);
+      setView("canvas");
       if (textSelectionRef.current?.fieldId !== field.id) textSelectionRef.current = null;
+      return;
     }
+    setView("inspector");
   }
 
   function handleEditField(field: DashboardFieldDefinition) {
     if (jsonDirty || pendingJsonChanges || (field.type !== "text" && field.type !== "textarea")) return;
-    handleSelectField(field);
+    setSelectedFieldId(field.id);
+    setActiveTextFieldId(field.id);
+    setView("canvas");
     setEditingFieldId(field.id);
   }
 
@@ -552,7 +560,6 @@ export function MessageEditor(props: MessageEditorProps) {
     recordChanges([{ field: activeTextField, raw: next }], true);
     textSelectionRef.current = { fieldId: activeTextField.id, start: nextStart, end: nextEnd };
     setSelectedFieldId(activeTextField.id);
-    setMode(fieldMode(activeTextField.id, activeTextField.label, activeTextField.type));
     focusTextControl(activeTextField.id, nextStart, nextEnd);
   }
 
@@ -570,121 +577,164 @@ export function MessageEditor(props: MessageEditorProps) {
     recordChanges([{ field: activeTextField, raw: next }], true);
     textSelectionRef.current = { fieldId: activeTextField.id, start: selectionStart, end: selectionEnd };
     setSelectedFieldId(activeTextField.id);
-    setMode(fieldMode(activeTextField.id, activeTextField.label, activeTextField.type));
     focusTextControl(activeTextField.id, selectionStart, selectionEnd);
   }
 
   function handleInsertVariable(key: string) {
     if (!variables || !activeTextField) return;
+    const targetId = activeTextField.id;
     const token = formatTemplateVariable(variables.syntax, key);
-    const current = String(latestDraftRef.current[activeTextField.id] ?? "");
-    const saved = textSelectionRef.current?.fieldId === activeTextField.id ? textSelectionRef.current : null;
+    const current = String(latestDraftRef.current[targetId] ?? "");
+    const saved = textSelectionRef.current?.fieldId === targetId ? textSelectionRef.current : null;
     const separator = !saved && current && !/\s$/.test(current) ? " " : "";
     replaceTextSelection(`${separator}${token}`);
+    setView("canvas");
+    setEditingFieldId(targetId);
   }
 
-  function handleModeChange(next: MessageEditorMode) {
-    if (jsonDirty && next !== "json") {
-      setMode("json");
-      return;
-    }
-    setMode(next);
-    setEditingFieldId(null);
-    if (next === "content" || next === "appearance" || next === "components") {
-      const candidates = categorizedFields[next];
-      const nextField = candidates.find((field) => field.id === selectedFieldId) ?? candidates[0] ?? null;
-      if (nextField) handleSelectField(nextField);
-    }
-  }
-
-  const currentFields = mode === "content" || mode === "appearance" || mode === "components" ? categorizedFields[mode] : [];
-  const contextField = currentFields.find((field) => field.id === selectedFieldId) ?? currentFields[0] ?? null;
-  const applyDisabled = Boolean(pendingJsonChanges) || (!localDirty && !jsonDirty);
+  const inspectorFields = relatedContextFields(selectedField, visualFields);
+  const activeEditingField = editingFieldId
+    ? fields.find((field) => field.id === editingFieldId && (field.type === "text" || field.type === "textarea")) ?? null
+    : null;
+  const activeEditingValue = activeEditingField ? String(draft[activeEditingField.id] ?? "") : "";
+  const applyDisabled = Boolean(pendingJsonChanges);
   const canvasInteractive = !jsonDirty && !pendingJsonChanges;
+
+  function openVariables() {
+    setEditingFieldId(null);
+    setView("variables");
+  }
+
+  function openJson() {
+    setEditingFieldId(null);
+    setView("json");
+  }
+
+  function openInspector(field = selectedField) {
+    if (!field || jsonDirty || pendingJsonChanges) return;
+    setSelectedFieldId(field.id);
+    setEditingFieldId(null);
+    setView("inspector");
+  }
+
+  function leaveAuxiliaryView() {
+    if (pendingJsonChanges) return;
+    if (view === "json" && jsonDirty) {
+      if (!window.confirm("Descartar as alterações não aplicadas do JSON?")) return;
+      discardJson();
+    }
+    setView("canvas");
+  }
+
+  auxiliaryBackRef.current = leaveAuxiliaryView;
+
+  function preventToolbarBlur(event: ReactMouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+  }
 
   function handleTransitionEnd(event: TransitionEvent<HTMLDivElement>) {
     if (event.target !== event.currentTarget || visible || !closing.current) return;
     if (event.propertyName === "opacity") finalizeClose();
   }
 
-  const editor = <div ref={dialogRef} className="osk-root osk-message-editor osk-message-editor--unified" data-visible={visible || undefined} role="dialog" aria-modal="true" aria-label={`Editar ${groupLabel}`} onTransitionEnd={handleTransitionEnd}>
+  const editor = <div
+    ref={dialogRef}
+    className="osk-root osk-message-editor osk-message-editor--unified"
+    data-visible={visible || undefined}
+    data-editor-view={view}
+    data-text-editing={activeEditingField ? "true" : undefined}
+    role="dialog"
+    aria-modal="true"
+    aria-label={`Editar ${groupLabel}`}
+    onTransitionEnd={handleTransitionEnd}
+  >
     <div className="osk-message-editor__shell">
       <header className="osk-message-editor__header">
-        <button type="button" className="osk-message-editor__back" onClick={handleApply} aria-label="Aplicar e voltar"><ChevronLeft size={19} /></button>
+        <button
+          type="button"
+          className="osk-message-editor__back"
+          onClick={view === "canvas" ? handleApply : leaveAuxiliaryView}
+          aria-label={view === "canvas" ? "Aplicar e voltar" : "Voltar à mensagem"}
+        >
+          <ChevronLeft size={19} />
+        </button>
         <div className="osk-message-editor__title">
           <small>{sectionLabel}</small>
           <strong>{groupLabel}</strong>
-          {description && <p>{description}</p>}
         </div>
         <div className="osk-message-editor__header-actions">
-          <button type="button" disabled={historyStatus.index <= 0 || jsonDirty || Boolean(pendingJsonChanges)} onClick={undo} aria-label="Desfazer"><Undo2 size={17} /></button>
-          <button type="button" disabled={historyStatus.index >= historyStatus.length || jsonDirty || Boolean(pendingJsonChanges)} onClick={redo} aria-label="Refazer"><Redo2 size={17} /></button>
+          <button type="button" disabled={historyStatus.index <= 0 || jsonDirty || Boolean(pendingJsonChanges)} onClick={undo} aria-label="Desfazer" title="Desfazer"><Undo2 size={17} /></button>
+          <button type="button" disabled={historyStatus.index >= historyStatus.length || jsonDirty || Boolean(pendingJsonChanges)} onClick={redo} aria-label="Refazer" title="Refazer"><Redo2 size={17} /></button>
+          {variables?.items.length ? <button type="button" disabled={Boolean(pendingJsonChanges)} onClick={openVariables} aria-label="Abrir variáveis" title="Variáveis"><Variable size={17} /></button> : null}
+          <button type="button" disabled={Boolean(pendingJsonChanges)} onClick={openJson} aria-label="Abrir JSON avançado" title="JSON avançado"><Braces size={17} /></button>
           <span className="osk-message-editor__dirty" data-visible={localDirty || jsonDirty || undefined} aria-live="polite" aria-hidden={!(localDirty || jsonDirty)}>Alterado</span>
         </div>
       </header>
 
       <div className="osk-message-editor__workspace">
-        <section className="osk-message-editor__canvas-pane">
-          <div className="osk-message-editor__canvas-head">
-            <div><strong>Mensagem</strong><small>Selecione um elemento. Toque novamente em um texto para editar diretamente.</small></div>
-            {selectedField && <span>{selectedField.label}</span>}
-          </div>
-          <MessagePreview
-            sectionId={sectionId}
-            editorId={editorId}
-            groupLabel={groupLabel}
-            fields={fields}
-            draft={draft}
-            guildOptions={guildOptions}
-            botName={botName}
-            botAvatarUrl={botAvatarUrl}
-            interactive={canvasInteractive}
-            selectedFieldId={selectedFieldId}
-            editingFieldId={editingFieldId}
-            selectedColorSlot={selectedColorSlot}
-            textSelection={textSelectionRef.current}
-            onSelectField={handleSelectField}
-            onEditField={handleEditField}
-            onFinishEdit={() => setEditingFieldId(null)}
-            onChange={handleFieldChange}
-            onTextSelection={handleTextSelection}
-            onSelectColorSlot={(slotNumber) => setSelectedColorSlot(slotNumber)}
-          />
-          {!canvasInteractive && <div className="osk-message-editor__canvas-lock"><Braces size={17} /><span>Aplique ou descarte o JSON pendente para voltar à edição visual.</span></div>}
-        </section>
-
-        <aside className="osk-message-editor__context-pane">
-          <nav className="osk-message-editor__modes" role="tablist" aria-label="Áreas da mensagem">
-            {availableModes.map((item) => {
-              const ModeIcon = modeIcon(item);
-              return <button key={item} type="button" role="tab" aria-selected={mode === item} data-active={mode === item || undefined} disabled={jsonDirty && item !== "json"} onClick={() => handleModeChange(item)}><ModeIcon size={15} />{MODE_LABELS[item]}</button>;
-            })}
-          </nav>
-
-          <div className="osk-message-editor__mode-content">
-            {mode === "variables" ? (
-              <MessageVariablesPanel variables={variables} insertTargetLabel={activeTextField?.label} onInsert={activeTextField ? handleInsertVariable : undefined} />
-            ) : mode === "json" ? (
-              <MessageJsonEditor value={jsonText} error={jsonError} dirty={jsonDirty} applying={Boolean(pendingJsonChanges)} onChange={handleJsonChange} onApply={() => applyJson(false)} onDiscard={discardJson} />
-            ) : contextField ? (
-              <>
-                <div className="osk-message-editor__field-tabs" aria-label={`Campos de ${MODE_LABELS[mode]}`}>
-                  {currentFields.map((field) => <button type="button" key={field.id} data-active={contextField.id === field.id || undefined} onClick={() => handleSelectField(field)}>{field.label}</button>)}
+        {view === "canvas" ? (
+          <section className="osk-message-editor__canvas-pane">
+            <MessagePreview
+              sectionId={sectionId}
+              editorId={editorId}
+              groupLabel={groupLabel}
+              fields={fields}
+              draft={draft}
+              guildOptions={guildOptions}
+              botName={botName}
+              botAvatarUrl={botAvatarUrl}
+              interactive={canvasInteractive}
+              selectedFieldId={selectedFieldId}
+              editingFieldId={editingFieldId}
+              selectedColorSlot={selectedColorSlot}
+              textSelection={textSelectionRef.current}
+              onSelectField={handleSelectField}
+              onEditField={handleEditField}
+              onFinishEdit={() => setEditingFieldId(null)}
+              onChange={handleFieldChange}
+              onTextSelection={handleTextSelection}
+              onSelectColorSlot={(slotNumber) => setSelectedColorSlot(slotNumber)}
+            />
+            {!canvasInteractive && <div className="osk-message-editor__canvas-lock"><Braces size={17} /><span>Aplique ou descarte o JSON pendente para voltar à edição visual.</span></div>}
+            {selectedField && !activeEditingField && canvasInteractive && (
+              <div className="osk-message-editor__selection-bar">
+                <div>
+                  <strong>{selectedField.label}</strong>
+                  <small>{selectedField.type === "text" || selectedField.type === "textarea" ? "Toque novamente no texto para editar." : "Abra as propriedades deste elemento."}</small>
                 </div>
-                {(contextField.type === "text" || contextField.type === "textarea") && (
-                  <div className="osk-message-editor__text-tools" aria-label="Formatação de texto">
-                    <button type="button" onClick={() => handleEditField(contextField)} title="Editar na mensagem"><Pencil size={15} /></button>
-                    <span />
-                    <button type="button" onClick={() => wrapText("**", "**", "texto")} title="Negrito"><Bold size={15} /></button>
-                    <button type="button" onClick={() => wrapText("*", "*", "texto")} title="Itálico"><Italic size={15} /></button>
-                    <button type="button" onClick={() => wrapText("~~", "~~", "texto")} title="Tachado"><Strikethrough size={15} /></button>
-                    <button type="button" onClick={() => wrapText("`", "`", "código")} title="Código"><Code2 size={15} /></button>
-                    <button type="button" onClick={() => wrapText("[", "](https://)", "texto do link")} title="Link"><Link2 size={15} /></button>
-                    {variables?.items.length ? <button type="button" onClick={() => setMode("variables")} title="Inserir variável"><Variable size={15} /></button> : null}
-                  </div>
-                )}
+                <div>
+                  {(selectedField.type === "text" || selectedField.type === "textarea") && <button type="button" onClick={() => handleEditField(selectedField)}><Pencil size={15} />Editar</button>}
+                  {inspectorFields.length > 1 && <button type="button" onClick={() => openInspector(selectedField)}><Settings2 size={15} />Opções</button>}
+                  {variables?.items.length && (selectedField.type === "text" || selectedField.type === "textarea") ? <button type="button" onClick={openVariables}><Variable size={15} />Variável</button> : null}
+                </div>
+              </div>
+            )}
+          </section>
+        ) : (
+          <section className="osk-message-editor__editor-view">
+            <div className="osk-message-editor__view-head">
+              <button type="button" onClick={leaveAuxiliaryView} disabled={Boolean(pendingJsonChanges)} aria-label="Voltar à mensagem"><ChevronLeft size={18} /></button>
+              <div>
+                <strong>{view === "variables" ? "Variáveis" : view === "json" ? "JSON avançado" : selectedField?.label ?? "Propriedades"}</strong>
+                <small>{view === "variables" ? (activeTextField ? `Inserir em ${activeTextField.label}` : "Toque em uma variável para copiar") : view === "json" ? "Edição técnica da mensagem" : "Configurações do elemento selecionado"}</small>
+              </div>
+            </div>
+            <div className="osk-message-editor__view-body">
+              {view === "variables" ? (
+                <MessageVariablesPanel variables={variables} insertTargetLabel={activeTextField?.label} onInsert={activeTextField ? handleInsertVariable : undefined} />
+              ) : view === "json" ? (
+                <MessageJsonEditor
+                  value={jsonText}
+                  error={jsonError}
+                  dirty={jsonDirty}
+                  applying={Boolean(pendingJsonChanges)}
+                  onChange={handleJsonChange}
+                  onApply={() => applyJson(false)}
+                  onDiscard={() => { discardJson(); setView("canvas"); }}
+                />
+              ) : selectedField ? (
                 <MessageVisualEditor
-                  fields={[contextField]}
+                  fields={inspectorFields}
                   baseline={baseline}
                   draft={draft}
                   guildOptions={guildOptions}
@@ -701,18 +751,36 @@ export function MessageEditor(props: MessageEditorProps) {
                   }}
                   onTextSelection={handleTextSelection}
                 />
-              </>
-            ) : (
-              <div className="osk-message-empty">Nenhum campo está disponível nesta área.</div>
-            )}
-          </div>
-        </aside>
+              ) : (
+                <div className="osk-message-empty">Selecione um elemento da mensagem para abrir suas propriedades.</div>
+              )}
+            </div>
+          </section>
+        )}
       </div>
 
-      <footer className="osk-message-editor__footer">
-        <button type="button" className="osk-secondary-button" onClick={() => requestClose("discard")}>Descartar</button>
-        <button type="button" className="osk-primary-button" disabled={applyDisabled} onClick={handleApply}>{pendingJsonChanges ? "Aplicando..." : "Aplicar ao painel"}</button>
-      </footer>
+      {activeEditingField ? (
+        <div className="osk-message-editor__text-dock">
+          <div className="osk-message-editor__text-dock-copy">
+            <strong>{activeEditingField.label}</strong>
+            {activeEditingField.maxLength ? <span>{activeEditingValue.length}/{activeEditingField.maxLength}</span> : null}
+          </div>
+          <div className="osk-message-editor__text-dock-tools" aria-label="Formatação de texto">
+            <button type="button" onMouseDown={preventToolbarBlur} onClick={() => wrapText("**", "**", "texto")} title="Negrito"><Bold size={16} /></button>
+            <button type="button" onMouseDown={preventToolbarBlur} onClick={() => wrapText("*", "*", "texto")} title="Itálico"><Italic size={16} /></button>
+            <button type="button" onMouseDown={preventToolbarBlur} onClick={() => wrapText("~~", "~~", "texto")} title="Tachado"><Strikethrough size={16} /></button>
+            <button type="button" onMouseDown={preventToolbarBlur} onClick={() => wrapText("`", "`", "código")} title="Código"><Code2 size={16} /></button>
+            <button type="button" onMouseDown={preventToolbarBlur} onClick={() => wrapText("[", "](https://)", "texto do link")} title="Link"><Link2 size={16} /></button>
+            {variables?.items.length ? <button type="button" onMouseDown={preventToolbarBlur} onClick={openVariables} title="Inserir variável"><Variable size={16} /></button> : null}
+          </div>
+          <button type="button" className="osk-message-editor__text-done" onClick={() => setEditingFieldId(null)}><Check size={16} />Concluir</button>
+        </div>
+      ) : (
+        <footer className="osk-message-editor__footer">
+          <button type="button" className="osk-secondary-button" onClick={() => requestClose("discard")}>Descartar</button>
+          <button type="button" className="osk-primary-button" disabled={applyDisabled} onClick={handleApply}>{pendingJsonChanges ? "Aplicando..." : localDirty || jsonDirty ? "Aplicar ao painel" : "Concluir"}</button>
+        </footer>
+      )}
     </div>
   </div>;
 

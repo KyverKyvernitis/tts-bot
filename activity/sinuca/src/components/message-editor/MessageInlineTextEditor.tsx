@@ -33,8 +33,12 @@ export function MessageInlineTextEditor({
 
   function resizeTextarea(control: HTMLInputElement | HTMLTextAreaElement) {
     if (!(control instanceof HTMLTextAreaElement)) return;
+    const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+    const maxHeight = Math.max(112, Math.min(240, Math.round(viewportHeight * 0.34)));
     control.style.height = "auto";
-    control.style.height = `${Math.max(42, control.scrollHeight)}px`;
+    const nextHeight = Math.max(58, Math.min(control.scrollHeight, maxHeight));
+    control.style.height = `${nextHeight}px`;
+    control.style.overflowY = control.scrollHeight > maxHeight ? "auto" : "hidden";
   }
 
   function updateSelection(control: HTMLInputElement | HTMLTextAreaElement) {
@@ -69,7 +73,7 @@ export function MessageInlineTextEditor({
         maxLength={field.maxLength}
         placeholder={field.placeholder || field.label}
         data-message-inline-field-id={field.id}
-        rows={Math.min(8, Math.max(2, value.split("\n").length))}
+        rows={Math.min(5, Math.max(2, value.split("\n").length))}
         onClick={handleClick}
         onFocus={handleFocus}
         onSelect={handleSelect}
