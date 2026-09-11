@@ -18,6 +18,8 @@ FRONT="$REPO_DIR/dashboard/frontend"
 BACK="$REPO_DIR/dashboard/backend"
 LEGACY_FRONT="$REPO_DIR/activity/sinuca"
 LEGACY_BACK="$REPO_DIR/activity/sinuca-server"
+FRONT_PUBLISH_DIR="${FRONT_PUBLISH_DIR:-/var/www/sinuca}"
+UPDATER_BOOTSTRAP_MARKER="$REPO_DIR/scripts/updater-bootstrap-publication-v2.marker"
 SITE_TEST_DIR="$REPO_DIR/tests/site"
 LEGACY_SITE_TESTS=(
   "$REPO_DIR/tests/test_activity_path_migration.py"
@@ -30,7 +32,63 @@ CANONICAL_SITE_TESTS=(
   "$SITE_TEST_DIR/test_dashboard_layout_migration.py"
 )
 
+bootstrap_frontend_publication_for_updater() {
+  [[ "$MODE" == "apply" && -f "$UPDATER_BOOTSTRAP_MARKER" ]] || return 0
+
+  # Este marker existe apenas no patch de bootstrap que corrige o updater.
+  # O runtime antigo tenta reconstruir o frontend mesmo em ZIPs que não o
+  # alteram quando /var/www/sinuca/index.html está ausente. Garanta uma
+  # publicação legível por uma única execução para permitir que o updater novo
+  # seja commitado; o marker é removido antes do staging e não persiste no Git.
+  if [[ -s "$FRONT_PUBLISH_DIR/index.html" && -r "$FRONT_PUBLISH_DIR/index.html" ]]; then
+    rm -f -- "$UPDATER_BOOTSTRAP_MARKER"
+    return 0
+  fi
+
+  local publish_parent source tmp old
+  publish_parent="$(dirname "$FRONT_PUBLISH_DIR")"
+  mkdir -p "$publish_parent"
+
+  # Prefira um build já existente; assim não substituímos uma UI recuperável
+  # por uma página mínima apenas para satisfazer o bootstrap.
+  for source in "$FRONT/dist" "$LEGACY_FRONT/dist"; do
+    if [[ -s "$source/index.html" ]]; then
+      tmp="$(mktemp -d "$publish_parent/.sinuca-bootstrap.XXXXXX")"
+      cp -a "$source/." "$tmp/"
+      find "$tmp" -type d -exec chmod 0755 {} + 2>/dev/null || true
+      find "$tmp" -type f -exec chmod 0644 {} + 2>/dev/null || true
+      old="$publish_parent/.sinuca-bootstrap-old.$$"
+      if [[ -e "$FRONT_PUBLISH_DIR" || -L "$FRONT_PUBLISH_DIR" ]]; then
+        mv -- "$FRONT_PUBLISH_DIR" "$old"
+      fi
+      mv -- "$tmp" "$FRONT_PUBLISH_DIR"
+      rm -rf -- "$old" 2>/dev/null || true
+      rm -f -- "$UPDATER_BOOTSTRAP_MARKER"
+      return 0
+    fi
+  done
+
+  # Sem build reaproveitável, publique apenas uma página estática de manutenção.
+  # O frontend já estava inválido para o updater; isto evita npm no patch de
+  # diagnóstico e mantém uma resposta HTTP útil até a recuperação definitiva.
+  mkdir -p "$FRONT_PUBLISH_DIR"
+  cat > "$FRONT_PUBLISH_DIR/.index.html.bootstrap.tmp" <<'HTML'
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Painel em manutenção</title></head><body><main><h1>Painel em manutenção</h1><p>A interface está sendo recuperada. O bot e a API continuam operacionais.</p></main></body></html>
+HTML
+  chmod 0644 "$FRONT_PUBLISH_DIR/.index.html.bootstrap.tmp"
+  mv -f -- "$FRONT_PUBLISH_DIR/.index.html.bootstrap.tmp" "$FRONT_PUBLISH_DIR/index.html"
+  chmod 0755 "$FRONT_PUBLISH_DIR" 2>/dev/null || true
+  rm -f -- "$UPDATER_BOOTSTRAP_MARKER"
+}
+
+bootstrap_frontend_publication_for_updater
+
 if [[ ! -f "$FRONT/package.json" || ! -f "$BACK/package.json" ]]; then
+  if [[ "$MODE" == "apply" ]]; then
+    echo "Migração dashboard adiada: layout canônico ainda incompleto; update não relacionado pode prosseguir."
+    exit 0
+  fi
   echo "layout canônico incompleto em $REPO_DIR/dashboard" >&2
   exit 1
 fi

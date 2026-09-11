@@ -750,3 +750,35 @@ def test_local_candidate_load_hydrates_progress_before_first_updater_stage() -> 
 
     assert "zip_progress_hydrate_from_candidate || true" in load_block
     assert 'zip_progress_publish "Conferindo ZIP"' in prepare_block
+
+
+
+def test_dashboard_migration_apply_defers_when_canonical_frontend_is_missing() -> None:
+    migration = ROOT / "scripts" / "migrate-dashboard-layout.sh"
+    source = migration.read_text(encoding="utf-8")
+    assert "Migração dashboard adiada: layout canônico ainda incompleto" in source
+    assert 'if [[ "$MODE" == "apply" ]]; then' in source
+
+
+def test_frontend_unrelated_patch_does_not_force_implicit_npm_repair() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    start = source.index("deploy_frontend() {")
+    end = source.index("\ndeploy_backend() {", start)
+    block = source[start:end]
+    assert 'DISCORD_AUTO_UPDATE_REPAIR_UNCHANGED_FRONTEND:-0' in block
+    assert 'publicação do frontend já estava inválida; update não a alterou' in block
+
+
+def test_rollback_preserves_original_failure_and_archives_candidate() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    start = source.index("rollback_after_failure() {")
+    end = source.index("\nhandle_post_deploy_failure() {", start)
+    block = source[start:end]
+
+    capture_at = block.index('local original_error_stderr="$LAST_ERROR_STDERR"')
+    rollback_front_at = block.index("FRONT_PUBLICATION_ATTEMPTED == 1", capture_at)
+    restore_at = block.index('LAST_ERROR_STDERR="$original_error_stderr"', rollback_front_at)
+    archive_at = block.index('archive_local_candidate "failed"', restore_at)
+    assert capture_at < rollback_front_at < restore_at < archive_at
+    assert 'LAST_ERROR_LOGS="$original_error_logs"' in block
+    assert 'LAST_ERROR_SERVICE_UNIT="$original_error_service_unit"' in block
