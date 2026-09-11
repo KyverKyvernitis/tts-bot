@@ -223,7 +223,7 @@ def test_fast_guard_stays_sync_and_memory_only() -> None:
 
 
 def test_tts_gate_blocks_antibot_before_database_lookup() -> None:
-    source = (ROOT / "cogs" / "tts" / "utils" / "message_gate.py").read_text(encoding="utf-8")
+    source = (ROOT / "cogs" / "tts" / "mensagens" / "triagem.py").read_text(encoding="utf-8")
     assert source.index("antibot_should_block_message") < source.index("db = cog._get_db()")
     assert 'reason="antibot_guard"' in source
 

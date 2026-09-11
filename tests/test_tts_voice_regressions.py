@@ -48,24 +48,25 @@ class VoiceConnectionSourceRegressionTests(unittest.TestCase):
         self.assertIn("if not post_connect_is_pending:", audio_source)
 
     def test_nested_text_inputs_do_not_duplicate_component_v2_labels(self):
-        tree = ast.parse((ROOT / "cogs" / "tts" / "ui.py").read_text(encoding="utf-8"))
         expected_targets = {"manual_input", "custom_values", "role_input"}
         checked_targets: set[str] = set()
 
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
-                continue
-            if not isinstance(node.value.func, ast.Name) or node.value.func.id != "_make_modal_text_input":
-                continue
-            target_names = {target.id for target in node.targets if isinstance(target, ast.Name)}
-            relevant = target_names & expected_targets
-            if not relevant:
-                continue
-            label_keyword = next((kw for kw in node.value.keywords if kw.arg == "label"), None)
-            self.assertIsNotNone(label_keyword)
-            self.assertIsInstance(label_keyword.value, ast.Constant)
-            self.assertIsNone(label_keyword.value.value)
-            checked_targets.update(relevant)
+        for rel in ("cogs/tts/ui.py", "cogs/tts/interface/modais_vozes_online.py", "cogs/tts/interface/modais_servidor.py", "cogs/tts/interface/modais_atts.py"):
+            tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+                    continue
+                if not isinstance(node.value.func, ast.Name) or node.value.func.id not in {"_make_modal_text_input", "criar_entrada_texto_modal"}:
+                    continue
+                target_names = {target.id for target in node.targets if isinstance(target, ast.Name)}
+                relevant = target_names & expected_targets
+                if not relevant:
+                    continue
+                label_keyword = next((kw for kw in node.value.keywords if kw.arg == "label"), None)
+                self.assertIsNotNone(label_keyword)
+                self.assertIsInstance(label_keyword.value, ast.Constant)
+                self.assertIsNone(label_keyword.value.value)
+                checked_targets.update(relevant)
 
         self.assertEqual(checked_targets, expected_targets)
 

@@ -57,7 +57,11 @@ class TTSPrefixAliasRegressionTests(unittest.TestCase):
 
     def test_panel_target_resolution_keeps_public_message_context(self):
         checked = 0
-        for rel in ("cogs/tts/ui.py", "cogs/tts/utils/panel_apply.py"):
+        for rel in (
+            "cogs/tts/ui.py",
+            "cogs/tts/utils/panel_apply.py",
+            "cogs/tts/interface/operacoes_painel.py",
+        ):
             tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
             for call in ast.walk(tree):
                 if not isinstance(call, ast.Call):
@@ -86,8 +90,15 @@ class TTSLauncherPersonalRegressionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.ui_text = (ROOT / "cogs" / "tts" / "ui.py").read_text(encoding="utf-8")
         cls.cog_text = (ROOT / "cogs" / "tts" / "cog.py").read_text(encoding="utf-8")
+        cls.operacoes_text = (ROOT / "cogs" / "tts" / "interface" / "operacoes_painel.py").read_text(encoding="utf-8")
+        cls.modais_vozes_text = (ROOT / "cogs" / "tts" / "interface" / "modais_vozes_online.py").read_text(encoding="utf-8")
+        cls.visoes_layout_text = (ROOT / "cogs" / "tts" / "interface" / "visoes_layout.py").read_text(encoding="utf-8")
+        cls.lancador_text = (ROOT / "cogs" / "tts" / "interface" / "visao_lancador_publico.py").read_text(encoding="utf-8")
         cls.ui_tree = ast.parse(cls.ui_text)
         cls.cog_tree = ast.parse(cls.cog_text)
+        cls.modais_vozes_tree = ast.parse(cls.modais_vozes_text)
+        cls.visoes_layout_tree = ast.parse(cls.visoes_layout_text)
+        cls.lancador_tree = ast.parse(cls.lancador_text)
 
     @staticmethod
     def _class_source(text: str, tree: ast.AST, name: str) -> str:
@@ -118,50 +129,53 @@ class TTSLauncherPersonalRegressionTests(unittest.TestCase):
         self.assertIn("TTSPublicLauncherView(self, int(owner_id or 0)", builder)
 
     def test_launcher_rejects_other_users_with_the_short_tts_hint(self):
-        base = self._class_source(self.ui_text, self.ui_tree, "_BaseTTSLayoutView")
+        base = self._class_source(self.visoes_layout_text, self.visoes_layout_tree, "VisaoLayoutBaseTTS")
         self.assertIn('if self.panel_kind == "launcher":', base)
         self.assertIn(
-            'command_hint = await self.cog._get_panel_prefix_hint(self.guild_id, "launcher")',
+            'dica_comando = await self.cog._get_panel_prefix_hint(self.guild_id, "launcher")',
             base,
         )
-        self.assertIn('Essa configuração não é sua, use o comando {command_hint} para configurar a sua voz', base)
+        self.assertIn('Essa configuração não é sua, use o comando {dica_comando} para configurar a sua voz', base)
         self.assertIn("allowed_mentions=discord.AllowedMentions.none()", base)
 
     def test_launcher_description_and_sections_match_the_compact_design(self):
-        launcher = self._class_source(self.ui_text, self.ui_tree, "TTSPublicLauncherView")
-        self.assertIn("TTS_LAUNCHER_DESCRIPTION", launcher)
+        launcher = self._class_source(self.lancador_text, self.lancador_tree, "VisaoLancadorPublicoTTS")
+        self.assertIn("DESCRICAO_LANCADOR_TTS", self.lancador_text)
         self.assertIn("Voz mais personalizável (é mais lenta)", launcher)
         self.assertIn("Voz mais simples (é mais rápida)", launcher)
-        self.assertIn('label="Configurar"', launcher)
-        self.assertIn('self._server_setting("edge_prefix", ",")', launcher)
-        self.assertIn('self._server_setting("gtts_prefix", ".")', launcher)
+        self.assertIn('rotulo="Configurar"', launcher)
+        self.assertIn('self._configuracao_servidor("edge_prefix", ",")', launcher)
+        self.assertIn('self._configuracao_servidor("gtts_prefix", ".")', launcher)
         self.assertNotIn("Como funciona", launcher)
 
         self.assertIn(
             '"Tem dois modos de texto para voz, cada um com um prefixo diferente. "',
-            self.ui_text,
+            self.ui_text + self.operacoes_text,
         )
         self.assertNotIn("Escolha o motor pelo prefixo da mensagem", self.ui_text + self.cog_text)
 
     def test_summary_shows_every_real_user_difference_and_never_collapses_it(self):
-        launcher = self._class_source(self.ui_text, self.ui_tree, "TTSPublicLauncherView")
-        voice_pos = launcher.index('self._is_personal_difference("voice"')
-        rate_pos = launcher.index('self._is_personal_difference("rate"')
-        pitch_pos = launcher.index('self._is_personal_difference("pitch"')
+        launcher = self._class_source(self.lancador_text, self.lancador_tree, "VisaoLancadorPublicoTTS")
+        voice_pos = launcher.index('self._diferenca_pessoal("voice"')
+        rate_pos = launcher.index('self._diferenca_pessoal("rate"')
+        pitch_pos = launcher.index('self._diferenca_pessoal("pitch"')
         self.assertLess(voice_pos, rate_pos)
         self.assertLess(rate_pos, pitch_pos)
-        self.assertIn('self._is_personal_difference("language", "pt-br")', launcher)
-        self.assertIn('return " · ".join(part for part in parts if part)', launcher)
-        self.assertIn('lines.append(f"-# {summary}")', launcher)
-        self.assertIn("if not personal:\n            return False", launcher)
-        self.assertIn("!= self._normalized_setting(key, server)", launcher)
+        self.assertIn('self._diferenca_pessoal("language", "pt-br")', launcher)
+        self.assertIn('return " · ".join(parte for parte in partes if parte)', launcher)
+        self.assertIn('linhas.append(f"-# {resumo}")', launcher)
+        self.assertIn("if not pessoal:\n            return False", launcher)
+        self.assertIn("!= self._configuracao_normalizada(chave, servidor)", launcher)
         self.assertNotIn("+ ajustes", launcher)
         self.assertNotIn("Configuração padrão", launcher)
 
     def test_launcher_refresh_keeps_owner_and_reloads_summary_after_save(self):
-        self.assertGreaterEqual(self.ui_text.count('owner_id=int(state.get("owner_id", 0) or 0)'), 2)
+        self.assertGreaterEqual(
+            (self.ui_text + self.operacoes_text).count('owner_id=int(state.get("owner_id", 0) or 0)'),
+            2,
+        )
         self.assertIn('owner_id=int(state.get("owner_id", 0) or 0)', self.cog_text)
-        self.assertIn("self._guild_defaults, self._user_settings = self._load_launcher_settings()", self.ui_text)
+        self.assertIn("self._guild_defaults, self._user_settings = self._carregar_configuracoes_lancador()", self.lancador_text)
 
     def test_expired_interaction_uses_server_prefix_and_short_tts_message(self):
         prefix_nodes = [
@@ -186,7 +200,7 @@ class TTSLauncherPersonalRegressionTests(unittest.TestCase):
         self.assertNotIn("ficou aberto por tempo demais", expired_source)
         self.assertNotIn("gere um painel novo", expired_source)
 
-        self.assertIn("_fallback_expired_panel_message(self.panel_kind)", self.ui_text)
+        self.assertIn("mensagem_painel_expirado(self.panel_kind)", self.visoes_layout_text)
 
     def test_update_confirmation_is_compact_components_v2(self):
         builder_nodes = [
@@ -209,8 +223,8 @@ class TTSLauncherPersonalRegressionTests(unittest.TestCase):
         updater = ast.get_source_segment(self.cog_text, updater_nodes[0]) or ""
         self.assertIn("await self._send_tts_notice(", updater)
 
-        edge = self._class_source(self.ui_text, self.ui_tree, "EdgeSettingsModal")
-        gtts = self._class_source(self.ui_text, self.ui_tree, "GTTSSettingsModal")
+        edge = self._class_source(self.modais_vozes_text, self.modais_vozes_tree, "ModalConfiguracaoEdge")
+        gtts = self._class_source(self.modais_vozes_text, self.modais_vozes_tree, "ModalConfiguracaoGTTS")
         self.assertIn('details.append(f"Velocidade · {human_rate(normalized)}")', edge)
         self.assertIn('details.append(f"Tom · {human_pitch(normalized)}")', edge)
         self.assertIn('success_description=" · ".join(details)', edge)
@@ -222,33 +236,37 @@ class TTSEdgeModalVoiceCatalogRegressionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.ui_text = (ROOT / "cogs" / "tts" / "ui.py").read_text(encoding="utf-8")
         cls.ui_tree = ast.parse(cls.ui_text)
+        cls.catalog_text = (ROOT / "cogs" / "tts" / "interface" / "catalogos_de_vozes.py").read_text(encoding="utf-8")
+        cls.modais_vozes_text = (ROOT / "cogs" / "tts" / "interface" / "modais_vozes_online.py").read_text(encoding="utf-8")
+        cls.catalog_tree = ast.parse(cls.catalog_text)
+        cls.modais_vozes_tree = ast.parse(cls.modais_vozes_text)
 
     @classmethod
-    def _function_source(cls, name: str) -> str:
-        nodes = [node for node in ast.walk(cls.ui_tree) if isinstance(node, ast.FunctionDef) and node.name == name]
+    def _catalog_function_source(cls, name: str) -> str:
+        nodes = [node for node in ast.walk(cls.catalog_tree) if isinstance(node, ast.FunctionDef) and node.name == name]
         if len(nodes) != 1:
             raise AssertionError(f"função {name}: esperado 1, encontrado {len(nodes)}")
-        return ast.get_source_segment(cls.ui_text, nodes[0]) or ""
+        return ast.get_source_segment(cls.catalog_text, nodes[0]) or ""
 
     def test_modal_never_injects_preferred_voices_outside_live_edge_catalog(self):
-        source = self._function_source("_edge_voice_options_for_language")
-        self.assertIn("available = {v for v in voices_source", source)
-        self.assertIn("candidates.extend([v for v in preferred if v in available])", source)
-        self.assertIn("candidates.extend(sorted(available))", source)
-        self.assertIn("if current in available:", source)
-        self.assertIn("if not voices:\n        return []", source)
-        self.assertNotIn('voices = ["pt-BR-FranciscaNeural"]', source)
+        source = self._catalog_function_source("opcoes_vozes_edge_por_idioma")
+        self.assertIn("disponiveis = {v for v in fonte_vozes", source)
+        self.assertIn("candidatos.extend([v for v in preferidas if v in disponiveis])", source)
+        self.assertIn("candidatos.extend(sorted(disponiveis))", source)
+        self.assertIn("if atual in disponiveis:", source)
+        self.assertIn("if not vozes:\n        return []", source)
+        self.assertNotIn('vozes = ["pt-BR-FranciscaNeural"]', source)
 
     def test_language_selector_only_advertises_languages_present_in_loaded_catalog(self):
-        source = self._function_source("_edge_language_options")
-        self.assertIn("discovered_set = set(discovered)", source)
-        self.assertIn("if discovered_set and code not in discovered_set", source)
+        source = self._catalog_function_source("opcoes_idiomas_edge")
+        self.assertIn("conjunto_descobertos = set(descobertos)", source)
+        self.assertIn("if conjunto_descobertos and codigo not in conjunto_descobertos", source)
 
     def test_guided_edge_modal_falls_back_if_no_verified_voice_exists(self):
-        nodes = [node for node in ast.walk(self.ui_tree) if isinstance(node, ast.ClassDef) and node.name == "EdgeSettingsModal"]
+        nodes = [node for node in ast.walk(self.modais_vozes_tree) if isinstance(node, ast.ClassDef) and node.name == "ModalConfiguracaoEdge"]
         self.assertEqual(len(nodes), 1)
-        source = ast.get_source_segment(self.ui_text, nodes[0]) or ""
-        self.assertIn("voice_options = _edge_voice_options_for_language", source)
+        source = ast.get_source_segment(self.modais_vozes_text, nodes[0]) or ""
+        self.assertIn("voice_options = opcoes_vozes_edge_por_idioma", source)
         self.assertIn("if not voice_options:\n                return False", source)
         self.assertIn('"Idioma indisponível"', source)
 

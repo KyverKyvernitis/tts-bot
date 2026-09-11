@@ -51,14 +51,48 @@ from .utils.embed import (
     spoken_name_status_text,
 )
 from .prefix import dispatch_prefix_control_command
-from .utils.message_render import render_message_tts_text, append_tts_descriptions
-from .utils.message_gate import analyze_message_for_tts
-from .utils.message_dispatch import dispatch_message_tts
+from .mensagens.referencias import (
+    descricoes_anexos_tts,
+    referencia_canal_tts,
+    referencia_cargo_tts,
+    referencia_link_tts,
+    referencia_usuario_tts,
+)
+from .mensagens.renderizacao import renderizar_texto_tts_mensagem, anexar_descricoes_tts
+from .mensagens.triagem import analisar_mensagem_para_tts
+from .mensagens.despacho import despachar_mensagem_tts
 from .utils.resolution import (
     normalize_rate_value,
     normalize_pitch_value,
     normalize_language_query,
     resolve_gtts_language_input,
+)
+from .configuracao.apelidos import (
+    obter_apelido_falado_salvo,
+    validar_entrada_apelido_falado,
+    resolver_apelido_falado,
+)
+from .configuracao.cargo_ignorado import (
+    obter_id_cargo_ignorado_tts,
+    cargo_ignorado_tts_ativo,
+    obter_cargo_ignorado_tts,
+    texto_cargo_ignorado_tts,
+    membro_tem_cargo_ignorado_tts,
+    sufixo_apelido_membro_tts,
+)
+from .configuracao.autocompletar import (
+    opcoes_autocomplete_vozes_edge,
+    opcoes_autocomplete_idiomas_gtts,
+)
+from .interface.status_tts import (
+    origem_configuracao_status,
+    texto_booleano_status,
+    distintivo_status,
+    distintivo_origem_status,
+    rotulo_motor_status,
+    texto_canal_voz_status,
+    texto_apelido_status,
+    construir_embed_status_tts,
 )
 from .ui import (
     _BaseTTSView,
@@ -2226,101 +2260,50 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return bool((guild_defaults or {}).get("announce_author", False))
 
     def _get_ignored_tts_role_id(self, guild_id: int, *, guild_defaults: dict | None = None) -> int:
-        if guild_defaults is not None:
-            try:
-                return max(0, int((guild_defaults or {}).get("ignored_tts_role_id", 0) or 0))
-            except Exception:
-                return 0
-
-        db = self._get_db()
-        if db is not None and hasattr(db, "get_ignored_tts_role_id"):
-            try:
-                value = db.get_ignored_tts_role_id(guild_id)
-                return max(0, int(value or 0))
-            except Exception:
-                pass
-        if db is not None and hasattr(db, "get_guild_tts_defaults"):
-            try:
-                defaults = db.get_guild_tts_defaults(guild_id)
-                return max(0, int((defaults or {}).get("ignored_tts_role_id", 0) or 0))
-            except Exception:
-                pass
-        return 0
+        return obter_id_cargo_ignorado_tts(
+            self._get_db(),
+            guild_id,
+            guild_defaults=guild_defaults,
+        )
 
     def _ignored_tts_role_enabled(self, guild_id: int, *, guild_defaults: dict | None = None) -> bool:
-        if guild_defaults is not None:
-            # Migração suave: se não existir flag explícita, cargo antigo salvo continua ativo.
-            if "ignored_tts_role_enabled" in (guild_defaults or {}):
-                return bool((guild_defaults or {}).get("ignored_tts_role_enabled", False))
-            return bool(self._get_ignored_tts_role_id(guild_id, guild_defaults=guild_defaults))
-
-        db = self._get_db()
-        if db is not None and hasattr(db, "get_ignored_tts_role_enabled"):
-            try:
-                return bool(db.get_ignored_tts_role_enabled(guild_id))
-            except Exception:
-                pass
-        if db is not None and hasattr(db, "get_guild_tts_defaults"):
-            try:
-                defaults = db.get_guild_tts_defaults(guild_id) or {}
-                if "ignored_tts_role_enabled" in defaults:
-                    return bool(defaults.get("ignored_tts_role_enabled", False))
-                return bool(self._get_ignored_tts_role_id(guild_id, guild_defaults=defaults))
-            except Exception:
-                pass
-        return bool(self._get_ignored_tts_role_id(guild_id))
+        return cargo_ignorado_tts_ativo(
+            self._get_db(),
+            guild_id,
+            guild_defaults=guild_defaults,
+            obter_id_cargo=self._get_ignored_tts_role_id,
+        )
 
     def _get_ignored_tts_role(self, guild: discord.Guild | None, *, guild_defaults: dict | None = None) -> discord.Role | None:
-        if guild is None:
-            return None
-        role_id = self._get_ignored_tts_role_id(guild.id, guild_defaults=guild_defaults)
-        if role_id <= 0:
-            return None
-        return guild.get_role(role_id)
+        return obter_cargo_ignorado_tts(
+            guild,
+            guild_defaults=guild_defaults,
+            obter_id_cargo=self._get_ignored_tts_role_id,
+        )
 
     def _ignored_tts_role_text(self, guild_id: int, *, guild_defaults: dict | None = None) -> str:
-        role_id = self._get_ignored_tts_role_id(guild_id, guild_defaults=guild_defaults)
-        enabled = self._ignored_tts_role_enabled(guild_id, guild_defaults=guild_defaults)
-        if role_id <= 0:
-            return "desligado"
-        guild = self.bot.get_guild(guild_id)
-        role = guild.get_role(role_id) if guild is not None else None
-        mention = role.mention if role is not None else f"<@&{role_id}>"
-        if enabled:
-            return f"{mention} · ligado"
-        return f"desligado · {mention} salvo"
+        return texto_cargo_ignorado_tts(
+            self.bot,
+            guild_id,
+            guild_defaults=guild_defaults,
+            obter_id_cargo=self._get_ignored_tts_role_id,
+            cargo_ativo=self._ignored_tts_role_enabled,
+        )
 
     def _member_has_ignored_tts_role(self, member: discord.Member | None, *, guild_defaults: dict | None = None) -> bool:
-        if member is None or member.guild is None:
-            return False
-        if not self._ignored_tts_role_enabled(member.guild.id, guild_defaults=guild_defaults):
-            return False
-        ignored_role_id = self._get_ignored_tts_role_id(member.guild.id, guild_defaults=guild_defaults)
-        if ignored_role_id <= 0:
-            return False
-        return any(int(getattr(role, "id", 0) or 0) == ignored_role_id for role in getattr(member, "roles", []))
+        return membro_tem_cargo_ignorado_tts(
+            member,
+            guild_defaults=guild_defaults,
+            obter_id_cargo=self._get_ignored_tts_role_id,
+            cargo_ativo=self._ignored_tts_role_enabled,
+        )
 
     def _spoken_name_suffix(self, member: discord.Member | None, *, guild_defaults: dict | None = None) -> str:
-        if member is None:
-            return ""
-
-        is_muted = False
-        voice_state = getattr(member, "voice", None)
-        if voice_state is not None:
-            try:
-                is_muted = bool(getattr(voice_state, "mute", False))
-            except Exception:
-                is_muted = False
-
-        ignores_tts = self._member_has_ignored_tts_role(member, guild_defaults=guild_defaults)
-
-        if is_muted and ignores_tts:
-            return " [ultra-censurado]"
-        if is_muted:
-            return " [censurado]"
-        if ignores_tts:
-            return " [bot ignora]"
-        return ""
+        return sufixo_apelido_membro_tts(
+            member,
+            guild_defaults=guild_defaults,
+            membro_tem_cargo_ignorado=self._member_has_ignored_tts_role,
+        )
 
     def _apply_author_prefix_if_needed(self, guild_id: int, author: discord.abc.User | None, text: str, *, enabled: bool) -> str:
         text = str(text or "").strip()
@@ -3438,7 +3421,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return await asyncio.shield(task)
 
     async def _process_tts_message(self, message: discord.Message):
-        gate = await analyze_message_for_tts(self, message)
+        gate = await analisar_mensagem_para_tts(self, message)
 
         if gate.should_dispatch_prefix_command:
             self._record_tts_message_gate(message, gate.reason or "prefix_command", matched=True)
@@ -3497,7 +3480,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
             gate.reason,
         )
 
-        dispatch_result = await dispatch_message_tts(
+        dispatch_result = await despachar_mensagem_tts(
             self,
             message,
             guild_defaults=guild_defaults,
@@ -3634,36 +3617,23 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        current = (current or "").strip().lower()
-        voices = self.edge_voice_cache or sorted(self.edge_voice_names)
-        voices = [voice for voice in voices if voice.lower().startswith("pt-")]
-
-        results: list[app_commands.Choice[str]] = []
-        for voice in voices:
-            if current and current not in voice.lower():
-                continue
-            results.append(app_commands.Choice(name=voice[:100], value=voice))
-            if len(results) >= 25:
-                break
-        return results
+        return opcoes_autocomplete_vozes_edge(
+            current,
+            vozes_cache=self.edge_voice_cache,
+            nomes_vozes=self.edge_voice_names,
+            construir_escolha=lambda nome, valor: app_commands.Choice(name=nome, value=valor),
+        )
 
     async def language_autocomplete(
         self,
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        current = (current or "").strip().lower()
-
-        results: list[app_commands.Choice[str]] = []
-        for code, name in sorted(self.gtts_languages.items()):
-            label = f"{code} — {name}"
-            haystack = f"{code} {name}".lower()
-            if current and current not in haystack:
-                continue
-            results.append(app_commands.Choice(name=label[:100], value=code))
-            if len(results) >= 25:
-                break
-        return results
+        return opcoes_autocomplete_idiomas_gtts(
+            current,
+            idiomas=self.gtts_languages,
+            construir_escolha=lambda nome, valor: app_commands.Choice(name=nome, value=valor),
+        )
 
 
     async def _set_mode_common(self, interaction: discord.Interaction, *, mode: str, server: bool):
@@ -4025,120 +3995,82 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
 
 
     def _get_saved_spoken_name(self, guild_id: int | None, user_id: int | None) -> str:
-        if not guild_id or not user_id:
-            return ""
-        db = self._get_db()
-        if db is None or not hasattr(db, "get_user_tts"):
-            return ""
-        try:
-            data = db.get_user_tts(int(guild_id), int(user_id)) or {}
-        except Exception:
-            return ""
-        return _normalize_spaces(str((data or {}).get("speaker_name", "") or ""))
-
+        return obter_apelido_falado_salvo(
+            self._get_db(),
+            guild_id,
+            user_id,
+            normalizar_espacos=_normalize_spaces,
+        )
 
     def _validate_spoken_name_input(self, raw_value: str) -> tuple[str | None, str | None]:
-        value = _normalize_spaces(str(raw_value or ""))
-        if not value:
-            return "", None
-        if not _looks_pronounceable_for_tts(value):
-            return None, "Esse apelido tem caracteres que o TTS não consegue pronunciar bem. Use letras, números, espaço, ponto, traço ou underline."
-        spoken = _speech_name(value)
-        if not spoken or not _looks_pronounceable_for_tts(spoken):
-            return None, "Esse apelido não ficou pronunciável depois da normalização do TTS."
-        return spoken[:32], None
+        return validar_entrada_apelido_falado(
+            raw_value,
+            normalizar_espacos=_normalize_spaces,
+            parece_pronunciavel=_looks_pronounceable_for_tts,
+            normalizar_nome_falado=_speech_name,
+        )
 
     def _resolve_spoken_name(self, member: discord.abc.User | None, *, guild_id: int | None = None) -> tuple[str, str]:
-        if member is None:
-            return "usuário", "padrão"
+        def _preparar_contexto_servidor(membro) -> None:
+            if isinstance(membro, discord.Member):
+                self.db.get_guild_tts_defaults(membro.guild.id)
 
-        guild_defaults = None
-        if isinstance(member, discord.Member):
-            try:
-                guild_defaults = self.db.get_guild_tts_defaults(member.guild.id)
-            except Exception:
-                guild_defaults = None
-
-
-        saved_spoken_name = self._get_saved_spoken_name(guild_id, getattr(member, "id", None))
-        if saved_spoken_name:
-            spoken = _speech_name(saved_spoken_name)
-            if spoken and _looks_pronounceable_for_tts(spoken):
-                return f"{spoken}", "personalizado"
-
-        display_name = _normalize_spaces(getattr(member, "display_name", None) or "")
-        username = _normalize_spaces(getattr(member, "name", None) or "")
-
-        if _looks_pronounceable_for_tts(display_name):
-            spoken = _speech_name(display_name)
-            if spoken:
-                return f"{spoken}", "apelido do servidor"
-
-        if _looks_pronounceable_for_tts(username):
-            spoken = _speech_name(username)
-            if spoken:
-                return f"{spoken}", "nome de usuário"
-
-        return "usuário", "padrão"
+        return resolver_apelido_falado(
+            member,
+            guild_id=guild_id,
+            obter_apelido_salvo=self._get_saved_spoken_name,
+            normalizar_espacos=_normalize_spaces,
+            parece_pronunciavel=_looks_pronounceable_for_tts,
+            normalizar_nome_falado=_speech_name,
+            preparar_contexto_servidor=_preparar_contexto_servidor,
+        )
 
     def _tts_user_reference(self, member: discord.abc.User | None, *, guild_id: int | None = None) -> str:
-        spoken, _ = self._resolve_spoken_name(member, guild_id=guild_id)
-        return spoken
+        return referencia_usuario_tts(
+            member,
+            resolvedor=self._resolve_spoken_name,
+            guild_id=guild_id,
+        )
 
     def _tts_role_reference(self, role: discord.Role | None) -> str:
-        name = _normalize_spaces(getattr(role, "name", None) or "")
-        if _looks_pronounceable_for_tts(name):
-            spoken = _speech_name(name)
-            if spoken:
-                return f"cargo {spoken}"
-        return "cargo do discord"
+        return referencia_cargo_tts(
+            role,
+            normalizar_espacos=_normalize_spaces,
+            parece_pronunciavel_para_tts=_looks_pronounceable_for_tts,
+            nome_falado=_speech_name,
+        )
 
     def _tts_channel_reference(self, channel) -> str:
-        name = _normalize_spaces(getattr(channel, "name", None) or "")
-        if _looks_pronounceable_for_tts(name):
-            spoken = _speech_name(name)
-            if spoken:
-                return f"canal {spoken}"
-        return "canal do discord"
+        return referencia_canal_tts(
+            channel,
+            normalizar_espacos=_normalize_spaces,
+            parece_pronunciavel_para_tts=_looks_pronounceable_for_tts,
+            nome_falado=_speech_name,
+        )
 
     def _tts_link_reference(self, url: str, *, guild: discord.Guild | None = None) -> str:
-        cleaned_url = str(url or "").strip().rstrip(".,!?)]}")
-        match = DISCORD_CHANNEL_URL_PATTERN.fullmatch(cleaned_url)
-        if match and guild is not None:
-            channel_id = int(match.group(2))
-            channel = guild.get_channel(channel_id)
-            return self._tts_channel_reference(channel)
-
-        try:
-            parsed = urlparse(cleaned_url)
-        except Exception:
-            return "link"
-
-        domain = _extract_primary_domain(parsed.hostname or "")
-        if _looks_pronounceable_for_tts(domain):
-            spoken = _speech_name(domain)
-            if spoken:
-                return f"link do {spoken}"
-        return "link"
+        return referencia_link_tts(
+            url,
+            guild=guild,
+            padrao_url_canal_discord=DISCORD_CHANNEL_URL_PATTERN,
+            referencia_canal=self._tts_channel_reference,
+            extrair_dominio_principal=_extract_primary_domain,
+            parece_pronunciavel_para_tts=_looks_pronounceable_for_tts,
+            nome_falado=_speech_name,
+        )
 
     def _tts_attachment_descriptions(self, attachments) -> list[str]:
-        descriptions: list[str] = []
-        for attachment in attachments or []:
-            content_type = str(getattr(attachment, "content_type", "") or "").lower()
-            filename = str(getattr(attachment, "filename", "") or "").lower()
-            if content_type == "image/gif" or filename.endswith(".gif"):
-                descriptions.append("Anexo em GIF")
-            elif content_type.startswith("image/") or filename.endswith(_ATTACHMENT_IMAGE_EXTENSIONS):
-                descriptions.append("Anexo de imagem")
-            elif content_type.startswith("video/") or filename.endswith(_ATTACHMENT_VIDEO_EXTENSIONS):
-                descriptions.append("Anexo de vídeo")
-        return descriptions
+        return descricoes_anexos_tts(
+            attachments,
+            extensoes_imagem=_ATTACHMENT_IMAGE_EXTENSIONS,
+            extensoes_video=_ATTACHMENT_VIDEO_EXTENSIONS,
+        )
 
     def _append_tts_descriptions(self, text: str, descriptions: list[str]) -> str:
-        return append_tts_descriptions(text, descriptions, normalize_spaces=_normalize_spaces)
+        return anexar_descricoes_tts(text, descriptions, normalize_spaces=_normalize_spaces)
 
     def _render_tts_text(self, message: discord.Message, raw_text: str) -> str:
-        return render_message_tts_text(
+        return renderizar_texto_tts_mensagem(
             message,
             raw_text,
             guild_id=getattr(message.guild, "id", None),
@@ -4157,29 +4089,31 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return build_toggle_embed(auto_leave_enabled=bool((guild_defaults or {}).get("auto_leave", True)))
 
     def _setting_origin_label(self, user_settings: dict, key: str) -> str:
-        return "Usuário" if str((user_settings or {}).get(key, "") or "").strip() else "Servidor"
+        return origem_configuracao_status(user_settings, key)
 
     def _status_bool(self, value: bool) -> str:
-        return "Ativado" if bool(value) else "Desativado"
+        return texto_booleano_status(value)
 
     def _status_badge(self, value: bool, *, on: str = "Ativo", off: str = "Inativo") -> str:
-        return status_badge(value, on=on, off=off)
+        return distintivo_status(value, ligado=on, desligado=off)
 
     def _status_source_badge(self, source: str) -> str:
-        from .utils.embed import status_source_badge as _status_source_badge
-        return _status_source_badge(source)
+        return distintivo_origem_status(source)
 
     def _status_engine_label(self, engine: str) -> str:
-        from .utils.embed import status_engine_label as _status_engine_label
-        return _status_engine_label(engine)
+        return rotulo_motor_status(engine)
 
     def _status_voice_channel_text(self, guild: discord.Guild | None, target_user_id: int) -> str:
-        return status_voice_channel_text(guild, target_user_id)
+        return texto_canal_voz_status(guild, target_user_id)
 
     def _spoken_name_status_text(self, guild_id: int, member: discord.abc.User | None, *, resolved: dict | None = None) -> tuple[str, str]:
-        active_name, active_source = self._resolve_spoken_name(member, guild_id=guild_id)
-        custom_name = _normalize_spaces(str((resolved or {}).get("speaker_name", "") or ""))
-        return spoken_name_status_text(active_name=active_name, active_source=active_source, custom_name=custom_name)
+        return texto_apelido_status(
+            guild_id,
+            member,
+            resolvido=resolved,
+            resolver_apelido=self._resolve_spoken_name,
+            normalizar_espacos=_normalize_spaces,
+        )
 
     async def _build_status_embed(
         self,
@@ -4190,39 +4124,13 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         target_user_name: str | None = None,
         public: bool = False,
     ) -> discord.Embed:
-        db = self._get_db()
-        user_settings = await self._maybe_await(db.get_user_tts(guild_id, user_id)) if db else {}
-        resolved = await self._maybe_await(db.resolve_tts(guild_id, user_id)) if db else {}
-
-        user_settings = user_settings or {}
-        resolved = resolved or {}
-
-        guild = self.bot.get_guild(guild_id)
-        vc = self._get_voice_client_for_guild(guild)
-        state = self.guild_states.get(guild_id)
-        queue_size = int(getattr(getattr(state, "queue", None), "qsize", lambda: 0)() if state else 0)
-        is_connected = bool(vc and self._voice_client_is_connected(vc))
-        is_playing = bool(vc and self._voice_client_is_playing_or_paused(vc))
-        vc_channel = self._voice_client_channel(vc)
-        bot_channel = getattr(vc_channel, "mention", None) or (f"`{getattr(vc_channel, 'name', 'Desconhecido')}`" if vc_channel is not None else "Desconectado")
-        user_channel = self._status_voice_channel_text(guild, user_id)
-        member = guild.get_member(user_id) if guild else None
-        target_name = str(target_user_name or self._member_panel_name(member))
-        spoken_name_text, _ = self._spoken_name_status_text(guild_id, member, resolved=resolved)
-        return build_status_embed(
-            member=member,
-            target_name=target_name,
-            user_id=user_id,
-            viewer_user_id=int(viewer_user_id or user_id or 0),
+        return await construir_embed_status_tts(
+            self,
+            guild_id,
+            user_id,
+            viewer_user_id=viewer_user_id,
+            target_user_name=target_user_name,
             public=public,
-            is_connected=is_connected,
-            is_playing=is_playing,
-            queue_size=queue_size,
-            resolved=resolved,
-            user_settings=user_settings,
-            user_channel=user_channel,
-            bot_channel=bot_channel,
-            spoken_name_text=spoken_name_text,
         )
 
     def _build_status_view(self, owner_id: int, guild_id: int, *, target_user_id: int | None = None, target_user_name: str | None = None, timeout: float = 180) -> discord.ui.View:
