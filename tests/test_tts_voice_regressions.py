@@ -33,8 +33,6 @@ class VoiceConnectionSourceRegressionTests(unittest.TestCase):
         self.assertIsInstance(values["reconnect"], ast.Constant)
         self.assertIs(values["reconnect"].value, False)
 
-        legacy_events = (ROOT / "cogs" / "tts" / "events.py").read_text(encoding="utf-8")
-        self.assertIn("voice_channel.connect(self_deaf=True, reconnect=False)", legacy_events)
 
     def test_cold_tts_connection_defers_only_post_connect_maintenance(self):
         cog_source = (ROOT / "cogs" / "tts" / "cog.py").read_text(encoding="utf-8")
@@ -335,7 +333,7 @@ class VoiceConnectionSourceRegressionTests(unittest.TestCase):
         self.assertEqual(len(ensures), 1)
         accepted = {arg.arg for arg in ensures[0].args.kwonlyargs}
 
-        for rel in ("cogs/tts/cog.py", "cogs/tts/audio.py", "cogs/tts/events.py"):
+        for rel in ("cogs/tts/cog.py", "cogs/tts/audio.py"):
             text = (ROOT / rel).read_text(encoding="utf-8")
             tree = ast.parse(text)
             for call in ast.walk(tree):
