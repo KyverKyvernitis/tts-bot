@@ -1324,7 +1324,7 @@ def _node_process_inventory() -> str:
         except Exception:
             cwd = "?"
         combined_with_cwd = f"{combined} {cwd.lower()}"
-        if "sinuca" in combined_with_cwd or "activity/sinuca-server" in combined_with_cwd:
+        if "sinuca" in combined_with_cwd or "dashboard/backend" in combined_with_cwd or "activity/sinuca-server" in combined_with_cwd:
             label = "Sinuca Activity"
         else:
             label = "Node.js (outro; não é backend de música)"

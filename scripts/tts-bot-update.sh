@@ -69,8 +69,8 @@ if ! flock -n 9; then
 fi
 UPDATE_RUNTIME_RUN_ID="$(date +%Y%m%d%H%M%S)-$$-${RANDOM:-0}"
 
-FRONT_DIR="$REPO_DIR/activity/sinuca"
-BACK_DIR="$REPO_DIR/activity/sinuca-server"
+FRONT_DIR="$REPO_DIR/dashboard/frontend"
+BACK_DIR="$REPO_DIR/dashboard/backend"
 FRONT_PUBLISH_DIR="/var/www/sinuca"
 BACK_PORT="8787"
 BACK_SERVICE="${DASHBOARD_SYSTEMD_SERVICE:-sinuca-activity-server.service}"
@@ -3576,6 +3576,13 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     fi
   else
     copy_local_candidate_files
+    # A primeira migração para dashboard/ é aplicada por um updater legado, que
+    # ainda precisa das pontes activity durante o próprio build. A partir da
+    # execução seguinte, este updater já usa dashboard/ diretamente e pode
+    # remover as pontes com segurança, preservando .env e stageando as deleções.
+    if [[ -f "$REPO_DIR/scripts/migrate-dashboard-layout.sh" ]]; then
+      REPO_DIR="$REPO_DIR" bash "$REPO_DIR/scripts/migrate-dashboard-layout.sh" --apply --stage
+    fi
     git_add_changed_files_or_reject "git add do candidato local"
   fi
   if ! CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only)"; then
@@ -3732,10 +3739,10 @@ classify_changed_files() {
     APP_COMMANDS_MAY_HAVE_CHANGED=1
   fi
 
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity/sinuca/'; then
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(dashboard/frontend|activity/sinuca)/'; then
     FRONT_CHANGED=1
   fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^activity/sinuca-server/'; then
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(dashboard/backend|activity/sinuca-server)/'; then
     BACK_CHANGED=1
   fi
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(bot\.py|webserver\.py|config\.py|db\.py|start\.sh|requirements\.txt|cogs/|music_system/|utility/)'; then
@@ -4833,6 +4840,16 @@ deploy_frontend() {
     "Compilando interface" \
     "Gerando os arquivos de produção"
 
+  STAGE="testes do frontend"
+  zip_progress_run_as_ubuntu \
+    "Validando interface" \
+    "Executando testes do site" \
+    "cd \"$FRONT_DIR\" && npm test"
+  zip_progress_done_and_publish \
+    "Testes da interface aprovados" \
+    "Compilando interface" \
+    "Gerando os arquivos de produção"
+
   STAGE="build do frontend"
   zip_progress_run_as_ubuntu \
     "Compilando interface" \
@@ -4901,6 +4918,16 @@ deploy_backend() {
     "cd \"$BACK_DIR\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi"
   zip_progress_done_and_publish \
     "Servidor preparado" \
+    "Compilando servidor" \
+    "Gerando arquivos"
+
+  STAGE="testes do backend"
+  zip_progress_run_as_ubuntu \
+    "Validando servidor" \
+    "Executando testes do dashboard" \
+    "cd \"$BACK_DIR\" && npm test"
+  zip_progress_done_and_publish \
+    "Testes do servidor aprovados" \
     "Compilando servidor" \
     "Gerando arquivos"
 

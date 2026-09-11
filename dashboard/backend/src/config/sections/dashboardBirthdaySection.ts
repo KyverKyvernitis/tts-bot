@@ -1,0 +1,86 @@
+import type { DashboardSectionDefinition } from "../dashboardTypes.js";
+import {
+  TTS_ENGINE_OPTIONS,
+  TTS_LANGUAGE_OPTIONS,
+  TTS_VOICE_OPTIONS,
+  BUTTON_STYLE_OPTIONS,
+  TICKET_FLOW_OPTIONS,
+  WELCOME_MODE_OPTIONS,
+  WELCOME_STYLE_OPTIONS,
+  WELCOME_COLOR_MODE_OPTIONS,
+  WELCOME_MEDIA_MODE_OPTIONS,
+  WELCOME_WEBHOOK_NAME_OPTIONS,
+  WELCOME_WEBHOOK_AVATAR_OPTIONS,
+  WELCOME_EMBED_IMAGE_MODE_OPTIONS,
+  WELCOME_EMBED_MAIN_IMAGE_MODE_OPTIONS,
+  BIRTHDAY_LEAP_MODE_OPTIONS,
+  WELCOME_TEMPLATE_VARIABLES,
+  FORM_TEMPLATE_VARIABLES,
+  BIRTHDAY_REGISTER_VARIABLES,
+  BIRTHDAY_ANNOUNCE_VARIABLES,
+  BIRTHDAY_CALENDAR_VARIABLES,
+  messageField,
+  ticketOptionFields
+} from "../dashboardCatalogShared.js";
+
+export const birthdaySection: DashboardSectionDefinition = {
+  id: "birthday", label: "Aniversários", emoji: "🎂", description: "Cadastro, calendário e avisos automáticos de aniversário.",
+  groups: ["Ativação", "Geral", "Canais", "Registro de datas", "Avisos", "Calendário"],
+  groupMetadata: {
+    "Registro de datas": {
+      kind: "message",
+      variables: BIRTHDAY_REGISTER_VARIABLES,
+      settingsFieldIds: ["birthday.options.leap_day_mode", "birthday.options.valid_reaction"],
+      editors: [{
+        id: "birthday-register-messages",
+        label: "Mensagens de cadastro",
+        description: "Respostas ao salvar, atualizar ou informar uma data inválida.",
+        fieldIds: ["birthday.templates.saved", "birthday.templates.updated", "birthday.templates.invalid"],
+      }],
+    },
+    Avisos: {
+      kind: "message",
+      variables: BIRTHDAY_ANNOUNCE_VARIABLES,
+      settingsFieldIds: [
+        "birthday.announce_hour", "birthday.announce_minute",
+        "birthday.options.show_age", "birthday.options.group_announcements", "birthday.options.delete_on_leave",
+      ],
+      editors: [{
+        id: "birthday-announcements",
+        label: "Mensagens de aniversário",
+        description: "Avisos individuais e agrupados enviados automaticamente.",
+        fieldIds: ["birthday.templates.announce_single", "birthday.templates.announce_group"],
+      }],
+    },
+    Calendário: {
+      kind: "message",
+      variables: BIRTHDAY_CALENDAR_VARIABLES,
+      editors: [{
+        id: "birthday-calendar",
+        label: "Calendário",
+        description: "Conteúdo do calendário e estado sem aniversários cadastrados.",
+        fieldIds: ["birthday.templates.calendar", "birthday.templates.empty_calendar"],
+      }],
+    },
+  },
+  fields: [
+    { id: "birthday.enabled", label: "Aniversários", description: "Ative para aceitar cadastros e enviar avisos. As datas existentes ficam preservadas ao desativar.", type: "boolean", scope: "birthday", path: "enabled", group: "Ativação" },
+    { id: "birthday.options.allow_update", label: "Permitir atualizar a própria data", type: "boolean", scope: "birthday", path: "options.allow_update", group: "Geral" },
+    { id: "birthday.register_channel_id", label: "Canal do calendário/cadastro", type: "channel", scope: "birthday", path: "register_channel_id", group: "Canais" },
+    { id: "birthday.announce_channel_id", label: "Canal de avisos", type: "channel", scope: "birthday", path: "announce_channel_id", group: "Canais" },
+    { id: "birthday.options.leap_day_mode", label: "Aniversário em 29/02", type: "select", scope: "birthday", path: "options.leap_day_mode", options: BIRTHDAY_LEAP_MODE_OPTIONS, group: "Registro de datas" },
+    { id: "birthday.options.valid_reaction", label: "Reação em data válida", type: "text", scope: "birthday", path: "options.valid_reaction", maxLength: 20, group: "Registro de datas" },
+    messageField("birthday.templates.saved", "Mensagem ao salvar", "birthday", "templates.saved", "Registro de datas"),
+    messageField("birthday.templates.updated", "Mensagem ao atualizar", "birthday", "templates.updated", "Registro de datas"),
+    messageField("birthday.templates.invalid", "Mensagem de data inválida", "birthday", "templates.invalid", "Registro de datas"),
+    { id: "birthday.announce_hour", label: "Hora do aviso", type: "number", scope: "birthday", path: "announce_hour", min: 0, max: 23, group: "Avisos" },
+    { id: "birthday.announce_minute", label: "Minuto do aviso", type: "number", scope: "birthday", path: "announce_minute", min: 0, max: 59, group: "Avisos" },
+    { id: "birthday.options.show_age", label: "Mostrar idade", type: "boolean", scope: "birthday", path: "options.show_age", group: "Avisos" },
+    { id: "birthday.options.group_announcements", label: "Agrupar aniversariantes", type: "boolean", scope: "birthday", path: "options.group_announcements", group: "Avisos" },
+    { id: "birthday.options.delete_on_leave", label: "Remover cadastro quando sair", type: "boolean", scope: "birthday", path: "options.delete_on_leave", group: "Avisos" },
+    messageField("birthday.templates.announce_single", "Aviso individual", "birthday", "templates.announce_single", "Avisos"),
+    messageField("birthday.templates.announce_group", "Aviso agrupado", "birthday", "templates.announce_group", "Avisos"),
+    messageField("birthday.templates.calendar", "Template do calendário", "birthday", "templates.calendar", "Calendário"),
+    messageField("birthday.templates.empty_calendar", "Calendário vazio", "birthday", "templates.empty_calendar", "Calendário"),
+  ],
+};

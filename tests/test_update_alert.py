@@ -297,9 +297,9 @@ def test_frontend_publish_is_atomic_readable_and_self_healing() -> None:
     assert 'find "$FRONT_PUBLISH_DIR" -mindepth 1 -maxdepth 1' not in frontend
 
 
-def test_frontend_build_normalizes_dist_permissions_for_legacy_publisher() -> None:
-    package = json.loads((ROOT / "activity" / "sinuca" / "package.json").read_text(encoding="utf-8"))
-    helper = (ROOT / "activity" / "sinuca" / "scripts" / "normalize-dist-permissions.mjs").read_text(encoding="utf-8")
+def test_frontend_build_normalizes_dist_permissions_for_publisher() -> None:
+    package = json.loads((ROOT / "dashboard" / "frontend" / "package.json").read_text(encoding="utf-8"))
+    helper = (ROOT / "dashboard" / "frontend" / "scripts" / "normalize-dist-permissions.mjs").read_text(encoding="utf-8")
 
     assert package["scripts"]["postbuild"] == "node scripts/normalize-dist-permissions.mjs"
     assert "chmod(target, 0o755)" in helper

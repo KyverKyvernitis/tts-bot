@@ -50,7 +50,7 @@ def test_inspect_zip_rejects_path_components_with_edge_whitespace(tmp_path: Path
         inspect_zip_archive(archive)
 
 
-@pytest.mark.parametrize("name", [".env.example", ".env.sample", ".env.template", "activity/sinuca-server/.env.example"])
+@pytest.mark.parametrize("name", [".env.example", ".env.sample", ".env.template", "dashboard/backend/.env.example", "activity/sinuca-server/.env.example"])
 def test_env_templates_are_allowed(name: str) -> None:
     assert is_safe_env_template_path(name)
     assert not is_forbidden_update_path(name)
@@ -63,6 +63,8 @@ def test_env_templates_are_allowed(name: str) -> None:
         ".env.local",
         ".env.production",
         ".env.example.local",
+        "dashboard/backend/.env",
+        "dashboard/backend/.env.production",
         "activity/sinuca-server/.env",
         "activity/sinuca-server/.env.production",
     ],

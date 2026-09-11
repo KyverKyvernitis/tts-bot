@@ -651,12 +651,12 @@ local_candidate_suspicion_reason
 def test_candidate_suspicion_allows_only_safe_env_templates(tmp_path: Path) -> None:
     assert _run_candidate_suspicion_check(
         tmp_path,
-        ["activity/sinuca-server/.env.example"],
+        ["dashboard/backend/.env.example"],
     ) == ""
 
     blocked = _run_candidate_suspicion_check(
         tmp_path,
-        ["activity/sinuca-server/.env.production"],
+        ["dashboard/backend/.env.production"],
     )
     assert "caminho protegido" in blocked
 
