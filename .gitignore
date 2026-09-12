@@ -40,6 +40,8 @@ ENV/
 build/
 dist/
 site/
+!tests/site/
+!tests/site/**
 .eggs/
 *.egg
 *.egg-info/
@@ -144,14 +146,26 @@ Thumbs.db
 .idea/
 
 # =========================
-# Activity envs específicos
+# Dashboard envs específicos
 # =========================
+dashboard/frontend/.env
+dashboard/frontend/.env.*
+!dashboard/frontend/.env.example
+!dashboard/frontend/.env.sample
+!dashboard/frontend/.env.template
+
+dashboard/backend/.env
+dashboard/backend/.env.*
+!dashboard/backend/.env.example
+!dashboard/backend/.env.sample
+!dashboard/backend/.env.template
+
+# Ponte transitória da primeira atualização activity -> dashboard.
 activity/sinuca/.env
 activity/sinuca/.env.*
 !activity/sinuca/.env.example
 !activity/sinuca/.env.sample
 !activity/sinuca/.env.template
-
 activity/sinuca-server/.env
 activity/sinuca-server/.env.*
 !activity/sinuca-server/.env.example

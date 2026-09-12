@@ -168,7 +168,6 @@ CORE_WORKER_AGENT_UPDATE_STATUS="sem mudanças"
 CORE_WORKER_APK_BUILD_STATUS="sem mudanças"
 CORE_WORKER_NOTIFY_STATUS="sem mudanças"
 FRONT_STATUS="não alterado"
-FRONT_PUBLICATION_ATTEMPTED=0
 BACK_STATUS="não alterado"
 ACTIVITY_HEALTHCHECK_STATUS="não verificado"
 ROLLBACK_STATUS="não foi necessário"
@@ -4774,10 +4773,6 @@ publish_frontend_atomically() {
   find "$release_dir" -type f -exec chmod 0644 {} +
   chown -R root:root "$release_dir" 2>/dev/null || true
 
-  # A partir daqui a publicação pública pode ser modificada. O rollback só
-  # precisa recompilar/republicar o frontend se chegamos efetivamente aqui.
-  FRONT_PUBLICATION_ATTEMPTED=1
-
   if [[ -e "$FRONT_PUBLISH_DIR" || -L "$FRONT_PUBLISH_DIR" ]]; then
     if ! mv -- "$FRONT_PUBLISH_DIR" "$backup_path"; then
       FRONT_STATUS="não foi possível preservar a publicação atual"
@@ -4822,19 +4817,12 @@ deploy_frontend() {
       FRONT_STATUS="não alterado"
       return 0
     fi
-    # Não transforme um ZIP sem mudanças de frontend em uma instalação npm
-    # implícita. Isso fazia patches do próprio updater falharem quando a
-    # publicação já estava degradada. O reparo automático fica opt-in; um ZIP
-    # que realmente altera o frontend continua obrigatoriamente testando/buildando.
-    if [[ "${DISCORD_AUTO_UPDATE_REPAIR_UNCHANGED_FRONTEND:-0}" != "1" ]]; then
-      FRONT_STATUS="publicação do frontend já estava inválida; update não a alterou"
-      UPDATE_HAS_WARNINGS=1
-      logger -t "$LOG_TAG" "$FRONT_STATUS" 2>/dev/null || true
-      return 0
-    fi
+    # Mesmo sem arquivos do frontend no patch, restaura automaticamente uma
+    # publicação ausente/corrompida. Isso evita manter o Nginx em 403 quando o
+    # repositório está íntegro, mas /var/www/sinuca perdeu o index.html.
     FRONT_CHANGED=1
     repair_mode=1
-    logger -t "$LOG_TAG" "publicação do frontend inválida; reconstrução automática opt-in solicitada"
+    logger -t "$LOG_TAG" "publicação do frontend inválida; reconstrução automática solicitada"
   fi
 
   if [[ ! -d "$FRONT_DIR" ]]; then
@@ -4992,9 +4980,12 @@ rollback_after_failure() {
   local failed_command="${2:-desconhecido}"
   register_error_context "$exit_code" "$failed_command"
 
-  # Preserve o diagnóstico da falha ORIGINAL. As ações de rollback também
-  # podem falhar e atualizar LAST_ERROR_*; o card deve continuar mostrando o
-  # npm/git/comando que derrubou o candidato inicialmente.
+  # Preserve o diagnóstico da falha ORIGINAL antes de iniciar qualquer ação de
+  # rollback. deploy_frontend/deploy_backend durante a restauração podem falhar
+  # também e atualizar LAST_ERROR_STDERR/LAST_ERROR_LOGS; sem este snapshot, o
+  # card acabava mostrando apenas o erro secundário do rollback (por exemplo,
+  # "build do frontend não produziu dist/index.html") e escondia o npm/git que
+  # realmente derrubou o candidato.
   local original_error_stderr="$LAST_ERROR_STDERR"
   local original_error_logs="$LAST_ERROR_LOGS"
   local original_error_service_unit="$LAST_ERROR_SERVICE_UNIT"
@@ -5050,15 +5041,13 @@ rollback_after_failure() {
   fi
 
   if (( rollback_success == 1 )); then
-    if (( FRONT_CHANGED == 1 && FRONT_PUBLICATION_ATTEMPTED == 1 )); then
+    if (( FRONT_CHANGED == 1 )); then
       if deploy_frontend; then
         rollback_front_status="${FRONT_STATUS:-}"
       else
         rollback_success=0
         rollback_front_status="falhou: $FRONT_STATUS"
       fi
-    elif (( FRONT_CHANGED == 1 )); then
-      rollback_front_status="não precisou republicar; falha ocorreu antes de alterar a publicação"
     else
       rollback_front_status="não precisou republicar"
     fi
@@ -5094,7 +5083,8 @@ rollback_after_failure() {
     rollback_bot_status="não executado porque o git reset falhou"
   fi
 
-  # Restaure o contexto original antes de montar alertas/status.
+  # O diagnóstico reportado deve continuar sendo o da falha que acionou o
+  # rollback, não de uma eventual falha secundária ao restaurar/publicar.
   LAST_ERROR_STDERR="$original_error_stderr"
   LAST_ERROR_LOGS="$original_error_logs"
   LAST_ERROR_SERVICE_UNIT="$original_error_service_unit"
@@ -5151,11 +5141,6 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
   notify_zip_status_message "error" "$title" "$summary" || true
   send_error "$title" "$body"
-  if (( LOCAL_CANDIDATE_MODE == 1 )); then
-    # Uma falha validada não deve permanecer em queue/active para ser retomada
-    # indefinidamente pelo timer. Reenvio do ZIP cria um candidato novo.
-    archive_local_candidate "failed" || true
-  fi
   exit "$exit_code"
 }
 
