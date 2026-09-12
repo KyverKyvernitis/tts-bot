@@ -185,6 +185,7 @@ APP_COMMAND_SYNC_PERFORMED=0
 APP_COMMANDS_MAY_HAVE_CHANGED=0
 CHANGED_FILES_RAW=""
 CHANGED_DIFF_NUMSTAT_RAW=""
+CHANGED_STATUS_RAW=""
 DIFF_TOTAL_SUMMARY=""
 FAST_RELOAD_STATUS="não usado"
 FAST_RELOAD_MODULES=""
@@ -276,6 +277,16 @@ PYUPDATESTATE
   chmod 0644 "$UPDATE_RUNTIME_STATE_FILE" 2>/dev/null || true
 }
 
+repo_git() {
+  # Toda operação Git no checkout deve usar o dono do repositório. Manter o
+  # `-C` aqui evita depender do cwd do serviço e elimina chamadas Git como root.
+  sudo -u ubuntu -H git -C "$REPO_DIR" "$@"
+}
+
+repo_python_as_ubuntu() {
+  sudo -u ubuntu -H python3 "$@"
+}
+
 clear_update_runtime_state() {
   [[ -f "$UPDATE_RUNTIME_STATE_FILE" ]] || return 0
   UPDATE_RUNTIME_RUN_ID_VALUE="$UPDATE_RUNTIME_RUN_ID" \
@@ -299,7 +310,7 @@ cleanup_runtime_artifacts() {
   clear_update_runtime_state || true
   rm -f "$RUN_LOG_FILE"
   if [[ -n "${REMOTE_WORKTREE_DIR:-}" && -d "$REMOTE_WORKTREE_DIR" ]]; then
-    sudo -u ubuntu -H git -C "$REPO_DIR" worktree remove --force "$REMOTE_WORKTREE_DIR" >/dev/null 2>&1 || rm -rf "$REMOTE_WORKTREE_DIR" 2>/dev/null || true
+    repo_git worktree remove --force "$REMOTE_WORKTREE_DIR" >/dev/null 2>&1 || rm -rf "$REMOTE_WORKTREE_DIR" 2>/dev/null || true
   fi
   if [[ -n "${UPDATER_RUNTIME_COPY:-}" && -f "$UPDATER_RUNTIME_COPY" ]]; then
     rm -f "$UPDATER_RUNTIME_COPY" 2>/dev/null || true
@@ -1079,19 +1090,31 @@ has_fatal_boot_logs() {
 run_preflight_checks() {
   local py="$REPO_DIR/.venv/bin/python"
   local file checked_py=0 checked_sh=0 import_checked=0 import_failed=0 import_output=""
+  local deleted_py=0 deleted_cogs=0
   [[ -x "$py" ]] || py="$(command -v python3 || true)"
 
   if [[ -n "$py" ]]; then
     STAGE="preflight Python"
     while IFS= read -r file; do
       [[ -n "$file" ]] || continue
-      [[ -f "$REPO_DIR/$file" ]] || continue
+      if [[ ! -f "$REPO_DIR/$file" ]]; then
+        if printf '%s
+' "$CHANGED_STATUS_RAW" | grep -Fq $'D	'"$file"; then
+          deleted_py=$((deleted_py + 1))
+          checked_py=1
+        fi
+        continue
+      fi
       checked_py=1
       sudo -u ubuntu -H "$py" -m py_compile "$REPO_DIR/$file"
     done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.py$' | grep -v '^activity/' || true)
 
     if (( checked_py == 1 )); then
-      PREFLIGHT_PY_STATUS="OK"
+      if (( deleted_py > 0 )); then
+        PREFLIGHT_PY_STATUS="OK; ${deleted_py} deleção(ões) Python reconhecida(s) no diff"
+      else
+        PREFLIGHT_PY_STATUS="OK"
+      fi
     else
       PREFLIGHT_PY_STATUS="sem arquivos Python alterados"
     fi
@@ -1103,8 +1126,15 @@ run_preflight_checks() {
     STAGE="preflight import de cogs"
     while IFS= read -r file; do
       [[ -n "$file" ]] || continue
-      [[ -f "$REPO_DIR/$file" ]] || continue
       [[ "$file" == cogs/*.py ]] || continue
+      if [[ ! -f "$REPO_DIR/$file" ]]; then
+        if printf '%s
+' "$CHANGED_STATUS_RAW" | grep -Fq $'D	'"$file"; then
+          deleted_cogs=$((deleted_cogs + 1))
+          import_checked=1
+        fi
+        continue
+      fi
       [[ "$(basename "$file")" == "__init__.py" ]] && continue
       import_checked=1
       module="${file%.py}"
@@ -1124,7 +1154,11 @@ PYIMPORT
     if (( import_checked == 0 )); then
       PREFLIGHT_COG_IMPORT_STATUS="sem cogs Python alteradas"
     elif (( import_failed == 0 )); then
-      PREFLIGHT_COG_IMPORT_STATUS="OK"
+      if (( deleted_cogs > 0 )); then
+        PREFLIGHT_COG_IMPORT_STATUS="OK; ${deleted_cogs} deleção(ões) de cog reconhecida(s) no diff"
+      else
+        PREFLIGHT_COG_IMPORT_STATUS="OK"
+      fi
     else
       UPDATE_HAS_WARNINGS=1
       PREFLIGHT_COG_IMPORT_STATUS="aviso: ${import_failed} import(s) de cog falharam"
@@ -1589,7 +1623,7 @@ validate_remote_commit_in_staging() {
   [[ -n "$remote_commit" ]] || return 1
   REMOTE_WORKTREE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tts-bot-remote-candidate.XXXXXX")"
   rmdir "$REMOTE_WORKTREE_DIR" 2>/dev/null || true
-  sudo -u ubuntu -H git -C "$REPO_DIR" worktree add --detach "$REMOTE_WORKTREE_DIR" "$remote_commit" >/dev/null || return 1
+  repo_git worktree add --detach "$REMOTE_WORKTREE_DIR" "$remote_commit" >/dev/null || return 1
   run_preflight_checks_in_dir "$REMOTE_WORKTREE_DIR"
 }
 
@@ -1932,7 +1966,7 @@ reject_local_candidate_safely() {
   STAGE="candidato rejeitado"
   normalize_changed_file_permissions "antes de restaurar candidato rejeitado" || true
   cleanup_local_candidate_new_files_after_reset
-  sudo -u ubuntu -H git reset --hard "${PREVIOUS_COMMIT:-HEAD}" >/dev/null 2>&1 || true
+  repo_git reset --hard "${PREVIOUS_COMMIT:-HEAD}" >/dev/null 2>&1 || true
   cleanup_local_candidate_new_files_after_reset
   update_local_candidate_heartbeat "failed" "$reason" || true
   notify_zip_status_message "error" "$title" "$summary" || true
@@ -1957,17 +1991,17 @@ local_candidate_base_conflict_reason() {
   [[ -n "${REMOTE_COMMIT//[[:space:]]/}" ]] || return 1
   [[ "$LOCAL_CANDIDATE_BASE_COMMIT" != "$REMOTE_COMMIT" ]] || return 1
 
-  if ! sudo -u ubuntu -H git cat-file -e "$LOCAL_CANDIDATE_BASE_COMMIT^{commit}" 2>/dev/null; then
+  if ! repo_git cat-file -e "$LOCAL_CANDIDATE_BASE_COMMIT^{commit}" 2>/dev/null; then
     printf 'base original do ZIP não existe mais no repositório local'
     return 0
   fi
-  if ! sudo -u ubuntu -H git merge-base --is-ancestor "$LOCAL_CANDIDATE_BASE_COMMIT" "$REMOTE_COMMIT" 2>/dev/null; then
+  if ! repo_git merge-base --is-ancestor "$LOCAL_CANDIDATE_BASE_COMMIT" "$REMOTE_COMMIT" 2>/dev/null; then
     printf 'base original do ZIP não é ancestral do GitHub atual'
     return 0
   fi
 
   local remote_changed
-  if ! remote_changed="$(sudo -u ubuntu -H git diff --name-only "$LOCAL_CANDIDATE_BASE_COMMIT" "$REMOTE_COMMIT" -- 2>/dev/null)"; then
+  if ! remote_changed="$(repo_git diff --name-only "$LOCAL_CANDIDATE_BASE_COMMIT" "$REMOTE_COMMIT" -- 2>/dev/null)"; then
     printf 'não foi possível comparar a base original do ZIP com o GitHub atual'
     return 0
   fi
@@ -2105,7 +2139,7 @@ prune_updater_runtime_orphans() {
   find "$legacy_tmp" -maxdepth 1 -type f -name 'tts-bot-updater.*.log' -mmin +1440 -delete 2>/dev/null || true
   find "$legacy_tmp" -maxdepth 1 -type f \( -name 'tts-bot-git-add.*' -o -name 'tts-bot-git-add-retry.*' \) -mmin +360 -delete 2>/dev/null || true
   find "$legacy_tmp" -mindepth 1 -maxdepth 1 -type d \( -name 'tts-bot-remote-candidate.*' -o -name 'tts-bot-systemd-overlay.*' \) -mmin +360 -exec rm -rf -- {} + 2>/dev/null || true
-  sudo -u ubuntu -H git -C "$REPO_DIR" worktree prune --expire=now >/dev/null 2>&1 || true
+  repo_git worktree prune --expire=now >/dev/null 2>&1 || true
 }
 
 prune_rejected_remote_commits() {
@@ -3310,7 +3344,7 @@ archive_rollback_request() {
 commit_exists() {
   local commit="$(sanitize_commit_ref "${1:-}")"
   [[ -n "$commit" ]] || return 1
-  sudo -u ubuntu -H git -C "$REPO_DIR" rev-parse --verify "${commit}^{commit}" >/dev/null 2>&1
+  repo_git rev-parse --verify "${commit}^{commit}" >/dev/null 2>&1
 }
 
 commits_have_same_tree() {
@@ -3319,7 +3353,7 @@ commits_have_same_tree() {
   [[ -n "$left" && -n "$right" ]] || return 1
   commit_exists "$left" || return 1
   commit_exists "$right" || return 1
-  sudo -u ubuntu -H git -C "$REPO_DIR" diff --quiet "$left" "$right" --
+  repo_git diff --quiet "$left" "$right" --
 }
 
 rollback_desired_tree_commit() {
@@ -3375,9 +3409,9 @@ prepare_rollback_request_update() {
   fi
   zip_progress_publish "Validando estado atual"
   STAGE="fetch remoto"
-  sudo -u ubuntu -H git fetch origin "$BRANCH"
-  CURRENT_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
-  REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse "origin/$BRANCH")"
+  repo_git fetch origin "$BRANCH"
+  CURRENT_COMMIT="$(repo_git rev-parse HEAD)"
+  REMOTE_COMMIT="$(repo_git rev-parse "origin/$BRANCH")"
   PREVIOUS_COMMIT="$CURRENT_COMMIT"
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
   mark_update_timing "fetch"
@@ -3405,7 +3439,7 @@ prepare_rollback_request_update() {
   zip_progress_done_and_publish "Estado validado" "Aplicando reversão"
 
   STAGE="reversão local"
-  if ! sudo -u ubuntu -H git -C "$REPO_DIR" rev-parse --verify "${ROLLBACK_REVERT_COMMIT}^{commit}" >/dev/null 2>&1; then
+  if ! repo_git rev-parse --verify "${ROLLBACK_REVERT_COMMIT}^{commit}" >/dev/null 2>&1; then
     local fail_title="Falha ao reverter"
     [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]] && fail_title="Falha ao reaplicar"
     local retry_control
@@ -3415,9 +3449,9 @@ prepare_rollback_request_update() {
     archive_rollback_request "failed"
     exit 0
   fi
-  if ! sudo -u ubuntu -H git revert --no-commit "$ROLLBACK_REVERT_COMMIT"; then
-    sudo -u ubuntu -H git revert --abort >/dev/null 2>&1 || true
-    sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
+  if ! repo_git revert --no-commit "$ROLLBACK_REVERT_COMMIT"; then
+    repo_git revert --abort >/dev/null 2>&1 || true
+    repo_git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
     local fail_title="Falha ao reverter"
     [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]] && fail_title="Falha ao reaplicar"
     local retry_control
@@ -3427,16 +3461,12 @@ prepare_rollback_request_update() {
     exit 0
   fi
   UPDATE_APPLIED=1
-  if ! CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only)"; then
-    LAST_ERROR_STDERR="falha ao listar arquivos staged da reversão"
-    return 1
-  fi
-  if ! CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --cached --numstat)"; then
-    LAST_ERROR_STDERR="falha ao calcular o diff staged da reversão"
+  if ! refresh_changed_files_from_staged_diff; then
+    LAST_ERROR_STDERR="${LAST_ERROR_STDERR:-falha ao calcular o diff staged da reversão}"
     return 1
   fi
   if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
-    sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
+    repo_git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1 || true
     local retry_control
     retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
     post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "warn" "Nenhuma alteração" "O estado já estava equivalente." "$retry_control" || true
@@ -3460,8 +3490,8 @@ publish_rollback_request_after_validation() {
   fi
   zip_progress_publish "Fazendo commit..."
   git_add_changed_files
-  sudo -u ubuntu -H git commit -m "$msg"
-  REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
+  repo_git commit -m "$msg"
+  REMOTE_COMMIT="$(repo_git rev-parse HEAD)"
   ROLLBACK_NEW_COMMIT="$REMOTE_COMMIT"
   if [[ "$ROLLBACK_REQUEST_ACTION" == "redo" ]]; then
     ROLLBACK_REDO_COMMIT="$REMOTE_COMMIT"
@@ -3473,7 +3503,7 @@ publish_rollback_request_after_validation() {
   zip_progress_done "Commit criado"
   STAGE="push GitHub"
   zip_progress_publish "Publicando no GitHub..."
-  sudo -u ubuntu -H git push origin "HEAD:$BRANCH"
+  repo_git push origin "HEAD:$BRANCH"
   # O commit de reversão/reaplicação já está remoto; a notificação posterior
   # não pode transformar isso em rollback automático do rollback.
   mark_deployment_committed
@@ -3532,13 +3562,106 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   exit 0
 }
 
+preflight_local_candidate_permissions() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 0
+  [[ -n "${LOCAL_CANDIDATE_DIR:-}" && -d "$LOCAL_CANDIDATE_DIR" ]] || return 0
+
+  local manifest="$LOCAL_CANDIDATE_DIR/manifest.json"
+  local files_dir="${LOCAL_CANDIDATE_FILES_DIR:-$LOCAL_CANDIDATE_DIR/files}"
+  local errfile
+  errfile="$(mktemp "${TMPDIR:-/tmp}/tts-bot-candidate-permissions.XXXXXX")"
+
+  if sudo -u ubuntu -H env REPO_DIR="$REPO_DIR" MANIFEST_PATH="$manifest" FILES_DIR="$files_dir" python3 - <<'PYPREFLIGHTPERM' 2>"$errfile"
+import json
+import os
+import pathlib
+import sys
+
+repo = pathlib.Path(os.environ['REPO_DIR']).resolve()
+manifest = pathlib.Path(os.environ['MANIFEST_PATH']).resolve()
+files_dir = pathlib.Path(os.environ['FILES_DIR']).resolve()
+
+if not repo.is_dir() or not os.access(repo, os.R_OK | os.W_OK | os.X_OK):
+    raise SystemExit(f'repositório não é acessível para o usuário do checkout: {repo}')
+if not (repo / '.git').exists():
+    raise SystemExit(f'checkout Git inválido ou .git inacessível: {repo}')
+if not manifest.is_file() or not os.access(manifest, os.R_OK):
+    raise SystemExit(f'manifesto do candidato não é legível: {manifest}')
+
+try:
+    data = json.loads(manifest.read_text(encoding='utf-8'))
+except Exception as exc:
+    raise SystemExit(f'manifesto do candidato não pôde ser lido: {type(exc).__name__}: {exc}')
+
+for raw in data.get('changed_files') or []:
+    rel = pathlib.PurePosixPath(str(raw))
+    if rel.is_absolute() or '..' in rel.parts:
+        raise SystemExit(f'caminho inválido no candidato: {raw}')
+    src = files_dir.joinpath(*rel.parts)
+    dst = repo.joinpath(*rel.parts)
+    try:
+        resolved_dst = dst.resolve(strict=False)
+    except Exception as exc:
+        raise SystemExit(f'destino não pôde ser resolvido: {raw}: {type(exc).__name__}')
+    if resolved_dst != repo and repo not in resolved_dst.parents:
+        raise SystemExit(f'destino resolve para fora do repositório: {raw}')
+    if not src.is_file() or not os.access(src, os.R_OK):
+        raise SystemExit(f'arquivo do candidato não é legível como ubuntu: {raw}')
+
+    # A cópia agora é feita pelo próprio usuário ubuntu. Valide antes de gastar
+    # tempo em testes/build se ele conseguirá substituir/criar o destino.
+    if dst.exists() or dst.is_symlink():
+        if not os.access(dst, os.W_OK):
+            raise SystemExit(f'destino não é gravável como ubuntu: {raw}')
+        parent = dst.parent
+    else:
+        parent = dst.parent
+        while parent != repo and not parent.exists():
+            parent = parent.parent
+        if not parent.exists():
+            parent = repo
+    if not os.access(parent, os.W_OK | os.X_OK):
+        raise SystemExit(f'diretório pai não permite criar/alterar como ubuntu: {raw} (parent={parent})')
+
+print('candidate-permissions-ok')
+PYPREFLIGHTPERM
+  then
+    rm -f "$errfile" 2>/dev/null || true
+    return 0
+  fi
+
+  LAST_ERROR_STDERR="$(cat "$errfile" 2>/dev/null || true)"
+  rm -f "$errfile" 2>/dev/null || true
+  [[ -n "${LAST_ERROR_STDERR//[[:space:]]/}" ]] || LAST_ERROR_STDERR="preflight de permissões do candidato falhou"
+  LAST_ERROR_CODE="CANDIDATE_PERMISSION_DENIED"
+  LAST_ERROR_COMMAND="preflight_local_candidate_permissions"
+  return 1
+}
+
+refresh_changed_files_from_staged_diff() {
+  # A intenção do manifesto deixa de ser autoridade após o stage. O que será
+  # validado/commitado é exatamente este diff, incluindo deleções.
+  if ! CHANGED_STATUS_RAW="$(repo_git diff --cached --name-status --no-renames)"; then
+    LAST_ERROR_STDERR="falha ao listar status do diff staged do candidato"
+    return 1
+  fi
+  if ! CHANGED_FILES_RAW="$(repo_git diff --cached --name-only --no-renames)"; then
+    LAST_ERROR_STDERR="falha ao listar arquivos staged do candidato"
+    return 1
+  fi
+  if ! CHANGED_DIFF_NUMSTAT_RAW="$(repo_git diff --cached --numstat --no-renames)"; then
+    LAST_ERROR_STDERR="falha ao calcular o diff staged do candidato"
+    return 1
+  fi
+  return 0
+}
+
 apply_local_candidate_patch_diff() {
   [[ -f "${LOCAL_CANDIDATE_PATCH_FILE:-}" ]] || return 1
   local errfile
   errfile="$(mktemp "${TMPDIR:-/tmp}/tts-bot-git-apply.XXXXXX")"
-  if sudo -u ubuntu -H git apply --3way --index "$LOCAL_CANDIDATE_PATCH_FILE" 2>"$errfile"; then
+  if repo_git apply --3way --index "$LOCAL_CANDIDATE_PATCH_FILE" 2>"$errfile"; then
     rm -f "$errfile" 2>/dev/null || true
-    normalize_changed_file_permissions "patch 3-way do candidato"
     return 0
   fi
   LAST_ERROR_STDERR="$(cat "$errfile" 2>/dev/null || true)"
@@ -3548,7 +3671,7 @@ apply_local_candidate_patch_diff() {
 
 copy_local_candidate_files() {
   [[ -d "$LOCAL_CANDIDATE_FILES_DIR" ]] || return 1
-  MANIFEST_PATH="$LOCAL_CANDIDATE_DIR/manifest.json" REPO_DIR="$REPO_DIR" FILES_DIR="$LOCAL_CANDIDATE_FILES_DIR" python3 - <<'PYCOPY'
+  sudo -u ubuntu -H env MANIFEST_PATH="$LOCAL_CANDIDATE_DIR/manifest.json" REPO_DIR="$REPO_DIR" FILES_DIR="$LOCAL_CANDIDATE_FILES_DIR" python3 - <<'PYCOPY'
 import json, os, pathlib, shutil
 repo = pathlib.Path(os.environ['REPO_DIR']).resolve()
 files_dir = pathlib.Path(os.environ['FILES_DIR']).resolve()
@@ -3568,7 +3691,6 @@ for raw in data.get('changed_files') or []:
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
 PYCOPY
-  normalize_changed_file_permissions "arquivos copiados do candidato"
 }
 
 normalize_changed_file_permissions() {
@@ -3674,10 +3796,10 @@ cleanup_local_candidate_new_files_after_reset() {
 ' "$rel" | grep -Eq '(^|/)\.\.(\/|$)|^/'; then
       continue
     fi
-    if sudo -u ubuntu -H git cat-file -e "$PREVIOUS_COMMIT:$rel" 2>/dev/null; then
+    if repo_git cat-file -e "$PREVIOUS_COMMIT:$rel" 2>/dev/null; then
       continue
     fi
-    sudo rm -rf -- "$REPO_DIR/$rel" 2>/dev/null || rm -rf -- "$REPO_DIR/$rel" 2>/dev/null || true
+    sudo -u ubuntu -H rm -rf -- "$REPO_DIR/$rel" 2>/dev/null || sudo rm -rf -- "$REPO_DIR/$rel" 2>/dev/null || true
   done <<< "$CHANGED_FILES_RAW"
   prune_empty_candidate_dirs_after_reset || true
 }
@@ -3706,7 +3828,7 @@ git_add_changed_files() {
     if [[ -e "$target" || -L "$target" ]]; then
       printf '%s\0' "$rel" >> "$pathspec_file"
       tracked_any=1
-    elif sudo -u ubuntu -H git ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
+    elif repo_git ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
       # Arquivo removido pelo patch: stageia a deleção com `git add -A`.
       printf '%s\0' "$rel" >> "$pathspec_file"
       tracked_any=1
@@ -3724,7 +3846,7 @@ git_add_changed_files() {
   # como ubuntu. Torne o pathspec legível antes de entregá-lo ao git add.
   chown ubuntu:ubuntu "$pathspec_file" 2>/dev/null || true
   chmod 0644 "$pathspec_file" 2>/dev/null || true
-  sudo -u ubuntu -H git add -A --pathspec-from-file="$pathspec_file" --pathspec-file-nul
+  repo_git add -A --pathspec-from-file="$pathspec_file" --pathspec-file-nul
   rc=$?
   rm -f "$pathspec_file" 2>/dev/null || true
   return "$rc"
@@ -3734,9 +3856,9 @@ prepare_local_candidate_update() {
   LOCAL_CANDIDATE_MODE=1
   zip_progress_publish "Conferindo ZIP" "Checando arquivo recebido e base local."
   STAGE="fetch remoto"
-  sudo -u ubuntu -H git fetch origin "$BRANCH"
-  REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse "origin/$BRANCH")"
-  CURRENT_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
+  repo_git fetch origin "$BRANCH"
+  REMOTE_COMMIT="$(repo_git rev-parse "origin/$BRANCH")"
+  CURRENT_COMMIT="$(repo_git rev-parse HEAD)"
   PREVIOUS_COMMIT="$CURRENT_COMMIT"
   COMMIT_SUBJECT="$LOCAL_CANDIDATE_COMMIT_MESSAGE"
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
@@ -3770,7 +3892,16 @@ prepare_local_candidate_update() {
       "Esse arquivo parece uma base completa ou contém caminhos suspeitos. Nenhuma alteração foi aplicada." \
       "$suspicion_reason"
   fi
-  zip_progress_done_and_publish "Segurança confirmada" "Validando estado local"
+  zip_progress_done_and_publish "Segurança confirmada" "Validando permissões"
+
+  STAGE="preflight de permissões do candidato"
+  if ! preflight_local_candidate_permissions; then
+    reject_local_candidate_safely \
+      "Atualização bloqueada" \
+      "Os arquivos do ZIP não podem ser aplicados com segurança pelo usuário do repositório. Nada foi aplicado." \
+      "${LAST_ERROR_STDERR:-preflight de permissões falhou}"
+  fi
+  zip_progress_done_and_publish "Permissões confirmadas" "Validando estado local"
 
   if [[ -n "$LOCAL_CANDIDATE_BASE_COMMIT" && "$LOCAL_CANDIDATE_BASE_COMMIT" != "$REMOTE_COMMIT" ]]; then
     if [[ -f "${LOCAL_CANDIDATE_PATCH_FILE:-}" ]]; then
@@ -3815,8 +3946,8 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
   if [[ "$CURRENT_COMMIT" != "$REMOTE_COMMIT" ]]; then
     STAGE="sincronização com GitHub antes do candidato"
-    sudo -u ubuntu -H git pull --ff-only origin "$BRANCH"
-    CURRENT_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
+    repo_git pull --ff-only origin "$BRANCH"
+    CURRENT_COMMIT="$(repo_git rev-parse HEAD)"
     PREVIOUS_COMMIT="$CURRENT_COMMIT"
     SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
     mark_update_timing "sync"
@@ -3844,7 +3975,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     if ! apply_local_candidate_patch_diff; then
       MANUAL_FAILURE_ALERT_SENT=1
       normalize_changed_file_permissions "falha no patch 3-way" || true
-      sudo -u ubuntu -H git reset --hard "${PREVIOUS_COMMIT:-HEAD}" >/dev/null 2>&1 || true
+      repo_git reset --hard "${PREVIOUS_COMMIT:-HEAD}" >/dev/null 2>&1 || true
       cleanup_local_candidate_new_files_after_reset
       notify_zip_status_message "error" "Atualização com conflito" "Esta atualização não pôde ser mesclada com as anteriores. Nada foi aplicado neste item; os próximos permanecem na fila." || true
       archive_local_candidate "failed"
@@ -3870,21 +4001,16 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     # execução seguinte, este updater já usa dashboard/ diretamente e pode
     # remover as pontes com segurança, preservando .env e stageando as deleções.
     if [[ -f "$REPO_DIR/scripts/migrate-dashboard-layout.sh" ]]; then
-      REPO_DIR="$REPO_DIR" bash "$REPO_DIR/scripts/migrate-dashboard-layout.sh" --apply --stage
+      sudo -u ubuntu -H env REPO_DIR="$REPO_DIR" bash "$REPO_DIR/scripts/migrate-dashboard-layout.sh" --apply --stage
     fi
     git_add_changed_files_or_reject "git add do candidato local"
   fi
-  if ! CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --cached --name-only)"; then
-    LAST_ERROR_STDERR="falha ao listar arquivos staged do candidato"
-    return 1
-  fi
-  if ! CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --cached --numstat)"; then
-    LAST_ERROR_STDERR="falha ao calcular o diff staged do candidato"
+  if ! refresh_changed_files_from_staged_diff; then
     return 1
   fi
   if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
     local head_message=""
-    head_message="$(sudo -u ubuntu -H git log -1 --pretty=%B HEAD 2>/dev/null || true)"
+    head_message="$(repo_git log -1 --pretty=%B HEAD 2>/dev/null || true)"
     if [[ "$CURRENT_COMMIT" == "$REMOTE_COMMIT" ]] && printf '%s
 ' "$head_message" | grep -Fqx "Candidate-ID: $LOCAL_CANDIDATE_ID"; then
       LOCAL_CANDIDATE_PUBLISHED=1
@@ -3916,13 +4042,17 @@ publish_local_candidate_after_validation() {
   STAGE="commit local validado"
   zip_progress_publish "Fazendo commit..."
   git_add_changed_files_or_reject "git add antes do commit"
+  if ! refresh_changed_files_from_staged_diff; then
+    return 1
+  fi
+  classify_changed_files
   local commit_body
   commit_body="Candidate-ID: $LOCAL_CANDIDATE_ID
 Update-ID: $LOCAL_CANDIDATE_DISPLAY_ID
 Discord-Author-ID: ${LOCAL_CANDIDATE_SOURCE_AUTHOR_ID:-desconhecido}
 Source-ZIP-SHA256: ${LOCAL_CANDIDATE_ZIP_SHA256:-indisponível}"
-  sudo -u ubuntu -H git commit -m "$LOCAL_CANDIDATE_COMMIT_MESSAGE" -m "$commit_body"
-  REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
+  repo_git commit -m "$LOCAL_CANDIDATE_COMMIT_MESSAGE" -m "$commit_body"
+  REMOTE_COMMIT="$(repo_git rev-parse HEAD)"
   SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
   mark_update_timing "commit"
   zip_progress_done "Commit criado"
@@ -3931,7 +4061,7 @@ Source-ZIP-SHA256: ${LOCAL_CANDIDATE_ZIP_SHA256:-indisponível}"
 
   STAGE="push GitHub pós-validação"
   zip_progress_publish "Publicando no GitHub..."
-  sudo -u ubuntu -H git push origin "HEAD:$BRANCH"
+  repo_git push origin "HEAD:$BRANCH"
   LOCAL_CANDIDATE_PUBLISHED=1
   # A partir daqui o remoto já contém o commit validado. Qualquer falha
   # subsequente é de finalização e não pode resetar somente a VPS.
@@ -4160,9 +4290,9 @@ PYOK
 cleanup_known_generated_update_artifacts() {
   # Estes arquivos/pastas são gerados por build/publicação do Core Worker e
   # não devem bloquear o auto updater. Não remove código fonte nem registry.
-  rm -rf "$REPO_DIR/android/core-worker-app/app/build" 2>/dev/null || true
-  rm -rf "$REPO_DIR/android/core-worker-app/.gradle" 2>/dev/null || true
-  rm -f "$REPO_DIR/android/core-worker-app/app/build.gradle.bak"* 2>/dev/null || true
+  sudo -u ubuntu -H rm -rf "$REPO_DIR/android/core-worker-app/app/build" 2>/dev/null || rm -rf "$REPO_DIR/android/core-worker-app/app/build" 2>/dev/null || true
+  sudo -u ubuntu -H rm -rf "$REPO_DIR/android/core-worker-app/.gradle" 2>/dev/null || rm -rf "$REPO_DIR/android/core-worker-app/.gradle" 2>/dev/null || true
+  sudo -u ubuntu -H rm -f "$REPO_DIR/android/core-worker-app/app/build.gradle.bak"* 2>/dev/null || rm -f "$REPO_DIR/android/core-worker-app/app/build.gradle.bak"* 2>/dev/null || true
   # Não removemos android/core-worker-app/releases aqui: é onde latest.json/APKs
   # privados ficam publicados para os celulares. O auto updater já ignora essa
   # pasta ao criar commits e alterações não rastreadas não bloqueiam git pull.
@@ -4170,9 +4300,9 @@ cleanup_known_generated_update_artifacts() {
 
 local_changes_fingerprint() {
   {
-    sudo -u ubuntu -H git status --short --untracked-files=no 2>/dev/null || true
-    sudo -u ubuntu -H git diff --name-only 2>/dev/null || true
-    sudo -u ubuntu -H git diff --name-only --cached 2>/dev/null || true
+    repo_git status --short --untracked-files=no 2>/dev/null || true
+    repo_git diff --name-only 2>/dev/null || true
+    repo_git diff --name-only --cached 2>/dev/null || true
   } | sha256sum | awk '{print $1}'
 }
 
@@ -4188,7 +4318,7 @@ collect_local_tracked_changes() {
   # Untracked locais como data/, cookies e healthcheck não bloqueiam o merge.
   # O que bloqueia o git pull são mudanças em arquivos rastreados.
   local status_text
-  status_text="$(sudo -u ubuntu -H git status --short --untracked-files=no 2>/dev/null || true)"
+  status_text="$(repo_git status --short --untracked-files=no 2>/dev/null || true)"
   printf '%s' "$status_text" | trim_alert_text 1800
 }
 
@@ -4196,8 +4326,8 @@ collect_local_tracked_files() {
   # Evita `head` em pipeline com pipefail: se houver muitos arquivos, o produtor
   # pode receber SIGPIPE e virar erro 141. A deduplicação/limite fica no Python.
   {
-    sudo -u ubuntu -H git diff --name-only 2>/dev/null || true
-    sudo -u ubuntu -H git diff --name-only --cached 2>/dev/null || true
+    repo_git diff --name-only 2>/dev/null || true
+    repo_git diff --name-only --cached 2>/dev/null || true
   } | python3 -c 'import sys
 seen = set()
 rows = []
@@ -4266,7 +4396,7 @@ PYCANDIDATE_DIRTY
 
 ensure_no_unstaged_tracked_changes() {
   local dirty
-  if ! dirty="$(sudo -u ubuntu -H git diff --name-only 2>/dev/null)"; then
+  if ! dirty="$(repo_git diff --name-only 2>/dev/null)"; then
     LAST_ERROR_STDERR="não foi possível verificar alterações rastreadas após o build"
     return 1
   fi
@@ -5315,9 +5445,9 @@ rollback_after_failure() {
   fi
 
   STAGE="rollback git"
-  sudo -u ubuntu -H git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1
+  repo_git reset --hard "$PREVIOUS_COMMIT" >/dev/null 2>&1
   reset_status=$?
-  head_after_reset="$(sudo -u ubuntu -H git rev-parse HEAD 2>/dev/null || true)"
+  head_after_reset="$(repo_git rev-parse HEAD 2>/dev/null || true)"
 
   if (( reset_status == 0 )) && [[ -n "$head_after_reset" && "$head_after_reset" == "$PREVIOUS_COMMIT" ]]; then
     cleanup_local_candidate_new_files_after_reset
@@ -5625,13 +5755,13 @@ elif load_pending_local_candidate; then
   prepare_local_candidate_update
 else
   STAGE="commit atual"
-  CURRENT_COMMIT="$(sudo -u ubuntu -H git rev-parse HEAD)"
+  CURRENT_COMMIT="$(repo_git rev-parse HEAD)"
   PREVIOUS_COMMIT="$CURRENT_COMMIT"
 
   STAGE="fetch remoto"
-  sudo -u ubuntu -H git fetch origin "$BRANCH"
-  REMOTE_COMMIT="$(sudo -u ubuntu -H git rev-parse "origin/$BRANCH")"
-  COMMIT_SUBJECT="$(sudo -u ubuntu -H git log -1 --pretty=%s "$REMOTE_COMMIT")"
+  repo_git fetch origin "$BRANCH"
+  REMOTE_COMMIT="$(repo_git rev-parse "origin/$BRANCH")"
+  COMMIT_SUBJECT="$(repo_git log -1 --pretty=%s "$REMOTE_COMMIT")"
   mark_update_timing "fetch"
 
   if [[ -f "$DIRTY_MARKER_FILE" ]]; then
@@ -5657,8 +5787,9 @@ else
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
   SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
 
-  CHANGED_FILES_RAW="$(sudo -u ubuntu -H git diff --name-only "$CURRENT_COMMIT" "$REMOTE_COMMIT")"
-  CHANGED_DIFF_NUMSTAT_RAW="$(sudo -u ubuntu -H git diff --numstat "$CURRENT_COMMIT" "$REMOTE_COMMIT")"
+  CHANGED_STATUS_RAW="$(repo_git diff --name-status --no-renames "$CURRENT_COMMIT" "$REMOTE_COMMIT")"
+  CHANGED_FILES_RAW="$(repo_git diff --name-only --no-renames "$CURRENT_COMMIT" "$REMOTE_COMMIT")"
+  CHANGED_DIFF_NUMSTAT_RAW="$(repo_git diff --numstat --no-renames "$CURRENT_COMMIT" "$REMOTE_COMMIT")"
   mark_update_timing "diff"
 
   classify_changed_files
@@ -5683,7 +5814,7 @@ else
   logger -t "$LOG_TAG" "Aplicando commit remoto validado de $CURRENT_COMMIT para $REMOTE_COMMIT"
 
   STAGE="aplicação do commit GitHub"
-  sudo -u ubuntu -H git merge --ff-only "$REMOTE_COMMIT"
+  repo_git merge --ff-only "$REMOTE_COMMIT"
   UPDATE_APPLIED=1
   mark_update_timing "apply"
   zip_progress_done "Aplicado na VPS"
