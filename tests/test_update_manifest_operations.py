@@ -75,6 +75,8 @@ LAST_ERROR_STDERR=''
 LAST_ERROR_CODE=''
 LOG_TAG='test-updater'
 repo_git() {{ git -C "$REPO_DIR" "$@"; }}
+candidate_repo_dir() {{ printf '%s\n' "$REPO_DIR"; }}
+candidate_git() {{ git -C "$(candidate_repo_dir)" "$@"; }}
 apply_local_candidate_operations
 # Retomar o mesmo candidato deve ser idempotente para delete/move já staged.
 apply_local_candidate_operations
@@ -101,7 +103,8 @@ printf '%s\\n' "$CHANGED_FILES_RAW"
 def test_new_candidates_do_not_trigger_filename_magic_migration() -> None:
     source = UPDATER.read_text(encoding="utf-8")
     prepare = source[source.index("prepare_local_candidate_update() {") : source.index("publish_local_candidate_after_validation() {")]
-    assert '(( LOCAL_CANDIDATE_SCHEMA_VERSION < 3 )) && [[ -f "$REPO_DIR/scripts/migrate-dashboard-layout.sh" ]]' in prepare
+    assert '(( LOCAL_CANDIDATE_SCHEMA_VERSION < 3 )) && [[ -f "$apply_repo/scripts/migrate-dashboard-layout.sh" ]]' in prepare
+    assert 'REPO_DIR="$apply_repo" bash "$apply_repo/scripts/migrate-dashboard-layout.sh"' in prepare
     assert "apply_local_candidate_operations" in prepare
 
 
@@ -153,6 +156,8 @@ LOCAL_CANDIDATE_DIR={candidate!s}
 LAST_ERROR_STDERR=''
 LAST_ERROR_CODE=''
 repo_git() {{ git -C "$REPO_DIR" "$@"; }}
+candidate_repo_dir() {{ printf '%s\n' "$REPO_DIR"; }}
+candidate_git() {{ git -C "$(candidate_repo_dir)" "$@"; }}
 apply_local_candidate_operations
 git -C "$REPO_DIR" diff --cached --name-status --no-renames
 """

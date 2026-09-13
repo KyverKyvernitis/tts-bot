@@ -114,6 +114,9 @@ LOCAL_CANDIDATE_FILES_DIR=""
 LOCAL_CANDIDATE_PATCH_FILE=""
 LOCAL_CANDIDATE_USE_PATCH=0
 LOCAL_CANDIDATE_PUBLISHED=0
+LOCAL_CANDIDATE_WORKTREE_DIR=""
+LOCAL_CANDIDATE_PREPARED_COMMIT=""
+LOCAL_CANDIDATE_ALREADY_PROMOTED=0
 REMOTE_CANDIDATE_MODE=0
 REMOTE_STATUS_CHANNEL_ID=""
 REMOTE_STATUS_MESSAGE_ID=""
@@ -285,6 +288,20 @@ repo_git() {
   sudo -u ubuntu -H git -C "$REPO_DIR" "$@"
 }
 
+candidate_repo_dir() {
+  if [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" && -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]]; then
+    printf '%s\n' "$LOCAL_CANDIDATE_WORKTREE_DIR"
+  else
+    printf '%s\n' "$REPO_DIR"
+  fi
+}
+
+candidate_git() {
+  local root
+  root="$(candidate_repo_dir)"
+  sudo -u ubuntu -H git -C "$root" "$@"
+}
+
 repo_python_as_ubuntu() {
   sudo -u ubuntu -H python3 "$@"
 }
@@ -313,6 +330,9 @@ cleanup_runtime_artifacts() {
   rm -f "$RUN_LOG_FILE"
   if [[ -n "${REMOTE_WORKTREE_DIR:-}" && -d "$REMOTE_WORKTREE_DIR" ]]; then
     repo_git worktree remove --force "$REMOTE_WORKTREE_DIR" >/dev/null 2>&1 || rm -rf "$REMOTE_WORKTREE_DIR" 2>/dev/null || true
+  fi
+  if [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" && -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]]; then
+    repo_git worktree remove --force "$LOCAL_CANDIDATE_WORKTREE_DIR" >/dev/null 2>&1 || rm -rf "$LOCAL_CANDIDATE_WORKTREE_DIR" 2>/dev/null || true
   fi
   if [[ -n "${UPDATER_RUNTIME_COPY:-}" && -f "$UPDATER_RUNTIME_COPY" ]]; then
     rm -f "$UPDATER_RUNTIME_COPY" 2>/dev/null || true
@@ -1580,20 +1600,37 @@ PYREJ
 run_preflight_checks_in_dir() {
   local root="${1:?}"
   local py="$REPO_DIR/.venv/bin/python"
-  local file checked_py=0 checked_sh=0 rc=0
+  local file checked_py=0 checked_sh=0 deleted_py=0 deleted_sh=0 rc=0
   [[ -x "$py" ]] || py="$(command -v python3 || true)"
   [[ -n "$py" ]] || { PREFLIGHT_PY_STATUS="python indisponível"; PREFLIGHT_BASH_STATUS="não executado"; return 1; }
 
   while IFS= read -r file; do
     [[ -n "$file" ]] || continue
-    [[ -f "$root/$file" ]] || continue
     checked_py=1
-    if ! sudo -u ubuntu -H "$py" -m py_compile "$root/$file"; then
+    if [[ ! -f "$root/$file" ]]; then
+      if printf '%s\n' "$CHANGED_STATUS_RAW" | grep -Fq $'D\t'"$file"; then
+        deleted_py=$((deleted_py + 1))
+      fi
+      continue
+    fi
+    # Validação de sintaxe sem gerar __pycache__ dentro do worktree.
+    if ! sudo -u ubuntu -H "$py" - "$root/$file" <<'PYSTATICCOMPILE'
+import pathlib, sys, tokenize
+path = pathlib.Path(sys.argv[1])
+with tokenize.open(path) as fh:
+    source = fh.read()
+compile(source, str(path), 'exec')
+PYSTATICCOMPILE
+    then
       rc=1
     fi
   done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.py$' | grep -v '^activity/' || true)
   if (( checked_py == 1 && rc == 0 )); then
-    PREFLIGHT_PY_STATUS="OK"
+    if (( deleted_py > 0 )); then
+      PREFLIGHT_PY_STATUS="OK; ${deleted_py} deleção(ões) Python reconhecida(s) no diff"
+    else
+      PREFLIGHT_PY_STATUS="OK"
+    fi
   elif (( checked_py == 1 )); then
     PREFLIGHT_PY_STATUS="falhou"
   else
@@ -1602,20 +1639,29 @@ run_preflight_checks_in_dir() {
 
   while IFS= read -r file; do
     [[ -n "$file" ]] || continue
-    [[ -f "$root/$file" ]] || continue
     checked_sh=1
+    if [[ ! -f "$root/$file" ]]; then
+      if printf '%s\n' "$CHANGED_STATUS_RAW" | grep -Fq $'D\t'"$file"; then
+        deleted_sh=$((deleted_sh + 1))
+      fi
+      continue
+    fi
     if ! bash -n "$root/$file"; then
       rc=1
     fi
   done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.sh$' || true)
   if (( checked_sh == 1 && rc == 0 )); then
-    PREFLIGHT_BASH_STATUS="OK"
+    if (( deleted_sh > 0 )); then
+      PREFLIGHT_BASH_STATUS="OK; ${deleted_sh} deleção(ões) Bash reconhecida(s) no diff"
+    else
+      PREFLIGHT_BASH_STATUS="OK"
+    fi
   elif (( checked_sh == 1 )); then
     PREFLIGHT_BASH_STATUS="falhou"
   else
     PREFLIGHT_BASH_STATUS="sem scripts Bash alterados"
   fi
-  PREFLIGHT_COG_IMPORT_STATUS="não executado no staging remoto"
+  PREFLIGHT_COG_IMPORT_STATUS="não executado no staging isolado"
   logger -t "$LOG_TAG" "Preflight staging: Python=$PREFLIGHT_PY_STATUS Bash=$PREFLIGHT_BASH_STATUS"
   return "$rc"
 }
@@ -1979,9 +2025,13 @@ reject_local_candidate_safely() {
   persist_primary_failure "manual" "reject_local_candidate_safely" || true
   STAGE="candidato rejeitado"
   normalize_changed_file_permissions "antes de restaurar candidato rejeitado" || true
-  cleanup_local_candidate_new_files_after_reset
-  repo_git reset --hard "${PREVIOUS_COMMIT:-HEAD}" >/dev/null 2>&1 || true
-  cleanup_local_candidate_new_files_after_reset
+  if (( UPDATE_APPLIED == 1 )); then
+    cleanup_local_candidate_new_files_after_reset
+    repo_git reset --hard "${PREVIOUS_COMMIT:-HEAD}" >/dev/null 2>&1 || true
+    cleanup_local_candidate_new_files_after_reset
+  else
+    discard_local_candidate_worktree || true
+  fi
   update_local_candidate_heartbeat "failed" "$reason" || true
   notify_zip_status_message "error" "$title" "$summary" || true
   archive_local_candidate "failed"
@@ -3712,18 +3762,202 @@ PYPREFLIGHTPERM
   return 1
 }
 
+discard_local_candidate_worktree() {
+  [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" ]] || return 0
+  if [[ -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]]; then
+    repo_git worktree remove --force "$LOCAL_CANDIDATE_WORKTREE_DIR" >/dev/null 2>&1 \
+      || rm -rf -- "$LOCAL_CANDIDATE_WORKTREE_DIR" 2>/dev/null \
+      || true
+  fi
+  LOCAL_CANDIDATE_WORKTREE_DIR=""
+}
+
+create_local_candidate_worktree() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 1
+  [[ -n "${CURRENT_COMMIT:-}" ]] || return 1
+
+  discard_local_candidate_worktree || true
+  repo_git worktree prune --expire=now >/dev/null 2>&1 || true
+
+  local root safe_id target
+  root="$CANDIDATE_ROOT/worktrees"
+  safe_id="$(sanitize_update_component "${LOCAL_CANDIDATE_ID:-candidate}")"
+  [[ -n "$safe_id" ]] || safe_id="candidate"
+  target="$root/${safe_id}-${UPDATE_RUNTIME_RUN_ID}"
+
+  mkdir -p "$root" || return 1
+  chown ubuntu:ubuntu "$root" 2>/dev/null || true
+  chmod 0775 "$root" 2>/dev/null || true
+  rm -rf -- "$target" 2>/dev/null || true
+
+  if ! repo_git worktree add --detach "$target" "$CURRENT_COMMIT" >/dev/null; then
+    LAST_ERROR_STDERR="não foi possível criar worktree isolado para o candidato"
+    LAST_ERROR_CODE="CANDIDATE_WORKTREE_CREATE_FAILED"
+    return 1
+  fi
+
+  LOCAL_CANDIDATE_WORKTREE_DIR="$target"
+  logger -t "$LOG_TAG" "worktree isolado criado para ${LOCAL_CANDIDATE_ID:-candidato}: $target" 2>/dev/null || true
+  return 0
+}
+
+ensure_candidate_worktree_staged_clean() {
+  [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" && -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]] || {
+    LAST_ERROR_STDERR="worktree isolado do candidato não está disponível"
+    LAST_ERROR_CODE="CANDIDATE_WORKTREE_MISSING"
+    return 1
+  }
+
+  local unstaged untracked
+  unstaged="$(candidate_git diff --name-only 2>/dev/null || true)"
+  untracked="$(candidate_git ls-files --others --exclude-standard 2>/dev/null || true)"
+  if [[ -n "${unstaged//[[:space:]]/}" || -n "${untracked//[[:space:]]/}" ]]; then
+    LAST_ERROR_STDERR="worktree do candidato contém mudanças fora do stage:
+${unstaged:-}${unstaged:+$'\n'}${untracked:-}"
+    LAST_ERROR_CODE="DIRTY_CANDIDATE_WORKTREE_AFTER_STAGE"
+    return 1
+  fi
+  return 0
+}
+
+local_candidate_commit_body() {
+  cat <<EOF
+Candidate-ID: $LOCAL_CANDIDATE_ID
+Update-ID: $LOCAL_CANDIDATE_DISPLAY_ID
+Discord-Author-ID: ${LOCAL_CANDIDATE_SOURCE_AUTHOR_ID:-desconhecido}
+Source-ZIP-SHA256: ${LOCAL_CANDIDATE_ZIP_SHA256:-indisponível}
+EOF
+}
+
+prepare_local_candidate_commit_in_worktree() {
+  [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" && -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]] || return 1
+
+  STAGE="preflight do candidato em worktree"
+  if ! run_preflight_checks_in_dir "$LOCAL_CANDIDATE_WORKTREE_DIR"; then
+    LAST_ERROR_STDERR="preflight estático falhou no worktree isolado"
+    LAST_ERROR_CODE="CANDIDATE_WORKTREE_PREFLIGHT_FAILED"
+    return 1
+  fi
+  if ! ensure_candidate_worktree_staged_clean; then
+    return 1
+  fi
+
+  if candidate_git diff --cached --quiet; then
+    LAST_ERROR_STDERR="candidato não produziu diff staged no worktree isolado"
+    LAST_ERROR_CODE="EMPTY_CANDIDATE_DIFF"
+    return 1
+  fi
+
+  STAGE="commit isolado do candidato"
+  local commit_body
+  commit_body="$(local_candidate_commit_body)"
+  if ! candidate_git commit -m "$LOCAL_CANDIDATE_COMMIT_MESSAGE" -m "$commit_body" >/dev/null; then
+    LAST_ERROR_STDERR="não foi possível criar commit isolado do candidato"
+    LAST_ERROR_CODE="CANDIDATE_WORKTREE_COMMIT_FAILED"
+    return 1
+  fi
+  LOCAL_CANDIDATE_PREPARED_COMMIT="$(candidate_git rev-parse HEAD)"
+  mark_update_timing "commit"
+  write_local_candidate_state "prepared" "$LOCAL_CANDIDATE_PREPARED_COMMIT"
+  logger -t "$LOG_TAG" "candidato ${LOCAL_CANDIDATE_ID:-desconhecido} preparado isoladamente em $(short_commit "$LOCAL_CANDIDATE_PREPARED_COMMIT")" 2>/dev/null || true
+  return 0
+}
+
+promote_local_candidate_worktree_commit() {
+  [[ -n "${LOCAL_CANDIDATE_PREPARED_COMMIT:-}" ]] || {
+    LAST_ERROR_STDERR="commit isolado do candidato não foi preparado"
+    LAST_ERROR_CODE="CANDIDATE_WORKTREE_COMMIT_MISSING"
+    return 1
+  }
+
+  local live_head dirty
+  live_head="$(repo_git rev-parse HEAD)"
+  if [[ "$live_head" != "$CURRENT_COMMIT" ]]; then
+    LAST_ERROR_STDERR="HEAD live mudou durante a validação isolada: esperado $(short_commit "$CURRENT_COMMIT"), atual $(short_commit "$live_head")"
+    LAST_ERROR_CODE="LIVE_HEAD_CHANGED_BEFORE_PROMOTION"
+    return 1
+  fi
+  dirty="$(collect_local_tracked_changes || true)"
+  if [[ -n "${dirty//[[:space:]]/}" ]]; then
+    LAST_ERROR_STDERR="checkout live ficou sujo antes da promoção do candidato:
+$dirty"
+    LAST_ERROR_CODE="DIRTY_LIVE_BEFORE_PROMOTION"
+    return 1
+  fi
+
+  STAGE="promoção atômica do candidato"
+  if ! repo_git merge --ff-only "$LOCAL_CANDIDATE_PREPARED_COMMIT" >/dev/null; then
+    LAST_ERROR_STDERR="não foi possível promover por fast-forward o commit isolado do candidato"
+    LAST_ERROR_CODE="CANDIDATE_PROMOTION_FAILED"
+    return 1
+  fi
+
+  UPDATE_APPLIED=1
+  LOCAL_CANDIDATE_ALREADY_PROMOTED=1
+  REMOTE_COMMIT="$LOCAL_CANDIDATE_PREPARED_COMMIT"
+  SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
+  write_local_candidate_state "promoted" "$REMOTE_COMMIT"
+  discard_local_candidate_worktree || true
+  logger -t "$LOG_TAG" "candidato ${LOCAL_CANDIDATE_ID:-desconhecido} promovido ao checkout live: $(short_commit "$REMOTE_COMMIT")" 2>/dev/null || true
+  return 0
+}
+
+local_live_head_candidate_state() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 1
+  local live_head origin_head body parent
+  live_head="$(repo_git rev-parse HEAD 2>/dev/null || true)"
+  origin_head="${REMOTE_COMMIT:-}"
+  [[ -n "$live_head" ]] || return 1
+  body="$(repo_git log -1 --pretty=%B "$live_head" 2>/dev/null || true)"
+  printf '%s\n' "$body" | grep -Fqx "Candidate-ID: $LOCAL_CANDIDATE_ID" || return 1
+
+  parent="$(repo_git rev-parse "${live_head}^" 2>/dev/null || true)"
+  if [[ -n "$origin_head" && "$live_head" == "$origin_head" ]]; then
+    # O commit já chegou ao GitHub em execução anterior; só falta a entrega final.
+    PREVIOUS_COMMIT="${parent:-$live_head}"
+    CURRENT_COMMIT="$PREVIOUS_COMMIT"
+    LOCAL_CANDIDATE_PREPARED_COMMIT="$live_head"
+    LOCAL_CANDIDATE_PUBLISHED=1
+    LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY=1
+    REMOTE_COMMIT="$live_head"
+    SHORT_FROM="$(short_commit "$PREVIOUS_COMMIT")"
+    SHORT_TO="$(short_commit "$live_head")"
+    mark_deployment_committed
+    return 0
+  fi
+
+  if [[ -n "$origin_head" && -n "$parent" && "$parent" == "$origin_head" ]]; then
+    # A execução anterior promoveu o commit local, mas caiu antes do push.
+    PREVIOUS_COMMIT="$parent"
+    CURRENT_COMMIT="$parent"
+    LOCAL_CANDIDATE_PREPARED_COMMIT="$live_head"
+    LOCAL_CANDIDATE_ALREADY_PROMOTED=1
+    UPDATE_APPLIED=1
+    REMOTE_COMMIT="$live_head"
+    SHORT_FROM="$(short_commit "$parent")"
+    SHORT_TO="$(short_commit "$live_head")"
+    CHANGED_STATUS_RAW="$(repo_git diff --name-status --no-renames "$parent" "$live_head")"
+    CHANGED_FILES_RAW="$(repo_git diff --name-only --no-renames "$parent" "$live_head")"
+    CHANGED_DIFF_NUMSTAT_RAW="$(repo_git diff --numstat --no-renames "$parent" "$live_head")"
+    classify_changed_files
+    write_local_candidate_state "promoted" "$live_head"
+    return 0
+  fi
+  return 1
+}
+
 refresh_changed_files_from_staged_diff() {
   # A intenção do manifesto deixa de ser autoridade após o stage. O que será
   # validado/commitado é exatamente este diff, incluindo deleções.
-  if ! CHANGED_STATUS_RAW="$(repo_git diff --cached --name-status --no-renames)"; then
+  if ! CHANGED_STATUS_RAW="$(candidate_git diff --cached --name-status --no-renames)"; then
     LAST_ERROR_STDERR="falha ao listar status do diff staged do candidato"
     return 1
   fi
-  if ! CHANGED_FILES_RAW="$(repo_git diff --cached --name-only --no-renames)"; then
+  if ! CHANGED_FILES_RAW="$(candidate_git diff --cached --name-only --no-renames)"; then
     LAST_ERROR_STDERR="falha ao listar arquivos staged do candidato"
     return 1
   fi
-  if ! CHANGED_DIFF_NUMSTAT_RAW="$(repo_git diff --cached --numstat --no-renames)"; then
+  if ! CHANGED_DIFF_NUMSTAT_RAW="$(candidate_git diff --cached --numstat --no-renames)"; then
     LAST_ERROR_STDERR="falha ao calcular o diff staged do candidato"
     return 1
   fi
@@ -3734,7 +3968,7 @@ apply_local_candidate_patch_diff() {
   [[ -f "${LOCAL_CANDIDATE_PATCH_FILE:-}" ]] || return 1
   local errfile
   errfile="$(mktemp "${TMPDIR:-/tmp}/tts-bot-git-apply.XXXXXX")"
-  if repo_git apply --3way --index "$LOCAL_CANDIDATE_PATCH_FILE" 2>"$errfile"; then
+  if candidate_git apply --3way --index "$LOCAL_CANDIDATE_PATCH_FILE" 2>"$errfile"; then
     rm -f "$errfile" 2>/dev/null || true
     return 0
   fi
@@ -3746,33 +3980,34 @@ apply_local_candidate_patch_diff() {
 apply_local_candidate_operations() {
   (( LOCAL_CANDIDATE_SCHEMA_VERSION >= 3 )) || return 0
   local manifest="$LOCAL_CANDIDATE_DIR/manifest.json"
-  local op first second
+  local op first second apply_repo
+  apply_repo="$(candidate_repo_dir)"
 
   while IFS=$'\t' read -r op first second; do
     [[ -n "$op" ]] || continue
     case "$op" in
       delete)
-        if [[ -L "$REPO_DIR/$first" ]]; then
+        if [[ -L "$apply_repo/$first" ]]; then
           LAST_ERROR_STDERR="delete não aceita symlink: $first"
           LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
           return 1
         fi
-        if [[ -f "$REPO_DIR/$first" ]]; then
-          if ! repo_git ls-files --error-unmatch -- "$first" >/dev/null 2>&1; then
+        if [[ -f "$apply_repo/$first" ]]; then
+          if ! candidate_git ls-files --error-unmatch -- "$first" >/dev/null 2>&1; then
             LAST_ERROR_STDERR="delete exige arquivo rastreado pelo Git: $first"
             LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
             return 1
           fi
-          if ! repo_git rm -f -- "$first"; then
+          if ! candidate_git rm -f -- "$first"; then
             LAST_ERROR_STDERR="git rm falhou para operação delete: $first"
             LAST_ERROR_CODE="CANDIDATE_OPERATION_APPLY_FAILED"
             return 1
           fi
-        elif repo_git diff --cached --name-only --no-renames --diff-filter=D -- "$first" | grep -Fqx -- "$first"; then
+        elif candidate_git diff --cached --name-only --no-renames --diff-filter=D -- "$first" | grep -Fqx -- "$first"; then
           : # retomada: deleção já staged
-        elif repo_git ls-files --error-unmatch -- "$first" >/dev/null 2>&1; then
+        elif candidate_git ls-files --error-unmatch -- "$first" >/dev/null 2>&1; then
           # Retomada após remoção do worktree, antes do stage.
-          if ! repo_git add -A -- "$first"; then
+          if ! candidate_git add -A -- "$first"; then
             LAST_ERROR_STDERR="não foi possível retomar delete pendente: $first"
             LAST_ERROR_CODE="CANDIDATE_OPERATION_APPLY_FAILED"
             return 1
@@ -3784,37 +4019,37 @@ apply_local_candidate_operations() {
         fi
         ;;
       move)
-        if [[ -L "$REPO_DIR/$first" || -L "$REPO_DIR/$second" ]]; then
+        if [[ -L "$apply_repo/$first" || -L "$apply_repo/$second" ]]; then
           LAST_ERROR_STDERR="move não aceita symlink: $first -> $second"
           LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
           return 1
         fi
-        if [[ -f "$REPO_DIR/$first" && ! -e "$REPO_DIR/$second" ]]; then
-          if ! repo_git ls-files --error-unmatch -- "$first" >/dev/null 2>&1; then
+        if [[ -f "$apply_repo/$first" && ! -e "$apply_repo/$second" ]]; then
+          if ! candidate_git ls-files --error-unmatch -- "$first" >/dev/null 2>&1; then
             LAST_ERROR_STDERR="move exige origem rastreada pelo Git: $first"
             LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
             return 1
           fi
-          sudo -u ubuntu -H mkdir -p -- "$REPO_DIR/$(dirname "$second")"
-          if ! repo_git mv -- "$first" "$second"; then
+          sudo -u ubuntu -H mkdir -p -- "$apply_repo/$(dirname "$second")"
+          if ! candidate_git mv -- "$first" "$second"; then
             LAST_ERROR_STDERR="git mv falhou: $first -> $second"
             LAST_ERROR_CODE="CANDIDATE_OPERATION_APPLY_FAILED"
             return 1
           fi
-        elif [[ ! -e "$REPO_DIR/$first" && -f "$REPO_DIR/$second" ]]; then
-          if repo_git diff --cached --name-only --no-renames --diff-filter=D -- "$first" | grep -Fqx -- "$first" \
-            && repo_git diff --cached --name-only --no-renames --diff-filter=A -- "$second" | grep -Fqx -- "$second"; then
+        elif [[ ! -e "$apply_repo/$first" && -f "$apply_repo/$second" ]]; then
+          if candidate_git diff --cached --name-only --no-renames --diff-filter=D -- "$first" | grep -Fqx -- "$first" \
+            && candidate_git diff --cached --name-only --no-renames --diff-filter=A -- "$second" | grep -Fqx -- "$second"; then
             : # retomada: git mv já staged
-          elif repo_git ls-files --error-unmatch -- "$first" >/dev/null 2>&1; then
+          elif candidate_git ls-files --error-unmatch -- "$first" >/dev/null 2>&1; then
             local source_blob target_blob
-            source_blob="$(repo_git rev-parse "HEAD:$first" 2>/dev/null || true)"
-            target_blob="$(repo_git hash-object "$REPO_DIR/$second" 2>/dev/null || true)"
+            source_blob="$(candidate_git rev-parse "HEAD:$first" 2>/dev/null || true)"
+            target_blob="$(candidate_git hash-object "$apply_repo/$second" 2>/dev/null || true)"
             if [[ -z "$source_blob" || "$source_blob" != "$target_blob" ]]; then
               LAST_ERROR_STDERR="move parcial não corresponde ao blob original: $first -> $second"
               LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
               return 1
             fi
-            repo_git add -A -- "$first" "$second" || {
+            candidate_git add -A -- "$first" "$second" || {
               LAST_ERROR_STDERR="não foi possível retomar move pendente: $first -> $second"
               LAST_ERROR_CODE="CANDIDATE_OPERATION_APPLY_FAILED"
               return 1
@@ -3824,7 +4059,7 @@ apply_local_candidate_operations() {
             LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
             return 1
           fi
-        elif [[ -e "$REPO_DIR/$first" && -e "$REPO_DIR/$second" ]]; then
+        elif [[ -e "$apply_repo/$first" && -e "$apply_repo/$second" ]]; then
           LAST_ERROR_STDERR="destino de move já existe: $second"
           LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
           return 1
@@ -3861,9 +4096,9 @@ PYOPS
 
 copy_local_candidate_files() {
   [[ -d "$LOCAL_CANDIDATE_FILES_DIR" ]] || return 1
-  sudo -u ubuntu -H env MANIFEST_PATH="$LOCAL_CANDIDATE_DIR/manifest.json" REPO_DIR="$REPO_DIR" FILES_DIR="$LOCAL_CANDIDATE_FILES_DIR" python3 - <<'PYCOPY'
+  sudo -u ubuntu -H env MANIFEST_PATH="$LOCAL_CANDIDATE_DIR/manifest.json" APPLY_REPO_DIR="$(candidate_repo_dir)" FILES_DIR="$LOCAL_CANDIDATE_FILES_DIR" python3 - <<'PYCOPY'
 import json, os, pathlib, shutil
-repo = pathlib.Path(os.environ['REPO_DIR']).resolve()
+repo = pathlib.Path(os.environ['APPLY_REPO_DIR']).resolve()
 files_dir = pathlib.Path(os.environ['FILES_DIR']).resolve()
 data = json.loads(pathlib.Path(os.environ['MANIFEST_PATH']).read_text(encoding='utf-8'))
 try:
@@ -3898,7 +4133,7 @@ PYCOPY
 normalize_changed_file_permissions() {
   local context="${1:-permissões do candidato}"
   [[ -n "${CHANGED_FILES_RAW//[[:space:]]/}" ]] || return 0
-  CHANGED_FILES_RAW="$CHANGED_FILES_RAW" REPO_DIR="$REPO_DIR" python3 - <<'PYPERM'
+  CHANGED_FILES_RAW="$CHANGED_FILES_RAW" REPO_DIR="$(candidate_repo_dir)" python3 - <<'PYPERM'
 import os, pathlib, pwd, grp, stat
 repo = pathlib.Path(os.environ.get('REPO_DIR', '/home/ubuntu/bot')).resolve()
 raw_items = os.environ.get('CHANGED_FILES_RAW', '').splitlines()
@@ -3989,7 +4224,10 @@ PYPRUNE
 }
 
 cleanup_local_candidate_new_files_after_reset() {
-  if (( LOCAL_CANDIDATE_MODE == 0 )) || [[ -z "${PREVIOUS_COMMIT:-}" ]]; then
+  # Antes da promoção, toda mutação do candidato vive exclusivamente no
+  # worktree. Nunca remova paths do checkout live nessa fase: um arquivo novo
+  # do candidato pode coincidir com um untracked local legítimo.
+  if (( LOCAL_CANDIDATE_MODE == 0 || UPDATE_APPLIED == 0 )) || [[ -z "${PREVIOUS_COMMIT:-}" ]]; then
     return 0
   fi
   while IFS= read -r rel; do
@@ -4014,7 +4252,8 @@ git_add_changed_files() {
   # worktree; `git add -A` stageia deleções, mas ainda falha para paths que
   # nunca foram rastreados. Por isso só passamos paths existentes/symlinks ou
   # paths que o Git já conhece.
-  local pathspec_file rel target tracked_any rc
+  local pathspec_file rel target tracked_any rc apply_repo
+  apply_repo="$(candidate_repo_dir)"
   pathspec_file="$(mktemp "${TMPDIR:-/tmp}/tts-bot-git-pathspec.XXXXXX")"
   tracked_any=0
 
@@ -4026,11 +4265,11 @@ git_add_changed_files() {
       return 1
     fi
 
-    target="$REPO_DIR/$rel"
+    target="$apply_repo/$rel"
     if [[ -e "$target" || -L "$target" ]]; then
       printf '%s\0' "$rel" >> "$pathspec_file"
       tracked_any=1
-    elif repo_git ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
+    elif candidate_git ls-files --error-unmatch -- "$rel" >/dev/null 2>&1; then
       # Arquivo removido pelo patch: stageia a deleção com `git add -A`.
       printf '%s\0' "$rel" >> "$pathspec_file"
       tracked_any=1
@@ -4048,7 +4287,7 @@ git_add_changed_files() {
   # como ubuntu. Torne o pathspec legível antes de entregá-lo ao git add.
   chown ubuntu:ubuntu "$pathspec_file" 2>/dev/null || true
   chmod 0644 "$pathspec_file" 2>/dev/null || true
-  repo_git add -A --pathspec-from-file="$pathspec_file" --pathspec-file-nul
+  candidate_git add -A --pathspec-from-file="$pathspec_file" --pathspec-file-nul
   rc=$?
   rm -f "$pathspec_file" 2>/dev/null || true
   return "$rc"
@@ -4115,6 +4354,18 @@ prepare_local_candidate_update() {
   fi
   zip_progress_done_and_publish "Permissões confirmadas" "Validando estado local"
 
+  # Se uma execução anterior caiu depois da promoção (ou até depois do push),
+  # reconheça o commit pelo Candidate-ID antes de tentar sincronizar/aplicar de
+  # novo. Isso torna a retomada segura sem depender de um worktree antigo.
+  if local_live_head_candidate_state; then
+    if (( LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY == 1 )); then
+      logger -t "$LOG_TAG" "Candidato local já publicado; retomando apenas a entrega final." 2>/dev/null || true
+    else
+      logger -t "$LOG_TAG" "Candidato local já promovido; retomando validação/runtime antes do push." 2>/dev/null || true
+    fi
+    return 0
+  fi
+
   if [[ -n "$LOCAL_CANDIDATE_BASE_COMMIT" && "$LOCAL_CANDIDATE_BASE_COMMIT" != "$REMOTE_COMMIT" ]]; then
     if [[ -f "${LOCAL_CANDIDATE_PATCH_FILE:-}" ]]; then
       LOCAL_CANDIDATE_USE_PATCH=1
@@ -4176,78 +4427,86 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
   classify_changed_files
 
-  STAGE="limpeza de artefatos gerados"
-  cleanup_known_generated_update_artifacts
+  STAGE="criação do worktree isolado"
+  if ! create_local_candidate_worktree; then
+    reject_local_candidate_safely \
+      "Atualização bloqueada" \
+      "Não consegui criar a área isolada para testar este candidato. A árvore live não foi alterada." \
+      "${LAST_ERROR_STDERR:-falha ao criar worktree isolado}"
+  fi
 
-  zip_progress_done_and_publish "ZIP conferido" "Aplicando na VPS"
+  zip_progress_done_and_publish "ZIP conferido" "Aplicando em área isolada"
 
-  STAGE="aplicação local do candidato"
-  UPDATE_APPLIED=1
+  STAGE="aplicação isolada do candidato"
   if (( LOCAL_CANDIDATE_USE_PATCH == 1 )); then
     if ! apply_local_candidate_patch_diff; then
-      MANUAL_FAILURE_ALERT_SENT=1
-      normalize_changed_file_permissions "falha no patch 3-way" || true
-      repo_git reset --hard "${PREVIOUS_COMMIT:-HEAD}" >/dev/null 2>&1 || true
-      cleanup_local_candidate_new_files_after_reset
-      notify_zip_status_message "error" "Atualização com conflito" "Esta atualização não pôde ser mesclada com as anteriores. Nada foi aplicado neste item; os próximos permanecem na fila." || true
-      archive_local_candidate "failed"
-      send_error "Update com conflito na fila" "Resumo: O updater tentou mesclar esse ZIP sobre a base atual usando 3-way, mas encontrou conflito. Nada foi aplicado e nada foi enviado ao GitHub para este item.
-Branch: $BRANCH
-Base do ZIP: $(short_commit "$LOCAL_CANDIDATE_BASE_COMMIT")
-GitHub atual: $(short_commit "$REMOTE_COMMIT")
-Candidato: ${LOCAL_CANDIDATE_ID:-desconhecido}
-ZIP: ${LOCAL_CANDIDATE_ZIP_NAME:-desconhecido}
-Erro:
-${LAST_ERROR_STDERR:-git apply falhou}
-Arquivos:
-$(format_changed_files)
-Ação sugerida: gere esse patch novamente usando a base atual.
-Hora: $(date '+%d/%m/%Y %H:%M:%S')"
-      trigger_updater_if_queue_pending
-      exit 0
+      LAST_ERROR_CODE="CANDIDATE_PATCH_CONFLICT"
+      reject_local_candidate_safely \
+        "Atualização com conflito" \
+        "O patch não pôde ser mesclado na área isolada. A VPS live permaneceu no commit anterior." \
+        "${LAST_ERROR_STDERR:-git apply 3-way falhou}"
     fi
   else
     if ! apply_local_candidate_operations; then
       reject_local_candidate_safely \
         "Atualização bloqueada" \
-        "Uma operação declarativa do candidato não pôde ser aplicada com segurança. A VPS foi restaurada e o item foi arquivado." \
+        "Uma operação declarativa não pôde ser aplicada na área isolada. A VPS live não foi alterada." \
         "${LAST_ERROR_STDERR:-falha em operação declarativa}"
     fi
-    copy_local_candidate_files
-    # A primeira migração para dashboard/ é aplicada por um updater legado, que
-    # ainda precisa das pontes activity durante o próprio build. A partir da
-    # execução seguinte, este updater já usa dashboard/ diretamente e pode
-    # remover as pontes com segurança, preservando .env e stageando as deleções.
-    if (( LOCAL_CANDIDATE_SCHEMA_VERSION < 3 )) && [[ -f "$REPO_DIR/scripts/migrate-dashboard-layout.sh" ]]; then
-      sudo -u ubuntu -H env REPO_DIR="$REPO_DIR" bash "$REPO_DIR/scripts/migrate-dashboard-layout.sh" --apply --stage
+    if ! copy_local_candidate_files; then
+      LAST_ERROR_CODE="CANDIDATE_COPY_FAILED"
+      LAST_ERROR_STDERR="não foi possível copiar os arquivos do candidato para o worktree isolado"
+      reject_local_candidate_safely \
+        "Falha ao aplicar atualização" \
+        "Os arquivos não puderam ser preparados na área isolada. A VPS live não foi alterada." \
+        "$LAST_ERROR_STDERR"
     fi
-    git_add_changed_files_or_reject "git add do candidato local"
+    # Compatibilidade exclusiva com candidatos schema v2 antigos. Mesmo esse
+    # hook legado agora roda dentro do worktree, nunca diretamente no checkout
+    # live antes da validação estática.
+    local apply_repo
+    apply_repo="$(candidate_repo_dir)"
+    if (( LOCAL_CANDIDATE_SCHEMA_VERSION < 3 )) && [[ -f "$apply_repo/scripts/migrate-dashboard-layout.sh" ]]; then
+      sudo -u ubuntu -H env REPO_DIR="$apply_repo" bash "$apply_repo/scripts/migrate-dashboard-layout.sh" --apply --stage
+    fi
+    git_add_changed_files_or_reject "git add do candidato isolado"
   fi
+
   if ! refresh_changed_files_from_staged_diff; then
-    return 1
+    LAST_ERROR_CODE="CANDIDATE_STAGED_DIFF_FAILED"
+    reject_local_candidate_safely \
+      "Falha ao validar atualização" \
+      "Não consegui calcular o diff staged na área isolada. A VPS live não foi alterada." \
+      "${LAST_ERROR_STDERR:-falha ao ler diff staged}"
   fi
   if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
-    local head_message=""
-    head_message="$(repo_git log -1 --pretty=%B HEAD 2>/dev/null || true)"
-    if [[ "$CURRENT_COMMIT" == "$REMOTE_COMMIT" ]] && printf '%s
-' "$head_message" | grep -Fqx "Candidate-ID: $LOCAL_CANDIDATE_ID"; then
-      LOCAL_CANDIDATE_PUBLISHED=1
-      LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY=1
-      REMOTE_COMMIT="$CURRENT_COMMIT"
-      SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
-      mark_deployment_committed
-      logger -t "$LOG_TAG" "Candidato local já publicado e validado; retomando somente a entrega final, sem novo restart." 2>/dev/null || true
-      return 0
-    fi
+    discard_local_candidate_worktree || true
     notify_zip_status_message "success" "Nenhuma alteração necessária" "O pacote já corresponde ao estado atual da VPS. Nenhum arquivo foi modificado." || true
     archive_local_candidate "done"
-    logger -t "$LOG_TAG" "Candidato local não mudou o repositório"
+    logger -t "$LOG_TAG" "Candidato local não produziu diff no worktree isolado"
     trigger_updater_if_queue_pending
     exit 0
   fi
+
   classify_changed_files
+  if ! prepare_local_candidate_commit_in_worktree; then
+    reject_local_candidate_safely \
+      "Atualização rejeitada no staging" \
+      "O candidato falhou antes de tocar a árvore live. Nenhuma promoção foi realizada." \
+      "${LAST_ERROR_STDERR:-preflight/commit isolado falhou}"
+  fi
   mark_update_timing "candidate_apply"
-  zip_progress_done "Aplicado na VPS"
+  zip_progress_done_and_publish "Candidato validado em isolamento" "Promovendo para a VPS"
+
+  if ! promote_local_candidate_worktree_commit; then
+    reject_local_candidate_safely \
+      "Atualização não promovida" \
+      "O candidato passou pelo staging, mas o checkout live mudou ou não pôde receber o fast-forward. Nenhuma promoção parcial foi mantida." \
+      "${LAST_ERROR_STDERR:-promoção do candidato falhou}"
+  fi
+  mark_update_timing "candidate_promote"
+  zip_progress_done "Promovido para a VPS"
+
 }
 
 publish_local_candidate_after_validation() {
@@ -4257,25 +4516,22 @@ publish_local_candidate_after_validation() {
   if (( LOCAL_CANDIDATE_PUBLISHED == 1 )); then
     return 0
   fi
-  STAGE="commit local validado"
-  zip_progress_publish "Fazendo commit..."
-  git_add_changed_files_or_reject "git add antes do commit"
-  if ! refresh_changed_files_from_staged_diff; then
+
+  STAGE="confirmação do commit local validado"
+  local live_head
+  live_head="$(repo_git rev-parse HEAD)"
+  if [[ -z "${LOCAL_CANDIDATE_PREPARED_COMMIT:-}" ]]; then
+    LOCAL_CANDIDATE_PREPARED_COMMIT="$live_head"
+  fi
+  if [[ "$live_head" != "$LOCAL_CANDIDATE_PREPARED_COMMIT" ]]; then
+    LAST_ERROR_STDERR="HEAD live divergiu do commit preparado antes do push: esperado $(short_commit "$LOCAL_CANDIDATE_PREPARED_COMMIT"), atual $(short_commit "$live_head")"
+    LAST_ERROR_CODE="LIVE_HEAD_CHANGED_BEFORE_PUSH"
     return 1
   fi
-  classify_changed_files
-  local commit_body
-  commit_body="Candidate-ID: $LOCAL_CANDIDATE_ID
-Update-ID: $LOCAL_CANDIDATE_DISPLAY_ID
-Discord-Author-ID: ${LOCAL_CANDIDATE_SOURCE_AUTHOR_ID:-desconhecido}
-Source-ZIP-SHA256: ${LOCAL_CANDIDATE_ZIP_SHA256:-indisponível}"
-  repo_git commit -m "$LOCAL_CANDIDATE_COMMIT_MESSAGE" -m "$commit_body"
-  REMOTE_COMMIT="$(repo_git rev-parse HEAD)"
-  SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
-  mark_update_timing "commit"
-  zip_progress_done "Commit criado"
 
-  write_local_candidate_state "committed" "$REMOTE_COMMIT"
+  REMOTE_COMMIT="$live_head"
+  SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
+  write_local_candidate_state "validated" "$REMOTE_COMMIT"
 
   STAGE="push GitHub pós-validação"
   zip_progress_publish "Publicando no GitHub..."
@@ -4287,6 +4543,7 @@ Source-ZIP-SHA256: ${LOCAL_CANDIDATE_ZIP_SHA256:-indisponível}"
   mark_update_timing "push"
   zip_progress_done "GitHub atualizado"
 }
+
 
 format_changed_files() {
   if [[ -n "$CHANGED_DIFF_NUMSTAT_RAW" ]]; then
@@ -5889,7 +6146,11 @@ on_error() {
     rollback_after_failure "$exit_code" "$failed_command"
   fi
   if (( LOCAL_CANDIDATE_MODE == 1 )); then
-    cleanup_local_candidate_new_files_after_reset || true
+    if (( UPDATE_APPLIED == 1 )); then
+      cleanup_local_candidate_new_files_after_reset || true
+    else
+      discard_local_candidate_worktree || true
+    fi
     update_local_candidate_heartbeat "failed" "falha em $FAILED_STAGE" || true
   fi
 
@@ -6061,6 +6322,10 @@ if (( LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY == 1 )); then
 else
   if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
     zip_progress_publish "Validando arquivos"
+  fi
+  if (( LOCAL_CANDIDATE_MODE == 1 )); then
+    STAGE="limpeza de artefatos gerados pós-promoção"
+    cleanup_known_generated_update_artifacts
   fi
   run_preflight_checks
   mark_update_timing "preflight"

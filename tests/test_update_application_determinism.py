@@ -39,7 +39,8 @@ def test_candidate_copy_and_legacy_migration_run_as_ubuntu() -> None:
     assert 'FILES_DIR="$LOCAL_CANDIDATE_FILES_DIR" python3 -' in copy_fn
 
     prepare_fn = source[source.index("prepare_local_candidate_update() {") : source.index("publish_local_candidate_after_validation() {")]
-    assert 'sudo -u ubuntu -H env REPO_DIR="$REPO_DIR" bash "$REPO_DIR/scripts/migrate-dashboard-layout.sh" --apply --stage' in prepare_fn
+    assert 'apply_repo="$(candidate_repo_dir)"' in prepare_fn
+    assert 'sudo -u ubuntu -H env REPO_DIR="$apply_repo" bash "$apply_repo/scripts/migrate-dashboard-layout.sh" --apply --stage' in prepare_fn
 
 
 def test_staged_diff_is_authoritative_and_keeps_deleted_python(tmp_path: Path) -> None:
@@ -60,6 +61,7 @@ source <(awk '/^refresh_changed_files_from_staged_diff[(][)]/{{flag=1}} /^apply_
 source <(awk '/^classify_changed_files[(][)]/{{flag=1}} /^fast_reload_modules_for_changed_files[(][)]/{{flag=0}} flag' {UPDATER!s})
 REPO_DIR={repo!s}
 repo_git() {{ git -C "$REPO_DIR" "$@"; }}
+candidate_git() {{ git -C "$REPO_DIR" "$@"; }}
 LAST_ERROR_STDERR=''
 CHANGED_STATUS_RAW=''
 CHANGED_FILES_RAW='manifest-was-wrong.txt'
@@ -114,7 +116,7 @@ def test_permission_preflight_happens_before_candidate_application() -> None:
     source = UPDATER.read_text(encoding="utf-8")
     prepare_fn = source[source.index("prepare_local_candidate_update() {") : source.index("publish_local_candidate_after_validation() {")]
     preflight_at = prepare_fn.index("preflight_local_candidate_permissions")
-    apply_at = prepare_fn.index('STAGE="aplicação local do candidato"')
+    apply_at = prepare_fn.index('STAGE="aplicação isolada do candidato"')
     assert preflight_at < apply_at
     assert 'LAST_ERROR_CODE="CANDIDATE_PERMISSION_DENIED"' in source
 

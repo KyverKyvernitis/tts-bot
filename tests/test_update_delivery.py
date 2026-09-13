@@ -433,7 +433,7 @@ def test_deployment_is_committed_before_final_status_formatting() -> None:
 def test_resume_after_published_candidate_does_not_restart_bot() -> None:
     source = UPDATER.read_text(encoding="utf-8")
     assert "LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY=1" in source
-    branch_start = source.index("if (( LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY == 1 )); then")
+    branch_start = source.rindex("if (( LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY == 1 )); then")
     branch_end = source.index("\nelse", branch_start)
     branch = source[branch_start:branch_end]
     assert "mark_deployment_committed" in branch
