@@ -129,6 +129,8 @@ LOCAL_CANDIDATE_ALREADY_PROMOTED=0
 LOCAL_CANDIDATE_ARTIFACT_ROOT=""
 LOCAL_CANDIDATE_FRONTEND_ARTIFACT=""
 LOCAL_CANDIDATE_BACKEND_ARTIFACT=""
+LOCAL_CANDIDATE_BACKEND_DEP_KEY=""
+LOCAL_CANDIDATE_BACKEND_DEP_LAYER=""
 LOCAL_CANDIDATE_PYTHON_ARTIFACT=""
 LOCAL_CANDIDATE_PYTHON_READY=0
 LOCAL_CANDIDATE_ARTIFACT_COMMIT=""
@@ -999,6 +1001,23 @@ format_changed_processes() {
 
 run_as_ubuntu() {
   sudo -u ubuntu -H bash -lc "$1"
+}
+
+wait_for_service_active() {
+  local unit="${1:?}" attempts="${2:-20}" delay="${3:-0.25}" i
+  [[ "$attempts" =~ ^[0-9]+$ ]] || attempts=20
+  (( attempts >= 1 )) || attempts=1
+
+  for ((i=1; i<=attempts; i++)); do
+    if systemctl is-active --quiet "$unit"; then
+      return 0
+    fi
+    if systemctl is-failed --quiet "$unit"; then
+      return 1
+    fi
+    sleep "$delay"
+  done
+  systemctl is-active --quiet "$unit"
 }
 
 wait_for_health() {
@@ -2008,8 +2027,9 @@ archive_local_candidate() {
   chmod 0775 "$CANDIDATE_ROOT" "$CANDIDATE_ROOT/$status" "$queue_archive_dir" 2>/dev/null || true
 
   update_local_candidate_heartbeat "$status" "${LOCAL_CANDIDATE_VERIFY_ERROR:-}" || true
-  # Artefatos READY podem conter node_modules e não fazem parte do histórico do
-  # candidato. Remova-os antes de arquivar para preservar o disco da VPS.
+  # Artefatos READY são cache de build por commit e não fazem parte do histórico
+  # do candidato. Remova-os antes de arquivar; dependency layers ficam no cache
+  # global e são preservados somente enquanto houver referência ou retenção.
   if [[ -d "$LOCAL_CANDIDATE_DIR/runtime-artifacts" && ! -L "$LOCAL_CANDIDATE_DIR/runtime-artifacts" ]]; then
     rm -rf -- "$LOCAL_CANDIDATE_DIR/runtime-artifacts" 2>/dev/null || true
   fi
@@ -3985,13 +4005,30 @@ PYARTIFACTREADY
   fi
   LOCAL_CANDIDATE_FRONTEND_ARTIFACT=""
   LOCAL_CANDIDATE_BACKEND_ARTIFACT=""
+  LOCAL_CANDIDATE_BACKEND_DEP_KEY=""
+  LOCAL_CANDIDATE_BACKEND_DEP_LAYER=""
   LOCAL_CANDIDATE_PYTHON_ARTIFACT=""
   LOCAL_CANDIDATE_PYTHON_READY=0
   if [[ -s "$root/frontend/dist/index.html" ]]; then
     LOCAL_CANDIDATE_FRONTEND_ARTIFACT="$root/frontend/dist"
   fi
-  if [[ -s "$root/backend/dist/index.js" && -d "$root/backend/node_modules" ]]; then
+  if [[ -s "$root/backend/dist/index.js" && -s "$root/backend/deps.json" ]]; then
+    local backend_dep_key backend_dep_layer
+    backend_dep_key="$(ARTIFACT_DEPS_FILE="$root/backend/deps.json" python3 - <<'PYBACKDEPS' 2>/dev/null
+import json, os
+with open(os.environ['ARTIFACT_DEPS_FILE'], encoding='utf-8') as fh:
+    data = json.load(fh)
+key = str(data.get('deps_key') or '')
+if len(key) != 64:
+    raise SystemExit(1)
+print(key)
+PYBACKDEPS
+)" || return 1
+    backend_dep_layer="$(node_dependency_layer_root backend prod "$backend_dep_key")" || return 1
+    verify_node_dependency_layer "$backend_dep_layer" "$backend_dep_key" prod || return 1
     LOCAL_CANDIDATE_BACKEND_ARTIFACT="$root/backend"
+    LOCAL_CANDIDATE_BACKEND_DEP_KEY="$backend_dep_key"
+    LOCAL_CANDIDATE_BACKEND_DEP_LAYER="$backend_dep_layer"
   fi
   if ARTIFACT_READY_FILE="$ready" python3 - <<'PYARTIFACTPYREADY' >/dev/null 2>&1
 import json, os
@@ -4021,6 +4058,26 @@ verify_local_candidate_artifact_integrity() {
   [[ -n "$root" ]] || return 1
   ready="$root/ready.json"
   [[ -s "$ready" ]] || return 1
+
+  if [[ "$kind" == "backend" ]]; then
+    local deps_key deps_layer
+    deps_key="$(ARTIFACT_READY_FILE="$ready" python3 - <<'PYBACKREADY' 2>/dev/null
+import json, os
+with open(os.environ['ARTIFACT_READY_FILE'], encoding='utf-8') as fh:
+    data = json.load(fh)
+record = data.get('backend') if isinstance(data, dict) else None
+if not isinstance(record, dict) or not record.get('ready'):
+    raise SystemExit(1)
+key = str(record.get('deps_key') or '')
+if len(key) != 64:
+    raise SystemExit(1)
+print(key)
+PYBACKREADY
+)" || return 1
+    deps_layer="$(node_dependency_layer_root backend prod "$deps_key")" || return 1
+    verify_node_dependency_layer "$deps_layer" "$deps_key" prod || return 1
+  fi
+
   ARTIFACT_READY_FILE="$ready" ARTIFACT_KIND="$kind" ARTIFACT_ROOT="$root" python3 - <<'PYVERIFYARTIFACT' >/dev/null 2>&1
 import hashlib, json, os, pathlib
 ready = pathlib.Path(os.environ['ARTIFACT_READY_FILE'])
@@ -4030,7 +4087,7 @@ data = json.loads(ready.read_text(encoding='utf-8'))
 record = data.get(kind) if isinstance(data, dict) else None
 if not isinstance(record, dict) or not record.get('ready'):
     raise SystemExit(1)
-path = root / ('frontend/dist' if kind == 'frontend' else 'backend')
+path = root / ('frontend/dist' if kind == 'frontend' else 'backend/dist')
 
 def tree_hash(base: pathlib.Path) -> str:
     digest = hashlib.sha256()
@@ -4094,6 +4151,17 @@ def tree_hash(path: pathlib.Path) -> str:
                 digest.update(chunk)
     return digest.hexdigest()
 
+back_ready = os.environ.get('ARTIFACT_BACK_READY') == '1'
+back_deps_key = ''
+if back_ready:
+    deps_file = root / 'backend' / 'deps.json'
+    if not deps_file.is_file() or deps_file.is_symlink():
+        raise SystemExit('backend artifact missing deps.json')
+    deps = json.loads(deps_file.read_text(encoding='utf-8'))
+    back_deps_key = str(deps.get('deps_key') or '')
+    if len(back_deps_key) != 64:
+        raise SystemExit('backend artifact has invalid deps_key')
+
 payload = {
     'state': 'ready',
     'commit': os.environ['ARTIFACT_COMMIT'],
@@ -4103,8 +4171,9 @@ payload = {
         'sha256': tree_hash(root / 'frontend' / 'dist') if os.environ.get('ARTIFACT_FRONT_READY') == '1' else '',
     },
     'backend': {
-        'ready': os.environ.get('ARTIFACT_BACK_READY') == '1',
-        'sha256': tree_hash(root / 'backend') if os.environ.get('ARTIFACT_BACK_READY') == '1' else '',
+        'ready': back_ready,
+        'sha256': tree_hash(root / 'backend' / 'dist') if back_ready else '',
+        'deps_key': back_deps_key,
     },
     'python': {
         'ready': os.environ.get('ARTIFACT_PYTHON_READY') == '1',
@@ -4576,19 +4645,155 @@ prepare_node_dependency_layer() {
   return 0
 }
 
+
+backend_live_dependency_layer() {
+  local project_dir="${1:-${BACK_DIR:-}}" modules
+  local target layer key parent tmp backup
+  modules="$project_dir/node_modules"
+  LAST_NODE_DEP_LAYER_PATH=""
+  LAST_NODE_DEP_LAYER_KEY=""
+  LAST_NODE_DEP_CACHE_HIT=0
+
+  [[ -d "$project_dir" && -s "$project_dir/package.json" && -s "$project_dir/package-lock.json" ]] || return 1
+
+  if [[ -L "$modules" ]]; then
+    target="$(readlink -f -- "$modules" 2>/dev/null || true)"
+    [[ -n "$target" && "$(basename "$target")" == "node_modules" ]] || return 1
+    layer="$(dirname "$target")"
+    key="$(basename "$layer")"
+    [[ "$key" =~ ^[a-f0-9]{64}$ ]] || return 1
+    verify_node_dependency_layer "$layer" "$key" prod || return 1
+    LAST_NODE_DEP_LAYER_PATH="$layer"
+    LAST_NODE_DEP_LAYER_KEY="$key"
+    LAST_NODE_DEP_CACHE_HIT=1
+    touch "$layer/layer.json" 2>/dev/null || true
+    return 0
+  fi
+
+  [[ -d "$modules" ]] || return 1
+  key="$(node_dependency_cache_key "$project_dir" prod)" || return 1
+  layer="$(node_dependency_layer_root backend prod "$key")" || return 1
+  parent="$(dirname "$layer")"
+
+  if verify_node_dependency_layer "$layer" "$key" prod; then
+    backup="$project_dir/.previous-node-modules-adopt-${UPDATE_RUNTIME_RUN_ID//[^[:alnum:]._-]/_}"
+    rm -rf -- "$backup" 2>/dev/null || true
+    sudo -u ubuntu -H mv -- "$modules" "$backup" || return 1
+    if ! sudo -u ubuntu -H ln -s -- "$layer/node_modules" "$modules"; then
+      sudo -u ubuntu -H mv -- "$backup" "$modules" 2>/dev/null || true
+      return 1
+    fi
+    rm -rf -- "$backup" 2>/dev/null || true
+    LAST_NODE_DEP_LAYER_PATH="$layer"
+    LAST_NODE_DEP_LAYER_KEY="$key"
+    LAST_NODE_DEP_CACHE_HIT=1
+    touch "$layer/layer.json" 2>/dev/null || true
+    logger -t "$LOG_TAG" "backend live migrou para dependency layer existente ${key:0:12}" 2>/dev/null || true
+    return 0
+  fi
+
+  install -d -o ubuntu -g ubuntu -m 0775 "$parent" || return 1
+  tmp="$(mktemp -d "$parent/.adopt-${key}.XXXXXX")" || return 1
+  chown ubuntu:ubuntu "$tmp" 2>/dev/null || true
+  chmod 0775 "$tmp" 2>/dev/null || true
+
+  if ! sudo -u ubuntu -H mv -- "$modules" "$tmp/node_modules"; then
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! write_node_dependency_layer_manifest "$tmp" "$key" backend prod "$project_dir"; then
+    sudo -u ubuntu -H mv -- "$tmp/node_modules" "$modules" 2>/dev/null || true
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  chown -R root:root "$tmp" 2>/dev/null || true
+  chmod -R a-w "$tmp" 2>/dev/null || true
+
+  if [[ -e "$layer" ]]; then
+    chmod -R u+w "$tmp" 2>/dev/null || true
+    sudo -u ubuntu -H mv -- "$tmp/node_modules" "$modules" 2>/dev/null || true
+    rm -rf -- "$tmp" 2>/dev/null || true
+    verify_node_dependency_layer "$layer" "$key" prod || return 1
+  elif ! mv -- "$tmp" "$layer"; then
+    chmod -R u+w "$tmp" 2>/dev/null || true
+    sudo -u ubuntu -H mv -- "$tmp/node_modules" "$modules" 2>/dev/null || true
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+
+  if ! sudo -u ubuntu -H ln -s -- "$layer/node_modules" "$modules"; then
+    # Último recurso de segurança: restaure os mesmos arquivos ao path live.
+    chmod -R u+w "$layer" 2>/dev/null || true
+    mv -- "$layer/node_modules" "$modules" 2>/dev/null || true
+    chown -R ubuntu:ubuntu "$modules" 2>/dev/null || true
+    rm -rf -- "$layer" 2>/dev/null || true
+    return 1
+  fi
+
+  LAST_NODE_DEP_LAYER_PATH="$layer"
+  LAST_NODE_DEP_LAYER_KEY="$key"
+  logger -t "$LOG_TAG" "backend live adotado como dependency layer ${key:0:12} sem cópia" 2>/dev/null || true
+  return 0
+}
+
+collect_protected_node_dependency_keys() {
+  local target key file
+  if [[ -n "${BACK_DIR:-}" && -L "${BACK_DIR}/node_modules" ]]; then
+    target="$(readlink -f -- "${BACK_DIR}/node_modules" 2>/dev/null || true)"
+    if [[ -n "$target" && "$(basename "$target")" == "node_modules" ]]; then
+      key="$(basename "$(dirname "$target")")"
+      [[ "$key" =~ ^[a-f0-9]{64}$ ]] && printf '%s\n' "$key"
+    fi
+  fi
+
+  while IFS= read -r file; do
+    [[ -s "$file" ]] || continue
+    NODE_REF_MANIFEST="$file" python3 - <<'PYNODEREFS' 2>/dev/null || true
+import json, os
+try:
+    with open(os.environ['NODE_REF_MANIFEST'], encoding='utf-8') as fh:
+        data = json.load(fh)
+except Exception:
+    raise SystemExit(0)
+record = data.get('backend') if isinstance(data, dict) else None
+if isinstance(record, dict):
+    key = str(record.get('deps_key') or '')
+    if len(key) == 64:
+        print(key)
+PYNODEREFS
+  done < <(
+    {
+      [[ -n "${RUNTIME_RELEASE_ROOT:-}" ]] && find "$RUNTIME_RELEASE_ROOT" -mindepth 2 -maxdepth 2 -type f -name release.json -print 2>/dev/null || true
+      [[ -n "${CANDIDATE_ROOT:-}" ]] && find "$CANDIDATE_ROOT" -mindepth 4 -maxdepth 4 -type f -name ready.json -path '*/runtime-artifacts/*/ready.json' -print 2>/dev/null || true
+      [[ -n "${REMOTE_RUNTIME_ARTIFACT_ROOT:-}" ]] && find "$REMOTE_RUNTIME_ARTIFACT_ROOT" -mindepth 2 -maxdepth 2 -type f -name ready.json -print 2>/dev/null || true
+    } | sort -u
+  )
+}
+
 prune_node_dependency_layers() {
-  local keep="${NODE_DEPENDENCY_CACHE_RETENTION:-4}" group count entry cache_root
+  local keep="${NODE_DEPENDENCY_CACHE_RETENTION:-4}" group count entry cache_root key
   cache_root="${NODE_DEPENDENCY_CACHE_ROOT:-${CANDIDATE_ROOT:-${TMPDIR:-/tmp}/tts-bot-node-dependency-cache}}"
   [[ "$keep" =~ ^[0-9]+$ ]] || keep=4
   (( keep >= 1 )) || keep=1
   [[ -d "$cache_root" ]] || return 0
+
+  declare -A protected=()
+  while IFS= read -r key; do
+    [[ "$key" =~ ^[a-f0-9]{64}$ ]] && protected["$key"]=1
+  done < <(collect_protected_node_dependency_keys | sort -u)
+
   while IFS= read -r group; do
     [[ -d "$group" ]] || continue
     count=0
     while IFS= read -r entry; do
       [[ -d "$entry" ]] || continue
+      key="$(basename "$entry")"
+      if [[ -n "${protected[$key]:-}" ]]; then
+        continue
+      fi
       count=$((count + 1))
       if (( count > keep )); then
+        chmod -R u+w "$entry" 2>/dev/null || true
         rm -rf -- "$entry" 2>/dev/null || true
       fi
     done < <(find "$group" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-)
@@ -4814,39 +5019,40 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
         return 1
       fi
 
-      local backend_runtime_modules=""
+      local backend_dep_key="" backend_dep_layer=""
       STAGE="dependências do backend (produção)"
-      if [[ -s "$back_dir/package-lock.json" ]]; then
-        prepare_node_dependency_layer "$back_dir" backend prod \
-          "Preparando runtime do servidor" "Dependências de produção · cache" || {
-            local rc=$?
-            register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm ci --omit=dev $npm_flags}"
-            return "$rc"
-          }
-        backend_runtime_modules="$LAST_NODE_DEP_LAYER_PATH/node_modules"
-      else
-        zip_progress_run_as_ubuntu \
-          "Preparando runtime do servidor" \
-          "Removendo dependências de desenvolvimento" \
-          "cd \"$back_dir\" && npm prune --omit=dev --no-audit --no-fund --progress=false" || {
-            local rc=$?
-            register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm prune --omit=dev}"
-            return "$rc"
-          }
-        backend_runtime_modules="$back_dir/node_modules"
-      fi
-      if [[ ! -d "$backend_runtime_modules" ]]; then
-        BACK_STATUS="runtime isolado do backend não produziu node_modules de produção"
+      if [[ ! -s "$back_dir/package-lock.json" ]]; then
+        BACK_STATUS="backend sem package-lock.json; runtime imutável exige lockfile"
         LAST_ERROR_STDERR="$BACK_STATUS"
-        LAST_ERROR_CODE="BACKEND_BUILD_FAILED"
+        LAST_ERROR_CODE="BACKEND_LOCKFILE_REQUIRED"
+        return 1
+      fi
+      prepare_node_dependency_layer "$back_dir" backend prod \
+        "Preparando runtime do servidor" "Dependências de produção · cache" || {
+          local rc=$?
+          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm ci --omit=dev $npm_flags}"
+          return "$rc"
+        }
+      backend_dep_key="$LAST_NODE_DEP_LAYER_KEY"
+      backend_dep_layer="$LAST_NODE_DEP_LAYER_PATH"
+      if [[ ! "$backend_dep_key" =~ ^[a-f0-9]{64}$ ]] || ! verify_node_dependency_layer "$backend_dep_layer" "$backend_dep_key" prod; then
+        BACK_STATUS="runtime isolado do backend não produziu dependency layer válido"
+        LAST_ERROR_STDERR="$BACK_STATUS"
+        LAST_ERROR_CODE="BACKEND_DEPENDENCY_LAYER_INVALID"
         return 1
       fi
 
       install -d -o ubuntu -g ubuntu -m 0775 "$back_artifact"
       sudo -u ubuntu -H cp -a -- "$back_dir/dist" "$back_artifact/dist"
-      sudo -u ubuntu -H cp -a -- "$backend_runtime_modules" "$back_artifact/node_modules"
-      [[ -f "$back_dir/package.json" ]] && sudo -u ubuntu -H cp -a -- "$back_dir/package.json" "$back_artifact/package.json"
-      [[ -f "$back_dir/package-lock.json" ]] && sudo -u ubuntu -H cp -a -- "$back_dir/package-lock.json" "$back_artifact/package-lock.json"
+      BACK_ARTIFACT_DEPS_FILE="$back_artifact/deps.json" BACK_ARTIFACT_DEPS_KEY="$backend_dep_key" python3 - <<'PYBACKARTIFACTDEPS'
+import json, os, pathlib
+path = pathlib.Path(os.environ['BACK_ARTIFACT_DEPS_FILE'])
+payload = {'mode': 'prod', 'deps_key': os.environ['BACK_ARTIFACT_DEPS_KEY']}
+tmp = path.with_name('.deps.json.tmp')
+tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding='utf-8')
+os.replace(tmp, path)
+PYBACKARTIFACTDEPS
+      chown ubuntu:ubuntu "$back_artifact/deps.json" 2>/dev/null || true
       back_ready=1
       BACK_STATUS="backend validado e compilado no worktree"
     else
@@ -6889,7 +7095,8 @@ deploy_frontend() {
 
 install_backend_prebuilt_artifact() {
   local source_dir="${1:?}" token temp_dist temp_modules backup_dist backup_modules had_dist=0 had_modules=0
-  [[ -s "$source_dir/dist/index.js" && -d "$source_dir/node_modules" ]] || {
+  local deps_key deps_layer
+  [[ -s "$source_dir/dist/index.js" && -s "$source_dir/deps.json" ]] || {
     LAST_ERROR_STDERR="artefato backend incompleto: $source_dir"
     return 1
   }
@@ -6897,6 +7104,25 @@ install_backend_prebuilt_artifact() {
     LAST_ERROR_STDERR="backend live não encontrado em $BACK_DIR"
     return 1
   }
+
+  deps_key="$(BACK_DEPS_FILE="$source_dir/deps.json" python3 - <<'PYBACKINSTALLDEPS' 2>/dev/null
+import json, os
+with open(os.environ['BACK_DEPS_FILE'], encoding='utf-8') as fh:
+    data = json.load(fh)
+key = str(data.get('deps_key') or '')
+if len(key) != 64:
+    raise SystemExit(1)
+print(key)
+PYBACKINSTALLDEPS
+)" || {
+    LAST_ERROR_STDERR="artefato backend possui deps_key inválido"
+    return 1
+  }
+  deps_layer="$(node_dependency_layer_root backend prod "$deps_key")" || return 1
+  if ! verify_node_dependency_layer "$deps_layer" "$deps_key" prod; then
+    LAST_ERROR_STDERR="dependency layer backend ausente ou inválido: ${deps_key:0:12}"
+    return 1
+  fi
 
   token="${UPDATE_RUNTIME_RUN_ID//[^[:alnum:]._-]/_}"
   temp_dist="$BACK_DIR/.update-dist-$token"
@@ -6906,16 +7132,16 @@ install_backend_prebuilt_artifact() {
 
   sudo -u ubuntu -H rm -rf -- "$temp_dist" "$temp_modules" "$backup_dist" "$backup_modules"
   sudo -u ubuntu -H cp -a -- "$source_dir/dist" "$temp_dist" || return 1
-  sudo -u ubuntu -H cp -a -- "$source_dir/node_modules" "$temp_modules" || {
+  sudo -u ubuntu -H ln -s -- "$deps_layer/node_modules" "$temp_modules" || {
     sudo -u ubuntu -H rm -rf -- "$temp_dist" "$temp_modules"
     return 1
   }
 
-  if [[ -e "$BACK_DIR/dist" ]]; then
+  if [[ -e "$BACK_DIR/dist" || -L "$BACK_DIR/dist" ]]; then
     sudo -u ubuntu -H mv -- "$BACK_DIR/dist" "$backup_dist" || return 1
     had_dist=1
   fi
-  if [[ -e "$BACK_DIR/node_modules" ]]; then
+  if [[ -e "$BACK_DIR/node_modules" || -L "$BACK_DIR/node_modules" ]]; then
     if ! sudo -u ubuntu -H mv -- "$BACK_DIR/node_modules" "$backup_modules"; then
       (( had_dist == 1 )) && sudo -u ubuntu -H mv -- "$backup_dist" "$BACK_DIR/dist" 2>/dev/null || true
       return 1
@@ -6969,7 +7195,7 @@ deploy_backend() {
     if (( LOCAL_CANDIDATE_RUNTIME_READY == 0 )); then
       hydrate_local_candidate_runtime_artifacts "${LOCAL_CANDIDATE_PREPARED_COMMIT:-${REMOTE_COMMIT:-$(repo_git rev-parse HEAD)}}" || true
     fi
-    if [[ -z "${LOCAL_CANDIDATE_BACKEND_ARTIFACT:-}" || ! -s "$LOCAL_CANDIDATE_BACKEND_ARTIFACT/dist/index.js" || ! -d "$LOCAL_CANDIDATE_BACKEND_ARTIFACT/node_modules" ]]; then
+    if [[ -z "${LOCAL_CANDIDATE_BACKEND_ARTIFACT:-}" || ! -s "$LOCAL_CANDIDATE_BACKEND_ARTIFACT/dist/index.js" || ! -s "$LOCAL_CANDIDATE_BACKEND_ARTIFACT/deps.json" ]]; then
       BACK_STATUS="artefato backend READY ausente; recusando rebuild no checkout live"
       LAST_ERROR_STDERR="$BACK_STATUS"
       LAST_ERROR_CODE="BACKEND_PREBUILT_ARTIFACT_MISSING"
@@ -6999,8 +7225,7 @@ deploy_backend() {
     fi
     systemctl reset-failed "$BACK_SERVICE" >/dev/null 2>&1 || true
     systemctl restart "$BACK_SERVICE"
-    sleep 3
-    if ! systemctl is-active --quiet "$BACK_SERVICE"; then
+    if ! wait_for_service_active "$BACK_SERVICE" 20 0.25; then
       BACK_STATUS="serviço não ficou ativo: $BACK_SERVICE"
       LAST_ERROR_STDERR="$(journalctl -u "$BACK_SERVICE" -n 30 --no-pager 2>/dev/null | trim_alert_text 1800)"
       return 1
@@ -7066,8 +7291,7 @@ deploy_backend() {
   fi
   systemctl reset-failed "$BACK_SERVICE" >/dev/null 2>&1 || true
   systemctl restart "$BACK_SERVICE"
-  sleep 3
-  if ! systemctl is-active --quiet "$BACK_SERVICE"; then
+  if ! wait_for_service_active "$BACK_SERVICE" 20 0.25; then
     BACK_STATUS="serviço não ficou ativo: $BACK_SERVICE"
     LAST_ERROR_STDERR="$(journalctl -u "$BACK_SERVICE" -n 30 --no-pager 2>/dev/null | trim_alert_text 1800)"
     return 1
@@ -7131,6 +7355,17 @@ def tree_hash(path: pathlib.Path) -> str:
                 digest.update(chunk)
     return digest.hexdigest()
 
+back_ready = os.environ.get('RELEASE_BACK_READY') == '1'
+back_deps_key = ''
+if back_ready:
+    deps_file = root / 'backend' / 'deps.json'
+    if not deps_file.is_file() or deps_file.is_symlink():
+        raise SystemExit('backend release missing deps.json')
+    deps = json.loads(deps_file.read_text(encoding='utf-8'))
+    back_deps_key = str(deps.get('deps_key') or '')
+    if len(back_deps_key) != 64:
+        raise SystemExit('backend release has invalid deps_key')
+
 payload = {
     'state': 'ready',
     'commit': os.environ['RELEASE_COMMIT'],
@@ -7140,8 +7375,9 @@ payload = {
         'sha256': tree_hash(root / 'frontend') if os.environ.get('RELEASE_FRONT_READY') == '1' else '',
     },
     'backend': {
-        'ready': os.environ.get('RELEASE_BACK_READY') == '1',
-        'sha256': tree_hash(root / 'backend') if os.environ.get('RELEASE_BACK_READY') == '1' else '',
+        'ready': back_ready,
+        'sha256': tree_hash(root / 'backend' / 'dist') if back_ready else '',
+        'deps_key': back_deps_key,
     },
 }
 path = root / 'release.json'
@@ -7155,6 +7391,26 @@ verify_runtime_release_component() {
   local root="${1:?}" kind="${2:?}" ready
   ready="$root/release.json"
   [[ -s "$ready" && ! -L "$ready" ]] || return 1
+
+  if [[ "$kind" == "backend" ]]; then
+    local deps_key deps_layer
+    deps_key="$(RELEASE_READY_FILE="$ready" python3 - <<'PYBACKRELEASEDEPS' 2>/dev/null
+import json, os
+with open(os.environ['RELEASE_READY_FILE'], encoding='utf-8') as fh:
+    data = json.load(fh)
+record = data.get('backend') if isinstance(data, dict) else None
+if data.get('state') != 'ready' or not isinstance(record, dict) or not record.get('ready'):
+    raise SystemExit(1)
+key = str(record.get('deps_key') or '')
+if len(key) != 64:
+    raise SystemExit(1)
+print(key)
+PYBACKRELEASEDEPS
+)" || return 1
+    deps_layer="$(node_dependency_layer_root backend prod "$deps_key")" || return 1
+    verify_node_dependency_layer "$deps_layer" "$deps_key" prod || return 1
+  fi
+
   RELEASE_READY_FILE="$ready" RELEASE_KIND="$kind" RELEASE_ROOT="$root" python3 - <<'PYVERIFYRUNTIME' >/dev/null 2>&1
 import hashlib, json, os, pathlib
 ready = pathlib.Path(os.environ['RELEASE_READY_FILE'])
@@ -7164,7 +7420,7 @@ data = json.loads(ready.read_text(encoding='utf-8'))
 record = data.get(kind) if isinstance(data, dict) else None
 if data.get('state') != 'ready' or not isinstance(record, dict) or not record.get('ready'):
     raise SystemExit(1)
-path = root / kind
+path = root / (kind if kind == 'frontend' else 'backend/dist')
 
 def tree_hash(base: pathlib.Path) -> str:
     digest = hashlib.sha256()
@@ -7244,17 +7500,31 @@ capture_runtime_release_snapshot() {
   fi
 
   if (( BACK_CHANGED == 1 )); then
-    if [[ ! -s "$BACK_DIR/dist/index.js" || ! -d "$BACK_DIR/node_modules" ]]; then
+    if [[ ! -s "$BACK_DIR/dist/index.js" || ! -e "$BACK_DIR/node_modules" && ! -L "$BACK_DIR/node_modules" ]]; then
       LAST_ERROR_STDERR="backend live não possui dist/index.js e node_modules preserváveis antes da promoção"
       LAST_ERROR_CODE="RUNTIME_RELEASE_BACKEND_BASELINE_MISSING"
       rm -rf -- "$tmp" 2>/dev/null || true
       return 1
     fi
+    if ! backend_live_dependency_layer "$BACK_DIR"; then
+      LAST_ERROR_STDERR="não foi possível adotar/reutilizar dependency layer do backend live antes da promoção"
+      LAST_ERROR_CODE="RUNTIME_RELEASE_BACKEND_DEP_LAYER_FAILED"
+      rm -rf -- "$tmp" 2>/dev/null || true
+      return 1
+    fi
+    local baseline_dep_key="$LAST_NODE_DEP_LAYER_KEY"
+    [[ "$baseline_dep_key" =~ ^[a-f0-9]{64}$ ]] || {
+      rm -rf -- "$tmp" 2>/dev/null || true
+      return 1
+    }
     install -d -m 0755 "$tmp/backend"
     cp -a -- "$BACK_DIR/dist" "$tmp/backend/dist" || { rm -rf -- "$tmp" 2>/dev/null || true; return 1; }
-    cp -a -- "$BACK_DIR/node_modules" "$tmp/backend/node_modules" || { rm -rf -- "$tmp" 2>/dev/null || true; return 1; }
-    [[ -f "$BACK_DIR/package.json" ]] && cp -a -- "$BACK_DIR/package.json" "$tmp/backend/package.json"
-    [[ -f "$BACK_DIR/package-lock.json" ]] && cp -a -- "$BACK_DIR/package-lock.json" "$tmp/backend/package-lock.json"
+    RELEASE_BACK_DEPS_FILE="$tmp/backend/deps.json" RELEASE_BACK_DEPS_KEY="$baseline_dep_key" python3 - <<'PYRELEASEBACKDEPS'
+import json, os, pathlib
+path = pathlib.Path(os.environ['RELEASE_BACK_DEPS_FILE'])
+payload = {'mode': 'prod', 'deps_key': os.environ['RELEASE_BACK_DEPS_KEY']}
+path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding='utf-8')
+PYRELEASEBACKDEPS
     back_ready=1
   fi
 
@@ -7328,8 +7598,7 @@ restore_backend_runtime_release() {
   fi
   systemctl reset-failed "$BACK_SERVICE" >/dev/null 2>&1 || true
   systemctl restart "$BACK_SERVICE" || return 1
-  sleep 3
-  if ! systemctl is-active --quiet "$BACK_SERVICE"; then
+  if ! wait_for_service_active "$BACK_SERVICE" 20 0.25; then
     BACK_STATUS="backend anterior restaurado, mas serviço não ficou ativo"
     LAST_ERROR_STDERR="$(journalctl -u "$BACK_SERVICE" -n 30 --no-pager 2>/dev/null | trim_alert_text 1800)"
     LAST_ERROR_CODE="ROLLBACK_BACKEND_SERVICE_FAILED"

@@ -139,7 +139,9 @@ def test_backend_has_separate_dev_and_prod_dependency_layers() -> None:
 
     assert 'prepare_node_dependency_layer "$back_dir" backend dev' in block
     assert 'prepare_node_dependency_layer "$back_dir" backend prod' in block
-    assert 'backend_runtime_modules="$LAST_NODE_DEP_LAYER_PATH/node_modules"' in block
+    assert 'backend_dep_key="$LAST_NODE_DEP_LAYER_KEY"' in block
+    assert '"$back_artifact/deps.json"' in block
+    assert 'cp -a -- "$backend_runtime_modules"' not in block
     assert 'npm run build && npm prune --omit=dev' not in block
 
 

@@ -348,7 +348,7 @@ def test_backend_restart_is_owned_by_systemd_instead_of_detached_nohup() -> None
     backend = source[source.index("deploy_backend() {") : source.index("\n\nrollback_after_failure() {")]
 
     assert 'systemctl restart "$BACK_SERVICE"' in backend
-    assert 'systemctl is-active --quiet "$BACK_SERVICE"' in backend
+    assert 'wait_for_service_active "$BACK_SERVICE"' in backend
     assert 'nohup node dist/index.js' not in backend
     assert 'fuser -k "${BACK_PORT}/tcp"' not in backend
 

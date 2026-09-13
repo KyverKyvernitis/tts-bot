@@ -42,7 +42,8 @@ def test_isolated_runtime_build_uses_worktree_and_keeps_npm_cache() -> None:
     assert "npm ci" in block
     assert "npm test" in block
     assert "npm run build" in block
-    assert "npm prune --omit=dev" in block
+    assert "npm prune --omit=dev" not in block
+    assert "BACKEND_LOCKFILE_REQUIRED" in block
     assert "npm cache clean --force" not in block
     assert 'write_local_candidate_state "ready"' in block
 
@@ -59,19 +60,23 @@ def test_ready_artifact_manifest_is_bound_to_commit_and_content(tmp_path: Path) 
     back = candidate / "runtime-artifacts" / "deadbeef" / "backend"
     (front / "assets").mkdir(parents=True)
     (back / "dist").mkdir(parents=True)
-    (back / "node_modules" / "pkg").mkdir(parents=True)
-    (back / "node_modules" / ".bin").mkdir(parents=True)
+    dep_key = "a" * 64
+    cache = tmp_path / "node-cache"
+    layer = cache / "backend" / "prod" / dep_key
+    (layer / "node_modules" / "pkg").mkdir(parents=True)
     (front / "index.html").write_text("front-v1", encoding="utf-8")
     (front / "assets" / "app.js").write_text("asset", encoding="utf-8")
     (back / "dist" / "index.js").write_text("server-v1", encoding="utf-8")
-    (back / "node_modules" / "pkg" / "index.js").write_text("module", encoding="utf-8")
-    (back / "node_modules" / ".bin" / "pkg").symlink_to("../pkg/index.js")
+    (back / "deps.json").write_text(f'{{"mode":"prod","deps_key":"{dep_key}"}}', encoding="utf-8")
+    (layer / "node_modules" / "pkg" / "index.js").write_text("module", encoding="utf-8")
+    (layer / "layer.json").write_text(f'{{"state":"ready","key":"{dep_key}","mode":"prod"}}', encoding="utf-8")
 
     harness = f'''
 set -eu -o pipefail
 source "{functions}"
 LOCAL_CANDIDATE_DIR="{candidate}"
 LOCAL_CANDIDATE_PREPARED_COMMIT=deadbeef
+NODE_DEPENDENCY_CACHE_ROOT="{cache}"
 root="$(local_candidate_artifact_root_for_commit deadbeef)"
 write_local_candidate_artifact_ready_manifest "$root" deadbeef 1 1
 hydrate_local_candidate_runtime_artifacts deadbeef
@@ -153,8 +158,8 @@ def test_local_backend_publish_consumes_ready_artifact_without_rebuild(tmp_path:
     functions.write_text(block, encoding="utf-8")
     artifact = tmp_path / "backend"
     (artifact / "dist").mkdir(parents=True)
-    (artifact / "node_modules").mkdir()
     (artifact / "dist" / "index.js").write_text("ok", encoding="utf-8")
+    (artifact / "deps.json").write_text('{"mode":"prod","deps_key":"' + ('a' * 64) + '"}', encoding="utf-8")
 
     harness = f'''
 set -eu -o pipefail
@@ -183,6 +188,7 @@ zip_progress_done_and_publish() {{ :; }}
 zip_progress_run_as_ubuntu() {{ echo REBUILD_CALLED; return 88; }}
 repo_git() {{ echo deadbeef; }}
 systemctl() {{ return 0; }}
+wait_for_service_active() {{ return 0; }}
 sleep() {{ :; }}
 wait_for_health() {{ return 0; }}
 trim_alert_text() {{ cat; }}
@@ -317,7 +323,8 @@ verify_local_candidate_artifact_integrity backend
     assert "READY=1" in result.stdout
     assert (artifact_root / "frontend" / "dist" / "index.html").is_file()
     assert (artifact_root / "backend" / "dist" / "index.js").is_file()
-    assert (artifact_root / "backend" / "node_modules" / ".bin" / "pkg").is_symlink()
+    assert (artifact_root / "backend" / "deps.json").is_file()
+    assert not (artifact_root / "backend" / "node_modules").exists()
     assert (artifact_root / "ready.json").is_file()
 
 
@@ -337,14 +344,17 @@ def test_backend_prebuilt_installer_replaces_runtime_tree_without_build(tmp_path
 
     live = tmp_path / "live-backend"
     artifact = tmp_path / "artifact-backend"
+    dep_key = "b" * 64
+    layer = tmp_path / "layer"
     (live / "dist").mkdir(parents=True)
     (live / "node_modules" / "oldpkg").mkdir(parents=True)
     (artifact / "dist").mkdir(parents=True)
-    (artifact / "node_modules" / "newpkg").mkdir(parents=True)
+    (layer / "node_modules" / "newpkg").mkdir(parents=True)
     (live / "dist" / "index.js").write_text("old", encoding="utf-8")
     (live / "node_modules" / "oldpkg" / "index.js").write_text("old", encoding="utf-8")
     (artifact / "dist" / "index.js").write_text("new", encoding="utf-8")
-    (artifact / "node_modules" / "newpkg" / "index.js").write_text("new", encoding="utf-8")
+    (artifact / "deps.json").write_text(f'{{"mode":"prod","deps_key":"{dep_key}"}}', encoding="utf-8")
+    (layer / "node_modules" / "newpkg" / "index.js").write_text("new", encoding="utf-8")
 
     harness = f'''
 set -eu -o pipefail
@@ -352,6 +362,8 @@ source "{functions}"
 BACK_DIR="{live}"
 UPDATE_RUNTIME_RUN_ID=test-run
 LAST_ERROR_STDERR=''
+node_dependency_layer_root() {{ printf '%s\n' "{layer}"; }}
+verify_node_dependency_layer() {{ return 0; }}
 sudo() {{
   if [[ "${{1:-}}" == -u ]]; then shift 2; fi
   [[ "${{1:-}}" == -H ]] && shift

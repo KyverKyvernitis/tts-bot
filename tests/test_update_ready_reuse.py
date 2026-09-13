@@ -21,6 +21,7 @@ def test_ready_artifact_is_reused_without_repeating_validation_commands(tmp_path
         root = worktree / "dashboard" / side
         root.mkdir(parents=True)
         (root / "package.json").write_text('{"name":"fake"}', encoding="utf-8")
+        (root / "package-lock.json").write_text('{"lockfileVersion":3}', encoding="utf-8")
 
     harness = f'''
 set -eu -o pipefail
@@ -31,6 +32,7 @@ LOCAL_CANDIDATE_DIR="{candidate}"
 LOCAL_CANDIDATE_WORKTREE_DIR="{worktree}"
 LOCAL_CANDIDATE_PREPARED_COMMIT=feedface
 LOCAL_CANDIDATE_ID=zip-test
+NODE_DEPENDENCY_CACHE_ROOT="{tmp_path / 'node-cache'}"
 LOCAL_CANDIDATE_RUNTIME_READY=0
 LOCAL_CANDIDATE_ARTIFACT_ROOT=''
 LOCAL_CANDIDATE_ARTIFACT_COMMIT=''
@@ -69,7 +71,7 @@ sudo() {{
 frontend_publication_is_healthy() {{ return 0; }}
 npm() {{
   case "$1 ${{2:-}}" in
-    'install '*)
+    'ci '*|'install '*)
       mkdir -p node_modules/pkg
       printf module > node_modules/pkg/index.js
       ;;
@@ -83,9 +85,6 @@ npm() {{
       else
         printf 'ok' > dist/index.js
       fi
-      ;;
-    'prune --omit=dev'*)
-      :
       ;;
     *)
       echo "unexpected npm: $*" >&2

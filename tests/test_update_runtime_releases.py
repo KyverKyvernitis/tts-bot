@@ -38,6 +38,8 @@ def test_runtime_snapshot_is_versioned_and_detects_tamper(tmp_path: Path) -> Non
     (back / "node_modules" / "pkg").mkdir(parents=True)
     (back / "node_modules" / ".bin").mkdir(parents=True)
     (back / "dist" / "index.js").write_text("server-old", encoding="utf-8")
+    (back / "package.json").write_text('{"name":"backend"}', encoding="utf-8")
+    (back / "package-lock.json").write_text('{"lockfileVersion":3}', encoding="utf-8")
     (back / "node_modules" / "pkg" / "index.js").write_text("module", encoding="utf-8")
     (back / "node_modules" / ".bin" / "pkg").symlink_to("../pkg/index.js")
 
@@ -55,9 +57,13 @@ RUNTIME_RELEASE_SNAPSHOT_ROOT=''
 LAST_ERROR_STDERR=''
 LAST_ERROR_CODE=''
 LOG_TAG=test
+BASELINE_KEY={'a'*64}
 sanitize_commit_ref() {{ printf '%s\n' "$1"; }}
 short_commit() {{ printf '%.7s' "$1"; }}
 logger() {{ :; }}
+backend_live_dependency_layer() {{ LAST_NODE_DEP_LAYER_KEY="${{BASELINE_KEY}}"; LAST_NODE_DEP_LAYER_PATH="{tmp_path / 'node-layer'}"; return 0; }}
+node_dependency_layer_root() {{ printf '%s\n' "{tmp_path / 'node-layer'}"; }}
+verify_node_dependency_layer() {{ return 0; }}
 frontend_publication_is_healthy() {{ [[ -s "$FRONT_PUBLISH_DIR/index.html" ]]; }}
 install() {{
   local -a args=()
@@ -77,6 +83,8 @@ verify_runtime_release_component "$root" backend
 printf 'READY=%s\n' "$RUNTIME_RELEASE_SNAPSHOT_READY"
 printf 'FRONT=%s\n' "$(cat "$root/frontend/index.html")"
 printf 'BACK=%s\n' "$(cat "$root/backend/dist/index.js")"
+test -s "$root/backend/deps.json"
+test ! -e "$root/backend/node_modules"
 printf tamper >> "$root/frontend/index.html"
 if verify_runtime_release_component "$root" frontend; then
   echo TAMPER_ACCEPTED
@@ -161,8 +169,8 @@ def test_backend_restore_consumes_saved_release_and_only_restarts(tmp_path: Path
     functions.write_text(_release_functions(source), encoding="utf-8")
     root = tmp_path / "releases" / "deadbeef"
     (root / "backend" / "dist").mkdir(parents=True)
-    (root / "backend" / "node_modules").mkdir(parents=True)
     (root / "backend" / "dist" / "index.js").write_text("old", encoding="utf-8")
+    (root / "backend" / "deps.json").write_text('{"mode":"prod","deps_key":"' + ('a' * 64) + '"}', encoding="utf-8")
 
     harness = f'''
 source "{functions}"
@@ -179,6 +187,7 @@ short_commit() {{ printf '%.7s' "$1"; }}
 verify_runtime_release_component() {{ return 0; }}
 install_backend_prebuilt_artifact() {{ printf 'INSTALL=%s\n' "$1"; }}
 systemctl() {{ printf 'SYSTEMCTL=%s\n' "$*"; return 0; }}
+wait_for_service_active() {{ return 0; }}
 sleep() {{ :; }}
 wait_for_health() {{ return 0; }}
 journalctl() {{ :; }}
