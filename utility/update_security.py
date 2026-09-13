@@ -14,6 +14,8 @@ from typing import Iterable, Mapping
 
 
 SAFE_ENV_TEMPLATE_NAMES = frozenset({".env.example", ".env.sample", ".env.template"})
+UPDATE_CONTROL_MANIFEST_NAME = "update-manifest.json"
+UPDATE_OPERATION_TYPES = frozenset({"add", "update", "delete", "move"})
 
 
 def is_safe_env_template_path(path: Path | PurePosixPath | str) -> bool:
@@ -107,6 +109,99 @@ def normalize_member_parts(raw_name: str) -> tuple[str, ...]:
 def canonical_path_key(parts: Iterable[str]) -> str:
     normalized = "/".join(unicodedata.normalize("NFC", str(part)) for part in parts)
     return normalized.casefold()
+
+
+def normalize_update_repo_path(raw: object) -> str:
+    """Normaliza um path declarativo de update e rejeita escapes/paths protegidos."""
+    text = str(raw or "").replace("\\", "/")
+    try:
+        parts = normalize_member_parts(text)
+    except UpdateSecurityError as exc:
+        raise UpdateSecurityError(f"caminho inválido em operação: {raw!r} ({exc})") from exc
+    if not parts:
+        raise UpdateSecurityError(f"caminho vazio em operação: {raw!r}")
+    rel = PurePosixPath(*parts)
+    if is_forbidden_update_path(rel):
+        raise UpdateSecurityError(f"caminho protegido em operação: {rel.as_posix()}")
+    return rel.as_posix()
+
+
+def normalize_update_operations(
+    raw_operations: object,
+    *,
+    allowed_ops: Iterable[str] | None = None,
+) -> list[dict[str, str]]:
+    """Valida operações declarativas e retorna uma representação canônica.
+
+    Cada path pode participar de no máximo uma operação. A primeira versão
+    deliberadamente mantém `move` puro; rename+edição pode ser enviado como
+    delete/add até que exista uma semântica explícita para isso.
+    """
+    if raw_operations is None:
+        return []
+    if not isinstance(raw_operations, list):
+        raise UpdateSecurityError("operations precisa ser uma lista")
+    if len(raw_operations) > 500:
+        raise UpdateSecurityError("operations excede o limite de 500 itens")
+
+    allowed = UPDATE_OPERATION_TYPES if allowed_ops is None else frozenset(str(item).strip().lower() for item in allowed_ops)
+    unknown_allowed = allowed - UPDATE_OPERATION_TYPES
+    if unknown_allowed:
+        raise ValueError(f"allowed_ops inválido: {sorted(unknown_allowed)!r}")
+
+    normalized: list[dict[str, str]] = []
+    occupied: dict[str, str] = {}
+
+    def claim(path: str, label: str) -> None:
+        key = canonical_path_key(PurePosixPath(path).parts)
+        previous = occupied.get(key)
+        if previous is not None:
+            raise UpdateSecurityError(f"path participa de operações conflitantes: {path} ({previous} / {label})")
+        occupied[key] = label
+
+    for index, raw in enumerate(raw_operations):
+        if not isinstance(raw, Mapping):
+            raise UpdateSecurityError(f"operação #{index + 1} precisa ser um objeto")
+        op = str(raw.get("op") or "").strip().lower()
+        if op not in UPDATE_OPERATION_TYPES:
+            raise UpdateSecurityError(f"operação desconhecida: {op or '<vazia>'}")
+        if op not in allowed:
+            raise UpdateSecurityError(f"operação {op!r} não é permitida neste manifesto")
+
+        if op == "move":
+            source = normalize_update_repo_path(raw.get("from"))
+            target = normalize_update_repo_path(raw.get("to"))
+            if canonical_path_key(PurePosixPath(source).parts) == canonical_path_key(PurePosixPath(target).parts):
+                raise UpdateSecurityError(f"move precisa ter origem e destino diferentes: {source}")
+            claim(source, f"move.from#{index + 1}")
+            claim(target, f"move.to#{index + 1}")
+            normalized.append({"op": "move", "from": source, "to": target})
+            continue
+
+        path = normalize_update_repo_path(raw.get("path"))
+        claim(path, f"{op}#{index + 1}")
+        normalized.append({"op": op, "path": path})
+
+    return normalized
+
+
+def update_operation_paths(operations: Iterable[Mapping[str, object]]) -> list[str]:
+    paths: list[str] = []
+    for item in operations:
+        op = str(item.get("op") or "").strip().lower()
+        if op == "move":
+            paths.extend([str(item.get("from") or ""), str(item.get("to") or "")])
+        else:
+            paths.append(str(item.get("path") or ""))
+    return [path for path in paths if path]
+
+
+def update_payload_paths(operations: Iterable[Mapping[str, object]]) -> list[str]:
+    return [
+        str(item.get("path") or "")
+        for item in operations
+        if str(item.get("op") or "").strip().lower() in {"add", "update"} and str(item.get("path") or "")
+    ]
 
 
 def _entry_kind(info: zipfile.ZipInfo) -> str:
@@ -276,10 +371,29 @@ def verify_candidate(candidate_dir: Path, *, max_age_seconds: int = 86400) -> di
     if not changed_files:
         raise UpdateSecurityError("lista changed_files vazia")
 
+    try:
+        schema_version = int(manifest.get("schema_version") or 2)
+    except (TypeError, ValueError) as exc:
+        raise UpdateSecurityError("schema_version inválido") from exc
+
+    payload_files = changed_files
+    if schema_version >= 3:
+        operations = normalize_update_operations(manifest.get("operations"))
+        if not operations:
+            raise UpdateSecurityError("operations vazia no manifesto v3")
+        expected_changed = update_operation_paths(operations)
+        changed_keys = [canonical_path_key(PurePosixPath(normalize_update_repo_path(item)).parts) for item in changed_files]
+        expected_keys = [canonical_path_key(PurePosixPath(item).parts) for item in expected_changed]
+        if len(changed_keys) != len(set(changed_keys)):
+            raise UpdateSecurityError("changed_files contém caminhos duplicados")
+        if set(changed_keys) != set(expected_keys):
+            raise UpdateSecurityError("changed_files não corresponde às operations")
+        payload_files = update_payload_paths(operations)
+
     integrity = manifest.get("file_integrity")
     if not isinstance(integrity, Mapping):
         raise UpdateSecurityError("file_integrity ausente")
-    actual = build_file_integrity(candidate_dir / "files", changed_files)
+    actual = build_file_integrity(candidate_dir / "files", payload_files)
     if set(actual) != set(str(key) for key in integrity):
         raise UpdateSecurityError("file_integrity não corresponde aos arquivos alterados")
     for rel, values in actual.items():

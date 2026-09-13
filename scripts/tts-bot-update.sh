@@ -105,7 +105,9 @@ LOCAL_CANDIDATE_COMMIT_MESSAGE=""
 LOCAL_CANDIDATE_ZIP_NAME=""
 LOCAL_CANDIDATE_ZIP_SHA256=""
 LOCAL_CANDIDATE_SOURCE_AUTHOR_ID=""
+LOCAL_CANDIDATE_SCHEMA_VERSION=2
 LOCAL_CANDIDATE_ATTEMPT=0
+LOCAL_CANDIDATE_RESUME_COUNT=0
 LOCAL_CANDIDATE_VERIFY_ERROR=""
 LOCAL_CANDIDATE_PENDING_FILE=""
 LOCAL_CANDIDATE_FILES_DIR=""
@@ -1647,7 +1649,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 }
 
 load_pending_local_candidate() {
-  local manifest active_file pending_file legacy_active legacy_pending active_payload
+  local manifest active_file pending_file legacy_active legacy_pending active_payload resuming_active=0
   LOCAL_CANDIDATE_PENDING_FILE=""
   LOCAL_CANDIDATE_DIR=""
 
@@ -1659,6 +1661,7 @@ load_pending_local_candidate() {
   # antes de pegar outro pending. Isso evita aplicar fora de ordem.
   active_file="$(find "$CANDIDATE_QUEUE_ACTIVE_DIR" -maxdepth 1 -type f -name '*.json' 2>/dev/null | sort | head -n 1 || true)"
   if [[ -n "${active_file//[[:space:]]/}" ]]; then
+    resuming_active=1
     LOCAL_CANDIDATE_PENDING_FILE="$active_file"
     LOCAL_CANDIDATE_DIR="$(json_field_from_file "$active_file" candidate_dir 2>/dev/null || true)"
     if [[ -z "${LOCAL_CANDIDATE_DIR//[[:space:]]/}" || ! -d "$LOCAL_CANDIDATE_DIR" ]]; then
@@ -1672,6 +1675,7 @@ load_pending_local_candidate() {
     # Compatibilidade com o formato antigo candidates/*/active.json.
     legacy_active="$(find "$CANDIDATE_ROOT" -mindepth 2 -maxdepth 2 -type f -name active.json 2>/dev/null | grep -v '/queue/' | sort | head -n 1 || true)"
     if [[ -n "${legacy_active//[[:space:]]/}" ]]; then
+      resuming_active=1
       LOCAL_CANDIDATE_PENDING_FILE="$legacy_active"
       LOCAL_CANDIDATE_DIR="$(dirname "$legacy_active")"
       logger -t "$LOG_TAG" "Retomando candidato local ativo legado: $(basename "$LOCAL_CANDIDATE_DIR")"
@@ -1737,6 +1741,8 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')" "candidate-corrupt-$(basename "$LOCAL_CANDID
   LOCAL_CANDIDATE_ZIP_NAME="$(json_field_from_file "$manifest" zip_name 2>/dev/null || true)"
   LOCAL_CANDIDATE_ZIP_SHA256="$(json_field_from_file "$manifest" zip_sha256 2>/dev/null || true)"
   LOCAL_CANDIDATE_SOURCE_AUTHOR_ID="$(json_field_from_file "$manifest" discord_status.source_author_id 2>/dev/null || true)"
+  LOCAL_CANDIDATE_SCHEMA_VERSION="$(json_field_from_file "$manifest" schema_version 2>/dev/null || true)"
+  [[ "$LOCAL_CANDIDATE_SCHEMA_VERSION" =~ ^[0-9]+$ ]] || LOCAL_CANDIDATE_SCHEMA_VERSION=2
   LOCAL_CANDIDATE_FILES_DIR="$LOCAL_CANDIDATE_DIR/files"
   LOCAL_CANDIDATE_PATCH_FILE="$LOCAL_CANDIDATE_DIR/patch.diff"
   LOCAL_CANDIDATE_USE_PATCH=0
@@ -1746,27 +1752,35 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')" "candidate-corrupt-$(basename "$LOCAL_CANDID
   [[ -n "${LOCAL_CANDIDATE_DISPLAY_ID//[[:space:]]/}" ]] || LOCAL_CANDIDATE_DISPLAY_ID="$LOCAL_CANDIDATE_ID"
   [[ -n "${LOCAL_CANDIDATE_COMMIT_MESSAGE//[[:space:]]/}" ]] || LOCAL_CANDIDATE_COMMIT_MESSAGE="update: aplicar $LOCAL_CANDIDATE_DISPLAY_ID"
   if [[ -f "$LOCAL_CANDIDATE_PENDING_FILE" ]]; then
-    LOCAL_CANDIDATE_ATTEMPT="$(python3 - "$LOCAL_CANDIDATE_PENDING_FILE" <<'PYATTEMPT' 2>/dev/null || echo 1
+    LOCAL_CANDIDATE_ATTEMPT="$(RESUMING_ACTIVE="$resuming_active" python3 - "$LOCAL_CANDIDATE_PENDING_FILE" <<'PYATTEMPT' 2>/dev/null || echo 1
 import datetime, json, os, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 try:
     data = json.loads(path.read_text(encoding='utf-8'))
 except Exception:
     data = {}
-attempt = int(data.get('attempt') or 0) + 1
+resuming = os.environ.get('RESUMING_ACTIVE') == '1'
+previous_attempt = int(data.get('attempt') or 0)
+attempt = max(1, previous_attempt) if resuming else previous_attempt + 1
+resume_count = int(data.get('resume_count') or 0) + (1 if resuming else 0)
 data.update({
     'state': 'active',
     'attempt': attempt,
+    'resume_count': resume_count,
     'started_at': data.get('started_at') or datetime.datetime.now(datetime.timezone.utc).isoformat(),
     'heartbeat_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
     'last_error': None,
 })
+if resuming:
+    data['resumed_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 tmp = path.with_name('.' + path.name + '.tmp')
 tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
 os.replace(tmp, path)
 print(attempt)
 PYATTEMPT
 )"
+    LOCAL_CANDIDATE_RESUME_COUNT="$(json_field_from_file "$LOCAL_CANDIDATE_PENDING_FILE" resume_count 2>/dev/null || true)"
+    [[ "$LOCAL_CANDIDATE_RESUME_COUNT" =~ ^[0-9]+$ ]] || LOCAL_CANDIDATE_RESUME_COUNT=0
   fi
 
   CHANGED_FILES_RAW="$(python3 - "$manifest" <<'PYFILES'
@@ -3593,35 +3607,95 @@ try:
 except Exception as exc:
     raise SystemExit(f'manifesto do candidato não pôde ser lido: {type(exc).__name__}: {exc}')
 
-for raw in data.get('changed_files') or []:
-    rel = pathlib.PurePosixPath(str(raw))
+def normalize_rel(raw):
+    rel = pathlib.PurePosixPath(str(raw).replace('\\', '/'))
     if rel.is_absolute() or '..' in rel.parts:
         raise SystemExit(f'caminho inválido no candidato: {raw}')
-    src = files_dir.joinpath(*rel.parts)
+    if not rel.parts:
+        raise SystemExit(f'caminho vazio no candidato: {raw}')
+    return rel
+
+def resolve_inside(rel, *, label):
     dst = repo.joinpath(*rel.parts)
     try:
         resolved_dst = dst.resolve(strict=False)
     except Exception as exc:
-        raise SystemExit(f'destino não pôde ser resolvido: {raw}: {type(exc).__name__}')
+        raise SystemExit(f'{label} não pôde ser resolvido: {rel.as_posix()}: {type(exc).__name__}')
     if resolved_dst != repo and repo not in resolved_dst.parents:
-        raise SystemExit(f'destino resolve para fora do repositório: {raw}')
+        raise SystemExit(f'{label} resolve para fora do repositório: {rel.as_posix()}')
+    return dst
+
+def writable_parent(dst, raw):
+    parent = dst.parent
+    while parent != repo and not parent.exists():
+        parent = parent.parent
+    if not parent.exists():
+        parent = repo
+    if not os.access(parent, os.W_OK | os.X_OK):
+        raise SystemExit(f'diretório pai não permite criar/alterar como ubuntu: {raw} (parent={parent})')
+
+def validate_payload(raw):
+    rel = normalize_rel(raw)
+    src = files_dir.joinpath(*rel.parts)
+    dst = resolve_inside(rel, label='destino')
     if not src.is_file() or not os.access(src, os.R_OK):
         raise SystemExit(f'arquivo do candidato não é legível como ubuntu: {raw}')
-
-    # A cópia agora é feita pelo próprio usuário ubuntu. Valide antes de gastar
-    # tempo em testes/build se ele conseguirá substituir/criar o destino.
+    if dst.is_symlink():
+        raise SystemExit(f'destino é symlink e não pode ser sobrescrito: {raw}')
     if dst.exists() or dst.is_symlink():
         if not os.access(dst, os.W_OK):
             raise SystemExit(f'destino não é gravável como ubuntu: {raw}')
-        parent = dst.parent
     else:
-        parent = dst.parent
-        while parent != repo and not parent.exists():
-            parent = parent.parent
-        if not parent.exists():
-            parent = repo
-    if not os.access(parent, os.W_OK | os.X_OK):
-        raise SystemExit(f'diretório pai não permite criar/alterar como ubuntu: {raw} (parent={parent})')
+        writable_parent(dst, raw)
+
+try:
+    schema_version = int(data.get('schema_version') or 2)
+except (TypeError, ValueError):
+    raise SystemExit('schema_version inválido no candidato')
+
+if schema_version >= 3:
+    operations = data.get('operations') or []
+    if not isinstance(operations, list) or not operations:
+        raise SystemExit('manifesto v3 não contém operations válidas')
+    for item in operations:
+        if not isinstance(item, dict):
+            raise SystemExit('operação declarativa inválida no candidato')
+        op = str(item.get('op') or '').strip().lower()
+        if op in {'add', 'update'}:
+            validate_payload(item.get('path'))
+        elif op == 'delete':
+            rel = normalize_rel(item.get('path'))
+            dst = resolve_inside(rel, label='alvo de delete')
+            if dst.is_symlink():
+                raise SystemExit(f'delete não aceita symlink: {rel.as_posix()}')
+            # Em retomada o git rm pode já ter sido executado. A ausência será
+            # validada contra o index em apply_local_candidate_operations().
+            if dst.exists() and not dst.is_file():
+                raise SystemExit(f'delete exige arquivo regular: {rel.as_posix()}')
+            if dst.exists() and not os.access(dst.parent, os.W_OK | os.X_OK):
+                raise SystemExit(f'diretório pai não permite delete como ubuntu: {rel.as_posix()}')
+        elif op == 'move':
+            source_rel = normalize_rel(item.get('from'))
+            target_rel = normalize_rel(item.get('to'))
+            source = resolve_inside(source_rel, label='origem de move')
+            target = resolve_inside(target_rel, label='destino de move')
+            if source.is_symlink() or target.is_symlink():
+                raise SystemExit(f'move não aceita symlink: {source_rel.as_posix()} -> {target_rel.as_posix()}')
+            if source.exists() and not source.is_file():
+                raise SystemExit(f'move exige arquivo regular: {source_rel.as_posix()}')
+            if source.exists() and target.exists():
+                raise SystemExit(f'destino de move já existe: {target_rel.as_posix()}')
+            # source ausente + target presente pode ser uma retomada após git mv.
+            # O apply valida o index/hash antes de aceitar esse estado.
+            if source.exists() and not os.access(source.parent, os.W_OK | os.X_OK):
+                raise SystemExit(f'diretório pai não permite mover origem como ubuntu: {source_rel.as_posix()}')
+            if not target.exists():
+                writable_parent(target, target_rel.as_posix())
+        else:
+            raise SystemExit(f'operação declarativa desconhecida: {op or "<vazia>"}')
+else:
+    for raw in data.get('changed_files') or []:
+        validate_payload(raw)
 
 print('candidate-permissions-ok')
 PYPREFLIGHTPERM
@@ -3669,6 +3743,122 @@ apply_local_candidate_patch_diff() {
   return 1
 }
 
+apply_local_candidate_operations() {
+  (( LOCAL_CANDIDATE_SCHEMA_VERSION >= 3 )) || return 0
+  local manifest="$LOCAL_CANDIDATE_DIR/manifest.json"
+  local op first second
+
+  while IFS=$'\t' read -r op first second; do
+    [[ -n "$op" ]] || continue
+    case "$op" in
+      delete)
+        if [[ -L "$REPO_DIR/$first" ]]; then
+          LAST_ERROR_STDERR="delete não aceita symlink: $first"
+          LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
+          return 1
+        fi
+        if [[ -f "$REPO_DIR/$first" ]]; then
+          if ! repo_git ls-files --error-unmatch -- "$first" >/dev/null 2>&1; then
+            LAST_ERROR_STDERR="delete exige arquivo rastreado pelo Git: $first"
+            LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
+            return 1
+          fi
+          if ! repo_git rm -f -- "$first"; then
+            LAST_ERROR_STDERR="git rm falhou para operação delete: $first"
+            LAST_ERROR_CODE="CANDIDATE_OPERATION_APPLY_FAILED"
+            return 1
+          fi
+        elif repo_git diff --cached --name-only --no-renames --diff-filter=D -- "$first" | grep -Fqx -- "$first"; then
+          : # retomada: deleção já staged
+        elif repo_git ls-files --error-unmatch -- "$first" >/dev/null 2>&1; then
+          # Retomada após remoção do worktree, antes do stage.
+          if ! repo_git add -A -- "$first"; then
+            LAST_ERROR_STDERR="não foi possível retomar delete pendente: $first"
+            LAST_ERROR_CODE="CANDIDATE_OPERATION_APPLY_FAILED"
+            return 1
+          fi
+        else
+          LAST_ERROR_STDERR="delete não encontrou arquivo rastreado nem deleção staged: $first"
+          LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
+          return 1
+        fi
+        ;;
+      move)
+        if [[ -L "$REPO_DIR/$first" || -L "$REPO_DIR/$second" ]]; then
+          LAST_ERROR_STDERR="move não aceita symlink: $first -> $second"
+          LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
+          return 1
+        fi
+        if [[ -f "$REPO_DIR/$first" && ! -e "$REPO_DIR/$second" ]]; then
+          if ! repo_git ls-files --error-unmatch -- "$first" >/dev/null 2>&1; then
+            LAST_ERROR_STDERR="move exige origem rastreada pelo Git: $first"
+            LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
+            return 1
+          fi
+          sudo -u ubuntu -H mkdir -p -- "$REPO_DIR/$(dirname "$second")"
+          if ! repo_git mv -- "$first" "$second"; then
+            LAST_ERROR_STDERR="git mv falhou: $first -> $second"
+            LAST_ERROR_CODE="CANDIDATE_OPERATION_APPLY_FAILED"
+            return 1
+          fi
+        elif [[ ! -e "$REPO_DIR/$first" && -f "$REPO_DIR/$second" ]]; then
+          if repo_git diff --cached --name-only --no-renames --diff-filter=D -- "$first" | grep -Fqx -- "$first" \
+            && repo_git diff --cached --name-only --no-renames --diff-filter=A -- "$second" | grep -Fqx -- "$second"; then
+            : # retomada: git mv já staged
+          elif repo_git ls-files --error-unmatch -- "$first" >/dev/null 2>&1; then
+            local source_blob target_blob
+            source_blob="$(repo_git rev-parse "HEAD:$first" 2>/dev/null || true)"
+            target_blob="$(repo_git hash-object "$REPO_DIR/$second" 2>/dev/null || true)"
+            if [[ -z "$source_blob" || "$source_blob" != "$target_blob" ]]; then
+              LAST_ERROR_STDERR="move parcial não corresponde ao blob original: $first -> $second"
+              LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
+              return 1
+            fi
+            repo_git add -A -- "$first" "$second" || {
+              LAST_ERROR_STDERR="não foi possível retomar move pendente: $first -> $second"
+              LAST_ERROR_CODE="CANDIDATE_OPERATION_APPLY_FAILED"
+              return 1
+            }
+          else
+            LAST_ERROR_STDERR="move não corresponde a estado staged/rastreado: $first -> $second"
+            LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
+            return 1
+          fi
+        elif [[ -e "$REPO_DIR/$first" && -e "$REPO_DIR/$second" ]]; then
+          LAST_ERROR_STDERR="destino de move já existe: $second"
+          LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
+          return 1
+        else
+          LAST_ERROR_STDERR="move não encontrou origem nem destino válido: $first -> $second"
+          LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
+          return 1
+        fi
+        ;;
+      add|update)
+        # Conteúdo é copiado em copy_local_candidate_files().
+        ;;
+      *)
+        LAST_ERROR_STDERR="operação declarativa desconhecida no manifesto: $op"
+        LAST_ERROR_CODE="CANDIDATE_OPERATION_INVALID"
+        return 1
+        ;;
+    esac
+  done < <(python3 - "$manifest" <<'PYOPS'
+import json, pathlib, sys
+data = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+for item in data.get('operations') or []:
+    if not isinstance(item, dict):
+        continue
+    op = str(item.get('op') or '').strip().lower()
+    if op == 'move':
+        print(f"move\t{item.get('from', '')}\t{item.get('to', '')}")
+    else:
+        print(f"{op}\t{item.get('path', '')}\t")
+PYOPS
+)
+  return 0
+}
+
 copy_local_candidate_files() {
   [[ -d "$LOCAL_CANDIDATE_FILES_DIR" ]] || return 1
   sudo -u ubuntu -H env MANIFEST_PATH="$LOCAL_CANDIDATE_DIR/manifest.json" REPO_DIR="$REPO_DIR" FILES_DIR="$LOCAL_CANDIDATE_FILES_DIR" python3 - <<'PYCOPY'
@@ -3676,7 +3866,19 @@ import json, os, pathlib, shutil
 repo = pathlib.Path(os.environ['REPO_DIR']).resolve()
 files_dir = pathlib.Path(os.environ['FILES_DIR']).resolve()
 data = json.loads(pathlib.Path(os.environ['MANIFEST_PATH']).read_text(encoding='utf-8'))
-for raw in data.get('changed_files') or []:
+try:
+    schema_version = int(data.get('schema_version') or 2)
+except (TypeError, ValueError):
+    schema_version = 2
+if schema_version >= 3:
+    raw_paths = [
+        item.get('path')
+        for item in (data.get('operations') or [])
+        if isinstance(item, dict) and str(item.get('op') or '').strip().lower() in {'add', 'update'}
+    ]
+else:
+    raw_paths = data.get('changed_files') or []
+for raw in raw_paths:
     rel = pathlib.PurePosixPath(str(raw))
     if rel.is_absolute() or '..' in rel.parts:
         raise SystemExit(f'caminho inválido no candidato: {raw}')
@@ -3873,6 +4075,16 @@ prepare_local_candidate_update() {
     reject_local_candidate_safely       "Atualização arquivada"       "O pacote excedeu o limite de tentativas automáticas e não foi aplicado."       "tentativa ${LOCAL_CANDIDATE_ATTEMPT}/${max_attempts}; reenvie o patch após revisar a falha anterior"
   fi
 
+  local max_resumes="${DISCORD_AUTO_UPDATE_MAX_RESUMES:-5}"
+  [[ "$max_resumes" =~ ^[0-9]+$ ]] || max_resumes=5
+  (( max_resumes < 1 )) && max_resumes=1
+  if [[ "${LOCAL_CANDIDATE_RESUME_COUNT:-0}" =~ ^[0-9]+$ ]] && (( LOCAL_CANDIDATE_RESUME_COUNT > max_resumes )); then
+    reject_local_candidate_safely \
+      "Atualização arquivada" \
+      "O candidato foi interrompido vezes demais e não será retomado automaticamente." \
+      "retomadas ${LOCAL_CANDIDATE_RESUME_COUNT}/${max_resumes}; revise a causa das interrupções antes de reenviar"
+  fi
+
   STAGE="validação de integridade do candidato"
   if ! verify_local_candidate_integrity; then
     reject_local_candidate_safely \
@@ -3995,12 +4207,18 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
       exit 0
     fi
   else
+    if ! apply_local_candidate_operations; then
+      reject_local_candidate_safely \
+        "Atualização bloqueada" \
+        "Uma operação declarativa do candidato não pôde ser aplicada com segurança. A VPS foi restaurada e o item foi arquivado." \
+        "${LAST_ERROR_STDERR:-falha em operação declarativa}"
+    fi
     copy_local_candidate_files
     # A primeira migração para dashboard/ é aplicada por um updater legado, que
     # ainda precisa das pontes activity durante o próprio build. A partir da
     # execução seguinte, este updater já usa dashboard/ diretamente e pode
     # remover as pontes com segurança, preservando .env e stageando as deleções.
-    if [[ -f "$REPO_DIR/scripts/migrate-dashboard-layout.sh" ]]; then
+    if (( LOCAL_CANDIDATE_SCHEMA_VERSION < 3 )) && [[ -f "$REPO_DIR/scripts/migrate-dashboard-layout.sh" ]]; then
       sudo -u ubuntu -H env REPO_DIR="$REPO_DIR" bash "$REPO_DIR/scripts/migrate-dashboard-layout.sh" --apply --stage
     fi
     git_add_changed_files_or_reject "git add do candidato local"

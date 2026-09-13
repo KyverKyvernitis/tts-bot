@@ -152,13 +152,17 @@ from webserver import run_webserver, set_health_provider, set_update_action_prov
 from music_system import AudioRouter
 from utility.interaction_safety import is_unknown_interaction, safe_send_interaction_message
 from utility.update_security import (
+    UPDATE_CONTROL_MANIFEST_NAME,
     UpdateSecurityError,
     ZipLimits,
     build_file_integrity,
     canonical_path_key,
     inspect_zip_archive,
     is_forbidden_update_path,
+    normalize_update_operations,
     sha256_file,
+    update_operation_paths,
+    update_payload_paths,
 )
 from utility.application_bio import ApplicationBioService
 from utility.application_presence import ApplicationPresenceService
@@ -1778,7 +1782,7 @@ class BotLocal(commands.Bot):
         return clone_dir
 
     def _git_diff_numstat_sync(self, repo_dir: Path, env: dict[str, str]) -> dict[str, object]:
-        result = self._run_cmd(["git", "diff", "--cached", "--numstat"], repo_dir, env=env)
+        result = self._run_cmd(["git", "diff", "--cached", "--numstat", "--no-renames"], repo_dir, env=env)
         if result.returncode != 0:
             err = (result.stderr or result.stdout or "").strip()
             raise RuntimeError(f"Falha ao calcular diff de linhas. {err}")
@@ -1813,6 +1817,7 @@ class BotLocal(commands.Bot):
         branch_name: str,
         base_commit: str | None,
         changed_files: list[str],
+        operations: list[dict[str, str]],
         diff_stats: dict[str, object],
         extracted_files: list[tuple[Path, Path]],
         zip_name: str,
@@ -1836,10 +1841,14 @@ class BotLocal(commands.Bot):
 
         try:
             written_files: list[str] = []
-            expected_changed = set(changed_files)
+            normalized_operations = normalize_update_operations(operations)
+            expected_changed = set(update_operation_paths(normalized_operations))
+            expected_payload = set(update_payload_paths(normalized_operations))
+            if set(changed_files) != expected_changed:
+                raise RuntimeError("Operações do candidato não correspondem ao diff staged.")
             for extracted_path, rel_path in extracted_files:
                 rel_posix = rel_path.as_posix()
-                if rel_posix not in expected_changed:
+                if rel_posix not in expected_payload:
                     continue
                 if self._zip_update_is_forbidden_path(rel_path):
                     raise RuntimeError(f"Caminho protegido não pode ser alterado: {rel_posix}")
@@ -1848,10 +1857,8 @@ class BotLocal(commands.Bot):
                 shutil.copy2(extracted_path, target)
                 written_files.append(rel_posix)
 
-            if not written_files:
-                raise RuntimeError("O candidato local não trouxe nenhum arquivo alterado.")
-            if set(written_files) != expected_changed:
-                missing = sorted(expected_changed - set(written_files))
+            if set(written_files) != expected_payload:
+                missing = sorted(expected_payload - set(written_files))
                 raise RuntimeError("Candidato incompleto; arquivo(s) ausente(s): " + ", ".join(missing[:5]))
 
             patch_path = candidate_dir / "patch.diff"
@@ -1895,7 +1902,7 @@ class BotLocal(commands.Bot):
                 )
 
             manifest: dict[str, object] = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "id": candidate_id,
                 "display_id": display_id,
                 "created_at": created_at.isoformat(),
@@ -1907,7 +1914,8 @@ class BotLocal(commands.Bot):
                 "zip_sha256": str(zip_inspection.get("sha256") or ""),
                 "zip_stats": zip_inspection,
                 "commit_message": f"update: aplicar {display_id}",
-                "changed_files": written_files,
+                "changed_files": changed_files,
+                "operations": normalized_operations,
                 "diff_stats": diff_stats,
                 "file_integrity": file_integrity,
                 "patch_sha256": sha256_file(patch_path) if patch_path.is_file() else "",
@@ -2137,10 +2145,12 @@ class BotLocal(commands.Bot):
         extract_dir: Path,
         repo_name_hint: str,
         branch_name: str,
-    ) -> tuple[list[tuple[Path, Path]], dict[str, object]]:
+    ) -> tuple[list[tuple[Path, Path]], dict[str, object], list[dict[str, str]]]:
         limits = self._zip_update_limits()
         inspection = inspect_zip_archive(zip_path, limits)
         accepted: list[tuple[Path, Path]] = []
+        control_operations: list[dict[str, str]] = []
+        control_seen = False
         mapped_entries: dict[str, str] = {}
         mapped_files: set[str] = set()
         mapped_dirs: set[str] = set()
@@ -2173,6 +2183,35 @@ class BotLocal(commands.Bot):
                     raise RuntimeError(f"Caminho inválido no ZIP: {info.filename}")
 
                 target_rel = Path(*normalized.parts)
+                if normalized.as_posix() == UPDATE_CONTROL_MANIFEST_NAME:
+                    if info.is_dir():
+                        raise RuntimeError(f"{UPDATE_CONTROL_MANIFEST_NAME} precisa ser um arquivo JSON")
+                    if control_seen:
+                        raise RuntimeError(f"{UPDATE_CONTROL_MANIFEST_NAME} duplicado no ZIP")
+                    control_seen = True
+                    if int(info.file_size) > 64 * 1024:
+                        raise RuntimeError(f"{UPDATE_CONTROL_MANIFEST_NAME} excede 64 KiB")
+                    try:
+                        payload = json.loads(zf.read(info).decode("utf-8"))
+                    except Exception as exc:
+                        raise RuntimeError(f"{UPDATE_CONTROL_MANIFEST_NAME} inválido: {type(exc).__name__}") from exc
+                    if not isinstance(payload, dict):
+                        raise RuntimeError(f"{UPDATE_CONTROL_MANIFEST_NAME} precisa ser um objeto JSON")
+                    try:
+                        control_schema = int(payload.get("schema_version") or 1)
+                    except (TypeError, ValueError) as exc:
+                        raise RuntimeError(f"schema_version inválido em {UPDATE_CONTROL_MANIFEST_NAME}") from exc
+                    if control_schema != 1:
+                        raise RuntimeError(f"schema_version não suportado em {UPDATE_CONTROL_MANIFEST_NAME}: {control_schema}")
+                    try:
+                        control_operations = normalize_update_operations(
+                            payload.get("operations"),
+                            allowed_ops={"delete", "move"},
+                        )
+                    except UpdateSecurityError as exc:
+                        raise RuntimeError(f"operações inválidas em {UPDATE_CONTROL_MANIFEST_NAME}: {exc}") from exc
+                    continue
+
                 if self._zip_update_should_ignore_generated_file(target_rel):
                     continue
                 if self._zip_update_is_forbidden_path(target_rel):
@@ -2221,17 +2260,69 @@ class BotLocal(commands.Bot):
                     raise RuntimeError(f"Tamanho descompactado divergente: {info.filename}")
                 accepted.append((extract_path, target_rel))
 
-        if not accepted:
-            raise RuntimeError("O ZIP não trouxe nenhum arquivo aplicável.")
-        return accepted, inspection.as_dict()
+        if not accepted and not control_operations:
+            raise RuntimeError("O ZIP não trouxe nenhum arquivo ou operação aplicável.")
+        return accepted, inspection.as_dict(), control_operations
 
-    def _apply_patch_to_clone(self, extracted_files: list[tuple[Path, Path]], clone_dir: Path) -> list[str]:
-        changed_files: list[str] = []
+    def _apply_declarative_operations_to_clone(
+        self,
+        operations: list[dict[str, str]],
+        clone_dir: Path,
+        env: dict[str, str],
+    ) -> list[dict[str, str]]:
+        clone_root = clone_dir.resolve()
+        normalized = normalize_update_operations(operations, allowed_ops={"delete", "move"})
+        for item in normalized:
+            op = item["op"]
+            if op == "delete":
+                rel = item["path"]
+                target = clone_dir / rel
+                resolved = target.resolve(strict=False)
+                if resolved != clone_root and clone_root not in resolved.parents:
+                    raise RuntimeError(f"delete resolve para fora do repositório: {rel}")
+                if target.is_symlink() or not target.is_file():
+                    raise RuntimeError(f"delete exige arquivo regular existente: {rel}")
+                tracked = self._run_cmd(["git", "ls-files", "--error-unmatch", "--", rel], clone_dir, env=env)
+                if tracked.returncode != 0:
+                    raise RuntimeError(f"delete exige arquivo rastreado pelo Git: {rel}")
+                result = self._run_cmd(["git", "rm", "-f", "--", rel], clone_dir, env=env)
+                if result.returncode != 0:
+                    err = (result.stderr or result.stdout or "").strip()
+                    raise RuntimeError(f"git rm falhou para {rel}: {err}")
+                continue
+
+            source_rel = item["from"]
+            target_rel = item["to"]
+            source = clone_dir / source_rel
+            target = clone_dir / target_rel
+            source_resolved = source.resolve(strict=False)
+            target_resolved = target.resolve(strict=False)
+            for label, resolved in ((source_rel, source_resolved), (target_rel, target_resolved)):
+                if resolved != clone_root and clone_root not in resolved.parents:
+                    raise RuntimeError(f"move resolve para fora do repositório: {label}")
+            if source.is_symlink() or not source.is_file():
+                raise RuntimeError(f"move exige arquivo regular existente: {source_rel}")
+            if target.exists() or target.is_symlink():
+                raise RuntimeError(f"destino de move já existe: {target_rel}")
+            tracked = self._run_cmd(["git", "ls-files", "--error-unmatch", "--", source_rel], clone_dir, env=env)
+            if tracked.returncode != 0:
+                raise RuntimeError(f"move exige origem rastreada pelo Git: {source_rel}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            result = self._run_cmd(["git", "mv", "--", source_rel, target_rel], clone_dir, env=env)
+            if result.returncode != 0:
+                err = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(f"git mv falhou para {source_rel} -> {target_rel}: {err}")
+        return normalized
+
+    def _apply_patch_to_clone(self, extracted_files: list[tuple[Path, Path]], clone_dir: Path) -> list[dict[str, str]]:
+        operations: list[dict[str, str]] = []
         for extracted_path, rel_path in extracted_files:
             destination = (clone_dir / rel_path).resolve()
             clone_root = clone_dir.resolve()
             if clone_root not in destination.parents and destination != clone_root:
                 raise RuntimeError(f"Arquivo fora do repositório: {rel_path.as_posix()}")
+            if (clone_dir / rel_path).is_symlink():
+                raise RuntimeError(f"Destino é symlink e não pode ser sobrescrito: {rel_path.as_posix()}")
 
             destination.parent.mkdir(parents=True, exist_ok=True)
             before = destination.read_bytes() if destination.exists() else None
@@ -2239,8 +2330,8 @@ class BotLocal(commands.Bot):
             if before == data:
                 continue
             destination.write_bytes(data)
-            changed_files.append(rel_path.as_posix())
-        return changed_files
+            operations.append({"op": "update" if before is not None else "add", "path": rel_path.as_posix()})
+        return operations
 
     def _process_zip_update_sync(
         self,
@@ -2312,7 +2403,7 @@ class BotLocal(commands.Bot):
                     raise RuntimeError("ZIP bloqueado pelo phone-worker: " + "; ".join(str(item) for item in errors[:3]))
                 raise RuntimeError("ZIP bloqueado pelo phone-worker")
 
-            extracted_files, zip_inspection = self._safe_extract_patch(zip_path, extract_dir, repo_name_hint, branch_name)
+            extracted_files, zip_inspection, requested_operations = self._safe_extract_patch(zip_path, extract_dir, repo_name_hint, branch_name)
             elapsed = mark("extract_ms")
             publish_progress("Preparando base de comparação", "Estrutura do ZIP conferida", elapsed)
 
@@ -2320,7 +2411,10 @@ class BotLocal(commands.Bot):
             elapsed = mark("staging_prepare_ms")
             publish_progress("Comparando arquivos", "Base de comparação preparada", elapsed)
 
-            changed_files = self._apply_patch_to_clone(extracted_files, clone_dir)
+            tree_operations = self._apply_declarative_operations_to_clone(requested_operations, clone_dir, env)
+            content_operations = self._apply_patch_to_clone(extracted_files, clone_dir)
+            operations = normalize_update_operations([*tree_operations, *content_operations])
+            changed_files = update_operation_paths(operations)
             elapsed = mark("apply_patch_ms")
             publish_progress("Calculando alterações", "Arquivos comparados", elapsed)
             if not changed_files:
@@ -2337,7 +2431,7 @@ class BotLocal(commands.Bot):
             self._run_cmd(["git", "config", "user.name", "Discord Auto Update"], clone_dir, env=env)
             self._run_cmd(["git", "config", "user.email", "discord-auto-update@local"], clone_dir, env=env)
 
-            add_result = self._run_cmd(["git", "add", "--", *changed_files], clone_dir, env=env)
+            add_result = self._run_cmd(["git", "add", "-A", "--", *changed_files], clone_dir, env=env)
             if add_result.returncode != 0:
                 err = (add_result.stderr or add_result.stdout or "").strip()
                 raise RuntimeError(f"Falha ao preparar arquivos para commit. {err}")
@@ -2364,6 +2458,8 @@ class BotLocal(commands.Bot):
                 raise RuntimeError(f"Falha ao gerar patch de fila. {err}")
             patch_diff_text = patch_result.stdout or ""
             changed_files = [str(item.get("path")) for item in diff_stats.get("entries", []) if item.get("path")] or changed_files
+            if set(changed_files) != set(update_operation_paths(operations)):
+                raise RuntimeError("O diff staged divergiu das operações declaradas no candidato.")
             elapsed = mark("diff_ms")
             publish_progress("Montando candidato seguro", "Alterações calculadas", elapsed)
 
@@ -2374,6 +2470,7 @@ class BotLocal(commands.Bot):
                 branch_name=branch_name,
                 base_commit=base_commit,
                 changed_files=changed_files,
+                operations=operations,
                 diff_stats=diff_stats,
                 extracted_files=extracted_files,
                 zip_name=zip_path.name,

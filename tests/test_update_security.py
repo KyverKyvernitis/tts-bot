@@ -15,7 +15,10 @@ from utility.update_security import (
     inspect_zip_archive,
     is_forbidden_update_path,
     is_safe_env_template_path,
+    normalize_update_operations,
     sha256_file,
+    update_operation_paths,
+    update_payload_paths,
     verify_candidate,
 )
 
@@ -146,6 +149,84 @@ def test_verify_candidate_accepts_untampered_candidate(tmp_path: Path) -> None:
     assert result["ok"] is True
     assert result["files"] == 1
     assert result["display_id"] == "UPD-TEST"
+
+
+def test_manifest_v3_accepts_delete_only_without_payload_files(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate-v3-delete"
+    (candidate / "files").mkdir(parents=True)
+    created = datetime.now(timezone.utc)
+    operations = [{"op": "delete", "path": "cogs/obsolete.py"}]
+    manifest = {
+        "schema_version": 3,
+        "id": "zip-v3-delete",
+        "display_id": "UPD-V3DELETE",
+        "created_at": created.isoformat(),
+        "expires_at": (created + timedelta(hours=1)).isoformat(),
+        "changed_files": update_operation_paths(operations),
+        "operations": operations,
+        "file_integrity": {},
+    }
+    (candidate / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = verify_candidate(candidate)
+    assert result["ok"] is True
+    assert result["files"] == 0
+
+
+def test_manifest_v3_integrity_covers_only_add_update_payloads(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate-v3-mixed"
+    files = candidate / "files"
+    payload = files / "cogs" / "new.py"
+    payload.parent.mkdir(parents=True)
+    payload.write_text("VALUE = 2\n", encoding="utf-8")
+    created = datetime.now(timezone.utc)
+    operations = [
+        {"op": "delete", "path": "cogs/obsolete.py"},
+        {"op": "add", "path": "cogs/new.py"},
+    ]
+    manifest = {
+        "schema_version": 3,
+        "id": "zip-v3-mixed",
+        "created_at": created.isoformat(),
+        "expires_at": (created + timedelta(hours=1)).isoformat(),
+        "changed_files": update_operation_paths(operations),
+        "operations": operations,
+        "file_integrity": build_file_integrity(files, update_payload_paths(operations)),
+    }
+    (candidate / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert verify_candidate(candidate)["files"] == 1
+
+
+def test_manifest_v3_rejects_operations_changed_files_divergence(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate-v3-bad"
+    (candidate / "files").mkdir(parents=True)
+    created = datetime.now(timezone.utc)
+    manifest = {
+        "schema_version": 3,
+        "id": "zip-v3-bad",
+        "created_at": created.isoformat(),
+        "expires_at": (created + timedelta(hours=1)).isoformat(),
+        "changed_files": ["cogs/other.py"],
+        "operations": [{"op": "delete", "path": "cogs/obsolete.py"}],
+        "file_integrity": {},
+    }
+    (candidate / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(UpdateSecurityError, match="changed_files não corresponde"):
+        verify_candidate(candidate)
+
+
+def test_update_operations_reject_conflicts_and_protected_paths() -> None:
+    with pytest.raises(UpdateSecurityError, match="conflitantes"):
+        normalize_update_operations(
+            [
+                {"op": "delete", "path": "cogs/a.py"},
+                {"op": "move", "from": "cogs/a.py", "to": "cogs/b.py"},
+            ]
+        )
+    with pytest.raises(UpdateSecurityError, match="protegido"):
+        normalize_update_operations([{"op": "delete", "path": ".env"}])
+    with pytest.raises(UpdateSecurityError, match="não é permitida"):
+        normalize_update_operations([{"op": "add", "path": "cogs/a.py"}], allowed_ops={"delete", "move"})
 
 
 @pytest.mark.parametrize("target", ["files/cogs/example.py", "patch.diff"])
