@@ -176,6 +176,7 @@ BOT_WARNINGS_STATUS="sem avisos"
 PREFLIGHT_PY_STATUS="não verificado"
 PREFLIGHT_BASH_STATUS="não verificado"
 PREFLIGHT_COG_IMPORT_STATUS="não verificado"
+PREFLIGHT_RUNTIME_STATUS="não verificado"
 UPDATE_HAS_WARNINGS=0
 AUDIO_SERVICES_STATUS="não alterado"
 CLEANUP_STATUS="não alterada"
@@ -3615,7 +3616,7 @@ finalize_rollback_request_success() {
   if (( file_count == 1 )); then altered_label="alterado"; else altered_label="alterados"; fi
   if [[ "$FAST_RELOAD_STATUS" == OK* ]]; then
     apply_mode="recarga controlada de cog"
-  elif (( BOT_CHANGED == 0 )); then
+  elif (( ${BOT_CHANGED:-0} == 0 )); then
     apply_mode="sem reinício do bot"
   else
     apply_mode="reinício completo"
@@ -4044,6 +4045,74 @@ os.replace(tmp, path)
 PYARTIFACTMANIFEST
 }
 
+run_candidate_python_runtime_smoke() {
+  local root="${1:?}"
+  local py smoke timeout command rc
+
+  if (( ${BOT_CHANGED:-0} == 0 )); then
+    PREFLIGHT_RUNTIME_STATUS="não necessário"
+    return 0
+  fi
+
+  # Uma alteração em requirements.txt precisa de um ambiente Python candidato
+  # próprio antes que possamos afirmar que os imports são reproduzíveis. Não
+  # contaminamos a .venv live apenas para validar. Esse caso continua coberto
+  # pelo preflight estático e pela instalação/health pós-promoção até a etapa
+  # dedicada de artefato Python.
+  if (( ${REQUIREMENTS_CHANGED:-0} == 1 )); then
+    PREFLIGHT_RUNTIME_STATUS="adiado: dependências Python alteradas"
+    return 0
+  fi
+
+  py="$REPO_DIR/.venv/bin/python"
+  [[ -x "$py" ]] || py="$(command -v python3 || true)"
+  if [[ -z "$py" ]]; then
+    PREFLIGHT_RUNTIME_STATUS="falhou: Python indisponível"
+    LAST_ERROR_STDERR="$PREFLIGHT_RUNTIME_STATUS"
+    LAST_ERROR_CODE="BOT_RUNTIME_SMOKE_PYTHON_MISSING"
+    return 1
+  fi
+
+  smoke="$root/utility/update_runtime_smoke.py"
+  if [[ ! -f "$smoke" ]]; then
+    PREFLIGHT_RUNTIME_STATUS="falhou: utility/update_runtime_smoke.py ausente"
+    LAST_ERROR_STDERR="$PREFLIGHT_RUNTIME_STATUS"
+    LAST_ERROR_CODE="BOT_RUNTIME_SMOKE_SCRIPT_MISSING"
+    return 1
+  fi
+
+  timeout="${UPDATE_RUNTIME_SMOKE_TIMEOUT_SECONDS:-45}"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=45
+  (( timeout < 5 )) && timeout=5
+  (( timeout > 180 )) && timeout=180
+
+  STAGE="smoke runtime Python do candidato"
+  printf -v command 'cd %q && timeout %qs env PYTHONDONTWRITEBYTECODE=1 UPDATE_RUNTIME_SMOKE=1 PYTHONPATH=%q %q %q --root %q' \
+    "$root" "$timeout" "$root" "$py" "$smoke" "$root"
+
+  if zip_progress_run_as_ubuntu \
+    "Validando runtime Python" \
+    "Importando bot, cogs e comandos sem conectar ao Discord" \
+    "$command"
+  then
+    PREFLIGHT_RUNTIME_STATUS="OK"
+    return 0
+  else
+    rc=$?
+    register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-$command}"
+    if (( rc == 124 )); then
+      LAST_ERROR_CODE="BOT_RUNTIME_SMOKE_TIMEOUT"
+      PREFLIGHT_RUNTIME_STATUS="falhou: timeout (${timeout}s)"
+    else
+      LAST_ERROR_CODE="BOT_RUNTIME_SMOKE_FAILED"
+      PREFLIGHT_RUNTIME_STATUS="falhou"
+    fi
+    [[ -n "${LAST_ERROR_STDERR//[[:space:]]/}" ]] || LAST_ERROR_STDERR="$PREFLIGHT_RUNTIME_STATUS"
+    return "$rc"
+  fi
+
+}
+
 prepare_local_candidate_runtime_artifacts_in_worktree() {
   (( LOCAL_CANDIDATE_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )) || return 0
 
@@ -4087,6 +4156,10 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
     LAST_ERROR_CODE="CANDIDATE_ARTIFACT_DIR_FAILED"
     return 1
   }
+
+  # O smoke Python roda antes de npm ci/build para falhar cedo. Ele é comum ao
+  # caminho ZIP e ao caminho remoto porque ambos chegam aqui ainda no worktree.
+  run_candidate_python_runtime_smoke "$validation_worktree" || return $?
 
   if (( FRONT_CHANGED == 1 )); then
     [[ -d "$front_dir" ]] || {
@@ -7120,6 +7193,7 @@ if (( LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY == 1 )); then
   PREFLIGHT_PY_STATUS="validado na execução anterior"
   PREFLIGHT_BASH_STATUS="validado na execução anterior"
   PREFLIGHT_COG_IMPORT_STATUS="validado na execução anterior"
+  PREFLIGHT_RUNTIME_STATUS="validado na execução anterior"
   if refresh_bot_health_status; then
     BOT_HEALTHCHECK_STATUS="OK"
   else
@@ -7262,10 +7336,15 @@ if [[ -z "${UPDATE_DISPLAY_ID//[[:space:]]/}" ]]; then
     UPDATE_DISPLAY_ID="UPD-$(short_commit "${REMOTE_COMMIT:-$CURRENT_COMMIT}" | tr '[:lower:]' '[:upper:]')"
   fi
 fi
+RUNTIME_CHECK_MARK="✓"
+if [[ "$PREFLIGHT_RUNTIME_STATUS" == adiado:* || "$PREFLIGHT_RUNTIME_STATUS" == falhou:* || "$PREFLIGHT_RUNTIME_STATUS" == "não verificado" ]]; then
+  RUNTIME_CHECK_MARK="•"
+fi
 CHECKS_TEXT="✓ Bot — ${BOT_HEALTHCHECK_STATUS}
 ✓ Python — ${PREFLIGHT_PY_STATUS}
 ✓ Bash — ${PREFLIGHT_BASH_STATUS}
 ✓ Cogs — ${PREFLIGHT_COG_IMPORT_STATUS}
+${RUNTIME_CHECK_MARK} Runtime candidato — ${PREFLIGHT_RUNTIME_STATUS}
 ✓ Comandos — ${APP_COMMAND_SYNC_SUMMARY}"
 TIMINGS_TEXT="${UPDATER_TIMINGS:-sem etapas}, total=${DURATION}"
 BODY="Resumo: $ALERT_SUMMARY
