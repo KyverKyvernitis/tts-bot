@@ -139,6 +139,7 @@ LOCAL_CANDIDATE_PYTHON_ARTIFACT=""
 LOCAL_CANDIDATE_PYTHON_READY=0
 LOCAL_CANDIDATE_ARTIFACT_COMMIT=""
 LOCAL_CANDIDATE_RUNTIME_READY=0
+READY_FAST_PATH_USED=0
 RUNTIME_RELEASE_SNAPSHOT_COMMIT=""
 RUNTIME_RELEASE_SNAPSHOT_ROOT=""
 RUNTIME_RELEASE_SNAPSHOT_READY=0
@@ -2504,7 +2505,40 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')" "$event_id"
   return 0
 }
 
+updater_heavy_maintenance_due() {
+  local interval="${UPDATE_HEAVY_MAINTENANCE_INTERVAL_SECONDS:-3600}"
+  local stamp="${UPDATE_HEAVY_MAINTENANCE_STAMP:-$CANDIDATE_ROOT/.heavy-maintenance.stamp}"
+  local now last=0
+  [[ "$interval" =~ ^[0-9]+$ ]] || interval=3600
+  (( interval >= 60 )) || interval=60
+  now="$(date +%s)"
+  if [[ -f "$stamp" && ! -L "$stamp" ]]; then
+    last="$(stat -c %Y "$stamp" 2>/dev/null || printf '0')"
+  fi
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  (( now - last >= interval ))
+}
+
+mark_updater_heavy_maintenance() {
+  local stamp="${UPDATE_HEAVY_MAINTENANCE_STAMP:-$CANDIDATE_ROOT/.heavy-maintenance.stamp}"
+  local tmp="${stamp}.tmp.$$"
+  install -d -o ubuntu -g ubuntu -m 0775 "$(dirname "$stamp")" 2>/dev/null || true
+  printf '%s\n' "$(date +%s)" > "$tmp" 2>/dev/null || return 0
+  chown ubuntu:ubuntu "$tmp" 2>/dev/null || true
+  chmod 0644 "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$stamp" 2>/dev/null || rm -f -- "$tmp" 2>/dev/null || true
+}
+
 prune_update_artifacts() {
+  # O timer do updater pode rodar a cada minuto. As podas abaixo fazem vários
+  # find/sort e percorrem metadados de caches grandes; executá-las em todo tick
+  # desperdiça I/O mesmo quando não há update. Faça manutenção pesada no máximo
+  # uma vez por hora por padrão. A proteção de espaço continua rodando em todo
+  # ciclo e pode bloquear updates independentemente desta poda.
+  if ! updater_heavy_maintenance_due; then
+    return 0
+  fi
+
   local done_days="${DISCORD_AUTO_UPDATE_DONE_RETENTION_DAYS:-7}"
   local failed_days="${DISCORD_AUTO_UPDATE_FAILED_RETENTION_DAYS:-30}"
   local cancelled_days="${DISCORD_AUTO_UPDATE_CANCELLED_RETENTION_DAYS:-7}"
@@ -2540,6 +2574,7 @@ prune_update_artifacts() {
   find "$UPDATE_INCIDENT_ROOT" -mindepth 1 -maxdepth 1 -type d -empty -delete 2>/dev/null || true
   prune_rejected_remote_commits
   prune_updater_runtime_orphans
+  mark_updater_heavy_maintenance
 }
 
 git_add_changed_files_or_reject() {
@@ -4425,7 +4460,8 @@ prepare_candidate_python_runtime() {
     rm -rf -- "$root" 2>/dev/null || true
     return 1
   fi
-  chown -R ubuntu:ubuntu "$root" 2>/dev/null || true
+  chown ubuntu:ubuntu "$root/python.json" 2>/dev/null || true
+  chmod 0644 "$root/python.json" 2>/dev/null || true
   LOCAL_CANDIDATE_PYTHON_ARTIFACT="$root"
   LOCAL_CANDIDATE_PYTHON_READY=1
   return 0
@@ -4467,7 +4503,8 @@ capture_python_runtime_release_snapshot() {
     rm -rf -- "$root" 2>/dev/null || true
     return 1
   fi
-  chown -R ubuntu:ubuntu "$root" 2>/dev/null || true
+  chown ubuntu:ubuntu "$root/python.json" 2>/dev/null || true
+  chmod 0644 "$root/python.json" 2>/dev/null || true
   logger -t "$LOG_TAG" "runtime Python anterior preservado para rollback: $(short_commit "$commit")" 2>/dev/null || true
   return 0
 }
@@ -4925,7 +4962,6 @@ prune_node_dependency_layers() {
       fi
       count=$((count + 1))
       if (( count > keep )); then
-        chmod -R u+w "$entry" 2>/dev/null || true
         rm -rf -- "$entry" 2>/dev/null || true
       fi
     done < <(find "$group" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-)
@@ -5226,7 +5262,6 @@ prune_typescript_cache() {
       [[ -d "$entry" ]] || continue
       count=$((count + 1))
       if (( count > keep )); then
-        chmod -R u+w "$entry" 2>/dev/null || true
         rm -rf -- "$entry" 2>/dev/null || true
       fi
     done < <(find "$group" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-)
@@ -5304,6 +5339,103 @@ bot_health_profile_for_changed_files() {
   printf 'standard'
 }
 
+reuse_ready_artifacts_for_commit() {
+  local artifact_commit="${1:?}" root reusable_ready=1
+  root="$(local_candidate_artifact_root_for_commit "$artifact_commit")" || return 1
+  [[ -s "$root/ready.json" && ! -L "$root/ready.json" ]] || return 1
+
+  if ! hydrate_local_candidate_runtime_artifacts "$artifact_commit"; then
+    return 1
+  fi
+  if (( FRONT_CHANGED == 1 )) && ! verify_local_candidate_artifact_integrity frontend; then
+    reusable_ready=0
+  fi
+  if (( BACK_CHANGED == 1 )) && ! verify_local_candidate_artifact_integrity backend; then
+    reusable_ready=0
+  fi
+  if (( ${REQUIREMENTS_CHANGED:-0} == 1 )) && ! verify_local_candidate_artifact_integrity python; then
+    reusable_ready=0
+  fi
+  if (( reusable_ready != 1 )); then
+    LOCAL_CANDIDATE_RUNTIME_READY=0
+    LOCAL_CANDIDATE_ARTIFACT_ROOT=""
+    LOCAL_CANDIDATE_ARTIFACT_COMMIT=""
+    LOCAL_CANDIDATE_FRONTEND_ARTIFACT=""
+    LOCAL_CANDIDATE_BACKEND_ARTIFACT=""
+    LOCAL_CANDIDATE_BACKEND_DEP_KEY=""
+    LOCAL_CANDIDATE_BACKEND_DEP_LAYER=""
+    LOCAL_CANDIDATE_PYTHON_ARTIFACT=""
+    LOCAL_CANDIDATE_PYTHON_READY=0
+    return 1
+  fi
+
+  if (( FRONT_CHANGED == 1 )); then
+    FRONT_STATUS="frontend READY reutilizado sem rebuild"
+    FRONT_TEST_PLAN_STATUS="READY reutilizado; testes não repetidos"
+  elif (( ${FRONT_TESTS_CHANGED:-0} == 1 )); then
+    FRONT_STATUS="validação frontend READY reutilizada; runtime não alterado"
+    FRONT_TEST_PLAN_STATUS="READY reutilizado; testes não repetidos"
+  fi
+  if (( BACK_CHANGED == 1 )); then
+    BACK_STATUS="backend READY reutilizado sem rebuild"
+    BACK_TEST_PLAN_STATUS="READY reutilizado; testes não repetidos"
+  elif (( ${BACK_TESTS_CHANGED:-0} == 1 )); then
+    BACK_STATUS="validação backend READY reutilizada; runtime não alterado"
+    BACK_TEST_PLAN_STATUS="READY reutilizado; testes não repetidos"
+  fi
+  if (( ${BOT_CHANGED:-0} == 1 )); then
+    PREFLIGHT_RUNTIME_STATUS="OK; READY reutilizado"
+  fi
+  READY_FAST_PATH_USED=1
+  return 0
+}
+
+local_candidate_ready_commit_from_state() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 1
+  [[ -s "${LOCAL_CANDIDATE_DIR:-}/state.json" && ! -L "${LOCAL_CANDIDATE_DIR:-}/state.json" ]] || return 1
+  CANDIDATE_STATE_FILE="$LOCAL_CANDIDATE_DIR/state.json" python3 - <<'PYLOCALREADYSTATE' 2>/dev/null
+import json, os
+try:
+    with open(os.environ['CANDIDATE_STATE_FILE'], encoding='utf-8') as fh:
+        data = json.load(fh)
+except Exception:
+    raise SystemExit(1)
+if str(data.get('state') or '') != 'ready':
+    raise SystemExit(1)
+commit = str(data.get('commit') or '').strip().lower()
+if not (40 <= len(commit) <= 64 and all(ch in '0123456789abcdef' for ch in commit)):
+    raise SystemExit(1)
+print(commit)
+PYLOCALREADYSTATE
+}
+
+resume_local_ready_before_worktree() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 1
+  local prepared parent body
+  prepared="$(local_candidate_ready_commit_from_state 2>/dev/null || true)"
+  [[ -n "$prepared" ]] || return 1
+  repo_git cat-file -e "${prepared}^{commit}" >/dev/null 2>&1 || return 1
+  parent="$(repo_git rev-parse "${prepared}^" 2>/dev/null || true)"
+  [[ -n "$parent" && "$parent" == "$CURRENT_COMMIT" ]] || return 1
+  body="$(repo_git log -1 --pretty=%B "$prepared" 2>/dev/null || true)"
+  printf '%s\n' "$body" | grep -Fqx "Candidate-ID: $LOCAL_CANDIDATE_ID" || return 1
+
+  if ! load_git_diff_snapshot "$REPO_DIR" --base "$CURRENT_COMMIT" --target "$prepared"; then
+    return 1
+  fi
+  [[ -n "${CHANGED_FILES_RAW//[[:space:]]/}" ]] || return 1
+  classify_changed_files
+
+  LOCAL_CANDIDATE_PREPARED_COMMIT="$prepared"
+  if ! reuse_ready_artifacts_for_commit "$prepared"; then
+    LOCAL_CANDIDATE_PREPARED_COMMIT=""
+    return 1
+  fi
+  write_local_candidate_state "ready" "$prepared"
+  logger -t "$LOG_TAG" "candidato ${LOCAL_CANDIDATE_ID:-desconhecido} retomou READY diretamente de $(short_commit "$prepared") sem recriar worktree" 2>/dev/null || true
+  return 0
+}
+
 prepare_local_candidate_runtime_artifacts_in_worktree() {
   (( LOCAL_CANDIDATE_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )) || return 0
 
@@ -5352,46 +5484,12 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
 
   # READY é imutável e endereçado pelo commit. Em retry/resume, valide os
   # hashes e reutilize-o em vez de repetir npm/test/build/smoke.
-  if [[ -s "$root/ready.json" ]] && hydrate_local_candidate_runtime_artifacts "$artifact_commit"; then
-    local reusable_ready=1
-    if (( FRONT_CHANGED == 1 )) && ! verify_local_candidate_artifact_integrity frontend; then
-      reusable_ready=0
+  if reuse_ready_artifacts_for_commit "$artifact_commit"; then
+    if (( LOCAL_CANDIDATE_MODE == 1 )); then
+      write_local_candidate_state "ready" "$artifact_commit"
     fi
-    if (( BACK_CHANGED == 1 )) && ! verify_local_candidate_artifact_integrity backend; then
-      reusable_ready=0
-    fi
-    if (( ${REQUIREMENTS_CHANGED:-0} == 1 )) && ! verify_local_candidate_artifact_integrity python; then
-      reusable_ready=0
-    fi
-    if (( reusable_ready == 1 )); then
-      if (( FRONT_CHANGED == 1 )); then
-        FRONT_STATUS="frontend READY reutilizado sem rebuild"
-        FRONT_TEST_PLAN_STATUS="READY reutilizado; testes não repetidos"
-      elif (( ${FRONT_TESTS_CHANGED:-0} == 1 )); then
-        FRONT_STATUS="validação frontend READY reutilizada; runtime não alterado"
-        FRONT_TEST_PLAN_STATUS="READY reutilizado; testes não repetidos"
-      fi
-      if (( BACK_CHANGED == 1 )); then
-        BACK_STATUS="backend READY reutilizado sem rebuild"
-        BACK_TEST_PLAN_STATUS="READY reutilizado; testes não repetidos"
-      elif (( ${BACK_TESTS_CHANGED:-0} == 1 )); then
-        BACK_STATUS="validação backend READY reutilizada; runtime não alterado"
-        BACK_TEST_PLAN_STATUS="READY reutilizado; testes não repetidos"
-      fi
-      if (( ${BOT_CHANGED:-0} == 1 )); then
-        PREFLIGHT_RUNTIME_STATUS="OK; READY reutilizado"
-      fi
-      if (( LOCAL_CANDIDATE_MODE == 1 )); then
-        write_local_candidate_state "ready" "$artifact_commit"
-      fi
-      logger -t "$LOG_TAG" "$candidate_label reutilizou READY validado de $(short_commit "$artifact_commit")" 2>/dev/null || true
-      return 0
-    fi
-    LOCAL_CANDIDATE_RUNTIME_READY=0
-    LOCAL_CANDIDATE_ARTIFACT_ROOT=""
-    LOCAL_CANDIDATE_ARTIFACT_COMMIT=""
-    LOCAL_CANDIDATE_FRONTEND_ARTIFACT=""
-    LOCAL_CANDIDATE_BACKEND_ARTIFACT=""
+    logger -t "$LOG_TAG" "$candidate_label reutilizou READY validado de $(short_commit "$artifact_commit")" 2>/dev/null || true
+    return 0
   fi
 
   rm -rf -- "$root" 2>/dev/null || true
@@ -5617,9 +5715,11 @@ $tracked_mutations"
     LAST_ERROR_CODE="CANDIDATE_ARTIFACT_MANIFEST_FAILED"
     return 1
   fi
-  chown -R ubuntu:ubuntu "$root" 2>/dev/null || true
-  find "$root" -type d -exec chmod u+rwx,go+rx {} + 2>/dev/null || true
-  find "$root" -type f -exec chmod u+rw,go+r {} + 2>/dev/null || true
+  # frontend/backend artifacts are created as ubuntu already. Avoid a recursive
+  # chown/chmod over dist trees on every update; only ready.json is emitted by
+  # the privileged coordinator and needs normalization here.
+  chown ubuntu:ubuntu "$root/ready.json" 2>/dev/null || true
+  chmod 0644 "$root/ready.json" 2>/dev/null || true
 
   if ! hydrate_local_candidate_runtime_artifacts "$artifact_commit"; then
     LAST_ERROR_STDERR="artefatos preparados não passaram pela hidratação de READY"
@@ -6212,81 +6312,88 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
   classify_changed_files
 
-  STAGE="criação do worktree isolado"
-  if ! create_local_candidate_worktree; then
-    reject_local_candidate_safely \
-      "Atualização bloqueada" \
-      "Não consegui criar a área isolada para testar este candidato. A árvore live não foi alterada." \
-      "${LAST_ERROR_STDERR:-falha ao criar worktree isolado}"
-  fi
-
-  zip_progress_done_and_publish "ZIP conferido" "Aplicando em área isolada"
-
-  STAGE="aplicação isolada do candidato"
-  if (( LOCAL_CANDIDATE_USE_PATCH == 1 )); then
-    if ! apply_local_candidate_patch_diff; then
-      LAST_ERROR_CODE="CANDIDATE_PATCH_CONFLICT"
-      reject_local_candidate_safely \
-        "Atualização com conflito" \
-        "O patch não pôde ser mesclado na área isolada. A VPS live permaneceu no commit anterior." \
-        "${LAST_ERROR_STDERR:-git apply 3-way falhou}"
-    fi
+  local local_ready_fast_path=0
+  STAGE="retomada READY do candidato"
+  if resume_local_ready_before_worktree; then
+    local_ready_fast_path=1
+    zip_progress_done_and_publish "READY anterior confirmado" "Preservando runtime atual"
   else
-    if ! apply_local_candidate_operations; then
+    STAGE="criação do worktree isolado"
+    if ! create_local_candidate_worktree; then
       reject_local_candidate_safely \
         "Atualização bloqueada" \
-        "Uma operação declarativa não pôde ser aplicada na área isolada. A VPS live não foi alterada." \
-        "${LAST_ERROR_STDERR:-falha em operação declarativa}"
+        "Não consegui criar a área isolada para testar este candidato. A árvore live não foi alterada." \
+        "${LAST_ERROR_STDERR:-falha ao criar worktree isolado}"
     fi
-    if ! copy_local_candidate_files; then
-      LAST_ERROR_CODE="CANDIDATE_COPY_FAILED"
-      LAST_ERROR_STDERR="não foi possível copiar os arquivos do candidato para o worktree isolado"
+
+    zip_progress_done_and_publish "ZIP conferido" "Aplicando em área isolada"
+
+    STAGE="aplicação isolada do candidato"
+    if (( LOCAL_CANDIDATE_USE_PATCH == 1 )); then
+      if ! apply_local_candidate_patch_diff; then
+        LAST_ERROR_CODE="CANDIDATE_PATCH_CONFLICT"
+        reject_local_candidate_safely \
+          "Atualização com conflito" \
+          "O patch não pôde ser mesclado na área isolada. A VPS live permaneceu no commit anterior." \
+          "${LAST_ERROR_STDERR:-git apply 3-way falhou}"
+      fi
+    else
+      if ! apply_local_candidate_operations; then
+        reject_local_candidate_safely \
+          "Atualização bloqueada" \
+          "Uma operação declarativa não pôde ser aplicada na área isolada. A VPS live não foi alterada." \
+          "${LAST_ERROR_STDERR:-falha em operação declarativa}"
+      fi
+      if ! copy_local_candidate_files; then
+        LAST_ERROR_CODE="CANDIDATE_COPY_FAILED"
+        LAST_ERROR_STDERR="não foi possível copiar os arquivos do candidato para o worktree isolado"
+        reject_local_candidate_safely \
+          "Falha ao aplicar atualização" \
+          "Os arquivos não puderam ser preparados na área isolada. A VPS live não foi alterada." \
+          "$LAST_ERROR_STDERR"
+      fi
+      # Compatibilidade exclusiva com candidatos schema v2 antigos. Mesmo esse
+      # hook legado agora roda dentro do worktree, nunca diretamente no checkout
+      # live antes da validação estática.
+      local apply_repo
+      apply_repo="$(candidate_repo_dir)"
+      if (( LOCAL_CANDIDATE_SCHEMA_VERSION < 3 )) && [[ -f "$apply_repo/scripts/migrate-dashboard-layout.sh" ]]; then
+        sudo -u ubuntu -H env REPO_DIR="$apply_repo" bash "$apply_repo/scripts/migrate-dashboard-layout.sh" --apply --stage
+      fi
+      git_add_changed_files_or_reject "git add do candidato isolado"
+    fi
+
+    if ! refresh_changed_files_from_staged_diff; then
+      LAST_ERROR_CODE="CANDIDATE_STAGED_DIFF_FAILED"
       reject_local_candidate_safely \
-        "Falha ao aplicar atualização" \
-        "Os arquivos não puderam ser preparados na área isolada. A VPS live não foi alterada." \
-        "$LAST_ERROR_STDERR"
+        "Falha ao validar atualização" \
+        "Não consegui calcular o diff staged na área isolada. A VPS live não foi alterada." \
+        "${LAST_ERROR_STDERR:-falha ao ler diff staged}"
     fi
-    # Compatibilidade exclusiva com candidatos schema v2 antigos. Mesmo esse
-    # hook legado agora roda dentro do worktree, nunca diretamente no checkout
-    # live antes da validação estática.
-    local apply_repo
-    apply_repo="$(candidate_repo_dir)"
-    if (( LOCAL_CANDIDATE_SCHEMA_VERSION < 3 )) && [[ -f "$apply_repo/scripts/migrate-dashboard-layout.sh" ]]; then
-      sudo -u ubuntu -H env REPO_DIR="$apply_repo" bash "$apply_repo/scripts/migrate-dashboard-layout.sh" --apply --stage
+    if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
+      discard_local_candidate_worktree || true
+      notify_zip_status_message "success" "Nenhuma alteração necessária" "O pacote já corresponde ao estado atual da VPS. Nenhum arquivo foi modificado." || true
+      archive_local_candidate "done"
+      logger -t "$LOG_TAG" "Candidato local não produziu diff no worktree isolado"
+      trigger_updater_if_queue_pending
+      exit 0
     fi
-    git_add_changed_files_or_reject "git add do candidato isolado"
-  fi
 
-  if ! refresh_changed_files_from_staged_diff; then
-    LAST_ERROR_CODE="CANDIDATE_STAGED_DIFF_FAILED"
-    reject_local_candidate_safely \
-      "Falha ao validar atualização" \
-      "Não consegui calcular o diff staged na área isolada. A VPS live não foi alterada." \
-      "${LAST_ERROR_STDERR:-falha ao ler diff staged}"
-  fi
-  if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
-    discard_local_candidate_worktree || true
-    notify_zip_status_message "success" "Nenhuma alteração necessária" "O pacote já corresponde ao estado atual da VPS. Nenhum arquivo foi modificado." || true
-    archive_local_candidate "done"
-    logger -t "$LOG_TAG" "Candidato local não produziu diff no worktree isolado"
-    trigger_updater_if_queue_pending
-    exit 0
-  fi
+    classify_changed_files
+    if ! prepare_local_candidate_commit_in_worktree; then
+      reject_local_candidate_safely \
+        "Atualização rejeitada no staging" \
+        "O candidato falhou antes de tocar a árvore live. Nenhuma promoção foi realizada." \
+        "${LAST_ERROR_STDERR:-preflight/commit isolado falhou}"
+    fi
 
-  classify_changed_files
-  if ! prepare_local_candidate_commit_in_worktree; then
-    reject_local_candidate_safely \
-      "Atualização rejeitada no staging" \
-      "O candidato falhou antes de tocar a árvore live. Nenhuma promoção foi realizada." \
-      "${LAST_ERROR_STDERR:-preflight/commit isolado falhou}"
-  fi
-
-  STAGE="preparação de artefatos no worktree"
-  if ! prepare_local_candidate_runtime_artifacts_in_worktree; then
-    reject_local_candidate_safely \
-      "Atualização rejeitada no build isolado" \
-      "Testes ou builds falharam antes de tocar a árvore live. Nenhuma promoção foi realizada." \
-      "${LAST_ERROR_STDERR:-falha ao preparar artefatos isolados}"
+    STAGE="preparação de artefatos no worktree"
+    if ! prepare_local_candidate_runtime_artifacts_in_worktree; then
+      reject_local_candidate_safely \
+        "Atualização rejeitada no build isolado" \
+        "Testes ou builds falharam antes de tocar a árvore live. Nenhuma promoção foi realizada." \
+        "${LAST_ERROR_STDERR:-falha ao preparar artefatos isolados}"
+    fi
   fi
   mark_update_timing "candidate_apply"
 
@@ -8502,9 +8609,7 @@ PYRELEASEBACKDEPS
     rm -rf -- "$tmp" 2>/dev/null || true
     return 1
   fi
-  chown -R ubuntu:ubuntu "$root" 2>/dev/null || true
-  find "$root" -type d -exec chmod u+rwx,go+rx {} + 2>/dev/null || true
-  find "$root" -type f -exec chmod u+rw,go+r {} + 2>/dev/null || true
+  chmod 0644 "$root/release.json" 2>/dev/null || true
   RUNTIME_RELEASE_SNAPSHOT_ROOT="$root"
   RUNTIME_RELEASE_SNAPSHOT_COMMIT="$commit"
   RUNTIME_RELEASE_SNAPSHOT_READY=1
@@ -9054,19 +9159,31 @@ else
   eval "$(create_direct_update_message "applying" "$(zip_progress_title "Conferindo commit do GitHub")" "$UPDATE_STAGE_EMOJI **Conferindo commit do GitHub**")"
   zip_progress_publish "Conferindo commit do GitHub"
 
-  STAGE="validação do commit remoto em staging"
-  if ! validate_remote_commit_in_staging "$REMOTE_COMMIT"; then
-    reject_remote_commit_without_live_apply "preflight falhou no staging remoto"
-  fi
-  mark_update_timing "remote_preflight"
+  local remote_ready_fast_path=0
+  STAGE="reutilização READY do commit remoto"
+  if reuse_ready_artifacts_for_commit "$REMOTE_COMMIT"; then
+    remote_ready_fast_path=1
+    PREFLIGHT_PY_STATUS="validado no READY anterior"
+    PREFLIGHT_BASH_STATUS="validado no READY anterior"
+    PREFLIGHT_COG_IMPORT_STATUS="validado no READY anterior"
+    logger -t "$LOG_TAG" "commit remoto $(short_commit "$REMOTE_COMMIT") reutilizou READY antes de criar worktree" 2>/dev/null || true
+    mark_update_timing "remote_ready_reuse"
+    zip_progress_done_and_publish "READY anterior confirmado" "Aplicando na VPS"
+  else
+    STAGE="validação do commit remoto em staging"
+    if ! validate_remote_commit_in_staging "$REMOTE_COMMIT"; then
+      reject_remote_commit_without_live_apply "preflight falhou no staging remoto"
+    fi
+    mark_update_timing "remote_preflight"
 
-  STAGE="preparação de artefatos do commit remoto"
-  zip_progress_done_and_publish "Commit conferido" "Validando runtime em isolamento"
-  if ! prepare_local_candidate_runtime_artifacts_in_worktree; then
-    reject_remote_commit_without_live_apply "validação/build isolado falhou antes da promoção: ${LAST_ERROR_CODE:-REMOTE_READY_FAILED}: ${LAST_ERROR_STDERR:-erro desconhecido}"
+    STAGE="preparação de artefatos do commit remoto"
+    zip_progress_done_and_publish "Commit conferido" "Validando runtime em isolamento"
+    if ! prepare_local_candidate_runtime_artifacts_in_worktree; then
+      reject_remote_commit_without_live_apply "validação/build isolado falhou antes da promoção: ${LAST_ERROR_CODE:-REMOTE_READY_FAILED}: ${LAST_ERROR_STDERR:-erro desconhecido}"
+    fi
+    mark_update_timing "remote_ready"
+    zip_progress_done_and_publish "Commit READY em isolamento" "Aplicando na VPS"
   fi
-  mark_update_timing "remote_ready"
-  zip_progress_done_and_publish "Commit READY em isolamento" "Aplicando na VPS"
 
   STAGE="preservação do runtime anterior"
   if ! capture_runtime_release_snapshot "$PREVIOUS_COMMIT"; then
@@ -9256,6 +9373,9 @@ ${RUNTIME_CHECK_MARK} Runtime candidato — ${PREFLIGHT_RUNTIME_STATUS}
 ✓ Comandos — ${APP_COMMAND_SYNC_SUMMARY}"
 TIMINGS_TEXT="${UPDATER_TIMINGS:-sem etapas}, total=${DURATION}"
 CACHE_TEXT="Node ${NODE_DEP_CACHE_HITS:-0} hit/${NODE_DEP_CACHE_MISSES:-0} miss · TypeScript ${TYPESCRIPT_CACHE_HITS:-0} hit/${TYPESCRIPT_CACHE_MISSES:-0} miss"
+if (( ${READY_FAST_PATH_USED:-0} == 1 )); then
+  CACHE_TEXT+=" · READY hit"
+fi
 TEST_PLAN_TEXT="frontend: ${FRONT_TEST_PLAN_STATUS:-não executado} · backend: ${BACK_TEST_PLAN_STATUS:-não executado}"
 BODY="Resumo: $ALERT_SUMMARY
 Identificador: $UPDATE_DISPLAY_ID
