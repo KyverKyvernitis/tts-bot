@@ -4921,6 +4921,176 @@ run_frontend_incremental_typecheck() {
   return 0
 }
 
+backend_typescript_cache_key() {
+  local project_dir="${1:?}" dep_key tsconfig_hash
+  [[ -s "$project_dir/tsconfig.json" && -s "$project_dir/package.json" && -s "$project_dir/package-lock.json" ]] || return 2
+  dep_key="$(node_dependency_cache_key "$project_dir" dev)" || return 1
+  tsconfig_hash="$(sha256sum "$project_dir/tsconfig.json" | awk '{print $1}')"
+  printf '%s\0%s\0%s\0' "backend-emit-v1" "$dep_key" "$tsconfig_hash" \
+    | sha256sum | awk '{print $1}'
+}
+
+backend_typescript_cache_entry() {
+  local key="${1:?}" root
+  root="${TYPESCRIPT_CACHE_ROOT:-${CANDIDATE_ROOT:-${TMPDIR:-/tmp}/tts-bot-typescript-cache}}"
+  [[ "$key" =~ ^[a-f0-9]{64}$ ]] || return 1
+  printf '%s/backend/%s\n' "$root" "$key"
+}
+
+backend_typescript_dist_hash() {
+  local dist_dir="${1:?}"
+  [[ -d "$dist_dir" && ! -L "$dist_dir" ]] || return 1
+  TYPESCRIPT_DIST_DIR="$dist_dir" python3 - <<'PYBACKTSDISTHASH'
+import hashlib, os, pathlib
+root = pathlib.Path(os.environ['TYPESCRIPT_DIST_DIR'])
+h = hashlib.sha256()
+for path in sorted(root.rglob('*'), key=lambda p: p.relative_to(root).as_posix()):
+    rel = path.relative_to(root).as_posix()
+    if path.is_symlink():
+        raise SystemExit(2)
+    if path.is_dir():
+        continue
+    if not path.is_file():
+        raise SystemExit(3)
+    h.update(rel.encode('utf-8'))
+    h.update(b'\0')
+    with path.open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            h.update(chunk)
+    h.update(b'\0')
+print(h.hexdigest())
+PYBACKTSDISTHASH
+}
+
+verify_backend_typescript_cache() {
+  local entry="${1:?}" expected_key="${2:?}" expected_hash actual_hash
+  [[ -d "$entry" && ! -L "$entry" && -s "$entry/tsconfig.tsbuildinfo" && ! -L "$entry/tsconfig.tsbuildinfo" \
+     && -s "$entry/cache.json" && ! -L "$entry/cache.json" && -s "$entry/dist/index.js" && ! -L "$entry/dist" ]] || return 1
+  expected_hash="$(TYPESCRIPT_CACHE_META="$entry/cache.json" TYPESCRIPT_CACHE_KEY="$expected_key" python3 - <<'PYBACKTSCACHEVERIFY' 2>/dev/null
+import json, os, pathlib
+path = pathlib.Path(os.environ['TYPESCRIPT_CACHE_META'])
+data = json.loads(path.read_text(encoding='utf-8'))
+if data.get('state') != 'ready' or data.get('kind') != 'backend-emit':
+    raise SystemExit(1)
+if data.get('key') != os.environ['TYPESCRIPT_CACHE_KEY']:
+    raise SystemExit(1)
+value = str(data.get('dist_sha256') or '')
+if len(value) != 64:
+    raise SystemExit(1)
+print(value)
+PYBACKTSCACHEVERIFY
+)" || return 1
+  actual_hash="$(backend_typescript_dist_hash "$entry/dist")" || return 1
+  [[ "$actual_hash" == "$expected_hash" ]]
+}
+
+write_backend_typescript_cache_manifest() {
+  local entry="${1:?}" key="${2:?}" project_dir="${3:?}" dist_hash="${4:?}" tsconfig_hash
+  tsconfig_hash="$(sha256sum "$project_dir/tsconfig.json" | awk '{print $1}')"
+  TYPESCRIPT_CACHE_META="$entry/cache.json" TYPESCRIPT_CACHE_KEY="$key" TYPESCRIPT_TSCONFIG_HASH="$tsconfig_hash" TYPESCRIPT_DIST_HASH="$dist_hash" python3 - <<'PYBACKTSCACHEWRITE'
+import datetime, json, os, pathlib
+path = pathlib.Path(os.environ['TYPESCRIPT_CACHE_META'])
+payload = {
+    'state': 'ready',
+    'kind': 'backend-emit',
+    'key': os.environ['TYPESCRIPT_CACHE_KEY'],
+    'tsconfig_sha256': os.environ['TYPESCRIPT_TSCONFIG_HASH'],
+    'dist_sha256': os.environ['TYPESCRIPT_DIST_HASH'],
+    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+}
+tmp = path.with_name('.cache.json.tmp')
+tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+os.replace(tmp, path)
+PYBACKTSCACHEWRITE
+}
+
+backend_typescript_cache_can_seed() {
+  # TypeScript não remove automaticamente JS órfão quando um source some.
+  # Nesse caso, force build limpo para que dist não retenha um módulo deletado.
+  if printf '%s\n' "${CHANGED_STATUS_RAW:-}" | grep -Eq '^D[[:space:]]+dashboard/backend/src/.*[.]ts$'; then
+    return 1
+  fi
+  return 0
+}
+
+run_backend_incremental_build() {
+  local project_dir="${1:?}" key entry parent tmp local_cache qdir dist_hash
+  LAST_BACKEND_TYPESCRIPT_CACHE_HIT=0
+  [[ -x "$project_dir/node_modules/.bin/tsc" && -s "$project_dir/tsconfig.json" ]] || return 1
+  key="$(backend_typescript_cache_key "$project_dir")" || return 1
+  entry="$(backend_typescript_cache_entry "$key")" || return 1
+  parent="$(dirname "$entry")"
+  local_cache="$project_dir/.update-tscache-backend"
+  rm -rf -- "$local_cache" 2>/dev/null || true
+  install -d -o ubuntu -g ubuntu -m 0775 "$local_cache" || return 1
+
+  if backend_typescript_cache_can_seed && verify_backend_typescript_cache "$entry" "$key"; then
+    sudo -u ubuntu -H cp -- "$entry/tsconfig.tsbuildinfo" "$local_cache/tsconfig.tsbuildinfo" || return 1
+    rm -rf -- "$project_dir/dist" 2>/dev/null || true
+    if ! sudo -u ubuntu -H cp -a --reflink=auto --no-preserve=ownership -- "$entry/dist" "$project_dir/dist" 2>/dev/null; then
+      sudo -u ubuntu -H cp -a --no-preserve=ownership -- "$entry/dist" "$project_dir/dist" || return 1
+    fi
+    chmod -R u+w "$project_dir/dist" 2>/dev/null || true
+    LAST_BACKEND_TYPESCRIPT_CACHE_HIT=1
+    TYPESCRIPT_CACHE_HITS=$(( ${TYPESCRIPT_CACHE_HITS:-0} + 1 ))
+    touch "$entry/cache.json" 2>/dev/null || true
+    logger -t "$LOG_TAG" "cache TypeScript HIT: backend ${key:0:12}" 2>/dev/null || true
+  else
+    rm -rf -- "$project_dir/dist" 2>/dev/null || true
+    TYPESCRIPT_CACHE_MISSES=$(( ${TYPESCRIPT_CACHE_MISSES:-0} + 1 ))
+    logger -t "$LOG_TAG" "cache TypeScript MISS: backend ${key:0:12}" 2>/dev/null || true
+  fi
+
+  printf -v qdir '%q' "$project_dir"
+  zip_progress_run_as_ubuntu \
+    "Compilando servidor" \
+    "TypeScript incremental do backend" \
+    "cd $qdir && ./node_modules/.bin/tsc -p tsconfig.json --incremental --tsBuildInfoFile .update-tscache-backend/tsconfig.tsbuildinfo && node scripts/copy-command-catalog.mjs" || return $?
+
+  if [[ ! -s "$project_dir/dist/index.js" ]]; then
+    rm -rf -- "$local_cache" 2>/dev/null || true
+    return 1
+  fi
+  # Cache é só otimização. Se o compilador não gerar buildinfo, o artefato já
+  # está correto; apenas não haverá HIT na próxima execução.
+  if [[ ! -s "$local_cache/tsconfig.tsbuildinfo" || -L "$local_cache/tsconfig.tsbuildinfo" ]]; then
+    rm -rf -- "$local_cache" 2>/dev/null || true
+    return 0
+  fi
+
+  dist_hash="$(backend_typescript_dist_hash "$project_dir/dist")" || {
+    rm -rf -- "$local_cache" 2>/dev/null || true
+    return 1
+  }
+  install -d -o ubuntu -g ubuntu -m 0775 "$parent" || return 1
+  tmp="$(mktemp -d "$parent/.${key}.XXXXXX")" || return 1
+  chown ubuntu:ubuntu "$tmp" 2>/dev/null || true
+  if ! sudo -u ubuntu -H cp -- "$local_cache/tsconfig.tsbuildinfo" "$tmp/tsconfig.tsbuildinfo"; then
+    rm -rf -- "$tmp" "$local_cache" 2>/dev/null || true
+    return 1
+  fi
+  if ! sudo -u ubuntu -H cp -a -- "$project_dir/dist" "$tmp/dist"; then
+    rm -rf -- "$tmp" "$local_cache" 2>/dev/null || true
+    return 1
+  fi
+  if ! write_backend_typescript_cache_manifest "$tmp" "$key" "$project_dir" "$dist_hash"; then
+    rm -rf -- "$tmp" "$local_cache" 2>/dev/null || true
+    return 1
+  fi
+  chown -R root:root "$tmp" 2>/dev/null || true
+  chmod -R a-w "$tmp" 2>/dev/null || true
+  if [[ -e "$entry" ]]; then
+    chmod -R u+w "$entry" 2>/dev/null || true
+    rm -rf -- "$entry" 2>/dev/null || true
+  fi
+  if ! mv -- "$tmp" "$entry"; then
+    rm -rf -- "$tmp" "$local_cache" 2>/dev/null || true
+    return 1
+  fi
+  rm -rf -- "$local_cache" 2>/dev/null || true
+  return 0
+}
+
 prune_typescript_cache() {
   local keep="${TYPESCRIPT_CACHE_RETENTION:-4}" root group count entry
   root="${TYPESCRIPT_CACHE_ROOT:-${CANDIDATE_ROOT:-${TMPDIR:-/tmp}/tts-bot-typescript-cache}}"
@@ -5153,26 +5323,25 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
         }
     fi
 
-    STAGE="testes do backend"
-    zip_progress_run_as_ubuntu \
-      "Validando servidor" \
-      "Executando testes no worktree" \
-      "cd \"$back_dir\" && npm test" || {
-        local rc=$?
-        register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm test}"
-        return "$rc"
-      }
+    if (( ${BACK_TESTS_REQUIRED:-1} == 1 )); then
+      STAGE="testes do backend"
+      zip_progress_run_as_ubuntu \
+        "Validando servidor" \
+        "Executando testes no worktree" \
+        "cd \"$back_dir\" && npm test" || {
+          local rc=$?
+          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm test}"
+          return "$rc"
+        }
+    fi
 
     if (( BACK_CHANGED == 1 )); then
       STAGE="build do backend"
-      zip_progress_run_as_ubuntu \
-        "Compilando servidor" \
-        "Gerando artefato isolado" \
-        "cd \"$back_dir\" && npm run build" || {
-          local rc=$?
-          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm run build}"
-          return "$rc"
-        }
+      run_backend_incremental_build "$back_dir" || {
+        local rc=$?
+        register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-tsc incremental backend}"
+        return "$rc"
+      }
 
       if [[ ! -s "$back_dir/dist/index.js" ]]; then
         BACK_STATUS="build isolado do backend não produziu dist/index.js"
@@ -5216,7 +5385,13 @@ os.replace(tmp, path)
 PYBACKARTIFACTDEPS
       chown ubuntu:ubuntu "$back_artifact/deps.json" 2>/dev/null || true
       back_ready=1
-      BACK_STATUS="backend validado e compilado no worktree"
+      if (( ${LAST_BACKEND_TYPESCRIPT_CACHE_HIT:-0} == 1 )); then
+        BACK_STATUS="backend validado e compilado incrementalmente com cache HIT"
+      elif (( ${BACK_TESTS_REQUIRED:-1} == 0 )); then
+        BACK_STATUS="backend recompilado incrementalmente sem testes desnecessários"
+      else
+        BACK_STATUS="backend validado e compilado incrementalmente no worktree"
+      fi
     else
       BACK_STATUS="testes do backend aprovados; runtime não alterado"
     fi
@@ -6030,6 +6205,7 @@ classify_changed_files() {
   BACK_TESTS_CHANGED=0
   FRONT_TESTS_REQUIRED=0
   FRONT_TYPECHECK_REQUIRED=0
+  BACK_TESTS_REQUIRED=0
   BOT_CHANGED=0
   REQUIREMENTS_CHANGED=0
   AUDIO_SYSTEMD_CHANGED=0
@@ -6052,6 +6228,7 @@ classify_changed_files() {
   fi
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^dashboard/backend/tests/'; then
     BACK_TESTS_CHANGED=1
+    BACK_TESTS_REQUIRED=1
   fi
   # Alterações exclusivamente em tests/ precisam validar, mas não mudam o
   # runtime publicado. Todo path desconhecido fora de tests/ continua sendo
@@ -6060,6 +6237,13 @@ classify_changed_files() {
     FRONT_CHANGED=1
   fi
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '^(dashboard/backend|activity/sinuca-server)/' | grep -Ev '^dashboard/backend/tests/' | grep -q .; then
+    BACK_CHANGED=1
+    BACK_TESTS_REQUIRED=1
+  fi
+  # O catálogo compartilhado entra no dist do backend pelo postbuild. Alterá-lo
+  # exige novo artefato, mas não altera TypeScript/runtime e portanto não precisa
+  # repetir a suíte unitária; o build incremental reutiliza o dist anterior.
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^shared/help_catalog\.json$'; then
     BACK_CHANGED=1
   fi
   # Frontend leve: alterações exclusivamente visuais (CSS/index.html) precisam

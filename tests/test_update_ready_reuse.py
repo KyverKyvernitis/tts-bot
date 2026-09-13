@@ -22,6 +22,15 @@ def test_ready_artifact_is_reused_without_repeating_validation_commands(tmp_path
         root.mkdir(parents=True)
         (root / "package.json").write_text('{"name":"fake"}', encoding="utf-8")
         (root / "package-lock.json").write_text('{"lockfileVersion":3}', encoding="utf-8")
+    back_fixture = worktree / "dashboard" / "backend"
+    (back_fixture / "src").mkdir()
+    (back_fixture / "scripts").mkdir()
+    (back_fixture / "src" / "index.ts").write_text("export const ready = true;\n", encoding="utf-8")
+    (back_fixture / "scripts" / "copy-command-catalog.mjs").write_text("// fixture\n", encoding="utf-8")
+    (back_fixture / "tsconfig.json").write_text(
+        '{"compilerOptions":{"outDir":"dist","rootDir":"src"},"include":["src"]}',
+        encoding="utf-8",
+    )
 
     harness = f'''
 set -eu -o pipefail
@@ -84,6 +93,21 @@ mkdir -p dist
 printf '<html>ok</html>' > dist/index.html
 SHVITE
         chmod +x node_modules/.bin/vite
+      else
+        cat > node_modules/.bin/tsc <<'SHTSC'
+#!/bin/sh
+set -eu
+info=''
+prev=''
+for arg in "$@"; do
+  if [ "$prev" = '--tsBuildInfoFile' ]; then info="$arg"; fi
+  prev="$arg"
+done
+mkdir -p dist "$(dirname "$info")"
+printf 'ok' > dist/index.js
+printf '{{"program":"ok"}}' > "$info"
+SHTSC
+        chmod +x node_modules/.bin/tsc
       fi
       ;;
     'test ')

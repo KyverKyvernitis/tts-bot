@@ -22,7 +22,7 @@ def _classify(tmp_path: Path, changed: str) -> dict[str, int]:
 source "{functions}"
 CHANGED_FILES_RAW="$TEST_CHANGED_FILES"
 classify_changed_files
-printf 'FRONT=%s FRONT_TESTS=%s BACK=%s BACK_TESTS=%s FRONT_TESTS_REQUIRED=%s FRONT_TYPECHECK_REQUIRED=%s\n' "$FRONT_CHANGED" "$FRONT_TESTS_CHANGED" "$BACK_CHANGED" "$BACK_TESTS_CHANGED" "$FRONT_TESTS_REQUIRED" "$FRONT_TYPECHECK_REQUIRED"
+printf 'FRONT=%s FRONT_TESTS=%s BACK=%s BACK_TESTS=%s FRONT_TESTS_REQUIRED=%s FRONT_TYPECHECK_REQUIRED=%s BACK_TESTS_REQUIRED=%s\n' "$FRONT_CHANGED" "$FRONT_TESTS_CHANGED" "$BACK_CHANGED" "$BACK_TESTS_CHANGED" "$FRONT_TESTS_REQUIRED" "$FRONT_TYPECHECK_REQUIRED" "$BACK_TESTS_REQUIRED"
 '''
     import os
     env = os.environ.copy()
@@ -44,12 +44,12 @@ printf 'FRONT=%s FRONT_TESTS=%s BACK=%s BACK_TESTS=%s FRONT_TESTS_REQUIRED=%s FR
 
 def test_frontend_test_only_does_not_mark_runtime_for_publish(tmp_path: Path) -> None:
     values = _classify(tmp_path, "dashboard/frontend/tests/app.test.ts")
-    assert values == {"FRONT": 0, "FRONT_TESTS": 1, "BACK": 0, "BACK_TESTS": 0, "FRONT_TESTS_REQUIRED": 1, "FRONT_TYPECHECK_REQUIRED": 0}
+    assert values == {"FRONT": 0, "FRONT_TESTS": 1, "BACK": 0, "BACK_TESTS": 0, "FRONT_TESTS_REQUIRED": 1, "FRONT_TYPECHECK_REQUIRED": 0, "BACK_TESTS_REQUIRED": 0}
 
 
 def test_backend_test_only_does_not_mark_runtime_for_restart(tmp_path: Path) -> None:
     values = _classify(tmp_path, "dashboard/backend/tests/api.test.ts")
-    assert values == {"FRONT": 0, "FRONT_TESTS": 0, "BACK": 0, "BACK_TESTS": 1, "FRONT_TESTS_REQUIRED": 0, "FRONT_TYPECHECK_REQUIRED": 0}
+    assert values == {"FRONT": 0, "FRONT_TESTS": 0, "BACK": 0, "BACK_TESTS": 1, "FRONT_TESTS_REQUIRED": 0, "FRONT_TYPECHECK_REQUIRED": 0, "BACK_TESTS_REQUIRED": 1}
 
 
 def test_source_plus_tests_keeps_runtime_publish_required(tmp_path: Path) -> None:
@@ -58,7 +58,7 @@ def test_source_plus_tests_keeps_runtime_publish_required(tmp_path: Path) -> Non
         "dashboard/frontend/tests/app.test.ts\ndashboard/frontend/src/App.tsx\n"
         "dashboard/backend/tests/api.test.ts\ndashboard/backend/src/index.ts",
     )
-    assert values == {"FRONT": 1, "FRONT_TESTS": 1, "BACK": 1, "BACK_TESTS": 1, "FRONT_TESTS_REQUIRED": 1, "FRONT_TYPECHECK_REQUIRED": 1}
+    assert values == {"FRONT": 1, "FRONT_TESTS": 1, "BACK": 1, "BACK_TESTS": 1, "FRONT_TESTS_REQUIRED": 1, "FRONT_TYPECHECK_REQUIRED": 1, "BACK_TESTS_REQUIRED": 1}
 
 
 def test_unknown_dashboard_path_is_conservatively_runtime_relevant(tmp_path: Path) -> None:
@@ -126,3 +126,25 @@ def test_frontend_build_splits_typecheck_from_vite_bundle() -> None:
     assert 'run_frontend_incremental_typecheck "$front_dir"' in block
     assert './node_modules/.bin/vite build && node scripts/normalize-dist-permissions.mjs' in block
     assert 'cd "$front_dir" && npm run build' not in block
+
+
+def test_shared_help_catalog_rebuilds_backend_without_unit_tests(tmp_path: Path) -> None:
+    values = _classify(tmp_path, "shared/help_catalog.json")
+    assert values["BACK"] == 1
+    assert values["BACK_TESTS"] == 0
+    assert values["BACK_TESTS_REQUIRED"] == 0
+
+
+def test_backend_source_change_requires_unit_tests(tmp_path: Path) -> None:
+    values = _classify(tmp_path, "dashboard/backend/src/index.ts")
+    assert values["BACK"] == 1
+    assert values["BACK_TESTS_REQUIRED"] == 1
+
+
+def test_backend_build_uses_incremental_typescript_in_transactional_pipeline() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    start = source.index("prepare_local_candidate_runtime_artifacts_in_worktree() {")
+    end = source.index("\npromote_local_candidate_worktree_commit() {", start)
+    block = source[start:end]
+    assert 'run_backend_incremental_build "$back_dir"' in block
+    assert 'cd "$back_dir" && npm run build' not in block

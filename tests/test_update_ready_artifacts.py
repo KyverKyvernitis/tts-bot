@@ -41,7 +41,7 @@ def test_isolated_runtime_build_uses_worktree_and_keeps_npm_cache() -> None:
     assert 'cd \\\"$back_dir\\\"' in block
     assert "npm ci" in block
     assert "npm test" in block
-    assert "npm run build" in block
+    assert 'run_backend_incremental_build "$back_dir"' in block
     assert "npm prune --omit=dev" not in block
     assert "BACKEND_LOCKFILE_REQUIRED" in block
     assert "npm cache clean --force" not in block
@@ -235,6 +235,15 @@ def test_prepare_runtime_artifacts_builds_both_sides_before_promotion(tmp_path: 
         root = worktree / "dashboard" / side
         (root / "package.json").write_text('{"name":"fake"}', encoding="utf-8")
         (root / "package-lock.json").write_text('{"lockfileVersion":3}', encoding="utf-8")
+    back_fixture = worktree / "dashboard" / "backend"
+    (back_fixture / "src").mkdir()
+    (back_fixture / "scripts").mkdir()
+    (back_fixture / "src" / "index.ts").write_text("export const ready = true;\n", encoding="utf-8")
+    (back_fixture / "scripts" / "copy-command-catalog.mjs").write_text("// fixture\n", encoding="utf-8")
+    (back_fixture / "tsconfig.json").write_text(
+        '{"compilerOptions":{"outDir":"dist","rootDir":"src"},"include":["src"]}',
+        encoding="utf-8",
+    )
 
     harness = f'''
 set -eu -o pipefail
@@ -289,6 +298,21 @@ mkdir -p dist
 printf '<html>ready</html>' > dist/index.html
 SHVITE
         chmod +x node_modules/.bin/vite
+      else
+        cat > node_modules/.bin/tsc <<'SHTSC'
+#!/bin/sh
+set -eu
+info=''
+prev=''
+for arg in "$@"; do
+  if [ "$prev" = '--tsBuildInfoFile' ]; then info="$arg"; fi
+  prev="$arg"
+done
+mkdir -p dist "$(dirname "$info")"
+printf 'console.log("ready")' > dist/index.js
+printf '{{"program":"ok"}}' > "$info"
+SHTSC
+        chmod +x node_modules/.bin/tsc
       fi
       ;;
     'test ')
