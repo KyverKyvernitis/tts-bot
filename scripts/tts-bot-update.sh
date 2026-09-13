@@ -76,6 +76,8 @@ BACK_PORT="8787"
 BACK_SERVICE="${DASHBOARD_SYSTEMD_SERVICE:-sinuca-activity-server.service}"
 BACK_HEALTH_URL="http://127.0.0.1:${BACK_PORT}/health"
 BOT_HEALTH_URL="http://127.0.0.1:10000/health"
+RUNTIME_RELEASE_ROOT="${TTS_BOT_RUNTIME_RELEASE_ROOT:-$CANDIDATE_ROOT/runtime-releases}"
+RUNTIME_RELEASE_RETENTION="${TTS_BOT_RUNTIME_RELEASE_RETENTION:-3}"
 APP_COMMAND_SYNC_STATUS_FILE="$REPO_DIR/data/app_commands_sync_status.json"
 
 STAGE="inicialização"
@@ -122,6 +124,11 @@ LOCAL_CANDIDATE_FRONTEND_ARTIFACT=""
 LOCAL_CANDIDATE_BACKEND_ARTIFACT=""
 LOCAL_CANDIDATE_ARTIFACT_COMMIT=""
 LOCAL_CANDIDATE_RUNTIME_READY=0
+RUNTIME_RELEASE_SNAPSHOT_COMMIT=""
+RUNTIME_RELEASE_SNAPSHOT_ROOT=""
+RUNTIME_RELEASE_SNAPSHOT_READY=0
+FRONT_RUNTIME_MUTATED=0
+BACK_RUNTIME_MUTATED=0
 REMOTE_CANDIDATE_MODE=0
 REMOTE_STATUS_CHANNEL_ID=""
 REMOTE_STATUS_MESSAGE_ID=""
@@ -4791,6 +4798,14 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
       "${LAST_ERROR_STDERR:-falha ao preparar artefatos isolados}"
   fi
   mark_update_timing "candidate_apply"
+
+  STAGE="preservação do runtime anterior"
+  if ! capture_runtime_release_snapshot "$PREVIOUS_COMMIT"; then
+    reject_local_candidate_safely \
+      "Atualização não promovida" \
+      "O candidato ficou READY, mas o runtime atual não pôde ser preservado para rollback sem rebuild. A árvore live permaneceu no commit anterior." \
+      "${LAST_ERROR_STDERR:-falha ao preservar release runtime anterior}"
+  fi
   zip_progress_done_and_publish "Candidato READY em isolamento" "Promovendo para a VPS"
 
   if ! promote_local_candidate_worktree_commit; then
@@ -6035,6 +6050,7 @@ deploy_frontend() {
     if ! publish_frontend_atomically "$LOCAL_CANDIDATE_FRONTEND_ARTIFACT"; then
       return 1
     fi
+    FRONT_RUNTIME_MUTATED=1
     FRONT_STATUS="frontend publicado a partir do artefato READY do worktree"
     zip_progress_done "Interface publicada"
     return 0
@@ -6084,6 +6100,7 @@ deploy_frontend() {
   if ! publish_frontend_atomically "$FRONT_DIR/dist"; then
     return 1
   fi
+  FRONT_RUNTIME_MUTATED=1
 
   STAGE="limpeza do frontend"
   zip_progress_run_as_ubuntu \
@@ -6198,6 +6215,7 @@ deploy_backend() {
       LAST_ERROR_CODE="BACKEND_PUBLISH_FAILED"
       return 1
     fi
+    BACK_RUNTIME_MUTATED=1
 
     STAGE="reinício do backend"
     if ! systemctl cat "$BACK_SERVICE" >/dev/null 2>&1; then
@@ -6232,6 +6250,10 @@ deploy_backend() {
     return 1
   fi
 
+  # npm ci altera node_modules do runtime live antes mesmo do restart. Se
+  # qualquer etapa falhar a partir daqui, o rollback precisa restaurar a
+  # release preservada em vez de recompilar a versão anterior.
+  BACK_RUNTIME_MUTATED=1
   STAGE="dependências do backend"
   zip_progress_run_as_ubuntu \
     "Preparando servidor" \
@@ -6296,6 +6318,274 @@ deploy_backend() {
 }
 
 
+runtime_release_root_for_commit() {
+  local commit="$(sanitize_commit_ref "${1:-}")"
+  [[ -n "$commit" ]] || return 1
+  printf '%s/%s\n' "$RUNTIME_RELEASE_ROOT" "$commit"
+}
+
+write_runtime_release_manifest() {
+  local root="${1:?}" commit="${2:?}" front_ready="${3:-0}" back_ready="${4:-0}"
+  RELEASE_ROOT="$root" RELEASE_COMMIT="$commit" RELEASE_FRONT_READY="$front_ready" RELEASE_BACK_READY="$back_ready" \
+    python3 - <<'PYRUNTIMERELEASE'
+import datetime, hashlib, json, os, pathlib
+root = pathlib.Path(os.environ['RELEASE_ROOT'])
+
+def tree_hash(path: pathlib.Path) -> str:
+    if not path.exists():
+        return ''
+    digest = hashlib.sha256()
+    base = path.resolve()
+    for item in sorted(path.rglob('*'), key=lambda p: p.as_posix()):
+        rel = item.relative_to(path).as_posix()
+        if item.is_symlink():
+            target = os.readlink(item)
+            if os.path.isabs(target):
+                raise SystemExit(f'release contains absolute symlink: {rel}')
+            resolved = (item.parent / target).resolve(strict=False)
+            try:
+                resolved.relative_to(base)
+            except ValueError:
+                raise SystemExit(f'release symlink escapes root: {rel}')
+            digest.update(b'L\0' + rel.encode() + b'\0' + target.encode() + b'\0')
+            continue
+        if not item.is_file():
+            continue
+        digest.update(b'F\0' + rel.encode() + b'\0')
+        with item.open('rb') as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+payload = {
+    'state': 'ready',
+    'commit': os.environ['RELEASE_COMMIT'],
+    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'frontend': {
+        'ready': os.environ.get('RELEASE_FRONT_READY') == '1',
+        'sha256': tree_hash(root / 'frontend') if os.environ.get('RELEASE_FRONT_READY') == '1' else '',
+    },
+    'backend': {
+        'ready': os.environ.get('RELEASE_BACK_READY') == '1',
+        'sha256': tree_hash(root / 'backend') if os.environ.get('RELEASE_BACK_READY') == '1' else '',
+    },
+}
+path = root / 'release.json'
+tmp = root / '.release.json.tmp'
+tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+os.replace(tmp, path)
+PYRUNTIMERELEASE
+}
+
+verify_runtime_release_component() {
+  local root="${1:?}" kind="${2:?}" ready
+  ready="$root/release.json"
+  [[ -s "$ready" && ! -L "$ready" ]] || return 1
+  RELEASE_READY_FILE="$ready" RELEASE_KIND="$kind" RELEASE_ROOT="$root" python3 - <<'PYVERIFYRUNTIME' >/dev/null 2>&1
+import hashlib, json, os, pathlib
+ready = pathlib.Path(os.environ['RELEASE_READY_FILE'])
+kind = os.environ['RELEASE_KIND']
+root = pathlib.Path(os.environ['RELEASE_ROOT'])
+data = json.loads(ready.read_text(encoding='utf-8'))
+record = data.get(kind) if isinstance(data, dict) else None
+if data.get('state') != 'ready' or not isinstance(record, dict) or not record.get('ready'):
+    raise SystemExit(1)
+path = root / kind
+
+def tree_hash(base: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    resolved_base = base.resolve()
+    for item in sorted(base.rglob('*'), key=lambda p: p.as_posix()):
+        rel = item.relative_to(base).as_posix()
+        if item.is_symlink():
+            target = os.readlink(item)
+            if os.path.isabs(target):
+                raise SystemExit(1)
+            resolved = (item.parent / target).resolve(strict=False)
+            try:
+                resolved.relative_to(resolved_base)
+            except ValueError:
+                raise SystemExit(1)
+            digest.update(b'L\0' + rel.encode() + b'\0' + target.encode() + b'\0')
+            continue
+        if not item.is_file():
+            continue
+        digest.update(b'F\0' + rel.encode() + b'\0')
+        with item.open('rb') as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+if not path.exists() or tree_hash(path) != str(record.get('sha256') or ''):
+    raise SystemExit(1)
+PYVERIFYRUNTIME
+}
+
+capture_runtime_release_snapshot() {
+  local commit="$(sanitize_commit_ref "${1:-$PREVIOUS_COMMIT}")"
+  [[ -n "$commit" ]] || return 1
+  if (( FRONT_CHANGED == 0 && BACK_CHANGED == 0 )); then
+    RUNTIME_RELEASE_SNAPSHOT_READY=1
+    RUNTIME_RELEASE_SNAPSHOT_COMMIT="$commit"
+    return 0
+  fi
+
+  local root tmp front_ready=0 back_ready=0
+  root="$(runtime_release_root_for_commit "$commit")" || return 1
+  if [[ -s "$root/release.json" ]]; then
+    local reusable=1
+    (( FRONT_CHANGED == 0 )) || verify_runtime_release_component "$root" frontend || reusable=0
+    (( BACK_CHANGED == 0 )) || verify_runtime_release_component "$root" backend || reusable=0
+    if (( reusable == 1 )); then
+      RUNTIME_RELEASE_SNAPSHOT_ROOT="$root"
+      RUNTIME_RELEASE_SNAPSHOT_COMMIT="$commit"
+      RUNTIME_RELEASE_SNAPSHOT_READY=1
+      logger -t "$LOG_TAG" "release runtime anterior reutilizado para rollback: $(short_commit "$commit")" 2>/dev/null || true
+      return 0
+    fi
+  fi
+
+  install -d -o ubuntu -g ubuntu -m 0775 "$RUNTIME_RELEASE_ROOT" || return 1
+  tmp="$(mktemp -d "$RUNTIME_RELEASE_ROOT/.${commit}.XXXXXX")" || return 1
+
+  if (( FRONT_CHANGED == 1 )); then
+    if ! frontend_publication_is_healthy; then
+      LAST_ERROR_STDERR="não há publicação frontend saudável para preservar antes da promoção"
+      LAST_ERROR_CODE="RUNTIME_RELEASE_FRONTEND_BASELINE_MISSING"
+      rm -rf -- "$tmp" 2>/dev/null || true
+      return 1
+    fi
+    cp -a -- "$FRONT_PUBLISH_DIR" "$tmp/frontend" || {
+      LAST_ERROR_STDERR="falha ao preservar publicação frontend anterior"
+      LAST_ERROR_CODE="RUNTIME_RELEASE_FRONTEND_SNAPSHOT_FAILED"
+      rm -rf -- "$tmp" 2>/dev/null || true
+      return 1
+    }
+    front_ready=1
+  fi
+
+  if (( BACK_CHANGED == 1 )); then
+    if [[ ! -s "$BACK_DIR/dist/index.js" || ! -d "$BACK_DIR/node_modules" ]]; then
+      LAST_ERROR_STDERR="backend live não possui dist/index.js e node_modules preserváveis antes da promoção"
+      LAST_ERROR_CODE="RUNTIME_RELEASE_BACKEND_BASELINE_MISSING"
+      rm -rf -- "$tmp" 2>/dev/null || true
+      return 1
+    fi
+    install -d -m 0755 "$tmp/backend"
+    cp -a -- "$BACK_DIR/dist" "$tmp/backend/dist" || { rm -rf -- "$tmp" 2>/dev/null || true; return 1; }
+    cp -a -- "$BACK_DIR/node_modules" "$tmp/backend/node_modules" || { rm -rf -- "$tmp" 2>/dev/null || true; return 1; }
+    [[ -f "$BACK_DIR/package.json" ]] && cp -a -- "$BACK_DIR/package.json" "$tmp/backend/package.json"
+    [[ -f "$BACK_DIR/package-lock.json" ]] && cp -a -- "$BACK_DIR/package-lock.json" "$tmp/backend/package-lock.json"
+    back_ready=1
+  fi
+
+  if ! write_runtime_release_manifest "$tmp" "$commit" "$front_ready" "$back_ready"; then
+    LAST_ERROR_STDERR="não foi possível registrar release runtime anterior"
+    LAST_ERROR_CODE="RUNTIME_RELEASE_MANIFEST_FAILED"
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if (( front_ready == 1 )) && ! verify_runtime_release_component "$tmp" frontend; then
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if (( back_ready == 1 )) && ! verify_runtime_release_component "$tmp" backend; then
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+
+  rm -rf -- "$root" 2>/dev/null || true
+  if ! mv -- "$tmp" "$root"; then
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  chown -R ubuntu:ubuntu "$root" 2>/dev/null || true
+  find "$root" -type d -exec chmod u+rwx,go+rx {} + 2>/dev/null || true
+  find "$root" -type f -exec chmod u+rw,go+r {} + 2>/dev/null || true
+  RUNTIME_RELEASE_SNAPSHOT_ROOT="$root"
+  RUNTIME_RELEASE_SNAPSHOT_COMMIT="$commit"
+  RUNTIME_RELEASE_SNAPSHOT_READY=1
+  logger -t "$LOG_TAG" "release runtime anterior preservado para rollback: $(short_commit "$commit") em $root" 2>/dev/null || true
+  return 0
+}
+
+restore_frontend_runtime_release() {
+  local commit="$(sanitize_commit_ref "${1:-$PREVIOUS_COMMIT}")" root
+  root="$(runtime_release_root_for_commit "$commit")" || return 1
+  if ! verify_runtime_release_component "$root" frontend; then
+    FRONT_STATUS="release frontend anterior ausente ou corrompido para $(short_commit "$commit")"
+    LAST_ERROR_STDERR="$FRONT_STATUS"
+    LAST_ERROR_CODE="ROLLBACK_FRONTEND_RELEASE_INVALID"
+    return 1
+  fi
+  if ! publish_frontend_atomically "$root/frontend"; then
+    LAST_ERROR_CODE="ROLLBACK_FRONTEND_RELEASE_PUBLISH_FAILED"
+    return 1
+  fi
+  FRONT_STATUS="frontend restaurado sem rebuild a partir do release $(short_commit "$commit")"
+  return 0
+}
+
+restore_backend_runtime_release() {
+  local commit="$(sanitize_commit_ref "${1:-$PREVIOUS_COMMIT}")" root
+  root="$(runtime_release_root_for_commit "$commit")" || return 1
+  if ! verify_runtime_release_component "$root" backend; then
+    BACK_STATUS="release backend anterior ausente ou corrompido para $(short_commit "$commit")"
+    LAST_ERROR_STDERR="$BACK_STATUS"
+    LAST_ERROR_CODE="ROLLBACK_BACKEND_RELEASE_INVALID"
+    return 1
+  fi
+  if ! install_backend_prebuilt_artifact "$root/backend"; then
+    BACK_STATUS="falha ao restaurar release backend anterior"
+    LAST_ERROR_STDERR="${LAST_ERROR_STDERR:-$BACK_STATUS}"
+    LAST_ERROR_CODE="ROLLBACK_BACKEND_RELEASE_INSTALL_FAILED"
+    return 1
+  fi
+  if ! systemctl cat "$BACK_SERVICE" >/dev/null 2>&1; then
+    BACK_STATUS="serviço systemd ausente durante rollback: $BACK_SERVICE"
+    LAST_ERROR_STDERR="$BACK_STATUS"
+    LAST_ERROR_CODE="ROLLBACK_BACKEND_SERVICE_MISSING"
+    return 1
+  fi
+  systemctl reset-failed "$BACK_SERVICE" >/dev/null 2>&1 || true
+  systemctl restart "$BACK_SERVICE" || return 1
+  sleep 3
+  if ! systemctl is-active --quiet "$BACK_SERVICE"; then
+    BACK_STATUS="backend anterior restaurado, mas serviço não ficou ativo"
+    LAST_ERROR_STDERR="$(journalctl -u "$BACK_SERVICE" -n 30 --no-pager 2>/dev/null | trim_alert_text 1800)"
+    LAST_ERROR_CODE="ROLLBACK_BACKEND_SERVICE_FAILED"
+    return 1
+  fi
+  if ! wait_for_health "$BACK_HEALTH_URL" 8 3; then
+    ACTIVITY_HEALTHCHECK_STATUS="falhou"
+    BACK_STATUS="backend anterior restaurado sem rebuild, mas healthcheck falhou"
+    LAST_ERROR_CODE="ROLLBACK_BACKEND_HEALTH_FAILED"
+    return 1
+  fi
+  ACTIVITY_HEALTHCHECK_STATUS="OK"
+  BACK_STATUS="backend restaurado sem rebuild a partir do release $(short_commit "$commit")"
+  return 0
+}
+
+prune_runtime_releases() {
+  local keep="${RUNTIME_RELEASE_RETENTION:-3}" current count=0 entry
+  [[ "$keep" =~ ^[0-9]+$ ]] || keep=3
+  (( keep >= 1 )) || keep=1
+  [[ -d "$RUNTIME_RELEASE_ROOT" ]] || return 0
+  current="$(repo_git rev-parse HEAD 2>/dev/null || true)"
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    if [[ "$(basename "$entry")" == "$current" ]]; then
+      continue
+    fi
+    count=$((count + 1))
+    if (( count > keep )); then
+      rm -rf -- "$entry" 2>/dev/null || true
+    fi
+  done < <(find "$RUNTIME_RELEASE_ROOT" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-)
+}
+
+
 rollback_after_failure() {
   local exit_code="${1:-1}"
   local failed_command="${2:-desconhecido}"
@@ -6305,11 +6595,10 @@ rollback_after_failure() {
   # causa original por uma mensagem produzida durante a própria restauração.
 
   # Preserve o diagnóstico da falha ORIGINAL antes de iniciar qualquer ação de
-  # rollback. deploy_frontend/deploy_backend durante a restauração podem falhar
-  # também e atualizar LAST_ERROR_STDERR/LAST_ERROR_LOGS; sem este snapshot, o
-  # card acabava mostrando apenas o erro secundário do rollback (por exemplo,
-  # "build do frontend não produziu dist/index.html") e escondia o npm/git que
-  # realmente derrubou o candidato.
+  # rollback. A restauração por release e os healthchecks podem falhar também e
+  # atualizar o contexto de erro; o card final deve continuar apontando para a
+  # causa que derrubou o candidato, nunca para uma falha secundária do rollback.
+  local original_error_code="$LAST_ERROR_CODE"
   local original_error_stderr="$LAST_ERROR_STDERR"
   local original_error_logs="$LAST_ERROR_LOGS"
   local original_error_service_unit="$LAST_ERROR_SERVICE_UNIT"
@@ -6372,24 +6661,39 @@ rollback_after_failure() {
 
   if (( rollback_success == 1 )); then
     if (( FRONT_CHANGED == 1 )); then
-      if deploy_frontend; then
-        rollback_front_status="${FRONT_STATUS:-}"
+      if (( FRONT_RUNTIME_MUTATED == 1 )); then
+        STAGE="rollback frontend por release"
+        if restore_frontend_runtime_release "$PREVIOUS_COMMIT"; then
+          rollback_front_status="${FRONT_STATUS:-}"
+        else
+          rollback_success=0
+          rollback_front_status="falhou: $FRONT_STATUS"
+        fi
       else
-        rollback_success=0
-        rollback_front_status="falhou: $FRONT_STATUS"
+        rollback_front_status="runtime frontend não chegou a ser alterado; nenhum rebuild necessário"
       fi
     else
-      rollback_front_status="não precisou republicar"
+      rollback_front_status="não precisou restaurar"
     fi
 
     if (( BACK_CHANGED == 1 )); then
-      if deploy_backend; then
-        rollback_back_status="${BACK_STATUS:-}"
-        rollback_activity_status="${ACTIVITY_HEALTHCHECK_STATUS:-}"
+      if (( BACK_RUNTIME_MUTATED == 1 )); then
+        STAGE="rollback backend por release"
+        if restore_backend_runtime_release "$PREVIOUS_COMMIT"; then
+          rollback_back_status="${BACK_STATUS:-}"
+          rollback_activity_status="${ACTIVITY_HEALTHCHECK_STATUS:-}"
+        else
+          rollback_success=0
+          rollback_back_status="falhou: $BACK_STATUS"
+          rollback_activity_status="${ACTIVITY_HEALTHCHECK_STATUS:-}"
+        fi
       else
-        rollback_success=0
-        rollback_back_status="falhou: $BACK_STATUS"
-        rollback_activity_status="${ACTIVITY_HEALTHCHECK_STATUS:-}"
+        rollback_back_status="runtime backend não chegou a ser alterado; nenhum rebuild necessário"
+        if wait_for_health "$BACK_HEALTH_URL" 2 2; then
+          rollback_activity_status="OK"
+        else
+          rollback_activity_status="não verificada/indisponível"
+        fi
       fi
     else
       if wait_for_health "$BACK_HEALTH_URL" 2 2; then
@@ -6429,6 +6733,7 @@ rollback_after_failure() {
 
   # O diagnóstico reportado deve continuar sendo o da falha que acionou o
   # rollback, não de uma eventual falha secundária ao restaurar/publicar.
+  LAST_ERROR_CODE="$original_error_code"
   LAST_ERROR_STDERR="$original_error_stderr"
   LAST_ERROR_LOGS="$original_error_logs"
   LAST_ERROR_SERVICE_UNIT="$original_error_service_unit"
@@ -6710,6 +7015,11 @@ else
   mark_update_timing "remote_preflight"
   zip_progress_done_and_publish "Commit conferido" "Aplicando na VPS"
 
+  STAGE="preservação do runtime anterior"
+  if ! capture_runtime_release_snapshot "$PREVIOUS_COMMIT"; then
+    reject_remote_commit_without_live_apply "não foi possível preservar o runtime atual para rollback sem rebuild: ${LAST_ERROR_STDERR:-erro desconhecido}"
+  fi
+
   STAGE="limpeza de artefatos gerados"
   cleanup_known_generated_update_artifacts
 
@@ -6789,6 +7099,10 @@ else
   publish_local_candidate_after_validation
   mark_deployment_committed
 fi
+
+# Releases de rollback podem conter node_modules completos. Mantenha apenas
+# algumas versões recentes depois que a nova versão já está comprometida.
+prune_runtime_releases || true
 
 DURATION="$(human_duration "$SECONDS")"
 ROLLBACK_STATUS="não foi necessário"

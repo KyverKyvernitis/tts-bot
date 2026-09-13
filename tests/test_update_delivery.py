@@ -758,12 +758,17 @@ def test_rollback_preserves_original_failure_diagnostics() -> None:
     end = source.index("\nhandle_post_deploy_failure() {", start)
     block = source[start:end]
 
-    capture_at = block.index('local original_error_stderr="$LAST_ERROR_STDERR"')
-    rollback_front_at = block.index("if deploy_frontend", capture_at)
-    restore_at = block.index('LAST_ERROR_STDERR="$original_error_stderr"', rollback_front_at)
+    code_capture_at = block.index('local original_error_code="$LAST_ERROR_CODE"')
+    capture_at = block.index('local original_error_stderr="$LAST_ERROR_STDERR"', code_capture_at)
+    rollback_front_at = block.index('restore_frontend_runtime_release "$PREVIOUS_COMMIT"', capture_at)
+    rollback_back_at = block.index('restore_backend_runtime_release "$PREVIOUS_COMMIT"', rollback_front_at)
+    restore_at = block.index('LAST_ERROR_STDERR="$original_error_stderr"', rollback_back_at)
     body_at = block.index('body="Resumo:', restore_at)
 
-    assert capture_at < rollback_front_at < restore_at < body_at
+    assert code_capture_at < capture_at < rollback_front_at < rollback_back_at < restore_at < body_at
+    assert "if deploy_frontend" not in block
+    assert "if deploy_backend" not in block
     assert 'local original_error_logs="$LAST_ERROR_LOGS"' in block
+    assert 'LAST_ERROR_CODE="$original_error_code"' in block
     assert 'LAST_ERROR_LOGS="$original_error_logs"' in block
     assert 'LAST_ERROR_SERVICE_UNIT="$original_error_service_unit"' in block
