@@ -117,6 +117,11 @@ LOCAL_CANDIDATE_PUBLISHED=0
 LOCAL_CANDIDATE_WORKTREE_DIR=""
 LOCAL_CANDIDATE_PREPARED_COMMIT=""
 LOCAL_CANDIDATE_ALREADY_PROMOTED=0
+LOCAL_CANDIDATE_ARTIFACT_ROOT=""
+LOCAL_CANDIDATE_FRONTEND_ARTIFACT=""
+LOCAL_CANDIDATE_BACKEND_ARTIFACT=""
+LOCAL_CANDIDATE_ARTIFACT_COMMIT=""
+LOCAL_CANDIDATE_RUNTIME_READY=0
 REMOTE_CANDIDATE_MODE=0
 REMOTE_STATUS_CHANNEL_ID=""
 REMOTE_STATUS_MESSAGE_ID=""
@@ -1937,6 +1942,11 @@ archive_local_candidate() {
   chmod 0775 "$CANDIDATE_ROOT" "$CANDIDATE_ROOT/$status" "$queue_archive_dir" 2>/dev/null || true
 
   update_local_candidate_heartbeat "$status" "${LOCAL_CANDIDATE_VERIFY_ERROR:-}" || true
+  # Artefatos READY podem conter node_modules e não fazem parte do histórico do
+  # candidato. Remova-os antes de arquivar para preservar o disco da VPS.
+  if [[ -d "$LOCAL_CANDIDATE_DIR/runtime-artifacts" && ! -L "$LOCAL_CANDIDATE_DIR/runtime-artifacts" ]]; then
+    rm -rf -- "$LOCAL_CANDIDATE_DIR/runtime-artifacts" 2>/dev/null || true
+  fi
   if [[ -f "${LOCAL_CANDIDATE_PENDING_FILE:-}" ]]; then
     ARCHIVE_STATUS="$status" ARCHIVED_CANDIDATE_DIR="$archived_candidate_dir" python3 - "$LOCAL_CANDIDATE_PENDING_FILE" <<'PYARCHIVEQUEUE' 2>/dev/null || true
 import datetime, json, os, pathlib, sys
@@ -3863,6 +3873,281 @@ prepare_local_candidate_commit_in_worktree() {
   return 0
 }
 
+local_candidate_artifact_root_for_commit() {
+  local commit="${1:-${LOCAL_CANDIDATE_PREPARED_COMMIT:-}}"
+  [[ -n "${LOCAL_CANDIDATE_DIR:-}" && -n "$commit" ]] || return 1
+  printf '%s/runtime-artifacts/%s\n' "$LOCAL_CANDIDATE_DIR" "$commit"
+}
+
+hydrate_local_candidate_runtime_artifacts() {
+  local commit="${1:-${LOCAL_CANDIDATE_PREPARED_COMMIT:-}}" root ready
+  [[ -n "$commit" ]] || return 1
+  root="$(local_candidate_artifact_root_for_commit "$commit")" || return 1
+  ready="$root/ready.json"
+  [[ -s "$ready" && ! -L "$ready" ]] || return 1
+
+  if ! ARTIFACT_READY_FILE="$ready" ARTIFACT_EXPECTED_COMMIT="$commit" python3 - <<'PYARTIFACTREADY' >/dev/null 2>&1
+import json, os, pathlib
+path = pathlib.Path(os.environ['ARTIFACT_READY_FILE'])
+data = json.loads(path.read_text(encoding='utf-8'))
+if str(data.get('commit') or '') != os.environ['ARTIFACT_EXPECTED_COMMIT']:
+    raise SystemExit(1)
+if data.get('state') != 'ready':
+    raise SystemExit(1)
+PYARTIFACTREADY
+  then
+    return 1
+  fi
+
+  LOCAL_CANDIDATE_ARTIFACT_ROOT="$root"
+  LOCAL_CANDIDATE_ARTIFACT_COMMIT="$commit"
+  LOCAL_CANDIDATE_FRONTEND_ARTIFACT=""
+  LOCAL_CANDIDATE_BACKEND_ARTIFACT=""
+  if [[ -s "$root/frontend/dist/index.html" ]]; then
+    LOCAL_CANDIDATE_FRONTEND_ARTIFACT="$root/frontend/dist"
+  fi
+  if [[ -s "$root/backend/dist/index.js" && -d "$root/backend/node_modules" ]]; then
+    LOCAL_CANDIDATE_BACKEND_ARTIFACT="$root/backend"
+  fi
+  LOCAL_CANDIDATE_RUNTIME_READY=1
+  return 0
+}
+
+verify_local_candidate_artifact_integrity() {
+  local kind="${1:?}" root="${LOCAL_CANDIDATE_ARTIFACT_ROOT:-}" ready
+  [[ -n "$root" ]] || return 1
+  ready="$root/ready.json"
+  [[ -s "$ready" ]] || return 1
+  ARTIFACT_READY_FILE="$ready" ARTIFACT_KIND="$kind" ARTIFACT_ROOT="$root" python3 - <<'PYVERIFYARTIFACT' >/dev/null 2>&1
+import hashlib, json, os, pathlib
+ready = pathlib.Path(os.environ['ARTIFACT_READY_FILE'])
+kind = os.environ['ARTIFACT_KIND']
+root = pathlib.Path(os.environ['ARTIFACT_ROOT'])
+data = json.loads(ready.read_text(encoding='utf-8'))
+record = data.get(kind) if isinstance(data, dict) else None
+if not isinstance(record, dict) or not record.get('ready'):
+    raise SystemExit(1)
+path = root / ('frontend/dist' if kind == 'frontend' else 'backend')
+
+def tree_hash(base: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    resolved_base = base.resolve()
+    for item in sorted(base.rglob('*'), key=lambda p: p.as_posix()):
+        rel = item.relative_to(base).as_posix()
+        if item.is_symlink():
+            target = os.readlink(item)
+            if os.path.isabs(target):
+                raise SystemExit(1)
+            resolved = (item.parent / target).resolve(strict=False)
+            try:
+                resolved.relative_to(resolved_base)
+            except ValueError:
+                raise SystemExit(1)
+            digest.update(b'L\0' + rel.encode('utf-8') + b'\0' + target.encode('utf-8') + b'\0')
+            continue
+        if not item.is_file():
+            continue
+        digest.update(b'F\0' + rel.encode('utf-8') + b'\0')
+        with item.open('rb') as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+if not path.exists() or tree_hash(path) != str(record.get('sha256') or ''):
+    raise SystemExit(1)
+PYVERIFYARTIFACT
+}
+
+write_local_candidate_artifact_ready_manifest() {
+  local root="${1:?}" commit="${2:?}" front_ready="${3:-0}" back_ready="${4:-0}"
+  ARTIFACT_ROOT="$root" ARTIFACT_COMMIT="$commit" ARTIFACT_FRONT_READY="$front_ready" ARTIFACT_BACK_READY="$back_ready" \
+    python3 - <<'PYARTIFACTMANIFEST'
+import datetime, hashlib, json, os, pathlib
+root = pathlib.Path(os.environ['ARTIFACT_ROOT'])
+
+def tree_hash(path: pathlib.Path) -> str:
+    if not path.exists():
+        return ''
+    digest = hashlib.sha256()
+    base = path.resolve()
+    for item in sorted(path.rglob('*'), key=lambda p: p.as_posix()):
+        rel = item.relative_to(path).as_posix()
+        if item.is_symlink():
+            target = os.readlink(item)
+            if os.path.isabs(target):
+                raise SystemExit(f'artifact contains absolute symlink: {rel}')
+            resolved = (item.parent / target).resolve(strict=False)
+            try:
+                resolved.relative_to(base)
+            except ValueError:
+                raise SystemExit(f'artifact symlink escapes root: {rel}')
+            digest.update(b'L\0' + rel.encode('utf-8') + b'\0' + target.encode('utf-8') + b'\0')
+            continue
+        if not item.is_file():
+            continue
+        digest.update(b'F\0' + rel.encode('utf-8') + b'\0')
+        with item.open('rb') as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+payload = {
+    'state': 'ready',
+    'commit': os.environ['ARTIFACT_COMMIT'],
+    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'frontend': {
+        'ready': os.environ.get('ARTIFACT_FRONT_READY') == '1',
+        'sha256': tree_hash(root / 'frontend' / 'dist') if os.environ.get('ARTIFACT_FRONT_READY') == '1' else '',
+    },
+    'backend': {
+        'ready': os.environ.get('ARTIFACT_BACK_READY') == '1',
+        'sha256': tree_hash(root / 'backend') if os.environ.get('ARTIFACT_BACK_READY') == '1' else '',
+    },
+}
+path = root / 'ready.json'
+tmp = path.with_name('.ready.json.tmp')
+tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+os.replace(tmp, path)
+PYARTIFACTMANIFEST
+}
+
+prepare_local_candidate_runtime_artifacts_in_worktree() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 0
+  [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" && -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]] || return 1
+  [[ -n "${LOCAL_CANDIDATE_PREPARED_COMMIT:-}" ]] || return 1
+
+  local root front_dir back_dir front_artifact back_artifact front_ready=0 back_ready=0
+  root="$(local_candidate_artifact_root_for_commit "$LOCAL_CANDIDATE_PREPARED_COMMIT")" || return 1
+  front_dir="$LOCAL_CANDIDATE_WORKTREE_DIR/dashboard/frontend"
+  back_dir="$LOCAL_CANDIDATE_WORKTREE_DIR/dashboard/backend"
+  front_artifact="$root/frontend/dist"
+  back_artifact="$root/backend"
+
+  rm -rf -- "$root" 2>/dev/null || true
+  install -d -o ubuntu -g ubuntu -m 0775 "$root" || {
+    LAST_ERROR_STDERR="não foi possível criar diretório persistente de artefatos: $root"
+    LAST_ERROR_CODE="CANDIDATE_ARTIFACT_DIR_FAILED"
+    return 1
+  }
+
+  if (( FRONT_CHANGED == 1 )); then
+    [[ -d "$front_dir" ]] || {
+      LAST_ERROR_STDERR="frontend não encontrado no worktree: $front_dir"
+      LAST_ERROR_CODE="FRONTEND_SOURCE_MISSING"
+      return 1
+    }
+    STAGE="dependências do frontend"
+    zip_progress_run_as_ubuntu \
+      "Instalando dependências" \
+      "Validando frontend no worktree" \
+      "cd \"$front_dir\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi" || {
+        local rc=$?
+        register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm ci}"
+        return "$rc"
+      }
+
+    STAGE="testes do frontend"
+    zip_progress_run_as_ubuntu \
+      "Validando interface" \
+      "Executando testes no worktree" \
+      "cd \"$front_dir\" && npm test" || {
+        local rc=$?
+        register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm test}"
+        return "$rc"
+      }
+
+    STAGE="build do frontend"
+    zip_progress_run_as_ubuntu \
+      "Compilando interface" \
+      "Gerando artefato isolado" \
+      "cd \"$front_dir\" && npm run build" || {
+        local rc=$?
+        register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm run build}"
+        return "$rc"
+      }
+
+    if [[ ! -s "$front_dir/dist/index.html" ]]; then
+      FRONT_STATUS="build isolado do frontend não produziu dist/index.html"
+      LAST_ERROR_STDERR="$FRONT_STATUS"
+      LAST_ERROR_CODE="FRONTEND_BUILD_FAILED"
+      return 1
+    fi
+    install -d -o ubuntu -g ubuntu -m 0775 "$(dirname "$front_artifact")"
+    sudo -u ubuntu -H cp -a -- "$front_dir/dist" "$front_artifact"
+    front_ready=1
+    FRONT_STATUS="frontend validado e compilado no worktree"
+  fi
+
+  if (( BACK_CHANGED == 1 )); then
+    [[ -d "$back_dir" ]] || {
+      LAST_ERROR_STDERR="backend não encontrado no worktree: $back_dir"
+      LAST_ERROR_CODE="BACKEND_SOURCE_MISSING"
+      return 1
+    }
+    STAGE="dependências do backend"
+    zip_progress_run_as_ubuntu \
+      "Preparando servidor" \
+      "Validando backend no worktree" \
+      "cd \"$back_dir\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi" || {
+        local rc=$?
+        register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm ci}"
+        return "$rc"
+      }
+
+    STAGE="testes do backend"
+    zip_progress_run_as_ubuntu \
+      "Validando servidor" \
+      "Executando testes no worktree" \
+      "cd \"$back_dir\" && npm test" || {
+        local rc=$?
+        register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm test}"
+        return "$rc"
+      }
+
+    STAGE="build do backend"
+    zip_progress_run_as_ubuntu \
+      "Compilando servidor" \
+      "Gerando artefato isolado" \
+      "cd \"$back_dir\" && npm run build && npm prune --omit=dev" || {
+        local rc=$?
+        register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm run build}"
+        return "$rc"
+      }
+
+    if [[ ! -s "$back_dir/dist/index.js" || ! -d "$back_dir/node_modules" ]]; then
+      BACK_STATUS="build isolado do backend não produziu dist/index.js/node_modules"
+      LAST_ERROR_STDERR="$BACK_STATUS"
+      LAST_ERROR_CODE="BACKEND_BUILD_FAILED"
+      return 1
+    fi
+    install -d -o ubuntu -g ubuntu -m 0775 "$back_artifact"
+    sudo -u ubuntu -H cp -a -- "$back_dir/dist" "$back_artifact/dist"
+    sudo -u ubuntu -H cp -a -- "$back_dir/node_modules" "$back_artifact/node_modules"
+    [[ -f "$back_dir/package.json" ]] && sudo -u ubuntu -H cp -a -- "$back_dir/package.json" "$back_artifact/package.json"
+    [[ -f "$back_dir/package-lock.json" ]] && sudo -u ubuntu -H cp -a -- "$back_dir/package-lock.json" "$back_artifact/package-lock.json"
+    back_ready=1
+    BACK_STATUS="backend validado e compilado no worktree"
+  fi
+
+  if ! write_local_candidate_artifact_ready_manifest "$root" "$LOCAL_CANDIDATE_PREPARED_COMMIT" "$front_ready" "$back_ready"; then
+    LAST_ERROR_STDERR="não foi possível registrar manifesto dos artefatos preparados"
+    LAST_ERROR_CODE="CANDIDATE_ARTIFACT_MANIFEST_FAILED"
+    return 1
+  fi
+  chown -R ubuntu:ubuntu "$root" 2>/dev/null || true
+  find "$root" -type d -exec chmod u+rwx,go+rx {} + 2>/dev/null || true
+  find "$root" -type f -exec chmod u+rw,go+r {} + 2>/dev/null || true
+
+  if ! hydrate_local_candidate_runtime_artifacts "$LOCAL_CANDIDATE_PREPARED_COMMIT"; then
+    LAST_ERROR_STDERR="artefatos preparados não passaram pela hidratação de READY"
+    LAST_ERROR_CODE="CANDIDATE_ARTIFACT_READY_INVALID"
+    return 1
+  fi
+  write_local_candidate_state "ready" "$LOCAL_CANDIDATE_PREPARED_COMMIT"
+  logger -t "$LOG_TAG" "candidato ${LOCAL_CANDIDATE_ID:-desconhecido} atingiu READY com artefatos isolados em $root" 2>/dev/null || true
+  return 0
+}
+
 promote_local_candidate_worktree_commit() {
   [[ -n "${LOCAL_CANDIDATE_PREPARED_COMMIT:-}" ]] || {
     LAST_ERROR_STDERR="commit isolado do candidato não foi preparado"
@@ -3923,6 +4208,7 @@ local_live_head_candidate_state() {
     SHORT_FROM="$(short_commit "$PREVIOUS_COMMIT")"
     SHORT_TO="$(short_commit "$live_head")"
     mark_deployment_committed
+    hydrate_local_candidate_runtime_artifacts "$live_head" || true
     return 0
   fi
 
@@ -3936,6 +4222,7 @@ local_live_head_candidate_state() {
     REMOTE_COMMIT="$live_head"
     SHORT_FROM="$(short_commit "$parent")"
     SHORT_TO="$(short_commit "$live_head")"
+    hydrate_local_candidate_runtime_artifacts "$live_head" || true
     CHANGED_STATUS_RAW="$(repo_git diff --name-status --no-renames "$parent" "$live_head")"
     CHANGED_FILES_RAW="$(repo_git diff --name-only --no-renames "$parent" "$live_head")"
     CHANGED_DIFF_NUMSTAT_RAW="$(repo_git diff --numstat --no-renames "$parent" "$live_head")"
@@ -4495,8 +4782,16 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
       "O candidato falhou antes de tocar a árvore live. Nenhuma promoção foi realizada." \
       "${LAST_ERROR_STDERR:-preflight/commit isolado falhou}"
   fi
+
+  STAGE="preparação de artefatos no worktree"
+  if ! prepare_local_candidate_runtime_artifacts_in_worktree; then
+    reject_local_candidate_safely \
+      "Atualização rejeitada no build isolado" \
+      "Testes ou builds falharam antes de tocar a árvore live. Nenhuma promoção foi realizada." \
+      "${LAST_ERROR_STDERR:-falha ao preparar artefatos isolados}"
+  fi
   mark_update_timing "candidate_apply"
-  zip_progress_done_and_publish "Candidato validado em isolamento" "Promovendo para a VPS"
+  zip_progress_done_and_publish "Candidato READY em isolamento" "Promovendo para a VPS"
 
   if ! promote_local_candidate_worktree_commit; then
     reject_local_candidate_safely \
@@ -5719,6 +6014,32 @@ deploy_frontend() {
     logger -t "$LOG_TAG" "publicação do frontend inválida; reconstrução automática solicitada"
   fi
 
+  if (( LOCAL_CANDIDATE_MODE == 1 && FRONT_CHANGED == 1 && ROLLBACK_IN_PROGRESS == 0 )); then
+    if (( LOCAL_CANDIDATE_RUNTIME_READY == 0 )); then
+      hydrate_local_candidate_runtime_artifacts "${LOCAL_CANDIDATE_PREPARED_COMMIT:-$(repo_git rev-parse HEAD)}" || true
+    fi
+    if [[ -z "${LOCAL_CANDIDATE_FRONTEND_ARTIFACT:-}" || ! -s "$LOCAL_CANDIDATE_FRONTEND_ARTIFACT/index.html" ]]; then
+      FRONT_STATUS="artefato frontend READY ausente; recusando rebuild no checkout live"
+      LAST_ERROR_STDERR="$FRONT_STATUS"
+      LAST_ERROR_CODE="FRONTEND_PREBUILT_ARTIFACT_MISSING"
+      return 1
+    fi
+    if ! verify_local_candidate_artifact_integrity frontend; then
+      FRONT_STATUS="artefato frontend READY divergiu do hash validado"
+      LAST_ERROR_STDERR="$FRONT_STATUS"
+      LAST_ERROR_CODE="FRONTEND_PREBUILT_ARTIFACT_INVALID"
+      return 1
+    fi
+    STAGE="publicação do frontend"
+    zip_progress_publish "Publicando interface" "Ativando artefato já validado"
+    if ! publish_frontend_atomically "$LOCAL_CANDIDATE_FRONTEND_ARTIFACT"; then
+      return 1
+    fi
+    FRONT_STATUS="frontend publicado a partir do artefato READY do worktree"
+    zip_progress_done "Interface publicada"
+    return 0
+  fi
+
   if [[ ! -d "$FRONT_DIR" ]]; then
     FRONT_STATUS="frontend não encontrado em $FRONT_DIR"
     return 1
@@ -5779,6 +6100,59 @@ deploy_frontend() {
   return 0
 }
 
+install_backend_prebuilt_artifact() {
+  local source_dir="${1:?}" token temp_dist temp_modules backup_dist backup_modules had_dist=0 had_modules=0
+  [[ -s "$source_dir/dist/index.js" && -d "$source_dir/node_modules" ]] || {
+    LAST_ERROR_STDERR="artefato backend incompleto: $source_dir"
+    return 1
+  }
+  [[ -d "$BACK_DIR" ]] || {
+    LAST_ERROR_STDERR="backend live não encontrado em $BACK_DIR"
+    return 1
+  }
+
+  token="${UPDATE_RUNTIME_RUN_ID//[^[:alnum:]._-]/_}"
+  temp_dist="$BACK_DIR/.update-dist-$token"
+  temp_modules="$BACK_DIR/.update-node_modules-$token"
+  backup_dist="$BACK_DIR/.previous-dist-$token"
+  backup_modules="$BACK_DIR/.previous-node_modules-$token"
+
+  sudo -u ubuntu -H rm -rf -- "$temp_dist" "$temp_modules" "$backup_dist" "$backup_modules"
+  sudo -u ubuntu -H cp -a -- "$source_dir/dist" "$temp_dist" || return 1
+  sudo -u ubuntu -H cp -a -- "$source_dir/node_modules" "$temp_modules" || {
+    sudo -u ubuntu -H rm -rf -- "$temp_dist" "$temp_modules"
+    return 1
+  }
+
+  if [[ -e "$BACK_DIR/dist" ]]; then
+    sudo -u ubuntu -H mv -- "$BACK_DIR/dist" "$backup_dist" || return 1
+    had_dist=1
+  fi
+  if [[ -e "$BACK_DIR/node_modules" ]]; then
+    if ! sudo -u ubuntu -H mv -- "$BACK_DIR/node_modules" "$backup_modules"; then
+      (( had_dist == 1 )) && sudo -u ubuntu -H mv -- "$backup_dist" "$BACK_DIR/dist" 2>/dev/null || true
+      return 1
+    fi
+    had_modules=1
+  fi
+
+  if ! sudo -u ubuntu -H mv -- "$temp_dist" "$BACK_DIR/dist"; then
+    (( had_modules == 1 )) && sudo -u ubuntu -H mv -- "$backup_modules" "$BACK_DIR/node_modules" 2>/dev/null || true
+    (( had_dist == 1 )) && sudo -u ubuntu -H mv -- "$backup_dist" "$BACK_DIR/dist" 2>/dev/null || true
+    sudo -u ubuntu -H rm -rf -- "$temp_dist" "$temp_modules"
+    return 1
+  fi
+  if ! sudo -u ubuntu -H mv -- "$temp_modules" "$BACK_DIR/node_modules"; then
+    sudo -u ubuntu -H rm -rf -- "$BACK_DIR/dist" "$temp_modules" 2>/dev/null || true
+    (( had_modules == 1 )) && sudo -u ubuntu -H mv -- "$backup_modules" "$BACK_DIR/node_modules" 2>/dev/null || true
+    (( had_dist == 1 )) && sudo -u ubuntu -H mv -- "$backup_dist" "$BACK_DIR/dist" 2>/dev/null || true
+    return 1
+  fi
+
+  sudo -u ubuntu -H rm -rf -- "$backup_dist" "$backup_modules" 2>/dev/null || true
+  return 0
+}
+
 deploy_backend() {
   if (( BACK_CHANGED == 0 && FRONT_CHANGED == 0 )); then
     BACK_STATUS="não alterado"
@@ -5798,6 +6172,59 @@ deploy_backend() {
       zip_progress_done "Publicação concluída; validação indisponível"
     fi
     return 0
+  fi
+
+  if (( LOCAL_CANDIDATE_MODE == 1 && BACK_CHANGED == 1 && ROLLBACK_IN_PROGRESS == 0 )); then
+    if (( LOCAL_CANDIDATE_RUNTIME_READY == 0 )); then
+      hydrate_local_candidate_runtime_artifacts "${LOCAL_CANDIDATE_PREPARED_COMMIT:-$(repo_git rev-parse HEAD)}" || true
+    fi
+    if [[ -z "${LOCAL_CANDIDATE_BACKEND_ARTIFACT:-}" || ! -s "$LOCAL_CANDIDATE_BACKEND_ARTIFACT/dist/index.js" || ! -d "$LOCAL_CANDIDATE_BACKEND_ARTIFACT/node_modules" ]]; then
+      BACK_STATUS="artefato backend READY ausente; recusando rebuild no checkout live"
+      LAST_ERROR_STDERR="$BACK_STATUS"
+      LAST_ERROR_CODE="BACKEND_PREBUILT_ARTIFACT_MISSING"
+      return 1
+    fi
+    if ! verify_local_candidate_artifact_integrity backend; then
+      BACK_STATUS="artefato backend READY divergiu do hash validado"
+      LAST_ERROR_STDERR="$BACK_STATUS"
+      LAST_ERROR_CODE="BACKEND_PREBUILT_ARTIFACT_INVALID"
+      return 1
+    fi
+    STAGE="publicação do backend"
+    zip_progress_publish "Publicando servidor" "Ativando artefato já validado"
+    if ! install_backend_prebuilt_artifact "$LOCAL_CANDIDATE_BACKEND_ARTIFACT"; then
+      BACK_STATUS="falha ao ativar artefato backend pré-compilado"
+      LAST_ERROR_STDERR="${LAST_ERROR_STDERR:-$BACK_STATUS}"
+      LAST_ERROR_CODE="BACKEND_PUBLISH_FAILED"
+      return 1
+    fi
+
+    STAGE="reinício do backend"
+    if ! systemctl cat "$BACK_SERVICE" >/dev/null 2>&1; then
+      BACK_STATUS="serviço systemd ausente: $BACK_SERVICE"
+      LAST_ERROR_STDERR="$BACK_STATUS"
+      return 1
+    fi
+    systemctl reset-failed "$BACK_SERVICE" >/dev/null 2>&1 || true
+    systemctl restart "$BACK_SERVICE"
+    sleep 3
+    if ! systemctl is-active --quiet "$BACK_SERVICE"; then
+      BACK_STATUS="serviço não ficou ativo: $BACK_SERVICE"
+      LAST_ERROR_STDERR="$(journalctl -u "$BACK_SERVICE" -n 30 --no-pager 2>/dev/null | trim_alert_text 1800)"
+      return 1
+    fi
+    zip_progress_done_and_publish "Servidor reiniciado" "Validando" "Aguardando resposta"
+
+    STAGE="healthcheck do painel web"
+    if wait_for_health "$BACK_HEALTH_URL" 8 3; then
+      ACTIVITY_HEALTHCHECK_STATUS="OK"
+      BACK_STATUS="backend publicado a partir do artefato READY e validado em $BACK_HEALTH_URL"
+      zip_progress_done "Validação concluída"
+      return 0
+    fi
+    ACTIVITY_HEALTHCHECK_STATUS="falhou"
+    BACK_STATUS="backend pré-compilado ativado, mas healthcheck falhou em $BACK_HEALTH_URL"
+    return 1
   fi
 
   if [[ ! -d "$BACK_DIR" ]]; then
