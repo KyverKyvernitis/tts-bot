@@ -156,6 +156,10 @@ NODE_DEP_CACHE_MISSES=0
 TYPESCRIPT_CACHE_HITS=0
 TYPESCRIPT_CACHE_MISSES=0
 LAST_TYPESCRIPT_CACHE_HIT=0
+FRONT_TEST_PLAN_STATUS="não executado"
+BACK_TEST_PLAN_STATUS="não executado"
+SELECTED_NODE_TEST_COMMAND=""
+SELECTED_NODE_TEST_STATUS=""
 LAST_NODE_DEP_LAYER_PATH=""
 LAST_NODE_DEP_LAYER_KEY=""
 LAST_NODE_DEP_CACHE_HIT=0
@@ -1047,6 +1051,37 @@ wait_for_health() {
   return 1
 }
 
+wait_for_health_adaptive() {
+  local url="${1:?}"
+  local attempts="${2:-12}"
+  local max_delay="${3:-2}"
+  local i delay
+  local -a delays_fast=(0.20 0.40 0.80 1.00)
+  local -a delays_normal=(0.20 0.40 0.80 1.60 2.00)
+  local -a delays=()
+  [[ "$attempts" =~ ^[0-9]+$ ]] || attempts=12
+  (( attempts >= 1 )) || attempts=1
+  if [[ "$max_delay" == "1" || "$max_delay" == "1.0" ]]; then
+    delays=("${delays_fast[@]}")
+  else
+    delays=("${delays_normal[@]}")
+  fi
+
+  for ((i=1; i<=attempts; i++)); do
+    if curl -fsS --max-time "${UPDATE_LOCAL_HEALTH_CURL_TIMEOUT_SECONDS:-2}" "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    (( i == attempts )) && break
+    if (( i <= ${#delays[@]} )); then
+      delay="${delays[$((i-1))]}"
+    else
+      delay="${delays[-1]}"
+    fi
+    sleep "$delay"
+  done
+  return 1
+}
+
 fetch_bot_health_json() {
   curl -fsS --max-time 2 "$BOT_HEALTH_URL" 2>/dev/null || true
 }
@@ -1308,10 +1343,18 @@ verify_bot_after_restart() {
   local restart_epoch="${1:?}"
   local restarts_before="${2:-0}"
   local allowed_restart_delta="${3:-1}"
-  local timeout="${UPDATE_BOT_RESTART_TIMEOUT_SECONDS:-45}"
+  local profile="${4:-standard}"
+  local default_stability=7 default_successes=3 default_timeout=35
+  case "$profile" in
+    reload) default_stability=3; default_successes=2; default_timeout=18 ;;
+    cogs) default_stability=5; default_successes=3; default_timeout=25 ;;
+    critical) default_stability=10; default_successes=3; default_timeout=45 ;;
+    *) profile="standard" ;;
+  esac
+  local timeout="${UPDATE_BOT_RESTART_TIMEOUT_SECONDS:-$default_timeout}"
   local interval="${UPDATE_BOT_RESTART_POLL_SECONDS:-1}"
-  local required_successes="${UPDATE_BOT_HEALTH_CONSECUTIVE_SUCCESSES:-3}"
-  local stability_seconds="${UPDATE_BOT_HEALTH_STABILITY_SECONDS:-10}"
+  local required_successes="${UPDATE_BOT_HEALTH_CONSECUTIVE_SUCCESSES:-$default_successes}"
+  local stability_seconds="${UPDATE_BOT_HEALTH_STABILITY_SECONDS:-$default_stability}"
   local waited=0 restarts_after health_ok=0 last_log_check=0
   local consecutive=0 healthy_since=0 now_epoch stable_for=0
 
@@ -1382,10 +1425,10 @@ verify_bot_after_restart() {
       return 1
     fi
     if has_real_warning_text "$BOT_WARNINGS_STATUS" || cogs_have_failures "$BOT_COGS_STATUS"; then
-      BOT_HEALTHCHECK_STATUS="estável com avisos"
+      BOT_HEALTHCHECK_STATUS="estável com avisos (${stability_seconds}s; perfil=$profile)"
       UPDATE_HAS_WARNINGS=1
     else
-      BOT_HEALTHCHECK_STATUS="estável (${stability_seconds}s)"
+      BOT_HEALTHCHECK_STATUS="estável (${stability_seconds}s; perfil=$profile)"
     fi
     return 0
   fi
@@ -5111,6 +5154,77 @@ prune_typescript_cache() {
   done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null)
 }
 
+select_node_test_plan() {
+  local project_dir="${1:?}" prefix="${2:?}"
+  local repo_root="${REPO_DIR:-$(pwd)}"
+  local selector="${UPDATE_TEST_SELECTOR_SCRIPT:-$repo_root/utility/update_test_selector.py}"
+  local -a plan_lines=()
+  local meta mode selected total reason
+  SELECTED_NODE_TEST_COMMAND="npm test"
+  SELECTED_NODE_TEST_STATUS="suíte completa (fallback)"
+
+  if [[ -z "${CHANGED_FILES_RAW:-}" ]]; then
+    logger -t "$LOG_TAG" "diff indisponível para seleção de testes em $prefix; usando suíte completa" 2>/dev/null || true
+    return 0
+  fi
+  if [[ ! -f "$selector" ]]; then
+    logger -t "$LOG_TAG" "seletor de testes ausente em $selector; usando suíte completa" 2>/dev/null || true
+    return 0
+  fi
+  if ! mapfile -t plan_lines < <(
+    CHANGED_FILES_RAW_INPUT="${CHANGED_FILES_RAW:-}" python3 "$selector" \
+      --project "$project_dir" --prefix "$prefix" --format shell
+  ); then
+    logger -t "$LOG_TAG" "seletor de testes falhou para $prefix; usando suíte completa" 2>/dev/null || true
+    return 0
+  fi
+  if (( ${#plan_lines[@]} < 2 )); then
+    logger -t "$LOG_TAG" "seletor de testes retornou plano incompleto para $prefix; usando suíte completa" 2>/dev/null || true
+    return 0
+  fi
+
+  meta="${plan_lines[0]}"
+  IFS=$'\t' read -r mode selected total reason <<< "$meta"
+  [[ "$selected" =~ ^[0-9]+$ ]] || selected=0
+  [[ "$total" =~ ^[0-9]+$ ]] || total=0
+  case "$mode" in
+    selected)
+      SELECTED_NODE_TEST_COMMAND="${plan_lines[1]}"
+      SELECTED_NODE_TEST_STATUS="${selected}/${total} selecionado(s) por impacto"
+      ;;
+    none)
+      SELECTED_NODE_TEST_COMMAND=":"
+      SELECTED_NODE_TEST_STATUS="0/${total}; nenhum teste necessário"
+      ;;
+    *)
+      SELECTED_NODE_TEST_COMMAND="npm test"
+      SELECTED_NODE_TEST_STATUS="suíte completa ${total}/${total} (${reason:-fallback})"
+      ;;
+  esac
+  logger -t "$LOG_TAG" "plano de testes $prefix: $SELECTED_NODE_TEST_STATUS" 2>/dev/null || true
+}
+
+bot_health_profile_for_changed_files() {
+  # Perfis só reduzem a janela quando o próprio diff prova que o impacto é
+  # restrito. Variáveis UPDATE_BOT_HEALTH_* continuam podendo sobrescrever.
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(bot\.py|config\.py|db\.py|start\.sh|requirements\.txt|deploy/systemd(/vps)?/tts-bot\.service$)'; then
+    printf 'critical'
+    return 0
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(music_system/|utility/)'; then
+    printf 'standard'
+    return 0
+  fi
+  if [[ -n "${CHANGED_FILES_RAW//[[:space:]]/}" ]] && ! printf '%s\n' "$CHANGED_FILES_RAW" \
+      | grep -Ev '^(tests/|docs/)' \
+      | grep -Ev '^cogs/' \
+      | grep -q .; then
+    printf 'cogs'
+    return 0
+  fi
+  printf 'standard'
+}
+
 prepare_local_candidate_runtime_artifacts_in_worktree() {
   (( LOCAL_CANDIDATE_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )) || return 0
 
@@ -5173,13 +5287,17 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
     if (( reusable_ready == 1 )); then
       if (( FRONT_CHANGED == 1 )); then
         FRONT_STATUS="frontend READY reutilizado sem rebuild"
+        FRONT_TEST_PLAN_STATUS="READY reutilizado; testes não repetidos"
       elif (( ${FRONT_TESTS_CHANGED:-0} == 1 )); then
         FRONT_STATUS="validação frontend READY reutilizada; runtime não alterado"
+        FRONT_TEST_PLAN_STATUS="READY reutilizado; testes não repetidos"
       fi
       if (( BACK_CHANGED == 1 )); then
         BACK_STATUS="backend READY reutilizado sem rebuild"
+        BACK_TEST_PLAN_STATUS="READY reutilizado; testes não repetidos"
       elif (( ${BACK_TESTS_CHANGED:-0} == 1 )); then
         BACK_STATUS="validação backend READY reutilizada; runtime não alterado"
+        BACK_TEST_PLAN_STATUS="READY reutilizado; testes não repetidos"
       fi
       if (( ${BOT_CHANGED:-0} == 1 )); then
         PREFLIGHT_RUNTIME_STATUS="OK; READY reutilizado"
@@ -5243,12 +5361,15 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
 
     if (( ${FRONT_TESTS_REQUIRED:-0} == 1 )); then
       STAGE="testes do frontend"
+      select_node_test_plan "$front_dir" "dashboard/frontend"
+      FRONT_TEST_PLAN_STATUS="$SELECTED_NODE_TEST_STATUS"
+      local front_test_command="${SELECTED_NODE_TEST_COMMAND:-npm test}"
       zip_progress_run_as_ubuntu \
         "Validando interface" \
-        "Executando testes no worktree" \
-        "cd \"$front_dir\" && npm test" || {
+        "Executando testes no worktree · $FRONT_TEST_PLAN_STATUS" \
+        "cd \"$front_dir\" && $front_test_command" || {
           local rc=$?
-          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm test}"
+          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-$front_test_command}"
           return "$rc"
         }
     fi
@@ -5325,12 +5446,15 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
 
     if (( ${BACK_TESTS_REQUIRED:-1} == 1 )); then
       STAGE="testes do backend"
+      select_node_test_plan "$back_dir" "dashboard/backend"
+      BACK_TEST_PLAN_STATUS="$SELECTED_NODE_TEST_STATUS"
+      local back_test_command="${SELECTED_NODE_TEST_COMMAND:-npm test}"
       zip_progress_run_as_ubuntu \
         "Validando servidor" \
-        "Executando testes no worktree" \
-        "cd \"$back_dir\" && npm test" || {
+        "Executando testes no worktree · $BACK_TEST_PLAN_STATUS" \
+        "cd \"$back_dir\" && $back_test_command" || {
           local rc=$?
-          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm test}"
+          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-$back_test_command}"
           return "$rc"
         }
     fi
@@ -6206,6 +6330,8 @@ classify_changed_files() {
   FRONT_TESTS_REQUIRED=0
   FRONT_TYPECHECK_REQUIRED=0
   BACK_TESTS_REQUIRED=0
+  FRONT_TEST_PLAN_STATUS="não executado"
+  BACK_TEST_PLAN_STATUS="não executado"
   BOT_CHANGED=0
   REQUIREMENTS_CHANGED=0
   AUDIO_SYSTEMD_CHANGED=0
@@ -6381,7 +6507,7 @@ PYOK
   fi
   rm -f "$response"
   STAGE="estabilidade após reload rápido"
-  if verify_bot_after_restart "$verification_epoch" "$restarts_before" 0; then
+  if verify_bot_after_restart "$verification_epoch" "$restarts_before" 0 reload; then
     FAST_RELOAD_STATUS="OK; estabilidade confirmada"
     return 0
   fi
@@ -7243,7 +7369,9 @@ deploy_bot() {
     fi
 
     STAGE="validação fatal do bot"
-    verify_bot_after_restart "$restart_epoch" "$restarts_before"
+    local health_profile
+    health_profile="$(bot_health_profile_for_changed_files)"
+    verify_bot_after_restart "$restart_epoch" "$restarts_before" 1 "$health_profile"
     return $?
   fi
 
@@ -7798,7 +7926,7 @@ deploy_backend() {
     BACK_STATUS="não alterado"
     STAGE="healthcheck informativo do painel web"
     zip_progress_publish "Validando" "Confirmando disponibilidade"
-    if wait_for_health "$BACK_HEALTH_URL" 3 2; then
+    if { if declare -F wait_for_health_adaptive >/dev/null 2>&1; then wait_for_health_adaptive "$BACK_HEALTH_URL" 8 1; else wait_for_health "$BACK_HEALTH_URL" 3 2; fi; }; then
       ACTIVITY_HEALTHCHECK_STATUS="OK"
       zip_progress_done "Validação concluída"
     else
@@ -7850,7 +7978,7 @@ deploy_backend() {
     zip_progress_done_and_publish "Servidor reiniciado" "Validando" "Aguardando resposta"
 
     STAGE="healthcheck do painel web"
-    if wait_for_health "$BACK_HEALTH_URL" 8 3; then
+    if { if declare -F wait_for_health_adaptive >/dev/null 2>&1; then wait_for_health_adaptive "$BACK_HEALTH_URL" 14 2; else wait_for_health "$BACK_HEALTH_URL" 8 3; fi; }; then
       ACTIVITY_HEALTHCHECK_STATUS="OK"
       BACK_STATUS="backend publicado a partir do artefato READY e validado em $BACK_HEALTH_URL"
       zip_progress_done "Validação concluída"
@@ -7920,7 +8048,7 @@ deploy_backend() {
     "Aguardando resposta"
 
   STAGE="healthcheck do painel web"
-  if wait_for_health "$BACK_HEALTH_URL" 8 3; then
+  if { if declare -F wait_for_health_adaptive >/dev/null 2>&1; then wait_for_health_adaptive "$BACK_HEALTH_URL" 14 2; else wait_for_health "$BACK_HEALTH_URL" 8 3; fi; }; then
     ACTIVITY_HEALTHCHECK_STATUS="OK"
     BACK_STATUS="backend publicado e validado em $BACK_HEALTH_URL"
     zip_progress_done "Validação concluída"
@@ -8322,7 +8450,7 @@ restore_backend_runtime_release() {
     LAST_ERROR_CODE="ROLLBACK_BACKEND_SERVICE_FAILED"
     return 1
   fi
-  if ! wait_for_health "$BACK_HEALTH_URL" 8 3; then
+  if ! { if declare -F wait_for_health_adaptive >/dev/null 2>&1; then wait_for_health_adaptive "$BACK_HEALTH_URL" 14 2; else wait_for_health "$BACK_HEALTH_URL" 8 3; fi; }; then
     ACTIVITY_HEALTHCHECK_STATUS="falhou"
     BACK_STATUS="backend anterior restaurado sem rebuild, mas healthcheck falhou"
     LAST_ERROR_CODE="ROLLBACK_BACKEND_HEALTH_FAILED"
@@ -8474,14 +8602,14 @@ rollback_after_failure() {
         fi
       else
         rollback_back_status="runtime backend não chegou a ser alterado; nenhum rebuild necessário"
-        if wait_for_health "$BACK_HEALTH_URL" 2 2; then
+        if { if declare -F wait_for_health_adaptive >/dev/null 2>&1; then wait_for_health_adaptive "$BACK_HEALTH_URL" 6 1; else wait_for_health "$BACK_HEALTH_URL" 2 2; fi; }; then
           rollback_activity_status="OK"
         else
           rollback_activity_status="não verificada/indisponível"
         fi
       fi
     else
-      if wait_for_health "$BACK_HEALTH_URL" 2 2; then
+      if { if declare -F wait_for_health_adaptive >/dev/null 2>&1; then wait_for_health_adaptive "$BACK_HEALTH_URL" 6 1; else wait_for_health "$BACK_HEALTH_URL" 2 2; fi; }; then
         rollback_activity_status="OK"
       else
         rollback_activity_status="não verificada/indisponível"
@@ -8998,6 +9126,7 @@ ${RUNTIME_CHECK_MARK} Runtime candidato — ${PREFLIGHT_RUNTIME_STATUS}
 ✓ Comandos — ${APP_COMMAND_SYNC_SUMMARY}"
 TIMINGS_TEXT="${UPDATER_TIMINGS:-sem etapas}, total=${DURATION}"
 CACHE_TEXT="Node ${NODE_DEP_CACHE_HITS:-0} hit/${NODE_DEP_CACHE_MISSES:-0} miss · TypeScript ${TYPESCRIPT_CACHE_HITS:-0} hit/${TYPESCRIPT_CACHE_MISSES:-0} miss"
+TEST_PLAN_TEXT="frontend: ${FRONT_TEST_PLAN_STATUS:-não executado} · backend: ${BACK_TEST_PLAN_STATUS:-não executado}"
 BODY="Resumo: $ALERT_SUMMARY
 Identificador: $UPDATE_DISPLAY_ID
 Branch: $BRANCH
@@ -9010,6 +9139,7 @@ Verificações:
 $CHECKS_TEXT
 Tempos: $TIMINGS_TEXT
 Cache: $CACHE_TEXT
+Testes: $TEST_PLAN_TEXT
 Arquivos:
 $CHANGED_FILES"
 
