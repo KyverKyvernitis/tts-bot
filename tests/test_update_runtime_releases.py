@@ -19,17 +19,18 @@ def _run_bash(script: str) -> subprocess.CompletedProcess[str]:
 
 
 def _release_functions(source: str) -> str:
-    start = source.index("runtime_release_root_for_commit() {")
+    start = source.index("frontend_release_root_for_key() {")
     end = source.index("\nrollback_after_failure() {", start)
     return source[start:end]
 
 
-def test_runtime_snapshot_is_versioned_and_detects_tamper(tmp_path: Path) -> None:
+def test_runtime_snapshot_references_frontend_release_and_detects_tamper(tmp_path: Path) -> None:
     source = UPDATER.read_text(encoding="utf-8")
     functions = tmp_path / "release-functions.sh"
     functions.write_text(_release_functions(source), encoding="utf-8")
 
     front = tmp_path / "www" / "sinuca"
+    front_releases = tmp_path / "www" / "sinuca-releases"
     back = tmp_path / "repo" / "dashboard" / "backend"
     releases = tmp_path / "runtime-releases"
     front.mkdir(parents=True)
@@ -47,9 +48,12 @@ def test_runtime_snapshot_is_versioned_and_detects_tamper(tmp_path: Path) -> Non
 source "{functions}"
 RUNTIME_RELEASE_ROOT="{releases}"
 FRONT_PUBLISH_DIR="{front}"
+FRONT_RELEASE_ROOT="{front_releases}"
+FRONT_RELEASE_RETENTION=4
 BACK_DIR="{back}"
 FRONT_CHANGED=1
 BACK_CHANGED=1
+REQUIREMENTS_CHANGED=0
 PREVIOUS_COMMIT=deadbeef
 RUNTIME_RELEASE_SNAPSHOT_READY=0
 RUNTIME_RELEASE_SNAPSHOT_COMMIT=''
@@ -64,7 +68,6 @@ logger() {{ :; }}
 backend_live_dependency_layer() {{ LAST_NODE_DEP_LAYER_KEY="${{BASELINE_KEY}}"; LAST_NODE_DEP_LAYER_PATH="{tmp_path / 'node-layer'}"; return 0; }}
 node_dependency_layer_root() {{ printf '%s\n' "{tmp_path / 'node-layer'}"; }}
 verify_node_dependency_layer() {{ return 0; }}
-frontend_publication_is_healthy() {{ [[ -s "$FRONT_PUBLISH_DIR/index.html" ]]; }}
 install() {{
   local -a args=()
   while (($#)); do
@@ -81,11 +84,13 @@ root="$(runtime_release_root_for_commit "$PREVIOUS_COMMIT")"
 verify_runtime_release_component "$root" frontend
 verify_runtime_release_component "$root" backend
 printf 'READY=%s\n' "$RUNTIME_RELEASE_SNAPSHOT_READY"
-printf 'FRONT=%s\n' "$(cat "$root/frontend/index.html")"
+printf 'FRONT=%s\n' "$(cat "$FRONT_PUBLISH_DIR/index.html")"
 printf 'BACK=%s\n' "$(cat "$root/backend/dist/index.js")"
-test -s "$root/backend/deps.json"
-test ! -e "$root/backend/node_modules"
-printf tamper >> "$root/frontend/index.html"
+test -s "$root/frontend.json"
+test ! -e "$root/frontend"
+test -L "$FRONT_PUBLISH_DIR"
+test -s "{front_releases}/deadbeef/.tts-release.json"
+printf tamper >> "{front_releases}/deadbeef/index.html"
 if verify_runtime_release_component "$root" frontend; then
   echo TAMPER_ACCEPTED
   exit 55
@@ -136,30 +141,46 @@ def test_rollback_never_rebuilds_frontend_or_backend() -> None:
     assert "npm run build" not in block
 
 
-def test_frontend_restore_consumes_saved_release_without_build(tmp_path: Path) -> None:
+def test_frontend_restore_switches_saved_release_without_build(tmp_path: Path) -> None:
     source = UPDATER.read_text(encoding="utf-8")
     functions = tmp_path / "release-functions.sh"
     functions.write_text(_release_functions(source), encoding="utf-8")
-    root = tmp_path / "releases" / "deadbeef"
-    (root / "frontend").mkdir(parents=True)
-    (root / "frontend" / "index.html").write_text("old", encoding="utf-8")
+    runtime_root = tmp_path / "runtime-releases" / "deadbeef"
+    runtime_root.mkdir(parents=True)
+    front_source = tmp_path / "front-source"
+    front_source.mkdir()
+    (front_source / "index.html").write_text("old", encoding="utf-8")
+    front_publish = tmp_path / "www" / "sinuca"
+    front_releases = tmp_path / "www" / "sinuca-releases"
 
     harness = f'''
 source "{functions}"
-RUNTIME_RELEASE_ROOT="{tmp_path / 'releases'}"
+RUNTIME_RELEASE_ROOT="{tmp_path / 'runtime-releases'}"
+FRONT_PUBLISH_DIR="{front_publish}"
+FRONT_RELEASE_ROOT="{front_releases}"
+FRONT_RELEASE_RETENTION=4
 PREVIOUS_COMMIT=deadbeef
 FRONT_STATUS=''
 LAST_ERROR_STDERR=''
 LAST_ERROR_CODE=''
+LOG_TAG=test
 sanitize_commit_ref() {{ printf '%s\n' "$1"; }}
 short_commit() {{ printf '%.7s' "$1"; }}
-verify_runtime_release_component() {{ return 0; }}
-publish_frontend_atomically() {{ printf 'PUBLISH=%s\n' "$1"; }}
+logger() {{ :; }}
+prepare_frontend_release "{front_source}" frontkey >/dev/null
+RUNTIME_MANIFEST="{runtime_root / 'release.json'}" python3 - <<'PYRUNTIME'
+import json, os, pathlib
+p = pathlib.Path(os.environ['RUNTIME_MANIFEST'])
+p.write_text(json.dumps({{'state':'ready','commit':'deadbeef','frontend':{{'ready':True,'release_key':'frontkey','sha256':''}},'backend':{{'ready':False}}}}), encoding='utf-8')
+PYRUNTIME
 restore_frontend_runtime_release deadbeef
 printf 'STATUS=%s\n' "$FRONT_STATUS"
+printf 'ACTIVE=%s\n' "$(frontend_active_release_key)"
+printf 'BODY=%s\n' "$(cat "$FRONT_PUBLISH_DIR/index.html")"
 '''
     result = _run_bash(harness)
-    assert f"PUBLISH={root / 'frontend'}" in result.stdout
+    assert "ACTIVE=frontkey" in result.stdout
+    assert "BODY=old" in result.stdout
     assert "sem rebuild" in result.stdout
 
 

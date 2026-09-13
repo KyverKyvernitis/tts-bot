@@ -72,6 +72,8 @@ UPDATE_RUNTIME_RUN_ID="$(date +%Y%m%d%H%M%S)-$$-${RANDOM:-0}"
 FRONT_DIR="$REPO_DIR/dashboard/frontend"
 BACK_DIR="$REPO_DIR/dashboard/backend"
 FRONT_PUBLISH_DIR="/var/www/sinuca"
+FRONT_RELEASE_ROOT="${TTS_BOT_FRONTEND_RELEASE_ROOT:-$(dirname "$FRONT_PUBLISH_DIR")/sinuca-releases}"
+FRONT_RELEASE_RETENTION="${TTS_BOT_FRONTEND_RELEASE_RETENTION:-4}"
 BACK_PORT="8787"
 BACK_SERVICE="${DASHBOARD_SYSTEMD_SERVICE:-sinuca-activity-server.service}"
 BACK_HEALTH_URL="http://127.0.0.1:${BACK_PORT}/health"
@@ -6900,89 +6902,338 @@ deploy_bot() {
 }
 
 
+frontend_release_root_for_key() {
+  local key
+  key="$(sanitize_commit_ref "${1:-}")"
+  [[ -n "$key" ]] || return 1
+  local root="${FRONT_RELEASE_ROOT:-$(dirname "$FRONT_PUBLISH_DIR")/sinuca-releases}"
+  printf '%s/%s\n' "$root" "$key"
+}
+
+write_frontend_release_manifest() {
+  local root="${1:?}" key="${2:?}"
+  FRONT_RELEASE_DIR="$root" FRONT_RELEASE_KEY="$key" python3 - <<'PYFRONTRELEASEWRITE'
+import datetime, hashlib, json, os, pathlib
+root = pathlib.Path(os.environ['FRONT_RELEASE_DIR'])
+
+def tree_hash(base: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    resolved_base = base.resolve()
+    for item in sorted(base.rglob('*'), key=lambda p: p.as_posix()):
+        if item.name == '.tts-release.json':
+            continue
+        rel = item.relative_to(base).as_posix()
+        if item.is_symlink():
+            target = os.readlink(item)
+            if os.path.isabs(target):
+                raise SystemExit(1)
+            resolved = (item.parent / target).resolve(strict=False)
+            try:
+                resolved.relative_to(resolved_base)
+            except ValueError:
+                raise SystemExit(1)
+            digest.update(b'L\0' + rel.encode() + b'\0' + target.encode() + b'\0')
+            continue
+        if not item.is_file():
+            continue
+        digest.update(b'F\0' + rel.encode() + b'\0')
+        with item.open('rb') as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+if not (root / 'index.html').is_file():
+    raise SystemExit(1)
+payload = {
+    'state': 'ready',
+    'release_key': os.environ['FRONT_RELEASE_KEY'],
+    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'sha256': tree_hash(root),
+}
+tmp = root / '.tts-release.json.tmp'
+final = root / '.tts-release.json'
+tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+os.replace(tmp, final)
+PYFRONTRELEASEWRITE
+}
+
+verify_frontend_release() {
+  local root="${1:?}" expected_key="${2:-}" manifest
+  manifest="$root/.tts-release.json"
+  [[ -d "$root" && ! -L "$root" && -s "$root/index.html" && -s "$manifest" && ! -L "$manifest" ]] || return 1
+  FRONT_RELEASE_DIR="$root" FRONT_RELEASE_MANIFEST="$manifest" FRONT_RELEASE_EXPECTED_KEY="$expected_key" python3 - <<'PYFRONTRELEASEVERIFY' >/dev/null 2>&1
+import hashlib, json, os, pathlib
+root = pathlib.Path(os.environ['FRONT_RELEASE_DIR'])
+manifest = pathlib.Path(os.environ['FRONT_RELEASE_MANIFEST'])
+data = json.loads(manifest.read_text(encoding='utf-8'))
+if data.get('state') != 'ready':
+    raise SystemExit(1)
+expected = os.environ.get('FRONT_RELEASE_EXPECTED_KEY') or ''
+if expected and str(data.get('release_key') or '') != expected:
+    raise SystemExit(1)
+
+def tree_hash(base: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    resolved_base = base.resolve()
+    for item in sorted(base.rglob('*'), key=lambda p: p.as_posix()):
+        if item.name == '.tts-release.json':
+            continue
+        rel = item.relative_to(base).as_posix()
+        if item.is_symlink():
+            target = os.readlink(item)
+            if os.path.isabs(target):
+                raise SystemExit(1)
+            resolved = (item.parent / target).resolve(strict=False)
+            try:
+                resolved.relative_to(resolved_base)
+            except ValueError:
+                raise SystemExit(1)
+            digest.update(b'L\0' + rel.encode() + b'\0' + target.encode() + b'\0')
+            continue
+        if not item.is_file():
+            continue
+        digest.update(b'F\0' + rel.encode() + b'\0')
+        with item.open('rb') as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+if tree_hash(root) != str(data.get('sha256') or ''):
+    raise SystemExit(1)
+PYFRONTRELEASEVERIFY
+}
+
+frontend_active_release_key() {
+  [[ -L "$FRONT_PUBLISH_DIR" ]] || return 1
+  local target root resolved
+  target="$(readlink -f -- "$FRONT_PUBLISH_DIR" 2>/dev/null || true)"
+  root="$(readlink -f -- "${FRONT_RELEASE_ROOT:-$(dirname "$FRONT_PUBLISH_DIR")/sinuca-releases}" 2>/dev/null || true)"
+  [[ -n "$target" && -n "$root" && "$target" == "$root"/* ]] || return 1
+  resolved="$(basename "$target")"
+  [[ -n "$resolved" ]] || return 1
+  verify_frontend_release "$target" "$resolved" || return 1
+  printf '%s\n' "$resolved"
+}
+
 frontend_publication_is_healthy() {
-  [[ -d "$FRONT_PUBLISH_DIR" ]] || return 1
+  [[ -e "$FRONT_PUBLISH_DIR" || -L "$FRONT_PUBLISH_DIR" ]] || return 1
   [[ -s "$FRONT_PUBLISH_DIR/index.html" ]] || return 1
   [[ -r "$FRONT_PUBLISH_DIR/index.html" ]] || return 1
+  if [[ -L "$FRONT_PUBLISH_DIR" ]]; then
+    frontend_active_release_key >/dev/null 2>&1 || return 1
+  fi
+  return 0
+}
+
+adopt_frontend_publication_as_release() {
+  local baseline_key="${1:-}" release_root release_dir parent tmp_link
+  if frontend_active_release_key >/dev/null 2>&1; then
+    frontend_active_release_key
+    return 0
+  fi
+  [[ -d "$FRONT_PUBLISH_DIR" && ! -L "$FRONT_PUBLISH_DIR" && -s "$FRONT_PUBLISH_DIR/index.html" ]] || return 1
+  baseline_key="$(sanitize_commit_ref "$baseline_key")"
+  [[ -n "$baseline_key" ]] || return 1
+  release_root="${FRONT_RELEASE_ROOT:-$(dirname "$FRONT_PUBLISH_DIR")/sinuca-releases}"
+  release_dir="$(frontend_release_root_for_key "$baseline_key")" || return 1
+  parent="$(dirname "$FRONT_PUBLISH_DIR")"
+  install -d -m 0755 "$release_root" || return 1
+  if [[ -e "$release_dir" || -L "$release_dir" ]]; then
+    if ! verify_frontend_release "$release_dir" "$baseline_key"; then
+      return 1
+    fi
+    # Só descarta a árvore física se ela for byte-a-byte equivalente ao release já existente.
+    local live_hash release_hash
+    live_hash="$(FRONT_RELEASE_DIR="$FRONT_PUBLISH_DIR" python3 - <<'PYFRONTLIVEHASH'
+import hashlib, os, pathlib
+base = pathlib.Path(os.environ['FRONT_RELEASE_DIR'])
+resolved_base = base.resolve()
+d = hashlib.sha256()
+for item in sorted(base.rglob('*'), key=lambda p: p.as_posix()):
+    if item.name == '.tts-release.json':
+        continue
+    rel = item.relative_to(base).as_posix()
+    if item.is_symlink():
+        target = os.readlink(item)
+        if os.path.isabs(target):
+            raise SystemExit(1)
+        resolved = (item.parent / target).resolve(strict=False)
+        try:
+            resolved.relative_to(resolved_base)
+        except ValueError:
+            raise SystemExit(1)
+        d.update(b'L\0' + rel.encode() + b'\0' + target.encode() + b'\0')
+        continue
+    if not item.is_file():
+        continue
+    d.update(b'F\0' + rel.encode() + b'\0')
+    with item.open('rb') as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+            d.update(chunk)
+print(d.hexdigest())
+PYFRONTLIVEHASH
+)"
+    release_hash="$(FRONT_RELEASE_MANIFEST="$release_dir/.tts-release.json" python3 - <<'PYFRONTHASHREAD'
+import json, os
+print(json.load(open(os.environ['FRONT_RELEASE_MANIFEST'], encoding='utf-8')).get('sha256',''))
+PYFRONTHASHREAD
+)"
+    [[ -n "$live_hash" && "$live_hash" == "$release_hash" ]] || return 1
+    rm -rf -- "$FRONT_PUBLISH_DIR" || return 1
+  else
+    # Registra o hash ainda no path live; o mv seguinte é rename no mesmo filesystem.
+    write_frontend_release_manifest "$FRONT_PUBLISH_DIR" "$baseline_key" || return 1
+    if ! mv -- "$FRONT_PUBLISH_DIR" "$release_dir"; then
+      rm -f -- "$FRONT_PUBLISH_DIR/.tts-release.json" 2>/dev/null || true
+      return 1
+    fi
+  fi
+  tmp_link="$parent/.sinuca-current.$$.${RANDOM}"
+  ln -s -- "$release_dir" "$tmp_link" || return 1
+  if ! mv -Tf -- "$tmp_link" "$FRONT_PUBLISH_DIR"; then
+    rm -f -- "$tmp_link" 2>/dev/null || true
+    if [[ ! -e "$FRONT_PUBLISH_DIR" && -d "$release_dir" ]]; then
+      mv -- "$release_dir" "$FRONT_PUBLISH_DIR" 2>/dev/null || true
+    fi
+    return 1
+  fi
+  verify_frontend_release "$release_dir" "$baseline_key" || return 1
+  printf '%s\n' "$baseline_key"
+}
+
+prepare_frontend_release() {
+  local source_dir="${1:?}" release_key="${2:?}" release_root release_dir tmp copy_mode="copy"
+  release_key="$(sanitize_commit_ref "$release_key")"
+  [[ -n "$release_key" && -s "$source_dir/index.html" ]] || return 1
+  release_root="${FRONT_RELEASE_ROOT:-$(dirname "$FRONT_PUBLISH_DIR")/sinuca-releases}"
+  release_dir="$(frontend_release_root_for_key "$release_key")" || return 1
+  if verify_frontend_release "$release_dir" "$release_key"; then
+    printf '%s\n' "$release_dir"
+    return 0
+  fi
+  install -d -m 0755 "$release_root" || return 1
+  tmp="$(mktemp -d "$release_root/.${release_key}.XXXXXX")" || return 1
+  if cp -al -- "$source_dir/." "$tmp/" 2>/dev/null; then
+    copy_mode="hardlink"
+  else
+    rm -rf -- "$tmp"/* "$tmp"/.[!.]* "$tmp"/..?* 2>/dev/null || true
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a --delete "$source_dir/" "$tmp/" || { rm -rf -- "$tmp"; return 1; }
+    else
+      cp -a -- "$source_dir/." "$tmp/" || { rm -rf -- "$tmp"; return 1; }
+    fi
+  fi
+  [[ -s "$tmp/index.html" ]] || { rm -rf -- "$tmp"; return 1; }
+  find "$tmp" -type d -exec chmod 0755 {} + 2>/dev/null || true
+  find "$tmp" -type f -exec chmod 0644 {} + 2>/dev/null || true
+  write_frontend_release_manifest "$tmp" "$release_key" || { rm -rf -- "$tmp"; return 1; }
+  verify_frontend_release "$tmp" "$release_key" || { rm -rf -- "$tmp"; return 1; }
+  rm -rf -- "$release_dir" 2>/dev/null || true
+  mv -- "$tmp" "$release_dir" || { rm -rf -- "$tmp"; return 1; }
+  logger -t "$LOG_TAG" "frontend release $(short_commit "$release_key") preparada via $copy_mode" 2>/dev/null || true
+  printf '%s\n' "$release_dir"
+}
+
+activate_frontend_release() {
+  local release_key="${1:?}" release_dir parent tmp_link backup="" had_physical=0
+  release_key="$(sanitize_commit_ref "$release_key")"
+  release_dir="$(frontend_release_root_for_key "$release_key")" || return 1
+  verify_frontend_release "$release_dir" "$release_key" || return 1
+  parent="$(dirname "$FRONT_PUBLISH_DIR")"
+  install -d -m 0755 "$parent" || return 1
+  tmp_link="$parent/.sinuca-current.$$.${RANDOM}"
+  ln -s -- "$release_dir" "$tmp_link" || return 1
+  if [[ -d "$FRONT_PUBLISH_DIR" && ! -L "$FRONT_PUBLISH_DIR" ]]; then
+    backup="$parent/.sinuca-legacy.$$.${RANDOM}"
+    mv -- "$FRONT_PUBLISH_DIR" "$backup" || { rm -f -- "$tmp_link"; return 1; }
+    had_physical=1
+  fi
+  if ! mv -Tf -- "$tmp_link" "$FRONT_PUBLISH_DIR"; then
+    rm -f -- "$tmp_link" 2>/dev/null || true
+    if (( had_physical == 1 )); then
+      mv -- "$backup" "$FRONT_PUBLISH_DIR" 2>/dev/null || true
+    fi
+    return 1
+  fi
+  if ! frontend_publication_is_healthy; then
+    rm -f -- "$FRONT_PUBLISH_DIR" 2>/dev/null || true
+    if (( had_physical == 1 )); then
+      mv -- "$backup" "$FRONT_PUBLISH_DIR" 2>/dev/null || true
+    fi
+    return 1
+  fi
+  (( had_physical == 0 )) || rm -rf -- "$backup" 2>/dev/null || true
   return 0
 }
 
 publish_frontend_atomically() {
-  local source_dir="$1"
-  local publish_parent release_dir backup_path had_previous=0
-
-  publish_parent="$(dirname "$FRONT_PUBLISH_DIR")"
-  mkdir -p "$publish_parent"
-  chmod 0755 "$publish_parent" 2>/dev/null || true
-
-  release_dir="$(mktemp -d "$publish_parent/.sinuca-release.XXXXXX")" || {
-    FRONT_STATUS="não foi possível criar a área temporária da publicação"
+  local source_dir="${1:?}" release_key="${2:-}"
+  if [[ -z "$release_key" ]]; then
+    release_key="${LOCAL_CANDIDATE_ARTIFACT_COMMIT:-${LOCAL_CANDIDATE_PREPARED_COMMIT:-${REMOTE_COMMIT:-}}}"
+  fi
+  if [[ -z "$release_key" ]]; then
+    release_key="$(repo_git rev-parse HEAD 2>/dev/null || true)"
+  fi
+  release_key="$(sanitize_commit_ref "$release_key")"
+  [[ -n "$release_key" ]] || {
+    FRONT_STATUS="não foi possível determinar a chave da release frontend"
     LAST_ERROR_STDERR="$FRONT_STATUS"
     return 1
   }
-  backup_path="$publish_parent/.sinuca-previous.$$.${RANDOM}"
-
-  if command -v rsync >/dev/null 2>&1; then
-    if ! rsync -a --delete "$source_dir/" "$release_dir/"; then
-      FRONT_STATUS="falha ao preparar a nova publicação do frontend"
-      LAST_ERROR_STDERR="$FRONT_STATUS"
-      rm -rf -- "$release_dir" 2>/dev/null || true
-      return 1
-    fi
-  elif ! cp -a "$source_dir/." "$release_dir/"; then
-    FRONT_STATUS="falha ao preparar a nova publicação do frontend"
+  prepare_frontend_release "$source_dir" "$release_key" >/dev/null || {
+    FRONT_STATUS="falha ao preparar release imutável do frontend"
     LAST_ERROR_STDERR="$FRONT_STATUS"
-    rm -rf -- "$release_dir" 2>/dev/null || true
     return 1
-  fi
-
-  if [[ ! -s "$release_dir/index.html" ]]; then
-    FRONT_STATUS="publicação temporária sem index.html"
+  }
+  if ! activate_frontend_release "$release_key"; then
+    FRONT_STATUS="não foi possível ativar release frontend $(short_commit "$release_key")"
     LAST_ERROR_STDERR="$FRONT_STATUS"
-    rm -rf -- "$release_dir" 2>/dev/null || true
     return 1
-  fi
-
-  # O Nginx precisa atravessar todos os diretórios e ler os arquivos. A cópia
-  # anterior preservava permissões do build e podia publicar uma árvore 0700.
-  find "$release_dir" -type d -exec chmod 0755 {} +
-  find "$release_dir" -type f -exec chmod 0644 {} +
-  chown -R root:root "$release_dir" 2>/dev/null || true
-
-  if [[ -e "$FRONT_PUBLISH_DIR" || -L "$FRONT_PUBLISH_DIR" ]]; then
-    if ! mv -- "$FRONT_PUBLISH_DIR" "$backup_path"; then
-      FRONT_STATUS="não foi possível preservar a publicação atual"
-      LAST_ERROR_STDERR="$FRONT_STATUS"
-      rm -rf -- "$release_dir" 2>/dev/null || true
-      return 1
-    fi
-    had_previous=1
-  fi
-
-  if ! mv -- "$release_dir" "$FRONT_PUBLISH_DIR"; then
-    FRONT_STATUS="não foi possível ativar a nova publicação"
-    LAST_ERROR_STDERR="$FRONT_STATUS"
-    if (( had_previous == 1 )); then
-      mv -- "$backup_path" "$FRONT_PUBLISH_DIR" 2>/dev/null || true
-    fi
-    rm -rf -- "$release_dir" 2>/dev/null || true
-    return 1
-  fi
-
-  if ! frontend_publication_is_healthy; then
-    FRONT_STATUS="a nova publicação não ficou legível para o servidor web"
-    LAST_ERROR_STDERR="$FRONT_STATUS"
-    rm -rf -- "$FRONT_PUBLISH_DIR" 2>/dev/null || true
-    if (( had_previous == 1 )); then
-      mv -- "$backup_path" "$FRONT_PUBLISH_DIR" 2>/dev/null || true
-    fi
-    return 1
-  fi
-
-  if (( had_previous == 1 )); then
-    rm -rf -- "$backup_path" 2>/dev/null || logger -t "$LOG_TAG" "aviso: backup antigo do frontend não pôde ser removido: $backup_path"
   fi
   return 0
+}
+
+collect_protected_frontend_release_keys() {
+  local active=""
+  active="$(frontend_active_release_key 2>/dev/null || true)"
+  [[ -n "$active" ]] && printf '%s\n' "$active"
+  [[ -d "${RUNTIME_RELEASE_ROOT:-}" ]] || return 0
+  find "$RUNTIME_RELEASE_ROOT" -mindepth 2 -maxdepth 2 -type f -name release.json -print0 2>/dev/null | while IFS= read -r -d '' manifest; do
+    FRONT_RUNTIME_MANIFEST="$manifest" python3 - <<'PYFRONTREFS' 2>/dev/null || true
+import json, os
+try:
+    data = json.load(open(os.environ['FRONT_RUNTIME_MANIFEST'], encoding='utf-8'))
+except Exception:
+    raise SystemExit(0)
+record = data.get('frontend') if isinstance(data, dict) else None
+if isinstance(record, dict):
+    key = str(record.get('release_key') or '')
+    if key:
+        print(key)
+PYFRONTREFS
+  done
+}
+
+prune_frontend_releases() {
+  local root="${FRONT_RELEASE_ROOT:-$(dirname "$FRONT_PUBLISH_DIR")/sinuca-releases}" keep="${FRONT_RELEASE_RETENTION:-4}" count=0 entry key
+  [[ "$keep" =~ ^[0-9]+$ ]] || keep=4
+  (( keep >= 1 )) || keep=1
+  [[ -d "$root" ]] || return 0
+  declare -A protected=()
+  while IFS= read -r key; do
+    [[ -n "$key" ]] && protected["$key"]=1
+  done < <(collect_protected_frontend_release_keys | sort -u)
+  while IFS= read -r entry; do
+    [[ -d "$entry" ]] || continue
+    key="$(basename "$entry")"
+    if [[ -n "${protected[$key]:-}" ]]; then
+      continue
+    fi
+    count=$((count + 1))
+    if (( count > keep )); then
+      rm -rf -- "$entry" 2>/dev/null || true
+    fi
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-)
 }
 
 deploy_frontend() {
@@ -7355,6 +7606,21 @@ def tree_hash(path: pathlib.Path) -> str:
                 digest.update(chunk)
     return digest.hexdigest()
 
+front_ready = os.environ.get('RELEASE_FRONT_READY') == '1'
+front_release_key = ''
+if front_ready:
+    ref = root / 'frontend.json'
+    if ref.is_file() and not ref.is_symlink():
+        data = json.loads(ref.read_text(encoding='utf-8'))
+        front_release_key = str(data.get('release_key') or '')
+        if not front_release_key:
+            raise SystemExit('frontend runtime release missing release_key')
+    elif (root / 'frontend').is_dir():
+        # Compatibilidade para releases criados antes do frontend por referência.
+        front_release_key = ''
+    else:
+        raise SystemExit('frontend runtime release missing reference')
+
 back_ready = os.environ.get('RELEASE_BACK_READY') == '1'
 back_deps_key = ''
 if back_ready:
@@ -7371,8 +7637,9 @@ payload = {
     'commit': os.environ['RELEASE_COMMIT'],
     'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
     'frontend': {
-        'ready': os.environ.get('RELEASE_FRONT_READY') == '1',
-        'sha256': tree_hash(root / 'frontend') if os.environ.get('RELEASE_FRONT_READY') == '1' else '',
+        'ready': front_ready,
+        'release_key': front_release_key,
+        'sha256': tree_hash(root / 'frontend') if front_ready and not front_release_key else '',
     },
     'backend': {
         'ready': back_ready,
@@ -7391,6 +7658,62 @@ verify_runtime_release_component() {
   local root="${1:?}" kind="${2:?}" ready
   ready="$root/release.json"
   [[ -s "$ready" && ! -L "$ready" ]] || return 1
+
+  if [[ "$kind" == "frontend" ]]; then
+    local release_key release_dir
+    release_key="$(RELEASE_READY_FILE="$ready" python3 - <<'PYFRONTRELEASEKEY' 2>/dev/null
+import json, os
+with open(os.environ['RELEASE_READY_FILE'], encoding='utf-8') as fh:
+    data = json.load(fh)
+record = data.get('frontend') if isinstance(data, dict) else None
+if data.get('state') != 'ready' or not isinstance(record, dict) or not record.get('ready'):
+    raise SystemExit(1)
+print(str(record.get('release_key') or ''))
+PYFRONTRELEASEKEY
+)" || return 1
+    if [[ -n "$release_key" ]]; then
+      release_dir="$(frontend_release_root_for_key "$release_key")" || return 1
+      verify_frontend_release "$release_dir" "$release_key"
+      return $?
+    fi
+    # Compatibilidade com release Wave 6–11 que continha snapshot físico.
+    RELEASE_READY_FILE="$ready" RELEASE_ROOT="$root" python3 - <<'PYLEGACYFRONTVERIFY' >/dev/null 2>&1
+import hashlib, json, os, pathlib
+ready = pathlib.Path(os.environ['RELEASE_READY_FILE'])
+root = pathlib.Path(os.environ['RELEASE_ROOT'])
+data = json.loads(ready.read_text(encoding='utf-8'))
+record = data.get('frontend') if isinstance(data, dict) else None
+if not isinstance(record, dict) or not record.get('ready'):
+    raise SystemExit(1)
+base = root / 'frontend'
+if not base.is_dir():
+    raise SystemExit(1)
+digest = hashlib.sha256()
+resolved_base = base.resolve()
+for item in sorted(base.rglob('*'), key=lambda p: p.as_posix()):
+    rel = item.relative_to(base).as_posix()
+    if item.is_symlink():
+        target = os.readlink(item)
+        if os.path.isabs(target):
+            raise SystemExit(1)
+        resolved = (item.parent / target).resolve(strict=False)
+        try:
+            resolved.relative_to(resolved_base)
+        except ValueError:
+            raise SystemExit(1)
+        digest.update(b'L\0' + rel.encode() + b'\0' + target.encode() + b'\0')
+        continue
+    if not item.is_file():
+        continue
+    digest.update(b'F\0' + rel.encode() + b'\0')
+    with item.open('rb') as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+            digest.update(chunk)
+if digest.hexdigest() != str(record.get('sha256') or ''):
+    raise SystemExit(1)
+PYLEGACYFRONTVERIFY
+    return $?
+  fi
 
   if [[ "$kind" == "backend" ]]; then
     local deps_key deps_layer
@@ -7420,7 +7743,7 @@ data = json.loads(ready.read_text(encoding='utf-8'))
 record = data.get(kind) if isinstance(data, dict) else None
 if data.get('state') != 'ready' or not isinstance(record, dict) or not record.get('ready'):
     raise SystemExit(1)
-path = root / (kind if kind == 'frontend' else 'backend/dist')
+path = root / 'backend/dist'
 
 def tree_hash(base: pathlib.Path) -> str:
     digest = hashlib.sha256()
@@ -7490,12 +7813,23 @@ capture_runtime_release_snapshot() {
       rm -rf -- "$tmp" 2>/dev/null || true
       return 1
     fi
-    cp -a -- "$FRONT_PUBLISH_DIR" "$tmp/frontend" || {
-      LAST_ERROR_STDERR="falha ao preservar publicação frontend anterior"
-      LAST_ERROR_CODE="RUNTIME_RELEASE_FRONTEND_SNAPSHOT_FAILED"
+    local baseline_front_release_key=""
+    baseline_front_release_key="$(frontend_active_release_key 2>/dev/null || true)"
+    if [[ -z "$baseline_front_release_key" ]]; then
+      baseline_front_release_key="$(adopt_frontend_publication_as_release "$commit" 2>/dev/null || true)"
+    fi
+    if [[ -z "$baseline_front_release_key" ]]; then
+      LAST_ERROR_STDERR="não foi possível adotar/reutilizar release frontend anterior"
+      LAST_ERROR_CODE="RUNTIME_RELEASE_FRONTEND_ADOPTION_FAILED"
       rm -rf -- "$tmp" 2>/dev/null || true
       return 1
-    }
+    fi
+    RELEASE_FRONT_REF_FILE="$tmp/frontend.json" RELEASE_FRONT_REF_KEY="$baseline_front_release_key" python3 - <<'PYRELEASEFRONTREF'
+import json, os, pathlib
+path = pathlib.Path(os.environ['RELEASE_FRONT_REF_FILE'])
+payload = {'release_key': os.environ['RELEASE_FRONT_REF_KEY']}
+path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding='utf-8')
+PYRELEASEFRONTREF
     front_ready=1
   fi
 
@@ -7559,7 +7893,7 @@ PYRELEASEBACKDEPS
 }
 
 restore_frontend_runtime_release() {
-  local commit="$(sanitize_commit_ref "${1:-$PREVIOUS_COMMIT}")" root
+  local commit="$(sanitize_commit_ref "${1:-$PREVIOUS_COMMIT}")" root release_key=""
   root="$(runtime_release_root_for_commit "$commit")" || return 1
   if ! verify_runtime_release_component "$root" frontend; then
     FRONT_STATUS="release frontend anterior ausente ou corrompido para $(short_commit "$commit")"
@@ -7567,11 +7901,29 @@ restore_frontend_runtime_release() {
     LAST_ERROR_CODE="ROLLBACK_FRONTEND_RELEASE_INVALID"
     return 1
   fi
-  if ! publish_frontend_atomically "$root/frontend"; then
+  release_key="$(RELEASE_READY_FILE="$root/release.json" python3 - <<'PYROLLBACKFRONTKEY' 2>/dev/null
+import json, os
+with open(os.environ['RELEASE_READY_FILE'], encoding='utf-8') as fh:
+    data = json.load(fh)
+record = data.get('frontend') if isinstance(data, dict) else None
+print(str(record.get('release_key') or '') if isinstance(record, dict) else '')
+PYROLLBACKFRONTKEY
+)" || true
+  if [[ -z "$release_key" ]]; then
+    # Migração de releases Wave 6–11: transforma o snapshot físico antigo em
+    # release dedicada uma única vez; hardlink é usado quando o filesystem permite.
+    [[ -s "$root/frontend/index.html" ]] || return 1
+    prepare_frontend_release "$root/frontend" "$commit" >/dev/null || {
+      LAST_ERROR_CODE="ROLLBACK_FRONTEND_RELEASE_MIGRATION_FAILED"
+      return 1
+    }
+    release_key="$commit"
+  fi
+  if ! activate_frontend_release "$release_key"; then
     LAST_ERROR_CODE="ROLLBACK_FRONTEND_RELEASE_PUBLISH_FAILED"
     return 1
   fi
-  FRONT_STATUS="frontend restaurado sem rebuild a partir do release $(short_commit "$commit")"
+  FRONT_STATUS="frontend restaurado sem rebuild por release $(short_commit "$release_key")"
   return 0
 }
 
@@ -7617,6 +7969,7 @@ restore_backend_runtime_release() {
 
 prune_runtime_releases() {
   prune_python_runtime_releases || true
+  prune_frontend_releases || true
   local keep="${RUNTIME_RELEASE_RETENTION:-3}" current count=0 entry
   [[ "$keep" =~ ^[0-9]+$ ]] || keep=3
   (( keep >= 1 )) || keep=1
