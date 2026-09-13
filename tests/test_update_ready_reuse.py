@@ -41,6 +41,8 @@ LOCAL_CANDIDATE_BACKEND_ARTIFACT=''
 FRONT_CHANGED=1
 BACK_CHANGED=1
 FRONT_TESTS_CHANGED=0
+FRONT_TESTS_REQUIRED=1
+FRONT_TYPECHECK_REQUIRED=0
 BACK_TESTS_CHANGED=0
 BOT_CHANGED=0
 REQUIREMENTS_CHANGED=0
@@ -63,6 +65,7 @@ install() {{
 }}
 chown() {{ :; }}
 logger() {{ :; }}
+node() {{ :; }}
 sudo() {{
   if [[ "${{1:-}}" == -u ]]; then shift 2; fi
   [[ "${{1:-}}" == -H ]] && shift
@@ -72,8 +75,16 @@ frontend_publication_is_healthy() {{ return 0; }}
 npm() {{
   case "$1 ${{2:-}}" in
     'ci '*|'install '*)
-      mkdir -p node_modules/pkg
+      mkdir -p node_modules/.bin node_modules/pkg
       printf module > node_modules/pkg/index.js
+      if [[ "$PWD" == */frontend ]]; then
+        cat > node_modules/.bin/vite <<'SHVITE'
+#!/bin/sh
+mkdir -p dist
+printf '<html>ok</html>' > dist/index.html
+SHVITE
+        chmod +x node_modules/.bin/vite
+      fi
       ;;
     'test ')
       :

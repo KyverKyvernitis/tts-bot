@@ -86,6 +86,8 @@ PYTHON_RUNTIME_CURRENT_LINK="${TTS_BOT_PYTHON_RUNTIME_CURRENT_LINK:-$PYTHON_RUNT
 PYTHON_RUNTIME_RETENTION="${TTS_BOT_PYTHON_RUNTIME_RETENTION:-3}"
 NODE_DEPENDENCY_CACHE_ROOT="${TTS_BOT_NODE_DEPENDENCY_CACHE_ROOT:-$CANDIDATE_ROOT/node-dependency-cache}"
 NODE_DEPENDENCY_CACHE_RETENTION="${TTS_BOT_NODE_DEPENDENCY_CACHE_RETENTION:-4}"
+TYPESCRIPT_CACHE_ROOT="${TTS_BOT_TYPESCRIPT_CACHE_ROOT:-$CANDIDATE_ROOT/typescript-cache}"
+TYPESCRIPT_CACHE_RETENTION="${TTS_BOT_TYPESCRIPT_CACHE_RETENTION:-4}"
 NPM_INSTALL_FLAGS="--prefer-offline --no-audit --no-fund --progress=false"
 APP_COMMAND_SYNC_STATUS_FILE="$REPO_DIR/data/app_commands_sync_status.json"
 
@@ -151,6 +153,9 @@ REMOTE_REJECT_REASON=""
 REMOTE_CANDIDATE_ARTIFACT_ROOT=""
 NODE_DEP_CACHE_HITS=0
 NODE_DEP_CACHE_MISSES=0
+TYPESCRIPT_CACHE_HITS=0
+TYPESCRIPT_CACHE_MISSES=0
+LAST_TYPESCRIPT_CACHE_HIT=0
 LAST_NODE_DEP_LAYER_PATH=""
 LAST_NODE_DEP_LAYER_KEY=""
 LAST_NODE_DEP_CACHE_HIT=0
@@ -176,6 +181,8 @@ FRONT_CHANGED=0
 BACK_CHANGED=0
 FRONT_TESTS_CHANGED=0
 BACK_TESTS_CHANGED=0
+FRONT_TESTS_REQUIRED=0
+FRONT_TYPECHECK_REQUIRED=0
 BOT_CHANGED=0
 REQUIREMENTS_CHANGED=0
 AUDIO_SYSTEMD_CHANGED=0
@@ -523,6 +530,8 @@ classify_failure_code() {
     printf 'FRONTEND_NPM_CI_FAILED'
   elif [[ "$stage_lc" == *"testes do frontend"* ]]; then
     printf 'FRONTEND_TEST_FAILED'
+  elif [[ "$stage_lc" == *"typecheck do frontend"* ]]; then
+    printf 'FRONTEND_TSC_FAILED'
   elif [[ "$stage_lc" == *"build do frontend"* ]]; then
     if [[ "$excerpt_lc" == *"error ts"* ]]; then
       printf 'FRONTEND_TSC_FAILED'
@@ -2439,6 +2448,7 @@ prune_update_artifacts() {
   prune_archive_root "$CANDIDATE_ROOT/cancelled" "$cancelled_days" "$cancelled_keep"
   prune_archive_root "$REMOTE_RUNTIME_ARTIFACT_ROOT" 1 2
   prune_node_dependency_layers || true
+  prune_typescript_cache || true
   find "$CANDIDATE_QUEUE_DONE_DIR" -type f -mtime "+$done_days" -delete 2>/dev/null || true
   find "$CANDIDATE_QUEUE_FAILED_DIR" -type f -mtime "+$failed_days" -delete 2>/dev/null || true
   find "$CANDIDATE_QUEUE_CANCELLED_DIR" -type f -mtime "+$cancelled_days" -delete 2>/dev/null || true
@@ -4802,6 +4812,135 @@ prune_node_dependency_layers() {
   done < <(find "$cache_root" -mindepth 2 -maxdepth 2 -type d -print 2>/dev/null)
 }
 
+frontend_typescript_cache_key() {
+  local project_dir="${1:?}" dep_key tsconfig_hash
+  [[ -s "$project_dir/tsconfig.json" && -s "$project_dir/package.json" && -s "$project_dir/package-lock.json" ]] || return 2
+  dep_key="$(node_dependency_cache_key "$project_dir" dev)" || return 1
+  tsconfig_hash="$(sha256sum "$project_dir/tsconfig.json" | awk '{print $1}')"
+  printf '%s\0%s\0%s\0' "frontend-noemit-v1" "$dep_key" "$tsconfig_hash" \
+    | sha256sum | awk '{print $1}'
+}
+
+frontend_typescript_cache_entry() {
+  local key="${1:?}" root
+  root="${TYPESCRIPT_CACHE_ROOT:-${CANDIDATE_ROOT:-${TMPDIR:-/tmp}/tts-bot-typescript-cache}}"
+  [[ "$key" =~ ^[a-f0-9]{64}$ ]] || return 1
+  printf '%s/frontend/%s\n' "$root" "$key"
+}
+
+verify_frontend_typescript_cache() {
+  local entry="${1:?}" expected_key="${2:?}"
+  [[ -d "$entry" && ! -L "$entry" && -s "$entry/tsconfig.tsbuildinfo" && ! -L "$entry/tsconfig.tsbuildinfo" && -s "$entry/cache.json" && ! -L "$entry/cache.json" ]] || return 1
+  TYPESCRIPT_CACHE_META="$entry/cache.json" TYPESCRIPT_CACHE_KEY="$expected_key" python3 - <<'PYTSCACHEVERIFY' >/dev/null 2>&1
+import json, os, pathlib
+path = pathlib.Path(os.environ['TYPESCRIPT_CACHE_META'])
+data = json.loads(path.read_text(encoding='utf-8'))
+if data.get('state') != 'ready' or data.get('kind') != 'frontend-noemit':
+    raise SystemExit(1)
+if data.get('key') != os.environ['TYPESCRIPT_CACHE_KEY']:
+    raise SystemExit(1)
+PYTSCACHEVERIFY
+}
+
+write_frontend_typescript_cache_manifest() {
+  local entry="${1:?}" key="${2:?}" project_dir="${3:?}" tsconfig_hash
+  tsconfig_hash="$(sha256sum "$project_dir/tsconfig.json" | awk '{print $1}')"
+  TYPESCRIPT_CACHE_META="$entry/cache.json" TYPESCRIPT_CACHE_KEY="$key" TYPESCRIPT_TSCONFIG_HASH="$tsconfig_hash" python3 - <<'PYTSCACHEWRITE'
+import datetime, json, os, pathlib
+path = pathlib.Path(os.environ['TYPESCRIPT_CACHE_META'])
+payload = {
+    'state': 'ready',
+    'kind': 'frontend-noemit',
+    'key': os.environ['TYPESCRIPT_CACHE_KEY'],
+    'tsconfig_sha256': os.environ['TYPESCRIPT_TSCONFIG_HASH'],
+    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+}
+tmp = path.with_name('.cache.json.tmp')
+tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+os.replace(tmp, path)
+PYTSCACHEWRITE
+}
+
+run_frontend_incremental_typecheck() {
+  local project_dir="${1:?}" key entry parent tmp local_cache qdir
+  LAST_TYPESCRIPT_CACHE_HIT=0
+  [[ -x "$project_dir/node_modules/.bin/tsc" && -s "$project_dir/tsconfig.json" ]] || return 1
+  key="$(frontend_typescript_cache_key "$project_dir")" || return 1
+  entry="$(frontend_typescript_cache_entry "$key")" || return 1
+  parent="$(dirname "$entry")"
+  local_cache="$project_dir/.update-tscache"
+  rm -rf -- "$local_cache" 2>/dev/null || true
+  install -d -o ubuntu -g ubuntu -m 0775 "$local_cache" || return 1
+
+  if verify_frontend_typescript_cache "$entry" "$key"; then
+    sudo -u ubuntu -H cp -a -- "$entry/tsconfig.tsbuildinfo" "$local_cache/tsconfig.tsbuildinfo" || return 1
+    LAST_TYPESCRIPT_CACHE_HIT=1
+    TYPESCRIPT_CACHE_HITS=$(( ${TYPESCRIPT_CACHE_HITS:-0} + 1 ))
+    touch "$entry/cache.json" 2>/dev/null || true
+    logger -t "$LOG_TAG" "cache TypeScript HIT: frontend ${key:0:12}" 2>/dev/null || true
+  else
+    TYPESCRIPT_CACHE_MISSES=$(( ${TYPESCRIPT_CACHE_MISSES:-0} + 1 ))
+    logger -t "$LOG_TAG" "cache TypeScript MISS: frontend ${key:0:12}" 2>/dev/null || true
+  fi
+
+  printf -v qdir '%q' "$project_dir"
+  zip_progress_run_as_ubuntu \
+    "Validando TypeScript" \
+    "Typecheck incremental do frontend" \
+    "cd $qdir && ./node_modules/.bin/tsc -p tsconfig.json --incremental --tsBuildInfoFile .update-tscache/tsconfig.tsbuildinfo --noEmit" || return $?
+
+  # Cache é uma otimização: se uma versão futura do TypeScript deixar de gerar
+  # buildinfo com --noEmit, o typecheck continua válido e só perdemos o HIT.
+  if [[ ! -s "$local_cache/tsconfig.tsbuildinfo" || -L "$local_cache/tsconfig.tsbuildinfo" ]]; then
+    rm -rf -- "$local_cache" 2>/dev/null || true
+    return 0
+  fi
+
+  install -d -o ubuntu -g ubuntu -m 0775 "$parent" || return 1
+  tmp="$(mktemp -d "$parent/.${key}.XXXXXX")" || return 1
+  chown ubuntu:ubuntu "$tmp" 2>/dev/null || true
+  if ! sudo -u ubuntu -H cp -a -- "$local_cache/tsconfig.tsbuildinfo" "$tmp/tsconfig.tsbuildinfo"; then
+    rm -rf -- "$tmp" "$local_cache" 2>/dev/null || true
+    return 1
+  fi
+  if ! write_frontend_typescript_cache_manifest "$tmp" "$key" "$project_dir"; then
+    rm -rf -- "$tmp" "$local_cache" 2>/dev/null || true
+    return 1
+  fi
+  chown -R root:root "$tmp" 2>/dev/null || true
+  chmod -R a-w "$tmp" 2>/dev/null || true
+  if [[ -e "$entry" ]]; then
+    chmod -R u+w "$entry" 2>/dev/null || true
+    rm -rf -- "$entry" 2>/dev/null || true
+  fi
+  if ! mv -- "$tmp" "$entry"; then
+    rm -rf -- "$tmp" "$local_cache" 2>/dev/null || true
+    return 1
+  fi
+  rm -rf -- "$local_cache" 2>/dev/null || true
+  return 0
+}
+
+prune_typescript_cache() {
+  local keep="${TYPESCRIPT_CACHE_RETENTION:-4}" root group count entry
+  root="${TYPESCRIPT_CACHE_ROOT:-${CANDIDATE_ROOT:-${TMPDIR:-/tmp}/tts-bot-typescript-cache}}"
+  [[ "$keep" =~ ^[0-9]+$ ]] || keep=4
+  (( keep >= 1 )) || keep=1
+  [[ -d "$root" ]] || return 0
+  while IFS= read -r group; do
+    [[ -d "$group" ]] || continue
+    count=0
+    while IFS= read -r entry; do
+      [[ -d "$entry" ]] || continue
+      count=$((count + 1))
+      if (( count > keep )); then
+        chmod -R u+w "$entry" 2>/dev/null || true
+        rm -rf -- "$entry" 2>/dev/null || true
+      fi
+    done < <(find "$group" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-)
+  done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null)
+}
+
 prepare_local_candidate_runtime_artifacts_in_worktree() {
   (( LOCAL_CANDIDATE_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )) || return 0
 
@@ -4932,24 +5071,35 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
         }
     fi
 
-    STAGE="testes do frontend"
-    zip_progress_run_as_ubuntu \
-      "Validando interface" \
-      "Executando testes no worktree" \
-      "cd \"$front_dir\" && npm test" || {
-        local rc=$?
-        register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm test}"
-        return "$rc"
-      }
+    if (( ${FRONT_TESTS_REQUIRED:-0} == 1 )); then
+      STAGE="testes do frontend"
+      zip_progress_run_as_ubuntu \
+        "Validando interface" \
+        "Executando testes no worktree" \
+        "cd \"$front_dir\" && npm test" || {
+          local rc=$?
+          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm test}"
+          return "$rc"
+        }
+    fi
 
     if (( FRONT_CHANGED == 1 )); then
+      if (( ${FRONT_TYPECHECK_REQUIRED:-0} == 1 )); then
+        STAGE="typecheck do frontend"
+        run_frontend_incremental_typecheck "$front_dir" || {
+          local rc=$?
+          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-tsc incremental}"
+          return "$rc"
+        }
+      fi
+
       STAGE="build do frontend"
       zip_progress_run_as_ubuntu \
         "Compilando interface" \
-        "Gerando artefato isolado" \
-        "cd \"$front_dir\" && npm run build" || {
+        "Gerando bundle Vite isolado" \
+        "cd \"$front_dir\" && ./node_modules/.bin/vite build && node scripts/normalize-dist-permissions.mjs" || {
           local rc=$?
-          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm run build}"
+          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-vite build}"
           return "$rc"
         }
 
@@ -4962,7 +5112,17 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
       install -d -o ubuntu -g ubuntu -m 0775 "$(dirname "$front_artifact")"
       sudo -u ubuntu -H cp -a -- "$front_dir/dist" "$front_artifact"
       front_ready=1
-      FRONT_STATUS="frontend validado e compilado no worktree"
+      if (( ${FRONT_TYPECHECK_REQUIRED:-0} == 1 )); then
+        if (( ${LAST_TYPESCRIPT_CACHE_HIT:-0} == 1 )); then
+          FRONT_STATUS="frontend validado; typecheck incremental com cache HIT e bundle Vite gerado"
+        else
+          FRONT_STATUS="frontend validado; typecheck incremental e bundle Vite gerado"
+        fi
+      elif (( ${FRONT_TESTS_REQUIRED:-0} == 0 )); then
+        FRONT_STATUS="frontend visual recompilado sem testes/typecheck desnecessários"
+      else
+        FRONT_STATUS="frontend validado e bundle Vite gerado"
+      fi
     else
       FRONT_STATUS="testes do frontend aprovados; runtime não alterado"
     fi
@@ -5868,6 +6028,8 @@ classify_changed_files() {
   BACK_CHANGED=0
   FRONT_TESTS_CHANGED=0
   BACK_TESTS_CHANGED=0
+  FRONT_TESTS_REQUIRED=0
+  FRONT_TYPECHECK_REQUIRED=0
   BOT_CHANGED=0
   REQUIREMENTS_CHANGED=0
   AUDIO_SYSTEMD_CHANGED=0
@@ -5899,6 +6061,26 @@ classify_changed_files() {
   fi
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '^(dashboard/backend|activity/sinuca-server)/' | grep -Ev '^dashboard/backend/tests/' | grep -q .; then
     BACK_CHANGED=1
+  fi
+  # Frontend leve: alterações exclusivamente visuais (CSS/index.html) precisam
+  # do bundle Vite, mas não se beneficiam de unit tests nem de typecheck do app.
+  # Qualquer path runtime fora dessa allowlist continua conservador: testes +
+  # typecheck antes do bundle.
+  if (( FRONT_TESTS_CHANGED == 1 )); then
+    FRONT_TESTS_REQUIRED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^dashboard/frontend/(src/.*\.(ts|tsx)|tsconfig\.json|package\.json|package-lock\.json)$'; then
+    FRONT_TYPECHECK_REQUIRED=1
+  fi
+  if (( FRONT_CHANGED == 1 )); then
+    if printf '%s\n' "$CHANGED_FILES_RAW" \
+      | grep -E '^(dashboard/frontend|activity/sinuca)/' \
+      | grep -Ev '^dashboard/frontend/tests/' \
+      | grep -Ev '^dashboard/frontend/(src/.*\.css|index\.html)$' \
+      | grep -q .; then
+      FRONT_TESTS_REQUIRED=1
+      FRONT_TYPECHECK_REQUIRED=1
+    fi
   fi
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(bot\.py|webserver\.py|config\.py|db\.py|start\.sh|requirements\.txt|cogs/|music_system/|utility/)'; then
     BOT_CHANGED=1
@@ -8631,6 +8813,7 @@ CHECKS_TEXT="✓ Bot — ${BOT_HEALTHCHECK_STATUS}
 ${RUNTIME_CHECK_MARK} Runtime candidato — ${PREFLIGHT_RUNTIME_STATUS}
 ✓ Comandos — ${APP_COMMAND_SYNC_SUMMARY}"
 TIMINGS_TEXT="${UPDATER_TIMINGS:-sem etapas}, total=${DURATION}"
+CACHE_TEXT="Node ${NODE_DEP_CACHE_HITS:-0} hit/${NODE_DEP_CACHE_MISSES:-0} miss · TypeScript ${TYPESCRIPT_CACHE_HITS:-0} hit/${TYPESCRIPT_CACHE_MISSES:-0} miss"
 BODY="Resumo: $ALERT_SUMMARY
 Identificador: $UPDATE_DISPLAY_ID
 Branch: $BRANCH
@@ -8642,6 +8825,7 @@ Duração: $DURATION
 Verificações:
 $CHECKS_TEXT
 Tempos: $TIMINGS_TEXT
+Cache: $CACHE_TEXT
 Arquivos:
 $CHANGED_FILES"
 

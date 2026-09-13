@@ -62,6 +62,8 @@ REMOTE_CANDIDATE_MODE=1
 REMOTE_WORKTREE_DIR="{worktree}"
 REMOTE_COMMIT=feedface
 REMOTE_RUNTIME_ARTIFACT_ROOT="{artifact_base}"
+NODE_DEPENDENCY_CACHE_ROOT="{tmp_path / 'node-cache'}"
+TYPESCRIPT_CACHE_ROOT="{tmp_path / 'typescript-cache'}"
 LOCAL_CANDIDATE_RUNTIME_READY=0
 LOCAL_CANDIDATE_ARTIFACT_ROOT=''
 LOCAL_CANDIDATE_ARTIFACT_COMMIT=''
@@ -70,6 +72,8 @@ LOCAL_CANDIDATE_BACKEND_ARTIFACT=''
 REMOTE_CANDIDATE_ARTIFACT_ROOT=''
 FRONT_CHANGED=1
 BACK_CHANGED=1
+FRONT_TESTS_REQUIRED=1
+FRONT_TYPECHECK_REQUIRED=0
 FRONT_STATUS=''
 BACK_STATUS=''
 STAGE=''
@@ -91,6 +95,7 @@ install() {{
 }}
 chown() {{ :; }}
 logger() {{ :; }}
+node() {{ :; }}
 sudo() {{
   if [[ "${{1:-}}" == -u ]]; then shift 2; fi
   [[ "${{1:-}}" == -H ]] && shift
@@ -103,6 +108,14 @@ npm() {{
       mkdir -p node_modules/.bin node_modules/pkg
       printf module > node_modules/pkg/index.js
       ln -sfn ../pkg/index.js node_modules/.bin/pkg
+      if [[ "$PWD" == */frontend ]]; then
+        cat > node_modules/.bin/vite <<'SHVITE'
+#!/bin/sh
+mkdir -p dist
+printf '<html>remote-ready</html>' > dist/index.html
+SHVITE
+        chmod +x node_modules/.bin/vite
+      fi
       ;;
     'test ')
       :

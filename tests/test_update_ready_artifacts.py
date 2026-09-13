@@ -244,8 +244,12 @@ LOCAL_CANDIDATE_DIR="{candidate}"
 LOCAL_CANDIDATE_WORKTREE_DIR="{worktree}"
 LOCAL_CANDIDATE_PREPARED_COMMIT=feedface
 LOCAL_CANDIDATE_ID=zip-test
+NODE_DEPENDENCY_CACHE_ROOT="{tmp_path / 'node-cache'}"
+TYPESCRIPT_CACHE_ROOT="{tmp_path / 'typescript-cache'}"
 FRONT_CHANGED=1
 BACK_CHANGED=1
+FRONT_TESTS_REQUIRED=1
+FRONT_TYPECHECK_REQUIRED=0
 FRONT_STATUS=''
 BACK_STATUS=''
 STAGE=''
@@ -266,6 +270,7 @@ install() {{
 }}
 chown() {{ :; }}
 logger() {{ :; }}
+node() {{ :; }}
 sudo() {{
   if [[ "${{1:-}}" == -u ]]; then shift 2; fi
   [[ "${{1:-}}" == -H ]] && shift
@@ -277,6 +282,14 @@ npm() {{
       mkdir -p node_modules/.bin node_modules/pkg
       printf module > node_modules/pkg/index.js
       ln -sfn ../pkg/index.js node_modules/.bin/pkg
+      if [[ "$PWD" == */frontend ]]; then
+        cat > node_modules/.bin/vite <<'SHVITE'
+#!/bin/sh
+mkdir -p dist
+printf '<html>ready</html>' > dist/index.html
+SHVITE
+        chmod +x node_modules/.bin/vite
+      fi
       ;;
     'test ')
       :
