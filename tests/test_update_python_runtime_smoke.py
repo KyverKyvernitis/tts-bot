@@ -110,13 +110,14 @@ def test_updater_runs_runtime_smoke_before_frontend_backend_builds_and_ready_man
     assert smoke < ready
 
 
-def test_runtime_smoke_uses_candidate_worktree_and_live_venv_without_discord_connection():
+def test_runtime_smoke_accepts_candidate_interpreter_without_discord_connection():
     text = UPDATER.read_text(encoding="utf-8")
     start = text.index("run_candidate_python_runtime_smoke()")
     end = text.index("prepare_local_candidate_runtime_artifacts_in_worktree()", start)
     block = text[start:end]
 
-    assert 'py="$REPO_DIR/.venv/bin/python"' in block
+    assert 'local py="${2:-}"' in block
+    assert 'py="$(current_bot_python_bin)"' in block
     assert 'PYTHONPATH=%q' in block
     assert 'PYTHONDONTWRITEBYTECODE=1' in block
     assert 'utility/update_runtime_smoke.py' in block
@@ -126,17 +127,23 @@ def test_runtime_smoke_uses_candidate_worktree_and_live_venv_without_discord_con
     assert "bot.start" not in block
 
 
-def test_requirements_change_does_not_mutate_live_venv_during_pre_promotion_smoke():
+def test_requirements_change_prepares_isolated_python_runtime_before_smoke():
     text = UPDATER.read_text(encoding="utf-8")
-    start = text.index("run_candidate_python_runtime_smoke()")
-    end = text.index("prepare_local_candidate_runtime_artifacts_in_worktree()", start)
+    start = text.index("prepare_local_candidate_runtime_artifacts_in_worktree()")
+    end = text.index("promote_local_candidate_worktree_commit()", start)
     block = text[start:end]
 
-    requirements_guard = block.index("REQUIREMENTS_CHANGED:-0")
-    smoke_command = block.index("update_runtime_smoke.py")
-    assert requirements_guard < smoke_command
-    assert "pip install" not in block
-    assert "adiado: dependências Python alteradas" in block
+    prepare = block.index('prepare_candidate_python_runtime "$validation_worktree" "$artifact_commit"')
+    smoke = block.index('run_candidate_python_runtime_smoke "$validation_worktree" "$smoke_py"')
+    assert prepare < smoke
+    assert 'smoke_py="$LOCAL_CANDIDATE_PYTHON_ARTIFACT/venv/bin/python"' in block
+
+    deploy_start = text.index("deploy_bot()")
+    deploy_end = text.index("frontend_publication_is_healthy()", deploy_start)
+    deploy = text[deploy_start:deploy_end]
+    transactional = deploy[deploy.index("if (( REQUIREMENTS_CHANGED == 1") : deploy.index("if (( BOT_CHANGED == 1")]
+    assert "activate_python_runtime_release" in transactional
+    assert '$REPO_DIR/.venv/bin/pip' not in transactional
 
 
 def test_success_report_includes_candidate_runtime_status():

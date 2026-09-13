@@ -79,6 +79,9 @@ BOT_HEALTH_URL="http://127.0.0.1:10000/health"
 RUNTIME_RELEASE_ROOT="${TTS_BOT_RUNTIME_RELEASE_ROOT:-$CANDIDATE_ROOT/runtime-releases}"
 RUNTIME_RELEASE_RETENTION="${TTS_BOT_RUNTIME_RELEASE_RETENTION:-3}"
 REMOTE_RUNTIME_ARTIFACT_ROOT="${TTS_BOT_REMOTE_RUNTIME_ARTIFACT_ROOT:-$CANDIDATE_ROOT/remote-runtime-artifacts}"
+PYTHON_RUNTIME_ROOT="${TTS_BOT_PYTHON_RUNTIME_ROOT:-$CANDIDATE_ROOT/python-runtimes}"
+PYTHON_RUNTIME_CURRENT_LINK="${TTS_BOT_PYTHON_RUNTIME_CURRENT_LINK:-$PYTHON_RUNTIME_ROOT/current}"
+PYTHON_RUNTIME_RETENTION="${TTS_BOT_PYTHON_RUNTIME_RETENTION:-3}"
 APP_COMMAND_SYNC_STATUS_FILE="$REPO_DIR/data/app_commands_sync_status.json"
 
 STAGE="inicialização"
@@ -123,6 +126,8 @@ LOCAL_CANDIDATE_ALREADY_PROMOTED=0
 LOCAL_CANDIDATE_ARTIFACT_ROOT=""
 LOCAL_CANDIDATE_FRONTEND_ARTIFACT=""
 LOCAL_CANDIDATE_BACKEND_ARTIFACT=""
+LOCAL_CANDIDATE_PYTHON_ARTIFACT=""
+LOCAL_CANDIDATE_PYTHON_READY=0
 LOCAL_CANDIDATE_ARTIFACT_COMMIT=""
 LOCAL_CANDIDATE_RUNTIME_READY=0
 RUNTIME_RELEASE_SNAPSHOT_COMMIT=""
@@ -130,6 +135,7 @@ RUNTIME_RELEASE_SNAPSHOT_ROOT=""
 RUNTIME_RELEASE_SNAPSHOT_READY=0
 FRONT_RUNTIME_MUTATED=0
 BACK_RUNTIME_MUTATED=0
+PYTHON_RUNTIME_MUTATED=0
 REMOTE_CANDIDATE_MODE=0
 REMOTE_STATUS_CHANNEL_ID=""
 REMOTE_STATUS_MESSAGE_ID=""
@@ -325,6 +331,20 @@ candidate_git() {
 
 repo_python_as_ubuntu() {
   sudo -u ubuntu -H python3 "$@"
+}
+
+current_bot_python_bin() {
+  local candidate="$PYTHON_RUNTIME_CURRENT_LINK/venv/bin/python"
+  if [[ -x "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  candidate="$REPO_DIR/.venv/bin/python"
+  if [[ -x "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  command -v python3 || true
 }
 
 clear_update_runtime_state() {
@@ -593,7 +613,7 @@ PYFAILURE
 }
 
 persist_rollback_failure() {
-  local git_status="${1:-desconhecido}" front_status="${2:-não executado}" back_status="${3:-não executado}" bot_status="${4:-não executado}" activity_status="${5:-não executado}" rollback_log="${6:-}"
+  local git_status="${1:-desconhecido}" front_status="${2:-não executado}" back_status="${3:-não executado}" bot_status="${4:-não executado}" activity_status="${5:-não executado}" python_status="${6:-não executado}" rollback_log="${7:-}"
   ensure_update_incident_dir || return 0
   ROLLBACK_FAILURE_FILE_VALUE="$UPDATE_ROLLBACK_FAILURE_FILE" \
   ROLLBACK_FAILURE_PRIMARY_FILE_VALUE="$UPDATE_FAILURE_FILE" \
@@ -602,6 +622,7 @@ persist_rollback_failure() {
   ROLLBACK_FAILURE_BACK_VALUE="$back_status" \
   ROLLBACK_FAILURE_BOT_VALUE="$bot_status" \
   ROLLBACK_FAILURE_ACTIVITY_VALUE="$activity_status" \
+  ROLLBACK_FAILURE_PYTHON_VALUE="$python_status" \
   ROLLBACK_FAILURE_LOG_VALUE="$rollback_log" \
   ROLLBACK_FAILURE_RUN_ID_VALUE="${UPDATE_RUNTIME_RUN_ID:-}" \
   ROLLBACK_FAILURE_UPDATE_ID_VALUE="$(update_incident_identifier)" \
@@ -617,6 +638,7 @@ payload = {
     'backend': os.environ.get('ROLLBACK_FAILURE_BACK_VALUE') or '',
     'bot': os.environ.get('ROLLBACK_FAILURE_BOT_VALUE') or '',
     'activity_health': os.environ.get('ROLLBACK_FAILURE_ACTIVITY_VALUE') or '',
+    'python_runtime': os.environ.get('ROLLBACK_FAILURE_PYTHON_VALUE') or '',
     'rollback_log_path': os.environ.get('ROLLBACK_FAILURE_LOG_VALUE') or '',
     'run_id': os.environ.get('ROLLBACK_FAILURE_RUN_ID_VALUE') or '',
     'update_id': os.environ.get('ROLLBACK_FAILURE_UPDATE_ID_VALUE') or '',
@@ -1134,7 +1156,13 @@ has_fatal_boot_logs() {
 }
 
 run_preflight_checks() {
-  local py="$REPO_DIR/.venv/bin/python"
+  local py
+  if declare -F current_bot_python_bin >/dev/null 2>&1; then
+    py="$(current_bot_python_bin)"
+  else
+    py="$REPO_DIR/.venv/bin/python"
+    [[ -x "$py" ]] || py="$(command -v python3 || true)"
+  fi
   local file checked_py=0 checked_sh=0 import_checked=0 import_failed=0 import_output=""
   local deleted_py=0 deleted_cogs=0
   [[ -x "$py" ]] || py="$(command -v python3 || true)"
@@ -1623,7 +1651,13 @@ PYREJ
 
 run_preflight_checks_in_dir() {
   local root="${1:?}"
-  local py="$REPO_DIR/.venv/bin/python"
+  local py
+  if declare -F current_bot_python_bin >/dev/null 2>&1; then
+    py="$(current_bot_python_bin)"
+  else
+    py="$REPO_DIR/.venv/bin/python"
+    [[ -x "$py" ]] || py="$(command -v python3 || true)"
+  fi
   local file checked_py=0 checked_sh=0 deleted_py=0 deleted_sh=0 rc=0
   [[ -x "$py" ]] || py="$(command -v python3 || true)"
   [[ -n "$py" ]] || { PREFLIGHT_PY_STATUS="python indisponível"; PREFLIGHT_BASH_STATUS="não executado"; return 1; }
@@ -1887,8 +1921,7 @@ PYDIFF
 verify_local_candidate_integrity() {
   (( LOCAL_CANDIDATE_MODE == 1 )) || return 1
   local py output rc max_age
-  py="$REPO_DIR/.venv/bin/python"
-  [[ -x "$py" ]] || py="$(command -v python3 || true)"
+  py="$(current_bot_python_bin)"
   [[ -n "$py" ]] || { LOCAL_CANDIDATE_VERIFY_ERROR="Python indisponível para validar o candidato"; return 1; }
   max_age="${DISCORD_AUTO_UPDATE_CANDIDATE_MAX_AGE_SECONDS:-86400}"
   [[ "$max_age" =~ ^[0-9]+$ ]] || max_age=86400
@@ -3937,11 +3970,27 @@ PYARTIFACTREADY
   fi
   LOCAL_CANDIDATE_FRONTEND_ARTIFACT=""
   LOCAL_CANDIDATE_BACKEND_ARTIFACT=""
+  LOCAL_CANDIDATE_PYTHON_ARTIFACT=""
+  LOCAL_CANDIDATE_PYTHON_READY=0
   if [[ -s "$root/frontend/dist/index.html" ]]; then
     LOCAL_CANDIDATE_FRONTEND_ARTIFACT="$root/frontend/dist"
   fi
   if [[ -s "$root/backend/dist/index.js" && -d "$root/backend/node_modules" ]]; then
     LOCAL_CANDIDATE_BACKEND_ARTIFACT="$root/backend"
+  fi
+  if ARTIFACT_READY_FILE="$ready" python3 - <<'PYARTIFACTPYREADY' >/dev/null 2>&1
+import json, os
+with open(os.environ['ARTIFACT_READY_FILE'], encoding='utf-8') as fh:
+    data = json.load(fh)
+record = data.get('python') if isinstance(data, dict) else None
+raise SystemExit(0 if isinstance(record, dict) and record.get('ready') else 1)
+PYARTIFACTPYREADY
+  then
+    LOCAL_CANDIDATE_PYTHON_ARTIFACT="$(python_runtime_release_root_for_commit "$commit")" || return 1
+    if ! verify_python_runtime_release "$LOCAL_CANDIDATE_PYTHON_ARTIFACT" "$commit"; then
+      return 1
+    fi
+    LOCAL_CANDIDATE_PYTHON_READY=1
   fi
   LOCAL_CANDIDATE_RUNTIME_READY=1
   return 0
@@ -3949,6 +3998,11 @@ PYARTIFACTREADY
 
 verify_local_candidate_artifact_integrity() {
   local kind="${1:?}" root="${LOCAL_CANDIDATE_ARTIFACT_ROOT:-}" ready
+  if [[ "$kind" == "python" ]]; then
+    [[ -n "${LOCAL_CANDIDATE_PYTHON_ARTIFACT:-}" ]] || return 1
+    verify_python_runtime_release "$LOCAL_CANDIDATE_PYTHON_ARTIFACT" "${LOCAL_CANDIDATE_ARTIFACT_COMMIT:-${LOCAL_CANDIDATE_PREPARED_COMMIT:-${REMOTE_COMMIT:-}}}" "$REPO_DIR/requirements.txt"
+    return $?
+  fi
   [[ -n "$root" ]] || return 1
   ready="$root/ready.json"
   [[ -s "$ready" ]] || return 1
@@ -3993,8 +4047,8 @@ PYVERIFYARTIFACT
 }
 
 write_local_candidate_artifact_ready_manifest() {
-  local root="${1:?}" commit="${2:?}" front_ready="${3:-0}" back_ready="${4:-0}"
-  ARTIFACT_ROOT="$root" ARTIFACT_COMMIT="$commit" ARTIFACT_FRONT_READY="$front_ready" ARTIFACT_BACK_READY="$back_ready" \
+  local root="${1:?}" commit="${2:?}" front_ready="${3:-0}" back_ready="${4:-0}" python_ready="${5:-0}"
+  ARTIFACT_ROOT="$root" ARTIFACT_COMMIT="$commit" ARTIFACT_FRONT_READY="$front_ready" ARTIFACT_BACK_READY="$back_ready" ARTIFACT_PYTHON_READY="$python_ready" \
     python3 - <<'PYARTIFACTMANIFEST'
 import datetime, hashlib, json, os, pathlib
 root = pathlib.Path(os.environ['ARTIFACT_ROOT'])
@@ -4037,6 +4091,10 @@ payload = {
         'ready': os.environ.get('ARTIFACT_BACK_READY') == '1',
         'sha256': tree_hash(root / 'backend') if os.environ.get('ARTIFACT_BACK_READY') == '1' else '',
     },
+    'python': {
+        'ready': os.environ.get('ARTIFACT_PYTHON_READY') == '1',
+        'release_commit': os.environ['ARTIFACT_COMMIT'] if os.environ.get('ARTIFACT_PYTHON_READY') == '1' else '',
+    },
 }
 path = root / 'ready.json'
 tmp = path.with_name('.ready.json.tmp')
@@ -4045,28 +4103,261 @@ os.replace(tmp, path)
 PYARTIFACTMANIFEST
 }
 
+python_runtime_release_root_for_commit() {
+  local commit
+  commit="$(sanitize_commit_ref "${1:-}")"
+  [[ -n "$commit" ]] || return 1
+  printf '%s/%s\n' "$PYTHON_RUNTIME_ROOT" "$commit"
+}
+
+python_runtime_freeze_hash() {
+  local root="${1:?}" py="$root/venv/bin/python"
+  [[ -x "$py" ]] || return 1
+  sudo -u ubuntu -H "$py" -m pip freeze --all 2>/dev/null | LC_ALL=C sort | sha256sum | awk '{print $1}'
+}
+
+write_python_runtime_manifest() {
+  local root="${1:?}" commit="${2:?}" requirements_file="${3:-}"
+  local py="$root/venv/bin/python" freeze_hash requirements_hash python_version
+  [[ -x "$py" ]] || return 1
+  freeze_hash="$(python_runtime_freeze_hash "$root")" || return 1
+  requirements_hash=""
+  if [[ -n "$requirements_file" && -f "$requirements_file" ]]; then
+    requirements_hash="$(sha256sum "$requirements_file" | awk '{print $1}')"
+  fi
+  python_version="$(sudo -u ubuntu -H "$py" -c 'import platform; print(platform.python_version())' 2>/dev/null || true)"
+  PY_RUNTIME_ROOT="$root" PY_RUNTIME_COMMIT="$commit" PY_RUNTIME_FREEZE_SHA="$freeze_hash" \
+  PY_RUNTIME_REQUIREMENTS_SHA="$requirements_hash" PY_RUNTIME_PYTHON_VERSION="$python_version" \
+    python3 - <<'PYPYMANIFEST'
+import datetime, json, os, pathlib
+root = pathlib.Path(os.environ['PY_RUNTIME_ROOT'])
+payload = {
+    'state': 'ready',
+    'commit': os.environ['PY_RUNTIME_COMMIT'],
+    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'python_version': os.environ.get('PY_RUNTIME_PYTHON_VERSION') or '',
+    'requirements_sha256': os.environ.get('PY_RUNTIME_REQUIREMENTS_SHA') or '',
+    'freeze_sha256': os.environ['PY_RUNTIME_FREEZE_SHA'],
+}
+path = root / 'python.json'
+tmp = root / '.python.json.tmp'
+tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+os.replace(tmp, path)
+PYPYMANIFEST
+}
+
+verify_python_runtime_release() {
+  local root="${1:?}" expected_commit="${2:?}" requirements_file="${3:-}"
+  local manifest="$root/python.json" py="$root/venv/bin/python" freeze_hash requirements_hash=""
+  [[ -s "$manifest" && ! -L "$manifest" && -x "$py" ]] || return 1
+  if ! PY_RUNTIME_MANIFEST="$manifest" PY_RUNTIME_EXPECTED_COMMIT="$expected_commit" python3 - <<'PYPYVERIFY' >/dev/null 2>&1
+import json, os, pathlib
+path = pathlib.Path(os.environ['PY_RUNTIME_MANIFEST'])
+data = json.loads(path.read_text(encoding='utf-8'))
+if data.get('state') != 'ready':
+    raise SystemExit(1)
+if str(data.get('commit') or '') != os.environ['PY_RUNTIME_EXPECTED_COMMIT']:
+    raise SystemExit(1)
+if not str(data.get('freeze_sha256') or ''):
+    raise SystemExit(1)
+PYPYVERIFY
+  then
+    return 1
+  fi
+  freeze_hash="$(python_runtime_freeze_hash "$root")" || return 1
+  PY_RUNTIME_MANIFEST="$manifest" PY_RUNTIME_FREEZE_SHA="$freeze_hash" python3 - <<'PYPYFREEZE' >/dev/null 2>&1 || return 1
+import json, os
+with open(os.environ['PY_RUNTIME_MANIFEST'], encoding='utf-8') as fh:
+    data = json.load(fh)
+raise SystemExit(0 if data.get('freeze_sha256') == os.environ['PY_RUNTIME_FREEZE_SHA'] else 1)
+PYPYFREEZE
+  if [[ -n "$requirements_file" && -f "$requirements_file" ]]; then
+    requirements_hash="$(sha256sum "$requirements_file" | awk '{print $1}')"
+    PY_RUNTIME_MANIFEST="$manifest" PY_RUNTIME_REQUIREMENTS_SHA="$requirements_hash" python3 - <<'PYPYREQ' >/dev/null 2>&1 || return 1
+import json, os
+with open(os.environ['PY_RUNTIME_MANIFEST'], encoding='utf-8') as fh:
+    data = json.load(fh)
+raise SystemExit(0 if data.get('requirements_sha256') == os.environ['PY_RUNTIME_REQUIREMENTS_SHA'] else 1)
+PYPYREQ
+  fi
+  sudo -u ubuntu -H "$py" -m pip check >/dev/null 2>&1
+}
+
+prepare_candidate_python_runtime() {
+  local validation_root="${1:?}" commit="${2:?}" requirements
+  requirements="$validation_root/requirements.txt"
+  [[ -f "$requirements" ]] || {
+    LAST_ERROR_STDERR="requirements.txt ausente no candidato"
+    LAST_ERROR_CODE="PYTHON_REQUIREMENTS_MISSING"
+    return 1
+  }
+  local root py base_py command rc
+  root="$(python_runtime_release_root_for_commit "$commit")" || return 1
+  if verify_python_runtime_release "$root" "$commit" "$requirements"; then
+    LOCAL_CANDIDATE_PYTHON_ARTIFACT="$root"
+    LOCAL_CANDIDATE_PYTHON_READY=1
+    return 0
+  fi
+  if [[ -L "$PYTHON_RUNTIME_CURRENT_LINK" && "$(readlink -f "$PYTHON_RUNTIME_CURRENT_LINK" 2>/dev/null || true)" == "$(readlink -f "$root" 2>/dev/null || true)" ]]; then
+    LAST_ERROR_STDERR="release Python candidato ativo falhou na verificação; recusando apagar runtime em uso"
+    LAST_ERROR_CODE="PYTHON_RUNTIME_ACTIVE_INVALID"
+    return 1
+  fi
+
+  rm -rf -- "$root" 2>/dev/null || true
+  install -d -o ubuntu -g ubuntu -m 0775 "$root" || {
+    LAST_ERROR_STDERR="não foi possível criar release Python candidato: $root"
+    LAST_ERROR_CODE="PYTHON_RUNTIME_DIR_FAILED"
+    return 1
+  }
+  if [[ -x /usr/bin/python3 ]]; then
+    base_py=/usr/bin/python3
+  else
+    base_py="$(command -v python3 || true)"
+  fi
+  [[ -n "$base_py" ]] || {
+    LAST_ERROR_STDERR="python3 indisponível para criar ambiente candidato"
+    LAST_ERROR_CODE="PYTHON_RUNTIME_BASE_MISSING"
+    return 1
+  }
+  STAGE="ambiente Python do candidato"
+  printf -v command '%q -m venv %q && %q -m pip install --disable-pip-version-check -r %q && %q -m pip check' \
+    "$base_py" "$root/venv" "$root/venv/bin/python" "$requirements" "$root/venv/bin/python"
+  if zip_progress_run_as_ubuntu \
+    "Preparando dependências Python" \
+    "Criando ambiente isolado do candidato" \
+    "$command"
+  then
+    :
+  else
+    rc=$?
+    register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-python3 -m venv / pip install}"
+    LAST_ERROR_CODE="PYTHON_RUNTIME_PREPARE_FAILED"
+    rm -rf -- "$root" 2>/dev/null || true
+    return "$rc"
+  fi
+  if ! write_python_runtime_manifest "$root" "$commit" "$requirements"; then
+    LAST_ERROR_STDERR="ambiente Python criado, mas manifesto imutável não pôde ser gravado"
+    LAST_ERROR_CODE="PYTHON_RUNTIME_MANIFEST_FAILED"
+    rm -rf -- "$root" 2>/dev/null || true
+    return 1
+  fi
+  if ! verify_python_runtime_release "$root" "$commit" "$requirements"; then
+    LAST_ERROR_STDERR="ambiente Python candidato falhou na verificação pós-instalação"
+    LAST_ERROR_CODE="PYTHON_RUNTIME_VERIFY_FAILED"
+    rm -rf -- "$root" 2>/dev/null || true
+    return 1
+  fi
+  chown -R ubuntu:ubuntu "$root" 2>/dev/null || true
+  LOCAL_CANDIDATE_PYTHON_ARTIFACT="$root"
+  LOCAL_CANDIDATE_PYTHON_READY=1
+  return 0
+}
+
+capture_python_runtime_release_snapshot() {
+  local commit="$(sanitize_commit_ref "${1:-$PREVIOUS_COMMIT}")"
+  (( ${REQUIREMENTS_CHANGED:-0} == 1 )) || return 0
+  [[ -n "$commit" ]] || return 1
+  local root current_py source_venv requirements_file="$REPO_DIR/requirements.txt"
+  root="$(python_runtime_release_root_for_commit "$commit")" || return 1
+  if verify_python_runtime_release "$root" "$commit" "$requirements_file"; then
+    return 0
+  fi
+  current_py="$(current_bot_python_bin)"
+  [[ -x "$current_py" ]] || {
+    LAST_ERROR_STDERR="runtime Python saudável atual não foi encontrado para snapshot"
+    LAST_ERROR_CODE="PYTHON_RUNTIME_BASELINE_MISSING"
+    return 1
+  }
+  source_venv="$(dirname "$(dirname "$current_py")")"
+  [[ -d "$source_venv" ]] || return 1
+  if [[ -L "$PYTHON_RUNTIME_CURRENT_LINK" && "$(readlink -f "$PYTHON_RUNTIME_CURRENT_LINK" 2>/dev/null || true)" == "$(readlink -f "$root" 2>/dev/null || true)" ]]; then
+    LAST_ERROR_STDERR="runtime Python ativo do commit anterior está inconsistente; recusando sobrescrever baseline em uso"
+    LAST_ERROR_CODE="PYTHON_RUNTIME_ACTIVE_BASELINE_INVALID"
+    return 1
+  fi
+  rm -rf -- "$root" 2>/dev/null || true
+  install -d -o ubuntu -g ubuntu -m 0775 "$root" || return 1
+  if ! sudo -u ubuntu -H cp -a -- "$source_venv" "$root/venv"; then
+    LAST_ERROR_STDERR="falha ao preservar ambiente Python anterior para rollback"
+    LAST_ERROR_CODE="PYTHON_RUNTIME_SNAPSHOT_FAILED"
+    rm -rf -- "$root" 2>/dev/null || true
+    return 1
+  fi
+  if ! write_python_runtime_manifest "$root" "$commit" "$requirements_file" || ! verify_python_runtime_release "$root" "$commit" "$requirements_file"; then
+    LAST_ERROR_STDERR="snapshot do runtime Python anterior não passou na verificação"
+    LAST_ERROR_CODE="PYTHON_RUNTIME_SNAPSHOT_INVALID"
+    rm -rf -- "$root" 2>/dev/null || true
+    return 1
+  fi
+  chown -R ubuntu:ubuntu "$root" 2>/dev/null || true
+  logger -t "$LOG_TAG" "runtime Python anterior preservado para rollback: $(short_commit "$commit")" 2>/dev/null || true
+  return 0
+}
+
+activate_python_runtime_release() {
+  local commit="$(sanitize_commit_ref "${1:-}")" root tmp
+  [[ -n "$commit" ]] || return 1
+  root="$(python_runtime_release_root_for_commit "$commit")" || return 1
+  if ! verify_python_runtime_release "$root" "$commit" "$REPO_DIR/requirements.txt"; then
+    LAST_ERROR_STDERR="release Python ausente, inconsistente ou incompatível com requirements.txt: $(short_commit "$commit")"
+    LAST_ERROR_CODE="PYTHON_RUNTIME_RELEASE_INVALID"
+    return 1
+  fi
+  install -d -o ubuntu -g ubuntu -m 0775 "$PYTHON_RUNTIME_ROOT" || return 1
+  tmp="$PYTHON_RUNTIME_ROOT/.current.$$.${RANDOM:-0}"
+  rm -f -- "$tmp" 2>/dev/null || true
+  ln -s -- "$root" "$tmp" || return 1
+  if ! mv -Tf -- "$tmp" "$PYTHON_RUNTIME_CURRENT_LINK"; then
+    rm -f -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  PYTHON_RUNTIME_MUTATED=1
+  return 0
+}
+
+restore_python_runtime_release() {
+  local commit="$(sanitize_commit_ref "${1:-$PREVIOUS_COMMIT}")"
+  if ! activate_python_runtime_release "$commit"; then
+    LAST_ERROR_CODE="ROLLBACK_PYTHON_RUNTIME_INVALID"
+    return 1
+  fi
+  # A restauração não é uma mutação da versão nova; evita reentrância confusa.
+  PYTHON_RUNTIME_MUTATED=0
+  return 0
+}
+
+prune_python_runtime_releases() {
+  local keep="${PYTHON_RUNTIME_RETENTION:-3}" current_target="" count=0 entry
+  [[ "$keep" =~ ^[0-9]+$ ]] || keep=3
+  (( keep >= 1 )) || keep=1
+  [[ -d "$PYTHON_RUNTIME_ROOT" ]] || return 0
+  if [[ -L "$PYTHON_RUNTIME_CURRENT_LINK" ]]; then
+    current_target="$(readlink -f "$PYTHON_RUNTIME_CURRENT_LINK" 2>/dev/null || true)"
+  fi
+  while IFS= read -r entry; do
+    [[ -n "$entry" && -d "$entry" ]] || continue
+    [[ "$entry" == "$current_target" ]] && continue
+    count=$((count + 1))
+    if (( count > keep )); then
+      rm -rf -- "$entry" 2>/dev/null || true
+    fi
+  done < <(find "$PYTHON_RUNTIME_ROOT" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-)
+}
+
 run_candidate_python_runtime_smoke() {
   local root="${1:?}"
-  local py smoke timeout command rc
+  local py="${2:-}" smoke timeout command rc
 
   if (( ${BOT_CHANGED:-0} == 0 )); then
     PREFLIGHT_RUNTIME_STATUS="não necessário"
     return 0
   fi
 
-  # Uma alteração em requirements.txt precisa de um ambiente Python candidato
-  # próprio antes que possamos afirmar que os imports são reproduzíveis. Não
-  # contaminamos a .venv live apenas para validar. Esse caso continua coberto
-  # pelo preflight estático e pela instalação/health pós-promoção até a etapa
-  # dedicada de artefato Python.
-  if (( ${REQUIREMENTS_CHANGED:-0} == 1 )); then
-    PREFLIGHT_RUNTIME_STATUS="adiado: dependências Python alteradas"
-    return 0
-  fi
-
-  py="$REPO_DIR/.venv/bin/python"
-  [[ -x "$py" ]] || py="$(command -v python3 || true)"
   if [[ -z "$py" ]]; then
+    py="$(current_bot_python_bin)"
+  fi
+  if [[ -z "$py" || ! -x "$py" ]]; then
     PREFLIGHT_RUNTIME_STATUS="falhou: Python indisponível"
     LAST_ERROR_STDERR="$PREFLIGHT_RUNTIME_STATUS"
     LAST_ERROR_CODE="BOT_RUNTIME_SMOKE_PYTHON_MISSING"
@@ -4095,7 +4386,11 @@ run_candidate_python_runtime_smoke() {
     "Importando bot, cogs e comandos sem conectar ao Discord" \
     "$command"
   then
-    PREFLIGHT_RUNTIME_STATUS="OK"
+    if (( ${REQUIREMENTS_CHANGED:-0} == 1 )); then
+      PREFLIGHT_RUNTIME_STATUS="OK no ambiente Python candidato"
+    else
+      PREFLIGHT_RUNTIME_STATUS="OK"
+    fi
     return 0
   else
     rc=$?
@@ -4110,7 +4405,6 @@ run_candidate_python_runtime_smoke() {
     [[ -n "${LAST_ERROR_STDERR//[[:space:]]/}" ]] || LAST_ERROR_STDERR="$PREFLIGHT_RUNTIME_STATUS"
     return "$rc"
   fi
-
 }
 
 prepare_local_candidate_runtime_artifacts_in_worktree() {
@@ -4131,7 +4425,7 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
     candidate_label="commit remoto $(short_commit "$REMOTE_COMMIT")"
   fi
 
-  local root front_dir back_dir front_artifact back_artifact front_ready=0 back_ready=0
+  local root front_dir back_dir front_artifact back_artifact front_ready=0 back_ready=0 python_ready=0 smoke_py=""
   root="$(local_candidate_artifact_root_for_commit "$artifact_commit")" || return 1
   if [[ "${REMOTE_CANDIDATE_MODE:-0}" == "1" ]]; then
     # Registre o path antes de qualquer npm/cópia: se a validação falhar no
@@ -4157,9 +4451,17 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
     return 1
   }
 
+  # Dependências Python alteradas são preparadas em um runtime versionado e
+  # persistente antes do smoke. A .venv live não é tocada durante staging.
+  if (( ${REQUIREMENTS_CHANGED:-0} == 1 )); then
+    prepare_candidate_python_runtime "$validation_worktree" "$artifact_commit" || return $?
+    smoke_py="$LOCAL_CANDIDATE_PYTHON_ARTIFACT/venv/bin/python"
+    python_ready=1
+  fi
+
   # O smoke Python roda antes de npm ci/build para falhar cedo. Ele é comum ao
   # caminho ZIP e ao caminho remoto porque ambos chegam aqui ainda no worktree.
-  run_candidate_python_runtime_smoke "$validation_worktree" || return $?
+  run_candidate_python_runtime_smoke "$validation_worktree" "$smoke_py" || return $?
 
   if (( FRONT_CHANGED == 1 )); then
     [[ -d "$front_dir" ]] || {
@@ -4272,7 +4574,7 @@ $tracked_mutations"
     return 1
   fi
 
-  if ! write_local_candidate_artifact_ready_manifest "$root" "$artifact_commit" "$front_ready" "$back_ready"; then
+  if ! write_local_candidate_artifact_ready_manifest "$root" "$artifact_commit" "$front_ready" "$back_ready" "$python_ready"; then
     LAST_ERROR_STDERR="não foi possível registrar manifesto dos artefatos preparados"
     LAST_ERROR_CODE="CANDIDATE_ARTIFACT_MANIFEST_FAILED"
     return 1
@@ -5838,8 +6140,8 @@ run_core_worker_post_update_automation() {
   fi
 
   STAGE="automação pós-update dos Core Workers"
-  local py="$REPO_DIR/.venv/bin/python"
-  [[ -x "$py" ]] || py="$(command -v python3 || true)"
+  local py
+  py="$(current_bot_python_bin)"
   if [[ -z "$py" || ! -f "$REPO_DIR/scripts/core-worker-automation.py" ]]; then
     CORE_WORKER_AGENT_UPDATE_STATUS="não executado: core-worker-automation ausente"
     CORE_WORKER_APK_BUILD_STATUS="não executado"
@@ -6005,10 +6307,33 @@ deploy_bot() {
     deploy_phone_worker_sync
   fi
 
-  if (( REQUIREMENTS_CHANGED == 1 )); then
-    STAGE="dependências do bot"
-    if [[ -x "$REPO_DIR/.venv/bin/pip" && -f "$REPO_DIR/requirements.txt" ]]; then
-      sudo -u ubuntu -H "$REPO_DIR/.venv/bin/pip" install -r "$REPO_DIR/requirements.txt"
+  if (( REQUIREMENTS_CHANGED == 1 && ROLLBACK_IN_PROGRESS == 0 )); then
+    STAGE="ativação do runtime Python"
+    if (( LOCAL_CANDIDATE_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
+      local runtime_commit="${LOCAL_CANDIDATE_PREPARED_COMMIT:-${REMOTE_COMMIT:-}}"
+      if (( LOCAL_CANDIDATE_RUNTIME_READY == 0 )); then
+        hydrate_local_candidate_runtime_artifacts "$runtime_commit" || {
+          LAST_ERROR_STDERR="runtime Python candidato READY ausente após promoção"
+          LAST_ERROR_CODE="PYTHON_RUNTIME_READY_MISSING"
+          return 1
+        }
+      fi
+      if (( LOCAL_CANDIDATE_PYTHON_READY == 0 )) || ! verify_local_candidate_artifact_integrity python; then
+        LAST_ERROR_STDERR="runtime Python candidato ausente ou divergiu da validação READY"
+        LAST_ERROR_CODE="PYTHON_RUNTIME_READY_INVALID"
+        return 1
+      fi
+      if ! activate_python_runtime_release "$runtime_commit"; then
+        return 1
+      fi
+    else
+      # Compatibilidade de operações administrativas legadas fora dos caminhos
+      # transacionais local/remoto. Updates normais nunca instalam na .venv live.
+      local legacy_py
+      legacy_py="$(current_bot_python_bin)"
+      if [[ -x "$legacy_py" && -f "$REPO_DIR/requirements.txt" ]]; then
+        sudo -u ubuntu -H "$legacy_py" -m pip install -r "$REPO_DIR/requirements.txt"
+      fi
     fi
   fi
 
@@ -6562,6 +6887,11 @@ PYVERIFYRUNTIME
 capture_runtime_release_snapshot() {
   local commit="$(sanitize_commit_ref "${1:-$PREVIOUS_COMMIT}")"
   [[ -n "$commit" ]] || return 1
+  if (( ${REQUIREMENTS_CHANGED:-0} == 1 )); then
+    if ! capture_python_runtime_release_snapshot "$commit"; then
+      return 1
+    fi
+  fi
   if (( FRONT_CHANGED == 0 && BACK_CHANGED == 0 )); then
     RUNTIME_RELEASE_SNAPSHOT_READY=1
     RUNTIME_RELEASE_SNAPSHOT_COMMIT="$commit"
@@ -6706,6 +7036,7 @@ restore_backend_runtime_release() {
 }
 
 prune_runtime_releases() {
+  prune_python_runtime_releases || true
   local keep="${RUNTIME_RELEASE_RETENTION:-3}" current count=0 entry
   [[ "$keep" =~ ^[0-9]+$ ]] || keep=3
   (( keep >= 1 )) || keep=1
@@ -6744,6 +7075,7 @@ rollback_after_failure() {
   local rollback_bot_status="não executado"
   local rollback_front_status="não executado"
   local rollback_back_status="não executado"
+  local rollback_python_status="não executado"
   local rollback_activity_status="não executado"
   local rollback_git_status="não executado"
   local rollback_success=1
@@ -6798,6 +7130,22 @@ rollback_after_failure() {
   fi
 
   if (( rollback_success == 1 )); then
+    if (( REQUIREMENTS_CHANGED == 1 )); then
+      if (( PYTHON_RUNTIME_MUTATED == 1 )); then
+        STAGE="rollback runtime Python por release"
+        if restore_python_runtime_release "$PREVIOUS_COMMIT"; then
+          rollback_python_status="runtime Python anterior reativado sem reinstalação"
+        else
+          rollback_success=0
+          rollback_python_status="falhou ao reativar runtime Python anterior"
+        fi
+      else
+        rollback_python_status="runtime Python novo não chegou a ser ativado"
+      fi
+    else
+      rollback_python_status="não precisou restaurar"
+    fi
+
     if (( FRONT_CHANGED == 1 )); then
       if (( FRONT_RUNTIME_MUTATED == 1 )); then
         STAGE="rollback frontend por release"
@@ -6851,6 +7199,7 @@ rollback_after_failure() {
   else
     rollback_front_status="não executado porque o git reset falhou"
     rollback_back_status="não executado porque o git reset falhou"
+    rollback_python_status="não executado porque o git reset falhou"
     rollback_activity_status="não executado porque o git reset falhou"
     rollback_bot_status="não executado porque o git reset falhou"
   fi
@@ -6866,6 +7215,7 @@ rollback_after_failure() {
       "$rollback_back_status" \
       "$rollback_bot_status" \
       "$rollback_activity_status" \
+      "$rollback_python_status" \
       "$rollback_log_file" || true
   fi
 
@@ -6915,6 +7265,7 @@ Validações:
 • Cogs: $BOT_COGS_STATUS
 • Health: $BOT_HEALTH_DETAIL_STATUS
 Serviços:
+• Runtime Python: $rollback_python_status
 • Frontend: $rollback_front_status
 • Backend: $rollback_back_status
 • Painel web: $rollback_activity_status
