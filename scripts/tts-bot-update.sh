@@ -82,6 +82,9 @@ REMOTE_RUNTIME_ARTIFACT_ROOT="${TTS_BOT_REMOTE_RUNTIME_ARTIFACT_ROOT:-$CANDIDATE
 PYTHON_RUNTIME_ROOT="${TTS_BOT_PYTHON_RUNTIME_ROOT:-$CANDIDATE_ROOT/python-runtimes}"
 PYTHON_RUNTIME_CURRENT_LINK="${TTS_BOT_PYTHON_RUNTIME_CURRENT_LINK:-$PYTHON_RUNTIME_ROOT/current}"
 PYTHON_RUNTIME_RETENTION="${TTS_BOT_PYTHON_RUNTIME_RETENTION:-3}"
+NODE_DEPENDENCY_CACHE_ROOT="${TTS_BOT_NODE_DEPENDENCY_CACHE_ROOT:-$CANDIDATE_ROOT/node-dependency-cache}"
+NODE_DEPENDENCY_CACHE_RETENTION="${TTS_BOT_NODE_DEPENDENCY_CACHE_RETENTION:-4}"
+NPM_INSTALL_FLAGS="--prefer-offline --no-audit --no-fund --progress=false"
 APP_COMMAND_SYNC_STATUS_FILE="$REPO_DIR/data/app_commands_sync_status.json"
 
 STAGE="inicialização"
@@ -142,6 +145,11 @@ REMOTE_STATUS_MESSAGE_ID=""
 REMOTE_WORKTREE_DIR=""
 REMOTE_REJECT_REASON=""
 REMOTE_CANDIDATE_ARTIFACT_ROOT=""
+NODE_DEP_CACHE_HITS=0
+NODE_DEP_CACHE_MISSES=0
+LAST_NODE_DEP_LAYER_PATH=""
+LAST_NODE_DEP_LAYER_KEY=""
+LAST_NODE_DEP_CACHE_HIT=0
 ROLLBACK_CONTROL_MODE=0
 ROLLBACK_REQUEST_ID=""
 ROLLBACK_REQUEST_FILE=""
@@ -162,6 +170,8 @@ ROLLBACK_REDO_COMMIT=""
 
 FRONT_CHANGED=0
 BACK_CHANGED=0
+FRONT_TESTS_CHANGED=0
+BACK_TESTS_CHANGED=0
 BOT_CHANGED=0
 REQUIREMENTS_CHANGED=0
 AUDIO_SYSTEMD_CHANGED=0
@@ -373,7 +383,11 @@ cleanup_runtime_artifacts() {
     repo_git worktree remove --force "$REMOTE_WORKTREE_DIR" >/dev/null 2>&1 || rm -rf "$REMOTE_WORKTREE_DIR" 2>/dev/null || true
   fi
   if [[ -n "${REMOTE_CANDIDATE_ARTIFACT_ROOT:-}" && -d "$REMOTE_CANDIDATE_ARTIFACT_ROOT" && ! -L "$REMOTE_CANDIDATE_ARTIFACT_ROOT" ]]; then
-    rm -rf -- "$REMOTE_CANDIDATE_ARTIFACT_ROOT" 2>/dev/null || true
+    # READY é cache de build por commit e pode ser reutilizado numa retomada.
+    # Artefato parcial nunca é confiável e deve desaparecer no EXIT.
+    if [[ ! -s "$REMOTE_CANDIDATE_ARTIFACT_ROOT/ready.json" ]]; then
+      rm -rf -- "$REMOTE_CANDIDATE_ARTIFACT_ROOT" 2>/dev/null || true
+    fi
   fi
   if [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" && -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]]; then
     repo_git worktree remove --force "$LOCAL_CANDIDATE_WORKTREE_DIR" >/dev/null 2>&1 || rm -rf "$LOCAL_CANDIDATE_WORKTREE_DIR" 2>/dev/null || true
@@ -2402,6 +2416,7 @@ prune_update_artifacts() {
   prune_archive_root "$CANDIDATE_ROOT/failed" "$failed_days" "$failed_keep"
   prune_archive_root "$CANDIDATE_ROOT/cancelled" "$cancelled_days" "$cancelled_keep"
   prune_archive_root "$REMOTE_RUNTIME_ARTIFACT_ROOT" 1 2
+  prune_node_dependency_layers || true
   find "$CANDIDATE_QUEUE_DONE_DIR" -type f -mtime "+$done_days" -delete 2>/dev/null || true
   find "$CANDIDATE_QUEUE_FAILED_DIR" -type f -mtime "+$failed_days" -delete 2>/dev/null || true
   find "$CANDIDATE_QUEUE_CANCELLED_DIR" -type f -mtime "+$cancelled_days" -delete 2>/dev/null || true
@@ -4407,10 +4422,184 @@ run_candidate_python_runtime_smoke() {
   fi
 }
 
+node_dependency_cache_key() {
+  local project_dir="${1:?}" mode="${2:?}"
+  [[ -s "$project_dir/package.json" && -s "$project_dir/package-lock.json" ]] || return 2
+
+  local node_version npm_version platform package_hash lock_hash
+  node_version="$(sudo -u ubuntu -H bash -lc 'node --version' 2>/dev/null)" || return 1
+  npm_version="$(sudo -u ubuntu -H bash -lc 'npm --version' 2>/dev/null)" || return 1
+  platform="$(uname -s)-$(uname -m)"
+  package_hash="$(sha256sum "$project_dir/package.json" | awk '{print $1}')"
+  lock_hash="$(sha256sum "$project_dir/package-lock.json" | awk '{print $1}')"
+  printf '%s\0%s\0%s\0%s\0%s\0' \
+    "$mode" "$node_version" "$npm_version" "$platform" "$package_hash:$lock_hash" \
+    | sha256sum | awk '{print $1}'
+}
+
+node_dependency_layer_root() {
+  local kind="${1:?}" mode="${2:?}" key="${3:?}" cache_root
+  cache_root="${NODE_DEPENDENCY_CACHE_ROOT:-${CANDIDATE_ROOT:-${TMPDIR:-/tmp}/tts-bot-node-dependency-cache}}"
+  [[ "$kind" =~ ^[a-z0-9_-]+$ && "$mode" =~ ^[a-z0-9_-]+$ && "$key" =~ ^[a-f0-9]{64}$ ]] || return 1
+  printf '%s/%s/%s/%s\n' "$cache_root" "$kind" "$mode" "$key"
+}
+
+verify_node_dependency_layer() {
+  local layer="${1:?}" expected_key="${2:?}" expected_mode="${3:?}"
+  [[ -d "$layer" && ! -L "$layer" && -d "$layer/node_modules" && ! -L "$layer/node_modules" && -s "$layer/layer.json" && ! -L "$layer/layer.json" ]] || return 1
+  NODE_LAYER_META="$layer/layer.json" NODE_LAYER_KEY="$expected_key" NODE_LAYER_MODE="$expected_mode" python3 - <<'PYNODELAYERVERIFY' >/dev/null 2>&1
+import json, os, pathlib
+path = pathlib.Path(os.environ['NODE_LAYER_META'])
+data = json.loads(path.read_text(encoding='utf-8'))
+if data.get('state') != 'ready':
+    raise SystemExit(1)
+if data.get('key') != os.environ['NODE_LAYER_KEY']:
+    raise SystemExit(1)
+if data.get('mode') != os.environ['NODE_LAYER_MODE']:
+    raise SystemExit(1)
+PYNODELAYERVERIFY
+}
+
+write_node_dependency_layer_manifest() {
+  local layer="${1:?}" key="${2:?}" kind="${3:?}" mode="${4:?}" project_dir="${5:?}"
+  local node_version npm_version package_hash lock_hash platform
+  node_version="$(sudo -u ubuntu -H bash -lc 'node --version' 2>/dev/null)" || return 1
+  npm_version="$(sudo -u ubuntu -H bash -lc 'npm --version' 2>/dev/null)" || return 1
+  package_hash="$(sha256sum "$project_dir/package.json" | awk '{print $1}')"
+  lock_hash="$(sha256sum "$project_dir/package-lock.json" | awk '{print $1}')"
+  platform="$(uname -s)-$(uname -m)"
+  NODE_LAYER_META="$layer/layer.json" NODE_LAYER_KEY="$key" NODE_LAYER_KIND="$kind" NODE_LAYER_MODE="$mode" \
+  NODE_LAYER_NODE="$node_version" NODE_LAYER_NPM="$npm_version" NODE_LAYER_PACKAGE_HASH="$package_hash" \
+  NODE_LAYER_LOCK_HASH="$lock_hash" NODE_LAYER_PLATFORM="$platform" python3 - <<'PYNODELAYERWRITE'
+import datetime, json, os, pathlib
+path = pathlib.Path(os.environ['NODE_LAYER_META'])
+payload = {
+    'state': 'ready',
+    'key': os.environ['NODE_LAYER_KEY'],
+    'kind': os.environ['NODE_LAYER_KIND'],
+    'mode': os.environ['NODE_LAYER_MODE'],
+    'node': os.environ['NODE_LAYER_NODE'],
+    'npm': os.environ['NODE_LAYER_NPM'],
+    'package_sha256': os.environ['NODE_LAYER_PACKAGE_HASH'],
+    'lock_sha256': os.environ['NODE_LAYER_LOCK_HASH'],
+    'platform': os.environ['NODE_LAYER_PLATFORM'],
+    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+}
+tmp = path.with_name('.layer.json.tmp')
+tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
+os.replace(tmp, path)
+PYNODELAYERWRITE
+}
+
+attach_node_dependency_layer() {
+  local project_dir="${1:?}" layer="${2:?}"
+  [[ -d "$project_dir" && -d "$layer/node_modules" ]] || return 1
+  rm -rf -- "$project_dir/node_modules" 2>/dev/null || return 1
+  sudo -u ubuntu -H ln -s -- "$layer/node_modules" "$project_dir/node_modules"
+}
+
+prepare_node_dependency_layer() {
+  local project_dir="${1:?}" kind="${2:?}" mode="${3:?}"
+  local progress_title="${4:-Instalando dependências}" progress_detail="${5:-Preparando dependências}" key layer parent tmp qdir install_cmd
+  LAST_NODE_DEP_LAYER_PATH=""
+  LAST_NODE_DEP_LAYER_KEY=""
+  LAST_NODE_DEP_CACHE_HIT=0
+
+  [[ -d "$project_dir" ]] || return 1
+  if [[ ! -s "$project_dir/package-lock.json" ]]; then
+    return 2
+  fi
+  key="$(node_dependency_cache_key "$project_dir" "$mode")" || return 1
+  layer="$(node_dependency_layer_root "$kind" "$mode" "$key")" || return 1
+  parent="$(dirname "$layer")"
+
+  if verify_node_dependency_layer "$layer" "$key" "$mode"; then
+    LAST_NODE_DEP_LAYER_PATH="$layer"
+    LAST_NODE_DEP_LAYER_KEY="$key"
+    LAST_NODE_DEP_CACHE_HIT=1
+    NODE_DEP_CACHE_HITS=$(( ${NODE_DEP_CACHE_HITS:-0} + 1 ))
+    touch "$layer/layer.json" 2>/dev/null || true
+    if [[ "$mode" == "dev" ]]; then
+      attach_node_dependency_layer "$project_dir" "$layer" || return 1
+    fi
+    logger -t "$LOG_TAG" "cache Node HIT: $kind/$mode ${key:0:12}" 2>/dev/null || true
+    return 0
+  fi
+
+  NODE_DEP_CACHE_MISSES=$(( ${NODE_DEP_CACHE_MISSES:-0} + 1 ))
+  rm -rf -- "$layer" 2>/dev/null || true
+  install -d -o ubuntu -g ubuntu -m 0775 "$parent" || return 1
+  tmp="$(mktemp -d "$parent/.${key}.XXXXXX")" || return 1
+  chown ubuntu:ubuntu "$tmp" 2>/dev/null || true
+  chmod 0775 "$tmp" 2>/dev/null || true
+
+  rm -rf -- "$project_dir/node_modules" 2>/dev/null || true
+  printf -v qdir '%q' "$project_dir"
+  local npm_flags="${NPM_INSTALL_FLAGS:---prefer-offline --no-audit --no-fund --progress=false}"
+  install_cmd="cd $qdir && npm ci $npm_flags"
+  if [[ "$mode" == "prod" ]]; then
+    install_cmd="cd $qdir && npm ci --omit=dev $npm_flags"
+  fi
+  zip_progress_run_as_ubuntu "$progress_title" "$progress_detail · cache miss" "$install_cmd" || {
+    local rc=$?
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return "$rc"
+  }
+  if [[ ! -d "$project_dir/node_modules" || -L "$project_dir/node_modules" ]]; then
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! sudo -u ubuntu -H mv -- "$project_dir/node_modules" "$tmp/node_modules"; then
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! write_node_dependency_layer_manifest "$tmp" "$key" "$kind" "$mode" "$project_dir"; then
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  chown -R root:root "$tmp" 2>/dev/null || true
+  chmod -R a-w "$tmp" 2>/dev/null || true
+
+  if [[ -e "$layer" ]]; then
+    rm -rf -- "$tmp" 2>/dev/null || true
+  elif ! mv -- "$tmp" "$layer"; then
+    rm -rf -- "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  verify_node_dependency_layer "$layer" "$key" "$mode" || return 1
+  LAST_NODE_DEP_LAYER_PATH="$layer"
+  LAST_NODE_DEP_LAYER_KEY="$key"
+  if [[ "$mode" == "dev" ]]; then
+    attach_node_dependency_layer "$project_dir" "$layer" || return 1
+  fi
+  logger -t "$LOG_TAG" "cache Node MISS preparado: $kind/$mode ${key:0:12}" 2>/dev/null || true
+  return 0
+}
+
+prune_node_dependency_layers() {
+  local keep="${NODE_DEPENDENCY_CACHE_RETENTION:-4}" group count entry cache_root
+  cache_root="${NODE_DEPENDENCY_CACHE_ROOT:-${CANDIDATE_ROOT:-${TMPDIR:-/tmp}/tts-bot-node-dependency-cache}}"
+  [[ "$keep" =~ ^[0-9]+$ ]] || keep=4
+  (( keep >= 1 )) || keep=1
+  [[ -d "$cache_root" ]] || return 0
+  while IFS= read -r group; do
+    [[ -d "$group" ]] || continue
+    count=0
+    while IFS= read -r entry; do
+      [[ -d "$entry" ]] || continue
+      count=$((count + 1))
+      if (( count > keep )); then
+        rm -rf -- "$entry" 2>/dev/null || true
+      fi
+    done < <(find "$group" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-)
+  done < <(find "$cache_root" -mindepth 2 -maxdepth 2 -type d -print 2>/dev/null)
+}
+
 prepare_local_candidate_runtime_artifacts_in_worktree() {
   (( LOCAL_CANDIDATE_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )) || return 0
 
   local validation_worktree artifact_commit candidate_label
+  local npm_flags="${NPM_INSTALL_FLAGS:---prefer-offline --no-audit --no-fund --progress=false}"
   if (( LOCAL_CANDIDATE_MODE == 1 )); then
     [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" && -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]] || return 1
     [[ -n "${LOCAL_CANDIDATE_PREPARED_COMMIT:-}" ]] || return 1
@@ -4444,6 +4633,54 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
   front_artifact="$root/frontend/dist"
   back_artifact="$root/backend"
 
+  # Test-only normalmente não publica nada. Se o runtime live já estiver
+  # quebrado, transforme a validação em reparo antes de decidir se um READY
+  # antigo ainda satisfaz este candidato.
+  if (( FRONT_CHANGED == 0 && ${FRONT_TESTS_CHANGED:-0} == 1 )) && ! frontend_publication_is_healthy; then
+    FRONT_CHANGED=1
+    logger -t "$LOG_TAG" "frontend test-only encontrou publicação inválida; artefato de reparo será preparado no worktree" 2>/dev/null || true
+  fi
+
+  # READY é imutável e endereçado pelo commit. Em retry/resume, valide os
+  # hashes e reutilize-o em vez de repetir npm/test/build/smoke.
+  if [[ -s "$root/ready.json" ]] && hydrate_local_candidate_runtime_artifacts "$artifact_commit"; then
+    local reusable_ready=1
+    if (( FRONT_CHANGED == 1 )) && ! verify_local_candidate_artifact_integrity frontend; then
+      reusable_ready=0
+    fi
+    if (( BACK_CHANGED == 1 )) && ! verify_local_candidate_artifact_integrity backend; then
+      reusable_ready=0
+    fi
+    if (( ${REQUIREMENTS_CHANGED:-0} == 1 )) && ! verify_local_candidate_artifact_integrity python; then
+      reusable_ready=0
+    fi
+    if (( reusable_ready == 1 )); then
+      if (( FRONT_CHANGED == 1 )); then
+        FRONT_STATUS="frontend READY reutilizado sem rebuild"
+      elif (( ${FRONT_TESTS_CHANGED:-0} == 1 )); then
+        FRONT_STATUS="validação frontend READY reutilizada; runtime não alterado"
+      fi
+      if (( BACK_CHANGED == 1 )); then
+        BACK_STATUS="backend READY reutilizado sem rebuild"
+      elif (( ${BACK_TESTS_CHANGED:-0} == 1 )); then
+        BACK_STATUS="validação backend READY reutilizada; runtime não alterado"
+      fi
+      if (( ${BOT_CHANGED:-0} == 1 )); then
+        PREFLIGHT_RUNTIME_STATUS="OK; READY reutilizado"
+      fi
+      if (( LOCAL_CANDIDATE_MODE == 1 )); then
+        write_local_candidate_state "ready" "$artifact_commit"
+      fi
+      logger -t "$LOG_TAG" "$candidate_label reutilizou READY validado de $(short_commit "$artifact_commit")" 2>/dev/null || true
+      return 0
+    fi
+    LOCAL_CANDIDATE_RUNTIME_READY=0
+    LOCAL_CANDIDATE_ARTIFACT_ROOT=""
+    LOCAL_CANDIDATE_ARTIFACT_COMMIT=""
+    LOCAL_CANDIDATE_FRONTEND_ARTIFACT=""
+    LOCAL_CANDIDATE_BACKEND_ARTIFACT=""
+  fi
+
   rm -rf -- "$root" 2>/dev/null || true
   install -d -o ubuntu -g ubuntu -m 0775 "$root" || {
     LAST_ERROR_STDERR="não foi possível criar diretório persistente de artefatos: $root"
@@ -4463,21 +4700,30 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
   # caminho ZIP e ao caminho remoto porque ambos chegam aqui ainda no worktree.
   run_candidate_python_runtime_smoke "$validation_worktree" "$smoke_py" || return $?
 
-  if (( FRONT_CHANGED == 1 )); then
+  if (( FRONT_CHANGED == 1 || ${FRONT_TESTS_CHANGED:-0} == 1 )); then
     [[ -d "$front_dir" ]] || {
       LAST_ERROR_STDERR="frontend não encontrado no worktree: $front_dir"
       LAST_ERROR_CODE="FRONTEND_SOURCE_MISSING"
       return 1
     }
     STAGE="dependências do frontend"
-    zip_progress_run_as_ubuntu \
-      "Instalando dependências" \
-      "Validando frontend no worktree" \
-      "cd \"$front_dir\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi" || {
-        local rc=$?
-        register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm ci}"
-        return "$rc"
-      }
+    if [[ -s "$front_dir/package-lock.json" ]]; then
+      prepare_node_dependency_layer "$front_dir" frontend dev \
+        "Preparando dependências" "Validando frontend no worktree" || {
+          local rc=$?
+          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm ci $npm_flags}"
+          return "$rc"
+        }
+    else
+      zip_progress_run_as_ubuntu \
+        "Instalando dependências" \
+        "Validando frontend no worktree · sem lockfile" \
+        "cd \"$front_dir\" && npm install $npm_flags" || {
+          local rc=$?
+          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm install $npm_flags}"
+          return "$rc"
+        }
+    fi
 
     STAGE="testes do frontend"
     zip_progress_run_as_ubuntu \
@@ -4489,43 +4735,56 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
         return "$rc"
       }
 
-    STAGE="build do frontend"
-    zip_progress_run_as_ubuntu \
-      "Compilando interface" \
-      "Gerando artefato isolado" \
-      "cd \"$front_dir\" && npm run build" || {
-        local rc=$?
-        register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm run build}"
-        return "$rc"
-      }
+    if (( FRONT_CHANGED == 1 )); then
+      STAGE="build do frontend"
+      zip_progress_run_as_ubuntu \
+        "Compilando interface" \
+        "Gerando artefato isolado" \
+        "cd \"$front_dir\" && npm run build" || {
+          local rc=$?
+          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm run build}"
+          return "$rc"
+        }
 
-    if [[ ! -s "$front_dir/dist/index.html" ]]; then
-      FRONT_STATUS="build isolado do frontend não produziu dist/index.html"
-      LAST_ERROR_STDERR="$FRONT_STATUS"
-      LAST_ERROR_CODE="FRONTEND_BUILD_FAILED"
-      return 1
+      if [[ ! -s "$front_dir/dist/index.html" ]]; then
+        FRONT_STATUS="build isolado do frontend não produziu dist/index.html"
+        LAST_ERROR_STDERR="$FRONT_STATUS"
+        LAST_ERROR_CODE="FRONTEND_BUILD_FAILED"
+        return 1
+      fi
+      install -d -o ubuntu -g ubuntu -m 0775 "$(dirname "$front_artifact")"
+      sudo -u ubuntu -H cp -a -- "$front_dir/dist" "$front_artifact"
+      front_ready=1
+      FRONT_STATUS="frontend validado e compilado no worktree"
+    else
+      FRONT_STATUS="testes do frontend aprovados; runtime não alterado"
     fi
-    install -d -o ubuntu -g ubuntu -m 0775 "$(dirname "$front_artifact")"
-    sudo -u ubuntu -H cp -a -- "$front_dir/dist" "$front_artifact"
-    front_ready=1
-    FRONT_STATUS="frontend validado e compilado no worktree"
   fi
 
-  if (( BACK_CHANGED == 1 )); then
+  if (( BACK_CHANGED == 1 || ${BACK_TESTS_CHANGED:-0} == 1 )); then
     [[ -d "$back_dir" ]] || {
       LAST_ERROR_STDERR="backend não encontrado no worktree: $back_dir"
       LAST_ERROR_CODE="BACKEND_SOURCE_MISSING"
       return 1
     }
     STAGE="dependências do backend"
-    zip_progress_run_as_ubuntu \
-      "Preparando servidor" \
-      "Validando backend no worktree" \
-      "cd \"$back_dir\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi" || {
-        local rc=$?
-        register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm ci}"
-        return "$rc"
-      }
+    if [[ -s "$back_dir/package-lock.json" ]]; then
+      prepare_node_dependency_layer "$back_dir" backend dev \
+        "Preparando servidor" "Validando backend no worktree" || {
+          local rc=$?
+          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm ci $npm_flags}"
+          return "$rc"
+        }
+    else
+      zip_progress_run_as_ubuntu \
+        "Preparando servidor" \
+        "Validando backend no worktree · sem lockfile" \
+        "cd \"$back_dir\" && npm install $npm_flags" || {
+          local rc=$?
+          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm install $npm_flags}"
+          return "$rc"
+        }
+    fi
 
     STAGE="testes do backend"
     zip_progress_run_as_ubuntu \
@@ -4537,29 +4796,62 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
         return "$rc"
       }
 
-    STAGE="build do backend"
-    zip_progress_run_as_ubuntu \
-      "Compilando servidor" \
-      "Gerando artefato isolado" \
-      "cd \"$back_dir\" && npm run build && npm prune --omit=dev" || {
-        local rc=$?
-        register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm run build}"
-        return "$rc"
-      }
+    if (( BACK_CHANGED == 1 )); then
+      STAGE="build do backend"
+      zip_progress_run_as_ubuntu \
+        "Compilando servidor" \
+        "Gerando artefato isolado" \
+        "cd \"$back_dir\" && npm run build" || {
+          local rc=$?
+          register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm run build}"
+          return "$rc"
+        }
 
-    if [[ ! -s "$back_dir/dist/index.js" || ! -d "$back_dir/node_modules" ]]; then
-      BACK_STATUS="build isolado do backend não produziu dist/index.js/node_modules"
-      LAST_ERROR_STDERR="$BACK_STATUS"
-      LAST_ERROR_CODE="BACKEND_BUILD_FAILED"
-      return 1
+      if [[ ! -s "$back_dir/dist/index.js" ]]; then
+        BACK_STATUS="build isolado do backend não produziu dist/index.js"
+        LAST_ERROR_STDERR="$BACK_STATUS"
+        LAST_ERROR_CODE="BACKEND_BUILD_FAILED"
+        return 1
+      fi
+
+      local backend_runtime_modules=""
+      STAGE="dependências do backend (produção)"
+      if [[ -s "$back_dir/package-lock.json" ]]; then
+        prepare_node_dependency_layer "$back_dir" backend prod \
+          "Preparando runtime do servidor" "Dependências de produção · cache" || {
+            local rc=$?
+            register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm ci --omit=dev $npm_flags}"
+            return "$rc"
+          }
+        backend_runtime_modules="$LAST_NODE_DEP_LAYER_PATH/node_modules"
+      else
+        zip_progress_run_as_ubuntu \
+          "Preparando runtime do servidor" \
+          "Removendo dependências de desenvolvimento" \
+          "cd \"$back_dir\" && npm prune --omit=dev --no-audit --no-fund --progress=false" || {
+            local rc=$?
+            register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-npm prune --omit=dev}"
+            return "$rc"
+          }
+        backend_runtime_modules="$back_dir/node_modules"
+      fi
+      if [[ ! -d "$backend_runtime_modules" ]]; then
+        BACK_STATUS="runtime isolado do backend não produziu node_modules de produção"
+        LAST_ERROR_STDERR="$BACK_STATUS"
+        LAST_ERROR_CODE="BACKEND_BUILD_FAILED"
+        return 1
+      fi
+
+      install -d -o ubuntu -g ubuntu -m 0775 "$back_artifact"
+      sudo -u ubuntu -H cp -a -- "$back_dir/dist" "$back_artifact/dist"
+      sudo -u ubuntu -H cp -a -- "$backend_runtime_modules" "$back_artifact/node_modules"
+      [[ -f "$back_dir/package.json" ]] && sudo -u ubuntu -H cp -a -- "$back_dir/package.json" "$back_artifact/package.json"
+      [[ -f "$back_dir/package-lock.json" ]] && sudo -u ubuntu -H cp -a -- "$back_dir/package-lock.json" "$back_artifact/package-lock.json"
+      back_ready=1
+      BACK_STATUS="backend validado e compilado no worktree"
+    else
+      BACK_STATUS="testes do backend aprovados; runtime não alterado"
     fi
-    install -d -o ubuntu -g ubuntu -m 0775 "$back_artifact"
-    sudo -u ubuntu -H cp -a -- "$back_dir/dist" "$back_artifact/dist"
-    sudo -u ubuntu -H cp -a -- "$back_dir/node_modules" "$back_artifact/node_modules"
-    [[ -f "$back_dir/package.json" ]] && sudo -u ubuntu -H cp -a -- "$back_dir/package.json" "$back_artifact/package.json"
-    [[ -f "$back_dir/package-lock.json" ]] && sudo -u ubuntu -H cp -a -- "$back_dir/package-lock.json" "$back_artifact/package-lock.json"
-    back_ready=1
-    BACK_STATUS="backend validado e compilado no worktree"
   fi
 
   # Validação/build não pode alterar nenhum arquivo rastreado do commit.
@@ -5366,6 +5658,8 @@ PYDIFF
 classify_changed_files() {
   FRONT_CHANGED=0
   BACK_CHANGED=0
+  FRONT_TESTS_CHANGED=0
+  BACK_TESTS_CHANGED=0
   BOT_CHANGED=0
   REQUIREMENTS_CHANGED=0
   AUDIO_SYSTEMD_CHANGED=0
@@ -5383,10 +5677,19 @@ classify_changed_files() {
     APP_COMMANDS_MAY_HAVE_CHANGED=1
   fi
 
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(dashboard/frontend|activity/sinuca)/'; then
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^dashboard/frontend/tests/'; then
+    FRONT_TESTS_CHANGED=1
+  fi
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^dashboard/backend/tests/'; then
+    BACK_TESTS_CHANGED=1
+  fi
+  # Alterações exclusivamente em tests/ precisam validar, mas não mudam o
+  # runtime publicado. Todo path desconhecido fora de tests/ continua sendo
+  # tratado conservadoramente como mudança publicável.
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '^(dashboard/frontend|activity/sinuca)/' | grep -Ev '^dashboard/frontend/tests/' | grep -q .; then
     FRONT_CHANGED=1
   fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(dashboard/backend|activity/sinuca-server)/'; then
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '^(dashboard/backend|activity/sinuca-server)/' | grep -Ev '^dashboard/backend/tests/' | grep -q .; then
     BACK_CHANGED=1
   fi
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(bot\.py|webserver\.py|config\.py|db\.py|start\.sh|requirements\.txt|cogs/|music_system/|utility/)'; then
@@ -6481,12 +6784,16 @@ deploy_frontend() {
 
   if (( FRONT_CHANGED == 0 )); then
     if frontend_publication_is_healthy; then
-      FRONT_STATUS="não alterado"
+      if (( ${FRONT_TESTS_CHANGED:-0} == 1 )); then
+        FRONT_STATUS="testes do frontend aprovados no worktree; publicação não necessária"
+      else
+        FRONT_STATUS="não alterado"
+      fi
       return 0
     fi
     # Mesmo sem arquivos do frontend no patch, restaura automaticamente uma
-    # publicação ausente/corrompida. Isso evita manter o Nginx em 403 quando o
-    # repositório está íntegro, mas /var/www/sinuca perdeu o index.html.
+    # publicação ausente/corrompida. Candidatos transacionais normalmente já
+    # terão preparado esse reparo no worktree antes da promoção.
     FRONT_CHANGED=1
     repair_mode=1
     logger -t "$LOG_TAG" "publicação do frontend inválida; reconstrução automática solicitada"
@@ -6528,7 +6835,7 @@ deploy_frontend() {
   zip_progress_run_as_ubuntu \
     "Instalando dependências" \
     "Verificando pacotes" \
-    "cd \"$FRONT_DIR\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi"
+    "cd \"$FRONT_DIR\" && if [ -f package-lock.json ]; then npm ci $NPM_INSTALL_FLAGS; else npm install $NPM_INSTALL_FLAGS; fi"
   zip_progress_done_and_publish \
     "Dependências instaladas" \
     "Compilando interface" \
@@ -6569,7 +6876,7 @@ deploy_frontend() {
   zip_progress_run_as_ubuntu \
     "Publicando interface" \
     "Limpando temporários" \
-    "cd \"$FRONT_DIR\" && rm -rf node_modules && { npm cache clean --force >/dev/null 2>&1 || true; }"
+    "cd \"$FRONT_DIR\" && rm -rf node_modules"
   zip_progress_done "Interface publicada"
 
   if (( repair_mode == 1 )); then
@@ -6635,7 +6942,11 @@ install_backend_prebuilt_artifact() {
 
 deploy_backend() {
   if (( BACK_CHANGED == 0 && FRONT_CHANGED == 0 )); then
-    BACK_STATUS="não alterado"
+    if (( ${BACK_TESTS_CHANGED:-0} == 1 )); then
+      BACK_STATUS="testes do backend aprovados no worktree; publicação não necessária"
+    else
+      BACK_STATUS="não alterado"
+    fi
     ACTIVITY_HEALTHCHECK_STATUS="não alterada"
     return 0
   fi
@@ -6721,7 +7032,7 @@ deploy_backend() {
   zip_progress_run_as_ubuntu \
     "Preparando servidor" \
     "Verificando pacotes" \
-    "cd \"$BACK_DIR\" && if [ -f package-lock.json ]; then npm ci; else npm install; fi"
+    "cd \"$BACK_DIR\" && if [ -f package-lock.json ]; then npm ci $NPM_INSTALL_FLAGS; else npm install $NPM_INSTALL_FLAGS; fi"
   zip_progress_done_and_publish \
     "Servidor preparado" \
     "Compilando servidor" \
@@ -6741,7 +7052,7 @@ deploy_backend() {
   zip_progress_run_as_ubuntu \
     "Compilando servidor" \
     "Gerando arquivos" \
-    "cd \"$BACK_DIR\" && npm run build && npm prune --omit=dev && { npm cache clean --force >/dev/null 2>&1 || true; }"
+    "cd \"$BACK_DIR\" && npm run build && npm prune --omit=dev --no-audit --no-fund --progress=false"
   zip_progress_done_and_publish \
     "Servidor compilado" \
     "Reiniciando servidor" \

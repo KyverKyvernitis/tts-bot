@@ -267,7 +267,7 @@ sudo() {{
 }}
 npm() {{
   case "$1 ${{2:-}}" in
-    'ci '| 'install ')
+    'ci '*| 'install '*)
       mkdir -p node_modules/.bin node_modules/pkg
       printf module > node_modules/pkg/index.js
       ln -sfn ../pkg/index.js node_modules/.bin/pkg
@@ -283,7 +283,7 @@ npm() {{
         printf 'console.log("ready")' > dist/index.js
       fi
       ;;
-    'prune --omit=dev')
+    'prune --omit=dev'*)
       :
       ;;
     *)

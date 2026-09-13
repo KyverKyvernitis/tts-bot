@@ -99,7 +99,7 @@ sudo() {{
 worktree_git() {{ return 0; }}
 npm() {{
   case "$1 ${{2:-}}" in
-    'ci '| 'install ')
+    'ci '*| 'install '*)
       mkdir -p node_modules/.bin node_modules/pkg
       printf module > node_modules/pkg/index.js
       ln -sfn ../pkg/index.js node_modules/.bin/pkg
@@ -115,7 +115,7 @@ npm() {{
         printf 'console.log("remote-ready")' > dist/index.js
       fi
       ;;
-    'prune --omit=dev')
+    'prune --omit=dev'*)
       :
       ;;
     *)
@@ -217,10 +217,11 @@ printf 'ERROR=%s\n' "$LAST_ERROR_STDERR"
     assert "package-lock.json" in result.stdout
 
 
-def test_remote_ready_artifacts_are_ephemeral_and_pruned() -> None:
+def test_remote_ready_artifacts_keep_ready_cache_but_prune_partial_and_old_entries() -> None:
     source = UPDATER.read_text(encoding="utf-8")
     cleanup = _function_block(source, "cleanup_runtime_artifacts", "trim_alert_text")
     prune = _function_block(source, "prune_update_artifacts", "git_add_changed_files_or_reject")
 
+    assert '[[ ! -s "$REMOTE_CANDIDATE_ARTIFACT_ROOT/ready.json" ]]' in cleanup
     assert 'rm -rf -- "$REMOTE_CANDIDATE_ARTIFACT_ROOT"' in cleanup
     assert 'prune_archive_root "$REMOTE_RUNTIME_ARTIFACT_ROOT" 1 2' in prune
