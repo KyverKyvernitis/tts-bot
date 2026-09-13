@@ -238,6 +238,10 @@ CHANGED_FILES_RAW=""
 CHANGED_DIFF_NUMSTAT_RAW=""
 CHANGED_STATUS_RAW=""
 DIFF_TOTAL_SUMMARY=""
+GIT_DIFF_SNAPSHOT_HASH=""
+NODE_TOOLCHAIN_NODE_VERSION=""
+NODE_TOOLCHAIN_NPM_VERSION=""
+NODE_TOOLCHAIN_PLATFORM=""
 FAST_RELOAD_STATUS="não usado"
 FAST_RELOAD_MODULES=""
 UPDATER_UNIT="tts-bot-updater.service"
@@ -356,6 +360,39 @@ candidate_git() {
 
 repo_python_as_ubuntu() {
   sudo -u ubuntu -H python3 "$@"
+}
+
+load_git_diff_snapshot() {
+  local root="${1:?}"
+  shift
+  local output
+  if ! output="$(repo_python_as_ubuntu "$REPO_DIR/utility/update_git_snapshot.py" diff --repo "$root" "$@" 2>&1)"; then
+    LAST_ERROR_STDERR="${output:-falha ao capturar snapshot Git do diff}"
+    return 1
+  fi
+  eval "$output"
+  CHANGED_STATUS_RAW="${GIT_DIFF_STATUS_RAW:-}"
+  CHANGED_FILES_RAW="${GIT_DIFF_FILES_RAW:-}"
+  CHANGED_DIFF_NUMSTAT_RAW="${GIT_DIFF_NUMSTAT_RAW:-}"
+  GIT_DIFF_SNAPSHOT_HASH="${GIT_DIFF_SNAPSHOT_HASH:-}"
+}
+
+load_repo_status_snapshot() {
+  local output
+  if ! output="$(repo_python_as_ubuntu "$REPO_DIR/utility/update_git_snapshot.py" status --repo "$REPO_DIR" 2>&1)"; then
+    LAST_ERROR_STDERR="${output:-falha ao capturar status Git do checkout}"
+    return 1
+  fi
+  eval "$output"
+}
+
+load_repo_ref_snapshot() {
+  local branch="${1:-$BRANCH}" output
+  if ! output="$(repo_python_as_ubuntu "$REPO_DIR/utility/update_git_snapshot.py" refs --repo "$REPO_DIR" --branch "$branch" 2>&1)"; then
+    LAST_ERROR_STDERR="${output:-falha ao capturar refs Git local/remoto}"
+    return 1
+  fi
+  eval "$output"
 }
 
 current_bot_python_bin() {
@@ -3627,8 +3664,9 @@ prepare_rollback_request_update() {
   zip_progress_publish "Validando estado atual"
   STAGE="fetch remoto"
   repo_git fetch origin "$BRANCH"
-  CURRENT_COMMIT="$(repo_git rev-parse HEAD)"
-  REMOTE_COMMIT="$(repo_git rev-parse "origin/$BRANCH")"
+  if ! load_repo_ref_snapshot "$BRANCH"; then return 1; fi
+  CURRENT_COMMIT="$GIT_REFS_CURRENT"
+  REMOTE_COMMIT="$GIT_REFS_REMOTE"
   PREVIOUS_COMMIT="$CURRENT_COMMIT"
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
   mark_update_timing "fetch"
@@ -4546,18 +4584,49 @@ run_candidate_python_runtime_smoke() {
   fi
 }
 
+load_node_toolchain_identity() {
+  if [[ -n "${NODE_TOOLCHAIN_NODE_VERSION:-}" && -n "${NODE_TOOLCHAIN_NPM_VERSION:-}" && -n "${NODE_TOOLCHAIN_PLATFORM:-}" ]]; then
+    return 0
+  fi
+  local output node_version npm_version
+  if ! output="$(sudo -u ubuntu -H bash -lc 'printf "%s\n%s\n" "$(node --version)" "$(npm --version)"' 2>/dev/null)"; then
+    return 1
+  fi
+  node_version="${output%%$'\n'*}"
+  npm_version="${output#*$'\n'}"
+  [[ -n "$node_version" && -n "$npm_version" ]] || return 1
+  NODE_TOOLCHAIN_NODE_VERSION="$node_version"
+  NODE_TOOLCHAIN_NPM_VERSION="$npm_version"
+  NODE_TOOLCHAIN_PLATFORM="$(uname -s)-$(uname -m)"
+}
+
 node_dependency_cache_key() {
   local project_dir="${1:?}" mode="${2:?}"
   [[ -s "$project_dir/package.json" && -s "$project_dir/package-lock.json" ]] || return 2
+  # Harnesses antigos extraem o bloco a partir desta função. Mantenha um
+  # fallback autocontido; no updater completo o helper já existe e o custo é 0.
+  if ! declare -F load_node_toolchain_identity >/dev/null 2>&1; then
+    load_node_toolchain_identity() {
+      if [[ -n "${NODE_TOOLCHAIN_NODE_VERSION:-}" && -n "${NODE_TOOLCHAIN_NPM_VERSION:-}" && -n "${NODE_TOOLCHAIN_PLATFORM:-}" ]]; then
+        return 0
+      fi
+      local output node_version npm_version
+      output="$(sudo -u ubuntu -H bash -lc 'printf "%s\n%s\n" "$(node --version)" "$(npm --version)"' 2>/dev/null)" || return 1
+      node_version="${output%%$'\n'*}"
+      npm_version="${output#*$'\n'}"
+      [[ -n "$node_version" && -n "$npm_version" ]] || return 1
+      NODE_TOOLCHAIN_NODE_VERSION="$node_version"
+      NODE_TOOLCHAIN_NPM_VERSION="$npm_version"
+      NODE_TOOLCHAIN_PLATFORM="$(uname -s)-$(uname -m)"
+    }
+  fi
+  load_node_toolchain_identity || return 1
 
-  local node_version npm_version platform package_hash lock_hash
-  node_version="$(sudo -u ubuntu -H bash -lc 'node --version' 2>/dev/null)" || return 1
-  npm_version="$(sudo -u ubuntu -H bash -lc 'npm --version' 2>/dev/null)" || return 1
-  platform="$(uname -s)-$(uname -m)"
+  local package_hash lock_hash
   package_hash="$(sha256sum "$project_dir/package.json" | awk '{print $1}')"
   lock_hash="$(sha256sum "$project_dir/package-lock.json" | awk '{print $1}')"
   printf '%s\0%s\0%s\0%s\0%s\0' \
-    "$mode" "$node_version" "$npm_version" "$platform" "$package_hash:$lock_hash" \
+    "$mode" "$NODE_TOOLCHAIN_NODE_VERSION" "$NODE_TOOLCHAIN_NPM_VERSION" "$NODE_TOOLCHAIN_PLATFORM" "$package_hash:$lock_hash" \
     | sha256sum | awk '{print $1}'
 }
 
@@ -4586,15 +4655,21 @@ PYNODELAYERVERIFY
 
 write_node_dependency_layer_manifest() {
   local layer="${1:?}" key="${2:?}" kind="${3:?}" mode="${4:?}" project_dir="${5:?}"
-  local node_version npm_version package_hash lock_hash platform
-  node_version="$(sudo -u ubuntu -H bash -lc 'node --version' 2>/dev/null)" || return 1
-  npm_version="$(sudo -u ubuntu -H bash -lc 'npm --version' 2>/dev/null)" || return 1
+  if declare -F load_node_toolchain_identity >/dev/null 2>&1; then
+    load_node_toolchain_identity || return 1
+  else
+    local output
+    output="$(sudo -u ubuntu -H bash -lc 'printf "%s\n%s\n" "$(node --version)" "$(npm --version)"' 2>/dev/null)" || return 1
+    NODE_TOOLCHAIN_NODE_VERSION="${output%%$'\n'*}"
+    NODE_TOOLCHAIN_NPM_VERSION="${output#*$'\n'}"
+    NODE_TOOLCHAIN_PLATFORM="$(uname -s)-$(uname -m)"
+  fi
+  local package_hash lock_hash
   package_hash="$(sha256sum "$project_dir/package.json" | awk '{print $1}')"
   lock_hash="$(sha256sum "$project_dir/package-lock.json" | awk '{print $1}')"
-  platform="$(uname -s)-$(uname -m)"
   NODE_LAYER_META="$layer/layer.json" NODE_LAYER_KEY="$key" NODE_LAYER_KIND="$kind" NODE_LAYER_MODE="$mode" \
-  NODE_LAYER_NODE="$node_version" NODE_LAYER_NPM="$npm_version" NODE_LAYER_PACKAGE_HASH="$package_hash" \
-  NODE_LAYER_LOCK_HASH="$lock_hash" NODE_LAYER_PLATFORM="$platform" python3 - <<'PYNODELAYERWRITE'
+  NODE_LAYER_NODE="$NODE_TOOLCHAIN_NODE_VERSION" NODE_LAYER_NPM="$NODE_TOOLCHAIN_NPM_VERSION" NODE_LAYER_PACKAGE_HASH="$package_hash" \
+  NODE_LAYER_LOCK_HASH="$lock_hash" NODE_LAYER_PLATFORM="$NODE_TOOLCHAIN_PLATFORM" python3 - <<'PYNODELAYERWRITE'
 import datetime, json, os, pathlib
 path = pathlib.Path(os.environ['NODE_LAYER_META'])
 payload = {
@@ -4633,6 +4708,7 @@ prepare_node_dependency_layer() {
   if [[ ! -s "$project_dir/package-lock.json" ]]; then
     return 2
   fi
+  if declare -F load_node_toolchain_identity >/dev/null 2>&1; then load_node_toolchain_identity || return 1; fi
   key="$(node_dependency_cache_key "$project_dir" "$mode")" || return 1
   layer="$(node_dependency_layer_root "$kind" "$mode" "$key")" || return 1
   parent="$(dirname "$layer")"
@@ -4726,6 +4802,7 @@ backend_live_dependency_layer() {
   fi
 
   [[ -d "$modules" ]] || return 1
+  if declare -F load_node_toolchain_identity >/dev/null 2>&1; then load_node_toolchain_identity || return 1; fi
   key="$(node_dependency_cache_key "$project_dir" prod)" || return 1
   layer="$(node_dependency_layer_root backend prod "$key")" || return 1
   parent="$(dirname "$layer")"
@@ -4858,6 +4935,7 @@ prune_node_dependency_layers() {
 frontend_typescript_cache_key() {
   local project_dir="${1:?}" dep_key tsconfig_hash
   [[ -s "$project_dir/tsconfig.json" && -s "$project_dir/package.json" && -s "$project_dir/package-lock.json" ]] || return 2
+  if declare -F load_node_toolchain_identity >/dev/null 2>&1; then load_node_toolchain_identity || return 1; fi
   dep_key="$(node_dependency_cache_key "$project_dir" dev)" || return 1
   tsconfig_hash="$(sha256sum "$project_dir/tsconfig.json" | awk '{print $1}')"
   printf '%s\0%s\0%s\0' "frontend-noemit-v1" "$dep_key" "$tsconfig_hash" \
@@ -4967,6 +5045,7 @@ run_frontend_incremental_typecheck() {
 backend_typescript_cache_key() {
   local project_dir="${1:?}" dep_key tsconfig_hash
   [[ -s "$project_dir/tsconfig.json" && -s "$project_dir/package.json" && -s "$project_dir/package-lock.json" ]] || return 2
+  if declare -F load_node_toolchain_identity >/dev/null 2>&1; then load_node_toolchain_identity || return 1; fi
   dep_key="$(node_dependency_cache_key "$project_dir" dev)" || return 1
   tsconfig_hash="$(sha256sum "$project_dir/tsconfig.json" | awk '{print $1}')"
   printf '%s\0%s\0%s\0' "backend-emit-v1" "$dep_key" "$tsconfig_hash" \
@@ -5629,9 +5708,15 @@ local_live_head_candidate_state() {
     SHORT_FROM="$(short_commit "$parent")"
     SHORT_TO="$(short_commit "$live_head")"
     hydrate_local_candidate_runtime_artifacts "$live_head" || true
-    CHANGED_STATUS_RAW="$(repo_git diff --name-status --no-renames "$parent" "$live_head")"
-    CHANGED_FILES_RAW="$(repo_git diff --name-only --no-renames "$parent" "$live_head")"
-    CHANGED_DIFF_NUMSTAT_RAW="$(repo_git diff --numstat --no-renames "$parent" "$live_head")"
+    if declare -F load_git_diff_snapshot >/dev/null 2>&1; then
+      if ! load_git_diff_snapshot "$REPO_DIR" --base "$parent" --target "$live_head"; then
+        return 1
+      fi
+    else
+      CHANGED_STATUS_RAW="$(repo_git diff --name-status --no-renames "$parent" "$live_head")"
+      CHANGED_FILES_RAW="$(repo_git diff --name-only --no-renames "$parent" "$live_head")"
+      CHANGED_DIFF_NUMSTAT_RAW="$(repo_git diff --numstat --no-renames "$parent" "$live_head")"
+    fi
     classify_changed_files
     write_local_candidate_state "promoted" "$live_head"
     return 0
@@ -5640,20 +5725,26 @@ local_live_head_candidate_state() {
 }
 
 refresh_changed_files_from_staged_diff() {
-  # A intenção do manifesto deixa de ser autoridade após o stage. O que será
-  # validado/commitado é exatamente este diff, incluindo deleções.
-  if ! CHANGED_STATUS_RAW="$(candidate_git diff --cached --name-status --no-renames)"; then
-    LAST_ERROR_STDERR="falha ao listar status do diff staged do candidato"
-    return 1
+  # Uma única chamada Git produz status, paths e numstat. A intenção do
+  # manifesto deixa de ser autoridade após o stage; este snapshot é a fonte
+  # única usada por classificação, testes e relatório.
+  local root
+  if declare -F candidate_repo_dir >/dev/null 2>&1; then
+    root="$(candidate_repo_dir)"
+  else
+    root="${REPO_DIR:-.}"
   fi
-  if ! CHANGED_FILES_RAW="$(candidate_git diff --cached --name-only --no-renames)"; then
-    LAST_ERROR_STDERR="falha ao listar arquivos staged do candidato"
-    return 1
+  if declare -F load_git_diff_snapshot >/dev/null 2>&1; then
+    if ! load_git_diff_snapshot "$root" --cached; then
+      LAST_ERROR_STDERR="${LAST_ERROR_STDERR:-falha ao calcular snapshot do diff staged do candidato}"
+      return 1
+    fi
+    return 0
   fi
-  if ! CHANGED_DIFF_NUMSTAT_RAW="$(candidate_git diff --cached --numstat --no-renames)"; then
-    LAST_ERROR_STDERR="falha ao calcular o diff staged do candidato"
-    return 1
-  fi
+  # Compatibilidade com harnesses/execuções parciais do helper.
+  if ! CHANGED_STATUS_RAW="$(candidate_git diff --cached --name-status --no-renames)"; then return 1; fi
+  if ! CHANGED_FILES_RAW="$(candidate_git diff --cached --name-only --no-renames)"; then return 1; fi
+  if ! CHANGED_DIFF_NUMSTAT_RAW="$(candidate_git diff --cached --numstat --no-renames)"; then return 1; fi
   return 0
 }
 
@@ -5991,8 +6082,9 @@ prepare_local_candidate_update() {
   zip_progress_publish "Conferindo ZIP" "Checando arquivo recebido e base local."
   STAGE="fetch remoto"
   repo_git fetch origin "$BRANCH"
-  REMOTE_COMMIT="$(repo_git rev-parse "origin/$BRANCH")"
-  CURRENT_COMMIT="$(repo_git rev-parse HEAD)"
+  if ! load_repo_ref_snapshot "$BRANCH"; then return 1; fi
+  REMOTE_COMMIT="$GIT_REFS_REMOTE"
+  CURRENT_COMMIT="$GIT_REFS_CURRENT"
   PREVIOUS_COMMIT="$CURRENT_COMMIT"
   COMMIT_SUBJECT="$LOCAL_CANDIDATE_COMMIT_MESSAGE"
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
@@ -6345,96 +6437,112 @@ classify_changed_files() {
   CORE_WORKER_AUTOMATION_REQUIRED=0
   APP_COMMANDS_MAY_HAVE_CHANGED=0
 
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(bot\.py|cogs/.*\.py|cogs/.*/.*\.py|utility/commands/.*\.py)$'; then
-    APP_COMMANDS_MAY_HAVE_CHANGED=1
-  fi
+  # Classificação é feita em uma única passagem Bash. A versão anterior
+  # disparava dezenas de grep/pipes a cada refresh do diff, custo perceptível
+  # em updates pequenos e repetido no staging/retomada.
+  local file
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
 
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^dashboard/frontend/tests/'; then
-    FRONT_TESTS_CHANGED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^dashboard/backend/tests/'; then
-    BACK_TESTS_CHANGED=1
-    BACK_TESTS_REQUIRED=1
-  fi
-  # Alterações exclusivamente em tests/ precisam validar, mas não mudam o
-  # runtime publicado. Todo path desconhecido fora de tests/ continua sendo
-  # tratado conservadoramente como mudança publicável.
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '^(dashboard/frontend|activity/sinuca)/' | grep -Ev '^dashboard/frontend/tests/' | grep -q .; then
-    FRONT_CHANGED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '^(dashboard/backend|activity/sinuca-server)/' | grep -Ev '^dashboard/backend/tests/' | grep -q .; then
-    BACK_CHANGED=1
-    BACK_TESTS_REQUIRED=1
-  fi
-  # O catálogo compartilhado entra no dist do backend pelo postbuild. Alterá-lo
-  # exige novo artefato, mas não altera TypeScript/runtime e portanto não precisa
-  # repetir a suíte unitária; o build incremental reutiliza o dist anterior.
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^shared/help_catalog\.json$'; then
-    BACK_CHANGED=1
-  fi
-  # Frontend leve: alterações exclusivamente visuais (CSS/index.html) precisam
-  # do bundle Vite, mas não se beneficiam de unit tests nem de typecheck do app.
-  # Qualquer path runtime fora dessa allowlist continua conservador: testes +
-  # typecheck antes do bundle.
-  if (( FRONT_TESTS_CHANGED == 1 )); then
-    FRONT_TESTS_REQUIRED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^dashboard/frontend/(src/.*\.(ts|tsx)|tsconfig\.json|package\.json|package-lock\.json)$'; then
-    FRONT_TYPECHECK_REQUIRED=1
-  fi
-  if (( FRONT_CHANGED == 1 )); then
-    if printf '%s\n' "$CHANGED_FILES_RAW" \
-      | grep -E '^(dashboard/frontend|activity/sinuca)/' \
-      | grep -Ev '^dashboard/frontend/tests/' \
-      | grep -Ev '^dashboard/frontend/(src/.*\.css|index\.html)$' \
-      | grep -q .; then
-      FRONT_TESTS_REQUIRED=1
-      FRONT_TYPECHECK_REQUIRED=1
-    fi
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(bot\.py|webserver\.py|config\.py|db\.py|start\.sh|requirements\.txt|cogs/|music_system/|utility/)'; then
-    BOT_CHANGED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/systemd(/vps)?/tts-bot\.service$'; then
-    BOT_CHANGED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^requirements\.txt$'; then
-    REQUIREMENTS_CHANGED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/systemd/(lavalink|tts-bot|tts-bot-alert@)\.service$'; then
-    AUDIO_SYSTEMD_CHANGED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(alert\.sh|deploy/systemd(/vps)?/tts-bot-alert@\.service)$'; then
-    ALERT_CHANGED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(deploy/systemd/(vps/)?(tts-bot\.service|tts-bot-updater\.(service|timer)|tts-bot-alert@\.service|cleanup-audio-temp\.(service|timer)|sinuca-activity-server\.service|phone-worker-watch\.(service|timer)|tts-bot\.service\.d/)|deploy/(sudoers\.d|journald|tmpfiles\.d)/|scripts/install-vps-systemd-units\.sh$)'; then
-    # O instalador sincroniza as units gerenciadas em uma única passagem. Inclua
-    # também os templates na raiz deploy/systemd; ignorá-los deixava a VPS usando
-    # uma unit antiga mesmo depois do commit ter sido aplicado.
-    VPS_SYSTEMD_UNITS_CHANGED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(cleanup-audio-temp\.sh|deploy/systemd/cleanup-audio-temp\.(service|timer))$'; then
-    CLEANUP_CHANGED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(scripts/phone-lavalink-watch\.sh|deploy/systemd/phone-lavalink-watch\.(service|timer)|deploy/termux/phone-lavalink/)'; then
-    PHONE_LAVALINK_WATCH_CHANGED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(scripts/phone-worker-watch\.sh|scripts/phone-worker-client\.py|deploy/systemd/phone-worker-watch\.(service|timer)|deploy/termux/phone-worker/)'; then
-    PHONE_WORKER_WATCH_CHANGED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^deploy/termux/phone-worker/'; then
-    PHONE_WORKER_SYNC_REQUIRED=1
-    CORE_WORKER_AUTOMATION_REQUIRED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^android/core-worker-app/'; then
-    CORE_WORKER_APK_CHANGED=1
-    CORE_WORKER_AUTOMATION_REQUIRED=1
-  fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(scripts/core-worker-automation\.py|utility/commands/workers_registry\.py|webserver\.py)$'; then
-    # Mudanças no próprio orquestrador/registry também precisam reavaliar as
-    # pendências; antes elas só entravam em vigor no próximo patch Android/Termux.
-    CORE_WORKER_AUTOMATION_REQUIRED=1
-  fi
+    case "$file" in
+      bot.py|cogs/*.py|utility/commands/*.py)
+        APP_COMMANDS_MAY_HAVE_CHANGED=1
+        ;;
+    esac
+
+    case "$file" in
+      dashboard/frontend/tests/*)
+        FRONT_TESTS_CHANGED=1
+        FRONT_TESTS_REQUIRED=1
+        ;;
+      dashboard/frontend/*|activity/sinuca/*)
+        FRONT_CHANGED=1
+        case "$file" in
+          dashboard/frontend/src/*.css|dashboard/frontend/index.html)
+            ;;
+          *)
+            FRONT_TESTS_REQUIRED=1
+            FRONT_TYPECHECK_REQUIRED=1
+            ;;
+        esac
+        ;;
+    esac
+
+    case "$file" in
+      dashboard/frontend/src/*.ts|dashboard/frontend/src/*.tsx|dashboard/frontend/tsconfig.json|dashboard/frontend/package.json|dashboard/frontend/package-lock.json)
+        FRONT_TYPECHECK_REQUIRED=1
+        ;;
+    esac
+
+    case "$file" in
+      dashboard/backend/tests/*)
+        BACK_TESTS_CHANGED=1
+        BACK_TESTS_REQUIRED=1
+        ;;
+      dashboard/backend/*|activity/sinuca-server/*)
+        BACK_CHANGED=1
+        BACK_TESTS_REQUIRED=1
+        ;;
+      shared/help_catalog.json)
+        BACK_CHANGED=1
+        ;;
+    esac
+
+    case "$file" in
+      bot.py|webserver.py|config.py|db.py|start.sh|requirements.txt|cogs/*|music_system/*|utility/*)
+        BOT_CHANGED=1
+        ;;
+      deploy/systemd/tts-bot.service|deploy/systemd/vps/tts-bot.service)
+        BOT_CHANGED=1
+        ;;
+    esac
+
+    [[ "$file" == "requirements.txt" ]] && REQUIREMENTS_CHANGED=1
+
+    case "$file" in
+      deploy/systemd/lavalink.service|deploy/systemd/tts-bot.service|deploy/systemd/tts-bot-alert@.service)
+        AUDIO_SYSTEMD_CHANGED=1
+        ;;
+    esac
+    case "$file" in
+      alert.sh|deploy/systemd/tts-bot-alert@.service|deploy/systemd/vps/tts-bot-alert@.service)
+        ALERT_CHANGED=1
+        ;;
+    esac
+    case "$file" in
+      deploy/systemd/tts-bot.service|deploy/systemd/tts-bot-updater.service|deploy/systemd/tts-bot-updater.timer|deploy/systemd/tts-bot-alert@.service|deploy/systemd/cleanup-audio-temp.service|deploy/systemd/cleanup-audio-temp.timer|deploy/systemd/sinuca-activity-server.service|deploy/systemd/phone-worker-watch.service|deploy/systemd/phone-worker-watch.timer|deploy/systemd/tts-bot.service.d/*|deploy/systemd/vps/tts-bot.service|deploy/systemd/vps/tts-bot-updater.service|deploy/systemd/vps/tts-bot-updater.timer|deploy/systemd/vps/tts-bot-alert@.service|deploy/systemd/vps/cleanup-audio-temp.service|deploy/systemd/vps/cleanup-audio-temp.timer|deploy/systemd/vps/sinuca-activity-server.service|deploy/systemd/vps/phone-worker-watch.service|deploy/systemd/vps/phone-worker-watch.timer|deploy/systemd/vps/tts-bot.service.d/*|deploy/sudoers.d/*|deploy/journald/*|deploy/tmpfiles.d/*|scripts/install-vps-systemd-units.sh)
+        VPS_SYSTEMD_UNITS_CHANGED=1
+        ;;
+    esac
+    case "$file" in
+      cleanup-audio-temp.sh|deploy/systemd/cleanup-audio-temp.service|deploy/systemd/cleanup-audio-temp.timer)
+        CLEANUP_CHANGED=1
+        ;;
+    esac
+    case "$file" in
+      scripts/phone-lavalink-watch.sh|deploy/systemd/phone-lavalink-watch.service|deploy/systemd/phone-lavalink-watch.timer|deploy/termux/phone-lavalink/*)
+        PHONE_LAVALINK_WATCH_CHANGED=1
+        ;;
+    esac
+    case "$file" in
+      scripts/phone-worker-watch.sh|scripts/phone-worker-client.py|deploy/systemd/phone-worker-watch.service|deploy/systemd/phone-worker-watch.timer|deploy/termux/phone-worker/*)
+        PHONE_WORKER_WATCH_CHANGED=1
+        ;;
+    esac
+    case "$file" in
+      deploy/termux/phone-worker/*)
+        PHONE_WORKER_SYNC_REQUIRED=1
+        CORE_WORKER_AUTOMATION_REQUIRED=1
+        ;;
+      android/core-worker-app/*)
+        CORE_WORKER_APK_CHANGED=1
+        CORE_WORKER_AUTOMATION_REQUIRED=1
+        ;;
+      scripts/core-worker-automation.py|utility/commands/workers_registry.py|webserver.py)
+        CORE_WORKER_AUTOMATION_REQUIRED=1
+        ;;
+    esac
+  done <<< "$CHANGED_FILES_RAW"
 }
 
 fast_reload_modules_for_changed_files() {
@@ -6527,11 +6635,11 @@ cleanup_known_generated_update_artifacts() {
 }
 
 local_changes_fingerprint() {
-  {
-    repo_git status --short --untracked-files=no 2>/dev/null || true
-    repo_git diff --name-only 2>/dev/null || true
-    repo_git diff --name-only --cached 2>/dev/null || true
-  } | sha256sum | awk '{print $1}'
+  if declare -F load_repo_status_snapshot >/dev/null 2>&1 && load_repo_status_snapshot; then
+    printf '%s\n' "${GIT_STATUS_FINGERPRINT:-}"
+    return 0
+  fi
+  repo_git status --porcelain=v1 --untracked-files=no 2>/dev/null | sha256sum | awk '{print $1}'
 }
 
 clear_local_changes_marker_if_clean() {
@@ -6543,95 +6651,108 @@ clear_local_changes_marker_if_clean() {
 }
 
 collect_local_tracked_changes() {
-  # Untracked locais como data/, cookies e healthcheck não bloqueiam o merge.
-  # O que bloqueia o git pull são mudanças em arquivos rastreados.
-  local status_text
-  status_text="$(repo_git status --short --untracked-files=no 2>/dev/null || true)"
-  printf '%s' "$status_text" | trim_alert_text 1800
+  # Um único status snapshot substitui status + diff + diff --cached.
+  if declare -F load_repo_status_snapshot >/dev/null 2>&1 && load_repo_status_snapshot; then
+    printf '%s' "${GIT_STATUS_RAW:-}" | trim_alert_text 1800
+    return 0
+  fi
+  repo_git status --short --untracked-files=no 2>/dev/null | trim_alert_text 1800 || true
+}
+
+format_tracked_files_for_alert() {
+  local raw="${1:-}" item count=0 text=""
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    (( count < 40 )) || break
+    [[ -z "$text" ]] || text+=$'\n'
+    text+="• $item"
+    count=$((count + 1))
+  done <<< "$raw"
+  if (( ${#text} > 1500 )); then
+    text="${text:0:1499}…"
+  fi
+  printf '%s\n' "$text"
 }
 
 collect_local_tracked_files() {
-  # Evita `head` em pipeline com pipefail: se houver muitos arquivos, o produtor
-  # pode receber SIGPIPE e virar erro 141. A deduplicação/limite fica no Python.
+  if declare -F load_repo_status_snapshot >/dev/null 2>&1 && load_repo_status_snapshot; then
+    format_tracked_files_for_alert "${GIT_STATUS_FILES_RAW:-}"
+    return 0
+  fi
   {
     repo_git diff --name-only 2>/dev/null || true
     repo_git diff --name-only --cached 2>/dev/null || true
-  } | python3 -c 'import sys
-seen = set()
-rows = []
-for raw in sys.stdin:
-    item = raw.strip()
-    if not item or item in seen:
-        continue
-    seen.add(item)
-    if len(rows) < 40:
-        rows.append("• " + item)
-text = "\n".join(rows).strip()
-limit = 1500
-if text and len(text) > limit:
-    text = text[: limit - 1].rstrip() + "…"
-if text:
-    sys.stdout.write(text + "\n")
-' || true
+  } | awk '!seen[$0]++ && NF {print "• " $0; if (++n >= 40) exit}' | trim_alert_text 1500
 }
 
 candidate_local_changes_are_expected() {
   (( LOCAL_CANDIDATE_MODE == 1 )) || return 1
   [[ -n "${CHANGED_FILES_RAW//[[:space:]]/}" ]] || return 1
-  CHANGED_FILES_RAW="$CHANGED_FILES_RAW" REPO_DIR="$REPO_DIR" python3 - <<'PYCANDIDATE_DIRTY'
+  if ! declare -F load_repo_status_snapshot >/dev/null 2>&1; then
+    CHANGED_FILES_RAW="$CHANGED_FILES_RAW" REPO_DIR="$REPO_DIR" python3 - <<'PYCANDIDATE_DIRTY_FALLBACK'
 import os
 import subprocess
 import sys
-
-expected = {
-    line.strip()
-    for line in os.environ.get("CHANGED_FILES_RAW", "").splitlines()
-    if line.strip()
-}
-if not expected:
-    raise SystemExit(1)
-
+expected = {line.strip() for line in os.environ.get("CHANGED_FILES_RAW", "").splitlines() if line.strip()}
 repo = os.environ.get("REPO_DIR", "/home/ubuntu/bot")
-
 def git_lines(*args: str) -> set[str]:
     cp = subprocess.run(
         ["sudo", "-u", "ubuntu", "-H", "git", *args],
-        cwd=repo,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     if cp.returncode != 0:
-        message = (cp.stderr or "git falhou sem stderr").strip()
-        print(message, file=sys.stderr)
+        print((cp.stderr or "git falhou sem stderr").strip(), file=sys.stderr)
         raise SystemExit(2)
     return {line.strip() for line in cp.stdout.splitlines() if line.strip()}
-
-dirty = set()
-dirty |= git_lines("diff", "--name-only")
-dirty |= git_lines("diff", "--name-only", "--cached")
-if not dirty:
-    raise SystemExit(0)
-
+dirty = git_lines("diff", "--name-only") | git_lines("diff", "--name-only", "--cached")
 extra = dirty - expected
 if extra:
-    for item in sorted(extra):
-        print(item)
+    print("\n".join(sorted(extra)))
     raise SystemExit(1)
 raise SystemExit(0)
-PYCANDIDATE_DIRTY
+PYCANDIDATE_DIRTY_FALLBACK
+    return $?
+  fi
+  load_repo_status_snapshot || return 2
+  [[ -n "${GIT_STATUS_FILES_RAW//[[:space:]]/}" ]] || return 0
+
+  local dirty expected found
+  while IFS= read -r dirty; do
+    [[ -n "$dirty" ]] || continue
+    found=0
+    while IFS= read -r expected; do
+      [[ "$dirty" == "$expected" ]] && { found=1; break; }
+    done <<< "$CHANGED_FILES_RAW"
+    (( found == 1 )) || {
+      printf '%s\n' "$dirty"
+      return 1
+    }
+  done <<< "$GIT_STATUS_FILES_RAW"
+  return 0
 }
 
 ensure_no_unstaged_tracked_changes() {
+  if declare -F load_repo_status_snapshot >/dev/null 2>&1; then
+    if ! load_repo_status_snapshot; then
+      LAST_ERROR_STDERR="não foi possível verificar alterações rastreadas após o build"
+      return 1
+    fi
+    local dirty="${GIT_STATUS_UNSTAGED_FILES_RAW:-}"
+    if [[ -z "${dirty//[[:space:]]/}" ]]; then
+      return 0
+    fi
+    LAST_ERROR_STDERR="arquivos rastreados foram alterados durante build/deploy:
+$(printf '%s\n' "$dirty" | trim_alert_text 1500)"
+    logger -t "$LOG_TAG" "$LAST_ERROR_STDERR" 2>/dev/null || true
+    return 1
+  fi
+
   local dirty
   if ! dirty="$(repo_git diff --name-only 2>/dev/null)"; then
     LAST_ERROR_STDERR="não foi possível verificar alterações rastreadas após o build"
     return 1
   fi
-  if [[ -z "${dirty//[[:space:]]/}" ]]; then
-    return 0
-  fi
-
+  [[ -z "${dirty//[[:space:]]/}" ]] && return 0
   LAST_ERROR_STDERR="arquivos rastreados foram alterados durante build/deploy:
 $(printf '%s\n' "$dirty" | trim_alert_text 1500)"
   logger -t "$LOG_TAG" "$LAST_ERROR_STDERR" 2>/dev/null || true
@@ -6640,14 +6761,20 @@ $(printf '%s\n' "$dirty" | trim_alert_text 1500)"
 
 
 fail_local_changes_before_pull() {
-  local status_text files_text duration body
-  status_text="$(collect_local_tracked_changes)"
+  local status_text files_text duration body fingerprint previous_fingerprint
+  if declare -F load_repo_status_snapshot >/dev/null 2>&1 && load_repo_status_snapshot; then
+    status_text="$(printf '%s' "${GIT_STATUS_RAW:-}" | trim_alert_text 1800)"
+    fingerprint="${GIT_STATUS_FINGERPRINT:-}"
+    files_text="$(format_tracked_files_for_alert "${GIT_STATUS_FILES_RAW:-}")"
+  else
+    status_text="$(collect_local_tracked_changes)"
+    fingerprint="$(local_changes_fingerprint)"
+    files_text="$(collect_local_tracked_files)"
+  fi
   if [[ -z "${status_text//[[:space:]]/}" ]]; then
     return 0
   fi
 
-  local fingerprint previous_fingerprint
-  fingerprint="$(local_changes_fingerprint)"
   previous_fingerprint=""
   if [[ -f "$LOCAL_CHANGES_MARKER_FILE" ]]; then
     previous_fingerprint="$(awk -F= '$1 == "FINGERPRINT" { sub($1 "=", ""); print; exit }' "$LOCAL_CHANGES_MARKER_FILE" 2>/dev/null || true)"
@@ -6657,7 +6784,6 @@ fail_local_changes_before_pull() {
     exit 1
   fi
   MANUAL_FAILURE_ALERT_SENT=1
-  files_text="$(collect_local_tracked_files)"
   duration="$(human_duration "$SECONDS")"
   cat > "$LOCAL_CHANGES_MARKER_FILE" <<EOM
 FINGERPRINT=$fingerprint
@@ -8887,8 +9013,11 @@ else
 
   STAGE="fetch remoto"
   repo_git fetch origin "$BRANCH"
-  REMOTE_COMMIT="$(repo_git rev-parse "origin/$BRANCH")"
-  COMMIT_SUBJECT="$(repo_git log -1 --pretty=%s "$REMOTE_COMMIT")"
+  if ! load_repo_ref_snapshot "$BRANCH"; then return 1; fi
+  CURRENT_COMMIT="$GIT_REFS_CURRENT"
+  PREVIOUS_COMMIT="$CURRENT_COMMIT"
+  REMOTE_COMMIT="$GIT_REFS_REMOTE"
+  COMMIT_SUBJECT="$GIT_REFS_REMOTE_SUBJECT"
   mark_update_timing "fetch"
 
   if [[ -f "$DIRTY_MARKER_FILE" ]]; then
@@ -8914,9 +9043,10 @@ else
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
   SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
 
-  CHANGED_STATUS_RAW="$(repo_git diff --name-status --no-renames "$CURRENT_COMMIT" "$REMOTE_COMMIT")"
-  CHANGED_FILES_RAW="$(repo_git diff --name-only --no-renames "$CURRENT_COMMIT" "$REMOTE_COMMIT")"
-  CHANGED_DIFF_NUMSTAT_RAW="$(repo_git diff --numstat --no-renames "$CURRENT_COMMIT" "$REMOTE_COMMIT")"
+  if ! load_git_diff_snapshot "$REPO_DIR" --base "$CURRENT_COMMIT" --target "$REMOTE_COMMIT"; then
+    LAST_ERROR_CODE="REMOTE_DIFF_SNAPSHOT_FAILED"
+    return 1
+  fi
   mark_update_timing "diff"
 
   classify_changed_files
