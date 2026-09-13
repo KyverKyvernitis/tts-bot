@@ -78,6 +78,7 @@ BACK_HEALTH_URL="http://127.0.0.1:${BACK_PORT}/health"
 BOT_HEALTH_URL="http://127.0.0.1:10000/health"
 RUNTIME_RELEASE_ROOT="${TTS_BOT_RUNTIME_RELEASE_ROOT:-$CANDIDATE_ROOT/runtime-releases}"
 RUNTIME_RELEASE_RETENTION="${TTS_BOT_RUNTIME_RELEASE_RETENTION:-3}"
+REMOTE_RUNTIME_ARTIFACT_ROOT="${TTS_BOT_REMOTE_RUNTIME_ARTIFACT_ROOT:-$CANDIDATE_ROOT/remote-runtime-artifacts}"
 APP_COMMAND_SYNC_STATUS_FILE="$REPO_DIR/data/app_commands_sync_status.json"
 
 STAGE="inicialização"
@@ -134,6 +135,7 @@ REMOTE_STATUS_CHANNEL_ID=""
 REMOTE_STATUS_MESSAGE_ID=""
 REMOTE_WORKTREE_DIR=""
 REMOTE_REJECT_REASON=""
+REMOTE_CANDIDATE_ARTIFACT_ROOT=""
 ROLLBACK_CONTROL_MODE=0
 ROLLBACK_REQUEST_ID=""
 ROLLBACK_REQUEST_FILE=""
@@ -300,6 +302,12 @@ repo_git() {
   sudo -u ubuntu -H git -C "$REPO_DIR" "$@"
 }
 
+worktree_git() {
+  local root="${1:?}"
+  shift
+  sudo -u ubuntu -H git -C "$root" "$@"
+}
+
 candidate_repo_dir() {
   if [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" && -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]]; then
     printf '%s\n' "$LOCAL_CANDIDATE_WORKTREE_DIR"
@@ -311,7 +319,7 @@ candidate_repo_dir() {
 candidate_git() {
   local root
   root="$(candidate_repo_dir)"
-  sudo -u ubuntu -H git -C "$root" "$@"
+  worktree_git "$root" "$@"
 }
 
 repo_python_as_ubuntu() {
@@ -342,6 +350,9 @@ cleanup_runtime_artifacts() {
   rm -f "$RUN_LOG_FILE"
   if [[ -n "${REMOTE_WORKTREE_DIR:-}" && -d "$REMOTE_WORKTREE_DIR" ]]; then
     repo_git worktree remove --force "$REMOTE_WORKTREE_DIR" >/dev/null 2>&1 || rm -rf "$REMOTE_WORKTREE_DIR" 2>/dev/null || true
+  fi
+  if [[ -n "${REMOTE_CANDIDATE_ARTIFACT_ROOT:-}" && -d "$REMOTE_CANDIDATE_ARTIFACT_ROOT" && ! -L "$REMOTE_CANDIDATE_ARTIFACT_ROOT" ]]; then
+    rm -rf -- "$REMOTE_CANDIDATE_ARTIFACT_ROOT" 2>/dev/null || true
   fi
   if [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" && -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]]; then
     repo_git worktree remove --force "$LOCAL_CANDIDATE_WORKTREE_DIR" >/dev/null 2>&1 || rm -rf "$LOCAL_CANDIDATE_WORKTREE_DIR" 2>/dev/null || true
@@ -2356,6 +2367,7 @@ prune_update_artifacts() {
   prune_archive_root "$CANDIDATE_ROOT/done" "$done_days" "$done_keep"
   prune_archive_root "$CANDIDATE_ROOT/failed" "$failed_days" "$failed_keep"
   prune_archive_root "$CANDIDATE_ROOT/cancelled" "$cancelled_days" "$cancelled_keep"
+  prune_archive_root "$REMOTE_RUNTIME_ARTIFACT_ROOT" 1 2
   find "$CANDIDATE_QUEUE_DONE_DIR" -type f -mtime "+$done_days" -delete 2>/dev/null || true
   find "$CANDIDATE_QUEUE_FAILED_DIR" -type f -mtime "+$failed_days" -delete 2>/dev/null || true
   find "$CANDIDATE_QUEUE_CANCELLED_DIR" -type f -mtime "+$cancelled_days" -delete 2>/dev/null || true
@@ -3881,8 +3893,19 @@ prepare_local_candidate_commit_in_worktree() {
 }
 
 local_candidate_artifact_root_for_commit() {
-  local commit="${1:-${LOCAL_CANDIDATE_PREPARED_COMMIT:-}}"
-  [[ -n "${LOCAL_CANDIDATE_DIR:-}" && -n "$commit" ]] || return 1
+  local commit="${1:-${LOCAL_CANDIDATE_PREPARED_COMMIT:-${REMOTE_COMMIT:-}}}"
+  [[ -n "$commit" ]] || return 1
+  if [[ "${LOCAL_CANDIDATE_MODE:-0}" == "1" ]]; then
+    [[ -n "${LOCAL_CANDIDATE_DIR:-}" ]] || return 1
+    printf '%s/runtime-artifacts/%s\n' "$LOCAL_CANDIDATE_DIR" "$commit"
+    return 0
+  fi
+  if [[ "${REMOTE_CANDIDATE_MODE:-0}" == "1" ]]; then
+    printf '%s/%s\n' "$REMOTE_RUNTIME_ARTIFACT_ROOT" "$commit"
+    return 0
+  fi
+  # Compatibilidade dos harnesses/testes que chamam o helper isoladamente.
+  [[ -n "${LOCAL_CANDIDATE_DIR:-}" ]] || return 1
   printf '%s/runtime-artifacts/%s\n' "$LOCAL_CANDIDATE_DIR" "$commit"
 }
 
@@ -3908,6 +3931,9 @@ PYARTIFACTREADY
 
   LOCAL_CANDIDATE_ARTIFACT_ROOT="$root"
   LOCAL_CANDIDATE_ARTIFACT_COMMIT="$commit"
+  if [[ "${REMOTE_CANDIDATE_MODE:-0}" == "1" ]]; then
+    REMOTE_CANDIDATE_ARTIFACT_ROOT="$root"
+  fi
   LOCAL_CANDIDATE_FRONTEND_ARTIFACT=""
   LOCAL_CANDIDATE_BACKEND_ARTIFACT=""
   if [[ -s "$root/frontend/dist/index.html" ]]; then
@@ -4019,14 +4045,39 @@ PYARTIFACTMANIFEST
 }
 
 prepare_local_candidate_runtime_artifacts_in_worktree() {
-  (( LOCAL_CANDIDATE_MODE == 1 )) || return 0
-  [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" && -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]] || return 1
-  [[ -n "${LOCAL_CANDIDATE_PREPARED_COMMIT:-}" ]] || return 1
+  (( LOCAL_CANDIDATE_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )) || return 0
+
+  local validation_worktree artifact_commit candidate_label
+  if (( LOCAL_CANDIDATE_MODE == 1 )); then
+    [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" && -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]] || return 1
+    [[ -n "${LOCAL_CANDIDATE_PREPARED_COMMIT:-}" ]] || return 1
+    validation_worktree="$LOCAL_CANDIDATE_WORKTREE_DIR"
+    artifact_commit="$LOCAL_CANDIDATE_PREPARED_COMMIT"
+    candidate_label="${LOCAL_CANDIDATE_ID:-candidato local}"
+  else
+    [[ -n "${REMOTE_WORKTREE_DIR:-}" && -d "$REMOTE_WORKTREE_DIR" ]] || return 1
+    [[ -n "${REMOTE_COMMIT:-}" ]] || return 1
+    validation_worktree="$REMOTE_WORKTREE_DIR"
+    artifact_commit="$REMOTE_COMMIT"
+    candidate_label="commit remoto $(short_commit "$REMOTE_COMMIT")"
+  fi
 
   local root front_dir back_dir front_artifact back_artifact front_ready=0 back_ready=0
-  root="$(local_candidate_artifact_root_for_commit "$LOCAL_CANDIDATE_PREPARED_COMMIT")" || return 1
-  front_dir="$LOCAL_CANDIDATE_WORKTREE_DIR/dashboard/frontend"
-  back_dir="$LOCAL_CANDIDATE_WORKTREE_DIR/dashboard/backend"
+  root="$(local_candidate_artifact_root_for_commit "$artifact_commit")" || return 1
+  if [[ "${REMOTE_CANDIDATE_MODE:-0}" == "1" ]]; then
+    # Registre o path antes de qualquer npm/cópia: se a validação falhar no
+    # meio, o trap EXIT consegue remover também artefatos remotos parciais.
+    REMOTE_CANDIDATE_ARTIFACT_ROOT="$root"
+  fi
+  # Mantemos estes dois assignments explícitos para facilitar auditoria e
+  # regressões do caminho local; o remoto usa o worktree equivalente abaixo.
+  if (( LOCAL_CANDIDATE_MODE == 1 )); then
+    front_dir="$LOCAL_CANDIDATE_WORKTREE_DIR/dashboard/frontend"
+    back_dir="$LOCAL_CANDIDATE_WORKTREE_DIR/dashboard/backend"
+  else
+    front_dir="$REMOTE_WORKTREE_DIR/dashboard/frontend"
+    back_dir="$REMOTE_WORKTREE_DIR/dashboard/backend"
+  fi
   front_artifact="$root/frontend/dist"
   back_artifact="$root/backend"
 
@@ -4136,7 +4187,19 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
     BACK_STATUS="backend validado e compilado no worktree"
   fi
 
-  if ! write_local_candidate_artifact_ready_manifest "$root" "$LOCAL_CANDIDATE_PREPARED_COMMIT" "$front_ready" "$back_ready"; then
+  # Validação/build não pode alterar nenhum arquivo rastreado do commit.
+  # dist/node_modules são artefatos gerados; se uma ferramenta modificar source
+  # ou lockfile rastreado, o candidato deixa de ser reproduzível e é rejeitado.
+  local tracked_mutations
+  tracked_mutations="$(worktree_git "$validation_worktree" status --porcelain=v1 --untracked-files=no 2>/dev/null || true)"
+  if [[ -n "${tracked_mutations//[[:space:]]/}" ]]; then
+    LAST_ERROR_STDERR="validação alterou arquivos rastreados no worktree:
+$tracked_mutations"
+    LAST_ERROR_CODE="VALIDATOR_MUTATED_SOURCE_TREE"
+    return 1
+  fi
+
+  if ! write_local_candidate_artifact_ready_manifest "$root" "$artifact_commit" "$front_ready" "$back_ready"; then
     LAST_ERROR_STDERR="não foi possível registrar manifesto dos artefatos preparados"
     LAST_ERROR_CODE="CANDIDATE_ARTIFACT_MANIFEST_FAILED"
     return 1
@@ -4145,13 +4208,15 @@ prepare_local_candidate_runtime_artifacts_in_worktree() {
   find "$root" -type d -exec chmod u+rwx,go+rx {} + 2>/dev/null || true
   find "$root" -type f -exec chmod u+rw,go+r {} + 2>/dev/null || true
 
-  if ! hydrate_local_candidate_runtime_artifacts "$LOCAL_CANDIDATE_PREPARED_COMMIT"; then
+  if ! hydrate_local_candidate_runtime_artifacts "$artifact_commit"; then
     LAST_ERROR_STDERR="artefatos preparados não passaram pela hidratação de READY"
     LAST_ERROR_CODE="CANDIDATE_ARTIFACT_READY_INVALID"
     return 1
   fi
-  write_local_candidate_state "ready" "$LOCAL_CANDIDATE_PREPARED_COMMIT"
-  logger -t "$LOG_TAG" "candidato ${LOCAL_CANDIDATE_ID:-desconhecido} atingiu READY com artefatos isolados em $root" 2>/dev/null || true
+  if (( LOCAL_CANDIDATE_MODE == 1 )); then
+    write_local_candidate_state "ready" "$artifact_commit"
+  fi
+  logger -t "$LOG_TAG" "$candidate_label atingiu READY com artefatos isolados em $root" 2>/dev/null || true
   return 0
 }
 
@@ -6029,9 +6094,9 @@ deploy_frontend() {
     logger -t "$LOG_TAG" "publicação do frontend inválida; reconstrução automática solicitada"
   fi
 
-  if (( LOCAL_CANDIDATE_MODE == 1 && FRONT_CHANGED == 1 && ROLLBACK_IN_PROGRESS == 0 )); then
+  if (( (LOCAL_CANDIDATE_MODE == 1 || REMOTE_CANDIDATE_MODE == 1) && FRONT_CHANGED == 1 && ROLLBACK_IN_PROGRESS == 0 )); then
     if (( LOCAL_CANDIDATE_RUNTIME_READY == 0 )); then
-      hydrate_local_candidate_runtime_artifacts "${LOCAL_CANDIDATE_PREPARED_COMMIT:-$(repo_git rev-parse HEAD)}" || true
+      hydrate_local_candidate_runtime_artifacts "${LOCAL_CANDIDATE_PREPARED_COMMIT:-${REMOTE_COMMIT:-$(repo_git rev-parse HEAD)}}" || true
     fi
     if [[ -z "${LOCAL_CANDIDATE_FRONTEND_ARTIFACT:-}" || ! -s "$LOCAL_CANDIDATE_FRONTEND_ARTIFACT/index.html" ]]; then
       FRONT_STATUS="artefato frontend READY ausente; recusando rebuild no checkout live"
@@ -6191,9 +6256,9 @@ deploy_backend() {
     return 0
   fi
 
-  if (( LOCAL_CANDIDATE_MODE == 1 && BACK_CHANGED == 1 && ROLLBACK_IN_PROGRESS == 0 )); then
+  if (( (LOCAL_CANDIDATE_MODE == 1 || REMOTE_CANDIDATE_MODE == 1) && BACK_CHANGED == 1 && ROLLBACK_IN_PROGRESS == 0 )); then
     if (( LOCAL_CANDIDATE_RUNTIME_READY == 0 )); then
-      hydrate_local_candidate_runtime_artifacts "${LOCAL_CANDIDATE_PREPARED_COMMIT:-$(repo_git rev-parse HEAD)}" || true
+      hydrate_local_candidate_runtime_artifacts "${LOCAL_CANDIDATE_PREPARED_COMMIT:-${REMOTE_COMMIT:-$(repo_git rev-parse HEAD)}}" || true
     fi
     if [[ -z "${LOCAL_CANDIDATE_BACKEND_ARTIFACT:-}" || ! -s "$LOCAL_CANDIDATE_BACKEND_ARTIFACT/dist/index.js" || ! -d "$LOCAL_CANDIDATE_BACKEND_ARTIFACT/node_modules" ]]; then
       BACK_STATUS="artefato backend READY ausente; recusando rebuild no checkout live"
@@ -7013,7 +7078,14 @@ else
     reject_remote_commit_without_live_apply "preflight falhou no staging remoto"
   fi
   mark_update_timing "remote_preflight"
-  zip_progress_done_and_publish "Commit conferido" "Aplicando na VPS"
+
+  STAGE="preparação de artefatos do commit remoto"
+  zip_progress_done_and_publish "Commit conferido" "Validando runtime em isolamento"
+  if ! prepare_local_candidate_runtime_artifacts_in_worktree; then
+    reject_remote_commit_without_live_apply "validação/build isolado falhou antes da promoção: ${LAST_ERROR_CODE:-REMOTE_READY_FAILED}: ${LAST_ERROR_STDERR:-erro desconhecido}"
+  fi
+  mark_update_timing "remote_ready"
+  zip_progress_done_and_publish "Commit READY em isolamento" "Aplicando na VPS"
 
   STAGE="preservação do runtime anterior"
   if ! capture_runtime_release_snapshot "$PREVIOUS_COMMIT"; then
