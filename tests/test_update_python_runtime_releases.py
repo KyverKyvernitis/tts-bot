@@ -12,7 +12,7 @@ SMOKE = ROOT / "utility" / "update_runtime_smoke.py"
 
 def _python_runtime_functions(tmp_path: Path) -> Path:
     source = UPDATER.read_text(encoding="utf-8")
-    start = source.index("python_runtime_release_root_for_commit() {")
+    start = source.index("python_runtime_install_requirements_file() {")
     end = source.index("\nrun_candidate_python_runtime_smoke() {", start)
     path = tmp_path / "python-runtime-functions.sh"
     path.write_text(source[start:end], encoding="utf-8")
@@ -30,6 +30,13 @@ PREVIOUS_COMMIT=base0001
 LOCAL_CANDIDATE_PYTHON_ARTIFACT=''
 LOCAL_CANDIDATE_PYTHON_READY=0
 PYTHON_RUNTIME_MUTATED=0
+PYTHON_TOOL_ROOT="{runtime_root}/tools"
+PYTHON_UV_CACHE_ROOT="{runtime_root}/uv-cache"
+PYTHON_UV_VERSION=0.12.13
+PYTHON_INSTALLER_MODE=pip
+PYTHON_AUTO_BOOTSTRAP_UV=0
+PYTHON_INSTALLER_STATUS='não usado'
+PYTHON_UV_BIN_RESOLVED=''
 LAST_ERROR_STDERR=''
 LAST_ERROR_CODE=''
 CURRENT_STAGE_COMMAND=''

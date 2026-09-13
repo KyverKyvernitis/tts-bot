@@ -84,6 +84,11 @@ REMOTE_RUNTIME_ARTIFACT_ROOT="${TTS_BOT_REMOTE_RUNTIME_ARTIFACT_ROOT:-$CANDIDATE
 PYTHON_RUNTIME_ROOT="${TTS_BOT_PYTHON_RUNTIME_ROOT:-$CANDIDATE_ROOT/python-runtimes}"
 PYTHON_RUNTIME_CURRENT_LINK="${TTS_BOT_PYTHON_RUNTIME_CURRENT_LINK:-$PYTHON_RUNTIME_ROOT/current}"
 PYTHON_RUNTIME_RETENTION="${TTS_BOT_PYTHON_RUNTIME_RETENTION:-3}"
+PYTHON_TOOL_ROOT="${TTS_BOT_PYTHON_TOOL_ROOT:-$CANDIDATE_ROOT/python-tools}"
+PYTHON_UV_VERSION="${TTS_BOT_UV_VERSION:-0.12.13}"
+PYTHON_UV_CACHE_ROOT="${TTS_BOT_UV_CACHE_ROOT:-$CANDIDATE_ROOT/uv-cache}"
+PYTHON_INSTALLER_MODE="${TTS_BOT_PYTHON_INSTALLER:-auto}"
+PYTHON_AUTO_BOOTSTRAP_UV="${TTS_BOT_AUTO_BOOTSTRAP_UV:-1}"
 NODE_DEPENDENCY_CACHE_ROOT="${TTS_BOT_NODE_DEPENDENCY_CACHE_ROOT:-$CANDIDATE_ROOT/node-dependency-cache}"
 NODE_DEPENDENCY_CACHE_RETENTION="${TTS_BOT_NODE_DEPENDENCY_CACHE_RETENTION:-4}"
 TYPESCRIPT_CACHE_ROOT="${TTS_BOT_TYPESCRIPT_CACHE_ROOT:-$CANDIDATE_ROOT/typescript-cache}"
@@ -156,6 +161,8 @@ NODE_DEP_CACHE_HITS=0
 NODE_DEP_CACHE_MISSES=0
 TYPESCRIPT_CACHE_HITS=0
 TYPESCRIPT_CACHE_MISSES=0
+PYTHON_INSTALLER_STATUS="não usado"
+PYTHON_UV_BIN_RESOLVED=""
 LAST_TYPESCRIPT_CACHE_HIT=0
 FRONT_TEST_PLAN_STATUS="não executado"
 BACK_TEST_PLAN_STATUS="não executado"
@@ -4167,7 +4174,7 @@ raise SystemExit(0 if isinstance(record, dict) and record.get('ready') else 1)
 PYARTIFACTPYREADY
   then
     LOCAL_CANDIDATE_PYTHON_ARTIFACT="$(python_runtime_release_root_for_commit "$commit")" || return 1
-    if ! verify_python_runtime_release "$LOCAL_CANDIDATE_PYTHON_ARTIFACT" "$commit"; then
+    if ! verify_python_runtime_release_for_commit "$LOCAL_CANDIDATE_PYTHON_ARTIFACT" "$commit"; then
       return 1
     fi
     LOCAL_CANDIDATE_PYTHON_READY=1
@@ -4180,7 +4187,10 @@ verify_local_candidate_artifact_integrity() {
   local kind="${1:?}" root="${LOCAL_CANDIDATE_ARTIFACT_ROOT:-}" ready
   if [[ "$kind" == "python" ]]; then
     [[ -n "${LOCAL_CANDIDATE_PYTHON_ARTIFACT:-}" ]] || return 1
-    verify_python_runtime_release "$LOCAL_CANDIDATE_PYTHON_ARTIFACT" "${LOCAL_CANDIDATE_ARTIFACT_COMMIT:-${LOCAL_CANDIDATE_PREPARED_COMMIT:-${REMOTE_COMMIT:-}}}" "$REPO_DIR/requirements.txt"
+    local install_requirements
+    install_requirements="$(python_runtime_install_requirements_file "$REPO_DIR" || true)"
+    [[ -n "$install_requirements" ]] || return 1
+    verify_python_runtime_release "$LOCAL_CANDIDATE_PYTHON_ARTIFACT" "${LOCAL_CANDIDATE_ARTIFACT_COMMIT:-${LOCAL_CANDIDATE_PREPARED_COMMIT:-${REMOTE_COMMIT:-}}}" "$install_requirements"
     return $?
   fi
   [[ -n "$root" ]] || return 1
@@ -4315,6 +4325,124 @@ os.replace(tmp, path)
 PYARTIFACTMANIFEST
 }
 
+python_runtime_install_requirements_file() {
+  local root="${1:?}"
+  if [[ -s "$root/requirements.lock" && ! -L "$root/requirements.lock" ]]; then
+    printf '%s\n' "$root/requirements.lock"
+    return 0
+  fi
+  [[ -f "$root/requirements.txt" && ! -L "$root/requirements.txt" ]] || return 1
+  printf '%s\n' "$root/requirements.txt"
+}
+
+python_runtime_base_python() {
+  if [[ -x /usr/bin/python3 ]]; then
+    printf '%s\n' /usr/bin/python3
+    return 0
+  fi
+  command -v python3 2>/dev/null || return 1
+}
+
+python_uv_tool_root() {
+  printf '%s/uv-%s\n' "${PYTHON_TOOL_ROOT:-$CANDIDATE_ROOT/python-tools}" "${PYTHON_UV_VERSION:-0.12.13}"
+}
+
+python_uv_bin_if_ready() {
+  local candidate version expected="${PYTHON_UV_VERSION:-0.12.13}"
+  if [[ -n "${TTS_BOT_UV_BIN:-}" && -x "${TTS_BOT_UV_BIN}" ]]; then
+    candidate="$TTS_BOT_UV_BIN"
+  elif [[ -n "${PYTHON_UV_BIN_RESOLVED:-}" && -x "${PYTHON_UV_BIN_RESOLVED}" ]]; then
+    candidate="$PYTHON_UV_BIN_RESOLVED"
+  elif [[ -x /home/ubuntu/.local/bin/uv ]]; then
+    candidate=/home/ubuntu/.local/bin/uv
+  elif [[ -x /usr/local/bin/uv ]]; then
+    candidate=/usr/local/bin/uv
+  elif [[ -x /usr/bin/uv ]]; then
+    candidate=/usr/bin/uv
+  else
+    candidate="$(python_uv_tool_root)/venv/bin/uv"
+  fi
+  [[ -x "$candidate" ]] || return 1
+  version="$(sudo -u ubuntu -H "$candidate" --version 2>/dev/null | awk 'NR==1{print $2}')"
+  [[ "$version" == "$expected" ]] || return 1
+  PYTHON_UV_BIN_RESOLVED="$candidate"
+  printf '%s\n' "$candidate"
+}
+
+ensure_python_uv_tool() {
+  local mode="${PYTHON_INSTALLER_MODE:-auto}" base_py="${1:-}" root command rc
+  case "$mode" in
+    pip) return 1 ;;
+    auto|uv) ;;
+    *)
+      LAST_ERROR_STDERR="TTS_BOT_PYTHON_INSTALLER inválido: $mode (use auto, uv ou pip)"
+      LAST_ERROR_CODE="PYTHON_INSTALLER_MODE_INVALID"
+      return 2
+      ;;
+  esac
+  if python_uv_bin_if_ready >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ "${PYTHON_AUTO_BOOTSTRAP_UV:-1}" != "1" ]]; then
+    [[ "$mode" == uv ]] && return 2 || return 1
+  fi
+  [[ -n "$base_py" && -x "$base_py" ]] || base_py="$(python_runtime_base_python || true)"
+  [[ -x "$base_py" ]] || return 2
+  root="$(python_uv_tool_root)"
+  rm -rf -- "$root.tmp" 2>/dev/null || true
+  install -d -o ubuntu -g ubuntu -m 0775 "$(dirname "$root")" || return 2
+  STAGE="bootstrap do instalador Python"
+  printf -v command '%q -m venv %q && %q -m pip install --disable-pip-version-check --prefer-binary --no-input --progress-bar off %q' \
+    "$base_py" "$root.tmp/venv" "$root.tmp/venv/bin/python" "uv==${PYTHON_UV_VERSION:-0.12.13}"
+  if zip_progress_run_as_ubuntu \
+    "Preparando instalador Python rápido" \
+    "Instalando uv ${PYTHON_UV_VERSION:-0.12.13} uma única vez" \
+    "$command"
+  then
+    :
+  else
+    rc=$?
+    rm -rf -- "$root.tmp" 2>/dev/null || true
+    if [[ "$mode" == uv ]]; then
+      register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-bootstrap uv}"
+      LAST_ERROR_CODE="PYTHON_UV_BOOTSTRAP_FAILED"
+      return 2
+    fi
+    logger -t "$LOG_TAG" "uv indisponível; fallback seguro para pip" 2>/dev/null || true
+    return 1
+  fi
+  if [[ ! -x "$root.tmp/venv/bin/uv" || "$(sudo -u ubuntu -H "$root.tmp/venv/bin/uv" --version 2>/dev/null | awk 'NR==1{print $2}')" != "${PYTHON_UV_VERSION:-0.12.13}" ]]; then
+    rm -rf -- "$root.tmp" 2>/dev/null || true
+    [[ "$mode" == uv ]] && return 2 || return 1
+  fi
+  rm -rf -- "$root" 2>/dev/null || true
+  mv -- "$root.tmp" "$root" || return 2
+  PYTHON_UV_BIN_RESOLVED="$root/venv/bin/uv"
+  return 0
+}
+
+prepare_python_runtime_with_uv() {
+  local uv="${1:?}" base_py="${2:?}" root="${3:?}" requirements="${4:?}" command
+  install -d -o ubuntu -g ubuntu -m 0775 "${PYTHON_UV_CACHE_ROOT:-$CANDIDATE_ROOT/uv-cache}" || return 1
+  printf -v command 'UV_CACHE_DIR=%q UV_LINK_MODE=clone UV_NO_PROGRESS=1 UV_NO_PYTHON_DOWNLOADS=1 UV_NO_MANAGED_PYTHON=1 UV_NO_CONFIG=1 %q venv --python %q --seed %q && UV_CACHE_DIR=%q UV_LINK_MODE=clone UV_NO_PROGRESS=1 UV_NO_PYTHON_DOWNLOADS=1 UV_NO_MANAGED_PYTHON=1 UV_NO_CONFIG=1 %q pip install --python %q -r %q && %q -m pip check' \
+    "${PYTHON_UV_CACHE_ROOT:-$CANDIDATE_ROOT/uv-cache}" "$uv" "$base_py" "$root/venv" \
+    "${PYTHON_UV_CACHE_ROOT:-$CANDIDATE_ROOT/uv-cache}" "$uv" "$root/venv/bin/python" "$requirements" "$root/venv/bin/python"
+  zip_progress_run_as_ubuntu \
+    "Preparando dependências Python" \
+    "Instalando ambiente isolado via uv/cache CoW" \
+    "$command"
+}
+
+prepare_python_runtime_with_pip() {
+  local base_py="${1:?}" root="${2:?}" requirements="${3:?}" command
+  printf -v command '%q -m venv %q && %q -m pip install --disable-pip-version-check --prefer-binary --no-input --progress-bar off -r %q && %q -m pip check' \
+    "$base_py" "$root/venv" "$root/venv/bin/python" "$requirements" "$root/venv/bin/python"
+  zip_progress_run_as_ubuntu \
+    "Preparando dependências Python" \
+    "Criando ambiente isolado do candidato via pip/cache" \
+    "$command"
+}
+
 python_runtime_release_root_for_commit() {
   local commit
   commit="$(sanitize_commit_ref "${1:-}")"
@@ -4340,6 +4468,7 @@ write_python_runtime_manifest() {
   python_version="$(sudo -u ubuntu -H "$py" -c 'import platform; print(platform.python_version())' 2>/dev/null || true)"
   PY_RUNTIME_ROOT="$root" PY_RUNTIME_COMMIT="$commit" PY_RUNTIME_FREEZE_SHA="$freeze_hash" \
   PY_RUNTIME_REQUIREMENTS_SHA="$requirements_hash" PY_RUNTIME_PYTHON_VERSION="$python_version" \
+  PY_RUNTIME_INSTALLER="${PYTHON_INSTALLER_STATUS:-unknown}" PY_RUNTIME_REQUIREMENTS_NAME="$(basename "${requirements_file:-requirements.txt}")" \
     python3 - <<'PYPYMANIFEST'
 import datetime, json, os, pathlib
 root = pathlib.Path(os.environ['PY_RUNTIME_ROOT'])
@@ -4349,6 +4478,8 @@ payload = {
     'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
     'python_version': os.environ.get('PY_RUNTIME_PYTHON_VERSION') or '',
     'requirements_sha256': os.environ.get('PY_RUNTIME_REQUIREMENTS_SHA') or '',
+    'requirements_file': os.environ.get('PY_RUNTIME_REQUIREMENTS_NAME') or 'requirements.txt',
+    'installer': os.environ.get('PY_RUNTIME_INSTALLER') or 'unknown',
     'freeze_sha256': os.environ['PY_RUNTIME_FREEZE_SHA'],
 }
 path = root / 'python.json'
@@ -4356,6 +4487,37 @@ tmp = root / '.python.json.tmp'
 tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
 os.replace(tmp, path)
 PYPYMANIFEST
+}
+
+python_runtime_requirements_hash_for_commit() {
+  local commit="${1:?}" path
+  if repo_git cat-file -e "${commit}:requirements.lock" 2>/dev/null; then
+    path="requirements.lock"
+  elif repo_git cat-file -e "${commit}:requirements.txt" 2>/dev/null; then
+    path="requirements.txt"
+  else
+    return 1
+  fi
+  repo_git show "${commit}:${path}" 2>/dev/null | sha256sum | awk '{print $1}'
+}
+
+python_runtime_manifest_matches_requirements_hash() {
+  local root="${1:?}" expected_hash="${2:?}" manifest="$root/python.json"
+  [[ -s "$manifest" && ! -L "$manifest" ]] || return 1
+  PY_RUNTIME_MANIFEST="$manifest" PY_RUNTIME_REQUIREMENTS_SHA="$expected_hash" python3 - <<'PYPYMANIFESTREQ' >/dev/null 2>&1
+import json, os
+with open(os.environ['PY_RUNTIME_MANIFEST'], encoding='utf-8') as fh:
+    data = json.load(fh)
+raise SystemExit(0 if data.get('requirements_sha256') == os.environ['PY_RUNTIME_REQUIREMENTS_SHA'] else 1)
+PYPYMANIFESTREQ
+}
+
+verify_python_runtime_release_for_commit() {
+  local root="${1:?}" commit="${2:?}" expected_hash
+  verify_python_runtime_release "$root" "$commit" || return 1
+  expected_hash="$(python_runtime_requirements_hash_for_commit "$commit" || true)"
+  [[ -n "$expected_hash" ]] || return 1
+  python_runtime_manifest_matches_requirements_hash "$root" "$expected_hash"
 }
 
 verify_python_runtime_release() {
@@ -4397,17 +4559,18 @@ PYPYREQ
 
 prepare_candidate_python_runtime() {
   local validation_root="${1:?}" commit="${2:?}" requirements
-  requirements="$validation_root/requirements.txt"
-  [[ -f "$requirements" ]] || {
-    LAST_ERROR_STDERR="requirements.txt ausente no candidato"
+  requirements="$(python_runtime_install_requirements_file "$validation_root" || true)"
+  [[ -n "$requirements" && -f "$requirements" ]] || {
+    LAST_ERROR_STDERR="requirements.txt/requirements.lock ausente no candidato"
     LAST_ERROR_CODE="PYTHON_REQUIREMENTS_MISSING"
     return 1
   }
-  local root py base_py command rc
+  local root py base_py uv="" rc=0
   root="$(python_runtime_release_root_for_commit "$commit")" || return 1
   if verify_python_runtime_release "$root" "$commit" "$requirements"; then
     LOCAL_CANDIDATE_PYTHON_ARTIFACT="$root"
     LOCAL_CANDIDATE_PYTHON_READY=1
+    PYTHON_INSTALLER_STATUS="runtime hit"
     return 0
   fi
   if [[ -L "$PYTHON_RUNTIME_CURRENT_LINK" && "$(readlink -f "$PYTHON_RUNTIME_CURRENT_LINK" 2>/dev/null || true)" == "$(readlink -f "$root" 2>/dev/null || true)" ]]; then
@@ -4422,32 +4585,46 @@ prepare_candidate_python_runtime() {
     LAST_ERROR_CODE="PYTHON_RUNTIME_DIR_FAILED"
     return 1
   }
-  if [[ -x /usr/bin/python3 ]]; then
-    base_py=/usr/bin/python3
-  else
-    base_py="$(command -v python3 || true)"
-  fi
-  [[ -n "$base_py" ]] || {
+  base_py="$(python_runtime_base_python || true)"
+  [[ -n "$base_py" && -x "$base_py" ]] || {
     LAST_ERROR_STDERR="python3 indisponível para criar ambiente candidato"
     LAST_ERROR_CODE="PYTHON_RUNTIME_BASE_MISSING"
     return 1
   }
   STAGE="ambiente Python do candidato"
-  printf -v command '%q -m venv %q && %q -m pip install --disable-pip-version-check -r %q && %q -m pip check' \
-    "$base_py" "$root/venv" "$root/venv/bin/python" "$requirements" "$root/venv/bin/python"
-  if zip_progress_run_as_ubuntu \
-    "Preparando dependências Python" \
-    "Criando ambiente isolado do candidato" \
-    "$command"
-  then
-    :
-  else
-    rc=$?
-    register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-python3 -m venv / pip install}"
-    LAST_ERROR_CODE="PYTHON_RUNTIME_PREPARE_FAILED"
+
+  set +e
+  ensure_python_uv_tool "$base_py"
+  rc=$?
+  set -e
+  uv="${PYTHON_UV_BIN_RESOLVED:-}"
+  if (( rc == 0 )) && [[ -n "$uv" ]]; then
+    if prepare_python_runtime_with_uv "$uv" "$base_py" "$root" "$requirements"; then
+      PYTHON_INSTALLER_STATUS="uv ${PYTHON_UV_VERSION:-0.12.13}"
+    else
+      rc=$?
+      register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-uv venv / uv pip install}"
+      LAST_ERROR_CODE="PYTHON_RUNTIME_PREPARE_FAILED"
+      rm -rf -- "$root" 2>/dev/null || true
+      return "$rc"
+    fi
+  elif (( rc == 2 )) && [[ "${PYTHON_INSTALLER_MODE:-auto}" == uv ]]; then
+    LAST_ERROR_STDERR="uv foi exigido, mas não pôde ser preparado"
+    LAST_ERROR_CODE="PYTHON_UV_REQUIRED_UNAVAILABLE"
     rm -rf -- "$root" 2>/dev/null || true
-    return "$rc"
+    return 1
+  else
+    if prepare_python_runtime_with_pip "$base_py" "$root" "$requirements"; then
+      PYTHON_INSTALLER_STATUS="pip"
+    else
+      rc=$?
+      register_error_context "$rc" "${CURRENT_STAGE_COMMAND:-python3 -m venv / pip install}"
+      LAST_ERROR_CODE="PYTHON_RUNTIME_PREPARE_FAILED"
+      rm -rf -- "$root" 2>/dev/null || true
+      return "$rc"
+    fi
   fi
+
   if ! write_python_runtime_manifest "$root" "$commit" "$requirements"; then
     LAST_ERROR_STDERR="ambiente Python criado, mas manifesto imutável não pôde ser gravado"
     LAST_ERROR_CODE="PYTHON_RUNTIME_MANIFEST_FAILED"
@@ -4471,7 +4648,9 @@ capture_python_runtime_release_snapshot() {
   local commit="$(sanitize_commit_ref "${1:-$PREVIOUS_COMMIT}")"
   (( ${REQUIREMENTS_CHANGED:-0} == 1 )) || return 0
   [[ -n "$commit" ]] || return 1
-  local root current_py source_venv requirements_file="$REPO_DIR/requirements.txt"
+  local root current_py source_venv requirements_file
+  requirements_file="$(python_runtime_install_requirements_file "$REPO_DIR" || true)"
+  [[ -n "$requirements_file" ]] || return 1
   root="$(python_runtime_release_root_for_commit "$commit")" || return 1
   if verify_python_runtime_release "$root" "$commit" "$requirements_file"; then
     return 0
@@ -4513,7 +4692,9 @@ activate_python_runtime_release() {
   local commit="$(sanitize_commit_ref "${1:-}")" root tmp
   [[ -n "$commit" ]] || return 1
   root="$(python_runtime_release_root_for_commit "$commit")" || return 1
-  if ! verify_python_runtime_release "$root" "$commit" "$REPO_DIR/requirements.txt"; then
+  local install_requirements
+  install_requirements="$(python_runtime_install_requirements_file "$REPO_DIR" || true)"
+  if [[ -z "$install_requirements" ]] || ! verify_python_runtime_release "$root" "$commit" "$install_requirements"; then
     LAST_ERROR_STDERR="release Python ausente, inconsistente ou incompatível com requirements.txt: $(short_commit "$commit")"
     LAST_ERROR_CODE="PYTHON_RUNTIME_RELEASE_INVALID"
     return 1
@@ -6596,7 +6777,7 @@ classify_changed_files() {
     esac
 
     case "$file" in
-      bot.py|webserver.py|config.py|db.py|start.sh|requirements.txt|cogs/*|music_system/*|utility/*)
+      bot.py|webserver.py|config.py|db.py|start.sh|requirements.txt|requirements.lock|cogs/*|music_system/*|utility/*)
         BOT_CHANGED=1
         ;;
       deploy/systemd/tts-bot.service|deploy/systemd/vps/tts-bot.service)
@@ -6604,7 +6785,7 @@ classify_changed_files() {
         ;;
     esac
 
-    [[ "$file" == "requirements.txt" ]] && REQUIREMENTS_CHANGED=1
+    [[ "$file" == "requirements.txt" || "$file" == "requirements.lock" ]] && REQUIREMENTS_CHANGED=1
 
     case "$file" in
       deploy/systemd/lavalink.service|deploy/systemd/tts-bot.service|deploy/systemd/tts-bot-alert@.service)
@@ -7567,8 +7748,10 @@ deploy_bot() {
       # transacionais local/remoto. Updates normais nunca instalam na .venv live.
       local legacy_py
       legacy_py="$(current_bot_python_bin)"
-      if [[ -x "$legacy_py" && -f "$REPO_DIR/requirements.txt" ]]; then
-        sudo -u ubuntu -H "$legacy_py" -m pip install -r "$REPO_DIR/requirements.txt"
+      local legacy_requirements
+      legacy_requirements="$(python_runtime_install_requirements_file "$REPO_DIR" || true)"
+      if [[ -x "$legacy_py" && -n "$legacy_requirements" && -f "$legacy_requirements" ]]; then
+        sudo -u ubuntu -H "$legacy_py" -m pip install --disable-pip-version-check --prefer-binary --no-input --progress-bar off -r "$legacy_requirements"
       fi
     fi
   fi
@@ -9372,7 +9555,7 @@ CHECKS_TEXT="✓ Bot — ${BOT_HEALTHCHECK_STATUS}
 ${RUNTIME_CHECK_MARK} Runtime candidato — ${PREFLIGHT_RUNTIME_STATUS}
 ✓ Comandos — ${APP_COMMAND_SYNC_SUMMARY}"
 TIMINGS_TEXT="${UPDATER_TIMINGS:-sem etapas}, total=${DURATION}"
-CACHE_TEXT="Node ${NODE_DEP_CACHE_HITS:-0} hit/${NODE_DEP_CACHE_MISSES:-0} miss · TypeScript ${TYPESCRIPT_CACHE_HITS:-0} hit/${TYPESCRIPT_CACHE_MISSES:-0} miss"
+CACHE_TEXT="Node ${NODE_DEP_CACHE_HITS:-0} hit/${NODE_DEP_CACHE_MISSES:-0} miss · TypeScript ${TYPESCRIPT_CACHE_HITS:-0} hit/${TYPESCRIPT_CACHE_MISSES:-0} miss · Python ${PYTHON_INSTALLER_STATUS:-não usado}"
 if (( ${READY_FAST_PATH_USED:-0} == 1 )); then
   CACHE_TEXT+=" · READY hit"
 fi
