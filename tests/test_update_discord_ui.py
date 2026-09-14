@@ -237,6 +237,36 @@ def test_macro_classifier_matches_the_visible_seven_stage_timeline() -> None:
 
 
 
+
+def test_progress_macro_never_regresses_when_a_later_microstep_looks_like_validation() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    assert "ZIP_PROGRESS_CURRENT_MACRO_INDEX=-1" in source
+    advance = _block(source, "zip_progress_advance_macro_index() {", "\nzip_progress_status() {")
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "ZIP_PROGRESS_CURRENT_MACRO_INDEX=-1\n"
+            + advance
+            + "\nzip_progress_advance_macro_index 4; echo $ZIP_PROGRESS_CURRENT_MACRO_INDEX"
+            + "\nzip_progress_advance_macro_index 2; echo $ZIP_PROGRESS_CURRENT_MACRO_INDEX"
+            + "\nzip_progress_advance_macro_index 5; echo $ZIP_PROGRESS_CURRENT_MACRO_INDEX",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert completed.stdout.splitlines() == ["4", "4", "5"]
+
+
+def test_bot_ignores_regressive_progress_and_recovery_events() -> None:
+    source = BOT.read_text(encoding="utf-8")
+    block = _block(source, "    def _zip_update_progress_should_render", "\n    def _zip_update_progress_mark_rendered")
+    assert 'incoming_macro_int < previous_macro_int' in block
+    assert 'return False, "macroetapa regressiva"' in block
+    assert 'incoming_step_int < previous_step_int' in block
+    assert 'return False, "etapa de recuperação regressiva"' in block
+
 def test_progress_card_has_no_accent_color_but_final_cards_keep_status_color() -> None:
     source = BOT.read_text(encoding="utf-8")
     block = _block(source, "    def _make_zip_update_view", "\n    def _make_zip_update_confirmation_view")

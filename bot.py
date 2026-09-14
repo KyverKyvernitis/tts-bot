@@ -3094,6 +3094,22 @@ class BotLocal(commands.Bot):
                 age = 999.0
             if str(previous.get("signature") or "") == signature and age < 8.0:
                 return False, "microetapa idêntica"
+            if previous_kind == kind == "progress":
+                try:
+                    previous_macro_int = int(previous_macro)
+                    incoming_macro_int = int(presentation.get("macro_index"))
+                except (TypeError, ValueError):
+                    previous_macro_int = incoming_macro_int = -1
+                if previous_macro_int >= 0 and incoming_macro_int >= 0 and incoming_macro_int < previous_macro_int:
+                    return False, "macroetapa regressiva"
+            if previous_kind == kind == "recovery":
+                try:
+                    previous_step_int = int(previous_step)
+                    incoming_step_int = int(presentation.get("recovery_step"))
+                except (TypeError, ValueError):
+                    previous_step_int = incoming_step_int = -1
+                if previous_step_int >= 0 and incoming_step_int >= 0 and incoming_step_int < previous_step_int:
+                    return False, "etapa de recuperação regressiva"
             same_phase = (
                 previous_kind == kind
                 and previous_macro == presentation.get("macro_index")

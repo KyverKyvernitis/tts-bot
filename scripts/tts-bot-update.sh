@@ -277,6 +277,7 @@ ZIP_PROGRESS_STAGE_STARTED_MS=0
 ZIP_PROGRESS_STARTED_MS=0
 ZIP_PROGRESS_RECEIVED_AT_MS=0
 ZIP_PROGRESS_UPDATER_DELAY_MS=0
+ZIP_PROGRESS_CURRENT_MACRO_INDEX=-1
 UPDATER_PROCESS_STARTED_MS=0
 LOCAL_CANDIDATE_UPDATER_STARTED_MS=0
 ZIP_PROGRESS_DONE_LABELS=""
@@ -3153,6 +3154,17 @@ zip_progress_macro_index() {
   esac
 }
 
+zip_progress_advance_macro_index() {
+  local candidate="${1:-0}" current="${ZIP_PROGRESS_CURRENT_MACRO_INDEX:--1}"
+  [[ "$candidate" =~ ^[0-6]$ ]] || candidate=0
+  [[ "$current" =~ ^-?[0-6]$ ]] || current=-1
+  if (( candidate > current )); then
+    ZIP_PROGRESS_CURRENT_MACRO_INDEX="$candidate"
+  else
+    ZIP_PROGRESS_CURRENT_MACRO_INDEX="$current"
+  fi
+}
+
 zip_progress_status() {
   if (( ROLLBACK_CONTROL_MODE == 1 )); then
     printf 'progress'
@@ -3345,6 +3357,8 @@ zip_progress_publish() {
   description+=$'\n'"-# $footer"
   local macro_index action_name stage_elapsed_ms stage_elapsed_text
   macro_index="$(zip_progress_macro_index "$stage_label")"
+  zip_progress_advance_macro_index "$macro_index"
+  macro_index="$ZIP_PROGRESS_CURRENT_MACRO_INDEX"
   stage_elapsed_ms=$((now_ms - ZIP_PROGRESS_STAGE_STARTED_MS))
   (( stage_elapsed_ms < 0 )) && stage_elapsed_ms=0
   stage_elapsed_text="$(format_update_duration_ms "$stage_elapsed_ms")"
