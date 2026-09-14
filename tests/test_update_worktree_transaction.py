@@ -67,6 +67,11 @@ candidate_repo_dir() {{
   fi
 }}
 candidate_git() {{ git -C "$(candidate_repo_dir)" "$@"; }}
+sudo() {{
+  if [[ "${{1:-}}" == '-u' ]]; then shift 2; fi
+  [[ "${{1:-}}" == '-H' ]] && shift
+  "$@"
+}}
 sanitize_update_component() {{ printf '%s\\n' "$1" | tr -cs '[:alnum:]._-' '_'; }}
 short_commit() {{ printf '%.7s' "$1"; }}
 logger() {{ :; }}
@@ -75,6 +80,8 @@ collect_local_tracked_changes() {{ git -C "$REPO_DIR" status --short --untracked
 classify_changed_files() {{ :; }}
 mark_deployment_committed() {{ :; }}
 mark_update_timing() {{ :; }}
+append_update_timing_ms() {{ :; }}
+UPDATER_STEP_LAST=0
 update_now_ms() {{ date +%s%3N; }}
 log_update_operation_timing_ms() {{ :; }}
 """

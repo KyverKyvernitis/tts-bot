@@ -4469,6 +4469,23 @@ Source-ZIP-SHA256: ${LOCAL_CANDIDATE_ZIP_SHA256:-indisponível}
 EOF
 }
 
+candidate_commit_and_head() {
+  # Commit + resolução do novo HEAD compartilham uma única fronteira sudo.
+  # Mantemos todos os hooks Git e a política de assinatura do repositório;
+  # apenas evitamos abrir um segundo `sudo -u ubuntu` para `rev-parse HEAD`.
+  local subject="${1:?}" body="${2:?}" root
+  root="$(candidate_repo_dir)"
+  sudo -u ubuntu -H env GIT_EDITOR=: GIT_SEQUENCE_EDITOR=: \
+    bash -c '
+      set -e
+      root="$1"
+      subject="$2"
+      body="$3"
+      git -C "$root" commit --quiet -m "$subject" -m "$body" >/dev/null
+      git -C "$root" rev-parse HEAD
+    ' _ "$root" "$subject" "$body"
+}
+
 prepare_local_candidate_commit_in_worktree() {
   [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" && -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]] || return 1
 
@@ -4496,19 +4513,41 @@ prepare_local_candidate_commit_in_worktree() {
     return 1
   fi
 
+  # O marcador `commit` antigo também incluía tudo desde o último timing
+  # grosseiro (segurança, worktree, stage e preflight), o que fazia um commit
+  # rápido parecer levar 10–15s. Feche essa janela como `prepare` antes de
+  # medir o commit de verdade.
+  mark_update_timing "prepare"
+
   STAGE="commit isolado do candidato"
   commit_body="$(local_candidate_commit_body)"
-  op_started_ms="$(update_now_ms)"
-  if ! candidate_git commit -m "$LOCAL_CANDIDATE_COMMIT_MESSAGE" -m "$commit_body" >/dev/null; then
-    log_update_operation_timing_ms "preparation.commit" "$op_started_ms"
+  local commit_started_ms commit_finished_ms commit_elapsed_ms state_started_ms
+  commit_started_ms="$(update_now_ms)"
+  if ! LOCAL_CANDIDATE_PREPARED_COMMIT="$(candidate_commit_and_head "$LOCAL_CANDIDATE_COMMIT_MESSAGE" "$commit_body")"; then
+    log_update_operation_timing_ms "preparation.commit.command_and_head" "$commit_started_ms"
+    log_update_operation_timing_ms "preparation.commit" "$commit_started_ms"
+    commit_finished_ms="$(update_now_ms)"
+    commit_elapsed_ms=$((commit_finished_ms - commit_started_ms))
+    (( commit_elapsed_ms < 0 )) && commit_elapsed_ms=0
+    append_update_timing_ms "commit" "$commit_elapsed_ms"
+    UPDATER_STEP_LAST="$SECONDS"
     LAST_ERROR_STDERR="não foi possível criar commit isolado do candidato"
     LAST_ERROR_CODE="CANDIDATE_WORKTREE_COMMIT_FAILED"
     return 1
   fi
-  LOCAL_CANDIDATE_PREPARED_COMMIT="$(candidate_git rev-parse HEAD)"
-  log_update_operation_timing_ms "preparation.commit" "$op_started_ms"
-  mark_update_timing "commit"
+  commit_finished_ms="$(update_now_ms)"
+  commit_elapsed_ms=$((commit_finished_ms - commit_started_ms))
+  (( commit_elapsed_ms < 0 )) && commit_elapsed_ms=0
+  log_update_operation_timing_ms "preparation.commit.command_and_head" "$commit_started_ms"
+  log_update_operation_timing_ms "preparation.commit" "$commit_started_ms"
+  append_update_timing_ms "commit" "$commit_elapsed_ms"
+  # O próximo timing grosseiro deve começar depois do commit real, não depois
+  # do bloco de preparação anterior.
+  UPDATER_STEP_LAST="$SECONDS"
+
+  state_started_ms="$(update_now_ms)"
   write_local_candidate_state "prepared" "$LOCAL_CANDIDATE_PREPARED_COMMIT"
+  log_update_operation_timing_ms "preparation.commit.state_write" "$state_started_ms"
   logger -t "$LOG_TAG" "candidato ${LOCAL_CANDIDATE_ID:-desconhecido} preparado isoladamente em $(short_commit "$LOCAL_CANDIDATE_PREPARED_COMMIT")" 2>/dev/null || true
   return 0
 }

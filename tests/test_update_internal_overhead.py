@@ -236,6 +236,8 @@ def test_preparation_path_has_fine_grained_timing_labels() -> None:
         "preparation.static_preflight",
         "preparation.worktree_clean_check",
         "preparation.commit",
+        "preparation.commit.command_and_head",
+        "preparation.commit.state_write",
         "preparation.runtime_artifacts",
         "preparation.rollback_snapshot",
     }
