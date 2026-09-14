@@ -1005,26 +1005,39 @@ class BotLocal(commands.Bot):
             except (TypeError, ValueError):
                 completed_macro = -1
             try:
-                current = max(0, min(6, int(presentation.get("macro_index") or 0)))
+                current = max(0, min(9, int(presentation.get("macro_index") or 0)))
             except (TypeError, ValueError):
                 current = 0
-            macros = ("Pacote", "Preparação", "Validação", "Release", "Promoção", "Verificação", "GitHub")
+            macros = ("Pacote", "Segurança", "Preparação", "Isolamento", "Validação", "Release", "Promoção", "Aplicação", "Verificação", "GitHub")
             lines = [f"# {UPDATE_EMOJI_PROGRESS_TITLE} {headline}"]
             meta = " · ".join(piece for piece in (f"`{identifier}`" if identifier else "", elapsed) if piece)
             if meta:
                 lines.append(f"-# {meta}")
             lines.append("")
+            raw_macro_durations = presentation.get("macro_durations")
+            macro_durations: dict[int, str] = {}
+            if isinstance(raw_macro_durations, dict):
+                for raw_index, raw_duration in raw_macro_durations.items():
+                    try:
+                        duration_index = int(raw_index)
+                    except (TypeError, ValueError):
+                        continue
+                    duration_text = str(raw_duration or "").strip()
+                    if 0 <= duration_index < len(macros) and duration_text:
+                        macro_durations[duration_index] = duration_text
+            # Compatibilidade com eventos produzidos pelo updater anterior: ele
+            # conhecia apenas a última duração concluída.
+            if completed_duration and completed_macro >= 0:
+                macro_durations.setdefault(completed_macro, completed_duration)
+
             # Etapas futuras não são pré-renderizadas. O card cresce conforme o
             # updater realmente alcança cada macroetapa, preservando a sensação
             # de progresso da UI antiga sem criar mensagens adicionais.
             for index, label in enumerate(macros[: current + 1]):
-                # A duração pertence visualmente à etapa, não ao texto
-                # descritivo abaixo dela. O texto inferior permanece neutro.
-                duration_suffix = (
-                    f" ({completed_duration})"
-                    if completed_duration and completed_macro == index
-                    else ""
-                )
+                # Cada macroetapa concluída preserva seu próprio tempo. A etapa
+                # atual não mostra tempo parcial para não sugerir conclusão.
+                duration_text = macro_durations.get(index, "") if index < current else ""
+                duration_suffix = f" ({duration_text})" if duration_text else ""
                 if index < current:
                     lines.append(f"{UPDATE_EMOJI_CHECK} {label}{duration_suffix}")
                 else:

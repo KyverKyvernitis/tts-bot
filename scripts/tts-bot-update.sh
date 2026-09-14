@@ -317,6 +317,7 @@ ZIP_PROGRESS_STARTED_MS=0
 ZIP_PROGRESS_RECEIVED_AT_MS=0
 ZIP_PROGRESS_UPDATER_DELAY_MS=0
 ZIP_PROGRESS_CURRENT_MACRO_INDEX=-1
+ZIP_PROGRESS_MACRO_MAX_INDEX=9
 ZIP_PROGRESS_LAST_DONE_LABEL=""
 ZIP_PROGRESS_LAST_DONE_DURATION=""
 ZIP_PROGRESS_LAST_DONE_MACRO_INDEX=-1
@@ -3360,27 +3361,58 @@ zip_progress_macro_index() {
   local stage_label="${1:-Processando atualização}"
   local lowered="${stage_label,,}"
   case "$lowered" in
-    *github*|*push*|*sincronizando*) printf '6' ;;
-    *health*|*saúde*|*saude*|*comandos*|*estabilidade*|*finalizando*|*estado\ publicado*|*recuperando\ confirmação*) printf '5' ;;
-    *promov*|*aplicando\ na\ vps*|*ativando*|*publicando\ interface*|*publicando\ servidor*|*reiniciando*|*recarregando*|*reload*) printf '4' ;;
-    *ready*|*release*|*preservando\ runtime*|*fazendo\ commit*|*commit\ criado*|*registrando*) printf '3' ;;
-    *conferindo\ zip*|*integridade*|*segurança*|*seguranca*|*pacote*) printf '0' ;;
-    *validando\ runtime*|*validando\ arquivos*|*verificando\ comandos*|*analisando*|*test*|*typescript*|*compilando*|*build*|*dependências*|*dependencias*) printf '2' ;;
-    *validando\ permissões*|*validando\ estado*|*preparando\ arquivos*|*aplicando\ em\ área*|*worktree*|*staging*) printf '1' ;;
-    *validando*) printf '2' ;;
-    *) printf '1' ;;
+    *github*|*push*|*sincronizando*) printf '9' ;;
+    *health*|*saúde*|*saude*|*comandos*|*estabilidade*|*finalizando*|*estado\ publicado*|*recuperando\ confirmação*|"validando"|*validando\ arquivos*) printf '8' ;;
+    *publicando\ interface*|*publicando\ servidor*|*reiniciando*|*recarregando*|*reload*|*ativando*) printf '7' ;;
+    *promov*|*aplicando\ na\ vps*) printf '6' ;;
+    *ready*|*release*|*preservando\ runtime*|*fazendo\ commit*|*commit\ criado*|*registrando*) printf '5' ;;
+    *validando\ runtime*|*verificando\ comandos*|*test*|*typescript*|*compilando*|*build*|*dependências*|*dependencias*) printf '4' ;;
+    *aplicando\ em\ área*|*worktree*|*staging*|*isolamento*) printf '3' ;;
+    *validando\ estado*|*preparando\ arquivos*) printf '2' ;;
+    *integridade*|*segurança*|*seguranca*|*validando\ permissões*|*analisando*) printf '1' ;;
+    *conferindo\ zip*|*pacote*|*conferindo\ commit*) printf '0' ;;
+    *validando*) printf '4' ;;
+    *) printf '2' ;;
   esac
 }
 
 zip_progress_advance_macro_index() {
   local candidate="${1:-0}" current="${ZIP_PROGRESS_CURRENT_MACRO_INDEX:--1}"
-  [[ "$candidate" =~ ^[0-6]$ ]] || candidate=0
-  [[ "$current" =~ ^-?[0-6]$ ]] || current=-1
+  local max_index="${ZIP_PROGRESS_MACRO_MAX_INDEX:-9}"
+  [[ "$candidate" =~ ^[0-9]+$ ]] || candidate=0
+  [[ "$current" =~ ^-?[0-9]+$ ]] || current=-1
+  (( candidate > max_index )) && candidate="$max_index"
+  (( current > max_index )) && current="$max_index"
   if (( candidate > current )); then
     ZIP_PROGRESS_CURRENT_MACRO_INDEX="$candidate"
   else
     ZIP_PROGRESS_CURRENT_MACRO_INDEX="$current"
   fi
+}
+
+zip_progress_add_macro_duration() {
+  local macro_index="${1:-}" elapsed_ms="${2:-0}" var current
+  [[ "$macro_index" =~ ^[0-9]+$ ]] || return 0
+  (( macro_index <= ${ZIP_PROGRESS_MACRO_MAX_INDEX:-9} )) || return 0
+  [[ "$elapsed_ms" =~ ^[0-9]+$ ]] || elapsed_ms=0
+  var="ZIP_PROGRESS_MACRO_DURATION_MS_${macro_index}"
+  current="${!var:-0}"
+  [[ "$current" =~ ^[0-9]+$ ]] || current=0
+  printf -v "$var" '%d' "$((current + elapsed_ms))"
+}
+
+zip_progress_macro_duration_pairs() {
+  local index var elapsed_ms duration output=""
+  for ((index=0; index<=${ZIP_PROGRESS_MACRO_MAX_INDEX:-9}; index++)); do
+    var="ZIP_PROGRESS_MACRO_DURATION_MS_${index}"
+    elapsed_ms="${!var:-0}"
+    [[ "$elapsed_ms" =~ ^[0-9]+$ ]] || elapsed_ms=0
+    (( elapsed_ms > 0 )) || continue
+    duration="$(format_update_duration_ms "$elapsed_ms")"
+    [[ -n "$output" ]] && output+="|"
+    output+="${index}=${duration}"
+  done
+  printf '%s' "$output"
 }
 
 zip_progress_status() {
@@ -3494,6 +3526,7 @@ PYHANDOFF
     ZIP_PROGRESS_LAST_DONE_LABEL="$label"
     ZIP_PROGRESS_LAST_DONE_DURATION="$(format_update_duration_ms "$elapsed_ms")"
     ZIP_PROGRESS_LAST_DONE_MACRO_INDEX="$(zip_progress_macro_index "$label")"
+    zip_progress_add_macro_duration "$ZIP_PROGRESS_LAST_DONE_MACRO_INDEX" "$elapsed_ms"
     line="-# $label"
     if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
       ZIP_PROGRESS_HISTORY+=$'\n'
@@ -3588,12 +3621,22 @@ zip_progress_publish() {
       action_name="rollback"
     fi
   fi
-  ZIP_STATUS_UI_JSON="$(UI_KIND=progress UI_STAGE="$stage_label" UI_DETAIL="$detail" UI_IDENTIFIER="$identifier" UI_ELAPSED="$elapsed_text" UI_COMPLETED_STAGE="${ZIP_PROGRESS_LAST_DONE_LABEL:-}" UI_COMPLETED_DURATION="${ZIP_PROGRESS_LAST_DONE_DURATION:-}" UI_COMPLETED_MACRO_INDEX="${ZIP_PROGRESS_LAST_DONE_MACRO_INDEX:--1}" UI_MACRO_INDEX="$macro_index" UI_ACTION="$action_name" python3 - <<'PYPROGRESSUI'
+  local macro_duration_pairs
+  macro_duration_pairs="$(zip_progress_macro_duration_pairs)"
+  ZIP_STATUS_UI_JSON="$(UI_KIND=progress UI_STAGE="$stage_label" UI_DETAIL="$detail" UI_IDENTIFIER="$identifier" UI_ELAPSED="$elapsed_text" UI_COMPLETED_STAGE="${ZIP_PROGRESS_LAST_DONE_LABEL:-}" UI_COMPLETED_DURATION="${ZIP_PROGRESS_LAST_DONE_DURATION:-}" UI_COMPLETED_MACRO_INDEX="${ZIP_PROGRESS_LAST_DONE_MACRO_INDEX:--1}" UI_MACRO_INDEX="$macro_index" UI_MACRO_DURATIONS="$macro_duration_pairs" UI_ACTION="$action_name" python3 - <<'PYPROGRESSUI'
 import json, os
 try:
     completed_macro_index = int(os.environ.get("UI_COMPLETED_MACRO_INDEX") or -1)
 except (TypeError, ValueError):
     completed_macro_index = -1
+macro_durations = {}
+for item in (os.environ.get("UI_MACRO_DURATIONS") or "").split("|"):
+    if "=" not in item:
+        continue
+    key, value = item.split("=", 1)
+    key, value = key.strip(), value.strip()
+    if key.isdigit() and value:
+        macro_durations[key] = value
 print(json.dumps({
     "kind": "progress",
     "stage": os.environ.get("UI_STAGE") or "Processando atualização",
@@ -3603,6 +3646,7 @@ print(json.dumps({
     "completed_stage": os.environ.get("UI_COMPLETED_STAGE") or "",
     "completed_duration": os.environ.get("UI_COMPLETED_DURATION") or "",
     "completed_macro_index": completed_macro_index,
+    "macro_durations": macro_durations,
     "macro_index": int(os.environ.get("UI_MACRO_INDEX") or 0),
     "action": os.environ.get("UI_ACTION") or "update",
 }, ensure_ascii=False))
@@ -3670,9 +3714,13 @@ zip_progress_done() {
   fi
   (( elapsed_ms < 0 )) && elapsed_ms=0
   elapsed_text="$(format_update_duration_ms "$elapsed_ms")"
+  local completed_macro_source completed_macro_index
+  completed_macro_source="${ZIP_PROGRESS_STAGE_LABEL:-$done_label}"
+  completed_macro_index="$(zip_progress_macro_index "$completed_macro_source")"
   ZIP_PROGRESS_LAST_DONE_LABEL="$done_label"
   ZIP_PROGRESS_LAST_DONE_DURATION="$elapsed_text"
-  ZIP_PROGRESS_LAST_DONE_MACRO_INDEX="$(zip_progress_macro_index "$done_label")"
+  ZIP_PROGRESS_LAST_DONE_MACRO_INDEX="$completed_macro_index"
+  zip_progress_add_macro_duration "$completed_macro_index" "$elapsed_ms"
   ZIP_PROGRESS_COMPLETED_COUNT=$((ZIP_PROGRESS_COMPLETED_COUNT + 1))
   line="-# $done_label"
   if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then

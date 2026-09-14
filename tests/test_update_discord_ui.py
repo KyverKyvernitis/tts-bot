@@ -37,7 +37,7 @@ def test_progress_card_reveals_macro_stages_only_when_reached() -> None:
     source = BOT.read_text(encoding="utf-8")
     renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
     block = renderer[renderer.index('if kind == "progress":'):renderer.index('if kind == "recovery":')]
-    assert '("Pacote", "Preparação", "Validação", "Release", "Promoção", "Verificação", "GitHub")' in block
+    assert '("Pacote", "Segurança", "Preparação", "Isolamento", "Validação", "Release", "Promoção", "Aplicação", "Verificação", "GitHub")' in block
     assert 'lines = [f"# {UPDATE_EMOJI_PROGRESS_TITLE} {headline}"]' in block
     assert 'enumerate(macros[: current + 1])' in block
     assert 'lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}{duration_suffix}**")' in block
@@ -146,19 +146,21 @@ def test_success_path_queues_the_raw_updater_log_for_technical_channel() -> None
     assert 'FINAL_RAW_LOG="$RUN_LOG_FILE"' in block
     assert '"$FINAL_RAW_LOG" "tts-bot-updater.log"' in block
 
-def test_progress_card_moves_completed_duration_to_stage_line_and_keeps_detail_plain() -> None:
+def test_progress_card_persists_completed_macro_durations_and_keeps_detail_plain() -> None:
     source = BOT.read_text(encoding="utf-8")
     renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
     updater = UPDATER.read_text(encoding="utf-8")
     progress = renderer[renderer.index('if kind == "progress":'):renderer.index('if kind == "recovery":')]
-    assert 'duration_suffix = (' in progress
-    assert 'if completed_duration and completed_macro == index' in progress
+    assert 'raw_macro_durations = presentation.get("macro_durations")' in progress
+    assert 'macro_durations.setdefault(completed_macro, completed_duration)' in progress
+    assert 'duration_text = macro_durations.get(index, "") if index < current else ""' in progress
     assert 'lines.append(f"{UPDATE_EMOJI_CHECK} {label}{duration_suffix}")' in progress
     assert 'lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}{duration_suffix}**")' in progress
     assert 'lines.append(f"-# {completed_stage}"[:240])' in progress
     assert 'f"-# {UPDATE_EMOJI_CHECK} {completed_stage}' not in progress
     assert 'line="-# $done_label"' in updater
-    assert 'line="-# ✅ $done_label ($elapsed_text)"' not in updater
+    assert 'zip_progress_add_macro_duration "$completed_macro_index" "$elapsed_ms"' in updater
+    assert '"macro_durations": macro_durations' in updater
     assert 'preparation_history.append(f"-# {completed}")' in source
 
 def test_progress_completed_microstep_can_stay_visible_when_macro_advances() -> None:
@@ -234,21 +236,22 @@ def test_details_prettify_internal_timing_names() -> None:
     assert '"total": "Total desde envio"' in block
     assert '"```text\\n"' in block
 
-def test_macro_classifier_matches_the_visible_seven_stage_timeline() -> None:
+def test_macro_classifier_matches_the_visible_ten_stage_timeline() -> None:
     source = UPDATER.read_text(encoding="utf-8")
     block = _block(source, "zip_progress_macro_index() {", "\nzip_progress_status() {")
     cases = {
         "Conferindo ZIP": "0",
-        "Analisando segurança": "0",
+        "Analisando segurança": "1",
         "Validando permissões": "1",
-        "Aplicando em área isolada": "1",
-        "Validando runtime em isolamento": "2",
-        "TypeScript frontend": "2",
-        "Candidato READY em isolamento": "3",
-        "Promovendo para a VPS": "4",
-        "Reiniciando processo: bot": "4",
-        "Verificando comandos": "5",
-        "Publicando no GitHub...": "6",
+        "Validando estado local": "2",
+        "Aplicando em área isolada": "3",
+        "Validando runtime em isolamento": "4",
+        "TypeScript frontend": "4",
+        "Candidato READY em isolamento": "5",
+        "Promovendo para a VPS": "6",
+        "Reiniciando processo: bot": "7",
+        "Verificando comandos": "8",
+        "Publicando no GitHub...": "9",
     }
     for label, expected in cases.items():
         completed = subprocess.run(
@@ -260,6 +263,26 @@ def test_macro_classifier_matches_the_visible_seven_stage_timeline() -> None:
         assert completed.stdout == expected, (label, completed.stdout, expected)
 
 
+def test_macro_duration_history_accumulates_and_serializes_all_completed_stages() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    helper = _block(source, "zip_progress_add_macro_duration() {", "\nzip_progress_status() {")
+    format_block = _block(source, "human_duration() {", "\nmark_update_timing() {")
+    completed = subprocess.run(
+        [
+            "bash", "-eu", "-o", "pipefail", "-c",
+            format_block
+            + "\nZIP_PROGRESS_MACRO_MAX_INDEX=9"
+            + "\n" + helper
+            + "\nzip_progress_add_macro_duration 0 1200"
+            + "\nzip_progress_add_macro_duration 0 800"
+            + "\nzip_progress_add_macro_duration 1 3400"
+            + "\nprintf '%s' \"$(zip_progress_macro_duration_pairs)\"",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert completed.stdout == "0=2s|1=3,4s"
 
 
 
