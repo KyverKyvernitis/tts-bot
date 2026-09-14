@@ -7,9 +7,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from updater.testes.fonte_core import caminho_fonte_core
+
 
 ROOT = Path(__file__).resolve().parents[1]
-UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
+UPDATER = caminho_fonte_core()
 INSTALLER = ROOT / "scripts" / "install-vps-systemd-units.sh"
 JOURNAL_POLICY = ROOT / "deploy" / "journald" / "60-tts-bot-storage.conf"
 TMPFILES_POLICY = ROOT / "deploy" / "tmpfiles.d" / "tts-bot-storage.conf"
@@ -32,7 +34,7 @@ def test_updater_runtime_is_systemd_managed_and_uses_unpredictable_names() -> No
     assert 'mktemp "$UPDATER_EPHEMERAL_DIR/tts-bot-updater.XXXXXX.log"' in updater
     assert "prune_updater_runtime_orphans" in updater
     assert "guard_updater_disk_space" in updater
-    assert updater.index("prune_update_artifacts || true") < updater.index("if ! guard_updater_disk_space; then")
+    assert updater.index("if ! guard_updater_disk_space; then") < updater.index("prune_update_artifacts || true")
 
     for unit in (
         ROOT / "deploy/systemd/tts-bot-updater.service",

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+
+from updater.testes.fonte_core import caminho_fonte_core
 import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT = ROOT / "bot.py"
-UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
+UPDATER = caminho_fonte_core()
 WEBSERVER = ROOT / "webserver.py"
 ALERT = ROOT / "alert.sh"
 

@@ -8,9 +8,11 @@ import subprocess
 import pytest
 from pathlib import Path
 
+from updater.testes.fonte_core import caminho_fonte_core
+
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "scripts" / "migrate-dashboard-layout.sh"
-UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
+UPDATER = caminho_fonte_core()
 FRONT_BRIDGE = ROOT / "activity" / "sinuca" / "scripts" / "dashboard-bridge-build.mjs"
 BACK_BRIDGE = ROOT / "activity" / "sinuca-server" / "scripts" / "dashboard-bridge-build.mjs"
 

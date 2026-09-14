@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from updater.testes.fonte_core import caminho_fonte_core
+
 ROOT = Path(__file__).resolve().parents[1]
-UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
+UPDATER = caminho_fonte_core()
 
 
 def _function_block(source: str, name: str, next_name: str) -> str:

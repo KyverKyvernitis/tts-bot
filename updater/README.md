@@ -1,20 +1,23 @@
 # Updater
 
-Esta pasta é a raiz canônica do sistema de atualização do projeto.
+Implementação canônica do atualizador do bot.
 
 ## Estrutura
 
-- `core/`: orquestração e regras centrais do updater.
-- `utilitarios/`: segurança, snapshots Git, smoke de runtime e seleção de testes.
-- `testes/`: testes específicos da estrutura modular do updater.
-- `discord/`, `sistema/` e `sudoers/`: serão migrados em rodadas estruturais seguintes, mantendo fachadas temporárias nos caminhos antigos enquanto houver consumidores legados.
+- `core/atualizar.sh`: orquestrador e entrypoint principal.
+- `core/configuracao.sh`: prioridade e configuração operacional.
+- `core/estado.sh`: estado runtime persistido da execução.
+- `core/git.sh`: operações Git e snapshots transacionais.
+- `core/registros.sh`: logs, evidências, incidentes e alertas técnicos.
+- `core/tempos.sh`: medição e formatação de tempos.
+- `core/fila.sh`: fila de candidatos, arquivamento e dispatch.
+- `utilitarios/`: auxiliares Python canônicos com nomes em português.
+- `testes/`: contratos da arquitetura e helpers de teste.
 
-## Entrypoint
+Os caminhos antigos em `scripts/`, `deploy/scripts/` e `utility/update_*` são
+fachadas transitórias de compatibilidade. Código novo deve apontar para
+`updater/`.
 
-O entrypoint canônico é `updater/core/atualizar.sh`.
-
-`scripts/tts-bot-update.sh` permanece apenas como fachada de compatibilidade e deve desaparecer quando todos os consumidores antigos tiverem sido migrados. O serviço systemd já executa diretamente o entrypoint canônico.
-
-## Regra de modularização
-
-As rodadas estruturais não alteram os contratos funcionais do updater. Fila, segurança, worktree, validação, promoção, rollback, recovery, dispatch por `.path`, tempos e integração Discord devem manter o comportamento do baseline anterior.
+O entrypoint executa uma cópia runtime estável de `atualizar.sh` e preserva em
+`TTS_BOT_UPDATER_SOURCE_DIR` a revisão dos módulos carregada no início. Assim,
+um update do próprio updater não mistura versões durante a mesma execução.

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from updater.testes.fonte_core import caminho_fonte_core
 import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
+UPDATER = caminho_fonte_core()
 
 
 def _runtime_functions(tmp_path: Path) -> Path:

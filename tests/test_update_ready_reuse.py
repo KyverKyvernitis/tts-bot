@@ -3,9 +3,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from updater.testes.fonte_core import caminho_fonte_core
+
 
 ROOT = Path(__file__).resolve().parents[1]
-UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
+UPDATER = caminho_fonte_core()
 
 
 def test_ready_artifact_is_reused_without_repeating_validation_commands(tmp_path: Path) -> None:

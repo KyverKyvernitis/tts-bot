@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
+from updater.testes.fonte_core import caminho_fonte_core
 import shutil
 import subprocess
 import sys
@@ -10,7 +12,7 @@ import textwrap
 
 ROOT = Path(__file__).resolve().parents[1]
 SMOKE = ROOT / "updater" / "utilitarios" / "smoke_runtime.py"
-UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
+UPDATER = caminho_fonte_core()
 
 
 def _write_fake_project(tmp_path: Path, *, cog_source: str, setup_source: str | None = None) -> Path:

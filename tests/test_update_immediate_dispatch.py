@@ -1,9 +1,11 @@
 from pathlib import Path
 
+from updater.testes.fonte_core import caminho_fonte_core
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT = ROOT / "bot.py"
-UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
+UPDATER = caminho_fonte_core()
 
 
 def _block(source: str, start: str, end: str) -> str:

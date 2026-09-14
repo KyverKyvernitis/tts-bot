@@ -5,10 +5,12 @@ import os
 import subprocess
 from pathlib import Path
 
+from updater.testes.fonte_core import caminho_fonte_core
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SELECTOR = ROOT / "updater" / "utilitarios" / "selecao_testes.py"
-UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
+UPDATER = caminho_fonte_core()
 
 
 def _select(project: Path, prefix: str, changed: str) -> dict[str, object]:

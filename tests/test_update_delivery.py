@@ -7,9 +7,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from updater.testes.fonte_core import caminho_fonte_core
+
 
 ROOT = Path(__file__).resolve().parents[1]
-UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
+UPDATER = caminho_fonte_core()
 BOT = ROOT / "bot.py"
 
 
