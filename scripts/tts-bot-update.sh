@@ -1257,8 +1257,9 @@ run_preflight_checks() {
     py="$REPO_DIR/.venv/bin/python"
     [[ -x "$py" ]] || py="$(command -v python3 || true)"
   fi
-  local file checked_py=0 checked_sh=0 import_checked=0 import_failed=0 import_output=""
-  local deleted_py=0 deleted_cogs=0
+  local file module line checked_py=0 checked_sh=0 import_checked=0 import_failed=0 import_output=""
+  local deleted_py=0 deleted_cogs=0 batch_output=""
+  local -a python_files=() cog_modules=()
   [[ -x "$py" ]] || py="$(command -v python3 || true)"
 
   if [[ -n "$py" ]]; then
@@ -1266,16 +1267,39 @@ run_preflight_checks() {
     while IFS= read -r file; do
       [[ -n "$file" ]] || continue
       if [[ ! -f "$REPO_DIR/$file" ]]; then
-        if printf '%s
-' "$CHANGED_STATUS_RAW" | grep -Fq $'D	'"$file"; then
+        if printf '%s\n' "$CHANGED_STATUS_RAW" | grep -Fq $'D\t'"$file"; then
           deleted_py=$((deleted_py + 1))
           checked_py=1
         fi
         continue
       fi
       checked_py=1
-      sudo -u ubuntu -H "$py" -m py_compile "$REPO_DIR/$file"
+      python_files+=("$REPO_DIR/$file")
     done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.py$' | grep -v '^activity/' || true)
+
+    # Compila todos os Python alterados em uma única inicialização do
+    # interpretador. Mantém o mesmo py_compile/doraise por arquivo e relata
+    # individualmente qualquer falha, sem pagar fork+startup do Python N vezes.
+    if (( ${#python_files[@]} > 0 )); then
+      if ! batch_output="$(sudo -u ubuntu -H "$py" - "${python_files[@]}" <<'PYCOMPILEBATCH' 2>&1
+import py_compile
+import sys
+
+failed = False
+for filename in sys.argv[1:]:
+    try:
+        py_compile.compile(filename, doraise=True)
+    except Exception as exc:
+        failed = True
+        print(f"FAIL {filename}: {exc}", file=sys.stderr)
+raise SystemExit(1 if failed else 0)
+PYCOMPILEBATCH
+)"; then
+        PREFLIGHT_PY_STATUS="falhou"
+        [[ -n "$batch_output" ]] && printf '%s\n' "$batch_output" >&2
+        return 1
+      fi
+    fi
 
     if (( checked_py == 1 )); then
       if (( deleted_py > 0 )); then
@@ -1288,16 +1312,14 @@ run_preflight_checks() {
     fi
 
     # `py_compile` não pega erro executado no import, como discord.ui.StringSelect.
-    # Para cogs alteradas, tentamos importar o módulo sem conectar ao Discord.
-    # Falha aqui vira aviso, não rollback automático: o bot.py decide no boot se
-    # a cog é opcional ou crítica.
+    # Para cogs alteradas, reunimos os módulos e fazemos todos os imports em uma
+    # única inicialização do Python. Falhas continuam sendo aviso, não rollback.
     STAGE="preflight import de cogs"
     while IFS= read -r file; do
       [[ -n "$file" ]] || continue
       [[ "$file" == cogs/*.py ]] || continue
       if [[ ! -f "$REPO_DIR/$file" ]]; then
-        if printf '%s
-' "$CHANGED_STATUS_RAW" | grep -Fq $'D	'"$file"; then
+        if printf '%s\n' "$CHANGED_STATUS_RAW" | grep -Fq $'D\t'"$file"; then
           deleted_cogs=$((deleted_cogs + 1))
           import_checked=1
         fi
@@ -1307,17 +1329,59 @@ run_preflight_checks() {
       import_checked=1
       module="${file%.py}"
       module="${module//\//.}"
-      if ! line="$(cd "$REPO_DIR" && sudo -u ubuntu -H "$py" - <<PYIMPORT 2>&1
-import importlib
-module = ${module@Q}
-importlib.import_module(module)
-print(f"OK {module}")
-PYIMPORT
-)"; then
-        import_failed=1
-        import_output+="FAIL $module: $(printf '%s' "$line" | tail -n 1)"$'\n'
-      fi
+      cog_modules+=("$module")
     done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '^cogs/.*\.py$' || true)
+
+    if (( ${#cog_modules[@]} > 0 )); then
+      set +e
+      import_output="$(cd "$REPO_DIR" && sudo -u ubuntu -H "$py" - "${cog_modules[@]}" <<'PYIMPORTBATCH' 2>&1
+import importlib
+import os
+import sys
+
+# Uma única inicialização do interpretador, mas cada cog continua isolada em
+# um processo filho. Isso evita que side effects/sys.modules de uma cog mudem
+# o resultado da próxima, preservando o isolamento do preflight anterior.
+failed = 0
+for module in sys.argv[1:]:
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            importlib.import_module(module)
+            payload = f"OK {module}\n"
+            code = 0
+        except BaseException as exc:
+            payload = f"FAIL {module}: {type(exc).__name__}: {exc}\n"
+            code = 1
+        try:
+            os.write(write_fd, payload.encode("utf-8", "replace"))
+        finally:
+            os.close(write_fd)
+        os._exit(code)
+    os.close(write_fd)
+    chunks = []
+    while True:
+        chunk = os.read(read_fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    os.close(read_fd)
+    _, status = os.waitpid(pid, 0)
+    sys.stdout.write(b"".join(chunks).decode("utf-8", "replace"))
+    if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+        failed += 1
+print(f"__FAILED__={failed}")
+raise SystemExit(0)
+PYIMPORTBATCH
+)"
+      set -e
+      line="$(printf '%s\n' "$import_output" | grep -E '^__FAILED__=[0-9]+$' | tail -n 1 || true)"
+      import_failed="${line#__FAILED__=}"
+      [[ "$import_failed" =~ ^[0-9]+$ ]] || import_failed=0
+      import_output="$(printf '%s\n' "$import_output" | grep -v -E '^__FAILED__=[0-9]+$' || true)"
+    fi
 
     if (( import_checked == 0 )); then
       PREFLIGHT_COG_IMPORT_STATUS="sem cogs Python alteradas"
@@ -1760,7 +1824,8 @@ run_preflight_checks_in_dir() {
     py="$REPO_DIR/.venv/bin/python"
     [[ -x "$py" ]] || py="$(command -v python3 || true)"
   fi
-  local file checked_py=0 checked_sh=0 deleted_py=0 deleted_sh=0 rc=0
+  local file checked_py=0 checked_sh=0 deleted_py=0 deleted_sh=0 rc=0 batch_output=""
+  local -a python_files=()
   [[ -x "$py" ]] || py="$(command -v python3 || true)"
   [[ -n "$py" ]] || { PREFLIGHT_PY_STATUS="python indisponível"; PREFLIGHT_BASH_STATUS="não executado"; return 1; }
 
@@ -1773,18 +1838,36 @@ run_preflight_checks_in_dir() {
       fi
       continue
     fi
-    # Validação de sintaxe sem gerar __pycache__ dentro do worktree.
-    if ! sudo -u ubuntu -H "$py" - "$root/$file" <<'PYSTATICCOMPILE'
-import pathlib, sys, tokenize
-path = pathlib.Path(sys.argv[1])
-with tokenize.open(path) as fh:
-    source = fh.read()
-compile(source, str(path), 'exec')
-PYSTATICCOMPILE
-    then
-      rc=1
-    fi
+    python_files+=("$root/$file")
   done < <(printf '%s\n' "$CHANGED_FILES_RAW" | grep -E '\.py$' | grep -v '^activity/' || true)
+
+  # Valida todos os Python do worktree em um único processo, sem gerar
+  # __pycache__. Cada arquivo continua sendo aberto com tokenize.open() e
+  # compilado isoladamente para preservar encoding, filename e erro individual.
+  if (( ${#python_files[@]} > 0 )); then
+    if ! batch_output="$(sudo -u ubuntu -H "$py" - "${python_files[@]}" <<'PYSTATICCOMPILEBATCH' 2>&1
+import pathlib
+import sys
+import tokenize
+
+failed = False
+for filename in sys.argv[1:]:
+    path = pathlib.Path(filename)
+    try:
+        with tokenize.open(path) as fh:
+            source = fh.read()
+        compile(source, str(path), 'exec')
+    except Exception as exc:
+        failed = True
+        print(f"FAIL {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
+raise SystemExit(1 if failed else 0)
+PYSTATICCOMPILEBATCH
+)"; then
+      rc=1
+      [[ -n "$batch_output" ]] && printf '%s\n' "$batch_output" >&2
+    fi
+  fi
+
   if (( checked_py == 1 && rc == 0 )); then
     if (( deleted_py > 0 )); then
       PREFLIGHT_PY_STATUS="OK; ${deleted_py} deleção(ões) Python reconhecida(s) no diff"
@@ -1806,6 +1889,10 @@ PYSTATICCOMPILE
       fi
       continue
     fi
+    # Bash não oferece um parser multi-arquivo independente em uma única
+    # invocação. Manter `bash -n` por arquivo evita falsos positivos causados
+    # por concatenação de scripts, enquanto o batch de Python remove o maior
+    # custo de startup do preflight.
     if ! bash -n "$root/$file"; then
       rc=1
     fi
