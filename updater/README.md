@@ -20,9 +20,10 @@ Implementação canônica do atualizador do bot.
 - `utilitarios/`: auxiliares Python canônicos com nomes em português.
 - `testes/`: contratos da arquitetura e helpers de teste.
 
-Os caminhos antigos em `scripts/`, `deploy/scripts/` e `utility/update_*` são
-fachadas transitórias de compatibilidade. Código novo deve apontar para
-`updater/`.
+Os entrypoints, utilitários, integração Discord e infraestrutura próprios do updater
+ficam exclusivamente em `updater/`. Caminhos legados usados durante a migração foram
+removidos na Wave 45; compatibilidade com nomes antigos existe apenas na interpretação
+de candidatos quando necessário, não como implementação duplicada no repositório.
 
 O entrypoint executa uma cópia runtime estável de `atualizar.sh` e preserva em
 `TTS_BOT_UPDATER_SOURCE_DIR` a revisão dos módulos carregada no início. Assim,
@@ -55,13 +56,6 @@ A integração do updater com o bot fica em `updater/discord/`:
 ## Infraestrutura da VPS
 
 A infraestrutura própria do updater é canônica em `updater/sistema/` e
-`updater/sudoers/`. Os caminhos antigos em `deploy/systemd/`,
-`deploy/sudoers.d/` e `scripts/install-vps-systemd-units.sh` permanecem nesta
-fase apenas como compatibilidade para pacotes e instalações anteriores.
-
-## Infraestrutura da VPS
-
-A infraestrutura própria do updater é canônica em `updater/sistema/` e
-`updater/sudoers/`. Os caminhos antigos em `deploy/systemd/`,
-`deploy/sudoers.d/` e `scripts/install-vps-systemd-units.sh` permanecem nesta
-fase apenas como compatibilidade para pacotes e instalações anteriores.
+`updater/sudoers/`. As cópias antigas das units, sudoers e instaladores foram
+removidas; templates gerais da VPS que não pertencem ao updater continuam em
+`deploy/systemd/`, `deploy/journald/` e `deploy/tmpfiles.d/`.

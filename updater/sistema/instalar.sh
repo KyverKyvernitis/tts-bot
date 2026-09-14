@@ -110,17 +110,14 @@ install_file() {
   local dst="$SYSTEMD_DIR/$rel"
   local fallback_src=""
   src="$(template_source "$rel")"
-  # Compatibilidade de bootstrap: a primeira versão do updater que instala o
-  # .path ainda constrói o overlay com a lista antiga, sem esse arquivo. Nesse
-  # único caso, leia o template novo diretamente do checkout já promovido.
+  # Se um overlay transacional antigo omitir o .path, a fonte canônica no
+  # checkout já promovido ainda é segura para completar a instalação.
   if [[ ( -z "$src" || ! -f "$src" ) && "$rel" == "tts-bot-updater.path" ]]; then
-    for fallback_src in       "$UPDATER_SYSTEM_DIR/$rel"       "$REPO_DIR/deploy/systemd/vps/$rel"       "$REPO_DIR/deploy/systemd/$rel"; do
-      if [[ -f "$fallback_src" && ! -L "$fallback_src" ]]; then
-        src="$fallback_src"
-        action "bootstrap do template fora do overlay: $rel"
-        break
-      fi
-    done
+    fallback_src="$UPDATER_SYSTEM_DIR/$rel"
+    if [[ -f "$fallback_src" && ! -L "$fallback_src" ]]; then
+      src="$fallback_src"
+      action "bootstrap do template canônico fora do overlay: $rel"
+    fi
   fi
   if [[ ! -f "$src" ]]; then
     warn "template ausente: $rel"
@@ -406,10 +403,7 @@ install_sudoers_files() {
   local src_dir="$UPDATER_SUDOERS_DIR"
   local src rel dst tmp
   if [[ ! -d "$src_dir" ]]; then
-    src_dir="$REPO_DIR/deploy/sudoers.d"
-  fi
-  if [[ ! -d "$src_dir" ]]; then
-    action "sudoers do updater ausente"
+    action "sudoers canônico do updater ausente"
     return 0
   fi
   while IFS= read -r -d '' src; do

@@ -497,20 +497,17 @@ def test_raw_log_receipt_is_written_only_after_bot_sends_to_discord() -> None:
     assert "_zip_update_flush_raw_logs_once" in source
 
 def test_updater_timer_waits_until_previous_run_is_inactive() -> None:
-    for path in (
-        ROOT / "deploy" / "systemd" / "tts-bot-updater.timer",
-        ROOT / "deploy" / "systemd" / "vps" / "tts-bot-updater.timer",
-    ):
-        text = path.read_text(encoding="utf-8")
-        assert "OnUnitInactiveSec=1min" in text
-        assert "OnUnitActiveSec=" not in text
-        assert "Persistent=false" in text
+    path = ROOT / "updater" / "sistema" / "tts-bot-updater.timer"
+    text = path.read_text(encoding="utf-8")
+    assert "OnUnitInactiveSec=1min" in text
+    assert "OnUnitActiveSec=" not in text
+    assert "Persistent=false" in text
 
 
 def test_systemd_installer_change_does_not_restart_unrelated_subsystems() -> None:
     harness = f"""
 source <(awk '/^classify_changed_files[(][)]/{{flag=1}} /^fast_reload_modules_for_changed_files[(][)]/{{flag=0}} flag' {UPDATER!s})
-CHANGED_FILES_RAW='scripts/install-vps-systemd-units.sh'
+CHANGED_FILES_RAW='updater/sistema/instalar.sh'
 classify_changed_files
 printf '%s %s %s %s %s\n' \
   "$VPS_SYSTEMD_UNITS_CHANGED" \
@@ -651,14 +648,11 @@ def test_update_presence_and_short_user_notice_are_connected_to_runtime_state() 
 
 
 def test_updater_service_has_lower_cpu_and_io_priority() -> None:
-    for path in (
-        ROOT / "deploy" / "systemd" / "tts-bot-updater.service",
-        ROOT / "deploy" / "systemd" / "vps" / "tts-bot-updater.service",
-    ):
-        text = path.read_text(encoding="utf-8")
-        assert "Nice=10" in text
-        assert "CPUWeight=20" in text
-        assert "IOWeight=20" in text
+    path = ROOT / "updater" / "sistema" / "tts-bot-updater.service"
+    text = path.read_text(encoding="utf-8")
+    assert "Nice=10" in text
+    assert "CPUWeight=20" in text
+    assert "IOWeight=20" in text
 
 
 def test_bot_persists_preparation_progress_before_enqueuing_candidate() -> None:

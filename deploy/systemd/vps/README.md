@@ -6,13 +6,13 @@ inside `/etc/systemd/system` on the Oracle VPS.
 Use:
 
 ```bash
-sudo /home/ubuntu/bot/scripts/install-vps-systemd-units.sh
+sudo /home/ubuntu/bot/updater/sistema/instalar.sh
 ```
 
 To compare the live VPS state with the repository templates without changing anything:
 
 ```bash
-sudo /home/ubuntu/bot/scripts/install-vps-systemd-units.sh --audit
+sudo /home/ubuntu/bot/updater/sistema/instalar.sh --audit
 ```
 
 The installer is idempotent and creates backups before changing live files. It:

@@ -53,7 +53,6 @@ def test_changed_shell_scripts_pass_bash_syntax_check() -> None:
         ROOT / "alert.sh",
         ROOT / "updater" / "core" / "atualizar.sh",
         ROOT / "updater" / "sistema" / "instalar.sh",
-        ROOT / "scripts" / "install-vps-systemd-units.sh",
     ):
         subprocess.run(["bash", "-n", str(path)], check=True, cwd=ROOT)
 

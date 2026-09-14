@@ -141,21 +141,16 @@ managed_systemd_template_source() {
   local canonical_src="$REPO_DIR/updater/sistema/$rel"
   local root_src="$REPO_DIR/deploy/systemd/$rel"
   local vps_src="$REPO_DIR/deploy/systemd/vps/$rel"
-  local canonical_unit=0
 
+  # As units próprias do updater têm uma única fonte de verdade.
   case "$rel" in
     tts-bot-updater.service|tts-bot-updater.timer|tts-bot-updater.path|tts-bot-alert@.service)
-      canonical_unit=1
+      [[ -f "$canonical_src" ]] && printf '%s' "$canonical_src"
+      return 0
       ;;
   esac
 
-  # Durante a migração, respeite o caminho que realmente mudou. O diretório
-  # updater/sistema é canônico; deploy/systemd continua aceito apenas para
-  # compatibilidade com pacotes antigos.
-  if (( canonical_unit == 1 ))       && printf '%s\n' "$CHANGED_FILES_RAW" | grep -Fxq "updater/sistema/$rel"; then
-    [[ -f "$canonical_src" ]] && printf '%s' "$canonical_src"
-    return 0
-  fi
+  # Os demais templates continuam pertencendo à infraestrutura geral da VPS.
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Fxq "deploy/systemd/vps/$rel"; then
     [[ -f "$vps_src" ]] && printf '%s' "$vps_src"
     return 0
@@ -164,10 +159,7 @@ managed_systemd_template_source() {
     [[ -f "$root_src" ]] && printf '%s' "$root_src"
     return 0
   fi
-
-  if (( canonical_unit == 1 )) && [[ -f "$canonical_src" ]]; then
-    printf '%s' "$canonical_src"
-  elif [[ -f "$vps_src" ]]; then
+  if [[ -f "$vps_src" ]]; then
     printf '%s' "$vps_src"
   elif [[ -f "$root_src" ]]; then
     printf '%s' "$root_src"
@@ -223,9 +215,6 @@ deploy_vps_systemd_units() {
 
   STAGE="sincronização dos units systemd da VPS"
   local instalador="$REPO_DIR/updater/sistema/instalar.sh"
-  if [[ ! -f "$instalador" ]]; then
-    instalador="$REPO_DIR/scripts/install-vps-systemd-units.sh"
-  fi
   if [[ ! -f "$instalador" ]]; then
     VPS_SYSTEMD_UNITS_STATUS="script ausente"
     LAST_ERROR_STDERR="updater/sistema/instalar.sh não foi encontrado"

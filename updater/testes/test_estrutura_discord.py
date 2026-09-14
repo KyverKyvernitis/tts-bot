@@ -44,3 +44,12 @@ def test_fonte_expandida_preserva_contratos_visuais_e_dispatch() -> None:
     assert "async def _dispatch_updater_candidate" in source
     assert "async def _start_zip_update_rollback_flow" in source
     assert 'UPDATE_EMOJI_PROGRESS_TITLE = "<a:areia:1496606578395189473>"' in source
+
+
+def test_mudancas_na_integracao_discord_exigem_reinicio_do_bot() -> None:
+    from updater.testes.fonte_core import ler_fonte_core
+
+    fonte = ler_fonte_core()
+    bloco = fonte[fonte.index("classify_changed_files() {") : fonte.index("fast_reload_modules_for_changed_files() {")]
+    assert "updater/discord/*" in bloco
+    assert "updater/utilitarios/*" in bloco

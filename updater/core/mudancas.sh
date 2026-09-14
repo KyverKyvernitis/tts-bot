@@ -145,7 +145,7 @@ classify_changed_files() {
     esac
 
     case "$file" in
-      bot.py|webserver.py|config.py|db.py|start.sh|requirements.txt|requirements.lock|cogs/*|music_system/*|utility/*)
+      bot.py|webserver.py|config.py|db.py|start.sh|requirements.txt|requirements.lock|cogs/*|music_system/*|utility/*|updater/discord/*|updater/utilitarios/*)
         BOT_CHANGED=1
         ;;
       deploy/systemd/tts-bot.service|deploy/systemd/vps/tts-bot.service)

@@ -12,6 +12,6 @@ Arquivos canônicos:
 - `tts-bot-alert@.service`: alerta de falha usado pelo bot/systemd;
 - `instalar.sh`: sincroniza units, sudoers e políticas operacionais na VPS.
 
-Os equivalentes em `deploy/systemd/` e o antigo
-`scripts/install-vps-systemd-units.sh` são compatibilidade temporária e não são
-a fonte canônica do updater.
+As units próprias do updater não possuem mais cópias em `deploy/systemd/`, e o
+instalador antigo em `scripts/` foi removido. Templates gerais da VPS continuam
+em `deploy/systemd/` porque pertencem a outros subsistemas.
