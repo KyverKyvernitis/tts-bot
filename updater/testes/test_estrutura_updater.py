@@ -68,6 +68,8 @@ def test_core_esta_dividido_em_modulos_de_responsabilidade():
         "registros.sh",
         "tempos.sh",
         "fila.sh",
+        "validacao.sh",
+        "candidato.sh",
     }
     assert esperados <= {p.name for p in core.glob("*.sh")}
     entrypoint = CANONICO.read_text(encoding="utf-8")
@@ -90,6 +92,8 @@ def test_funcoes_extraidas_nao_ficam_duplicadas_no_orquestrador():
         "registros.sh": "send_error() {",
         "tempos.sh": "human_duration() {",
         "fila.sh": "load_pending_local_candidate() {",
+        "validacao.sh": "run_preflight_checks() {",
+        "candidato.sh": "prepare_local_candidate_update() {",
     }
     for modulo, assinatura in contratos.items():
         assert assinatura not in entrypoint
@@ -102,3 +106,23 @@ def test_modulos_sao_carregados_depois_da_copia_runtime_estavel():
     exec_at = text.index('exec /usr/bin/env bash "$UPDATER_RUNTIME_COPY" "$@"')
     primeiro_source = text.index('. "$UPDATER_SOURCE_DIR/configuracao.sh"')
     assert export_at < exec_at < primeiro_source
+
+
+def test_validacao_e_candidato_estao_fora_do_orquestrador():
+    entrypoint = CANONICO.read_text(encoding="utf-8")
+    validacao = (ROOT / "updater" / "core" / "validacao.sh").read_text(encoding="utf-8")
+    candidato = (ROOT / "updater" / "core" / "candidato.sh").read_text(encoding="utf-8")
+
+    assert "run_preflight_checks() {" not in entrypoint
+    assert "verify_bot_after_restart() {" not in entrypoint
+    assert "run_preflight_checks() {" in validacao
+    assert "verify_bot_after_restart() {" in validacao
+
+    assert "prepare_local_candidate_update() {" not in entrypoint
+    assert "promote_local_candidate_worktree_commit() {" not in entrypoint
+    assert "prepare_local_candidate_update() {" in candidato
+    assert "promote_local_candidate_worktree_commit() {" in candidato
+
+
+def test_orquestrador_core_fica_abaixo_de_seis_mil_linhas():
+    assert len(CANONICO.read_text(encoding="utf-8").splitlines()) < 6000

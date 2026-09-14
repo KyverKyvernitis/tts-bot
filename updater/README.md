@@ -11,6 +11,8 @@ Implementação canônica do atualizador do bot.
 - `core/registros.sh`: logs, evidências, incidentes e alertas técnicos.
 - `core/tempos.sh`: medição e formatação de tempos.
 - `core/fila.sh`: fila de candidatos, arquivamento e dispatch.
+- `core/validacao.sh`: preflight, saúde e validação de candidatos/remoto.
+- `core/candidato.sh`: isolamento, artefatos, commit e promoção de candidatos locais.
 - `utilitarios/`: auxiliares Python canônicos com nomes em português.
 - `testes/`: contratos da arquitetura e helpers de teste.
 
