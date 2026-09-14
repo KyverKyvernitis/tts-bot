@@ -2496,19 +2496,214 @@ class BotLocal(commands.Bot):
             shutil.rmtree(candidate_dir, ignore_errors=True)
             raise
 
+    def _updater_service_state_sync(self) -> str:
+        service = Path("/etc/systemd/system/tts-bot-updater.service")
+        if not service.exists():
+            return "missing"
+        result = self._run_cmd(
+            ["systemctl", "is-active", "tts-bot-updater.service"],
+            self._repo_root,
+            env=self._git_env(),
+        )
+        state = (result.stdout or result.stderr or "").strip().splitlines()
+        if state:
+            return state[-1][:40].lower()
+        return "active" if result.returncode == 0 else "unknown"
+
     def _trigger_updater_service_sync(self) -> tuple[bool, str]:
         service = Path("/etc/systemd/system/tts-bot-updater.service")
         if not service.exists():
-            return False, "updater via systemd não encontrado"
-        for args in (["sudo", "-n", "systemctl", "start", "--no-block", "tts-bot-updater.service"], ["systemctl", "start", "--no-block", "tts-bot-updater.service"]):
+            detail = "updater via systemd não encontrado"
+            UPDATE_LOG.warning("dispatch do updater indisponível: %s", detail)
+            return False, detail
+
+        before_state = self._updater_service_state_sync()
+        if before_state in {"active", "activating", "reloading"}:
+            detail = f"updater já {before_state}; aguardando consumo da fila"
+            UPDATE_LOG.info("dispatch do updater: %s", detail)
+            return True, detail
+
+        failures: list[str] = []
+        commands = (
+            ["sudo", "-n", "systemctl", "start", "--no-block", "tts-bot-updater.service"],
+            ["systemctl", "start", "--no-block", "tts-bot-updater.service"],
+        )
+        for args in commands:
             result = self._run_cmd(args, self._repo_root, env=self._git_env())
+            command_name = "sudo systemctl" if args[0] == "sudo" else "systemctl"
+            output = (result.stderr or result.stdout or "").strip()
+            output = output.splitlines()[-1][:180] if output else ""
+            UPDATE_LOG.info(
+                "dispatch do updater: comando=%s rc=%s estado_antes=%s detalhe=%s",
+                command_name,
+                result.returncode,
+                before_state,
+                output or "-",
+            )
             if result.returncode == 0:
-                return True, "updater disparado agora"
-        detail = (result.stderr or result.stdout or "").strip() if 'result' in locals() else ""
-        if detail:
-            detail = detail.splitlines()[-1][:180]
-            return False, f"commit enviado; timer aplicará depois ({detail})"
-        return False, "commit enviado; timer aplicará depois"
+                return True, f"updater disparado agora via {command_name}"
+            failures.append(f"{command_name} rc={result.returncode}" + (f" ({output})" if output else ""))
+
+        detail = "; ".join(failures)[-500:] or "systemctl recusou o start"
+        UPDATE_LOG.warning("dispatch imediato do updater falhou: %s", detail)
+        return False, f"timer aplicará depois ({detail})"
+
+    async def _watch_updater_candidate_dispatch(self, candidate_id: str, display_id: str = "") -> None:
+        candidate_id = str(candidate_id or "").strip()
+        if not candidate_id:
+            return
+        label = str(display_id or candidate_id).strip() or candidate_id
+        started = time.monotonic()
+        deadline = started + 60.0
+        retriggers = 0
+        last_service_state = ""
+        try:
+            # Dá tempo para um start --no-block normal mover pending -> active.
+            await asyncio.sleep(1.0)
+            while time.monotonic() < deadline:
+                found = await asyncio.to_thread(self._zip_update_find_candidate_sync, candidate_id)
+                queue_state = str(found.get("state") or "missing")
+                elapsed = max(0.0, time.monotonic() - started)
+                if queue_state != "pending":
+                    UPDATE_LOG.info(
+                        "dispatch do updater confirmado para %s: fila=%s em %.1fs retriggers=%d",
+                        label,
+                        queue_state,
+                        elapsed,
+                        retriggers,
+                    )
+                    return
+
+                service_state = await asyncio.to_thread(self._updater_service_state_sync)
+                if service_state != last_service_state:
+                    UPDATE_LOG.info(
+                        "dispatch aguardando claim de %s: fila=pending serviço=%s após %.1fs",
+                        label,
+                        service_state,
+                        elapsed,
+                    )
+                    last_service_state = service_state
+
+                # `systemctl start` em unidade já ativa não agenda uma nova execução.
+                # Assim que ela ficar livre, reexecute o start em vez de esperar o timer.
+                if service_state not in {"active", "activating", "reloading"}:
+                    retriggers += 1
+                    triggered, detail = await asyncio.to_thread(self._trigger_updater_service_sync)
+                    UPDATE_LOG.info(
+                        "retrigger imediato do updater para %s #%d: ok=%s detalhe=%s",
+                        label,
+                        retriggers,
+                        triggered,
+                        detail,
+                    )
+
+                await asyncio.sleep(2.0 if elapsed < 15.0 else 3.0)
+
+            found = await asyncio.to_thread(self._zip_update_find_candidate_sync, candidate_id)
+            if str(found.get("state") or "missing") == "pending":
+                UPDATE_LOG.warning(
+                    "candidato %s continuou pending por %.1fs após dispatch; timer permanece como fallback",
+                    label,
+                    max(0.0, time.monotonic() - started),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            UPDATE_LOG.warning("falha no watchdog de dispatch do updater para %s", label, exc_info=True)
+
+    async def _dispatch_updater_candidate(self, candidate_id: str, display_id: str = "") -> tuple[bool, str]:
+        triggered, detail = await asyncio.to_thread(self._trigger_updater_service_sync)
+        label = str(display_id or candidate_id or "").strip()
+        UPDATE_LOG.info(
+            "dispatch inicial do updater para %s: ok=%s detalhe=%s",
+            label or "candidato",
+            triggered,
+            detail,
+        )
+        asyncio.create_task(self._watch_updater_candidate_dispatch(candidate_id, display_id))
+        return triggered, detail
+
+    @staticmethod
+    def _updater_control_request_state_sync(pending: Path, active: Path, request_id: str) -> str:
+        for state, path in (("active", active), ("pending", pending)):
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if str(payload.get("id") or "") == str(request_id or ""):
+                return state
+        return "missing"
+
+    async def _watch_updater_control_dispatch(
+        self,
+        pending: Path,
+        active: Path,
+        request_id: str,
+        label: str,
+    ) -> None:
+        started = time.monotonic()
+        deadline = started + 60.0
+        retriggers = 0
+        try:
+            await asyncio.sleep(1.0)
+            while time.monotonic() < deadline:
+                state = await asyncio.to_thread(
+                    self._updater_control_request_state_sync, pending, active, request_id
+                )
+                elapsed = max(0.0, time.monotonic() - started)
+                if state != "pending":
+                    UPDATE_LOG.info(
+                        "dispatch de %s confirmado: pedido=%s estado=%s em %.1fs retriggers=%d",
+                        label,
+                        request_id,
+                        state,
+                        elapsed,
+                        retriggers,
+                    )
+                    return
+                service_state = await asyncio.to_thread(self._updater_service_state_sync)
+                if service_state not in {"active", "activating", "reloading"}:
+                    retriggers += 1
+                    triggered, detail = await asyncio.to_thread(self._trigger_updater_service_sync)
+                    UPDATE_LOG.info(
+                        "retrigger de %s #%d: ok=%s detalhe=%s",
+                        label,
+                        retriggers,
+                        triggered,
+                        detail,
+                    )
+                await asyncio.sleep(2.0 if elapsed < 15.0 else 3.0)
+            if await asyncio.to_thread(self._updater_control_request_state_sync, pending, active, request_id) == "pending":
+                UPDATE_LOG.warning(
+                    "pedido %s de %s continuou pending por %.1fs; timer permanece como fallback",
+                    request_id,
+                    label,
+                    max(0.0, time.monotonic() - started),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            UPDATE_LOG.warning("falha no watchdog de dispatch de %s", label, exc_info=True)
+
+    async def _dispatch_updater_control_request(
+        self,
+        pending: Path,
+        active: Path,
+        request_id: str,
+        label: str,
+    ) -> tuple[bool, str]:
+        triggered, detail = await asyncio.to_thread(self._trigger_updater_service_sync)
+        UPDATE_LOG.info(
+            "dispatch inicial de %s: pedido=%s ok=%s detalhe=%s",
+            label,
+            request_id,
+            triggered,
+            detail,
+        )
+        asyncio.create_task(self._watch_updater_control_dispatch(pending, active, request_id, label))
+        return triggered, detail
 
     def _guess_repo_name(self, origin_url: str) -> str:
         cleaned = (origin_url or "").strip().rstrip("/")
@@ -3706,9 +3901,12 @@ class BotLocal(commands.Bot):
         except Exception:
             UPDATE_LOG.warning("falha ao colocar update em estado de processamento", exc_info=True)
 
-        triggered, detail = await asyncio.to_thread(self._trigger_updater_service_sync)
+        action_label = "reaplicação" if mode == "redo" else "rollback"
+        triggered, detail = await self._dispatch_updater_control_request(
+            pending, active, request_id, action_label
+        )
         if not triggered:
-            UPDATE_LOG.warning("rollback/redo aguardando timer do updater: %s", detail)
+            UPDATE_LOG.warning("%s aguardando fallback do updater: %s", action_label, detail)
 
         async def _rollback_start_watchdog() -> None:
             await asyncio.sleep(90)
@@ -4131,7 +4329,7 @@ class BotLocal(commands.Bot):
                             discord.Color.blurple(),
                             control=self._zip_update_cancel_control(candidate_id),
                         )
-                    await asyncio.to_thread(self._trigger_updater_service_sync)
+                    await self._dispatch_updater_candidate(candidate_id, display_id)
                 except zipfile.BadZipFile:
                     await self._edit_zip_update_message(
                         message,

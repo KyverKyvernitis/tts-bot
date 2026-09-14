@@ -607,7 +607,7 @@ def test_candidate_suspicion_rejects_legacy_directory_with_trailing_space(tmp_pa
 def test_first_candidate_keeps_preparation_microsteps_instead_of_fake_queue() -> None:
     source = BOT.read_text(encoding="utf-8")
     start = source.index("                    queue_position = max(1")
-    end = source.index("                    await asyncio.to_thread(self._trigger_updater_service_sync)", start)
+    end = source.index("                    await self._dispatch_updater_candidate(candidate_id, display_id)", start)
     block = source[start:end]
 
     first_at = block.index("if queue_position <= 1:")

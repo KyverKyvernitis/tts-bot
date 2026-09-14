@@ -2099,6 +2099,27 @@ load_pending_local_candidate() {
     fi
   fi
 
+  if (( resuming_active == 0 )) && [[ -f "${LOCAL_CANDIDATE_PENDING_FILE:-}" ]]; then
+    local queue_created_at queue_wait_ms queue_wait_text
+    queue_created_at="$(json_field_from_file "$LOCAL_CANDIDATE_PENDING_FILE" created_at 2>/dev/null || true)"
+    queue_wait_ms="$(python3 - "$queue_created_at" <<'PYQUEUEWAIT' 2>/dev/null || echo 0
+import datetime, sys, time
+raw = (sys.argv[1] or '').strip()
+try:
+    dt = datetime.datetime.fromisoformat(raw.replace('Z', '+00:00'))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    print(max(0, int(time.time() * 1000) - int(dt.timestamp() * 1000)))
+except Exception:
+    print(0)
+PYQUEUEWAIT
+)"
+    [[ "$queue_wait_ms" =~ ^[0-9]+$ ]] || queue_wait_ms=0
+    queue_wait_text="$(format_update_duration_ms "$queue_wait_ms")"
+    printf '[timing] dispatch.queue_wait=%s (%sms)\n' "$queue_wait_text" "$queue_wait_ms"
+    logger -t "$LOG_TAG" "timing dispatch.queue_wait=${queue_wait_ms}ms" 2>/dev/null || true
+  fi
+
   manifest="$LOCAL_CANDIDATE_DIR/manifest.json"
   if [[ ! -f "$manifest" ]] || ! python3 - "$manifest" <<'PYVALIDMANIFEST' >/dev/null 2>&1
 import json, pathlib, sys
