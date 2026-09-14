@@ -3264,6 +3264,11 @@ def internal_update_create_zip_status():
     return _dispatch_internal_update_action("create_zip_status")
 
 
+@app.post("/internal/update/flush-logs")
+def internal_update_flush_logs():
+    return _dispatch_internal_update_action("flush_logs")
+
+
 
 @app.post("/core-worker/app/publish")
 def core_worker_app_publish():

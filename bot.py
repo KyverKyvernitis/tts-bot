@@ -4,6 +4,7 @@ import base64
 from collections import deque
 import contextlib
 import hashlib
+import io
 import json
 import logging
 import logging.handlers
@@ -173,6 +174,14 @@ COG_LOG = logging.getLogger("bot.cogs")
 UPDATE_LOG = logging.getLogger("zip_update")
 ASYNCIO_LOG = logging.getLogger("bot.asyncio")
 
+UPDATE_EMOJI_CHECK = "<:checkmark:1548838297806311445>"
+UPDATE_EMOJI_ERROR = "<:x_mark:1548838423169605654>"
+UPDATE_EMOJI_DATABASE = "<:Database:1548838603059105872>"
+UPDATE_EMOJI_CLOUD = "<:Cloud:1548838660915462254>"
+UPDATE_EMOJI_FILES = "<:Files:1548838468665475193>"
+UPDATE_EMOJI_GITHUB = "<:Github:1548838545500807239>"
+UPDATE_EMOJI_PROGRESS = "<a:loading:1510065277868445796>"
+
 print("BOT.PY INICIOU")
 
 
@@ -292,6 +301,9 @@ class BotLocal(commands.Bot):
         self._update_temp_root = Path("/tmp/discord-auto-update")
         self._update_staging_root = Path(os.getenv("DISCORD_AUTO_UPDATE_STAGING_DIR", str(self._repo_root.parent / "bot-update-staging")))
         self._zip_rollback_state_path = self._update_staging_root / "zip_update_rollback_state.json"
+        self._zip_update_log_outbox_dir = self._repo_root / "data" / "runtime" / "update-alert-outbox"
+        self._zip_update_delivery_receipts_dir = self._repo_root / "data" / "runtime" / "update-delivery-receipts"
+        self._zip_update_log_channel_state_path = self._repo_root / "data" / "runtime" / "update-log-channel.json"
         self._app_command_manifest_path = self._repo_root / "data" / "app_commands_manifest.json"
         self._app_command_sync_status_path = self._repo_root / "data" / "app_commands_sync_status.json"
         self._removed_slash_cleanup_state_path = self._repo_root / "data" / "removed_slash_cleanup_state.json"
@@ -963,19 +975,144 @@ class BotLocal(commands.Bot):
                             lag_ms,
                         )
 
+    def _zip_update_render_card_text(
+        self,
+        title: str,
+        description: str,
+        presentation: dict[str, object] | None = None,
+    ) -> str:
+        presentation = presentation if isinstance(presentation, dict) else {}
+        kind = str(presentation.get("kind") or "").strip().lower()
+        if kind == "progress":
+            action = str(presentation.get("action") or "update").strip().lower()
+            headline = {
+                "rollback": "Revertendo atualização",
+                "redo": "Reaplicando atualização",
+            }.get(action, "Atualizando")
+            identifier = str(presentation.get("identifier") or "").strip()
+            elapsed = str(presentation.get("elapsed") or "").strip()
+            stage = str(presentation.get("stage") or "Processando atualização").strip()
+            detail = str(presentation.get("detail") or "").strip()
+            try:
+                current = max(0, min(5, int(presentation.get("macro_index") or 0)))
+            except (TypeError, ValueError):
+                current = 0
+            macros = ("Preparação", "Validação", "Release", "Promoção", "Verificação", "GitHub")
+            lines = [f"# {UPDATE_EMOJI_PROGRESS} {headline}"]
+            meta = " · ".join(piece for piece in (f"`{identifier}`" if identifier else "", elapsed) if piece)
+            if meta:
+                lines.append(f"-# {meta}")
+            lines.append("")
+            for index, label in enumerate(macros):
+                if index < current:
+                    lines.append(f"{UPDATE_EMOJI_CHECK} {label}")
+                elif index == current:
+                    lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}**")
+                    micro = stage
+                    if detail and detail.casefold() not in stage.casefold():
+                        micro = f"{stage} · {detail}"
+                    if micro:
+                        lines.append(f"-# {micro[:220]}")
+                else:
+                    lines.append(f"○ {label}")
+            return "\n".join(lines)
+
+        if kind == "final":
+            status = str(presentation.get("status") or "success").strip().lower()
+            if status in {"error", "failed", "failure"}:
+                icon = UPDATE_EMOJI_ERROR
+                headline = "Atualização não aplicada"
+            elif status in {"warn", "warning"}:
+                icon = "⚠️"
+                headline = "Atualização concluída com avisos"
+            else:
+                icon = UPDATE_EMOJI_CHECK
+                headline = "Atualização concluída"
+            headline = str(presentation.get("headline") or headline).strip() or headline
+            summary = str(presentation.get("summary") or description or "Atualização aplicada e validada.").strip()
+            identifier = str(presentation.get("display_id") or "").strip()
+            old_commit = str(presentation.get("from") or "").strip()
+            new_commit = str(presentation.get("to") or "").strip()
+            files = str(presentation.get("file_count_text") or "arquivos alterados").strip()
+            diff_summary = str(presentation.get("diff_summary") or "").strip()
+            impact = str(presentation.get("impact") or "").strip()
+            impact = {
+                "sem reinício do bot": "Sem reinício",
+                "reinício completo": "Bot reiniciado",
+                "recarga controlada de cog": "Cog recarregada",
+            }.get(impact.casefold(), impact)
+            duration = str(presentation.get("duration") or "").strip()
+            bot_health = str(presentation.get("bot_health") or "").strip()
+            github_synced = bool(presentation.get("github_synced", True))
+            lines = [f"# {icon} {headline}"]
+            if summary:
+                lines.append(summary)
+            lines.append("")
+            if identifier:
+                lines.append(f"`{identifier}`")
+            if old_commit or new_commit:
+                lines.append(f"`{old_commit or '?'}` → `{new_commit or '?'}`")
+            file_line = f"{UPDATE_EMOJI_FILES} **{files}**"
+            if diff_summary:
+                file_line += f" · `{diff_summary}`"
+            lines.append(file_line)
+            impact_line = " · ".join(piece for piece in (impact, f"**{duration}**" if duration else "") if piece)
+            if impact_line:
+                lines.append(impact_line)
+            health_bits: list[str] = []
+            if bot_health:
+                health_label = "Bot saudável" if bot_health == "OK" or bot_health.startswith("estável") else f"Bot: {bot_health}"
+                health_bits.append(f"{UPDATE_EMOJI_CHECK} {health_label}")
+            if github_synced:
+                health_bits.append(f"{UPDATE_EMOJI_GITHUB} GitHub sincronizado")
+            if health_bits:
+                lines.append("")
+                lines.append(" · ".join(health_bits))
+            return "\n".join(lines)
+
+        title = self._zip_update_normalize_title(title, "")
+        return f"# {title}\n{description.strip()}".strip()
+
     def _make_zip_update_view(
         self,
         title: str,
         description: str,
         color: discord.Color,
         control: dict[str, object] | None = None,
+        *,
+        presentation: dict[str, object] | None = None,
+        info_token: str = "",
     ) -> discord.ui.LayoutView:
         view = discord.ui.LayoutView(timeout=None)
-        title = self._zip_update_normalize_title(title, "")
-        text = f"# {title}\n{description.strip()}".strip()
+        text = self._zip_update_render_card_text(title, description, presentation)
         if len(text) > 3900:
             text = text[:3897].rstrip() + "..."
         children: list[discord.ui.Item] = [discord.ui.TextDisplay(text)]
+
+        info_buttons: list[discord.ui.Button] = []
+        if info_token and isinstance(presentation, dict) and str(presentation.get("kind") or "").lower() == "final":
+            token = str(info_token)[:40]
+            info_buttons.append(
+                discord.ui.Button(
+                    label="Detalhes",
+                    emoji=UPDATE_EMOJI_DATABASE,
+                    style=discord.ButtonStyle.secondary,
+                    custom_id=f"zip_update_info:details:{token}"[:100],
+                )
+            )
+            if str(presentation.get("files_text") or "").strip():
+                info_buttons.append(
+                    discord.ui.Button(
+                        label="Arquivos",
+                        emoji=UPDATE_EMOJI_FILES,
+                        style=discord.ButtonStyle.secondary,
+                        custom_id=f"zip_update_info:files:{token}"[:100],
+                    )
+                )
+        if info_buttons:
+            children.append(discord.ui.Separator())
+            children.append(discord.ui.ActionRow(*info_buttons))
+
         if isinstance(control, dict) and control.get("enabled"):
             emoji = str(control.get("emoji") or "").strip() or None
             label = str(control.get("label") or "").strip()[:80] or None
@@ -995,7 +1132,8 @@ class BotLocal(commands.Bot):
                     custom_id=custom_id,
                     disabled=disabled,
                 )
-                children.append(discord.ui.Separator())
+                if not info_buttons:
+                    children.append(discord.ui.Separator())
                 children.append(discord.ui.ActionRow(button))
         view.add_item(discord.ui.Container(*children, accent_color=color))
         return view
@@ -1148,6 +1286,201 @@ class BotLocal(commands.Bot):
             UPDATE_LOG.warning("falha ao salvar recibo global do log de update em %s", path, exc_info=True)
             return False
 
+    def _zip_update_log_channel_id_sync(self) -> int:
+        """Resolve o canal técnico sem usar o webhook para envio.
+
+        A migração é automática: `DISCORD_AUTO_UPDATE_LOG_CHANNEL_ID` tem
+        prioridade; na primeira execução sem esse valor, o bot consulta apenas os
+        metadados do webhook antigo, persiste o channel_id e nunca depende dele
+        novamente para entregar mensagens.
+        """
+        for name in ("DISCORD_AUTO_UPDATE_LOG_CHANNEL_ID", "UPDATE_LOG_CHANNEL_ID", "ALERT_CHANNEL_ID"):
+            raw = str(os.getenv(name, "") or "").strip()
+            if raw.isdigit() and int(raw) > 0:
+                return int(raw)
+
+        try:
+            data = json.loads(self._zip_update_log_channel_state_path.read_text(encoding="utf-8"))
+            channel_id = int(str(data.get("channel_id") or "0")) if isinstance(data, dict) else 0
+            if channel_id > 0:
+                return channel_id
+        except Exception:
+            pass
+
+        webhook_url = str(os.getenv("ALERT_WEBHOOK_URL", "") or "").strip()
+        if not webhook_url.startswith("https://"):
+            return 0
+        try:
+            request = urllib.request.Request(webhook_url, headers={"User-Agent": "tts-bot-update-log-migration/1"})
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
+            channel_id = int(str(payload.get("channel_id") or "0")) if isinstance(payload, dict) else 0
+            if channel_id <= 0:
+                return 0
+            self._zip_update_log_channel_state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._zip_update_log_channel_state_path.with_name(
+                f".{self._zip_update_log_channel_state_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            )
+            tmp.write_text(
+                json.dumps(
+                    {
+                        "channel_id": str(channel_id),
+                        "resolved_at": datetime.now(timezone.utc).isoformat(),
+                        "source": "legacy_webhook_metadata",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self._zip_update_log_channel_state_path)
+            return channel_id
+        except Exception:
+            UPDATE_LOG.warning(
+                "não consegui resolver o canal de logs a partir do webhook legado; defina DISCORD_AUTO_UPDATE_LOG_CHANNEL_ID",
+                exc_info=True,
+            )
+            return 0
+
+    def _zip_update_claim_log_jobs_sync(self, *, limit: int = 12) -> list[tuple[Path, dict[str, object]]]:
+        root = self._zip_update_log_outbox_dir
+        root.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        for stale in root.glob(".sending.*.json"):
+            try:
+                if now - stale.stat().st_mtime < 120:
+                    continue
+                parts = stale.name.split(".", 3)
+                original = parts[3] if len(parts) == 4 and parts[3] else f"recovered-{int(now)}.json"
+                target = root / original
+                if target.exists():
+                    target = root / f"recovered-{int(now)}-{uuid.uuid4().hex[:6]}-{original}"
+                os.replace(stale, target)
+            except OSError:
+                continue
+
+        claimed: list[tuple[Path, dict[str, object]]] = []
+        candidates = sorted(root.glob("*.json"), key=lambda item: item.stat().st_mtime if item.exists() else 0.0)
+        for path in candidates[: max(1, limit)]:
+            claim = path.with_name(f".sending.{os.getpid()}.{path.name}")
+            try:
+                os.replace(path, claim)
+                data = json.loads(claim.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("job de log não é objeto JSON")
+                try:
+                    next_attempt = float(data.get("next_attempt_at") or 0)
+                except (TypeError, ValueError):
+                    next_attempt = 0.0
+                if next_attempt > now:
+                    os.replace(claim, path)
+                    continue
+                claimed.append((claim, data))
+            except Exception as exc:
+                failed = root / "failed"
+                failed.mkdir(parents=True, exist_ok=True)
+                try:
+                    fallback = {"attempts": 20, "last_error": f"{type(exc).__name__}: {exc}", "failed_at": datetime.now(timezone.utc).isoformat()}
+                    claim.write_text(json.dumps(fallback, ensure_ascii=False, indent=2), encoding="utf-8")
+                    os.replace(claim, failed / path.name)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        claim.unlink()
+        return claimed
+
+    def _zip_update_requeue_log_job_sync(self, claim: Path, data: dict[str, object], exc: BaseException) -> None:
+        root = self._zip_update_log_outbox_dir
+        try:
+            attempts = int(data.get("attempts") or 0) + 1
+        except (TypeError, ValueError):
+            attempts = 1
+        data["attempts"] = attempts
+        data["last_error"] = f"{type(exc).__name__}: {exc}"[:800]
+        data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        if attempts >= 20:
+            data["failed_at"] = datetime.now(timezone.utc).isoformat()
+            failed = root / "failed"
+            failed.mkdir(parents=True, exist_ok=True)
+            claim.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(claim, failed / claim.name.split(".", 3)[-1])
+            return
+        data["next_attempt_at"] = time.time() + min(300, 5 * (2 ** min(attempts, 6)))
+        original = claim.name.split(".", 3)[-1]
+        target = root / original
+        claim.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(claim, target)
+
+    def _zip_update_log_attachment_path(self, raw: object) -> Path | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        root = self._zip_update_log_outbox_dir.resolve(strict=False)
+        candidate = Path(text).resolve(strict=False)
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("anexo do log fora do outbox") from exc
+        return candidate if candidate.is_file() else None
+
+    async def _zip_update_flush_raw_logs_once(self) -> dict[str, object]:
+        channel_id = await asyncio.to_thread(self._zip_update_log_channel_id_sync)
+        if channel_id <= 0:
+            return {"ok": False, "error": "canal de logs não configurado"}
+        try:
+            channel = self.get_channel(channel_id)
+            if channel is None:
+                channel = await self.fetch_channel(channel_id)
+            if channel is None or not hasattr(channel, "send"):
+                return {"ok": False, "error": "canal de logs indisponível"}
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+
+        jobs = await asyncio.to_thread(self._zip_update_claim_log_jobs_sync)
+        delivered = 0
+        for claim, data in jobs:
+            event_id = str(data.get("event_id") or claim.stem).strip() or claim.stem
+            safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", event_id)[:120]
+            receipt = self._zip_update_delivery_receipts_dir / f"{safe_id}.alert.done"
+            attachment: Path | None = None
+            try:
+                attachment = self._zip_update_log_attachment_path(data.get("attachment"))
+                if receipt.is_file():
+                    claim.unlink(missing_ok=True)
+                    if attachment is not None:
+                        attachment.unlink(missing_ok=True)
+                    continue
+
+                title = str(data.get("title") or "Log do updater").strip()[:180]
+                body = str(data.get("body") or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+                kind = str(data.get("type") or "info").strip().lower()
+                icon = {
+                    "success": "<:checkmark:1548838297806311445>",
+                    "error": "<:x_mark:1548838423169605654>",
+                    "warn": "⚠️",
+                    "warning": "⚠️",
+                }.get(kind, "<:Files:1548838468665475193>")
+                header = f"{icon} **{title}**\n-# `{event_id}`"
+                files: list[discord.File] = []
+                if attachment is not None:
+                    files.append(discord.File(str(attachment), filename=str(data.get("attachment_name") or attachment.name)[:120]))
+                if body and len(body) <= 1600 and "```" not in body:
+                    content = f"{header}\n```text\n{body}\n```"
+                else:
+                    content = header
+                    if body:
+                        files.insert(0, discord.File(io.BytesIO(body.encode("utf-8", errors="replace")), filename=f"{safe_id or 'update'}.log.txt"))
+                await channel.send(content=content, files=files, allowed_mentions=discord.AllowedMentions.none())
+                await asyncio.to_thread(self._zip_update_alert_receipt_save_sync, receipt, event_id)
+                claim.unlink(missing_ok=True)
+                if attachment is not None:
+                    attachment.unlink(missing_ok=True)
+                delivered += 1
+            except Exception as exc:
+                UPDATE_LOG.warning("falha ao entregar log técnico %s", event_id, exc_info=True)
+                await asyncio.to_thread(self._zip_update_requeue_log_job_sync, claim, data, exc)
+        return {"ok": True, "delivered": delivered}
+
     def _zip_update_current_head_sync(self) -> str:
         try:
             completed = subprocess.run(
@@ -1294,7 +1627,7 @@ class BotLocal(commands.Bot):
                         "status_detected_at": datetime.now(timezone.utc).isoformat(),
                     }
                 )
-                # A mensagem pública final não prova que o webhook/log também
+                # A mensagem pública final não prova que o log técnico também
                 # chegou. O recibo global é compartilhado com a outbox do shell,
                 # evitando que uma recuperação do bot e um replay posterior
                 # publiquem o mesmo log duas vezes.
@@ -1408,41 +1741,56 @@ class BotLocal(commands.Bot):
             body_lines.append(f"Hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
             alert_type = "success" if status == "success" else ("warn" if status == "warn" else "error")
             try:
+                env = self._git_env()
+                env["REPO_DIR"] = str(self._repo_root)
+                env["UPDATE_ALERT_OUTBOX_DIR"] = str(self._zip_update_log_outbox_dir)
                 completed = await asyncio.to_thread(
                     subprocess.run,
-                    ["bash", str(self._repo_root / "alert.sh"), alert_type, log_title, "\n".join(body_lines)],
+                    [
+                        "bash",
+                        str(self._repo_root / "alert.sh"),
+                        alert_type,
+                        log_title,
+                        "\n".join(body_lines),
+                        "",
+                        "",
+                        alert_event_id,
+                    ],
                     cwd=str(self._repo_root),
-                    env=self._git_env(),
+                    env=env,
                     text=True,
                     capture_output=True,
-                    timeout=25,
+                    timeout=10,
                     check=False,
                 )
                 if completed.returncode == 0:
-                    global_receipt_saved = await asyncio.to_thread(
-                        self._zip_update_alert_receipt_save_sync,
-                        alert_receipt,
-                        alert_event_id,
-                    )
-                    receipt["log_delivered"] = True
-                    receipt["log_recovered_at"] = datetime.now(timezone.utc).isoformat()
-                    receipt["global_log_receipt_saved"] = global_receipt_saved
-                    await asyncio.to_thread(self._zip_update_recovery_receipt_save, candidate_dir, receipt)
+                    await self._zip_update_flush_raw_logs_once()
+                    if alert_receipt.is_file():
+                        receipt["log_delivered"] = True
+                        receipt["log_recovered_at"] = datetime.now(timezone.utc).isoformat()
+                        receipt["global_log_receipt_saved"] = True
+                        await asyncio.to_thread(self._zip_update_recovery_receipt_save, candidate_dir, receipt)
                 else:
-                    UPDATE_LOG.warning("falha ao recuperar log final de %s: %s", display_id, (completed.stderr or completed.stdout or "")[-500:])
+                    UPDATE_LOG.warning("falha ao enfileirar log final recuperado de %s: %s", display_id, (completed.stderr or completed.stdout or "")[-500:])
             except Exception:
-                UPDATE_LOG.warning("falha ao executar recuperação do log final de %s", display_id, exc_info=True)
+                UPDATE_LOG.warning("falha ao recuperar log final de %s", display_id, exc_info=True)
 
     async def _zip_update_reconcile_loop(self) -> None:
         await asyncio.sleep(4)
+        reconcile_tick = 0
         while not self.is_closed():
             try:
-                await self._zip_update_reconcile_archived_messages_once()
+                # Logs técnicos usam o mesmo bot, inclusive depois de um restart.
+                # O polling curto reduz a latência sem editar a mensagem pública.
+                await self._zip_update_flush_raw_logs_once()
+                if reconcile_tick % 12 == 0:
+                    await self._zip_update_reconcile_archived_messages_once()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 UPDATE_LOG.warning("falha na reconciliação de confirmações de update", exc_info=True)
-            await asyncio.sleep(60)
+            reconcile_tick += 1
+            await asyncio.sleep(5)
 
     def _zip_update_rollback_request_roots(self) -> list[Path]:
         roots: list[Path] = []
@@ -1593,8 +1941,10 @@ class BotLocal(commands.Bot):
         description: str,
         color: discord.Color,
         control: dict[str, object] | None = None,
+        *,
+        presentation: dict[str, object] | None = None,
     ) -> discord.Message:
-        view = self._make_zip_update_view(title, description, color, control=control)
+        view = self._make_zip_update_view(title, description, color, control=control, presentation=presentation)
         return await message.reply(view=view, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
     async def _edit_zip_update_message(
@@ -1605,8 +1955,10 @@ class BotLocal(commands.Bot):
         description: str,
         color: discord.Color,
         control: dict[str, object] | None = None,
+        *,
+        presentation: dict[str, object] | None = None,
     ) -> discord.Message:
-        view = self._make_zip_update_view(title, description, color, control=control)
+        view = self._make_zip_update_view(title, description, color, control=control, presentation=presentation)
         if status_message is not None:
             try:
                 await status_message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
@@ -1698,11 +2050,14 @@ class BotLocal(commands.Bot):
         title = self._zip_update_normalize_title(str(record.get("title") or "Update aplicado"), str(record.get("status") or "success"))
         description = str(record.get("description") or "")
         status = str(record.get("status") or "success")
+        presentation = record.get("presentation") if isinstance(record.get("presentation"), dict) else None
         return self._make_zip_update_view(
             title,
             description,
             self._zip_update_status_color(status),
             control=self._zip_update_control_for_record(record),
+            presentation=presentation,
+            info_token=str(record.get("token") or ""),
         )
 
     def _git_env(self) -> dict[str, str]:
@@ -2515,6 +2870,9 @@ class BotLocal(commands.Bot):
         if action == "create_zip_status":
             future = asyncio.run_coroutine_threadsafe(self._create_zip_status_from_update(payload), self.loop)
             return future.result(timeout=15)
+        if action == "flush_logs":
+            future = asyncio.run_coroutine_threadsafe(self._zip_update_flush_raw_logs_once(), self.loop)
+            return future.result(timeout=20)
         if action != "reload_cogs":
             return {"ok": False, "error": "ação interna desconhecida"}
         modules_raw = payload.get("modules") if isinstance(payload, dict) else None
@@ -2563,6 +2921,8 @@ class BotLocal(commands.Bot):
         status = str(payload.get("status") or "info").lower().strip()
         title = self._zip_update_normalize_title(title, status)
         color = self._zip_update_status_color(status)
+        presentation_raw = payload.get("ui") if isinstance(payload, dict) else None
+        presentation = dict(presentation_raw) if isinstance(presentation_raw, dict) else None
         control_raw = payload.get("control") if isinstance(payload, dict) else None
         control: dict[str, object] | None = None
         state_record: dict[str, object] | None = None
@@ -2623,7 +2983,32 @@ class BotLocal(commands.Bot):
                 for key in ("update_from", "update_to", "rollback_commit", "redo_commit"):
                     if control_raw.get(key):
                         state_record[key] = str(control_raw.get(key))
+                if presentation is not None:
+                    state_record["presentation"] = presentation
                 control = self._zip_update_control_for_record(state_record, disabled=stale_event)
+
+        # Detalhes/Arquivos pertencem à mensagem final, não ao botão de rollback.
+        # Mesmo quando não há reversão disponível, persista um token somente de
+        # leitura para que os botões informativos sobrevivam a restart do bot.
+        if (
+            state_record is None
+            and isinstance(presentation, dict)
+            and str(presentation.get("kind") or "").strip().lower() == "final"
+            and not stale_event
+        ):
+            state_record = {
+                "token": uuid.uuid4().hex[:16],
+                "mode": "info",
+                "channel_id": str(channel_id),
+                "message_id": str(message_id),
+                "title": title,
+                "description": description,
+                "status": status,
+                "branch": str(presentation.get("branch") or payload.get("branch") or "main"),
+                "event_at": incoming_event.isoformat(),
+                "updated_at": now_event.isoformat(),
+                "presentation": presentation,
+            }
 
         clear_previous_control = bool(payload.get("clear_previous_control"))
         preserve_existing_control = bool(payload.get("preserve_existing_control"))
@@ -2639,7 +3024,15 @@ class BotLocal(commands.Bot):
             status_message = await self._zip_update_fetch_message(channel_id, message_id)
             if status_message is None:
                 return {"ok": False, "error": "mensagem não encontrada"}
-            view = self._make_zip_update_view(title, description, color, control=control)
+            info_token = str(state_record.get("token") or "") if isinstance(state_record, dict) else ""
+            view = self._make_zip_update_view(
+                title,
+                description,
+                color,
+                control=control,
+                presentation=presentation,
+                info_token=info_token,
+            )
             await status_message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
             # O estado persistente só pode avançar depois que o Discord confirmou
             # a edição. A ordem antiga salvava antes do await; uma falha tornava o
@@ -2653,7 +3046,7 @@ class BotLocal(commands.Bot):
                     # depois de um restart. A confirmação final continua visível,
                     # porém sem oferecer uma ação de rollback inconsistente.
                     await status_message.edit(
-                        view=self._make_zip_update_view(title, description, color),
+                        view=self._make_zip_update_view(title, description, color, presentation=presentation),
                         allowed_mentions=discord.AllowedMentions.none(),
                     )
                     return {
@@ -2758,6 +3151,60 @@ class BotLocal(commands.Bot):
         found["queue_file"] = str(cancelled_queue)
         return found
 
+
+    def _make_zip_update_info_view(self, title: str, body: str) -> discord.ui.LayoutView:
+        text = f"# {title}\n{body.strip()}".strip()
+        if len(text) > 3900:
+            text = text[:3897].rstrip() + "..."
+        view = discord.ui.LayoutView(timeout=120)
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay(text), accent_color=discord.Color.blurple()))
+        return view
+
+    async def _on_zip_update_info_click(self, interaction: discord.Interaction) -> None:
+        data = getattr(interaction, "data", None)
+        custom_id = str(data.get("custom_id") or "") if isinstance(data, dict) else ""
+        parts = custom_id.split(":", 2)
+        if len(parts) != 3 or parts[0] != "zip_update_info":
+            return
+        kind, token = parts[1], parts[2]
+        state = self._zip_update_state_load()
+        record = state.get("latest") if isinstance(state.get("latest"), dict) else None
+        if not isinstance(record, dict) or str(record.get("token") or "") != token:
+            await interaction.response.send_message("Os detalhes desta atualização não estão mais disponíveis.", ephemeral=True)
+            return
+        presentation = record.get("presentation") if isinstance(record.get("presentation"), dict) else {}
+        if kind == "files":
+            files_text = str(presentation.get("files_text") or "Nenhum arquivo listado.").strip()
+            count = str(presentation.get("file_count_text") or "Arquivos alterados").strip()
+            view = self._make_zip_update_info_view(f"{UPDATE_EMOJI_FILES} {count}", files_text)
+        else:
+            lines: list[str] = []
+            display_id = str(presentation.get("display_id") or "").strip()
+            branch = str(presentation.get("branch") or record.get("branch") or "main").strip()
+            old_commit = str(presentation.get("from") or record.get("update_from") or "").strip()
+            new_commit = str(presentation.get("to") or record.get("update_to") or "").strip()
+            if display_id:
+                lines.append(f"`{display_id}` · branch `{branch}`")
+            if old_commit or new_commit:
+                lines.append(f"`{old_commit or '?'}` → `{new_commit or '?'}`")
+            checks = str(presentation.get("checks_text") or "").strip()
+            if checks:
+                lines.extend(["", "**Verificações**", checks])
+            cache = str(presentation.get("cache_text") or "").strip()
+            if cache and "0 hit/0 miss" not in cache:
+                lines.extend(["", "**Cache**", cache])
+            tests = str(presentation.get("tests_text") or "").strip()
+            if tests and "não executado" not in tests:
+                lines.extend(["", "**Testes**", tests])
+            timings = str(presentation.get("timings_text") or "").strip()
+            if timings:
+                pretty_timings = "\n".join(piece.strip() for piece in timings.split(",") if piece.strip())
+                lines.extend(["", "**Tempos**", pretty_timings])
+            processes = str(presentation.get("processes") or "").strip()
+            if processes and processes.casefold() not in {"nenhum", "nenhum processo alterado"}:
+                lines.extend(["", "**Processos**", processes])
+            view = self._make_zip_update_info_view(f"{UPDATE_EMOJI_DATABASE} Detalhes", "\n".join(lines) or "Sem detalhes adicionais.")
+        await interaction.response.send_message(view=view, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     async def _on_zip_update_control_click(self, interaction: discord.Interaction) -> None:
         data = getattr(interaction, "data", None)
@@ -3093,6 +3540,8 @@ class BotLocal(commands.Bot):
                 custom_id = str(data.get("custom_id") or "")
             if custom_id.startswith("zip_update_confirm:"):
                 await self._on_zip_update_confirmation_click(interaction)
+            elif custom_id.startswith("zip_update_info:"):
+                await self._on_zip_update_info_click(interaction)
             elif custom_id.startswith("zip_update:"):
                 await self._on_zip_update_control_click(interaction)
         except Exception:
@@ -3176,14 +3625,24 @@ class BotLocal(commands.Bot):
                 )
                 continue
 
+            prep_ui_started = time.monotonic()
             status_message: discord.Message | None = await self._send_zip_update_message(
                 message,
-                "📦 Atualização recebida",
+                "Atualização recebida",
                 (
                     f"**Conferindo o anexo**\n"
                     f"A estrutura e a segurança serão validadas antes de alterar a VPS.{zip_hint}"
                 ),
                 discord.Color.blurple(),
+                presentation={
+                    "kind": "progress",
+                    "stage": "Recebendo pacote",
+                    "detail": str(getattr(zip_attachment, "filename", "update.zip") or "update.zip"),
+                    "identifier": prefix,
+                    "elapsed": "<1s",
+                    "macro_index": 0,
+                    "action": "update",
+                },
             )
 
             async with self._zip_update_lock:
@@ -3200,12 +3659,21 @@ class BotLocal(commands.Bot):
                     status_message = await self._edit_zip_update_message(
                         message,
                         status_message,
-                        "🔎 Preparando atualização",
+                        "Preparando atualização",
                         (
-                            "<a:loading:1510065277868445796> **Validando pacote**\n"
+                            f"{UPDATE_EMOJI_PROGRESS} **Validando pacote**\n"
                             "-# A mensagem será atualizada em cada etapa." + zip_hint
                         ),
                         discord.Color.blurple(),
+                        presentation={
+                            "kind": "progress",
+                            "stage": "Validando pacote",
+                            "detail": "Integridade e segurança do ZIP",
+                            "identifier": prefix,
+                            "elapsed": f"{max(0, int(time.monotonic() - prep_ui_started))}s",
+                            "macro_index": 0,
+                            "action": "update",
+                        },
                     )
 
                     status_context = {
@@ -3258,9 +3726,18 @@ class BotLocal(commands.Bot):
                             if prefix:
                                 lines.append(f"-# {prefix}")
                             view = self._make_zip_update_view(
-                                "🔎 Preparando atualização",
+                                "Preparando atualização",
                                 "\n".join(lines),
                                 discord.Color.blurple(),
+                                presentation={
+                                    "kind": "progress",
+                                    "stage": current,
+                                    "detail": completed and f"{completed} concluído" or "Preparação segura do candidato",
+                                    "identifier": prefix,
+                                    "elapsed": f"{max(0, int(time.monotonic() - prep_ui_started))}s",
+                                    "macro_index": 0,
+                                    "action": "update",
+                                },
                             )
                             try:
                                 await asyncio.wait_for(
@@ -3323,10 +3800,19 @@ class BotLocal(commands.Bot):
                         status_message = await self._edit_zip_update_message(
                             message,
                             status_message,
-                            "🔎 Preparando atualização",
+                            "Preparando atualização",
                             "\n".join(details),
                             discord.Color.blurple(),
                             control=self._zip_update_cancel_control(candidate_id),
+                            presentation={
+                                "kind": "progress",
+                                "stage": "Iniciando atualização",
+                                "detail": file_summary,
+                                "identifier": display_id,
+                                "elapsed": f"{max(0, int(time.monotonic() - prep_ui_started))}s",
+                                "macro_index": 0,
+                                "action": "update",
+                            },
                         )
                     else:
                         before = queue_position - 1

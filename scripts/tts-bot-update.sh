@@ -232,7 +232,7 @@ ACTIVITY_HEALTHCHECK_STATUS="não verificado"
 ROLLBACK_STATUS="não foi necessário"
 # Variáveis opcionais usadas apenas quando certos scripts/instaladores mudam.
 # Com `set -u`, elas precisam existir desde o topo para a etapa final de
-# webhook/mensagem nunca derrubar o updater após o commit/push já ter passado.
+# falha de entrega ao Discord nunca derrubar o updater após o commit/push já ter passado.
 ALERT_UNIT_STATUS="não alterado"
 CRONTAB_HEALTH_STATUS="não alterado"
 APP_COMMAND_SYNC_SUMMARY="Comandos sem mudanças"
@@ -259,8 +259,15 @@ if [[ "$UPDATER_EPHEMERAL_DIR" != /* || ! -d "$UPDATER_EPHEMERAL_DIR" || -L "$UP
 fi
 RUN_LOG_FILE="$(mktemp "$UPDATER_EPHEMERAL_DIR/tts-bot-updater.XXXXXX.log")"
 ZIP_STATUS_CONTROL_JSON=""
+ZIP_STATUS_UI_JSON=""
 UPDATE_TITLE_EMOJI="<a:areia:1496606578395189473>"
 UPDATE_STAGE_EMOJI="<a:loading:1510065277868445796>"
+UPDATE_CHECK_EMOJI="<:checkmark:1548838297806311445>"
+UPDATE_ERROR_EMOJI="<:x_mark:1548838423169605654>"
+UPDATE_DATABASE_EMOJI="<:Database:1548838603059105872>"
+UPDATE_CLOUD_EMOJI="<:Cloud:1548838660915462254>"
+UPDATE_FILES_EMOJI="<:Files:1548838468665475193>"
+UPDATE_GITHUB_EMOJI="<:Github:1548838545500807239>"
 ZIP_PROGRESS_HISTORY=""
 ZIP_PROGRESS_COMPLETED_COUNT=0
 ZIP_PROGRESS_HIDDEN_COUNT=0
@@ -847,79 +854,18 @@ send_alert_reliably() {
     [[ -f "$receipt" ]] && return 0
   fi
 
-  if sudo -u ubuntu /usr/bin/env bash "$REPO_DIR/alert.sh" "$alert_type" "$title" "$body" "$attach" "$attach_name"; then
-    if [[ -n "$receipt" ]]; then
-      local receipt_tmp="$receipt.tmp.$$"
-      if printf '%s\n' "$(date -Iseconds)" > "$receipt_tmp"; then
-        chown ubuntu:ubuntu "$receipt_tmp" 2>/dev/null || true
-        chmod 0664 "$receipt_tmp" 2>/dev/null || true
-        if ! mv -f "$receipt_tmp" "$receipt"; then
-          rm -f "$receipt_tmp" 2>/dev/null || true
-          logger -t "$LOG_TAG" "alerta entregue, mas recibo não pôde ser persistido: ${event_id:-$title}" 2>/dev/null || true
-        fi
-      else
-        rm -f "$receipt_tmp" 2>/dev/null || true
-        logger -t "$LOG_TAG" "alerta entregue, mas recibo não pôde ser criado: ${event_id:-$title}" 2>/dev/null || true
-      fi
-    fi
+  # alert.sh não envia mais webhook. Ele é somente o produtor durável da fila
+  # que o próprio bot consome no canal técnico de logs. O sexto argumento torna
+  # eventos finais idempotentes entre retry/restart do updater.
+  if sudo -u ubuntu /usr/bin/env \
+      REPO_DIR="$REPO_DIR" \
+      UPDATE_ALERT_OUTBOX_DIR="$UPDATE_ALERT_OUTBOX_DIR" \
+      bash "$REPO_DIR/alert.sh" "$alert_type" "$title" "$body" "$attach" "$attach_name" "$event_id"; then
+    logger -t "$LOG_TAG" "log técnico enfileirado para entrega pelo bot: ${event_id:-$title}" 2>/dev/null || true
     return 0
   fi
 
-  local queued_rc=0
-  if ALERT_TYPE_VALUE="$alert_type" ALERT_TITLE_VALUE="$title" ALERT_BODY_VALUE="$body" \
-  ALERT_ATTACH_VALUE="$attach" ALERT_ATTACH_NAME_VALUE="$attach_name" ALERT_EVENT_ID_VALUE="$event_id" \
-  UPDATE_ALERT_OUTBOX_DIR="$UPDATE_ALERT_OUTBOX_DIR" python3 - <<'PYQUEUEALERT'
-import datetime, hashlib, json, os, pathlib, shutil, time, uuid
-
-root = pathlib.Path(os.environ['UPDATE_ALERT_OUTBOX_DIR'])
-root.mkdir(parents=True, exist_ok=True)
-event_id = (os.environ.get('ALERT_EVENT_ID_VALUE') or '').strip()
-if event_id:
-    safe = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in event_id)[:120]
-else:
-    digest = hashlib.sha256(
-        ((os.environ.get('ALERT_TITLE_VALUE') or '') + '\0' + (os.environ.get('ALERT_BODY_VALUE') or '')).encode('utf-8', errors='ignore')
-    ).hexdigest()[:16]
-    safe = f"{int(time.time() * 1000)}-{digest}-{uuid.uuid4().hex[:8]}"
-job_path = root / f"{safe}.json"
-attachment = ''
-source = pathlib.Path(os.environ.get('ALERT_ATTACH_VALUE') or '')
-if source.is_file() and source.stat().st_size > 0:
-    attachment = str(root / f"{safe}.attachment")
-    shutil.copy2(source, attachment)
-payload = {
-    'schema_version': 1,
-    'event_id': event_id or safe,
-    'type': os.environ.get('ALERT_TYPE_VALUE') or 'info',
-    'title': os.environ.get('ALERT_TITLE_VALUE') or 'Auto update',
-    'body': os.environ.get('ALERT_BODY_VALUE') or '',
-    'attachment': attachment,
-    'attachment_name': os.environ.get('ALERT_ATTACH_NAME_VALUE') or '',
-    'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'attempts': 0,
-    'last_error': 'falha no envio direto',
-}
-tmp = job_path.with_name('.' + job_path.name + f'.{os.getpid()}.tmp')
-tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
-os.replace(tmp, job_path)
-for path in (job_path, pathlib.Path(attachment) if attachment else None):
-    if path:
-        try:
-            os.chmod(path, 0o664)
-        except OSError:
-            pass
-PYQUEUEALERT
-  then
-    queued_rc=0
-  else
-    queued_rc=$?
-  fi
-  chown ubuntu:ubuntu "$UPDATE_ALERT_OUTBOX_DIR" 2>/dev/null || true
-  if (( queued_rc == 0 )); then
-    logger -t "$LOG_TAG" "alerta enfileirado para reenvio: ${event_id:-$title}" 2>/dev/null || true
-    return 0
-  fi
-  logger -t "$LOG_TAG" "falha ao enviar e ao persistir alerta: ${event_id:-$title}" 2>/dev/null || true
+  logger -t "$LOG_TAG" "falha ao persistir log técnico: ${event_id:-$title}" 2>/dev/null || true
   return 1
 }
 
@@ -2866,127 +2812,96 @@ PYFLUSHSTATUS
 }
 
 flush_update_alert_outbox() {
+  # A fila de logs pertence ao bot. Quando ele está online, pedimos um flush
+  # imediato; quando está reiniciando/offline, os jobs permanecem no disco e o
+  # loop de reconciliação do bot os entrega assim que voltar.
   prepare_update_delivery_dirs || true
-  UPDATE_ALERT_OUTBOX_DIR="$UPDATE_ALERT_OUTBOX_DIR" UPDATE_DELIVERY_RECEIPTS_DIR="$UPDATE_DELIVERY_RECEIPTS_DIR" \
-  REPO_DIR="$REPO_DIR" python3 - <<'PYFLUSHALERT'
-import datetime, json, os, pathlib, subprocess, time
+  BOT_HEALTH_URL="$BOT_HEALTH_URL" REPO_DIR="$REPO_DIR" python3 - <<'PYFLUSHLOG' 2>/dev/null || true
+import json, os, pathlib, urllib.request
 
-root = pathlib.Path(os.environ['UPDATE_ALERT_OUTBOX_DIR'])
-receipts = pathlib.Path(os.environ['UPDATE_DELIVERY_RECEIPTS_DIR'])
-repo = pathlib.Path(os.environ.get('REPO_DIR') or '/home/ubuntu/bot')
-if not root.is_dir():
-    raise SystemExit(0)
-receipts.mkdir(parents=True, exist_ok=True)
-now = time.time()
-
-# Um processo pode morrer depois de renomear o job para .sending.*. Nesse caso,
-# o glob normal não o encontra mais e a entrega ficava presa para sempre.
-# Recoloque claims antigos na fila antes de buscar novos trabalhos.
-for stale_claim in root.glob('.sending.*.json'):
-    try:
-        if now - stale_claim.stat().st_mtime < 120:
-            continue
-        parts = stale_claim.name.split('.', 3)
-        original_name = parts[3] if len(parts) == 4 and parts[3] else f'recovered-{int(now)}.json'
-        target = root / original_name
-        if target.exists():
-            target = root / f'recovered-{int(now)}-{os.getpid()}-{original_name}'
-        os.replace(stale_claim, target)
-    except OSError:
-        pass
-
-for path in sorted(root.glob('*.json'), key=lambda item: item.stat().st_mtime)[:100]:
-    claim = path.with_name(f'.sending.{os.getpid()}.{path.name}')
-    try:
-        os.replace(path, claim)
-    except OSError:
-        continue
-    attachment = ''
-    data = {}
-    try:
-        data = json.loads(claim.read_text(encoding='utf-8'))
-        event_id = str(data.get('event_id') or path.stem)
-        safe_id = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in event_id)[:120]
-        receipt = receipts / f'{safe_id}.alert.done'
-        attachment = str(data.get('attachment') or '')
-        attachment_path = None
-        if attachment:
-            candidate_attachment = pathlib.Path(attachment).resolve(strict=False)
-            try:
-                candidate_attachment.relative_to(root.resolve())
-            except ValueError as exc:
-                raise ValueError('anexo do alerta fora do outbox') from exc
-            attachment_path = candidate_attachment
-            attachment = str(candidate_attachment)
-        if receipt.is_file():
-            claim.unlink(missing_ok=True)
-            if attachment_path is not None:
-                attachment_path.unlink(missing_ok=True)
-            continue
-        attempts = int(data.get('attempts') or 0)
-        next_attempt_at = float(data.get('next_attempt_at') or 0)
-        if next_attempt_at > now:
-            os.replace(claim, path)
-            continue
-        args = [
-            'sudo', '-u', 'ubuntu', '/usr/bin/env', 'bash', str(repo / 'alert.sh'),
-            str(data.get('type') or 'info'),
-            str(data.get('title') or 'Auto update'),
-            str(data.get('body') or ''),
-            attachment,
-            str(data.get('attachment_name') or ''),
-        ]
-        completed = subprocess.run(args, cwd=str(repo), text=True, capture_output=True, timeout=35, check=False)
-        if completed.returncode != 0:
-            raise RuntimeError((completed.stderr or completed.stdout or f'return {completed.returncode}')[-800:])
-        tmp = receipt.with_name('.' + receipt.name + f'.{os.getpid()}.tmp')
-        tmp.write_text(datetime.datetime.now(datetime.timezone.utc).isoformat() + '\n', encoding='utf-8')
-        os.replace(tmp, receipt)
-        claim.unlink(missing_ok=True)
-        if attachment_path is not None:
-            attachment_path.unlink(missing_ok=True)
-    except Exception as exc:
-        try:
-            permanent = isinstance(exc, (json.JSONDecodeError, ValueError, TypeError, AttributeError))
-            attempts = 20 if permanent else (int(data.get('attempts') or 0) + 1 if isinstance(data, dict) else 1)
-            if attempts >= 20:
-                dead = root / 'failed'
-                dead.mkdir(parents=True, exist_ok=True)
-                if not isinstance(data, dict):
-                    data = {}
-                data['attempts'] = attempts
-                data['last_error'] = f'{type(exc).__name__}: {exc}'[:800]
-                data['failed_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                claim.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
-                os.replace(claim, dead / path.name)
-                continue
-            if not isinstance(data, dict):
-                data = {}
-            data['attempts'] = attempts
-            data['last_error'] = f'{type(exc).__name__}: {exc}'[:800]
-            data['updated_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            data['next_attempt_at'] = now + min(300, 5 * (2 ** min(attempts, 6)))
-            claim.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding='utf-8')
-            os.replace(claim, path)
-        except Exception:
-            try:
-                os.replace(claim, path)
-            except Exception:
-                pass
-PYFLUSHALERT
-  local rc=$?
-  chown -R ubuntu:ubuntu "$UPDATE_ALERT_OUTBOX_DIR" "$UPDATE_DELIVERY_RECEIPTS_DIR" 2>/dev/null || true
-  return "$rc"
+url = (os.environ.get('BOT_HEALTH_URL') or 'http://127.0.0.1:10000/health').replace('/health', '/internal/update/flush-logs')
+headers = {'Content-Type': 'application/json'}
+try:
+    env_path = pathlib.Path(os.environ.get('REPO_DIR', '/home/ubuntu/bot')) / '.env'
+    if env_path.exists():
+        for line in env_path.read_text(encoding='utf-8', errors='ignore').splitlines():
+            if line.startswith('BOT_INTERNAL_UPDATE_TOKEN='):
+                token = line.split('=', 1)[1].strip().strip('"').strip("'")
+                if token:
+                    headers['X-Update-Token'] = token
+                break
+except Exception:
+    pass
+try:
+    request = urllib.request.Request(url, data=b'{}', headers=headers, method='POST')
+    urllib.request.urlopen(request, timeout=3).read()
+except Exception:
+    pass
+PYFLUSHLOG
+  return 0
 }
 
 notify_zip_status_message() {
   local status="${1:-info}"
   local title="${2:-Atualização}"
   local description="${3:-}"
-  local final_delivery=0
+  local final_delivery=0 generated_fallback_ui=0
   [[ "$status" =~ ^(success|ok|warn|error|done|failed)$ ]] && final_delivery=1
+
+  # Todo estado final usa o mesmo renderer compacto do bot, inclusive falhas,
+  # rejeições e recuperações que terminam antes do bloco final principal. Isso
+  # evita voltar ao card técnico antigo justamente nos caminhos de erro.
+  if (( final_delivery == 1 )) && [[ -z "${ZIP_STATUS_UI_JSON:-}" ]]; then
+    local fallback_display_id fallback_from fallback_to fallback_count fallback_duration fallback_github
+    fallback_display_id="${LOCAL_CANDIDATE_DISPLAY_ID:-${UPDATE_DISPLAY_ID:-${ROLLBACK_REQUEST_ID:-}}}"
+    fallback_from="$(short_commit "${PREVIOUS_COMMIT:-${CURRENT_COMMIT:-}}")"
+    fallback_to="$(short_commit "${REMOTE_COMMIT:-${CURRENT_COMMIT:-}}")"
+    fallback_count="$(format_update_file_count "${CHANGED_FILES_COUNT:-0}")"
+    fallback_duration="$(human_duration "${SECONDS:-0}")"
+    fallback_github="false"
+    [[ "$status" =~ ^(success|ok|done)$ ]] && fallback_github="true"
+    ZIP_STATUS_UI_JSON="$(
+      UI_STATUS="$status" UI_HEADLINE="$title" UI_SUMMARY="$description" \
+      UI_DISPLAY_ID="$fallback_display_id" UI_BRANCH="${BRANCH:-main}" \
+      UI_FROM="$fallback_from" UI_TO="$fallback_to" UI_FILE_COUNT="$fallback_count" \
+      UI_DIFF="${DIFF_TOTAL_SUMMARY:-}" UI_IMPACT="${APPLY_MODE:-}" UI_DURATION="$fallback_duration" \
+      UI_HEALTH="${BOT_HEALTHCHECK_STATUS:-}" UI_GITHUB="$fallback_github" \
+      UI_CHECKS="${CHECKS_TEXT:-}" UI_TIMINGS="${TIMINGS_TEXT:-}" UI_CACHE="${CACHE_TEXT:-}" \
+      UI_TESTS="${TEST_PLAN_TEXT:-}" UI_FILES="${CHANGED_FILES:-}" UI_PROCESSES="${CHANGED_PROCESSES:-}" \
+      python3 - <<'PYFALLBACKUI'
+import json, os, re
+headline = os.environ.get("UI_HEADLINE") or ""
+headline = re.sub(r"^[^\wÀ-ÿ]+\s*", "", headline, count=1).strip()
+print(json.dumps({
+    "kind": "final",
+    "status": os.environ.get("UI_STATUS") or "error",
+    "headline": headline,
+    "summary": os.environ.get("UI_SUMMARY") or "",
+    "display_id": os.environ.get("UI_DISPLAY_ID") or "",
+    "branch": os.environ.get("UI_BRANCH") or "main",
+    "from": os.environ.get("UI_FROM") or "",
+    "to": os.environ.get("UI_TO") or "",
+    "file_count_text": os.environ.get("UI_FILE_COUNT") or "0 arquivos",
+    "diff_summary": os.environ.get("UI_DIFF") or "",
+    "impact": os.environ.get("UI_IMPACT") or "",
+    "duration": os.environ.get("UI_DURATION") or "",
+    "bot_health": os.environ.get("UI_HEALTH") or "",
+    "github_synced": (os.environ.get("UI_GITHUB") or "false").lower() == "true",
+    "checks_text": os.environ.get("UI_CHECKS") or "",
+    "timings_text": os.environ.get("UI_TIMINGS") or "",
+    "cache_text": os.environ.get("UI_CACHE") or "",
+    "tests_text": os.environ.get("UI_TESTS") or "",
+    "files_text": os.environ.get("UI_FILES") or "",
+    "processes": os.environ.get("UI_PROCESSES") or "",
+}, ensure_ascii=False))
+PYFALLBACKUI
+    )"
+    generated_fallback_ui=1
+  fi
+
   if (( REMOTE_CANDIDATE_MODE == 1 )); then
     post_direct_update_message "$REMOTE_STATUS_CHANNEL_ID" "$REMOTE_STATUS_MESSAGE_ID" "$status" "$title" "$description" "${ZIP_STATUS_CONTROL_JSON:-}"
+    (( generated_fallback_ui == 1 )) && ZIP_STATUS_UI_JSON=""
     return 0
   fi
   (( LOCAL_CANDIDATE_MODE == 1 )) || return 0
@@ -2995,7 +2910,7 @@ notify_zip_status_message() {
   channel_id="$(json_field_from_file "$LOCAL_CANDIDATE_DIR/manifest.json" discord_status.channel_id 2>/dev/null || true)"
   message_id="$(json_field_from_file "$LOCAL_CANDIDATE_DIR/manifest.json" discord_status.message_id 2>/dev/null || true)"
   [[ -n "$channel_id" && -n "$message_id" ]] || return 0
-  payload="$(CHANNEL_ID_VALUE="$channel_id" MESSAGE_ID_VALUE="$message_id" STATUS_VALUE="$status" TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" CONTROL_VALUE="${ZIP_STATUS_CONTROL_JSON:-}" CANDIDATE_ID_VALUE="${LOCAL_CANDIDATE_ID:-}" DISPLAY_ID_VALUE="${LOCAL_CANDIDATE_DISPLAY_ID:-}" python3 - <<'PYBUILDPAYLOAD'
+  payload="$(CHANNEL_ID_VALUE="$channel_id" MESSAGE_ID_VALUE="$message_id" STATUS_VALUE="$status" TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" CONTROL_VALUE="${ZIP_STATUS_CONTROL_JSON:-}" UI_VALUE="${ZIP_STATUS_UI_JSON:-}" CANDIDATE_ID_VALUE="${LOCAL_CANDIDATE_ID:-}" DISPLAY_ID_VALUE="${LOCAL_CANDIDATE_DISPLAY_ID:-}" python3 - <<'PYBUILDPAYLOAD'
 import datetime, json, os
 payload = {
     'channel_id': os.environ.get('CHANNEL_ID_VALUE') or '',
@@ -3013,10 +2928,19 @@ try:
         payload['control'] = control
 except Exception:
     pass
+try:
+    ui = json.loads(os.environ.get('UI_VALUE') or '')
+    if isinstance(ui, dict):
+        payload['ui'] = ui
+except Exception:
+    pass
 print(json.dumps(payload, ensure_ascii=False))
 PYBUILDPAYLOAD
 )"
   send_update_status_payload "$payload" "$final_delivery"
+  local delivery_rc=$?
+  (( generated_fallback_ui == 1 )) && ZIP_STATUS_UI_JSON=""
+  return "$delivery_rc"
 }
 
 post_direct_update_message() {
@@ -3029,7 +2953,7 @@ post_direct_update_message() {
   local final_delivery=0 payload
   [[ -n "$channel_id" && -n "$message_id" ]] || return 0
   [[ "$status" =~ ^(success|ok|warn|error|done|failed)$ ]] && final_delivery=1
-  payload="$(CHANNEL_ID_VALUE="$channel_id" MESSAGE_ID_VALUE="$message_id" STATUS_VALUE="$status" TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" CONTROL_VALUE="$control_json" python3 - <<'PYDIRECTPAYLOAD'
+  payload="$(CHANNEL_ID_VALUE="$channel_id" MESSAGE_ID_VALUE="$message_id" STATUS_VALUE="$status" TITLE_VALUE="$title" DESCRIPTION_VALUE="$description" CONTROL_VALUE="$control_json" UI_VALUE="${ZIP_STATUS_UI_JSON:-}" python3 - <<'PYDIRECTPAYLOAD'
 import datetime, json, os
 payload = {
     'channel_id': os.environ.get('CHANNEL_ID_VALUE') or '',
@@ -3043,6 +2967,12 @@ try:
     control = json.loads(os.environ.get('CONTROL_VALUE') or '')
     if isinstance(control, dict):
         payload['control'] = control
+except Exception:
+    pass
+try:
+    ui = json.loads(os.environ.get('UI_VALUE') or '')
+    if isinstance(ui, dict):
+        payload['ui'] = ui
 except Exception:
     pass
 print(json.dumps(payload, ensure_ascii=False))
@@ -3140,6 +3070,19 @@ zip_progress_title() {
     *)
       printf '⚙️ Atualizando'
       ;;
+  esac
+}
+
+zip_progress_macro_index() {
+  local stage_label="${1:-Processando atualização}"
+  local lowered="${stage_label,,}"
+  case "$lowered" in
+    *github*|*push*|*sincronizando*) printf '5' ;;
+    *health*|*saúde*|*saude*|*comandos*|*estabilidade*|*finalizando*|*estado\ publicado*) printf '4' ;;
+    *promov*|*ativando*|*publicando\ interface*|*publicando\ servidor*|*reiniciando*|*recarregando*|*reload*) printf '3' ;;
+    *ready*|*release*|*fazendo\ commit*|*commit\ criado*|*registrando*) printf '2' ;;
+    *validando*|*verificando*|*analisando*|*test*|*typescript*|*compilando*|*build*|*dependências*|*dependencias*|*runtime*) printf '1' ;;
+    *) printf '0' ;;
   esac
 }
 
@@ -3314,11 +3257,35 @@ zip_progress_publish() {
     footer="$identifier · $ZIP_PROGRESS_COMPLETED_COUNT etapas concluídas · $elapsed_text"
   fi
   description+=$'\n'"-# $footer"
+  local macro_index action_name
+  macro_index="$(zip_progress_macro_index "$stage_label")"
+  action_name="update"
+  if (( ROLLBACK_CONTROL_MODE == 1 )); then
+    if [[ "${ROLLBACK_REQUEST_ACTION:-rollback}" == "redo" ]]; then
+      action_name="redo"
+    else
+      action_name="rollback"
+    fi
+  fi
+  ZIP_STATUS_UI_JSON="$(UI_KIND=progress UI_STAGE="$stage_label" UI_DETAIL="$detail" UI_IDENTIFIER="$identifier" UI_ELAPSED="$elapsed_text" UI_MACRO_INDEX="$macro_index" UI_ACTION="$action_name" python3 - <<'PYPROGRESSUI'
+import json, os
+print(json.dumps({
+    "kind": "progress",
+    "stage": os.environ.get("UI_STAGE") or "Processando atualização",
+    "detail": os.environ.get("UI_DETAIL") or "",
+    "identifier": os.environ.get("UI_IDENTIFIER") or "",
+    "elapsed": os.environ.get("UI_ELAPSED") or "",
+    "macro_index": int(os.environ.get("UI_MACRO_INDEX") or 0),
+    "action": os.environ.get("UI_ACTION") or "update",
+}, ensure_ascii=False))
+PYPROGRESSUI
+)"
   if (( ROLLBACK_CONTROL_MODE == 1 )); then
     post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "$status" "$title" "$description" || true
   else
     notify_zip_status_message "$status" "$title" "$description" || true
   fi
+  ZIP_STATUS_UI_JSON=""
   if (( stage_changed == 1 )); then
     ZIP_PROGRESS_STAGE_STARTED_MS="$(update_now_ms)"
   fi
@@ -9259,14 +9226,14 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     if (( UPDATE_APPLIED == 0 )); then
       retry_control="$(rollback_control_json "$ROLLBACK_REQUEST_ACTION" "$ROLLBACK_EXPECTED_HEAD" "$ROLLBACK_REVERT_COMMIT" 2>/dev/null || true)"
     fi
-    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "O estado local foi mantido quando possível. Verifique o webhook/log interno." "$retry_control" || true
+    post_direct_update_message "$ROLLBACK_MESSAGE_CHANNEL_ID" "$ROLLBACK_MESSAGE_ID" "error" "$fail_title" "O estado local foi mantido quando possível. Verifique o canal técnico/log interno." "$retry_control" || true
     archive_rollback_request "failed"
   else
     if (( LOCAL_CANDIDATE_MODE == 1 )); then
       notify_zip_status_message "error" "Falha ao aplicar atualização" "A VPS foi restaurada quando possível e o candidato foi arquivado. Verifique o canal de logs." || true
       archive_local_candidate "failed"
     else
-      notify_zip_status_message "error" "Falha na atualização" "O updater falhou antes de concluir a aplicação. Verifique o webhook/log interno." || true
+      notify_zip_status_message "error" "Falha na atualização" "O updater falhou antes de concluir a aplicação. Verifique o canal técnico/log interno." || true
     fi
   fi
   send_error "Falha na atualização automática" "$body"
@@ -9464,7 +9431,7 @@ CHANGED_FILES="$(format_changed_files)"
 DIFF_TOTAL_SUMMARY="$(format_diff_total_summary)"
 CHANGED_FILES_COUNT="$(printf '%s\n' "$CHANGED_FILES_RAW" | awk 'NF {c++} END {print c+0}')"
 # O resumo por phone-worker é caro e só deve ser chamado por fluxos de erro/anexo.
-# No update saudável, o webhook compacto não precisa dessa análise.
+# No update saudável, o resumo público compacto não precisa dessa análise.
 
 # Atualiza o resumo do health no fim, mesmo que o bot não tenha reiniciado.
 refresh_bot_health_status >/dev/null 2>&1 || true
@@ -9631,16 +9598,65 @@ print(json.dumps({
 PYCTRL
 )"
 fi
+FINAL_FILE_COUNT_TEXT="$(format_update_file_count "$CHANGED_FILES_COUNT")"
+ZIP_STATUS_UI_JSON="$(
+  UI_STATUS="$ALERT_TYPE" \
+  UI_SUMMARY="$ALERT_SUMMARY" \
+  UI_DISPLAY_ID="$UPDATE_DISPLAY_ID" \
+  UI_BRANCH="$BRANCH" \
+  UI_FROM="$SHORT_FROM" \
+  UI_TO="$SHORT_TO" \
+  UI_FILE_COUNT="$FINAL_FILE_COUNT_TEXT" \
+  UI_DIFF="$DIFF_TOTAL_SUMMARY" \
+  UI_IMPACT="$APPLY_MODE" \
+  UI_DURATION="$DURATION" \
+  UI_HEALTH="$BOT_HEALTHCHECK_STATUS" \
+  UI_CHECKS="$CHECKS_TEXT" \
+  UI_TIMINGS="$TIMINGS_TEXT" \
+  UI_CACHE="$CACHE_TEXT" \
+  UI_TESTS="$TEST_PLAN_TEXT" \
+  UI_FILES="$CHANGED_FILES" \
+  UI_PROCESSES="$CHANGED_PROCESSES" \
+  python3 - <<'PYFINALUI'
+import json, os
+print(json.dumps({
+    "kind": "final",
+    "status": os.environ.get("UI_STATUS") or "success",
+    "summary": os.environ.get("UI_SUMMARY") or "",
+    "display_id": os.environ.get("UI_DISPLAY_ID") or "",
+    "branch": os.environ.get("UI_BRANCH") or "main",
+    "from": os.environ.get("UI_FROM") or "",
+    "to": os.environ.get("UI_TO") or "",
+    "file_count_text": os.environ.get("UI_FILE_COUNT") or "arquivos",
+    "diff_summary": os.environ.get("UI_DIFF") or "",
+    "impact": os.environ.get("UI_IMPACT") or "",
+    "duration": os.environ.get("UI_DURATION") or "",
+    "bot_health": os.environ.get("UI_HEALTH") or "",
+    "github_synced": True,
+    "checks_text": os.environ.get("UI_CHECKS") or "",
+    "timings_text": os.environ.get("UI_TIMINGS") or "",
+    "cache_text": os.environ.get("UI_CACHE") or "",
+    "tests_text": os.environ.get("UI_TESTS") or "",
+    "files_text": os.environ.get("UI_FILES") or "",
+    "processes": os.environ.get("UI_PROCESSES") or "",
+}, ensure_ascii=False))
+PYFINALUI
+)"
 if (( LOCAL_CANDIDATE_MODE == 1 )); then
   write_local_candidate_state "finalizing_delivery" "$REMOTE_COMMIT"
 fi
 FINAL_STATUS_DELIVERY_RC=0
 notify_zip_status_message "$ALERT_TYPE" "$ALERT_TITLE" "$ZIP_STATUS_DESCRIPTION" || FINAL_STATUS_DELIVERY_RC=$?
+ZIP_STATUS_UI_JSON=""
 flush_update_status_outbox || true
 
 FINAL_ALERT_EVENT_ID="${UPDATE_DISPLAY_ID:-update}-final-${SHORT_TO:-unknown}"
 FINAL_ALERT_DELIVERY_RC=0
-send_alert_reliably "$ALERT_TYPE" "$ALERT_TITLE" "$BODY" "" "" "$FINAL_ALERT_EVENT_ID" || FINAL_ALERT_DELIVERY_RC=$?
+FINAL_RAW_LOG=""
+if [[ -f "${RUN_LOG_FILE:-}" && -s "${RUN_LOG_FILE:-}" ]]; then
+  FINAL_RAW_LOG="$RUN_LOG_FILE"
+fi
+send_alert_reliably "$ALERT_TYPE" "$ALERT_TITLE" "$BODY" "$FINAL_RAW_LOG" "tts-bot-updater.log" "$FINAL_ALERT_EVENT_ID" || FINAL_ALERT_DELIVERY_RC=$?
 flush_update_alert_outbox || true
 if (( LOCAL_CANDIDATE_MODE == 1 )); then
   # "delivery_scheduled" significa que cada saída foi entregue ou persistida

@@ -121,21 +121,24 @@ send_update_status_payload {json.dumps(json.dumps(payload))} 1
     assert job["last_error"]
 
 
-def test_alert_outbox_replays_once_and_writes_receipt(tmp_path: Path) -> None:
+def test_alert_outbox_is_owned_by_bot_and_shell_flush_only_wakes_bot(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
+    (repo / "alert.sh").write_text((ROOT / "alert.sh").read_text(encoding="utf-8"), encoding="utf-8")
+    (repo / "alert.sh").chmod(0o755)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     fake_sudo = fake_bin / "sudo"
-    fake_sudo.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    fake_sudo.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"${1:-}\" = '-u' ]; then shift 2; fi\n"
+        "exec \"$@\"\n",
+        encoding="utf-8",
+    )
     fake_sudo.chmod(0o755)
-    fake_alert = repo / "alert.sh"
-    fake_alert.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$REPLAY_LOG\"\n", encoding="utf-8")
-    fake_alert.chmod(0o755)
     status_outbox = tmp_path / "status"
     alert_outbox = tmp_path / "alerts"
     receipts = tmp_path / "receipts"
-    replay_log = tmp_path / "replayed.log"
 
     queue_harness = f"""
 source <(awk '/^prepare_update_delivery_dirs[(][)]/{{flag=1}} /^human_duration[(][)]/{{flag=0}} flag' {UPDATER!s})
@@ -144,39 +147,48 @@ UPDATE_STATUS_OUTBOX_DIR={status_outbox!s}
 UPDATE_ALERT_OUTBOX_DIR={alert_outbox!s}
 UPDATE_DELIVERY_RECEIPTS_DIR={receipts!s}
 LOG_TAG=test-updater
-send_alert_reliably success '✅ Atualização concluída' 'Resumo: ok' '' '' 'UPD-TEST-final'
+send_alert_reliably success 'Atualização concluída' 'Resumo: ok' '' '' 'UPD-TEST-final'
 """
     _run_bash(queue_harness, env={"PATH": f"{fake_bin}:{os.environ['PATH']}"})
     jobs = list(alert_outbox.glob("*.json"))
     assert len(jobs) == 1
+    job = json.loads(jobs[0].read_text(encoding="utf-8"))
+    assert job["event_id"] == "UPD-TEST-final"
+    assert job["delivery"] == "discord_bot"
+    assert not (receipts / "UPD-TEST-final.alert.done").exists()
 
-    fake_sudo.write_text(
-        "#!/usr/bin/env bash\n"
-        "if [ \"${1:-}\" = '-u' ]; then shift 2; fi\n"
-        "exec \"$@\"\n",
-        encoding="utf-8",
-    )
-    fake_sudo.chmod(0o755)
-    flush_harness = f"""
+    received_paths: list[str] = []
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            received_paths.append(self.path)
+            size = int(self.headers.get("Content-Length") or "0")
+            self.rfile.read(size)
+            body = b'{"ok": true}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        flush_harness = f"""
 source <(awk '/^flush_update_alert_outbox[(][)]/{{flag=1}} /^notify_zip_status_message[(][)]/{{flag=0}} flag' {UPDATER!s})
-prepare_update_delivery_dirs() {{ mkdir -p "$UPDATE_STATUS_OUTBOX_DIR" "$UPDATE_ALERT_OUTBOX_DIR" "$UPDATE_DELIVERY_RECEIPTS_DIR"; }}
+prepare_update_delivery_dirs() {{ :; }}
+BOT_HEALTH_URL='http://127.0.0.1:{server.server_port}/health'
 REPO_DIR={repo!s}
-UPDATE_STATUS_OUTBOX_DIR={status_outbox!s}
-UPDATE_ALERT_OUTBOX_DIR={alert_outbox!s}
-UPDATE_DELIVERY_RECEIPTS_DIR={receipts!s}
 flush_update_alert_outbox
 """
-    _run_bash(
-        flush_harness,
-        env={
-            "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            "REPLAY_LOG": str(replay_log),
-        },
-    )
-    assert not list(alert_outbox.glob("*.json"))
-    assert (receipts / "UPD-TEST-final.alert.done").is_file()
-    assert "Atualização concluída" in replay_log.read_text(encoding="utf-8")
+        _run_bash(flush_harness)
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
 
+    assert received_paths == ["/internal/update/flush-logs"]
+    assert jobs[0].is_file(), "o shell não deve consumir a fila pertencente ao bot"
+    assert not (receipts / "UPD-TEST-final.alert.done").exists()
 
 def test_discord_status_state_is_saved_only_after_successful_edit() -> None:
     source = BOT.read_text(encoding="utf-8")
@@ -204,61 +216,15 @@ def test_final_delivery_is_durable_before_candidate_archive() -> None:
 
 
 
-def test_stale_alert_claim_is_recovered_after_interrupted_flush(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_sudo = fake_bin / "sudo"
-    fake_sudo.write_text(
-        "#!/usr/bin/env bash\n"
-        "if [ \"${1:-}\" = '-u' ]; then shift 2; fi\n"
-        "exec \"$@\"\n",
-        encoding="utf-8",
-    )
-    fake_sudo.chmod(0o755)
-    fake_alert = repo / "alert.sh"
-    replay_log = tmp_path / "stale-replayed.log"
-    fake_alert.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$REPLAY_LOG\"\n", encoding="utf-8")
-    fake_alert.chmod(0o755)
-
-    alert_outbox = tmp_path / "alerts"
-    receipts = tmp_path / "receipts"
-    status_outbox = tmp_path / "status"
-    alert_outbox.mkdir()
-    stale = alert_outbox / ".sending.999.UPD-STALE.json"
-    stale.write_text(
-        json.dumps(
-            {
-                "event_id": "UPD-STALE",
-                "type": "success",
-                "title": "Atualização recuperada",
-                "body": "Resumo: ok",
-                "attempts": 0,
-            }
-        ),
-        encoding="utf-8",
-    )
-    os.utime(stale, (1, 1))
-
-    harness = f"""
-source <(awk '/^flush_update_alert_outbox[(][)]/{{flag=1}} /^notify_zip_status_message[(][)]/{{flag=0}} flag' {UPDATER!s})
-prepare_update_delivery_dirs() {{ mkdir -p "$UPDATE_STATUS_OUTBOX_DIR" "$UPDATE_ALERT_OUTBOX_DIR" "$UPDATE_DELIVERY_RECEIPTS_DIR"; }}
-REPO_DIR={repo!s}
-UPDATE_STATUS_OUTBOX_DIR={status_outbox!s}
-UPDATE_ALERT_OUTBOX_DIR={alert_outbox!s}
-UPDATE_DELIVERY_RECEIPTS_DIR={receipts!s}
-flush_update_alert_outbox
-"""
-    _run_bash(
-        harness,
-        env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "REPLAY_LOG": str(replay_log)},
-    )
-    assert not list(alert_outbox.glob("*.json"))
-    assert not list(alert_outbox.glob(".sending.*.json"))
-    assert (receipts / "UPD-STALE.alert.done").is_file()
-    assert "Atualização recuperada" in replay_log.read_text(encoding="utf-8")
-
+def test_bot_recovers_stale_raw_log_claims_after_restart() -> None:
+    source = BOT.read_text(encoding="utf-8")
+    start = source.index("    def _zip_update_claim_log_jobs_sync")
+    end = source.index("\n    def _zip_update_requeue_log_job_sync", start)
+    block = source[start:end]
+    assert 'root.glob(".sending.*.json")' in block
+    assert "now - stale.stat().st_mtime < 120" in block
+    assert "os.replace(stale, target)" in block
+    assert 'root.glob("*.json")' in block
 
 def test_malformed_status_job_goes_to_dead_letter_instead_of_disappearing(tmp_path: Path) -> None:
     outbox = tmp_path / "status"
@@ -298,58 +264,23 @@ def test_rollback_control_is_removed_when_persistent_state_cannot_be_saved() -> 
     edit_end = source.index("\n    def _zip_update_find_candidate_sync", edit_start)
     edit_block = source[edit_start:edit_end]
     failure_at = edit_block.index('if not self._zip_update_state_save({"latest": state_record})')
-    no_control_at = edit_block.index("view=self._make_zip_update_view(title, description, color)", failure_at)
+    no_control_at = edit_block.index("view=self._make_zip_update_view(", failure_at)
     delivered_at = edit_block.index('"warning": "controle de rollback indisponível"', no_control_at)
+    assert "presentation=presentation" in edit_block[no_control_at:delivered_at]
     assert failure_at < no_control_at < delivered_at
 
 
-def test_alert_outbox_never_deletes_attachment_outside_its_directory(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_sudo = fake_bin / "sudo"
-    fake_sudo.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8")
-    fake_sudo.chmod(0o755)
-    (repo / "alert.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-    (repo / "alert.sh").chmod(0o755)
-
-    alert_outbox = tmp_path / "alerts"
-    receipts = tmp_path / "receipts"
-    status_outbox = tmp_path / "status"
-    alert_outbox.mkdir()
-    external = tmp_path / "must-not-delete.txt"
-    external.write_text("preserve", encoding="utf-8")
-    (alert_outbox / "unsafe.json").write_text(
-        json.dumps(
-            {
-                "event_id": "unsafe",
-                "type": "error",
-                "title": "Teste",
-                "body": "Teste",
-                "attachment": str(external),
-                "attempts": 0,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    harness = f"""
-source <(awk '/^flush_update_alert_outbox[(][)]/{{flag=1}} /^notify_zip_status_message[(][)]/{{flag=0}} flag' {UPDATER!s})
-prepare_update_delivery_dirs() {{ mkdir -p "$UPDATE_STATUS_OUTBOX_DIR" "$UPDATE_ALERT_OUTBOX_DIR" "$UPDATE_DELIVERY_RECEIPTS_DIR"; }}
-REPO_DIR={repo!s}
-UPDATE_STATUS_OUTBOX_DIR={status_outbox!s}
-UPDATE_ALERT_OUTBOX_DIR={alert_outbox!s}
-UPDATE_DELIVERY_RECEIPTS_DIR={receipts!s}
-flush_update_alert_outbox
-"""
-    _run_bash(harness, env={"PATH": f"{fake_bin}:{os.environ['PATH']}"})
-    assert external.read_text(encoding="utf-8") == "preserve"
-    dead = list((alert_outbox / "failed").glob("unsafe.json"))
-    assert len(dead) == 1
-    payload = json.loads(dead[0].read_text(encoding="utf-8"))
-    assert "fora do outbox" in payload["last_error"]
-
+def test_bot_raw_log_attachment_is_confined_to_outbox() -> None:
+    source = BOT.read_text(encoding="utf-8")
+    start = source.index("    def _zip_update_log_attachment_path")
+    end = source.index("\n    async def _zip_update_flush_raw_logs_once", start)
+    block = source[start:end]
+    assert "candidate.relative_to(root)" in block
+    assert 'raise ValueError("anexo do log fora do outbox")' in block
+    flush_start = source.index("    async def _zip_update_flush_raw_logs_once")
+    flush_end = source.index("\n    def _zip_update_current_head_sync", flush_start)
+    flush = source[flush_start:flush_end]
+    assert "self._zip_update_log_attachment_path" in flush
 
 def test_recovery_does_not_replace_latest_rollback_control_with_old_update() -> None:
     source = BOT.read_text(encoding="utf-8")
@@ -545,18 +476,22 @@ on_error 999 main
     assert "ROLLBACK" not in lines
 
 
-def test_final_public_message_does_not_hide_missing_log_delivery() -> None:
+def test_raw_log_receipt_is_written_only_after_bot_sends_to_discord() -> None:
     source = BOT.read_text(encoding="utf-8")
+    flush_start = source.index("    async def _zip_update_flush_raw_logs_once")
+    flush_end = source.index("\n    def _zip_update_current_head_sync", flush_start)
+    flush = source[flush_start:flush_end]
+    send_at = flush.index("await channel.send")
+    receipt_at = flush.index("_zip_update_alert_receipt_save_sync", send_at)
+    unlink_at = flush.index("claim.unlink", receipt_at)
+    assert send_at < receipt_at < unlink_at
+
     reconcile_start = source.index("    async def _zip_update_reconcile_archived_messages_once")
     reconcile_end = source.index("\n    async def _zip_update_reconcile_loop", reconcile_start)
-    block = source[reconcile_start:reconcile_end]
-    assert "update-delivery-receipts" in block
-    assert "if alert_receipt.is_file()" in block
-    assert 'receipt["log_delivered"] = True' in block
-    assert "_zip_update_alert_receipt_save_sync" in block
-    assert 'receipt["global_log_receipt_saved"] = global_receipt_saved' in block
-    assert 'if not already_final or status == "warn"' in block
-
+    reconcile = source[reconcile_start:reconcile_end]
+    assert "if alert_receipt.is_file()" in reconcile
+    assert 'receipt["log_delivered"] = True' in reconcile
+    assert "_zip_update_flush_raw_logs_once" in source
 
 def test_updater_timer_waits_until_previous_run_is_inactive() -> None:
     for path in (
@@ -679,9 +614,10 @@ def test_first_candidate_keeps_preparation_microsteps_instead_of_fake_queue() ->
     direct_at = block.index("**Iniciando atualização**", first_at)
     queue_at = block.index('"📦 Atualização na fila"', direct_at)
     assert first_at < direct_at < queue_at
-    assert '"🔎 Preparando atualização"' in block[first_at:queue_at]
-    assert 'f"Posição na fila: **{queue_position}**"' in block[first_at:queue_at]
-
+    first_block = block[first_at:queue_at]
+    assert '"kind": "progress"' in first_block
+    assert '"stage": "Iniciando atualização"' in first_block
+    assert '"macro_index": 0' in first_block
 
 def test_queue_refresher_preserves_new_first_candidate_animation() -> None:
     source = UPDATER.read_text(encoding="utf-8")

@@ -24,7 +24,7 @@ SUMMARY="O serviço caiu com erro fatal."
 if [[ "$FORCE_ALERT" == "1" ]]; then
   ALERT_TYPE="warn"
   ALERT_TITLE="Teste de alerta do serviço"
-  SUMMARY="Alerta manual para validar o webhook do serviço."
+  SUMMARY="Alerta manual para validar o canal técnico de logs do bot."
 else
   should_alert=0
 
