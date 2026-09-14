@@ -121,3 +121,62 @@ def test_updater_uses_snapshot_helpers_for_hot_diff_and_repo_status() -> None:
     assert 'load_git_diff_snapshot "$root" --cached' in refresh
     assert "GIT_STATUS_UNSTAGED_FILES_RAW" in source
     assert 'load_repo_ref_snapshot "$BRANCH"' in source
+
+
+def test_local_candidate_preflight_reuses_single_repo_status_snapshot() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    prepare_start = source.index("prepare_local_candidate_update() {")
+    start = source.index('STAGE="verificação de alterações locais"', prepare_start)
+    end = source.index('zip_progress_done_and_publish "Estado local validado"', start)
+    block = source[start:end]
+
+    assert block.count("load_repo_status_snapshot") == 1
+    assert "clear_local_changes_marker_if_clean 1" in block
+    assert "candidate_local_changes_are_expected 1" in block
+    assert 'log_update_operation_timing_ms "preflight.git_status"' in block
+    assert 'log_update_operation_timing_ms "preflight.local_changes_check"' in block
+    assert 'log_update_operation_timing_ms "preflight.git_pull"' in block
+
+
+def test_status_snapshot_reuse_is_explicit_and_does_not_change_default_fresh_reads() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    clear_start = source.index("clear_local_changes_marker_if_clean() {")
+    clear_end = source.index("\ncollect_local_tracked_changes() {", clear_start)
+    clear_fn = source[clear_start:clear_end]
+    candidate_start = source.index("candidate_local_changes_are_expected() {")
+    candidate_end = source.index("\nensure_no_unstaged_tracked_changes() {", candidate_start)
+    candidate_fn = source[candidate_start:candidate_end]
+
+    assert 'local reuse_snapshot="${1:-0}"' in clear_fn
+    assert '"${GIT_STATUS_SNAPSHOT_READY:-0}" == "1"' in clear_fn
+    assert 'local reuse_snapshot="${1:-0}"' in candidate_fn
+    assert 'if [[ "$reuse_snapshot" != "1" || "${GIT_STATUS_SNAPSHOT_READY:-0}" != "1" ]]; then' in candidate_fn
+    assert "load_repo_status_snapshot || return 2" in candidate_fn
+
+
+def test_preloaded_status_snapshot_is_reused_without_second_git_scan(tmp_path: Path) -> None:
+    marker = tmp_path / "marker"
+    marker.write_text("dirty", encoding="utf-8")
+    counter = tmp_path / "status-count"
+    harness = f'''
+source <(awk '/^clear_local_changes_marker_if_clean[(][)]/{{flag=1}} /^ensure_no_unstaged_tracked_changes[(][)]/{{flag=0}} flag' {UPDATER!s})
+trim_alert_text() {{ cat; }}
+load_repo_status_snapshot() {{
+  printf '1\\n' >> {counter!s}
+  GIT_STATUS_RAW=' M bot.py'
+  GIT_STATUS_FILES_RAW='bot.py'
+  GIT_STATUS_STAGED_FILES_RAW=''
+  GIT_STATUS_UNSTAGED_FILES_RAW='bot.py'
+  GIT_STATUS_SNAPSHOT_READY=1
+}}
+LOCAL_CHANGES_MARKER_FILE={marker!s}
+LOCAL_CANDIDATE_MODE=1
+CHANGED_FILES_RAW='bot.py'
+load_repo_status_snapshot
+clear_local_changes_marker_if_clean 1
+candidate_local_changes_are_expected 1
+printf 'COUNT=%s MARKER=%s\\n' "$(wc -l < {counter!s})" "$([[ -f {marker!s} ]] && echo yes || echo no)"
+'''
+    result = _run_bash(harness)
+    assert "COUNT=1" in result.stdout
+    assert "MARKER=yes" in result.stdout

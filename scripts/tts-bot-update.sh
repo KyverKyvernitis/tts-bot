@@ -404,10 +404,12 @@ load_git_diff_snapshot() {
 load_repo_status_snapshot() {
   local output
   if ! output="$(repo_python_as_ubuntu "$REPO_DIR/utility/update_git_snapshot.py" status --repo "$REPO_DIR" 2>&1)"; then
+    GIT_STATUS_SNAPSHOT_READY=0
     LAST_ERROR_STDERR="${output:-falha ao capturar status Git do checkout}"
     return 1
   fi
   eval "$output"
+  GIT_STATUS_SNAPSHOT_READY=1
 }
 
 load_repo_ref_snapshot() {
@@ -977,6 +979,17 @@ mark_update_timing() {
   fi
   UPDATER_TIMINGS+="${label}=${delta}s"
   logger -t "$LOG_TAG" "timing ${label}=${delta}s total=${now}s"
+}
+
+log_update_operation_timing_ms() {
+  local label="${1:-operação}" start_ms="${2:-0}" end_ms elapsed_ms elapsed_text
+  end_ms="$(update_now_ms)"
+  [[ "$start_ms" =~ ^[0-9]+$ ]] || start_ms="$end_ms"
+  elapsed_ms=$((end_ms - start_ms))
+  (( elapsed_ms < 0 )) && elapsed_ms=0
+  elapsed_text="$(format_update_duration_ms "$elapsed_ms")"
+  printf '[timing] %s=%s (%sms)\n' "$label" "$elapsed_text" "$elapsed_ms"
+  logger -t "$LOG_TAG" "timing ${label}=${elapsed_ms}ms" 2>/dev/null || true
 }
 
 format_changed_processes() {
@@ -6534,7 +6547,10 @@ prepare_local_candidate_update() {
   # Se uma execução anterior caiu depois da promoção (ou até depois do push),
   # reconheça o commit pelo Candidate-ID antes de tentar sincronizar/aplicar de
   # novo. Isso torna a retomada segura sem depender de um worktree antigo.
+  local git_preflight_started_ms
+  git_preflight_started_ms="$(update_now_ms)"
   if local_live_head_candidate_state; then
+    log_update_operation_timing_ms "preflight.git_head_candidate" "$git_preflight_started_ms"
     if (( LOCAL_CANDIDATE_RESUME_DELIVERY_ONLY == 1 )); then
       logger -t "$LOG_TAG" "Candidato local já publicado; retomando apenas a entrega final." 2>/dev/null || true
     else
@@ -6542,6 +6558,7 @@ prepare_local_candidate_update() {
     fi
     return 0
   fi
+  log_update_operation_timing_ms "preflight.git_head_candidate" "$git_preflight_started_ms"
 
   if [[ -n "$LOCAL_CANDIDATE_BASE_COMMIT" && "$LOCAL_CANDIDATE_BASE_COMMIT" != "$REMOTE_COMMIT" ]]; then
     if [[ -f "${LOCAL_CANDIDATE_PATCH_FILE:-}" ]]; then
@@ -6572,11 +6589,25 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   fi
 
   STAGE="verificação de alterações locais"
-  clear_local_changes_marker_if_clean
-  if candidate_local_changes_are_expected; then
+  git_preflight_started_ms="$(update_now_ms)"
+  if ! load_repo_status_snapshot; then
+    log_update_operation_timing_ms "preflight.git_status" "$git_preflight_started_ms"
+    LAST_ERROR_STDERR="${LAST_ERROR_STDERR:-não foi possível conferir as alterações locais do candidato como usuário ubuntu}"
+    return 1
+  fi
+  log_update_operation_timing_ms "preflight.git_status" "$git_preflight_started_ms"
+
+  # O mesmo snapshot alimenta a limpeza do marker e a validação do candidato.
+  # Antes estes dois passos executavam `git status` separadamente, duplicando a
+  # varredura do índice/worktree exatamente no caminho crítico de inicialização.
+  clear_local_changes_marker_if_clean 1
+  git_preflight_started_ms="$(update_now_ms)"
+  if candidate_local_changes_are_expected 1; then
+    log_update_operation_timing_ms "preflight.local_changes_check" "$git_preflight_started_ms"
     logger -t "$LOG_TAG" "Alterações locais correspondem ao candidato ativo; retomando aplicação segura."
   else
     local candidate_dirty_rc=$?
+    log_update_operation_timing_ms "preflight.local_changes_check" "$git_preflight_started_ms"
     if (( candidate_dirty_rc == 2 )); then
       LAST_ERROR_STDERR="não foi possível conferir as alterações locais do candidato como usuário ubuntu"
       return 1
@@ -6586,10 +6617,12 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
   if [[ "$CURRENT_COMMIT" != "$REMOTE_COMMIT" ]]; then
     STAGE="sincronização com GitHub antes do candidato"
+    git_preflight_started_ms="$(update_now_ms)"
     repo_git pull --ff-only origin "$BRANCH"
     CURRENT_COMMIT="$(repo_git rev-parse HEAD)"
     PREVIOUS_COMMIT="$CURRENT_COMMIT"
     SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
+    log_update_operation_timing_ms "preflight.git_pull" "$git_preflight_started_ms"
     mark_update_timing "sync"
   fi
   zip_progress_done_and_publish "Estado local validado" "Preparando arquivos"
@@ -7042,8 +7075,12 @@ local_changes_fingerprint() {
 }
 
 clear_local_changes_marker_if_clean() {
-  local status_text
-  status_text="$(collect_local_tracked_changes)"
+  local reuse_snapshot="${1:-0}" status_text
+  if [[ "$reuse_snapshot" == "1" && "${GIT_STATUS_SNAPSHOT_READY:-0}" == "1" ]]; then
+    status_text="$(printf '%s' "${GIT_STATUS_RAW:-}" | trim_alert_text 1800)"
+  else
+    status_text="$(collect_local_tracked_changes)"
+  fi
   if [[ -z "${status_text//[[:space:]]/}" ]]; then
     rm -f "$LOCAL_CHANGES_MARKER_FILE" 2>/dev/null || true
   fi
@@ -7085,6 +7122,7 @@ collect_local_tracked_files() {
 }
 
 candidate_local_changes_are_expected() {
+  local reuse_snapshot="${1:-0}"
   (( LOCAL_CANDIDATE_MODE == 1 )) || return 1
   [[ -n "${CHANGED_FILES_RAW//[[:space:]]/}" ]] || return 1
   if ! declare -F load_repo_status_snapshot >/dev/null 2>&1; then
@@ -7112,7 +7150,9 @@ raise SystemExit(0)
 PYCANDIDATE_DIRTY_FALLBACK
     return $?
   fi
-  load_repo_status_snapshot || return 2
+  if [[ "$reuse_snapshot" != "1" || "${GIT_STATUS_SNAPSHOT_READY:-0}" != "1" ]]; then
+    load_repo_status_snapshot || return 2
+  fi
   [[ -n "${GIT_STATUS_FILES_RAW//[[:space:]]/}" ]] || return 0
 
   local dirty expected found
