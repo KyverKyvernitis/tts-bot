@@ -1198,7 +1198,10 @@ class BotLocal(commands.Bot):
                 if not info_buttons:
                     children.append(discord.ui.Separator())
                 children.append(discord.ui.ActionRow(button))
-        view.add_item(discord.ui.Container(*children, accent_color=color))
+        container_kwargs: dict[str, object] = {}
+        if not (isinstance(presentation, dict) and str(presentation.get("kind") or "").lower() == "progress"):
+            container_kwargs["accent_color"] = color
+        view.add_item(discord.ui.Container(*children, **container_kwargs))
         return view
 
     def _make_zip_update_confirmation_view(

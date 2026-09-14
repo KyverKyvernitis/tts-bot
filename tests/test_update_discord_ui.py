@@ -235,6 +235,16 @@ def test_macro_classifier_matches_the_visible_seven_stage_timeline() -> None:
 
 
 
+
+
+def test_progress_card_has_no_accent_color_but_final_cards_keep_status_color() -> None:
+    source = BOT.read_text(encoding="utf-8")
+    block = _block(source, "    def _make_zip_update_view", "\n    def _make_zip_update_confirmation_view")
+    assert 'str(presentation.get("kind") or "").lower() == "progress"' in block
+    assert 'container_kwargs["accent_color"] = color' in block
+    assert 'discord.ui.Container(*children, **container_kwargs)' in block
+
+
 def test_progress_handoff_preserves_discord_receive_time_across_process_boundary() -> None:
     bot = BOT.read_text(encoding="utf-8")
     updater = UPDATER.read_text(encoding="utf-8")
