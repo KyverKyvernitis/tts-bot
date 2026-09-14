@@ -277,6 +277,7 @@ ZIP_PROGRESS_STAGE_STARTED_MS=0
 ZIP_PROGRESS_STARTED_MS=0
 ZIP_PROGRESS_DONE_LABELS=""
 ZIP_PROGRESS_HANDOFF_LOADED=0
+ZIP_RECOVERY_STARTED_MS=0
 UPDATER_STEP_LAST=0
 UPDATER_TIMINGS=""
 UPDATE_STATUS_OUTBOX_DIR="$REPO_DIR/data/runtime/update-status-outbox"
@@ -3077,12 +3078,15 @@ zip_progress_macro_index() {
   local stage_label="${1:-Processando atualização}"
   local lowered="${stage_label,,}"
   case "$lowered" in
-    *github*|*push*|*sincronizando*) printf '5' ;;
-    *health*|*saúde*|*saude*|*comandos*|*estabilidade*|*finalizando*|*estado\ publicado*) printf '4' ;;
-    *promov*|*ativando*|*publicando\ interface*|*publicando\ servidor*|*reiniciando*|*recarregando*|*reload*) printf '3' ;;
-    *ready*|*release*|*fazendo\ commit*|*commit\ criado*|*registrando*) printf '2' ;;
-    *validando*|*verificando*|*analisando*|*test*|*typescript*|*compilando*|*build*|*dependências*|*dependencias*|*runtime*) printf '1' ;;
-    *) printf '0' ;;
+    *github*|*push*|*sincronizando*) printf '6' ;;
+    *health*|*saúde*|*saude*|*comandos*|*estabilidade*|*finalizando*|*estado\ publicado*|*recuperando\ confirmação*) printf '5' ;;
+    *promov*|*aplicando\ na\ vps*|*ativando*|*publicando\ interface*|*publicando\ servidor*|*reiniciando*|*recarregando*|*reload*) printf '4' ;;
+    *ready*|*release*|*preservando\ runtime*|*fazendo\ commit*|*commit\ criado*|*registrando*) printf '3' ;;
+    *conferindo\ zip*|*integridade*|*segurança*|*seguranca*|*pacote*) printf '0' ;;
+    *validando\ runtime*|*validando\ arquivos*|*verificando\ comandos*|*analisando*|*test*|*typescript*|*compilando*|*build*|*dependências*|*dependencias*) printf '2' ;;
+    *validando\ permissões*|*validando\ estado*|*preparando\ arquivos*|*aplicando\ em\ área*|*worktree*|*staging*) printf '1' ;;
+    *validando*) printf '2' ;;
+    *) printf '1' ;;
   esac
 }
 
@@ -3225,6 +3229,7 @@ zip_progress_publish() {
   fi
   if [[ "$ZIP_PROGRESS_STAGE_LABEL" != "$stage_label" || "$ZIP_PROGRESS_STAGE_STARTED_MS" -le 0 ]]; then
     ZIP_PROGRESS_STAGE_LABEL="$stage_label"
+    ZIP_PROGRESS_STAGE_STARTED_MS="$now_ms"
     stage_changed=1
   fi
   if declare -F write_update_runtime_state >/dev/null 2>&1; then
@@ -3257,8 +3262,11 @@ zip_progress_publish() {
     footer="$identifier · $ZIP_PROGRESS_COMPLETED_COUNT etapas concluídas · $elapsed_text"
   fi
   description+=$'\n'"-# $footer"
-  local macro_index action_name
+  local macro_index action_name stage_elapsed_ms stage_elapsed_text
   macro_index="$(zip_progress_macro_index "$stage_label")"
+  stage_elapsed_ms=$((now_ms - ZIP_PROGRESS_STAGE_STARTED_MS))
+  (( stage_elapsed_ms < 0 )) && stage_elapsed_ms=0
+  stage_elapsed_text="$(format_update_duration_ms "$stage_elapsed_ms")"
   action_name="update"
   if (( ROLLBACK_CONTROL_MODE == 1 )); then
     if [[ "${ROLLBACK_REQUEST_ACTION:-rollback}" == "redo" ]]; then
@@ -3267,7 +3275,7 @@ zip_progress_publish() {
       action_name="rollback"
     fi
   fi
-  ZIP_STATUS_UI_JSON="$(UI_KIND=progress UI_STAGE="$stage_label" UI_DETAIL="$detail" UI_IDENTIFIER="$identifier" UI_ELAPSED="$elapsed_text" UI_MACRO_INDEX="$macro_index" UI_ACTION="$action_name" python3 - <<'PYPROGRESSUI'
+  ZIP_STATUS_UI_JSON="$(UI_KIND=progress UI_STAGE="$stage_label" UI_DETAIL="$detail" UI_IDENTIFIER="$identifier" UI_ELAPSED="$elapsed_text" UI_STAGE_ELAPSED="$stage_elapsed_text" UI_MACRO_INDEX="$macro_index" UI_ACTION="$action_name" python3 - <<'PYPROGRESSUI'
 import json, os
 print(json.dumps({
     "kind": "progress",
@@ -3275,6 +3283,7 @@ print(json.dumps({
     "detail": os.environ.get("UI_DETAIL") or "",
     "identifier": os.environ.get("UI_IDENTIFIER") or "",
     "elapsed": os.environ.get("UI_ELAPSED") or "",
+    "stage_elapsed": os.environ.get("UI_STAGE_ELAPSED") or "",
     "macro_index": int(os.environ.get("UI_MACRO_INDEX") or 0),
     "action": os.environ.get("UI_ACTION") or "update",
 }, ensure_ascii=False))
@@ -3286,10 +3295,38 @@ PYPROGRESSUI
     notify_zip_status_message "$status" "$title" "$description" || true
   fi
   ZIP_STATUS_UI_JSON=""
-  if (( stage_changed == 1 )); then
-    ZIP_PROGRESS_STAGE_STARTED_MS="$(update_now_ms)"
-  fi
   update_local_candidate_heartbeat "active" "" "$stage_label"
+}
+
+zip_recovery_publish() {
+  local stage_label="${1:-Restaurando versão anterior}"
+  local detail="${2:-}"
+  local recovery_step="${3:-0}"
+  local now_ms elapsed_ms elapsed_text identifier failure_code
+  now_ms="$(update_now_ms)"
+  if (( ZIP_RECOVERY_STARTED_MS <= 0 )); then
+    ZIP_RECOVERY_STARTED_MS="$now_ms"
+  fi
+  elapsed_ms=$((now_ms - ZIP_RECOVERY_STARTED_MS))
+  (( elapsed_ms < 0 )) && elapsed_ms=0
+  elapsed_text="$(format_update_duration_ms "$elapsed_ms")"
+  identifier="$(zip_progress_identifier)"
+  failure_code="${LAST_ERROR_CODE:-UPDATE_STAGE_FAILED}"
+  ZIP_STATUS_UI_JSON="$(UI_STAGE="$stage_label" UI_DETAIL="$detail" UI_IDENTIFIER="$identifier" UI_ELAPSED="$elapsed_text" UI_RECOVERY_STEP="$recovery_step" UI_FAILURE_CODE="$failure_code" python3 - <<'PYRECOVERYUI'
+import json, os
+print(json.dumps({
+    "kind": "recovery",
+    "stage": os.environ.get("UI_STAGE") or "Restaurando versão anterior",
+    "detail": os.environ.get("UI_DETAIL") or "",
+    "identifier": os.environ.get("UI_IDENTIFIER") or "",
+    "elapsed": os.environ.get("UI_ELAPSED") or "",
+    "recovery_step": int(os.environ.get("UI_RECOVERY_STEP") or 0),
+    "failure_code": os.environ.get("UI_FAILURE_CODE") or "UPDATE_STAGE_FAILED",
+}, ensure_ascii=False))
+PYRECOVERYUI
+)"
+  notify_zip_status_message "recovering" "Atualização falhou" "$detail" || true
+  ZIP_STATUS_UI_JSON=""
 }
 
 zip_progress_done() {
@@ -3378,7 +3415,7 @@ zip_progress_run_as_ubuntu() {
     if (( now_ms >= next_publish_ms )); then
       elapsed_ms=$((now_ms - started_ms))
       (( elapsed_ms < 0 )) && elapsed_ms=0
-      zip_progress_publish "$stage_label" "$detail · $(format_update_duration_ms "$elapsed_ms")"
+      zip_progress_publish "$stage_label" "$detail"
       next_publish_ms=$((now_ms + interval * 1000))
     fi
   done
@@ -8904,6 +8941,8 @@ rollback_after_failure() {
   fi
   ROLLBACK_DONE=1
   ROLLBACK_IN_PROGRESS=1
+  ZIP_RECOVERY_STARTED_MS="$(update_now_ms)"
+  zip_recovery_publish "Restaurando código" "Falha original: ${original_error_code:-UPDATE_STAGE_FAILED}" 0
 
   if (( LOCAL_CANDIDATE_MODE == 1 )); then
     logger -t "$LOG_TAG" "Erro fatal no candidato local. Tentando rollback para $(short_commit "$PREVIOUS_COMMIT") antes de push GitHub"
@@ -8938,6 +8977,7 @@ rollback_after_failure() {
   fi
 
   if (( rollback_success == 1 )); then
+    zip_recovery_publish "Restaurando runtimes" "Código anterior restaurado" 1
     if (( REQUIREMENTS_CHANGED == 1 )); then
       if (( PYTHON_RUNTIME_MUTATED == 1 )); then
         STAGE="rollback runtime Python por release"
@@ -8998,6 +9038,7 @@ rollback_after_failure() {
       rollback_back_status="não precisou reiniciar"
     fi
 
+    zip_recovery_publish "Verificando versão anterior" "Confirmando serviços e estabilidade do bot" 2
     if deploy_bot; then
       rollback_bot_status="$BOT_HEALTHCHECK_STATUS"
     else
@@ -9087,7 +9128,61 @@ ${LAST_ERROR_LOGS:-nenhum log adicional encontrado}
 Duração: $duration
 Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
+  local recovery_duration rollback_bool final_headline final_summary
+  if (( ZIP_RECOVERY_STARTED_MS > 0 )); then
+    recovery_duration="$(format_update_duration_ms $(( $(update_now_ms) - ZIP_RECOVERY_STARTED_MS )))"
+  else
+    recovery_duration=""
+  fi
+  if (( rollback_success == 1 )); then
+    rollback_bool="true"
+    final_headline="Atualização não aplicada"
+    final_summary="A versão anterior foi restaurada e validada."
+  else
+    rollback_bool="false"
+    final_headline="Recuperação necessária"
+    final_summary="O rollback não conseguiu restaurar completamente o estado anterior."
+  fi
+  ZIP_STATUS_UI_JSON="$(
+    UI_STATUS=error UI_HEADLINE="$final_headline" UI_SUMMARY="$final_summary" \
+    UI_DISPLAY_ID="${LOCAL_CANDIDATE_DISPLAY_ID:-${UPDATE_DISPLAY_ID:-}}" UI_BRANCH="${BRANCH:-main}" \
+    UI_FROM="$(short_commit "$PREVIOUS_COMMIT")" UI_TO="$(short_commit "$REMOTE_COMMIT")" \
+    UI_FILE_COUNT="$(format_update_file_count "${CHANGED_FILES_COUNT:-0}")" UI_DIFF="${DIFF_TOTAL_SUMMARY:-}" \
+    UI_DURATION="$duration" UI_RECOVERY_DURATION="$recovery_duration" UI_HEALTH="$rollback_bot_status" \
+    UI_FAILURE_CODE="${original_error_code:-UPDATE_STAGE_FAILED}" UI_ROLLBACK_OK="$rollback_bool" \
+    UI_CHECKS="${CHECKS_TEXT:-}" UI_TIMINGS="${TIMINGS_TEXT:-}" UI_CACHE="${CACHE_TEXT:-}" \
+    UI_TESTS="${TEST_PLAN_TEXT:-}" UI_FILES="${CHANGED_FILES:-}" UI_PROCESSES="${CHANGED_PROCESSES:-}" \
+    python3 - <<'PYROLLBACKFINAL'
+import json, os
+print(json.dumps({
+    "kind": "final",
+    "status": "error",
+    "headline": os.environ.get("UI_HEADLINE") or "Atualização não aplicada",
+    "summary": os.environ.get("UI_SUMMARY") or "",
+    "display_id": os.environ.get("UI_DISPLAY_ID") or "",
+    "branch": os.environ.get("UI_BRANCH") or "main",
+    "from": os.environ.get("UI_FROM") or "",
+    "to": os.environ.get("UI_TO") or "",
+    "file_count_text": os.environ.get("UI_FILE_COUNT") or "0 arquivos",
+    "diff_summary": os.environ.get("UI_DIFF") or "",
+    "impact": "",
+    "duration": os.environ.get("UI_DURATION") or "",
+    "recovery_duration": os.environ.get("UI_RECOVERY_DURATION") or "",
+    "bot_health": os.environ.get("UI_HEALTH") or "",
+    "github_synced": False,
+    "failure_code": os.environ.get("UI_FAILURE_CODE") or "UPDATE_STAGE_FAILED",
+    "rollback_ok": (os.environ.get("UI_ROLLBACK_OK") or "false").lower() == "true",
+    "checks_text": os.environ.get("UI_CHECKS") or "",
+    "timings_text": os.environ.get("UI_TIMINGS") or "",
+    "cache_text": os.environ.get("UI_CACHE") or "",
+    "tests_text": os.environ.get("UI_TESTS") or "",
+    "files_text": os.environ.get("UI_FILES") or "",
+    "processes": os.environ.get("UI_PROCESSES") or "",
+}, ensure_ascii=False))
+PYROLLBACKFINAL
+  )"
   notify_zip_status_message "error" "$title" "$summary" || true
+  ZIP_STATUS_UI_JSON=""
   send_error "$title" "$body"
   exit "$exit_code"
 }

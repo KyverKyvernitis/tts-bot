@@ -304,6 +304,10 @@ class BotLocal(commands.Bot):
         self._zip_update_log_outbox_dir = self._repo_root / "data" / "runtime" / "update-alert-outbox"
         self._zip_update_delivery_receipts_dir = self._repo_root / "data" / "runtime" / "update-delivery-receipts"
         self._zip_update_log_channel_state_path = self._repo_root / "data" / "runtime" / "update-log-channel.json"
+        # Coalesce de microetapas: o updater pode atravessar vários passos em
+        # poucos milissegundos. Não vale martelar a API do Discord para mostrar
+        # estados que desapareceriam antes de o usuário conseguir lê-los.
+        self._zip_update_progress_render_state: dict[tuple[int, int], dict[str, object]] = {}
         self._app_command_manifest_path = self._repo_root / "data" / "app_commands_manifest.json"
         self._app_command_sync_status_path = self._repo_root / "data" / "app_commands_sync_status.json"
         self._removed_slash_cleanup_state_path = self._repo_root / "data" / "removed_slash_cleanup_state.json"
@@ -993,11 +997,12 @@ class BotLocal(commands.Bot):
             elapsed = str(presentation.get("elapsed") or "").strip()
             stage = str(presentation.get("stage") or "Processando atualização").strip()
             detail = str(presentation.get("detail") or "").strip()
+            stage_elapsed = str(presentation.get("stage_elapsed") or "").strip()
             try:
-                current = max(0, min(5, int(presentation.get("macro_index") or 0)))
+                current = max(0, min(6, int(presentation.get("macro_index") or 0)))
             except (TypeError, ValueError):
                 current = 0
-            macros = ("Preparação", "Validação", "Release", "Promoção", "Verificação", "GitHub")
+            macros = ("Pacote", "Preparação", "Validação", "Release", "Promoção", "Verificação", "GitHub")
             lines = [f"# {UPDATE_EMOJI_PROGRESS} {headline}"]
             meta = " · ".join(piece for piece in (f"`{identifier}`" if identifier else "", elapsed) if piece)
             if meta:
@@ -1008,11 +1013,42 @@ class BotLocal(commands.Bot):
                     lines.append(f"{UPDATE_EMOJI_CHECK} {label}")
                 elif index == current:
                     lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}**")
-                    micro = stage
+                    micro_parts = [stage]
                     if detail and detail.casefold() not in stage.casefold():
-                        micro = f"{stage} · {detail}"
+                        micro_parts.append(detail)
+                    if stage_elapsed and stage_elapsed not in {"0s", "0 ms", "0ms"}:
+                        micro_parts.append(stage_elapsed)
+                    micro = " · ".join(part for part in micro_parts if part)
                     if micro:
-                        lines.append(f"-# {micro[:220]}")
+                        lines.append(f"-# {micro[:240]}")
+                else:
+                    lines.append(f"○ {label}")
+            return "\n".join(lines)
+
+        if kind == "recovery":
+            identifier = str(presentation.get("identifier") or "").strip()
+            failure_code = str(presentation.get("failure_code") or "UPDATE_STAGE_FAILED").strip()
+            stage = str(presentation.get("stage") or "Restaurando versão anterior").strip()
+            detail = str(presentation.get("detail") or "").strip()
+            elapsed = str(presentation.get("elapsed") or "").strip()
+            try:
+                step = max(0, min(2, int(presentation.get("recovery_step") or 0)))
+            except (TypeError, ValueError):
+                step = 0
+            recovery_steps = ("Código", "Runtimes", "Verificação")
+            lines = [f"# {UPDATE_EMOJI_ERROR} Atualização falhou"]
+            meta = " · ".join(piece for piece in (f"`{identifier}`" if identifier else "", f"`{failure_code}`", elapsed) if piece)
+            if meta:
+                lines.append(f"-# {meta}")
+            lines.append("")
+            for index, label in enumerate(recovery_steps):
+                if index < step:
+                    lines.append(f"{UPDATE_EMOJI_CHECK} {label}")
+                elif index == step:
+                    lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}**")
+                    micro = " · ".join(part for part in (stage, detail) if part)
+                    if micro:
+                        lines.append(f"-# {micro[:240]}")
                 else:
                     lines.append(f"○ {label}")
             return "\n".join(lines)
@@ -1044,6 +1080,13 @@ class BotLocal(commands.Bot):
             duration = str(presentation.get("duration") or "").strip()
             bot_health = str(presentation.get("bot_health") or "").strip()
             github_synced = bool(presentation.get("github_synced", True))
+            failure_code = str(presentation.get("failure_code") or "").strip()
+            rollback_ok = presentation.get("rollback_ok")
+            recovery_duration = str(presentation.get("recovery_duration") or "").strip()
+            if status in {"error", "failed", "failure"} and rollback_ok is True:
+                headline = str(presentation.get("headline") or "Atualização não aplicada").strip() or "Atualização não aplicada"
+            elif status in {"error", "failed", "failure"} and rollback_ok is False:
+                headline = str(presentation.get("headline") or "Recuperação necessária").strip() or "Recuperação necessária"
             lines = [f"# {icon} {headline}"]
             if summary:
                 lines.append(summary)
@@ -1052,11 +1095,22 @@ class BotLocal(commands.Bot):
                 lines.append(f"`{identifier}`")
             if old_commit or new_commit:
                 lines.append(f"`{old_commit or '?'}` → `{new_commit or '?'}`")
+            if failure_code:
+                lines.append(f"{UPDATE_EMOJI_ERROR} `{failure_code}`")
+            if rollback_ok is True:
+                lines.append(f"{UPDATE_EMOJI_CHECK} Versão anterior restaurada")
+            elif rollback_ok is False:
+                lines.append("⚠️ Rollback incompleto · verificação manual necessária")
             file_line = f"{UPDATE_EMOJI_FILES} **{files}**"
             if diff_summary:
                 file_line += f" · `{diff_summary}`"
             lines.append(file_line)
-            impact_line = " · ".join(piece for piece in (impact, f"**{duration}**" if duration else "") if piece)
+            duration_bits = [impact] if impact else []
+            if duration:
+                duration_bits.append(f"**{duration}**")
+            if recovery_duration:
+                duration_bits.append(f"recuperação **{recovery_duration}**")
+            impact_line = " · ".join(piece for piece in duration_bits if piece)
             if impact_line:
                 lines.append(impact_line)
             health_bits: list[str] = []
@@ -1460,7 +1514,7 @@ class BotLocal(commands.Bot):
                     "warn": "⚠️",
                     "warning": "⚠️",
                 }.get(kind, "<:Files:1548838468665475193>")
-                header = f"{icon} **{title}**\n-# `{event_id}`"
+                header = f"{icon} **{title}**\n-# `{event_id}` · canal técnico · log bruto"
                 files: list[discord.File] = []
                 if attachment is not None:
                     files.append(discord.File(str(attachment), filename=str(data.get("attachment_name") or attachment.name)[:120]))
@@ -2010,7 +2064,7 @@ class BotLocal(commands.Bot):
             return discord.Color.green()
         if status in {"warn", "warning", "progress"}:
             return discord.Color.gold()
-        if status in {"error", "failed", "failure"}:
+        if status in {"error", "failed", "failure", "recovering"}:
             return discord.Color.red()
         if status in {"applying", "pending"}:
             return discord.Color.blurple()
@@ -2907,6 +2961,74 @@ class BotLocal(commands.Bot):
             logging.getLogger("zip_update").warning("falha ao criar mensagem de update pelo updater", exc_info=True)
             return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
 
+    def _zip_update_progress_should_render(
+        self,
+        channel_id: int,
+        message_id: int,
+        presentation: dict[str, object] | None,
+    ) -> tuple[bool, str]:
+        if not isinstance(presentation, dict):
+            return True, ""
+        kind = str(presentation.get("kind") or "").strip().lower()
+        if kind not in {"progress", "recovery"}:
+            return True, ""
+        key = (int(channel_id), int(message_id))
+        now = time.monotonic()
+        signature_payload = {
+            "kind": kind,
+            "macro_index": presentation.get("macro_index"),
+            "recovery_step": presentation.get("recovery_step"),
+            "stage": str(presentation.get("stage") or ""),
+            "detail": str(presentation.get("detail") or ""),
+            "action": str(presentation.get("action") or ""),
+            "failure_code": str(presentation.get("failure_code") or ""),
+        }
+        signature = json.dumps(signature_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        previous = self._zip_update_progress_render_state.get(key)
+        if isinstance(previous, dict):
+            previous_kind = str(previous.get("kind") or "")
+            previous_macro = previous.get("macro_index")
+            previous_step = previous.get("recovery_step")
+            try:
+                age = now - float(previous.get("rendered_at") or 0.0)
+            except (TypeError, ValueError):
+                age = 999.0
+            if str(previous.get("signature") or "") == signature and age < 8.0:
+                return False, "microetapa idêntica"
+            same_phase = (
+                previous_kind == kind
+                and previous_macro == presentation.get("macro_index")
+                and previous_step == presentation.get("recovery_step")
+            )
+            # Microetapas muito rápidas na mesma macrofase são intencionalmente
+            # coalescidas. Mudança de macrofase/recovery sempre é imediata.
+            if kind == "progress" and same_phase and age < 1.0:
+                return False, "microetapa coalescida"
+        return True, signature
+
+    def _zip_update_progress_mark_rendered(
+        self,
+        channel_id: int,
+        message_id: int,
+        presentation: dict[str, object] | None,
+        signature: str,
+    ) -> None:
+        if not isinstance(presentation, dict):
+            return
+        kind = str(presentation.get("kind") or "").strip().lower()
+        if kind not in {"progress", "recovery"}:
+            self._zip_update_progress_render_state.pop((int(channel_id), int(message_id)), None)
+            return
+        if not signature:
+            return
+        self._zip_update_progress_render_state[(int(channel_id), int(message_id))] = {
+            "signature": signature,
+            "kind": kind,
+            "macro_index": presentation.get("macro_index"),
+            "recovery_step": presentation.get("recovery_step"),
+            "rendered_at": time.monotonic(),
+        }
+
     async def _edit_zip_status_from_update(self, payload: dict[str, object]) -> dict[str, object]:
         try:
             channel_id = int(str(payload.get("channel_id") or "0"))
@@ -2923,6 +3045,9 @@ class BotLocal(commands.Bot):
         color = self._zip_update_status_color(status)
         presentation_raw = payload.get("ui") if isinstance(payload, dict) else None
         presentation = dict(presentation_raw) if isinstance(presentation_raw, dict) else None
+        should_render, progress_signature = self._zip_update_progress_should_render(channel_id, message_id, presentation)
+        if not should_render:
+            return {"ok": True, "ignored": "progresso coalescido"}
         control_raw = payload.get("control") if isinstance(payload, dict) else None
         control: dict[str, object] | None = None
         state_record: dict[str, object] | None = None
@@ -3034,6 +3159,7 @@ class BotLocal(commands.Bot):
                 info_token=info_token,
             )
             await status_message.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+            self._zip_update_progress_mark_rendered(channel_id, message_id, presentation, progress_signature)
             # O estado persistente só pode avançar depois que o Discord confirmou
             # a edição. A ordem antiga salvava antes do await; uma falha tornava o
             # retry "antigo" e o outbox removia a notificação sem nunca publicá-la.
@@ -3198,8 +3324,25 @@ class BotLocal(commands.Bot):
                 lines.extend(["", "**Testes**", tests])
             timings = str(presentation.get("timings_text") or "").strip()
             if timings:
-                pretty_timings = "\n".join(piece.strip() for piece in timings.split(",") if piece.strip())
-                lines.extend(["", "**Tempos**", pretty_timings])
+                timing_labels = {
+                    "fetch": "Git fetch",
+                    "candidate_apply": "Aplicação isolada",
+                    "candidate_promote": "Promoção",
+                    "preflight": "Preflight",
+                    "frontend": "Frontend",
+                    "backend": "Backend",
+                    "bot": "Bot",
+                    "worker": "Worker",
+                    "commit": "Commit",
+                    "push": "GitHub",
+                    "total": "Total",
+                }
+                pretty_rows: list[str] = []
+                for piece in (part.strip() for part in timings.split(",") if part.strip()):
+                    key, sep, value = piece.partition("=")
+                    label = timing_labels.get(key.strip(), key.strip().replace("_", " ").title())
+                    pretty_rows.append(f"{label:<18} {value.strip()}" if sep else piece)
+                lines.extend(["", "**Tempos**", "```text\n" + "\n".join(pretty_rows) + "\n```"])
             processes = str(presentation.get("processes") or "").strip()
             if processes and processes.casefold() not in {"nenhum", "nenhum processo alterado"}:
                 lines.extend(["", "**Processos**", processes])
@@ -3704,35 +3847,45 @@ class BotLocal(commands.Bot):
                         return f"{minutes}min {seconds:02d}s"
 
                     async def consume_preparation_progress() -> None:
-                        progress_edits_enabled = True
+                        last_render_at = 0.0
                         while True:
                             event = await progress_queue.get()
                             if event is None:
                                 return
-                            completed = str(event.get("completed") or "").strip()
-                            current = str(event.get("current") or "Processando pacote").strip()
-                            if completed:
-                                preparation_history.append(
-                                    f"-# ✅ {completed} · {format_elapsed_ms(event.get('elapsed_ms'))}"
-                                )
-                            visible_history = preparation_history[-8:]
-                            hidden_count = max(0, len(preparation_history) - len(visible_history))
-                            lines: list[str] = []
-                            if hidden_count:
-                                noun = "etapa anterior concluída" if hidden_count == 1 else "etapas anteriores concluídas"
-                                lines.append(f"-# … {hidden_count} {noun}")
-                            lines.extend(visible_history)
-                            lines.append(f"<a:loading:1510065277868445796> **{current}**")
-                            if prefix:
-                                lines.append(f"-# {prefix}")
+                            batch: list[dict[str, object]] = [event]
+                            stop_after_batch = False
+                            # Etapas de preparação podem terminar em poucos ms. Espere uma
+                            # fração curta e drene o burst para não piscar dezenas de edits.
+                            since_last = time.monotonic() - last_render_at
+                            if last_render_at and since_last < 0.75:
+                                await asyncio.sleep(0.75 - since_last)
+                            while True:
+                                try:
+                                    queued = progress_queue.get_nowait()
+                                except asyncio.QueueEmpty:
+                                    break
+                                if queued is None:
+                                    stop_after_batch = True
+                                    break
+                                batch.append(queued)
+                            current = "Processando pacote"
+                            detail = "Preparação segura do candidato"
+                            for item in batch:
+                                completed = str(item.get("completed") or "").strip()
+                                current = str(item.get("current") or current).strip() or current
+                                if completed:
+                                    preparation_history.append(
+                                        f"-# {UPDATE_EMOJI_CHECK} {completed} · {format_elapsed_ms(item.get('elapsed_ms'))}"
+                                    )
+                                    detail = f"{completed} concluído"
                             view = self._make_zip_update_view(
                                 "Preparando atualização",
-                                "\n".join(lines),
+                                "",
                                 discord.Color.blurple(),
                                 presentation={
                                     "kind": "progress",
                                     "stage": current,
-                                    "detail": completed and f"{completed} concluído" or "Preparação segura do candidato",
+                                    "detail": detail,
                                     "identifier": prefix,
                                     "elapsed": f"{max(0, int(time.monotonic() - prep_ui_started))}s",
                                     "macro_index": 0,
@@ -3744,8 +3897,11 @@ class BotLocal(commands.Bot):
                                     status_message.edit(view=view, allowed_mentions=discord.AllowedMentions.none()),
                                     timeout=15,
                                 )
+                                last_render_at = time.monotonic()
                             except Exception:
                                 UPDATE_LOG.warning("falha ao editar microetapa de preparação", exc_info=True)
+                            if stop_after_batch:
+                                return
 
                     progress_consumer = asyncio.create_task(consume_preparation_progress())
 
