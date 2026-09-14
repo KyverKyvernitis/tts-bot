@@ -144,6 +144,7 @@ from utility.interaction_safety import is_unknown_interaction, safe_send_interac
 from utility.application_bio import ApplicationBioService
 from utility.application_presence import ApplicationPresenceService
 from updater.discord import IntegracaoDiscordUpdaterMixin, inicializar_integracao_updater
+# Integração do updater vive em updater/discord; esta importação também força reload seguro em migrações.
 
 
 BOOT_LOG = logging.getLogger("bot.boot")

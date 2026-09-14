@@ -981,10 +981,16 @@ class PreparacaoUpdaterMixin:
             self._run_cmd(["git", "config", "user.name", "Discord Auto Update"], clone_dir, env=env)
             self._run_cmd(["git", "config", "user.email", "discord-auto-update@local"], clone_dir, env=env)
 
-            add_result = self._run_cmd(["git", "add", "-A", "--", *changed_files], clone_dir, env=env)
-            if add_result.returncode != 0:
-                err = (add_result.stderr or add_result.stdout or "").strip()
-                raise RuntimeError(f"Falha ao preparar arquivos para commit. {err}")
+            # Operações declarativas (`git rm`/`git mv`) já deixam suas mudanças
+            # staged. Repassar os paths removidos para `git add -A -- <path>`
+            # faz o Git rejeitar o pathspec porque ele já saiu do index. Portanto,
+            # stageamos aqui somente arquivos de conteúdo copiados do ZIP.
+            content_changed_files = update_operation_paths(content_operations)
+            if content_changed_files:
+                add_result = self._run_cmd(["git", "add", "-A", "--", *content_changed_files], clone_dir, env=env)
+                if add_result.returncode != 0:
+                    err = (add_result.stderr or add_result.stdout or "").strip()
+                    raise RuntimeError(f"Falha ao preparar arquivos para commit. {err}")
 
             status_result = self._run_cmd(["git", "status", "--porcelain"], clone_dir, env=env)
             if status_result.returncode != 0:

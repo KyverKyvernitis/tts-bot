@@ -117,7 +117,8 @@ def test_bot_emits_schema_v3_and_reserves_control_manifest() -> None:
     assert 'allowed_ops={"delete", "move"}' in source
     assert '"schema_version": 3' in source
     assert '"operations": normalized_operations' in source
-    assert '["git", "add", "-A", "--", *changed_files]' in source
+    assert 'content_changed_files = update_operation_paths(content_operations)' in source
+    assert '["git", "add", "-A", "--", *content_changed_files]' in source
     assert '"--numstat", "--no-renames"' in source
 
 
@@ -168,3 +169,91 @@ git -C "$REPO_DIR" diff --cached --name-status --no-renames
     assert "D\tcogs/obsolete.py" in result.stdout
     assert "D\tcogs/before.py" in result.stdout
     assert "A\tcogs/after.py" in result.stdout
+
+
+
+def test_discord_delete_only_does_not_restage_removed_pathspec(tmp_path: Path, monkeypatch) -> None:
+    """`git rm` já stageia delete; o preparo não deve executar `git add` no path removido."""
+    import sys
+    import types
+    import zipfile
+
+    import importlib.util
+    import logging
+
+    monkeypatch.setitem(sys.modules, "config", types.SimpleNamespace())
+    package = types.ModuleType("updater.discord")
+    package.__path__ = [str(ROOT / "updater" / "discord")]
+    monkeypatch.setitem(sys.modules, "updater.discord", package)
+    constantes = types.ModuleType("updater.discord.constantes")
+    constantes.UPDATE_LOG = logging.getLogger("zip_update-test")
+    monkeypatch.setitem(sys.modules, "updater.discord.constantes", constantes)
+    spec = importlib.util.spec_from_file_location(
+        "updater.discord.preparacao", ROOT / "updater" / "discord" / "preparacao.py"
+    )
+    assert spec is not None and spec.loader is not None
+    modulo = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "updater.discord.preparacao", modulo)
+    spec.loader.exec_module(modulo)
+    PreparacaoUpdaterMixin = modulo.PreparacaoUpdaterMixin
+
+    remote = tmp_path / "remote.git"
+    live = tmp_path / "live"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    subprocess.run(["git", "init", "-q", str(live)], check=True)
+    subprocess.run(["git", "-C", str(live), "config", "user.email", "test@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(live), "config", "user.name", "Updater Test"], check=True)
+    (live / "deploy" / "scripts").mkdir(parents=True)
+    doomed = live / "deploy" / "scripts" / "tts-bot-update.sh"
+    doomed.write_text("#!/bin/sh\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(live), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(live), "commit", "-qm", "base"], check=True)
+    subprocess.run(["git", "-C", str(live), "branch", "-M", "main"], check=True)
+    subprocess.run(["git", "-C", str(live), "remote", "add", "origin", str(remote)], check=True)
+    subprocess.run(["git", "-C", str(live), "push", "-q", "-u", "origin", "main"], check=True)
+
+    package = tmp_path / "delete-only.zip"
+    manifest = {
+        "schema_version": 1,
+        "operations": [{"op": "delete", "path": "deploy/scripts/tts-bot-update.sh"}],
+    }
+    with zipfile.ZipFile(package, "w") as zf:
+        zf.writestr("update-manifest.json", json.dumps(manifest))
+
+    class Harness(PreparacaoUpdaterMixin):
+        def __init__(self) -> None:
+            self._repo_root = live
+            self._update_temp_root = tmp_path / "tmp"
+            self._update_staging_root = tmp_path / "staging"
+
+        def _zip_update_limits(self):
+            from updater.utilitarios.seguranca import ZipLimits
+            return ZipLimits()
+
+        def _phone_worker_validate_zip_sync(self, _zip_path):
+            return None
+
+        def _write_local_update_candidate_sync(self, **kwargs):
+            assert kwargs["changed_files"] == ["deploy/scripts/tts-bot-update.sh"]
+            assert kwargs["operations"] == [
+                {"op": "delete", "path": "deploy/scripts/tts-bot-update.sh"}
+            ]
+            return {
+                "candidate_id": "test",
+                "display_id": "TEST",
+                "candidate_dir": str(tmp_path / "candidate"),
+                "queue_position": 1,
+                "queue_pending_count": 1,
+                "candidate_prepare_elapsed_ms": 0,
+            }
+
+    result = Harness()._process_zip_update_sync(package)
+    assert result["changed_files"] == ["deploy/scripts/tts-bot-update.sh"]
+    staging = Path(result["staging_dir"])
+    status = subprocess.run(
+        ["git", "-C", str(staging), "diff", "--cached", "--name-status", "--no-renames"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "D\tdeploy/scripts/tts-bot-update.sh" in status
