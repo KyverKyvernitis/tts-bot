@@ -75,6 +75,8 @@ collect_local_tracked_changes() {{ git -C "$REPO_DIR" status --short --untracked
 classify_changed_files() {{ :; }}
 mark_deployment_committed() {{ :; }}
 mark_update_timing() {{ :; }}
+update_now_ms() {{ date +%s%3N; }}
+log_update_operation_timing_ms() {{ :; }}
 """
 
 

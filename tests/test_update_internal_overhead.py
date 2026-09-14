@@ -180,3 +180,64 @@ printf 'COUNT=%s MARKER=%s\\n' "$(wc -l < {counter!s})" "$([[ -f {marker!s} ]] &
     result = _run_bash(harness)
     assert "COUNT=1" in result.stdout
     assert "MARKER=yes" in result.stdout
+
+
+
+def test_local_candidate_claim_precedes_maintenance_and_outbox_flushes() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    main = source[source.index("SECONDS=0") :]
+    claim = main.index("if load_pending_rollback_request; then")
+    local_claim = main.index("elif load_pending_local_candidate; then")
+    maintenance = main.index("prune_update_artifacts || true")
+    status_flush = main.index("flush_update_status_outbox || true")
+    alert_flush = main.index("flush_update_alert_outbox || true")
+    queue_refresh = main.index("refresh_pending_queue_messages || true")
+
+    assert claim < local_claim < maintenance
+    assert local_claim < status_flush
+    assert local_claim < alert_flush
+    assert local_claim < queue_refresh
+
+
+def test_queue_claim_does_not_recursive_chown_history() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    start = source.index("load_pending_local_candidate() {")
+    end = source.index("\nverify_local_candidate_integrity() {", start)
+    block = source[start:end]
+
+    assert 'chown -R ubuntu:ubuntu "$CANDIDATE_QUEUE_ROOT"' not in block
+    assert "install -d -o ubuntu -g ubuntu -m 0775" in block
+
+
+def test_worktree_prune_is_maintenance_only_not_candidate_creation() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    create_start = source.index("create_local_candidate_worktree() {")
+    create_end = source.index("\nensure_candidate_worktree_staged_clean() {", create_start)
+    create_block = source[create_start:create_end]
+    prune_start = source.index("prune_updater_runtime_orphans() {")
+    prune_end = source.index("\nprune_rejected_remote_commits() {", prune_start)
+    prune_block = source[prune_start:prune_end]
+
+    assert "repo_git worktree prune --expire=now" not in create_block
+    assert "worktree prune --expire=now" in prune_block
+
+
+def test_preparation_path_has_fine_grained_timing_labels() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    required = {
+        "startup.disk_guard",
+        "startup.queue_claim",
+        "preparation.worktree_create",
+        "preparation.apply_patch",
+        "preparation.operations",
+        "preparation.copy_files",
+        "preparation.git_add",
+        "preparation.staged_diff",
+        "preparation.static_preflight",
+        "preparation.worktree_clean_check",
+        "preparation.commit",
+        "preparation.runtime_artifacts",
+        "preparation.rollback_snapshot",
+    }
+    for label in required:
+        assert f'log_update_operation_timing_ms "{label}"' in source

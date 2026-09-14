@@ -1859,9 +1859,16 @@ load_pending_local_candidate() {
   LOCAL_CANDIDATE_PENDING_FILE=""
   LOCAL_CANDIDATE_DIR=""
 
-  mkdir -p "$CANDIDATE_QUEUE_PENDING_DIR" "$CANDIDATE_QUEUE_ACTIVE_DIR" "$CANDIDATE_QUEUE_DONE_DIR" "$CANDIDATE_QUEUE_FAILED_DIR" "$CANDIDATE_QUEUE_CANCELLED_DIR" 2>/dev/null || true
-  chown -R ubuntu:ubuntu "$CANDIDATE_QUEUE_ROOT" 2>/dev/null || true
-  chmod 0775 "$CANDIDATE_QUEUE_ROOT" "$CANDIDATE_QUEUE_PENDING_DIR" "$CANDIDATE_QUEUE_ACTIVE_DIR" "$CANDIDATE_QUEUE_DONE_DIR" "$CANDIDATE_QUEUE_FAILED_DIR" "$CANDIDATE_QUEUE_CANCELLED_DIR" 2>/dev/null || true
+  # A fila é criada com ownership correto na origem. Não percorra todo o histórico
+  # com chown -R a cada tick: conforme done/failed crescem, isso transforma o
+  # simples claim de um candidato em I/O proporcional ao histórico inteiro.
+  install -d -o ubuntu -g ubuntu -m 0775 \
+    "$CANDIDATE_QUEUE_ROOT" \
+    "$CANDIDATE_QUEUE_PENDING_DIR" \
+    "$CANDIDATE_QUEUE_ACTIVE_DIR" \
+    "$CANDIDATE_QUEUE_DONE_DIR" \
+    "$CANDIDATE_QUEUE_FAILED_DIR" \
+    "$CANDIDATE_QUEUE_CANCELLED_DIR" 2>/dev/null || true
 
   # Recuperação primeiro: se uma execução caiu com item ativo, retome esse item
   # antes de pegar outro pending. Isso evita aplicar fora de ordem.
@@ -4134,7 +4141,9 @@ create_local_candidate_worktree() {
   [[ -n "${CURRENT_COMMIT:-}" ]] || return 1
 
   discard_local_candidate_worktree || true
-  repo_git worktree prune --expire=now >/dev/null 2>&1 || true
+  # `prune_updater_runtime_orphans` já executa worktree prune dentro da
+  # manutenção pesada horária. Repetir a poda aqui bloqueava toda criação de
+  # candidato no caminho crítico sem aumentar a segurança transacional.
 
   local root safe_id target
   root="$CANDIDATE_ROOT/worktrees"
@@ -4189,15 +4198,23 @@ EOF
 prepare_local_candidate_commit_in_worktree() {
   [[ -n "${LOCAL_CANDIDATE_WORKTREE_DIR:-}" && -d "$LOCAL_CANDIDATE_WORKTREE_DIR" ]] || return 1
 
+  local op_started_ms commit_body
   STAGE="preflight do candidato em worktree"
+  op_started_ms="$(update_now_ms)"
   if ! run_preflight_checks_in_dir "$LOCAL_CANDIDATE_WORKTREE_DIR"; then
+    log_update_operation_timing_ms "preparation.static_preflight" "$op_started_ms"
     LAST_ERROR_STDERR="preflight estático falhou no worktree isolado"
     LAST_ERROR_CODE="CANDIDATE_WORKTREE_PREFLIGHT_FAILED"
     return 1
   fi
+  log_update_operation_timing_ms "preparation.static_preflight" "$op_started_ms"
+
+  op_started_ms="$(update_now_ms)"
   if ! ensure_candidate_worktree_staged_clean; then
+    log_update_operation_timing_ms "preparation.worktree_clean_check" "$op_started_ms"
     return 1
   fi
+  log_update_operation_timing_ms "preparation.worktree_clean_check" "$op_started_ms"
 
   if candidate_git diff --cached --quiet; then
     LAST_ERROR_STDERR="candidato não produziu diff staged no worktree isolado"
@@ -4206,14 +4223,16 @@ prepare_local_candidate_commit_in_worktree() {
   fi
 
   STAGE="commit isolado do candidato"
-  local commit_body
   commit_body="$(local_candidate_commit_body)"
+  op_started_ms="$(update_now_ms)"
   if ! candidate_git commit -m "$LOCAL_CANDIDATE_COMMIT_MESSAGE" -m "$commit_body" >/dev/null; then
+    log_update_operation_timing_ms "preparation.commit" "$op_started_ms"
     LAST_ERROR_STDERR="não foi possível criar commit isolado do candidato"
     LAST_ERROR_CODE="CANDIDATE_WORKTREE_COMMIT_FAILED"
     return 1
   fi
   LOCAL_CANDIDATE_PREPARED_COMMIT="$(candidate_git rev-parse HEAD)"
+  log_update_operation_timing_ms "preparation.commit" "$op_started_ms"
   mark_update_timing "commit"
   write_local_candidate_state "prepared" "$LOCAL_CANDIDATE_PREPARED_COMMIT"
   logger -t "$LOG_TAG" "candidato ${LOCAL_CANDIDATE_ID:-desconhecido} preparado isoladamente em $(short_commit "$LOCAL_CANDIDATE_PREPARED_COMMIT")" 2>/dev/null || true
@@ -6547,7 +6566,7 @@ prepare_local_candidate_update() {
   # Se uma execução anterior caiu depois da promoção (ou até depois do push),
   # reconheça o commit pelo Candidate-ID antes de tentar sincronizar/aplicar de
   # novo. Isso torna a retomada segura sem depender de um worktree antigo.
-  local git_preflight_started_ms
+  local git_preflight_started_ms prepare_started_ms
   git_preflight_started_ms="$(update_now_ms)"
   if local_live_head_candidate_state; then
     log_update_operation_timing_ms "preflight.git_head_candidate" "$git_preflight_started_ms"
@@ -6644,32 +6663,44 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     zip_progress_done_and_publish "READY anterior confirmado" "Preservando runtime atual"
   else
     STAGE="criação do worktree isolado"
+    prepare_started_ms="$(update_now_ms)"
     if ! create_local_candidate_worktree; then
+      log_update_operation_timing_ms "preparation.worktree_create" "$prepare_started_ms"
       reject_local_candidate_safely \
         "Atualização bloqueada" \
         "Não consegui criar a área isolada para testar este candidato. A árvore live não foi alterada." \
         "${LAST_ERROR_STDERR:-falha ao criar worktree isolado}"
     fi
+    log_update_operation_timing_ms "preparation.worktree_create" "$prepare_started_ms"
 
     zip_progress_done_and_publish "ZIP conferido" "Aplicando em área isolada"
 
     STAGE="aplicação isolada do candidato"
     if (( LOCAL_CANDIDATE_USE_PATCH == 1 )); then
+      prepare_started_ms="$(update_now_ms)"
       if ! apply_local_candidate_patch_diff; then
+        log_update_operation_timing_ms "preparation.apply_patch" "$prepare_started_ms"
         LAST_ERROR_CODE="CANDIDATE_PATCH_CONFLICT"
         reject_local_candidate_safely \
           "Atualização com conflito" \
           "O patch não pôde ser mesclado na área isolada. A VPS live permaneceu no commit anterior." \
           "${LAST_ERROR_STDERR:-git apply 3-way falhou}"
       fi
+      log_update_operation_timing_ms "preparation.apply_patch" "$prepare_started_ms"
     else
+      prepare_started_ms="$(update_now_ms)"
       if ! apply_local_candidate_operations; then
+        log_update_operation_timing_ms "preparation.operations" "$prepare_started_ms"
         reject_local_candidate_safely \
           "Atualização bloqueada" \
           "Uma operação declarativa não pôde ser aplicada na área isolada. A VPS live não foi alterada." \
           "${LAST_ERROR_STDERR:-falha em operação declarativa}"
       fi
+      log_update_operation_timing_ms "preparation.operations" "$prepare_started_ms"
+
+      prepare_started_ms="$(update_now_ms)"
       if ! copy_local_candidate_files; then
+        log_update_operation_timing_ms "preparation.copy_files" "$prepare_started_ms"
         LAST_ERROR_CODE="CANDIDATE_COPY_FAILED"
         LAST_ERROR_STDERR="não foi possível copiar os arquivos do candidato para o worktree isolado"
         reject_local_candidate_safely \
@@ -6677,24 +6708,32 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
           "Os arquivos não puderam ser preparados na área isolada. A VPS live não foi alterada." \
           "$LAST_ERROR_STDERR"
       fi
+      log_update_operation_timing_ms "preparation.copy_files" "$prepare_started_ms"
       # Compatibilidade exclusiva com candidatos schema v2 antigos. Mesmo esse
       # hook legado agora roda dentro do worktree, nunca diretamente no checkout
       # live antes da validação estática.
       local apply_repo
       apply_repo="$(candidate_repo_dir)"
       if (( LOCAL_CANDIDATE_SCHEMA_VERSION < 3 )) && [[ -f "$apply_repo/scripts/migrate-dashboard-layout.sh" ]]; then
+        prepare_started_ms="$(update_now_ms)"
         sudo -u ubuntu -H env REPO_DIR="$apply_repo" bash "$apply_repo/scripts/migrate-dashboard-layout.sh" --apply --stage
+        log_update_operation_timing_ms "preparation.legacy_migration" "$prepare_started_ms"
       fi
+      prepare_started_ms="$(update_now_ms)"
       git_add_changed_files_or_reject "git add do candidato isolado"
+      log_update_operation_timing_ms "preparation.git_add" "$prepare_started_ms"
     fi
 
+    prepare_started_ms="$(update_now_ms)"
     if ! refresh_changed_files_from_staged_diff; then
+      log_update_operation_timing_ms "preparation.staged_diff" "$prepare_started_ms"
       LAST_ERROR_CODE="CANDIDATE_STAGED_DIFF_FAILED"
       reject_local_candidate_safely \
         "Falha ao validar atualização" \
         "Não consegui calcular o diff staged na área isolada. A VPS live não foi alterada." \
         "${LAST_ERROR_STDERR:-falha ao ler diff staged}"
     fi
+    log_update_operation_timing_ms "preparation.staged_diff" "$prepare_started_ms"
     if [[ -z "${CHANGED_FILES_RAW//[[:space:]]/}" ]]; then
       discard_local_candidate_worktree || true
       notify_zip_status_message "success" "Nenhuma alteração necessária" "O pacote já corresponde ao estado atual da VPS. Nenhum arquivo foi modificado." || true
@@ -6713,22 +6752,28 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     fi
 
     STAGE="preparação de artefatos no worktree"
+    prepare_started_ms="$(update_now_ms)"
     if ! prepare_local_candidate_runtime_artifacts_in_worktree; then
+      log_update_operation_timing_ms "preparation.runtime_artifacts" "$prepare_started_ms"
       reject_local_candidate_safely \
         "Atualização rejeitada no build isolado" \
         "Testes ou builds falharam antes de tocar a árvore live. Nenhuma promoção foi realizada." \
         "${LAST_ERROR_STDERR:-falha ao preparar artefatos isolados}"
     fi
+    log_update_operation_timing_ms "preparation.runtime_artifacts" "$prepare_started_ms"
   fi
   mark_update_timing "candidate_apply"
 
   STAGE="preservação do runtime anterior"
+  prepare_started_ms="$(update_now_ms)"
   if ! capture_runtime_release_snapshot "$PREVIOUS_COMMIT"; then
+    log_update_operation_timing_ms "preparation.rollback_snapshot" "$prepare_started_ms"
     reject_local_candidate_safely \
       "Atualização não promovida" \
       "O candidato ficou READY, mas o runtime atual não pôde ser preservado para rollback sem rebuild. A árvore live permaneceu no commit anterior." \
       "${LAST_ERROR_STDERR:-falha ao preservar release runtime anterior}"
   fi
+  log_update_operation_timing_ms "preparation.rollback_snapshot" "$prepare_started_ms"
   zip_progress_done_and_publish "Candidato READY em isolamento" "Promovendo para a VPS"
 
   if ! promote_local_candidate_worktree_commit; then
@@ -9502,21 +9547,33 @@ SECONDS=0
 cd "$REPO_DIR"
 prepare_update_delivery_dirs || true
 mkdir -p "$CANDIDATE_QUEUE_CANCELLED_DIR" "$CANDIDATE_ROOT/cancelled" 2>/dev/null || true
-prune_update_artifacts || true
+startup_phase_started_ms="$(update_now_ms)"
 if ! guard_updater_disk_space; then
+  log_update_operation_timing_ms "startup.disk_guard" "$startup_phase_started_ms"
   exit 0
 fi
-flush_update_status_outbox || true
-flush_update_alert_outbox || true
-refresh_pending_queue_messages || true
+log_update_operation_timing_ms "startup.disk_guard" "$startup_phase_started_ms"
 
+# Claim de rollback/ZIP vem antes de manutenção, outboxes e refresh da fila.
+# Esses trabalhos são recuperáveis e não devem adicionar dezenas de segundos
+# entre o arquivo recebido e o início real da atualização. O bot possui seu
+# próprio reconciliador de outbox; a manutenção pesada continua no caminho
+# ocioso/remoto e ao final das entregas.
+startup_phase_started_ms="$(update_now_ms)"
 if load_pending_rollback_request; then
+  log_update_operation_timing_ms "startup.queue_claim" "$startup_phase_started_ms"
   logger -t "$LOG_TAG" "Controle de update recebido: $ROLLBACK_REQUEST_ACTION $ROLLBACK_REQUEST_ID"
   prepare_rollback_request_update
 elif load_pending_local_candidate; then
+  log_update_operation_timing_ms "startup.queue_claim" "$startup_phase_started_ms"
   logger -t "$LOG_TAG" "Candidato local recebido: $LOCAL_CANDIDATE_ID"
   prepare_local_candidate_update
 else
+  log_update_operation_timing_ms "startup.queue_scan" "$startup_phase_started_ms"
+  prune_update_artifacts || true
+  flush_update_status_outbox || true
+  flush_update_alert_outbox || true
+  refresh_pending_queue_messages || true
   STAGE="commit atual"
   CURRENT_COMMIT="$(repo_git rev-parse HEAD)"
   PREVIOUS_COMMIT="$CURRENT_COMMIT"
