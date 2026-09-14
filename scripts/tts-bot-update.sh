@@ -50,16 +50,50 @@ if [[ "${TTS_BOT_UPDATER_RUNNING_COPY:-0}" != "1" ]]; then
 fi
 UPDATER_RUNTIME_COPY="${TTS_BOT_UPDATER_RUNTIME_COPY:-}"
 
-# Mantém o updater em baixa prioridade para não competir com heartbeat/voz do bot
-# na VPS pequena. Filhos como git, python de validação e scripts auxiliares herdam
-# essa prioridade sem mudar a lógica do update.
+# Perfil conservador padrão: protege heartbeat/voz do bot na VPS pequena.
+# Trechos curtos de Git/worktree usam um perfil moderado temporário; antes de
+# testes, builds e snapshots pesados voltamos sempre ao perfil conservador.
 UPDATER_NICE_LEVEL="${TTS_BOT_UPDATER_NICE_LEVEL:-10}"
 UPDATER_IONICE_CLASS="${TTS_BOT_UPDATER_IONICE_CLASS:-2}"
 UPDATER_IONICE_LEVEL="${TTS_BOT_UPDATER_IONICE_LEVEL:-7}"
-renice -n "$UPDATER_NICE_LEVEL" -p "$$" >/dev/null 2>&1 || true
-if command -v ionice >/dev/null 2>&1; then
-  ionice -c "$UPDATER_IONICE_CLASS" -n "$UPDATER_IONICE_LEVEL" -p "$$" >/dev/null 2>&1 || true
-fi
+UPDATER_FAST_NICE_LEVEL="${TTS_BOT_UPDATER_FAST_NICE_LEVEL:-5}"
+UPDATER_FAST_IONICE_CLASS="${TTS_BOT_UPDATER_FAST_IONICE_CLASS:-2}"
+UPDATER_FAST_IONICE_LEVEL="${TTS_BOT_UPDATER_FAST_IONICE_LEVEL:-4}"
+UPDATER_PRIORITY_PROFILE=""
+
+set_updater_priority_profile() {
+  local profile="${1:-safe}" nice_level ionice_class ionice_level failed=0
+  case "$profile" in
+    fast)
+      nice_level="$UPDATER_FAST_NICE_LEVEL"
+      ionice_class="$UPDATER_FAST_IONICE_CLASS"
+      ionice_level="$UPDATER_FAST_IONICE_LEVEL"
+      ;;
+    safe)
+      nice_level="$UPDATER_NICE_LEVEL"
+      ionice_class="$UPDATER_IONICE_CLASS"
+      ionice_level="$UPDATER_IONICE_LEVEL"
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+
+  [[ "${UPDATER_PRIORITY_PROFILE:-}" == "$profile" ]] && return 0
+  renice -n "$nice_level" -p "$$" >/dev/null 2>&1 || failed=1
+  if command -v ionice >/dev/null 2>&1; then
+    ionice -c "$ionice_class" -n "$ionice_level" -p "$$" >/dev/null 2>&1 || failed=1
+  fi
+  UPDATER_PRIORITY_PROFILE="$profile"
+  if (( failed == 1 )); then
+    logger -t "$LOG_TAG" "perfil de prioridade $profile aplicado parcialmente (nice=$nice_level ionice=$ionice_class:$ionice_level)" 2>/dev/null || true
+  else
+    logger -t "$LOG_TAG" "perfil de prioridade $profile (nice=$nice_level ionice=$ionice_class:$ionice_level)" 2>/dev/null || true
+  fi
+  return 0
+}
+
+set_updater_priority_profile safe
 
 mkdir -p "$(dirname "$UPDATER_LOCK_FILE")" 2>/dev/null || true
 exec 9>"$UPDATER_LOCK_FILE"
@@ -6590,6 +6624,9 @@ git_add_changed_files() {
 
 prepare_local_candidate_update() {
   LOCAL_CANDIDATE_MODE=1
+  # Git, worktree e staging são curtos e sensíveis à latência. Use prioridade
+  # moderada só nesta janela; trabalhos pesados retornam ao perfil conservador.
+  set_updater_priority_profile fast
   zip_progress_publish "Conferindo ZIP" "Checando arquivo recebido e base local."
   STAGE="fetch remoto"
   repo_git fetch origin "$BRANCH"
@@ -6662,6 +6699,7 @@ prepare_local_candidate_update() {
     else
       logger -t "$LOG_TAG" "Candidato local já promovido; retomando validação/runtime antes do push." 2>/dev/null || true
     fi
+    set_updater_priority_profile safe
     return 0
   fi
   log_update_operation_timing_ms "preflight.git_head_candidate" "$git_preflight_started_ms"
@@ -6839,6 +6877,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     fi
 
     STAGE="preparação de artefatos no worktree"
+    set_updater_priority_profile safe
     prepare_started_ms="$(update_now_ms)"
     if ! prepare_local_candidate_runtime_artifacts_in_worktree; then
       log_update_operation_timing_ms "preparation.runtime_artifacts" "$prepare_started_ms"
@@ -6851,6 +6890,8 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   fi
   mark_update_timing "candidate_apply"
 
+  # Snapshot pode copiar árvores/runtime e portanto permanece em baixa prioridade.
+  set_updater_priority_profile safe
   STAGE="preservação do runtime anterior"
   prepare_started_ms="$(update_now_ms)"
   if ! capture_runtime_release_snapshot "$PREVIOUS_COMMIT"; then
@@ -6863,13 +6904,16 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
   log_update_operation_timing_ms "preparation.rollback_snapshot" "$prepare_started_ms"
   zip_progress_done_and_publish "Candidato READY em isolamento" "Promovendo para a VPS"
 
+  set_updater_priority_profile fast
   if ! promote_local_candidate_worktree_commit; then
+    set_updater_priority_profile safe
     reject_local_candidate_safely \
       "Atualização não promovida" \
       "O candidato passou pelo staging, mas o checkout live mudou ou não pôde receber o fast-forward. Nenhuma promoção parcial foi mantida." \
       "${LAST_ERROR_STDERR:-promoção do candidato falhou}"
   fi
   mark_update_timing "candidate_promote"
+  set_updater_priority_profile safe
   zip_progress_done "Promovido para a VPS"
 
 }
@@ -9539,6 +9583,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 
 on_error() {
   local exit_code="$?"
+  set_updater_priority_profile safe || true
   local failed_line="${1:-${BASH_LINENO[0]:-?}}"
   local failed_function="${2:-${FUNCNAME[1]:-main}}"
   if (( MANUAL_FAILURE_ALERT_SENT == 1 )); then
@@ -9694,6 +9739,7 @@ else
   fi
 
   REMOTE_CANDIDATE_MODE=1
+  set_updater_priority_profile fast
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
   SHORT_TO="$(short_commit "$REMOTE_COMMIT")"
 
@@ -9726,6 +9772,7 @@ else
     mark_update_timing "remote_preflight"
 
     STAGE="preparação de artefatos do commit remoto"
+    set_updater_priority_profile safe
     zip_progress_done_and_publish "Commit conferido" "Validando runtime em isolamento"
     if ! prepare_local_candidate_runtime_artifacts_in_worktree; then
       reject_remote_commit_without_live_apply "validação/build isolado falhou antes da promoção: ${LAST_ERROR_CODE:-REMOTE_READY_FAILED}: ${LAST_ERROR_STDERR:-erro desconhecido}"
@@ -9734,6 +9781,7 @@ else
     zip_progress_done_and_publish "Commit READY em isolamento" "Aplicando na VPS"
   fi
 
+  set_updater_priority_profile safe
   STAGE="preservação do runtime anterior"
   if ! capture_runtime_release_snapshot "$PREVIOUS_COMMIT"; then
     reject_remote_commit_without_live_apply "não foi possível preservar o runtime atual para rollback sem rebuild: ${LAST_ERROR_STDERR:-erro desconhecido}"
@@ -9749,9 +9797,11 @@ else
   logger -t "$LOG_TAG" "Aplicando commit remoto validado de $CURRENT_COMMIT para $REMOTE_COMMIT"
 
   STAGE="aplicação do commit GitHub"
+  set_updater_priority_profile fast
   repo_git merge --ff-only "$REMOTE_COMMIT"
   UPDATE_APPLIED=1
   mark_update_timing "apply"
+  set_updater_priority_profile safe
   zip_progress_done "Aplicado na VPS"
 fi
 
