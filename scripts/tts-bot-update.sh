@@ -328,6 +328,8 @@ ZIP_PROGRESS_HANDOFF_LOADED=0
 ZIP_RECOVERY_STARTED_MS=0
 UPDATER_STEP_LAST=0
 UPDATER_TIMINGS=""
+BOT_HEALTH_IS_HEALTHY=0
+BOT_HEALTH_READY_HEALTHY=0
 UPDATE_STATUS_OUTBOX_DIR="$REPO_DIR/data/runtime/update-status-outbox"
 UPDATE_ALERT_OUTBOX_DIR="$REPO_DIR/data/runtime/update-alert-outbox"
 UPDATE_DELIVERY_RECEIPTS_DIR="$REPO_DIR/data/runtime/update-delivery-receipts"
@@ -1069,6 +1071,17 @@ mark_update_timing() {
   logger -t "$LOG_TAG" "timing ${label}=${delta}s total=${now}s"
 }
 
+append_update_timing_ms() {
+  local label="${1:-etapa}" elapsed_ms="${2:-0}" elapsed_text
+  [[ "$elapsed_ms" =~ ^[0-9]+$ ]] || elapsed_ms=0
+  elapsed_text="$(format_update_duration_ms "$elapsed_ms")"
+  if [[ -n "$UPDATER_TIMINGS" ]]; then
+    UPDATER_TIMINGS+=", "
+  fi
+  UPDATER_TIMINGS+="${label}=${elapsed_text}"
+  logger -t "$LOG_TAG" "timing ${label}=${elapsed_ms}ms" 2>/dev/null || true
+}
+
 log_update_operation_timing_ms() {
   local label="${1:-operação}" start_ms="${2:-0}" end_ms elapsed_ms elapsed_text
   end_ms="$(update_now_ms)"
@@ -1189,97 +1202,81 @@ fetch_bot_health_json() {
   curl -fsS --max-time 2 "$BOT_HEALTH_URL" 2>/dev/null || true
 }
 
-bot_health_python() {
-  local mode="${1:?}"
-  BOT_HEALTH_JSON_INPUT="${BOT_HEALTH_JSON:-}" python3 - "$mode" <<'PYHEALTH' 2>/dev/null
+parse_bot_health_snapshot() {
+  BOT_HEALTH_JSON_INPUT="${BOT_HEALTH_JSON:-}" python3 - <<'PYHEALTHSNAPSHOT' 2>/dev/null
 import json
 import os
-import sys
 
-mode = sys.argv[1]
 raw = os.environ.get("BOT_HEALTH_JSON_INPUT") or ""
 try:
     data = json.loads(raw) if raw.strip() else {}
 except Exception as exc:
-    if mode == "is_healthy":
-        raise SystemExit(1)
     print(f"health inválido: {type(exc).__name__}: {exc}")
+    print("indisponível")
+    print("health inválido")
+    print("0")
+    print("0")
     raise SystemExit(0)
 
-if mode == "is_ready_healthy":
-    critical = data.get("critical_failed_cogs") or []
-    if (
-        data.get("healthy") is True
-        and data.get("status") == "ok"
-        and data.get("discord_ready") is True
-        and data.get("discord_closed") is not True
-        and data.get("mongo_ok") is True
-        and data.get("cog_loading_finished") is True
-        and not critical
-    ):
-        raise SystemExit(0)
-    raise SystemExit(1)
+status = data.get("status") or ("ok" if data.get("healthy") is True else "erro")
+ready = data.get("discord_ready")
+mongo = data.get("mongo_ok")
+latency = data.get("latency_ms")
+parts = [str(status)]
+if ready is not None:
+    parts.append(f"discord={'online' if ready else 'não pronto'}")
+if mongo is not None:
+    parts.append(f"mongo={'OK' if mongo else 'falhou'}")
+if latency is not None:
+    parts.append(f"latência={latency}ms")
+print("; ".join(parts))
 
-if mode == "is_healthy":
-    if data.get("healthy") is True:
-        raise SystemExit(0)
-    raise SystemExit(1)
+loaded = data.get("loaded_cogs_count")
+failed = data.get("failed_cogs_count")
+failed_cogs = data.get("failed_cogs") or {}
+critical = data.get("critical_failed_cogs") or []
+if loaded is None:
+    loaded = len(data.get("loaded_extensions") or [])
+if failed is None:
+    failed = len(failed_cogs)
+cog_parts = [f"{loaded or 0} carregada(s)"]
+if failed:
+    kind = "crítica(s)" if critical else "opcional(is)"
+    names = []
+    for name, details in list(failed_cogs.items())[:5]:
+        summary = ""
+        if isinstance(details, dict):
+            summary = str(details.get("summary") or "").strip()
+        names.append(f"{name}" + (f" — {summary}" if summary else ""))
+    details = "; ".join(names)
+    cog_parts.append(f"{failed} com falha {kind}" + (f": {details}" if details else ""))
+else:
+    cog_parts.append("0 com falha")
+print("; ".join(cog_parts)[:1200])
 
-if mode == "status":
-    status = data.get("status") or ("ok" if data.get("healthy") is True else "erro")
-    ready = data.get("discord_ready")
-    mongo = data.get("mongo_ok")
-    latency = data.get("latency_ms")
-    parts = [str(status)]
-    if ready is not None:
-        parts.append(f"discord={'online' if ready else 'não pronto'}")
-    if mongo is not None:
-        parts.append(f"mongo={'OK' if mongo else 'falhou'}")
-    if latency is not None:
-        parts.append(f"latência={latency}ms")
-    print("; ".join(parts))
-    raise SystemExit(0)
+warnings = data.get("warnings") or []
+warnings = [str(item).strip() for item in warnings if str(item).strip()]
+print(("; ".join(warnings)[:900]) if warnings else "sem avisos")
 
-if mode == "warnings":
-    warnings = data.get("warnings") or []
-    warnings = [str(item).strip() for item in warnings if str(item).strip()]
-    if warnings:
-        print("; ".join(warnings)[:900])
-    else:
-        print("sem avisos")
-    raise SystemExit(0)
-
-if mode == "cogs":
-    loaded = data.get("loaded_cogs_count")
-    failed = data.get("failed_cogs_count")
-    failed_cogs = data.get("failed_cogs") or {}
-    critical = data.get("critical_failed_cogs") or []
-    if loaded is None:
-        loaded = len(data.get("loaded_extensions") or [])
-    if failed is None:
-        failed = len(failed_cogs)
-    parts = [f"{loaded or 0} carregada(s)"]
-    if failed:
-        kind = "crítica(s)" if critical else "opcional(is)"
-        names = []
-        for name, details in list(failed_cogs.items())[:5]:
-            summary = ""
-            if isinstance(details, dict):
-                summary = str(details.get("summary") or "").strip()
-            names.append(f"{name}" + (f" — {summary}" if summary else ""))
-        details = "; ".join(names)
-        parts.append(f"{failed} com falha {kind}" + (f": {details}" if details else ""))
-    else:
-        parts.append("0 com falha")
-    print("; ".join(parts)[:1200])
-    raise SystemExit(0)
-
-print("—")
-PYHEALTH
+healthy = data.get("healthy") is True
+ready_healthy = (
+    healthy
+    and data.get("status") == "ok"
+    and data.get("discord_ready") is True
+    and data.get("discord_closed") is not True
+    and data.get("mongo_ok") is True
+    and data.get("cog_loading_finished") is True
+    and not critical
+)
+print("1" if healthy else "0")
+print("1" if ready_healthy else "0")
+PYHEALTHSNAPSHOT
 }
 
 refresh_bot_health_status() {
   BOT_HEALTH_JSON="$(fetch_bot_health_json)"
+  BOT_HEALTH_IS_HEALTHY=0
+  BOT_HEALTH_READY_HEALTHY=0
   if [[ -z "${BOT_HEALTH_JSON//[[:space:]]/}" ]]; then
     BOT_HEALTH_DETAIL_STATUS="HTTP sem resposta"
     BOT_COGS_STATUS="indisponível"
@@ -1287,14 +1284,21 @@ refresh_bot_health_status() {
     return 1
   fi
 
-  BOT_HEALTH_DETAIL_STATUS="$(bot_health_python status)"
-  BOT_COGS_STATUS="$(bot_health_python cogs)"
-  BOT_WARNINGS_STATUS="$(bot_health_python warnings)"
-
-  if bot_health_python is_healthy >/dev/null; then
-    return 0
+  local -a health_fields=()
+  mapfile -t health_fields < <(parse_bot_health_snapshot)
+  if (( ${#health_fields[@]} < 5 )); then
+    BOT_HEALTH_DETAIL_STATUS="health inválido"
+    BOT_COGS_STATUS="indisponível"
+    BOT_WARNINGS_STATUS="health inválido"
+    return 1
   fi
-  return 1
+  BOT_HEALTH_DETAIL_STATUS="${health_fields[0]}"
+  BOT_COGS_STATUS="${health_fields[1]}"
+  BOT_WARNINGS_STATUS="${health_fields[2]}"
+  [[ "${health_fields[3]}" == "1" ]] && BOT_HEALTH_IS_HEALTHY=1
+  [[ "${health_fields[4]}" == "1" ]] && BOT_HEALTH_READY_HEALTHY=1
+
+  (( BOT_HEALTH_IS_HEALTHY == 1 ))
 }
 
 
@@ -1524,7 +1528,9 @@ verify_bot_after_restart() {
   local stability_seconds="${UPDATE_BOT_HEALTH_STABILITY_SECONDS:-$default_stability}"
   local waited=0 restarts_after health_ok=0 last_log_check=0
   local consecutive=0 healthy_since=0 now_epoch stable_for=0
+  local verify_started_ms first_active_ms=0 first_health_ms=0 first_ready_ms=0 verify_finished_ms
 
+  verify_started_ms="$(update_now_ms)"
   [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=45
   [[ "$interval" =~ ^[0-9]+$ ]] || interval=1
   [[ "$required_successes" =~ ^[0-9]+$ ]] || required_successes=3
@@ -1541,6 +1547,9 @@ verify_bot_after_restart() {
     fi
 
     if systemctl is-active --quiet "$SERVICE"; then
+      if (( first_active_ms == 0 )); then
+        first_active_ms="$(update_now_ms)"
+      fi
       restarts_after="$(service_restart_count "$SERVICE")"
       if [[ "$restarts_after" =~ ^[0-9]+$ && "$restarts_before" =~ ^[0-9]+$ ]]; then
         if (( restarts_after > restarts_before + allowed_restart_delta )); then
@@ -1557,17 +1566,29 @@ verify_bot_after_restart() {
         fi
       fi
 
-      if refresh_bot_health_status && bot_health_python is_ready_healthy >/dev/null; then
-        now_epoch="$(date +%s)"
-        if (( consecutive == 0 )); then
-          healthy_since="$now_epoch"
+      if refresh_bot_health_status; then
+        if (( first_health_ms == 0 )); then
+          first_health_ms="$(update_now_ms)"
         fi
-        consecutive=$((consecutive + 1))
-        stable_for=$((now_epoch - healthy_since))
-        BOT_HEALTHCHECK_STATUS="confirmando estabilidade (${stable_for}s/${stability_seconds}s; ${consecutive}/${required_successes})"
-        if (( consecutive >= required_successes && stable_for >= stability_seconds )); then
-          health_ok=1
-          break
+        if (( BOT_HEALTH_READY_HEALTHY == 1 )); then
+          now_epoch="$(date +%s)"
+          if (( first_ready_ms == 0 )); then
+            first_ready_ms="$(update_now_ms)"
+          fi
+          if (( consecutive == 0 )); then
+            healthy_since="$now_epoch"
+          fi
+          consecutive=$((consecutive + 1))
+          stable_for=$((now_epoch - healthy_since))
+          BOT_HEALTHCHECK_STATUS="confirmando estabilidade (${stable_for}s/${stability_seconds}s; ${consecutive}/${required_successes})"
+          if (( consecutive >= required_successes && stable_for >= stability_seconds )); then
+            health_ok=1
+            break
+          fi
+        else
+          consecutive=0
+          healthy_since=0
+          stable_for=0
         fi
       else
         consecutive=0
@@ -1591,6 +1612,14 @@ verify_bot_after_restart() {
       BOT_HEALTHCHECK_STATUS="falhou: erro fatal durante a janela de estabilidade"
       return 1
     fi
+    verify_finished_ms="$(update_now_ms)"
+    (( first_active_ms > 0 )) && append_update_timing_ms "bot.service_active" "$((first_active_ms - verify_started_ms))"
+    (( first_health_ms > 0 )) && append_update_timing_ms "bot.first_health" "$((first_health_ms - verify_started_ms))"
+    (( first_ready_ms > 0 )) && append_update_timing_ms "bot.first_ready" "$((first_ready_ms - verify_started_ms))"
+    if (( first_ready_ms > 0 )); then
+      append_update_timing_ms "bot.stability" "$((verify_finished_ms - first_ready_ms))"
+    fi
+    append_update_timing_ms "bot.verify_total" "$((verify_finished_ms - verify_started_ms))"
     if has_real_warning_text "$BOT_WARNINGS_STATUS" || cogs_have_failures "$BOT_COGS_STATUS"; then
       BOT_HEALTHCHECK_STATUS="estável com avisos (${stability_seconds}s; perfil=$profile)"
       UPDATE_HAS_WARNINGS=1
@@ -8246,11 +8275,18 @@ deploy_bot() {
 
     STAGE="reinício do bot"
     restart_epoch="$(date +%s)"
+    local bot_phase_started_ms bot_phase_finished_ms
+    bot_phase_started_ms="$(update_now_ms)"
     restart_bot_service_once
+    bot_phase_finished_ms="$(update_now_ms)"
+    append_update_timing_ms "bot.restart_command" "$((bot_phase_finished_ms - bot_phase_started_ms))"
 
     if env_truthy LAVALINK_ENABLED; then
       STAGE="espera curta do Lavalink"
+      bot_phase_started_ms="$(update_now_ms)"
       wait_for_lavalink_ready || true
+      bot_phase_finished_ms="$(update_now_ms)"
+      append_update_timing_ms "bot.lavalink_wait" "$((bot_phase_finished_ms - bot_phase_started_ms))"
     fi
 
     STAGE="validação fatal do bot"
