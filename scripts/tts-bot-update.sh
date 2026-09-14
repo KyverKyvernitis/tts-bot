@@ -21,6 +21,11 @@ CANDIDATE_QUEUE_CANCELLED_DIR="$CANDIDATE_QUEUE_ROOT/cancelled"
 UPDATE_RUNTIME_STATE_FILE="${DISCORD_AUTO_UPDATE_RUNTIME_STATE_FILE:-$CANDIDATE_ROOT/runtime-state.json}"
 UPDATER_LOCK_FILE="${DISCORD_AUTO_UPDATE_LOCK_FILE:-/run/lock/tts-bot-updater.lock}"
 REMOTE_REJECTED_FILE="${DISCORD_AUTO_UPDATE_REJECTED_REMOTE_FILE:-$REPO_DIR/data/updater/rejected_remote_commits.json}"
+REMOTE_FETCH_STATE_FILE="${TTS_BOT_REMOTE_FETCH_STATE_FILE:-$CANDIDATE_ROOT/remote-fetch-state.tsv}"
+# Reuso curto apenas para ZIP local. O polling remoto continua fazendo fetch real
+# para não atrasar a descoberta de commits novos no GitHub.
+LOCAL_FETCH_REUSE_SECONDS="${TTS_BOT_LOCAL_FETCH_REUSE_SECONDS:-15}"
+REMOTE_FETCH_REUSED=0
 ROLLBACK_REQUEST_DEFAULT_ROOT="$CANDIDATE_ROOT/rollback"
 ROLLBACK_REQUEST_DATA_ROOT="${DISCORD_AUTO_UPDATE_ROLLBACK_REQUEST_DIR:-$REPO_DIR/data/runtime/update-rollback}"
 ROLLBACK_REQUEST_TMP_ROOT="${TMPDIR:-/tmp}/tts-bot-update-rollback"
@@ -453,6 +458,54 @@ load_repo_ref_snapshot() {
     return 1
   fi
   eval "$output"
+}
+
+record_remote_fetch_state() {
+  local commit="${1:-}" now tmp
+  commit="$(sanitize_commit_ref "$commit")"
+  [[ -n "$commit" ]] || return 1
+  now="$(date +%s)"
+  mkdir -p "$(dirname "$REMOTE_FETCH_STATE_FILE")" 2>/dev/null || return 1
+  tmp="${REMOTE_FETCH_STATE_FILE}.tmp.$$"
+  if ! printf '%s\t%s\t%s\n' "$now" "$BRANCH" "$commit" > "$tmp"; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  chmod 0600 "$tmp" 2>/dev/null || true
+  if ! mv -f "$tmp" "$REMOTE_FETCH_STATE_FILE"; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+}
+
+recent_remote_fetch_commit() {
+  local ttl="${LOCAL_FETCH_REUSE_SECONDS:-15}" stamp branch commit now age tracked
+  [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=15
+  (( ttl > 0 )) || return 1
+  (( ttl > 60 )) && ttl=60
+  [[ -f "$REMOTE_FETCH_STATE_FILE" && ! -L "$REMOTE_FETCH_STATE_FILE" ]] || return 1
+  IFS=$'\t' read -r stamp branch commit < "$REMOTE_FETCH_STATE_FILE" || return 1
+  [[ "$stamp" =~ ^[0-9]+$ ]] || return 1
+  [[ "$branch" == "$BRANCH" ]] || return 1
+  commit="$(sanitize_commit_ref "$commit")"
+  [[ -n "$commit" ]] || return 1
+  now="$(date +%s)"
+  age=$(( now - stamp ))
+  (( age >= 0 && age <= ttl )) || return 1
+  tracked="$(repo_git rev-parse "origin/$BRANCH" 2>/dev/null || true)"
+  [[ "$tracked" == "$commit" ]] || return 1
+  printf '%s\n' "$commit"
+}
+
+fetch_remote_for_local_candidate() {
+  local cached_commit
+  REMOTE_FETCH_REUSED=0
+  if cached_commit="$(recent_remote_fetch_commit 2>/dev/null)"; then
+    REMOTE_FETCH_REUSED=1
+    logger -t "$LOG_TAG" "reutilizando fetch remoto recente de $(short_commit "$cached_commit") por até ${LOCAL_FETCH_REUSE_SECONDS}s" 2>/dev/null || true
+    return 0
+  fi
+  repo_git fetch origin "$BRANCH"
 }
 
 current_bot_python_bin() {
@@ -3963,6 +4016,7 @@ prepare_rollback_request_update() {
   REMOTE_COMMIT="$GIT_REFS_REMOTE"
   PREVIOUS_COMMIT="$CURRENT_COMMIT"
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
+  record_remote_fetch_state "$REMOTE_COMMIT" || true
   mark_update_timing "fetch"
 
   if [[ "$CURRENT_COMMIT" != "$REMOTE_COMMIT" || "$CURRENT_COMMIT" != "$ROLLBACK_EXPECTED_HEAD" ]]; then
@@ -4053,6 +4107,7 @@ publish_rollback_request_after_validation() {
   STAGE="push GitHub"
   zip_progress_publish "Publicando no GitHub..."
   repo_git push origin "HEAD:$BRANCH"
+  record_remote_fetch_state "$REMOTE_COMMIT" || true
   # O commit de reversão/reaplicação já está remoto; a notificação posterior
   # não pode transformar isso em rollback automático do rollback.
   mark_deployment_committed
@@ -6629,15 +6684,32 @@ prepare_local_candidate_update() {
   set_updater_priority_profile fast
   zip_progress_publish "Conferindo ZIP" "Checando arquivo recebido e base local."
   STAGE="fetch remoto"
-  repo_git fetch origin "$BRANCH"
+  local fetch_started_ms
+  fetch_started_ms="$(update_now_ms)"
+  if ! fetch_remote_for_local_candidate; then
+    log_update_operation_timing_ms "preflight.git_fetch" "$fetch_started_ms"
+    return 1
+  fi
+  if (( REMOTE_FETCH_REUSED == 1 )); then
+    log_update_operation_timing_ms "preflight.git_fetch_reuse" "$fetch_started_ms"
+  else
+    log_update_operation_timing_ms "preflight.git_fetch" "$fetch_started_ms"
+  fi
   if ! load_repo_ref_snapshot "$BRANCH"; then return 1; fi
   REMOTE_COMMIT="$GIT_REFS_REMOTE"
   CURRENT_COMMIT="$GIT_REFS_CURRENT"
+  if (( REMOTE_FETCH_REUSED == 0 )); then
+    record_remote_fetch_state "$REMOTE_COMMIT" || true
+  fi
   PREVIOUS_COMMIT="$CURRENT_COMMIT"
   COMMIT_SUBJECT="$LOCAL_CANDIDATE_COMMIT_MESSAGE"
   SHORT_FROM="$(short_commit "$CURRENT_COMMIT")"
   SHORT_TO="local"
-  mark_update_timing "fetch"
+  if (( REMOTE_FETCH_REUSED == 1 )); then
+    mark_update_timing "fetch_reuse"
+  else
+    mark_update_timing "fetch"
+  fi
   zip_progress_done_and_publish "Base conferida" "Validando integridade do pacote"
 
   local max_attempts="${DISCORD_AUTO_UPDATE_MAX_ATTEMPTS:-3}"
@@ -6945,6 +7017,7 @@ publish_local_candidate_after_validation() {
   STAGE="push GitHub pós-validação"
   zip_progress_publish "Publicando no GitHub..."
   repo_git push origin "HEAD:$BRANCH"
+  record_remote_fetch_state "$REMOTE_COMMIT" || true
   LOCAL_CANDIDATE_PUBLISHED=1
   # A partir daqui o remoto já contém o commit validado. Qualquer falha
   # subsequente é de finalização e não pode resetar somente a VPS.
@@ -9717,6 +9790,7 @@ else
   PREVIOUS_COMMIT="$CURRENT_COMMIT"
   REMOTE_COMMIT="$GIT_REFS_REMOTE"
   COMMIT_SUBJECT="$GIT_REFS_REMOTE_SUBJECT"
+  record_remote_fetch_state "$REMOTE_COMMIT" || true
   mark_update_timing "fetch"
 
   if [[ -f "$DIRTY_MARKER_FILE" ]]; then

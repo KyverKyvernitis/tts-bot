@@ -63,7 +63,7 @@ def test_local_candidate_uses_fast_only_for_light_preparation_and_promotion() ->
     end = source.index("\npublish_local_candidate_after_validation() {", start)
     block = source[start:end]
 
-    assert block.index("set_updater_priority_profile fast") < block.index('repo_git fetch origin "$BRANCH"')
+    assert block.index("set_updater_priority_profile fast") < block.index('fetch_remote_for_local_candidate')
     runtime = block.index('STAGE="preparação de artefatos no worktree"')
     assert block.index("set_updater_priority_profile safe", runtime) < block.index(
         "prepare_local_candidate_runtime_artifacts_in_worktree", runtime
