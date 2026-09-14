@@ -70,6 +70,8 @@ def test_core_esta_dividido_em_modulos_de_responsabilidade():
         "fila.sh",
         "validacao.sh",
         "candidato.sh",
+        "aplicacao.sh",
+        "recuperacao.sh",
     }
     assert esperados <= {p.name for p in core.glob("*.sh")}
     entrypoint = CANONICO.read_text(encoding="utf-8")
@@ -94,6 +96,8 @@ def test_funcoes_extraidas_nao_ficam_duplicadas_no_orquestrador():
         "fila.sh": "load_pending_local_candidate() {",
         "validacao.sh": "run_preflight_checks() {",
         "candidato.sh": "prepare_local_candidate_update() {",
+        "aplicacao.sh": "deploy_bot() {",
+        "recuperacao.sh": "rollback_after_failure() {",
     }
     for modulo, assinatura in contratos.items():
         assert assinatura not in entrypoint
@@ -124,5 +128,36 @@ def test_validacao_e_candidato_estao_fora_do_orquestrador():
     assert "promote_local_candidate_worktree_commit() {" in candidato
 
 
-def test_orquestrador_core_fica_abaixo_de_seis_mil_linhas():
-    assert len(CANONICO.read_text(encoding="utf-8").splitlines()) < 6000
+def test_aplicacao_e_recuperacao_estao_fora_do_orquestrador():
+    entrypoint = CANONICO.read_text(encoding="utf-8")
+    aplicacao = (ROOT / "updater" / "core" / "aplicacao.sh").read_text(encoding="utf-8")
+    recuperacao = (ROOT / "updater" / "core" / "recuperacao.sh").read_text(encoding="utf-8")
+
+    for assinatura in (
+        "deploy_vps_systemd_units() {",
+        "deploy_bot() {",
+        "deploy_frontend() {",
+        "deploy_backend() {",
+        "capture_runtime_release_snapshot() {",
+    ):
+        assert assinatura not in entrypoint
+        assert assinatura in aplicacao
+
+    for assinatura in (
+        "rollback_after_failure() {",
+        "handle_post_deploy_failure() {",
+        "on_error() {",
+    ):
+        assert assinatura not in entrypoint
+        assert assinatura in recuperacao
+
+
+def test_recuperacao_e_carregada_antes_dos_traps_transacionais():
+    text = CANONICO.read_text(encoding="utf-8")
+    source_at = text.index('. "$UPDATER_SOURCE_DIR/recuperacao.sh"')
+    trap_at = text.index("trap 'on_error")
+    assert source_at < trap_at
+
+
+def test_orquestrador_core_fica_abaixo_de_tres_mil_e_quinhentas_linhas():
+    assert len(CANONICO.read_text(encoding="utf-8").splitlines()) < 3500

@@ -19,10 +19,9 @@ def ler_fonte_core() -> str:
         if not modulo.is_file():
             partes.append(linha); continue
         conteudo = modulo.read_text(encoding="utf-8")
-        partes.append(f"# --- início módulo {modulo.name} ---\n")
         partes.append(conteudo)
-        if not conteudo.endswith("\n"): partes.append("\n")
-        partes.append(f"# --- fim módulo {modulo.name} ---\n")
+        if not conteudo.endswith("\n"):
+            partes.append("\n")
     return "".join(partes)
 
 def caminho_fonte_core() -> Path:
