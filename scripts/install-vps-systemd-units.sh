@@ -71,6 +71,19 @@ install_file() {
   local rel="$1"
   local src="$TEMPLATE_DIR/$rel"
   local dst="$SYSTEMD_DIR/$rel"
+  local fallback_src=""
+  # Compatibilidade de bootstrap: a primeira versão do updater que instala o
+  # .path ainda constrói o overlay com a lista antiga, sem esse arquivo. Nesse
+  # único caso, leia o template novo diretamente do checkout já promovido.
+  if [[ ! -f "$src" && "$rel" == "tts-bot-updater.path" ]]; then
+    for fallback_src in       "$REPO_DIR/deploy/systemd/vps/$rel"       "$REPO_DIR/deploy/systemd/$rel"; do
+      if [[ -f "$fallback_src" && ! -L "$fallback_src" ]]; then
+        src="$fallback_src"
+        action "bootstrap do template fora do overlay: $rel"
+        break
+      fi
+    done
+  fi
   if [[ ! -f "$src" ]]; then
     warn "template ausente: $rel"
     return 0
@@ -400,7 +413,7 @@ install_units() {
   local unit
   for unit in \
     tts-bot.service \
-    tts-bot-updater.service tts-bot-updater.timer \
+    tts-bot-updater.service tts-bot-updater.timer tts-bot-updater.path \
     tts-bot-alert@.service \
     cleanup-audio-temp.service cleanup-audio-temp.timer \
     sinuca-activity-server.service \
@@ -438,21 +451,24 @@ apply_service_policy() {
       warn "política tmpfiles instalada, mas a limpeza inicial falhou"
     fi
   fi
-  systemctl reset-failed tts-bot.service tts-bot-updater.service tts-bot-alert@tts-bot.service >/dev/null 2>&1 || true
+  systemctl reset-failed tts-bot.service tts-bot-updater.service tts-bot-updater.path tts-bot-alert@tts-bot.service >/dev/null 2>&1 || true
   systemctl enable tts-bot.service >/dev/null 2>&1 || true
 
   # Uma manutenção pode desativar o updater de propósito. Ao sincronizar units
   # de dentro do próprio updater, preserve esse estado em vez de reativar o
   # timer silenciosamente no meio de uma recuperação.
   if [[ "$FROM_UPDATER" == "1" && "$UPDATER_TIMER_WAS_ENABLED" != "1" ]]; then
-    systemctl disable --now tts-bot-updater.timer >/dev/null 2>&1 || true
-    action "tts-bot-updater.timer permaneceu desativado"
+    systemctl disable --now tts-bot-updater.timer tts-bot-updater.path >/dev/null 2>&1 || true
+    action "tts-bot-updater.timer/path permaneceram desativados"
   else
     systemctl enable tts-bot-updater.timer >/dev/null 2>&1 || true
+    # O path é o mecanismo normal de baixa latência; o timer permanece apenas
+    # como fallback periódico. Ativá-lo é passivo até existir JSON pendente.
+    systemctl enable --now tts-bot-updater.path >/dev/null 2>&1 || true
     if [[ "$FROM_UPDATER" != "1" || "$UPDATER_TIMER_WAS_ACTIVE" == "1" ]]; then
       systemctl start tts-bot-updater.timer >/dev/null 2>&1 || true
     fi
-    action "tts-bot-updater.timer habilitado"
+    action "tts-bot-updater.path habilitado; timer mantido como fallback"
   fi
 
   systemctl enable --now cleanup-audio-temp.timer >/dev/null 2>&1 || true
@@ -541,7 +557,7 @@ audit_vps_systemd() {
   action "audit: comparando templates do repo com $SYSTEMD_DIR"
   for unit in \
     tts-bot.service \
-    tts-bot-updater.service tts-bot-updater.timer \
+    tts-bot-updater.service tts-bot-updater.timer tts-bot-updater.path \
     tts-bot-alert@.service \
     cleanup-audio-temp.service cleanup-audio-temp.timer \
     sinuca-activity-server.service \
@@ -559,7 +575,7 @@ audit_vps_systemd() {
     name="${live#$SYSTEMD_DIR/}"
     case "$name" in
       *.backup.*|*.disabled.*|*.disabled|*.tmp) continue ;;
-      tts-bot.service|tts-bot-updater.service|tts-bot-updater.timer|tts-bot-alert@.service|cleanup-audio-temp.service|cleanup-audio-temp.timer|sinuca-activity-server.service|phone-worker-watch.service|phone-worker-watch.timer|tts-bot.service.d/*)
+      tts-bot.service|tts-bot-updater.service|tts-bot-updater.timer|tts-bot-updater.path|tts-bot-alert@.service|cleanup-audio-temp.service|cleanup-audio-temp.timer|sinuca-activity-server.service|phone-worker-watch.service|phone-worker-watch.timer|tts-bot.service.d/*)
         [[ -f "$TEMPLATE_DIR/$name" ]] || warn "audit: existe só na VPS: $name"
         ;;
       lavalink.service|lavalink.service.d/*)

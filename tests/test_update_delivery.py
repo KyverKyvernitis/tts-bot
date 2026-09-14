@@ -415,7 +415,7 @@ def test_systemd_installer_preserves_disabled_updater_timer_during_update() -> N
     installer = (ROOT / "scripts" / "install-vps-systemd-units.sh").read_text(encoding="utf-8")
     assert "capture_updater_timer_state" in installer
     assert '"$FROM_UPDATER" == "1" && "$UPDATER_TIMER_WAS_ENABLED" != "1"' in installer
-    assert 'action "tts-bot-updater.timer permaneceu desativado"' in installer
+    assert 'action "tts-bot-updater.timer/path permaneceram desativados"' in installer
 
 
 def test_post_deploy_failure_path_preserves_code_and_archives_candidate(tmp_path: Path) -> None:
@@ -561,8 +561,9 @@ apply_service_policy
 """
     _run_bash(harness)
     logged = calls.read_text(encoding="utf-8").splitlines()
-    assert "disable --now tts-bot-updater.timer" in logged
+    assert "disable --now tts-bot-updater.timer tts-bot-updater.path" in logged
     assert "enable tts-bot-updater.timer" not in logged
+    assert "enable --now tts-bot-updater.path" not in logged
     assert "start tts-bot-updater.timer" not in logged
 
 

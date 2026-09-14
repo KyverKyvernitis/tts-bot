@@ -384,3 +384,41 @@ def test_reconciler_rebuilds_compact_final_cards_from_archived_state() -> None:
     assert 'failure_code = str(state_data.get("failure_code")' in block
     assert '"recovery_duration": recovery_duration' in block
     assert '**({"ui": presentation} if isinstance(presentation, dict) else {})' in block
+
+
+def test_macro_transition_auto_closes_active_stage_duration() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    macro_index = _block(source, "zip_progress_macro_index() {", "\nzip_progress_advance_macro_index() {")
+    add_duration = _block(source, "zip_progress_add_macro_duration() {", "\nzip_progress_macro_duration_pairs() {")
+    duration_pairs = _block(source, "zip_progress_macro_duration_pairs() {", "\nzip_progress_status() {")
+    close_active = _block(source, "zip_progress_close_active_macro_on_advance() {", "\nzip_progress_publish() {")
+    harness = "\n".join(
+        [
+            "format_update_duration_ms() { printf '%sms' \"$1\"; }",
+            macro_index,
+            add_duration,
+            duration_pairs,
+            close_active,
+            "ZIP_PROGRESS_MACRO_MAX_INDEX=9",
+            "ZIP_PROGRESS_STAGE_LABEL='Validando candidato'",
+            "ZIP_PROGRESS_STAGE_STARTED_MS=1000",
+            "ZIP_PROGRESS_LAST_DONE_LABEL=''",
+            "ZIP_PROGRESS_LAST_DONE_DURATION=''",
+            "ZIP_PROGRESS_LAST_DONE_MACRO_INDEX=-1",
+            "zip_progress_close_active_macro_on_advance 'Criando release candidata' 3500",
+            "printf 'PAIRS=%s\\n' \"$(zip_progress_macro_duration_pairs)\"",
+            "printf 'LAST=%s|%s|%s\\n' \"$ZIP_PROGRESS_LAST_DONE_LABEL\" \"$ZIP_PROGRESS_LAST_DONE_DURATION\" \"$ZIP_PROGRESS_LAST_DONE_MACRO_INDEX\"",
+        ]
+    )
+    result = subprocess.run(["bash", "-u", "-c", harness], cwd=ROOT, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert "PAIRS=4=2500ms" in result.stdout
+    assert "LAST=Validando candidato|2500ms|4" in result.stdout
+
+
+def test_local_candidate_exposes_real_validation_release_and_application_phases() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    assert 'zip_progress_done_and_publish "Isolamento preparado" "Validando candidato"' in source
+    assert 'zip_progress_done_and_publish "Candidato validado" "Criando release candidata"' in source
+    classifier = _block(source, "zip_progress_macro_index() {", "\nzip_progress_advance_macro_index() {")
+    assert "*validando\\ aplicação*" in classifier

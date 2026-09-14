@@ -3392,7 +3392,7 @@ zip_progress_macro_index() {
   case "$lowered" in
     *github*|*push*|*sincronizando*) printf '9' ;;
     *health*|*saúde*|*saude*|*comandos*|*estabilidade*|*finalizando*|*estado\ publicado*|*recuperando\ confirmação*|"validando"|*validando\ arquivos*) printf '8' ;;
-    *publicando\ interface*|*publicando\ servidor*|*reiniciando*|*recarregando*|*reload*|*ativando*) printf '7' ;;
+    *publicando\ interface*|*publicando\ servidor*|*reiniciando*|*recarregando*|*reload*|*ativando*|*validando\ aplicação*|*validando\ aplicacao*) printf '7' ;;
     *promov*|*aplicando\ na\ vps*) printf '6' ;;
     *ready*|*release*|*preservando\ runtime*|*fazendo\ commit*|*commit\ criado*|*registrando*) printf '5' ;;
     *validando\ runtime*|*verificando\ comandos*|*test*|*typescript*|*compilando*|*build*|*dependências*|*dependencias*) printf '4' ;;
@@ -3595,6 +3595,31 @@ zip_progress_trim_history() {
   done
 }
 
+zip_progress_close_active_macro_on_advance() {
+  local next_label="${1:-}" now_ms="${2:-0}"
+  local active_label="${ZIP_PROGRESS_STAGE_LABEL:-}" active_started="${ZIP_PROGRESS_STAGE_STARTED_MS:-0}"
+  local active_macro next_macro elapsed_ms
+  [[ -n "${active_label//[[:space:]]/}" ]] || return 0
+  [[ "$active_started" =~ ^[0-9]+$ ]] || return 0
+  (( active_started > 0 )) || return 0
+  [[ "$now_ms" =~ ^[0-9]+$ ]] || return 0
+
+  active_macro="$(zip_progress_macro_index "$active_label")"
+  next_macro="$(zip_progress_macro_index "$next_label")"
+  [[ "$active_macro" =~ ^[0-9]+$ && "$next_macro" =~ ^[0-9]+$ ]] || return 0
+  # Evento atrasado/regressivo não pode fechar nem reatribuir a etapa atual.
+  (( next_macro >= active_macro )) || return 0
+
+  elapsed_ms=$((now_ms - active_started))
+  (( elapsed_ms < 0 )) && elapsed_ms=0
+  zip_progress_add_macro_duration "$active_macro" "$elapsed_ms"
+  if (( next_macro > active_macro )); then
+    ZIP_PROGRESS_LAST_DONE_LABEL="$active_label"
+    ZIP_PROGRESS_LAST_DONE_DURATION="$(format_update_duration_ms "$elapsed_ms")"
+    ZIP_PROGRESS_LAST_DONE_MACRO_INDEX="$active_macro"
+  fi
+}
+
 zip_progress_publish() {
   local stage_label="${1:-Processando atualização}"
   local detail="${2:-}"
@@ -3602,6 +3627,9 @@ zip_progress_publish() {
   now_ms="$(update_now_ms)"
   if (( ZIP_PROGRESS_STARTED_MS <= 0 )); then
     ZIP_PROGRESS_STARTED_MS="$now_ms"
+  fi
+  if [[ "$ZIP_PROGRESS_STAGE_LABEL" != "$stage_label" && "$ZIP_PROGRESS_STAGE_STARTED_MS" -gt 0 ]]; then
+    zip_progress_close_active_macro_on_advance "$stage_label" "$now_ms"
   fi
   if [[ "$ZIP_PROGRESS_STAGE_LABEL" != "$stage_label" || "$ZIP_PROGRESS_STAGE_STARTED_MS" -le 0 ]]; then
     ZIP_PROGRESS_STAGE_LABEL="$stage_label"
@@ -4511,6 +4539,12 @@ prepare_local_candidate_commit_in_worktree() {
     LAST_ERROR_STDERR="candidato não produziu diff staged no worktree isolado"
     LAST_ERROR_CODE="EMPTY_CANDIDATE_DIFF"
     return 1
+  fi
+
+  # A validação isolada terminou de verdade aqui. A fase seguinte inclui commit,
+  # preparação de artefatos e snapshot de rollback até o candidato ficar READY.
+  if declare -F zip_progress_done_and_publish >/dev/null 2>&1; then
+    zip_progress_done_and_publish "Candidato validado" "Criando release candidata"
   fi
 
   # O marcador `commit` antigo também incluía tudo desde o último timing
@@ -7078,6 +7112,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     fi
 
     classify_changed_files
+    zip_progress_done_and_publish "Isolamento preparado" "Validando candidato"
     if ! prepare_local_candidate_commit_in_worktree; then
       reject_local_candidate_safely \
         "Atualização rejeitada no staging" \
@@ -7328,7 +7363,7 @@ classify_changed_files() {
         ;;
     esac
     case "$file" in
-      deploy/systemd/tts-bot.service|deploy/systemd/tts-bot-updater.service|deploy/systemd/tts-bot-updater.timer|deploy/systemd/tts-bot-alert@.service|deploy/systemd/cleanup-audio-temp.service|deploy/systemd/cleanup-audio-temp.timer|deploy/systemd/sinuca-activity-server.service|deploy/systemd/phone-worker-watch.service|deploy/systemd/phone-worker-watch.timer|deploy/systemd/tts-bot.service.d/*|deploy/systemd/vps/tts-bot.service|deploy/systemd/vps/tts-bot-updater.service|deploy/systemd/vps/tts-bot-updater.timer|deploy/systemd/vps/tts-bot-alert@.service|deploy/systemd/vps/cleanup-audio-temp.service|deploy/systemd/vps/cleanup-audio-temp.timer|deploy/systemd/vps/sinuca-activity-server.service|deploy/systemd/vps/phone-worker-watch.service|deploy/systemd/vps/phone-worker-watch.timer|deploy/systemd/vps/tts-bot.service.d/*|deploy/sudoers.d/*|deploy/journald/*|deploy/tmpfiles.d/*|scripts/install-vps-systemd-units.sh)
+      deploy/systemd/tts-bot.service|deploy/systemd/tts-bot-updater.service|deploy/systemd/tts-bot-updater.timer|deploy/systemd/tts-bot-updater.path|deploy/systemd/tts-bot-alert@.service|deploy/systemd/cleanup-audio-temp.service|deploy/systemd/cleanup-audio-temp.timer|deploy/systemd/sinuca-activity-server.service|deploy/systemd/phone-worker-watch.service|deploy/systemd/phone-worker-watch.timer|deploy/systemd/tts-bot.service.d/*|deploy/systemd/vps/tts-bot.service|deploy/systemd/vps/tts-bot-updater.service|deploy/systemd/vps/tts-bot-updater.timer|deploy/systemd/vps/tts-bot-updater.path|deploy/systemd/vps/tts-bot-alert@.service|deploy/systemd/vps/cleanup-audio-temp.service|deploy/systemd/vps/cleanup-audio-temp.timer|deploy/systemd/vps/sinuca-activity-server.service|deploy/systemd/vps/phone-worker-watch.service|deploy/systemd/vps/phone-worker-watch.timer|deploy/systemd/vps/tts-bot.service.d/*|deploy/sudoers.d/*|deploy/journald/*|deploy/tmpfiles.d/*|scripts/install-vps-systemd-units.sh)
         VPS_SYSTEMD_UNITS_CHANGED=1
         ;;
     esac
@@ -7811,6 +7846,7 @@ build_vps_systemd_template_overlay() {
     tts-bot.service
     tts-bot-updater.service
     tts-bot-updater.timer
+    tts-bot-updater.path
     tts-bot-alert@.service
     cleanup-audio-temp.service
     cleanup-audio-temp.timer

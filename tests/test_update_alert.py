@@ -251,7 +251,9 @@ def test_update_installs_root_systemd_templates_and_treats_install_failure_as_fa
 
     assert "deploy/systemd/tts-bot-updater.service" in classify
     assert "deploy/systemd/tts-bot-updater.timer" in classify
+    assert "deploy/systemd/tts-bot-updater.path" in classify
     assert "deploy/systemd/vps/tts-bot-updater.service" in classify
+    assert "deploy/systemd/vps/tts-bot-updater.path" in classify
     assert "deploy/systemd/sinuca-activity-server.service" in classify
     assert "deploy/systemd/vps/sinuca-activity-server.service" in classify
     assert 'return "$rc"' in deploy
