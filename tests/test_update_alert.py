@@ -54,7 +54,7 @@ def test_changed_shell_scripts_pass_bash_syntax_check() -> None:
         subprocess.run(["bash", "-n", str(path)], check=True, cwd=ROOT)
 
 
-def test_update_progress_times_completed_microsteps_in_parentheses() -> None:
+def test_update_progress_keeps_detail_plain_and_exports_completed_duration_for_stage_line() -> None:
     harness = r'''
 source <(awk '/^human_duration\(\)/{flag=1} /^mark_update_timing\(\)/{flag=0} flag' scripts/tts-bot-update.sh)
 source <(awk '/^zip_progress_title\(\)/{flag=1} /^rollback_request_roots\(\)/{flag=0} flag' scripts/tts-bot-update.sh)
@@ -70,7 +70,7 @@ ZIP_PROGRESS_MAX_VISIBLE_STEPS=10
 ZIP_PROGRESS_STAGE_LABEL=''
 ZIP_PROGRESS_STAGE_STARTED_MS=0
 ZIP_PROGRESS_STARTED_MS=0
-notify_zip_status_message(){ printf '%s\n---\n' "$3"; }
+notify_zip_status_message(){ printf '%s\nUI=%s\n---\n' "$3" "$ZIP_STATUS_UI_JSON"; }
 update_local_candidate_heartbeat(){ :; }
 zip_progress_publish 'Conferindo ZIP'
 sleep 0.02
@@ -88,8 +88,11 @@ printf 'FORMAT=%s\n' "$(format_update_duration_ms 2450)"
     )
     text = result.stdout
     assert "<a:loading:test> **Conferindo ZIP**" in text
-    assert "✅ Base conferida (" in text
-    assert "✅ Integridade confirmada (" in text
+    assert "-# Base conferida" in text
+    assert "-# Integridade confirmada" in text
+    assert "✅ Base conferida" not in text
+    assert '"completed_stage": "Base conferida"' in text
+    assert '"completed_duration":' in text
     assert "<a:loading:test> **Aplicando na VPS**" in text
     assert "UPD-TEST1234 · 2 etapas concluídas" in text
     assert "FORMAT=2,5s" in text
@@ -493,8 +496,9 @@ printf 'COUNT=%s START=%s\n' "$ZIP_PROGRESS_COMPLETED_COUNT" "$ZIP_PROGRESS_STAR
         text=True,
     )
     text = result.stdout
-    assert "✅ Pacote inspecionado (5s)" in text
-    assert "✅ Candidato seguro preparado (20ms)" in text
+    assert "-# Pacote inspecionado" in text
+    assert "-# Candidato seguro preparado" in text
+    assert "✅ Pacote inspecionado" not in text
     assert "<a:loading:test> **Conferindo ZIP**" in text
     assert "UPD-HANDOFF · 6 etapas concluídas · 7s" in text
     assert "COUNT=6 START=93000" in text

@@ -1018,19 +1018,25 @@ class BotLocal(commands.Bot):
             # updater realmente alcança cada macroetapa, preservando a sensação
             # de progresso da UI antiga sem criar mensagens adicionais.
             for index, label in enumerate(macros[: current + 1]):
+                # A duração pertence visualmente à etapa, não ao texto
+                # descritivo abaixo dela. O texto inferior permanece neutro.
+                duration_suffix = (
+                    f" ({completed_duration})"
+                    if completed_duration and completed_macro == index
+                    else ""
+                )
                 if index < current:
-                    lines.append(f"{UPDATE_EMOJI_CHECK} {label}")
+                    lines.append(f"{UPDATE_EMOJI_CHECK} {label}{duration_suffix}")
                 else:
-                    lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}**")
+                    lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}{duration_suffix}**")
                 if completed_stage and completed_macro == index:
-                    completed_suffix = f" ({completed_duration})" if completed_duration else ""
-                    lines.append(f"-# {UPDATE_EMOJI_CHECK} {completed_stage}{completed_suffix}"[:240])
+                    lines.append(f"-# {completed_stage}"[:240])
                 if index == current:
                     micro_parts = [stage]
                     if detail and detail.casefold() not in stage.casefold():
                         micro_parts.append(detail)
                     micro = " · ".join(part for part in micro_parts if part)
-                    if micro:
+                    if micro and micro.casefold() != completed_stage.casefold():
                         lines.append(f"-# {micro[:240]}")
             return "\n".join(lines)
 
@@ -4003,9 +4009,7 @@ class BotLocal(commands.Bot):
                                 current = str(item.get("current") or current).strip() or current
                                 if completed:
                                     completed_duration = format_elapsed_ms(item.get("elapsed_ms"))
-                                    preparation_history.append(
-                                        f"-# {UPDATE_EMOJI_CHECK} {completed} ({completed_duration})"
-                                    )
+                                    preparation_history.append(f"-# {completed}")
                                     preparation_last_completed["stage"] = completed
                                     preparation_last_completed["duration"] = completed_duration
                                     detail = f"{completed} concluído"

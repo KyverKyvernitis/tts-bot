@@ -40,9 +40,9 @@ def test_progress_card_reveals_macro_stages_only_when_reached() -> None:
     assert '("Pacote", "Preparação", "Validação", "Release", "Promoção", "Verificação", "GitHub")' in block
     assert 'lines = [f"# {UPDATE_EMOJI_PROGRESS_TITLE} {headline}"]' in block
     assert 'enumerate(macros[: current + 1])' in block
-    assert 'lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}**")' in block
+    assert 'lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}{duration_suffix}**")' in block
     assert 'lines.append(f"-# {micro[:240]}")' in block
-    assert 'lines.append(f"{UPDATE_EMOJI_CHECK} {label}")' in block
+    assert 'lines.append(f"{UPDATE_EMOJI_CHECK} {label}{duration_suffix}")' in block
     assert 'lines.append(f"○ {label}")' not in block
 
 
@@ -146,20 +146,20 @@ def test_success_path_queues_the_raw_updater_log_for_technical_channel() -> None
     assert 'FINAL_RAW_LOG="$RUN_LOG_FILE"' in block
     assert '"$FINAL_RAW_LOG" "tts-bot-updater.log"' in block
 
-def test_progress_card_times_only_completed_microsteps_in_parentheses() -> None:
+def test_progress_card_moves_completed_duration_to_stage_line_and_keeps_detail_plain() -> None:
     source = BOT.read_text(encoding="utf-8")
     renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
     updater = UPDATER.read_text(encoding="utf-8")
-    assert 'stage_elapsed = str(presentation.get("stage_elapsed") or "").strip()' not in renderer
-    assert 'UI_STAGE_ELAPSED' not in updater
-    assert 'completed_stage = str(presentation.get("completed_stage") or "").strip()' in renderer
-    assert 'completed_duration = str(presentation.get("completed_duration") or "").strip()' in renderer
-    assert 'completed_suffix = f" ({completed_duration})" if completed_duration else ""' in renderer
-    assert '"completed_stage": os.environ.get("UI_COMPLETED_STAGE") or ""' in updater
-    assert '"completed_duration": os.environ.get("UI_COMPLETED_DURATION") or ""' in updater
-    assert 'line="-# ✅ $done_label ($elapsed_text)"' in updater
-    assert 'f"-# {UPDATE_EMOJI_CHECK} {completed} ({completed_duration})"' in source
-
+    progress = renderer[renderer.index('if kind == "progress":'):renderer.index('if kind == "recovery":')]
+    assert 'duration_suffix = (' in progress
+    assert 'if completed_duration and completed_macro == index' in progress
+    assert 'lines.append(f"{UPDATE_EMOJI_CHECK} {label}{duration_suffix}")' in progress
+    assert 'lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}{duration_suffix}**")' in progress
+    assert 'lines.append(f"-# {completed_stage}"[:240])' in progress
+    assert 'f"-# {UPDATE_EMOJI_CHECK} {completed_stage}' not in progress
+    assert 'line="-# $done_label"' in updater
+    assert 'line="-# ✅ $done_label ($elapsed_text)"' not in updater
+    assert 'preparation_history.append(f"-# {completed}")' in source
 
 def test_progress_completed_microstep_can_stay_visible_when_macro_advances() -> None:
     source = BOT.read_text(encoding="utf-8")

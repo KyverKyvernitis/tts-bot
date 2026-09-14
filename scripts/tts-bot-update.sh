@@ -3292,7 +3292,7 @@ PYHANDOFF
     ZIP_PROGRESS_LAST_DONE_LABEL="$label"
     ZIP_PROGRESS_LAST_DONE_DURATION="$(format_update_duration_ms "$elapsed_ms")"
     ZIP_PROGRESS_LAST_DONE_MACRO_INDEX="$(zip_progress_macro_index "$label")"
-    line="-# ✅ $label ($ZIP_PROGRESS_LAST_DONE_DURATION)"
+    line="-# $label"
     if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
       ZIP_PROGRESS_HISTORY+=$'\n'
     fi
@@ -3472,7 +3472,7 @@ zip_progress_done() {
   ZIP_PROGRESS_LAST_DONE_DURATION="$elapsed_text"
   ZIP_PROGRESS_LAST_DONE_MACRO_INDEX="$(zip_progress_macro_index "$done_label")"
   ZIP_PROGRESS_COMPLETED_COUNT=$((ZIP_PROGRESS_COMPLETED_COUNT + 1))
-  line="-# ✅ $done_label ($elapsed_text)"
+  line="-# $done_label"
   if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
     ZIP_PROGRESS_HISTORY+=$'\n'
   fi
