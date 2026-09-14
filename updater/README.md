@@ -13,6 +13,8 @@ Implementação canônica do atualizador do bot.
 - `core/fila.sh`: fila de candidatos, arquivamento e dispatch.
 - `core/validacao.sh`: preflight, saúde e validação de candidatos/remoto.
 - `core/candidato.sh`: isolamento, artefatos, commit e promoção de candidatos locais.
+- `core/progresso.sh`: status, progresso, histórico e entrega visual no Discord.
+- `core/mudancas.sh`: diff, classificação de impacto, fast reload e proteção de mudanças locais.
 - `core/aplicacao.sh`: systemd, deploy do bot/site, publicação e releases de runtime.
 - `core/recuperacao.sh`: rollback transacional e tratamento de falhas.
 - `utilitarios/`: auxiliares Python canônicos com nomes em português.

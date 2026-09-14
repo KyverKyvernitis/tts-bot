@@ -72,6 +72,8 @@ def test_core_esta_dividido_em_modulos_de_responsabilidade():
         "candidato.sh",
         "aplicacao.sh",
         "recuperacao.sh",
+        "progresso.sh",
+        "mudancas.sh",
     }
     assert esperados <= {p.name for p in core.glob("*.sh")}
     entrypoint = CANONICO.read_text(encoding="utf-8")
@@ -98,6 +100,8 @@ def test_funcoes_extraidas_nao_ficam_duplicadas_no_orquestrador():
         "candidato.sh": "prepare_local_candidate_update() {",
         "aplicacao.sh": "deploy_bot() {",
         "recuperacao.sh": "rollback_after_failure() {",
+        "progresso.sh": "zip_progress_publish() {",
+        "mudancas.sh": "classify_changed_files() {",
     }
     for modulo, assinatura in contratos.items():
         assert assinatura not in entrypoint
@@ -161,3 +165,32 @@ def test_recuperacao_e_carregada_antes_dos_traps_transacionais():
 
 def test_orquestrador_core_fica_abaixo_de_tres_mil_e_quinhentas_linhas():
     assert len(CANONICO.read_text(encoding="utf-8").splitlines()) < 3500
+
+
+def test_progresso_e_mudancas_estao_fora_do_orquestrador():
+    entrypoint = CANONICO.read_text(encoding="utf-8")
+    progresso = (ROOT / "updater" / "core" / "progresso.sh").read_text(encoding="utf-8")
+    mudancas = (ROOT / "updater" / "core" / "mudancas.sh").read_text(encoding="utf-8")
+
+    for assinatura in (
+        "send_update_status_payload() {",
+        "zip_progress_publish() {",
+        "zip_recovery_publish() {",
+        "zip_progress_done() {",
+    ):
+        assert assinatura not in entrypoint
+        assert assinatura in progresso
+
+    for assinatura in (
+        "format_changed_files() {",
+        "classify_changed_files() {",
+        "fast_reload_modules_for_changed_files() {",
+        "ensure_no_unstaged_tracked_changes() {",
+        "fail_local_changes_before_pull() {",
+    ):
+        assert assinatura not in entrypoint
+        assert assinatura in mudancas
+
+
+def test_orquestrador_core_fica_abaixo_de_duas_mil_linhas():
+    assert len(CANONICO.read_text(encoding="utf-8").splitlines()) < 2000
