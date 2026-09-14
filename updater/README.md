@@ -37,3 +37,17 @@ Na etapa atual da modularização, o restante do fluxo foi separado em:
 - `core/finalizacao.sh`: consolidação de saúde/tempos, card final, log técnico e entrega idempotente.
 
 Com isso, `core/atualizar.sh` fica responsável principalmente por bootstrap, estado inicial, carregamento dos módulos, locks e traps transacionais.
+
+
+## Discord
+
+A integração do updater com o bot fica em `updater/discord/`:
+
+- `cartoes.py`: renderer, estado visual, logs técnicos e reconciliação;
+- `preparacao.py`: validação/extracao do ZIP e criação do candidato;
+- `progresso.py`: endpoint interno, progressão e edição de status;
+- `controles.py`: botões, detalhes, cancelamento, rollback e reaplicação;
+- `eventos.py`: eventos do Discord, reload e recepção de anexos;
+- `integracao.py`: composição dos mixins e inicialização do estado.
+
+`bot.py` mantém apenas a composição com `IntegracaoDiscordUpdaterMixin` e os hooks gerais do bot.

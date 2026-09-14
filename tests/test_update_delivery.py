@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from updater.testes.fonte_core import caminho_fonte_core
+from updater.testes.fonte_discord import ler_fonte_discord
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -193,7 +194,7 @@ flush_update_alert_outbox
     assert not (receipts / "UPD-TEST-final.alert.done").exists()
 
 def test_discord_status_state_is_saved_only_after_successful_edit() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     start = source.index("    async def _edit_zip_status_from_update")
     end = source.index("\n    def _zip_update_find_candidate_sync", start)
     block = source[start:end]
@@ -219,7 +220,7 @@ def test_final_delivery_is_durable_before_candidate_archive() -> None:
 
 
 def test_bot_recovers_stale_raw_log_claims_after_restart() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     start = source.index("    def _zip_update_claim_log_jobs_sync")
     end = source.index("\n    def _zip_update_requeue_log_job_sync", start)
     block = source[start:end]
@@ -254,7 +255,7 @@ flush_update_status_outbox
 
 
 def test_rollback_control_is_removed_when_persistent_state_cannot_be_saved() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     state_start = source.index("    def _zip_update_state_save")
     state_end = source.index("\n    def _zip_update_component_text", state_start)
     state_block = source[state_start:state_end]
@@ -273,7 +274,7 @@ def test_rollback_control_is_removed_when_persistent_state_cannot_be_saved() -> 
 
 
 def test_bot_raw_log_attachment_is_confined_to_outbox() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     start = source.index("    def _zip_update_log_attachment_path")
     end = source.index("\n    async def _zip_update_flush_raw_logs_once", start)
     block = source[start:end]
@@ -285,7 +286,7 @@ def test_bot_raw_log_attachment_is_confined_to_outbox() -> None:
     assert "self._zip_update_log_attachment_path" in flush
 
 def test_recovery_does_not_replace_latest_rollback_control_with_old_update() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     reconcile_start = source.index("    async def _zip_update_reconcile_archived_messages_once")
     reconcile_end = source.index("\n    async def _zip_update_reconcile_loop", reconcile_start)
     reconcile = source[reconcile_start:reconcile_end]
@@ -401,7 +402,7 @@ printf 'RC=%s DEPLOY=%s ROLLBACK=%s\\n' "$rc" "$BOT_RESTARTS_DEPLOY" "$BOT_RESTA
 
 
 def test_reconciler_skips_active_updater_and_never_confirms_mismatched_head() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     assert "DISCORD_AUTO_UPDATE_RECONCILE_MAX_AGE_SECONDS\", \"1800" in source
     reconcile_start = source.index("    async def _zip_update_reconcile_archived_messages_once")
     reconcile_end = source.index("\n    async def _zip_update_reconcile_loop", reconcile_start)
@@ -479,7 +480,7 @@ on_error 999 main
 
 
 def test_raw_log_receipt_is_written_only_after_bot_sends_to_discord() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     flush_start = source.index("    async def _zip_update_flush_raw_logs_once")
     flush_end = source.index("\n    def _zip_update_current_head_sync", flush_start)
     flush = source[flush_start:flush_end]
@@ -608,7 +609,7 @@ def test_candidate_suspicion_rejects_legacy_directory_with_trailing_space(tmp_pa
 
 
 def test_first_candidate_keeps_preparation_microsteps_instead_of_fake_queue() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     start = source.index("                    queue_position = max(1")
     end = source.index("                    await self._dispatch_updater_candidate(candidate_id, display_id)", start)
     block = source[start:end]
@@ -636,7 +637,7 @@ def test_queue_refresher_preserves_new_first_candidate_animation() -> None:
 
 
 def test_update_presence_and_short_user_notice_are_connected_to_runtime_state() -> None:
-    bot_source = BOT.read_text(encoding="utf-8")
+    bot_source = ler_fonte_discord()
     presence_source = (ROOT / "utility" / "application_presence.py").read_text(encoding="utf-8")
 
     assert '"candidates" / "runtime-state.json"' in bot_source
@@ -661,7 +662,7 @@ def test_updater_service_has_lower_cpu_and_io_priority() -> None:
 
 
 def test_bot_persists_preparation_progress_before_enqueuing_candidate() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     writer_start = source.index("    def _write_local_update_candidate_sync(")
     writer_end = source.index("    def _trigger_updater_service_sync", writer_start)
     writer = source[writer_start:writer_end]

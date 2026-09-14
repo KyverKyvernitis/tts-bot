@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from updater.testes.fonte_core import caminho_fonte_core
+from updater.testes.fonte_discord import ler_fonte_discord
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +16,7 @@ def _block(source: str, start: str, end: str) -> str:
 
 
 def test_trigger_reports_real_systemctl_result_and_active_state() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     state = _block(source, "    def _updater_service_state_sync", "\n    def _trigger_updater_service_sync")
     trigger = _block(source, "    def _trigger_updater_service_sync", "\n    async def _watch_updater_candidate_dispatch")
 
@@ -28,7 +29,7 @@ def test_trigger_reports_real_systemctl_result_and_active_state() -> None:
 
 
 def test_candidate_watchdog_retriggers_when_service_becomes_free() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     watchdog = _block(source, "    async def _watch_updater_candidate_dispatch", "\n    async def _dispatch_updater_candidate")
 
     assert "deadline = started + 60.0" in watchdog
@@ -40,7 +41,7 @@ def test_candidate_watchdog_retriggers_when_service_becomes_free() -> None:
 
 
 def test_zip_handler_uses_immediate_dispatch_watchdog() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     handler = _block(source, "    async def _handle_zip_update_message", "\n    async def on_guild_join")
     dispatch = _block(source, "    async def _dispatch_updater_candidate", "\n    def _guess_repo_name")
 
@@ -68,7 +69,7 @@ def test_updater_timer_and_exit_retrigger_remain_as_fallbacks() -> None:
 
 
 def test_rollback_and_redo_share_immediate_dispatch_watchdog() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     control = _block(source, "    async def _watch_updater_control_dispatch", "\n    async def _dispatch_updater_control_request")
     confirm = _block(source, "    async def _start_zip_update_rollback_flow", "\n    async def _handle_zip_update_message")
 

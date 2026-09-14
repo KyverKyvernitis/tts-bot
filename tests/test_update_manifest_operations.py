@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from updater.testes.fonte_core import caminho_fonte_core
+from updater.testes.fonte_discord import ler_fonte_discord
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -111,7 +112,7 @@ def test_new_candidates_do_not_trigger_filename_magic_migration() -> None:
 
 
 def test_bot_emits_schema_v3_and_reserves_control_manifest() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     assert 'UPDATE_CONTROL_MANIFEST_NAME' in source
     assert 'allowed_ops={"delete", "move"}' in source
     assert '"schema_version": 3' in source

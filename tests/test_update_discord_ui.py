@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from updater.testes.fonte_core import caminho_fonte_core
+from updater.testes.fonte_discord import ler_fonte_discord
 import subprocess
 
 
@@ -20,7 +21,7 @@ def _block(source: str, start_marker: str, end_marker: str) -> str:
 
 
 def test_public_update_card_uses_custom_emojis_and_separate_title_progress_emoji() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     expected = {
         'UPDATE_EMOJI_CHECK = "<:checkmark:1548838297806311445>"',
         'UPDATE_EMOJI_ERROR = "<:x_mark:1548838423169605654>"',
@@ -36,7 +37,7 @@ def test_public_update_card_uses_custom_emojis_and_separate_title_progress_emoji
 
 
 def test_progress_card_reveals_macro_stages_only_when_reached() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
     block = renderer[renderer.index('if kind == "progress":'):renderer.index('if kind == "recovery":')]
     assert '("Pacote", "Segurança", "Preparação", "Isolamento", "Validação", "Release", "Promoção", "Aplicação", "Verificação", "GitHub")' in block
@@ -49,7 +50,7 @@ def test_progress_card_reveals_macro_stages_only_when_reached() -> None:
 
 
 def test_final_card_is_compact_and_moves_technical_data_to_buttons() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
     view = _block(source, "    def _make_zip_update_view", "\n    def _zip_update_alert_receipt_save_sync")
     assert "file_count_text" in renderer
@@ -72,7 +73,7 @@ def test_final_card_is_compact_and_moves_technical_data_to_buttons() -> None:
 
 
 def test_final_info_buttons_survive_even_without_rollback_control() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     edit = _block(source, "    async def _edit_zip_status_from_update", "\n    def _zip_update_find_candidate_sync")
     assert 'str(presentation.get("kind") or "").strip().lower() == "final"' in edit
     assert '"mode": "info"' in edit
@@ -81,7 +82,7 @@ def test_final_info_buttons_survive_even_without_rollback_control() -> None:
 
 
 def test_info_buttons_reply_ephemerally() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     block = _block(source, "    async def _on_zip_update_info_click", "\n    async def _on_zip_update_control_click")
     assert "ephemeral=True" in block
     assert 'kind == "files"' in block
@@ -96,7 +97,7 @@ def test_webhook_is_not_a_delivery_transport_anymore() -> None:
     assert "urllib" not in source
     assert '"delivery": "discord_bot"' in source
 
-    bot = BOT.read_text(encoding="utf-8")
+    bot = ler_fonte_discord()
     resolver = _block(bot, "    def _zip_update_log_channel_id_sync", "\n    def _zip_update_claim_log_jobs_sync")
     # Legacy webhook is metadata-only migration: discover channel_id once, then
     # persist it. There is no webhook execute/send path.
@@ -106,7 +107,7 @@ def test_webhook_is_not_a_delivery_transport_anymore() -> None:
 
 
 def test_raw_log_channel_is_sent_by_bot_and_receipted_after_discord_confirmation() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     block = _block(source, "    async def _zip_update_flush_raw_logs_once", "\n    def _zip_update_current_head_sync")
     send_at = block.index("await channel.send")
     receipt_at = block.index("_zip_update_alert_receipt_save_sync", send_at)
@@ -149,7 +150,7 @@ def test_success_path_queues_the_raw_updater_log_for_technical_channel() -> None
     assert '"$FINAL_RAW_LOG" "tts-bot-updater.log"' in block
 
 def test_progress_card_persists_completed_macro_durations_and_keeps_detail_plain() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
     updater = UPDATER.read_text(encoding="utf-8")
     progress = renderer[renderer.index('if kind == "progress":'):renderer.index('if kind == "recovery":')]
@@ -166,7 +167,7 @@ def test_progress_card_persists_completed_macro_durations_and_keeps_detail_plain
     assert 'preparation_history.append(f"-# {completed}")' in source
 
 def test_progress_completed_microstep_can_stay_visible_when_macro_advances() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
     progress = renderer[renderer.index('if kind == "progress":'):renderer.index('if kind == "recovery":')]
     assert 'if completed_stage and completed_macro == index:' in progress
@@ -174,7 +175,7 @@ def test_progress_completed_microstep_can_stay_visible_when_macro_advances() -> 
 
 
 def test_final_card_shows_only_one_unlabelled_total_timer() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
     final = renderer[renderer.index('if kind == "final":'):]
     assert 'final_duration = total_duration or duration or recovery_duration' in final
@@ -185,7 +186,7 @@ def test_final_card_shows_only_one_unlabelled_total_timer() -> None:
 
 
 def test_progress_edits_are_coalesced_but_macro_and_recovery_transitions_are_immediate() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     block = _block(source, "    def _zip_update_progress_should_render", "\n    def _zip_update_progress_mark_rendered")
     assert 'kind not in {"progress", "recovery"}' in block
     assert 'age < 1.0' in block
@@ -197,7 +198,7 @@ def test_progress_edits_are_coalesced_but_macro_and_recovery_transitions_are_imm
 
 
 def test_automatic_failure_uses_recovery_timeline_before_final_card() -> None:
-    bot = BOT.read_text(encoding="utf-8")
+    bot = ler_fonte_discord()
     updater = UPDATER.read_text(encoding="utf-8")
     renderer = _block(bot, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
     assert 'if kind == "recovery":' in renderer
@@ -210,7 +211,7 @@ def test_automatic_failure_uses_recovery_timeline_before_final_card() -> None:
 
 
 def test_final_failure_card_distinguishes_successful_and_failed_rollback() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
     assert 'rollback_ok = presentation.get("rollback_ok")' in renderer
     assert 'Versão anterior restaurada' in renderer
@@ -219,7 +220,7 @@ def test_final_failure_card_distinguishes_successful_and_failed_rollback() -> No
 
 
 def test_raw_log_card_is_explicitly_technical_and_receipt_deduplicated() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     block = _block(source, "    async def _zip_update_flush_raw_logs_once", "\n    def _zip_update_current_head_sync")
     assert 'resumo técnico · log anexado' in block
     assert 're.sub(r"^[^\\wÀ-ÿ<]+\\s*", "", title, count=1)' in block
@@ -228,7 +229,7 @@ def test_raw_log_card_is_explicitly_technical_and_receipt_deduplicated() -> None
 
 
 def test_details_prettify_internal_timing_names() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     block = _block(source, "    async def _on_zip_update_info_click", "\n    async def _on_zip_update_control_click")
     assert '"receive_to_updater": "Recebido → updater"' in block
     assert '"candidate_apply": "Aplicação isolada"' in block
@@ -311,7 +312,7 @@ def test_progress_macro_never_regresses_when_a_later_microstep_looks_like_valida
 
 
 def test_bot_ignores_regressive_progress_and_recovery_events() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     block = _block(source, "    def _zip_update_progress_should_render", "\n    def _zip_update_progress_mark_rendered")
     assert 'incoming_macro_int < previous_macro_int' in block
     assert 'return False, "macroetapa regressiva"' in block
@@ -319,7 +320,7 @@ def test_bot_ignores_regressive_progress_and_recovery_events() -> None:
     assert 'return False, "etapa de recuperação regressiva"' in block
 
 def test_progress_card_has_no_accent_color_but_final_cards_keep_status_color() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     block = _block(source, "    def _make_zip_update_view", "\n    def _make_zip_update_confirmation_view")
     assert 'str(presentation.get("kind") or "").lower() == "progress"' in block
     assert 'container_kwargs["accent_color"] = color' in block
@@ -327,7 +328,7 @@ def test_progress_card_has_no_accent_color_but_final_cards_keep_status_color() -
 
 
 def test_progress_handoff_preserves_discord_receive_time_across_process_boundary() -> None:
-    bot = BOT.read_text(encoding="utf-8")
+    bot = ler_fonte_discord()
     updater = UPDATER.read_text(encoding="utf-8")
     writer = _block(bot, "    def _write_local_update_candidate_sync", "\n    def _trigger_updater_service_sync")
     handler = _block(bot, "    async def _handle_zip_update_message", "\n    async def on_guild_join")
@@ -350,7 +351,7 @@ def test_final_timings_distinguish_receive_delay_execution_and_total() -> None:
     assert 'DURATION_DISPLAY="$TOTAL_FROM_RECEIVE_DURATION desde o envio · $DURATION de execução"' in source
 
 def test_recovery_status_is_red_but_not_treated_as_final_delivery() -> None:
-    bot = BOT.read_text(encoding="utf-8")
+    bot = ler_fonte_discord()
     updater = UPDATER.read_text(encoding="utf-8")
     color = _block(bot, "    def _zip_update_status_color", "\n    def _zip_update_normalize_title")
     notify = _block(updater, "notify_zip_status_message() {", "\npost_direct_update_message() {")
@@ -361,7 +362,7 @@ def test_recovery_status_is_red_but_not_treated_as_final_delivery() -> None:
 
 
 def test_reconciler_recognizes_new_failure_cards_as_terminal() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     block = _block(
         source,
         "    async def _zip_update_reconcile_archived_messages_once",
@@ -374,7 +375,7 @@ def test_reconciler_recognizes_new_failure_cards_as_terminal() -> None:
 
 
 def test_reconciler_rebuilds_compact_final_cards_from_archived_state() -> None:
-    source = BOT.read_text(encoding="utf-8")
+    source = ler_fonte_discord()
     block = _block(
         source,
         "    async def _zip_update_reconcile_archived_messages_once",
