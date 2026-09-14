@@ -194,3 +194,40 @@ def test_progresso_e_mudancas_estao_fora_do_orquestrador():
 
 def test_orquestrador_core_fica_abaixo_de_duas_mil_linhas():
     assert len(CANONICO.read_text(encoding="utf-8").splitlines()) < 2000
+
+
+def test_wave42_separa_manutencao_persistencia_reversao_e_fluxo_final():
+    core = ROOT / "updater" / "core"
+    entrypoint = CANONICO.read_text(encoding="utf-8")
+    contratos = {
+        "manutencao.sh": "prune_update_artifacts() {",
+        "persistencia.sh": "write_local_candidate_state() {",
+        "reversao.sh": "prepare_rollback_request_update() {",
+    }
+    for nome, assinatura in contratos.items():
+        modulo = (core / nome).read_text(encoding="utf-8")
+        assert assinatura in modulo
+        assert assinatura not in entrypoint
+        assert f'$UPDATER_SOURCE_DIR/{nome}' in entrypoint
+
+    orquestracao = (core / "orquestracao.sh").read_text(encoding="utf-8")
+    finalizacao = (core / "finalizacao.sh").read_text(encoding="utf-8")
+    assert "load_pending_local_candidate" in orquestracao
+    assert 'STAGE="fetch remoto"' in orquestracao
+    assert "run_preflight_checks" in orquestracao
+    assert "deploy_bot" in orquestracao
+    assert "build_final_status_description" in finalizacao
+    assert "notify_zip_status_message" in finalizacao
+    assert "send_alert_reliably" in finalizacao
+
+
+def test_wave42_fluxo_principal_carrega_depois_dos_traps_transacionais():
+    text = CANONICO.read_text(encoding="utf-8")
+    trap_at = text.index("trap 'on_error")
+    orquestracao_at = text.index('. "$UPDATER_SOURCE_DIR/orquestracao.sh"')
+    finalizacao_at = text.index('. "$UPDATER_SOURCE_DIR/finalizacao.sh"')
+    assert trap_at < orquestracao_at < finalizacao_at
+
+
+def test_orquestrador_core_fica_abaixo_de_seiscentas_linhas():
+    assert len(CANONICO.read_text(encoding="utf-8").splitlines()) < 600

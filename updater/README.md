@@ -27,3 +27,13 @@ fachadas transitórias de compatibilidade. Código novo deve apontar para
 O entrypoint executa uma cópia runtime estável de `atualizar.sh` e preserva em
 `TTS_BOT_UPDATER_SOURCE_DIR` a revisão dos módulos carregada no início. Assim,
 um update do próprio updater não mistura versões durante a mesma execução.
+
+Na etapa atual da modularização, o restante do fluxo foi separado em:
+
+- `core/manutencao.sh`: retenção, limpeza de artefatos e proteção de espaço em disco.
+- `core/persistencia.sh`: estado durável do candidato e evidências de recuperação.
+- `core/reversao.sh`: pedidos de reverter/reaplicar e publicação do resultado da reversão.
+- `core/orquestracao.sh`: sequência transacional principal (fila local, rollback ou commit remoto, validação e deploy).
+- `core/finalizacao.sh`: consolidação de saúde/tempos, card final, log técnico e entrega idempotente.
+
+Com isso, `core/atualizar.sh` fica responsável principalmente por bootstrap, estado inicial, carregamento dos módulos, locks e traps transacionais.
