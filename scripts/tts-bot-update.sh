@@ -278,6 +278,9 @@ ZIP_PROGRESS_STARTED_MS=0
 ZIP_PROGRESS_RECEIVED_AT_MS=0
 ZIP_PROGRESS_UPDATER_DELAY_MS=0
 ZIP_PROGRESS_CURRENT_MACRO_INDEX=-1
+ZIP_PROGRESS_LAST_DONE_LABEL=""
+ZIP_PROGRESS_LAST_DONE_DURATION=""
+ZIP_PROGRESS_LAST_DONE_MACRO_INDEX=-1
 UPDATER_PROCESS_STARTED_MS=0
 LOCAL_CANDIDATE_UPDATER_STARTED_MS=0
 ZIP_PROGRESS_DONE_LABELS=""
@@ -3273,7 +3276,10 @@ PYHANDOFF
       ZIP_PROGRESS_DONE_LABELS+=$'\n'
     fi
     ZIP_PROGRESS_DONE_LABELS="${ZIP_PROGRESS_DONE_LABELS:-}${label}"
-    line="-# ✅ $label · $(format_update_duration_ms "$elapsed_ms")"
+    ZIP_PROGRESS_LAST_DONE_LABEL="$label"
+    ZIP_PROGRESS_LAST_DONE_DURATION="$(format_update_duration_ms "$elapsed_ms")"
+    ZIP_PROGRESS_LAST_DONE_MACRO_INDEX="$(zip_progress_macro_index "$label")"
+    line="-# ✅ $label ($ZIP_PROGRESS_LAST_DONE_DURATION)"
     if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
       ZIP_PROGRESS_HISTORY+=$'\n'
     fi
@@ -3355,13 +3361,10 @@ zip_progress_publish() {
     footer="$identifier · $ZIP_PROGRESS_COMPLETED_COUNT etapas concluídas · $elapsed_text"
   fi
   description+=$'\n'"-# $footer"
-  local macro_index action_name stage_elapsed_ms stage_elapsed_text
+  local macro_index action_name
   macro_index="$(zip_progress_macro_index "$stage_label")"
   zip_progress_advance_macro_index "$macro_index"
   macro_index="$ZIP_PROGRESS_CURRENT_MACRO_INDEX"
-  stage_elapsed_ms=$((now_ms - ZIP_PROGRESS_STAGE_STARTED_MS))
-  (( stage_elapsed_ms < 0 )) && stage_elapsed_ms=0
-  stage_elapsed_text="$(format_update_duration_ms "$stage_elapsed_ms")"
   action_name="update"
   if (( ROLLBACK_CONTROL_MODE == 1 )); then
     if [[ "${ROLLBACK_REQUEST_ACTION:-rollback}" == "redo" ]]; then
@@ -3370,15 +3373,21 @@ zip_progress_publish() {
       action_name="rollback"
     fi
   fi
-  ZIP_STATUS_UI_JSON="$(UI_KIND=progress UI_STAGE="$stage_label" UI_DETAIL="$detail" UI_IDENTIFIER="$identifier" UI_ELAPSED="$elapsed_text" UI_STAGE_ELAPSED="$stage_elapsed_text" UI_MACRO_INDEX="$macro_index" UI_ACTION="$action_name" python3 - <<'PYPROGRESSUI'
+  ZIP_STATUS_UI_JSON="$(UI_KIND=progress UI_STAGE="$stage_label" UI_DETAIL="$detail" UI_IDENTIFIER="$identifier" UI_ELAPSED="$elapsed_text" UI_COMPLETED_STAGE="${ZIP_PROGRESS_LAST_DONE_LABEL:-}" UI_COMPLETED_DURATION="${ZIP_PROGRESS_LAST_DONE_DURATION:-}" UI_COMPLETED_MACRO_INDEX="${ZIP_PROGRESS_LAST_DONE_MACRO_INDEX:--1}" UI_MACRO_INDEX="$macro_index" UI_ACTION="$action_name" python3 - <<'PYPROGRESSUI'
 import json, os
+try:
+    completed_macro_index = int(os.environ.get("UI_COMPLETED_MACRO_INDEX") or -1)
+except (TypeError, ValueError):
+    completed_macro_index = -1
 print(json.dumps({
     "kind": "progress",
     "stage": os.environ.get("UI_STAGE") or "Processando atualização",
     "detail": os.environ.get("UI_DETAIL") or "",
     "identifier": os.environ.get("UI_IDENTIFIER") or "",
     "elapsed": os.environ.get("UI_ELAPSED") or "",
-    "stage_elapsed": os.environ.get("UI_STAGE_ELAPSED") or "",
+    "completed_stage": os.environ.get("UI_COMPLETED_STAGE") or "",
+    "completed_duration": os.environ.get("UI_COMPLETED_DURATION") or "",
+    "completed_macro_index": completed_macro_index,
     "macro_index": int(os.environ.get("UI_MACRO_INDEX") or 0),
     "action": os.environ.get("UI_ACTION") or "update",
 }, ensure_ascii=False))
@@ -3446,8 +3455,11 @@ zip_progress_done() {
   fi
   (( elapsed_ms < 0 )) && elapsed_ms=0
   elapsed_text="$(format_update_duration_ms "$elapsed_ms")"
+  ZIP_PROGRESS_LAST_DONE_LABEL="$done_label"
+  ZIP_PROGRESS_LAST_DONE_DURATION="$elapsed_text"
+  ZIP_PROGRESS_LAST_DONE_MACRO_INDEX="$(zip_progress_macro_index "$done_label")"
   ZIP_PROGRESS_COMPLETED_COUNT=$((ZIP_PROGRESS_COMPLETED_COUNT + 1))
-  line="-# ✅ $done_label · $elapsed_text"
+  line="-# ✅ $done_label ($elapsed_text)"
   if [[ -n "${ZIP_PROGRESS_HISTORY//[[:space:]]/}" ]]; then
     ZIP_PROGRESS_HISTORY+=$'\n'
   fi

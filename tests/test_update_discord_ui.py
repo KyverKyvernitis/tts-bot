@@ -56,7 +56,8 @@ def test_final_card_is_compact_and_moves_technical_data_to_buttons() -> None:
     assert "duration" in renderer
     assert "total_duration" in renderer
     assert 'lines.append(f"`{identifier}` · `{branch}`")' in renderer
-    assert "desde o envio" in renderer
+    assert "final_duration = total_duration or duration or recovery_duration" in renderer
+    assert 'lines.append(f"⏱ **{final_duration}**")' in renderer
     assert "GitHub sincronizado" in renderer
     assert 'label="Detalhes"' in view
     assert 'label="Arquivos"' in view
@@ -145,13 +146,38 @@ def test_success_path_queues_the_raw_updater_log_for_technical_channel() -> None
     assert 'FINAL_RAW_LOG="$RUN_LOG_FILE"' in block
     assert '"$FINAL_RAW_LOG" "tts-bot-updater.log"' in block
 
-def test_progress_card_exposes_stage_elapsed_without_duplicating_shell_heartbeat_text() -> None:
+def test_progress_card_times_only_completed_microsteps_in_parentheses() -> None:
     source = BOT.read_text(encoding="utf-8")
     renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
     updater = UPDATER.read_text(encoding="utf-8")
-    assert 'stage_elapsed = str(presentation.get("stage_elapsed") or "").strip()' in renderer
-    assert '"stage_elapsed": os.environ.get("UI_STAGE_ELAPSED") or ""' in updater
-    assert 'zip_progress_publish "$stage_label" "$detail · $(format_update_duration_ms "$elapsed_ms")"' not in updater
+    assert 'stage_elapsed = str(presentation.get("stage_elapsed") or "").strip()' not in renderer
+    assert 'UI_STAGE_ELAPSED' not in updater
+    assert 'completed_stage = str(presentation.get("completed_stage") or "").strip()' in renderer
+    assert 'completed_duration = str(presentation.get("completed_duration") or "").strip()' in renderer
+    assert 'completed_suffix = f" ({completed_duration})" if completed_duration else ""' in renderer
+    assert '"completed_stage": os.environ.get("UI_COMPLETED_STAGE") or ""' in updater
+    assert '"completed_duration": os.environ.get("UI_COMPLETED_DURATION") or ""' in updater
+    assert 'line="-# ✅ $done_label ($elapsed_text)"' in updater
+    assert 'f"-# {UPDATE_EMOJI_CHECK} {completed} ({completed_duration})"' in source
+
+
+def test_progress_completed_microstep_can_stay_visible_when_macro_advances() -> None:
+    source = BOT.read_text(encoding="utf-8")
+    renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
+    progress = renderer[renderer.index('if kind == "progress":'):renderer.index('if kind == "recovery":')]
+    assert 'if completed_stage and completed_macro == index:' in progress
+    assert 'if index == current:' in progress
+
+
+def test_final_card_shows_only_one_unlabelled_total_timer() -> None:
+    source = BOT.read_text(encoding="utf-8")
+    renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
+    final = renderer[renderer.index('if kind == "final":'):]
+    assert 'final_duration = total_duration or duration or recovery_duration' in final
+    assert 'lines.append(f"⏱ **{final_duration}**")' in final
+    assert 'desde o envio' not in final
+    assert 'execução **' not in final
+    assert 'recuperação **' not in final
 
 
 def test_progress_edits_are_coalesced_but_macro_and_recovery_transitions_are_immediate() -> None:

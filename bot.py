@@ -998,7 +998,12 @@ class BotLocal(commands.Bot):
             elapsed = str(presentation.get("elapsed") or "").strip()
             stage = str(presentation.get("stage") or "Processando atualização").strip()
             detail = str(presentation.get("detail") or "").strip()
-            stage_elapsed = str(presentation.get("stage_elapsed") or "").strip()
+            completed_stage = str(presentation.get("completed_stage") or "").strip()
+            completed_duration = str(presentation.get("completed_duration") or "").strip()
+            try:
+                completed_macro = int(presentation.get("completed_macro_index") if presentation.get("completed_macro_index") is not None else -1)
+            except (TypeError, ValueError):
+                completed_macro = -1
             try:
                 current = max(0, min(6, int(presentation.get("macro_index") or 0)))
             except (TypeError, ValueError):
@@ -1017,11 +1022,13 @@ class BotLocal(commands.Bot):
                     lines.append(f"{UPDATE_EMOJI_CHECK} {label}")
                 else:
                     lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}**")
+                if completed_stage and completed_macro == index:
+                    completed_suffix = f" ({completed_duration})" if completed_duration else ""
+                    lines.append(f"-# {UPDATE_EMOJI_CHECK} {completed_stage}{completed_suffix}"[:240])
+                if index == current:
                     micro_parts = [stage]
                     if detail and detail.casefold() not in stage.casefold():
                         micro_parts.append(detail)
-                    if stage_elapsed and stage_elapsed not in {"0s", "0 ms", "0ms"}:
-                        micro_parts.append(stage_elapsed)
                     micro = " · ".join(part for part in micro_parts if part)
                     if micro:
                         lines.append(f"-# {micro[:240]}")
@@ -1113,15 +1120,9 @@ class BotLocal(commands.Bot):
             lines.append(file_line)
             if impact:
                 lines.append(impact)
-            timing_bits: list[str] = []
-            if total_duration:
-                timing_bits.append(f"**{total_duration}** desde o envio")
-            if duration:
-                timing_bits.append(f"execução **{duration}**")
-            if recovery_duration:
-                timing_bits.append(f"recuperação **{recovery_duration}**")
-            if timing_bits:
-                lines.append("⏱ " + " · ".join(timing_bits))
+            final_duration = total_duration or duration or recovery_duration
+            if final_duration:
+                lines.append(f"⏱ **{final_duration}**")
             health_bits: list[str] = []
             if bot_health:
                 health_label = "Bot saudável" if bot_health == "OK" or bot_health.startswith("estável") else f"Bot: {bot_health}"
@@ -3954,6 +3955,7 @@ class BotLocal(commands.Bot):
                     }
                     progress_queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
                     preparation_history: list[str] = []
+                    preparation_last_completed = {"stage": "", "duration": ""}
 
                     def format_elapsed_ms(value: object) -> str:
                         try:
@@ -4000,9 +4002,12 @@ class BotLocal(commands.Bot):
                                 completed = str(item.get("completed") or "").strip()
                                 current = str(item.get("current") or current).strip() or current
                                 if completed:
+                                    completed_duration = format_elapsed_ms(item.get("elapsed_ms"))
                                     preparation_history.append(
-                                        f"-# {UPDATE_EMOJI_CHECK} {completed} · {format_elapsed_ms(item.get('elapsed_ms'))}"
+                                        f"-# {UPDATE_EMOJI_CHECK} {completed} ({completed_duration})"
                                     )
+                                    preparation_last_completed["stage"] = completed
+                                    preparation_last_completed["duration"] = completed_duration
                                     detail = f"{completed} concluído"
                             view = self._make_zip_update_view(
                                 "Preparando atualização",
@@ -4014,6 +4019,9 @@ class BotLocal(commands.Bot):
                                     "detail": detail,
                                     "identifier": prefix,
                                     "elapsed": progress_elapsed_text(),
+                                    "completed_stage": preparation_last_completed["stage"],
+                                    "completed_duration": preparation_last_completed["duration"],
+                                    "completed_macro_index": 0,
                                     "macro_index": 0,
                                     "action": "update",
                                 },
@@ -4093,6 +4101,9 @@ class BotLocal(commands.Bot):
                                 "detail": file_summary,
                                 "identifier": display_id,
                                 "elapsed": progress_elapsed_text(),
+                                "completed_stage": preparation_last_completed["stage"],
+                                "completed_duration": preparation_last_completed["duration"],
+                                "completed_macro_index": 0,
                                 "macro_index": 0,
                                 "action": "update",
                             },
