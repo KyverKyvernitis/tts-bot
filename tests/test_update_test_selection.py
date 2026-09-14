@@ -7,8 +7,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SELECTOR = ROOT / "utility" / "update_test_selector.py"
-UPDATER = ROOT / "scripts" / "tts-bot-update.sh"
+SELECTOR = ROOT / "updater" / "utilitarios" / "selecao_testes.py"
+UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
 
 
 def _select(project: Path, prefix: str, changed: str) -> dict[str, object]:

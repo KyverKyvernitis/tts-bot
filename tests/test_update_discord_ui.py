@@ -6,7 +6,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT = ROOT / "bot.py"
-UPDATER = ROOT / "scripts" / "tts-bot-update.sh"
+UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
 WEBSERVER = ROOT / "webserver.py"
 ALERT = ROOT / "alert.sh"
 

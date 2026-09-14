@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "scripts" / "migrate-dashboard-layout.sh"
-UPDATER = ROOT / "scripts" / "tts-bot-update.sh"
+UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
 FRONT_BRIDGE = ROOT / "activity" / "sinuca" / "scripts" / "dashboard-bridge-build.mjs"
 BACK_BRIDGE = ROOT / "activity" / "sinuca-server" / "scripts" / "dashboard-bridge-build.mjs"
 

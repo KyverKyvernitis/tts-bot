@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from utility.update_security import (
+from updater.utilitarios.seguranca import (
     UpdateSecurityError,
     ZipLimits,
     build_file_integrity,

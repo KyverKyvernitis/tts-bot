@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-UPDATER = ROOT / "scripts" / "tts-bot-update.sh"
+UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
 INSTALLER = ROOT / "scripts" / "install-vps-systemd-units.sh"
 JOURNAL_POLICY = ROOT / "deploy" / "journald" / "60-tts-bot-storage.conf"
 TMPFILES_POLICY = ROOT / "deploy" / "tmpfiles.d" / "tts-bot-storage.conf"

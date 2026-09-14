@@ -5,9 +5,9 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-UPDATER = ROOT / "scripts" / "tts-bot-update.sh"
+UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
 START = ROOT / "start.sh"
-SMOKE = ROOT / "utility" / "update_runtime_smoke.py"
+SMOKE = ROOT / "updater" / "utilitarios" / "smoke_runtime.py"
 
 
 def _python_runtime_functions(tmp_path: Path) -> Path:

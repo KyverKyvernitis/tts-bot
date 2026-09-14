@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-UPDATER = ROOT / "scripts" / "tts-bot-update.sh"
+UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
 
 
 def test_ready_artifact_is_reused_without_repeating_validation_commands(tmp_path: Path) -> None:

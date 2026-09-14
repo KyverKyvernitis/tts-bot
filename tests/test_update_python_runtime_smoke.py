@@ -9,8 +9,8 @@ import textwrap
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SMOKE = ROOT / "utility" / "update_runtime_smoke.py"
-UPDATER = ROOT / "scripts" / "tts-bot-update.sh"
+SMOKE = ROOT / "updater" / "utilitarios" / "smoke_runtime.py"
+UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
 
 
 def _write_fake_project(tmp_path: Path, *, cog_source: str, setup_source: str | None = None) -> Path:
@@ -120,7 +120,7 @@ def test_runtime_smoke_accepts_candidate_interpreter_without_discord_connection(
     assert 'py="$(current_bot_python_bin)"' in block
     assert 'PYTHONPATH=%q' in block
     assert 'PYTHONDONTWRITEBYTECODE=1' in block
-    assert 'utility/update_runtime_smoke.py' in block
+    assert 'updater/utilitarios/smoke_runtime.py' in block
     assert 'timeout %qs' in block
     assert 'BOT_RUNTIME_SMOKE_FAILED' in block
     assert 'BOT_RUNTIME_SMOKE_TIMEOUT' in block

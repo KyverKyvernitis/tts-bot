@@ -6,8 +6,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-UPDATER = ROOT / "scripts" / "tts-bot-update.sh"
-SNAPSHOT = ROOT / "utility" / "update_git_snapshot.py"
+UPDATER = ROOT / "updater" / "core" / "atualizar.sh"
+SNAPSHOT = ROOT / "updater" / "utilitarios" / "snapshot_git.py"
 
 
 def _run_bash(script: str) -> subprocess.CompletedProcess[str]:
