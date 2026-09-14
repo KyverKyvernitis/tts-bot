@@ -275,6 +275,10 @@ ZIP_PROGRESS_MAX_VISIBLE_STEPS=10
 ZIP_PROGRESS_STAGE_LABEL=""
 ZIP_PROGRESS_STAGE_STARTED_MS=0
 ZIP_PROGRESS_STARTED_MS=0
+ZIP_PROGRESS_RECEIVED_AT_MS=0
+ZIP_PROGRESS_UPDATER_DELAY_MS=0
+UPDATER_PROCESS_STARTED_MS=0
+LOCAL_CANDIDATE_UPDATER_STARTED_MS=0
 ZIP_PROGRESS_DONE_LABELS=""
 ZIP_PROGRESS_HANDOFF_LOADED=0
 ZIP_RECOVERY_STARTED_MS=0
@@ -918,6 +922,8 @@ import time
 print(time.time_ns() // 1_000_000)
 PYMS
 }
+UPDATER_PROCESS_STARTED_MS="$(update_now_ms)"
+
 
 format_update_duration_ms() {
   local total_ms="${1:-0}"
@@ -1832,7 +1838,7 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
 }
 
 load_pending_local_candidate() {
-  local manifest active_file pending_file legacy_active legacy_pending active_payload resuming_active=0
+  local manifest active_file pending_file legacy_active legacy_pending active_payload resuming_active=0 started_at_iso
   LOCAL_CANDIDATE_PENDING_FILE=""
   LOCAL_CANDIDATE_DIR=""
 
@@ -1964,6 +1970,20 @@ PYATTEMPT
 )"
     LOCAL_CANDIDATE_RESUME_COUNT="$(json_field_from_file "$LOCAL_CANDIDATE_PENDING_FILE" resume_count 2>/dev/null || true)"
     [[ "$LOCAL_CANDIDATE_RESUME_COUNT" =~ ^[0-9]+$ ]] || LOCAL_CANDIDATE_RESUME_COUNT=0
+    started_at_iso="$(json_field_from_file "$LOCAL_CANDIDATE_PENDING_FILE" started_at 2>/dev/null || true)"
+    LOCAL_CANDIDATE_UPDATER_STARTED_MS="$(python3 - "$started_at_iso" <<'PYSTARTMS' 2>/dev/null || echo 0
+import datetime, sys
+raw = (sys.argv[1] or '').strip()
+try:
+    dt = datetime.datetime.fromisoformat(raw.replace('Z', '+00:00'))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    print(max(0, int(dt.timestamp() * 1000)))
+except Exception:
+    print(0)
+PYSTARTMS
+)"
+    [[ "$LOCAL_CANDIDATE_UPDATER_STARTED_MS" =~ ^[0-9]+$ ]] || LOCAL_CANDIDATE_UPDATER_STARTED_MS=0
   fi
 
   CHANGED_FILES_RAW="$(python3 - "$manifest" <<'PYFILES'
@@ -2592,6 +2612,48 @@ os.replace(tmp, path)
 PYSTATE
 }
 
+write_local_candidate_recovery_state() {
+  (( LOCAL_CANDIDATE_MODE == 1 )) || return 0
+  [[ -n "${LOCAL_CANDIDATE_DIR:-}" && -d "$LOCAL_CANDIDATE_DIR" ]] || return 0
+  local rollback_ok="${1:-false}"
+  local restored_commit="${2:-}"
+  local target_commit="${3:-}"
+  local failure_code="${4:-UPDATE_STAGE_FAILED}"
+  local failed_stage="${5:-}"
+  local recovery_duration="${6:-}"
+  local bot_health="${7:-}"
+  ROLLBACK_OK_VALUE="$rollback_ok" RESTORED_COMMIT_VALUE="$restored_commit" \
+  TARGET_COMMIT_VALUE="$target_commit" FAILURE_CODE_VALUE="$failure_code" \
+  FAILED_STAGE_VALUE="$failed_stage" RECOVERY_DURATION_VALUE="$recovery_duration" \
+  BOT_HEALTH_VALUE="$bot_health" python3 - "$LOCAL_CANDIDATE_DIR" <<'PYRECOVERYSTATE' 2>/dev/null || true
+import datetime, json, os, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+path = root / "state.json"
+data = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+rollback_ok = (os.environ.get("ROLLBACK_OK_VALUE") or "false").lower() == "true"
+data.update({
+    "state": "failed",
+    "commit": os.environ.get("RESTORED_COMMIT_VALUE") or "",
+    "target_commit": os.environ.get("TARGET_COMMIT_VALUE") or "",
+    "rollback_ok": rollback_ok,
+    "recovery_state": "restored" if rollback_ok else "incomplete",
+    "failure_code": os.environ.get("FAILURE_CODE_VALUE") or "UPDATE_STAGE_FAILED",
+    "failed_stage": os.environ.get("FAILED_STAGE_VALUE") or "",
+    "recovery_duration": os.environ.get("RECOVERY_DURATION_VALUE") or "",
+    "bot_health": os.environ.get("BOT_HEALTH_VALUE") or "",
+    "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+})
+tmp = path.with_name('.' + path.name + f'.{os.getpid()}.tmp')
+tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+os.replace(tmp, path)
+PYRECOVERYSTATE
+}
+
 send_update_status_payload() {
   # `${1:-{}}` acrescenta uma chave `}` ao argumento em Bash, produzindo JSON
   # inválido e fazendo toda edição via /internal/update/zip-status ser descartada.
@@ -2866,7 +2928,7 @@ notify_zip_status_message() {
       UI_DISPLAY_ID="$fallback_display_id" UI_BRANCH="${BRANCH:-main}" \
       UI_FROM="$fallback_from" UI_TO="$fallback_to" UI_FILE_COUNT="$fallback_count" \
       UI_DIFF="${DIFF_TOTAL_SUMMARY:-}" UI_IMPACT="${APPLY_MODE:-}" UI_DURATION="$fallback_duration" \
-      UI_HEALTH="${BOT_HEALTHCHECK_STATUS:-}" UI_GITHUB="$fallback_github" \
+      UI_TOTAL_DURATION="${TOTAL_FROM_RECEIVE_DURATION:-}" UI_HEALTH="${BOT_HEALTHCHECK_STATUS:-}" UI_GITHUB="$fallback_github" \
       UI_CHECKS="${CHECKS_TEXT:-}" UI_TIMINGS="${TIMINGS_TEXT:-}" UI_CACHE="${CACHE_TEXT:-}" \
       UI_TESTS="${TEST_PLAN_TEXT:-}" UI_FILES="${CHANGED_FILES:-}" UI_PROCESSES="${CHANGED_PROCESSES:-}" \
       python3 - <<'PYFALLBACKUI'
@@ -2886,6 +2948,7 @@ print(json.dumps({
     "diff_summary": os.environ.get("UI_DIFF") or "",
     "impact": os.environ.get("UI_IMPACT") or "",
     "duration": os.environ.get("UI_DURATION") or "",
+    "total_duration": os.environ.get("UI_TOTAL_DURATION") or "",
     "bot_health": os.environ.get("UI_HEALTH") or "",
     "github_synced": (os.environ.get("UI_GITHUB") or "false").lower() == "true",
     "checks_text": os.environ.get("UI_CHECKS") or "",
@@ -3115,7 +3178,7 @@ zip_progress_hydrate_from_candidate() {
   (( ZIP_PROGRESS_HANDOFF_LOADED == 0 )) || return 0
   [[ -f "${LOCAL_CANDIDATE_DIR:-}/manifest.json" ]] || return 0
 
-  local record_kind elapsed_ms encoded_label label total_ms=0 summed_ms=0 now_ms line index
+  local record_kind elapsed_ms encoded_label label total_ms=0 summed_ms=0 started_at_ms=0 now_ms line index
   local -a handoff_labels=()
   local -a handoff_elapsed=()
 
@@ -3123,6 +3186,9 @@ zip_progress_hydrate_from_candidate() {
     case "$record_kind" in
       META)
         [[ "$elapsed_ms" =~ ^[0-9]+$ ]] && total_ms="$elapsed_ms"
+        ;;
+      START)
+        [[ "$elapsed_ms" =~ ^[0-9]+$ ]] && started_at_ms="$elapsed_ms"
         ;;
       STEP)
         [[ "$elapsed_ms" =~ ^[0-9]+$ ]] || elapsed_ms=0
@@ -3158,6 +3224,11 @@ try:
 except (TypeError, ValueError):
     total_ms = 0
 print(f"META\t{total_ms}\t")
+try:
+    started_at_ms = max(0, int(handoff.get("started_at_epoch_ms") or 0))
+except (TypeError, ValueError):
+    started_at_ms = 0
+print(f"START\t{started_at_ms}\t")
 
 seen: set[str] = set()
 steps = handoff.get("completed_steps")
@@ -3201,8 +3272,18 @@ PYHANDOFF
 
   now_ms="$(update_now_ms)"
   if [[ "$now_ms" =~ ^[0-9]+$ ]] && (( ZIP_PROGRESS_STARTED_MS <= 0 )); then
-    ZIP_PROGRESS_STARTED_MS=$((now_ms - total_ms))
-    (( ZIP_PROGRESS_STARTED_MS < 0 )) && ZIP_PROGRESS_STARTED_MS=0
+    if (( started_at_ms > 0 && started_at_ms <= now_ms )); then
+      ZIP_PROGRESS_STARTED_MS="$started_at_ms"
+      ZIP_PROGRESS_RECEIVED_AT_MS="$started_at_ms"
+      local updater_started_ms="$LOCAL_CANDIDATE_UPDATER_STARTED_MS"
+      [[ "$updater_started_ms" =~ ^[0-9]+$ ]] || updater_started_ms="$UPDATER_PROCESS_STARTED_MS"
+      if [[ "$updater_started_ms" =~ ^[0-9]+$ ]] && (( updater_started_ms >= started_at_ms )); then
+        ZIP_PROGRESS_UPDATER_DELAY_MS=$((updater_started_ms - started_at_ms))
+      fi
+    else
+      ZIP_PROGRESS_STARTED_MS=$((now_ms - total_ms))
+      (( ZIP_PROGRESS_STARTED_MS < 0 )) && ZIP_PROGRESS_STARTED_MS=0
+    fi
   fi
   ZIP_PROGRESS_STAGE_LABEL=""
   ZIP_PROGRESS_STAGE_STARTED_MS=0
@@ -9143,6 +9224,13 @@ Hora: $(date '+%d/%m/%Y %H:%M:%S')"
     final_headline="Recuperação necessária"
     final_summary="O rollback não conseguiu restaurar completamente o estado anterior."
   fi
+  if (( LOCAL_CANDIDATE_MODE == 1 )); then
+    write_local_candidate_recovery_state \
+      "$rollback_bool" "$head_after_reset" "$REMOTE_COMMIT" \
+      "${original_error_code:-UPDATE_STAGE_FAILED}" "${FAILED_STAGE:-$STAGE}" \
+      "$recovery_duration" "$rollback_bot_status"
+  fi
+
   ZIP_STATUS_UI_JSON="$(
     UI_STATUS=error UI_HEADLINE="$final_headline" UI_SUMMARY="$final_summary" \
     UI_DISPLAY_ID="${LOCAL_CANDIDATE_DISPLAY_ID:-${UPDATE_DISPLAY_ID:-}}" UI_BRANCH="${BRANCH:-main}" \
@@ -9184,6 +9272,12 @@ PYROLLBACKFINAL
   notify_zip_status_message "error" "$title" "$summary" || true
   ZIP_STATUS_UI_JSON=""
   send_error "$title" "$body"
+  if (( LOCAL_CANDIDATE_MODE == 1 )); then
+    # rollback_after_failure termina o trap com exit; sem arquivar aqui o item
+    # ficaria em queue/active e poderia ser retomado como se ainda estivesse em
+    # aplicação. O histórico de recovery foi salvo acima antes de mover o diretório.
+    archive_local_candidate "failed" || true
+  fi
   exit "$exit_code"
 }
 
@@ -9521,6 +9615,19 @@ fi
 prune_runtime_releases || true
 
 DURATION="$(human_duration "$SECONDS")"
+TOTAL_DURATION="$DURATION"
+TOTAL_FROM_RECEIVE_DURATION=""
+RECEIVE_TO_UPDATER_DURATION=""
+if (( ZIP_PROGRESS_RECEIVED_AT_MS > 0 )); then
+  FINAL_NOW_MS="$(update_now_ms)"
+  if [[ "$FINAL_NOW_MS" =~ ^[0-9]+$ ]] && (( FINAL_NOW_MS >= ZIP_PROGRESS_RECEIVED_AT_MS )); then
+    TOTAL_DURATION="$(format_update_duration_ms "$((FINAL_NOW_MS - ZIP_PROGRESS_RECEIVED_AT_MS))")"
+    TOTAL_FROM_RECEIVE_DURATION="$TOTAL_DURATION"
+  fi
+  if (( ZIP_PROGRESS_UPDATER_DELAY_MS >= 0 )); then
+    RECEIVE_TO_UPDATER_DURATION="$(format_update_duration_ms "$ZIP_PROGRESS_UPDATER_DELAY_MS")"
+  fi
+fi
 ROLLBACK_STATUS="não foi necessário"
 CHANGED_FILES="$(format_changed_files)"
 DIFF_TOTAL_SUMMARY="$(format_diff_total_summary)"
@@ -9616,12 +9723,20 @@ CHECKS_TEXT="✓ Bot — ${BOT_HEALTHCHECK_STATUS}
 ✓ Cogs — ${PREFLIGHT_COG_IMPORT_STATUS}
 ${RUNTIME_CHECK_MARK} Runtime candidato — ${PREFLIGHT_RUNTIME_STATUS}
 ✓ Comandos — ${APP_COMMAND_SYNC_SUMMARY}"
-TIMINGS_TEXT="${UPDATER_TIMINGS:-sem etapas}, total=${DURATION}"
+if [[ -n "$RECEIVE_TO_UPDATER_DURATION" ]]; then
+  TIMINGS_TEXT="receive_to_updater=${RECEIVE_TO_UPDATER_DURATION}, ${UPDATER_TIMINGS:-sem etapas}, execution=${DURATION}, total=${TOTAL_DURATION}"
+else
+  TIMINGS_TEXT="${UPDATER_TIMINGS:-sem etapas}, execution=${DURATION}, total=${TOTAL_DURATION}"
+fi
 CACHE_TEXT="Node ${NODE_DEP_CACHE_HITS:-0} hit/${NODE_DEP_CACHE_MISSES:-0} miss · TypeScript ${TYPESCRIPT_CACHE_HITS:-0} hit/${TYPESCRIPT_CACHE_MISSES:-0} miss · Python ${PYTHON_INSTALLER_STATUS:-não usado}"
 if (( ${READY_FAST_PATH_USED:-0} == 1 )); then
   CACHE_TEXT+=" · READY hit"
 fi
 TEST_PLAN_TEXT="frontend: ${FRONT_TEST_PLAN_STATUS:-não executado} · backend: ${BACK_TEST_PLAN_STATUS:-não executado}"
+DURATION_DISPLAY="$DURATION"
+if [[ -n "$TOTAL_FROM_RECEIVE_DURATION" ]]; then
+  DURATION_DISPLAY="$TOTAL_FROM_RECEIVE_DURATION desde o envio · $DURATION de execução"
+fi
 BODY="Resumo: $ALERT_SUMMARY
 Identificador: $UPDATE_DISPLAY_ID
 Branch: $BRANCH
@@ -9629,7 +9744,7 @@ Commit: ${SHORT_FROM} → ${SHORT_TO}
 Update: $(format_update_file_count "$CHANGED_FILES_COUNT") · $DIFF_TOTAL_SUMMARY
 Aplicação: $APPLY_MODE
 Processos alterados: $CHANGED_PROCESSES
-Duração: $DURATION
+Duração: $DURATION_DISPLAY
 Verificações:
 $CHECKS_TEXT
 Tempos: $TIMINGS_TEXT
@@ -9650,7 +9765,7 @@ if [[ -n "${APP_COMMAND_SYNC_WEBHOOK_BLOCK//[[:space:]]/}" ]]; then
   BODY+=$'\n'"$APP_COMMAND_SYNC_WEBHOOK_BLOCK"
 fi
 BODY+=$'\n'"Hora: $(date '+%d/%m/%Y %H:%M:%S')"
-logger -t "$LOG_TAG" "timings: ${UPDATER_TIMINGS:-sem etapas}; total=$DURATION"
+logger -t "$LOG_TAG" "timings: ${UPDATER_TIMINGS:-sem etapas}; execution=$DURATION; total=$TOTAL_DURATION; receive_to_updater=${RECEIVE_TO_UPDATER_DURATION:-n/a}"
 if (( LOCAL_CANDIDATE_MODE == 1 || ROLLBACK_CONTROL_MODE == 1 || REMOTE_CANDIDATE_MODE == 1 )); then
   zip_progress_publish "Finalizando..."
 fi
@@ -9664,7 +9779,7 @@ build_final_status_description \
   "$CHANGED_FILES_COUNT" \
   "$DIFF_TOTAL_SUMMARY" \
   "$APPLY_MODE" \
-  "$DURATION" \
+  "$TOTAL_DURATION" \
   "$BOT_HEALTHCHECK_STATUS"
 if (( UPDATE_HAS_WARNINGS == 1 || OVERALL_FATAL == 1 )); then
   ZIP_STATUS_DESCRIPTION+=$'\n\nDetalhes enviados no canal de logs.'
@@ -9705,6 +9820,7 @@ ZIP_STATUS_UI_JSON="$(
   UI_DIFF="$DIFF_TOTAL_SUMMARY" \
   UI_IMPACT="$APPLY_MODE" \
   UI_DURATION="$DURATION" \
+  UI_TOTAL_DURATION="$TOTAL_FROM_RECEIVE_DURATION" \
   UI_HEALTH="$BOT_HEALTHCHECK_STATUS" \
   UI_CHECKS="$CHECKS_TEXT" \
   UI_TIMINGS="$TIMINGS_TEXT" \
@@ -9726,6 +9842,7 @@ print(json.dumps({
     "diff_summary": os.environ.get("UI_DIFF") or "",
     "impact": os.environ.get("UI_IMPACT") or "",
     "duration": os.environ.get("UI_DURATION") or "",
+    "total_duration": os.environ.get("UI_TOTAL_DURATION") or "",
     "bot_health": os.environ.get("UI_HEALTH") or "",
     "github_synced": True,
     "checks_text": os.environ.get("UI_CHECKS") or "",

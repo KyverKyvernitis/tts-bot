@@ -181,6 +181,7 @@ UPDATE_EMOJI_CLOUD = "<:Cloud:1548838660915462254>"
 UPDATE_EMOJI_FILES = "<:Files:1548838468665475193>"
 UPDATE_EMOJI_GITHUB = "<:Github:1548838545500807239>"
 UPDATE_EMOJI_PROGRESS = "<a:loading:1510065277868445796>"
+UPDATE_EMOJI_PROGRESS_TITLE = "<a:areia:1496606578395189473>"
 
 print("BOT.PY INICIOU")
 
@@ -1003,15 +1004,18 @@ class BotLocal(commands.Bot):
             except (TypeError, ValueError):
                 current = 0
             macros = ("Pacote", "Preparação", "Validação", "Release", "Promoção", "Verificação", "GitHub")
-            lines = [f"# {UPDATE_EMOJI_PROGRESS} {headline}"]
+            lines = [f"# {UPDATE_EMOJI_PROGRESS_TITLE} {headline}"]
             meta = " · ".join(piece for piece in (f"`{identifier}`" if identifier else "", elapsed) if piece)
             if meta:
                 lines.append(f"-# {meta}")
             lines.append("")
-            for index, label in enumerate(macros):
+            # Etapas futuras não são pré-renderizadas. O card cresce conforme o
+            # updater realmente alcança cada macroetapa, preservando a sensação
+            # de progresso da UI antiga sem criar mensagens adicionais.
+            for index, label in enumerate(macros[: current + 1]):
                 if index < current:
                     lines.append(f"{UPDATE_EMOJI_CHECK} {label}")
-                elif index == current:
+                else:
                     lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}**")
                     micro_parts = [stage]
                     if detail and detail.casefold() not in stage.casefold():
@@ -1021,8 +1025,6 @@ class BotLocal(commands.Bot):
                     micro = " · ".join(part for part in micro_parts if part)
                     if micro:
                         lines.append(f"-# {micro[:240]}")
-                else:
-                    lines.append(f"○ {label}")
             return "\n".join(lines)
 
         if kind == "recovery":
@@ -1067,6 +1069,7 @@ class BotLocal(commands.Bot):
             headline = str(presentation.get("headline") or headline).strip() or headline
             summary = str(presentation.get("summary") or description or "Atualização aplicada e validada.").strip()
             identifier = str(presentation.get("display_id") or "").strip()
+            branch = str(presentation.get("branch") or "main").strip() or "main"
             old_commit = str(presentation.get("from") or "").strip()
             new_commit = str(presentation.get("to") or "").strip()
             files = str(presentation.get("file_count_text") or "arquivos alterados").strip()
@@ -1078,6 +1081,7 @@ class BotLocal(commands.Bot):
                 "recarga controlada de cog": "Cog recarregada",
             }.get(impact.casefold(), impact)
             duration = str(presentation.get("duration") or "").strip()
+            total_duration = str(presentation.get("total_duration") or "").strip()
             bot_health = str(presentation.get("bot_health") or "").strip()
             github_synced = bool(presentation.get("github_synced", True))
             failure_code = str(presentation.get("failure_code") or "").strip()
@@ -1088,11 +1092,13 @@ class BotLocal(commands.Bot):
             elif status in {"error", "failed", "failure"} and rollback_ok is False:
                 headline = str(presentation.get("headline") or "Recuperação necessária").strip() or "Recuperação necessária"
             lines = [f"# {icon} {headline}"]
-            if summary:
+            # No sucesso, o título já comunica "aplicada e validada". Preserve
+            # apenas resumos que realmente acrescentem contexto (avisos/erros).
+            if summary and not (status not in {"error", "failed", "failure", "warn", "warning"} and summary.casefold() == "atualização aplicada e validada."):
                 lines.append(summary)
             lines.append("")
             if identifier:
-                lines.append(f"`{identifier}`")
+                lines.append(f"`{identifier}` · `{branch}`")
             if old_commit or new_commit:
                 lines.append(f"`{old_commit or '?'}` → `{new_commit or '?'}`")
             if failure_code:
@@ -1105,14 +1111,17 @@ class BotLocal(commands.Bot):
             if diff_summary:
                 file_line += f" · `{diff_summary}`"
             lines.append(file_line)
-            duration_bits = [impact] if impact else []
+            if impact:
+                lines.append(impact)
+            timing_bits: list[str] = []
+            if total_duration:
+                timing_bits.append(f"**{total_duration}** desde o envio")
             if duration:
-                duration_bits.append(f"**{duration}**")
+                timing_bits.append(f"execução **{duration}**")
             if recovery_duration:
-                duration_bits.append(f"recuperação **{recovery_duration}**")
-            impact_line = " · ".join(piece for piece in duration_bits if piece)
-            if impact_line:
-                lines.append(impact_line)
+                timing_bits.append(f"recuperação **{recovery_duration}**")
+            if timing_bits:
+                lines.append("⏱ " + " · ".join(timing_bits))
             health_bits: list[str] = []
             if bot_health:
                 health_label = "Bot saudável" if bot_health == "OK" or bot_health.startswith("estável") else f"Bot: {bot_health}"
@@ -1506,6 +1515,9 @@ class BotLocal(commands.Bot):
                     continue
 
                 title = str(data.get("title") or "Log do updater").strip()[:180]
+                # O tipo já fornece o ícone do cabeçalho. Remova emoji/pictograma
+                # legado do título para não produzir "✅ ✅ Atualização...".
+                title = re.sub(r"^[^\wÀ-ÿ<]+\s*", "", title, count=1).strip() or "Log do updater"
                 body = str(data.get("body") or "").replace("\r\n", "\n").replace("\r", "\n").strip()
                 kind = str(data.get("type") or "info").strip().lower()
                 icon = {
@@ -1514,7 +1526,7 @@ class BotLocal(commands.Bot):
                     "warn": "⚠️",
                     "warning": "⚠️",
                 }.get(kind, "<:Files:1548838468665475193>")
-                header = f"{icon} **{title}**\n-# `{event_id}` · canal técnico · log bruto"
+                header = f"{icon} **{title}**\n-# `{event_id}` · resumo técnico · log anexado"
                 files: list[discord.File] = []
                 if attachment is not None:
                     files.append(discord.File(str(attachment), filename=str(data.get("attachment_name") or attachment.name)[:120]))
@@ -1640,6 +1652,10 @@ class BotLocal(commands.Bot):
             "atualizacao rejeitada",
             "falha ao aplicar",
             "falha na atualização",
+            "atualização não aplicada",
+            "atualizacao nao aplicada",
+            "recuperação necessária",
+            "recuperacao necessaria",
             "update aplicado",
             "update revertido",
             "reversão concluída",
@@ -1694,6 +1710,7 @@ class BotLocal(commands.Bot):
             source_author_id = str((manifest.get("discord_status") or {}).get("source_author_id") or "")
             archive_state = str(record.get("archive_state") or "failed")
 
+            presentation: dict[str, object] | None = None
             if archive_state == "done" and applied_commit:
                 commit_line = ""
                 if base_commit:
@@ -1714,6 +1731,20 @@ class BotLocal(commands.Bot):
                     )
                     control = None
                     status = "warn"
+                    presentation = {
+                        "kind": "final",
+                        "status": "warn",
+                        "headline": "Estado da atualização divergente",
+                        "summary": "O registro indica conclusão, mas o commit instalado é diferente.",
+                        "display_id": display_id,
+                        "branch": branch,
+                        "from": base_commit[:7],
+                        "to": applied_commit[:7],
+                        "file_count_text": count_text,
+                        "diff_summary": diff_summary,
+                        "github_synced": False,
+                        "files_text": "\n".join(changed_files),
+                    }
                     log_title = title
                     log_summary = "A reconciliação detectou divergência entre o candidato concluído e o HEAD local."
                 else:
@@ -1737,6 +1768,21 @@ class BotLocal(commands.Bot):
                         "source_author_id": source_author_id,
                     }
                     status = "success"
+                    presentation = {
+                        "kind": "final",
+                        "status": "success",
+                        "headline": "Atualização concluída",
+                        "summary": "A confirmação visual foi recuperada automaticamente após o reinício.",
+                        "display_id": display_id,
+                        "branch": branch,
+                        "from": base_commit[:7],
+                        "to": applied_commit[:7],
+                        "file_count_text": count_text,
+                        "diff_summary": diff_summary,
+                        "bot_health": "estável após reconciliação",
+                        "github_synced": True,
+                        "files_text": "\n".join(changed_files),
+                    }
                     log_title = title
                     log_summary = "Confirmação final recuperada após o bot reiniciar durante a atualização."
             elif archive_state == "done":
@@ -1744,14 +1790,59 @@ class BotLocal(commands.Bot):
                 description = f"A atualização `{display_id}` já correspondia ao estado atual. Nenhum arquivo foi modificado."
                 control = None
                 status = "success"
+                presentation = {
+                    "kind": "final",
+                    "status": "success",
+                    "headline": "Nenhuma alteração necessária",
+                    "summary": "O pacote já correspondia ao estado atual da VPS.",
+                    "display_id": display_id,
+                    "branch": branch,
+                    "from": base_commit[:7],
+                    "to": base_commit[:7],
+                    "file_count_text": "0 arquivos alterados",
+                    "github_synced": True,
+                    "files_text": "",
+                }
                 log_title = title
                 log_summary = "Candidato concluído sem diferenças no repositório."
             else:
                 error_text = str(state_data.get("last_error") or "A atualização não foi concluída.").strip()
-                title = "❌ Falha ao aplicar atualização"
-                description = f"A confirmação de falha foi recuperada automaticamente.\n\nAtualização `{display_id}`\n{error_text[:900]}"
+                failure_code = str(state_data.get("failure_code") or "UPDATE_STAGE_FAILED").strip()
+                rollback_ok_raw = state_data.get("rollback_ok")
+                rollback_ok = rollback_ok_raw if isinstance(rollback_ok_raw, bool) else None
+                target_commit = str(state_data.get("target_commit") or "").strip()
+                recovery_duration = str(state_data.get("recovery_duration") or "").strip()
+                bot_health = str(state_data.get("bot_health") or "").strip()
+                if rollback_ok is True:
+                    title = "❌ Atualização não aplicada"
+                    summary_text = "A versão anterior foi restaurada e validada."
+                elif rollback_ok is False:
+                    title = "❌ Recuperação necessária"
+                    summary_text = "O rollback não conseguiu restaurar completamente o estado anterior."
+                else:
+                    title = "❌ Falha ao aplicar atualização"
+                    summary_text = "A confirmação de falha foi recuperada automaticamente."
+                description = f"{summary_text}\n\nAtualização `{display_id}`\n{error_text[:900]}"
                 control = None
                 status = "error"
+                presentation = {
+                    "kind": "final",
+                    "status": "error",
+                    "headline": title.lstrip("❌ ").strip(),
+                    "summary": summary_text,
+                    "display_id": display_id,
+                    "branch": branch,
+                    "from": base_commit[:7],
+                    "to": (target_commit or applied_commit)[:7],
+                    "file_count_text": "1 arquivo alterado" if len(changed_files) == 1 else f"{len(changed_files)} arquivos alterados",
+                    "diff_summary": diff_summary,
+                    "bot_health": bot_health,
+                    "github_synced": False,
+                    "failure_code": failure_code,
+                    "rollback_ok": rollback_ok,
+                    "recovery_duration": recovery_duration,
+                    "files_text": "\n".join(changed_files),
+                }
                 log_title = title
                 log_summary = error_text[:1200]
 
@@ -1767,6 +1858,7 @@ class BotLocal(commands.Bot):
                         "display_id": display_id,
                         "event_at": datetime.now(timezone.utc).isoformat(),
                         "preserve_existing_control": control is None,
+                        **({"ui": presentation} if isinstance(presentation, dict) else {}),
                         **({"control": control} if control else {}),
                     }
                 )
@@ -2236,6 +2328,7 @@ class BotLocal(commands.Bot):
         preparation_steps: list[dict[str, object]] | None = None,
         preparation_started_monotonic: float | None = None,
         candidate_step_started_monotonic: float | None = None,
+        progress_started_epoch_ms: int | None = None,
     ) -> dict[str, object]:
         """Grava um candidato íntegro para validação e aplicação na VPS."""
         candidate_root = self._update_staging_root / "candidates"
@@ -2334,6 +2427,7 @@ class BotLocal(commands.Bot):
                     "completed_steps": handoff_steps,
                     "completed_count": len(handoff_steps),
                     "preparation_total_ms": preparation_total_ms,
+                    "started_at_epoch_ms": max(0, int(progress_started_epoch_ms or 0)),
                 },
             }
             if isinstance(status_context, dict) and status_context.get("message_id") and status_context.get("channel_id"):
@@ -2747,6 +2841,7 @@ class BotLocal(commands.Bot):
         zip_path: Path,
         status_context: dict[str, object] | None = None,
         progress_callback=None,
+        progress_started_epoch_ms: int | None = None,
     ) -> dict[str, object]:
         self._update_temp_root.mkdir(parents=True, exist_ok=True)
         env = self._git_env()
@@ -2889,6 +2984,7 @@ class BotLocal(commands.Bot):
                 preparation_steps=list(preparation_steps),
                 preparation_started_monotonic=t0,
                 candidate_step_started_monotonic=last,
+                progress_started_epoch_ms=progress_started_epoch_ms,
             )
             measured_elapsed = mark("candidate_write_ms")
             elapsed = max(0, int(candidate.get("candidate_prepare_elapsed_ms") or measured_elapsed))
@@ -3325,6 +3421,7 @@ class BotLocal(commands.Bot):
             timings = str(presentation.get("timings_text") or "").strip()
             if timings:
                 timing_labels = {
+                    "receive_to_updater": "Recebido → updater",
                     "fetch": "Git fetch",
                     "candidate_apply": "Aplicação isolada",
                     "candidate_promote": "Promoção",
@@ -3335,7 +3432,8 @@ class BotLocal(commands.Bot):
                     "worker": "Worker",
                     "commit": "Commit",
                     "push": "GitHub",
-                    "total": "Total",
+                    "execution": "Execução updater",
+                    "total": "Total desde envio",
                 }
                 pretty_rows: list[str] = []
                 for piece in (part.strip() for part in timings.split(",") if part.strip()):
@@ -3768,7 +3866,16 @@ class BotLocal(commands.Bot):
                 )
                 continue
 
-            prep_ui_started = time.monotonic()
+            received_at = getattr(message, "created_at", None)
+            try:
+                progress_started_epoch_ms = int(received_at.timestamp() * 1000)
+            except Exception:
+                progress_started_epoch_ms = int(time.time() * 1000)
+
+            def progress_elapsed_text() -> str:
+                elapsed_ms = max(0, int(time.time() * 1000) - progress_started_epoch_ms)
+                return f"{elapsed_ms // 1000}s"
+
             status_message: discord.Message | None = await self._send_zip_update_message(
                 message,
                 "Atualização recebida",
@@ -3782,7 +3889,7 @@ class BotLocal(commands.Bot):
                     "stage": "Recebendo pacote",
                     "detail": str(getattr(zip_attachment, "filename", "update.zip") or "update.zip"),
                     "identifier": prefix,
-                    "elapsed": "<1s",
+                    "elapsed": progress_elapsed_text(),
                     "macro_index": 0,
                     "action": "update",
                 },
@@ -3813,7 +3920,7 @@ class BotLocal(commands.Bot):
                             "stage": "Validando pacote",
                             "detail": "Integridade e segurança do ZIP",
                             "identifier": prefix,
-                            "elapsed": f"{max(0, int(time.monotonic() - prep_ui_started))}s",
+                            "elapsed": progress_elapsed_text(),
                             "macro_index": 0,
                             "action": "update",
                         },
@@ -3887,7 +3994,7 @@ class BotLocal(commands.Bot):
                                     "stage": current,
                                     "detail": detail,
                                     "identifier": prefix,
-                                    "elapsed": f"{max(0, int(time.monotonic() - prep_ui_started))}s",
+                                    "elapsed": progress_elapsed_text(),
                                     "macro_index": 0,
                                     "action": "update",
                                 },
@@ -3914,6 +4021,7 @@ class BotLocal(commands.Bot):
                             zip_path,
                             status_context,
                             report_preparation_progress,
+                            progress_started_epoch_ms,
                         )
                     finally:
                         progress_queue.put_nowait(None)
@@ -3965,7 +4073,7 @@ class BotLocal(commands.Bot):
                                 "stage": "Iniciando atualização",
                                 "detail": file_summary,
                                 "identifier": display_id,
-                                "elapsed": f"{max(0, int(time.monotonic() - prep_ui_started))}s",
+                                "elapsed": progress_elapsed_text(),
                                 "macro_index": 0,
                                 "action": "update",
                             },

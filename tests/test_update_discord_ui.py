@@ -17,7 +17,7 @@ def _block(source: str, start_marker: str, end_marker: str) -> str:
     return source[start:end]
 
 
-def test_public_update_card_uses_custom_emojis_and_existing_progress_emoji() -> None:
+def test_public_update_card_uses_custom_emojis_and_separate_title_progress_emoji() -> None:
     source = BOT.read_text(encoding="utf-8")
     expected = {
         'UPDATE_EMOJI_CHECK = "<:checkmark:1548838297806311445>"',
@@ -27,19 +27,23 @@ def test_public_update_card_uses_custom_emojis_and_existing_progress_emoji() -> 
         'UPDATE_EMOJI_FILES = "<:Files:1548838468665475193>"',
         'UPDATE_EMOJI_GITHUB = "<:Github:1548838545500807239>"',
         'UPDATE_EMOJI_PROGRESS = "<a:loading:1510065277868445796>"',
+        'UPDATE_EMOJI_PROGRESS_TITLE = "<a:areia:1496606578395189473>"',
     }
     for line in expected:
         assert line in source
 
 
-def test_progress_card_has_stable_macro_stages_and_one_dynamic_microstep() -> None:
+def test_progress_card_reveals_macro_stages_only_when_reached() -> None:
     source = BOT.read_text(encoding="utf-8")
-    block = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
+    renderer = _block(source, "    def _zip_update_render_card_text", "\n    def _make_zip_update_view")
+    block = renderer[renderer.index('if kind == "progress":'):renderer.index('if kind == "recovery":')]
     assert '("Pacote", "Preparação", "Validação", "Release", "Promoção", "Verificação", "GitHub")' in block
+    assert 'lines = [f"# {UPDATE_EMOJI_PROGRESS_TITLE} {headline}"]' in block
+    assert 'enumerate(macros[: current + 1])' in block
     assert 'lines.append(f"{UPDATE_EMOJI_PROGRESS} **{label}**")' in block
     assert 'lines.append(f"-# {micro[:240]}")' in block
     assert 'lines.append(f"{UPDATE_EMOJI_CHECK} {label}")' in block
-    assert 'lines.append(f"○ {label}")' in block
+    assert 'lines.append(f"○ {label}")' not in block
 
 
 def test_final_card_is_compact_and_moves_technical_data_to_buttons() -> None:
@@ -50,6 +54,9 @@ def test_final_card_is_compact_and_moves_technical_data_to_buttons() -> None:
     assert "diff_summary" in renderer
     assert "impact" in renderer
     assert "duration" in renderer
+    assert "total_duration" in renderer
+    assert 'lines.append(f"`{identifier}` · `{branch}`")' in renderer
+    assert "desde o envio" in renderer
     assert "GitHub sincronizado" in renderer
     assert 'label="Detalhes"' in view
     assert 'label="Arquivos"' in view
@@ -184,7 +191,8 @@ def test_final_failure_card_distinguishes_successful_and_failed_rollback() -> No
 def test_raw_log_card_is_explicitly_technical_and_receipt_deduplicated() -> None:
     source = BOT.read_text(encoding="utf-8")
     block = _block(source, "    async def _zip_update_flush_raw_logs_once", "\n    def _zip_update_current_head_sync")
-    assert 'canal técnico · log bruto' in block
+    assert 'resumo técnico · log anexado' in block
+    assert 're.sub(r"^[^\\wÀ-ÿ<]+\\s*", "", title, count=1)' in block
     assert 'if receipt.is_file()' in block
     assert '_zip_update_alert_receipt_save_sync' in block
 
@@ -192,9 +200,12 @@ def test_raw_log_card_is_explicitly_technical_and_receipt_deduplicated() -> None
 def test_details_prettify_internal_timing_names() -> None:
     source = BOT.read_text(encoding="utf-8")
     block = _block(source, "    async def _on_zip_update_info_click", "\n    async def _on_zip_update_control_click")
+    assert '"receive_to_updater": "Recebido → updater"' in block
     assert '"candidate_apply": "Aplicação isolada"' in block
     assert '"candidate_promote": "Promoção"' in block
     assert '"push": "GitHub"' in block
+    assert '"execution": "Execução updater"' in block
+    assert '"total": "Total desde envio"' in block
     assert '"```text\\n"' in block
 
 def test_macro_classifier_matches_the_visible_seven_stage_timeline() -> None:
@@ -223,6 +234,30 @@ def test_macro_classifier_matches_the_visible_seven_stage_timeline() -> None:
         assert completed.stdout == expected, (label, completed.stdout, expected)
 
 
+
+def test_progress_handoff_preserves_discord_receive_time_across_process_boundary() -> None:
+    bot = BOT.read_text(encoding="utf-8")
+    updater = UPDATER.read_text(encoding="utf-8")
+    writer = _block(bot, "    def _write_local_update_candidate_sync", "\n    def _trigger_updater_service_sync")
+    handler = _block(bot, "    async def _handle_zip_update_message", "\n    async def on_guild_join")
+    hydrate = _block(updater, "zip_progress_hydrate_from_candidate() {", "\nzip_progress_trim_history() {")
+    assert 'progress_started_epoch_ms: int | None = None' in writer
+    assert '"started_at_epoch_ms": max(0, int(progress_started_epoch_ms or 0))' in writer
+    assert 'received_at = getattr(message, "created_at", None)' in handler
+    assert 'progress_elapsed_text()' in handler
+    assert 'started_at_ms = max(0, int(handoff.get("started_at_epoch_ms") or 0))' in hydrate
+    assert 'ZIP_PROGRESS_STARTED_MS="$started_at_ms"' in hydrate
+    assert 'ZIP_PROGRESS_UPDATER_DELAY_MS=$((updater_started_ms - started_at_ms))' in hydrate
+
+
+def test_final_timings_distinguish_receive_delay_execution_and_total() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    assert 'receive_to_updater=${RECEIVE_TO_UPDATER_DURATION}' in source
+    assert 'execution=${DURATION}' in source
+    assert 'total=${TOTAL_DURATION}' in source
+    assert 'UI_TOTAL_DURATION="$TOTAL_FROM_RECEIVE_DURATION"' in source
+    assert 'DURATION_DISPLAY="$TOTAL_FROM_RECEIVE_DURATION desde o envio · $DURATION de execução"' in source
+
 def test_recovery_status_is_red_but_not_treated_as_final_delivery() -> None:
     bot = BOT.read_text(encoding="utf-8")
     updater = UPDATER.read_text(encoding="utf-8")
@@ -232,3 +267,31 @@ def test_recovery_status_is_red_but_not_treated_as_final_delivery() -> None:
     assert '^(success|ok|warn|error|done|failed)$' in notify
     assert 'notify_zip_status_message "recovering"' in updater
 
+
+
+def test_reconciler_recognizes_new_failure_cards_as_terminal() -> None:
+    source = BOT.read_text(encoding="utf-8")
+    block = _block(
+        source,
+        "    async def _zip_update_reconcile_archived_messages_once",
+        "\n    async def _zip_update_reconcile_loop",
+    )
+    assert '"atualização não aplicada"' in block
+    assert '"atualizacao nao aplicada"' in block
+    assert '"recuperação necessária"' in block
+    assert '"recuperacao necessaria"' in block
+
+
+def test_reconciler_rebuilds_compact_final_cards_from_archived_state() -> None:
+    source = BOT.read_text(encoding="utf-8")
+    block = _block(
+        source,
+        "    async def _zip_update_reconcile_archived_messages_once",
+        "\n    async def _zip_update_reconcile_loop",
+    )
+    assert 'presentation: dict[str, object] | None = None' in block
+    assert '"kind": "final"' in block
+    assert 'rollback_ok_raw = state_data.get("rollback_ok")' in block
+    assert 'failure_code = str(state_data.get("failure_code")' in block
+    assert '"recovery_duration": recovery_duration' in block
+    assert '**({"ui": presentation} if isinstance(presentation, dict) else {})' in block

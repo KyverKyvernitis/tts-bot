@@ -166,3 +166,39 @@ printf 'CURRENT=%s\\n' "$CURRENT_STAGE_LOG_FILE"
     assert "RC=7" in result.stdout
     assert f"CURRENT={stage_log}" in result.stdout
     assert stage_log.read_text(encoding="utf-8") == "needle-stage-log\n"
+
+
+def test_rollback_persists_recovery_outcome_and_archives_local_candidate() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    start = source.index("rollback_after_failure() {")
+    end = source.index("\nhandle_post_deploy_failure() {", start)
+    block = source[start:end]
+
+    state_at = block.index("write_local_candidate_recovery_state")
+    notify_at = block.index('notify_zip_status_message "error"', state_at)
+    log_at = block.index('send_error "$title" "$body"', notify_at)
+    archive_at = block.index('archive_local_candidate "failed"', log_at)
+    exit_at = block.index('exit "$exit_code"', archive_at)
+
+    assert state_at < notify_at < log_at < archive_at < exit_at
+    assert '"$rollback_bool" "$head_after_reset" "$REMOTE_COMMIT"' in block
+    assert '"$recovery_duration" "$rollback_bot_status"' in block
+
+
+def test_recovery_state_keeps_fields_needed_by_post_restart_reconciliation() -> None:
+    source = UPDATER.read_text(encoding="utf-8")
+    start = source.index("write_local_candidate_recovery_state() {")
+    end = source.index("\nsend_update_status_payload() {", start)
+    block = source[start:end]
+
+    for field in (
+        '"rollback_ok": rollback_ok',
+        '"recovery_state": "restored" if rollback_ok else "incomplete"',
+        '"failure_code":',
+        '"failed_stage":',
+        '"recovery_duration":',
+        '"bot_health":',
+        '"target_commit":',
+    ):
+        assert field in block
+    assert "os.replace(tmp, path)" in block
