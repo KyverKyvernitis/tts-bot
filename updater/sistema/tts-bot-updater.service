@@ -1,0 +1,16 @@
+[Unit]
+Description=Atualiza o tts-bot e reinicia o serviço se houver commit novo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Nice=10
+CPUWeight=20
+IOWeight=20
+RuntimeDirectory=tts-bot-updater
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=no
+Environment=TTS_BOT_UPDATER_RUNTIME_DIR=/run/tts-bot-updater
+ExecStart=/usr/bin/env bash /home/ubuntu/bot/updater/core/atualizar.sh

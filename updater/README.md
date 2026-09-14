@@ -51,3 +51,17 @@ A integração do updater com o bot fica em `updater/discord/`:
 - `integracao.py`: composição dos mixins e inicialização do estado.
 
 `bot.py` mantém apenas a composição com `IntegracaoDiscordUpdaterMixin` e os hooks gerais do bot.
+
+## Infraestrutura da VPS
+
+A infraestrutura própria do updater é canônica em `updater/sistema/` e
+`updater/sudoers/`. Os caminhos antigos em `deploy/systemd/`,
+`deploy/sudoers.d/` e `scripts/install-vps-systemd-units.sh` permanecem nesta
+fase apenas como compatibilidade para pacotes e instalações anteriores.
+
+## Infraestrutura da VPS
+
+A infraestrutura própria do updater é canônica em `updater/sistema/` e
+`updater/sudoers/`. Os caminhos antigos em `deploy/systemd/`,
+`deploy/sudoers.d/` e `scripts/install-vps-systemd-units.sh` permanecem nesta
+fase apenas como compatibilidade para pacotes e instalações anteriores.

@@ -138,12 +138,24 @@ PY_CRON
 
 managed_systemd_template_source() {
   local rel="${1:-}"
+  local canonical_src="$REPO_DIR/updater/sistema/$rel"
   local root_src="$REPO_DIR/deploy/systemd/$rel"
   local vps_src="$REPO_DIR/deploy/systemd/vps/$rel"
+  local canonical_unit=0
 
-  # Quando o mesmo template existe nos dois diretórios, respeite o caminho que
-  # realmente mudou. A preferência fixa por vps/ fazia patches na raiz serem
-  # aceitos e commitados, mas a unit antiga continuava instalada na VPS.
+  case "$rel" in
+    tts-bot-updater.service|tts-bot-updater.timer|tts-bot-updater.path|tts-bot-alert@.service)
+      canonical_unit=1
+      ;;
+  esac
+
+  # Durante a migração, respeite o caminho que realmente mudou. O diretório
+  # updater/sistema é canônico; deploy/systemd continua aceito apenas para
+  # compatibilidade com pacotes antigos.
+  if (( canonical_unit == 1 ))       && printf '%s\n' "$CHANGED_FILES_RAW" | grep -Fxq "updater/sistema/$rel"; then
+    [[ -f "$canonical_src" ]] && printf '%s' "$canonical_src"
+    return 0
+  fi
   if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Fxq "deploy/systemd/vps/$rel"; then
     [[ -f "$vps_src" ]] && printf '%s' "$vps_src"
     return 0
@@ -153,7 +165,9 @@ managed_systemd_template_source() {
     return 0
   fi
 
-  if [[ -f "$vps_src" ]]; then
+  if (( canonical_unit == 1 )) && [[ -f "$canonical_src" ]]; then
+    printf '%s' "$canonical_src"
+  elif [[ -f "$vps_src" ]]; then
     printf '%s' "$vps_src"
   elif [[ -f "$root_src" ]]; then
     printf '%s' "$root_src"
@@ -208,9 +222,13 @@ deploy_vps_systemd_units() {
   fi
 
   STAGE="sincronização dos units systemd da VPS"
-  if [[ ! -x "$REPO_DIR/scripts/install-vps-systemd-units.sh" && ! -f "$REPO_DIR/scripts/install-vps-systemd-units.sh" ]]; then
+  local instalador="$REPO_DIR/updater/sistema/instalar.sh"
+  if [[ ! -f "$instalador" ]]; then
+    instalador="$REPO_DIR/scripts/install-vps-systemd-units.sh"
+  fi
+  if [[ ! -f "$instalador" ]]; then
     VPS_SYSTEMD_UNITS_STATUS="script ausente"
-    LAST_ERROR_STDERR="scripts/install-vps-systemd-units.sh não foi encontrado"
+    LAST_ERROR_STDERR="updater/sistema/instalar.sh não foi encontrado"
     return 1
   fi
 
@@ -224,7 +242,7 @@ deploy_vps_systemd_units() {
   fi
 
   if REPO_DIR="$REPO_DIR" TEMPLATE_DIR="$template_overlay" \
-      bash "$REPO_DIR/scripts/install-vps-systemd-units.sh" --from-updater; then
+      bash "$instalador" --from-updater; then
     VPS_SYSTEMD_UNITS_STATUS="sincronizados"
     rm -rf "$template_overlay"
     return 0

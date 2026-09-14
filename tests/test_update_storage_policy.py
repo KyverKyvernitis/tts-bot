@@ -12,7 +12,7 @@ from updater.testes.fonte_core import caminho_fonte_core
 
 ROOT = Path(__file__).resolve().parents[1]
 UPDATER = caminho_fonte_core()
-INSTALLER = ROOT / "scripts" / "install-vps-systemd-units.sh"
+INSTALLER = ROOT / "updater" / "sistema" / "instalar.sh"
 JOURNAL_POLICY = ROOT / "deploy" / "journald" / "60-tts-bot-storage.conf"
 TMPFILES_POLICY = ROOT / "deploy" / "tmpfiles.d" / "tts-bot-storage.conf"
 

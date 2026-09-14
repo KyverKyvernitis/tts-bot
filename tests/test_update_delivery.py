@@ -415,7 +415,7 @@ def test_reconciler_skips_active_updater_and_never_confirms_mismatched_head() ->
 
 
 def test_systemd_installer_preserves_disabled_updater_timer_during_update() -> None:
-    installer = (ROOT / "scripts" / "install-vps-systemd-units.sh").read_text(encoding="utf-8")
+    installer = (ROOT / "updater" / "sistema" / "instalar.sh").read_text(encoding="utf-8")
     assert "capture_updater_timer_state" in installer
     assert '"$FROM_UPDATER" == "1" && "$UPDATER_TIMER_WAS_ENABLED" != "1"' in installer
     assert 'action "tts-bot-updater.timer/path permaneceram desativados"' in installer
@@ -541,7 +541,7 @@ def test_game_bot_filter_uses_member_metadata_instead_of_decoding_tokens() -> No
 
 
 def test_installer_dynamically_keeps_disabled_updater_timer_disabled(tmp_path: Path) -> None:
-    installer = ROOT / "scripts" / "install-vps-systemd-units.sh"
+    installer = ROOT / "updater" / "sistema" / "instalar.sh"
     calls = tmp_path / "systemctl.log"
     harness = f"""
 source <(awk '/^capture_updater_timer_state[(][)]/{{flag=1}} /^write_status[(][)]/{{flag=0}} flag' {installer!s})
