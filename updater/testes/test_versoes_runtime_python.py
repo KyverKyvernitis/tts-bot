@@ -6,10 +6,10 @@ from updater.testes.fonte_core import caminho_fonte_core
 import subprocess
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 UPDATER = caminho_fonte_core()
 START = ROOT / "start.sh"
-SMOKE = ROOT / "updater" / "utilitarios" / "smoke_runtime.py"
+SMOKE = ROOT / "updater" / "utilitarios" / "verificacao_runtime.py"
 
 
 def _python_runtime_functions(tmp_path: Path) -> Path:

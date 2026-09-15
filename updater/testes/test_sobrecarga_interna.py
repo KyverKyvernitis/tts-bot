@@ -7,9 +7,9 @@ from pathlib import Path
 from updater.testes.fonte_core import caminho_fonte_core
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 UPDATER = caminho_fonte_core()
-SNAPSHOT = ROOT / "updater" / "utilitarios" / "snapshot_git.py"
+SNAPSHOT = ROOT / "updater" / "utilitarios" / "estado_git.py"
 
 
 def _run_bash(script: str) -> subprocess.CompletedProcess[str]:
@@ -245,29 +245,3 @@ def test_preparation_path_has_fine_grained_timing_labels() -> None:
     }
     for label in required:
         assert f'log_update_operation_timing_ms "{label}"' in source
-
-
-def test_git_snapshot_helper_survives_live_rename_during_bootstrap(tmp_path: Path) -> None:
-    git_module = ROOT / "updater" / "core" / "git.sh"
-    source = git_module.read_text(encoding="utf-8")
-    assert "git_snapshot_helper() {" in source
-    assert "updater/utilitarios/estado_git.py" in source
-    assert "updater/utilitarios/snapshot_git.py" in source
-
-    repo = tmp_path / "repo"
-    util = repo / "updater" / "utilitarios"
-    util.mkdir(parents=True)
-    legacy = util / "snapshot_git.py"
-    canonical = util / "estado_git.py"
-    legacy.write_text("legacy\n", encoding="utf-8")
-
-    harness = f"""
-REPO_DIR={repo!s}
-source {git_module!s}
-printf 'before=%s\n' "$(git_snapshot_helper)"
-mv {legacy!s} {canonical!s}
-printf 'after=%s\n' "$(git_snapshot_helper)"
-"""
-    result = _run_bash(harness)
-    assert f"before={legacy}" in result.stdout
-    assert f"after={canonical}" in result.stdout

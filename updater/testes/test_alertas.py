@@ -8,7 +8,7 @@ from pathlib import Path
 from updater.testes.fonte_core import caminho_fonte_core
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 os.environ["UPDATER_TEST_SOURCE"] = str(caminho_fonte_core())
 
 

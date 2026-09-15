@@ -11,7 +11,7 @@ from updater.testes.fonte_core import caminho_fonte_core
 from updater.testes.fonte_discord import ler_fonte_discord
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 UPDATER = caminho_fonte_core()
 BOT = ROOT / "bot.py"
 

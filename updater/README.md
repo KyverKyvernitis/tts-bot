@@ -1,61 +1,132 @@
 # Updater
 
-Implementação canônica do atualizador do bot.
+Implementação canônica do atualizador transacional do bot. Todo código, infraestrutura,
+integração Discord, utilitários e testes exclusivos do updater vivem nesta pasta.
+
+## Visão geral
+
+O fluxo normal começa quando um ZIP é recebido no Discord. A integração em `discord/`
+valida o pacote e grava um candidato na fila. O `tts-bot-updater.path` observa a fila e
+aciona o serviço systemd imediatamente; o timer fica apenas como fallback. O serviço
+executa `core/atualizar.sh`, que cria uma cópia runtime estável do próprio updater,
+carrega os módulos do `core/` e conduz a atualização em worktree isolado antes de
+promover qualquer mudança para a árvore principal.
+
+As dez macroetapas apresentadas no Discord são:
+
+1. Pacote
+2. Segurança
+3. Preparação
+4. Isolamento
+5. Validação
+6. Release
+7. Promoção
+8. Aplicação
+9. Verificação
+10. GitHub
+
+As durações são acumuladas por etapa e a progressão é monotônica: eventos atrasados
+não podem fazer o card voltar para uma fase anterior.
 
 ## Estrutura
 
-- `core/atualizar.sh`: orquestrador e entrypoint principal.
-- `core/configuracao.sh`: prioridade e configuração operacional.
-- `core/estado.sh`: estado runtime persistido da execução.
-- `core/git.sh`: operações Git e snapshots transacionais.
-- `core/registros.sh`: logs, evidências, incidentes e alertas técnicos.
-- `core/tempos.sh`: medição e formatação de tempos.
-- `core/fila.sh`: fila de candidatos, arquivamento e dispatch.
-- `core/validacao.sh`: preflight, saúde e validação de candidatos/remoto.
-- `core/candidato.sh`: isolamento, artefatos, commit e promoção de candidatos locais.
-- `core/progresso.sh`: status, progresso, histórico e entrega visual no Discord.
-- `core/mudancas.sh`: diff, classificação de impacto, fast reload e proteção de mudanças locais.
-- `core/aplicacao.sh`: systemd, deploy do bot/site, publicação e releases de runtime.
-- `core/recuperacao.sh`: rollback transacional e tratamento de falhas.
-- `utilitarios/`: auxiliares Python canônicos com nomes em português.
-- `testes/`: contratos da arquitetura e helpers de teste.
+### `core/`
 
-Os entrypoints, utilitários, integração Discord e infraestrutura próprios do updater
-ficam exclusivamente em `updater/`. Caminhos legados usados durante a migração foram
-removidos na Wave 45; compatibilidade com nomes antigos existe apenas na interpretação
-de candidatos quando necessário, não como implementação duplicada no repositório.
+- `atualizar.sh`: bootstrap, locks, traps e carregamento dos módulos.
+- `configuracao.sh`: configuração operacional e perfis de prioridade.
+- `estado.sh`: estado runtime da execução.
+- `git.sh`: operações Git e snapshots transacionais.
+- `registros.sh`: logs, evidências, incidentes e alertas técnicos.
+- `tempos.sh`: medição e formatação de tempos.
+- `fila.sh`: fila de candidatos, claim, arquivamento e dispatch.
+- `manutencao.sh`: retenção, limpeza e proteção de espaço em disco.
+- `persistencia.sh`: estado durável do candidato e dados de recovery.
+- `progresso.sh`: progresso, histórico e entrega visual ao Discord.
+- `validacao.sh`: preflight, health checks e validação de candidatos.
+- `candidato.sh`: worktree, artefatos, runtimes, commit e promoção local.
+- `mudancas.sh`: diff, classificação de impacto e proteção da árvore local.
+- `aplicacao.sh`: deploy, systemd, releases e publicação de runtime.
+- `recuperacao.sh`: rollback transacional e tratamento de falhas.
+- `reversao.sh`: pedidos explícitos de reverter ou reaplicar.
+- `orquestracao.sh`: sequência transacional principal.
+- `finalizacao.sh`: saúde final, tempos, card final e log técnico.
 
-O entrypoint executa uma cópia runtime estável de `atualizar.sh` e preserva em
-`TTS_BOT_UPDATER_SOURCE_DIR` a revisão dos módulos carregada no início. Assim,
-um update do próprio updater não mistura versões durante a mesma execução.
+`atualizar.sh` executa uma cópia runtime estável e exporta
+`TTS_BOT_UPDATER_SOURCE_DIR`. Assim uma atualização do próprio updater nunca mistura
+módulos de duas revisões na mesma execução.
 
-Na etapa atual da modularização, o restante do fluxo foi separado em:
+### `discord/`
 
-- `core/manutencao.sh`: retenção, limpeza de artefatos e proteção de espaço em disco.
-- `core/persistencia.sh`: estado durável do candidato e evidências de recuperação.
-- `core/reversao.sh`: pedidos de reverter/reaplicar e publicação do resultado da reversão.
-- `core/orquestracao.sh`: sequência transacional principal (fila local, rollback ou commit remoto, validação e deploy).
-- `core/finalizacao.sh`: consolidação de saúde/tempos, card final, log técnico e entrega idempotente.
+- `constantes.py`: emojis, limites e constantes da integração.
+- `cartoes.py`: renderer dos cards, detalhes, estado visual e log técnico.
+- `preparacao.py`: inspeção do ZIP, operações declarativas e criação do candidato.
+- `progresso.py`: eventos internos, heartbeat e edição do card.
+- `controles.py`: botões, detalhes, cancelamento, rollback e reaplicação.
+- `eventos.py`: recepção de anexos e eventos do Discord.
+- `integracao.py`: composição dos mixins e inicialização do updater no bot.
 
-Com isso, `core/atualizar.sh` fica responsável principalmente por bootstrap, estado inicial, carregamento dos módulos, locks e traps transacionais.
+`bot.py` mantém somente a composição com `IntegracaoDiscordUpdaterMixin` e os hooks
+gerais do bot.
 
+### `utilitarios/`
 
-## Discord
+- `seguranca.py`: inspeção do ZIP, manifesto e integridade do candidato.
+- `estado_git.py`: snapshots Git usados pelo core.
+- `verificacao_runtime.py`: smoke check isolado do runtime candidato.
+- `selecao_testes.py`: seleção incremental de testes do dashboard.
 
-A integração do updater com o bot fica em `updater/discord/`:
+Os nomes antigos `snapshot_git.py` e `smoke_runtime.py` foram eliminados na Wave 46;
+os caminhos canônicos são os nomes em português acima.
 
-- `cartoes.py`: renderer, estado visual, logs técnicos e reconciliação;
-- `preparacao.py`: validação/extracao do ZIP e criação do candidato;
-- `progresso.py`: endpoint interno, progressão e edição de status;
-- `controles.py`: botões, detalhes, cancelamento, rollback e reaplicação;
-- `eventos.py`: eventos do Discord, reload e recepção de anexos;
-- `integracao.py`: composição dos mixins e inicialização do estado.
+### `sistema/` e `sudoers/`
 
-`bot.py` mantém apenas a composição com `IntegracaoDiscordUpdaterMixin` e os hooks gerais do bot.
+`updater/sistema/` contém `instalar.sh` e as units `tts-bot-updater.*`.
+`updater/sudoers/` contém a permissão mínima usada para disparar o serviço.
 
-## Infraestrutura da VPS
+Os nomes das units continuam em inglês por serem contratos operacionais já instalados
+na VPS. Renomeá-los exige uma migração systemd própria e não faz parte da organização
+de arquivos.
 
-A infraestrutura própria do updater é canônica em `updater/sistema/` e
-`updater/sudoers/`. As cópias antigas das units, sudoers e instaladores foram
-removidas; templates gerais da VPS que não pertencem ao updater continuam em
-`deploy/systemd/`, `deploy/journald/` e `deploy/tmpfiles.d/`.
+### `testes/`
+
+Todos os testes exclusivos do updater ficam em `updater/testes/`. Os nomes dos arquivos
+são em português e tecnologias/protocolos preservam seus nomes oficiais quando isso
+melhora a leitura (`Python`, `Node`, `TypeScript`, `Discord`).
+
+Executar somente a suíte do updater:
+
+```bash
+python -m pytest -q updater/testes
+```
+
+Os helpers `fonte_core.py` e `fonte_discord.py` fornecem as visões expandidas usadas
+pelos testes que precisam inspecionar a implementação modularizada sem duplicar código
+no runtime.
+
+## Segurança e transação
+
+O candidato é preparado em worktree isolado. Operações `delete`, `move` e `rename`
+são declaradas no `update-manifest.json`; exclusões já ausentes são idempotentes e não
+são stageadas uma segunda vez. A árvore principal só é promovida depois das validações
+do candidato.
+
+Falhas após promoção acionam rollback e preservam evidências. Estados de recovery são
+persistidos para que reinícios do bot ou do serviço não transformem uma falha conhecida
+em um novo update.
+
+## Dispatch
+
+O caminho primário é orientado a evento:
+
+`Discord -> queue/pending -> tts-bot-updater.path -> tts-bot-updater.service`
+
+`tts-bot-updater.timer` permanece como fallback. O bot também mantém o mecanismo de
+dispatch/reconciliação para compatibilidade e observabilidade, mas não depende do timer
+de um minuto para o caminho normal.
+
+## Compatibilidade
+
+As fachadas antigas em `scripts/`, `utility/`, `deploy/systemd/` e `deploy/sudoers.d/`
+foram removidas nas Waves 45a/45b. O updater ainda reconhece nomes legados quando
+necessário para interpretar candidatos antigos, mas não mantém implementações duplicadas
+no repositório.

@@ -10,8 +10,8 @@ import sys
 import textwrap
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SMOKE = ROOT / "updater" / "utilitarios" / "smoke_runtime.py"
+ROOT = Path(__file__).resolve().parents[2]
+SMOKE = ROOT / "updater" / "utilitarios" / "verificacao_runtime.py"
 UPDATER = caminho_fonte_core()
 
 
@@ -122,7 +122,7 @@ def test_runtime_smoke_accepts_candidate_interpreter_without_discord_connection(
     assert 'py="$(current_bot_python_bin)"' in block
     assert 'PYTHONPATH=%q' in block
     assert 'PYTHONDONTWRITEBYTECODE=1' in block
-    assert 'updater/utilitarios/smoke_runtime.py' in block
+    assert 'updater/utilitarios/verificacao_runtime.py' in block
     assert 'timeout %qs' in block
     assert 'BOT_RUNTIME_SMOKE_FAILED' in block
     assert 'BOT_RUNTIME_SMOKE_TIMEOUT' in block

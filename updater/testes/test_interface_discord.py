@@ -7,7 +7,7 @@ from updater.testes.fonte_discord import ler_fonte_discord
 import subprocess
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 BOT = ROOT / "bot.py"
 UPDATER = caminho_fonte_core()
 WEBSERVER = ROOT / "webserver.py"

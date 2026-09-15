@@ -25,8 +25,8 @@ def test_systemd_canonico_executa_entrypoint_canonico():
 def test_utilitarios_canonicos_sem_fachadas_legadas():
     pares = {
         "update_security.py": "seguranca.py",
-        "update_git_snapshot.py": "snapshot_git.py",
-        "update_runtime_smoke.py": "smoke_runtime.py",
+        "update_git_snapshot.py": "estado_git.py",
+        "update_runtime_smoke.py": "verificacao_runtime.py",
         "update_test_selector.py": "selecao_testes.py",
     }
     for legado, canonico in pares.items():
@@ -39,9 +39,9 @@ def test_core_nao_depende_dos_utilitarios_legados():
     assert "utility.update_security" not in text
     assert "/utility/update_runtime_smoke.py" not in text
     assert "/utility/update_test_selector.py" not in text
-    assert "updater/utilitarios/snapshot_git.py" in text
+    assert "updater/utilitarios/estado_git.py" in text
     assert "updater.utilitarios.seguranca" in text
-    assert "updater/utilitarios/smoke_runtime.py" in text
+    assert "updater/utilitarios/verificacao_runtime.py" in text
     assert "updater/utilitarios/selecao_testes.py" in text
 
 
@@ -218,3 +218,27 @@ def test_wave42_fluxo_principal_carrega_depois_dos_traps_transacionais():
 
 def test_orquestrador_core_fica_abaixo_de_seiscentas_linhas():
     assert len(CANONICO.read_text(encoding="utf-8").splitlines()) < 600
+
+
+def test_wave46_testes_exclusivos_ficam_somente_em_updater_testes():
+    legados = sorted((ROOT / "tests").glob("test_update_*.py"))
+    assert legados == []
+    testes = ROOT / "updater" / "testes"
+    assert (testes / "test_seguranca.py").is_file()
+    assert (testes / "test_operacoes_manifesto.py").is_file()
+    assert (testes / "test_interface_discord.py").is_file()
+    assert (testes / "test_transacao_worktree.py").is_file()
+
+
+def test_wave46_utilitarios_canonicos_usam_nomes_em_portugues():
+    utilitarios = ROOT / "updater" / "utilitarios"
+    assert (utilitarios / "estado_git.py").is_file()
+    assert (utilitarios / "verificacao_runtime.py").is_file()
+    assert not (utilitarios / "snapshot_git.py").exists()
+    assert not (utilitarios / "smoke_runtime.py").exists()
+
+    fonte = ler_fonte_core()
+    assert "updater/utilitarios/estado_git.py" in fonte
+    assert "updater/utilitarios/verificacao_runtime.py" in fonte
+    assert "updater/utilitarios/snapshot_git.py" not in fonte
+    assert "updater/utilitarios/smoke_runtime.py" not in fonte

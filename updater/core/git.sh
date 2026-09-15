@@ -32,30 +32,11 @@ repo_python_as_ubuntu() {
   sudo -u ubuntu -H python3 "$@"
 }
 
-git_snapshot_helper() {
-  # Bootstrap de rename: durante a própria atualização o processo em execução
-  # pode ser da versão anterior enquanto a árvore live já contém o novo nome.
-  # Prefira o nome canônico novo, mas aceite o legado até a migração concluir.
-  local canonical="$REPO_DIR/updater/utilitarios/estado_git.py"
-  local legacy="$REPO_DIR/updater/utilitarios/snapshot_git.py"
-  if [[ -f "$canonical" ]]; then
-    printf '%s\n' "$canonical"
-    return 0
-  fi
-  if [[ -f "$legacy" ]]; then
-    printf '%s\n' "$legacy"
-    return 0
-  fi
-  LAST_ERROR_STDERR="helper de snapshot Git ausente: updater/utilitarios/estado_git.py e snapshot_git.py"
-  return 1
-}
-
 load_git_diff_snapshot() {
   local root="${1:?}"
   shift
-  local output helper
-  helper="$(git_snapshot_helper)" || return 1
-  if ! output="$(repo_python_as_ubuntu "$helper" diff --repo "$root" "$@" 2>&1)"; then
+  local output
+  if ! output="$(repo_python_as_ubuntu "$REPO_DIR/updater/utilitarios/estado_git.py" diff --repo "$root" "$@" 2>&1)"; then
     LAST_ERROR_STDERR="${output:-falha ao capturar snapshot Git do diff}"
     return 1
   fi
@@ -67,9 +48,8 @@ load_git_diff_snapshot() {
 }
 
 load_repo_status_snapshot() {
-  local output helper
-  helper="$(git_snapshot_helper)" || { GIT_STATUS_SNAPSHOT_READY=0; return 1; }
-  if ! output="$(repo_python_as_ubuntu "$helper" status --repo "$REPO_DIR" 2>&1)"; then
+  local output
+  if ! output="$(repo_python_as_ubuntu "$REPO_DIR/updater/utilitarios/estado_git.py" status --repo "$REPO_DIR" 2>&1)"; then
     GIT_STATUS_SNAPSHOT_READY=0
     LAST_ERROR_STDERR="${output:-falha ao capturar status Git do checkout}"
     return 1
@@ -79,9 +59,8 @@ load_repo_status_snapshot() {
 }
 
 load_repo_ref_snapshot() {
-  local branch="${1:-$BRANCH}" output helper
-  helper="$(git_snapshot_helper)" || return 1
-  if ! output="$(repo_python_as_ubuntu "$helper" refs --repo "$REPO_DIR" --branch "$branch" 2>&1)"; then
+  local branch="${1:-$BRANCH}" output
+  if ! output="$(repo_python_as_ubuntu "$REPO_DIR/updater/utilitarios/estado_git.py" refs --repo "$REPO_DIR" --branch "$branch" 2>&1)"; then
     LAST_ERROR_STDERR="${output:-falha ao capturar refs Git local/remoto}"
     return 1
   fi
