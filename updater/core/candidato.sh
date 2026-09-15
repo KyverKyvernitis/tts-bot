@@ -959,9 +959,12 @@ run_candidate_python_runtime_smoke() {
     return 1
   fi
 
-  smoke="$root/updater/utilitarios/smoke_runtime.py"
+  smoke="$root/updater/utilitarios/verificacao_runtime.py"
   if [[ ! -f "$smoke" ]]; then
-    PREFLIGHT_RUNTIME_STATUS="falhou: updater/utilitarios/smoke_runtime.py ausente"
+    smoke="$root/updater/utilitarios/smoke_runtime.py"
+  fi
+  if [[ ! -f "$smoke" ]]; then
+    PREFLIGHT_RUNTIME_STATUS="falhou: updater/utilitarios/verificacao_runtime.py e smoke_runtime.py ausentes"
     LAST_ERROR_STDERR="$PREFLIGHT_RUNTIME_STATUS"
     LAST_ERROR_CODE="BOT_RUNTIME_SMOKE_SCRIPT_MISSING"
     return 1
