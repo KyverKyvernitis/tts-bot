@@ -1411,7 +1411,8 @@ run_frontend_incremental_typecheck() {
   install -d -o ubuntu -g ubuntu -m 0775 "$local_cache" || return 1
 
   if verify_frontend_typescript_cache "$entry" "$key"; then
-    sudo -u ubuntu -H cp -a -- "$entry/tsconfig.tsbuildinfo" "$local_cache/tsconfig.tsbuildinfo" || return 1
+    # A camada compartilhada é imutável; a cópia local precisa aceitar escrita do tsc.
+    sudo -u ubuntu -H install -m 0644 -- "$entry/tsconfig.tsbuildinfo" "$local_cache/tsconfig.tsbuildinfo" || return 1
     LAST_TYPESCRIPT_CACHE_HIT=1
     TYPESCRIPT_CACHE_HITS=$(( ${TYPESCRIPT_CACHE_HITS:-0} + 1 ))
     touch "$entry/cache.json" 2>/dev/null || true
@@ -1564,7 +1565,8 @@ run_backend_incremental_build() {
   install -d -o ubuntu -g ubuntu -m 0775 "$local_cache" || return 1
 
   if backend_typescript_cache_can_seed && verify_backend_typescript_cache "$entry" "$key"; then
-    sudo -u ubuntu -H cp -- "$entry/tsconfig.tsbuildinfo" "$local_cache/tsconfig.tsbuildinfo" || return 1
+    # A camada compartilhada é imutável; a cópia local precisa aceitar escrita do tsc.
+    sudo -u ubuntu -H install -m 0644 -- "$entry/tsconfig.tsbuildinfo" "$local_cache/tsconfig.tsbuildinfo" || return 1
     rm -rf -- "$project_dir/dist" 2>/dev/null || true
     if ! sudo -u ubuntu -H cp -a --reflink=auto --no-preserve=ownership -- "$entry/dist" "$project_dir/dist" 2>/dev/null; then
       sudo -u ubuntu -H cp -a --no-preserve=ownership -- "$entry/dist" "$project_dir/dist" || return 1

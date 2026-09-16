@@ -51,9 +51,10 @@ não podem fazer o card voltar para uma fase anterior.
 - `orquestracao.sh`: sequência transacional principal.
 - `finalizacao.sh`: saúde final, tempos, card final e log técnico.
 
-`atualizar.sh` executa uma cópia runtime estável e exporta
-`TTS_BOT_UPDATER_SOURCE_DIR`. Assim uma atualização do próprio updater nunca mistura
-módulos de duas revisões na mesma execução.
+`atualizar.sh` captura todos os módulos do core com o lock já adquirido e exporta
+`TTS_BOT_UPDATER_SOURCE_DIR` para essa cópia privada. Inclusive `finalizacao.sh`,
+carregado após a promoção, pertence à revisão que iniciou a transação. O diretório
+é removido no encerramento e também é gerenciado pelo `RuntimeDirectory` do systemd.
 
 ### `discord/`
 
@@ -87,7 +88,15 @@ A Wave 47a instala a família `bot-updater.*`, migra o `OnFailure` do bot e
 transfere os estados de timer/path independentemente. A Wave 47b remove os arquivos das units
 antigas somente após comprovar a migração e a inatividade da família antiga. O serviço que executa a migração nunca é parado;
 o lock `/run/lock/tts-bot-updater.lock` continua compartilhado entre as duas famílias.
-Falhas na instalação restauram os arquivos e os gatilhos anteriores.
+Falhas na instalação restauram os arquivos e os gatilhos anteriores. O serviço
+novo espera o lock da execução antiga; isso impede ciclos do `.path` quando há
+outros candidatos na fila durante a migração.
+
+A Wave 48 exige um overlay completo com os nomes canônicos. A compatibilidade
+temporária com overlays das Waves 45/46 foi encerrada. As referências antigas
+no instalador servem somente para verificar/remover o legado e recuperar uma
+instalação interrompida. O nome do lock e as variáveis `TTS_BOT_*` são contratos
+operacionais preservados. A limpeza também reconhece logs temporários antigos.
 
 ### `testes/`
 
@@ -104,6 +113,10 @@ python -m pytest -q updater/testes
 Os helpers `fonte_core.py` e `fonte_discord.py` fornecem as visões expandidas usadas
 pelos testes que precisam inspecionar a implementação modularizada sem duplicar código
 no runtime.
+
+Os testes de criação de venv usam o mesmo interpretador da suíte, com `ensurepip`,
+e continuam criando ambientes reais. A seleção do Python de produção é testada
+separadamente. Caches dos testes são isolados por execução.
 
 ## Segurança e transação
 
@@ -132,3 +145,20 @@ As fachadas antigas em `scripts/`, `utility/`, `deploy/systemd/` e `deploy/sudoe
 foram removidas nas Waves 45a/45b. O updater ainda reconhece nomes legados quando
 necessário para interpretar candidatos antigos, mas não mantém implementações duplicadas
 no repositório.
+
+## Fechamento da modularização
+
+Aplicar os pacotes na ordem `47a`, `47b`, `48`, aguardando a confirmação de sucesso
+de cada um no Discord. Cada ZIP contém somente alterações relativas ao anterior;
+o `update-manifest.json` da 47b declara as cinco exclusões de arquivos legados.
+
+O fechamento corrige também a cópia local gravável de `tsconfig.tsbuildinfo` nos
+caches de frontend/backend, preservando as camadas compartilhadas imutáveis, e
+uma declaração `local` inválida no fluxo remoto que foi extraído para um módulo.
+
+Para inspecionar a execução na VPS após a migração:
+
+```bash
+sudo systemctl status bot-updater.service bot-updater.path bot-updater.timer --no-pager
+sudo journalctl -u bot-updater.service -n 150 --no-pager
+```

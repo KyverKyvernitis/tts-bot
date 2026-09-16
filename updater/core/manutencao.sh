@@ -28,6 +28,9 @@ prune_updater_runtime_orphans() {
   # Apenas prefixos privados do updater, sem recursão fora das raízes exatas.
   find "$legacy_tmp" -maxdepth 1 -type f -name 'tts-bot-update.*.run' -mmin +60 -delete 2>/dev/null || true
   find "$legacy_tmp" -maxdepth 1 -type f -name 'tts-bot-updater.*.log' -mmin +1440 -delete 2>/dev/null || true
+  find "$legacy_tmp" -maxdepth 1 -type f -name 'bot-updater.*.log' -mmin +1440 -delete 2>/dev/null || true
+  find "$legacy_tmp" -maxdepth 1 -type d -name 'bot-updater.*.core' \
+    ! -path "${UPDATER_RUNTIME_BUNDLE:-}" -mmin +1440 -exec rm -rf -- {} + 2>/dev/null || true
   find "$legacy_tmp" -maxdepth 1 -type f \( -name 'tts-bot-git-add.*' -o -name 'tts-bot-git-add-retry.*' \) -mmin +360 -delete 2>/dev/null || true
   find "$legacy_tmp" -mindepth 1 -maxdepth 1 -type d \( -name 'tts-bot-remote-candidate.*' -o -name 'tts-bot-systemd-overlay.*' \) -mmin +360 -exec rm -rf -- {} + 2>/dev/null || true
   repo_git worktree prune --expire=now >/dev/null 2>&1 || true
@@ -248,4 +251,3 @@ git_add_changed_files_or_reject() {
     "Não consegui preparar os arquivos do ZIP. A VPS foi restaurada e o candidato foi arquivado." \
     "$context: ${LAST_ERROR_STDERR:-git add falhou}"
 }
-

@@ -29,9 +29,9 @@ def _run_bash(source: str) -> subprocess.CompletedProcess[str]:
 
 def test_updater_runtime_is_systemd_managed_and_uses_unpredictable_names() -> None:
     updater = UPDATER.read_text(encoding="utf-8")
-    assert 'mktemp "$UPDATER_RUNTIME_BASE/tts-bot-update.XXXXXX.run"' in updater
+    assert 'mktemp -d "$UPDATER_RUNTIME_BASE/bot-updater.XXXXXX.core"' in updater
     assert 'tts-bot-update.$$.run' not in updater
-    assert 'mktemp "$UPDATER_EPHEMERAL_DIR/tts-bot-updater.XXXXXX.log"' in updater
+    assert 'mktemp "$UPDATER_EPHEMERAL_DIR/bot-updater.XXXXXX.log"' in updater
     assert "prune_updater_runtime_orphans" in updater
     assert "guard_updater_disk_space" in updater
     assert updater.index("if ! guard_updater_disk_space; then") < updater.index("prune_update_artifacts || true")

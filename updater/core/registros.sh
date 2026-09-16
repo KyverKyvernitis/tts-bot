@@ -40,6 +40,9 @@ cleanup_runtime_artifacts() {
   if [[ -n "${UPDATER_RUNTIME_COPY:-}" && -f "$UPDATER_RUNTIME_COPY" ]]; then
     rm -f "$UPDATER_RUNTIME_COPY" 2>/dev/null || true
   fi
+  if [[ -n "${UPDATER_RUNTIME_BUNDLE:-}" && "${UPDATER_SOURCE_DIR:-}" == "$UPDATER_RUNTIME_BUNDLE" ]]; then
+    rm -rf -- "$UPDATER_RUNTIME_BUNDLE" 2>/dev/null || true
+  fi
 }
 
 trim_alert_text() {
@@ -469,6 +472,5 @@ send_error() {
   local incident_id="${LOCAL_CANDIDATE_ID:-${ROLLBACK_REQUEST_ID:-${REMOTE_COMMIT:-${CURRENT_COMMIT:-}}}}"
   [[ -n "${incident_id//[[:space:]]/}" ]] || incident_id="$(date +%Y%m%d%H%M%S)-$$"
   local event_id="${3:-error-${incident_id}-${FAILED_STAGE:-$STAGE}}"
-  send_alert_reliably error "$title" "$body" "$attach" "tts-bot-updater.log" "$event_id" || true
+  send_alert_reliably error "$title" "$body" "$attach" "bot-updater.log" "$event_id" || true
 }
-

@@ -112,13 +112,6 @@ install_file() {
   local src=""
   local dst="$SYSTEMD_DIR/$rel"
   src="$(template_source "$rel")"
-  # Ponte da Wave 47a: o core anterior monta um overlay com nomes antigos.
-  # As units novas vêm do checkout promovido somente quando faltam no overlay.
-  if [[ -z "$src" ]] && is_updater_unit "$rel"; then
-    if [[ -f "$UPDATER_SYSTEM_DIR/$rel" && ! -L "$UPDATER_SYSTEM_DIR/$rel" ]]; then
-      src="$UPDATER_SYSTEM_DIR/$rel"
-    fi
-  fi
   if [[ ! -f "$src" ]]; then
     warn "template ausente: $rel"
     return 0
@@ -472,12 +465,6 @@ capture_updater_timer_state() {
       UPDATER_TRIGGER_ACTIVE[$unit]=1
     fi
   done
-  # Um arquivo novo sozinho não comprova migração: uma instalação interrompida
-  # pode ter escrito o template e ainda não ter transferido os gatilhos.
-  if [[ -e "$SYSTEMD_DIR/tts-bot-updater.service" ]] \
-      && ! updater_migration_ready; then
-    prefix=tts-bot-updater
-  fi
   UPDATER_TIMER_WAS_ENABLED="${UPDATER_TRIGGER_ENABLED[$prefix.timer]}"
   UPDATER_TIMER_WAS_ACTIVE="${UPDATER_TRIGGER_ACTIVE[$prefix.timer]}"
   UPDATER_PATH_WAS_ENABLED="${UPDATER_TRIGGER_ENABLED[$prefix.path]}"
@@ -500,12 +487,8 @@ PY_MIGRATION_READY
 required_updater_template() {
   local rel="${1:?}" src
   src="$(template_source "$rel")"
-  # Ponte 47a, necessária para o overlay gerado pelo core da Wave 46.
-  if [[ -z "$src" && -f "$UPDATER_SYSTEM_DIR/$rel" && ! -L "$UPDATER_SYSTEM_DIR/$rel" ]]; then
-    src="$UPDATER_SYSTEM_DIR/$rel"
-  fi
   [[ -n "$src" && -s "$src" && ! -L "$src" ]] || {
-    warn "template obrigatório ausente: $rel"
+    warn "template obrigatório ausente: $rel" >&2
     return 1
   }
   printf '%s' "$src"

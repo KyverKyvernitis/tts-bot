@@ -407,7 +407,7 @@ on_error() {
   body="Resumo: O updater falhou antes de concluir a troca de commit.
 Host: $HOSTNAME
 Branch: $BRANCH
-Serviço: tts-bot-updater
+Serviço: $UPDATER_UNIT
 Serviço afetado: ${LAST_ERROR_SERVICE_UNIT:-$UPDATER_UNIT}
 Commit anterior: $(short_commit "$CURRENT_COMMIT")
 Commit alvo: $(short_commit "$REMOTE_COMMIT")

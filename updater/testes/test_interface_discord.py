@@ -147,7 +147,7 @@ def test_success_path_queues_the_raw_updater_log_for_technical_channel() -> None
     end = source.index("flush_update_alert_outbox || true", start)
     block = source[start:end]
     assert 'FINAL_RAW_LOG="$RUN_LOG_FILE"' in block
-    assert '"$FINAL_RAW_LOG" "tts-bot-updater.log"' in block
+    assert '"$FINAL_RAW_LOG" "bot-updater.log"' in block
 
 def test_progress_card_persists_completed_macro_durations_and_keeps_detail_plain() -> None:
     source = ler_fonte_discord()

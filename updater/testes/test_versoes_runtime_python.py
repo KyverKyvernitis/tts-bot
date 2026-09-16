@@ -4,6 +4,8 @@ from pathlib import Path
 
 from updater.testes.fonte_core import caminho_fonte_core
 import subprocess
+import shlex
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +27,7 @@ def _common_harness(functions: Path, runtime_root: Path, repo: Path) -> str:
     return f'''
 set -eu -o pipefail
 source "{functions}"
+python_runtime_base_python() {{ printf '%s\\n' {shlex.quote(sys.executable)}; }}
 PYTHON_RUNTIME_ROOT="{runtime_root}"
 PYTHON_RUNTIME_CURRENT_LINK="$PYTHON_RUNTIME_ROOT/current"
 REPO_DIR="{repo}"

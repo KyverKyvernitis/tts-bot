@@ -9,6 +9,10 @@ Timer e path preservam individualmente seus estados habilitado/ativo, inclusive
 quando desativados para manutenção. O instalador valida templates e sudoers
 antes de aplicar; uma falha restaura a família anterior sem parar o updater.
 
+Após a 48, overlays incompletos são rejeitados antes da escrita de units. O
+serviço novo aguarda o lock compartilhado quando a execução anterior ainda
+está terminando. Uma ativação via `.path` assim não fica reiniciando em ciclo.
+
 Arquivos canônicos:
 
 - `bot-updater.service`: execução transacional do updater;

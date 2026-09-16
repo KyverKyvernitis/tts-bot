@@ -256,7 +256,7 @@ FINAL_RAW_LOG=""
 if [[ -f "${RUN_LOG_FILE:-}" && -s "${RUN_LOG_FILE:-}" ]]; then
   FINAL_RAW_LOG="$RUN_LOG_FILE"
 fi
-send_alert_reliably "$ALERT_TYPE" "$ALERT_TITLE" "$BODY" "$FINAL_RAW_LOG" "tts-bot-updater.log" "$FINAL_ALERT_EVENT_ID" || FINAL_ALERT_DELIVERY_RC=$?
+send_alert_reliably "$ALERT_TYPE" "$ALERT_TITLE" "$BODY" "$FINAL_RAW_LOG" "bot-updater.log" "$FINAL_ALERT_EVENT_ID" || FINAL_ALERT_DELIVERY_RC=$?
 flush_update_alert_outbox || true
 if (( LOCAL_CANDIDATE_MODE == 1 )); then
   # "delivery_scheduled" significa que cada saída foi entregue ou persistida

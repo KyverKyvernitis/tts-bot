@@ -156,17 +156,17 @@ classify_changed_files() {
     [[ "$file" == "requirements.txt" || "$file" == "requirements.lock" ]] && REQUIREMENTS_CHANGED=1
 
     case "$file" in
-      deploy/systemd/lavalink.service|deploy/systemd/tts-bot.service|deploy/systemd/tts-bot-alert@.service|updater/sistema/tts-bot-alert@.service)
+      deploy/systemd/lavalink.service|deploy/systemd/tts-bot.service)
         AUDIO_SYSTEMD_CHANGED=1
         ;;
     esac
     case "$file" in
-      alert.sh|updater/sistema/bot-updater-alert@.service|updater/sistema/tts-bot-alert@.service|deploy/systemd/tts-bot-alert@.service|deploy/systemd/vps/tts-bot-alert@.service)
+      alert.sh|updater/sistema/bot-updater-alert@.service)
         ALERT_CHANGED=1
         ;;
     esac
     case "$file" in
-      updater/sistema/*.service|updater/sistema/*.timer|updater/sistema/*.path|updater/sistema/*.sh|updater/sudoers/*|deploy/systemd/tts-bot.service|deploy/systemd/tts-bot-updater.service|deploy/systemd/tts-bot-updater.timer|deploy/systemd/tts-bot-updater.path|deploy/systemd/tts-bot-alert@.service|deploy/systemd/cleanup-audio-temp.service|deploy/systemd/cleanup-audio-temp.timer|deploy/systemd/sinuca-activity-server.service|deploy/systemd/phone-worker-watch.service|deploy/systemd/phone-worker-watch.timer|deploy/systemd/tts-bot.service.d/*|deploy/systemd/vps/tts-bot.service|deploy/systemd/vps/tts-bot-updater.service|deploy/systemd/vps/tts-bot-updater.timer|deploy/systemd/vps/tts-bot-updater.path|deploy/systemd/vps/tts-bot-alert@.service|deploy/systemd/vps/cleanup-audio-temp.service|deploy/systemd/vps/cleanup-audio-temp.timer|deploy/systemd/vps/sinuca-activity-server.service|deploy/systemd/vps/phone-worker-watch.service|deploy/systemd/vps/phone-worker-watch.timer|deploy/systemd/vps/tts-bot.service.d/*|deploy/sudoers.d/*|deploy/journald/*|deploy/tmpfiles.d/*|scripts/install-vps-systemd-units.sh)
+      updater/sistema/*.service|updater/sistema/*.timer|updater/sistema/*.path|updater/sistema/*.sh|updater/sudoers/*|deploy/systemd/tts-bot.service|deploy/systemd/cleanup-audio-temp.service|deploy/systemd/cleanup-audio-temp.timer|deploy/systemd/sinuca-activity-server.service|deploy/systemd/phone-worker-watch.service|deploy/systemd/phone-worker-watch.timer|deploy/systemd/tts-bot.service.d/*|deploy/systemd/vps/tts-bot.service|deploy/systemd/vps/cleanup-audio-temp.service|deploy/systemd/vps/cleanup-audio-temp.timer|deploy/systemd/vps/sinuca-activity-server.service|deploy/systemd/vps/phone-worker-watch.service|deploy/systemd/vps/phone-worker-watch.timer|deploy/systemd/vps/tts-bot.service.d/*|deploy/journald/*|deploy/tmpfiles.d/*)
         VPS_SYSTEMD_UNITS_CHANGED=1
         ;;
     esac
@@ -459,7 +459,7 @@ EOM
   body="Resumo: O updater parou antes do git pull porque existem alterações locais em arquivos rastreados. O Git bloqueou o merge para não sobrescrever seus testes na VPS.
 Host: $HOSTNAME
 Branch: $BRANCH
-Serviço: tts-bot-updater
+Serviço: $UPDATER_UNIT
 Serviço afetado: $UPDATER_UNIT
 Commit anterior: $(short_commit "$CURRENT_COMMIT")
 Commit alvo: $(short_commit "$REMOTE_COMMIT")

@@ -5,7 +5,7 @@ REPO_DIR="/home/ubuntu/bot"
 BRANCH="main"
 SERVICE="tts-bot"
 LAVALINK_SERVICE="lavalink"
-LOG_TAG="tts-bot-updater"
+LOG_TAG="bot-updater"
 DIRTY_MARKER_FILE="$REPO_DIR/.fatal-update-dirty"
 LOCAL_CHANGES_MARKER_FILE="$REPO_DIR/.fatal-update-local-changes"
 CANDIDATE_ROOT="${DISCORD_AUTO_UPDATE_STAGING_DIR:-$(dirname "$REPO_DIR")/bot-update-staging}/candidates"
@@ -47,6 +47,17 @@ export TTS_BOT_UPDATER_SOURCE_DIR="$UPDATER_SOURCE_DIR"
 # quebrar com variáveis antigas/novas fora de sincronia. Por isso o processo
 # real sempre roda a partir de uma cópia temporária estável.
 if [[ "${TTS_BOT_UPDATER_RUNNING_COPY:-0}" != "1" ]]; then
+  # A fotografia dos módulos também pertence à transação: capturá-la com o
+  # lock evita copiar duas revisões enquanto outra execução promove o Git.
+  mkdir -p "$(dirname "$UPDATER_LOCK_FILE")" 2>/dev/null || true
+  exec 9>"$UPDATER_LOCK_FILE"
+  if [[ "${TTS_BOT_UPDATER_WAIT_FOR_LOCK:-0}" == 1 ]]; then
+    # O serviço novo espera a família antiga encerrar, sem loop do .path.
+    flock 9
+  elif ! flock -n 9; then
+    logger -t "$LOG_TAG" "updater já está em execução; mantendo fila para o próximo ciclo" 2>/dev/null || true
+    exit 0
+  fi
   UPDATER_RUNTIME_BASE="${TTS_BOT_UPDATER_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
   if [[ "$UPDATER_RUNTIME_BASE" != /* || ! -d "$UPDATER_RUNTIME_BASE" || -L "$UPDATER_RUNTIME_BASE" || ! -w "$UPDATER_RUNTIME_BASE" ]]; then
     UPDATER_RUNTIME_BASE="/tmp"
@@ -54,14 +65,22 @@ if [[ "${TTS_BOT_UPDATER_RUNNING_COPY:-0}" != "1" ]]; then
   # mktemp evita colisão/symlink previsível em /tmp. No serviço systemd, a
   # cópia fica em RuntimeDirectory e é removida pelo próprio systemd mesmo em
   # SIGKILL, reboot ou queda antes do trap EXIT.
-  UPDATER_RUNTIME_COPY="$(mktemp "$UPDATER_RUNTIME_BASE/tts-bot-update.XXXXXX.run")"
-  cp -- "$0" "$UPDATER_RUNTIME_COPY"
-  chmod 0700 "$UPDATER_RUNTIME_COPY" 2>/dev/null || true
+  UPDATER_RUNTIME_BUNDLE="$(mktemp -d "$UPDATER_RUNTIME_BASE/bot-updater.XXXXXX.core")"
+  trap 'rm -rf -- "$UPDATER_RUNTIME_BUNDLE"' EXIT
+  cp -a -- "$UPDATER_SOURCE_DIR/." "$UPDATER_RUNTIME_BUNDLE/"
+  UPDATER_SOURCE_DIR="$UPDATER_RUNTIME_BUNDLE"
+  UPDATER_RUNTIME_COPY="$UPDATER_SOURCE_DIR/atualizar.sh"
+  chmod 0700 "$UPDATER_RUNTIME_COPY"
   export TTS_BOT_UPDATER_RUNNING_COPY=1
-  export TTS_BOT_UPDATER_RUNTIME_COPY
+  export TTS_BOT_UPDATER_SOURCE_DIR="$UPDATER_SOURCE_DIR"
+  export TTS_BOT_UPDATER_RUNTIME_COPY="$UPDATER_RUNTIME_COPY"
+  export TTS_BOT_UPDATER_RUNTIME_BUNDLE="$UPDATER_RUNTIME_BUNDLE"
   exec /usr/bin/env bash "$UPDATER_RUNTIME_COPY" "$@"
 fi
 UPDATER_RUNTIME_COPY="${TTS_BOT_UPDATER_RUNTIME_COPY:-}"
+UPDATER_RUNTIME_BUNDLE="${TTS_BOT_UPDATER_RUNTIME_BUNDLE:-}"
+# Cobre também saídas anteriores ao carregamento dos traps completos.
+trap 'if [[ -n "$UPDATER_RUNTIME_BUNDLE" && "$UPDATER_SOURCE_DIR" == "$UPDATER_RUNTIME_BUNDLE" ]]; then rm -rf -- "$UPDATER_RUNTIME_BUNDLE"; fi' EXIT
 
 # Perfil conservador padrão: protege heartbeat/voz do bot na VPS pequena.
 # Trechos curtos de Git/worktree usam um perfil moderado temporário; antes de
@@ -69,16 +88,6 @@ UPDATER_RUNTIME_COPY="${TTS_BOT_UPDATER_RUNTIME_COPY:-}"
 # módulo: configuracao.sh
 . "$UPDATER_SOURCE_DIR/configuracao.sh"
 
-mkdir -p "$(dirname "$UPDATER_LOCK_FILE")" 2>/dev/null || true
-exec 9>"$UPDATER_LOCK_FILE"
-if [[ "${TTS_BOT_UPDATER_WAIT_FOR_LOCK:-0}" == 1 ]]; then
-  # A família nova aguarda a transação antiga terminar. Sair imediatamente
-  # faria o .path disparar em ciclo enquanto houvesse outro ZIP pendente.
-  flock 9
-elif ! flock -n 9; then
-  logger -t "$LOG_TAG" "updater já está em execução; mantendo fila para o próximo ciclo" 2>/dev/null || true
-  exit 0
-fi
 UPDATE_RUNTIME_RUN_ID="$(date +%Y%m%d%H%M%S)-$$-${RANDOM:-0}"
 
 FRONT_DIR="$REPO_DIR/dashboard/frontend"
@@ -269,7 +278,7 @@ UPDATER_EPHEMERAL_DIR="${TTS_BOT_UPDATER_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
 if [[ "$UPDATER_EPHEMERAL_DIR" != /* || ! -d "$UPDATER_EPHEMERAL_DIR" || -L "$UPDATER_EPHEMERAL_DIR" || ! -w "$UPDATER_EPHEMERAL_DIR" ]]; then
   UPDATER_EPHEMERAL_DIR="/tmp"
 fi
-RUN_LOG_FILE="$(mktemp "$UPDATER_EPHEMERAL_DIR/tts-bot-updater.XXXXXX.log")"
+RUN_LOG_FILE="$(mktemp "$UPDATER_EPHEMERAL_DIR/bot-updater.XXXXXX.log")"
 ZIP_STATUS_CONTROL_JSON=""
 ZIP_STATUS_UI_JSON=""
 UPDATE_TITLE_EMOJI="<a:areia:1496606578395189473>"

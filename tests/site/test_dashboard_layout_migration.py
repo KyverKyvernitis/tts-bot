@@ -142,8 +142,21 @@ def test_updater_uses_canonical_dashboard_paths_and_tests_before_build() -> None
     source = UPDATER.read_text(encoding="utf-8")
     assert 'FRONT_DIR="$REPO_DIR/dashboard/frontend"' in source
     assert 'BACK_DIR="$REPO_DIR/dashboard/backend"' in source
-    assert "^(dashboard/frontend|activity/sinuca)/" in source
-    assert "^(dashboard/backend|activity/sinuca-server)/" in source
+    start = source.index('classify_changed_files() {')
+    end = source.index('\nfast_reload_modules_for_changed_files() {', start)
+    classifier = source[start:end]
+    for path, expected in (
+        ('dashboard/frontend/src/main.ts', '1 0'),
+        ('activity/sinuca/src/main.ts', '1 0'),
+        ('dashboard/backend/src/index.ts', '0 1'),
+        ('activity/sinuca-server/src/index.ts', '0 1'),
+    ):
+        result = subprocess.run(
+            ['bash', '-euc', classifier + '\nclassify_changed_files\nprintf "%s %s" "$FRONT_CHANGED" "$BACK_CHANGED"'],
+            env={**os.environ, 'CHANGED_FILES_RAW': path}, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == expected
     assert source.index('STAGE="testes do frontend"') < source.index('STAGE="build do frontend"')
     assert source.index('STAGE="testes do backend"') < source.index('STAGE="build do backend"')
 

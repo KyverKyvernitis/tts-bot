@@ -78,7 +78,7 @@ else
   eval "$(create_direct_update_message "applying" "$(zip_progress_title "Conferindo commit do GitHub")" "$UPDATE_STAGE_EMOJI **Conferindo commit do GitHub**")"
   zip_progress_publish "Conferindo commit do GitHub"
 
-  local remote_ready_fast_path=0
+  remote_ready_fast_path=0
   STAGE="reutilização READY do commit remoto"
   if reuse_ready_artifacts_for_commit "$REMOTE_COMMIT"; then
     remote_ready_fast_path=1

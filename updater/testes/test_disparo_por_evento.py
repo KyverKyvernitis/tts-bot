@@ -20,13 +20,12 @@ def test_path_units_watch_only_pending_candidate_jsons() -> None:
     assert "PathChanged=" not in text
 
 
-def test_installer_bootstraps_path_even_when_old_updater_overlay_omits_it() -> None:
+def test_installer_requires_complete_canonical_overlay() -> None:
     text = INSTALLER.read_text(encoding="utf-8")
-    assert 'is_updater_unit "$rel"' in text
-    assert '"$UPDATER_SYSTEM_DIR/$rel"' in text
-    assert '"$REPO_DIR/deploy/systemd/vps/$rel"' not in text
-    assert '"$REPO_DIR/deploy/systemd/$rel"' not in text
-    assert "bot-updater.service bot-updater.timer bot-updater.path" in text
+    assert 'required_updater_template' in text
+    assert 'template obrigatório ausente' in text
+    assert 'Ponte 47a' not in text
+    assert 'Ponte da Wave 47a' not in text
 
 
 def test_path_enablement_follows_updater_timer_maintenance_policy() -> None:
