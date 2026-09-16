@@ -71,7 +71,11 @@ UPDATER_RUNTIME_COPY="${TTS_BOT_UPDATER_RUNTIME_COPY:-}"
 
 mkdir -p "$(dirname "$UPDATER_LOCK_FILE")" 2>/dev/null || true
 exec 9>"$UPDATER_LOCK_FILE"
-if ! flock -n 9; then
+if [[ "${TTS_BOT_UPDATER_WAIT_FOR_LOCK:-0}" == 1 ]]; then
+  # A família nova aguarda a transação antiga terminar. Sair imediatamente
+  # faria o .path disparar em ciclo enquanto houvesse outro ZIP pendente.
+  flock 9
+elif ! flock -n 9; then
   logger -t "$LOG_TAG" "updater já está em execução; mantendo fila para o próximo ciclo" 2>/dev/null || true
   exit 0
 fi
@@ -260,7 +264,7 @@ NODE_TOOLCHAIN_NPM_VERSION=""
 NODE_TOOLCHAIN_PLATFORM=""
 FAST_RELOAD_STATUS="não usado"
 FAST_RELOAD_MODULES=""
-UPDATER_UNIT="tts-bot-updater.service"
+UPDATER_UNIT="bot-updater.service"
 UPDATER_EPHEMERAL_DIR="${TTS_BOT_UPDATER_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
 if [[ "$UPDATER_EPHEMERAL_DIR" != /* || ! -d "$UPDATER_EPHEMERAL_DIR" || -L "$UPDATER_EPHEMERAL_DIR" || ! -w "$UPDATER_EPHEMERAL_DIR" ]]; then
   UPDATER_EPHEMERAL_DIR="/tmp"

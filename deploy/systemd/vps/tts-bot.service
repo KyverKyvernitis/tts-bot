@@ -4,7 +4,7 @@ After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
 StartLimitBurst=5
-OnFailure=tts-bot-alert@%n.service
+OnFailure=bot-updater-alert@%n.service
 
 [Service]
 Type=simple

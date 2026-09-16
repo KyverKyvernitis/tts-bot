@@ -90,10 +90,10 @@ FAILED_STAGE='build do frontend'
 LAST_ERROR_CODE='FRONTEND_TSC_FAILED'
 LAST_ERROR_COMMAND='npm run build'
 LAST_ERROR_EXIT_CODE=2
-LAST_ERROR_SERVICE_UNIT='tts-bot-updater.service'
+LAST_ERROR_SERVICE_UNIT='bot-updater.service'
 LAST_ERROR_STDERR='error TS2540: original failure'
 LAST_ERROR_LOGS='journal original'
-UPDATER_UNIT='tts-bot-updater.service'
+UPDATER_UNIT='bot-updater.service'
 LOG_TAG='test-updater'
 persist_primary_failure 58 deploy_frontend
 printf 'FAILURE=%s\n' "$UPDATE_FAILURE_FILE"

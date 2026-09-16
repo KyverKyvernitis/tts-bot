@@ -144,7 +144,7 @@ managed_systemd_template_source() {
 
   # As units próprias do updater têm uma única fonte de verdade.
   case "$rel" in
-    tts-bot-updater.service|tts-bot-updater.timer|tts-bot-updater.path|tts-bot-alert@.service)
+    bot-updater.service|bot-updater.timer|bot-updater.path|bot-updater-alert@.service)
       [[ -f "$canonical_src" ]] && printf '%s' "$canonical_src"
       return 0
       ;;
@@ -171,10 +171,10 @@ build_vps_systemd_template_overlay() {
   local rel src changed_path
   local -a managed_units=(
     tts-bot.service
-    tts-bot-updater.service
-    tts-bot-updater.timer
-    tts-bot-updater.path
-    tts-bot-alert@.service
+    bot-updater.service
+    bot-updater.timer
+    bot-updater.path
+    bot-updater-alert@.service
     cleanup-audio-temp.service
     cleanup-audio-temp.timer
     sinuca-activity-server.service
@@ -241,16 +241,16 @@ deploy_vps_systemd_units() {
   rm -rf "$template_overlay"
 
   VPS_SYSTEMD_UNITS_STATUS="falha ao sincronizar"
-  LAST_ERROR_STDERR="o instalador das units systemd falhou; a VPS não foi deixada com templates parcialmente atualizados"
+  LAST_ERROR_STDERR="o instalador das units systemd falhou; consulte o log do instalador e a restauração da migração"
   return "$rc"
 }
 
 deploy_alert_unit() {
   STAGE="configuração do alerta systemd"
   local src=""
-  src="$(managed_systemd_template_source "tts-bot-alert@.service")"
+  src="$(managed_systemd_template_source "bot-updater-alert@.service")"
   if [[ -n "$src" ]]; then
-    cp "$src" /etc/systemd/system/tts-bot-alert@.service
+    cp "$src" /etc/systemd/system/bot-updater-alert@.service
     systemctl daemon-reload || true
     ALERT_UNIT_STATUS="unit instalada"
   else

@@ -654,7 +654,7 @@ class CartoesUpdaterMixin:
         """Evita reconciliar enquanto o updater ainda está finalizando o candidato."""
         try:
             completed = subprocess.run(
-                ["systemctl", "is-active", "--quiet", "tts-bot-updater.service"],
+                ["systemctl", "is-active", "--quiet", "bot-updater.service"],
                 text=True,
                 capture_output=True,
                 timeout=3,

@@ -324,11 +324,11 @@ class PreparacaoUpdaterMixin:
 
 
     def _updater_service_state_sync(self) -> str:
-        service = Path("/etc/systemd/system/tts-bot-updater.service")
+        service = Path("/etc/systemd/system/bot-updater.service")
         if not service.exists():
             return "missing"
         result = self._run_cmd(
-            ["systemctl", "is-active", "tts-bot-updater.service"],
+            ["systemctl", "is-active", "bot-updater.service"],
             self._repo_root,
             env=self._git_env(),
         )
@@ -339,7 +339,7 @@ class PreparacaoUpdaterMixin:
 
 
     def _trigger_updater_service_sync(self) -> tuple[bool, str]:
-        service = Path("/etc/systemd/system/tts-bot-updater.service")
+        service = Path("/etc/systemd/system/bot-updater.service")
         if not service.exists():
             detail = "updater via systemd não encontrado"
             UPDATE_LOG.warning("dispatch do updater indisponível: %s", detail)
@@ -353,8 +353,8 @@ class PreparacaoUpdaterMixin:
 
         failures: list[str] = []
         commands = (
-            ["sudo", "-n", "systemctl", "start", "--no-block", "tts-bot-updater.service"],
-            ["systemctl", "start", "--no-block", "tts-bot-updater.service"],
+            ["sudo", "-n", "systemctl", "start", "--no-block", "bot-updater.service"],
+            ["systemctl", "start", "--no-block", "bot-updater.service"],
         )
         for args in commands:
             result = self._run_cmd(args, self._repo_root, env=self._git_env())

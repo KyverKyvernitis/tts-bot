@@ -20,7 +20,7 @@ The installer is idempotent and creates backups before changing live files. It:
 - syncs the active VPS unit templates from this directory to `/etc/systemd/system`;
 - keeps VPS-local `lavalink.service` disabled/masked because Lavalink belongs on
   the phone worker / Music Agent side;
-- installs `tts-bot-alert@.service` and the updater timer;
+- installs `bot-updater-alert@.service` and the updater timer;
 - installs phone worker watcher units but keeps them inactive unless explicitly
   enabled by environment flags;
 - normalizes emergency crontab lines without re-enabling healthcheck/resource-check.

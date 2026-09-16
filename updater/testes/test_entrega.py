@@ -417,8 +417,8 @@ def test_reconciler_skips_active_updater_and_never_confirms_mismatched_head() ->
 def test_systemd_installer_preserves_disabled_updater_timer_during_update() -> None:
     installer = (ROOT / "updater" / "sistema" / "instalar.sh").read_text(encoding="utf-8")
     assert "capture_updater_timer_state" in installer
-    assert '"$FROM_UPDATER" == "1" && "$UPDATER_TIMER_WAS_ENABLED" != "1"' in installer
-    assert 'action "tts-bot-updater.timer/path permaneceram desativados"' in installer
+    assert 'if [[ "$FROM_UPDATER" != 1 ]]; then' in installer
+    assert 'set_updater_trigger_state bot-updater.timer' in installer
 
 
 def test_post_deploy_failure_path_preserves_code_and_archives_candidate(tmp_path: Path) -> None:
@@ -444,7 +444,7 @@ LAST_ERROR_STDERR='erro visual'
 BOT_RESTARTS_DEPLOY=1
 BOT_RESTARTS_ROLLBACK=0
 ROLLBACK_STATUS='não foi necessário'
-UPDATER_UNIT='tts-bot-updater.service'
+UPDATER_UNIT='bot-updater.service'
 HOSTNAME=test-host
 short_commit() {{ printf '%s' "${{1:0:7}}"; }}
 register_error_context() {{ :; }}
@@ -497,7 +497,7 @@ def test_raw_log_receipt_is_written_only_after_bot_sends_to_discord() -> None:
     assert "_zip_update_flush_raw_logs_once" in source
 
 def test_updater_timer_waits_until_previous_run_is_inactive() -> None:
-    path = ROOT / "updater" / "sistema" / "tts-bot-updater.timer"
+    path = ROOT / "updater" / "sistema" / "bot-updater.timer"
     text = path.read_text(encoding="utf-8")
     assert "OnUnitInactiveSec=1min" in text
     assert "OnUnitActiveSec=" not in text
@@ -538,33 +538,15 @@ def test_game_bot_filter_uses_member_metadata_instead_of_decoding_tokens() -> No
 
 
 def test_installer_dynamically_keeps_disabled_updater_timer_disabled(tmp_path: Path) -> None:
-    installer = ROOT / "updater" / "sistema" / "instalar.sh"
-    calls = tmp_path / "systemctl.log"
-    harness = f"""
-source <(awk '/^capture_updater_timer_state[(][)]/{{flag=1}} /^write_status[(][)]/{{flag=0}} flag' {installer!s})
-DRY_RUN=0
-FROM_UPDATER=1
-UPDATER_TIMER_WAS_ENABLED=0
-UPDATER_TIMER_WAS_ACTIVE=0
-ACTIONS=()
-action() {{ :; }}
-truthy_env() {{ return 1; }}
-systemctl() {{
-  if [[ "${{1:-}}" == "is-enabled" || "${{1:-}}" == "is-active" ]]; then
-    return 1
-  fi
-  printf '%s\n' "$*" >> {calls!s}
-  return 0
-}}
-capture_updater_timer_state
-apply_service_policy
-"""
-    _run_bash(harness)
-    logged = calls.read_text(encoding="utf-8").splitlines()
-    assert "disable --now tts-bot-updater.timer tts-bot-updater.path" in logged
-    assert "enable tts-bot-updater.timer" not in logged
-    assert "enable --now tts-bot-updater.path" not in logged
-    assert "start tts-bot-updater.timer" not in logged
+    from updater.testes.test_migracao_systemd import installation, run_install
+
+    _, _, _, state, env = installation(tmp_path, timer=False, path=False)
+    result = run_install(env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    units = json.loads(state.read_text())["units"]
+    for name in ("bot-updater.timer", "bot-updater.path"):
+        assert units[name]["enabled"] is False
+        assert units[name]["active"] is False
 
 
 def _run_candidate_suspicion_check(tmp_path: Path, changed_files: list[str]) -> str:
@@ -648,7 +630,7 @@ def test_update_presence_and_short_user_notice_are_connected_to_runtime_state() 
 
 
 def test_updater_service_has_lower_cpu_and_io_priority() -> None:
-    path = ROOT / "updater" / "sistema" / "tts-bot-updater.service"
+    path = ROOT / "updater" / "sistema" / "bot-updater.service"
     text = path.read_text(encoding="utf-8")
     assert "Nice=10" in text
     assert "CPUWeight=20" in text

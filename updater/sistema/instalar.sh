@@ -32,6 +32,8 @@ ACTIONS=()
 WARNINGS=()
 UPDATER_TIMER_WAS_ENABLED=0
 UPDATER_TIMER_WAS_ACTIVE=0
+UPDATER_PATH_WAS_ENABLED=0
+UPDATER_PATH_WAS_ACTIVE=0
 JOURNALD_POLICY_CHANGED=0
 TMPFILES_POLICY_CHANGED=0
 
@@ -79,7 +81,7 @@ backup_live() {
 
 is_updater_unit() {
   case "${1:-}" in
-    tts-bot-updater.service|tts-bot-updater.timer|tts-bot-updater.path|tts-bot-alert@.service) return 0 ;;
+    bot-updater.service|bot-updater.timer|bot-updater.path|bot-updater-alert@.service) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -102,21 +104,19 @@ template_source() {
   fi
 
   [[ -f "$src" && ! -L "$src" ]] && printf '%s' "$src"
+  return 0
 }
 
 install_file() {
   local rel="$1"
   local src=""
   local dst="$SYSTEMD_DIR/$rel"
-  local fallback_src=""
   src="$(template_source "$rel")"
-  # Se um overlay transacional antigo omitir o .path, a fonte canônica no
-  # checkout já promovido ainda é segura para completar a instalação.
-  if [[ ( -z "$src" || ! -f "$src" ) && "$rel" == "tts-bot-updater.path" ]]; then
-    fallback_src="$UPDATER_SYSTEM_DIR/$rel"
-    if [[ -f "$fallback_src" && ! -L "$fallback_src" ]]; then
-      src="$fallback_src"
-      action "bootstrap do template canônico fora do overlay: $rel"
+  # Ponte da Wave 47a: o core anterior monta um overlay com nomes antigos.
+  # As units novas vêm do checkout promovido somente quando faltam no overlay.
+  if [[ -z "$src" ]] && is_updater_unit "$rel"; then
+    if [[ -f "$UPDATER_SYSTEM_DIR/$rel" && ! -L "$UPDATER_SYSTEM_DIR/$rel" ]]; then
+      src="$UPDATER_SYSTEM_DIR/$rel"
     fi
   fi
   if [[ ! -f "$src" ]]; then
@@ -407,6 +407,7 @@ install_sudoers_files() {
     return 0
   fi
   while IFS= read -r -d '' src; do
+    [[ "${src##*/}" == "bot-updater-start" ]] || continue
     rel="${src#$src_dir/}"
     dst="$SUDOERS_DIR/$rel"
     if [[ "$DRY_RUN" == "1" ]]; then
@@ -418,8 +419,8 @@ install_sudoers_files() {
     chmod 0440 "$tmp"
     if ! visudo -cf "$tmp" >/dev/null; then
       rm -f "$tmp"
-      warn "sudoers inválido ignorado: $rel"
-      continue
+      warn "sudoers inválido: $rel"
+      return 1
     fi
     if [[ -f "$dst" && ! -L "$dst" ]] \
         && cmp -s "$tmp" "$dst" \
@@ -448,8 +449,8 @@ install_units() {
   local unit
   for unit in \
     tts-bot.service \
-    tts-bot-updater.service tts-bot-updater.timer tts-bot-updater.path \
-    tts-bot-alert@.service \
+    bot-updater.service bot-updater.timer bot-updater.path \
+    bot-updater-alert@.service \
     cleanup-audio-temp.service cleanup-audio-temp.timer \
     sinuca-activity-server.service \
     phone-worker-watch.service phone-worker-watch.timer; do
@@ -459,19 +460,225 @@ install_units() {
 }
 
 capture_updater_timer_state() {
-  if systemctl is-enabled --quiet tts-bot-updater.timer 2>/dev/null; then
-    UPDATER_TIMER_WAS_ENABLED=1
+  local unit prefix=bot-updater
+  declare -gA UPDATER_TRIGGER_ENABLED=() UPDATER_TRIGGER_ACTIVE=()
+  for unit in bot-updater.timer bot-updater.path tts-bot-updater.timer tts-bot-updater.path; do
+    UPDATER_TRIGGER_ENABLED[$unit]=0
+    UPDATER_TRIGGER_ACTIVE[$unit]=0
+    if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+      UPDATER_TRIGGER_ENABLED[$unit]=1
+    fi
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+      UPDATER_TRIGGER_ACTIVE[$unit]=1
+    fi
+  done
+  # Um arquivo novo sozinho não comprova migração: uma instalação interrompida
+  # pode ter escrito o template e ainda não ter transferido os gatilhos.
+  if [[ -e "$SYSTEMD_DIR/tts-bot-updater.service" ]] \
+      && ! updater_migration_ready; then
+    prefix=tts-bot-updater
   fi
-  if systemctl is-active --quiet tts-bot-updater.timer 2>/dev/null; then
-    UPDATER_TIMER_WAS_ACTIVE=1
+  UPDATER_TIMER_WAS_ENABLED="${UPDATER_TRIGGER_ENABLED[$prefix.timer]}"
+  UPDATER_TIMER_WAS_ACTIVE="${UPDATER_TRIGGER_ACTIVE[$prefix.timer]}"
+  UPDATER_PATH_WAS_ENABLED="${UPDATER_TRIGGER_ENABLED[$prefix.path]}"
+  UPDATER_PATH_WAS_ACTIVE="${UPDATER_TRIGGER_ACTIVE[$prefix.path]}"
+}
+
+updater_migration_ready() {
+  local receipt="${UPDATER_MIGRATION_FILE:-$REPO_DIR/data/updater/systemd-migration.json}"
+  [[ -f "$receipt" && ! -L "$receipt" ]] || return 1
+  python3 - "$receipt" <<'PY_MIGRATION_READY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding='utf-8'))
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if data.get('ready') is True and data.get('service') == 'bot-updater.service' else 1)
+PY_MIGRATION_READY
+}
+
+required_updater_template() {
+  local rel="${1:?}" src
+  src="$(template_source "$rel")"
+  # Ponte 47a, necessária para o overlay gerado pelo core da Wave 46.
+  if [[ -z "$src" && -f "$UPDATER_SYSTEM_DIR/$rel" && ! -L "$UPDATER_SYSTEM_DIR/$rel" ]]; then
+    src="$UPDATER_SYSTEM_DIR/$rel"
+  fi
+  [[ -n "$src" && -s "$src" && ! -L "$src" ]] || {
+    warn "template obrigatório ausente: $rel"
+    return 1
+  }
+  printf '%s' "$src"
+}
+
+preflight_updater_migration() {
+  local unit src
+  for unit in bot-updater.service bot-updater.timer bot-updater.path bot-updater-alert@.service; do
+    src="$(required_updater_template "$unit")" || return 1
+    # Não seguir máscaras ou links locais ao instalar templates privilegiados.
+    if [[ -L "$SYSTEMD_DIR/$unit" ]]; then
+      warn "unit canônica mascarada ou vinculada: $unit"
+      return 1
+    fi
+    case "$unit" in
+      bot-updater.service)
+        grep -Fxq 'ExecStart=/usr/bin/env bash /home/ubuntu/bot/updater/core/atualizar.sh' "$src" || return 1 ;;
+      bot-updater.timer|bot-updater.path)
+        grep -Fxq 'Unit=bot-updater.service' "$src" || return 1 ;;
+    esac
+  done
+  src="$UPDATER_SUDOERS_DIR/bot-updater-start"
+  [[ -s "$src" && ! -L "$src" && ! -L "$SUDOERS_DIR/bot-updater-start" ]] || return 1
+  visudo -cf "$src" >/dev/null || return 1
+}
+
+begin_updater_migration() {
+  UPDATER_MIGRATION_OPEN=0
+  [[ "$DRY_RUN" != "1" ]] || return 0
+  UPDATER_MIGRATION_BACKUP="$BACKUP_DIR/updater-migration"
+  UPDATER_MIGRATION_FILE="${UPDATER_MIGRATION_FILE:-$REPO_DIR/data/updater/systemd-migration.json}"
+  mkdir -p "$UPDATER_MIGRATION_BACKUP"
+  local unit file
+  declare -ga UPDATER_SAVED_FILES=() UPDATER_EXISTING_FILES=()
+  for unit in bot-updater.service bot-updater.timer bot-updater.path bot-updater-alert@.service \
+      tts-bot-updater.service tts-bot-updater.timer tts-bot-updater.path tts-bot-alert@.service \
+      tts-bot.service; do
+    save_updater_migration_file "$SYSTEMD_DIR/$unit"
+  done
+  for file in "$SYSTEMD_DIR"/tts-bot.service.d/*.conf; do
+    [[ -e "$file" || -L "$file" ]] || continue
+    save_updater_migration_file "$file"
+  done
+  save_updater_migration_file "$SUDOERS_DIR/bot-updater-start"
+  save_updater_migration_file "$SUDOERS_DIR/tts-bot-updater-start"
+  save_updater_migration_file "$UPDATER_MIGRATION_FILE"
+  UPDATER_MIGRATION_OPEN=1
+}
+
+save_updater_migration_file() {
+  local file="${1:?}" index="${#UPDATER_SAVED_FILES[@]}" existed=0
+  if [[ -e "$file" || -L "$file" ]]; then
+    cp -a -- "$file" "$UPDATER_MIGRATION_BACKUP/$index"
+    existed=1
+  fi
+  UPDATER_SAVED_FILES+=("$file")
+  UPDATER_EXISTING_FILES+=("$existed")
+}
+
+set_updater_trigger_state() {
+  local unit="${1:?}" enabled="${2:?}" active="${3:?}"
+  if [[ "$enabled" == 1 ]]; then
+    systemctl enable "$unit" >/dev/null || return 1
+  else
+    systemctl disable "$unit" >/dev/null || return 1
+  fi
+  if [[ "$active" == 1 ]]; then
+    systemctl start "$unit" || return 1
+  else
+    systemctl stop "$unit" || return 1
   fi
 }
+
+apply_updater_service_policy() {
+  local unit
+  # A cópia antiga do updater pode continuar rodando até encerrar a transação.
+  # Desativar timer/path não para esse serviço; o lock continua compartilhado.
+  for unit in tts-bot-updater.timer tts-bot-updater.path; do
+    if [[ -e "$SYSTEMD_DIR/$unit" || -L "$SYSTEMD_DIR/$unit" ]]; then
+      systemctl disable --now "$unit" >/dev/null || return 1
+    fi
+  done
+  if [[ "$FROM_UPDATER" != 1 ]]; then
+    UPDATER_TIMER_WAS_ENABLED=1
+    UPDATER_TIMER_WAS_ACTIVE=1
+    UPDATER_PATH_WAS_ENABLED=1
+    UPDATER_PATH_WAS_ACTIVE=1
+  fi
+  set_updater_trigger_state bot-updater.timer "$UPDATER_TIMER_WAS_ENABLED" "$UPDATER_TIMER_WAS_ACTIVE" || return 1
+  set_updater_trigger_state bot-updater.path "$UPDATER_PATH_WAS_ENABLED" "$UPDATER_PATH_WAS_ACTIVE" || return 1
+  action "bot-updater.path/timer sincronizados; timer mantido como fallback; manutenção preservada"
+}
+
+verify_updater_installation() {
+  [[ "$DRY_RUN" != 1 ]] || return 0
+  local unit src actual expected active
+  for unit in bot-updater.service bot-updater.timer bot-updater.path bot-updater-alert@.service; do
+    src="$(required_updater_template "$unit")" || return 1
+    [[ -f "$SYSTEMD_DIR/$unit" && ! -L "$SYSTEMD_DIR/$unit" ]] || return 1
+    cmp -s "$src" "$SYSTEMD_DIR/$unit" || return 1
+    if [[ "$unit" != bot-updater-alert@.service ]]; then
+      [[ "$(systemctl show -p LoadState --value "$unit")" == loaded ]] || return 1
+      [[ "$(systemctl show -p FragmentPath --value "$unit")" == "$SYSTEMD_DIR/$unit" ]] || return 1
+    fi
+  done
+  cmp -s "$UPDATER_SUDOERS_DIR/bot-updater-start" "$SUDOERS_DIR/bot-updater-start" || return 1
+  visudo -cf "$SUDOERS_DIR/bot-updater-start" >/dev/null || return 1
+  for unit in bot-updater.timer bot-updater.path; do
+    expected="$UPDATER_TIMER_WAS_ENABLED"; active="$UPDATER_TIMER_WAS_ACTIVE"
+    if [[ "$unit" == bot-updater.path ]]; then
+      expected="$UPDATER_PATH_WAS_ENABLED"; active="$UPDATER_PATH_WAS_ACTIVE"
+    fi
+    actual=0
+    if systemctl is-enabled --quiet "$unit"; then actual=1; fi
+    [[ "$actual" == "$expected" ]] || return 1
+    actual=0
+    if systemctl is-active --quiet "$unit"; then actual=1; fi
+    [[ "$actual" == "$active" ]] || return 1
+  done
+}
+
+commit_updater_migration() {
+  [[ "$DRY_RUN" != 1 ]] || return 0
+  mkdir -p "$(dirname "$UPDATER_MIGRATION_FILE")"
+  python3 - "$UPDATER_MIGRATION_FILE" <<'PY_MIGRATION_COMMIT'
+import datetime, json, os, sys, tempfile
+from pathlib import Path
+path = Path(sys.argv[1])
+fd, name = tempfile.mkstemp(prefix='.systemd-migration-', dir=path.parent)
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+        json.dump({'ready': True, 'service': 'bot-updater.service',
+                   'updated_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(name, path)
+finally:
+    if os.path.exists(name):
+        os.unlink(name)
+PY_MIGRATION_COMMIT
+  UPDATER_MIGRATION_OPEN=0
+}
+
+updater_install_failed() {
+  local rc="${1:-1}" index file unit restore_ok=1
+  trap - ERR
+  if [[ "${UPDATER_MIGRATION_OPEN:-0}" == 1 ]]; then
+    for index in "${!UPDATER_SAVED_FILES[@]}"; do
+      file="${UPDATER_SAVED_FILES[$index]}"
+      if ! rm -f -- "$file"; then restore_ok=0; continue; fi
+      if [[ "${UPDATER_EXISTING_FILES[$index]}" == 1 ]]; then
+        if ! cp -a -- "$UPDATER_MIGRATION_BACKUP/$index" "$file"; then restore_ok=0; fi
+      fi
+    done
+    systemctl daemon-reload || restore_ok=0
+    for unit in bot-updater.timer bot-updater.path tts-bot-updater.timer tts-bot-updater.path; do
+      if [[ -e "$SYSTEMD_DIR/$unit" || -L "$SYSTEMD_DIR/$unit" ]]; then
+        set_updater_trigger_state "$unit" "${UPDATER_TRIGGER_ENABLED[$unit]}" "${UPDATER_TRIGGER_ACTIVE[$unit]}" || restore_ok=0
+      else
+        systemctl disable --now "$unit" >/dev/null 2>&1 || true
+      fi
+    done
+    warn "falha na migração; restauração dos arquivos/gatilhos: $restore_ok; backup: $UPDATER_MIGRATION_BACKUP"
+  fi
+  exit "$rc"
+}
+
 
 apply_service_policy() {
   if [[ "$DRY_RUN" == "1" ]]; then
     return 0
   fi
-  systemctl daemon-reload || true
+  systemctl daemon-reload
   if [[ "${JOURNALD_POLICY_CHANGED:-0}" == "1" ]]; then
     if systemctl restart systemd-journald.service; then
       action "limite persistente do journal aplicado"
@@ -486,25 +693,10 @@ apply_service_policy() {
       warn "política tmpfiles instalada, mas a limpeza inicial falhou"
     fi
   fi
-  systemctl reset-failed tts-bot.service tts-bot-updater.service tts-bot-updater.path tts-bot-alert@tts-bot.service >/dev/null 2>&1 || true
+  systemctl reset-failed tts-bot.service bot-updater.service bot-updater.path bot-updater-alert@tts-bot.service >/dev/null 2>&1 || true
   systemctl enable tts-bot.service >/dev/null 2>&1 || true
 
-  # Uma manutenção pode desativar o updater de propósito. Ao sincronizar units
-  # de dentro do próprio updater, preserve esse estado em vez de reativar o
-  # timer silenciosamente no meio de uma recuperação.
-  if [[ "$FROM_UPDATER" == "1" && "$UPDATER_TIMER_WAS_ENABLED" != "1" ]]; then
-    systemctl disable --now tts-bot-updater.timer tts-bot-updater.path >/dev/null 2>&1 || true
-    action "tts-bot-updater.timer/path permaneceram desativados"
-  else
-    systemctl enable tts-bot-updater.timer >/dev/null 2>&1 || true
-    # O path é o mecanismo normal de baixa latência; o timer permanece apenas
-    # como fallback periódico. Ativá-lo é passivo até existir JSON pendente.
-    systemctl enable --now tts-bot-updater.path >/dev/null 2>&1 || true
-    if [[ "$FROM_UPDATER" != "1" || "$UPDATER_TIMER_WAS_ACTIVE" == "1" ]]; then
-      systemctl start tts-bot-updater.timer >/dev/null 2>&1 || true
-    fi
-    action "tts-bot-updater.path habilitado; timer mantido como fallback"
-  fi
+  apply_updater_service_policy
 
   systemctl enable --now cleanup-audio-temp.timer >/dev/null 2>&1 || true
   systemctl start cleanup-audio-temp.service >/dev/null 2>&1 || true
@@ -593,8 +785,8 @@ audit_vps_systemd() {
   action "audit: comparando templates do repo com $SYSTEMD_DIR"
   for unit in \
     tts-bot.service \
-    tts-bot-updater.service tts-bot-updater.timer tts-bot-updater.path \
-    tts-bot-alert@.service \
+    bot-updater.service bot-updater.timer bot-updater.path \
+    bot-updater-alert@.service \
     cleanup-audio-temp.service cleanup-audio-temp.timer \
     sinuca-activity-server.service \
     phone-worker-watch.service phone-worker-watch.timer; do
@@ -611,7 +803,7 @@ audit_vps_systemd() {
     name="${live#$SYSTEMD_DIR/}"
     case "$name" in
       *.backup.*|*.disabled.*|*.disabled|*.tmp) continue ;;
-      tts-bot.service|tts-bot-updater.service|tts-bot-updater.timer|tts-bot-updater.path|tts-bot-alert@.service|cleanup-audio-temp.service|cleanup-audio-temp.timer|sinuca-activity-server.service|phone-worker-watch.service|phone-worker-watch.timer|tts-bot.service.d/*)
+      tts-bot.service|bot-updater.service|bot-updater.timer|bot-updater.path|bot-updater-alert@.service|cleanup-audio-temp.service|cleanup-audio-temp.timer|sinuca-activity-server.service|phone-worker-watch.service|phone-worker-watch.timer|tts-bot.service.d/*)
         [[ -n "$(template_source "$name")" ]] || warn "audit: existe só na VPS: $name"
         ;;
       lavalink.service|lavalink.service.d/*)
@@ -676,7 +868,10 @@ main() {
     log "auditoria concluída; nenhuma alteração aplicada"
     return 0
   fi
+  preflight_updater_migration
   capture_updater_timer_state
+  begin_updater_migration
+  trap 'updater_install_failed "$?"' ERR
   chmod_scripts
   install_units
   install_storage_policies
@@ -685,6 +880,11 @@ main() {
   mask_vps_lavalink
   normalize_crontab
   apply_service_policy
+  verify_updater_installation
+  # A Wave 47a conserva os arquivos legados para a próxima execução.
+  action "migração concluída; units legadas preservadas até a Wave 47b"
+  commit_updater_migration
+  trap - ERR
   prune_systemd_backups
   write_status
   if [[ -d "$BACKUP_DIR" ]]; then

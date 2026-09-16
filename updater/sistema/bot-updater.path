@@ -1,0 +1,9 @@
+[Unit]
+Description=Dispara o updater quando um candidato local entra na fila
+
+[Path]
+PathExistsGlob=/home/ubuntu/bot-update-staging/candidates/queue/pending/*.json
+Unit=bot-updater.service
+
+[Install]
+WantedBy=paths.target

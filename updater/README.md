@@ -6,7 +6,7 @@ integração Discord, utilitários e testes exclusivos do updater vivem nesta pa
 ## Visão geral
 
 O fluxo normal começa quando um ZIP é recebido no Discord. A integração em `discord/`
-valida o pacote e grava um candidato na fila. O `tts-bot-updater.path` observa a fila e
+valida o pacote e grava um candidato na fila. O `bot-updater.path` observa a fila e
 aciona o serviço systemd imediatamente; o timer fica apenas como fallback. O serviço
 executa `core/atualizar.sh`, que cria uma cópia runtime estável do próprio updater,
 carrega os módulos do `core/` e conduz a atualização em worktree isolado antes de
@@ -80,12 +80,14 @@ os caminhos canônicos são os nomes em português acima.
 
 ### `sistema/` e `sudoers/`
 
-`updater/sistema/` contém `instalar.sh` e as units `tts-bot-updater.*`.
+`updater/sistema/` contém `instalar.sh` e as units `bot-updater.*`.
 `updater/sudoers/` contém a permissão mínima usada para disparar o serviço.
 
-Os nomes das units continuam em inglês por serem contratos operacionais já instalados
-na VPS. Renomeá-los exige uma migração systemd própria e não faz parte da organização
-de arquivos.
+A Wave 47a instala a família `bot-updater.*`, migra o `OnFailure` do bot e
+transfere os estados de timer/path independentemente. Os arquivos das units
+antigas permanecem até a Wave 47b. O serviço que executa a migração nunca é parado;
+o lock `/run/lock/tts-bot-updater.lock` continua compartilhado entre as duas famílias.
+Falhas na instalação restauram os arquivos e os gatilhos anteriores.
 
 ### `testes/`
 
@@ -118,9 +120,9 @@ em um novo update.
 
 O caminho primário é orientado a evento:
 
-`Discord -> queue/pending -> tts-bot-updater.path -> tts-bot-updater.service`
+`Discord -> queue/pending -> bot-updater.path -> bot-updater.service`
 
-`tts-bot-updater.timer` permanece como fallback. O bot também mantém o mecanismo de
+`bot-updater.timer` permanece como fallback. O bot também mantém o mecanismo de
 dispatch/reconciliação para compatibilidade e observabilidade, mas não depende do timer
 de um minuto para o caminho normal.
 

@@ -252,11 +252,9 @@ def test_update_installs_root_systemd_templates_and_treats_install_failure_as_fa
     classify = source[source.index("classify_changed_files() {") : source.index("\ndeploy_audio_services() {")]
     deploy = source[source.index("deploy_vps_systemd_units() {") : source.index("\ndeploy_alert_unit() {")]
 
-    assert "deploy/systemd/tts-bot-updater.service" in classify
-    assert "deploy/systemd/tts-bot-updater.timer" in classify
-    assert "deploy/systemd/tts-bot-updater.path" in classify
-    assert "deploy/systemd/vps/tts-bot-updater.service" in classify
-    assert "deploy/systemd/vps/tts-bot-updater.path" in classify
+    assert "updater/sistema/*.service" in classify
+    assert "updater/sistema/*.timer" in classify
+    assert "updater/sistema/*.path" in classify
     assert "deploy/systemd/sinuca-activity-server.service" in classify
     assert "deploy/systemd/vps/sinuca-activity-server.service" in classify
     assert 'return "$rc"' in deploy

@@ -1,15 +1,18 @@
 # Infraestrutura do updater
 
-Este diretório contém a infraestrutura systemd que pertence ao updater. Os nomes
-das units permanecem `tts-bot-updater.*` durante a migração para preservar o
-estado e as dependências já instaladas na VPS.
+Este diretório contém a infraestrutura systemd que pertence ao updater.
+A Wave 47a instala `bot-updater.*` e preserva os arquivos das units antigas
+para permitir a transição do processo em execução. A Wave 47b faz a remoção.
+Timer e path preservam individualmente seus estados habilitado/ativo, inclusive
+quando desativados para manutenção. O instalador valida templates e sudoers
+antes de aplicar; uma falha restaura a família anterior sem parar o updater.
 
 Arquivos canônicos:
 
-- `tts-bot-updater.service`: execução transacional do updater;
-- `tts-bot-updater.path`: disparo imediato quando entra candidato na fila;
-- `tts-bot-updater.timer`: fallback periódico do `.path`;
-- `tts-bot-alert@.service`: alerta de falha usado pelo bot/systemd;
+- `bot-updater.service`: execução transacional do updater;
+- `bot-updater.path`: disparo imediato quando entra candidato na fila;
+- `bot-updater.timer`: fallback periódico do `.path`;
+- `bot-updater-alert@.service`: alerta de falha usado pelo bot/systemd;
 - `instalar.sh`: sincroniza units, sudoers e políticas operacionais na VPS.
 
 As units próprias do updater não possuem mais cópias em `deploy/systemd/`, e o

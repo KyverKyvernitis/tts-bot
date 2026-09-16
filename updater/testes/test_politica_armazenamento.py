@@ -36,11 +36,11 @@ def test_updater_runtime_is_systemd_managed_and_uses_unpredictable_names() -> No
     assert "guard_updater_disk_space" in updater
     assert updater.index("if ! guard_updater_disk_space; then") < updater.index("prune_update_artifacts || true")
 
-    unit = ROOT / "updater/sistema/tts-bot-updater.service"
+    unit = ROOT / "updater/sistema/bot-updater.service"
     text = unit.read_text(encoding="utf-8")
-    assert "RuntimeDirectory=tts-bot-updater" in text
+    assert "RuntimeDirectory=bot-updater" in text
     assert "RuntimeDirectoryPreserve=no" in text
-    assert "TTS_BOT_UPDATER_RUNTIME_DIR=/run/tts-bot-updater" in text
+    assert "TTS_BOT_UPDATER_RUNTIME_DIR=/run/bot-updater" in text
 
 
 def test_native_os_storage_policies_are_bounded_and_conservative() -> None:

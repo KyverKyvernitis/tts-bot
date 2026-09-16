@@ -17,7 +17,7 @@ def test_entrypoint_e_infra_legados_foram_removidos():
 
 
 def test_systemd_canonico_executa_entrypoint_canonico():
-    text = (ROOT / "updater/sistema/tts-bot-updater.service").read_text(encoding="utf-8")
+    text = (ROOT / "updater/sistema/bot-updater.service").read_text(encoding="utf-8")
     assert "/home/ubuntu/bot/updater/core/atualizar.sh" in text
     assert "/home/ubuntu/bot/scripts/tts-bot-update.sh" not in text
 

@@ -20,10 +20,10 @@ def test_trigger_reports_real_systemctl_result_and_active_state() -> None:
     state = _block(source, "    def _updater_service_state_sync", "\n    def _trigger_updater_service_sync")
     trigger = _block(source, "    def _trigger_updater_service_sync", "\n    async def _watch_updater_candidate_dispatch")
 
-    assert '["systemctl", "is-active", "tts-bot-updater.service"]' in state
+    assert '["systemctl", "is-active", "bot-updater.service"]' in state
     assert 'before_state in {"active", "activating", "reloading"}' in trigger
-    assert '["sudo", "-n", "systemctl", "start", "--no-block", "tts-bot-updater.service"]' in trigger
-    assert '["systemctl", "start", "--no-block", "tts-bot-updater.service"]' in trigger
+    assert '["sudo", "-n", "systemctl", "start", "--no-block", "bot-updater.service"]' in trigger
+    assert '["systemctl", "start", "--no-block", "bot-updater.service"]' in trigger
     assert '"dispatch do updater: comando=%s rc=%s estado_antes=%s detalhe=%s"' in trigger
     assert 'return False, f"timer aplicará depois ({detail})"' in trigger
 
