@@ -2,7 +2,9 @@
 
 Este diretório contém a infraestrutura systemd que pertence ao updater.
 A Wave 47a instala `bot-updater.*` e preserva os arquivos das units antigas
-para permitir a transição do processo em execução. A Wave 47b faz a remoção.
+para permitir a transição do processo em execução. A Wave 47b remove as quatro
+units antigas e o sudoers legado após validar a migração, a inatividade do
+serviço antigo e a ausência de consumidores de `OnFailure` antigos.
 Timer e path preservam individualmente seus estados habilitado/ativo, inclusive
 quando desativados para manutenção. O instalador valida templates e sudoers
 antes de aplicar; uma falha restaura a família anterior sem parar o updater.

@@ -540,7 +540,7 @@ def test_game_bot_filter_uses_member_metadata_instead_of_decoding_tokens() -> No
 def test_installer_dynamically_keeps_disabled_updater_timer_disabled(tmp_path: Path) -> None:
     from updater.testes.test_migracao_systemd import installation, run_install
 
-    _, _, _, state, env = installation(tmp_path, timer=False, path=False)
+    _, _, _, state, env = installation(tmp_path, timer=False, path=False, migrated=True)
     result = run_install(env)
     assert result.returncode == 0, result.stdout + result.stderr
     units = json.loads(state.read_text())["units"]

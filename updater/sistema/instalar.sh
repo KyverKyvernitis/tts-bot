@@ -532,6 +532,83 @@ preflight_updater_migration() {
   visudo -cf "$src" >/dev/null || return 1
 }
 
+preflight_legacy_updater_removal() {
+  local unit state found=0
+  for unit in tts-bot-updater.service tts-bot-updater.timer tts-bot-updater.path tts-bot-alert@.service; do
+    [[ ! -e "$SYSTEMD_DIR/$unit" && ! -L "$SYSTEMD_DIR/$unit" ]] || found=1
+  done
+  [[ ! -e "$SUDOERS_DIR/tts-bot-updater-start" && ! -L "$SUDOERS_DIR/tts-bot-updater-start" ]] || found=1
+  [[ "$found" == 1 ]] || return 0
+  if ! updater_migration_ready; then
+    warn "remoção legada exige a migração 47a concluída"
+    return 1
+  fi
+  state="$(systemctl show -p ActiveState --value tts-bot-updater.service)" || return 1
+  case "$state" in
+    inactive|failed) ;;
+    *) warn "serviço legado ainda está em execução; conclua a Wave 47a antes da 47b"; return 1 ;;
+  esac
+  # De dentro do updater, a própria nova família precisa estar conduzindo a
+  # transação. Não remover o único serviço operacional a partir da ponte antiga.
+  if [[ "$FROM_UPDATER" == 1 ]]; then
+    state="$(systemctl show -p ActiveState --value bot-updater.service)" || return 1
+    case "$state" in
+      active|activating|reloading) ;;
+      *) warn "remoção legada requer execução pela nova família bot-updater"; return 1 ;;
+    esac
+  fi
+  for unit in tts-bot-updater.timer tts-bot-updater.path; do
+    if systemctl is-active --quiet "$unit" || systemctl is-enabled --quiet "$unit"; then
+      warn "gatilho legado ainda habilitado/ativo: $unit"
+      return 1
+    fi
+  done
+  if [[ -n "$(systemctl list-units 'tts-bot-alert@*.service' --state=active,activating --no-legend --plain)" ]]; then
+    warn "alerta legado ainda em execução"
+    return 1
+  fi
+  # Drop-ins locais podem manter um OnFailure antigo apesar dos templates do
+  # repositório. Detectar o consumidor antes de excluir seu destino.
+  python3 - "$SYSTEMD_DIR" <<'PY_LEGACY_CONSUMERS'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+legacy = {'tts-bot-updater.service', 'tts-bot-updater.timer', 'tts-bot-updater.path', 'tts-bot-alert@.service'}
+for pattern in ('*.service', '*.conf', '*.timer', '*.path'):
+    for path in root.rglob(pattern):
+        if path.is_symlink() or path.name in legacy or not path.is_file():
+            continue
+        for line in path.read_text(encoding='utf-8').splitlines():
+            value = line.strip()
+            if value and not value.startswith(('#', ';')) and '=' in value:
+                if 'tts-bot-alert@' in value or any('tts-bot-updater.' + ext in value for ext in ('service', 'timer', 'path')):
+                    print(f'referência legada ainda ativa: {path}: {value}', file=sys.stderr)
+                    raise SystemExit(1)
+PY_LEGACY_CONSUMERS
+}
+
+remove_legacy_updater_files() {
+  [[ "$DRY_RUN" != 1 ]] || { action "dry-run: removeria somente a família legada verificada"; return 0; }
+  # Revalidar o serviço antigo após instalar as novas units. Isso cobre uma
+  # partida concorrente entre o preflight e a limpeza dos arquivos.
+  preflight_legacy_updater_removal || return 1
+  local unit
+  for unit in tts-bot-updater.service tts-bot-updater.timer tts-bot-updater.path tts-bot-alert@.service; do
+    if [[ -e "$SYSTEMD_DIR/$unit" || -L "$SYSTEMD_DIR/$unit" ]]; then
+      systemctl disable "$unit" >/dev/null || return 1
+      rm -f -- "$SYSTEMD_DIR/$unit" || return 1
+      CHANGED=1
+    fi
+  done
+  if [[ -e "$SUDOERS_DIR/tts-bot-updater-start" || -L "$SUDOERS_DIR/tts-bot-updater-start" ]]; then
+    rm -f -- "$SUDOERS_DIR/tts-bot-updater-start" || return 1
+    CHANGED=1
+  fi
+  systemctl daemon-reload || return 1
+  action "família legada removida; bot-updater é a infraestrutura canônica"
+}
+
+
 begin_updater_migration() {
   UPDATER_MIGRATION_OPEN=0
   [[ "$DRY_RUN" != "1" ]] || return 0
@@ -869,6 +946,7 @@ main() {
     return 0
   fi
   preflight_updater_migration
+  preflight_legacy_updater_removal
   capture_updater_timer_state
   begin_updater_migration
   trap 'updater_install_failed "$?"' ERR
@@ -881,8 +959,8 @@ main() {
   normalize_crontab
   apply_service_policy
   verify_updater_installation
-  # A Wave 47a conserva os arquivos legados para a próxima execução.
-  action "migração concluída; units legadas preservadas até a Wave 47b"
+  remove_legacy_updater_files
+  verify_updater_installation
   commit_updater_migration
   trap - ERR
   prune_systemd_backups

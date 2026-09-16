@@ -84,8 +84,8 @@ os caminhos canônicos são os nomes em português acima.
 `updater/sudoers/` contém a permissão mínima usada para disparar o serviço.
 
 A Wave 47a instala a família `bot-updater.*`, migra o `OnFailure` do bot e
-transfere os estados de timer/path independentemente. Os arquivos das units
-antigas permanecem até a Wave 47b. O serviço que executa a migração nunca é parado;
+transfere os estados de timer/path independentemente. A Wave 47b remove os arquivos das units
+antigas somente após comprovar a migração e a inatividade da família antiga. O serviço que executa a migração nunca é parado;
 o lock `/run/lock/tts-bot-updater.lock` continua compartilhado entre as duas famílias.
 Falhas na instalação restauram os arquivos e os gatilhos anteriores.
 

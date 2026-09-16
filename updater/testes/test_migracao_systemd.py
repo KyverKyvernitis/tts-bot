@@ -32,6 +32,8 @@ if command == 'is-enabled':
     raise SystemExit(0 if units.get(unit, {}).get('enabled') else 1)
 if command == 'is-active':
     raise SystemExit(0 if units.get(unit, {}).get('active') else 3)
+if command == 'list-units':
+    raise SystemExit(0)
 if command == 'show':
     prop = args[args.index('-p') + 1]
     if prop == 'LoadState': print('loaded' if (root / unit).is_file() else 'not-found')
@@ -67,6 +69,7 @@ def installation(tmp_path: Path, *, timer=True, path=True, migrated=False):
     (sudoers / 'tts-bot-updater-start').write_text('# permissão antiga\n')
     (systemd / 'tts-bot.service').write_text('[Unit]\nOnFailure=tts-bot-alert@%n.service\n')
     if migrated:
+        (systemd / 'tts-bot.service').write_text('[Unit]\nOnFailure=bot-updater-alert@%n.service\n')
         for unit in NEW_UNITS:
             shutil.copy(ROOT / 'updater/sistema' / unit, systemd / unit)
         shutil.copy(ROOT / 'updater/sudoers/bot-updater-start', sudoers)
@@ -105,7 +108,7 @@ def run_install(env, *args):
 
 def assert_no_service_stop(calls):
     for args in calls:
-        if args[0] in {'stop', 'restart', 'disable'}:
+        if args[0] in {'stop', 'restart'} or args[0] == 'disable' and '--now' in args:
             assert 'tts-bot-updater.service' not in args
             assert 'bot-updater.service' not in args
 
@@ -139,50 +142,45 @@ def test_new_service_waits_for_shared_lock_without_a_path_restart_loop(tmp_path)
 
 @pytest.mark.parametrize('timer,path', [(True, True), (False, False), (False, True), (True, False)])
 def test_migration_preserves_independent_maintenance_states(tmp_path, timer, path):
-    repo, systemd, sudoers, state, env = installation(tmp_path, timer=timer, path=path)
+    repo, systemd, sudoers, state, env = installation(tmp_path, timer=timer, path=path, migrated=True)
     result = run_install(env)
     assert result.returncode == 0, result.stdout + result.stderr
     data = json.loads(state.read_text())
     for suffix, enabled in [('timer', timer), ('path', path)]:
         assert data['units'][f'bot-updater.{suffix}']['enabled'] is enabled
         assert data['units'][f'bot-updater.{suffix}']['active'] is enabled
-        assert data['units'][f'tts-bot-updater.{suffix}']['active'] is False
-    assert all((systemd / unit).is_file() for unit in (*OLD_UNITS, *NEW_UNITS))
-    assert (sudoers / 'tts-bot-updater-start').is_file()
+        assert data['units'].get(f'tts-bot-updater.{suffix}', {}).get('active', False) is False
+    assert all((systemd / unit).is_file() for unit in NEW_UNITS)
+    assert all(not (systemd / unit).exists() for unit in OLD_UNITS)
+    assert not (sudoers / 'tts-bot-updater-start').exists()
     assert 'OnFailure=bot-updater-alert@%n.service' in (systemd / 'tts-bot.service').read_text()
     assert json.loads((repo / 'data/updater/systemd-migration.json').read_text())['ready'] is True
     assert_no_service_stop(data['calls'])
 
 
-def test_old_core_overlay_can_bootstrap_canonical_units(tmp_path):
-    repo, systemd, _, _, env = installation(tmp_path)
-    overlay = tmp_path / 'overlay'
-    overlay.mkdir()
-    for unit in OLD_UNITS:
-        shutil.copy(systemd / unit, overlay)
-    shutil.copy(repo / 'deploy/systemd/vps/tts-bot.service', overlay)
-    env['TEMPLATE_DIR'] = str(overlay)
+def test_removal_refuses_to_skip_wave47a(tmp_path):
+    repo, systemd, _, state, env = installation(tmp_path)
     result = run_install(env)
-    assert result.returncode == 0, result.stdout + result.stderr
-    for unit in NEW_UNITS:
-        assert (systemd / unit).read_bytes() == (repo / 'updater/sistema' / unit).read_bytes()
+    assert result.returncode != 0
+    assert 'migração 47a concluída' in result.stdout
+    assert all((systemd / unit).exists() for unit in OLD_UNITS)
+    assert not (systemd / 'bot-updater.service').exists()
+    assert json.loads(state.read_text())['calls'] == []
 
 
 def test_failed_migration_restores_old_files_and_dispatch(tmp_path):
-    repo, systemd, sudoers, state, env = installation(tmp_path)
+    repo, systemd, sudoers, state, env = installation(tmp_path, migrated=True)
     original = (systemd / 'tts-bot.service').read_bytes()
-    env['MOCK_FAIL'] = 'start bot-updater.path'
+    env['MOCK_FAIL'] = 'disable tts-bot-alert@.service'
     result = run_install(env)
     assert result.returncode != 0
-    assert not (repo / 'data/updater/systemd-migration.json').exists()
     assert (systemd / 'tts-bot.service').read_bytes() == original
-    assert all((systemd / name).is_file() for name in OLD_UNITS)
-    assert all(not (systemd / name).exists() for name in NEW_UNITS)
+    assert all((systemd / name).is_file() for name in (*OLD_UNITS, *NEW_UNITS))
     assert (sudoers / 'tts-bot-updater-start').is_file()
-    assert not (sudoers / 'bot-updater-start').exists()
+    assert (sudoers / 'bot-updater-start').is_file()
     data = json.loads(state.read_text())
-    assert data['units']['tts-bot-updater.timer']['active'] is True
-    assert data['units']['tts-bot-updater.path']['active'] is True
+    assert data['units']['bot-updater.timer']['active'] is True
+    assert data['units']['bot-updater.path']['active'] is True
     assert_no_service_stop(data['calls'])
 
 
@@ -195,10 +193,45 @@ def test_invalid_sudoers_aborts_before_any_installation(tmp_path):
     assert json.loads(state.read_text())['calls'] == []
 
 
+@pytest.mark.parametrize('legacy_state', ['active', 'activating', 'reloading', 'deactivating'])
+def test_removal_never_interrupts_running_legacy_service(tmp_path, legacy_state):
+    _, systemd, _, state, env = installation(tmp_path, migrated=True)
+    data = json.loads(state.read_text())
+    data['units']['tts-bot-updater.service'] = {'state': legacy_state}
+    state.write_text(json.dumps(data))
+    result = run_install(env)
+    assert result.returncode != 0
+    assert 'serviço legado ainda está em execução' in result.stdout
+    assert all((systemd / unit).exists() for unit in OLD_UNITS)
+    assert all(call[0] in {'is-active', 'is-enabled', 'show', 'list-units'} for call in json.loads(state.read_text())['calls'])
+
+
+def test_removal_detects_old_onfailure_in_live_dropin(tmp_path):
+    _, systemd, _, _, env = installation(tmp_path, migrated=True)
+    dropin = systemd / 'tts-bot.service.d/custom.conf'
+    dropin.parent.mkdir()
+    dropin.write_text('[Unit]\nOnFailure=tts-bot-alert@%n.service\n')
+    result = run_install(env)
+    assert result.returncode != 0
+    assert 'referência legada ainda ativa' in result.stderr
+    assert all((systemd / unit).exists() for unit in OLD_UNITS)
+
+
+def test_removal_is_idempotent_after_legacy_files_are_gone(tmp_path):
+    _, systemd, sudoers, state, env = installation(tmp_path, migrated=True)
+    first = run_install(env)
+    assert first.returncode == 0, first.stdout + first.stderr
+    second = run_install(env)
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert all(not (systemd / unit).exists() for unit in OLD_UNITS)
+    assert not (sudoers / 'tts-bot-updater-start').exists()
+    assert_no_service_stop(json.loads(state.read_text())['calls'])
+
+
 def test_dry_run_has_no_service_or_file_mutations(tmp_path):
-    repo, systemd, _, state, env = installation(tmp_path)
+    repo, systemd, _, state, env = installation(tmp_path, migrated=True)
     result = run_install(env, '--dry-run')
     assert result.returncode == 0, result.stdout + result.stderr
-    assert not (systemd / 'bot-updater.service').exists()
-    assert not (repo / 'data/updater/systemd-migration.json').exists()
-    assert all(call[0] in {'is-active', 'is-enabled', 'show'} for call in json.loads(state.read_text())['calls'])
+    assert (systemd / 'bot-updater.service').exists()
+    assert all((systemd / unit).exists() for unit in OLD_UNITS)
+    assert all(call[0] in {'is-active', 'is-enabled', 'show', 'list-units'} for call in json.loads(state.read_text())['calls'])
