@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 import config
 from updater.utilitarios.seguranca import (
     UPDATE_CONTROL_MANIFEST_NAME, UpdateSecurityError, build_file_integrity,
-    canonical_path_key, inspect_zip_archive, is_forbidden_update_path,
+    candidate_confirmation_reasons, canonical_path_key, inspect_zip_archive, is_forbidden_update_path,
     normalize_update_operations, sha256_file, update_operation_paths,
     update_payload_paths,
 )
@@ -239,6 +239,9 @@ class PreparacaoUpdaterMixin:
                     }
                 )
 
+            confirmation_reasons = candidate_confirmation_reasons(zip_name, changed_files)
+            confirmation_required = bool(confirmation_reasons)
+
             manifest: dict[str, object] = {
                 "schema_version": 3,
                 "id": candidate_id,
@@ -264,6 +267,10 @@ class PreparacaoUpdaterMixin:
                     "completed_count": len(handoff_steps),
                     "preparation_total_ms": preparation_total_ms,
                     "started_at_epoch_ms": max(0, int(progress_started_epoch_ms or 0)),
+                },
+                "security_confirmation": {
+                    "required": confirmation_required,
+                    "reasons": confirmation_reasons,
                 },
             }
             if isinstance(status_context, dict) and status_context.get("message_id") and status_context.get("channel_id"):
@@ -300,7 +307,11 @@ class PreparacaoUpdaterMixin:
                 "candidate_dir": str(candidate_dir),
                 "id": candidate_id,
                 "display_id": display_id,
-                "state": "queued",
+                "state": "awaiting_confirmation" if confirmation_required else "queued",
+                "confirmation_required": confirmation_required,
+                "confirmation_reasons": confirmation_reasons,
+                "confirmed_at": None,
+                "confirmed_by": None,
                 "attempt": 0,
                 "created_at": created_at.isoformat(),
                 "expires_at": expires_at.isoformat(),
@@ -315,6 +326,8 @@ class PreparacaoUpdaterMixin:
                 "pending_path": str(pending_path),
                 "queue_position": queue_position,
                 "queue_pending_count": pending_count + 1,
+                "confirmation_required": confirmation_required,
+                "confirmation_reasons": confirmation_reasons,
                 "candidate_prepare_elapsed_ms": candidate_prepare_elapsed_ms,
                 "preparation_total_ms": preparation_total_ms,
             }

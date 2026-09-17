@@ -425,3 +425,42 @@ def test_local_candidate_exposes_real_validation_release_and_application_phases(
     assert 'zip_progress_done_and_publish "Candidato validado" "Criando release candidata"' in source
     classifier = _block(source, "zip_progress_macro_index() {", "\nzip_progress_advance_macro_index() {")
     assert "*validando\\ aplicação*" in classifier
+
+
+def test_large_zip_requires_human_confirmation_before_dispatch() -> None:
+    bot = ler_fonte_discord()
+    updater = UPDATER.read_text(encoding="utf-8")
+    writer = _block(bot, "    def _write_local_update_candidate_sync", "\n    def _trigger_updater_service_sync")
+    handler = _block(bot, "    async def _handle_zip_update_message", "\n    async def on_guild_join")
+    controls = _block(bot, "    async def _on_zip_update_control_click", "\n    async def _on_zip_update_confirmation_click")
+
+    assert "candidate_confirmation_reasons(zip_name, changed_files)" in writer
+    assert '"state": "awaiting_confirmation" if confirmation_required else "queued"' in writer
+    assert '"confirmation_required": confirmation_required' in writer
+    assert '"confirmed_at": None' in writer
+    assert '"⚠️ Atualização requer confirmação"' in handler
+    assert "_zip_update_security_confirmation_control(candidate_id)" in handler
+    assert 'if requested_mode == "approve":' in controls
+    assert "_zip_update_confirm_candidate_sync" in controls
+    assert "await self._dispatch_updater_candidate(token, display_id)" in controls
+
+    assert "Candidato aguardando confirmação humana" in updater
+    assert "required and not confirmed" in updater
+    assert "CANDIDATE_CONFIRMED_AT" in updater
+    assert "if not confirmed and not allow_full:" in updater
+
+
+def test_confirmation_card_has_confirm_and_cancel_buttons_and_keeps_file_count() -> None:
+    source = ler_fonte_discord()
+    control = _block(
+        source,
+        "    def _zip_update_security_confirmation_control",
+        "\n    def _zip_update_cancel_control",
+    )
+    view = _block(source, "    def _make_zip_update_view", "\n    def _make_zip_update_confirmation_view")
+    handler = _block(source, "    async def _handle_zip_update_message", "\n    async def on_guild_join")
+    assert '"label": "Confirmar atualização"' in control
+    assert 'f"zip_update:approve:{candidate_id}"' in control
+    assert 'f"zip_update:cancel:{candidate_id}"' in control
+    assert 'discord.ui.ActionRow(*buttons)' in view
+    assert 'f"`{display_id}` · **{file_text}**"' in handler

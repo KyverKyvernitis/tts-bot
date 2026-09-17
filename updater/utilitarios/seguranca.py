@@ -47,6 +47,26 @@ def is_forbidden_update_path(path: Path | PurePosixPath | str) -> bool:
     return False
 
 
+def candidate_confirmation_reasons(zip_name: object, changed_files: Iterable[object]) -> list[str]:
+    """Retorna heurísticas de risco que exigem aprovação humana, não rejeição.
+
+    Segurança estrutural (traversal, caminhos protegidos, symlinks, integridade etc.)
+    continua sendo bloqueante em outras validações. Aqui entram apenas sinais de que
+    o pacote pode ser grande/amplo demais para aplicação automática sem revisão.
+    """
+    name = str(zip_name or "").strip().casefold()
+    changed = [str(item).strip().replace("\\", "/") for item in changed_files if str(item).strip()]
+    reasons: list[str] = []
+    if name.startswith(("repo-", "tts-bot-main", "tts-bot-base")):
+        reasons.append("o arquivo parece uma base completa, não um patch")
+    if len(changed) > 120:
+        reasons.append(f"muitos arquivos alterados para um patch normal ({len(changed)})")
+    lockfiles = [path for path in changed if path.casefold().endswith("package-lock.json")]
+    if len(lockfiles) >= 2 and len(changed) > 20:
+        reasons.append("parece conter árvore de projeto/frontend completa")
+    return list(dict.fromkeys(reasons))
+
+
 class UpdateSecurityError(ValueError):
     """Raised when an update package or candidate fails a security check."""
 

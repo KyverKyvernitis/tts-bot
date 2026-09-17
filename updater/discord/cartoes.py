@@ -246,27 +246,36 @@ class CartoesUpdaterMixin:
             children.append(discord.ui.ActionRow(*info_buttons))
 
         if isinstance(control, dict) and control.get("enabled"):
-            emoji = str(control.get("emoji") or "").strip() or None
-            label = str(control.get("label") or "").strip()[:80] or None
-            custom_id = str(control.get("custom_id") or "")[:100]
-            disabled = bool(control.get("disabled"))
-            style_name = str(control.get("style") or "secondary").strip().lower()
-            style = {
-                "primary": discord.ButtonStyle.primary,
-                "success": discord.ButtonStyle.success,
-                "danger": discord.ButtonStyle.danger,
-            }.get(style_name, discord.ButtonStyle.secondary)
-            if custom_id and (label or emoji):
-                button = discord.ui.Button(
-                    label=label,
-                    emoji=emoji,
-                    style=style,
-                    custom_id=custom_id,
-                    disabled=disabled,
-                )
+            raw_buttons = control.get("buttons")
+            control_items = raw_buttons if isinstance(raw_buttons, list) else [control]
+            buttons: list[discord.ui.Button] = []
+            for item in control_items[:5]:
+                if not isinstance(item, dict):
+                    continue
+                emoji = str(item.get("emoji") or "").strip() or None
+                label = str(item.get("label") or "").strip()[:80] or None
+                custom_id = str(item.get("custom_id") or "")[:100]
+                disabled = bool(item.get("disabled"))
+                style_name = str(item.get("style") or "secondary").strip().lower()
+                style = {
+                    "primary": discord.ButtonStyle.primary,
+                    "success": discord.ButtonStyle.success,
+                    "danger": discord.ButtonStyle.danger,
+                }.get(style_name, discord.ButtonStyle.secondary)
+                if custom_id and (label or emoji):
+                    buttons.append(
+                        discord.ui.Button(
+                            label=label,
+                            emoji=emoji,
+                            style=style,
+                            custom_id=custom_id,
+                            disabled=disabled,
+                        )
+                    )
+            if buttons:
                 if not info_buttons:
                     children.append(discord.ui.Separator())
-                children.append(discord.ui.ActionRow(button))
+                children.append(discord.ui.ActionRow(*buttons))
         container_kwargs: dict[str, object] = {}
         if not (isinstance(presentation, dict) and str(presentation.get("kind") or "").lower() == "progress"):
             container_kwargs["accent_color"] = color
@@ -1092,6 +1101,33 @@ class CartoesUpdaterMixin:
             "style": "success" if mode == "redo" else "danger",
             "custom_id": f"zip_update:{mode}:{token}"[:100],
             "disabled": disabled,
+        }
+
+
+    def _zip_update_security_confirmation_control(
+        self, candidate_id: str, *, disabled: bool = False
+    ) -> dict[str, object] | None:
+        candidate_id = str(candidate_id or "").strip()
+        if not candidate_id:
+            return None
+        return {
+            "enabled": True,
+            "buttons": [
+                {
+                    "emoji": "✅",
+                    "label": "Confirmar atualização",
+                    "style": "success",
+                    "custom_id": f"zip_update:approve:{candidate_id}"[:100],
+                    "disabled": disabled,
+                },
+                {
+                    "emoji": "✖️",
+                    "label": "Cancelar",
+                    "style": "secondary",
+                    "custom_id": f"zip_update:cancel:{candidate_id}"[:100],
+                    "disabled": disabled,
+                },
+            ],
         }
 
 

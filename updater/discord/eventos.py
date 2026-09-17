@@ -372,6 +372,32 @@ class EventosUpdaterMixin:
                     file_text = "1 arquivo preparado" if file_count == 1 else f"{file_count} arquivos preparados"
                     file_summary = f"{file_text} · {diff_summary}" if diff_summary else file_text
 
+                    confirmation_required = bool(result.get("confirmation_required"))
+                    confirmation_reasons = [
+                        str(item).strip()
+                        for item in (result.get("confirmation_reasons") or [])
+                        if str(item).strip()
+                    ]
+                    if confirmation_required:
+                        reason_lines = [f"• {reason}" for reason in confirmation_reasons[:4]]
+                        details = [
+                            f"`{display_id}` · **{file_text}**",
+                            "",
+                            "O pacote passou pelas validações estruturais, mas é amplo demais para aplicação automática.",
+                        ]
+                        if reason_lines:
+                            details.extend(["", "**Motivo**", *reason_lines])
+                        details.extend(["", "Confirme para continuar com o mesmo candidato; nenhum arquivo foi aplicado ainda."])
+                        status_message = await self._edit_zip_update_message(
+                            message,
+                            status_message,
+                            "⚠️ Atualização requer confirmação",
+                            "\n".join(details),
+                            discord.Color.gold(),
+                            control=self._zip_update_security_confirmation_control(candidate_id),
+                        )
+                        continue
+
                     if queue_position <= 1:
                         # O primeiro item não está esperando outro update. Mantenha o
                         # painel de microetapas e faça a transição direta para o updater.

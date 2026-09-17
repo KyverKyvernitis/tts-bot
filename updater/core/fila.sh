@@ -55,6 +55,24 @@ load_pending_local_candidate() {
         return 1
       fi
 
+      # Candidatos amplos permanecem em pending até uma confirmação explícita no
+      # Discord. O timer pode acordar livremente, mas não deve reivindicar o item
+      # nem permitir que atualizações posteriores ultrapassem sua posição na fila.
+      if python3 - "$pending_file" <<'PYCONFIRMWAIT' >/dev/null 2>&1
+import json, pathlib, sys
+try:
+    data = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit(1)
+required = bool(data.get('confirmation_required'))
+confirmed = bool(str(data.get('confirmed_at') or '').strip())
+raise SystemExit(0 if required and not confirmed else 1)
+PYCONFIRMWAIT
+      then
+        logger -t "$LOG_TAG" "Candidato aguardando confirmação humana: $(basename "$pending_file")" 2>/dev/null || true
+        return 1
+      fi
+
       active_payload="$CANDIDATE_QUEUE_ACTIVE_DIR/$(basename "$pending_file")"
       if ! mv "$pending_file" "$active_payload" 2>/dev/null; then
         # Outro processo pode ter pego no mesmo instante. O flock torna isso raro,
@@ -320,10 +338,12 @@ PYARCHIVEQUEUE
 
 local_candidate_suspicion_reason() {
   (( LOCAL_CANDIDATE_MODE == 1 )) || return 1
-  [[ "${DISCORD_AUTO_UPDATE_ALLOW_FULL_REPO_ZIP:-0}" == "1" ]] && return 1
   [[ -f "${LOCAL_CANDIDATE_DIR:-}/manifest.json" ]] || return 1
-  python3 - "$LOCAL_CANDIDATE_DIR/manifest.json" <<'PYSUSPECT'
-import json, pathlib, sys
+  local confirmed_at allow_full
+  confirmed_at="$(json_field_from_file "${LOCAL_CANDIDATE_PENDING_FILE:-}" confirmed_at 2>/dev/null || true)"
+  allow_full="${DISCORD_AUTO_UPDATE_ALLOW_FULL_REPO_ZIP:-0}"
+  CANDIDATE_CONFIRMED_AT="$confirmed_at" CANDIDATE_ALLOW_FULL="$allow_full" python3 - "$LOCAL_CANDIDATE_DIR/manifest.json" <<'PYSUSPECT'
+import json, os, pathlib, sys
 try:
     data = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
 except Exception:
@@ -335,11 +355,22 @@ protected_prefixes = (
     'secrets/', 'google-credentials', 'youtube-cookies',
 )
 safe_env_templates = {'.env.example', '.env.sample', '.env.template'}
+confirmed = bool((os.environ.get('CANDIDATE_CONFIRMED_AT') or '').strip())
+allow_full = os.environ.get('CANDIDATE_ALLOW_FULL') == '1'
 reasons = []
-if zip_name.startswith('repo-') or zip_name.startswith('tts-bot-main') or zip_name.startswith('tts-bot-base'):
-    reasons.append('o arquivo parece uma base completa, não um patch')
-if len(changed) > 120:
-    reasons.append(f'muitos arquivos alterados para um patch normal ({len(changed)})')
+
+# Heurísticas de amplitude são confirmáveis. Uma confirmação humana válida
+# libera apenas essas heurísticas; caminhos estruturalmente perigosos continuam
+# sendo rejeitados abaixo.
+if not confirmed and not allow_full:
+    if zip_name.startswith(('repo-', 'tts-bot-main', 'tts-bot-base')):
+        reasons.append('o arquivo parece uma base completa, não um patch')
+    if len(changed) > 120:
+        reasons.append(f'muitos arquivos alterados para um patch normal ({len(changed)})')
+    lockfiles = [p for p in changed if p.endswith('package-lock.json')]
+    if len(lockfiles) >= 2 and len(changed) > 20:
+        reasons.append('parece conter árvore de projeto/frontend completa')
+
 for path in changed:
     low = path.lower()
     parts = pathlib.PurePosixPath(path.replace('\\', '/')).parts
@@ -351,9 +382,6 @@ for path in changed:
     if protected_env or low.startswith(protected_prefixes) or '/node_modules/' in low or '/.git/' in low:
         reasons.append(f'caminho protegido/suspeito no ZIP: {path}')
         break
-lockfiles = [p for p in changed if p.endswith('package-lock.json')]
-if len(lockfiles) >= 2 and len(changed) > 20:
-    reasons.append('parece conter árvore de projeto/frontend completa')
 if reasons:
     print('; '.join(dict.fromkeys(reasons)))
 PYSUSPECT
@@ -470,6 +498,9 @@ for index, queue_path in enumerate(sorted(pending_root.glob('*.json')), start=1)
         candidate_id = str(manifest.get('id') or queue.get('id') or '')
         display_id = str(manifest.get('display_id') or queue.get('display_id') or candidate_id)
         if not channel_id or not message_id or not candidate_id:
+            continue
+        if bool(queue.get('confirmation_required')) and not str(queue.get('confirmed_at') or '').strip():
+            # O card com Confirmar/Cancelar é mantido pelo bot até a decisão.
             continue
         position = active_count + index
         diff = manifest.get('diff_stats') or {}

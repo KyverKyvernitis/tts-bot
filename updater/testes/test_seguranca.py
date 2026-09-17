@@ -12,6 +12,7 @@ from updater.utilitarios.seguranca import (
     UpdateSecurityError,
     ZipLimits,
     build_file_integrity,
+    candidate_confirmation_reasons,
     inspect_zip_archive,
     is_forbidden_update_path,
     is_safe_env_template_path,
@@ -21,6 +22,33 @@ from updater.utilitarios.seguranca import (
     update_payload_paths,
     verify_candidate,
 )
+
+
+def test_candidate_confirmation_reasons_only_cover_confirmable_scope_risks() -> None:
+    large = [f"cogs/module_{index}.py" for index in range(121)]
+    assert candidate_confirmation_reasons("patch.zip", large) == [
+        "muitos arquivos alterados para um patch normal (121)"
+    ]
+
+    repo_reasons = candidate_confirmation_reasons("repo-20260916.zip", ["cogs/a.py"])
+    assert repo_reasons == ["o arquivo parece uma base completa, não um patch"]
+
+    frontend = [f"dashboard/file_{index}.ts" for index in range(19)] + [
+        "dashboard/frontend/package-lock.json",
+        "dashboard/backend/package-lock.json",
+    ]
+    assert "parece conter árvore de projeto/frontend completa" in candidate_confirmation_reasons(
+        "frontend.zip", frontend
+    )
+
+    assert candidate_confirmation_reasons("patch.zip", ["cogs/a.py"]) == []
+
+
+def test_confirmation_does_not_turn_structurally_forbidden_paths_into_soft_risks() -> None:
+    assert candidate_confirmation_reasons("patch.zip", [".env"]) == []
+    assert is_forbidden_update_path(".env")
+    with pytest.raises(UpdateSecurityError, match="protegido"):
+        normalize_update_operations([{"op": "update", "path": ".env"}])
 
 
 def _write_zip(path: Path, entries: list[tuple[str, bytes]], *, compression=zipfile.ZIP_DEFLATED) -> Path:

@@ -45,6 +45,55 @@ class ControlesUpdaterMixin:
         return {"state": "missing"}
 
 
+    def _zip_update_confirm_candidate_sync(
+        self, candidate_id: str, confirmed_by: str = ""
+    ) -> dict[str, object]:
+        found = self._zip_update_find_candidate_sync(candidate_id)
+        if found.get("state") != "pending":
+            return found
+        queue_file = Path(str(found.get("queue_file") or ""))
+        try:
+            payload = json.loads(queue_file.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                payload = {}
+        except Exception as exc:
+            return {"state": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+        if not bool(payload.get("confirmation_required")):
+            found["confirmation_status"] = "not_required"
+            return found
+        if str(payload.get("confirmed_at") or "").strip():
+            found["confirmation_status"] = "already_confirmed"
+            return found
+
+        now = datetime.now(timezone.utc)
+        payload.update(
+            {
+                "state": "queued",
+                "confirmed_at": now.isoformat(),
+                "confirmed_by": str(confirmed_by or "")[:80],
+                "heartbeat_at": now.isoformat(),
+            }
+        )
+        tmp = queue_file.with_name(f".{queue_file.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, queue_file)
+        except FileNotFoundError:
+            with contextlib.suppress(Exception):
+                tmp.unlink(missing_ok=True)
+            return self._zip_update_find_candidate_sync(candidate_id)
+        except OSError as exc:
+            with contextlib.suppress(Exception):
+                tmp.unlink(missing_ok=True)
+            return {"state": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+        found["confirmation_status"] = "confirmed"
+        found["confirmed_at"] = payload["confirmed_at"]
+        found["confirmed_by"] = payload["confirmed_by"]
+        return found
+
+
     def _zip_update_cancel_candidate_sync(self, candidate_id: str) -> dict[str, object]:
         found = self._zip_update_find_candidate_sync(candidate_id)
         if found.get("state") != "pending":
@@ -189,6 +238,70 @@ class ControlesUpdaterMixin:
         if len(parts) != 3:
             return
         requested_mode, token = parts[1], parts[2]
+
+        if requested_mode == "approve":
+            found = await asyncio.to_thread(self._zip_update_find_candidate_sync, token)
+            manifest = found.get("manifest") if isinstance(found.get("manifest"), dict) else {}
+            if found.get("state") == "active":
+                await interaction.response.send_message(
+                    "Essa atualização já foi confirmada e iniciada.", ephemeral=True
+                )
+                return
+            if found.get("state") != "pending":
+                await interaction.response.send_message(
+                    "Essa atualização não está mais aguardando confirmação.", ephemeral=True
+                )
+                return
+            if not self._zip_update_can_control(interaction, manifest):
+                await interaction.response.send_message(
+                    "Você não pode confirmar esta atualização.", ephemeral=True
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True, thinking=False)
+            confirmed = await asyncio.to_thread(
+                self._zip_update_confirm_candidate_sync,
+                token,
+                str(getattr(interaction.user, "id", "") or ""),
+            )
+            status = str(confirmed.get("confirmation_status") or "")
+            if status == "already_confirmed":
+                await interaction.followup.send("Essa atualização já foi confirmada.", ephemeral=True)
+                return
+            if status != "confirmed":
+                detail = str(confirmed.get("error") or "o candidato mudou de estado")
+                await interaction.followup.send(
+                    f"Não consegui confirmar a atualização: {detail}", ephemeral=True
+                )
+                return
+
+            display_id = str(manifest.get("display_id") or token)
+            file_count = len(manifest.get("changed_files") or [])
+            file_text = "1 arquivo" if file_count == 1 else f"{file_count} arquivos"
+            try:
+                if interaction.message is not None:
+                    await interaction.message.edit(
+                        view=self._make_zip_update_view(
+                            "✅ Atualização confirmada",
+                            f"`{display_id}` · **{file_text}**\nO mesmo candidato foi liberado e o updater será iniciado agora.",
+                            discord.Color.green(),
+                        ),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+            except Exception:
+                UPDATE_LOG.warning("falha ao atualizar mensagem após confirmação de segurança", exc_info=True)
+
+            triggered, detail = await self._dispatch_updater_candidate(token, display_id)
+            UPDATE_LOG.info(
+                "confirmação humana liberou candidato %s: dispatch=%s detalhe=%s",
+                display_id,
+                triggered,
+                detail,
+            )
+            await interaction.followup.send(
+                "Atualização confirmada e liberada para o updater.", ephemeral=True
+            )
+            return
 
         if requested_mode == "cancel":
             found = await asyncio.to_thread(self._zip_update_find_candidate_sync, token)
