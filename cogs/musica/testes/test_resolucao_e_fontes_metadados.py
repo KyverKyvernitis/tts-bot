@@ -141,3 +141,69 @@ def test_mixin_youtube_preserva_contrato_da_fachada(monkeypatch) -> None:
     assert resultados[0].title == "Faixa"
     assert resultados[0].duration == 180.0
     assert resultados[0].provider == "youtube"
+
+
+def test_spotify_esta_isolado_como_fonte_de_metadados() -> None:
+    fachada = (RAIZ_MUSICA / "metadados" / "provedores_api.py").read_text(encoding="utf-8")
+    spotify = (RAIZ_MUSICA / "metadados" / "fontes" / "spotify.py").read_text(encoding="utf-8")
+
+    assert "def spotify_search" not in fachada
+    assert "def spotify_batch_from_url" not in fachada
+    assert "class ProvedorSpotifyMixin" in spotify
+    assert "def spotify_search" in spotify
+    assert "def spotify_batch_from_url" in spotify
+    for proibido in ("FFmpegPCMAudio", "LavalinkBackend", "yt_dlp.YoutubeDL", "voice_client.play"):
+        assert proibido not in spotify
+
+
+def test_spotify_preserva_conversao_de_metadados_sem_player(monkeypatch) -> None:
+    monkeypatch.setattr("cogs.musica.metadados.provedores_api._env", lambda name, default="": "")
+    api = MusicApiProviders(timeout=2.0)
+    faixa = api._spotify_candidate(
+        {
+            "name": "Faixa",
+            "artists": [{"name": "Artista"}],
+            "duration_ms": 183000,
+            "album": {
+                "name": "Album",
+                "images": [{"url": "https://img.test/capa.jpg"}],
+            },
+            "external_ids": {"isrc": "BRABC1234567"},
+            "external_urls": {"spotify": "https://open.spotify.com/track/abc"},
+        }
+    )
+
+    assert faixa is not None
+    assert faixa.provider == "spotify"
+    assert faixa.title == "Faixa"
+    assert faixa.artist == "Artista"
+    assert faixa.duration == 183.0
+    assert faixa.thumbnail == "https://img.test/capa.jpg"
+    assert not hasattr(faixa, "stream_url")
+
+
+def test_preparo_da_resolucao_worker_esta_em_modulo_proprio() -> None:
+    from cogs.musica.agente_telefone import resolucao
+    from cogs.musica.agente_telefone.solicitacao_resolucao import (
+        limite_resolucao,
+        montar_tarefa_resolucao,
+        timeout_resolucao,
+    )
+
+    assert resolucao._limite_resolucao is limite_resolucao
+    assert resolucao._montar_tarefa_resolucao is montar_tarefa_resolucao
+    assert resolucao._timeout_resolucao is timeout_resolucao
+
+    limite, busca = limite_resolucao("https://example.test/faixa", 10, permitir_playlist=False)
+    assert (limite, busca) == (1, False)
+    tarefa = montar_tarefa_resolucao(
+        query="https://example.test/faixa",
+        limit=limite,
+        timeout_seconds=28.0,
+        somente_metadados=False,
+        permitir_playlist=False,
+        busca_textual=busca,
+    )
+    assert tarefa["default_search"] == "auto"
+    assert tarefa["metadata_only"] is False
+    assert timeout_resolucao(somente_metadados=True, timeout_seconds=1.0) == 5.0

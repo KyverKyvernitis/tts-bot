@@ -13,65 +13,19 @@ from .cache_resolucao import (
     copiar_lote_para_requisicao,
     obter_cache_resolucao,
 )
-from .conversao_resolucao import converter_resposta_resolucao, parece_url
+from .conversao_resolucao import converter_resposta_resolucao
 from .modelos import MUSIC_WORKER_UNAVAILABLE_MESSAGE, MusicWorkerUnavailable
 from .selecao import require_music_worker_available_async
+from .solicitacao_resolucao import (
+    limite_resolucao as _limite_resolucao,
+    montar_tarefa_resolucao as _montar_tarefa_resolucao,
+    timeout_resolucao as _timeout_resolucao,
+)
 from .transporte_resolucao import executar_tarefa_resolucao
 from .utilitarios import _phone_worker_base_url
 
 logger = logging.getLogger(__name__)
 
-
-def _limite_resolucao(query: str, limit: int, *, permitir_playlist: bool) -> tuple[int, bool]:
-    try:
-        max_limit = max(1, min(10, int(limit or 5)))
-    except Exception:
-        max_limit = 5
-    busca_textual = not parece_url(query)
-    if not busca_textual and not permitir_playlist:
-        # Link direto de faixa deve respeitar exatamente o URL enviado.
-        max_limit = 1
-    return max_limit, busca_textual
-
-
-def _timeout_resolucao(*, somente_metadados: bool, timeout_seconds: float | None) -> float:
-    if somente_metadados:
-        default_timeout = float(
-            getattr(config, "MUSIC_WORKER_YTDLP_SEARCH_TIMEOUT_SECONDS", 12.0)
-            or 12.0
-        )
-    else:
-        default_timeout = float(
-            getattr(config, "MUSIC_WORKER_YTDLP_TIMEOUT_SECONDS", 28.0)
-            or 28.0
-        )
-    return max(
-        5.0,
-        float(timeout_seconds if timeout_seconds is not None else default_timeout),
-    )
-
-
-def _montar_tarefa_resolucao(
-    *,
-    query: str,
-    limit: int,
-    timeout_seconds: float,
-    somente_metadados: bool,
-    permitir_playlist: bool,
-    busca_textual: bool,
-) -> dict[str, object]:
-    return {
-        "task": "music_ytdlp_resolve",
-        "query": query,
-        "limit": limit,
-        "timeout_seconds": timeout_seconds,
-        "metadata_only": bool(somente_metadados),
-        "allow_playlist": bool(permitir_playlist),
-        "js_runtimes": str(
-            getattr(config, "MUSIC_WORKER_YTDLP_JS_RUNTIMES", "node") or "node"
-        ),
-        "default_search": f"ytsearch{limit}" if busca_textual else "auto",
-    }
 
 
 async def resolve_music_tracks_on_worker(
