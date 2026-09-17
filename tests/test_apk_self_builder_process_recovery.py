@@ -157,3 +157,98 @@ def test_finalize_rejects_work_root_itself_instead_of_deleting_all_attempts(tmp_
     assert result["state"] == "work_identity_unverified"
     assert sentinel.read_text(encoding="utf-8") == "keep"
     assert lock.is_dir()
+
+
+def test_gradle_forces_java_tmpdir_to_private_work_directory(tmp_path: Path) -> None:
+    process_path = PYTHON_ROOT / "coreworker/builder/process.py"
+    spec = importlib.util.spec_from_file_location("apk_process_java_tmpdir", process_path)
+    assert spec and spec.loader
+    process_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(process_module)
+
+    files = tmp_path / "files"
+    project = tmp_path / "project"
+    work = tmp_path / "work"
+    log_path = tmp_path / "logs/build.log"
+    build_lock = files / "apk-self-builder/.apk-build-active"
+    build_lock.mkdir(parents=True)
+    project.mkdir()
+    (build_lock / "owner.json").write_text("{}", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    class Process:
+        pid = 4321
+
+        def poll(self):
+            return 0
+
+    def fake_popen(command, *, cwd, env, stdout, stderr, start_new_session):
+        captured.update({
+            "command": command,
+            "cwd": cwd,
+            "env": dict(env),
+            "start_new_session": start_new_session,
+        })
+        return Process()
+
+    def toolchain_environment(_tool, *, home, temp, gradle_home, clean):
+        assert temp.is_dir()
+        return {
+            "TMPDIR": "/data/data/com.termux/files/usr/tmp",
+            "JAVA_TOOL_OPTIONS": "-Djava.io.tmpdir=/data/data/com.termux/files/usr/tmp",
+        }
+
+    def safe_json_load(path: Path):
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def atomic_json(path: Path, value):
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    result = process_module.run_gradle(
+        files,
+        project,
+        {"timeoutSeconds": 600},
+        work,
+        log_path,
+        {"xmxMb": 256, "maxMetaspaceMb": 128},
+        build_lock,
+        None,
+        public_preflight=lambda *_args: json.dumps({
+            "ready": True,
+            "toolchain": {
+                "paths": {
+                    "gradle": "/private/toolchain/gradle",
+                    "aapt2": "/private/toolchain/aapt2",
+                }
+            },
+        }),
+        toolchain_environment=toolchain_environment,
+        toolchain_fingerprint=lambda _tool: "fingerprint",
+        safe_json_load=safe_json_load,
+        atomic_json=atomic_json,
+        proc_ticks=lambda _pid: 9876,
+        stop_process=lambda _process: 0,
+        tail=lambda path, _limit: path.read_text(encoding="utf-8"),
+        schema="test",
+        default_timeout_seconds=600,
+        popen=fake_popen,
+        stdout_target=-2,
+        wall_time=lambda: 100.0,
+        monotonic=lambda: 1.0,
+        sleep=lambda _seconds: None,
+    )
+
+    assert result["returncode"] == 0
+    temp = work / "tmp"
+    java_tmpdir = f"-Djava.io.tmpdir={temp}"
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["TMPDIR"] == str(temp)
+    assert java_tmpdir in env["JAVA_TOOL_OPTIONS"]
+    assert java_tmpdir in env["GRADLE_OPTS"]
+    assert "/data/data/com.termux/files/usr/tmp" not in env["JAVA_TOOL_OPTIONS"]
+
+    gradle_props = files / "apk-self-builder/persistent/gradle-home/gradle.properties"
+    props = gradle_props.read_text(encoding="utf-8")
+    assert java_tmpdir in props

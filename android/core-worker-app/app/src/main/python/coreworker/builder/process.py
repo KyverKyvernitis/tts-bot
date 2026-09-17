@@ -550,6 +550,7 @@ def run_gradle(
 
     xmx_mb = int(resources.get("xmxMb") or 512)
     metaspace_mb = int(resources.get("maxMetaspaceMb") or 256)
+    java_tmpdir = f"-Djava.io.tmpdir={temp}"
     gradle_props = gradle_home / "gradle.properties"
     gradle_props.write_text("\n".join((
         f"android.aapt2FromMavenOverride={paths['aapt2']}",
@@ -557,7 +558,7 @@ def run_gradle(
         "org.gradle.workers.max=1",
         "org.gradle.parallel=false",
         "org.gradle.vfs.watch=false",
-        f"org.gradle.jvmargs=-Xmx{xmx_mb}m -Xms64m -XX:MaxMetaspaceSize={metaspace_mb}m -Dfile.encoding=UTF-8 -Djdk.lang.Process.launchMechanism=FORK",
+        f"org.gradle.jvmargs=-Xmx{xmx_mb}m -Xms64m -XX:MaxMetaspaceSize={metaspace_mb}m -Dfile.encoding=UTF-8 -Djdk.lang.Process.launchMechanism=FORK {java_tmpdir}",
         "",
     )), encoding="utf-8")
 
@@ -565,12 +566,13 @@ def run_gradle(
     vps_url = str(payload.get("coreWorkerVpsUrl") or payload.get("core_worker_vps_url") or "").strip()
     vps_label = str(payload.get("coreWorkerVpsLabel") or payload.get("core_worker_vps_label") or "VPS privada").strip()
     env.update({
+        "TMPDIR": str(temp),
         "CORE_WORKER_VPS_URL": vps_url,
         "CORE_WORKER_VPS_LABEL": vps_label,
         "CORE_WORKER_REQUIRE_COMPAT_SIGNING": "true",
         "CORE_WORKER_REQUIRE_SELF_BUILDER_TOOLCHAIN": "true",
-        "GRADLE_OPTS": f"-Xmx{xmx_mb}m -Xms64m -XX:MaxMetaspaceSize={metaspace_mb}m -Dfile.encoding=UTF-8 -Dorg.gradle.daemon=false -Dorg.gradle.vfs.watch=false -Djdk.lang.Process.launchMechanism=FORK",
-        "JAVA_TOOL_OPTIONS": "-Djdk.lang.Process.launchMechanism=FORK",
+        "GRADLE_OPTS": f"-Xmx{xmx_mb}m -Xms64m -XX:MaxMetaspaceSize={metaspace_mb}m -Dfile.encoding=UTF-8 -Dorg.gradle.daemon=false -Dorg.gradle.vfs.watch=false -Djdk.lang.Process.launchMechanism=FORK {java_tmpdir}",
+        "JAVA_TOOL_OPTIONS": f"-Djdk.lang.Process.launchMechanism=FORK {java_tmpdir}",
     })
     parent_worker_id = str(payload.get("physicalWorkerId") or payload.get("parentWorkerId") or payload.get("selectedBuilderWorkerId") or "").strip()
     source_fingerprint = str(payload.get("sourceFingerprint") or payload.get("source_sha256") or "").strip()
