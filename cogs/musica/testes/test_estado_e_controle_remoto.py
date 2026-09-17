@@ -38,9 +38,9 @@ def test_controles_de_worker_estao_centralizados() -> None:
     for chamada in ('_music_agent_command("volume"', '_music_agent_command("previous"'):
         assert chamada not in legado
 
-    modulo = (MUSICA / "modulo.py").read_text(encoding="utf-8")
+    base = (MUSICA / "comandos" / "base.py").read_text(encoding="utf-8")
     interface = (MUSICA / "interface" / "componentes.py").read_text(encoding="utf-8")
-    assert "await enviar_controle_remoto(" in modulo
+    assert "await enviar_controle_remoto(" in base
     assert "await enviar_controle_remoto(" in interface
 
 

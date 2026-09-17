@@ -12,9 +12,11 @@ def test_comandos_de_reproducao_possuem_rota_para_music_agent() -> None:
     tocar = (MUSICA / "comandos" / "tocar.py").read_text(encoding="utf-8")
     for acao in ("play", "pause", "resume", "skip", "stop", "shuffle"):
         assert f'"{acao}"' in modulo
-    assert "_send_music_agent_control" in modulo
+    base = (MUSICA / "comandos" / "base.py").read_text(encoding="utf-8")
+    assert "_send_music_agent_control" in base
     assert 'music_agent_command(\n                            "play"' in tocar
-    assert "class Music(FluxoTocar, commands.Cog)" in modulo
+    assert "class Music(" in modulo
+    assert "FluxoTocar" in modulo and "BaseComandosMusica" in modulo
 
 
 def test_phone_worker_esta_separado_por_responsabilidade() -> None:

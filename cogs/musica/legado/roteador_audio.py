@@ -30,9 +30,9 @@ from ..nucleo.modelos import LoopMode, MusicTrack
 from ..nucleo.estado import ControlVote, MusicGuildState
 from ..metadados.provedores import describe_url
 from .motores import MusicBackendManager
-from ..agente_telefone.conversao import faixa_do_payload
 from ..reproducao.sincronizacao import sincronizar_estado_agente
-from ..reproducao.controle_remoto import ajustar_volume, alternar_repeticao, anterior, buscar_momento, embaralhar
+from ..reproducao.fila_remota import alternar_repeticao_worker, embaralhar_fila_worker, voltar_historico_worker
+from ..reproducao.controle_remoto import ajustar_volume, buscar_momento
 from ..agente_telefone.monitor import iniciar_monitor_music_agent
 from ..agente_telefone.estado import atualizar_estado_controle_remoto, usar_controles_fila_remota
 from ..nucleo.fila import (
@@ -5390,37 +5390,7 @@ class AudioRouter:
         state.shuffle = False
         self._cancel_next_prefetch(state)
         if usar_controles_fila_remota(self, state):
-            try:
-                result = await embaralhar(
-                    self,
-                    int(guild_id),
-                    track=state.current,
-                    requester_id=int(getattr(member, "id", 0) or 0),
-                    requester_name=getattr(member, "display_name", str(member)) if member is not None else "",
-                    voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
-                    text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
-                )
-                remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
-                state.shuffle = False
-                self._schedule_panel_update(guild_id, create=False)
-                if bool((result or {}).get("shuffled")):
-                    return True, "ok"
-
-                # Evite mensagem falsa de "não há músicas suficientes" quando a
-                # própria VPS espelha uma fila remota maior que 1. Re-sincronize uma
-                # vez e retorne erro genérico se o worker ainda não embaralhou.
-                refreshed = await atualizar_estado_controle_remoto(self, guild_id, create_panel=True)
-                queue_size = 0
-                with contextlib.suppress(Exception):
-                    queue_size = int((refreshed or remote or {}).get("queue_size") or getattr(self.get_state(guild_id), "agent_remote_queue_size", 0) or 0)
-                if queue_size <= 1:
-                    return False, "not_enough"
-                return False, "remote_failed"
-            except Exception:
-                logger.warning("[music/agent] falha ao embaralhar queue remoto | guild=%s", guild_id, exc_info=True)
-                state.shuffle = False
-                self._schedule_panel_update(guild_id, create=False)
-                return False, "remote_failed"
+            return await embaralhar_fila_worker(self, guild_id, state, member=member)
         if len(items) > 1:
             random.shuffle(items)
             await self.replace_queue(guild_id, items)
@@ -5434,28 +5404,7 @@ class AudioRouter:
         state = self.get_state(guild_id)
         state.control_votes.pop("loop", None)
         if usar_controles_fila_remota(self, state):
-            try:
-                result = await alternar_repeticao(
-                    self,
-                    int(guild_id),
-                    track=state.current,
-                    requester_id=int(getattr(member, "id", 0) or 0),
-                    requester_name=getattr(member, "display_name", str(member)) if member is not None else "",
-                    voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
-                    text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
-                )
-                remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
-                mode_value = str((result or {}).get("mode") or (remote or {}).get("loop_mode") or "").strip().lower()
-                if mode_value in {"off", "one", "all"}:
-                    state.loop_mode = LoopMode(mode_value)
-                self._schedule_panel_update(guild_id, create=False)
-                return state.loop_mode
-            except Exception:
-                logger.warning("[music/agent] falha ao alternar repetição remota | guild=%s", guild_id, exc_info=True)
-                # Se o Music Agent falhar, não minta alterando só a VPS enquanto a
-                # fila real está no worker. Mantenha o modo atual.
-                self._schedule_panel_update(guild_id, create=False)
-                return state.loop_mode
+            return await alternar_repeticao_worker(self, guild_id, state, member=member)
         if state.loop_mode is LoopMode.OFF:
             state.loop_mode = LoopMode.ONE
         elif state.loop_mode is LoopMode.ONE:
@@ -5484,84 +5433,7 @@ class AudioRouter:
         previous_track: MusicTrack | None = None
 
         if is_agent:
-            # O Music Agent é o dono do histórico quando ele é dono da voz.
-            # Antes de negar o botão, faça uma leitura curta do estado remoto: a
-            # VPS pode estar com agent_remote_history_size atrasado entre uma
-            # transição de faixa e o clique do usuário.
-            with contextlib.suppress(Exception):
-                await atualizar_estado_controle_remoto(self, guild_id, create_panel=False)
-                state = self.get_state(guild_id)
-            remote_has_history = bool(int(getattr(state, "agent_remote_history_size", 0) or 0) > 0)
-            local_fallback = state.history[-1] if state.history else None
-            if local_fallback is None and not remote_has_history:
-                # Sem histórico local/remoto, o botão de voltar não reinicia a faixa atual.
-                return False
-            if not int(getattr(state, "last_voice_channel_id", 0) or 0):
-                return False
-            payload = {
-                "guild_id": int(guild_id),
-                "voice_channel_id": int(getattr(state, "last_voice_channel_id", 0) or 0),
-                "text_channel_id": int(getattr(state, "last_text_channel_id", 0) or 0),
-                "timeout_seconds": getattr(config, "MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", 12.0),
-            }
-            # Só envie faixa explícita quando o worker realmente não tem
-            # histórico remoto. Se os dois lados têm histórico, o remoto manda.
-            if not remote_has_history and local_fallback is not None:
-                payload.update({
-                    "query": local_fallback.webpage_url or local_fallback.original_url or local_fallback.stream_url or local_fallback.title,
-                    "track": local_fallback,
-                })
-            try:
-                result = await anterior(
-                    self,
-                    int(guild_id),
-                    voice_channel_id=payload.get("voice_channel_id"),
-                    text_channel_id=payload.get("text_channel_id"),
-                    track=payload.get("track"),
-                    query=payload.get("query", ""),
-                    timeout_seconds=payload.get("timeout_seconds"),
-                    create_panel=False,
-                )
-            except Exception:
-                logger.warning("[music/agent] falha ao voltar histórico pelo worker | guild=%s", guild_id, exc_info=True)
-                return False
-            if not bool(result.get("ok", True)):
-                remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
-                if remote:
-                    with contextlib.suppress(Exception):
-                        await self.sync_music_agent_state(
-                            int(guild_id),
-                            None,
-                            remote,
-                            voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0),
-                            text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0),
-                            queued=False,
-                            create_panel=False,
-                        )
-                return False
-            # Se o fallback local foi usado com sucesso, remova só agora.
-            if not remote_has_history and local_fallback is not None and state.history:
-                with contextlib.suppress(Exception):
-                    if state.history[-1] is local_fallback:
-                        state.history.pop()
-            state.stop_requested = False
-            state.skip_requested = False
-            state.skip_transition_active = True
-            self._clear_idle_reason(state)
-            self._cancel_music_idle_disconnect(state)
-            remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
-            previous_payload = result.get("previous") if isinstance(result, dict) and isinstance(result.get("previous"), dict) else {}
-            previous_track = faixa_do_payload(previous_payload, local_fallback) if previous_payload else local_fallback
-            await self.sync_music_agent_state(
-                int(guild_id),
-                previous_track,
-                remote,
-                voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0),
-                text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0),
-                queued=False,
-                create_panel=True,
-            )
-            return True
+            return await voltar_historico_worker(self, guild_id, state)
 
         if state.history:
             try:

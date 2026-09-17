@@ -45,9 +45,11 @@ def test_codigo_python_nao_importa_o_antigo_music_system() -> None:
 def test_entrypoint_nao_contem_player_local() -> None:
     modulo = (MUSICA / "modulo.py").read_text(encoding="utf-8")
     tocar = (MUSICA / "comandos" / "tocar.py").read_text(encoding="utf-8")
-    assert "class Music(FluxoTocar, commands.Cog)" in modulo
+    assert "class Music(" in modulo
+    assert "FluxoTocar" in modulo and "FluxoControle" in modulo and "FluxoFila" in modulo
     assert "music_agent_command" in tocar
-    assert "ensure_music_worker_available" in modulo
+    base = (MUSICA / "comandos" / "base.py").read_text(encoding="utf-8")
+    assert "ensure_music_worker_available" in base
     for texto in (modulo, tocar):
         assert "FFmpegPCMAudio" not in texto
         assert "yt_dlp.YoutubeDL" not in texto
@@ -61,7 +63,7 @@ def test_fluxo_tocar_esta_modularizado_fora_do_cog_principal() -> None:
     assert "class FluxoTocar" in tocar
     assert "async def _run_play" in tocar
     assert "async def _run_play" not in modulo
-    assert len(modulo.splitlines()) < 500
+    assert len(modulo.splitlines()) < 250
 
 def test_codigo_de_extracao_local_esta_isolado_como_legado() -> None:
     assert (MUSICA / "legado" / "extrator_local.py").is_file()
