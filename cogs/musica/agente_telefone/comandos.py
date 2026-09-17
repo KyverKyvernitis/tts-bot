@@ -6,7 +6,7 @@ import logging
 from typing import Any, Mapping
 
 import aiohttp
-import config
+from cogs.musica import configuracao as config
 
 from ..nucleo.modelos import MusicTrack
 from .protocolo import montar_comando, montar_consulta_status

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+
+from cogs.musica.integracoes.biografia import coletar_players_ativos
 import os
 import re
 import time
@@ -280,7 +282,7 @@ class ApplicationBioService:
         if tokens & {"workers"}:
             stats["workers"] = await self._collect_workers_online()
         if tokens & {"music"}:
-            stats["music"] = self._collect_music_active()
+            stats["music"] = coletar_players_ativos(self.bot, self._format_int)
         if tokens & {"tts"}:
             stats["tts"] = self._collect_tts_total()
         if tokens & {"cmd", "commands"}:
@@ -361,16 +363,6 @@ class ApplicationBioService:
                 return 0
 
         return self._format_int(await asyncio.to_thread(read_online))
-
-    def _collect_music_active(self) -> str:
-        try:
-            router = getattr(self.bot, "audio_router", None)
-            counter = getattr(router, "_active_player_count", None)
-            if callable(counter):
-                return self._format_int(int(counter()))
-        except Exception:
-            LOG.debug("falha ao ler players ativos", exc_info=True)
-        return "0"
 
     def _collect_tts_total(self) -> str:
         try:

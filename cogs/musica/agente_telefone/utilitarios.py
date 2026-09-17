@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-import config
+from cogs.musica import configuracao as config
 
 def _as_bool(value: object, default: bool = False) -> bool:
     if value is None:

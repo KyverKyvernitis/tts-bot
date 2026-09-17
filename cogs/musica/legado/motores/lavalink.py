@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import quote
 
-import config
+from cogs.musica import configuracao as config
 
 from .base import BackendHealth, BackendSearchResult
 from ...nucleo.modelos import ExtractedBatch, MusicTrack

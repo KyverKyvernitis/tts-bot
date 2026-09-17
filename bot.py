@@ -14,6 +14,8 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cogs.musica.integracoes.logs import eh_cancelamento_esperado
+
 # -----------------------------------------------------------------------------
 # Logging — precisa vir ANTES de qualquer import do discord para capturar os
 # logs de inicialização da biblioteca (gateway/voice/cogs).
@@ -33,11 +35,6 @@ class _LowValueNoiseFilter(logging.Filter):
     """
 
     _VOICE_LOGGERS = ("discord.voice", "discord.gateway", "discord.player")
-    _EXPECTED_MUSIC_CANCELS = (
-        "MusicPlaybackError: Música pulada antes de iniciar o áudio.",
-        "MusicPlaybackError: Playback cancelado.",
-    )
-
     def __init__(self) -> None:
         super().__init__()
         self._last_by_key: dict[str, float] = {}
@@ -78,7 +75,7 @@ class _LowValueNoiseFilter(logging.Filter):
                 exc_text = ""
                 if record.exc_info:
                     exc_text = "".join(traceback.format_exception_only(record.exc_info[0], record.exc_info[1]))
-                if any(marker in exc_text for marker in self._EXPECTED_MUSIC_CANCELS):
+                if eh_cancelamento_esperado(exc_text):
                     return False
         except Exception:
             return True
@@ -139,7 +136,7 @@ from discord.ext import commands
 import config
 from db import SettingsDB
 from webserver import run_webserver, set_health_provider, set_update_action_provider
-from cogs.musica import AudioRouter
+from cogs.musica.integracoes.bot import IntegracaoMusicaBot
 from utility.interaction_safety import is_unknown_interaction, safe_send_interaction_message
 from utility.application_bio import ApplicationBioService
 from utility.application_presence import ApplicationPresenceService
@@ -267,17 +264,14 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
         self._app_command_manifest_path = self._repo_root / "data" / "app_commands_manifest.json"
         self._app_command_sync_status_path = self._repo_root / "data" / "app_commands_sync_status.json"
         self._removed_slash_cleanup_state_path = self._repo_root / "data" / "removed_slash_cleanup_state.json"
-        self.audio_router = AudioRouter(self)
+        self.integracao_musica = IntegracaoMusicaBot(self)
+        self.integracao_musica.instalar_compatibilidade()
         self.application_bio = ApplicationBioService(self, self._repo_root / "data" / "application_bio.json")
         self.application_presence = ApplicationPresenceService(
             self,
             self._update_staging_root / "candidates" / "runtime-state.json",
             self._repo_root / "data" / "application_presence.json",
         )
-        self._music_bitrate_reconciled = False
-        self._music_voice_status_reconciled = False
-        self._music_startup_reconcile_task: asyncio.Task | None = None
-
         self.loaded_extensions: list[str] = []
         self.failed_extensions: dict[str, dict[str, object]] = {}
         self.skipped_extensions: dict[str, str] = {}
@@ -740,9 +734,7 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
     async def setup_hook(self):
         print("SETUP_HOOK INICIOU")
         try:
-            from cogs.musica.diagnostico.servico import cleanup_music_diagnostics_temp_artifacts
-
-            print(f"[DIAGNOSTICS] {cleanup_music_diagnostics_temp_artifacts()}")
+            print(f"[DIAGNOSTICS] {self.integracao_musica.limpar_temporarios_diagnostico()}")
         except Exception as exc:
             print(f"[DIAGNOSTICS] cleanup temporário falhou: {type(exc).__name__}: {exc}")
 
@@ -942,8 +934,6 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
             self._event_loop_watchdog_task.cancel()
         if self._health_task is not None:
             self._health_task.cancel()
-        if self._music_startup_reconcile_task is not None:
-            self._music_startup_reconcile_task.cancel()
         application_presence = getattr(self, "application_presence", None)
         if application_presence is not None:
             try:
@@ -956,56 +946,11 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
                 await application_bio.close()
             except Exception as e:
                 print(f"[bot] falha ao fechar application_bio: {e!r}")
-        router = getattr(self, "audio_router", None)
-        if router is not None:
-            try:
-                await router.close()
-            except Exception as e:
-                print(f"[bot] falha ao fechar audio_router: {e!r}")
+        integracao_musica = getattr(self, "integracao_musica", None)
+        if integracao_musica is not None:
+            await integracao_musica.fechar()
         await super().close()
 
-
-    def _schedule_music_startup_reconcile(self) -> None:
-        """Agenda restaurações de música fora do caminho crítico do on_ready.
-
-        Restore de bitrate/status pode fazer I/O/REST por guild. Rodar isso
-        diretamente no on_ready atrasava o heartbeat do Discord em restart
-        comum. O reconciler abaixo é idempotente e roda em background.
-        """
-        task = getattr(self, "_music_startup_reconcile_task", None)
-        if task is not None and not task.done():
-            return
-        if self._music_bitrate_reconciled and self._music_voice_status_reconciled:
-            return
-        self._music_startup_reconcile_task = asyncio.create_task(self._run_music_startup_reconcile())
-
-    async def _run_music_startup_reconcile(self) -> None:
-        try:
-            # Dá tempo para o gateway estabilizar e para o bot responder
-            # heartbeat antes de qualquer REST/DB extra pós-restart.
-            await asyncio.sleep(max(1.0, float(getattr(config, "MUSIC_STARTUP_RESTORE_DELAY_SECONDS", 12.0) or 12.0)))
-            router = getattr(self, "audio_router", None)
-            if router is None:
-                return
-            if not self._music_bitrate_reconciled and hasattr(router, "reconcile_auto_bitrate_records"):
-                self._music_bitrate_reconciled = True
-                try:
-                    await router.reconcile_auto_bitrate_records()
-                except Exception as e:
-                    logging.getLogger("music").debug("reconciliação de bitrate automático falhou: %r", e, exc_info=True)
-            # Pequeno intervalo entre categorias para não concentrar chamadas REST
-            # num único tick de startup.
-            await asyncio.sleep(max(0.0, float(getattr(config, "MUSIC_STARTUP_RESTORE_STEP_DELAY_SECONDS", 0.75) or 0.75)))
-            if not self._music_voice_status_reconciled and hasattr(router, "reconcile_voice_status_records"):
-                self._music_voice_status_reconciled = True
-                try:
-                    await router.reconcile_voice_status_records()
-                except Exception as e:
-                    logging.getLogger("music").debug("reconciliação de status de canal falhou: %r", e, exc_info=True)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logging.getLogger("music").debug("reconciliação pós-startup de música falhou", exc_info=True)
 
     async def on_ready(self):
         print(f"Logado como {self.user} (id: {self.user.id})")
@@ -1013,7 +958,7 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
         application_presence = getattr(self, "application_presence", None)
         if application_presence is not None:
             application_presence.start()
-        self._schedule_music_startup_reconcile()
+        self.integracao_musica.agendar_reconciliacao_inicial()
         if self._health_task is None or self._health_task.done():
             self._health_task = asyncio.create_task(self._health_monitor_loop())
         if self._event_loop_watchdog_task is None or self._event_loop_watchdog_task.done():

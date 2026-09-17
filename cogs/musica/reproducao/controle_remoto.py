@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import config
+from cogs.musica import configuracao as config
 
 from ..agente_telefone.comandos import music_agent_command
 from ..nucleo.modelos import MusicTrack

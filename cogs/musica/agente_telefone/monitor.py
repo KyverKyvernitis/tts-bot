@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Any
 
-import config
+from cogs.musica import configuracao as config
 
 from .comandos import music_agent_status
 from .conversao import estado_da_guild_no_payload

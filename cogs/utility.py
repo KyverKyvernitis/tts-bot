@@ -11,6 +11,7 @@ import config
 from .tts.utils.app_commands import fetch_root_command_ids_cached
 
 from utility.commands.help import HelpCommandMixin
+from cogs.musica.integracoes.ajuda import musica_disponivel_para_ajuda
 from utility.help_center import HELP_TIMEOUT_SECONDS, HelpCenterView, help_autocomplete_choices
 from utility.commands.ping import PingCommandMixin
 from utility.commands.vps import VpsCommandMixin
@@ -23,7 +24,6 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         self._app_command_id_cache: dict[object, tuple[float, dict[str, int]]] = {}
         self._help_prefix_cache: dict[int, tuple[float, dict[str, str]]] = {}
         self._help_permission_cache: dict[tuple[int, int], tuple[float, frozenset[str]]] = {}
-        self._help_music_available_cache: tuple[float, bool] | None = None
         self._core_worker_auto_wake_task: asyncio.Task | None = None
         self._core_worker_wake_lock = asyncio.Lock()
         self._start_core_worker_auto_wake_task()
@@ -151,39 +151,7 @@ class Utility(HelpCommandMixin, PingCommandMixin, VpsCommandMixin, WorkersComman
         return permissions
 
     async def _help_music_available(self) -> bool:
-        if self.bot.get_cog("Music") is None:
-            return False
-
-        now = asyncio.get_running_loop().time()
-        cached = self._help_music_available_cache
-        if cached is not None and now - cached[0] <= 5.0:
-            return bool(cached[1])
-
-        def read_registry() -> bool:
-            try:
-                from utility.commands.workers_registry import get_core_workers_registry
-
-                snapshot = get_core_workers_registry().snapshot(lock_timeout_seconds=0.03)
-                workers = snapshot.get("workers") if isinstance(snapshot, dict) else []
-                for worker in workers or []:
-                    if not isinstance(worker, dict) or not bool(worker.get("online")):
-                        continue
-                    runtime_kind = str(worker.get("runtime_kind") or "").strip().lower()
-                    source = str(worker.get("source") or "").strip().lower()
-                    if runtime_kind == "apk" or source.startswith("core-worker-apk"):
-                        continue
-                    roles = {str(value or "").strip().lower() for value in (worker.get("roles") or [])}
-                    capabilities = {str(value or "").strip().lower() for value in (worker.get("capabilities") or [])}
-                    roles_caps = roles | capabilities
-                    if "phone-worker" in roles_caps and "music" in roles_caps:
-                        return True
-                return False
-            except Exception:
-                return False
-
-        available = bool(await asyncio.to_thread(read_registry))
-        self._help_music_available_cache = (now, available)
-        return available
+        return await musica_disponivel_para_ajuda(self.bot)
 
     def _get_help_games_context(self, guild: discord.Guild | None) -> dict[str, str]:
         if guild is None:

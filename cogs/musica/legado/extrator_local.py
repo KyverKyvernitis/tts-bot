@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-import config
+from cogs.musica import configuracao as config
 
 from ..metadados.provedores_api import ApiTrackBatch, ApiTrackCandidate, MusicApiProviders, compact_key, is_bad_match_title, normalize_text, title_quality_score
 from ..nucleo.erros import MusicExtractionError

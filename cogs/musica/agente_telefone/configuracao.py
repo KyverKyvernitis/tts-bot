@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import config
+from cogs.musica import configuracao as config
 
 from .utilitarios import _as_bool, _csv
 

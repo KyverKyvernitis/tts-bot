@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 
-import config
+from cogs.musica import configuracao as config
 import discord
 from discord.ext import commands
 

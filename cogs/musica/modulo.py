@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextlib
 from typing import Optional
 
-import config
+from cogs.musica import configuracao as config
 import discord
 from discord.ext import commands
 

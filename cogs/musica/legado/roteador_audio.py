@@ -22,7 +22,7 @@ import urllib.error
 import discord
 import aiohttp
 
-import config
+from cogs.musica import configuracao as config
 from ..metadados.provedores_api import compact_key
 from .extrator_local import MusicExtractor
 from ..nucleo.erros import MusicExtractionError, MusicPlaybackError

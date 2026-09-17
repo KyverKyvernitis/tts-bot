@@ -27,7 +27,7 @@ from typing import Any
 
 import discord
 
-import config
+from cogs.musica import configuracao as config
 
 
 logger = logging.getLogger(__name__)

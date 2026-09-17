@@ -5,7 +5,7 @@ import logging
 import urllib.request
 from typing import Any, Mapping
 
-import config
+from cogs.musica import configuracao as config
 
 from .configuracao import ConfiguracaoSelecaoWorker, carregar_configuracao_selecao
 from .utilitarios import _as_bool, _nested, _version_at_least

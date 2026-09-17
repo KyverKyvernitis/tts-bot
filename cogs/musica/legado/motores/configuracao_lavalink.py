@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import config
+from cogs.musica import configuracao as config
 
 from .lavalink import LavalinkConfig, _as_bool, _normalize_mode, _safe_int
 

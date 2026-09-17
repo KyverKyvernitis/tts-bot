@@ -9,7 +9,7 @@ from typing import Optional
 
 import discord
 
-import config
+from cogs.musica import configuracao as config
 
 from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch, MusicTrack

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-import config
+from cogs.musica import configuracao as config
 
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
 

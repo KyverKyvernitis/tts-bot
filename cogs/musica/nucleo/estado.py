@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-import config
+from cogs.musica import configuracao as config
 
 from .modelos import LoopMode, MusicTrack
 

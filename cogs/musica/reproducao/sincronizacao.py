@@ -73,7 +73,7 @@ async def sincronizar_estado_agente(
     """
     import time
 
-    import config
+    from cogs.musica import configuracao as config
 
     from ..nucleo.estado import MUSIC_HISTORY_MAXSIZE, MUSIC_QUEUE_MAXSIZE
     from ..nucleo.fila import registrar_historico, tem_pendentes

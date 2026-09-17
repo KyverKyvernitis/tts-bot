@@ -8,7 +8,7 @@ from typing import Any, Iterable
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-import config
+from cogs.musica import configuracao as config
 
 from .modelos import ApiTrackBatch, ApiTrackCandidate
 from .normalizacao import compact_key, is_bad_match_title, normalize_text, title_quality_score

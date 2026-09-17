@@ -7,7 +7,7 @@ import re
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
-import config
+from cogs.musica import configuracao as config
 
 LAVALINK_REAL_TEST_GUILD_ID = 927002914449424404
 

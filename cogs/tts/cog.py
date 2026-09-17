@@ -19,6 +19,14 @@ from discord.ext import commands
 
 import config
 
+from cogs.musica.integracoes.tts import (
+    agendar_idle_musica,
+    atualizar_ocupacao_ou_agendar_idle,
+    deve_bloquear_voz_tts_local,
+    eh_cliente_voz_lavalink,
+    musica_ativa,
+)
+
 logger = logging.getLogger(__name__)
 from .audio import GuildTTSState, QueueItem, TTSAudioMixin, TTS_BOOT_WARMUP_ENABLED, TTS_TEMP_DIR
 from .common import (
@@ -1788,11 +1796,7 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return getattr(me_voice, "channel", None)
 
     def _is_lavalink_voice_client(self, vc) -> bool:
-        if vc is None:
-            return False
-        module = str(getattr(type(vc), "__module__", "") or "")
-        qualname = str(getattr(type(vc), "__qualname__", "") or getattr(type(vc), "__name__", "") or "")
-        return module.startswith("wavelink") or (qualname == "Player" and hasattr(vc, "node") and hasattr(vc, "play"))
+        return eh_cliente_voz_lavalink(vc)
 
     def _voice_client_is_connected(self, vc) -> bool:
         if vc is None:
@@ -2919,42 +2923,12 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         return False
 
     def _music_player_is_active(self, guild_id: int) -> bool:
-        router = getattr(getattr(self, "bot", None), "audio_router", None)
-        is_music_active = getattr(router, "is_music_active", None)
-        if not callable(is_music_active):
-            return False
-        try:
-            return bool(is_music_active(int(guild_id)))
-        except Exception:
-            return False
+        return musica_ativa(getattr(self, "bot", None), guild_id)
 
     def _lavalink_music_should_own_voice(self, guild: discord.Guild | None) -> bool:
-        """Evita que o TTS local roube a conexão enquanto o player de música via Wavelink está ativo.
-
-        Quando uma música está resolvendo/iniciando pelo Wavelink, ainda pode não
-        existir ``guild.voice_client``. Se o TTS conectar localmente nessa janela,
-        o playback real cai em ``Already connected to a voice channel`` ou precisa
-        derrubar o TTS. Preferimos ignorar/adiar esse TTS local e deixar o node
-        ser o único dono da conexão.
-        """
         if guild is None:
             return False
-        router = getattr(getattr(self, "bot", None), "audio_router", None)
-        if router is None:
-            return False
-        should_block_local = getattr(router, "should_block_tts_local_voice", None)
-        if callable(should_block_local):
-            try:
-                return bool(should_block_local(guild.id))
-            except Exception:
-                pass
-        lavalink_active = getattr(router, "is_lavalink_active_for_guild", None)
-        if callable(lavalink_active):
-            try:
-                return bool(lavalink_active(guild.id))
-            except Exception:
-                pass
-        return False
+        return deve_bloquear_voz_tts_local(self.bot, guild.id)
 
     async def _disconnect_and_clear(self, guild: discord.Guild):
         self._mark_manual_voice_disconnect(guild.id, seconds=60.0)
@@ -3007,7 +2981,6 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         if not auto_leave_enabled:
             return
 
-        router = getattr(getattr(self, "bot", None), "audio_router", None)
         vc = self._get_voice_client_for_guild(guild)
         if vc is None or not self._voice_client_is_connected(vc) or self._voice_client_channel(vc) is None:
             return
@@ -3015,28 +2988,19 @@ class TTSVoice(TTSAudioMixin, commands.GroupCog, group_name="tts", group_descrip
         channel = self._voice_client_channel(vc)
         only_bots_or_empty = self._voice_channel_has_only_bots_or_is_empty(channel)
 
-        should_defer = getattr(router, "should_defer_tts_auto_leave", None)
-        if callable(should_defer):
-            try:
-                if should_defer(guild.id):
-                    occupancy_update = getattr(router, "handle_music_voice_occupancy_update", None)
-                    if callable(occupancy_update):
-                        await occupancy_update(guild.id, auto_leave_enabled=True)
-                    elif only_bots_or_empty:
-                        schedule_idle = getattr(router, "schedule_music_idle_disconnect", None)
-                        if callable(schedule_idle):
-                            await schedule_idle(guild.id)
-                    if only_bots_or_empty:
-                        print(f"[tts_voice] auto-leave adiado | sessão de música em contagem AFK | guild={guild.id}")
-                    return
-            except Exception:
-                pass
+        if await atualizar_ocupacao_ou_agendar_idle(
+            self.bot,
+            guild.id,
+            auto_leave_enabled=True,
+            apenas_bots_ou_vazio=only_bots_or_empty,
+        ):
+            if only_bots_or_empty:
+                print(f"[tts_voice] auto-leave adiado | sessão de música em contagem AFK | guild={guild.id}")
+            return
 
         if self._music_player_is_active(guild.id):
             if only_bots_or_empty:
-                schedule_idle = getattr(router, "schedule_music_idle_disconnect", None)
-                if callable(schedule_idle):
-                    await schedule_idle(guild.id)
+                await agendar_idle_musica(self.bot, guild.id)
                 print(f"[tts_voice] auto-leave adiado | player de música ativo em contagem AFK | guild={guild.id}")
             return
 

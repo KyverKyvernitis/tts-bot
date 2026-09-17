@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-import config
+from cogs.musica import configuracao as config
 
 MUSIC_WORKER_UNAVAILABLE_MESSAGE = str(
     getattr(config, "MUSIC_WORKER_UNAVAILABLE_MESSAGE", "Sistema de música indisponível no momento: Nenhum worker online")

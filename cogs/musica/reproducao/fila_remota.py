@@ -4,7 +4,7 @@ import contextlib
 import logging
 from typing import Any
 
-import config
+from cogs.musica import configuracao as config
 
 from ..agente_telefone.conversao import faixa_do_payload
 from ..agente_telefone.estado import atualizar_estado_controle_remoto

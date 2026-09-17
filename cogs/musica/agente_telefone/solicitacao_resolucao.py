@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import config
+from cogs.musica import configuracao as config
 
 from .conversao_resolucao import parece_url
 

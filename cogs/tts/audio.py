@@ -30,6 +30,21 @@ from gtts.tts import gTTSError
 
 
 import config
+from cogs.musica.integracoes.tts import (
+    agendar_idle_musica,
+    deve_adiar_auto_leave_tts,
+    deve_rotear_tts_para_agente,
+    eh_cliente_voz_lavalink,
+    erro_agente_permite_fallback_local,
+    lavalink_ativo,
+    musica_ativa,
+    preparar_fallback_local_apos_lavalink,
+    roteador_suporta_tts,
+    suporta_cache_tts_agente,
+    tocar_tts_via_agente,
+    tocar_tts_via_roteador,
+)
+
 from .helpers import validate_voice
 from .runtime import MemoryBudget, PathLeases, ReplayBuffer, StreamJob, split_text, wait_writable, unlink_if_unlocked, await_physical_completion
 from .streaming import SharedSynthesisMixin
@@ -1011,12 +1026,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
         if guild_id and self._is_music_active_for_guild(guild_id):
             return False, "music_active"
 
-        router = getattr(getattr(self, "bot", None), "audio_router", None)
-        lavalink_active = getattr(router, "is_lavalink_active_for_guild", None)
-        if guild_id and callable(lavalink_active):
-            with contextlib.suppress(Exception):
-                if bool(lavalink_active(guild_id)):
-                    return False, "lavalink_active"
+        if guild_id and lavalink_ativo(self.bot, guild_id):
+            return False, "lavalink_active"
 
         guild = None
         get_guild = getattr(getattr(self, "bot", None), "get_guild", None)
@@ -1024,10 +1035,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
             with contextlib.suppress(Exception):
                 guild = get_guild(guild_id)
         get_vc = getattr(self, "_get_voice_client_for_guild", None)
-        is_lavalink_vc = getattr(self, "_is_lavalink_voice_client", None)
-        if guild is not None and callable(get_vc) and callable(is_lavalink_vc):
+        if guild is not None and callable(get_vc):
             with contextlib.suppress(Exception):
-                if bool(is_lavalink_vc(get_vc(guild))):
+                if eh_cliente_voz_lavalink(get_vc(guild)):
                     return False, "lavalink_voice_client"
         return True, "allowed"
 
@@ -1049,12 +1059,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
         if guild_id and self._is_music_active_for_guild(guild_id):
             return False, "music_active"
 
-        router = getattr(getattr(self, "bot", None), "audio_router", None)
-        lavalink_active = getattr(router, "is_lavalink_active_for_guild", None)
-        if guild_id and callable(lavalink_active):
-            with contextlib.suppress(Exception):
-                if bool(lavalink_active(guild_id)):
-                    return False, "lavalink_active"
+        if guild_id and lavalink_ativo(self.bot, guild_id):
+            return False, "lavalink_active"
 
         guild = None
         get_guild = getattr(getattr(self, "bot", None), "get_guild", None)
@@ -1062,10 +1068,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
             with contextlib.suppress(Exception):
                 guild = get_guild(guild_id)
         get_vc = getattr(self, "_get_voice_client_for_guild", None)
-        is_lavalink_vc = getattr(self, "_is_lavalink_voice_client", None)
-        if guild is not None and callable(get_vc) and callable(is_lavalink_vc):
+        if guild is not None and callable(get_vc):
             with contextlib.suppress(Exception):
-                if bool(is_lavalink_vc(get_vc(guild))):
+                if eh_cliente_voz_lavalink(get_vc(guild)):
                     return False, "lavalink_voice_client"
         return True, "allowed"
 
@@ -5541,8 +5546,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
             return path, should_cleanup, None
 
         edge_stream = self._edge_stream_handle_for_path(path)
-        router = getattr(getattr(self, "bot", None), "audio_router", None)
-        if edge_stream is None and callable(getattr(router, "play_tts", None)):
+        if edge_stream is None and roteador_suporta_tts(self.bot):
             # Arquivos comuns continuam passando pelo roteador, que também
             # coordena ducking e ownership. O FIFO progressivo já é um fast
             # path local e pode ser preparado sem alterar essa decisão.
@@ -5675,8 +5679,6 @@ class TTSAudioMixin(SharedSynthesisMixin):
             source = None
             used_prepared_source = False
             try:
-                router = getattr(getattr(self, "bot", None), "audio_router", None)
-                play_tts = getattr(router, "play_tts", None)
                 if prepared is not None and (
                     os.path.abspath(prepared.path) != os.path.abspath(path)
                     or self._is_music_active_for_guild(guild_id)
@@ -5687,10 +5689,11 @@ class TTSAudioMixin(SharedSynthesisMixin):
                 # FIFO é um fast path exclusivamente local. Música/Lavalink e
                 # agent são filtrados antes da síntese; pular o router aqui
                 # impede que uma rota remota tente tratar o pipe como arquivo.
-                if edge_stream is None and prepared is None and callable(play_tts) and guild is not None:
+                if edge_stream is None and prepared is None and roteador_suporta_tts(self.bot) and guild is not None:
                     if item is not None:
                         item._tts_source_factory = self._make_discord_tts_source
-                    router_result = await play_tts(
+                    router_result = await tocar_tts_via_roteador(
+                        self.bot,
                         guild=guild,
                         vc=vc,
                         path=path,
@@ -5702,20 +5705,18 @@ class TTSAudioMixin(SharedSynthesisMixin):
                     if not (isinstance(router_result, dict) and router_result.get("tts_lavalink_failed")):
                         return router_result
 
-                    fallback = getattr(router, "prepare_tts_local_fallback_after_lavalink_failure", None)
-                    if callable(fallback):
-                        reason = str(router_result.get("tts_lavalink_error") or router_result.get("error") or "tts_lavalink_failed")
-                        fallback_vc = await fallback(guild, vc, reason=reason)
-                        if fallback_vc is not None and not getattr(router, "_is_lavalink_voice_client", lambda _vc: False)(fallback_vc):
-                            vc = fallback_vc
-                            guild = getattr(vc, "guild", guild)
-                            logger.warning(
-                                "[tts_voice] TTS via Lavalink falhou; usando playback local direto | guild=%s reason=%s",
-                                getattr(guild, "id", None),
-                                reason,
-                            )
-                        else:
-                            return router_result
+                    reason = str(router_result.get("tts_lavalink_error") or router_result.get("error") or "tts_lavalink_failed")
+                    fallback_vc = await preparar_fallback_local_apos_lavalink(
+                        self.bot, guild, vc, reason=reason
+                    )
+                    if fallback_vc is not None and not eh_cliente_voz_lavalink(fallback_vc):
+                        vc = fallback_vc
+                        guild = getattr(vc, "guild", guild)
+                        logger.warning(
+                            "[tts_voice] TTS via Lavalink falhou; usando playback local direto | guild=%s reason=%s",
+                            getattr(guild, "id", None),
+                            reason,
+                        )
                     else:
                         return router_result
 
@@ -5840,13 +5841,7 @@ class TTSAudioMixin(SharedSynthesisMixin):
         )
 
     def _is_music_active_for_guild(self, guild_id: int) -> bool:
-        router = getattr(getattr(self, "bot", None), "audio_router", None)
-        is_music_active = getattr(router, "is_music_active", None)
-        if not callable(is_music_active):
-            return False
-        with contextlib.suppress(Exception):
-            return bool(is_music_active(int(guild_id)))
-        return False
+        return musica_ativa(getattr(self, "bot", None), guild_id)
 
     async def _reset_voice_client(self, guild: discord.Guild, *, reason: str = "unknown") -> None:
         lock_getter = getattr(self, "_get_voice_connect_lock", None)
@@ -6054,25 +6049,16 @@ class TTSAudioMixin(SharedSynthesisMixin):
         if vc is None or not self._voice_client_is_connected(vc) or self._voice_client_channel(vc) is None:
             return True
 
-        router = getattr(getattr(self, "bot", None), "audio_router", None)
-        is_music_active = getattr(router, "is_music_active", None)
-        if callable(is_music_active):
-            with contextlib.suppress(Exception):
-                if is_music_active(guild.id):
-                    if TTS_DEBUG_LOGS:
-                        self._log_debug(f"[tts_voice] Idle timeout ignorado | player de música ativo | guild={guild.id}")
-                    return False
+        if musica_ativa(self.bot, guild.id):
+            if TTS_DEBUG_LOGS:
+                self._log_debug(f"[tts_voice] Idle timeout ignorado | player de música ativo | guild={guild.id}")
+            return False
 
-        should_defer = getattr(router, "should_defer_tts_auto_leave", None)
-        if callable(should_defer):
-            with contextlib.suppress(Exception):
-                if should_defer(guild.id):
-                    schedule_idle = getattr(router, "schedule_music_idle_disconnect", None)
-                    if callable(schedule_idle):
-                        await schedule_idle(guild.id)
-                    if TTS_DEBUG_LOGS:
-                        self._log_debug(f"[tts_voice] Idle timeout adiado | sessão de música aguardando timeout | guild={guild.id}")
-                    return False
+        if deve_adiar_auto_leave_tts(self.bot, guild.id):
+            await agendar_idle_musica(self.bot, guild.id)
+            if TTS_DEBUG_LOGS:
+                self._log_debug(f"[tts_voice] Idle timeout adiado | sessão de música aguardando timeout | guild={guild.id}")
+            return False
 
         members = list(getattr(self._voice_client_channel(vc), "members", []))
         humans = [m for m in members if not m.bot]
@@ -6099,14 +6085,13 @@ class TTSAudioMixin(SharedSynthesisMixin):
         if target_channel is None:
             return None
 
-        router = getattr(getattr(self, "bot", None), "audio_router", None)
-        should_route_agent = getattr(router, "should_route_tts_to_music_agent", None)
-        if callable(should_route_agent) and not bool(getattr(item, "_skip_music_agent_tts_route", False)):
-            with contextlib.suppress(Exception):
-                if should_route_agent(guild.id, item.channel_id):
-                    state.last_channel_id = item.channel_id
-                    logger.debug("[tts_voice] conexão local ignorada; TTS será roteado pelo worker musical | guild=%s channel=%s", guild.id, item.channel_id)
-                    return None
+        if (
+            not bool(getattr(item, "_skip_music_agent_tts_route", False))
+            and deve_rotear_tts_para_agente(self.bot, guild.id, item.channel_id)
+        ):
+            state.last_channel_id = item.channel_id
+            logger.debug("[tts_voice] conexão local ignorada; TTS será roteado pelo worker musical | guild=%s channel=%s", guild.id, item.channel_id)
+            return None
 
         vc = self._get_voice_client_for_guild(guild)
         if getattr(self, "_is_lavalink_voice_client", lambda _vc: False)(vc):
@@ -6340,14 +6325,9 @@ class TTSAudioMixin(SharedSynthesisMixin):
                                     await self._maybe_await(self._disconnect_if_blocked(guild))
                                 continue
 
-                    router = getattr(getattr(self, "bot", None), "audio_router", None)
-                    should_route_agent = getattr(router, "should_route_tts_to_music_agent", None) if router is not None else None
-                    play_agent_tts = getattr(router, "play_tts_via_music_agent", None) if router is not None else None
                     if (
-                        callable(should_route_agent)
-                        and callable(play_agent_tts)
-                        and not bool(getattr(item, "_skip_music_agent_tts_route", False))
-                        and should_route_agent(guild.id, item.channel_id)
+                        not bool(getattr(item, "_skip_music_agent_tts_route", False))
+                        and deve_rotear_tts_para_agente(self.bot, guild.id, item.channel_id)
                     ):
                         if audio_task is not None and not audio_task.done():
                             audio_task.cancel()
@@ -6361,13 +6341,14 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         dequeue_started_at = float(getattr(item, "_dequeued_at_monotonic", time.monotonic()))
                         try:
                             cached_payload = {}
-                            if getattr(router, "_supports_tts_cached_audio", False):
+                            if suporta_cache_tts_agente(self.bot):
                                 await self._maybe_attach_prebuilt_direct_tts_audio(cached_payload, item)
                                 cached_payload.setdefault("cache_key", self._cache_key(item))
                                 cached_payload["tld"] = item.tld
                                 cached_payload["tts_request_id"] = item.request_id
                                 item._tts_remote_active = True
-                            playback_result = await play_agent_tts(
+                            playback_result = await tocar_tts_via_agente(
+                                self.bot,
                                 guild_id=guild.id,
                                 channel_id=item.channel_id,
                                 text=item.text,
@@ -6401,15 +6382,8 @@ class TTSAudioMixin(SharedSynthesisMixin):
                                 bool(isinstance(playback_result, dict) and playback_result.get("ok", True)),
                             )
                         except Exception as exc:
-                            exc_text = str(exc or "")
-                            exc_lower = exc_text.lower()
-                            music_active = bool(self._is_music_active_for_guild(int(guild.id)))
-                            safe_to_fallback = (
-                                not music_active
-                                or "sem sessão musical ativa" in exc_lower
-                                or "no active music" in exc_lower
-                                or "no music session" in exc_lower
-                                or "music session" in exc_lower
+                            safe_to_fallback = erro_agente_permite_fallback_local(
+                                self.bot, int(guild.id), exc
                             )
                             if safe_to_fallback:
                                 setattr(item, "_skip_music_agent_tts_route", True)

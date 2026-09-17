@@ -6,7 +6,7 @@ import os
 import time
 from typing import Any, Mapping
 
-import config
+from cogs.musica import configuracao as config
 
 from .configuracao import carregar_configuracao_selecao, music_worker_only_enabled
 from .modelos import MUSIC_WORKER_UNAVAILABLE_MESSAGE, MusicWorkerSelection, MusicWorkerUnavailable

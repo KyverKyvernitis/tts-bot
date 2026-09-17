@@ -11,7 +11,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from cogs.musica import AudioRouter
 from utility.interaction_safety import (
     is_unknown_interaction,
     safe_defer_interaction,
@@ -21,13 +20,14 @@ from cogs.musica.diagnostico.servico import (
     DiagnosticsOptions,
     build_full_vps_diagnostics_report,
     build_git_tracked_base_archive,
-    build_music_diagnostics_report,
     build_quick_vps_status_report,
-    build_music_diagnostics_archive,
-    build_music_diagnostics_emergency_report,
     build_vps_snapshot_archive,
     build_core_worker_apk_diagnostics_report,
     diagnostics_file_stamp,
+)
+from cogs.musica.integracoes.diagnostico_vps import (
+    gerar_diagnostico_musical_vps,
+    obter_roteador_musica,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,20 +39,11 @@ VpsItem = Literal["quick_status", "base_git", "music_diag", "full_diag", "snapsh
 
 VPS_QUICK_STATUS_TIMEOUT_SECONDS = 22.0
 VPS_BASE_TIMEOUT_SECONDS = 70.0
-VPS_MUSIC_DIAG_TIMEOUT_SECONDS = 115.0
 VPS_FULL_DIAG_TIMEOUT_SECONDS = 150.0
 VPS_SNAPSHOT_TIMEOUT_SECONDS = 75.0
 VPS_SERVERS_TIMEOUT_SECONDS = 25.0
 VPS_TTS_TIMEOUT_SECONDS = 18.0
 VPS_APK_DIAG_TIMEOUT_SECONDS = 25.0
-
-
-def _get_audio_router(bot: commands.Bot) -> AudioRouter:
-    router = getattr(bot, "audio_router", None)
-    if router is None:
-        router = AudioRouter(bot)
-        setattr(bot, "audio_router", router)
-    return router
 
 
 def _safe_get_value(item: Any, *, default: Any = None) -> Any:
@@ -1090,47 +1081,19 @@ class VpsCommandMixin:
                 continue
 
             if item == "music_diag":
-                router = _get_audio_router(self.bot)
-                try:
-                    payload, filename, summary, fallback_report = await self._with_vps_timeout("diagnóstico musical", build_music_diagnostics_archive(router, await self._vps_context_options(interaction)), timeout=VPS_MUSIC_DIAG_TIMEOUT_SECONDS)
-                    if payload and filename:
-                        files.append(discord.File(io.BytesIO(payload), filename=filename))
-                        attachment_lines.append(f"🎵 Diagnóstico musical anexado ({_format_attachment_size(len(payload))}).")
-                        generated_any = True
-                        # O diagnóstico musical modular deve ser um único anexo.
-                        # O resumo completo fica dentro do zip como 00-resumo-curto.txt/summary.txt.
-                    else:
-                        error_lines.append(f"Diagnóstico modular não foi anexado: {summary or 'falha sem detalhes'}")
-                        report = fallback_report or await self._with_vps_timeout("diagnóstico musical texto", build_music_diagnostics_report(router, await self._vps_context_options(interaction)), timeout=VPS_MUSIC_DIAG_TIMEOUT_SECONDS)
-                        report_bytes = report.encode("utf-8", "replace")
-                        files.append(discord.File(io.BytesIO(report_bytes), filename=f"music-diag-{stamp}.txt"))
-                        attachment_lines.append(f"🎵 Diagnóstico musical anexado ({_format_attachment_size(len(report_bytes))}).")
-                        generated_any = True
-                except Exception as exc:
-                    logger.exception("[utility/vps] falha ao gerar diagnóstico musical")
-                    try:
-                        report = await self._with_vps_timeout(
-                            "diagnóstico musical emergencial",
-                            build_music_diagnostics_emergency_report(router, await self._vps_context_options(interaction), reason=f"{type(exc).__name__}: {str(exc)[:500]}"),
-                            timeout=18.0,
-                        )
-                    except Exception as emergency_exc:
-                        report = (
-                            "# Diagnóstico musical falhou\n"
-                            f"Tipo: {type(exc).__name__}\n"
-                            f"Erro: {str(exc)[:500]}\n\n"
-                            "# Diagnóstico emergencial também falhou\n"
-                            f"Tipo: {type(emergency_exc).__name__}\n"
-                            f"Erro: {str(emergency_exc)[:500]}\n"
-                        )
-                    report_bytes = report.encode("utf-8", "replace")
-                    files.append(discord.File(io.BytesIO(report_bytes), filename=f"music-diag-emergency-{stamp}.txt"))
-                    attachment_lines.append(f"⚠️ Diagnóstico musical emergencial anexado ({_format_attachment_size(len(report_bytes))}).")
-                    generated_any = True
+                resultado_musica = await gerar_diagnostico_musical_vps(
+                    self.bot,
+                    await self._vps_context_options(interaction),
+                    stamp=stamp,
+                )
+                files.extend(resultado_musica.arquivos)
+                attachment_lines.extend(resultado_musica.linhas_anexos)
+                error_lines.extend(resultado_musica.erros)
+                generated_any = generated_any or resultado_musica.gerado
                 continue
 
             if item == "full_diag":
-                router = _get_audio_router(self.bot)
+                router = obter_roteador_musica(self.bot)
                 try:
                     report = await self._with_vps_timeout("diagnóstico completo", build_full_vps_diagnostics_report(router, await self._vps_context_options(interaction)), timeout=VPS_FULL_DIAG_TIMEOUT_SECONDS)
                 except Exception as exc:
