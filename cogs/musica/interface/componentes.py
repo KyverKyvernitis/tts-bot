@@ -18,6 +18,7 @@ from ..agente_telefone.comandos import music_agent_command, music_agent_status
 from ..reproducao.controle_remoto import enviar_controle_remoto
 from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
 from .carregamento import MusicLoadingReaction
+from .tarefas import agendar_tarefa_unica
 
 PLAYER_BAR_URL = "https://cdn.discordapp.com/attachments/554468640942981147/1127294696025227367/rainbow_bar3.gif"
 QUEUE_PAGE_SIZE = 8
@@ -202,7 +203,7 @@ def _schedule_agent_prefetch(
         except Exception as exc:
             logger.debug("[music/timing] prefetch UI ignorado | guild=%s erro=%s", guild_id, exc)
 
-    asyncio.create_task(runner())
+    agendar_tarefa_unica(("prefetch", int(guild_id)), runner())
 
 
 async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, router=None, voice_channel_id: int = 0, text_channel_id: int = 0, seconds: float | None = None, loading_reaction: MusicLoadingReaction | None = None) -> None:
@@ -210,40 +211,43 @@ async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, rou
     deadline = asyncio.get_running_loop().time() + max(5.0, limit)
     last_status = ""
     poll = max(0.4, min(1.5, float(getattr(config, "MUSIC_AGENT_STATUS_POLL_SECONDS", 0.75) or 0.75)))
-    while asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(poll)
-        try:
-            payload = await music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 3.5))
-            state = _agent_guild_state(payload, guild_id)
-            status = str(state.get("status") or "").lower()
-            if router is not None:
-                await _sync_agent_panel(router, guild_id, voice_channel_id, text_channel_id, track, {"state": state})
-            if not status or status == last_status:
-                continue
-            last_status = status
-            if _agent_confirmed_playing(state):
-                await message.edit(content=_music_agent_play_message(track, {"state": state}), embed=None, view=None)
-                if loading_reaction is not None:
-                    await loading_reaction.finish()
+    try:
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(poll)
+            try:
+                payload = await music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 3.5))
+                state = _agent_guild_state(payload, guild_id)
+                status = str(state.get("status") or "").lower()
+                if router is not None:
+                    await _sync_agent_panel(router, guild_id, voice_channel_id, text_channel_id, track, {"state": state})
+                if not status or status == last_status:
+                    continue
+                last_status = status
+                if _agent_confirmed_playing(state):
+                    await message.edit(content=_music_agent_play_message(track, {"state": state}), embed=None, view=None)
+                    return
+                if status in {"failed", "error"}:
+                    error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:220]
+                    await message.edit(content=f"`⚠️` Não consegui iniciar **{track.short_title}**: `{error}`", embed=None, view=None)
+                    return
+                if status in {"idle", "stopped"} and not state.get("current"):
+                    # Idle pode chegar entre accepted/queued/playing quando o worker ainda
+                    # está acordando ou quando a faixa acabou antes do painel atualizar.
+                    # Não envie erro público antes do timeout final.
+                    continue
+            except discord.NotFound:
+                # A mensagem foi apagada/expirou: continuar fazendo polling só gasta
+                # chamadas ao Phone Worker sem ter mais nada para atualizar.
                 return
-            if status in {"failed", "error"}:
-                error = str(state.get("last_error") or "fonte de áudio falhou").strip()[:220]
-                await message.edit(content=f"`⚠️` Não consegui iniciar **{track.short_title}**: `{error}`", embed=None, view=None)
-                if loading_reaction is not None:
-                    await loading_reaction.finish()
-                return
-            if status in {"idle", "stopped"} and not state.get("current"):
-                # Idle pode chegar entre accepted/queued/playing quando o worker ainda
-                # está acordando ou quando a faixa acabou antes do painel atualizar.
-                # Não envie erro público antes do timeout final.
+            except Exception:
+                # Não quebra o fluxo do usuário se o acompanhamento não conseguir consultar o worker.
                 continue
-        except Exception:
-            # Não quebra o fluxo do usuário se o acompanhamento não conseguir consultar o worker.
-            continue
-    with contextlib.suppress(Exception):
-        await message.edit(content=f"`⚠️` Demorei para confirmar o início de **{track.short_title}**. Tente novamente se não tocar.", embed=None, view=None)
-    if loading_reaction is not None:
-        await loading_reaction.finish()
+        with contextlib.suppress(Exception):
+            await message.edit(content=f"`⚠️` Demorei para confirmar o início de **{track.short_title}**. Tente novamente se não tocar.", embed=None, view=None)
+    finally:
+        if loading_reaction is not None:
+            with contextlib.suppress(Exception):
+                await loading_reaction.finish()
 
 
 _LAVALINK_SEARCH_PREFIXES = ("ytsearch:", "ytmsearch:", "scsearch:", "amsearch:", "dzsearch:", "spsearch:")
@@ -1050,7 +1054,7 @@ class SearchSelect(discord.ui.Select):
                         with contextlib.suppress(Exception):
                             message = await interaction.original_response()
                             finish_loading_reaction = False
-                            asyncio.create_task(_watch_agent_message(message, self.guild_id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id), loading_reaction=loading_reaction))
+                            agendar_tarefa_unica(("watch", int(self.guild_id)), _watch_agent_message(message, self.guild_id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id), loading_reaction=loading_reaction))
                         return
                     await edit_original(f"`⚠️` Não consegui preparar essa música: `{exc}`")
                     return
@@ -1076,7 +1080,7 @@ class SearchSelect(discord.ui.Select):
                     with contextlib.suppress(Exception):
                         message = await interaction.original_response()
                         finish_loading_reaction = False
-                        asyncio.create_task(_watch_agent_message(message, self.guild_id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id), loading_reaction=loading_reaction))
+                        agendar_tarefa_unica(("watch", int(self.guild_id)), _watch_agent_message(message, self.guild_id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id), loading_reaction=loading_reaction))
                 return
             state_before = self.router.get_state(self.guild_id)
             was_session_active = bool(
@@ -1234,7 +1238,7 @@ class AddSongModal(discord.ui.Modal):
                         wait=True,
                     )
                     if sent is not None:
-                        asyncio.create_task(_watch_agent_message(sent, guild.id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id)))
+                        agendar_tarefa_unica(("watch", int(self.guild_id)), _watch_agent_message(sent, guild.id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id)))
                     return
                 await _safe_interaction_followup(interaction, f"`⚠️` Não consegui preparar essa música: `{exc}`", ephemeral=True)
                 return
@@ -1279,7 +1283,7 @@ class AddSongModal(discord.ui.Modal):
             state = result.get("state") if isinstance(result.get("state"), dict) else {}
             status = str(state.get("status") or "").lower()
             if sent is not None and not result.get("queued") and status not in {"playing", "failed", "error"}:
-                asyncio.create_task(_watch_agent_message(sent, guild.id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id)))
+                agendar_tarefa_unica(("watch", int(self.guild_id)), _watch_agent_message(sent, guild.id, track, router=self.router, voice_channel_id=getattr(voice_channel, "id", self.voice_channel_id), text_channel_id=getattr(text_channel, "id", self.text_channel_id)))
             return
 
         state_before = self.router.get_state(self.guild_id)

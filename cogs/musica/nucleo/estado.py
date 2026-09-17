@@ -65,7 +65,7 @@ class MusicGuildState:
     now_message: Any = None
     panel_track_key: Optional[str] = None
     history: deque[MusicTrack] = field(default_factory=lambda: deque(maxlen=MUSIC_HISTORY_MAXSIZE))
-    forward_queue: deque[MusicTrack] = field(default_factory=lambda: deque(maxlen=MUSIC_HISTORY_MAXSIZE))
+    forward_queue: deque[MusicTrack] = field(default_factory=lambda: deque(maxlen=MUSIC_QUEUE_MAXSIZE))
     voice_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     panel_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     music_owns_voice: bool = False

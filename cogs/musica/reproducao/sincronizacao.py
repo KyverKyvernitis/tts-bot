@@ -38,7 +38,7 @@ def sincronizar_fila_remota(
     else:
         state.agent_remote_queue_size = max(state.agent_remote_queue_size, len(remote_queue))
 
-    mirrored: deque[MusicTrack] = deque(maxlen=limite_historico)
+    mirrored: deque[MusicTrack] = deque(maxlen=limite_fila)
     for item in remote_queue[:limite_fila]:
         if isinstance(item, dict):
             track = faixa_do_payload(item)

@@ -7,6 +7,8 @@ from typing import Any
 from cogs.musica import configuracao as config
 from cogs.musica.diagnostico.servico import cleanup_music_diagnostics_temp_artifacts
 from cogs.musica.legado.roteador_audio import AudioRouter
+from cogs.musica.agente_telefone.transporte_http import fechar_sessao_http
+from cogs.musica.interface.tarefas import cancelar_tarefas_interface
 
 LOG = logging.getLogger("music")
 
@@ -70,7 +72,12 @@ class IntegracaoMusicaBot:
         tarefa = self._tarefa_reconciliacao
         if tarefa is not None:
             tarefa.cancel()
+        await cancelar_tarefas_interface()
         try:
             await self.router.close()
         except Exception as exc:
             LOG.debug("falha ao fechar audio_router: %r", exc, exc_info=True)
+        try:
+            await fechar_sessao_http()
+        except Exception as exc:
+            LOG.debug("falha ao fechar sessão HTTP de música: %r", exc, exc_info=True)

@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import contextlib
-import json
 import logging
 from typing import Any, Mapping
 
-import aiohttp
 from cogs.musica import configuracao as config
 
 from ..nucleo.modelos import MusicTrack
@@ -17,6 +14,7 @@ from .modelos import (
     MusicWorkerUnavailable,
 )
 from .selecao import require_music_worker_available_async
+from .transporte_http import post_json_worker
 from .utilitarios import _phone_worker_base_url
 
 logger = logging.getLogger(__name__)
@@ -56,21 +54,15 @@ async def music_agent_command(
         timeout_seconds=timeout_seconds,
         **extra,
     )
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     total_timeout = max(2.0, float(payload["timeout_seconds"]) + 2.0)
-    timeout = aiohttp.ClientTimeout(total=total_timeout)
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(f"{base}/task", headers=headers, json=payload) as response:
-                text = await response.text()
-                if response.status < 200 or response.status >= 300:
-                    detail = text[:400]
-                    with contextlib.suppress(Exception):
-                        parsed = json.loads(text or "{}")
-                        if isinstance(parsed, Mapping):
-                            detail = str(parsed.get("error") or parsed.get("message") or detail)[:400]
-                    raise RuntimeError(f"Player remoto HTTP {response.status}: {detail}")
-                data = json.loads(text or "{}")
+        data = await post_json_worker(
+            url=f"{base}/task",
+            token=token,
+            payload=payload,
+            timeout_seconds=total_timeout,
+            max_erro=400,
+        )
     except Exception as exc:
         message = str(exc or "").strip() or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE
         logger.warning("[music/agent] comando remoto falhou | worker=%s action=%s erro=%s", selection.worker_id, action, message)
@@ -105,15 +97,15 @@ async def music_agent_status(*, timeout_seconds: float | None = None) -> dict[st
     if not base or not token:
         raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
     payload = montar_consulta_status(timeout_seconds=timeout_seconds)
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    timeout = aiohttp.ClientTimeout(total=max(1.0, float(payload["timeout_seconds"]) + 1.0))
+    total_timeout = max(1.0, float(payload["timeout_seconds"]) + 1.0)
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(f"{base}/task", headers=headers, json=payload) as response:
-                text = await response.text()
-                if response.status < 200 or response.status >= 300:
-                    raise RuntimeError(f"HTTP {response.status}: {text[:220]}")
-                data = json.loads(text or "{}")
+        data = await post_json_worker(
+            url=f"{base}/task",
+            token=token,
+            payload=payload,
+            timeout_seconds=total_timeout,
+            max_erro=220,
+        )
     except Exception as exc:
         logger.info("[music/agent] status remoto indisponível | worker=%s erro=%s", selection.worker_id, exc)
         return {"ok": False, "available": False, "error": str(exc)}
