@@ -8,11 +8,13 @@ MUSICA = RAIZ / "cogs" / "musica"
 
 
 def test_comandos_de_reproducao_possuem_rota_para_music_agent() -> None:
-    texto = (MUSICA / "modulo.py").read_text(encoding="utf-8")
+    modulo = (MUSICA / "modulo.py").read_text(encoding="utf-8")
+    tocar = (MUSICA / "comandos" / "tocar.py").read_text(encoding="utf-8")
     for acao in ("play", "pause", "resume", "skip", "stop", "shuffle"):
-        assert f'"{acao}"' in texto
-    assert "_send_music_agent_control" in texto
-    assert 'music_agent_command(\n                            "play"' in texto
+        assert f'"{acao}"' in modulo
+    assert "_send_music_agent_control" in modulo
+    assert 'music_agent_command(\n                            "play"' in tocar
+    assert "class Music(FluxoTocar, commands.Cog)" in modulo
 
 
 def test_phone_worker_esta_separado_por_responsabilidade() -> None:

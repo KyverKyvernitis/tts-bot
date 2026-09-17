@@ -145,15 +145,22 @@ def test_mixin_youtube_preserva_contrato_da_fachada(monkeypatch) -> None:
 
 def test_spotify_esta_isolado_como_fonte_de_metadados() -> None:
     fachada = (RAIZ_MUSICA / "metadados" / "provedores_api.py").read_text(encoding="utf-8")
-    spotify = (RAIZ_MUSICA / "metadados" / "fontes" / "spotify.py").read_text(encoding="utf-8")
+    pasta = RAIZ_MUSICA / "metadados" / "fontes"
+    spotify = (pasta / "spotify.py").read_text(encoding="utf-8")
+    autenticacao = (pasta / "spotify_autenticacao.py").read_text(encoding="utf-8")
+    publico = (pasta / "spotify_publico.py").read_text(encoding="utf-8")
+    api = (pasta / "spotify_api.py").read_text(encoding="utf-8")
 
     assert "def spotify_search" not in fachada
     assert "def spotify_batch_from_url" not in fachada
     assert "class ProvedorSpotifyMixin" in spotify
-    assert "def spotify_search" in spotify
-    assert "def spotify_batch_from_url" in spotify
+    assert "def spotify_token" in autenticacao
+    assert "def spotify_public_batch_from_url" in publico
+    assert "def spotify_search" in api
+    assert "def spotify_batch_from_url" in api
+    conjunto = spotify + autenticacao + publico + api
     for proibido in ("FFmpegPCMAudio", "LavalinkBackend", "yt_dlp.YoutubeDL", "voice_client.play"):
-        assert proibido not in spotify
+        assert proibido not in conjunto
 
 
 def test_spotify_preserva_conversao_de_metadados_sem_player(monkeypatch) -> None:
