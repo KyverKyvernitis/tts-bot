@@ -692,3 +692,78 @@ def test_turbo_profile_contract_cannot_lose_apk_builder_to_stale_env() -> None:
     assert "valores do env continuam aceitos como extensões" in phone_worker
     assert "roles, capabilities = _current_core_worker_roles_and_capabilities()" in phone_worker
     assert phone_worker_version_tuple() >= (1, 11, 5)
+
+
+
+def test_manual_builder_selection_can_force_termux_bootstrap() -> None:
+    import importlib.util
+
+    path = ROOT / "scripts/core-worker-automation.py"
+    spec = importlib.util.spec_from_file_location("core_worker_automation_force_termux_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    common = {
+        "enabled": True,
+        "online": True,
+        "last_seen": 1000.0,
+        "capabilities": ["apk-builder", "apk-self-builder", "apk-durable-jobs-v1"],
+        "supported_tasks": ["apk_build_debug"],
+    }
+    snapshot = {"workers": [
+        {
+            **common,
+            "worker_id": "phone-test-apk",
+            "source": "core-worker-apk-agent-service-v2",
+            "runtime_kind": "apk",
+            "physical_worker_id": "phone-test",
+            "appVersionCode": 133,
+            "status": {"apk_self_builder": {
+                "ready": True,
+                "ok": True,
+                "appVersionCode": 133,
+                "checkedAt": int(module.time.time() * 1000),
+                "toolchainReleaseFingerprint": "toolchain-apk",
+            }},
+            "apk_builder_last_ready_at": module.time.time(),
+        },
+        {
+            **common,
+            "worker_id": "phone-test",
+            "source": "termux-phone-worker",
+            "platform": "android-termux",
+            "runtime_kind": "termux",
+            "version": module._read_phone_worker_version(),
+            "source_hash": module._hash_phone_worker_files(ROOT / "deploy" / "termux" / "phone-worker"),
+            "capabilities": ["phone-worker", "apk-builder"],
+        },
+    ]}
+
+    selected = module._select_apk_builder(
+        snapshot,
+        target_agent_version=module._read_phone_worker_version(),
+        target_agent_source_hash=module._hash_phone_worker_files(ROOT / "deploy" / "termux" / "phone-worker"),
+        force_runtime_kind="termux",
+    )
+    assert selected["worker_id"] == "phone-test"
+    assert selected["runtime_kind"] == "termux"
+
+
+def test_manual_builder_selection_rejects_unknown_runtime() -> None:
+    import importlib.util
+
+    path = ROOT / "scripts/core-worker-automation.py"
+    spec = importlib.util.spec_from_file_location("core_worker_automation_force_runtime_validation_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    import pytest
+    with pytest.raises(ValueError, match="runtime de builder inválido"):
+        module._select_apk_builder(
+            {"workers": []},
+            target_agent_version="1.0.0",
+            target_agent_source_hash="a" * 64,
+            force_runtime_kind="desktop",
+        )

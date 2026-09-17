@@ -1302,10 +1302,14 @@ def _apk_preflight_is_transient(preflight: dict[str, Any]) -> bool:
 
 
 def _select_apk_builder(
-    snapshot: dict[str, Any], *, target_agent_version: str, target_agent_source_hash: str
+    snapshot: dict[str, Any], *, target_agent_version: str, target_agent_source_hash: str,
+    force_runtime_kind: str = "",
 ) -> dict[str, Any]:
     """Escolhe um builder concreto e dá grace ao APK após restart da VPS/app."""
     workers = [item for item in snapshot.get("workers") or [] if isinstance(item, dict)]
+    forced_runtime = str(force_runtime_kind or "").strip().lower()
+    if forced_runtime not in {"", "apk", "termux"}:
+        raise ValueError(f"runtime de builder inválido: {force_runtime_kind}")
     apk_candidates: list[dict[str, Any]] = []
     apk_grace_candidates: list[dict[str, Any]] = []
     termux_candidates: list[dict[str, Any]] = []
@@ -1326,6 +1330,8 @@ def _select_apk_builder(
         is_online = bool(worker.get("online"))
 
         if is_apk:
+            if forced_runtime == "termux":
+                continue
             preflight = _worker_apk_builder_status(worker)
             app_code = int(preflight.get("appVersionCode") or worker.get("appVersionCode") or worker.get("versionCode") or 0)
             fingerprint = _worker_toolchain_fingerprint(worker)
@@ -1381,6 +1387,8 @@ def _select_apk_builder(
                     apk_grace_candidates.append(candidate)
             continue
 
+        if forced_runtime == "apk":
+            continue
         if not is_online:
             continue
         if not _worker_supports(worker, "apk_build_debug", "apk-builder"):
@@ -2325,7 +2333,7 @@ def _pending_apk_build_recently_queued(pending: dict[str, Any], version_code: in
     return {}
 
 
-def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
+def queue_apk_build(*, manual: bool = False, force_runtime_kind: str = "") -> dict[str, Any]:
     registry = get_core_workers_registry()
     version_name, version_code = _read_android_version()
     source = _prepare_apk_source_zip()
@@ -2446,6 +2454,7 @@ def queue_apk_build(*, manual: bool = False) -> dict[str, Any]:
         snapshot,
         target_agent_version=target_agent_version,
         target_agent_source_hash=target_agent_source_hash,
+        force_runtime_kind=force_runtime_kind,
     )
     if builder and builder.get("wait_for_online"):
         item = dict(pending.get("apk_build") if isinstance(pending.get("apk_build"), dict) else {})
@@ -2884,7 +2893,8 @@ def main() -> int:
     after = sub.add_parser("after-update")
     after.add_argument("--force-agent", action="store_true")
     sub.add_parser("queue-agent-update")
-    sub.add_parser("queue-apk-build")
+    apk_build = sub.add_parser("queue-apk-build")
+    apk_build.add_argument("--runtime", choices=("auto", "apk", "termux"), default="auto")
     sub.add_parser("queue-boot-repair")
     process = sub.add_parser("process-pending")
     process.add_argument("--worker-id", default="")
@@ -2897,7 +2907,8 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 1
     if args.command == "queue-apk-build":
-        result = queue_apk_build(manual=True)
+        runtime = "" if args.runtime == "auto" else args.runtime
+        result = queue_apk_build(manual=True, force_runtime_kind=runtime)
         write_status({"manual": True, "apk_build": result, "pending": _load_pending(), "finished_at": time.time()})
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 2
