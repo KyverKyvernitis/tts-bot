@@ -17,6 +17,9 @@ import config
 
 from .modelos import ApiTrackBatch, ApiTrackCandidate
 from .normalizacao import compact_key, is_bad_match_title, normalize_text, parse_iso8601_duration, title_quality_score
+from .fontes.deezer import ProvedorDeezerMixin
+from .fontes.soundcloud import ProvedorSoundCloudMixin
+from .fontes.youtube import ProvedorYouTubeMixin
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +42,7 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
-class MusicApiProviders:
+class MusicApiProviders(ProvedorYouTubeMixin, ProvedorDeezerMixin, ProvedorSoundCloudMixin):
     """Providers opcionais para melhorar metadata/ranking.
 
     As APIs aqui não substituem o yt-dlp/FFmpeg. Elas só ajudam a escolher o
@@ -235,105 +238,8 @@ class MusicApiProviders:
         return {}
 
 
-    def _youtube_video_id_from_url(self, url: str) -> str:
-        parsed = urlparse(url or "")
-        host = (parsed.netloc or "").lower()
-        if "youtu.be" in host:
-            return (parsed.path or "").strip("/").split("/", 1)[0]
-        if "youtube" in host:
-            if parsed.path.startswith("/watch"):
-                return str((parse_qs(parsed.query).get("v") or [""])[0]).strip()
-            for prefix in ("/shorts/", "/embed/", "/live/"):
-                if parsed.path.startswith(prefix):
-                    return parsed.path[len(prefix):].strip("/").split("/", 1)[0]
-        return ""
 
-    async def youtube_video_metadata(self, video_id_or_url: str) -> ApiTrackCandidate | None:
-        if not self.youtube_api_key:
-            return None
-        video_id = self._youtube_video_id_from_url(video_id_or_url) or str(video_id_or_url or "").strip()
-        if not re.fullmatch(r"[A-Za-z0-9_-]{6,}", video_id):
-            return None
-        params = urlencode({
-            "part": "snippet,contentDetails,status",
-            "id": video_id,
-            "key": self.youtube_api_key,
-        })
-        data = await self._to_thread_json(f"https://www.googleapis.com/youtube/v3/videos?{params}")
-        first = next((item for item in (data.get("items") or []) if item), None)
-        if not first:
-            return None
-        snippet = first.get("snippet") or {}
-        thumbnails = snippet.get("thumbnails") or {}
-        thumb = ((thumbnails.get("maxres") or thumbnails.get("high") or thumbnails.get("medium") or thumbnails.get("default") or {}).get("url") or "")
-        candidate = ApiTrackCandidate(
-            title=html.unescape(str(snippet.get("title") or "").strip()),
-            artist=html.unescape(str(snippet.get("channelTitle") or "").strip()),
-            thumbnail=thumb,
-            webpage_url=f"https://www.youtube.com/watch?v={video_id}",
-            source="YouTube API",
-            provider="youtube",
-            query=video_id,
-            score=45,
-        )
-        candidate.duration = parse_iso8601_duration(str((first.get("contentDetails") or {}).get("duration") or ""))
-        status = first.get("status") or {}
-        if str(status.get("embeddable", "true")).lower() == "false":
-            candidate.score -= 10
-        return candidate
 
-    async def youtube_search(self, query: str, *, limit: int = 5) -> list[ApiTrackCandidate]:
-        if not self.youtube_api_key:
-            return []
-        params = urlencode({
-            "part": "snippet",
-            "type": "video",
-            "maxResults": max(1, min(10, int(limit))),
-            "q": query,
-            "key": self.youtube_api_key,
-            "safeSearch": "none",
-            "videoEmbeddable": "true",
-        })
-        data = await self._to_thread_json(f"https://www.googleapis.com/youtube/v3/search?{params}")
-        items = data.get("items") or []
-        video_ids = []
-        base: dict[str, ApiTrackCandidate] = {}
-        for item in items:
-            video_id = str(((item.get("id") or {}).get("videoId")) or "").strip()
-            snippet = item.get("snippet") or {}
-            if not video_id:
-                continue
-            thumbnails = snippet.get("thumbnails") or {}
-            thumb = ((thumbnails.get("medium") or thumbnails.get("default") or thumbnails.get("high") or {}).get("url") or "")
-            candidate = ApiTrackCandidate(
-                title=str(snippet.get("title") or "").strip(),
-                artist=str(snippet.get("channelTitle") or "").strip(),
-                thumbnail=thumb,
-                webpage_url=f"https://www.youtube.com/watch?v={video_id}",
-                provider="youtube",
-                source="YouTube API",
-                query=query,
-                score=40,
-            )
-            video_ids.append(video_id)
-            base[video_id] = candidate
-        if video_ids:
-            duration_params = urlencode({
-                "part": "contentDetails,status",
-                "id": ",".join(video_ids),
-                "key": self.youtube_api_key,
-            })
-            with_duration = await self._to_thread_json(f"https://www.googleapis.com/youtube/v3/videos?{duration_params}")
-            for item in with_duration.get("items") or []:
-                video_id = str(item.get("id") or "")
-                candidate = base.get(video_id)
-                if not candidate:
-                    continue
-                candidate.duration = parse_iso8601_duration(str((item.get("contentDetails") or {}).get("duration") or ""))
-                status = item.get("status") or {}
-                if str(status.get("embeddable", "true")).lower() == "false":
-                    candidate.score -= 10
-        return list(base.values())
 
     async def spotify_token(self, *, user: bool = False) -> str:
         """Retorna token Spotify.
@@ -1244,169 +1150,11 @@ class MusicApiProviders:
             score=35,
         )
 
-    def _deezer_resource(self, url: str) -> tuple[str, str]:
-        parsed = urlparse(url)
-        parts = [part for part in parsed.path.split("/") if part]
-        for kind in ("track", "album", "playlist"):
-            if kind in parts:
-                idx = parts.index(kind)
-                if idx + 1 < len(parts):
-                    return kind, parts[idx + 1]
-        return "", ""
 
-    async def deezer_batch_from_url(self, url: str, *, limit: int = 25) -> ApiTrackBatch | None:
-        if not self.deezer_enabled:
-            return None
-        kind, item_id = self._deezer_resource(url)
-        if not item_id:
-            return None
-        limit = max(1, min(100, int(limit)))
-        if kind == "track":
-            data = await self._to_thread_json(f"https://api.deezer.com/track/{quote(item_id)}")
-            candidate = self._deezer_candidate(data, url=url)
-            return ApiTrackBatch(tracks=[candidate] if candidate else [], title=candidate.title if candidate else "", is_playlist=False, source="Deezer API")
-        if kind == "album":
-            data = await self._to_thread_json(f"https://api.deezer.com/album/{quote(item_id)}")
-            title = str(data.get("title") or "Álbum Deezer")
-            artist_data = data.get("artist") or {}
-            album_data = {"title": title, "cover_medium": data.get("cover_medium") or data.get("cover") or ""}
-            tracks: list[ApiTrackCandidate] = []
-            for item in ((data.get("tracks") or {}).get("data") or [])[:limit]:
-                candidate = self._deezer_candidate({**item, "artist": item.get("artist") or artist_data, "album": album_data})
-                if candidate:
-                    candidate.album = title
-                    tracks.append(candidate)
-            total = int(((data.get("tracks") or {}).get("total")) or len(tracks))
-            return ApiTrackBatch(tracks=tracks, title=title, is_playlist=True, truncated=total > len(tracks), source="Deezer API")
-        if kind == "playlist":
-            data = await self._to_thread_json(f"https://api.deezer.com/playlist/{quote(item_id)}")
-            title = str(data.get("title") or "Playlist Deezer")
-            tracks: list[ApiTrackCandidate] = []
-            next_url = ""
-            for item in ((data.get("tracks") or {}).get("data") or []):
-                candidate = self._deezer_candidate(item)
-                if candidate:
-                    tracks.append(candidate)
-                    if len(tracks) >= limit:
-                        break
-            next_url = str(((data.get("tracks") or {}).get("next")) or "")
-            while next_url and len(tracks) < limit:
-                page = await self._to_thread_json(next_url)
-                for item in page.get("data") or []:
-                    candidate = self._deezer_candidate(item)
-                    if candidate:
-                        tracks.append(candidate)
-                        if len(tracks) >= limit:
-                            break
-                next_url = str(page.get("next") or "")
-            total = int(((data.get("tracks") or {}).get("total")) or len(tracks))
-            return ApiTrackBatch(tracks=tracks, title=title, is_playlist=True, truncated=total > len(tracks), source="Deezer API")
-        return None
 
-    async def deezer_track_from_url(self, url: str) -> ApiTrackCandidate | None:
-        parsed = urlparse(url)
-        parts = [part for part in parsed.path.split("/") if part]
-        track_id = ""
-        if "track" in parts:
-            idx = parts.index("track")
-            if idx + 1 < len(parts):
-                track_id = parts[idx + 1]
-        if not track_id:
-            return None
-        data = await self._to_thread_json(f"https://api.deezer.com/track/{quote(track_id)}")
-        return self._deezer_candidate(data, url=url)
 
-    async def deezer_search(self, query: str, *, limit: int = 5) -> list[ApiTrackCandidate]:
-        if not self.deezer_enabled:
-            return []
-        params = urlencode({"q": query, "limit": max(1, min(10, int(limit)))})
-        data = await self._to_thread_json(f"https://api.deezer.com/search/track?{params}")
-        items = data.get("data") or []
-        return [cand for cand in (self._deezer_candidate(item) for item in items) if cand]
 
-    def _deezer_candidate(self, data: dict[str, Any], *, url: str = "") -> ApiTrackCandidate | None:
-        if not data:
-            return None
-        title = str(data.get("title") or data.get("title_short") or "").strip()
-        artist_data = data.get("artist") or {}
-        album_data = data.get("album") or {}
-        artist = str(artist_data.get("name") or "").strip()
-        if not title:
-            return None
-        return ApiTrackCandidate(
-            title=title,
-            artist=artist,
-            album=str(album_data.get("title") or ""),
-            duration=float(data.get("duration") or 0) or None,
-            thumbnail=str(album_data.get("cover_medium") or album_data.get("cover") or ""),
-            webpage_url=url or str(data.get("link") or ""),
-            source="Deezer API",
-            provider="deezer",
-            isrc=str(data.get("isrc") or ""),
-            query=" ".join(part for part in (artist, title, "official audio") if part),
-            score=25,
-        )
 
-    def _soundcloud_auth(self, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> tuple[dict[str, Any], dict[str, str]]:
-        params = dict(params or {})
-        headers = dict(headers or {})
-        if self.soundcloud_token:
-            headers["Authorization"] = f"OAuth {self.soundcloud_token}"
-        elif self.soundcloud_client_id:
-            params["client_id"] = self.soundcloud_client_id
-        return params, headers
 
-    async def soundcloud_batch_from_url(self, url: str, *, limit: int = 25) -> ApiTrackBatch | None:
-        if not (self.soundcloud_enabled and (self.soundcloud_token or self.soundcloud_client_id)):
-            return None
-        params, headers = self._soundcloud_auth({"url": url})
-        data = await self._to_thread_json("https://api.soundcloud.com/resolve?" + urlencode(params), headers=headers)
-        if not data:
-            return None
-        kind = str(data.get("kind") or "").lower()
-        if kind == "track":
-            candidate = self._soundcloud_candidate(data, fallback_url=url)
-            return ApiTrackBatch(tracks=[candidate] if candidate else [], title=candidate.title if candidate else "", is_playlist=False, source="SoundCloud API")
-        if kind in {"playlist", "system-playlist"} or data.get("tracks"):
-            title = str(data.get("title") or "Playlist SoundCloud")
-            tracks: list[ApiTrackCandidate] = []
-            for item in (data.get("tracks") or [])[: max(1, int(limit))]:
-                candidate = self._soundcloud_candidate(item, fallback_url="")
-                if candidate:
-                    tracks.append(candidate)
-            total = int(data.get("track_count") or len(data.get("tracks") or []) or len(tracks))
-            return ApiTrackBatch(tracks=tracks, title=title, is_playlist=True, truncated=total > len(tracks), source="SoundCloud API")
-        return None
 
-    def _soundcloud_candidate(self, item: dict[str, Any], *, fallback_url: str = "") -> ApiTrackCandidate | None:
-        title = str(item.get("title") or "").strip()
-        if not title:
-            return None
-        user = item.get("user") or {}
-        duration = item.get("duration")
-        return ApiTrackCandidate(
-            title=title,
-            artist=str(user.get("username") or user.get("full_name") or ""),
-            duration=(float(duration) / 1000.0) if duration else None,
-            thumbnail=str(item.get("artwork_url") or item.get("waveform_url") or ""),
-            webpage_url=str(item.get("permalink_url") or fallback_url or ""),
-            source="SoundCloud API",
-            provider="soundcloud",
-            query=" ".join(part for part in (str(user.get("username") or ""), title) if part),
-            score=30,
-        )
 
-    async def soundcloud_search(self, query: str, *, limit: int = 5) -> list[ApiTrackCandidate]:
-        if not (self.soundcloud_enabled and (self.soundcloud_token or self.soundcloud_client_id)):
-            return []
-        params, headers = self._soundcloud_auth({"q": query, "limit": max(1, min(10, int(limit)))})
-        url = self.soundcloud_base_url.rstrip("?") + "?" + urlencode(params)
-        data = await self._to_thread_json(url, headers=headers)
-        items = data if isinstance(data, list) else (data.get("collection") or data.get("data") or [])
-        candidates: list[ApiTrackCandidate] = []
-        for item in items:
-            candidate = self._soundcloud_candidate(item)
-            if candidate:
-                candidate.query = query
-                candidates.append(candidate)
-        return candidates
