@@ -139,7 +139,7 @@ from discord.ext import commands
 import config
 from db import SettingsDB
 from webserver import run_webserver, set_health_provider, set_update_action_provider
-from music_system import AudioRouter
+from cogs.musica import AudioRouter
 from utility.interaction_safety import is_unknown_interaction, safe_send_interaction_message
 from utility.application_bio import ApplicationBioService
 from utility.application_presence import ApplicationPresenceService
@@ -740,7 +740,7 @@ class BotLocal(IntegracaoDiscordUpdaterMixin, commands.Bot):
     async def setup_hook(self):
         print("SETUP_HOOK INICIOU")
         try:
-            from music_system.diagnostics import cleanup_music_diagnostics_temp_artifacts
+            from cogs.musica.diagnostico.servico import cleanup_music_diagnostics_temp_artifacts
 
             print(f"[DIAGNOSTICS] {cleanup_music_diagnostics_temp_artifacts()}")
         except Exception as exc:

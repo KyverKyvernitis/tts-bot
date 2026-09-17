@@ -89,7 +89,7 @@ Não foi feita implantação nem benchmark de produção. O ganho de 10× não f
 - `deploy/termux/phone-worker/start-phone-music-agent.sh`
 - `deploy/termux/phone-worker/start-phone-worker.sh`
 - `deploy/termux/phone-worker/tts_transport.py`
-- `music_system/audio_router.py`
+- `cogs/musica/legado/roteador_audio.py`
 - `scripts/core-worker-automation.py`
 - `scripts/sync-phone-worker.sh`
 - `tests/test_core_worker_cleanup_and_apk_self_build.py`

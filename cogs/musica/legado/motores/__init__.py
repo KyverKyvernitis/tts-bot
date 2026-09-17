@@ -1,16 +1,16 @@
-from __future__ import annotations
+"""Motores legados preservados apenas durante a migração Worker-only."""
 
 from .base import BackendHealth, BackendSearchResult, LocalPlaybackBackend, MusicBackendAdapter
 from .lavalink import LavalinkBackend
-from .lavalink_config import LavalinkConfigStore
-from .manager import MusicBackendManager
+from .configuracao_lavalink import LavalinkConfigStore
+from .gerenciador import MusicBackendManager
 
 __all__ = [
     "BackendHealth",
     "BackendSearchResult",
     "LocalPlaybackBackend",
+    "MusicBackendAdapter",
     "LavalinkBackend",
     "LavalinkConfigStore",
-    "MusicBackendAdapter",
     "MusicBackendManager",
 ]

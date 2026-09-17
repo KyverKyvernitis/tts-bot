@@ -15,8 +15,8 @@ from typing import Any, Mapping
 import aiohttp
 
 import config
-from music_system.errors import MusicExtractionError
-from music_system.models import ExtractedBatch, MusicTrack
+from ..nucleo.erros import MusicExtractionError
+from ..nucleo.modelos import ExtractedBatch, MusicTrack
 
 logger = logging.getLogger(__name__)
 _SELECTION_CACHE: dict[str, Any] = {"at": 0.0, "selection": None}

@@ -233,7 +233,7 @@ def test_other_text_message_listeners_use_the_same_fast_guard() -> None:
         "cogs/chatbot/cog.py",
         "cogs/forms/cog.py",
         "cogs/games/__init__.py",
-        "cogs/music.py",
+        "cogs/musica/modulo.py",
         "cogs/role_cooldown.py",
         "cogs/say.py",
     )

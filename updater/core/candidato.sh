@@ -1708,7 +1708,7 @@ bot_health_profile_for_changed_files() {
     printf 'critical'
     return 0
   fi
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(music_system/|utility/)'; then
+  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -Eq '^(cogs/musica/|utility/)'; then
     printf 'standard'
     return 0
   fi

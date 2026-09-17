@@ -11,13 +11,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from music_system import AudioRouter
-from music_system.errors import MusicExtractionError
-from music_system.models import ExtractedBatch, MusicTrack
-from music_system.providers import describe_url
-from music_system.ui import SearchResultView, QueueView, VoiceStatusSettingsView, build_queue_embed, build_now_playing_embeds
-from music_system.worker_node import music_agent_command, music_agent_status, resolve_music_tracks_on_worker
-from music_system.loading_reaction import MusicLoadingReaction
+from .legado.roteador_audio import AudioRouter
+from .nucleo.erros import MusicExtractionError
+from .nucleo.modelos import ExtractedBatch, MusicTrack
+from .metadados.provedores import describe_url
+from .interface.componentes import SearchResultView, QueueView, VoiceStatusSettingsView, build_queue_embed, build_now_playing_embeds
+from .agente_telefone.servico import music_agent_command, music_agent_status, resolve_music_tracks_on_worker
+from .interface.carregamento import MusicLoadingReaction
 
 logger = logging.getLogger(__name__)
 

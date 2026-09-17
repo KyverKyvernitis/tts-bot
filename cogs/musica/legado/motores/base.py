@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from music_system.models import ExtractedBatch, MusicTrack
+from ...nucleo.modelos import ExtractedBatch, MusicTrack
 
 
 @dataclass(slots=True)

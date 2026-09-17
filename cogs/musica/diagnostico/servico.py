@@ -2671,11 +2671,11 @@ def build_vps_snapshot_archive_sync() -> tuple[bytes | None, str, str]:
                 files.append(("core-worker-apk/" + arc_name, _safe_core_worker_app_json_snapshot(rel, max_chars=500_000)))
 
         files.append(("bot/env.sanitized.txt", _sanitized_env_text()))
-        for rel in ["config.py", "requirements.txt", "cogs/music.py", "cogs/utility.py"]:
+        for rel in ["config.py", "requirements.txt", "cogs/utility.py"]:
             path = REPO_ROOT / rel
             if path.exists():
                 files.append((f"bot/{rel}", _safe_read_file(path)))
-        for folder in ["music_system", "utility"]:
+        for folder in ["cogs/musica", "utility"]:
             root = REPO_ROOT / folder
             if root.exists():
                 for path in sorted(root.rglob("*.py")):

@@ -11,13 +11,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from music_system import AudioRouter
+from cogs.musica import AudioRouter
 from utility.interaction_safety import (
     is_unknown_interaction,
     safe_defer_interaction,
     safe_send_interaction_message,
 )
-from music_system.diagnostics import (
+from cogs.musica.diagnostico.servico import (
     DiagnosticsOptions,
     build_full_vps_diagnostics_report,
     build_git_tracked_base_archive,

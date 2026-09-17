@@ -17,7 +17,7 @@ from urllib.parse import quote
 import config
 
 from .base import BackendHealth, BackendSearchResult
-from ..models import ExtractedBatch, MusicTrack
+from ...nucleo.modelos import ExtractedBatch, MusicTrack
 
 logger = logging.getLogger(__name__)
 

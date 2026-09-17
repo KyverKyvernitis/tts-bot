@@ -12,10 +12,10 @@ import config
 LAVALINK_REAL_TEST_GUILD_ID = 927002914449424404
 
 from .base import BackendHealth, BackendSearchResult, LocalPlaybackBackend
-from ..models import ExtractedBatch
+from ...nucleo.modelos import ExtractedBatch
 from .lavalink import LavalinkBackend, LavalinkConfig, _normalize_provider
-from .lavalink_config import LavalinkConfigStore
-from ..worker_node import (
+from .configuracao_lavalink import LavalinkConfigStore
+from ...agente_telefone.servico import (
     MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE,
     MUSIC_WORKER_UNAVAILABLE_MESSAGE,
     select_music_worker,

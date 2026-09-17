@@ -23,13 +23,13 @@ import discord
 import aiohttp
 
 import config
-from .api_providers import compact_key
-from .extractor import MusicExtractor
-from .errors import MusicExtractionError, MusicPlaybackError
-from .models import LoopMode, MusicTrack
-from .providers import describe_url
-from .backends import MusicBackendManager
-from .worker_node import (
+from ..metadados.provedores_api import compact_key
+from .extrator_local import MusicExtractor
+from ..nucleo.erros import MusicExtractionError, MusicPlaybackError
+from ..nucleo.modelos import LoopMode, MusicTrack
+from ..metadados.provedores import describe_url
+from .motores import MusicBackendManager
+from ..agente_telefone.servico import (
     MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE,
     MUSIC_WORKER_UNAVAILABLE_MESSAGE,
     MusicWorkerEngineUnavailable,

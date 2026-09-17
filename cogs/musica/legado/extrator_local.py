@@ -13,10 +13,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import config
 
-from .api_providers import ApiTrackBatch, ApiTrackCandidate, MusicApiProviders, compact_key, is_bad_match_title, normalize_text, title_quality_score
-from .errors import MusicExtractionError
-from .models import ExtractedBatch, MusicTrack
-from .providers import (
+from ..metadados.provedores_api import ApiTrackBatch, ApiTrackCandidate, MusicApiProviders, compact_key, is_bad_match_title, normalize_text, title_quality_score
+from ..nucleo.erros import MusicExtractionError
+from ..nucleo.modelos import ExtractedBatch, MusicTrack
+from ..metadados.provedores import (
     UrlProfile,
     clean_metadata_title,
     describe_url,
