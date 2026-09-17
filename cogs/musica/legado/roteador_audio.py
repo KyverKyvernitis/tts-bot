@@ -31,8 +31,21 @@ from ..nucleo.estado import ControlVote, MusicGuildState
 from ..metadados.provedores import describe_url
 from .motores import MusicBackendManager
 from ..agente_telefone.conversao import estado_da_guild_no_payload, faixa_do_payload
-from ..reproducao.sincronizacao import sincronizar_fila_remota
+from ..reproducao.sincronizacao import sincronizar_estado_agente
 from ..reproducao.controle_remoto import ajustar_volume, alternar_repeticao, anterior, buscar_momento, embaralhar
+from ..agente_telefone.monitor import iniciar_monitor_music_agent
+from ..nucleo.fila import (
+    chaves_da_faixa,
+    chaves_em_uso,
+    inserir_no_inicio,
+    itens_pendentes,
+    obter_proxima_faixa,
+    registrar_historico,
+    snapshot as snapshot_fila,
+    snapshot_historico,
+    substituir_fila_local,
+    tem_pendentes,
+)
 from ..agente_telefone.servico import (
     MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE,
     MUSIC_WORKER_UNAVAILABLE_MESSAGE,
@@ -2415,71 +2428,19 @@ class AudioRouter:
         return added, dropped
 
     def _track_keys(self, track: MusicTrack) -> set[str]:
-        keys: set[str] = set()
-        url = (track.webpage_url or track.original_url or "").strip().lower()
-        if url:
-            keys.add("url:" + url)
-        title_key = compact_key(track.title)
-        if title_key:
-            duration_bucket = ""
-            if track.duration is not None:
-                duration_bucket = str(int(max(0.0, float(track.duration)) // 8))
-            keys.add("title:" + title_key + ":" + duration_bucket)
-        return keys
+        return chaves_da_faixa(track, compact_key)
 
     def _current_track_keys(self, state: MusicGuildState) -> set[str]:
-        keys: set[str] = set()
-        if state.current is not None:
-            keys.update(self._track_keys(state.current))
-        for item in list(getattr(state, "forward_queue", []) or []):
-            keys.update(self._track_keys(item))
-        for item in list(getattr(state.queue, "_queue", [])):
-            keys.update(self._track_keys(item))
-        return keys
+        return chaves_em_uso(state, compact_key)
 
     def _pending_items(self, state: MusicGuildState) -> list[MusicTrack]:
-        """Retorna próximas músicas na ordem real de avanço.
-
-        ``forward_queue`` guarda músicas que ficaram à frente quando o usuário
-        voltou no histórico. Ela precisa ter prioridade sobre o queue normal para
-        que o fluxo A → B → voltar A → avançar B funcione mesmo com só 2 músicas.
-        """
-        items: list[MusicTrack] = []
-        with contextlib.suppress(Exception):
-            items.extend(list(getattr(state, "forward_queue", []) or []))
-        with contextlib.suppress(Exception):
-            items.extend(list(getattr(state.queue, "_queue", [])))
-        return items
+        return itens_pendentes(state)
 
     def _has_pending_track(self, state: MusicGuildState) -> bool:
-        return bool(self._pending_items(state))
+        return tem_pendentes(state)
 
     async def _get_next_worker_track(self, state: MusicGuildState, *, timeout: float) -> tuple[MusicTrack, bool]:
-        """Obtém a próxima música e informa se veio do asyncio.Queue.
-
-        Músicas do ``forward_queue`` não podem chamar ``queue.task_done()``.
-
-        O ``forward_queue`` não acorda tasks bloqueadas em ``asyncio.Queue.get``.
-        Isso quebrava o botão ⏮️ quando o player já estava em "Nada tocando":
-        a música anterior era colocada na frente, o painel mostrava "Queue
-        pronto", mas o worker seguia dormindo no queue normal. Por isso fazemos
-        pequenas esperas periódicas, preservando o timeout total de idle.
-        """
-        deadline = time.monotonic() + max(0.0, float(timeout))
-        poll_interval = 0.35
-        while True:
-            if getattr(state, "forward_queue", None):
-                try:
-                    return state.forward_queue.popleft(), False
-                except IndexError:
-                    pass
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise asyncio.TimeoutError
-            try:
-                return await asyncio.wait_for(state.queue.get(), timeout=min(poll_interval, remaining)), True
-            except asyncio.TimeoutError:
-                continue
+        return await obter_proxima_faixa(state, timeout=timeout)
 
     def _panel_key_for_track(self, track: MusicTrack | None) -> str | None:
         if track is None:
@@ -3982,59 +3943,13 @@ class AudioRouter:
 
 
     def start_music_agent_monitor(self, guild_id: int, *, voice_channel_id: int | None = None, text_channel_id: int | None = None) -> None:
-        state = self.get_state(int(guild_id))
-        task = getattr(state, "agent_monitor_task", None)
-        if task is not None and not task.done():
-            return
-
-        async def _runner() -> None:
-            idle_seen = 0
-            try:
-                while True:
-                    await asyncio.sleep(max(1.0, min(4.0, float(getattr(config, "MUSIC_AGENT_PANEL_POLL_SECONDS", 2.0) or 2.0))))
-                    try:
-                        payload = await _music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0))
-                    except Exception:
-                        logger.debug("[music/agent] monitor não conseguiu consultar status | guild=%s", guild_id, exc_info=True)
-                        continue
-                    remote = estado_da_guild_no_payload(payload, int(guild_id))
-                    if not remote:
-                        idle_seen += 1
-                        if idle_seen >= 4:
-                            return
-                        continue
-                    await self.sync_music_agent_state(
-                        int(guild_id),
-                        None,
-                        remote,
-                        voice_channel_id=voice_channel_id,
-                        text_channel_id=text_channel_id,
-                        queued=False,
-                        create_panel=True,
-                    )
-                    status = str(remote.get("status") or "").lower()
-                    has_current = isinstance(remote.get("current"), dict) and bool(remote.get("current"))
-                    if status in {"idle", "stopped", "failed", "error"} and not has_current:
-                        idle_seen += 1
-                    else:
-                        idle_seen = 0
-                    if idle_seen >= 3:
-                        return
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.debug("[music/agent] monitor encerrado por falha", exc_info=True)
-            finally:
-                st = self.get_state(int(guild_id))
-                if getattr(st, "agent_monitor_task", None) is asyncio.current_task():
-                    st.agent_monitor_task = None
-
-        try:
-            task = asyncio.create_task(_runner())
-            task.add_done_callback(_consume_expected_music_exception)
-            state.agent_monitor_task = task
-        except RuntimeError:
-            state.agent_monitor_task = None
+        iniciar_monitor_music_agent(
+            self,
+            int(guild_id),
+            voice_channel_id=voice_channel_id,
+            text_channel_id=text_channel_id,
+            callback_conclusao=_consume_expected_music_exception,
+        )
 
     def _schedule_agent_playback_started_effects(self, guild_id: int, track_key: str) -> None:
         state = self.get_state(int(guild_id))
@@ -4108,186 +4023,16 @@ class AudioRouter:
         queued: bool = False,
         create_panel: bool = True,
     ) -> MusicGuildState:
-        """Espelha o estado do backend de música do worker no painel da VPS.
-
-        O backend remoto toca a música; a VPS continua dona da UI. Este método
-        nunca conecta a VPS em voz e nunca expõe nomes internos de backend ao
-        usuário. Ele só mantém ``MusicGuildState`` renderizável para o painel.
-        """
-        state = self.get_state(int(guild_id))
-        remote = agent_state if isinstance(agent_state, dict) else {}
-        previous_panel_key = getattr(state, "panel_track_key", None)
-        previous_status = str(getattr(state, "current_status", "") or "")
-        previous_current = getattr(state, "current", None)
-        previous_current_key = self._panel_key_for_track(previous_current) if previous_current is not None else ""
-
-        try:
-            if text_channel_id:
-                state.last_text_channel_id = int(text_channel_id)
-            elif remote.get("text_channel_id"):
-                state.last_text_channel_id = int(remote.get("text_channel_id"))
-        except Exception:
-            pass
-        try:
-            if voice_channel_id:
-                state.last_voice_channel_id = int(voice_channel_id)
-            elif remote.get("voice_channel_id"):
-                state.last_voice_channel_id = int(remote.get("voice_channel_id"))
-        except Exception:
-            pass
-
-        remote_status_original = str(remote.get("status") or "").strip().lower()
-        raw_status = remote_status_original
-        current_payload = remote.get("current") if isinstance(remote.get("current"), dict) else {}
-        if current_payload:
-            track = faixa_do_payload(current_payload, track)
-            incoming_key = self._panel_key_for_track(track) if track is not None else ""
-            if (
-                previous_current is not None
-                and incoming_key
-                and previous_current_key
-                and incoming_key != previous_current_key
-                and previous_status not in {"stopped"}
-            ):
-                # Quando o Music Agent troca a faixa autoritativa, a VPS também
-                # guarda uma cópia local como fallback. Isso cobre a janela em
-                # que o estado remoto ainda não reportou history_size ou quando
-                # um painel antigo aciona o botão voltar logo após a transição.
-                self._push_history(state, previous_current)
-        last_error = str(remote.get("last_error") or "").strip()
-        sincronizar_fila_remota(state, remote, limite_fila=MUSIC_QUEUE_MAXSIZE, limite_historico=MUSIC_HISTORY_MAXSIZE)
-        with contextlib.suppress(Exception):
-            state.agent_remote_history_size = max(0, int(remote.get("history_size") or 0))
-        had_active_agent_session = bool(
-            str(getattr(state, "current_backend", "") or "").lower() == "agent"
-            and (state.current is not None or previous_status in {"resolving", "starting", "playing", "paused", "queued"})
+        return await sincronizar_estado_agente(
+            self,
+            int(guild_id),
+            track,
+            agent_state,
+            voice_channel_id=voice_channel_id,
+            text_channel_id=text_channel_id,
+            queued=queued,
+            create_panel=create_panel,
         )
-        confirmed_playing = bool(remote.get("confirmed_playing"))
-        if raw_status == "playing" and not confirmed_playing:
-            if "voice_connected" in remote or "player_present" in remote:
-                confirmed_playing = bool(remote.get("voice_connected")) and bool(remote.get("player_present"))
-        if raw_status == "playing" and not confirmed_playing:
-            raw_status = "starting"
-        if queued:
-            # Música foi aceita para fila remota; mantenha a faixa atual do painel.
-            if state.current is None and track is not None:
-                state.current = track
-                self._set_current_status(state, "queued")
-        else:
-            if last_error and raw_status in {"", "idle", "stopped"}:
-                raw_status = "failed"
-            if raw_status in {"failed", "error"}:
-                if track is not None:
-                    state.current = track
-                state.idle_reason = "track_failed"
-                state.current_status_detail = last_error[:300]
-                self._set_current_status(state, "error")
-            elif raw_status in {"idle", "stopped"} and not current_payload and not last_error:
-                if had_active_agent_session:
-                    last_action = str(remote.get("last_action") or "").strip().lower()
-                    last_event = str(remote.get("last_event") or "").strip().lower()
-                    if state.current is not None:
-                        self._push_history(state, state.current)
-                    state.current = None
-                    state.paused = False
-                    state.music_session_active = False
-                    state.agent_started_track_key = ""
-                    state.agent_last_idle_event = last_event or raw_status
-                    if last_action == "stop" or last_event == "stop":
-                        self._set_idle_reason(state, "manual_stop")
-                        self._invalidate_panel_controls_now(int(guild_id))
-                    elif last_event in {"external_disconnect", "voice_disconnected", "kicked"}:
-                        self._set_idle_reason(state, "external_disconnect")
-                        self._invalidate_panel_controls_now(int(guild_id))
-                    else:
-                        # Skip da última faixa, fim natural e fila remota vazia não
-                        # são desconexão externa. O painel deve mostrar fila vazia
-                        # e manter o botão anterior se houver histórico.
-                        self._set_idle_reason(state, "queue_finished")
-                        if not state.history:
-                            self._set_panel_controls_invalidation(int(guild_id), delay=60.0)
-                    self._set_current_status(state, "idle")
-                    self._mark_internal_voice_disconnect(int(guild_id), seconds=8.0)
-                    self._schedule_agent_session_finished_effects(int(guild_id), "agent_idle")
-                else:
-                    # O worker pode responder antes do primeiro evento de áudio. Não
-                    # apague o painel imediatamente; mostre preparação e deixe o watch
-                    # confirmar playing/failed/idle depois.
-                    if track is not None:
-                        state.current = track
-                        self._set_current_status(state, "starting")
-                    else:
-                        state.current = None
-                        self._set_current_status(state, "idle")
-            else:
-                if track is not None:
-                    state.current = track
-                mapped = {
-                    "preparing": "resolving",
-                    "starting": "starting",
-                    "playing": "playing",
-                    "paused": "paused",
-                    "queued": "queued",
-                }.get(raw_status or "starting", "starting")
-                self._set_current_status(state, mapped)
-
-        state.current_backend = "agent"
-        remote_loop_mode = str(remote.get("loop_mode") or remote.get("repeat") or "").strip().lower()
-        if remote_loop_mode in {"off", "one", "all"}:
-            with contextlib.suppress(Exception):
-                state.loop_mode = LoopMode(remote_loop_mode)
-        # Shuffle é uma ação pontual no worker, não um estado permanente/toggle.
-        state.shuffle = False
-        if state.current is not None:
-            with contextlib.suppress(Exception):
-                kbps = int(float(getattr(state.current, "resolved_audio_abr", 0) or getattr(state.current, "resolved_audio_max_abr", 0) or 0))
-                if kbps > 0:
-                    state.current_quality_kbps = kbps
-            ext = str(getattr(state.current, "resolved_audio_ext", "") or "").strip()
-            codec = str(getattr(state.current, "resolved_audio_codec", "") or "").strip()
-            if ext or codec:
-                state.current_quality_label = "Worker"
-        state.current_lavalink_player = None
-        state.current_source = None
-        state.paused = raw_status == "paused"
-        state.music_session_active = bool(state.current or raw_status in {"preparing", "starting", "playing", "paused", "queued"})
-        if raw_status and raw_status not in {"failed", "error"}:
-            state.current_status_detail = raw_status
-        active_statuses = {"resolving", "starting", "playing", "paused", "queued"}
-        new_panel_key = self._panel_key_for_track(state.current)
-        active_started_signal = bool(remote_status_original == "playing" and state.current is not None)
-        active_confirmed = bool(raw_status == "playing" and confirmed_playing and state.current is not None)
-        if state.current is not None or self._has_pending_track(state) or state.current_status in active_statuses:
-            self._reactivate_panel_controls_now(int(guild_id))
-        previous_started_key = str(getattr(state, "agent_started_track_key", "") or "")
-        just_started_agent_track = bool((active_confirmed or active_started_signal) and new_panel_key and previous_started_key != new_panel_key)
-        if just_started_agent_track:
-            state.agent_started_track_key = new_panel_key
-            state.current_started_at_monotonic = time.monotonic()
-            state.current_start_offset_seconds = 0.0
-            self._schedule_agent_playback_started_effects(int(guild_id), new_panel_key)
-
-        # O Music Agent envia confirmações repetidas de "playing" enquanto a faixa
-        # continua ativa. Repostar o painel em cada confirmação cria spam de
-        # painéis idênticos. Repost só no primeiro start confirmado de uma faixa;
-        # refresh de metadata/status apenas edita o painel atual.
-        track_changed_for_panel = bool(new_panel_key and previous_panel_key != new_panel_key)
-        repost_key = f"{guild_id}:{new_panel_key}" if new_panel_key else ""
-        already_reposted = bool(repost_key and repost_key == str(getattr(state, "panel_last_repost_key", "") or ""))
-        should_repost_panel = bool(
-            create_panel
-            and state.now_message is not None
-            and new_panel_key
-            and just_started_agent_track
-            and track_changed_for_panel
-            and not already_reposted
-            and bool(getattr(config, "MUSIC_PANEL_REPOST_ON_TRACK_CHANGE", True))
-        )
-        if create_panel:
-            await self.update_panel(int(guild_id), create=True, repost=should_repost_panel)
-        if state.current_backend == "agent" and state.current_status in active_statuses:
-            self.start_music_agent_monitor(int(guild_id), voice_channel_id=voice_channel_id, text_channel_id=text_channel_id)
-        return state
 
     async def update_panel(self, guild_id: int, *, create: bool = True, repost: bool = False) -> None:
         state = self.get_state(guild_id)
@@ -5773,31 +5518,17 @@ class AudioRouter:
         return state.loop_mode
 
     def snapshot_queue(self, guild_id: int) -> list[MusicTrack]:
-        state = self.get_state(guild_id)
-        return self._pending_items(state)
+        return snapshot_fila(self.get_state(guild_id))
 
     def history_snapshot(self, guild_id: int) -> list[MusicTrack]:
-        state = self.get_state(guild_id)
-        return list(state.history)
+        return snapshot_historico(self.get_state(guild_id))
 
     def _push_history(self, state: MusicGuildState, track: MusicTrack) -> None:
-        # Evita duplicar a mesma música em sequência quando skip/loop dispara rápido.
-        try:
-            if state.history and state.history[-1].display_url == track.display_url and state.history[-1].title == track.title:
-                return
-            state.history.append(track)
-        except Exception:
-            logger.debug("[music] falha ao salvar histórico", exc_info=True)
+        if not registrar_historico(state, track):
+            logger.debug("[music] histórico ignorado/indisponível | track=%r", getattr(track, "title", ""))
 
     def _prepend_queue(self, state: MusicGuildState, track: MusicTrack) -> bool:
-        try:
-            if state.queue.full():
-                return False
-            state.queue._queue.appendleft(track)
-            return True
-        except Exception:
-            logger.debug("[music] falha ao colocar música no começo da fila", exc_info=True)
-            return False
+        return inserir_no_inicio(state, track)
 
     async def previous(self, guild_id: int) -> bool:
         state = self.get_state(guild_id)
@@ -5960,13 +5691,7 @@ class AudioRouter:
     async def replace_queue(self, guild_id: int, tracks: list[MusicTrack]) -> None:
         state = self.get_state(guild_id)
         self._cancel_next_prefetch(state)
-        while not state.queue.empty():
-            with contextlib.suppress(Exception):
-                state.queue.get_nowait()
-                state.queue.task_done()
-        state.forward_queue.clear()
-        for track in tracks[:MUSIC_QUEUE_MAXSIZE]:
-            await state.queue.put(track)
+        await substituir_fila_local(state, tracks, limite=MUSIC_QUEUE_MAXSIZE)
         if tracks:
             state.music_session_active = True
             self._cancel_music_idle_disconnect(state)

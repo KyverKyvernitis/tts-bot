@@ -74,3 +74,22 @@ def test_fachada_phone_worker_nao_volta_a_virar_monolito() -> None:
     for relativo in ("modulo.py", "interface/componentes.py"):
         texto = (MUSICA / relativo).read_text(encoding="utf-8")
         assert "agente_telefone.servico" not in texto
+
+
+def test_fila_monitor_e_sincronizacao_saem_do_roteador_legado() -> None:
+    musica = Path(__file__).resolve().parents[1]
+    legado = (musica / "legado" / "roteador_audio.py").read_text(encoding="utf-8")
+    fila = (musica / "nucleo" / "fila.py").read_text(encoding="utf-8")
+    monitor = (musica / "agente_telefone" / "monitor.py").read_text(encoding="utf-8")
+    sync = (musica / "reproducao" / "sincronizacao.py").read_text(encoding="utf-8")
+
+    assert "async def obter_proxima_faixa" in fila
+    assert "def registrar_historico" in fila
+    assert "def iniciar_monitor_music_agent" in monitor
+    assert "async def sincronizar_estado_agente" in sync
+    assert "return await sincronizar_estado_agente(" in legado
+    assert "iniciar_monitor_music_agent(" in legado
+
+    arquitetura_nova = fila + monitor + sync
+    for proibido in ("yt_dlp", "FFmpegPCMAudio", "LavalinkBackend.play"):
+        assert proibido not in arquitetura_nova
