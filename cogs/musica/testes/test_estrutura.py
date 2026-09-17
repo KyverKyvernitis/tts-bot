@@ -24,6 +24,7 @@ def test_estrutura_principal_usa_nomes_em_portugues() -> None:
         "legado",
         "metadados",
         "nucleo",
+        "reproducao",
         "testes",
     }
     encontrados = {p.name for p in MUSICA.iterdir() if p.is_dir() and not p.name.startswith("__")}
@@ -54,3 +55,22 @@ def test_codigo_de_extracao_local_esta_isolado_como_legado() -> None:
         texto = arquivo.read_text(encoding="utf-8")
         assert "YoutubeDL" not in texto
         assert "import yt_dlp" not in texto
+
+
+def test_reproducao_nova_nao_contem_player_local_nem_lavalink() -> None:
+    pasta = MUSICA / "reproducao"
+    assert (pasta / "sincronizacao.py").is_file()
+    for arquivo in pasta.rglob("*.py"):
+        texto = arquivo.read_text(encoding="utf-8")
+        assert "yt_dlp" not in texto
+        assert "FFmpegPCMAudio" not in texto
+        assert "LavalinkBackend" not in texto
+        assert "play_lavalink_track" not in texto
+
+
+def test_fachada_phone_worker_nao_volta_a_virar_monolito() -> None:
+    servico = MUSICA / "agente_telefone" / "servico.py"
+    assert len(servico.read_text(encoding="utf-8").splitlines()) < 100
+    for relativo in ("modulo.py", "interface/componentes.py"):
+        texto = (MUSICA / relativo).read_text(encoding="utf-8")
+        assert "agente_telefone.servico" not in texto

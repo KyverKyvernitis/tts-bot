@@ -29,6 +29,8 @@ from ..nucleo.erros import MusicExtractionError, MusicPlaybackError
 from ..nucleo.modelos import LoopMode, MusicTrack
 from ..metadados.provedores import describe_url
 from .motores import MusicBackendManager
+from ..agente_telefone.conversao import estado_da_guild_no_payload, faixa_do_payload
+from ..reproducao.sincronizacao import sincronizar_fila_remota
 from ..agente_telefone.servico import (
     MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE,
     MUSIC_WORKER_UNAVAILABLE_MESSAGE,
@@ -3908,7 +3910,7 @@ class AudioRouter:
             # timeout curto antes de acusar desconexão externa.
             with contextlib.suppress(Exception):
                 payload = await _music_agent_status(timeout_seconds=min(2.0, float(getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0) or 5.0)))
-                remote = self._music_agent_state_from_payload(payload, int(guild.id))
+                remote = estado_da_guild_no_payload(payload, int(guild.id))
                 if remote:
                     remote_status = str(remote.get("status") or "").strip().lower()
                     remote_event = str(remote.get("last_event") or "").strip().lower()
@@ -4091,93 +4093,7 @@ class AudioRouter:
             pass
 
 
-    def _track_from_agent_payload(self, payload: dict, fallback: MusicTrack | None = None) -> MusicTrack | None:
-        if not isinstance(payload, dict):
-            return fallback
 
-        def first_useful(*values: object, generic: set[str] | None = None) -> str:
-            blocked = generic or {
-                "youtube", "link", "música", "musica", "desconhecida", "unknown",
-                "worker-agent", "music-agent", "music-agent-ytdlp", "worker-ytdlp",
-            }
-            for value in values:
-                text = str(value or "").strip()
-                if not text:
-                    continue
-                lower = text.lower()
-                if lower in blocked:
-                    continue
-                if "desconhecida" in lower and ("youtube" in lower or "worker" in lower):
-                    continue
-                return text
-            return ""
-
-        fallback_title = getattr(fallback, "title", "") if fallback is not None else ""
-        fallback_uploader = getattr(fallback, "uploader", "") if fallback is not None else ""
-        title = first_useful(
-            payload.get("display_title"), payload.get("title"), payload.get("fulltitle"),
-            payload.get("name"), payload.get("track_title"), fallback_title,
-        ) or "Música"
-        uploader = first_useful(
-            payload.get("display_uploader"), payload.get("uploader"), payload.get("author"),
-            payload.get("channel"), payload.get("creator"), payload.get("artist"), fallback_uploader,
-            generic={"youtube", "desconhecida", "unknown", "worker-agent", "music-agent", "worker-ytdlp"},
-        )
-        webpage_url = str(
-            payload.get("webpage_url")
-            or payload.get("url")
-            or payload.get("display_url")
-            or (getattr(fallback, "webpage_url", "") if fallback is not None else "")
-            or payload.get("query")
-            or ""
-        ).strip()
-        requester_id = int(payload.get("requester_id") or (getattr(fallback, "requester_id", 0) if fallback is not None else 0) or 0)
-        requester_name = str(payload.get("requester_name") or (getattr(fallback, "requester_name", "") if fallback is not None else "") or "").strip()
-        source = str(payload.get("display_source") or payload.get("source") or (getattr(fallback, "source", "") if fallback is not None else "") or "YouTube")
-        thumbnail = str(
-            payload.get("display_thumbnail")
-            or payload.get("thumbnail")
-            or payload.get("thumb")
-            or (getattr(fallback, "thumbnail", "") if fallback is not None else "")
-            or ""
-        )
-        stream_url = str(payload.get("stream_url") or (getattr(fallback, "stream_url", "") if fallback is not None else "") or "")
-        track = MusicTrack(
-            title=title,
-            webpage_url=webpage_url,
-            original_url=str(payload.get("original_url") or payload.get("query") or (getattr(fallback, "original_url", "") if fallback is not None else "") or webpage_url),
-            stream_url=stream_url,
-            requester_id=requester_id,
-            requester_name=requester_name,
-            duration=(payload.get("duration") if payload.get("duration") is not None else (getattr(fallback, "duration", None) if fallback is not None else None)),
-            uploader=uploader,
-            thumbnail=thumbnail,
-            source=source,
-            extractor=str(payload.get("extractor") or "worker-ytdlp"),
-            is_live=bool(payload.get("is_live") or (getattr(fallback, "is_live", False) if fallback is not None else False)),
-        )
-        track.display_source = "YouTube" if "youtube" in track.source.lower() or "ytdlp" in track.source.lower() else track.source
-        track.display_title = title
-        track.display_uploader = uploader
-        track.display_thumbnail = thumbnail
-        # O Music Agent é dono do áudio, mas o painel da VPS ainda precisa
-        # mostrar a qualidade/fonte como no player antigo. Carregue campos
-        # opcionais enviados pelo worker sem depender de detalhes internos.
-        with contextlib.suppress(Exception):
-            track.resolved_audio_abr = int(float(payload.get("resolved_audio_abr") or payload.get("audio_abr") or payload.get("abr") or 0))
-        with contextlib.suppress(Exception):
-            track.resolved_audio_max_abr = int(float(payload.get("resolved_audio_max_abr") or payload.get("audio_max_abr") or payload.get("max_abr") or track.resolved_audio_abr or 0))
-        track.resolved_audio_ext = str(payload.get("resolved_audio_ext") or payload.get("audio_ext") or payload.get("ext") or "").strip()
-        track.resolved_audio_codec = str(payload.get("resolved_audio_codec") or payload.get("audio_codec") or payload.get("codec") or "").strip()
-        track.resolved_audio_format_id = str(payload.get("resolved_audio_format_id") or payload.get("audio_format_id") or payload.get("format_id") or "").strip()
-        return track
-
-    def _music_agent_state_from_payload(self, payload: dict, guild_id: int) -> dict:
-        guilds = payload.get("guilds") if isinstance(payload, dict) else {}
-        if not isinstance(guilds, dict):
-            return {}
-        state = guilds.get(str(guild_id)) or guilds.get(guild_id)
-        return state if isinstance(state, dict) else {}
 
     def start_music_agent_monitor(self, guild_id: int, *, voice_channel_id: int | None = None, text_channel_id: int | None = None) -> None:
         state = self.get_state(int(guild_id))
@@ -4195,7 +4111,7 @@ class AudioRouter:
                     except Exception:
                         logger.debug("[music/agent] monitor não conseguiu consultar status | guild=%s", guild_id, exc_info=True)
                         continue
-                    remote = self._music_agent_state_from_payload(payload, int(guild_id))
+                    remote = estado_da_guild_no_payload(payload, int(guild_id))
                     if not remote:
                         idle_seen += 1
                         if idle_seen >= 4:
@@ -4294,41 +4210,6 @@ class AudioRouter:
         except RuntimeError:
             pass
 
-    def _sync_agent_remote_queue(self, state: MusicGuildState, remote: dict) -> None:
-        """Espelha a fila do Music Agent só para painel/controles.
-
-        A fila real continua no worker. A VPS usa essa cópia para mostrar
-        queue/próxima música e manter botões coerentes sem tentar tocar localmente.
-        """
-        if not isinstance(remote, dict):
-            return
-        remote_queue = remote.get("queue")
-        try:
-            state.agent_remote_queue_size = max(0, int(remote.get("queue_size") or 0))
-        except Exception:
-            state.agent_remote_queue_size = 0
-        if remote_queue is None and remote.get("queue_size") in (0, "0"):
-            remote_queue = []
-        if not isinstance(remote_queue, list):
-            return
-        if not state.agent_remote_queue_size:
-            state.agent_remote_queue_size = len(remote_queue)
-        else:
-            state.agent_remote_queue_size = max(state.agent_remote_queue_size, len(remote_queue))
-        mirrored: deque[MusicTrack] = deque(maxlen=MUSIC_HISTORY_MAXSIZE)
-        for item in remote_queue[:MUSIC_QUEUE_MAXSIZE]:
-            if isinstance(item, dict):
-                track = self._track_from_agent_payload(item, None)
-                if track is not None:
-                    mirrored.append(track)
-        state.forward_queue.clear()
-        state.forward_queue.extend(mirrored)
-        # Evita sobras da fila local poluírem o painel quando o backend remoto
-        # assumiu a sessão.
-        with contextlib.suppress(Exception):
-            while not state.queue.empty():
-                state.queue.get_nowait()
-                state.queue.task_done()
 
     async def sync_music_agent_state(
         self,
@@ -4373,7 +4254,7 @@ class AudioRouter:
         raw_status = remote_status_original
         current_payload = remote.get("current") if isinstance(remote.get("current"), dict) else {}
         if current_payload:
-            track = self._track_from_agent_payload(current_payload, track)
+            track = faixa_do_payload(current_payload, track)
             incoming_key = self._panel_key_for_track(track) if track is not None else ""
             if (
                 previous_current is not None
@@ -4388,7 +4269,7 @@ class AudioRouter:
                 # um painel antigo aciona o botão voltar logo após a transição.
                 self._push_history(state, previous_current)
         last_error = str(remote.get("last_error") or "").strip()
-        self._sync_agent_remote_queue(state, remote)
+        sincronizar_fila_remota(state, remote, limite_fila=MUSIC_QUEUE_MAXSIZE, limite_historico=MUSIC_HISTORY_MAXSIZE)
         with contextlib.suppress(Exception):
             state.agent_remote_history_size = max(0, int(remote.get("history_size") or 0))
         had_active_agent_session = bool(
@@ -6122,7 +6003,7 @@ class AudioRouter:
             self._cancel_music_idle_disconnect(state)
             remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
             previous_payload = result.get("previous") if isinstance(result, dict) and isinstance(result.get("previous"), dict) else {}
-            previous_track = self._track_from_agent_payload(previous_payload, local_fallback) if previous_payload else local_fallback
+            previous_track = faixa_do_payload(previous_payload, local_fallback) if previous_payload else local_fallback
             await self.sync_music_agent_state(
                 int(guild_id),
                 previous_track,

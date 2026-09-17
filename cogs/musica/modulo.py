@@ -16,7 +16,8 @@ from .nucleo.erros import MusicExtractionError
 from .nucleo.modelos import ExtractedBatch, MusicTrack
 from .metadados.provedores import describe_url
 from .interface.componentes import SearchResultView, QueueView, VoiceStatusSettingsView, build_queue_embed, build_now_playing_embeds
-from .agente_telefone.servico import music_agent_command, music_agent_status, resolve_music_tracks_on_worker
+from .agente_telefone.comandos import music_agent_command, music_agent_status
+from .agente_telefone.resolucao import resolve_music_tracks_on_worker
 from .interface.carregamento import MusicLoadingReaction
 
 logger = logging.getLogger(__name__)

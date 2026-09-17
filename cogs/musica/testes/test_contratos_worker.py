@@ -15,17 +15,31 @@ def test_comandos_de_reproducao_possuem_rota_para_music_agent() -> None:
     assert 'music_agent_command(\n                            "play"' in texto
 
 
-def test_servico_do_phone_worker_expoe_selecao_resolucao_e_controle() -> None:
-    texto = (MUSICA / "agente_telefone" / "servico.py").read_text(encoding="utf-8")
-    contratos = (
-        "select_music_worker",
-        "ensure_music_worker_available",
-        "resolve_music_tracks_on_worker",
-        "music_agent_command",
-        "music_agent_status",
-    )
-    for contrato in contratos:
-        assert f"def {contrato}" in texto or f"async def {contrato}" in texto
+def test_phone_worker_esta_separado_por_responsabilidade() -> None:
+    pasta = MUSICA / "agente_telefone"
+    esperados = {
+        "comandos.py",
+        "modelos.py",
+        "resolucao.py",
+        "selecao.py",
+        "servico.py",
+        "utilitarios.py",
+    }
+    assert esperados <= {p.name for p in pasta.iterdir() if p.is_file()}
+
+    contratos = {
+        "selecao.py": ("select_music_worker", "ensure_music_worker_available"),
+        "resolucao.py": ("resolve_music_tracks_on_worker",),
+        "comandos.py": ("music_agent_command", "music_agent_status"),
+    }
+    for nome, funcoes in contratos.items():
+        texto = (pasta / nome).read_text(encoding="utf-8")
+        for funcao in funcoes:
+            assert f"def {funcao}" in texto or f"async def {funcao}" in texto
+
+    fachada = (pasta / "servico.py").read_text(encoding="utf-8")
+    for funcao in ("select_music_worker", "resolve_music_tracks_on_worker", "music_agent_command", "music_agent_status"):
+        assert f'"{funcao}"' in fachada
 
 
 def test_lavalink_de_reproducao_permanece_apenas_no_legado_durante_migracao() -> None:

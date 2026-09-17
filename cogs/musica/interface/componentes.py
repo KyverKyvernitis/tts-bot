@@ -14,7 +14,8 @@ import config
 from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
 from ..metadados.provedores import describe_url
-from ..agente_telefone.servico import music_agent_command, music_agent_status, resolve_music_tracks_on_worker
+from ..agente_telefone.comandos import music_agent_command, music_agent_status
+from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
 from .carregamento import MusicLoadingReaction
 
 PLAYER_BAR_URL = "https://cdn.discordapp.com/attachments/554468640942981147/1127294696025227367/rainbow_bar3.gif"

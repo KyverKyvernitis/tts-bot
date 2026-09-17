@@ -981,7 +981,7 @@ def _spotify_dry_run_mirror_test(cfg: dict[str, Any]) -> str:
     spotify_url = str(track_meta.get("url") or VALID_SPOTIFY_TEST_URL).strip()
 
     try:
-        from .backends.lavalink import LavalinkBackend, LavalinkConfig
+        from ..legado.motores.lavalink import LavalinkBackend, LavalinkConfig
         from .models import MusicTrack
 
         backend = LavalinkBackend(LavalinkConfig(
