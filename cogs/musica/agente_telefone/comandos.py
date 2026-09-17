@@ -9,6 +9,7 @@ import aiohttp
 import config
 
 from ..nucleo.modelos import MusicTrack
+from .protocolo import montar_comando, montar_consulta_status
 from .modelos import (
     MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE,
     MUSIC_WORKER_UNAVAILABLE_MESSAGE,
@@ -43,48 +44,18 @@ async def music_agent_command(
     token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
     if not base or not token:
         raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
-    payload: dict[str, Any] = {
-        "task": "music_agent_command",
-        "action": action,
-        "guild_id": int(guild_id or 0),
-        "voice_channel_id": int(voice_channel_id or 0),
-        "text_channel_id": int(text_channel_id or 0),
-        "query": str(query or ""),
-        "requester_id": int(requester_id or 0),
-        "requester_name": requester_name or "",
-        "timeout_seconds": float(timeout_seconds or getattr(config, "MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", 12.0) or 12.0),
-    }
-    if track is not None:
-        if isinstance(track, MusicTrack):
-            payload["track"] = {
-                "title": track.title,
-                "display_title": getattr(track, "display_title", "") or track.title,
-                "webpage_url": track.webpage_url,
-                "original_url": track.original_url,
-                "stream_url": track.stream_url,
-                "duration": track.duration,
-                "uploader": track.uploader,
-                "display_uploader": getattr(track, "display_uploader", "") or track.uploader,
-                "thumbnail": track.thumbnail,
-                "source": track.source,
-                "display_source": getattr(track, "display_source", "") or track.source,
-                "extractor": track.extractor,
-                "requester_id": track.requester_id,
-                "requester_name": track.requester_name,
-                "resolved_audio_format_id": getattr(track, "resolved_audio_format_id", ""),
-                "resolved_audio_ext": getattr(track, "resolved_audio_ext", ""),
-                "resolved_audio_codec": getattr(track, "resolved_audio_codec", ""),
-                "resolved_audio_abr": getattr(track, "resolved_audio_abr", 0),
-                "audio_format_id": getattr(track, "audio_format_id", ""),
-                "audio_ext": getattr(track, "audio_ext", ""),
-                "audio_codec": getattr(track, "audio_codec", ""),
-                "audio_abr": getattr(track, "audio_abr", 0),
-            }
-            if not payload["query"]:
-                payload["query"] = track.webpage_url or track.original_url or track.stream_url or track.title
-        elif isinstance(track, Mapping):
-            payload["track"] = dict(track)
-    payload.update({k: v for k, v in extra.items() if v is not None})
+    payload = montar_comando(
+        action,
+        guild_id=guild_id,
+        voice_channel_id=voice_channel_id,
+        text_channel_id=text_channel_id,
+        query=query,
+        track=track,
+        requester_id=requester_id,
+        requester_name=requester_name,
+        timeout_seconds=timeout_seconds,
+        **extra,
+    )
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     total_timeout = max(2.0, float(payload["timeout_seconds"]) + 2.0)
     timeout = aiohttp.ClientTimeout(total=total_timeout)
@@ -133,11 +104,7 @@ async def music_agent_status(*, timeout_seconds: float | None = None) -> dict[st
     token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
     if not base or not token:
         raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
-    payload = {
-        "task": "music_agent_status",
-        "action": "status",
-        "timeout_seconds": float(timeout_seconds or getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 2.5) or 2.5),
-    }
+    payload = montar_consulta_status(timeout_seconds=timeout_seconds)
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     timeout = aiohttp.ClientTimeout(total=max(1.0, float(payload["timeout_seconds"]) + 1.0))
     try:

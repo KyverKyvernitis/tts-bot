@@ -30,10 +30,11 @@ from ..nucleo.modelos import LoopMode, MusicTrack
 from ..nucleo.estado import ControlVote, MusicGuildState
 from ..metadados.provedores import describe_url
 from .motores import MusicBackendManager
-from ..agente_telefone.conversao import estado_da_guild_no_payload, faixa_do_payload
+from ..agente_telefone.conversao import faixa_do_payload
 from ..reproducao.sincronizacao import sincronizar_estado_agente
 from ..reproducao.controle_remoto import ajustar_volume, alternar_repeticao, anterior, buscar_momento, embaralhar
 from ..agente_telefone.monitor import iniciar_monitor_music_agent
+from ..agente_telefone.estado import atualizar_estado_controle_remoto, usar_controles_fila_remota
 from ..nucleo.fila import (
     chaves_da_faixa,
     chaves_em_uso,
@@ -57,7 +58,6 @@ from ..agente_telefone.servico import (
     require_music_worker_available_async as _require_music_worker_available_async,
     resolve_music_tracks_on_worker as _resolve_music_tracks_on_worker,
     music_agent_command as _music_agent_command,
-    music_agent_status as _music_agent_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -2148,55 +2148,6 @@ class AudioRouter:
             or self._is_lavalink_transition_recent(state)
         )
 
-    def _should_use_music_agent_queue_controls(self, state: MusicGuildState) -> bool:
-        """Retorna se controles de fila devem ir para o Music Agent.
-
-        O painel pode estar espelhando uma fila remota grande mesmo quando a fila
-        local da VPS está vazia ou contém só o preview. Shuffle/repetição/queue
-        controls precisam usar o estado remoto nesse caso, senão aparecem erros
-        falsos como "não há músicas suficientes" em playlists.
-        """
-        if not (bool(getattr(config, "MUSIC_AGENT_ENABLED", True)) and self.music_worker_only_enabled()):
-            return False
-        backend = str(getattr(state, "current_backend", "") or "").lower()
-        if backend == "agent":
-            return True
-        try:
-            if int(getattr(state, "agent_remote_queue_size", 0) or 0) > 0:
-                return True
-        except Exception:
-            pass
-        return bool(getattr(state, "last_voice_channel_id", 0) and getattr(state, "current", None) is not None)
-
-    def _agent_guild_state_from_status(self, payload: dict[str, Any] | None, guild_id: int) -> dict[str, Any]:
-        if not isinstance(payload, dict):
-            return {}
-        guilds = payload.get("guilds")
-        if not isinstance(guilds, dict):
-            return {}
-        state = guilds.get(str(int(guild_id))) or guilds.get(int(guild_id))
-        return state if isinstance(state, dict) else {}
-
-    async def _refresh_music_agent_control_state(self, guild_id: int, *, create_panel: bool = False) -> dict[str, Any]:
-        """Busca um snapshot remoto curto e espelha no painel/estado local."""
-        try:
-            payload = await _music_agent_status(timeout_seconds=min(2.5, float(getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0) or 5.0)))
-        except Exception:
-            return {}
-        remote = self._agent_guild_state_from_status(payload, guild_id)
-        if remote:
-            state = self.get_state(guild_id)
-            await self.sync_music_agent_state(
-                int(guild_id),
-                state.current,
-                remote,
-                voice_channel_id=int(remote.get("voice_channel_id") or getattr(state, "last_voice_channel_id", 0) or 0) or None,
-                text_channel_id=int(remote.get("text_channel_id") or getattr(state, "last_text_channel_id", 0) or 0) or None,
-                queued=False,
-                create_panel=create_panel,
-            )
-        return remote
-
     async def _music_auto_leave_enabled(self, guild_id: int) -> bool:
         tts_cog = None
         getter = getattr(self.bot, "get_cog", None)
@@ -3756,23 +3707,20 @@ class AudioRouter:
             # que o Music Agent entrou em idle/fila vazia. Consulte o worker com
             # timeout curto antes de acusar desconexão externa.
             with contextlib.suppress(Exception):
-                payload = await _music_agent_status(timeout_seconds=min(2.0, float(getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0) or 5.0)))
-                remote = estado_da_guild_no_payload(payload, int(guild.id))
+                remote = await atualizar_estado_controle_remoto(
+                    self,
+                    int(guild.id),
+                    voice_channel_id=int(getattr(before_channel, "id", 0) or 0) or None,
+                    text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+                    create_panel=True,
+                    timeout_seconds=min(2.0, float(getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0) or 5.0)),
+                )
                 if remote:
                     remote_status = str(remote.get("status") or "").strip().lower()
                     remote_event = str(remote.get("last_event") or "").strip().lower()
                     remote_current = remote.get("current") if isinstance(remote.get("current"), dict) else {}
                     remote_queue_size = int(remote.get("queue_size") or 0)
                     if remote_status in {"idle", "stopped"} and not remote_current and remote_queue_size <= 0 and remote_event in internal_idle_events:
-                        await self.sync_music_agent_state(
-                            int(guild.id),
-                            None,
-                            remote,
-                            voice_channel_id=int(getattr(before_channel, "id", 0) or 0) or None,
-                            text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
-                            queued=False,
-                            create_panel=True,
-                        )
                         logger.info(
                             "[music/agent] voice_state disconnect confirmado como idle remoto | guild=%s event=%s",
                             guild.id,
@@ -5392,8 +5340,8 @@ class AudioRouter:
         # Se o painel local perdeu dados da faixa atual, sincronize rapidamente com
         # o Music Agent antes de validar dono/queue. Isso evita usar fila local
         # vazia contra uma playlist remota com dezenas de faixas.
-        if self._should_use_music_agent_queue_controls(state):
-            remote = await self._refresh_music_agent_control_state(guild_id, create_panel=False)
+        if usar_controles_fila_remota(self, state):
+            remote = await atualizar_estado_controle_remoto(self, guild_id, create_panel=False)
             if remote:
                 state = self.get_state(guild_id)
 
@@ -5411,7 +5359,7 @@ class AudioRouter:
         with contextlib.suppress(Exception):
             remote_count = int(getattr(state, "agent_remote_queue_size", 0) or 0)
         local_count = len(self.snapshot_queue(guild_id))
-        if max(remote_count, local_count) <= 1 and not self._should_use_music_agent_queue_controls(state):
+        if max(remote_count, local_count) <= 1 and not usar_controles_fila_remota(self, state):
             return False, "Não há músicas suficientes no queue para embaralhar."
 
         self.cancel_pending_music_operations(guild_id, reason="shuffle")
@@ -5441,7 +5389,7 @@ class AudioRouter:
         state.control_votes.pop("shuffle", None)
         state.shuffle = False
         self._cancel_next_prefetch(state)
-        if self._should_use_music_agent_queue_controls(state):
+        if usar_controles_fila_remota(self, state):
             try:
                 result = await embaralhar(
                     self,
@@ -5461,7 +5409,7 @@ class AudioRouter:
                 # Evite mensagem falsa de "não há músicas suficientes" quando a
                 # própria VPS espelha uma fila remota maior que 1. Re-sincronize uma
                 # vez e retorne erro genérico se o worker ainda não embaralhou.
-                refreshed = await self._refresh_music_agent_control_state(guild_id, create_panel=True)
+                refreshed = await atualizar_estado_controle_remoto(self, guild_id, create_panel=True)
                 queue_size = 0
                 with contextlib.suppress(Exception):
                     queue_size = int((refreshed or remote or {}).get("queue_size") or getattr(self.get_state(guild_id), "agent_remote_queue_size", 0) or 0)
@@ -5485,7 +5433,7 @@ class AudioRouter:
     async def cycle_loop(self, guild_id: int, *, member=None) -> LoopMode:
         state = self.get_state(guild_id)
         state.control_votes.pop("loop", None)
-        if self._should_use_music_agent_queue_controls(state):
+        if usar_controles_fila_remota(self, state):
             try:
                 result = await alternar_repeticao(
                     self,
@@ -5541,7 +5489,7 @@ class AudioRouter:
             # VPS pode estar com agent_remote_history_size atrasado entre uma
             # transição de faixa e o clique do usuário.
             with contextlib.suppress(Exception):
-                await self._refresh_music_agent_control_state(guild_id, create_panel=False)
+                await atualizar_estado_controle_remoto(self, guild_id, create_panel=False)
                 state = self.get_state(guild_id)
             remote_has_history = bool(int(getattr(state, "agent_remote_history_size", 0) or 0) > 0)
             local_fallback = state.history[-1] if state.history else None
