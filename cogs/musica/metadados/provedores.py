@@ -4,10 +4,12 @@ import html
 import json
 import logging
 import re
-from dataclasses import dataclass
 from typing import Iterable
 from urllib.parse import parse_qs, quote, unquote, urlparse, urlunparse
 from urllib.request import Request, urlopen
+
+from .modelos import UrlProfile
+from .normalizacao import clean_metadata_title, unique_queries
 
 logger = logging.getLogger(__name__)
 
@@ -31,21 +33,6 @@ _METADATA_TITLE_PATTERNS = (
     re.compile(r'<meta[^>]+name=["\\\']twitter:title["\\\'][^>]+content=["\\\']([^"\\\']+)', re.IGNORECASE),
     re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL),
 )
-
-
-@dataclass(frozen=True)
-class UrlProfile:
-    raw: str
-    canonical: str
-    host: str
-    is_url: bool
-    is_youtube: bool = False
-    is_metadata_only: bool = False
-    is_direct_audio: bool = False
-    youtube_video_id: str = ""
-    platform: str = ""
-    resource_type: str = ""
-    resource_id: str = ""
 
 
 def looks_like_url(value: str) -> bool:
@@ -173,19 +160,6 @@ def _clean_youtube_id(candidate: str) -> str:
     return match.group(0) if match else ""
 
 
-def clean_metadata_title(text: str) -> str:
-    value = html.unescape(re.sub(r"\s+", " ", text or "").strip())
-    if not value:
-        return ""
-
-    # Limpezas comuns de título de página/oEmbed.
-    value = re.sub(r"\s*[-|•]\s*(YouTube|Spotify|Apple Music|Deezer)\s*$", "", value, flags=re.IGNORECASE)
-    value = value.replace(" - song and lyrics by ", " ")
-    value = value.replace(" | Spotify", "")
-    value = re.sub(r"\bListen to\b", "", value, flags=re.IGNORECASE).strip()
-    return re.sub(r"\s+", " ", value).strip(" -|•\t\n\r")
-
-
 def spotify_oembed_url(url: str) -> str:
     return "https://open.spotify.com/oembed?url=" + quote(url, safe="")
 
@@ -278,18 +252,3 @@ def slug_search_terms(url: str) -> str:
         if part and not re.fullmatch(r"[A-Za-z0-9_-]{15,}", part):
             useful.append(part)
     return " ".join(useful).strip()
-
-
-def unique_queries(*queries: str) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for query in queries:
-        clean = re.sub(r"\s+", " ", (query or "").strip())
-        if not clean:
-            continue
-        key = clean.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(clean)
-    return out

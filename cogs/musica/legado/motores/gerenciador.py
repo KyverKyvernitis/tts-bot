@@ -20,8 +20,9 @@ from ...agente_telefone.servico import (
     MUSIC_WORKER_UNAVAILABLE_MESSAGE,
     select_music_worker,
     music_worker_only_enabled,
-    worker_music_summary,
 )
+
+from .worker_lavalink import worker_music_summary
 
 logger = logging.getLogger(__name__)
 

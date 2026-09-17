@@ -23,7 +23,6 @@ from .selecao import (
     select_music_worker,
     select_music_worker_async,
     worker_music_agent_summary,
-    worker_music_summary,
 )
 
 __all__ = [
@@ -43,5 +42,4 @@ __all__ = [
     "select_music_worker",
     "select_music_worker_async",
     "worker_music_agent_summary",
-    "worker_music_summary",
 ]

@@ -40,10 +40,6 @@ def _track_copy_for_request(track: MusicTrack, *, requester_id: int, requester_n
     clone.resolved_audio_ext = track.resolved_audio_ext
     clone.resolved_audio_codec = track.resolved_audio_codec
     clone.resolved_audio_format_id = track.resolved_audio_format_id
-    clone.lavalink_playable = track.lavalink_playable
-    clone.lavalink_encoded = track.lavalink_encoded
-    clone.lavalink_query = track.lavalink_query
-    clone.lavalink_resolved = track.lavalink_resolved
     clone.fallback_reason = track.fallback_reason
     clone.display_title = track.display_title
     clone.display_uploader = track.display_uploader
@@ -246,21 +242,15 @@ async def resolve_music_tracks_on_worker(
             source=source,
             extractor="worker-ytdlp",
             is_live=_as_bool(item.get("is_live"), False),
-            lavalink_query=direct_stream_url or stream_url,
-            lavalink_resolved=bool(direct_stream_url),
         )
         track.display_title = str(item.get("display_title") or item.get("title") or "").strip()
         track.display_uploader = str(item.get("display_uploader") or item.get("uploader") or item.get("channel") or "").strip()
         if item_metadata_only:
-            track.lavalink_query = ""
-            track.lavalink_resolved = False
             track.display_source = source or "YouTube"
         if direct_stream_url:
             # A URL foi resolvida pelo yt-dlp do Phone Worker. A VPS não toca esse
             # áudio; o Music Agent permanece responsável pela sessão de voz.
             track.display_source = "YouTube"
-            track.lavalink_query = direct_stream_url
-            track.lavalink_resolved = True
         elif worker_stream_url:
             # Compatibilidade com workers antigos: só use esse endpoint se o
             # worker não devolveu URL direta. O roteador atual evitará esse
