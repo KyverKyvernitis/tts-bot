@@ -27,10 +27,12 @@ from ..metadados.provedores_api import compact_key
 from .extrator_local import MusicExtractor
 from ..nucleo.erros import MusicExtractionError, MusicPlaybackError
 from ..nucleo.modelos import LoopMode, MusicTrack
+from ..nucleo.estado import ControlVote, MusicGuildState
 from ..metadados.provedores import describe_url
 from .motores import MusicBackendManager
 from ..agente_telefone.conversao import estado_da_guild_no_payload, faixa_do_payload
 from ..reproducao.sincronizacao import sincronizar_fila_remota
+from ..reproducao.controle_remoto import ajustar_volume, alternar_repeticao, anterior, buscar_momento, embaralhar
 from ..agente_telefone.servico import (
     MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE,
     MUSIC_WORKER_UNAVAILABLE_MESSAGE,
@@ -190,16 +192,6 @@ class TTSOverlay:
     future: asyncio.Future
     started_at: float = field(default_factory=time.monotonic)
     ended: bool = False
-
-
-@dataclass(slots=True)
-class ControlVote:
-    action: str
-    voters: set[int] = field(default_factory=set)
-    started_at: float = field(default_factory=time.monotonic)
-
-    def expired(self) -> bool:
-        return (time.monotonic() - self.started_at) > MUSIC_CONTROL_VOTE_SECONDS
 
 
 class MixedAudioSource(discord.AudioSource):
@@ -613,112 +605,6 @@ class WorkerPCMHttpAudioSource(discord.AudioSource):
                 response.close()
 
 
-@dataclass
-class MusicGuildState:
-    queue: asyncio.Queue[MusicTrack] = field(default_factory=lambda: asyncio.Queue(maxsize=MUSIC_QUEUE_MAXSIZE))
-    worker_task: Optional[asyncio.Task] = None
-    current: Optional[MusicTrack] = None
-    last_text_channel_id: Optional[int] = None
-    last_voice_channel_id: Optional[int] = None
-    volume: float = MUSIC_DEFAULT_VOLUME
-    loop_mode: LoopMode = LoopMode.OFF
-    shuffle: bool = False
-    stop_requested: bool = False
-    paused: bool = False
-    current_source: Optional[MixedAudioSource] = None
-    current_backend: str = "local"
-    current_lavalink_player: Any = None
-    current_lavalink_playable: Any = None
-    current_lavalink_node_label: str = ""
-    current_lavalink_node_name: str = ""
-    current_resolve_task: Optional[asyncio.Task] = None
-    next_resolve_task: Optional[asyncio.Task] = None
-    next_resolve_key: str = ""
-    next_resolve_active_key: str = ""
-    current_status: str = "idle"
-    current_status_changed_at: float = field(default_factory=time.monotonic)
-    skip_requested: bool = False
-    skip_transition_active: bool = False
-    skip_history_suppressed_once: bool = False
-    now_message: Optional[discord.Message] = None
-    panel_track_key: Optional[str] = None
-    history: deque[MusicTrack] = field(default_factory=lambda: deque(maxlen=MUSIC_HISTORY_MAXSIZE))
-    forward_queue: deque[MusicTrack] = field(default_factory=lambda: deque(maxlen=MUSIC_HISTORY_MAXSIZE))
-    voice_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    panel_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    music_owns_voice: bool = False
-    tts_voice_touched: bool = False
-    last_tts_activity_at: float = 0.0
-    lavalink_tts_until: float = 0.0
-    lavalink_resume_grace_until: float = 0.0
-    tts_session_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    tts_session_active_until: float = 0.0
-    tts_session_last_error: str = ""
-    tts_session_last_cleanup_at: float = 0.0
-    tts_lavalink_failures: int = 0
-    tts_lavalink_local_fallback_until: float = 0.0
-    music_session_active: bool = False
-    music_idle_disconnect_task: Optional[asyncio.Task] = None
-    music_afk_expired: bool = False
-    music_operation_generation: int = 0
-    control_votes: dict[str, ControlVote] = field(default_factory=dict)
-    control_vote_cleanup_tasks: dict[str, asyncio.Task] = field(default_factory=dict)
-    volume_loaded: bool = False
-    idle_reason: str = "idle"
-    idle_actor_id: Optional[int] = None
-    idle_actor_name: str = ""
-    idle_channel_name: str = ""
-    internal_voice_disconnect_until: float = 0.0
-    lavalink_transition_until: float = 0.0
-    last_lavalink_error: str = ""
-    panel_update_task: Optional[asyncio.Task] = None
-    panel_update_create: bool = True
-    panel_update_requested_at: float = 0.0
-    panel_controls_invalid_at: float = 0.0
-    panel_controls_invalidation_task: Optional[asyncio.Task] = None
-    current_started_at_monotonic: float = 0.0
-    current_start_offset_seconds: float = 0.0
-    next_local_start_offset_seconds: float = 0.0
-    auto_bitrate_channel_id: Optional[int] = None
-    auto_bitrate_original: Optional[int] = None
-    auto_bitrate_boosted: Optional[int] = None
-    current_quality_label: str = "Alta"
-    current_quality_kbps: int = MUSIC_HIGH_QUALITY_MAX_ABR
-    voice_status_channel_id: Optional[int] = None
-    voice_status_had_original: bool = False
-    voice_status_original: str = ""
-    voice_status_last_bot: str = ""
-    voice_status_update_task: Optional[asyncio.Task] = None
-    voice_status_last_update_at: float = 0.0
-    voice_status_last_track_key: str = ""
-    agent_started_track_key: str = ""
-    panel_last_repost_key: str = ""
-    panel_last_repost_at: float = 0.0
-    agent_last_idle_event: str = ""
-    agent_remote_queue_size: int = 0
-    agent_remote_history_size: int = 0
-    voice_status_last_applied_key: str = ""
-    voice_status_last_sync_request_key: str = ""
-    voice_status_last_sync_request_at: float = 0.0
-    voice_status_last_restore_key: str = ""
-    voice_status_last_restore_at: float = 0.0
-    voice_status_force_task: Optional[asyncio.Task] = None
-    voice_status_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    agent_monitor_task: Optional[asyncio.Task] = None
-    agent_started_track_key: str = ""
-    agent_side_effect_task: Optional[asyncio.Task] = None
-    panel_last_repost_key: str = ""
-    panel_last_repost_at: float = 0.0
-
-    def queue_size(self) -> int:
-        local_count = self.queue.qsize() + len(self.forward_queue)
-        try:
-            remote_count = int(getattr(self, "agent_remote_queue_size", 0) or 0)
-        except Exception:
-            remote_count = 0
-        if str(getattr(self, "current_backend", "") or "").lower() == "agent":
-            return max(local_count, remote_count)
-        return local_count
 
 
 class AudioRouter:
@@ -5638,27 +5524,19 @@ class AudioRouter:
         backend = str(getattr(state, "current_backend", "local") or "local").lower()
         if backend == "agent":
             try:
-                result = await _music_agent_command(
-                    "seek",
-                    guild_id=int(guild_id),
-                    position_seconds=target,
+                result = await buscar_momento(
+                    self,
+                    int(guild_id),
+                    target,
+                    track=track,
                     requester_id=int(getattr(track, "requester_id", 0) or 0),
                     requester_name=str(getattr(track, "requester_name", "") or ""),
+                    voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
+                    text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
                 )
             except Exception as exc:
                 logger.warning("[music/agent] falha ao selecionar momento | guild=%s target=%.2fs erro=%s", guild_id, target, exc)
                 return False, "Não consegui selecionar esse momento no player atual."
-            remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
-            if remote:
-                await self.sync_music_agent_state(
-                    int(guild_id),
-                    track,
-                    remote,
-                    voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
-                    text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
-                    queued=False,
-                    create_panel=True,
-                )
             if not bool(isinstance(result, dict) and result.get("ok")):
                 return False, str((result or {}).get("error") or "O player atual não aceitou selecionar momento.")
             state.current_started_at_monotonic = time.monotonic()
@@ -5724,18 +5602,14 @@ class AudioRouter:
             state.current_source.set_music_volume(volume)
         if state.current_backend == "agent":
             with contextlib.suppress(Exception):
-                result = await _music_agent_command("volume", guild_id=int(guild_id), volume_percent=int(round(volume * 100)))
-                remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
-                if remote:
-                    await self.sync_music_agent_state(
-                        int(guild_id),
-                        state.current,
-                        remote,
-                        voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
-                        text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
-                        queued=False,
-                        create_panel=False,
-                    )
+                await ajustar_volume(
+                    self,
+                    int(guild_id),
+                    int(round(volume * 100)),
+                    track=state.current,
+                    voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
+                    text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
+                )
         if state.current_backend == "lavalink":
             await self.backends.set_lavalink_player_volume(guild_id, int(round(volume * 100)))
         self._schedule_panel_update(guild_id, create=False)
@@ -5824,23 +5698,16 @@ class AudioRouter:
         self._cancel_next_prefetch(state)
         if self._should_use_music_agent_queue_controls(state):
             try:
-                result = await _music_agent_command(
-                    "shuffle",
-                    guild_id=int(guild_id),
+                result = await embaralhar(
+                    self,
+                    int(guild_id),
+                    track=state.current,
                     requester_id=int(getattr(member, "id", 0) or 0),
                     requester_name=getattr(member, "display_name", str(member)) if member is not None else "",
+                    voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
+                    text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
                 )
                 remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
-                if remote:
-                    await self.sync_music_agent_state(
-                        int(guild_id),
-                        state.current,
-                        remote,
-                        voice_channel_id=int(remote.get("voice_channel_id") or getattr(state, "last_voice_channel_id", 0) or 0) or None,
-                        text_channel_id=int(remote.get("text_channel_id") or getattr(state, "last_text_channel_id", 0) or 0) or None,
-                        queued=False,
-                        create_panel=True,
-                    )
                 state.shuffle = False
                 self._schedule_panel_update(guild_id, create=False)
                 if bool((result or {}).get("shuffled")):
@@ -5875,26 +5742,19 @@ class AudioRouter:
         state.control_votes.pop("loop", None)
         if self._should_use_music_agent_queue_controls(state):
             try:
-                result = await _music_agent_command(
-                    "loop",
-                    guild_id=int(guild_id),
+                result = await alternar_repeticao(
+                    self,
+                    int(guild_id),
+                    track=state.current,
                     requester_id=int(getattr(member, "id", 0) or 0),
                     requester_name=getattr(member, "display_name", str(member)) if member is not None else "",
+                    voice_channel_id=int(getattr(state, "last_voice_channel_id", 0) or 0) or None,
+                    text_channel_id=int(getattr(state, "last_text_channel_id", 0) or 0) or None,
                 )
                 remote = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
                 mode_value = str((result or {}).get("mode") or (remote or {}).get("loop_mode") or "").strip().lower()
                 if mode_value in {"off", "one", "all"}:
                     state.loop_mode = LoopMode(mode_value)
-                if remote:
-                    await self.sync_music_agent_state(
-                        int(guild_id),
-                        state.current,
-                        remote,
-                        voice_channel_id=int(remote.get("voice_channel_id") or getattr(state, "last_voice_channel_id", 0) or 0) or None,
-                        text_channel_id=int(remote.get("text_channel_id") or getattr(state, "last_text_channel_id", 0) or 0) or None,
-                        queued=False,
-                        create_panel=True,
-                    )
                 self._schedule_panel_update(guild_id, create=False)
                 return state.loop_mode
             except Exception:
@@ -5973,7 +5833,16 @@ class AudioRouter:
                     "track": local_fallback,
                 })
             try:
-                result = await _music_agent_command("previous", **payload)
+                result = await anterior(
+                    self,
+                    int(guild_id),
+                    voice_channel_id=payload.get("voice_channel_id"),
+                    text_channel_id=payload.get("text_channel_id"),
+                    track=payload.get("track"),
+                    query=payload.get("query", ""),
+                    timeout_seconds=payload.get("timeout_seconds"),
+                    create_panel=False,
+                )
             except Exception:
                 logger.warning("[music/agent] falha ao voltar histórico pelo worker | guild=%s", guild_id, exc_info=True)
                 return False

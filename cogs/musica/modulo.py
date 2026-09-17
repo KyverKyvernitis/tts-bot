@@ -17,6 +17,7 @@ from .nucleo.modelos import ExtractedBatch, MusicTrack
 from .metadados.provedores import describe_url
 from .interface.componentes import SearchResultView, QueueView, VoiceStatusSettingsView, build_queue_embed, build_now_playing_embeds
 from .agente_telefone.comandos import music_agent_command, music_agent_status
+from .reproducao.controle_remoto import enviar_controle_remoto
 from .agente_telefone.resolucao import resolve_music_tracks_on_worker
 from .interface.carregamento import MusicLoadingReaction
 
@@ -291,21 +292,20 @@ class Music(commands.Cog):
             with contextlib.suppress(Exception):
                 self.router.cancel_pending_music_operations(ctx.guild.id, reason=f"agent_{action}")
         try:
-            result = await music_agent_command(action, guild_id=ctx.guild.id, requester_id=ctx.author.id, requester_name=getattr(ctx.author, "display_name", str(ctx.author)))
+            voice = getattr(getattr(ctx.author, "voice", None), "channel", None)
+            await enviar_controle_remoto(
+                self.router,
+                action,
+                guild_id=ctx.guild.id,
+                requester_id=ctx.author.id,
+                requester_name=getattr(ctx.author, "display_name", str(ctx.author)),
+                voice_channel_id=getattr(voice, "id", 0),
+                text_channel_id=getattr(ctx.channel, "id", 0),
+                create_panel=True,
+            )
         except Exception as exc:
             await self._reply(ctx, self._music_error_message(exc))
             return True
-        state = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
-        if state:
-            with contextlib.suppress(Exception):
-                await self.router.sync_music_agent_state(
-                    ctx.guild.id,
-                    None,
-                    state,
-                    voice_channel_id=state.get("voice_channel_id") or getattr(getattr(ctx.author, "voice", None), "channel", None) and getattr(getattr(ctx.author, "voice", None).channel, "id", 0),
-                    text_channel_id=getattr(ctx.channel, "id", 0),
-                    create_panel=True,
-                )
         await self._reply(ctx, success_message)
         return True
 

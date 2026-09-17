@@ -15,6 +15,7 @@ from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
 from ..metadados.provedores import describe_url
 from ..agente_telefone.comandos import music_agent_command, music_agent_status
+from ..reproducao.controle_remoto import enviar_controle_remoto
 from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
 from .carregamento import MusicLoadingReaction
 
@@ -1900,21 +1901,17 @@ class MusicPlayerView(discord.ui.View):
             with contextlib.suppress(Exception):
                 self.router.cancel_pending_music_operations(self.guild_id, reason=f"agent_{action}")
         try:
-            result = await music_agent_command(action, guild_id=self.guild_id, requester_id=getattr(interaction.user, "id", 0), requester_name=getattr(interaction.user, "display_name", str(interaction.user)))
+            await enviar_controle_remoto(
+                self.router,
+                action,
+                guild_id=self.guild_id,
+                requester_id=getattr(interaction.user, "id", 0),
+                requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
+                create_panel=True,
+            )
         except Exception as exc:
             await self._ack(interaction, f"`⚠️` O player não respondeu: `{str(exc)[:180]}`")
             return True
-        state = result.get("state") if isinstance(result, dict) and isinstance(result.get("state"), dict) else {}
-        if state:
-            with contextlib.suppress(Exception):
-                await self.router.sync_music_agent_state(
-                    self.guild_id,
-                    None,
-                    state,
-                    voice_channel_id=state.get("voice_channel_id"),
-                    text_channel_id=state.get("text_channel_id"),
-                    create_panel=True,
-                )
         await self._ack(interaction, message)
         return True
 
