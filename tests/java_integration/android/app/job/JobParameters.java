@@ -1,0 +1,1 @@
+package android.app.job; public class JobParameters { private final android.os.PersistableBundle extras=new android.os.PersistableBundle(); public android.os.PersistableBundle getExtras(){return extras;} }

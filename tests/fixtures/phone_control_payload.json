@@ -1,0 +1,129 @@
+{
+  "worker_id": "parent",
+  "physical_worker_id": "parent",
+  "name": "phone fixture",
+  "source": "termux-phone-worker",
+  "platform": "android-termux",
+  "runtime_kind": "termux",
+  "runtime_mode": "termux",
+  "version": "1.11.6",
+  "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "worker_update_transports": [
+    "bootstrap-manifest-v2",
+    "zip-v1",
+    "inline-b64-v1"
+  ],
+  "profile": "midia",
+  "profile_label": "label-midia",
+  "safe_mode": false,
+  "endpoint": "http://127.0.0.1:8768",
+  "roles": [
+    "phone-worker"
+  ],
+  "capabilities": [
+    "status",
+    "ffmpeg"
+  ],
+  "supported_tasks": [
+    "ping",
+    "worker_update"
+  ],
+  "battery": {
+    "available": true,
+    "level": 42
+  },
+  "network": {
+    "type": "unknown",
+    "source": "inferred"
+  },
+  "health": {
+    "ok": true,
+    "pid": 123,
+    "uptime_seconds": null,
+    "jobs_started": null,
+    "jobs_failed": null,
+    "ffmpeg": true,
+    "ffprobe": false,
+    "scripts_ok": true,
+    "boot_ok": false,
+    "supervisor_ok": true,
+    "sshd_ok": null,
+    "runtime_mode": "termux",
+    "internal_runtime_state": "apk-preview-only",
+    "control_plane_alive": true,
+    "direct_http_state": "listening_recovery_after_conflict",
+    "http_port": 8768,
+    "last_heartbeat_ok_at": null
+  },
+  "status": {
+    "worker_update": {
+      "transports": [
+        "bootstrap-manifest-v2",
+        "zip-v1",
+        "inline-b64-v1"
+      ],
+      "updater": {
+        "state": "idle"
+      }
+    },
+    "core_worker_jobs": {
+      "configured": true,
+      "active": false,
+      "active_job_id": "",
+      "active_type": "",
+      "active_since": 0,
+      "last_result_job_id": "",
+      "last_result_type": "",
+      "last_result_status": "",
+      "last_result_summary": "",
+      "last_result_at": 0,
+      "last_result_sent": false,
+      "pending_results": 0
+    },
+    "core_worker_network": {
+      "last_ok_age_seconds": null,
+      "last_error_age_seconds": null,
+      "last_error_kind": "",
+      "last_error": ""
+    },
+    "music_node": {
+      "ok": false,
+      "online": false
+    },
+    "music_agent": {
+      "available": false
+    },
+    "runtime_mode": "termux",
+    "runtime": {
+      "mode": "termux",
+      "current_worker": "termux-phone-worker",
+      "internal_runtime": "apk-preview-only",
+      "migration_stage": "termux-bootstrap-builder",
+      "summary": "Termux executa jobs reais; APK prepara runtime interno gradualmente."
+    },
+    "profile": "midia",
+    "profile_label": "label-midia",
+    "http_host": "127.0.0.1",
+    "http_port": 8768,
+    "preferred_http_port": 8766,
+    "recovery_http_port": 8768,
+    "direct_http_state": "listening_recovery_after_conflict",
+    "control_plane_alive": true,
+    "python": null,
+    "platform": null,
+    "disk_home": null,
+    "loadavg": null,
+    "scripts": {
+      "complete": true
+    },
+    "boot": {
+      "ok": false
+    },
+    "shell_autostart": null,
+    "auto_boot_repair": null,
+    "supervisor": {
+      "supervisor_ok": true
+    },
+    "sshd": null
+  }
+}

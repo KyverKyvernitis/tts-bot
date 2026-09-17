@@ -1,0 +1,2677 @@
+{
+  "source": "deploy/termux/phone-worker/phone_worker.py",
+  "sha256": "8daa252ad76736b4abdb81c048bd50766bfe781eef6fa28d439e15374f75b33f",
+  "owner": "phone_worker.py: estado/locks/admissão e coordenação/publicação PCM; serviços opcionais sem estado com bindings vivos",
+  "globals": [
+    {
+      "names": [
+        "_APK_IDENTITY_MODULE"
+      ],
+      "line": 39,
+      "value": "None"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_CONFIG_MODULE"
+      ],
+      "line": 40,
+      "value": "None"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_CONFIG_LOCK"
+      ],
+      "line": 41,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_TELEMETRY_MODULE"
+      ],
+      "line": 42,
+      "value": "None"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_TELEMETRY_LOCK"
+      ],
+      "line": 43,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_CONTROL_PLANE_MODULE"
+      ],
+      "line": 44,
+      "value": "None"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_CONTROL_PLANE_LOCK"
+      ],
+      "line": 45,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_VOICE_STATE_MODULE"
+      ],
+      "line": 46,
+      "value": "None"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_VOICE_STATE_LOCK"
+      ],
+      "line": 47,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_TTS_POLICY_MODULE"
+      ],
+      "line": 48,
+      "value": "None"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_TTS_POLICY_LOCK"
+      ],
+      "line": 49,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_TTS_CACHE_MODULE"
+      ],
+      "line": 50,
+      "value": "None"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_TTS_CACHE_LOCK"
+      ],
+      "line": 51,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_TTS_ANDROID_MODULE"
+      ],
+      "line": 52,
+      "value": "None"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_TTS_ANDROID_LOCK"
+      ],
+      "line": 53,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_TTS_PROVIDERS_MODULE"
+      ],
+      "line": 54,
+      "value": "None"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_TTS_PROVIDERS_LOCK"
+      ],
+      "line": 55,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_PCM_IO_MODULE"
+      ],
+      "line": 56,
+      "value": "None"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_PCM_IO_LOCK"
+      ],
+      "line": 57,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "START_TIME"
+      ],
+      "line": 96,
+      "value": "time.time()"
+    },
+    {
+      "names": [
+        "JOBS_STARTED"
+      ],
+      "line": 97,
+      "value": "0"
+    },
+    {
+      "names": [
+        "JOBS_FAILED"
+      ],
+      "line": 98,
+      "value": "0"
+    },
+    {
+      "names": [
+        "_PING_CACHE"
+      ],
+      "line": 99,
+      "value": "{}"
+    },
+    {
+      "names": [
+        "_ANDROID_TTS_STATUS_CACHE"
+      ],
+      "line": 100,
+      "value": "{'at': 0.0, 'data': {}}"
+    },
+    {
+      "names": [
+        "_CORE_WORKER_NETWORK_STATE"
+      ],
+      "line": 101,
+      "value": "{'last_ok_at': 0.0, 'last_error_at': 0.0, 'last_error': '', 'last_error_kind': ''}"
+    },
+    {
+      "names": [
+        "_CORE_JOB_LOCK"
+      ],
+      "line": 102,
+      "value": "threading.RLock()"
+    },
+    {
+      "names": [
+        "_CORE_JOB_ACTIVE"
+      ],
+      "line": 103,
+      "value": "{}"
+    },
+    {
+      "names": [
+        "_CORE_JOB_LAST_RESULT"
+      ],
+      "line": 104,
+      "value": "{}"
+    },
+    {
+      "names": [
+        "_PENDING_CORE_JOB_RESULTS"
+      ],
+      "line": 105,
+      "value": "{}"
+    },
+    {
+      "names": [
+        "_APK_BUILD_THREAD_LOCK"
+      ],
+      "line": 106,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_HEAVY_RESOURCE_LOCK"
+      ],
+      "line": 107,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_TETO_RENDERER_LOCK"
+      ],
+      "line": 108,
+      "value": "threading.RLock()"
+    },
+    {
+      "names": [
+        "_TETO_RENDERER"
+      ],
+      "line": 109,
+      "value": "None"
+    },
+    {
+      "names": [
+        "_TETO_RENDERER_ERROR"
+      ],
+      "line": 110,
+      "value": "''"
+    },
+    {
+      "names": [
+        "_MUSIC_STREAM_LOCK"
+      ],
+      "line": 111,
+      "value": "threading.RLock()"
+    },
+    {
+      "names": [
+        "_MUSIC_STREAMS"
+      ],
+      "line": 112,
+      "value": "{}"
+    },
+    {
+      "names": [
+        "_MUSIC_PCM_PREPARATIONS"
+      ],
+      "line": 113,
+      "value": "{}"
+    },
+    {
+      "names": [
+        "PCM_SAMPLE_RATE"
+      ],
+      "line": 114,
+      "value": "48000"
+    },
+    {
+      "names": [
+        "PCM_CHANNELS"
+      ],
+      "line": 115,
+      "value": "2"
+    },
+    {
+      "names": [
+        "PCM_SAMPLE_WIDTH_BYTES"
+      ],
+      "line": 116,
+      "value": "2"
+    },
+    {
+      "names": [
+        "PCM_FRAME_MS"
+      ],
+      "line": 117,
+      "value": "20"
+    },
+    {
+      "names": [
+        "PCM_FRAME_BYTES"
+      ],
+      "line": 118,
+      "value": "int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * (PCM_FRAME_MS / 1000.0))"
+    },
+    {
+      "names": [
+        "DEFAULT_MAX_BODY_MB"
+      ],
+      "line": 120,
+      "value": "32"
+    },
+    {
+      "names": [
+        "DEFAULT_MAX_OUTPUT_MB"
+      ],
+      "line": 121,
+      "value": "32"
+    },
+    {
+      "names": [
+        "DEFAULT_TIMEOUT_SECONDS"
+      ],
+      "line": 122,
+      "value": "45"
+    },
+    {
+      "names": [
+        "PHONE_WORKER_VERSION"
+      ],
+      "line": 123,
+      "value": "'1.11.6'"
+    },
+    {
+      "names": [
+        "CORE_WORKER_RUNTIME_MODE"
+      ],
+      "line": 124,
+      "value": "'termux'"
+    },
+    {
+      "names": [
+        "CORE_WORKER_INTERNAL_RUNTIME_STATE"
+      ],
+      "line": 125,
+      "value": "'apk-preview-only'"
+    },
+    {
+      "names": [
+        "DEFAULT_HEARTBEAT_INTERVAL_SECONDS"
+      ],
+      "line": 126,
+      "value": "30"
+    },
+    {
+      "names": [
+        "DEFAULT_JOB_POLL_INTERVAL_SECONDS"
+      ],
+      "line": 127,
+      "value": "10"
+    },
+    {
+      "names": [
+        "DEFAULT_CORE_JOB_RESULT_MAX_BYTES"
+      ],
+      "line": 128,
+      "value": "256 * 1024"
+    },
+    {
+      "names": [
+        "DEFAULT_APK_BUILD_KEEP_ARTIFACTS"
+      ],
+      "line": 129,
+      "value": "3"
+    },
+    {
+      "names": [
+        "DEFAULT_APK_BUILD_KEEP_LOGS"
+      ],
+      "line": 130,
+      "value": "12"
+    },
+    {
+      "names": [
+        "DEFAULT_APK_BUILD_KEEP_WORKDIRS"
+      ],
+      "line": 131,
+      "value": "1"
+    },
+    {
+      "names": [
+        "DEFAULT_APK_BUILD_MIN_BATTERY_PERCENT"
+      ],
+      "line": 132,
+      "value": "25"
+    },
+    {
+      "names": [
+        "TERMUX_PRIMARY_HTTP_PORT"
+      ],
+      "line": 133,
+      "value": "8766"
+    },
+    {
+      "names": [
+        "TERMUX_RECOVERY_HTTP_PORT"
+      ],
+      "line": 134,
+      "value": "8768"
+    },
+    {
+      "names": [
+        "_DIRECT_HTTP_STATE"
+      ],
+      "line": 135,
+      "value": "'starting'"
+    },
+    {
+      "names": [
+        "_EFFECTIVE_HTTP_PORT"
+      ],
+      "line": 136,
+      "value": "None"
+    },
+    {
+      "names": [
+        "_LAST_HEARTBEAT_OK_AT"
+      ],
+      "line": 137,
+      "value": "0.0"
+    },
+    {
+      "names": [
+        "_RUNTIME_STATUS_LOCK"
+      ],
+      "line": 138,
+      "value": "threading.RLock()"
+    },
+    {
+      "names": [
+        "SUPPORTED_DIRECT_TASKS"
+      ],
+      "line": 218,
+      "value": "('diagnostic_basic', 'ffmpeg_check', 'ffmpeg_convert', 'ffprobe_check', 'ffprobe_media', 'health', 'log_extract', 'log_summary', 'maintenance_plan', 'music_ytdlp_resolve', 'music_agent_command', 'music_agent_status', 'network_probe', 'ping', 'service_restart', 'service_start', 'service_status', 'service_stop', 'sha256', 'status', 'tailscale_status', 'text_stats', 'tts_cache_lookup', 'tts_cache_store', 'tts_synthesize_benchmark', 'tts_agent_status', 'tts_agent_synthesize', 'voice_agent_status', 'voice_agent_register_session', 'voice_agent_clear_session', 'voice_agent_guild_status', 'voice_agent_register_handoff', 'voice_agent_clear_handoff', 'voice_agent_handoff_status', 'voice_agent_prepare_transfer', 'voice_agent_begin_transfer', 'voice_agent_release_transfer', 'voice_agent_transfer_status', 'voice_agent_play_tts', 'voice_agent_probe_connection', 'voice_agent_connection_status', 'voice_agent_clear_connection', 'worker_logs', 'worker_self_check', 'worker_update', 'apk_build_debug', 'apk_publish_last', 'vps_assist_probe', 'hash_batch', 'endpoint_probe', 'emoji_recolor', 'media_probe', 'audio_convert', 'log_digest', 'zip_audit', 'boot_status', 'boot_repair', 'zip', 'zip_validate')"
+    },
+    {
+      "names": [
+        "SUPPORTED_CORE_WORKER_JOB_TYPES"
+      ],
+      "line": 280,
+      "value": "('diagnostic_basic', 'ffmpeg_check', 'ffprobe_check', 'log_summary', 'maintenance_plan', 'music_ytdlp_resolve', 'music_agent_command', 'music_agent_status', 'network_probe', 'ping', 'service_restart', 'service_start', 'service_status', 'service_stop', 'status', 'tailscale_status', 'text_stats', 'tts_cache_lookup', 'tts_cache_store', 'tts_synthesize_benchmark', 'tts_agent_status', 'tts_agent_synthesize', 'voice_agent_status', 'voice_agent_register_session', 'voice_agent_clear_session', 'voice_agent_guild_status', 'voice_agent_register_handoff', 'voice_agent_clear_handoff', 'voice_agent_handoff_status', 'voice_agent_prepare_transfer', 'voice_agent_begin_transfer', 'voice_agent_release_transfer', 'voice_agent_transfer_status', 'voice_agent_play_tts', 'voice_agent_probe_connection', 'voice_agent_connection_status', 'voice_agent_clear_connection', 'worker_logs', 'worker_self_check', 'worker_update', 'apk_build_debug', 'apk_publish_last', 'vps_assist_probe', 'hash_batch', 'endpoint_probe', 'emoji_recolor', 'media_probe', 'audio_convert', 'log_digest', 'zip_audit', 'boot_status', 'boot_repair', 'zip_validate')"
+    },
+    {
+      "names": [
+        "CORE_WORKER_PROFILE_PRESETS"
+      ],
+      "line": 336,
+      "value": "{'leve': {'label': 'Leve', 'roles': ['phone-worker', 'diagnostics', 'log-summary', 'vps-assist'], 'capabilities': ['phone-worker', 'diagnostics', 'log-summary', 'vps-assist', 'hash-worker', 'endpoint-probe', 'worker-logs', 'network-probe', 'tailscale-status']}, 'midia': {'label': 'Mídia', 'roles': ['phone-worker', 'diagnostics', 'log-summary', 'zip-validate', 'ffmpeg', 'ffprobe', 'tts-convert', 'vps-assist'], 'capabilities': ['phone-worker', 'diagnostics', 'log-summary', 'zip-validate', 'ffmpeg', 'ffprobe', 'tts-convert', 'vps-assist', 'hash-worker', 'endpoint-probe', 'media-probe', 'audio-convert', 'worker-logs', 'network-probe', 'tailscale-status']}, 'completo': {'label': 'Completo', 'roles': ['phone-worker', 'diagnostics', 'log-summary', 'maintenance-plan', 'zip-validate', 'ffmpeg', 'ffprobe', 'tts-convert', 'vps-assist', 'cache-worker'], 'capabilities': ['phone-worker', 'diagnostics', 'log-summary', 'maintenance-plan', 'zip-validate', 'ffmpeg', 'ffprobe', 'tts-convert', 'vps-assist', 'cache-worker', 'hash-worker', 'endpoint-probe', 'media-probe', 'audio-convert', 'worker-logs', 'network-probe', 'tailscale-status', 'service-control']}, 'builder': {'label': 'Builder', 'roles': ['phone-worker', 'diagnostics', 'log-summary', 'maintenance-plan', 'apk-builder', 'zip-validate', 'vps-assist', 'cache-worker'], 'capabilities': ['phone-worker', 'diagnostics', 'log-summary', 'maintenance-plan', 'apk-builder', 'zip-validate', 'vps-assist', 'cache-worker', 'hash-worker', 'endpoint-probe', 'media-probe', 'worker-logs', 'network-probe', 'tailscale-status', 'boot-repair', 'service-control']}, 'turbo': {'label': 'Turbo', 'roles': ['phone-worker', 'diagnostics', 'log-summary', 'maintenance-plan', 'zip-validate', 'ffmpeg', 'ffprobe', 'tts-convert', 'tts-synth', 'tts-benchmark', 'tts-agent', 'voice-agent', 'apk-builder', 'vps-assist', 'cache-worker'], 'capabilities': ['phone-worker', 'diagnostics', 'log-summary', 'maintenance-plan', 'zip-validate', 'ffmpeg', 'ffprobe', 'tts-convert', 'tts-synth', 'tts-benchmark', 'tts-agent', 'tts-gtts', 'tts-edge', 'tts-android-native', 'tts-teto', 'voice-agent', 'worker-voice', 'shared-voice-session', 'apk-builder', 'vps-assist', 'cache-worker', 'music', 'music-node', 'music-lavalink', 'music-ytdlp', 'music-ytdlp-resolve', 'hash-worker', 'endpoint-probe', 'media-probe', 'audio-convert', 'emoji-recolor', 'worker-logs', 'network-probe', 'tailscale-status', 'service-control']}, 'bedrock': {'label': 'Bedrock', 'roles': ['phone-worker', 'diagnostics', 'log-summary', 'bedrock', 'bedrock-logs', 'bedrock-backup'], 'capabilities': ['phone-worker', 'diagnostics', 'log-summary', 'bedrock', 'bedrock-logs', 'bedrock-backup', 'worker-logs', 'network-probe', 'tailscale-status']}}"
+    },
+    {
+      "names": [
+        "_TTS_TRANSPORT_LOCK"
+      ],
+      "line": 2291,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_LAVALINK_AUTOSTART_LOCK"
+      ],
+      "line": 2455,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_LAVALINK_AUTOSTART_LAST_AT"
+      ],
+      "line": 2456,
+      "value": "0.0"
+    },
+    {
+      "names": [
+        "_TTS_DEP_AUTOINSTALL_LOCK"
+      ],
+      "line": 2729,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_TTS_DEP_AUTOINSTALL_LAST_AT"
+      ],
+      "line": 2730,
+      "value": "0.0"
+    },
+    {
+      "names": [
+        "_TTS_DEP_AUTOINSTALL_RUNNING"
+      ],
+      "line": 2731,
+      "value": "False"
+    },
+    {
+      "names": [
+        "_TTS_AGENT_LOCK"
+      ],
+      "line": 2732,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_TTS_AGENT_ACTIVE"
+      ],
+      "line": 2733,
+      "value": "0"
+    },
+    {
+      "names": [
+        "_TTS_AGENT_TOTAL"
+      ],
+      "line": 2734,
+      "value": "0"
+    },
+    {
+      "names": [
+        "_TTS_AGENT_FAILED"
+      ],
+      "line": 2735,
+      "value": "0"
+    },
+    {
+      "names": [
+        "_TTS_AGENT_TOTAL_MS"
+      ],
+      "line": 2736,
+      "value": "0.0"
+    },
+    {
+      "names": [
+        "_TTS_AGENT_LAST_ERROR"
+      ],
+      "line": 2737,
+      "value": "''"
+    },
+    {
+      "names": [
+        "_TTS_AGENT_LAST_ENGINE"
+      ],
+      "line": 2738,
+      "value": "''"
+    },
+    {
+      "names": [
+        "_TTS_AGENT_LAST_OK_AT"
+      ],
+      "line": 2739,
+      "value": "0.0"
+    },
+    {
+      "names": [
+        "_TTS_CACHE_MAINTENANCE_EXECUTOR"
+      ],
+      "line": 2740,
+      "value": "ThreadPoolExecutor(max_workers=1, thread_name_prefix='tts-cache-maint')"
+    },
+    {
+      "names": [
+        "_TTS_CACHE_MAINTENANCE_LOCK"
+      ],
+      "line": 2741,
+      "value": "threading.Lock()"
+    },
+    {
+      "names": [
+        "_TTS_CACHE_MAINTENANCE_PENDING"
+      ],
+      "line": 2742,
+      "value": "{}"
+    },
+    {
+      "names": [
+        "_TTS_CACHE_MAINTENANCE_RUNNING"
+      ],
+      "line": 2743,
+      "value": "False"
+    },
+    {
+      "names": [
+        "_TTS_CACHE_TOUCHES"
+      ],
+      "line": 2744,
+      "value": "{}"
+    },
+    {
+      "names": [
+        "_VOICE_AGENT_SESSION_LOCK"
+      ],
+      "line": 3099,
+      "value": "threading.RLock()"
+    },
+    {
+      "names": [
+        "_VOICE_AGENT_SESSION_MEMORY"
+      ],
+      "line": 3100,
+      "value": "None"
+    },
+    {
+      "names": [
+        "_VOICE_AGENT_HANDOFF_MEMORY"
+      ],
+      "line": 3101,
+      "value": "{}"
+    },
+    {
+      "names": [
+        "_VOICE_AGENT_CONNECTION_MEMORY"
+      ],
+      "line": 3102,
+      "value": "{}"
+    },
+    {
+      "names": [
+        "_VOICE_AGENT_TRANSFER_MEMORY"
+      ],
+      "line": 3103,
+      "value": "{}"
+    },
+    {
+      "names": [
+        "_GRADLE_DEFAULT_JVM_OPTS_RE"
+      ],
+      "line": 7707,
+      "value": "re.compile('(?m)^(?P<prefix>[ \\\\t]*DEFAULT_JVM_OPTS[ \\\\t]*=)[^\\\\r\\\\n]*$')"
+    },
+    {
+      "names": [
+        "_TERMUX_ANDROID_SYSTEM_LIBRARIES"
+      ],
+      "line": 7932,
+      "value": "frozenset({'libandroid.so', 'libbinder_ndk.so', 'libc.so', 'libdl.so', 'libEGL.so', 'libGLESv2.so', 'libjnigraphics.so', 'liblog.so', 'libm.so', 'libmediandk.so', 'libnativewindow.so', 'libOpenSLES.so', 'libstdc++.so', 'libsync.so', 'libvulkan.so', 'libz.so'})"
+    },
+    {
+      "names": [
+        "_ELF_NEEDED_RE"
+      ],
+      "line": 7950,
+      "value": "re.compile('\\\\(NEEDED\\\\).*?\\\\[([^\\\\]]+)\\\\]')"
+    },
+    {
+      "names": [
+        "_ELF_SONAME_RE"
+      ],
+      "line": 7951,
+      "value": "re.compile('\\\\(SONAME\\\\).*?\\\\[([^\\\\]]+)\\\\]')"
+    },
+    {
+      "names": [
+        "_WORKER_UPDATE_TARGETS"
+      ],
+      "line": 10134,
+      "value": "{'phone_worker.py': ('worker', 'phone_worker.py', 493), 'phone_worker_runtime/__init__.py': ('worker', 'phone_worker_runtime/__init__.py', 420), 'phone_worker_runtime/config.py': ('worker', 'phone_worker_runtime/config.py', 420), 'phone_worker_runtime/telemetry.py': ('worker', 'phone_worker_runtime/telemetry.py', 420), 'phone_worker_runtime/control_plane.py': ('worker', 'phone_worker_runtime/control_plane.py', 420), 'phone_worker_runtime/voice_state.py': ('worker', 'phone_worker_runtime/voice_state.py', 420), 'phone_worker_runtime/tts_policy.py': ('worker', 'phone_worker_runtime/tts_policy.py', 420), 'phone_worker_runtime/tts_cache.py': ('worker', 'phone_worker_runtime/tts_cache.py', 420), 'phone_worker_runtime/tts_android.py': ('worker', 'phone_worker_runtime/tts_android.py', 420), 'phone_worker_runtime/tts_providers.py': ('worker', 'phone_worker_runtime/tts_providers.py', 420), 'phone_worker_runtime/pcm_io.py': ('worker', 'phone_worker_runtime/pcm_io.py', 420), 'apk_identity.py': ('worker', 'apk_identity.py', 420), 'tts_transport.py': ('worker', 'tts_transport.py', 420), 'phone_worker_bootstrap.py': ('worker', 'phone_worker_bootstrap.py', 493), 'music_agent.py': ('worker', 'music_agent.py', 493), 'start-phone-worker.sh': ('worker', 'start-phone-worker.sh', 493), 'start-phone-music-agent.sh': ('worker', 'start-phone-music-agent.sh', 493), 'watch-phone-worker.sh': ('worker', 'watch-phone-worker.sh', 493), 'pair-phone-worker.sh': ('worker', 'pair-phone-worker.sh', 493), 'repair-phone-worker.sh': ('worker', 'repair-phone-worker.sh', 493), 'accept-core-worker-on-device.sh': ('worker', 'accept-core-worker-on-device.sh', 493), 'bootstrap-phone-worker.sh': ('worker', 'bootstrap-phone-worker.sh', 493), 'install.sh': ('worker', 'install.sh', 493), 'README.md': ('worker', 'README.md', 420), 'phone-worker.env.example': ('worker', 'phone-worker.env.example', 384), 'teto_renderer/__init__.py': ('worker', 'teto_renderer/__init__.py', 420), 'teto_renderer/errors.py': ('worker', 'teto_renderer/errors.py', 420), 'teto_renderer/cache.py': ('worker', 'teto_renderer/cache.py', 420), 'teto_renderer/voicebank.py': ('worker', 'teto_renderer/voicebank.py', 420), 'teto_renderer/phonemizer.py': ('worker', 'teto_renderer/phonemizer.py', 420), 'teto_renderer/prosody.py': ('worker', 'teto_renderer/prosody.py', 420), 'teto_renderer/renderer.py': ('worker', 'teto_renderer/renderer.py', 420), 'scripts/validate-teto-assets.py': ('worker', 'scripts/validate-teto-assets.py', 493)}"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_SOURCE_HASH_EXCLUDED"
+      ],
+      "line": 10169,
+      "value": "frozenset({'README.md', 'phone-worker.env.example'})"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_SOURCE_HASH_CACHE"
+      ],
+      "line": 10170,
+      "value": "{'signature': None, 'value': ''}"
+    },
+    {
+      "names": [
+        "_PHONE_WORKER_SOURCE_HASH_LOCK"
+      ],
+      "line": 10171,
+      "value": "threading.Lock()"
+    }
+  ],
+  "facade_functions": [
+    {
+      "name": "_load_apk_identity_module",
+      "line": 60,
+      "parameters": "",
+      "globals_written": [
+        "_APK_IDENTITY_MODULE"
+      ]
+    },
+    {
+      "name": "inspect_apk_identity",
+      "line": 83,
+      "parameters": "*args: Any, **kwargs: Any",
+      "globals_written": []
+    },
+    {
+      "name": "assert_expected_apk_identity",
+      "line": 87,
+      "parameters": "*args: Any, **kwargs: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_early_env_truthy",
+      "line": 141,
+      "parameters": "value: object, default: bool=False",
+      "globals_written": []
+    },
+    {
+      "name": "_load_env_file_once",
+      "line": 154,
+      "parameters": "path: Path, *, override: bool=False",
+      "globals_written": []
+    },
+    {
+      "name": "_music_agent_env_file_early",
+      "line": 175,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_ensure_music_agent_token_env",
+      "line": 180,
+      "parameters": "*, persist: bool=True",
+      "globals_written": []
+    },
+    {
+      "name": "_load_phone_worker_runtime_env",
+      "line": 211,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_env_bool",
+      "line": 371,
+      "parameters": "name: str, default: bool=False",
+      "globals_written": []
+    },
+    {
+      "name": "_env_int",
+      "line": 380,
+      "parameters": "name: str, default: int",
+      "globals_written": []
+    },
+    {
+      "name": "_decode_env_value",
+      "line": 387,
+      "parameters": "value: str",
+      "globals_written": []
+    },
+    {
+      "name": "_load_env_file",
+      "line": 409,
+      "parameters": "path: str | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_env_float",
+      "line": 436,
+      "parameters": "name: str, default: float",
+      "globals_written": []
+    },
+    {
+      "name": "_env_list",
+      "line": 443,
+      "parameters": "name: str, default: list[str] | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_parse_env_list",
+      "line": 447,
+      "parameters": "value: Any, default: list[str] | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_normalize_core_worker_profile",
+      "line": 460,
+      "parameters": "value: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_core_worker_profile_label",
+      "line": 467,
+      "parameters": "profile: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_core_worker_profile_roles",
+      "line": 472,
+      "parameters": "profile: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_core_worker_profile_capabilities",
+      "line": 477,
+      "parameters": "profile: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_merge_profile_contract",
+      "line": 482,
+      "parameters": "configured: list[str], required: list[str]",
+      "globals_written": []
+    },
+    {
+      "name": "_current_core_worker_roles_and_capabilities",
+      "line": 499,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_supported_core_worker_job_types",
+      "line": 508,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_current_core_worker_profile",
+      "line": 531,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_config_module",
+      "line": 535,
+      "parameters": "",
+      "globals_written": [
+        "_PHONE_WORKER_CONFIG_MODULE"
+      ]
+    },
+    {
+      "name": "_safe_env_key",
+      "line": 549,
+      "parameters": "value: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_format_env_value",
+      "line": 553,
+      "parameters": "value: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_update_env_file",
+      "line": 557,
+      "parameters": "path: str | None, updates: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_android_prop",
+      "line": 571,
+      "parameters": "name: str",
+      "globals_written": []
+    },
+    {
+      "name": "_default_worker_name",
+      "line": 581,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_default_worker_id",
+      "line": 604,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_short_text",
+      "line": 615,
+      "parameters": "value: Any, *, limit: int=120, default: str=''",
+      "globals_written": []
+    },
+    {
+      "name": "_music_stream_ttl_seconds",
+      "line": 624,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_cleanup_music_streams_unlocked",
+      "line": 628,
+      "parameters": "now: float | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_register_music_stream",
+      "line": 637,
+      "parameters": "item: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_music_stream_lookup",
+      "line": 654,
+      "parameters": "stream_id: str",
+      "globals_written": []
+    },
+    {
+      "name": "_safe_ffmpeg_header_lines",
+      "line": 664,
+      "parameters": "headers: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_music_pcm_cache_dir",
+      "line": 681,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_music_prepared_mode_enabled",
+      "line": 688,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_music_prepare_timeout_seconds",
+      "line": 693,
+      "parameters": "item: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_music_prepare_max_duration_seconds",
+      "line": 703,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_music_pcm_cache_max_bytes",
+      "line": 707,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_cleanup_music_prepared_file",
+      "line": 712,
+      "parameters": "item: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_cleanup_music_pcm_cache",
+      "line": 724,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_pcm_io_module",
+      "line": 753,
+      "parameters": "",
+      "globals_written": [
+        "_PHONE_WORKER_PCM_IO_MODULE"
+      ]
+    },
+    {
+      "name": "_music_stream_build_ffmpeg_input_cmd",
+      "line": 772,
+      "parameters": "item: dict[str, Any], *, output: str",
+      "globals_written": []
+    },
+    {
+      "name": "_assert_music_preparation_owner_unlocked",
+      "line": 777,
+      "parameters": "stream_id: str, owner: dict[str, Any] | None",
+      "globals_written": []
+    },
+    {
+      "name": "_prepare_music_pcm_file",
+      "line": 782,
+      "parameters": "stream_id: str, item: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_prepare_music_pcm_file_owned",
+      "line": 805,
+      "parameters": "stream_id: str, item: dict[str, Any], owner: dict[str, Any] | None",
+      "globals_written": []
+    },
+    {
+      "name": "_serve_prepared_music_pcm",
+      "line": 821,
+      "parameters": "handler: BaseHTTPRequestHandler, stream_id: str, item: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_stream_music_pcm",
+      "line": 825,
+      "parameters": "handler: BaseHTTPRequestHandler, stream_id: str",
+      "globals_written": []
+    },
+    {
+      "name": "_format_bytes",
+      "line": 858,
+      "parameters": "value: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_run_json_command",
+      "line": 873,
+      "parameters": "command: list[str], *, timeout: float=2.0",
+      "globals_written": []
+    },
+    {
+      "name": "_read_text_file",
+      "line": 889,
+      "parameters": "path: str | Path, *, limit: int=4096",
+      "globals_written": []
+    },
+    {
+      "name": "_empty_battery_snapshot",
+      "line": 896,
+      "parameters": "source: str='unavailable', error: object=''",
+      "globals_written": []
+    },
+    {
+      "name": "_safe_path_exists",
+      "line": 909,
+      "parameters": "path: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_telemetry_module",
+      "line": 918,
+      "parameters": "",
+      "globals_written": [
+        "_PHONE_WORKER_TELEMETRY_MODULE"
+      ]
+    },
+    {
+      "name": "_sysfs_battery_snapshot",
+      "line": 934,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_battery_snapshot",
+      "line": 946,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_safe_telemetry",
+      "line": 957,
+      "parameters": "name: str, callback, default: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_run_text_command",
+      "line": 969,
+      "parameters": "command: list[str], *, timeout: float=3.0, max_bytes: int=32768",
+      "globals_written": []
+    },
+    {
+      "name": "_mask_ipv4",
+      "line": 988,
+      "parameters": "value: str",
+      "globals_written": []
+    },
+    {
+      "name": "_base_url_host",
+      "line": 996,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_looks_like_tailscale_host",
+      "line": 1006,
+      "parameters": "host: str",
+      "globals_written": []
+    },
+    {
+      "name": "_tailscale_snapshot",
+      "line": 1015,
+      "parameters": "*, probe_vps: bool=False",
+      "globals_written": []
+    },
+    {
+      "name": "_vps_tcp_ping_snapshot",
+      "line": 1028,
+      "parameters": "*, timeout: float=2.5, cache_ttl: float=6.0",
+      "globals_written": []
+    },
+    {
+      "name": "_network_snapshot",
+      "line": 1038,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_heartbeat_configured",
+      "line": 1049,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_core_worker_jobs_configured",
+      "line": 1055,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_core_worker_auth_parts",
+      "line": 1061,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_classify_core_worker_network_error",
+      "line": 1068,
+      "parameters": "exc: BaseException | str",
+      "globals_written": []
+    },
+    {
+      "name": "_remember_core_worker_network_ok",
+      "line": 1083,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_remember_core_worker_network_error",
+      "line": 1091,
+      "parameters": "exc: BaseException | str",
+      "globals_written": []
+    },
+    {
+      "name": "_core_worker_network_runtime_snapshot",
+      "line": 1099,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_post_json_url",
+      "line": 1111,
+      "parameters": "url: str, payload: dict[str, Any], *, token: str='', timeout: float=8.0",
+      "globals_written": []
+    },
+    {
+      "name": "_get_json_url",
+      "line": 1150,
+      "parameters": "url: str, *, timeout: float=8.0, max_bytes: int=1024 * 1024",
+      "globals_written": []
+    },
+    {
+      "name": "_get_local_json_url",
+      "line": 1183,
+      "parameters": "url: str, *, timeout: float=4.0, max_bytes: int=128 * 1024",
+      "globals_written": []
+    },
+    {
+      "name": "_post_local_json_url",
+      "line": 1202,
+      "parameters": "url: str, payload: dict[str, Any], *, timeout: float=4.0, max_bytes: int=128 * 1024",
+      "globals_written": []
+    },
+    {
+      "name": "_download_url_to_file",
+      "line": 1222,
+      "parameters": "url: str, target: Path, *, timeout: float=35.0, max_bytes: int=150 * 1024 * 1024, accept: str='application/vnd.android.package-archive,*/*', size_label: str='APK'",
+      "globals_written": []
+    },
+    {
+      "name": "_post_core_worker_json",
+      "line": 1274,
+      "parameters": "path: str, payload: dict[str, Any], *, timeout: float=8.0",
+      "globals_written": []
+    },
+    {
+      "name": "_core_job_runtime_snapshot",
+      "line": 1283,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_set_core_job_active",
+      "line": 1304,
+      "parameters": "job: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_finish_core_job",
+      "line": 1314,
+      "parameters": "job_id: str, kind: str, status: str, *, summary: str='', sent_ok: bool=False",
+      "globals_written": []
+    },
+    {
+      "name": "_store_pending_core_job_result",
+      "line": 1328,
+      "parameters": "payload: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_post_core_worker_job_result_payload_status",
+      "line": 1339,
+      "parameters": "payload: dict[str, Any], *, timeout: float=8.0",
+      "globals_written": []
+    },
+    {
+      "name": "_post_core_worker_job_result_payload",
+      "line": 1348,
+      "parameters": "payload: dict[str, Any], *, timeout: float=8.0",
+      "globals_written": []
+    },
+    {
+      "name": "_pending_core_job_result_count",
+      "line": 1353,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_flush_pending_core_worker_job_results",
+      "line": 1359,
+      "parameters": "*, timeout: float=8.0",
+      "globals_written": []
+    },
+    {
+      "name": "_runtime_state_dir",
+      "line": 1386,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_runtime_status_path",
+      "line": 1393,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_write_runtime_status",
+      "line": 1397,
+      "parameters": "*, control_plane_alive: bool, heartbeat_ok: bool | None=None, reason: str=''",
+      "globals_written": [
+        "_LAST_HEARTBEAT_OK_AT"
+      ]
+    },
+    {
+      "name": "_probe_direct_http_owner",
+      "line": 1431,
+      "parameters": "host: str, port: int, *, timeout: float=0.8",
+      "globals_written": []
+    },
+    {
+      "name": "_bind_phone_worker_http_server",
+      "line": 1469,
+      "parameters": "host: str, preferred_port: int, *, token: str, max_body_bytes: int, max_output_bytes: int, job_timeout: int",
+      "globals_written": [
+        "_DIRECT_HTTP_STATE",
+        "_EFFECTIVE_HTTP_PORT"
+      ]
+    },
+    {
+      "name": "_bootstrap_updater_snapshot",
+      "line": 1513,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_control_plane_snapshot",
+      "line": 1530,
+      "parameters": "name: str, callback, default: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_control_plane_module",
+      "line": 1539,
+      "parameters": "",
+      "globals_written": [
+        "_PHONE_WORKER_CONTROL_PLANE_MODULE"
+      ]
+    },
+    {
+      "name": "_core_worker_endpoint",
+      "line": 1557,
+      "parameters": "host: str, effective_port: int | None",
+      "globals_written": []
+    },
+    {
+      "name": "_core_worker_payload",
+      "line": 1565,
+      "parameters": "*, host: str, port: int",
+      "globals_written": []
+    },
+    {
+      "name": "_pair_core_worker",
+      "line": 1643,
+      "parameters": "*, code: str, vps_url: str, host: str, port: int, worker_id: str='', name: str='', roles: str='', capabilities: str='', env_file: str | None=None, timeout: float=10.0",
+      "globals_written": []
+    },
+    {
+      "name": "_send_core_worker_heartbeat_once",
+      "line": 1723,
+      "parameters": "*, host: str, port: int, timeout: float=6.0",
+      "globals_written": []
+    },
+    {
+      "name": "_try_auto_enroll_local_apk_once",
+      "line": 1745,
+      "parameters": "*, timeout: float=4.0",
+      "globals_written": []
+    },
+    {
+      "name": "_start_apk_child_auto_enrollment",
+      "line": 1801,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_start_core_worker_heartbeat",
+      "line": 1832,
+      "parameters": "*, host: str, port: int",
+      "globals_written": []
+    },
+    {
+      "name": "_json_response",
+      "line": 1848,
+      "parameters": "handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_header_ascii",
+      "line": 1858,
+      "parameters": "value: Any, *, limit: int=180",
+      "globals_written": []
+    },
+    {
+      "name": "_audio_response",
+      "line": 1863,
+      "parameters": "handler: BaseHTTPRequestHandler, status: int, data: bytes, meta: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_error",
+      "line": 1908,
+      "parameters": "handler: BaseHTTPRequestHandler, status: int, message: str",
+      "globals_written": []
+    },
+    {
+      "name": "_b64decode",
+      "line": 1912,
+      "parameters": "value: str, *, max_bytes: int",
+      "globals_written": []
+    },
+    {
+      "name": "_b64encode",
+      "line": 1924,
+      "parameters": "data: bytes, *, max_bytes: int",
+      "globals_written": []
+    },
+    {
+      "name": "_with_tts_audio_payload",
+      "line": 1930,
+      "parameters": "payload: dict[str, Any], data: bytes, *, max_bytes: int, raw_response: bool",
+      "globals_written": []
+    },
+    {
+      "name": "_android_tts_enabled",
+      "line": 1946,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_android_tts_base_url",
+      "line": 1950,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_android_tts_timeout_seconds",
+      "line": 1955,
+      "parameters": "default: float=0.45",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_tts_android_module",
+      "line": 1959,
+      "parameters": "",
+      "globals_written": [
+        "_PHONE_WORKER_TTS_ANDROID_MODULE"
+      ]
+    },
+    {
+      "name": "_android_tts_json_request",
+      "line": 1978,
+      "parameters": "path: str, *, payload: dict[str, Any] | None=None, timeout: float=1.5",
+      "globals_written": []
+    },
+    {
+      "name": "_android_tts_raw_request",
+      "line": 1984,
+      "parameters": "path: str, *, payload: dict[str, Any], timeout: float=1.5, max_audio_bytes: int=8 * 1024 * 1024",
+      "globals_written": []
+    },
+    {
+      "name": "_android_tts_status",
+      "line": 1990,
+      "parameters": "*, use_cache: bool=True",
+      "globals_written": []
+    },
+    {
+      "name": "_android_tts_ready",
+      "line": 2026,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_android_tts_voices",
+      "line": 2030,
+      "parameters": "*, locale: str='', limit: int=500",
+      "globals_written": []
+    },
+    {
+      "name": "_safe_name",
+      "line": 2050,
+      "parameters": "name: Any, fallback: str='file.bin'",
+      "globals_written": []
+    },
+    {
+      "name": "_available_memory_mb",
+      "line": 2061,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_teto_resource_snapshot",
+      "line": 2072,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_tts_providers_module",
+      "line": 2117,
+      "parameters": "",
+      "globals_written": [
+        "_PHONE_WORKER_TTS_PROVIDERS_MODULE"
+      ]
+    },
+    {
+      "name": "_get_teto_renderer",
+      "line": 2136,
+      "parameters": "",
+      "globals_written": [
+        "_TETO_RENDERER",
+        "_TETO_RENDERER_ERROR"
+      ]
+    },
+    {
+      "name": "_teto_status",
+      "line": 2151,
+      "parameters": "*, force: bool=False",
+      "globals_written": []
+    },
+    {
+      "name": "_turbo_dependency_snapshot",
+      "line": 2172,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_tts_policy_module",
+      "line": 2229,
+      "parameters": "",
+      "globals_written": [
+        "_PHONE_WORKER_TTS_POLICY_MODULE"
+      ]
+    },
+    {
+      "name": "_tts_agent_normalize_engine",
+      "line": 2251,
+      "parameters": "raw: Any, *, default: str='gtts'",
+      "globals_written": []
+    },
+    {
+      "name": "_tts_agent_available_engines",
+      "line": 2255,
+      "parameters": "deps: dict[str, Any] | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_tts_agent_preferred_engine",
+      "line": 2259,
+      "parameters": "available: list[str]",
+      "globals_written": []
+    },
+    {
+      "name": "_tts_agent_queue_limit",
+      "line": 2263,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_tts_cache_module",
+      "line": 2267,
+      "parameters": "",
+      "globals_written": [
+        "_PHONE_WORKER_TTS_CACHE_MODULE"
+      ]
+    },
+    {
+      "name": "_prune_audio_cache",
+      "line": 2286,
+      "parameters": "root, max_bytes, max_files, *, protected=None",
+      "globals_written": []
+    },
+    {
+      "name": "_tts_transport_module",
+      "line": 2294,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_tts_agent_snapshot",
+      "line": 2316,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_tts_agent_record_start",
+      "line": 2370,
+      "parameters": "",
+      "globals_written": [
+        "_TTS_AGENT_ACTIVE"
+      ]
+    },
+    {
+      "name": "_tts_agent_record_done",
+      "line": 2378,
+      "parameters": "*, ok: bool, engine: str, elapsed_ms: float, error: str=''",
+      "globals_written": [
+        "_TTS_AGENT_ACTIVE",
+        "_TTS_AGENT_FAILED",
+        "_TTS_AGENT_LAST_ENGINE",
+        "_TTS_AGENT_LAST_ERROR",
+        "_TTS_AGENT_LAST_OK_AT",
+        "_TTS_AGENT_TOTAL",
+        "_TTS_AGENT_TOTAL_MS"
+      ]
+    },
+    {
+      "name": "_cache_dir_snapshot",
+      "line": 2392,
+      "parameters": "path: Path, *, max_scan_files: int=20000",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_lavalink_env_value",
+      "line": 2433,
+      "parameters": "name: str, default: str=''",
+      "globals_written": []
+    },
+    {
+      "name": "_truthy_env",
+      "line": 2459,
+      "parameters": "name: str, default: bool=False",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_lavalink_port",
+      "line": 2463,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_read_lavalink_application_password",
+      "line": 2471,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_lavalink_password",
+      "line": 2494,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_probe_local_lavalink_http",
+      "line": 2503,
+      "parameters": "*, timeout: float=2.5",
+      "globals_written": []
+    },
+    {
+      "name": "_spawn_builtin_lavalink_proot_start",
+      "line": 2525,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_ensure_phone_lavalink_started",
+      "line": 2558,
+      "parameters": "reason: str='health'",
+      "globals_written": [
+        "_LAVALINK_AUTOSTART_LAST_AT"
+      ]
+    },
+    {
+      "name": "_music_node_snapshot",
+      "line": 2595,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_worker_turbo_cache_snapshot",
+      "line": 2670,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_read_music_agent_version_from_path",
+      "line": 2687,
+      "parameters": "path: Path | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_version_tuple_loose",
+      "line": 2697,
+      "parameters": "value: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_version_lt_loose",
+      "line": 2705,
+      "parameters": "current: Any, target: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_music_agent_start_script",
+      "line": 2714,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_music_agent_pid_file",
+      "line": 2721,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_music_agent_log_file",
+      "line": 2725,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_submit_tts_cache_maintenance",
+      "line": 2747,
+      "parameters": "callback, *args, **kwargs",
+      "globals_written": [
+        "_TTS_CACHE_MAINTENANCE_RUNNING"
+      ]
+    },
+    {
+      "name": "_music_voice_dependency_specs",
+      "line": 2776,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_module_import_ok",
+      "line": 2789,
+      "parameters": "module_name: str",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_deps_mode_enabled",
+      "line": 2803,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_heavy_python_deps_enabled",
+      "line": 2819,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_allow_pip_source_builds",
+      "line": 2824,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_dependency_install_state_dir",
+      "line": 2829,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_dependency_attempt_allowed",
+      "line": 2833,
+      "parameters": "key: str, cooldown_seconds: float",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_safe_mode_enabled",
+      "line": 2856,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_env_autostart_enabled",
+      "line": 2863,
+      "parameters": "name: str, default: str='auto'",
+      "globals_written": []
+    },
+    {
+      "name": "_start_tts_dependency_autoinstall",
+      "line": 2874,
+      "parameters": "missing: list[str], checks: dict[str, dict[str, Any]]",
+      "globals_written": [
+        "_TTS_DEP_AUTOINSTALL_LAST_AT",
+        "_TTS_DEP_AUTOINSTALL_RUNNING"
+      ]
+    },
+    {
+      "name": "_music_voice_dependencies_snapshot",
+      "line": 2981,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_music_agent_snapshot",
+      "line": 3007,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_cancel_probe",
+      "line": 3110,
+      "parameters": "guild_id: str, *, reason: str",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_assert_probe_current",
+      "line": 3118,
+      "parameters": "guild_id: int, probe_id: str | None",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_voice_state_module",
+      "line": 3132,
+      "parameters": "",
+      "globals_written": [
+        "_PHONE_WORKER_VOICE_STATE_MODULE"
+      ]
+    },
+    {
+      "name": "_voice_agent_state_file",
+      "line": 3152,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_now_ms",
+      "line": 3158,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_int",
+      "line": 3162,
+      "parameters": "value: Any, default: int=0",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_clean_text",
+      "line": 3169,
+      "parameters": "value: Any, *, limit: int=160",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_flag",
+      "line": 3173,
+      "parameters": "value: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_load_state",
+      "line": 3177,
+      "parameters": "",
+      "globals_written": [
+        "_VOICE_AGENT_SESSION_MEMORY"
+      ]
+    },
+    {
+      "name": "_voice_agent_save_state",
+      "line": 3199,
+      "parameters": "state: dict[str, Any]",
+      "globals_written": [
+        "_VOICE_AGENT_SESSION_MEMORY"
+      ]
+    },
+    {
+      "name": "_voice_agent_public_session",
+      "line": 3217,
+      "parameters": "raw: dict[str, Any], *, now_ms: int | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_public_handoff",
+      "line": 3222,
+      "parameters": "raw: dict[str, Any], *, now_ms: int | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_expired_keys",
+      "line": 3227,
+      "parameters": "records: dict[str, Any], *, now_ms: int",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_revoke_handoff_owner",
+      "line": 3231,
+      "parameters": "guild_id: str, *, now_ms: int, policy: str",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_prune_handoffs",
+      "line": 3240,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_handoff_summary",
+      "line": 3250,
+      "parameters": "*, guild_id: int | None=None, limit: int=5",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_public_connection",
+      "line": 3258,
+      "parameters": "raw: dict[str, Any], *, now_ms: int | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_public_transfer",
+      "line": 3263,
+      "parameters": "raw: dict[str, Any], *, now_ms: int | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_prune_transfers",
+      "line": 3268,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_transfer_summary",
+      "line": 3280,
+      "parameters": "*, guild_id: int | None=None, limit: int=5",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_set_transfer",
+      "line": 3287,
+      "parameters": "guild_id: int, **updates: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_prepare_transfer",
+      "line": 3300,
+      "parameters": "body: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_begin_transfer",
+      "line": 3333,
+      "parameters": "body: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_release_transfer",
+      "line": 3378,
+      "parameters": "body: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_connection_summary",
+      "line": 3402,
+      "parameters": "*, guild_id: int | None=None, limit: int=5",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_normalize_endpoint",
+      "line": 3410,
+      "parameters": "endpoint: str",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_set_connection",
+      "line": 3420,
+      "parameters": "guild_id: int, *, _expected_probe_id: str | None=None, **updates: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_udp_discovery_probe",
+      "line": 3436,
+      "parameters": "*, ip: str, port: int, ssrc: int, timeout: float=0.9",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_probe_connection_async",
+      "line": 3465,
+      "parameters": "handoff: dict[str, Any], *, timeout_seconds: float",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_probe_worker",
+      "line": 3580,
+      "parameters": "handoff: dict[str, Any], *, timeout_seconds: float",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_start_connection_probe",
+      "line": 3598,
+      "parameters": "body: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_clear_connection",
+      "line": 3681,
+      "parameters": "body: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_register_handoff_payload",
+      "line": 3692,
+      "parameters": "body: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_register_handoff",
+      "line": 3733,
+      "parameters": "body: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_clear_handoff",
+      "line": 3749,
+      "parameters": "body: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_prune_sessions",
+      "line": 3770,
+      "parameters": "state: dict[str, Any] | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_session_summary",
+      "line": 3785,
+      "parameters": "*, guild_id: int | None=None, limit: int=5",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_register_session_payload",
+      "line": 3795,
+      "parameters": "body: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_register_session",
+      "line": 3831,
+      "parameters": "body: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_clear_session",
+      "line": 3852,
+      "parameters": "body: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_voice_agent_snapshot",
+      "line": 3873,
+      "parameters": "*, music_agent: dict[str, Any] | None=None, tts_agent: dict[str, Any] | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_system_status",
+      "line": 4016,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_local_agent_status_payload",
+      "line": 4095,
+      "parameters": "*, host: str, port: int",
+      "globals_written": []
+    },
+    {
+      "name": "_apply_local_core_worker_profile",
+      "line": 4151,
+      "parameters": "profile: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_command_version",
+      "line": 6753,
+      "parameters": "command: str",
+      "globals_written": []
+    },
+    {
+      "name": "_sanitize_log_text",
+      "line": 6771,
+      "parameters": "value: str, *, limit: int=12000",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_dir",
+      "line": 6784,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_log_file",
+      "line": 6788,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_pid_file",
+      "line": 6792,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_status_file",
+      "line": 6796,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_start_lock_dir",
+      "line": 6800,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_watch_log_file",
+      "line": 6804,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_watch_pid_file",
+      "line": 6808,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_pending_results_file",
+      "line": 6812,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_pending_results_archive_file",
+      "line": 6816,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_update_status_file",
+      "line": 6820,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_write_json_file_atomic",
+      "line": 6824,
+      "parameters": "path: Path, data: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_read_json_file",
+      "line": 6831,
+      "parameters": "path: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_load_persisted_pending_core_job_results",
+      "line": 6839,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_persist_pending_core_job_results",
+      "line": 6850,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_archive_pending_core_job_result",
+      "line": 6864,
+      "parameters": "job_id: str, payload: dict[str, Any], *, reason: str, response: dict[str, Any] | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_job_result_rejection_is_permanent",
+      "line": 6894,
+      "parameters": "code: int, data: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_read_pid_file",
+      "line": 6901,
+      "parameters": "path: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_pid_alive",
+      "line": 6910,
+      "parameters": "pid: int | None",
+      "globals_written": []
+    },
+    {
+      "name": "_path_size",
+      "line": 6924,
+      "parameters": "path: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_runtime_supervisor_snapshot",
+      "line": 6931,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_sshd_snapshot",
+      "line": 6970,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_termux_boot_script_path",
+      "line": 7023,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_termux_boot_script_content",
+      "line": 7027,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_termux_shell_autostart_block",
+      "line": 7046,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_update_managed_shell_block",
+      "line": 7066,
+      "parameters": "path: Path, block: str",
+      "globals_written": []
+    },
+    {
+      "name": "_termux_shell_autostart_status_snapshot",
+      "line": 7084,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_repair_termux_shell_autostart",
+      "line": 7109,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_termux_boot_package_status",
+      "line": 7129,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_termux_boot_status_snapshot",
+      "line": 7146,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_repair_termux_boot_script",
+      "line": 7189,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_home_script",
+      "line": 7210,
+      "parameters": "name: str",
+      "globals_written": []
+    },
+    {
+      "name": "_script_candidates",
+      "line": 7214,
+      "parameters": "name: str",
+      "globals_written": []
+    },
+    {
+      "name": "_best_script",
+      "line": 7223,
+      "parameters": "name: str",
+      "globals_written": []
+    },
+    {
+      "name": "_duplicate_installations_snapshot",
+      "line": 7230,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_script_inventory",
+      "line": 7282,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_local_boot_needs_repair",
+      "line": 7316,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_auto_repair_local_boot_if_needed",
+      "line": 7331,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_tmux_session_exists",
+      "line": 7356,
+      "parameters": "session: str",
+      "globals_written": []
+    },
+    {
+      "name": "_pgrep_count",
+      "line": 7363,
+      "parameters": "pattern: str",
+      "globals_written": []
+    },
+    {
+      "name": "_allowed_service_name",
+      "line": 7373,
+      "parameters": "value: Any",
+      "globals_written": []
+    },
+    {
+      "name": "_service_status",
+      "line": 7393,
+      "parameters": "service: str",
+      "globals_written": []
+    },
+    {
+      "name": "_run_service_action",
+      "line": 7467,
+      "parameters": "service: str, action: str",
+      "globals_written": []
+    },
+    {
+      "name": "_sha256_path",
+      "line": 7561,
+      "parameters": "path: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_safe_extract_zip_file",
+      "line": 7572,
+      "parameters": "zip_path: Path, target_dir: Path, *, max_members: int=6000",
+      "globals_written": []
+    },
+    {
+      "name": "_is_termux_runtime",
+      "line": 7596,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_apk_self_builder_bundle_asset",
+      "line": 7601,
+      "parameters": "project_dir: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_apk_self_builder_bundle_valid",
+      "line": 7605,
+      "parameters": "path: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_copy_tree_dereferenced",
+      "line": 7693,
+      "parameters": "source: Path, target: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_parse_gradle_default_jvm_opts",
+      "line": 7710,
+      "parameters": "raw_assignment: str, *, app_home: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_patch_gradle_launcher_for_android",
+      "line": 7743,
+      "parameters": "path: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_java_home_major",
+      "line": 7784,
+      "parameters": "candidate: Path, env: dict[str, str]",
+      "globals_written": []
+    },
+    {
+      "name": "_find_termux_java_home",
+      "line": 7808,
+      "parameters": "env: dict[str, str]",
+      "globals_written": []
+    },
+    {
+      "name": "_find_termux_gradle_home",
+      "line": 7842,
+      "parameters": "env: dict[str, str]",
+      "globals_written": []
+    },
+    {
+      "name": "_find_pinned_gradle_89_home",
+      "line": 7862,
+      "parameters": "env: dict[str, str]",
+      "globals_written": []
+    },
+    {
+      "name": "_find_android_sdk_home",
+      "line": 7876,
+      "parameters": "env: dict[str, str]",
+      "globals_written": []
+    },
+    {
+      "name": "_latest_android_build_tools",
+      "line": 7891,
+      "parameters": "sdk: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_zip_directory_deterministic",
+      "line": 7900,
+      "parameters": "source: Path, target: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_elf_header",
+      "line": 7954,
+      "parameters": "path: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_find_elf_inspector",
+      "line": 7974,
+      "parameters": "env: dict[str, str]",
+      "globals_written": []
+    },
+    {
+      "name": "_read_elf_dynamic_python",
+      "line": 8003,
+      "parameters": "path: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_read_elf_dynamic",
+      "line": 8118,
+      "parameters": "path: Path, inspector: list[str]",
+      "globals_written": []
+    },
+    {
+      "name": "_elf_index",
+      "line": 8165,
+      "parameters": "roots: list[Path], *, max_files: int=30000",
+      "globals_written": []
+    },
+    {
+      "name": "_required_jdk_elf_seeds",
+      "line": 8205,
+      "parameters": "jdk_home: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_collect_minimal_termux_runtime_libraries",
+      "line": 8253,
+      "parameters": "*, jdk_home: Path, aapt2_path: Path, prefix: Path, target: Path, env: dict[str, str]",
+      "globals_written": []
+    },
+    {
+      "name": "_is_inside_path",
+      "line": 8369,
+      "parameters": "path: Path, root: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_apk_self_builder_executable_paths",
+      "line": 8377,
+      "parameters": "bundle_root: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_smoke_apk_self_builder_bundle",
+      "line": 8398,
+      "parameters": "bundle_root: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_prepare_apk_self_builder_toolchain",
+      "line": 8468,
+      "parameters": "project_dir: Path, env: dict[str, str]",
+      "globals_written": []
+    },
+    {
+      "name": "_read_meminfo_bytes",
+      "line": 8580,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_effective_gradle_heap_mb",
+      "line": 8595,
+      "parameters": "available_bytes: int",
+      "globals_written": []
+    },
+    {
+      "name": "_prepare_termux_android_build",
+      "line": 8606,
+      "parameters": "project_dir: Path, env: dict[str, str]",
+      "globals_written": []
+    },
+    {
+      "name": "_apk_build_safe_slug",
+      "line": 8712,
+      "parameters": "value: Any, *, fallback: str='apk-build'",
+      "globals_written": []
+    },
+    {
+      "name": "_apk_build_logs_dir",
+      "line": 8717,
+      "parameters": "build_root: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_tail_text_file",
+      "line": 8723,
+      "parameters": "path: Path, *, limit: int=12000",
+      "globals_written": []
+    },
+    {
+      "name": "_apk_build_lock_path",
+      "line": 8733,
+      "parameters": "build_root: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_try_acquire_apk_build_file_lock",
+      "line": 8738,
+      "parameters": "build_root: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_release_apk_build_file_lock",
+      "line": 8773,
+      "parameters": "handle: Any | None",
+      "globals_written": []
+    },
+    {
+      "name": "_cleanup_old_apk_build_logs",
+      "line": 8783,
+      "parameters": "build_root: Path, *, keep_logs: int | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_cleanup_old_apk_build_artifacts",
+      "line": 8803,
+      "parameters": "build_root: Path, *, keep_apks: int | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_classify_apk_failure_text",
+      "line": 8863,
+      "parameters": "text: str",
+      "globals_written": []
+    },
+    {
+      "name": "_summarize_gradle_log",
+      "line": 8898,
+      "parameters": "path: Path | None",
+      "globals_written": []
+    },
+    {
+      "name": "_apk_build_failure_result",
+      "line": 8941,
+      "parameters": "*, summary: str, version_name: str, version_code: int, source_fingerprint: str, source_sha256: str, notification_id: str, work_dir: Path, gradle_log: Path | None=None, returncode: int | None=None, error: str='', builder_environment: dict[str, Any] | None=None, native_environment: dict[str, Any] | None=None, extra: dict[str, Any] | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_install_google_services_from_payload",
+      "line": 8988,
+      "parameters": "project_dir: Path, payload: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_install_apk_signing_from_payload",
+      "line": 9056,
+      "parameters": "project_dir: Path, payload: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_read_android_version",
+      "line": 9119,
+      "parameters": "project_dir: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_inspect_android_native_build_environment",
+      "line": 9129,
+      "parameters": "project_dir: Path, env: dict[str, str]",
+      "globals_written": []
+    },
+    {
+      "name": "_upload_core_worker_toolchain",
+      "line": 9213,
+      "parameters": "archive: Path, *, manifest: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_upload_core_worker_apk",
+      "line": 9275,
+      "parameters": "apk_path: Path, *, filename: str, version_name: str, version_code: int, sha256: str, publish_url: str, changelog: list[str] | None=None, source_sha256: str='', source_fingerprint: str='', notification_id: str='', apk_signing_mode: str='', apk_signing_keystore_sha256: str=''",
+      "globals_written": []
+    },
+    {
+      "name": "_apk_build_log_has_success",
+      "line": 9358,
+      "parameters": "log_path: Path | None",
+      "globals_written": []
+    },
+    {
+      "name": "_apk_build_log_value",
+      "line": 9372,
+      "parameters": "log_path: Path | None, key: str, default: str=''",
+      "globals_written": []
+    },
+    {
+      "name": "_find_gradle_log_for_work_dir",
+      "line": 9385,
+      "parameters": "build_root: Path, work_dir: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_persist_recovered_apk_artifact",
+      "line": 9401,
+      "parameters": "build_root: Path, *, apk_path: Path, project_dir: Path, gradle_log: Path | None, version_name: str='', version_code: int=0, source_sha256: str='', source_fingerprint: str='', notification_id: str='', reason: str='recovered-orphaned-gradle-output'",
+      "globals_written": []
+    },
+    {
+      "name": "_recover_orphaned_apk_build_outputs",
+      "line": 9476,
+      "parameters": "build_root: Path, *, version_name: str='', version_code: int=0, source_fingerprint: str='', source_sha256: str='', notification_id: str=''",
+      "globals_written": []
+    },
+    {
+      "name": "_latest_apk_artifact_metadata",
+      "line": 9536,
+      "parameters": "build_root: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_apply_apk_publish_last",
+      "line": 9589,
+      "parameters": "payload: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_apply_apk_build_debug",
+      "line": 9674,
+      "parameters": "payload: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_phone_worker_source_hash",
+      "line": 10174,
+      "parameters": "",
+      "globals_written": []
+    },
+    {
+      "name": "_normalize_worker_update_target",
+      "line": 10203,
+      "parameters": "target: str",
+      "globals_written": []
+    },
+    {
+      "name": "_safe_update_target_path",
+      "line": 10216,
+      "parameters": "target: str",
+      "globals_written": []
+    },
+    {
+      "name": "_read_phone_worker_version_from_path",
+      "line": 10232,
+      "parameters": "path: Path",
+      "globals_written": []
+    },
+    {
+      "name": "_load_worker_update_files",
+      "line": 10241,
+      "parameters": "payload: dict[str, Any], *, max_file_bytes: int, max_total_bytes: int",
+      "globals_written": []
+    },
+    {
+      "name": "_apply_worker_update",
+      "line": 10347,
+      "parameters": "payload: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_launch_deferred_phone_worker_action",
+      "line": 10507,
+      "parameters": "result: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_assist_readiness_snapshot",
+      "line": 10553,
+      "parameters": "payload: dict[str, Any] | None=None",
+      "globals_written": []
+    },
+    {
+      "name": "_worker_logs_snapshot",
+      "line": 10611,
+      "parameters": "payload: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_task_runner",
+      "line": 10629,
+      "parameters": "max_body_bytes: int, max_output_bytes: int, job_timeout: int",
+      "globals_written": []
+    },
+    {
+      "name": "_sanitize_job_result",
+      "line": 10640,
+      "parameters": "result: dict[str, Any]",
+      "globals_written": []
+    },
+    {
+      "name": "_execute_core_worker_job",
+      "line": 10658,
+      "parameters": "job: dict[str, Any], *, max_body_bytes: int, max_output_bytes: int, job_timeout: int",
+      "globals_written": [
+        "JOBS_FAILED",
+        "JOBS_STARTED"
+      ]
+    },
+    {
+      "name": "_send_core_worker_job_result",
+      "line": 10776,
+      "parameters": "*, job_id: str, status: str, result: dict[str, Any] | None=None, error: str='', timeout: float=8.0",
+      "globals_written": []
+    },
+    {
+      "name": "_poll_core_worker_job_once",
+      "line": 10798,
+      "parameters": "*, host: str, port: int, max_body_bytes: int, max_output_bytes: int, job_timeout: int, timeout: float=8.0",
+      "globals_written": []
+    },
+    {
+      "name": "_start_core_worker_jobs",
+      "line": 10841,
+      "parameters": "*, host: str, port: int, max_body_bytes: int, max_output_bytes: int, job_timeout: int",
+      "globals_written": []
+    },
+    {
+      "name": "main",
+      "line": 10867,
+      "parameters": "",
+      "globals_written": []
+    }
+  ]
+}

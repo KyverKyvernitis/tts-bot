@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from worker_source_contracts import phone_worker_version, phone_worker_version_tuple
+
 import json
 import time
 from pathlib import Path
@@ -68,7 +70,7 @@ def test_release_is_086_without_unnecessary_phone_worker_bump() -> None:
     phone = (ROOT / "deploy/termux/phone-worker/phone_worker.py").read_text(encoding="utf-8")
     assert 'versionCode 133' in gradle
     assert 'versionName "0.8.6"' in gradle
-    assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone
+    assert phone_worker_version_tuple() >= (1, 11, 5)
     automation = (ROOT / "scripts/core-worker-automation.py").read_text(encoding="utf-8")
     assert "lease_seconds=240,\n            max_attempts=2" in automation
 

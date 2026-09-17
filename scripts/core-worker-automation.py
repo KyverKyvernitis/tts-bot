@@ -28,10 +28,22 @@ from utility.apk_identity import assert_expected_apk_identity, inspect_apk_ident
 
 PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("phone_worker.py", 0o755),
+    ("phone_worker_runtime/__init__.py", 0o644),
+    ("phone_worker_runtime/config.py", 0o644),
+    ("phone_worker_runtime/telemetry.py", 0o644),
+    ("phone_worker_runtime/control_plane.py", 0o644),
+    ("phone_worker_runtime/voice_state.py", 0o644),
+    ("phone_worker_runtime/tts_policy.py", 0o644),
+    ("phone_worker_runtime/tts_cache.py", 0o644),
+    ("phone_worker_runtime/tts_android.py", 0o644),
+    ("phone_worker_runtime/tts_providers.py", 0o644),
+    ("phone_worker_runtime/pcm_io.py", 0o644),
     ("phone_worker_bootstrap.py", 0o755),
     ("apk_identity.py", 0o644),
     ("tts_transport.py", 0o644),
     ("music_agent.py", 0o755),
+    ("music_agent_runtime/__init__.py", 0o644),
+    ("music_agent_runtime/lifecycle.py", 0o644),
     ("start-phone-worker.sh", 0o755),
     ("start-phone-music-agent.sh", 0o755),
     ("watch-phone-worker.sh", 0o755),
@@ -53,6 +65,11 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
 )
 PHONE_WORKER_UPDATE_ARCHIVE_MIN_VERSION = "1.11.0"
 PHONE_WORKER_BOOTSTRAP_MIN_VERSION = "1.0.0"
+# The installed bootstrap must extract the first modular release before it can
+# run any bootstrap shipped inside that release. Count the internal manifest too.
+PHONE_WORKER_RELEASE_MAX_MEMBERS = 64
+PHONE_WORKER_RELEASE_MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
+PHONE_WORKER_RELEASE_MAX_EXPANDED_BYTES = 32 * 1024 * 1024
 AGENT_RELEASE_ROOT = ROOT / "data" / "core_worker_agent"
 PHONE_WORKER_CANONICAL_ROOT = (ROOT / "deploy" / "termux" / "phone-worker").resolve()
 PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"README.md", "phone-worker.env.example"})
@@ -175,11 +192,28 @@ def _hash_tree(root: Path, *, exclude_dirs: set[str] | None = None) -> str:
     return digest.hexdigest()
 
 
+def _phone_worker_source_path(root: Path, name: str) -> Path:
+    parts = name.split("/")
+    if not name or name.startswith("/") or "\\" in name or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("caminho fora da raiz do phone-worker")
+    if root.is_symlink():
+        raise ValueError("link na raiz do phone-worker recusado")
+    root = root.resolve()
+    path = root
+    for part in parts:
+        path = path / part
+        if path.is_symlink():
+            raise ValueError(f"link no fonte do phone-worker recusado: {name}")
+    if not path.resolve().is_relative_to(root):
+        raise ValueError(f"fonte fora da raiz do phone-worker: {name}")
+    return path
+
+
 def _hash_phone_worker_files(root: Path) -> str:
     """Hash estável do runtime instalado; documentação/exemplo não bloqueiam boot."""
     digest = hashlib.sha256()
     for name, _mode in sorted(PHONE_WORKER_SOURCE_FILES):
-        path = root / name
+        path = _phone_worker_source_path(root, name)
         if not path.is_file():
             return ""
         digest.update(name.encode("utf-8"))
@@ -372,7 +406,7 @@ def _publish_desired_apk_source(
 
 
 def _canonical_phone_worker_root() -> Path:
-    src = (ROOT / "deploy" / "termux" / "phone-worker").resolve()
+    src = _phone_worker_source_path(ROOT, "deploy/termux/phone-worker").resolve()
     if src != PHONE_WORKER_CANONICAL_ROOT:
         raise RuntimeError("raiz não canônica do phone-worker recusada")
     nested = ROOT / "tts-bot-main" / "deploy" / "termux" / "phone-worker"
@@ -389,7 +423,7 @@ def _build_worker_update_payload(*, scripts_only: bool = False) -> dict[str, Any
     files: list[dict[str, Any]] = []
     missing: list[str] = []
     for name, mode in targets:
-        path = src / name
+        path = _phone_worker_source_path(src, name)
         if not path.is_file():
             missing.append(name)
             continue
@@ -445,6 +479,8 @@ def _publish_phone_worker_release(inline_payload: dict[str, Any]) -> dict[str, A
     files = inline_payload.get("files")
     if not isinstance(files, list) or not files:
         raise RuntimeError("payload do phone-worker sem arquivos")
+    if len(files) + 1 > PHONE_WORKER_RELEASE_MAX_MEMBERS:
+        raise ValueError("release excede limite de membros do bootstrap 1.0.0")
     source_hash = str(inline_payload.get("source_hash") or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", source_hash):
         raise RuntimeError("source_hash inválido ao publicar release do agent")
@@ -454,15 +490,19 @@ def _publish_phone_worker_release(inline_payload: dict[str, Any]) -> dict[str, A
 
     decoded: list[tuple[str, int, bytes, str]] = []
     members: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: set[str] = {"phone-worker-release.json"}
+    expanded_bytes = 0
     for item in files:
         if not isinstance(item, dict):
             raise ValueError("arquivo inválido no release do agent")
         target = str(item.get("target") or "").strip().replace("\\", "/")
-        if target in seen or target.startswith("/") or any(part in {"", ".", ".."} for part in target.split("/")):
+        if target in seen or "\x00" in target or target.startswith("/") or any(part in {"", ".", ".."} for part in target.split("/")):
             raise ValueError(f"caminho inválido/duplicado no release: {target}")
         seen.add(target)
         raw = base64.b64decode(str(item.get("data_b64") or "").encode("ascii"), validate=True)
+        expanded_bytes += len(raw)
+        if expanded_bytes > PHONE_WORKER_RELEASE_MAX_EXPANDED_BYTES:
+            raise ValueError("release expandido excede limite do bootstrap 1.0.0")
         sha = hashlib.sha256(raw).hexdigest()
         if sha != str(item.get("sha256") or "").strip().lower():
             raise ValueError(f"sha256 divergente antes de empacotar {target}")
@@ -470,8 +510,6 @@ def _publish_phone_worker_release(inline_payload: dict[str, Any]) -> dict[str, A
         decoded.append((target, mode, raw, sha))
         members.append({"path": target, "mode": mode, "bytes": len(raw), "sha256": sha})
 
-    release_root = AGENT_RELEASE_ROOT / "releases"
-    release_root.mkdir(parents=True, exist_ok=True)
     inner_manifest = {
         "schema": "core-phone-worker-release-v2",
         "version": version,
@@ -480,20 +518,27 @@ def _publish_phone_worker_release(inline_payload: dict[str, Any]) -> dict[str, A
         "members": members,
     }
     inner_raw = json.dumps(inner_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if expanded_bytes + len(inner_raw) > PHONE_WORKER_RELEASE_MAX_EXPANDED_BYTES:
+        raise ValueError("release expandido excede limite do bootstrap 1.0.0")
+    release_root = AGENT_RELEASE_ROOT / "releases"
+    release_root.mkdir(parents=True, exist_ok=True)
     tmp = release_root / f".{source_hash}.{os.getpid()}.{time.time_ns()}.tmp"
-    with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        _write_deterministic_zip_member(zf, "phone-worker-release.json", inner_raw, 0o644)
-        for target, mode, raw, _sha in sorted(decoded):
-            _write_deterministic_zip_member(zf, target, raw, mode)
-    archive_sha = _sha256_file(tmp)
     final = release_root / f"{source_hash}.zip"
-    if final.exists():
-        if _sha256_file(final) != archive_sha:
-            tmp.unlink(missing_ok=True)
-            raise RuntimeError("release imutável existente diverge do novo pacote")
+    try:
+        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            _write_deterministic_zip_member(zf, "phone-worker-release.json", inner_raw, 0o644)
+            for target, mode, raw, _sha in sorted(decoded):
+                _write_deterministic_zip_member(zf, target, raw, mode)
+        if tmp.stat().st_size > PHONE_WORKER_RELEASE_MAX_ARCHIVE_BYTES:
+            raise ValueError("ZIP do release excede limite do bootstrap 1.0.0")
+        archive_sha = _sha256_file(tmp)
+        if final.exists():
+            if _sha256_file(final) != archive_sha:
+                raise RuntimeError("release imutável existente diverge do novo pacote")
+        else:
+            os.replace(tmp, final)
+    finally:
         tmp.unlink(missing_ok=True)
-    else:
-        os.replace(tmp, final)
 
     published_at = int(time.time())
     base = _public_base_url().rstrip("/")

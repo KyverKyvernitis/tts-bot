@@ -37,6 +37,24 @@ from typing import Any
 from types import SimpleNamespace
 
 _APK_IDENTITY_MODULE: Any = None
+_PHONE_WORKER_CONFIG_MODULE: Any = None
+_PHONE_WORKER_CONFIG_LOCK = threading.Lock()
+_PHONE_WORKER_TELEMETRY_MODULE: Any = None
+_PHONE_WORKER_TELEMETRY_LOCK = threading.Lock()
+_PHONE_WORKER_CONTROL_PLANE_MODULE: Any = None
+_PHONE_WORKER_CONTROL_PLANE_LOCK = threading.Lock()
+_PHONE_WORKER_VOICE_STATE_MODULE: Any = None
+_PHONE_WORKER_VOICE_STATE_LOCK = threading.Lock()
+_PHONE_WORKER_TTS_POLICY_MODULE: Any = None
+_PHONE_WORKER_TTS_POLICY_LOCK = threading.Lock()
+_PHONE_WORKER_TTS_CACHE_MODULE: Any = None
+_PHONE_WORKER_TTS_CACHE_LOCK = threading.Lock()
+_PHONE_WORKER_TTS_ANDROID_MODULE: Any = None
+_PHONE_WORKER_TTS_ANDROID_LOCK = threading.Lock()
+_PHONE_WORKER_TTS_PROVIDERS_MODULE: Any = None
+_PHONE_WORKER_TTS_PROVIDERS_LOCK = threading.Lock()
+_PHONE_WORKER_PCM_IO_MODULE: Any = None
+_PHONE_WORKER_PCM_IO_LOCK = threading.Lock()
 
 
 def _load_apk_identity_module() -> Any:
@@ -92,6 +110,7 @@ _TETO_RENDERER: Any = None
 _TETO_RENDERER_ERROR = ""
 _MUSIC_STREAM_LOCK = threading.RLock()
 _MUSIC_STREAMS: dict[str, dict[str, Any]] = {}
+_MUSIC_PCM_PREPARATIONS: dict[str, dict[str, Any]] = {}
 PCM_SAMPLE_RATE = 48000
 PCM_CHANNELS = 2
 PCM_SAMPLE_WIDTH_BYTES = 2
@@ -146,7 +165,7 @@ def _load_env_file_once(path: Path, *, override: bool = False) -> dict[str, str]
         key = key.strip()
         if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
             continue
-        value = value.strip().strip('"').strip("'")
+        value = _decode_env_value(value)
         loaded[key] = value
         if override or key not in os.environ:
             os.environ[key] = value
@@ -195,8 +214,6 @@ def _load_phone_worker_runtime_env() -> None:
     if _early_env_truthy(os.getenv("MUSIC_AGENT_AUTO_TOKEN"), True):
         _ensure_music_agent_token_env(persist=True)
 
-
-_load_phone_worker_runtime_env()
 
 SUPPORTED_DIRECT_TASKS = (
     "diagnostic_basic",
@@ -367,6 +384,28 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _decode_env_value(value: str) -> str:
+    """Read legacy JSON/plain values and the shell-safe escapes written now.
+
+    Kept in the facade so a lone entrypoint can still load its startup config.
+    """
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1]:
+        if value[0] == '"':
+            try:
+                return json.loads(value)
+            except (ValueError, TypeError):
+                # In JSON an escaped $/backtick is invalid; in a shell it is
+                # required to prevent interpolation. Decode only after trying
+                # legacy JSON so existing literal backslashes remain intact.
+                with contextlib.suppress(ValueError, TypeError):
+                    return json.loads(value.replace("\\$", "$").replace("\\`", "`"))
+            return value[1:-1]
+        if value[0] == "'":
+            return value[1:-1]
+    return value
+
+
 def _load_env_file(path: str | None = None) -> None:
     """Carrega ~/.phone-worker.env sem sobrescrever variáveis já exportadas.
 
@@ -391,14 +430,7 @@ def _load_env_file(path: str | None = None) -> None:
         key = key.strip()
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            if value[0] == '"':
-                with contextlib.suppress(Exception):
-                    value = json.loads(value)
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-                value = value[1:-1]
-        os.environ.setdefault(key, value)
+        os.environ.setdefault(key, _decode_env_value(value))
 
 
 def _env_float(name: str, default: float) -> float:
@@ -409,8 +441,12 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _env_list(name: str, default: list[str] | None = None) -> list[str]:
+    return _parse_env_list(os.getenv(name, ""), default)
+
+
+def _parse_env_list(value: Any, default: list[str] | None = None) -> list[str]:
     default = list(default or [])
-    raw = str(os.getenv(name, "") or "").strip()
+    raw = str(value or "").strip()
     if not raw:
         return default
     items: list[str] = []
@@ -496,18 +532,26 @@ def _current_core_worker_profile() -> str:
     return _normalize_core_worker_profile(os.getenv("CORE_WORKER_PROFILE") or os.getenv("PHONE_WORKER_PROFILE") or "midia")
 
 
+def _phone_worker_config_module() -> Any:
+    global _PHONE_WORKER_CONFIG_MODULE
+    with _PHONE_WORKER_CONFIG_LOCK:
+        if _PHONE_WORKER_CONFIG_MODULE is None:
+            path = Path(__file__).resolve().parent / "phone_worker_runtime/config.py"
+            spec = importlib.util.spec_from_file_location("core_phone_worker_runtime_config", path)
+            if not path.is_file() or spec is None or spec.loader is None:
+                raise RuntimeError("config.py ainda não foi instalado; aguarde o segundo estágio do auto-update")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _PHONE_WORKER_CONFIG_MODULE = module
+        return _PHONE_WORKER_CONFIG_MODULE
+
+
 def _safe_env_key(value: Any) -> str:
-    key = str(value or "").strip()
-    if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key):
-        raise ValueError(f"chave de env inválida: {key or '<vazia>'}")
-    return key
+    return _phone_worker_config_module().safe_env_key(value)
 
 
 def _format_env_value(value: Any) -> str:
-    text = str(value if value is not None else "")
-    if re.fullmatch(r"[A-Za-z0-9_./:@%+=,;-]*", text):
-        return text
-    return json.dumps(text, ensure_ascii=False)
+    return _phone_worker_config_module().format_env_value(value)
 
 
 def _update_env_file(path: str | None, updates: dict[str, Any]) -> Path:
@@ -515,25 +559,8 @@ def _update_env_file(path: str | None, updates: dict[str, Any]) -> Path:
     env_path.parent.mkdir(parents=True, exist_ok=True)
     wanted = {_safe_env_key(k): str(v if v is not None else "") for k, v in updates.items()}
     existing = env_path.read_text(encoding="utf-8", errors="ignore").splitlines() if env_path.exists() else []
-    seen: set[str] = set()
-    output: list[str] = []
-    assign_re = re.compile(r"^(?:export\s+)?([A-Z_][A-Z0-9_]*)=")
-    for line in existing:
-        match = assign_re.match(line.strip())
-        if match and match.group(1) in wanted:
-            key = match.group(1)
-            output.append(f"{key}={_format_env_value(wanted[key])}")
-            seen.add(key)
-        else:
-            output.append(line)
-    missing = [key for key in wanted if key not in seen]
-    if missing:
-        if output and output[-1].strip():
-            output.append("")
-        output.append("# Core Worker pareado automaticamente. Não envie estes valores ao GitHub.")
-        for key in missing:
-            output.append(f"{key}={_format_env_value(wanted[key])}")
-    env_path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    content = _phone_worker_config_module().render_env_lines(existing, wanted, _format_env_value)
+    env_path.write_text(content, encoding="utf-8")
     with contextlib.suppress(Exception):
         env_path.chmod(0o600)
     for key, value in wanted.items():
@@ -723,148 +750,77 @@ def _cleanup_music_pcm_cache() -> None:
             break
 
 
+def _phone_worker_pcm_io_module() -> Any:
+    global _PHONE_WORKER_PCM_IO_MODULE
+    if _PHONE_WORKER_PCM_IO_MODULE is not None:
+        return _PHONE_WORKER_PCM_IO_MODULE
+    with _PHONE_WORKER_PCM_IO_LOCK:
+        if _PHONE_WORKER_PCM_IO_MODULE is None:
+            path = Path(__file__).resolve().parent / "phone_worker_runtime/pcm_io.py"
+            spec = importlib.util.spec_from_file_location("core_phone_worker_runtime_pcm_io", path)
+            if not path.is_file() or spec is None or spec.loader is None:
+                raise RuntimeError("pcm_io.py ainda não foi instalado; aguarde o segundo estágio do auto-update")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            required = ("build_ffmpeg_input_cmd", "prepare_file", "serve_prepared", "stream_live")
+            if not all(callable(getattr(module, name, None)) for name in required):
+                raise RuntimeError("pcm_io.py incompleto")
+            _PHONE_WORKER_PCM_IO_MODULE = module
+        return _PHONE_WORKER_PCM_IO_MODULE
+
+
 def _music_stream_build_ffmpeg_input_cmd(item: dict[str, Any], *, output: str) -> list[str]:
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg não encontrado no worker")
-    stream_url = str(item.get("stream_url") or item.get("direct_url") or "").strip()
-    if not stream_url.startswith(("http://", "https://")):
-        raise ValueError("stream inválido")
-    cmd = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-reconnect",
-        "1",
-        "-reconnect_streamed",
-        "1",
-        "-reconnect_at_eof",
-        "1",
-        "-reconnect_on_network_error",
-        "1",
-        "-reconnect_on_http_error",
-        "403,404,408,429,5xx",
-        "-reconnect_delay_max",
-        "5",
-        "-rw_timeout",
-        "10000000",
-    ]
-    ff_headers = _safe_ffmpeg_header_lines(item.get("http_headers"))
-    if ff_headers:
-        cmd += ["-headers", ff_headers]
-    cmd += [
-        "-i",
-        stream_url,
-        "-vn",
-        "-sn",
-        "-dn",
-        "-f",
-        "s16le",
-        "-ar",
-        "48000",
-        "-ac",
-        "2",
-        output,
-    ]
-    return cmd
+    return _phone_worker_pcm_io_module().build_ffmpeg_input_cmd(item, output=output,
+        which=shutil.which, header_lines=_safe_ffmpeg_header_lines)
+
+
+def _assert_music_preparation_owner_unlocked(stream_id: str, owner: dict[str, Any] | None) -> None:
+    if owner is not None and (_MUSIC_STREAMS.get(stream_id) is not owner or float(owner.get("expires_at") or 0.0) <= time.time()):
+        raise RuntimeError("stream expirou ou foi substituído durante preparo")
 
 
 def _prepare_music_pcm_file(stream_id: str, item: dict[str, Any]) -> dict[str, Any]:
-    """Transcodifica a faixa inteira no worker antes de servir para a VPS.
-
-    Isso evita streaming PCM estritamente em tempo real via Tailscale. O worker usa
-    CPU/IO local para preparar o áudio mais rápido que tempo real; a VPS só lê um
-    arquivo PCM estável com buffer alto.
-    """
-    prepared_path = str(item.get("prepared_pcm_path") or "").strip()
-    if prepared_path:
-        p = Path(prepared_path)
-        if p.exists() and p.is_file() and p.stat().st_size > 0:
-            return item
-
-    duration = float(item.get("duration") or 0.0)
-    max_duration = _music_prepare_max_duration_seconds()
-    if max_duration > 0 and duration > max_duration:
-        raise TimeoutError(f"faixa muito longa para cache completo no worker ({duration:.0f}s > {max_duration:.0f}s)")
-
-    _cleanup_music_pcm_cache()
-    cache_dir = _music_pcm_cache_dir()
-    out_path = cache_dir / f"{stream_id}.pcm"
-    tmp_path = cache_dir / f"{stream_id}.tmp.pcm"
-    with contextlib.suppress(Exception):
-        tmp_path.unlink(missing_ok=True)
-
-    timeout = _music_prepare_timeout_seconds(item)
-    cmd = _music_stream_build_ffmpeg_input_cmd(item, output=str(tmp_path))
-    started = time.time()
-    print(
-        f"[music-stream] cache_started id={stream_id} title={_short_text(item.get('title'), limit=80)!r} duration={duration:.1f}s timeout={timeout:.1f}s",
-        flush=True,
-    )
-    proc = subprocess.run(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        cwd=str(Path.home() / "phone-worker"),
-        timeout=timeout,
-    )
-    elapsed = time.time() - started
-    if proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, (bytes, bytearray)) else str(proc.stderr or "")
-        with contextlib.suppress(Exception):
-            tmp_path.unlink(missing_ok=True)
-        raise RuntimeError(f"ffmpeg cache falhou rc={proc.returncode}: {_short_text(stderr, limit=220)}")
-    if not tmp_path.exists() or tmp_path.stat().st_size <= 0:
-        with contextlib.suppress(Exception):
-            tmp_path.unlink(missing_ok=True)
-        raise RuntimeError("ffmpeg não gerou PCM no worker")
-    tmp_path.replace(out_path)
-    size = out_path.stat().st_size
-    prepared_seconds = size / 192000.0
-    updated = dict(item)
-    updated["prepared_pcm_path"] = str(out_path)
-    updated["prepared_pcm_bytes"] = size
-    updated["prepared_pcm_seconds"] = prepared_seconds
-    updated["prepared_at"] = time.time()
-    updated["stream_mode"] = "prepared_pcm"
+    """Prepare once per stream; unrelated tracks retain independent processes."""
     with _MUSIC_STREAM_LOCK:
-        current = _MUSIC_STREAMS.get(stream_id)
-        if isinstance(current, dict):
-            current.update(updated)
-    print(
-        f"[music-stream] cache_ready id={stream_id} bytes={size} seconds={prepared_seconds:.1f} elapsed={elapsed:.1f}s",
-        flush=True,
-    )
-    _cleanup_music_pcm_cache()
-    return updated
+        owner = _MUSIC_STREAMS.get(stream_id)
+        preparation = _MUSIC_PCM_PREPARATIONS.get(stream_id)
+        if preparation is None:
+            preparation = {"lock": threading.Lock(), "users": 0}
+            _MUSIC_PCM_PREPARATIONS[stream_id] = preparation
+        preparation["users"] += 1
+    try:
+        with preparation["lock"]:
+            with _MUSIC_STREAM_LOCK:
+                _assert_music_preparation_owner_unlocked(stream_id, owner)
+                if isinstance(owner, dict) and owner.get("prepared_pcm_path") and not item.get("prepared_pcm_path"):
+                    item = dict(owner)
+            return _prepare_music_pcm_file_owned(stream_id, item, owner)
+    finally:
+        with _MUSIC_STREAM_LOCK:
+            preparation["users"] -= 1
+            if preparation["users"] == 0 and _MUSIC_PCM_PREPARATIONS.get(stream_id) is preparation:
+                _MUSIC_PCM_PREPARATIONS.pop(stream_id, None)
+
+
+def _prepare_music_pcm_file_owned(stream_id: str, item: dict[str, Any], owner: dict[str, Any] | None) -> dict[str, Any]:
+    def publish(tmp_path, out_path, updated):
+        with _MUSIC_STREAM_LOCK:
+            _assert_music_preparation_owner_unlocked(stream_id, owner)
+            tmp_path.replace(out_path)
+            current = _MUSIC_STREAMS.get(stream_id)
+            if isinstance(current, dict):
+                current.update(updated)
+    return _phone_worker_pcm_io_module().prepare_file(stream_id, item,
+        cleanup_cache=_cleanup_music_pcm_cache, cache_dir=_music_pcm_cache_dir,
+        max_duration_seconds=_music_prepare_max_duration_seconds, timeout_seconds=_music_prepare_timeout_seconds,
+        build_command=_music_stream_build_ffmpeg_input_cmd, wall_time=time.time,
+        temporary_directory=tempfile.TemporaryDirectory, path_type=Path, subprocess_api=subprocess,
+        publish=publish, short_text=_short_text)
 
 
 def _serve_prepared_music_pcm(handler: BaseHTTPRequestHandler, stream_id: str, item: dict[str, Any]) -> None:
-    path = Path(str(item.get("prepared_pcm_path") or ""))
-    if not path.exists() or not path.is_file():
-        raise FileNotFoundError("PCM preparado não encontrado")
-    size = path.stat().st_size
-    handler.send_response(HTTPStatus.OK)
-    handler.send_header("Content-Type", "application/octet-stream")
-    handler.send_header("Content-Length", str(size))
-    handler.send_header("Cache-Control", "no-store")
-    handler.send_header("X-Core-Worker-Stream-Id", stream_id)
-    handler.send_header("X-Core-Worker-Stream-Mode", "prepared-pcm")
-    handler.send_header("X-Core-Worker-Prepared-Seconds", f"{float(item.get('prepared_pcm_seconds') or 0.0):.3f}")
-    handler.end_headers()
-    with path.open("rb") as fh:
-        while True:
-            chunk = fh.read(PCM_FRAME_BYTES * 64)
-            if not chunk:
-                break
-            try:
-                handler.wfile.write(chunk)
-            except (BrokenPipeError, ConnectionResetError):
-                break
-    with contextlib.suppress(Exception):
-        handler.wfile.flush()
+    _phone_worker_pcm_io_module().serve_prepared(handler, stream_id, item,
+        path_type=Path, fstat=os.fstat, frame_bytes=PCM_FRAME_BYTES, short_text=_short_text)
 
 def _stream_music_pcm(handler: BaseHTTPRequestHandler, stream_id: str) -> None:
     item = _music_stream_lookup(stream_id)
@@ -890,40 +846,14 @@ def _stream_music_pcm(handler: BaseHTTPRequestHandler, stream_id: str) -> None:
 
     # Fallback legado: PCM ao vivo. Mantido apenas para emergência; por padrão o
     # modo prepared acima é usado para evitar travadas por jitter/rede.
-    proc: subprocess.Popen[bytes] | None = None
     try:
-        cmd = _music_stream_build_ffmpeg_input_cmd(item, output="pipe:1")
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(Path.home() / "phone-worker"))
-        handler.send_response(HTTPStatus.OK)
-        handler.send_header("Content-Type", "application/octet-stream")
-        handler.send_header("Cache-Control", "no-store")
-        handler.send_header("X-Core-Worker-Stream-Id", stream_id)
-        handler.send_header("X-Core-Worker-Stream-Mode", "live-pcm")
-        handler.end_headers()
-        assert proc.stdout is not None
-        while True:
-            chunk = proc.stdout.read(PCM_FRAME_BYTES * 16)
-            if not chunk:
-                break
-            try:
-                handler.wfile.write(chunk)
-            except (BrokenPipeError, ConnectionResetError):
-                break
-        with contextlib.suppress(Exception):
-            handler.wfile.flush()
+        pcm_io = _phone_worker_pcm_io_module()
     except Exception as exc:
-        try:
-            if not getattr(handler, "_headers_buffer", None):
-                _error(handler, HTTPStatus.INTERNAL_SERVER_ERROR, f"stream falhou: {type(exc).__name__}")
-        except Exception:
-            pass
-        print(f"[music-stream] falhou id={stream_id} erro={type(exc).__name__}: {_short_text(exc, limit=160)}", flush=True)
-    finally:
-        if proc is not None:
-            with contextlib.suppress(Exception):
-                proc.kill()
-            with contextlib.suppress(Exception):
-                proc.wait(timeout=2)
+        _error(handler, HTTPStatus.INTERNAL_SERVER_ERROR, f"stream falhou: {type(exc).__name__}")
+        return
+    pcm_io.stream_live(handler, stream_id, item, build_command=_music_stream_build_ffmpeg_input_cmd,
+        subprocess_api=subprocess, path_type=Path, frame_bytes=PCM_FRAME_BYTES,
+        send_error=_error, short_text=_short_text)
 
 def _format_bytes(value: Any) -> str:
     try:
@@ -985,108 +915,43 @@ def _safe_path_exists(path: Path) -> bool:
         return False
 
 
+def _phone_worker_telemetry_module() -> Any:
+    global _PHONE_WORKER_TELEMETRY_MODULE
+    if _PHONE_WORKER_TELEMETRY_MODULE is not None:
+        return _PHONE_WORKER_TELEMETRY_MODULE
+    with _PHONE_WORKER_TELEMETRY_LOCK:
+        if _PHONE_WORKER_TELEMETRY_MODULE is None:
+            path = Path(__file__).resolve().parent / "phone_worker_runtime/telemetry.py"
+            spec = importlib.util.spec_from_file_location("core_phone_worker_runtime_telemetry", path)
+            if not path.is_file() or spec is None or spec.loader is None:
+                raise RuntimeError("telemetry.py ainda não foi instalado; aguarde o segundo estágio do auto-update")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _PHONE_WORKER_TELEMETRY_MODULE = module
+        return _PHONE_WORKER_TELEMETRY_MODULE
+
+
 def _sysfs_battery_snapshot() -> dict[str, Any]:
-    # Fallback leve quando Termux:API não está instalado ou sem permissão.
-    # Em alguns Androids/Termux, apenas chamar Path.exists() em /sys pode gerar
-    # PermissionError. Telemetria é sempre best-effort e nunca pode derrubar
-    # heartbeat/jobs.
-    base_candidates: list[Path] = []
-    primary = Path("/sys/class/power_supply/battery")
-    if _safe_path_exists(primary):
-        base_candidates.append(primary)
     try:
-        for candidate in Path("/sys/class/power_supply").glob("BAT*"):
-            if _safe_path_exists(candidate) and candidate not in base_candidates:
-                base_candidates.append(candidate)
+        return _phone_worker_telemetry_module().sysfs_battery_snapshot(
+            Path("/sys/class/power_supply"), list_candidates=lambda root: root.glob("BAT*"),
+            path_exists=_safe_path_exists,
+            read_text=_read_text_file, empty_snapshot=_empty_battery_snapshot)
     except (PermissionError, OSError):
         return _empty_battery_snapshot("sysfs_permission_denied")
     except Exception as exc:
         return _empty_battery_snapshot("sysfs_error", exc)
 
-    for base in base_candidates:
-        try:
-            result: dict[str, Any] = {"available": True, "source": "sysfs"}
-            capacity = _read_text_file(base / "capacity", limit=32)
-            status = _read_text_file(base / "status", limit=64).lower()
-            plugged = _read_text_file(base / "type", limit=64).lower()
-            temp = _read_text_file(base / "temp", limit=32)
-            try:
-                if capacity:
-                    result["level"] = max(0, min(100, int(float(capacity))))
-            except Exception:
-                pass
-            if status:
-                result["status"] = status[:32]
-                result["charging"] = status in {"charging", "full"}
-            if plugged:
-                result["plugged"] = plugged[:32]
-            try:
-                if temp:
-                    raw_temp = float(temp)
-                    # Android costuma expor décimos de °C.
-                    if raw_temp > 1000:
-                        raw_temp = raw_temp / 10.0
-                    result["temperature_c"] = round(raw_temp, 1)
-            except Exception:
-                pass
-            if any(key in result for key in ("level", "status", "charging", "temperature_c")):
-                return result
-        except (PermissionError, OSError):
-            continue
-        except Exception:
-            continue
-    return _empty_battery_snapshot("sysfs_unavailable")
-
 
 def _battery_snapshot() -> dict[str, Any]:
     try:
-        raw = _run_json_command(["termux-battery-status"], timeout=2.0)
+        return _phone_worker_telemetry_module().battery_snapshot(
+            run_json_command=_run_json_command, sysfs_snapshot=_sysfs_battery_snapshot,
+            empty_snapshot=_empty_battery_snapshot)
+    except (PermissionError, OSError) as exc:
+        return _empty_battery_snapshot("battery_permission_denied", exc)
     except Exception as exc:
-        raw = {}
-        termux_error = exc
-    else:
-        termux_error = None
-
-    if not raw:
-        try:
-            return _sysfs_battery_snapshot()
-        except (PermissionError, OSError) as exc:
-            return _empty_battery_snapshot("battery_permission_denied", exc)
-        except Exception as exc:
-            return _empty_battery_snapshot("battery_error", exc or termux_error)
-
-    level = raw.get("percentage")
-    if level is None:
-        level = raw.get("level")
-    charging = None
-    status = str(raw.get("status") or "").strip().lower()
-    plugged = str(raw.get("plugged") or "").strip().lower()
-    if status:
-        charging = status in {"charging", "full"}
-    elif plugged:
-        charging = plugged not in {"unplugged", "none", "unknown"}
-    result: dict[str, Any] = {"available": True, "source": "termux-api"}
-    try:
-        if level is not None:
-            clean_level = max(0, min(100, int(float(level))))
-            result["level"] = clean_level
-            result["percentage"] = clean_level
-            result["percent"] = clean_level
-    except Exception:
-        pass
-    if charging is not None:
-        result["charging"] = bool(charging)
-    if status:
-        result["status"] = status[:32]
-    if plugged:
-        result["plugged"] = plugged[:32]
-    try:
-        temp = raw.get("temperature")
-        if temp is not None:
-            result["temperature_c"] = round(float(temp), 1)
-    except Exception:
-        pass
-    return result
+        return _empty_battery_snapshot("battery_error", exc)
 
 
 def _safe_telemetry(name: str, callback, default: Any) -> Any:
@@ -1148,190 +1013,43 @@ def _looks_like_tailscale_host(host: str) -> bool:
 
 
 def _tailscale_snapshot(*, probe_vps: bool = False) -> dict[str, Any]:
-    base_url, _token, _worker_id = _core_worker_auth_parts()
-    base_host = _base_url_host()
-    base_looks_tailscale = _looks_like_tailscale_host(base_host)
-    result: dict[str, Any] = {
-        "cli_available": bool(shutil.which("tailscale")),
-        "connected": False,
-        "state": "unknown",
-        "via_vps_url": bool(base_looks_tailscale),
-    }
-    if base_host:
-        result["vps_host_masked"] = _mask_ipv4(base_host)
-    ip = ""
-    if result["cli_available"]:
-        code, stdout, stderr = _run_text_command(["tailscale", "ip", "-4"], timeout=2.5, max_bytes=4096)
-        if code == 0 and stdout.strip():
-            ip = stdout.strip().splitlines()[0].strip()
-            result["connected"] = True
-            result["ip_present"] = True
-            result["ip_masked"] = _mask_ipv4(ip)
-        elif stderr:
-            result["ip_error"] = _short_text(stderr, limit=120)
-
-        code, stdout, stderr = _run_text_command(["tailscale", "status", "--json"], timeout=3.5, max_bytes=65536)
-        if code == 0 and stdout:
-            try:
-                parsed = json.loads(stdout)
-            except Exception:
-                parsed = {}
-            if isinstance(parsed, dict):
-                state = str(parsed.get("BackendState") or parsed.get("backendState") or "").strip()
-                if state:
-                    result["state"] = state[:48]
-                    result["connected"] = result["connected"] or state.lower() == "running"
-                self_info = parsed.get("Self") if isinstance(parsed.get("Self"), dict) else {}
-                if self_info:
-                    result["hostname"] = _short_text(self_info.get("HostName"), limit=64)
-                    result["online"] = bool(self_info.get("Online", result.get("connected")))
-                peers = parsed.get("Peer") if isinstance(parsed.get("Peer"), dict) else {}
-                result["peers"] = len(peers) if isinstance(peers, dict) else 0
-        elif code != 127 and stderr:
-            result["status_error"] = _short_text(stderr, limit=160)
-    else:
-        # No Android é comum usar o app oficial do Tailscale como VPN, sem CLI no Termux.
-        # Se a VPS configurada é 100.x.x.x ou MagicDNS, o heartbeat bem-sucedido já prova
-        # que o Termux alcança a VPS por uma rota privada/VPN; não mostrar como "off".
-        if base_looks_tailscale:
-            result["connected"] = True
-            result["state"] = "app/vpn"
-            result["note"] = "CLI tailscale ausente; conexão inferida pelo endpoint privado da VPS"
-        else:
-            result["state"] = "no-cli"
-            result["note"] = "CLI tailscale não encontrada no Termux; use o app oficial para a VPN"
-
-    if probe_vps and base_url:
-        health_url = base_url.rstrip("/") + "/health"
-        started = time.time()
-        try:
-            req = urllib.request.Request(health_url, headers={"Accept": "application/json"}, method="GET")
-            with urllib.request.urlopen(req, timeout=4.0) as resp:
-                raw = resp.read(4096)
-                result["vps_reachable"] = True
-                result["vps_status"] = int(getattr(resp, "status", 200) or 200)
-                result["vps_latency_ms"] = round((time.time() - started) * 1000, 1)
-                try:
-                    data = json.loads(raw.decode("utf-8", errors="replace") or "{}")
-                    if isinstance(data, dict):
-                        result["vps_health_ok"] = bool(data.get("ok", True))
-                except Exception:
-                    pass
-        except Exception as exc:
-            result["vps_reachable"] = False
-            result["vps_error"] = f"{type(exc).__name__}: {_short_text(exc, limit=120)}"
-    return result
+    try:
+        return _phone_worker_telemetry_module().tailscale_snapshot(
+            probe_vps=probe_vps, auth_parts=_core_worker_auth_parts, base_url_host=_base_url_host,
+            looks_like_tailscale_host=_looks_like_tailscale_host, find_command=shutil.which,
+            run_text_command=_run_text_command, mask_ipv4=_mask_ipv4, short_text=_short_text,
+            request_factory=urllib.request.Request, urlopen=urllib.request.urlopen, wall_clock=time.time)
+    except Exception as exc:
+        return {"connected": False, "state": "telemetry_failed",
+                "error": f"{type(exc).__name__}: {_short_text(exc, limit=100)}"}
 
 
 
 def _vps_tcp_ping_snapshot(*, timeout: float = 2.5, cache_ttl: float = 6.0) -> dict[str, Any]:
-    """Mede RTT TCP do worker até a VPS/orquestrador.
-
-    Não usa ICMP/root. Apenas abre uma conexão TCP curta para a URL já
-    configurada em CORE_WORKER_VPS_URL. Resultado é cacheado por poucos
-    segundos porque o payload também é usado no polling de jobs.
-    """
-    base_url, _token, _worker_id = _core_worker_auth_parts()
-    if not base_url:
-        return {"available": False, "reachable": False, "source": "not_configured"}
     try:
-        parsed = urllib.parse.urlparse(base_url)
-        host = parsed.hostname or ""
-        port = int(parsed.port or (443 if parsed.scheme == "https" else 80))
+        return _phone_worker_telemetry_module().vps_tcp_ping_snapshot(
+            timeout=timeout, cache_ttl=cache_ttl, auth_parts=_core_worker_auth_parts,
+            ping_cache=_PING_CACHE, monotonic=time.monotonic, perf_counter=time.perf_counter,
+            create_connection=socket.create_connection, mask_ipv4=_mask_ipv4, short_text=_short_text)
     except Exception as exc:
-        return {"available": False, "reachable": False, "source": "invalid_url", "error": _short_text(exc, limit=100)}
-    if not host:
-        return {"available": False, "reachable": False, "source": "missing_host"}
-
-    cache_key = f"{host}:{port}"
-    now = time.monotonic()
-    cached = _PING_CACHE.get(cache_key)
-    if isinstance(cached, dict) and now - float(cached.get("monotonic_at") or 0.0) <= max(0.5, cache_ttl):
-        result = dict(cached.get("result") or {})
-        result["cached"] = True
-        return result
-
-    started = time.perf_counter()
-    result: dict[str, Any] = {
-        "available": True,
-        "source": "tcp_connect",
-        "host_masked": _mask_ipv4(host),
-        "port": port,
-    }
-    try:
-        with socket.create_connection((host, port), timeout=max(0.3, timeout)):
-            pass
-        latency_ms = round((time.perf_counter() - started) * 1000, 1)
-        result.update({
-            "reachable": True,
-            "ping_ms": latency_ms,
-            "latency_ms": latency_ms,
-            "vps_ping_ms": latency_ms,
-        })
-    except Exception as exc:
-        result.update({
-            "reachable": False,
-            "error": f"{type(exc).__name__}: {_short_text(exc, limit=100)}",
-        })
-    _PING_CACHE[cache_key] = {"monotonic_at": now, "result": dict(result)}
-    return result
+        return {"available": False, "reachable": False, "source": "telemetry_failed",
+                "error": f"{type(exc).__name__}: {_short_text(exc, limit=100)}"}
 
 def _network_snapshot() -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    wifi = _run_json_command(["termux-wifi-connectioninfo"], timeout=2.0)
-    if wifi:
-        result["type"] = "wifi"
-        result["source"] = "termux-api"
-        ssid = str(wifi.get("ssid") or "").strip()
-        if ssid and ssid != "<unknown ssid>":
-            result["name"] = _short_text(ssid, limit=48)
-        try:
-            result["rssi"] = int(wifi.get("rssi"))
-        except Exception:
-            pass
-    else:
-        # Sem Termux:API, ainda conseguimos dizer que há conectividade se o worker
-        # está alcançando a VPS por heartbeat/poll.
-        result["type"] = "connected" if _heartbeat_configured() else "unknown"
-        result["source"] = "inferred"
-    tailscale = _tailscale_snapshot(probe_vps=False)
-    result["tailscale"] = bool(tailscale.get("connected"))
-    result["tailscale_cli"] = bool(tailscale.get("cli_available"))
-    result["tailscale_state"] = _short_text(tailscale.get("state"), limit=48, default="unknown")
-    result["tailscale_via_vps_url"] = bool(tailscale.get("via_vps_url"))
-    if tailscale.get("ip_masked"):
-        result["tailscale_ip_masked"] = tailscale.get("ip_masked")
-    elif tailscale.get("vps_host_masked") and tailscale.get("via_vps_url"):
-        result["tailscale_ip_masked"] = tailscale.get("vps_host_masked")
-    if tailscale.get("note"):
-        result["tailscale_note"] = _short_text(tailscale.get("note"), limit=100)
-    ping = _safe_telemetry("vps ping", _vps_tcp_ping_snapshot, {"available": False, "reachable": False, "source": "telemetry_failed"})
-    if isinstance(ping, dict):
-        result["vps_reachable"] = bool(ping.get("reachable"))
-        result["vps_ping_available"] = bool(ping.get("available", True))
-        if ping.get("ping_ms") is not None:
-            result["vps_ping_ms"] = ping.get("ping_ms")
-            result["ping_ms"] = ping.get("ping_ms")
-        elif ping.get("latency_ms") is not None:
-            result["vps_ping_ms"] = ping.get("latency_ms")
-            result["ping_ms"] = ping.get("latency_ms")
-        if ping.get("host_masked"):
-            result["vps_host_masked"] = ping.get("host_masked")
-        if ping.get("port"):
-            result["vps_port"] = ping.get("port")
-        if ping.get("error"):
-            result["vps_ping_error"] = _short_text(ping.get("error"), limit=120)
-    return result
+    try:
+        return _phone_worker_telemetry_module().network_snapshot(
+            run_json_command=_run_json_command, heartbeat_configured=_heartbeat_configured,
+            tailscale_snapshot=_tailscale_snapshot, safe_telemetry=_safe_telemetry,
+            ping_snapshot=_vps_tcp_ping_snapshot, short_text=_short_text)
+    except Exception as exc:
+        return {"type": "unknown", "source": "telemetry_failed",
+                "error": f"{type(exc).__name__}: {_short_text(exc, limit=100)}"}
 
 
 def _heartbeat_configured() -> bool:
     if not _env_bool("CORE_WORKER_HEARTBEAT_ENABLED", True):
         return False
-    return bool(
-        str(os.getenv("CORE_WORKER_VPS_URL") or os.getenv("CORE_WORKER_BASE_URL") or "").strip()
-        and str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
-        and str(os.getenv("CORE_WORKER_TOKEN") or "").strip()
-    )
+    return all(_core_worker_auth_parts())
 
 
 def _core_worker_jobs_configured() -> bool:
@@ -1407,7 +1125,12 @@ def _post_json_url(url: str, payload: dict[str, Any], *, token: str = "", timeou
             status = int(getattr(resp, "status", 200) or 200)
             _remember_core_worker_network_ok()
     except urllib.error.HTTPError as exc:
-        raw = exc.read(16 * 1024)
+        try:
+            with exc:
+                raw = exc.read(16 * 1024)
+        except Exception as read_exc:
+            _remember_core_worker_network_error(read_exc)
+            raise
         status = int(exc.code)
         _remember_core_worker_network_ok()
     except Exception as exc:
@@ -1436,7 +1159,12 @@ def _get_json_url(url: str, *, timeout: float = 8.0, max_bytes: int = 1024 * 102
             status = int(getattr(resp, "status", 200) or 200)
             _remember_core_worker_network_ok()
     except urllib.error.HTTPError as exc:
-        raw = exc.read(16 * 1024)
+        try:
+            with exc:
+                raw = exc.read(16 * 1024)
+        except Exception as read_exc:
+            _remember_core_worker_network_error(read_exc)
+            raise
         status = int(exc.code)
         _remember_core_worker_network_ok()
     except Exception as exc:
@@ -1459,7 +1187,8 @@ def _get_local_json_url(url: str, *, timeout: float = 4.0, max_bytes: int = 128 
             raw = resp.read(max_bytes + 1)
             status = int(getattr(resp, "status", 200) or 200)
     except urllib.error.HTTPError as exc:
-        raw = exc.read(min(max_bytes, 16 * 1024))
+        with exc:
+            raw = exc.read(min(max_bytes, 16 * 1024))
         status = int(exc.code)
     if len(raw) > max_bytes:
         return status, {"ok": False, "error": "resposta local grande demais"}
@@ -1478,7 +1207,8 @@ def _post_local_json_url(url: str, payload: dict[str, Any], *, timeout: float = 
             raw = resp.read(max_bytes + 1)
             status = int(getattr(resp, "status", 200) or 200)
     except urllib.error.HTTPError as exc:
-        raw = exc.read(min(max_bytes, 16 * 1024))
+        with exc:
+            raw = exc.read(min(max_bytes, 16 * 1024))
         status = int(exc.code)
     if len(raw) > max_bytes:
         return status, {"ok": False, "error": "resposta local grande demais"}
@@ -1521,10 +1251,16 @@ def _download_url_to_file(
                 digest.update(chunk)
                 fh.write(chunk)
     except urllib.error.HTTPError as exc:
-        _remember_core_worker_network_ok()
-        body = exc.read(8 * 1024).decode("utf-8", errors="replace")
-        with contextlib.suppress(Exception):
-            tmp.unlink()
+        try:
+            with exc:
+                body = exc.read(8 * 1024).decode("utf-8", errors="replace")
+            _remember_core_worker_network_ok()
+        except Exception as read_exc:
+            _remember_core_worker_network_error(read_exc)
+            raise
+        finally:
+            with contextlib.suppress(Exception):
+                tmp.unlink()
         return {"ok": False, "status": int(exc.code), "error": _short_text(body or exc, limit=180)}
     except Exception as exc:
         _remember_core_worker_network_error(exc)
@@ -1791,39 +1527,59 @@ def _bootstrap_updater_snapshot() -> dict[str, Any]:
         return {"state": "state_unreadable"}
 
 
-def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
-    status = _safe_telemetry("system", _system_status, {"ok": False})
-    music_node = _safe_telemetry("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"})
-    music_agent = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
-    worker_id = str(os.getenv("CORE_WORKER_ID") or os.getenv("CORE_WORKER_WORKER_ID") or "").strip()
-    name = _default_worker_name()
+def _control_plane_snapshot(name: str, callback, default: dict[str, Any]) -> dict[str, Any]:
+    def read():
+        value = callback()
+        if not isinstance(value, dict):
+            raise TypeError("snapshot não é objeto")
+        return value
+    return _safe_telemetry(name, read, default)
+
+
+def _phone_worker_control_plane_module() -> Any:
+    global _PHONE_WORKER_CONTROL_PLANE_MODULE
+    if _PHONE_WORKER_CONTROL_PLANE_MODULE is not None:
+        return _PHONE_WORKER_CONTROL_PLANE_MODULE
+    with _PHONE_WORKER_CONTROL_PLANE_LOCK:
+        if _PHONE_WORKER_CONTROL_PLANE_MODULE is None:
+            path = Path(__file__).resolve().parent / "phone_worker_runtime/control_plane.py"
+            spec = importlib.util.spec_from_file_location("core_phone_worker_runtime_control_plane", path)
+            if not path.is_file() or spec is None or spec.loader is None:
+                raise RuntimeError("control_plane.py ainda não foi instalado; aguarde o segundo estágio do auto-update")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            if not callable(getattr(module, "build_payload", None)):
+                raise RuntimeError("control_plane.py não contém build_payload")
+            _PHONE_WORKER_CONTROL_PLANE_MODULE = module
+        return _PHONE_WORKER_CONTROL_PLANE_MODULE
+
+
+def _core_worker_endpoint(host: str, effective_port: int | None) -> str:
     endpoint = str(os.getenv("CORE_WORKER_ENDPOINT") or os.getenv("PHONE_WORKER_ENDPOINT") or "").strip()
-    effective_port = _EFFECTIVE_HTTP_PORT
     if not endpoint and effective_port and host not in {"", "0.0.0.0", "::"}:
-        endpoint = f"http://{host}:{effective_port}"
+        address = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        endpoint = f"http://{address}:{effective_port}"
+    return endpoint
+
+
+def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
+    # Keep the recovery envelope independent of optional modules and probes.
+    # Capture the effective port once; the caller's preferred port may not bind.
+    _base_url, _token, worker_id = _core_worker_auth_parts()
+    effective_port, direct_http_state = _EFFECTIVE_HTTP_PORT, _DIRECT_HTTP_STATE
     profile = _current_core_worker_profile()
+    profile_label = _core_worker_profile_label(profile)
     roles, capabilities = _current_core_worker_roles_and_capabilities()
+    roles, capabilities = list(roles), list(capabilities)
     safe_mode = _phone_worker_safe_mode_enabled()
     if safe_mode:
         blocked_prefixes = ("music",)
         roles = [item for item in roles if not str(item).lower().startswith(blocked_prefixes)]
         capabilities = [item for item in capabilities if not str(item).lower().startswith(blocked_prefixes)]
-    if status.get("ffmpeg") and "ffmpeg" not in capabilities:
-        capabilities.append("ffmpeg")
-    if status.get("ffprobe") and "ffprobe" not in capabilities:
-        capabilities.append("ffprobe")
-    music_ready = (not safe_mode) and bool(music_agent.get("available") or music_node.get("ok") or music_node.get("online") or profile == "turbo")
-    if music_ready:
-        for role in ("music", "music-agent", "music-node", "music-lavalink", "music-ytdlp"):
-            if role not in roles:
-                roles.append(role)
-        for capability in ("music", "music-agent", "music-voice", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve"):
-            if capability not in capabilities:
-                capabilities.append(capability)
-    return {
+    payload = {
         "worker_id": worker_id,
         "physical_worker_id": worker_id,
-        "name": _short_text(name, limit=64, default="Core Phone Worker"),
+        "name": _short_text(_default_worker_name(), limit=64, default="Core Phone Worker"),
         "source": "termux-phone-worker",
         "platform": "android-termux",
         "runtime_kind": "termux",
@@ -1832,39 +1588,24 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         "source_hash": _phone_worker_source_hash(),
         "worker_update_transports": ["bootstrap-manifest-v2", "zip-v1", "inline-b64-v1"],
         "profile": profile,
-        "profile_label": _core_worker_profile_label(profile),
+        "profile_label": profile_label,
         "safe_mode": safe_mode,
-        "endpoint": endpoint,
-        "roles": roles[:16],
-        "capabilities": capabilities[:24],
+        "endpoint": _core_worker_endpoint(host, effective_port),
+        "roles": roles,
+        "capabilities": capabilities,
         "supported_tasks": _supported_core_worker_job_types(),
-        "battery": _safe_telemetry("battery", _battery_snapshot, _empty_battery_snapshot()),
-        "network": _safe_telemetry("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"}),
         "health": {
             "ok": True,
-            "pid": status.get("pid"),
-            "uptime_seconds": status.get("uptime_seconds"),
-            "jobs_started": status.get("jobs_started"),
-            "jobs_failed": status.get("jobs_failed"),
-            "ffmpeg": status.get("ffmpeg"),
-            "ffprobe": status.get("ffprobe"),
-            "scripts_ok": ((status.get("scripts") or {}).get("complete") if isinstance(status.get("scripts"), dict) else None),
-            "boot_ok": ((status.get("boot") or {}).get("ok") if isinstance(status.get("boot"), dict) else None),
-            "supervisor_ok": ((status.get("supervisor") or {}).get("supervisor_ok") if isinstance(status.get("supervisor"), dict) else None),
-            "sshd_ok": ((status.get("sshd") or {}).get("ok") if isinstance(status.get("sshd"), dict) else None),
             "runtime_mode": CORE_WORKER_RUNTIME_MODE,
             "internal_runtime_state": CORE_WORKER_INTERNAL_RUNTIME_STATE,
             "control_plane_alive": True,
-            "direct_http_state": _DIRECT_HTTP_STATE,
-            "http_port": _EFFECTIVE_HTTP_PORT,
+            "direct_http_state": direct_http_state,
+            "http_port": effective_port,
             "last_heartbeat_ok_at": _LAST_HEARTBEAT_OK_AT or None,
         },
         "status": {
-            "worker_update": {"transports": ["bootstrap-manifest-v2", "zip-v1", "inline-b64-v1"], "updater": _bootstrap_updater_snapshot()},
             "core_worker_jobs": _core_job_runtime_snapshot(),
             "core_worker_network": _core_worker_network_runtime_snapshot(),
-            "music_node": music_node,
-            "music_agent": music_agent,
             "runtime_mode": CORE_WORKER_RUNTIME_MODE,
             "runtime": {
                 "mode": CORE_WORKER_RUNTIME_MODE,
@@ -1874,25 +1615,29 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
                 "summary": "Termux executa jobs reais; APK prepara runtime interno gradualmente.",
             },
             "profile": profile,
-            "profile_label": _core_worker_profile_label(profile),
+            "profile_label": profile_label,
             "http_host": host,
-            "http_port": _EFFECTIVE_HTTP_PORT,
+            "http_port": effective_port,
             "preferred_http_port": TERMUX_PRIMARY_HTTP_PORT,
             "recovery_http_port": TERMUX_RECOVERY_HTTP_PORT,
-            "direct_http_state": _DIRECT_HTTP_STATE,
+            "direct_http_state": direct_http_state,
             "control_plane_alive": True,
-            "python": status.get("python"),
-            "platform": status.get("platform"),
-            "disk_home": status.get("disk_home"),
-            "loadavg": status.get("loadavg"),
-            "scripts": status.get("scripts"),
-            "boot": status.get("boot"),
-            "shell_autostart": status.get("shell_autostart"),
-            "auto_boot_repair": status.get("auto_boot_repair"),
-            "supervisor": status.get("supervisor"),
-            "sshd": status.get("sshd"),
         },
     }
+    try:
+        module = _phone_worker_control_plane_module()
+        return module.build_payload(payload,
+            system=_control_plane_snapshot("system", _system_status, {"ok": False}),
+            music_node=_control_plane_snapshot("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"}),
+            music_agent=_control_plane_snapshot("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False}),
+            battery=_control_plane_snapshot("battery", _battery_snapshot, _empty_battery_snapshot()),
+            network=_control_plane_snapshot("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"}),
+            updater=_bootstrap_updater_snapshot())
+    except Exception as exc:
+        print(f"[phone-worker] payload de recuperação: {type(exc).__name__}: {_short_text(exc, limit=100)}", flush=True)
+        payload["roles"], payload["capabilities"] = roles[:16], capabilities[:24]
+        payload["health"]["payload_mode"] = "bootstrap"
+        return payload
 
 
 def _pair_core_worker(
@@ -1925,17 +1670,12 @@ def _pair_core_worker(
     payload.update({
         "code": normalized_code,
         "worker_id": selected_worker_id,
+        "physical_worker_id": selected_worker_id,
         "name": _short_text(selected_name, limit=64, default="Core Phone Worker"),
         "source": "termux-phone-worker",
     })
-    requested_roles = _env_list("CORE_WORKER_ROLES", []) if not roles else _env_list("CORE_WORKER_ROLES", [])
-    if roles:
-        os.environ["CORE_WORKER_ROLES"] = roles
-        requested_roles = _env_list("CORE_WORKER_ROLES", [])
-    requested_capabilities = _env_list("CORE_WORKER_CAPABILITIES", []) if not capabilities else _env_list("CORE_WORKER_CAPABILITIES", [])
-    if capabilities:
-        os.environ["CORE_WORKER_CAPABILITIES"] = capabilities
-        requested_capabilities = _env_list("CORE_WORKER_CAPABILITIES", [])
+    requested_roles = _parse_env_list(roles) if roles else _env_list("CORE_WORKER_ROLES", [])
+    requested_capabilities = _parse_env_list(capabilities) if capabilities else _env_list("CORE_WORKER_CAPABILITIES", [])
     if requested_roles:
         payload["roles"] = requested_roles[:16]
     if requested_capabilities:
@@ -2216,57 +1956,35 @@ def _android_tts_timeout_seconds(default: float = 0.45) -> float:
     return max(0.08, min(5.0, _env_float("PHONE_WORKER_ANDROID_TTS_STATUS_TIMEOUT_SECONDS", default)))
 
 
+def _phone_worker_tts_android_module() -> Any:
+    global _PHONE_WORKER_TTS_ANDROID_MODULE
+    if _PHONE_WORKER_TTS_ANDROID_MODULE is not None:
+        return _PHONE_WORKER_TTS_ANDROID_MODULE
+    with _PHONE_WORKER_TTS_ANDROID_LOCK:
+        if _PHONE_WORKER_TTS_ANDROID_MODULE is None:
+            path = Path(__file__).resolve().parent / "phone_worker_runtime/tts_android.py"
+            spec = importlib.util.spec_from_file_location("core_phone_worker_runtime_tts_android", path)
+            if not path.is_file() or spec is None or spec.loader is None:
+                raise RuntimeError("tts_android.py ainda não foi instalado; aguarde o segundo estágio do auto-update")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            required = ("json_request", "raw_request", "synthesize")
+            if not all(callable(getattr(module, name, None)) for name in required):
+                raise RuntimeError("tts_android.py incompleto")
+            _PHONE_WORKER_TTS_ANDROID_MODULE = module
+        return _PHONE_WORKER_TTS_ANDROID_MODULE
+
+
 def _android_tts_json_request(path: str, *, payload: dict[str, Any] | None = None, timeout: float = 1.5) -> dict[str, Any]:
-    url = _android_tts_base_url() + path
-    data: bytes | None = None
-    method = "GET"
-    headers = {"Accept": "application/json", "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}"}
-    if payload is not None:
-        method = "POST"
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers["Content-Type"] = "application/json; charset=utf-8"
-    request = urllib.request.Request(url, data=data, method=method, headers=headers)
-    with urllib.request.urlopen(request, timeout=max(0.1, float(timeout))) as response:
-        raw = response.read(16 * 1024 * 1024)
-    parsed = json.loads(raw.decode("utf-8", errors="replace") or "{}")
-    if not isinstance(parsed, dict):
-        raise RuntimeError("Android TTS retornou JSON inválido")
-    return parsed
+    return _phone_worker_tts_android_module().json_request(path, payload=payload, timeout=timeout,
+        base_url=_android_tts_base_url(), version=PHONE_WORKER_VERSION,
+        request_factory=urllib.request.Request, open_url=urllib.request.urlopen)
 
 
 def _android_tts_raw_request(path: str, *, payload: dict[str, Any], timeout: float = 1.5, max_audio_bytes: int = 8 * 1024 * 1024) -> tuple[bytes, dict[str, Any]]:
-    url = _android_tts_base_url() + path
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = {
-        "Accept": "audio/wav,application/octet-stream,application/json;q=0.4,*/*;q=0.1",
-        "Content-Type": "application/json; charset=utf-8",
-        "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}",
-    }
-    request = urllib.request.Request(url, data=data, method="POST", headers=headers)
-    with urllib.request.urlopen(request, timeout=max(0.1, float(timeout))) as response:
-        content_type = str(response.headers.get("Content-Type") or "").lower()
-        raw = response.read(max(1024, max_audio_bytes) + 1)
-        if "application/json" in content_type:
-            try:
-                parsed = json.loads(raw.decode("utf-8", errors="replace") or "{}")
-            except Exception as exc:
-                raise RuntimeError(f"Android TTS raw retornou JSON inválido: {_short_text(exc, limit=100)}") from exc
-            if isinstance(parsed, dict) and parsed.get("ok") is False:
-                raise RuntimeError(str(parsed.get("error") or "Android TTS raw retornou ok=false"))
-            raise RuntimeError("Android TTS raw retornou JSON sem áudio")
-        if len(raw) > max_audio_bytes:
-            raise RuntimeError(f"Android TTS raw grande demais: {len(raw)} bytes")
-        meta = {
-            "content_type": content_type,
-            "audio_format": str(response.headers.get("X-Core-Worker-Audio-Format") or "wav").strip().lower() or "wav",
-            "android_synth_ms": str(response.headers.get("X-Core-Worker-Android-Synth-Ms") or "").strip(),
-            "locale": str(response.headers.get("X-Core-Worker-Locale") or "").strip(),
-            "voice": str(response.headers.get("X-Core-Worker-Voice") or "").strip(),
-            "sha256": str(response.headers.get("X-Core-Worker-Sha256") or "").strip(),
-        }
-    if not raw:
-        raise RuntimeError("Android TTS raw não retornou áudio")
-    return raw, meta
+    return _phone_worker_tts_android_module().raw_request(path, payload=payload, timeout=timeout,
+        max_audio_bytes=max_audio_bytes, base_url=_android_tts_base_url(), version=PHONE_WORKER_VERSION,
+        request_factory=urllib.request.Request, open_url=urllib.request.urlopen, short_text=_short_text)
 
 
 def _android_tts_status(*, use_cache: bool = True) -> dict[str, Any]:
@@ -2396,6 +2114,25 @@ def _teto_resource_snapshot() -> dict[str, Any]:
     }
 
 
+def _phone_worker_tts_providers_module() -> Any:
+    global _PHONE_WORKER_TTS_PROVIDERS_MODULE
+    if _PHONE_WORKER_TTS_PROVIDERS_MODULE is not None:
+        return _PHONE_WORKER_TTS_PROVIDERS_MODULE
+    with _PHONE_WORKER_TTS_PROVIDERS_LOCK:
+        if _PHONE_WORKER_TTS_PROVIDERS_MODULE is None:
+            path = Path(__file__).resolve().parent / "phone_worker_runtime/tts_providers.py"
+            spec = importlib.util.spec_from_file_location("core_phone_worker_runtime_tts_providers", path)
+            if not path.is_file() or spec is None or spec.loader is None:
+                raise RuntimeError("tts_providers.py ainda não foi instalado; aguarde o segundo estágio do auto-update")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            required = ("synthesize_teto", "synthesize_edge", "synthesize_gtts")
+            if not all(callable(getattr(module, name, None)) for name in required):
+                raise RuntimeError("tts_providers.py incompleto")
+            _PHONE_WORKER_TTS_PROVIDERS_MODULE = module
+        return _PHONE_WORKER_TTS_PROVIDERS_MODULE
+
+
 def _get_teto_renderer():
     global _TETO_RENDERER, _TETO_RENDERER_ERROR
     with _TETO_RENDERER_LOCK:
@@ -2489,67 +2226,66 @@ def _turbo_dependency_snapshot() -> dict[str, Any]:
 
 
 
+def _phone_worker_tts_policy_module() -> Any:
+    global _PHONE_WORKER_TTS_POLICY_MODULE
+    if _PHONE_WORKER_TTS_POLICY_MODULE is not None:
+        return _PHONE_WORKER_TTS_POLICY_MODULE
+    with _PHONE_WORKER_TTS_POLICY_LOCK:
+        if _PHONE_WORKER_TTS_POLICY_MODULE is None:
+            path = Path(__file__).resolve().parent / "phone_worker_runtime/tts_policy.py"
+            spec = importlib.util.spec_from_file_location("core_phone_worker_runtime_tts_policy", path)
+            if not path.is_file() or spec is None or spec.loader is None:
+                raise RuntimeError("tts_policy.py ainda não foi instalado; aguarde o segundo estágio do auto-update")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            required = ("normalize_engine", "available_engines", "preferred_engine", "engine_order",
+                        "normalize_edge_rate", "normalize_edge_pitch", "normalize_gtts_language",
+                        "sanitize_cache_key", "normalize_cache_format", "standard_cache_key",
+                        "cache_mode_allows_read", "cache_mode_allows_store")
+            if not all(callable(getattr(module, name, None)) for name in required):
+                raise RuntimeError("tts_policy.py incompleto")
+            _PHONE_WORKER_TTS_POLICY_MODULE = module
+        return _PHONE_WORKER_TTS_POLICY_MODULE
+
+
+def _tts_agent_normalize_engine(raw: Any, *, default: str = "gtts") -> str:
+    return _phone_worker_tts_policy_module().normalize_engine(raw, default=default)
+
+
 def _tts_agent_available_engines(deps: dict[str, Any] | None = None) -> list[str]:
     deps = deps if isinstance(deps, dict) else _turbo_dependency_snapshot()
-    engines: list[str] = []
-    if deps.get("teto_tts"):
-        engines.append("teto")
-    if deps.get("android_native_tts"):
-        engines.append("android_native")
-    # Piper ficou legado. O fluxo normal anuncia Teto/ATTS/Edge/gTTS.
-    if deps.get("edge_tts"):
-        engines.append("edge")
-    if deps.get("gtts"):
-        engines.append("gtts")
-    return engines
+    return _phone_worker_tts_policy_module().available_engines(deps)
 
 def _tts_agent_preferred_engine(available: list[str]) -> str:
-    requested = str(os.getenv("PHONE_WORKER_TTS_AGENT_ENGINE") or "auto").strip().lower().replace("-", "_") or "auto"
-    aliases = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native", "kasane_teto": "teto", "teto_utau": "teto", "utau": "teto"}
-    requested = aliases.get(requested, requested)
-    if requested != "auto" and requested in available:
-        return requested
-    for candidate in ("android_native", "edge", "gtts"):
-        if candidate in available:
-            return candidate
-    return ""
+    return _phone_worker_tts_policy_module().preferred_engine(available, requested=os.getenv("PHONE_WORKER_TTS_AGENT_ENGINE"))
 
 
 def _tts_agent_queue_limit() -> int:
     return max(1, min(8, _env_int("PHONE_WORKER_TTS_AGENT_CONCURRENCY", 2)))
 
 
+def _phone_worker_tts_cache_module() -> Any:
+    global _PHONE_WORKER_TTS_CACHE_MODULE
+    if _PHONE_WORKER_TTS_CACHE_MODULE is not None:
+        return _PHONE_WORKER_TTS_CACHE_MODULE
+    with _PHONE_WORKER_TTS_CACHE_LOCK:
+        if _PHONE_WORKER_TTS_CACHE_MODULE is None:
+            path = Path(__file__).resolve().parent / "phone_worker_runtime/tts_cache.py"
+            spec = importlib.util.spec_from_file_location("core_phone_worker_runtime_tts_cache", path)
+            if not path.is_file() or spec is None or spec.loader is None:
+                raise RuntimeError("tts_cache.py ainda não foi instalado; aguarde o segundo estágio do auto-update")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            required = ("prune_audio_cache", "find_file", "touch_file", "read_bytes", "publish_bytes")
+            if not all(callable(getattr(module, name, None)) for name in required):
+                raise RuntimeError("tts_cache.py incompleto")
+            _PHONE_WORKER_TTS_CACHE_MODULE = module
+        return _PHONE_WORKER_TTS_CACHE_MODULE
+
+
 def _prune_audio_cache(root, max_bytes, max_files, *, protected=None):
-    import fcntl
-    stats = []
-    with contextlib.suppress(OSError):
-        with os.scandir(root) as entries:
-            for entry in entries:
-                if Path(entry.name).suffix.lower() not in {".mp3", ".wav", ".ogg"} or not entry.is_file(follow_symlinks=False):
-                    continue
-                with contextlib.suppress(OSError):
-                    st = entry.stat(follow_symlinks=False)
-                    stats.append((st.st_mtime, st.st_size, entry.path))
-    remaining, total = len(stats), sum(row[1] for row in stats)
-    if remaining <= max_files and total <= max_bytes:
-        return
-    fresh = time.time() - 180
-    for mtime, size, path in sorted(stats):
-        if remaining <= max_files and total <= max_bytes:
-            break
-        if mtime > fresh or (protected is not None and path == str(protected)):
-            continue
-        try:
-            with open(path, "rb") as handle:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                before, current = os.fstat(handle.fileno()), os.stat(path)
-                if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
-                    continue
-                os.unlink(path)
-                remaining -= 1
-                total -= size
-        except OSError:
-            continue
+    return _phone_worker_tts_cache_module().prune_audio_cache(
+        root, max_bytes, max_files, protected=protected, os_api=os, wall_time=time.time)
 
 
 _TTS_TRANSPORT_LOCK = threading.Lock()
@@ -3367,6 +3103,52 @@ _VOICE_AGENT_CONNECTION_MEMORY: dict[str, dict[str, Any]] = {}
 _VOICE_AGENT_TRANSFER_MEMORY: dict[str, dict[str, Any]] = {}
 
 
+class _VoiceAgentProbeCancelled(RuntimeError):
+    """A scheduled probe lost its generation or temporary voice ownership."""
+
+
+def _voice_agent_cancel_probe(guild_id: str, *, reason: str) -> None:
+    with _VOICE_AGENT_SESSION_LOCK:
+        current = _VOICE_AGENT_CONNECTION_MEMORY.get(guild_id)
+        if isinstance(current, dict) and current.pop("_probe_id", None):
+            current.update(state="connection_cancelled", stage="cancelled", connected_once=False,
+                           closed_after_probe=False, error=reason, updated_at_ms=_voice_agent_now_ms())
+
+
+def _voice_agent_assert_probe_current(guild_id: int, probe_id: str | None) -> None:
+    if probe_id is None:
+        return
+    with _VOICE_AGENT_SESSION_LOCK:
+        _voice_agent_prune_transfers()
+        _voice_agent_prune_handoffs()
+        key = str(guild_id)
+        current = _VOICE_AGENT_CONNECTION_MEMORY.get(key) or {}
+        handoff = _VOICE_AGENT_HANDOFF_MEMORY.get(key) or {}
+        owner = str(handoff.get("voice_owner") or handoff.get("transport_owner") or "vps").strip().lower()
+        if current.get("_probe_id") != probe_id or owner != "worker":
+            raise _VoiceAgentProbeCancelled("probe cancelado, substituído ou sem posse da voz")
+
+
+def _phone_worker_voice_state_module() -> Any:
+    global _PHONE_WORKER_VOICE_STATE_MODULE
+    if _PHONE_WORKER_VOICE_STATE_MODULE is not None:
+        return _PHONE_WORKER_VOICE_STATE_MODULE
+    with _PHONE_WORKER_VOICE_STATE_LOCK:
+        if _PHONE_WORKER_VOICE_STATE_MODULE is None:
+            path = Path(__file__).resolve().parent / "phone_worker_runtime/voice_state.py"
+            spec = importlib.util.spec_from_file_location("core_phone_worker_runtime_voice_state", path)
+            if not path.is_file() or spec is None or spec.loader is None:
+                raise RuntimeError("voice_state.py ainda não foi instalado; aguarde o segundo estágio do auto-update")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            required = ("public_session", "public_handoff", "public_connection", "public_transfer", "expired_keys",
+                        "session_summary", "handoff_summary", "connection_summary", "transfer_summary")
+            if not all(callable(getattr(module, name, None)) for name in required):
+                raise RuntimeError("voice_state.py incompleto")
+            _PHONE_WORKER_VOICE_STATE_MODULE = module
+        return _PHONE_WORKER_VOICE_STATE_MODULE
+
+
 def _voice_agent_state_file() -> Path:
     base = Path(os.getenv("PHONE_WORKER_DIR") or Path.home() / "phone-worker").expanduser()
     raw = str(os.getenv("PHONE_WORKER_VOICE_AGENT_STATE_FILE") or "").strip()
@@ -3386,6 +3168,10 @@ def _voice_agent_int(value: Any, default: int = 0) -> int:
 
 def _voice_agent_clean_text(value: Any, *, limit: int = 160) -> str:
     return re.sub(r"[^a-zA-Z0-9_.:/@# -]+", "", str(value or "")).strip()[:limit]
+
+
+def _voice_agent_flag(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
 
 
 def _voice_agent_load_state() -> dict[str, Any]:
@@ -3429,167 +3215,73 @@ def _voice_agent_save_state(state: dict[str, Any]) -> None:
 
 
 def _voice_agent_public_session(raw: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
-    now_ms = int(now_ms or _voice_agent_now_ms())
-    expires_at_ms = _voice_agent_int(raw.get("expires_at_ms"), 0)
-    ttl_ms = max(0, expires_at_ms - now_ms) if expires_at_ms else 0
-    voice = raw.get("discord_voice") if isinstance(raw.get("discord_voice"), dict) else {}
-    return {
-        "guild_id": str(raw.get("guild_id") or ""),
-        "channel_id": str(raw.get("channel_id") or ""),
-        "text_channel_id": str(raw.get("text_channel_id") or ""),
-        "requester_id": str(raw.get("requester_id") or ""),
-        "source": str(raw.get("source") or "")[:40],
-        "state": str(raw.get("state") or "registered")[:60],
-        "registered_by": str(raw.get("registered_by") or "vps_control_plane")[:60],
-        "age_seconds": round(max(0, now_ms - _voice_agent_int(raw.get("updated_at_ms"), now_ms)) / 1000.0, 1),
-        "ttl_seconds": round(ttl_ms / 1000.0, 1) if ttl_ms else 0.0,
-        "session_id_present": bool(voice.get("session_id_present")),
-        "endpoint_present": bool(voice.get("endpoint_present")),
-        "voice_token_present": bool(voice.get("voice_token_present")),
-        "endpoint_host": str(voice.get("endpoint_host") or "")[:120],
-        "connected": bool(voice.get("connected")),
-        "direct_tts_enabled": bool(raw.get("direct_tts_enabled")),
-    }
+    return _phone_worker_voice_state_module().public_session(
+        raw, now_ms=int(_voice_agent_now_ms() if now_ms is None else now_ms), int_value=_voice_agent_int)
 
 
 def _voice_agent_public_handoff(raw: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
-    now_ms = int(now_ms or _voice_agent_now_ms())
-    expires_at_ms = _voice_agent_int(raw.get("expires_at_ms"), 0)
-    ttl_ms = max(0, expires_at_ms - now_ms) if expires_at_ms else 0
-    endpoint = _voice_agent_clean_text(raw.get("endpoint_host") or raw.get("endpoint"), limit=160)
-    return {
-        "guild_id": str(raw.get("guild_id") or ""),
-        "channel_id": str(raw.get("channel_id") or ""),
-        "source": str(raw.get("source") or "")[:40],
-        "state": str(raw.get("state") or "handoff_registered")[:60],
-        "dry_run": bool(raw.get("dry_run", True)),
-        "age_seconds": round(max(0, now_ms - _voice_agent_int(raw.get("updated_at_ms"), now_ms)) / 1000.0, 1),
-        "ttl_seconds": round(ttl_ms / 1000.0, 1) if ttl_ms else 0.0,
-        "session_id_present": bool(raw.get("session_id")),
-        "endpoint_present": bool(endpoint),
-        "voice_token_present": bool(raw.get("voice_token")),
-        "endpoint_host": endpoint[:120],
-        "voice_owner": str(raw.get("voice_owner") or raw.get("transport_owner") or "vps")[:40],
-        "transport_owner": str(raw.get("transport_owner") or raw.get("voice_owner") or "vps")[:40],
-        "connection_policy": str(raw.get("connection_policy") or "handoff_only_wait_for_voice_ownership")[:80],
-        "allow_connection_probe": bool(raw.get("allow_connection_probe") or raw.get("allow_probe")),
-        "complete": bool(raw.get("session_id") and raw.get("voice_token") and endpoint),
-    }
+    return _phone_worker_voice_state_module().public_handoff(
+        raw, now_ms=int(_voice_agent_now_ms() if now_ms is None else now_ms), int_value=_voice_agent_int, clean_text=_voice_agent_clean_text)
+
+
+def _voice_agent_expired_keys(records: dict[str, Any], *, now_ms: int) -> list[str]:
+    return _phone_worker_voice_state_module().expired_keys(records, now_ms=now_ms, int_value=_voice_agent_int)
+
+
+def _voice_agent_revoke_handoff_owner(guild_id: str, *, now_ms: int, policy: str) -> None:
+    # Caller holds the session lock; handoff credentials stay only in this map.
+    handoff = _VOICE_AGENT_HANDOFF_MEMORY.get(guild_id)
+    if isinstance(handoff, dict):
+        handoff.update(voice_owner="vps", transport_owner="vps", allow_connection_probe=False,
+                       connection_policy=policy, updated_at_ms=now_ms)
+        _voice_agent_cancel_probe(guild_id, reason=policy)
 
 
 def _voice_agent_prune_handoffs() -> dict[str, dict[str, Any]]:
     now_ms = _voice_agent_now_ms()
     with _VOICE_AGENT_SESSION_LOCK:
-        stale = [key for key, data in _VOICE_AGENT_HANDOFF_MEMORY.items() if _voice_agent_int(data.get("expires_at_ms"), 0) and _voice_agent_int(data.get("expires_at_ms"), 0) <= now_ms]
+        stale = _voice_agent_expired_keys(_VOICE_AGENT_HANDOFF_MEMORY, now_ms=now_ms)
         for key in stale:
             _VOICE_AGENT_HANDOFF_MEMORY.pop(key, None)
+            _voice_agent_cancel_probe(str(key), reason="voice_handoff_expired")
         return {str(k): dict(v) for k, v in _VOICE_AGENT_HANDOFF_MEMORY.items() if isinstance(v, dict)}
 
 
 def _voice_agent_handoff_summary(*, guild_id: int | None = None, limit: int = 5) -> dict[str, Any]:
     now_ms = _voice_agent_now_ms()
     handoffs_dict = _voice_agent_prune_handoffs()
-    handoffs = []
-    for key, raw in handoffs_dict.items():
-        if guild_id is not None and str(key) != str(int(guild_id)):
-            continue
-        handoffs.append(_voice_agent_public_handoff(raw, now_ms=now_ms))
-    handoffs.sort(key=lambda item: float(item.get("age_seconds", 999999) or 999999))
-    complete_count = sum(1 for item in handoffs if item.get("complete"))
-    return {
-        "handoff_count": len(handoffs),
-        "handoff_complete_count": complete_count,
-        "handoff_ready": complete_count > 0,
-        "handoff_guilds": [str(item.get("guild_id") or "") for item in handoffs[:12] if item.get("guild_id")],
-        "handoffs": handoffs[:limit],
-        "last_handoff": handoffs[0] if handoffs else {},
-    }
+    return _phone_worker_voice_state_module().handoff_summary(
+        handoffs_dict, now_ms=now_ms, guild_id=guild_id, limit=limit, public_record=_voice_agent_public_handoff)
 
 
 
 def _voice_agent_public_connection(raw: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
-    now_ms = int(now_ms or _voice_agent_now_ms())
-    started_at = _voice_agent_int(raw.get("started_at_ms"), now_ms)
-    updated_at = _voice_agent_int(raw.get("updated_at_ms"), started_at)
-    return {
-        "guild_id": str(raw.get("guild_id") or ""),
-        "channel_id": str(raw.get("channel_id") or ""),
-        "state": str(raw.get("state") or "unknown")[:80],
-        "stage": str(raw.get("stage") or "")[:80],
-        "dry_run": bool(raw.get("dry_run", True)),
-        "connected_once": bool(raw.get("connected_once")),
-        "closed_after_probe": bool(raw.get("closed_after_probe")),
-        "ws_url_present": bool(raw.get("ws_url_present")),
-        "hello_received": bool(raw.get("hello_received")),
-        "ready_received": bool(raw.get("ready_received")),
-        "udp_probe_attempted": bool(raw.get("udp_probe_attempted")),
-        "udp_probe_ok": bool(raw.get("udp_probe_ok")),
-        "ssrc_present": bool(raw.get("ssrc_present")),
-        "selected_protocol_ready": bool(raw.get("selected_protocol_ready")),
-        "endpoint_host": str(raw.get("endpoint_host") or "")[:120],
-        "voice_ip": str(raw.get("voice_ip") or "")[:80],
-        "voice_port": _voice_agent_int(raw.get("voice_port"), 0),
-        "latency_ms": raw.get("latency_ms"),
-        "age_seconds": round(max(0, now_ms - started_at) / 1000.0, 1),
-        "updated_age_seconds": round(max(0, now_ms - updated_at) / 1000.0, 1),
-        "error": str(raw.get("error") or "")[:180],
-    }
+    return _phone_worker_voice_state_module().public_connection(
+        raw, now_ms=int(_voice_agent_now_ms() if now_ms is None else now_ms), int_value=_voice_agent_int)
 
 
 def _voice_agent_public_transfer(raw: dict[str, Any], *, now_ms: int | None = None) -> dict[str, Any]:
-    now_ms = int(now_ms or _voice_agent_now_ms())
-    expires_at_ms = _voice_agent_int(raw.get("expires_at_ms"), 0)
-    ttl_ms = max(0, expires_at_ms - now_ms) if expires_at_ms else 0
-    return {
-        "guild_id": str(raw.get("guild_id") or ""),
-        "channel_id": str(raw.get("channel_id") or ""),
-        "state": str(raw.get("state") or "transfer_unknown")[:80],
-        "current_owner": str(raw.get("current_owner") or raw.get("voice_owner") or "vps")[:40],
-        "voice_owner": str(raw.get("voice_owner") or raw.get("current_owner") or "vps")[:40],
-        "requested_owner": str(raw.get("requested_owner") or "worker")[:40],
-        "lease_id": str(raw.get("lease_id") or "")[:80],
-        "allow_connection_probe": bool(raw.get("allow_connection_probe")),
-        "probe_authorized": bool(raw.get("probe_authorized")),
-        "age_seconds": round(max(0, now_ms - _voice_agent_int(raw.get("updated_at_ms"), now_ms)) / 1000.0, 1),
-        "ttl_seconds": round(ttl_ms / 1000.0, 1) if ttl_ms else 0.0,
-        "reason": str(raw.get("reason") or "")[:140],
-        "error": str(raw.get("error") or "")[:160],
-    }
+    return _phone_worker_voice_state_module().public_transfer(
+        raw, now_ms=int(_voice_agent_now_ms() if now_ms is None else now_ms), int_value=_voice_agent_int)
 
 
 def _voice_agent_prune_transfers() -> dict[str, dict[str, Any]]:
     now_ms = _voice_agent_now_ms()
     with _VOICE_AGENT_SESSION_LOCK:
-        stale = [key for key, data in _VOICE_AGENT_TRANSFER_MEMORY.items() if _voice_agent_int(data.get("expires_at_ms"), 0) and _voice_agent_int(data.get("expires_at_ms"), 0) <= now_ms]
+        stale = _voice_agent_expired_keys(_VOICE_AGENT_TRANSFER_MEMORY, now_ms=now_ms)
         for key in stale:
             _VOICE_AGENT_TRANSFER_MEMORY.pop(key, None)
+            handoff = _VOICE_AGENT_HANDOFF_MEMORY.get(key)
+            if isinstance(handoff, dict) and handoff.get("connection_policy") == "worker_ownership_granted_explicit_transfer":
+                _voice_agent_revoke_handoff_owner(key, now_ms=now_ms, policy="vps_owner_transfer_expired")
         return {str(k): dict(v) for k, v in _VOICE_AGENT_TRANSFER_MEMORY.items() if isinstance(v, dict)}
 
 
 def _voice_agent_transfer_summary(*, guild_id: int | None = None, limit: int = 5) -> dict[str, Any]:
     now_ms = _voice_agent_now_ms()
     transfers_dict = _voice_agent_prune_transfers()
-    transfers = []
-    for key, raw in transfers_dict.items():
-        if guild_id is not None and str(key) != str(int(guild_id)):
-            continue
-        transfers.append(_voice_agent_public_transfer(raw, now_ms=now_ms))
-    transfers.sort(key=lambda item: float(item.get("age_seconds", 999999) or 999999))
-    ready_count = sum(1 for item in transfers if item.get("voice_owner") == "worker" and item.get("probe_authorized"))
-    staged_count = sum(1 for item in transfers if str(item.get("state") or "").startswith("transfer_staged"))
-    last = transfers[0] if transfers else {}
-    return {
-        "transfer_count": len(transfers),
-        "transfer_ready_count": ready_count,
-        "transfer_staged_count": staged_count,
-        "transfer_ready": ready_count > 0,
-        "transfer_guilds": [str(item.get("guild_id") or "") for item in transfers[:12] if item.get("guild_id")],
-        "transfers": transfers[:limit],
-        "last_transfer": last,
-        "transfer_state": str(last.get("state") or ""),
-        "current_voice_owner": str(last.get("voice_owner") or last.get("current_owner") or "vps") if last else "vps",
-        "requested_voice_owner": str(last.get("requested_owner") or "") if last else "",
-    }
+    return _phone_worker_voice_state_module().transfer_summary(
+        transfers_dict, now_ms=now_ms, guild_id=guild_id, limit=limit, public_record=_voice_agent_public_transfer)
 
 
 def _voice_agent_set_transfer(guild_id: int, **updates: Any) -> dict[str, Any]:
@@ -3644,42 +3336,43 @@ def _voice_agent_begin_transfer(body: dict[str, Any]) -> dict[str, Any]:
     guild_id = _voice_agent_int(body.get("guild_id"), 0)
     if guild_id <= 0:
         raise RuntimeError("guild_id obrigatório para iniciar transferência")
-    if not bool(body.get("confirm_transfer") or body.get("confirm") or body.get("manual") or body.get("diagnostic")):
+    if not any(_voice_agent_flag(body.get(key)) for key in ("confirm_transfer", "confirm", "manual", "diagnostic")):
         raise RuntimeError("transferência exige confirmação explícita da VPS")
-    transfers = _voice_agent_prune_transfers()
-    current = dict(transfers.get(str(guild_id)) or {})
-    if not current:
-        current = _voice_agent_prepare_transfer(body).get("transfer") or {}
-    handoffs = _voice_agent_prune_handoffs()
-    handoff = dict(handoffs.get(str(guild_id)) or {})
-    if not handoff:
-        raise RuntimeError("handoff temporário ausente; não é seguro entregar posse")
-    ttl_seconds = max(10, min(120, _voice_agent_int(body.get("expires_in_seconds"), _env_int("PHONE_WORKER_VOICE_AGENT_TRANSFER_LEASE_TTL_SECONDS", 45))))
-    now_ms = _voice_agent_now_ms()
-    lease_id = str(current.get("lease_id") or f"vta:{guild_id}:{now_ms}")
-    current.pop("guild_id", None)
-    transfer = _voice_agent_set_transfer(
-        guild_id,
-        **current,
-        state="worker_ownership_granted_waiting_probe",
-        current_owner="worker",
-        voice_owner="worker",
-        requested_owner="worker",
-        lease_id=lease_id,
-        allow_connection_probe=True,
-        probe_authorized=True,
-        reason="VPS confirmou transferência controlada de posse da voz",
-        error="",
-        expires_at_ms=now_ms + ttl_seconds * 1000,
-    )
     with _VOICE_AGENT_SESSION_LOCK:
-        handoff["voice_owner"] = "worker"
-        handoff["transport_owner"] = "worker"
-        handoff["allow_connection_probe"] = True
-        handoff["connection_policy"] = "worker_ownership_granted_explicit_transfer"
-        handoff["updated_at_ms"] = now_ms
-        _VOICE_AGENT_HANDOFF_MEMORY[str(guild_id)] = handoff
-    return {"ok": True, "started": True, "state": transfer.get("state"), "transfer": _voice_agent_public_transfer(transfer), **_voice_agent_transfer_summary(guild_id=guild_id, limit=5), **_voice_agent_handoff_summary(guild_id=guild_id, limit=5)}
+        transfers = _voice_agent_prune_transfers()
+        current = dict(transfers.get(str(guild_id)) or {})
+        if not current:
+            current = _voice_agent_prepare_transfer(body).get("transfer") or {}
+        handoffs = _voice_agent_prune_handoffs()
+        handoff = dict(handoffs.get(str(guild_id)) or {})
+        if not handoff:
+            raise RuntimeError("handoff temporário ausente; não é seguro entregar posse")
+        ttl_seconds = max(10, min(120, _voice_agent_int(body.get("expires_in_seconds"), _env_int("PHONE_WORKER_VOICE_AGENT_TRANSFER_LEASE_TTL_SECONDS", 45))))
+        now_ms = _voice_agent_now_ms()
+        lease_id = str(current.get("lease_id") or f"vta:{guild_id}:{now_ms}")
+        current.pop("guild_id", None)
+        current.update(
+            state="worker_ownership_granted_waiting_probe",
+            current_owner="worker",
+            voice_owner="worker",
+            requested_owner="worker",
+            lease_id=lease_id,
+            allow_connection_probe=True,
+            probe_authorized=True,
+            reason="VPS confirmou transferência controlada de posse da voz",
+            error="",
+            expires_at_ms=now_ms + ttl_seconds * 1000,
+        )
+        transfer = _voice_agent_set_transfer(guild_id, **current)
+        with _VOICE_AGENT_SESSION_LOCK:
+            handoff["voice_owner"] = "worker"
+            handoff["transport_owner"] = "worker"
+            handoff["allow_connection_probe"] = True
+            handoff["connection_policy"] = "worker_ownership_granted_explicit_transfer"
+            handoff["updated_at_ms"] = now_ms
+            _VOICE_AGENT_HANDOFF_MEMORY[str(guild_id)] = handoff
+        return {"ok": True, "started": True, "state": transfer.get("state"), "transfer": _voice_agent_public_transfer(transfer), **_voice_agent_transfer_summary(guild_id=guild_id, limit=5), **_voice_agent_handoff_summary(guild_id=guild_id, limit=5)}
+
 
 
 def _voice_agent_release_transfer(body: dict[str, Any]) -> dict[str, Any]:
@@ -3687,53 +3380,31 @@ def _voice_agent_release_transfer(body: dict[str, Any]) -> dict[str, Any]:
     if guild_id <= 0:
         raise RuntimeError("guild_id obrigatório para liberar transferência")
     reason = _voice_agent_clean_text(body.get("reason") or "released_by_vps", limit=120)
-    now_ms = _voice_agent_now_ms()
-    transfer = _voice_agent_set_transfer(
-        guild_id,
-        state="released_to_vps",
-        current_owner="vps",
-        voice_owner="vps",
-        requested_owner="",
-        allow_connection_probe=False,
-        probe_authorized=False,
-        reason=reason,
-        expires_at_ms=now_ms + 10_000,
-    )
     with _VOICE_AGENT_SESSION_LOCK:
-        handoff = dict(_VOICE_AGENT_HANDOFF_MEMORY.get(str(guild_id)) or {})
-        if handoff:
-            handoff["voice_owner"] = "vps"
-            handoff["transport_owner"] = "vps"
-            handoff["allow_connection_probe"] = False
-            handoff["connection_policy"] = "vps_owner_transfer_released"
-            handoff["updated_at_ms"] = now_ms
-            _VOICE_AGENT_HANDOFF_MEMORY[str(guild_id)] = handoff
-    return {"ok": True, "released": True, "state": transfer.get("state"), "transfer": _voice_agent_public_transfer(transfer), **_voice_agent_transfer_summary(guild_id=guild_id, limit=5)}
+        now_ms = _voice_agent_now_ms()
+        transfer = _voice_agent_set_transfer(
+            guild_id,
+            state="released_to_vps",
+            current_owner="vps",
+            voice_owner="vps",
+            requested_owner="",
+            allow_connection_probe=False,
+            probe_authorized=False,
+            reason=reason,
+            expires_at_ms=now_ms + 10_000,
+        )
+        with _VOICE_AGENT_SESSION_LOCK:
+            _voice_agent_revoke_handoff_owner(str(guild_id), now_ms=now_ms, policy="vps_owner_transfer_released")
+        return {"ok": True, "released": True, "state": transfer.get("state"), "transfer": _voice_agent_public_transfer(transfer), **_voice_agent_transfer_summary(guild_id=guild_id, limit=5)}
+
 
 
 def _voice_agent_connection_summary(*, guild_id: int | None = None, limit: int = 5) -> dict[str, Any]:
     now_ms = _voice_agent_now_ms()
     with _VOICE_AGENT_SESSION_LOCK:
         items = {str(k): dict(v) for k, v in _VOICE_AGENT_CONNECTION_MEMORY.items() if isinstance(v, dict)}
-    connections = []
-    for key, raw in items.items():
-        if guild_id is not None and str(key) != str(int(guild_id)):
-            continue
-        connections.append(_voice_agent_public_connection(raw, now_ms=now_ms))
-    connections.sort(key=lambda item: float(item.get("updated_age_seconds", 999999) or 999999))
-    ready_count = sum(1 for item in connections if item.get("state") in {"connected_dry_run", "probe_ok", "voice_ws_ready"} or item.get("connected_once"))
-    probing_count = sum(1 for item in connections if item.get("state") in {"probing", "connecting", "voice_ws_connecting"})
-    failed_count = sum(1 for item in connections if str(item.get("state") or "").endswith("failed") or item.get("state") == "failed")
-    return {
-        "connection_count": len(connections),
-        "connection_ready_count": ready_count,
-        "connection_probing_count": probing_count,
-        "connection_failed_count": failed_count,
-        "connection_ready": ready_count > 0,
-        "connection_guilds": [str(item.get("guild_id") or "") for item in connections[:12] if item.get("guild_id")],
-        "connections": connections[:limit],
-        "last_connection": connections[0] if connections else {},
-    }
+    return _phone_worker_voice_state_module().connection_summary(
+        items, now_ms=now_ms, guild_id=guild_id, limit=limit, public_record=_voice_agent_public_connection)
 
 
 def _voice_agent_normalize_endpoint(endpoint: str) -> tuple[str, str]:
@@ -3746,11 +3417,14 @@ def _voice_agent_normalize_endpoint(endpoint: str) -> tuple[str, str]:
     return host, f"wss://{host}/?v=4"
 
 
-def _voice_agent_set_connection(guild_id: int, **updates: Any) -> dict[str, Any]:
+def _voice_agent_set_connection(guild_id: int, *, _expected_probe_id: str | None = None, **updates: Any) -> dict[str, Any]:
     key = str(int(guild_id or 0))
     now_ms = _voice_agent_now_ms()
     with _VOICE_AGENT_SESSION_LOCK:
+        _voice_agent_assert_probe_current(guild_id, _expected_probe_id)
         current = dict(_VOICE_AGENT_CONNECTION_MEMORY.get(key) or {})
+        if _expected_probe_id is None:
+            current.pop("_probe_id", None)
         current.setdefault("guild_id", key)
         current.setdefault("started_at_ms", now_ms)
         current.update(updates)
@@ -3795,6 +3469,7 @@ async def _voice_agent_probe_connection_async(handoff: dict[str, Any], *, timeou
         raise RuntimeError(f"aiohttp indisponível para voice dry-run: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
 
     guild_id = _voice_agent_int(handoff.get("guild_id"), 0)
+    probe_id = handoff.get("_probe_id")
     bot_user_id = _voice_agent_clean_text(handoff.get("bot_user_id"), limit=80)
     session_id = str(handoff.get("session_id") or "").strip()
     token = str(handoff.get("voice_token") or "").strip()
@@ -3804,7 +3479,7 @@ async def _voice_agent_probe_connection_async(handoff: dict[str, Any], *, timeou
 
     started = time.perf_counter()
     _voice_agent_set_connection(
-        guild_id,
+        guild_id, _expected_probe_id=probe_id,
         channel_id=str(handoff.get("channel_id") or ""),
         state="voice_ws_connecting",
         stage="ws_connect",
@@ -3820,7 +3495,7 @@ async def _voice_agent_probe_connection_async(handoff: dict[str, Any], *, timeou
     client_timeout = aiohttp.ClientTimeout(total=max(1.0, float(timeout_seconds or 4.0)))
     async with aiohttp.ClientSession(timeout=client_timeout, headers={"User-Agent": f"CorePhoneWorkerVoiceAgent/{PHONE_WORKER_VERSION}"}) as session:
         async with session.ws_connect(ws_url, timeout=max(1.0, min(8.0, float(timeout_seconds or 4.0))), heartbeat=None) as ws:
-            _voice_agent_set_connection(guild_id, state="voice_ws_identifying", stage="identify", endpoint_host=endpoint_host)
+            _voice_agent_set_connection(guild_id, _expected_probe_id=probe_id, state="voice_ws_identifying", stage="identify", endpoint_host=endpoint_host)
             await ws.send_json({
                 "op": 0,
                 "d": {
@@ -3834,6 +3509,7 @@ async def _voice_agent_probe_connection_async(handoff: dict[str, Any], *, timeou
             while time.monotonic() < deadline:
                 remaining = max(0.1, min(1.0, deadline - time.monotonic()))
                 msg = await ws.receive(timeout=remaining)
+                _voice_agent_assert_probe_current(guild_id, probe_id)
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     try:
                         payload = json.loads(msg.data or "{}")
@@ -3844,7 +3520,7 @@ async def _voice_agent_probe_connection_async(handoff: dict[str, Any], *, timeou
                     if op == 8:
                         hello_received = True
                         interval = int(float(data.get("heartbeat_interval") or 0)) if data else 0
-                        _voice_agent_set_connection(guild_id, state="voice_ws_hello", stage="hello", hello_received=True, heartbeat_interval_ms=interval)
+                        _voice_agent_set_connection(guild_id, _expected_probe_id=probe_id, state="voice_ws_hello", stage="hello", hello_received=True, heartbeat_interval_ms=interval)
                         # O dry-run não mantém sessão viva, mas manda um heartbeat curto para validar a ida/volta básica.
                         with contextlib.suppress(Exception):
                             await ws.send_json({"op": 3, "d": int(time.time() * 1000)})
@@ -3857,7 +3533,7 @@ async def _voice_agent_probe_connection_async(handoff: dict[str, Any], *, timeou
                         modes = data.get("modes") if isinstance(data.get("modes"), list) else []
                         selected_protocol_ready = bool(voice_ip and voice_port and ssrc and modes)
                         _voice_agent_set_connection(
-                            guild_id,
+                            guild_id, _expected_probe_id=probe_id,
                             state="voice_ws_ready",
                             stage="ready",
                             ready_received=True,
@@ -3870,7 +3546,7 @@ async def _voice_agent_probe_connection_async(handoff: dict[str, Any], *, timeou
                         udp_result = _voice_agent_udp_discovery_probe(ip=voice_ip, port=voice_port, ssrc=ssrc, timeout=max(0.2, min(1.2, float(timeout_seconds or 4.0) / 3.0)))
                         break
                     elif op == 6:
-                        _voice_agent_set_connection(guild_id, heartbeat_ack=True)
+                        _voice_agent_set_connection(guild_id, _expected_probe_id=probe_id, heartbeat_ack=True)
                     elif op == 9:
                         raise RuntimeError("Voice WS invalid session no dry-run")
                 elif msg.type in {aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE}:
@@ -3882,7 +3558,7 @@ async def _voice_agent_probe_connection_async(handoff: dict[str, Any], *, timeou
         raise RuntimeError("Voice WS não retornou READY no dry-run")
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
     final = _voice_agent_set_connection(
-        guild_id,
+        guild_id, _expected_probe_id=probe_id,
         state="connected_dry_run",
         stage="closed_after_probe",
         hello_received=hello_received,
@@ -3900,20 +3576,23 @@ async def _voice_agent_probe_connection_async(handoff: dict[str, Any], *, timeou
     return _voice_agent_public_connection(final)
 
 
+
 def _voice_agent_probe_worker(handoff: dict[str, Any], *, timeout_seconds: float) -> None:
     guild_id = _voice_agent_int(handoff.get("guild_id"), 0)
+    probe_id = handoff.get("_probe_id")
     try:
+        _voice_agent_assert_probe_current(guild_id, probe_id)
         result = asyncio.run(_voice_agent_probe_connection_async(handoff, timeout_seconds=timeout_seconds))
-        _voice_agent_set_connection(guild_id, **{k: v for k, v in result.items() if k not in {"guild_id"}})
+        _voice_agent_set_connection(guild_id, _expected_probe_id=probe_id, _probe_id="",
+                                   **{k: v for k, v in result.items() if k not in {"guild_id", "_probe_id"}})
+    except _VoiceAgentProbeCancelled:
+        return
     except Exception as exc:
-        _voice_agent_set_connection(
-            guild_id,
-            state="connection_failed",
-            stage="failed",
-            dry_run=True,
-            connected_once=False,
-            error=f"{type(exc).__name__}: {_short_text(exc, limit=180)}",
-        )
+        with contextlib.suppress(_VoiceAgentProbeCancelled):
+            _voice_agent_set_connection(
+                guild_id, _expected_probe_id=probe_id, _probe_id="",
+                state="connection_failed", stage="failed", dry_run=True, connected_once=False,
+                error=f"{type(exc).__name__}: {_short_text(exc, limit=180)}")
 
 
 def _voice_agent_start_connection_probe(body: dict[str, Any]) -> dict[str, Any]:
@@ -3921,70 +3600,82 @@ def _voice_agent_start_connection_probe(body: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("Worker Voice Agent desativado")
     if not _env_bool("PHONE_WORKER_VOICE_AGENT_CONNECTION_DRY_RUN_ENABLED", True):
         raise RuntimeError("voice connection dry-run desativado")
-    guild_id = _voice_agent_int(body.get("guild_id"), 0)
-    handoffs = _voice_agent_prune_handoffs()
-    handoff = handoffs.get(str(guild_id)) if guild_id > 0 else None
-    if not handoff:
-        # Se o chamador acabou de mandar um handoff embutido, aceita sem exigir registro prévio.
-        if isinstance(body.get("discord_voice_handoff"), dict):
-            handoff = _voice_agent_register_handoff_payload(body)
-            with _VOICE_AGENT_SESSION_LOCK:
-                _VOICE_AGENT_HANDOFF_MEMORY[str(handoff["guild_id"])] = handoff
-        else:
-            raise RuntimeError("handoff temporário de voz não encontrado para a guild")
-    guild_id = _voice_agent_int(handoff.get("guild_id"), 0)
-    force = bool(body.get("force") or body.get("manual") or body.get("diagnostic"))
-    allow_probe = bool(body.get("allow_probe") or body.get("allow_connection_probe") or handoff.get("allow_connection_probe") or handoff.get("allow_probe"))
-    owner = str(handoff.get("voice_owner") or handoff.get("transport_owner") or "vps").strip().lower() or "vps"
-    if owner != "worker":
-        blocked = _voice_agent_set_connection(
-            guild_id,
+    with _VOICE_AGENT_SESSION_LOCK:
+        guild_id = _voice_agent_int(body.get("guild_id"), 0)
+        _voice_agent_prune_transfers()
+        handoffs = _voice_agent_prune_handoffs()
+        handoff = handoffs.get(str(guild_id)) if guild_id > 0 else None
+        if not handoff:
+            # Se o chamador acabou de mandar um handoff embutido, aceita sem exigir registro prévio.
+            if isinstance(body.get("discord_voice_handoff"), dict):
+                handoff = _voice_agent_register_handoff_payload(body)
+                with _VOICE_AGENT_SESSION_LOCK:
+                    _VOICE_AGENT_HANDOFF_MEMORY[str(handoff["guild_id"])] = handoff
+            else:
+                raise RuntimeError("handoff temporário de voz não encontrado para a guild")
+        guild_id = _voice_agent_int(handoff.get("guild_id"), 0)
+        allow_probe = any(_voice_agent_flag(value) for value in (
+            body.get("allow_probe"), body.get("allow_connection_probe"), handoff.get("allow_connection_probe"), handoff.get("allow_probe")))
+        owner = str(handoff.get("voice_owner") or handoff.get("transport_owner") or "vps").strip().lower() or "vps"
+        if owner != "worker":
+            blocked = _voice_agent_set_connection(
+                guild_id,
+                channel_id=str(handoff.get("channel_id") or ""),
+                state="waiting_for_voice_ownership",
+                stage="handoff_received",
+                dry_run=True,
+                connected_once=False,
+                endpoint_host=_voice_agent_clean_text(handoff.get("endpoint_host") or handoff.get("endpoint"), limit=160),
+                error="dono atual da voz é a VPS; probe direto não iniciado",
+            )
+            return {
+                "ok": True,
+                "started": False,
+                "blocked": True,
+                "state": "waiting_for_explicit_voice_ownership_transfer",
+                "reason": "vps_voice_owner_requires_explicit_begin_transfer",
+                "connection": _voice_agent_public_connection(blocked),
+                **_voice_agent_connection_summary(guild_id=guild_id, limit=5),
+            }
+        if not allow_probe:
+            blocked = _voice_agent_set_connection(
+                guild_id,
+                channel_id=str(handoff.get("channel_id") or ""),
+                state="connection_probe_blocked",
+                stage="probe_not_authorized",
+                dry_run=True,
+                connected_once=False,
+                endpoint_host=_voice_agent_clean_text(handoff.get("endpoint_host") or handoff.get("endpoint"), limit=160),
+                error="probe de conexão exige allow_probe/force explícito",
+            )
+            return {"ok": True, "started": False, "blocked": True, "state": "connection_probe_blocked", "reason": "probe_not_authorized", "connection": _voice_agent_public_connection(blocked), **_voice_agent_connection_summary(guild_id=guild_id, limit=5)}
+        timeout_seconds = max(1.0, min(10.0, float(body.get("timeout_seconds") or _env_float("PHONE_WORKER_VOICE_AGENT_CONNECTION_TIMEOUT_SECONDS", 4.0))))
+        existing = _voice_agent_connection_summary(guild_id=guild_id, limit=1).get("last_connection") or {}
+        if existing.get("state") in {"probing", "connecting", "voice_ws_connecting", "voice_ws_identifying", "voice_ws_hello", "voice_ws_ready"} and float(existing.get("updated_age_seconds", 999.0)) < 8.0:
+            return {"ok": True, "started": False, "state": "connection_probe_already_running", **_voice_agent_connection_summary(guild_id=guild_id, limit=5)}
+        probe_id = secrets.token_hex(16)
+        handoff = {**handoff, "_probe_id": probe_id}
+        _voice_agent_set_connection(
+            guild_id, _probe_id=probe_id,
             channel_id=str(handoff.get("channel_id") or ""),
-            state="waiting_for_voice_ownership",
-            stage="handoff_received",
+            state="probing",
+            stage="scheduled",
             dry_run=True,
             connected_once=False,
             endpoint_host=_voice_agent_clean_text(handoff.get("endpoint_host") or handoff.get("endpoint"), limit=160),
-            error="dono atual da voz é a VPS; probe direto não iniciado",
+            error="",
         )
-        return {
-            "ok": True,
-            "started": False,
-            "blocked": True,
-            "state": "waiting_for_explicit_voice_ownership_transfer",
-            "reason": "vps_voice_owner_requires_explicit_begin_transfer",
-            "connection": _voice_agent_public_connection(blocked),
-            **_voice_agent_connection_summary(guild_id=guild_id, limit=5),
-        }
-    if not allow_probe:
-        blocked = _voice_agent_set_connection(
-            guild_id,
-            channel_id=str(handoff.get("channel_id") or ""),
-            state="connection_probe_blocked",
-            stage="probe_not_authorized",
-            dry_run=True,
-            connected_once=False,
-            endpoint_host=_voice_agent_clean_text(handoff.get("endpoint_host") or handoff.get("endpoint"), limit=160),
-            error="probe de conexão exige allow_probe/force explícito",
-        )
-        return {"ok": True, "started": False, "blocked": True, "state": "connection_probe_blocked", "reason": "probe_not_authorized", "connection": _voice_agent_public_connection(blocked), **_voice_agent_connection_summary(guild_id=guild_id, limit=5)}
-    timeout_seconds = max(1.0, min(10.0, float(body.get("timeout_seconds") or _env_float("PHONE_WORKER_VOICE_AGENT_CONNECTION_TIMEOUT_SECONDS", 4.0))))
-    existing = _voice_agent_connection_summary(guild_id=guild_id, limit=1).get("last_connection") or {}
-    if existing.get("state") in {"probing", "connecting", "voice_ws_connecting", "voice_ws_identifying"} and float(existing.get("updated_age_seconds") or 999.0) < 8.0:
-        return {"ok": True, "started": False, "state": "connection_probe_already_running", **_voice_agent_connection_summary(guild_id=guild_id, limit=5)}
-    _voice_agent_set_connection(
-        guild_id,
-        channel_id=str(handoff.get("channel_id") or ""),
-        state="probing",
-        stage="scheduled",
-        dry_run=True,
-        connected_once=False,
-        endpoint_host=_voice_agent_clean_text(handoff.get("endpoint_host") or handoff.get("endpoint"), limit=160),
-        error="",
-    )
-    thread = threading.Thread(target=_voice_agent_probe_worker, kwargs={"handoff": dict(handoff), "timeout_seconds": timeout_seconds}, name=f"voice-agent-probe-{guild_id}", daemon=True)
-    thread.start()
+    try:
+        thread = threading.Thread(target=_voice_agent_probe_worker, kwargs={"handoff": dict(handoff), "timeout_seconds": timeout_seconds}, name=f"voice-agent-probe-{guild_id}", daemon=True)
+        thread.start()
+    except Exception as exc:
+        with contextlib.suppress(_VoiceAgentProbeCancelled):
+            _voice_agent_set_connection(guild_id, _expected_probe_id=probe_id, _probe_id="",
+                state="connection_failed", stage="schedule_failed", connected_once=False,
+                error=f"{type(exc).__name__}: {_short_text(exc, limit=180)}")
+        raise
     return {"ok": True, "started": True, "state": "connection_probe_started", **_voice_agent_connection_summary(guild_id=guild_id, limit=5)}
+
 
 
 def _voice_agent_clear_connection(body: dict[str, Any]) -> dict[str, Any]:
@@ -4025,7 +3716,7 @@ def _voice_agent_register_handoff_payload(body: dict[str, Any]) -> dict[str, Any
         "dry_run": bool(body.get("dry_run", True)),
         "voice_owner": str(body.get("voice_owner") or body.get("transport_owner") or "vps")[:40],
         "transport_owner": str(body.get("transport_owner") or body.get("voice_owner") or "vps")[:40],
-        "allow_connection_probe": bool(body.get("allow_connection_probe") or body.get("allow_probe")),
+        "allow_connection_probe": any(_voice_agent_flag(body.get(key)) for key in ("allow_connection_probe", "allow_probe")),
         "connection_policy": str(body.get("connection_policy") or "handoff_only_wait_for_voice_ownership")[:80],
         "created_at_ms": now_ms,
         "updated_at_ms": now_ms,
@@ -4044,6 +3735,7 @@ def _voice_agent_register_handoff(body: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("Worker Voice Agent desativado")
     handoff = _voice_agent_register_handoff_payload(body)
     with _VOICE_AGENT_SESSION_LOCK:
+        _voice_agent_cancel_probe(str(handoff["guild_id"]), reason="voice_handoff_replaced")
         _VOICE_AGENT_HANDOFF_MEMORY[str(handoff["guild_id"])] = handoff
     return {
         "ok": True,
@@ -4059,9 +3751,12 @@ def _voice_agent_clear_handoff(body: dict[str, Any]) -> dict[str, Any]:
     removed = False
     with _VOICE_AGENT_SESSION_LOCK:
         if guild_id > 0:
+            _voice_agent_cancel_probe(str(guild_id), reason="voice_handoff_cleared")
             removed = _VOICE_AGENT_HANDOFF_MEMORY.pop(str(guild_id), None) is not None
         elif body.get("all"):
             removed = bool(_VOICE_AGENT_HANDOFF_MEMORY)
+            for key in _VOICE_AGENT_HANDOFF_MEMORY:
+                _voice_agent_cancel_probe(str(key), reason="voice_handoff_cleared")
             _VOICE_AGENT_HANDOFF_MEMORY.clear()
     return {
         "ok": True,
@@ -4073,35 +3768,28 @@ def _voice_agent_clear_handoff(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _voice_agent_prune_sessions(state: dict[str, Any] | None = None) -> dict[str, Any]:
-    now_ms = _voice_agent_now_ms()
-    state = state or _voice_agent_load_state()
-    sessions = state.setdefault("sessions", {})
-    stale = [key for key, data in sessions.items() if _voice_agent_int(data.get("expires_at_ms"), 0) and _voice_agent_int(data.get("expires_at_ms"), 0) <= now_ms]
-    for key in stale:
-        sessions.pop(key, None)
-    if stale:
-        _voice_agent_save_state(state)
-    return state
+    with _VOICE_AGENT_SESSION_LOCK:
+        now_ms = _voice_agent_now_ms()
+        state = _voice_agent_load_state() if state is None else state
+        sessions = state.setdefault("sessions", {})
+        if not isinstance(sessions, dict):
+            state["sessions"] = sessions = {}
+        stale = _voice_agent_expired_keys(sessions, now_ms=now_ms)
+        for key in stale:
+            sessions.pop(key, None)
+        if stale:
+            _voice_agent_save_state(state)
+        return state
 
 
 def _voice_agent_session_summary(*, guild_id: int | None = None, limit: int = 5) -> dict[str, Any]:
-    state = _voice_agent_prune_sessions()
-    now_ms = _voice_agent_now_ms()
-    sessions_dict = state.get("sessions") if isinstance(state.get("sessions"), dict) else {}
-    sessions = []
-    for key, raw in sessions_dict.items():
-        if guild_id is not None and str(key) != str(int(guild_id)):
-            continue
-        if isinstance(raw, dict):
-            sessions.append(_voice_agent_public_session(raw, now_ms=now_ms))
-    sessions.sort(key=lambda item: float(item.get("age_seconds", 999999) or 999999))
-    return {
-        "session_count": len(sessions),
-        "active_guilds": [str(item.get("guild_id") or "") for item in sessions[:12] if item.get("guild_id")],
-        "sessions": sessions[:limit],
-        "last_session": sessions[0] if sessions else {},
-        "state_file": str(_voice_agent_state_file()),
-    }
+    with _VOICE_AGENT_SESSION_LOCK:
+        state = _voice_agent_prune_sessions()
+        now_ms = _voice_agent_now_ms()
+        sessions_dict = dict(state.get("sessions") or {})
+    return _phone_worker_voice_state_module().session_summary(
+        sessions_dict, now_ms=now_ms, guild_id=guild_id, limit=limit, public_record=_voice_agent_public_session,
+        state_file=str(_voice_agent_state_file()))
 
 
 def _voice_agent_register_session_payload(body: dict[str, Any]) -> dict[str, Any]:
@@ -4146,10 +3834,11 @@ def _voice_agent_register_session(body: dict[str, Any]) -> dict[str, Any]:
     if not _env_bool("PHONE_WORKER_VOICE_AGENT_SHARED_SESSION_ENABLED", True):
         raise RuntimeError("sessão compartilhada do Worker Voice Agent desativada")
     session = _voice_agent_register_session_payload(body)
-    state = _voice_agent_prune_sessions()
-    sessions = state.setdefault("sessions", {})
-    sessions[str(session["guild_id"])] = session
-    _voice_agent_save_state(state)
+    with _VOICE_AGENT_SESSION_LOCK:
+        state = _voice_agent_prune_sessions()
+        sessions = state.setdefault("sessions", {})
+        sessions[str(session["guild_id"])] = session
+        _voice_agent_save_state(state)
     summary = _voice_agent_session_summary(guild_id=_voice_agent_int(session.get("guild_id"), 0), limit=5)
     return {
         "ok": True,
@@ -4162,15 +3851,16 @@ def _voice_agent_register_session(body: dict[str, Any]) -> dict[str, Any]:
 
 def _voice_agent_clear_session(body: dict[str, Any]) -> dict[str, Any]:
     guild_id = _voice_agent_int(body.get("guild_id"), 0)
-    state = _voice_agent_prune_sessions()
-    sessions = state.setdefault("sessions", {})
-    removed = False
-    if guild_id > 0:
-        removed = sessions.pop(str(guild_id), None) is not None
-    elif body.get("all"):
-        removed = bool(sessions)
-        sessions.clear()
-    _voice_agent_save_state(state)
+    with _VOICE_AGENT_SESSION_LOCK:
+        state = _voice_agent_prune_sessions()
+        sessions = state.setdefault("sessions", {})
+        removed = False
+        if guild_id > 0:
+            removed = sessions.pop(str(guild_id), None) is not None
+        elif body.get("all"):
+            removed = bool(sessions)
+            sessions.clear()
+        _voice_agent_save_state(state)
     summary = _voice_agent_session_summary(limit=5)
     return {
         "ok": True,
@@ -4797,36 +4487,13 @@ class WorkerHandler(BaseHTTPRequestHandler):
             _error(self, HTTPStatus.BAD_REQUEST, f"{type(exc).__name__}: {exc}")
 
     def _normalize_tts_edge_rate(self, raw: Any) -> str:
-        value = str(raw or "").strip().replace("％", "%").replace("−", "-").replace("–", "-").replace("—", "-").replace(" ", "")
-        if value.endswith("%"):
-            value = value[:-1]
-        if not value:
-            return "+0%"
-        if value[0] not in "+-":
-            value = f"+{value}"
-        sign, number = value[0], value[1:]
-        if not number.isdigit():
-            return "+0%"
-        return f"{sign}{number}%"
+        return _phone_worker_tts_policy_module().normalize_edge_rate(raw)
 
     def _normalize_tts_edge_pitch(self, raw: Any) -> str:
-        value = str(raw or "").strip().replace("−", "-").replace("–", "-").replace("—", "-").replace(" ", "")
-        if value.lower().endswith("hz"):
-            value = value[:-2]
-        if not value:
-            return "+0Hz"
-        if value[0] not in "+-":
-            value = f"+{value}"
-        sign, number = value[0], value[1:]
-        if not number.isdigit():
-            return "+0Hz"
-        return f"{sign}{number}Hz"
+        return _phone_worker_tts_policy_module().normalize_edge_pitch(raw)
 
     def _normalize_tts_gtts_language(self, raw: Any) -> str:
-        language = str(raw or "pt").strip().lower().replace("_", "-") or "pt"
-        if language == "pt-br":
-            language = "pt"
-        return language
+        return _phone_worker_tts_policy_module().normalize_gtts_language(raw)
 
 
 
@@ -4857,43 +4524,21 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return max_mb * 1024 * 1024, max_files
 
     def _sanitize_tts_cache_key(self, raw: Any) -> str:
-        key = str(raw or "").strip().lower()
-        key = re.sub(r"[^a-z0-9_\-]", "", key)
-        if len(key) < 16:
-            raise RuntimeError("cache_key inválida/curta")
-        return key[:96]
+        return _phone_worker_tts_policy_module().sanitize_cache_key(raw)
 
     def _normalize_tts_cache_format(self, raw: Any) -> str:
-        fmt = str(raw or "mp3").strip().lower().replace(".", "")
-        if fmt in {"wav", "wave"}:
-            return "wav"
-        if fmt in {"ogg", "opus"}:
-            return "ogg"
-        return "mp3"
+        return _phone_worker_tts_policy_module().normalize_cache_format(raw)
 
     def _tts_cache_path(self, key: str, audio_format: str) -> Path:
         return self._tts_cache_root() / f"{key}.{self._normalize_tts_cache_format(audio_format)}"
 
     def _find_tts_cache_file(self, key: str) -> tuple[Path | None, str]:
-        root = self._tts_cache_root()
-        for fmt in ("mp3", "wav", "ogg"):
-            path = root / f"{key}.{fmt}"
-            with contextlib.suppress(OSError):
-                if path.stat().st_size > 0:
-                    return path, fmt
-        return None, ""
+        return _phone_worker_tts_cache_module().find_file(self._tts_cache_root(), key)
 
     def _touch_tts_cache_file(self, path: Path) -> None:
-        now = time.monotonic()
-        key = str(path)
-        with _TTS_CACHE_MAINTENANCE_LOCK:
-            if now - _TTS_CACHE_TOUCHES.get(key, -60.0) < 30:
-                return
-            if len(_TTS_CACHE_TOUCHES) >= 4096:
-                _TTS_CACHE_TOUCHES.pop(next(iter(_TTS_CACHE_TOUCHES)))
-            _TTS_CACHE_TOUCHES[key] = now
-        with contextlib.suppress(OSError):
-            os.utime(path, None)
+        return _phone_worker_tts_cache_module().touch_file(path,
+            lock=_TTS_CACHE_MAINTENANCE_LOCK, touches=_TTS_CACHE_TOUCHES,
+            monotonic=time.monotonic, utime=os.utime)
 
     def _prune_tts_cache(self, *, protected: Path | None = None) -> None:
         _prune_audio_cache(self._tts_cache_root(), *self._tts_cache_limits(), protected=protected)
@@ -4927,7 +4572,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 "logs": [f"tts cache miss key={key[:16]}"],
             }
         read_started = time.monotonic()
-        data = path.read_bytes()
+        data = _phone_worker_tts_cache_module().read_bytes(path)
         read_ms = (time.monotonic() - read_started) * 1000.0
         if not data:
             raise RuntimeError("cache TTS vazio")
@@ -4971,9 +4616,8 @@ class WorkerHandler(BaseHTTPRequestHandler):
         root = self._tts_cache_root()
         root.mkdir(parents=True, exist_ok=True)
         path = self._tts_cache_path(key, audio_format)
-        tmp_path = path.with_suffix(path.suffix + f".tmp-{os.getpid()}-{threading.get_ident()}")
-        tmp_path.write_bytes(data)
-        os.replace(tmp_path, path)
+        _phone_worker_tts_cache_module().publish_bytes(path, data,
+            os_api=os, thread_id=threading.get_ident)
         self._touch_tts_cache_file(path)
         self._schedule_tts_cache_prune(protected=path)
         total_ms = (time.monotonic() - started) * 1000.0
@@ -5144,7 +4788,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         with contextlib.suppress(Exception):
             transfers = _voice_agent_prune_transfers()
             transfer = dict(transfers.get(str(guild_id)) or {})
-        if bool(body.get("confirm_transfer") or body.get("confirm") or body.get("manual")):
+        if any(_voice_agent_flag(body.get(key)) for key in ("confirm_transfer", "confirm", "manual")):
             if str(transfer.get("voice_owner") or transfer.get("current_owner") or "").lower() != "worker":
                 try:
                     transfer_result = _voice_agent_begin_transfer({**body, "confirm_transfer": True, "requested_owner": "worker"})
@@ -5296,37 +4940,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return result
 
     def _tts_agent_engine_order(self, body: dict[str, Any], available: list[str]) -> list[str]:
-        requested = str(body.get("engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
-        preferred = str(body.get("preferred_engine") or os.getenv("PHONE_WORKER_TTS_AGENT_ENGINE") or "auto").strip().lower().replace("-", "_") or "auto"
-        fallback = str(body.get("fallback_engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
-        aliases = {
-            "google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts",
-            "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native",
-            "native_android": "android_native", "kasane_teto": "teto", "teto_utau": "teto", "utau": "teto",
-        }
-        requested = aliases.get(requested, requested)
-        preferred = aliases.get(preferred, preferred)
-        fallback = aliases.get(fallback, fallback)
-        order: list[str] = []
-        if requested == "teto":
-            # Prefixo explícito: Teto deve ser tentada antes de qualquer preferência global.
-            order.append("teto")
-        elif preferred != "auto":
-            order.append(preferred)
-        order.append(requested)
-        if fallback != requested:
-            order.append(fallback)
-        for candidate in ("android_native", "edge", "gtts"):
-            order.append(candidate)
-        deduped: list[str] = []
-        for engine in order:
-            if engine not in {"teto", "android_native", "edge", "gtts"}:
-                continue
-            if engine not in available:
-                continue
-            if engine not in deduped:
-                deduped.append(engine)
-        return deduped
+        return _phone_worker_tts_policy_module().engine_order(body, available, preferred_default=body.get("preferred_engine") or os.getenv("PHONE_WORKER_TTS_AGENT_ENGINE"))
 
     def _tts_agent_standard_cache_enabled(self, roles: list[str], capabilities: list[str]) -> bool:
         if not _env_bool("PHONE_WORKER_TTS_AGENT_CACHE_ENABLED", True):
@@ -5339,53 +4953,33 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return True
 
     def _tts_agent_standard_cache_key(self, body: dict[str, Any], *, engine: str) -> str:
-        normalized_engine = str(engine or body.get("engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
-        aliases = {"google": "gtts", "google_tts": "gtts", "googlecloud": "gtts", "google_cloud": "gtts", "gcloud": "gtts", "edge_tts": "edge", "android": "android_native", "android_tts": "android_native", "native": "android_native", "native_android": "android_native", "kasane_teto": "teto", "teto_utau": "teto", "utau": "teto"}
-        normalized_engine = aliases.get(normalized_engine, normalized_engine)
-        requested_engine = str(body.get("engine") or normalized_engine).strip().lower().replace("-", "_") or normalized_engine
-        requested_engine = aliases.get(requested_engine, requested_engine)
-        provided = str(body.get("cache_key") or "").strip()
-        if provided and requested_engine == normalized_engine and normalized_engine != "teto":
-            with contextlib.suppress(Exception):
-                return self._sanitize_tts_cache_key(provided)
-        text = str(body.get("text") or "").strip()
+        normalized_engine = _tts_agent_normalize_engine(engine or body.get("engine"))
+        # Only Teto consults renderer status/environment, exactly at the old boundary.
+        fingerprint, base_pitch = "unavailable", "C4"
         if normalized_engine == "teto":
-            status = _teto_status()
-            fingerprint = str(status.get("fingerprint") or "unavailable")
-            voice = str(body.get("voice") or "kasane-teto-standard").strip() or "kasane-teto-standard"
-            language = str(body.get("language") or "pt-BR").strip() or "pt-BR"
+            fingerprint = str(_teto_status().get("fingerprint") or "unavailable")
             base_pitch = str(os.getenv("PHONE_WORKER_TETO_BASE_PITCH") or "C4")
-            payload = f"teto|{fingerprint}|{voice}|{language}|{base_pitch}|{text}"
-        elif normalized_engine == "android_native":
-            language = str(body.get("language") or body.get("fallback_language") or "pt-BR").strip().replace("_", "-") or "pt-BR"
-            voice = str(body.get("voice") or "auto").strip() or "auto"
-            rate = str(body.get("rate") or "1.0").strip() or "1.0"
-            pitch = str(body.get("pitch") or "1.0").strip() or "1.0"
-            payload = f"android_native|{language}|{voice}|{rate}|{pitch}|{text}"
-        elif normalized_engine == "edge":
-            voice = str(body.get("voice") or body.get("fallback_voice") or "pt-BR-FranciscaNeural").strip() or "pt-BR-FranciscaNeural"
-            rate = self._normalize_tts_edge_rate(body.get("rate"))
-            pitch = self._normalize_tts_edge_pitch(body.get("pitch"))
-            payload = f"edge|{voice}|{rate}|{pitch}|{text}"
-        else:
-            language = self._normalize_tts_gtts_language(body.get("language") or body.get("fallback_language"))
-            payload = f"gtts|{language}|{body.get('tld') or 'com'}|{text}"
-        return hashlib.sha256(("tts-v2|" + payload).encode("utf-8")).hexdigest()
+        return _phone_worker_tts_policy_module().standard_cache_key(
+            body, engine=normalized_engine, sanitize_key=self._sanitize_tts_cache_key,
+            normalize_rate=self._normalize_tts_edge_rate, normalize_pitch=self._normalize_tts_edge_pitch,
+            normalize_language=self._normalize_tts_gtts_language,
+            teto_fingerprint=fingerprint, teto_base_pitch=base_pitch,
+        )
 
     def _tts_agent_cache_mode_allows_read(self, body: dict[str, Any]) -> bool:
-        mode = str(body.get("cache_mode") or "prefer").strip().lower()
-        return mode not in {"0", "false", "off", "disabled", "none", "bypass", "refresh"}
+        return _phone_worker_tts_policy_module().cache_mode_allows_read(body)
 
     def _tts_agent_cache_mode_allows_store(self, body: dict[str, Any]) -> bool:
-        mode = str(body.get("cache_mode") or "prefer").strip().lower()
-        return mode not in {"0", "false", "off", "disabled", "none", "bypass", "no_store"}
+        return _phone_worker_tts_policy_module().cache_mode_allows_store(body)
 
     def _tts_agent_standard_cache_hit(self, *, key: str, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, raw_response: bool = False) -> dict[str, Any] | None:
         path, audio_format = self._find_tts_cache_file(key)
         if path is None:
             return None
         read_started = time.monotonic()
-        data = path.read_bytes()
+        data = _phone_worker_tts_cache_module().read_bytes(path, optional=True)
+        if data is None:
+            return None
         read_ms = (time.monotonic() - read_started) * 1000.0
         if not data:
             return None
@@ -5429,19 +5023,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
         if not key or not data:
             return
         path = self._tts_cache_path(key, audio_format)
-        tmp = path.with_suffix(path.suffix + f".tmp-{os.getpid()}-{threading.get_ident()}")
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_bytes(data)
-            os.replace(tmp, path)
+            _phone_worker_tts_cache_module().publish_bytes(path, data,
+                os_api=os, thread_id=threading.get_ident, create_parent=True, cleanup_errors=Exception)
             self._touch_tts_cache_file(path)
             self._schedule_tts_cache_prune(protected=path)
             logs.append(f"standard-cache store {path.name} {len(data)}B")
         except Exception as exc:
             logs.append(f"standard-cache store falhou: {type(exc).__name__}: {_short_text(exc, limit=90)}")
-        finally:
-            with contextlib.suppress(Exception):
-                tmp.unlink()
 
     def _synthesize_standard_tts_bytes(self, body: dict[str, Any], *, engine: str, roles: list[str], capabilities: list[str], logs: list[str], started: float, max_audio_bytes: int, timeout: int, raw_response: bool = False) -> dict[str, Any]:
         normalized = str(engine or "gtts").strip().lower().replace("-", "_") or "gtts"
@@ -5472,82 +5061,16 @@ class WorkerHandler(BaseHTTPRequestHandler):
         response: dict[str, Any] = {}
         teto_meta: dict[str, Any] = {}
         if engine == "teto":
-            if not _HEAVY_RESOURCE_LOCK.acquire(blocking=False):
-                raise RuntimeError("recurso pesado ocupado por build ou manutenção")
-            teto_started = time.monotonic()
-            try:
-                rendered = _get_teto_renderer().synthesize(
-                    text,
-                    timeout_seconds=float(timeout),
-                    max_audio_bytes=max_audio_bytes,
-                )
-            finally:
-                _HEAVY_RESOURCE_LOCK.release()
-            data = bytes(rendered.pop("audio", b"") or b"")
-            audio_format = self._normalize_tts_cache_format(rendered.get("audio_format") or "wav")
-            teto_meta = dict(rendered)
-            stage_ms["teto_render"] = round((time.monotonic() - teto_started) * 1000.0, 2)
-            logs.append(
-                f"teto voicebank={rendered.get('voicebank') or 'Kasane Teto'} "
-                f"rendered={rendered.get('rendered_phonemes') or 0} missing={len(rendered.get('missing_phonemes') or [])}"
-            )
+            data, audio_format, teto_meta = _phone_worker_tts_providers_module().synthesize_teto(
+                text=text, timeout=timeout, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
+                heavy_lock=_HEAVY_RESOURCE_LOCK, get_renderer=_get_teto_renderer,
+                monotonic=time.monotonic, normalize_format=self._normalize_tts_cache_format)
         elif engine == "android_native":
-            synth_timeout_ms = max(1000, min(timeout * 1000, int(float(body.get("android_timeout_ms") or os.getenv("PHONE_WORKER_ANDROID_TTS_SYNTH_TIMEOUT_MS") or timeout * 1000))))
-            android_payload = {
-                "text": text,
-                "language": str(body.get("language") or body.get("fallback_language") or "pt-BR"),
-                "locale": str(body.get("locale") or body.get("language") or body.get("fallback_language") or "pt-BR"),
-                "voice": str(body.get("voice") or ""),
-                "rate": str(body.get("rate") or "1.0"),
-                "pitch": str(body.get("pitch") or "1.0"),
-                "timeout_ms": synth_timeout_ms,
-                "max_audio_bytes": max_audio_bytes,
-            }
-            android_payload["prefer_local_voice"] = _env_bool("PHONE_WORKER_ANDROID_TTS_PREFER_LOCAL_VOICE", True)
-            android_started = time.monotonic()
-            raw_enabled = _env_bool("PHONE_WORKER_ANDROID_TTS_RAW_ENABLED", True)
-            raw_error = ""
-            response = {}
-            if raw_enabled:
-                try:
-                    data, raw_meta = _android_tts_raw_request(
-                        "/native-tts/synthesize.raw",
-                        payload=android_payload,
-                        timeout=max(1.0, min(timeout + 1.0, (synth_timeout_ms / 1000.0) + 1.0)),
-                        max_audio_bytes=max_audio_bytes,
-                    )
-                    audio_format = self._normalize_tts_cache_format(raw_meta.get("audio_format") or "wav")
-                    android_ms = (time.monotonic() - android_started) * 1000.0
-                    stage_ms["android_roundtrip"] = round(android_ms, 2)
-                    apk_ms = raw_meta.get("android_synth_ms") or ""
-                    with contextlib.suppress(Exception):
-                        stage_ms["android_synth"] = round(float(apk_ms), 2)
-                    voice_used = raw_meta.get("voice") or "auto"
-                    if raw_meta.get("sha256"):
-                        response["sha256"] = raw_meta.get("sha256")
-                    response["android_synth_ms"] = apk_ms
-                    response["voice"] = voice_used
-                    response["locale"] = raw_meta.get("locale") or android_payload["locale"]
-                    logs.append(f"android-native raw locale={response['locale']} voice={voice_used} format={audio_format} apk_ms={apk_ms or 0} roundtrip={android_ms:.1f}ms bytes={len(data)}")
-                except Exception as exc:
-                    raw_error = f"{type(exc).__name__}: {_short_text(exc, limit=110)}"
-                    data = b""
-                    logs.append(f"android-native raw indisponível; fallback json: {raw_error}")
-            if not data:
-                response = _android_tts_json_request(
-                    "/native-tts/synthesize",
-                    payload=android_payload,
-                    timeout=max(1.0, min(timeout + 1.0, (synth_timeout_ms / 1000.0) + 1.0)),
-                )
-                if response.get("ok") is False:
-                    raise RuntimeError(str(response.get("error") or "Android TTS retornou ok=false"))
-                data = _b64decode(str(response.get("data_b64") or ""), max_bytes=max_audio_bytes)
-                audio_format = self._normalize_tts_cache_format(response.get("audio_format") or "wav")
-                android_ms = (time.monotonic() - android_started) * 1000.0
-                stage_ms["android_roundtrip"] = round(android_ms, 2)
-                with contextlib.suppress(Exception):
-                    stage_ms["android_synth"] = round(float(response.get("android_synth_ms") or response.get("worker_synth_ms") or 0), 2)
-                logs.append(f"android-native json locale={android_payload['locale']} format={audio_format} apk_ms={response.get('android_synth_ms') or response.get('worker_synth_ms') or 0} roundtrip={android_ms:.1f}ms")
+            data, audio_format, response = _phone_worker_tts_android_module().synthesize(
+                body, text=text, timeout=timeout, max_audio_bytes=max_audio_bytes, logs=logs, stage_ms=stage_ms,
+                getenv=os.getenv, env_bool=_env_bool, monotonic=time.monotonic,
+                raw_request=_android_tts_raw_request, json_request=_android_tts_json_request,
+                short_text=_short_text, decode_audio=_b64decode, normalize_format=self._normalize_tts_cache_format)
         elif engine in {"edge", "gtts"} and _tts_transport_module() is not None:
             data = _tts_transport_module().synthesize_bytes(engine=engine, text=text,
                 voice=str(body.get("voice") or body.get("fallback_voice") or "pt-BR-FranciscaNeural"),
@@ -5557,35 +5080,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
                 tld=str(body.get("tld") or "com"), timeout=timeout, max_bytes=max_audio_bytes)
             logs.append(f"{engine} transporte compartilhado")
         elif engine == "edge":
-            try:
-                import edge_tts  # type: ignore
-            except Exception as exc:
-                raise RuntimeError(f"edge-tts não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
-            voice = str(body.get("voice") or body.get("fallback_voice") or "pt-BR-FranciscaNeural").strip() or "pt-BR-FranciscaNeural"
-            rate = self._normalize_tts_edge_rate(body.get("rate"))
-            pitch = self._normalize_tts_edge_pitch(body.get("pitch"))
-
-            async def _edge_bytes() -> bytes:
-                communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, pitch=pitch)
-                buffer = io.BytesIO()
-                async for chunk in communicate.stream():
-                    if chunk.get("type") == "audio" and chunk.get("data"):
-                        buffer.write(chunk["data"])
-                return buffer.getvalue()
-
-            data = asyncio.run(asyncio.wait_for(_edge_bytes(), timeout=timeout))
-            logs.append(f"edge voice={voice} rate={rate} pitch={pitch}")
+            data = _phone_worker_tts_providers_module().synthesize_edge(
+                body, text=text, timeout=timeout, logs=logs,
+                normalize_rate=self._normalize_tts_edge_rate, normalize_pitch=self._normalize_tts_edge_pitch,
+                short_text=_short_text, asyncio_api=asyncio, io_api=io)
         else:
-            try:
-                from gtts import gTTS  # type: ignore
-            except Exception as exc:
-                raise RuntimeError(f"gTTS não instalado no worker: {type(exc).__name__}: {_short_text(exc, limit=120)}") from exc
-            language = self._normalize_tts_gtts_language(body.get("language") or body.get("fallback_language"))
-            buffer = io.BytesIO()
-            tts = gTTS(text=text, lang=language, timeout=(min(3.5, timeout), min(8.0, timeout)))
-            tts.write_to_fp(buffer)
-            data = buffer.getvalue()
-            logs.append(f"gtts language={language}")
+            data = _phone_worker_tts_providers_module().synthesize_gtts(
+                body, text=text, timeout=timeout, logs=logs,
+                normalize_language=self._normalize_tts_gtts_language, short_text=_short_text, io_api=io)
         if not data:
             raise RuntimeError("engine não gerou áudio")
         if len(data) > max_audio_bytes:
@@ -5638,9 +5140,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
         max_chars = max(64, _env_int("PHONE_WORKER_TTS_AGENT_MAX_TEXT_LENGTH", 1200))
         if len(text) > max_chars:
             raise ValueError(f"texto grande demais para TTS Agent ({len(text)} > {max_chars})")
-        requested_engine = str(body.get("engine") or "gtts").strip().lower().replace("-", "_") or "gtts"
-        if requested_engine in {"kasane_teto", "teto_utau", "utau"}:
-            requested_engine = "teto"
+        requested_engine = _tts_agent_normalize_engine(body.get("engine"))
         if requested_engine == "teto":
             teto_max_chars = max(16, _env_int("PHONE_WORKER_TETO_MAX_CHARACTERS", 180))
             if len(text) > teto_max_chars:
@@ -6048,14 +5548,9 @@ class WorkerHandler(BaseHTTPRequestHandler):
             out_path = tmp_dir / "speech.mp3"
             try:
                 if engine == "android_native":
+                    # Benchmark measures the single requested engine. Fallback
+                    # substitution belongs to the agent's multi-engine path.
                     engine_body = dict(body)
-                    if engine != requested_engine:
-                        engine_body['engine'] = engine
-                        engine_body.pop('cache_key', None)
-                        for setting in ('voice', 'language', 'rate', 'pitch'):
-                            fallback_value = body.get('fallback_' + setting)
-                            if fallback_value not in (None, ''):
-                                engine_body[setting] = fallback_value
                     result = self._synthesize_standard_tts_bytes(
                         engine_body,
                         engine="android_native",
@@ -10638,10 +10133,22 @@ def _apply_apk_build_debug(payload: dict[str, Any]) -> dict[str, Any]:
 
 _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "phone_worker.py": ("worker", "phone_worker.py", 0o755),
+    "phone_worker_runtime/__init__.py": ("worker", "phone_worker_runtime/__init__.py", 0o644),
+    "phone_worker_runtime/config.py": ("worker", "phone_worker_runtime/config.py", 0o644),
+    "phone_worker_runtime/telemetry.py": ("worker", "phone_worker_runtime/telemetry.py", 0o644),
+    "phone_worker_runtime/control_plane.py": ("worker", "phone_worker_runtime/control_plane.py", 0o644),
+    "phone_worker_runtime/voice_state.py": ("worker", "phone_worker_runtime/voice_state.py", 0o644),
+    "phone_worker_runtime/tts_policy.py": ("worker", "phone_worker_runtime/tts_policy.py", 0o644),
+    "phone_worker_runtime/tts_cache.py": ("worker", "phone_worker_runtime/tts_cache.py", 0o644),
+    "phone_worker_runtime/tts_android.py": ("worker", "phone_worker_runtime/tts_android.py", 0o644),
+    "phone_worker_runtime/tts_providers.py": ("worker", "phone_worker_runtime/tts_providers.py", 0o644),
+    "phone_worker_runtime/pcm_io.py": ("worker", "phone_worker_runtime/pcm_io.py", 0o644),
     "apk_identity.py": ("worker", "apk_identity.py", 0o644),
     "tts_transport.py": ("worker", "tts_transport.py", 0o644),
     "phone_worker_bootstrap.py": ("worker", "phone_worker_bootstrap.py", 0o755),
     "music_agent.py": ("worker", "music_agent.py", 0o755),
+    "music_agent_runtime/__init__.py": ("worker", "music_agent_runtime/__init__.py", 0o644),
+    "music_agent_runtime/lifecycle.py": ("worker", "music_agent_runtime/lifecycle.py", 0o644),
     "start-phone-worker.sh": ("worker", "start-phone-worker.sh", 0o755),
     "start-phone-music-agent.sh": ("worker", "start-phone-music-agent.sh", 0o755),
     "watch-phone-worker.sh": ("worker", "watch-phone-worker.sh", 0o755),
@@ -11051,13 +10558,20 @@ def _assist_readiness_snapshot(payload: dict[str, Any] | None = None) -> dict[st
     battery = _safe_telemetry("battery", _battery_snapshot, _empty_battery_snapshot())
     network = _safe_telemetry("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"})
     system = _safe_telemetry("system", _system_status, {"ok": False})
+    battery_values = battery if isinstance(battery, dict) else {}
     level = None
-    charging = False
+    raw_level = battery_values.get("level")
+    if raw_level is None:
+        raw_level = battery_values.get("percent")
     try:
-        level = float((battery or {}).get("level") or (battery or {}).get("percent"))
-        charging = str((battery or {}).get("status") or "").lower() in {"charging", "full"} or bool((battery or {}).get("plugged"))
-    except Exception:
-        level = None
+        level = float(raw_level)
+    except (TypeError, ValueError):
+        pass
+    charging = battery_values.get("charging")
+    if not isinstance(charging, bool):
+        status = str(battery_values.get("status") or "").strip().lower()
+        plugged = str(battery_values.get("plugged") or "").strip().lower()
+        charging = status in {"charging", "full"} if status else plugged not in {"", "unplugged", "none", "unknown", "battery"}
     heavy_ok = True
     reasons: list[str] = []
     if level is not None and level < float(payload.get("min_battery_for_heavy") or 25) and not charging:
@@ -11353,6 +10867,9 @@ def _start_core_worker_jobs(*, host: str, port: int, max_body_bytes: int, max_ou
     print(f"[core-worker-jobs] polling ativo; intervalo={int(interval)}s", flush=True)
 
 def main() -> int:
+    # Importing the facade must not read private configuration or create tokens.
+    # Keep the original precedence when starting the physical worker process.
+    _load_phone_worker_runtime_env()
     _load_env_file()
     _load_persisted_pending_core_job_results()
     parser = argparse.ArgumentParser(description="Worker auxiliar do celular para tarefas opcionais da VPS.")
@@ -11391,6 +10908,18 @@ def main() -> int:
             timeout=10.0,
         )
         return 0 if result.get("ok") else 1
+    # Load the small pure policy before jobs/HTTP so the first synthesis does
+    # not pay source-file IO. Missing modules must not block recovery startup.
+    with contextlib.suppress(Exception):
+        _phone_worker_tts_policy_module()
+    with contextlib.suppress(Exception):
+        _phone_worker_tts_cache_module()
+    with contextlib.suppress(Exception):
+        _phone_worker_tts_android_module()
+    with contextlib.suppress(Exception):
+        _phone_worker_tts_providers_module()
+    with contextlib.suppress(Exception):
+        _phone_worker_pcm_io_module()
     if args.heartbeat_once:
         ok = _send_core_worker_heartbeat_once(host=args.host, port=args.port, timeout=8.0)
         return 0 if ok else 1

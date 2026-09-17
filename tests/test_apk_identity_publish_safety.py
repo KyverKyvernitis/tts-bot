@@ -300,7 +300,7 @@ def test_termux_artifact_metadata_is_rebuilt_from_apk_identity(tmp_path: Path) -
     assert metadata["sha256"] == module._sha256_path(apk)
 
 
-def test_automation_does_not_treat_fake_latest_version_as_published(tmp_path: Path) -> None:
+def test_automation_does_not_treat_fake_latest_version_as_published(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = Path(__file__).resolve().parents[1]
     automation_path = root / "scripts/core-worker-automation.py"
     spec = importlib.util.spec_from_file_location("core_worker_automation_identity_test", automation_path)
@@ -309,6 +309,7 @@ def test_automation_does_not_treat_fake_latest_version_as_published(tmp_path: Pa
     spec.loader.exec_module(module)
 
     release_dir = tmp_path / "android/core-worker-app/releases"
+    monkeypatch.setenv("CORE_WORKER_APK_DIR", str(release_dir))
     release_dir.mkdir(parents=True)
     apk = _write_apk(release_dir / "CoreWorker-v0.7.4-debug.apk", version_name="0.7.3", version_code=121)
     actual_sha = module._sha256_file(apk)

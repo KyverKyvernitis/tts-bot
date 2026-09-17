@@ -13,11 +13,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
@@ -271,15 +266,10 @@ public final class CoreWorkerNativeExecutor {
             return out;
         }
 
-        ExecutorService executor = Executors.newSingleThreadExecutor();
-        Future<String> future = executor.submit(new Callable<String>() {
-            @Override
-            public String call() {
-                return nativeRun(command, argument == null ? "" : argument, workDir == null ? "" : workDir.getAbsolutePath());
-            }
-        });
         try {
-            String raw = future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            String raw = CoreWorkerNativeCalls.call(
+                    () -> nativeRun(command, argument == null ? "" : argument,
+                            workDir == null ? "" : workDir.getAbsolutePath()), timeoutMs);
             JSONObject nativeResult = new JSONObject(raw == null || raw.trim().isEmpty() ? "{}" : raw);
             out.put("ok", nativeResult.optBoolean("ok", false));
             out.put("exitCode", nativeResult.optInt("exitCode", nativeResult.optBoolean("ok", false) ? 0 : 1));
@@ -287,21 +277,22 @@ public final class CoreWorkerNativeExecutor {
             out.put("stdout", sanitize(nativeResult.optString("stdout", ""), OUTPUT_LIMIT));
             out.put("stderr", sanitize(nativeResult.optString("stderr", ""), OUTPUT_LIMIT));
             out.put("native", nativeResult);
+        } catch (java.util.concurrent.RejectedExecutionException busy) {
+            out.put("ok", false).put("exitCode", 75).put("summary", "executor JNI ocupado")
+                    .put("stdout", "").put("stderr", "aguarde a chamada JNI atual");
         } catch (TimeoutException exc) {
-            future.cancel(true);
             out.put("ok", false);
             out.put("exitCode", -1);
             out.put("summary", "timeout no comando allowlist JNI");
             out.put("stdout", "");
             out.put("stderr", "timeout após " + timeoutMs + "ms");
         } catch (Throwable exc) {
+            if (exc instanceof InterruptedException) Thread.currentThread().interrupt();
             out.put("ok", false);
             out.put("exitCode", -1);
             out.put("summary", "falha no comando allowlist JNI: " + shortThrowable(exc));
             out.put("stdout", "");
             out.put("stderr", shortThrowable(exc));
-        } finally {
-            executor.shutdownNow();
         }
         out.put("durationMs", System.currentTimeMillis() - started);
         return out;

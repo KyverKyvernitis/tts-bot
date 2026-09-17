@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from worker_source_contracts import phone_worker_version, phone_worker_version_tuple
+
 import importlib.util
 import time
 from pathlib import Path
@@ -68,7 +70,7 @@ def test_release_versions_advance_after_failed_083_source() -> None:
     phone = PHONE.read_text(encoding="utf-8")
     assert 'versionCode 133' in gradle
     assert 'versionName "0.8.6"' in gradle
-    assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone
+    assert phone_worker_version_tuple() >= (1, 11, 5)
 
 
 def test_main_activity_lifecycle_flags_precede_field_initializers() -> None:

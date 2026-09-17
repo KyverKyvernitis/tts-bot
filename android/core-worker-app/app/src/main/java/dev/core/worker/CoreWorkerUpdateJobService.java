@@ -60,47 +60,77 @@ public class CoreWorkerUpdateJobService extends JobService {
         }
     }
 
+    private final Object cycleLock = new Object();
+    private long cycleGeneration;
+    private Thread cycleThread;
+    private JobParameters cycleParams;
+
     @Override
     public boolean onStartJob(JobParameters params) {
-        try {
-            new Thread(() -> {
-                try {
-                    runUpdateCheck(params);
-                } catch (Throwable ignored) {
-                } finally {
-                    try {
-                        jobFinished(params, false);
-                    } catch (Throwable ignored) {
+        synchronized (cycleLock) {
+            if (cycleThread != null) cycleThread.interrupt();
+            final long generation = ++cycleGeneration;
+            cycleParams = params;
+            try {
+                cycleThread = new Thread(() -> {
+                    try { runUpdateCheck(params, generation); }
+                    catch (Throwable ignored) { }
+                    finally {
+                        synchronized (cycleLock) {
+                            if (generation == cycleGeneration && cycleParams == params) {
+                                cycleThread = null;
+                                cycleParams = null;
+                                jobFinished(params, false);
+                            }
+                        }
                     }
-                }
-            }).start();
-            return true;
-        } catch (Throwable ignored) {
-            return false;
+                }, "core-worker-update-check");
+                cycleThread.setDaemon(true);
+                cycleThread.start();
+                return true;
+            } catch (Throwable ignored) {
+                ++cycleGeneration;
+                cycleThread = null;
+                cycleParams = null;
+                return false;
+            }
         }
     }
 
     @Override
     public boolean onStopJob(JobParameters params) {
+        synchronized (cycleLock) {
+            if (cycleParams == params) {
+                ++cycleGeneration;
+                cycleParams = null;
+                if (cycleThread != null) cycleThread.interrupt();
+                cycleThread = null;
+            }
+        }
         return true;
     }
 
-    private void runUpdateCheck(JobParameters params) {
-        String serverUrl = normalizedServerUrl(this);
-        if (serverUrl.isEmpty()) {
-            return;
+    private boolean isCurrentCycle(long generation) {
+        synchronized (cycleLock) {
+            return generation == cycleGeneration && !Thread.currentThread().isInterrupted();
         }
+    }
+
+    private void runUpdateCheck(JobParameters params, long generation) {
+        String serverUrl = normalizedServerUrl(this);
+        if (serverUrl.isEmpty() || !isCurrentCycle(generation)) return;
         try {
             String reason = params == null || params.getExtras() == null
                     ? "scheduled"
                     : params.getExtras().getString("reason", "scheduled");
-            if (CoreWorkerRuntimeService.shouldRunAgent(this)) {
-                // ACTION_POLL_NOW também sobe o foreground service caso ele tenha sido morto.
-                CoreWorkerRuntimeService.requestPoll(this, "job_scheduler:" + reason);
+            synchronized (cycleLock) {
+                if (!isCurrentCycle(generation)) return;
+                if (CoreWorkerRuntimeService.shouldRunAgent(this)) {
+                    CoreWorkerRuntimeService.requestPoll(this, "job_scheduler:" + reason);
+                }
             }
-            reportRuntimeHeartbeat(serverUrl, reason);
             JSONObject manifest = fetchLatestManifest(serverUrl);
-            if (manifest == null) {
+            if (manifest == null || !isCurrentCycle(generation)) {
                 return;
             }
             String versionName = manifest.optString("versionName", manifest.optString("version", ""));
@@ -115,18 +145,20 @@ public class CoreWorkerUpdateJobService extends JobService {
             if (!available || !requested) {
                 return;
             }
+            synchronized (cycleLock) {
+            if (!isCurrentCycle(generation)) return;
             String already = prefs().getString("last_update_notification", "");
             if (notificationId.equals(already)) {
-                report(serverUrl, notificationId, "background_duplicate", true, versionName, versionCode, "checagem em segundo plano: notificação já registrada");
+                report(generation, serverUrl, notificationId, "background_duplicate", true, versionName, versionCode, "checagem em segundo plano: notificação já registrada");
                 return;
             }
             if (!hasNotificationPermission()) {
-                report(serverUrl, notificationId, "background_permission_missing", false, versionName, versionCode, "Android não liberou POST_NOTIFICATIONS para notificar com app fechado");
+                report(generation, serverUrl, notificationId, "background_permission_missing", false, versionName, versionCode, "Android não liberou POST_NOTIFICATIONS para notificar com app fechado");
                 return;
             }
             NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             if (manager == null) {
-                report(serverUrl, notificationId, "background_failed", false, versionName, versionCode, "NotificationManager indisponível");
+                report(generation, serverUrl, notificationId, "background_failed", false, versionName, versionCode, "NotificationManager indisponível");
                 return;
             }
             if (Build.VERSION.SDK_INT >= 26) {
@@ -150,7 +182,8 @@ public class CoreWorkerUpdateJobService extends JobService {
                     .setAutoCancel(true);
             manager.notify(NOTIFICATION_ID, builder.build());
             prefs().edit().putString("last_update_notification", notificationId).apply();
-            report(serverUrl, notificationId, "background_displayed", true, versionName, versionCode, "notificação criada por checagem periódica com app fechado");
+            report(generation, serverUrl, notificationId, "background_displayed", true, versionName, versionCode, "notificação criada por checagem periódica com app fechado");
+            }
         } catch (Throwable ignored) {
         }
     }
@@ -173,15 +206,6 @@ public class CoreWorkerUpdateJobService extends JobService {
 
 
 
-    private void reportRuntimeHeartbeat(String serverUrl, String reason) {
-        if (!CoreWorkerRuntimeService.shouldRunAgent(this)) return;
-        String trigger = "job_scheduler:" + (reason == null ? "scheduled" : reason);
-        CoreWorkerRuntimeService.requestStart(this, trigger);
-        CoreWorkerRuntimeService.requestPoll(this, trigger);
-    }
-
-
-
     private JSONObject fetchLatestManifest(String serverUrl) throws Exception {
         String[] paths = new String[]{"/core-worker/app/latest.json", "/core-worker/latest.json"};
         for (String path : paths) {
@@ -193,7 +217,9 @@ public class CoreWorkerUpdateJobService extends JobService {
         return null;
     }
 
-    private void report(String serverUrl, String notificationId, String state, boolean delivered, String versionName, int versionCode, String detail) {
+    private void report(long generation, String serverUrl, String notificationId, String state, boolean delivered, String versionName, int versionCode, String detail) {
+        CoreWorkerBackgroundIo.report(() -> {
+        if (!isCurrentCycle(generation)) return;
         try {
             JSONObject payload = new JSONObject();
             payload.put("notificationId", notificationId == null ? "" : notificationId);
@@ -210,6 +236,7 @@ public class CoreWorkerUpdateJobService extends JobService {
             request("POST", serverUrl + "/core-worker/app/notification", payload);
         } catch (Throwable ignored) {
         }
+        });
     }
 
     private boolean hasNotificationPermission() {
@@ -217,12 +244,7 @@ public class CoreWorkerUpdateJobService extends JobService {
     }
 
     private String installId() {
-        String id = prefs().getString("install_id", "");
-        if (id == null || id.trim().isEmpty()) {
-            id = UUID.randomUUID().toString();
-            prefs().edit().putString("install_id", id).apply();
-        }
-        return id;
+        return CoreWorkerRuntimeIdentity.installId(prefs());
     }
 
     private SharedPreferences prefs() {
@@ -248,44 +270,13 @@ public class CoreWorkerUpdateJobService extends JobService {
     }
 
     private HttpResult request(String method, String url, JSONObject payload, String token) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestMethod(method);
-        conn.setConnectTimeout(7000);
-        conn.setReadTimeout(9000);
-        conn.setRequestProperty("Accept", "application/json");
-        if (token != null && !token.trim().isEmpty()) {
-            conn.setRequestProperty("Authorization", "Bearer " + token.trim());
-        }
-        if (payload != null) {
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            OutputStream output = conn.getOutputStream();
-            output.write(payload.toString().getBytes(StandardCharsets.UTF_8));
-            output.flush();
-            output.close();
-        }
-        int status = conn.getResponseCode();
-        InputStream input = status >= 200 && status < 400 ? conn.getInputStream() : conn.getErrorStream();
-        String body = readAll(input);
-        conn.disconnect();
-        return new HttpResult(status, body == null ? "" : body);
+        CoreWorkerHttpTransport.Result result = CoreWorkerHttpTransport.request(
+                method, url, payload == null ? null : payload.toString(), token, 7000, 9000);
+        return new HttpResult(result.status, result.body);
     }
 
     private String readAll(InputStream input) throws Exception {
-        if (input == null) {
-            return "";
-        }
-        BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
-        StringBuilder builder = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) {
-            if (builder.length() > 0) {
-                builder.append('\n');
-            }
-            builder.append(line);
-        }
-        reader.close();
-        return builder.toString();
+        return CoreWorkerHttpTransport.readBounded(input, CoreWorkerHttpTransport.MAX_RESPONSE_BYTES);
     }
 
     private static final class HttpResult {

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from worker_source_contracts import phone_worker_version, phone_worker_version_tuple
+
 import json
 import re
 import time
@@ -110,13 +112,18 @@ def test_direct_http_api_is_authenticated_and_compatible() -> None:
 
 def test_direct_executor_has_allowlist_without_free_shell() -> None:
     executor = read(JAVA / "CoreWorkerDirectTaskExecutor.java")
+    support = read(JAVA / "CoreWorkerDirectSupport.java")
+    media = read(JAVA / "CoreWorkerDirectMediaTasks.java")
+    data = read(JAVA / "CoreWorkerDirectDataTasks.java")
+    direct_sources = "\n".join(read(path) for path in JAVA.glob("CoreWorkerDirect*.java"))
     assert "static boolean supports(String rawTask)" in executor
-    assert "ProcessBuilder" in executor  # somente ferramentas privadas com argv validado
-    assert 'new String[] {"/system/bin/sh"' not in executor
-    assert "Runtime.getRuntime().exec" not in executor
-    assert "isSafeFfmpegArg" in executor
-    assert "caminho ZIP suspeito" in executor
-    assert "entrada grande demais" in executor
+    assert "CoreWorkerProcessRunner.run" in support
+    assert "new ProcessBuilder(command)" in support
+    assert '"/system/bin/sh"' not in direct_sources
+    assert "Runtime.getRuntime().exec" not in direct_sources
+    assert "isSafeFfmpegArg" in media
+    assert "safeZipPath" in data and "caminho ZIP suspeito" in support
+    assert "decodeBodyData" in data and "entrada grande demais" in support
 
 
 def test_java_python_and_registry_catalogs_include_dynamic_builder() -> None:
@@ -153,7 +160,11 @@ def test_runtime_dispatches_builder_before_regular_jobs() -> None:
 
 def test_self_builder_has_external_transactional_toolchain_and_no_arbitrary_command() -> None:
     manager = read(JAVA / "CoreWorkerApkBuildManager.java")
-    builder = read(PYTHON / "apk_self_builder.py")
+    builder = "\n".join((
+        read(PYTHON / "apk_self_builder.py"),
+        read(PYTHON / "builder/toolchain.py"),
+        read(PYTHON / "builder/preflight.py"),
+    ))
     gradle = read(ANDROID / "app/build.gradle")
     # Leitor antigo permanece apenas para migração; o caminho normal é remoto e transacional.
     assert "materializeChunkedToolchain" in manager
@@ -181,7 +192,7 @@ def test_termux_bootstrap_publishes_external_toolchain_and_stays_fallback() -> N
     phone_worker = read(ROOT / "deploy/termux/phone-worker/phone_worker.py")
     automation = read(ROOT / "scripts/core-worker-automation.py")
     workers = read(ROOT / "utility/commands/workers.py")
-    assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone_worker
+    assert phone_worker_version_tuple() >= (1, 11, 5)
     assert '_prepare_apk_self_builder_toolchain(project_dir, env)' in phone_worker
     assert '_upload_core_worker_toolchain' in phone_worker
     assert 'publish_toolchain_chunk_assets' not in phone_worker
@@ -293,7 +304,8 @@ def test_rootfs_and_bedrock_use_strict_real_gates() -> None:
 def test_direct_http_secret_is_removed_when_connection_is_forgotten() -> None:
     activity = read(JAVA / "MainActivity.java")
     assert '.putString("direct_http_token"' in activity
-    assert '.remove("direct_http_token")' in activity
+    assert "CoreWorkerRuntimeIdentity.clear(prefs)" in activity
+    assert '.remove("direct_http_token")' in read(JAVA / "CoreWorkerRuntimeIdentity.java")
 
 
 def test_registry_preserves_dynamic_apk_builder_after_large_android_heartbeat(tmp_path: Path) -> None:

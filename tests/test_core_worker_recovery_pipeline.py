@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from worker_source_contracts import phone_worker_version, phone_worker_version_tuple
+
 import base64
 import hashlib
 import importlib.util
@@ -148,7 +150,12 @@ def test_01_apk_health_on_8766_is_not_accepted_as_termux(tmp_path: Path):
         proc = subprocess.run(["bash", str(PHONE / "start-phone-worker.sh")], env=_start_script_env(tmp_path), text=True, capture_output=True, timeout=8)
         assert proc.returncode == 1
         assert "iniciado e validado" not in proc.stdout
-        assert "identidade/control-plane não foram confirmados" in proc.stdout
+        # Rejection can happen at PID verification or at control-plane identity.
+        # The existing APK listener must remain alive and must never validate Termux.
+        assert server.fileno() >= 0
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:8766/health", timeout=2) as response:
+            assert json.load(response)["runtime_kind"] == "apk"
     finally:
         pid_file = worker_dir / "phone-worker.pid"
         if pid_file.exists():
@@ -230,7 +237,7 @@ def test_05_offline_device_target_is_published_persistently(tmp_path: Path, monk
     result = module.queue_agent_updates()
     latest = json.loads((tmp_path / "agent/latest.json").read_text(encoding="utf-8"))
     assert result["pending"] is True
-    assert latest["version"] == "1.11.5"
+    assert latest["version"] == phone_worker_version()
     assert (tmp_path / "agent/releases" / f"{latest['source_hash']}.zip").is_file()
 
 
@@ -488,9 +495,12 @@ def test_25_valid_toolchain_runs_five_required_smokes(tmp_path: Path, monkeypatc
 
 def test_26_validated_toolchain_is_retained_between_updates():
     manager = text(JAVA / "CoreWorkerApkBuildManager.java")
+    filesystem = text(JAVA / "CoreWorkerApkToolchainFilesystem.java")
     assert 'File previous = new File(builder, "toolchain-previous")' in manager
-    assert "apk_self_builder_known_good_toolchain_fingerprint" in manager
-    assert "apk_self_builder_previous_toolchain_fingerprint" in manager
+    assert "CoreWorkerApkToolchainFilesystem.confirm(builder, prefs)" in manager
+    assert "CoreWorkerApkToolchainFilesystem.rollback(builder, prefs," in manager
+    assert "apk_self_builder_known_good_toolchain_fingerprint" in filesystem
+    assert "apk_self_builder_previous_toolchain_fingerprint" in filesystem
     assert "archivePart.delete()" in manager
 
 

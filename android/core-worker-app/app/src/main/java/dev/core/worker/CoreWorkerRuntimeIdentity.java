@@ -5,6 +5,10 @@ import android.content.SharedPreferences;
 
 import org.json.JSONObject;
 
+import java.util.Locale;
+import java.util.UUID;
+import java.util.WeakHashMap;
+
 /**
  * Mantém identidades separadas para o celular físico e para o runtime APK.
  *
@@ -15,6 +19,11 @@ import org.json.JSONObject;
  * continuam usando o próprio ID sem sufixo.
  */
 final class CoreWorkerRuntimeIdentity {
+    // Pairing, clear, migration and heartbeat completion share this lock.
+    static final Object LOCK = new Object();
+    private static long generation;
+    private static final WeakHashMap<SharedPreferences, String> pendingInstallIds = new WeakHashMap<>();
+    private static final WeakHashMap<SharedPreferences, Boolean> pendingMigrations = new WeakHashMap<>();
     private static final String PREFS = "core_worker_private";
     private static final int TERMUX_PORT = 8766;
     private static final int APK_BOOTSTRAP_PORT = 8767;
@@ -25,69 +34,140 @@ final class CoreWorkerRuntimeIdentity {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
+    static String installId(SharedPreferences prefs) {
+        synchronized (LOCK) {
+            String pending = pendingInstallIds.get(prefs);
+            String value = pending == null ? prefs.getString("install_id", "") : pending;
+            if (value != null && !value.trim().isEmpty() && pending == null) return value;
+            if (value == null || value.trim().isEmpty()) value = UUID.randomUUID().toString();
+            pendingInstallIds.put(prefs, value);
+            requireCommit(prefs.edit().putString("install_id", value));
+            pendingInstallIds.remove(prefs);
+            return value;
+        }
+    }
+
+    static void requireCommit(SharedPreferences.Editor editor) {
+        if (!editor.commit()) throw new IllegalStateException("falha ao persistir estado do Core Worker");
+    }
+
+    static long generation() {
+        synchronized (LOCK) { return generation; }
+    }
+
+    static boolean isCurrent(SharedPreferences prefs, long expected, String token, String runtime) {
+        synchronized (LOCK) {
+            return expected == generation && prefs.getBoolean("agent_enabled", false)
+                    && token != null && !token.isEmpty()
+                    && token.equals(prefs.getString("worker_token", ""))
+                    && runtime.equals(runtimeWorkerId(prefs));
+        }
+    }
+
     static void migrate(Context context) {
         if (context == null) return;
-        SharedPreferences prefs = prefs(context);
-        String canonical = canonicalWorkerId(prefs);
-        if (canonical.isEmpty()) return;
-        String runtime = runtimeWorkerId(prefs);
-        boolean sharedBootstrap = !runtime.equals(canonical);
-        SharedPreferences.Editor editor = prefs.edit()
-                .putString("runtime_worker_id", runtime)
-                .putString("physical_worker_id", canonical)
-                .putString("runtime_kind", "apk")
-                .putBoolean("bootstrap_shared_worker_identity", sharedBootstrap);
-        if (sharedBootstrap) {
-            editor.putString("parent_worker_id", canonical);
-            if (!prefs.getBoolean("direct_http_port_migrated_v072", false)
-                    || prefs.getInt("direct_http_port", TERMUX_PORT) == TERMUX_PORT) {
-                editor.putInt("direct_http_port", APK_BOOTSTRAP_PORT);
-            }
-        } else {
-            editor.remove("parent_worker_id");
-            if (!prefs.contains("direct_http_port")) editor.putInt("direct_http_port", TERMUX_PORT);
+        synchronized (LOCK) {
+            SharedPreferences prefs = prefs(context);
+            String canonical = canonicalWorkerId(prefs);
+            if (canonical.isEmpty()) return;
+            String runtime = runtimeWorkerId(prefs);
+            boolean sharedBootstrap = !runtime.equals(canonical);
+            int oldPort = prefs.getInt("direct_http_port", TERMUX_PORT);
+            int port = sharedBootstrap && (!prefs.getBoolean("direct_http_port_migrated_v072", false)
+                    || oldPort == TERMUX_PORT) ? APK_BOOTSTRAP_PORT : oldPort;
+            if (!pendingMigrations.containsKey(prefs) && runtime.equals(prefs.getString("runtime_worker_id", ""))
+                    && canonical.equals(prefs.getString("physical_worker_id", ""))
+                    && "apk".equals(prefs.getString("runtime_kind", ""))
+                    && prefs.getBoolean("bootstrap_shared_worker_identity", false) == sharedBootstrap
+                    && prefs.getBoolean("direct_http_port_migrated_v072", false)
+                    && prefs.contains("direct_http_port") && oldPort == port
+                    && (sharedBootstrap ? canonical.equals(prefs.getString("parent_worker_id", ""))
+                                        : !prefs.contains("parent_worker_id"))) return;
+            SharedPreferences.Editor editor = prefs.edit()
+                    .putString("runtime_worker_id", runtime)
+                    .putString("physical_worker_id", canonical)
+                    .putString("runtime_kind", "apk")
+                    .putBoolean("bootstrap_shared_worker_identity", sharedBootstrap)
+                    .putInt("direct_http_port", port)
+                    .putBoolean("direct_http_port_migrated_v072", true);
+            if (sharedBootstrap) editor.putString("parent_worker_id", canonical);
+            else editor.remove("parent_worker_id");
+            pendingMigrations.put(prefs, true);
+            requireCommit(editor);
+            pendingMigrations.remove(prefs);
         }
-        editor.putBoolean("direct_http_port_migrated_v072", true).apply();
     }
 
-    static void markChildApkPair(SharedPreferences prefs, String parentWorkerId) {
-        if (prefs == null) return;
-        String parent = safeId(parentWorkerId);
-        String child = apkChildId(parent);
-        prefs.edit()
-                .putString("pairing_owner", "parent-child")
-                .putString("runtime_worker_id", child)
-                .putString("physical_worker_id", parent)
-                .putString("parent_worker_id", parent)
-                .putBoolean("bootstrap_shared_worker_identity", true)
-                .putInt("direct_http_port", APK_BOOTSTRAP_PORT)
-                .putBoolean("direct_http_port_migrated_v072", true)
-                .apply();
+    static void markChildApkPair(SharedPreferences prefs, SharedPreferences.Editor editor, String parentWorkerId) {
+        synchronized (LOCK) {
+            String parent = safeId(parentWorkerId);
+            if (parent.isEmpty()) throw new IllegalArgumentException("parent vazio");
+            commitPair(prefs, editor.putString("pairing_owner", "parent-child")
+                    .putString("runtime_worker_id", apkChildId(parent))
+                    .putString("physical_worker_id", parent)
+                    .putString("parent_worker_id", parent)
+                    .putString("runtime_kind", "apk")
+                    .putBoolean("bootstrap_shared_worker_identity", true)
+                    .putInt("direct_http_port", APK_BOOTSTRAP_PORT)
+                    .putBoolean("direct_http_port_migrated_v072", true));
+        }
     }
 
-    static void markDedicatedApkPair(SharedPreferences prefs, String workerId) {
-        if (prefs == null) return;
-        String safe = safeId(workerId);
-        prefs.edit()
-                .putString("pairing_owner", "apk")
-                .putString("runtime_worker_id", safe)
-                .putString("physical_worker_id", safe)
-                .remove("parent_worker_id")
-                .putBoolean("bootstrap_shared_worker_identity", false)
-                .putInt("direct_http_port", TERMUX_PORT)
-                .putBoolean("direct_http_port_migrated_v072", true)
-                .apply();
+    static void markDedicatedApkPair(SharedPreferences prefs, SharedPreferences.Editor editor, String workerId) {
+        synchronized (LOCK) {
+            String safe = safeId(workerId);
+            if (safe.isEmpty()) throw new IllegalArgumentException("worker vazio");
+            commitPair(prefs, editor.putString("pairing_owner", "apk")
+                    .putString("runtime_worker_id", safe)
+                    .putString("physical_worker_id", safe)
+                    .putString("runtime_kind", "apk")
+                    .remove("parent_worker_id")
+                    .putBoolean("bootstrap_shared_worker_identity", false)
+                    .putInt("direct_http_port", TERMUX_PORT)
+                    .putBoolean("direct_http_port_migrated_v072", true));
+        }
     }
 
-    static void clear(SharedPreferences.Editor editor) {
-        if (editor == null) return;
-        editor.remove("pairing_owner")
-                .remove("runtime_worker_id")
-                .remove("physical_worker_id")
-                .remove("parent_worker_id")
-                .remove("runtime_kind")
-                .remove("bootstrap_shared_worker_identity")
-                .remove("direct_http_port_migrated_v072");
+    private static void commitPair(SharedPreferences prefs, SharedPreferences.Editor editor) {
+        generation++;
+        try {
+            requireCommit(editor);
+        } catch (RuntimeException error) {
+            // SharedPreferences can update memory even if its disk write fails.
+            // Never leave that unconfirmed credential usable by the agent.
+            clearEditor(prefs.edit()).commit();
+            throw error;
+        }
+    }
+
+    static void clear(SharedPreferences prefs) {
+        synchronized (LOCK) {
+            generation++;
+            requireCommit(clearEditor(prefs.edit()));
+        }
+    }
+
+    static void stopAgent(SharedPreferences prefs, SharedPreferences.Editor editor) {
+        synchronized (LOCK) {
+            generation++;
+            requireCommit(editor.putBoolean("agent_enabled", false));
+        }
+    }
+
+    private static SharedPreferences.Editor clearEditor(SharedPreferences.Editor editor) {
+        return editor.putBoolean("agent_enabled", false)
+                .putBoolean("foreground_runtime_active", false)
+                .putBoolean("job_executor_ready", false)
+                .remove("worker_token").remove("direct_http_token")
+                .remove("server_url").remove("profile")
+                .remove("paired_via_local_agent").remove("paired_via_native_apk")
+                .remove("auto_enrolled_apk").remove("auto_enrollment_state")
+                .remove("auto_enrollment_challenge").remove("auto_enrollment_challenge_created_at")
+                .remove("legacy_termux_online").remove("native_worker_id").remove("worker_id")
+                .remove("pairing_owner").remove("runtime_worker_id")
+                .remove("physical_worker_id").remove("parent_worker_id")
+                .remove("runtime_kind").remove("bootstrap_shared_worker_identity")
+                .remove("direct_http_effective_port").remove("direct_http_port_migrated_v072");
     }
 
     static String canonicalWorkerId(Context context) {
@@ -170,7 +250,7 @@ final class CoreWorkerRuntimeIdentity {
     }
 
     private static boolean isDedicatedApkPair(SharedPreferences prefs, String canonical) {
-        String owner = String.valueOf(prefs.getString("pairing_owner", "")).trim().toLowerCase();
+        String owner = String.valueOf(prefs.getString("pairing_owner", "")).trim().toLowerCase(Locale.ROOT);
         return "apk".equals(owner) || canonical.startsWith("apk-");
     }
 
@@ -182,7 +262,7 @@ final class CoreWorkerRuntimeIdentity {
     }
 
     private static String safeId(String value) {
-        String clean = value == null ? "" : value.trim().toLowerCase();
+        String clean = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
         clean = clean.replaceAll("[^a-z0-9_.:-]+", "-").replaceAll("^[-._:]+|[-._:]+$", "");
         return clean.length() <= 64 ? clean : clean.substring(0, 64);
     }

@@ -39,6 +39,7 @@ final class CoreWorkerAutoEnrollment {
     }
 
     static JSONObject status(Context context) throws Exception {
+        synchronized (CoreWorkerRuntimeIdentity.LOCK) {
         SharedPreferences prefs = prefs(context);
         JSONObject out = new JSONObject();
         out.put("ok", true);
@@ -69,9 +70,11 @@ final class CoreWorkerAutoEnrollment {
         out.put("worker_id", childId(BuildConfig.CORE_WORKER_PARENT_WORKER_ID));
         out.put("challenge", challenge);
         return out;
+        }
     }
 
     static JSONObject complete(Context context, JSONObject payload) throws Exception {
+        synchronized (CoreWorkerRuntimeIdentity.LOCK) {
         SharedPreferences prefs = prefs(context);
         if (!supported()) throw new IllegalStateException("auto-enrollment não habilitado neste APK");
         String expectedChallenge = challenge(prefs);
@@ -100,7 +103,7 @@ final class CoreWorkerAutoEnrollment {
             throw new SecurityException("URL da VPS inválida");
         }
 
-        prefs.edit()
+        SharedPreferences.Editor editor = prefs.edit()
                 .putString("server_url", serverUrl)
                 .putString("worker_id", expectedParent)
                 .putString("native_worker_id", expectedParent)
@@ -112,9 +115,8 @@ final class CoreWorkerAutoEnrollment {
                 .putString("auto_enrollment_state", "paired")
                 .putString("auto_enrollment_install_id", installId(prefs))
                 .remove("auto_enrollment_challenge")
-                .remove("auto_enrollment_challenge_created_at")
-                .apply();
-        CoreWorkerRuntimeIdentity.markChildApkPair(prefs, expectedParent);
+                .remove("auto_enrollment_challenge_created_at");
+        CoreWorkerRuntimeIdentity.markChildApkPair(prefs, editor, expectedParent);
         CoreWorkerApkBuildManager.refreshAsync(context.getApplicationContext());
         CoreWorkerRuntimeService.requestStart(context, "auto_enrollment_success");
         CoreWorkerRuntimeService.requestPoll(context, "auto_enrollment_success");
@@ -124,6 +126,7 @@ final class CoreWorkerAutoEnrollment {
                 .put("state", "paired")
                 .put("worker_id", workerId)
                 .put("parent_worker_id", expectedParent);
+        }
     }
 
     private static SharedPreferences prefs(Context context) {
@@ -131,11 +134,7 @@ final class CoreWorkerAutoEnrollment {
     }
 
     private static String installId(SharedPreferences prefs) {
-        String value = safe(prefs.getString("install_id", ""));
-        if (!value.isEmpty()) return value;
-        value = UUID.randomUUID().toString();
-        prefs.edit().putString("install_id", value).apply();
-        return value;
+        return CoreWorkerRuntimeIdentity.installId(prefs);
     }
 
     private static String challenge(SharedPreferences prefs) {
@@ -151,11 +150,15 @@ final class CoreWorkerAutoEnrollment {
         byte[] bytes = new byte[32];
         RANDOM.nextBytes(bytes);
         String value = Base64.encodeToString(bytes, Base64.NO_WRAP | Base64.URL_SAFE).replace("=", "");
-        prefs.edit()
+        try {
+        CoreWorkerRuntimeIdentity.requireCommit(prefs.edit()
                 .putString("auto_enrollment_challenge", value)
                 .putLong("auto_enrollment_challenge_created_at", System.currentTimeMillis())
-                .putString("auto_enrollment_state", "waiting_parent")
-                .apply();
+                .putString("auto_enrollment_state", "waiting_parent"));
+        } catch (RuntimeException error) {
+            prefs.edit().remove("auto_enrollment_challenge").remove("auto_enrollment_challenge_created_at").commit();
+            throw error;
+        }
         return value;
     }
 

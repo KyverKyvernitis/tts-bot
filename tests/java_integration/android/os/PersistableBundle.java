@@ -1,0 +1,1 @@
+package android.os; public class PersistableBundle { private final java.util.Map<String,String> values=new java.util.HashMap<>(); public void putString(String key,String value){values.put(key,value);} public String getString(String key,String fallback){return values.getOrDefault(key,fallback);} }

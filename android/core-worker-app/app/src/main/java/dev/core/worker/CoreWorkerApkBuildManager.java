@@ -123,6 +123,9 @@ final class CoreWorkerApkBuildManager {
         if (context == null || preflight == null || !preflight.optBoolean("ready", false)) return false;
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         if (prefs.getInt("apk_self_builder_checked_version_code", 0) != BuildConfig.VERSION_CODE) return false;
+        String current = prefs.getString("apk_self_builder_toolchain_fingerprint", "");
+        if (current.isEmpty() || !current.equals(prefs.getString("apk_self_builder_known_good_toolchain_fingerprint", ""))
+                || !prefs.getString("apk_self_builder_pending_toolchain_fingerprint", "").isEmpty()) return false;
         String updateState = prefs.getString("apk_self_builder_toolchain_update_state", "").trim().toLowerCase(Locale.ROOT);
         return !("toolchain_downloading".equals(updateState)
                 || "validating".equals(updateState)
@@ -246,6 +249,16 @@ final class CoreWorkerApkBuildManager {
     static JSONObject execute(
             Context rawContext, String type, JSONObject payload, String serverUrl,
             String jobId, int jobAttempt) throws Exception {
+        // Keep the installation approved by the gate pinned until Python has
+        // released all build resources. Refresh uses this same reentrant lock.
+        synchronized (PREFLIGHT_LOCK) {
+            return executeLocked(rawContext, type, payload, serverUrl, jobId, jobAttempt);
+        }
+    }
+
+    private static JSONObject executeLocked(
+            Context rawContext, String type, JSONObject payload, String serverUrl,
+            String jobId, int jobAttempt) throws Exception {
         Context context = rawContext.getApplicationContext();
         if (!supports(type)) {
             return new JSONObject().put("ok", false).put("type", type).put("error", "task de autobuild não permitida");
@@ -302,7 +315,6 @@ final class CoreWorkerApkBuildManager {
                 wakeLock.setReferenceCounted(false);
                 wakeLock.acquire(TimeUnit.HOURS.toMillis(5));
             }
-            provisionPrivateAssets(context);
             if (!Python.isStarted()) Python.start(new AndroidPlatform(context));
             PyObject module = Python.getInstance().getModule("coreworker.apk_self_builder");
             JSONObject effectivePayload = payload == null ? new JSONObject() : new JSONObject(payload.toString());
@@ -546,6 +558,8 @@ final class CoreWorkerApkBuildManager {
         if (!builder.exists() && !builder.mkdirs()) throw new IllegalStateException("não consegui criar diretório do autobuilder");
         if (!repro.exists() && !repro.mkdirs()) throw new IllegalStateException("não consegui criar repro-assets");
 
+        CoreWorkerApkToolchainFilesystem.recover(builder, prefs);
+
         // Compatibilidade de migração: instalações antigas podem ter o toolchain em
         // ZIP/.cwpart nos assets. Novos APKs nunca geram esses assets; só os lemos
         // uma vez se ainda não existir um toolchain privado.
@@ -647,10 +661,8 @@ final class CoreWorkerApkBuildManager {
         }
 
         File manifest = new File(toolchain, "manifest.json");
-        String currentFingerprint = prefs.getString("apk_self_builder_toolchain_fingerprint", "").trim().toLowerCase(Locale.ROOT);
-        if (manifest.isFile() && fingerprint.equals(currentFingerprint)) {
+        if (CoreWorkerApkToolchainFilesystem.reuse(builder, prefs, fingerprint)) {
             restoreExecutablePaths(toolchain, manifest);
-            prefs.edit().putString("apk_self_builder_toolchain_update_state", "succeeded").apply();
             return;
         }
 
@@ -704,84 +716,36 @@ final class CoreWorkerApkBuildManager {
 
     private static void promoteToolchain(
             File builder, File toolchain, File staging, SharedPreferences prefs, String newFingerprint) throws Exception {
-        File previous = new File(builder, "toolchain-previous");
-        String oldFingerprint = prefs.getString("apk_self_builder_toolchain_fingerprint", "");
-        deleteTree(previous);
-        if (toolchain.exists()) {
-            if (!toolchain.renameTo(previous)) {
-                copyTree(toolchain, previous);
-                deleteTree(toolchain);
-            }
-        }
-        try {
-            if (!staging.renameTo(toolchain)) {
-                copyTree(staging, toolchain);
-                deleteTree(staging);
-            }
-        } catch (Throwable error) {
-            deleteTree(toolchain);
-            if (previous.exists()) {
-                if (!previous.renameTo(toolchain)) copyTree(previous, toolchain);
-            }
-            throw error;
-        }
-        prefs.edit()
-                .putString("apk_self_builder_previous_toolchain_fingerprint", oldFingerprint)
-                .putString("apk_self_builder_toolchain_fingerprint", newFingerprint)
-                .putString("apk_self_builder_pending_toolchain_fingerprint", newFingerprint)
-                .putLong("apk_self_builder_toolchain_promoted_at", System.currentTimeMillis())
-                .apply();
+        CoreWorkerApkToolchainFilesystem.promote(builder, toolchain, staging, prefs, newFingerprint);
     }
 
     private static JSONObject finalizeToolchainPreflight(Context context, JSONObject value) throws Exception {
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        File builder = new File(context.getFilesDir(), "apk-self-builder");
+        CoreWorkerApkToolchainFilesystem.recover(builder, prefs);
         String pending = prefs.getString("apk_self_builder_pending_toolchain_fingerprint", "").trim();
         if (pending.isEmpty()) return value;
-        File builder = new File(context.getFilesDir(), "apk-self-builder");
         File current = new File(builder, "toolchain");
         File previous = new File(builder, "toolchain-previous");
         if (value.optBoolean("ready", false)) {
-            prefs.edit()
-                    .putString("apk_self_builder_known_good_toolchain_fingerprint", pending)
-                    .remove("apk_self_builder_pending_toolchain_fingerprint")
-                    .putString("apk_self_builder_toolchain_update_state", "succeeded")
-                    .putString("apk_self_builder_toolchain_update_error", "")
-                    .putLong("apk_self_builder_toolchain_verified_at", System.currentTimeMillis())
-                    .apply();
+            String confirmed = CoreWorkerApkToolchainFilesystem.confirm(builder, prefs);
             value.put("toolchainUpdateState", "succeeded");
-            value.put("toolchainFingerprint", pending);
+            value.put("toolchainFingerprint", confirmed);
             return value;
         }
         if (!previous.isDirectory()) {
-            prefs.edit().putString("apk_self_builder_toolchain_update_state", "failed").apply();
+            CoreWorkerRuntimeIdentity.requireCommit(prefs.edit().putString("apk_self_builder_toolchain_update_state", "failed"));
             value.put("toolchainUpdateState", "failed");
             return value;
         }
-
-        String previousFingerprint = prefs.getString("apk_self_builder_previous_toolchain_fingerprint", "");
-        File failed = new File(builder, "toolchain-failed");
-        deleteTree(failed);
-        if (current.exists() && !current.renameTo(failed)) {
-            copyTree(current, failed);
-            deleteTree(current);
-        }
-        if (!previous.renameTo(current)) {
-            copyTree(previous, current);
-            deleteTree(previous);
-        }
+        String previousFingerprint = CoreWorkerApkToolchainFilesystem.rollback(builder, prefs,
+                compact(value.optString("summary", "smoke do toolchain novo falhou")));
         restoreExecutablePaths(current, new File(current, "manifest.json"));
-        prefs.edit()
-                .putString("apk_self_builder_toolchain_fingerprint", previousFingerprint)
-                .remove("apk_self_builder_pending_toolchain_fingerprint")
-                .putString("apk_self_builder_toolchain_update_state", "rolled_back")
-                .putString("apk_self_builder_toolchain_update_error", compact(value.optString("summary", "smoke do toolchain novo falhou")))
-                .putLong("apk_self_builder_toolchain_verified_at", System.currentTimeMillis())
-                .apply();
         JSONObject rollback = callPythonPreflight(context, true);
         rollback.put("toolchainUpdateState", "rolled_back");
         rollback.put("rolledBackFrom", pending);
         rollback.put("toolchainFingerprint", previousFingerprint);
-        deleteTree(failed);
+        // Keep toolchain-failed for bounded diagnostic recovery; next rollback replaces it.
         return rollback;
     }
 
@@ -796,16 +760,8 @@ final class CoreWorkerApkBuildManager {
     }
 
     private static URL sameOriginUrl(String serverUrl, String candidate) throws Exception {
-        URL base = new URL(serverUrl);
         URL target = new URL(candidate);
-        int basePort = base.getPort() >= 0 ? base.getPort() : base.getDefaultPort();
-        int targetPort = target.getPort() >= 0 ? target.getPort() : target.getDefaultPort();
-        if (!("http".equalsIgnoreCase(target.getProtocol()) || "https".equalsIgnoreCase(target.getProtocol()))
-                || !base.getProtocol().equalsIgnoreCase(target.getProtocol())
-                || !base.getHost().equalsIgnoreCase(target.getHost())
-                || basePort != targetPort) {
-            throw new IllegalStateException("URL do toolchain aponta para origem não autorizada");
-        }
+        CoreWorkerUpdateArtifacts.requireSameOrigin(new URL(serverUrl), target);
         return target;
     }
 
@@ -822,6 +778,7 @@ final class CoreWorkerApkBuildManager {
 
     private static HttpResult authenticatedGet(URL url, String workerId, String token, long maxBytes) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        try {
         connection.setConnectTimeout(15_000);
         connection.setReadTimeout(30_000);
         connection.setInstanceFollowRedirects(false);
@@ -830,7 +787,6 @@ final class CoreWorkerApkBuildManager {
         connection.setRequestProperty("Accept-Encoding", "identity");
         int status = connection.getResponseCode();
         if (status < 200 || status >= 300) {
-            connection.disconnect();
             throw new IllegalStateException("VPS recusou manifesto do toolchain: HTTP " + status);
         }
         ByteArrayOutputStream output = new ByteArrayOutputStream();
@@ -848,8 +804,8 @@ final class CoreWorkerApkBuildManager {
         HttpResult result = new HttpResult(output.toByteArray(),
                 connection.getHeaderField("X-Core-Worker-Signature"),
                 connection.getHeaderField("X-Core-Worker-Timestamp"));
-        connection.disconnect();
         return result;
+        } finally { connection.disconnect(); }
     }
 
     private static Mac newHmac(String token) throws Exception {
@@ -883,6 +839,7 @@ final class CoreWorkerApkBuildManager {
     private static void downloadAuthenticated(
             URL url, String workerId, String token, File target, long expectedBytes, String expectedSha) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        try {
         connection.setConnectTimeout(20_000);
         connection.setReadTimeout(120_000);
         connection.setInstanceFollowRedirects(false);
@@ -891,7 +848,6 @@ final class CoreWorkerApkBuildManager {
         connection.setRequestProperty("Accept-Encoding", "identity");
         int status = connection.getResponseCode();
         if (status < 200 || status >= 300) {
-            connection.disconnect();
             throw new IllegalStateException("download do toolchain falhou: HTTP " + status);
         }
         String signature = connection.getHeaderField("X-Core-Worker-Signature");
@@ -920,10 +876,8 @@ final class CoreWorkerApkBuildManager {
             output.flush();
         } catch (Throwable error) {
             target.delete();
-            connection.disconnect();
             throw error;
         }
-        connection.disconnect();
         String actualSha = hex(digest.digest());
         String actualHmac = hex(mac.doFinal());
         if (total != expectedBytes || !actualSha.equals(expectedSha)
@@ -933,6 +887,7 @@ final class CoreWorkerApkBuildManager {
             target.delete();
             throw new SecurityException("tamanho/SHA-256/HMAC divergente no toolchain externo");
         }
+        } finally { connection.disconnect(); }
     }
 
     private static void retainAssetIfPresent(Context context, String asset, File target) {
@@ -958,17 +913,18 @@ final class CoreWorkerApkBuildManager {
             throw new IllegalStateException("não consegui criar " + parent);
         }
         File temp = new File(target.getPath() + ".tmp");
-        try (InputStream input = new BufferedInputStream(assets.open(path, AssetManager.ACCESS_STREAMING));
-             BufferedOutputStream output = new BufferedOutputStream(new FileOutputStream(temp, false))) {
-            byte[] buffer = new byte[1024 * 1024];
-            int read;
-            while ((read = input.read(buffer)) >= 0) {
-                if (read > 0) output.write(buffer, 0, read);
+        try {
+            try (InputStream input = new BufferedInputStream(assets.open(path, AssetManager.ACCESS_STREAMING));
+                 BufferedOutputStream output = new BufferedOutputStream(new FileOutputStream(temp, false))) {
+                byte[] buffer = new byte[1024 * 1024];
+                int read;
+                while ((read = input.read(buffer)) >= 0) {
+                    if (read > 0) output.write(buffer, 0, read);
+                }
+                output.flush();
             }
-            output.flush();
-        }
-        if (target.exists() && !target.delete()) throw new IllegalStateException("não consegui substituir asset retido");
-        if (!temp.renameTo(target)) throw new IllegalStateException("não consegui promover asset retido");
+            CoreLinuxRootfsFilesystem.replaceFile(temp, target);
+        } finally { java.nio.file.Files.deleteIfExists(temp.toPath()); }
     }
 
     private static JSONObject readChunkDescriptor(Context context) throws Exception {
@@ -1028,7 +984,6 @@ final class CoreWorkerApkBuildManager {
         File temp = new File(builder, "toolchain-source.zip.tmp");
         File outputArchive = new File(builder, "toolchain-source.zip");
         temp.delete();
-        outputArchive.delete();
         MessageDigest fullDigest = MessageDigest.getInstance("SHA-256");
         long total = 0L;
         Set<String> declared = new HashSet<>();
@@ -1079,12 +1034,12 @@ final class CoreWorkerApkBuildManager {
             temp.delete();
             throw new IllegalStateException("tamanho/sha256 total divergente no envelope particionado");
         }
-        copyAsset(context.getAssets(), TOOLCHAIN_CHUNKS_MANIFEST, new File(repro, TOOLCHAIN_CHUNKS_MANIFEST));
-        new File(repro, TOOLCHAIN_ASSET).delete();
-        if (!temp.renameTo(outputArchive)) {
-            temp.delete();
-            throw new IllegalStateException("não consegui promover o toolchain reconstituído");
+        try {
+            copyAsset(context.getAssets(), TOOLCHAIN_CHUNKS_MANIFEST, new File(repro, TOOLCHAIN_CHUNKS_MANIFEST));
+            new File(repro, TOOLCHAIN_ASSET).delete();
+            CoreLinuxRootfsFilesystem.replaceFile(temp, outputArchive);
         }
+        finally { java.nio.file.Files.deleteIfExists(temp.toPath()); }
         return outputArchive;
     }
 
@@ -1256,31 +1211,8 @@ final class CoreWorkerApkBuildManager {
         return value;
     }
 
-    private static void copyTree(File source, File target) throws Exception {
-        if (source.isDirectory()) {
-            if (!target.exists() && !target.mkdirs()) throw new IllegalStateException("falha copiando toolchain");
-            File[] children = source.listFiles();
-            if (children != null) for (File child : children) copyTree(child, new File(target, child.getName()));
-            return;
-        }
-        File parent = target.getParentFile();
-        if (parent != null && !parent.exists() && !parent.mkdirs()) throw new IllegalStateException("falha criando destino");
-        try (InputStream input = new java.io.FileInputStream(source);
-             BufferedOutputStream output = new BufferedOutputStream(new FileOutputStream(target, false))) {
-            byte[] buffer = new byte[1024 * 1024];
-            int read;
-            while ((read = input.read(buffer)) >= 0) if (read > 0) output.write(buffer, 0, read);
-        }
-        target.setExecutable(source.canExecute(), true);
-    }
-
-    private static void deleteTree(File file) {
-        if (file == null || !file.exists()) return;
-        if (file.isDirectory()) {
-            File[] children = file.listFiles();
-            if (children != null) for (File child : children) deleteTree(child);
-        }
-        file.delete();
+    private static void deleteTree(File file) throws java.io.IOException {
+        CoreLinuxRootfsFilesystem.removeTree(file);
     }
 
     private static JSONObject cloneJson(JSONObject value) {

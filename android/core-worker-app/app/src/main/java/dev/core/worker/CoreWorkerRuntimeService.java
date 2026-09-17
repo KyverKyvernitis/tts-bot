@@ -68,6 +68,7 @@ public class CoreWorkerRuntimeService extends Service {
     private NativeTtsManager nativeTtsManager;
     private LocalNativeTtsHttpServer nativeTtsServer;
     private CoreWorkerDirectHttpServer directHttpServer;
+    private final java.util.concurrent.atomic.AtomicLong lifecycleGeneration = new java.util.concurrent.atomic.AtomicLong();
     private final AtomicBoolean heartbeatRunning = new AtomicBoolean(false);
     private final AtomicBoolean pollRunning = new AtomicBoolean(false);
     private final ExecutorService agentExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -111,21 +112,30 @@ public class CoreWorkerRuntimeService extends Service {
         String reason = intent == null ? "foreground_start" : intent.getStringExtra("reason");
         if (ACTION_STOP.equals(action)) {
             requestActiveBuildCancellation();
-            running = false;
+            synchronized (CoreWorkerRuntimeIdentity.LOCK) {
+                lifecycleGeneration.incrementAndGet();
+                running = false;
+            }
             handler.removeCallbacks(tickRunnable);
             stopDirectHttpServer();
-            prefs().edit()
+            try {
+            CoreWorkerRuntimeIdentity.stopAgent(prefs(), prefs().edit()
                     .putBoolean("agent_enabled", false)
                     .putBoolean("job_executor_ready", false)
                     .putBoolean("foreground_runtime_active", false)
+                    .putString("native_worker_state", "agente autônomo parado")
                     .putString("foreground_runtime_state", "agente autônomo parado")
                     .putLong("foreground_runtime_last_tick_at", System.currentTimeMillis())
-                    .apply();
+                    );
+            } catch (RuntimeException error) {
+                android.util.Log.e("CoreWorker", "stop não persistido", error);
+            }
             stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
         }
 
+        if (!running) lifecycleGeneration.incrementAndGet();
         running = true;
         startForeground(NOTIFICATION_ID, buildNotification("Agente autônomo ativo"));
         prefs().edit()
@@ -185,7 +195,10 @@ public class CoreWorkerRuntimeService extends Service {
     @Override
     public void onDestroy() {
         requestActiveBuildCancellation();
-        running = false;
+        synchronized (CoreWorkerRuntimeIdentity.LOCK) {
+            lifecycleGeneration.incrementAndGet();
+            running = false;
+        }
         handler.removeCallbacks(tickRunnable);
         stopDirectHttpServer();
         stopNativeTtsBridge();
@@ -222,12 +235,13 @@ public class CoreWorkerRuntimeService extends Service {
                 nativeTtsManager = new NativeTtsManager(getApplicationContext(), prefs());
                 nativeTtsManager.warmUp();
             }
-            if (nativeTtsServer == null) {
+            if (nativeTtsServer == null || !nativeTtsServer.isRunning()) {
+                if (nativeTtsServer != null) nativeTtsServer.stop();
                 nativeTtsServer = new LocalNativeTtsHttpServer(nativeTtsManager);
                 nativeTtsServer.start();
             }
             prefs().edit()
-                    .putBoolean("native_tts_bridge_active", true)
+                    .putBoolean("native_tts_bridge_active", nativeTtsServer != null && nativeTtsServer.isRunning())
                     .putLong("native_tts_bridge_started_at", System.currentTimeMillis())
                     .apply();
         } catch (Throwable exc) {
@@ -265,7 +279,7 @@ public class CoreWorkerRuntimeService extends Service {
 
     private void ensureDirectHttpServer() {
         try {
-            if (nativeTtsManager == null) startNativeTtsBridge();
+            if (nativeTtsManager == null || nativeTtsServer == null || !nativeTtsServer.isRunning()) startNativeTtsBridge();
             if (directHttpServer != null && directHttpServer.isRunning()) return;
             directHttpServer = new CoreWorkerDirectHttpServer(getApplicationContext(), prefs(), nativeTtsManager);
             directHttpServer.start();
@@ -336,9 +350,11 @@ public class CoreWorkerRuntimeService extends Service {
         long now = System.currentTimeMillis();
         if (!force && now < nextPollAllowedAt) return;
         if (!pollRunning.compareAndSet(false, true)) return;
+        try {
         agentExecutor.execute(() -> {
             PowerManager.WakeLock wakeLock = null;
             try {
+                if (!running || !shouldRunAgent(this)) return;
                 PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
                 if (power != null) {
                     wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CoreWorker:AgentCycle");
@@ -368,6 +384,9 @@ public class CoreWorkerRuntimeService extends Service {
                 pollRunning.set(false);
             }
         });
+        } catch (java.util.concurrent.RejectedExecutionException error) {
+            pollRunning.set(false);
+        }
     }
 
     private void runAgentCycle(String reason, boolean force) throws Exception {
@@ -680,10 +699,17 @@ public class CoreWorkerRuntimeService extends Service {
         if (deadline <= 0L || owner.isEmpty()) return;
         // commit() torna a renovação durável sem disputar o active-job.json com
         // as atualizações de estágio feitas pelo Python durante o Gradle.
-        prefs().edit()
-                .putString("active_job_lease_owner", owner)
-                .putLong("active_job_lease_local_deadline_ms", deadline)
-                .commit();
+        String previousOwner = prefs().getString("active_job_lease_owner", "");
+        long previousDeadline = prefs().getLong("active_job_lease_local_deadline_ms", 0L);
+        try {
+            CoreWorkerRuntimeIdentity.requireCommit(prefs().edit()
+                    .putString("active_job_lease_owner", owner)
+                    .putLong("active_job_lease_local_deadline_ms", deadline));
+        } catch (RuntimeException error) {
+            prefs().edit().putString("active_job_lease_owner", previousOwner)
+                    .putLong("active_job_lease_local_deadline_ms", previousDeadline).commit();
+            throw error;
+        }
     }
 
     private int pendingResultOutboxCount() {
@@ -1091,43 +1117,45 @@ public class CoreWorkerRuntimeService extends Service {
     }
 
     private void reportHeartbeat(String reason) {
+        if (!running || !shouldRunAgent(this)) return;
         long now = System.currentTimeMillis();
         String safeReason = reason == null || reason.trim().isEmpty() ? "foreground" : reason.trim();
-        if (heartbeatRunning.get()) {
-            return;
-        }
-        if (lastHeartbeatStartedAt > 0L && now - lastHeartbeatStartedAt < HEARTBEAT_MIN_MS && !safeReason.contains("manual")) {
-            return;
-        }
+        if (lastHeartbeatStartedAt > 0L && now - lastHeartbeatStartedAt < HEARTBEAT_MIN_MS && !safeReason.contains("manual")) return;
+        if (!heartbeatRunning.compareAndSet(false, true)) return;
         lastHeartbeatStartedAt = now;
-        heartbeatRunning.set(true);
-        new Thread(() -> {
-            try {
-                String serverUrl = normalizedServerUrl();
-                if (serverUrl.isEmpty()) {
-                    return;
-                }
-                JSONObject payload = buildForegroundHeartbeatPayload(safeReason);
-                String token = prefs().getString("worker_token", "").trim();
-                if (token.isEmpty()) return;
-                CoreWorkerRuntimeIdentity.putRuntimeFields(getApplicationContext(), payload);
-                HttpResult heartbeat = request("POST", serverUrl + "/core-worker/heartbeat", payload, token);
-                if (heartbeat.ok()) {
+        final long lifecycle = lifecycleGeneration.get();
+        final long identity = CoreWorkerRuntimeIdentity.generation();
+        try {
+            Thread thread = new Thread(() -> {
+                try {
+                    String serverUrl = normalizedServerUrl();
+                    String token = prefs().getString("worker_token", "").trim();
+                    String workerId = CoreWorkerRuntimeIdentity.runtimeWorkerId(getApplicationContext());
+                    if (serverUrl.isEmpty() || token.isEmpty()) return;
+                    JSONObject payload = buildForegroundHeartbeatPayload(safeReason);
+                    CoreWorkerRuntimeIdentity.putRuntimeFields(getApplicationContext(), payload);
+                    HttpResult heartbeat = request("POST", serverUrl + "/core-worker/heartbeat", payload, token);
+                    if (!heartbeat.ok()) return;
                     JSONObject body = new JSONObject(heartbeat.body);
-                    if (body.optBoolean("ok", false)) {
-                        SharedPreferences.Editor editor = prefs().edit()
-                                .putLong("native_worker_last_heartbeat_at", System.currentTimeMillis())
-                                .putString("native_worker_state", "agente autônomo online");
-                        String directHttpToken = body.optString("direct_http_token", "").trim();
-                        if (!directHttpToken.isEmpty()) editor.putString("direct_http_token", directHttpToken);
-                        editor.apply();
+                    synchronized (CoreWorkerRuntimeIdentity.LOCK) {
+                        if (!running || lifecycle != lifecycleGeneration.get()
+                                || !serverUrl.equals(normalizedServerUrl())
+                                || !CoreWorkerRuntimeIdentity.isCurrent(prefs(), identity, token, workerId)) return;
+                        if (body.optBoolean("ok", false)) {
+                            SharedPreferences.Editor editor = prefs().edit()
+                                    .putLong("native_worker_last_heartbeat_at", System.currentTimeMillis())
+                                    .putString("native_worker_state", "agente autônomo online");
+                            String directHttpToken = body.optString("direct_http_token", "").trim();
+                            if (!directHttpToken.isEmpty()) editor.putString("direct_http_token", directHttpToken);
+                            editor.apply();
+                        }
                     }
-                }
-            } catch (Throwable ignored) {
-            } finally {
-                heartbeatRunning.set(false);
-            }
-        }, "core-worker-foreground-heartbeat").start();
+                } catch (Throwable ignored) {
+                } finally { heartbeatRunning.set(false); }
+            }, "core-worker-foreground-heartbeat");
+            thread.setDaemon(true);
+            thread.start();
+        } catch (Throwable error) { heartbeatRunning.set(false); }
     }
 
     private JSONObject buildForegroundHeartbeatPayload(String reason) throws Exception {
@@ -1447,12 +1475,7 @@ public class CoreWorkerRuntimeService extends Service {
     }
 
     private String installId() {
-        String id = prefs().getString("install_id", "");
-        if (id == null || id.trim().isEmpty()) {
-            id = UUID.randomUUID().toString();
-            prefs().edit().putString("install_id", id).apply();
-        }
-        return id;
+        return CoreWorkerRuntimeIdentity.installId(prefs());
     }
 
     private String normalizedServerUrl() {
@@ -1468,46 +1491,16 @@ public class CoreWorkerRuntimeService extends Service {
     }
 
     private HttpResult request(String method, String url, JSONObject payload, String token) throws Exception {
-        long requestStarted = SystemClock.elapsedRealtime();
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestMethod(method);
-        conn.setConnectTimeout(7000);
-        conn.setReadTimeout(12000);
-        conn.setRequestProperty("Accept", "application/json");
-        if (token != null && !token.trim().isEmpty()) {
-            conn.setRequestProperty("Authorization", "Bearer " + token.trim());
-        }
-        if (payload != null) {
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            OutputStream output = conn.getOutputStream();
-            output.write(payload.toString().getBytes(StandardCharsets.UTF_8));
-            output.flush();
-            output.close();
-        }
-        int status = conn.getResponseCode();
-        InputStream input = status >= 200 && status < 400 ? conn.getInputStream() : conn.getErrorStream();
-        String body = readAll(input);
-        conn.disconnect();
-        long elapsed = Math.max(0L, SystemClock.elapsedRealtime() - requestStarted);
-        prefs().edit()
-                .putFloat("control_plane_rtt_ms", (float) elapsed)
-                .putLong("control_plane_rtt_at", System.currentTimeMillis())
-                .apply();
-        return new HttpResult(status, body == null ? "" : body);
+        long started = SystemClock.elapsedRealtime();
+        CoreWorkerHttpTransport.Result result = CoreWorkerHttpTransport.request(
+                method, url, payload == null ? null : payload.toString(), token, 7000, 12000);
+        prefs().edit().putFloat("control_plane_rtt_ms", (float) Math.max(0L, SystemClock.elapsedRealtime() - started))
+                .putLong("control_plane_rtt_at", System.currentTimeMillis()).apply();
+        return new HttpResult(result.status, result.body);
     }
 
     private String readAll(InputStream input) throws Exception {
-        if (input == null) return "";
-        BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
-        StringBuilder builder = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) {
-            if (builder.length() > 0) builder.append('\n');
-            builder.append(line);
-        }
-        reader.close();
-        return builder.toString();
+        return CoreWorkerHttpTransport.readBounded(input, CoreWorkerHttpTransport.MAX_RESPONSE_BYTES);
     }
 
     private static final class HttpResult {

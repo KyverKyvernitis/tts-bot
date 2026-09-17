@@ -1,0 +1,292 @@
+{
+  "baseline_commit": "87e57527e72e611061ed52f6d00fa10c83f0397a",
+  "phone_source_sha256": "7b45a9b938622578240ebc185549c8f8d83d8a930d2fc003baa13e443aef70e9",
+  "teto_fingerprint": "contract-bank-v1",
+  "teto_base_pitch": "C5",
+  "cache_keys": [
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "gtts"
+      },
+      "engine": "gtts",
+      "key": "22c0280d96d177d1d247f09507c55fd451a4e1efe32ecb56e13a8d0f28b26063"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "gtts",
+        "cache_key": "ABCDEF0123456789ABCDEF0123456789"
+      },
+      "engine": "gtts",
+      "key": "abcdef0123456789abcdef0123456789"
+    },
+    {
+      "body": {
+        "text": "Áudio  com  espaços.",
+        "engine": "gtts",
+        "language": "en_US",
+        "voice": " voz ",
+        "rate": "−20％",
+        "pitch": "—5 hz",
+        "tld": "com.br"
+      },
+      "engine": "gtts",
+      "key": "ee5a41366be668b86a3f5f01cad8a5aff03b8ab7942b77b87be24d0b45fd6448"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "google-cloud"
+      },
+      "engine": "google-cloud",
+      "key": "22c0280d96d177d1d247f09507c55fd451a4e1efe32ecb56e13a8d0f28b26063"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "google-cloud",
+        "cache_key": "ABCDEF0123456789ABCDEF0123456789"
+      },
+      "engine": "google-cloud",
+      "key": "abcdef0123456789abcdef0123456789"
+    },
+    {
+      "body": {
+        "text": "Áudio  com  espaços.",
+        "engine": "google-cloud",
+        "language": "en_US",
+        "voice": " voz ",
+        "rate": "−20％",
+        "pitch": "—5 hz",
+        "tld": "com.br"
+      },
+      "engine": "google-cloud",
+      "key": "ee5a41366be668b86a3f5f01cad8a5aff03b8ab7942b77b87be24d0b45fd6448"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "edge"
+      },
+      "engine": "edge",
+      "key": "cfebe951937f88b2d961fc5091b6618ed2665896a9a927ab26cdfe1fba0f8e67"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "edge",
+        "cache_key": "ABCDEF0123456789ABCDEF0123456789"
+      },
+      "engine": "edge",
+      "key": "abcdef0123456789abcdef0123456789"
+    },
+    {
+      "body": {
+        "text": "Áudio  com  espaços.",
+        "engine": "edge",
+        "language": "en_US",
+        "voice": " voz ",
+        "rate": "−20％",
+        "pitch": "—5 hz",
+        "tld": "com.br"
+      },
+      "engine": "edge",
+      "key": "63bd8ae022975a8a125290c9baae6830541121e99b4351e3df939098a62ca0ce"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "edge_tts"
+      },
+      "engine": "edge_tts",
+      "key": "cfebe951937f88b2d961fc5091b6618ed2665896a9a927ab26cdfe1fba0f8e67"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "edge_tts",
+        "cache_key": "ABCDEF0123456789ABCDEF0123456789"
+      },
+      "engine": "edge_tts",
+      "key": "abcdef0123456789abcdef0123456789"
+    },
+    {
+      "body": {
+        "text": "Áudio  com  espaços.",
+        "engine": "edge_tts",
+        "language": "en_US",
+        "voice": " voz ",
+        "rate": "−20％",
+        "pitch": "—5 hz",
+        "tld": "com.br"
+      },
+      "engine": "edge_tts",
+      "key": "63bd8ae022975a8a125290c9baae6830541121e99b4351e3df939098a62ca0ce"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "android_native"
+      },
+      "engine": "android_native",
+      "key": "898657ace65b3b7862647a4176c30c7943444182428cb9703de2db8f938831cb"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "android_native",
+        "cache_key": "ABCDEF0123456789ABCDEF0123456789"
+      },
+      "engine": "android_native",
+      "key": "abcdef0123456789abcdef0123456789"
+    },
+    {
+      "body": {
+        "text": "Áudio  com  espaços.",
+        "engine": "android_native",
+        "language": "en_US",
+        "voice": " voz ",
+        "rate": "−20％",
+        "pitch": "—5 hz",
+        "tld": "com.br"
+      },
+      "engine": "android_native",
+      "key": "bd1e4add69fe74923c315ecc0d59d34128dfc5de0d80225428f1d1dc9518f446"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "native"
+      },
+      "engine": "native",
+      "key": "898657ace65b3b7862647a4176c30c7943444182428cb9703de2db8f938831cb"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "native",
+        "cache_key": "ABCDEF0123456789ABCDEF0123456789"
+      },
+      "engine": "native",
+      "key": "abcdef0123456789abcdef0123456789"
+    },
+    {
+      "body": {
+        "text": "Áudio  com  espaços.",
+        "engine": "native",
+        "language": "en_US",
+        "voice": " voz ",
+        "rate": "−20％",
+        "pitch": "—5 hz",
+        "tld": "com.br"
+      },
+      "engine": "native",
+      "key": "bd1e4add69fe74923c315ecc0d59d34128dfc5de0d80225428f1d1dc9518f446"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "teto"
+      },
+      "engine": "teto",
+      "key": "5877f4fb6de82830dca3d24337b1ab34cb060c132a629f5c13385c195c3242bb"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "teto",
+        "cache_key": "ABCDEF0123456789ABCDEF0123456789"
+      },
+      "engine": "teto",
+      "key": "5877f4fb6de82830dca3d24337b1ab34cb060c132a629f5c13385c195c3242bb"
+    },
+    {
+      "body": {
+        "text": "Áudio  com  espaços.",
+        "engine": "teto",
+        "language": "en_US",
+        "voice": " voz ",
+        "rate": "−20％",
+        "pitch": "—5 hz",
+        "tld": "com.br"
+      },
+      "engine": "teto",
+      "key": "ec47a6ea784fa4aa36e3495d6abdb180c848870106c7ba4896d1383cfbfae4f5"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "utau"
+      },
+      "engine": "utau",
+      "key": "5877f4fb6de82830dca3d24337b1ab34cb060c132a629f5c13385c195c3242bb"
+    },
+    {
+      "body": {
+        "text": " Olá, mundo! ",
+        "engine": "utau",
+        "cache_key": "ABCDEF0123456789ABCDEF0123456789"
+      },
+      "engine": "utau",
+      "key": "5877f4fb6de82830dca3d24337b1ab34cb060c132a629f5c13385c195c3242bb"
+    },
+    {
+      "body": {
+        "text": "Áudio  com  espaços.",
+        "engine": "utau",
+        "language": "en_US",
+        "voice": " voz ",
+        "rate": "−20％",
+        "pitch": "—5 hz",
+        "tld": "com.br"
+      },
+      "engine": "utau",
+      "key": "ec47a6ea784fa4aa36e3495d6abdb180c848870106c7ba4896d1383cfbfae4f5"
+    },
+    {
+      "body": {
+        "engine": "edge",
+        "text": "Fallback.",
+        "cache_key": "short",
+        "fallback_language": "pt_BR",
+        "fallback_voice": "en-US-FixtureNeural"
+      },
+      "engine": "gtts",
+      "key": "5c917d9af47b00f6c97c3dab0325af5ad4be81b827593c4ec171639caee20a4a"
+    },
+    {
+      "body": {
+        "engine": "edge",
+        "text": "Fallback.",
+        "cache_key": "short",
+        "fallback_language": "pt_BR",
+        "fallback_voice": "en-US-FixtureNeural"
+      },
+      "engine": "edge",
+      "key": "7380879b094c278ebcdb1888782b1de0a40bc083d894167954d289501c939065"
+    },
+    {
+      "body": {
+        "engine": "edge",
+        "text": "Fallback.",
+        "cache_key": "short",
+        "fallback_language": "pt_BR",
+        "fallback_voice": "en-US-FixtureNeural"
+      },
+      "engine": "android_native",
+      "key": "b4507a71924bc47600855a90401430dff9e5e4b0d5ee6b8d938d4050cba59f3c"
+    },
+    {
+      "body": {
+        "engine": "edge",
+        "text": "Fallback.",
+        "cache_key": "short",
+        "fallback_language": "pt_BR",
+        "fallback_voice": "en-US-FixtureNeural"
+      },
+      "engine": "teto",
+      "key": "9bc00f33deee16f798350bad757cb5d070409b9123c8a93265340852af72dcac"
+    }
+  ]
+}

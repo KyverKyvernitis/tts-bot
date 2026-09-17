@@ -43,7 +43,8 @@ def test_foreground_service_is_the_single_authenticated_queue_owner() -> None:
     assert source.count('/core-worker/jobs/result') == 1
     assert '/core-worker/app/jobs/fetch' not in source
     assert '/core-worker/app/jobs/result' not in source
-    assert 'Authorization", "Bearer " + token.trim()' in source
+    assert "CoreWorkerHttpTransport.request(" in source
+    assert 'Authorization", "Bearer " + token.trim()' in read("CoreWorkerHttpTransport.java")
     assert "Executors.newSingleThreadExecutor" in source
     assert "persistOutbox(jobId, envelope)" in source
     assert "flushResultOutbox(serverUrl)" in source

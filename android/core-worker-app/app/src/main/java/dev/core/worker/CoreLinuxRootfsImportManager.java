@@ -215,14 +215,14 @@ public final class CoreLinuxRootfsImportManager {
 
             writeImportProgress(layout, "rootfs_import_reading", "Lendo arquivo e calculando SHA-256", displayName, null);
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            TarStats stats;
+            CoreLinuxRootfsTarExtractor.Stats stats;
             try (InputStream raw = context.getContentResolver().openInputStream(uri)) {
                 if (raw == null) {
                     return failure(layout, "rootfs_import_open_failed", "Não consegui abrir o arquivo escolhido", null);
                 }
                 DigestInputStream digestInput = new DigestInputStream(new BufferedInputStream(raw, 64 * 1024), digest);
                 InputStream tarInput = isGzipName(displayName) ? new GZIPInputStream(digestInput, 64 * 1024) : digestInput;
-                stats = extractTar(tarInput, layout.importStaging);
+                stats = CoreLinuxRootfsTarExtractor.extractTar(tarInput, layout.importStaging);
                 drain(digestInput);
             }
             String actualSha = hex(digest.digest());
@@ -290,34 +290,11 @@ public final class CoreLinuxRootfsImportManager {
     }
 
     private static void promote(Layout layout) throws Exception {
-        removeTree(layout.previousRootfs);
-        if (layout.rootfs.exists()) {
-            if (!layout.rootfs.renameTo(layout.previousRootfs)) {
-                copyTree(layout.rootfs, layout.previousRootfs);
-                removeTree(layout.rootfs);
-            }
-        }
-        boolean promoted = layout.importStaging.renameTo(layout.rootfs);
-        if (!promoted) {
-            try {
-                copyTree(layout.importStaging, layout.rootfs);
-                removeTree(layout.importStaging);
-                promoted = true;
-            } catch (Throwable exc) {
-                removeTree(layout.rootfs);
-                if (layout.previousRootfs.exists()) {
-                    //noinspection ResultOfMethodCallIgnored
-                    layout.previousRootfs.renameTo(layout.rootfs);
-                }
-                throw exc;
-            }
-        }
-        if (promoted) {
-            appendLog(layout.importLog, "rootfs staging promovida para ativa");
-        }
+        CoreLinuxRootfsFilesystem.promote(layout.rootfs, layout.importStaging, layout.previousRootfs);
+        appendLog(layout.importLog, "rootfs staging promovida para ativa");
     }
 
-    private static void postProcessImportedRootfs(File rootfs, String fileName, String sha, boolean expectedProvided, boolean shaVerified, TarStats stats, long started) throws Exception {
+    private static void postProcessImportedRootfs(File rootfs, String fileName, String sha, boolean expectedProvided, boolean shaVerified, CoreLinuxRootfsTarExtractor.Stats stats, long started) throws Exception {
         new File(rootfs, "tmp").mkdirs();
         new File(rootfs, "var/log").mkdirs();
         new File(rootfs, "home/core").mkdirs();
@@ -410,7 +387,7 @@ public final class CoreLinuxRootfsImportManager {
                 .put("summary", ok ? "Rootfs real com glibc validado · pronto para preparar smoke Box64 em etapa futura" : "Rootfs real falhou na validação glibc V17");
     }
 
-    private static JSONObject realManifest(File rootfs, String fileName, String sha, boolean expectedProvided, boolean shaVerified, TarStats stats, long started) throws Exception {
+    private static JSONObject realManifest(File rootfs, String fileName, String sha, boolean expectedProvided, boolean shaVerified, CoreLinuxRootfsTarExtractor.Stats stats, long started) throws Exception {
         JSONObject layout = new JSONObject();
         for (String item : Arrays.asList("bin", "usr/bin", "etc", "tmp", "home/core", "var/log", "opt/core-worker")) {
             layout.put(item, new File(rootfs, item).exists());
@@ -456,164 +433,6 @@ public final class CoreLinuxRootfsImportManager {
                 .put("rootfsStagingImportV17", true)
                 .put("glibcRuntimeRequiredForBox64", true)
                 .put("runnerBlocked", true);
-    }
-
-    private static TarStats extractTar(InputStream input, File staging) throws Exception {
-        TarStats stats = new TarStats();
-        byte[] header = new byte[512];
-        String base = staging.getCanonicalPath();
-        String pendingLongName = null;
-        String pendingLongLink = null;
-        while (true) {
-            int read = readBlock(input, header);
-            if (read == 0) break;
-            if (read < 512) throw new IOException("tar header incompleto");
-            if (isZeroBlock(header)) break;
-            String name = tarString(header, 0, 100);
-            String prefix = tarString(header, 345, 155);
-            if (!prefix.isEmpty()) name = prefix + "/" + name;
-            long size = tarOctal(header, 124, 12);
-            char type = (char) header[156];
-            String linkName = tarString(header, 157, 100);
-
-            if (type == 'L') {
-                pendingLongName = readEntryText(input, size, 8192);
-                stats.meta += 1;
-                continue;
-            }
-            if (type == 'K') {
-                pendingLongLink = readEntryText(input, size, 8192);
-                stats.meta += 1;
-                continue;
-            }
-            if (type == 'x') {
-                String pax = readEntryText(input, size, 64 * 1024);
-                String paxPath = parsePaxValue(pax, "path");
-                String paxLink = parsePaxValue(pax, "linkpath");
-                if (!paxPath.isEmpty()) pendingLongName = paxPath;
-                if (!paxLink.isEmpty()) pendingLongLink = paxLink;
-                stats.meta += 1;
-                continue;
-            }
-            if (type == 'g') {
-                skipEntry(input, size);
-                stats.meta += 1;
-                continue;
-            }
-
-            if (pendingLongName != null && !pendingLongName.trim().isEmpty()) {
-                name = pendingLongName.trim();
-                pendingLongName = null;
-            }
-            if (pendingLongLink != null && !pendingLongLink.trim().isEmpty()) {
-                linkName = pendingLongLink.trim();
-                pendingLongLink = null;
-            }
-            name = cleanTarPath(name);
-            if (name.isEmpty()) {
-                skipEntry(input, size);
-                continue;
-            }
-            stats.entries += 1;
-            if (stats.entries > MAX_ENTRIES) throw new IOException("rootfs tem arquivos demais para import v1");
-            if (size < 0L || size > MAX_SINGLE_FILE_BYTES) throw new IOException("arquivo muito grande no rootfs: " + name);
-            stats.bytes += Math.max(0L, size);
-            if (stats.bytes > MAX_TOTAL_BYTES) throw new IOException("rootfs excede limite seguro v1");
-            File target = safeTarget(staging, base, name);
-            if (type == '5') {
-                target.mkdirs();
-                skipEntry(input, size);
-                stats.dirs += 1;
-            } else if (type == '0' || type == 0) {
-                File parent = target.getParentFile();
-                if (parent != null) parent.mkdirs();
-                try (FileOutputStream out = new FileOutputStream(target, false)) {
-                    copyExactly(input, out, size);
-                }
-                skipPadding(input, size);
-                stats.files += 1;
-            } else if (type == '2') {
-                createSafeSymlink(staging, base, target, linkName);
-                skipEntry(input, size);
-                stats.symlinks += 1;
-            } else if (type == '1') {
-                throw new IOException("hardlink não suportado no import v1: " + name);
-            } else {
-                throw new IOException("tipo tar não suportado no import v1: " + String.valueOf(type) + " em " + name);
-            }
-        }
-        return stats;
-    }
-
-    private static String readEntryText(InputStream input, long size, int limit) throws Exception {
-        int max = (int) Math.max(0L, Math.min(size, Math.max(1, limit)));
-        byte[] data = new byte[max];
-        int off = 0;
-        while (off < max) {
-            int n = input.read(data, off, max - off);
-            if (n < 0) break;
-            off += n;
-        }
-        if (size > max) skipFully(input, size - max);
-        skipPadding(input, size);
-        String text = new String(data, 0, off, StandardCharsets.UTF_8);
-        int zero = text.indexOf('\0');
-        return zero >= 0 ? text.substring(0, zero) : text.trim();
-    }
-
-    private static String parsePaxValue(String pax, String key) {
-        if (pax == null || key == null) return "";
-        String needle = key + "=";
-        for (String line : pax.split("\n")) {
-            int idx = line.indexOf(needle);
-            if (idx >= 0) {
-                return line.substring(idx + needle.length()).trim();
-            }
-        }
-        return "";
-    }
-
-    private static void createSafeSymlink(File staging, String base, File target, String linkName) throws Exception {
-        String link = clean(linkName, 512).replace('\\', '/');
-        if (link.isEmpty()) throw new IOException("symlink vazio em " + target.getName());
-        if (link.startsWith("/")) throw new IOException("symlink absoluto bloqueado: " + link);
-        File parent = target.getParentFile();
-        if (parent != null) parent.mkdirs();
-        File resolved = new File(parent == null ? staging : parent, link);
-        String resolvedPath = resolved.getCanonicalPath();
-        if (!resolvedPath.equals(base) && !resolvedPath.startsWith(base + File.separator)) {
-            throw new IOException("symlink escapando do staging: " + link);
-        }
-        if (target.exists()) removeTree(target);
-        try {
-            Os.symlink(link, target.getAbsolutePath());
-        } catch (Throwable exc) {
-            // Alguns aparelhos podem bloquear symlink em storage privado. Preserve um marcador
-            // para diagnóstico e deixe a validação decidir se esse rootfs ainda é aceitável.
-            writeText(new File(target.getAbsolutePath() + ".core-worker-symlink.txt"), "symlink=" + link + "\nerror=" + shortThrowable(exc) + "\n");
-        }
-    }
-
-    private static File safeTarget(File root, String base, String name) throws Exception {
-        if (name.startsWith("/") || name.contains("\u0000")) throw new IOException("path inseguro no tar: " + clean(name, 120));
-        File target = new File(root, name);
-        String path = target.getCanonicalPath();
-        if (!path.equals(base) && !path.startsWith(base + File.separator)) {
-            throw new IOException("path escapando do staging: " + clean(name, 120));
-        }
-        return target;
-    }
-
-    private static String cleanTarPath(String name) throws IOException {
-        String value = String.valueOf(name == null ? "" : name).replace('\\', '/').trim();
-        while (value.startsWith("./")) value = value.substring(2);
-        while (value.startsWith("/")) throw new IOException("path absoluto bloqueado: " + clean(value, 120));
-        if (value.equals(".") || value.equals("./")) return "";
-        String[] parts = value.split("/");
-        for (String part : parts) {
-            if (part.equals("..")) throw new IOException("path com .. bloqueado: " + clean(value, 120));
-        }
-        return value;
     }
 
     private static boolean looksLikeTar(String name) {
@@ -682,115 +501,26 @@ public final class CoreLinuxRootfsImportManager {
         return out;
     }
 
-    private static void ensureBase(Layout layout) {
+    private static void ensureBase(Layout layout) throws IOException {
         layout.core.mkdirs();
         layout.runtime.mkdirs();
         layout.logs.mkdirs();
         layout.manifests.mkdirs();
         layout.importStaging.getParentFile().mkdirs();
+        CoreLinuxRootfsFilesystem.recover(layout.rootfs, layout.previousRootfs);
     }
 
-    private static void copyTree(File src, File dst) throws Exception {
-        if (src.isDirectory()) {
-            if (!dst.exists()) dst.mkdirs();
-            File[] files = src.listFiles();
-            if (files != null) for (File child : files) copyTree(child, new File(dst, child.getName()));
-        } else {
-            File parent = dst.getParentFile();
-            if (parent != null) parent.mkdirs();
-            try (FileInputStream in = new FileInputStream(src); FileOutputStream out = new FileOutputStream(dst)) {
-                byte[] buf = new byte[64 * 1024];
-                int n;
-                while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
-            }
-        }
+
+
+    private static void removeTree(File file) throws IOException {
+        CoreLinuxRootfsFilesystem.removeTree(file);
     }
 
-    private static void removeTree(File file) {
-        if (file == null || !file.exists()) return;
-        File[] files = file.listFiles();
-        if (files != null) {
-            Arrays.sort(files, Comparator.comparing(File::getAbsolutePath).reversed());
-            for (File child : files) removeTree(child);
-        }
-        //noinspection ResultOfMethodCallIgnored
-        file.delete();
-    }
-
-    private static int readBlock(InputStream input, byte[] block) throws Exception {
-        int off = 0;
-        while (off < block.length) {
-            int n = input.read(block, off, block.length - off);
-            if (n < 0) break;
-            off += n;
-        }
-        return off;
-    }
-
-    private static boolean isZeroBlock(byte[] block) {
-        for (byte b : block) if (b != 0) return false;
-        return true;
-    }
-
-    private static String tarString(byte[] block, int offset, int len) {
-        int end = offset;
-        int max = Math.min(block.length, offset + len);
-        while (end < max && block[end] != 0) end++;
-        return new String(block, offset, Math.max(0, end - offset), StandardCharsets.UTF_8).trim();
-    }
-
-    private static long tarOctal(byte[] block, int offset, int len) {
-        String raw = tarString(block, offset, len).trim();
-        if (raw.isEmpty()) return 0L;
-        long value = 0L;
-        for (int i = 0; i < raw.length(); i++) {
-            char c = raw.charAt(i);
-            if (c < '0' || c > '7') continue;
-            value = (value << 3) + (c - '0');
-        }
-        return value;
-    }
-
-    private static void copyExactly(InputStream input, FileOutputStream output, long size) throws Exception {
-        byte[] buf = new byte[64 * 1024];
-        long remaining = size;
-        while (remaining > 0L) {
-            int n = input.read(buf, 0, (int) Math.min(buf.length, remaining));
-            if (n < 0) throw new IOException("fim inesperado do tar");
-            output.write(buf, 0, n);
-            remaining -= n;
-        }
-    }
-
-    private static void skipEntry(InputStream input, long size) throws Exception {
-        skipFully(input, size);
-        skipPadding(input, size);
-    }
-
-    private static void skipPadding(InputStream input, long size) throws Exception {
-        long pad = (512L - (size % 512L)) % 512L;
-        skipFully(input, pad);
-    }
-
-    private static void skipFully(InputStream input, long amount) throws Exception {
-        long remaining = amount;
-        byte[] buf = new byte[8192];
-        while (remaining > 0L) {
-            long skipped = input.skip(remaining);
-            if (skipped <= 0L) {
-                int n = input.read(buf, 0, (int) Math.min(buf.length, remaining));
-                if (n < 0) throw new IOException("fim inesperado ao pular tar");
-                skipped = n;
-            }
-            remaining -= skipped;
-        }
-    }
-
-    private static void drain(InputStream input) {
-        try {
-            byte[] buf = new byte[8192];
-            while (input.read(buf) >= 0) {}
-        } catch (Throwable ignored) {
+    private static void drain(InputStream input) throws IOException {
+        byte[] buf = new byte[8192]; int count; long bytes = 0;
+        while ((count = input.read(buf)) != -1) {
+            bytes += count;
+            if (bytes > 1024 * 1024) throw new IOException("dados residuais demais após TAR");
         }
     }
 
@@ -905,20 +635,15 @@ public final class CoreLinuxRootfsImportManager {
 
     private static JSONObject readJson(File file) {
         try {
-            if (file == null || !file.exists()) return new JSONObject();
-            return new JSONObject(new String(readBytes(file, TEXT_LIMIT), StandardCharsets.UTF_8));
+            if (file == null) return new JSONObject();
+            return new JSONObject(new String(CoreWorkerAtomicTextFiles.read(file, TEXT_LIMIT), StandardCharsets.UTF_8));
         } catch (Throwable ignored) {
             return new JSONObject();
         }
     }
 
     private static byte[] readBytes(File file, int limit) throws Exception {
-        try (FileInputStream in = new FileInputStream(file)) {
-            byte[] buf = new byte[Math.max(1, Math.min(limit, (int) Math.max(1L, file.length())) )];
-            int n = in.read(buf);
-            if (n <= 0) return new byte[0];
-            return n == buf.length ? buf : Arrays.copyOf(buf, n);
-        }
+        return CoreWorkerAtomicTextFiles.readPrefix(file, limit);
     }
 
     private static void writeJson(File file, JSONObject obj) throws Exception {
@@ -926,11 +651,7 @@ public final class CoreLinuxRootfsImportManager {
     }
 
     private static void writeText(File file, String value) throws Exception {
-        File parent = file.getParentFile();
-        if (parent != null) parent.mkdirs();
-        try (FileOutputStream out = new FileOutputStream(file, false)) {
-            out.write(String.valueOf(value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
-        }
+        CoreWorkerAtomicTextFiles.write(file, value);
     }
 
     private static void appendLog(File file, String line) {
@@ -1033,22 +754,4 @@ public final class CoreLinuxRootfsImportManager {
         }
     }
 
-    private static final class TarStats {
-        long entries = 0L;
-        long files = 0L;
-        long dirs = 0L;
-        long symlinks = 0L;
-        long meta = 0L;
-        long bytes = 0L;
-
-        JSONObject toJson() throws Exception {
-            return new JSONObject()
-                    .put("entries", entries)
-                    .put("files", files)
-                    .put("dirs", dirs)
-                    .put("symlinks", symlinks)
-                    .put("meta", meta)
-                    .put("bytes", bytes);
-        }
-    }
 }

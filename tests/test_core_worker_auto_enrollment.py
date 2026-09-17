@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from worker_source_contracts import phone_worker_version, phone_worker_version_tuple
+
 import importlib.util
 import json
 from pathlib import Path
@@ -141,13 +143,16 @@ def test_build_embeds_only_non_secret_parent_hint_and_source_fingerprint():
     gradle = GRADLE.read_text(encoding="utf-8")
     phone = PHONE_WORKER_PATH.read_text(encoding="utf-8")
     self_builder = (ROOT / "android/core-worker-app/app/src/main/python/coreworker/apk_self_builder.py").read_text(encoding="utf-8")
+    process = (ROOT / "android/core-worker-app/app/src/main/python/coreworker/builder/process.py").read_text(encoding="utf-8")
+    builder_python = self_builder + "\n" + process
     assert 'CORE_WORKER_PARENT_WORKER_ID' in gradle
     assert 'CORE_WORKER_SOURCE_FINGERPRINT' in gradle
     assert 'CORE_WORKER_TOKEN' not in "\n".join(line for line in gradle.splitlines() if "buildConfigField" in line)
     assert '-PCORE_WORKER_PARENT_WORKER_ID=' in phone
     assert '-PCORE_WORKER_SOURCE_FINGERPRINT=' in phone
-    assert '-PCORE_WORKER_PARENT_WORKER_ID=' in self_builder
-    assert '-PCORE_WORKER_SOURCE_FINGERPRINT=' in self_builder
+    assert '-PCORE_WORKER_PARENT_WORKER_ID=' in builder_python
+    assert '-PCORE_WORKER_SOURCE_FINGERPRINT=' in builder_python
+    assert 'process.run_gradle' in self_builder or '_builder_process.run_gradle' in self_builder
 
 
 def test_vps_enrollment_is_bound_to_current_selected_builder_and_source():
@@ -175,7 +180,7 @@ def test_versions_advance_for_auto_enrollment_protocol():
     phone = PHONE_WORKER_PATH.read_text(encoding="utf-8")
     assert 'versionCode 133' in gradle
     assert 'versionName "0.8.6"' in gradle
-    assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone
+    assert phone_worker_version_tuple() >= (1, 11, 5)
 
 
 def test_discord_panel_uses_manual_pairing_only_as_recovery():

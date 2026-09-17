@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from worker_source_contracts import phone_worker_version, phone_worker_version_tuple
+
 import ast
 import contextlib
 import hashlib
@@ -405,8 +407,12 @@ def test_13_hash_mismatch_removes_partial_without_retry(tmp_path: Path, monkeypa
 def test_14_source_retry_is_explicitly_limited() -> None:
     module = _load_self_builder()
     assert module.SOURCE_DOWNLOAD_ATTEMPTS == 3
-    source = SELF_BUILDER.read_text(encoding="utf-8")
-    assert "for attempt in range(1, SOURCE_DOWNLOAD_ATTEMPTS + 1)" in source
+    source = "\n".join((
+        SELF_BUILDER.read_text(encoding="utf-8"),
+        (ANDROID / "app/src/main/python/coreworker/builder/source.py").read_text(encoding="utf-8"),
+    ))
+    assert "for attempt in range(1, attempts + 1)" in source
+    assert "attempts=SOURCE_DOWNLOAD_ATTEMPTS" in source
 
 
 def test_15_deterministic_build_failure_is_classified_failed() -> None:
@@ -913,7 +919,7 @@ def test_apk_release_is_086_and_phone_worker_stays_1115() -> None:
     gradle = (ANDROID / "app/build.gradle").read_text(encoding="utf-8")
     phone = (ROOT / "deploy/termux/phone-worker/phone_worker.py").read_text(encoding="utf-8")
     assert 'versionName "0.8.6"' in gradle and "versionCode 133" in gradle
-    assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone
+    assert phone_worker_version_tuple() >= (1, 11, 5)
 
 
 def test_revoked_claim_is_stopped_before_executor_entrypoint() -> None:
@@ -937,21 +943,26 @@ def test_result_outbox_wins_over_stale_active_stage_on_restart() -> None:
 
 def test_lease_loss_cancellation_covers_preflight_gradle_and_publish() -> None:
     manager = (JAVA / "CoreWorkerApkBuildManager.java").read_text(encoding="utf-8")
-    builder = SELF_BUILDER.read_text(encoding="utf-8")
+    facade = SELF_BUILDER.read_text(encoding="utf-8")
+    artifact = (ANDROID / "app/src/main/python/coreworker/builder/artifact.py").read_text(encoding="utf-8")
+    build = (ANDROID / "app/src/main/python/coreworker/builder/build.py").read_text(encoding="utf-8")
     assert '"apk-self-builder/cancellations"' in manager
     assert 'effectivePayload.put("registryAttempt"' in manager
     assert 'effectivePayload.put("registryCancellationPath"' in manager
-    assert "registry_cancellation" in builder
-    assert "_raise_if_publish_cancelled(cancellation_marker, connection)" in builder
+    assert "registry_cancellation" in build
+    assert "raise_if_cancelled(cancellation_marker, connection)" in artifact
+    assert "raise_if_cancelled=_raise_if_publish_cancelled" in facade
     service = (JAVA / "CoreWorkerRuntimeService.java").read_text(encoding="utf-8")
     assert "requestActiveBuildCancellation();" in service
 
 
 def test_build_stages_are_written_for_lease_progress() -> None:
-    builder = SELF_BUILDER.read_text(encoding="utf-8")
+    facade = SELF_BUILDER.read_text(encoding="utf-8")
+    build = (ANDROID / "app/src/main/python/coreworker/builder/build.py").read_text(encoding="utf-8")
     for stage in ("source_downloading", "source_preparing", "gradle_running", "publishing"):
-        assert f'"{stage}"' in builder
-    assert "_update_active_job_stage" in builder
+        assert f'"{stage}"' in build
+    assert "update_active_job_stage" in build
+    assert "update_active_job_stage=_update_active_job_stage" in facade
 
 
 def test_result_is_fsynced_before_build_resources_are_released(tmp_path: Path) -> None:

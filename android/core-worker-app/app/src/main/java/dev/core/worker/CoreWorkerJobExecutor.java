@@ -662,31 +662,18 @@ final class CoreWorkerJobExecutor {
     }
 
     private JSONObject runCommand(String label, String[] command) throws Exception {
-        JSONObject out = new JSONObject();
-        out.put("label", label);
-        Process process = null;
+        JSONObject out = new JSONObject().put("label", label);
         try {
-            ProcessBuilder builder = new ProcessBuilder(command);
-            builder.directory(context.getFilesDir());
-            process = builder.start();
-            boolean finished = process.waitFor(1800L, TimeUnit.MILLISECONDS);
-            if (!finished) {
-                process.destroy();
-                out.put("ok", false);
-                out.put("error", "timeout");
-                return out;
-            }
-            out.put("ok", process.exitValue() == 0);
-            out.put("exitCode", process.exitValue());
-            out.put("stdout", limit(readAll(process.getInputStream()), 1200));
-            out.put("stderr", limit(readAll(process.getErrorStream()), 600));
+            CoreWorkerProcessRunner.Result result = CoreWorkerProcessRunner.run(
+                    new ProcessBuilder(command).directory(context.getFilesDir()), 1800L, 4096);
+            out.put("ok", !result.timedOut && result.exitCode == 0);
+            if (result.timedOut) { out.put("error", "timeout"); return out; }
+            out.put("exitCode", result.exitCode);
+            out.put("stdout", limit(result.stdout, 1200));
+            out.put("stderr", limit(result.stderr, 600));
         } catch (Throwable exc) {
-            out.put("ok", false);
-            out.put("error", shortThrowable(exc));
-        } finally {
-            if (process != null) {
-                try { process.destroy(); } catch (Throwable ignored) { }
-            }
+            if (exc instanceof InterruptedException) Thread.currentThread().interrupt();
+            out.put("ok", false).put("error", shortThrowable(exc));
         }
         return out;
     }

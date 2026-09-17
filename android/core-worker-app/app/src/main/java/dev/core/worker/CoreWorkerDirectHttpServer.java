@@ -38,15 +38,8 @@ final class CoreWorkerDirectHttpServer {
     private final Context context;
     private final SharedPreferences prefs;
     private final CoreWorkerDirectTaskExecutor executor;
-    private final AtomicBoolean running = new AtomicBoolean(false);
-    private final ExecutorService clients = Executors.newFixedThreadPool(3, runnable -> {
-        Thread thread = new Thread(runnable, "core-worker-direct-client");
-        thread.setDaemon(true);
-        return thread;
-    });
-
-    private volatile ServerSocket serverSocket;
-    private volatile Thread acceptThread;
+    private final CoreWorkerSocketListener listener =
+            new CoreWorkerSocketListener("core-worker-direct-http", 3, 6);
 
     CoreWorkerDirectHttpServer(Context context, SharedPreferences prefs, NativeTtsManager tts) {
         this.context = context.getApplicationContext();
@@ -73,8 +66,12 @@ final class CoreWorkerDirectHttpServer {
             reason = "8766 ocupada; APK preservou o listener existente";
             socket = bind(effectivePort);
         }
-        serverSocket = socket;
-        running.set(true);
+        try {
+            listener.start(socket, SOCKET_TIMEOUT_MS, this::handleClient, this::recordFailure);
+        } catch (Throwable error) {
+            try { socket.close(); } catch (Throwable ignored) { }
+            throw error;
+        }
         prefs.edit()
                 .putBoolean("direct_http_active", true)
                 .putInt("direct_http_requested_port", requestedPort)
@@ -83,10 +80,6 @@ final class CoreWorkerDirectHttpServer {
                 .putString("direct_http_error", reason)
                 .putLong("direct_http_started_at", System.currentTimeMillis())
                 .apply();
-        Thread thread = new Thread(this::acceptLoop, "core-worker-direct-http");
-        thread.setDaemon(true);
-        acceptThread = thread;
-        thread.start();
     }
 
     private static ServerSocket bind(int port) throws Exception {
@@ -102,46 +95,13 @@ final class CoreWorkerDirectHttpServer {
     }
 
     synchronized void stop() {
-        running.set(false);
-        ServerSocket socket = serverSocket;
-        serverSocket = null;
-        if (socket != null) {
-            try { socket.close(); } catch (Throwable ignored) { }
-        }
-        Thread thread = acceptThread;
-        acceptThread = null;
-        if (thread != null) {
-            try { thread.interrupt(); } catch (Throwable ignored) { }
-        }
-        try { clients.shutdownNow(); } catch (Throwable ignored) { }
-        prefs.edit()
-                .putBoolean("direct_http_active", false)
+        listener.stop();
+        prefs.edit().putBoolean("direct_http_active", false)
                 .putString("direct_http_state", "stopped")
-                .putLong("direct_http_stopped_at", System.currentTimeMillis())
-                .apply();
+                .putLong("direct_http_stopped_at", System.currentTimeMillis()).apply();
     }
 
-    boolean isRunning() {
-        ServerSocket socket = serverSocket;
-        return running.get() && socket != null && !socket.isClosed();
-    }
-
-    private void acceptLoop() {
-        try {
-            while (running.get()) {
-                ServerSocket socket = serverSocket;
-                if (socket == null) break;
-                Socket client = socket.accept();
-                client.setSoTimeout(SOCKET_TIMEOUT_MS);
-                clients.execute(() -> handleClient(client));
-            }
-        } catch (Throwable error) {
-            if (running.get()) recordFailure(error);
-        } finally {
-            running.set(false);
-            prefs.edit().putBoolean("direct_http_active", false).apply();
-        }
-    }
+    boolean isRunning() { return listener.isRunning(); }
 
     private void handleClient(Socket socket) {
         try (Socket client = socket;

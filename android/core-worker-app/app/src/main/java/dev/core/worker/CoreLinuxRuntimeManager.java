@@ -9,6 +9,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.IOException;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.FileInputStream;
@@ -1322,25 +1323,14 @@ public final class CoreLinuxRuntimeManager {
             pb.environment().put("PROOT_LOADER", path(new File(nativeDir, "libcoreworker_proot_loader.so")));
             pb.environment().put("PROOT_LOADER_32", path(new File(nativeDir, "libcoreworker_proot_loader32.so")));
 
-            Process process = pb.start();
-            StreamCollector stdout = new StreamCollector(process.getInputStream(), TEXT_LIMIT);
-            StreamCollector stderr = new StreamCollector(process.getErrorStream(), TEXT_LIMIT);
-            stdout.start();
-            stderr.start();
-            boolean finished = process.waitFor(Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-            }
-            stdout.join(1500L);
-            stderr.join(1500L);
-            int exitCode = finished ? process.exitValue() : -1;
-            out.put("ok", finished && exitCode == 0);
-            out.put("timedOut", !finished);
-            out.put("exitCode", exitCode);
-            out.put("stdout", clean(stdout.text(), TEXT_LIMIT));
-            out.put("stderr", clean(stderr.text(), TEXT_LIMIT));
-            if (stdout.error != null) out.put("stdoutReadError", shortThrowable(stdout.error));
-            if (stderr.error != null) out.put("stderrReadError", shortThrowable(stderr.error));
+            CoreWorkerProcessRunner.Result result = CoreWorkerProcessRunner.run(pb, Math.max(1L, timeoutMs), TEXT_LIMIT);
+            out.put("ok", !result.timedOut && result.exitCode == 0 && result.stdoutError == null && result.stderrError == null);
+            out.put("timedOut", result.timedOut);
+            out.put("exitCode", result.timedOut ? -1 : result.exitCode);
+            out.put("stdout", clean(result.stdout, TEXT_LIMIT));
+            out.put("stderr", clean(result.stderr, TEXT_LIMIT));
+            if (result.stdoutError != null) out.put("stdoutReadError", shortThrowable(result.stdoutError));
+            if (result.stderrError != null) out.put("stderrReadError", shortThrowable(result.stderrError));
             out.put("durationMs", now() - started);
             return out;
         } catch (Throwable exc) {
@@ -1391,12 +1381,8 @@ public final class CoreLinuxRuntimeManager {
             appendLog(layout.rootfsLog, state.optString("summary"));
             return state;
         }
-        if (layout.rootfs.exists()) removeTree(layout.rootfs);
-        layout.rootfs.getParentFile().mkdirs();
-        if (!layout.staging.renameTo(layout.rootfs)) {
-            copyTree(layout.staging, layout.rootfs);
-            removeTree(layout.staging);
-        }
+        CoreLinuxRootfsFilesystem.promote(layout.rootfs, layout.staging,
+                new File(new File(layout.core, "staging"), "rootfs-previous"));
         JSONObject state = status(layout, repair ? "repair" : "prepare");
         state.put("ok", true);
         state.put("state", "rootfs_validated");
@@ -1598,7 +1584,7 @@ public final class CoreLinuxRuntimeManager {
         return new File(context.getFilesDir(), "core-linux");
     }
 
-    private static void ensureBase(Layout layout) {
+    private static void ensureBase(Layout layout) throws IOException {
         layout.core.mkdirs();
         layout.runtime.mkdirs();
         layout.logs.mkdirs();
@@ -1615,41 +1601,20 @@ public final class CoreLinuxRuntimeManager {
                     .put("updatedAt", now()));
         } catch (Throwable ignored) {
         }
+            CoreLinuxRootfsFilesystem.recover(layout.rootfs,
+                new File(new File(layout.core, "staging"), "rootfs-previous"));
     }
 
-    private static void copyTree(File src, File dst) throws Exception {
-        if (src.isDirectory()) {
-            if (!dst.exists()) dst.mkdirs();
-            File[] files = src.listFiles();
-            if (files != null) {
-                for (File child : files) copyTree(child, new File(dst, child.getName()));
-            }
-        } else {
-            File parent = dst.getParentFile();
-            if (parent != null) parent.mkdirs();
-            try (FileInputStream in = new FileInputStream(src); FileOutputStream out = new FileOutputStream(dst)) {
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
-            }
-        }
-    }
 
-    private static void removeTree(File file) {
-        if (file == null || !file.exists()) return;
-        File[] files = file.listFiles();
-        if (files != null) {
-            Arrays.sort(files, Comparator.comparing(File::getAbsolutePath).reversed());
-            for (File child : files) removeTree(child);
-        }
-        //noinspection ResultOfMethodCallIgnored
-        file.delete();
+
+    private static void removeTree(File file) throws IOException {
+        CoreLinuxRootfsFilesystem.removeTree(file);
     }
 
     private static JSONObject readJson(File file) {
         try {
-            if (file == null || !file.exists()) return null;
-            byte[] raw = readBytes(file, TEXT_LIMIT * 4);
+            if (file == null) return null;
+            byte[] raw = CoreWorkerAtomicTextFiles.read(file, TEXT_LIMIT * 4);
             return new JSONObject(new String(raw, StandardCharsets.UTF_8));
         } catch (Throwable ignored) {
             return null;
@@ -1657,13 +1622,7 @@ public final class CoreLinuxRuntimeManager {
     }
 
     private static byte[] readBytes(File file, int limit) throws Exception {
-        try (FileInputStream in = new FileInputStream(file)) {
-            byte[] buf = new byte[Math.max(1, Math.min(limit, (int) Math.max(1, file.length())) )];
-            int n = in.read(buf);
-            if (n <= 0) return new byte[0];
-            if (n == buf.length) return buf;
-            return Arrays.copyOf(buf, n);
-        }
+        return CoreWorkerAtomicTextFiles.readPrefix(file, limit);
     }
 
     private static void writeJson(File file, JSONObject obj) throws Exception {
@@ -1671,11 +1630,7 @@ public final class CoreLinuxRuntimeManager {
     }
 
     private static void writeText(File file, String value) throws Exception {
-        File parent = file.getParentFile();
-        if (parent != null) parent.mkdirs();
-        try (FileOutputStream out = new FileOutputStream(file, false)) {
-            out.write(String.valueOf(value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
-        }
+        CoreWorkerAtomicTextFiles.write(file, value);
     }
 
     private static void appendLog(File file, String line) {
@@ -1775,37 +1730,6 @@ public final class CoreLinuxRuntimeManager {
         }
     }
 
-    private static final class StreamCollector extends Thread {
-        private final InputStream in;
-        private final int limit;
-        private final ByteArrayOutputStream out = new ByteArrayOutputStream();
-        volatile Throwable error;
-
-        StreamCollector(InputStream in, int limit) {
-            this.in = in;
-            this.limit = Math.max(1024, limit);
-        }
-
-        @Override
-        public void run() {
-            byte[] buffer = new byte[4096];
-            try {
-                int n;
-                while ((n = in.read(buffer)) >= 0) {
-                    int remaining = limit - out.size();
-                    if (remaining > 0) {
-                        out.write(buffer, 0, Math.min(n, remaining));
-                    }
-                }
-            } catch (Throwable exc) {
-                error = exc;
-            }
-        }
-
-        String text() {
-            return new String(out.toByteArray(), StandardCharsets.UTF_8);
-        }
-    }
 
     private static final class Layout {
         final File core;

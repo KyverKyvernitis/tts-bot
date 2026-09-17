@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from worker_source_contracts import phone_worker_version, phone_worker_version_tuple
+
 import json
 import time
 from pathlib import Path
@@ -195,8 +197,8 @@ def test_android_runtime_uses_child_identity_and_bootstrap_port() -> None:
     assert "CoreWorkerRuntimeIdentity.migrate(getApplicationContext())" in service
     assert "CoreWorkerRuntimeIdentity.putRuntimeFields(getApplicationContext(), payload)" in service
     assert "CoreWorkerRuntimeIdentity.directHttpPort(context)" in direct
-    assert "CoreWorkerRuntimeIdentity.markDedicatedApkPair(prefs, workerId)" in activity
-    assert "CoreWorkerRuntimeIdentity.clear(editor)" in activity
+    assert "CoreWorkerRuntimeIdentity.markDedicatedApkPair(prefs, pairEditor, workerId)" in activity
+    assert "CoreWorkerRuntimeIdentity.clear(prefs)" in activity
 
 
 def test_automation_routes_apk_trigger_to_termux_bootstrap() -> None:
@@ -206,7 +208,7 @@ def test_automation_routes_apk_trigger_to_termux_bootstrap() -> None:
     assert "def _bootstrap_worker_id_for_runtime" in automation
     assert "runtime APK não recebe worker_update" in automation
     assert "worker_update continua reservado ao Termux bootstrap" in automation
-    assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone_worker
+    assert phone_worker_version_tuple() >= (1, 11, 5)
     assert '"runtime_kind": "termux"' in phone_worker
     assert '"platform": "android-termux"' in phone_worker
     assert "def _core_worker_automation_transition_is_urgent" in webserver
@@ -588,6 +590,7 @@ def test_legacy_agent_requires_one_time_repair_but_target_stays_published(tmp_pa
     monkeypatch.setattr(module, "get_core_workers_registry", lambda: registry)
     monkeypatch.setattr(module, "_load_registry_snapshot", lambda: registry.snapshot())
     monkeypatch.setattr(module, "AGENT_RELEASE_ROOT", tmp_path / "agent")
+    monkeypatch.setattr(module, "PENDING_PATH", tmp_path / "pending.json")
     monkeypatch.setattr(module, "_public_base_url", lambda: "https://vps.invalid")
     monkeypatch.setattr(module, "_direct_phone_worker_update_if_needed", lambda *_a, **_k: {"ok": False, "skipped": True})
 
@@ -600,9 +603,10 @@ def test_legacy_agent_requires_one_time_repair_but_target_stays_published(tmp_pa
     assert not [job for job in raw["jobs"].values() if job.get("status") == "queued"]
     latest = json.loads((tmp_path / "agent/latest.json").read_text(encoding="utf-8"))
     assert latest["source_hash"] == module._hash_phone_worker_files(module.PHONE_WORKER_CANONICAL_ROOT)
+    assert json.loads(module.PENDING_PATH.read_text(encoding="utf-8"))["agent_update"]["pending"] is True
 
 
-def test_apk_retry_after_agent_update_bypasses_old_failure_once(monkeypatch) -> None:
+def test_apk_retry_after_agent_update_bypasses_old_failure_once(monkeypatch, tmp_path: Path) -> None:
     import importlib.util
 
     path = ROOT / "scripts/core-worker-automation.py"
@@ -611,6 +615,7 @@ def test_apk_retry_after_agent_update_bypasses_old_failure_once(monkeypatch) -> 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     pending = {"apk_build": {"pending": True, "retry_after_agent_update": True}}
+    monkeypatch.setattr(module, "PENDING_PATH", tmp_path / "pending.json")
     calls: list[bool] = []
     monkeypatch.setattr(module, "_load_pending", lambda: dict(pending))
     monkeypatch.setattr(module, "_load_registry_snapshot", lambda: {"workers": []})
@@ -628,7 +633,7 @@ def test_apk_retry_after_agent_update_bypasses_old_failure_once(monkeypatch) -> 
     assert result["apk_retry_reason"] == "agent_updated"
 
 
-def test_no_compatible_builder_is_transient_pending_not_build_failure(monkeypatch) -> None:
+def test_no_compatible_builder_is_transient_pending_not_build_failure(monkeypatch, isolated_apk_releases: Path) -> None:
     import importlib.util
 
     path = ROOT / "scripts/core-worker-automation.py"
@@ -673,6 +678,12 @@ def test_no_compatible_builder_is_transient_pending_not_build_failure(monkeypatc
     assert result["transient"] is True
     assert result["error"] == ""
     assert "aguardando um builder compatível" in result["message"]
+    # Exercise the real persistence/lock path, while keeping the fake source
+    # fingerprint away from release discovery and the production updater.
+    desired = isolated_apk_releases / "desired-source.json"
+    assert module._desired_apk_source_path() == desired
+    assert json.loads(desired.read_text(encoding="utf-8"))["sourceFingerprint"] == "a" * 64
+    assert module._desired_apk_source_lock_path().parent == isolated_apk_releases
 
 
 def test_turbo_profile_contract_cannot_lose_apk_builder_to_stale_env() -> None:
@@ -680,4 +691,4 @@ def test_turbo_profile_contract_cannot_lose_apk_builder_to_stale_env() -> None:
     assert "def _merge_profile_contract" in phone_worker
     assert "valores do env continuam aceitos como extensões" in phone_worker
     assert "roles, capabilities = _current_core_worker_roles_and_capabilities()" in phone_worker
-    assert 'PHONE_WORKER_VERSION = "1.11.5"' in phone_worker
+    assert phone_worker_version_tuple() >= (1, 11, 5)

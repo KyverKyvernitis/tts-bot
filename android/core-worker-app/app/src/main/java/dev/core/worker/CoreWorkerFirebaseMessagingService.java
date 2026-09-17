@@ -162,7 +162,8 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
         if (serverUrl.isEmpty() || token == null || token.trim().isEmpty()) {
             return;
         }
-        new Thread(() -> {
+        CoreWorkerBackgroundIo.latestRegistration(() -> {
+            if (!token.trim().equals(prefs().getString("fcm_token", ""))) return;
             try {
                 JSONObject payload = basePayload();
                 payload.put("fcmToken", token.trim());
@@ -172,7 +173,7 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
                 request("POST", serverUrl + "/core-worker/app/fcm-token", payload);
             } catch (Throwable ignored) {
             }
-        }).start();
+        });
     }
 
     private void report(String notificationId, String state, boolean delivered, String versionName, int versionCode, String detail) {
@@ -180,7 +181,7 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
         if (serverUrl.isEmpty()) {
             return;
         }
-        new Thread(() -> {
+        CoreWorkerBackgroundIo.report(() -> {
             try {
                 JSONObject payload = basePayload();
                 payload.put("notificationId", notificationId == null ? "" : notificationId);
@@ -193,7 +194,7 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
                 request("POST", serverUrl + "/core-worker/app/notification", payload);
             } catch (Throwable ignored) {
             }
-        }).start();
+        });
     }
 
     private JSONObject basePayload() throws Throwable {
@@ -213,59 +214,25 @@ public class CoreWorkerFirebaseMessagingService extends FirebaseMessagingService
     }
 
     private String installId() {
-        String id = prefs().getString("install_id", "");
-        if (id == null || id.trim().isEmpty()) {
-            id = UUID.randomUUID().toString();
-            prefs().edit().putString("install_id", id).apply();
-        }
-        return id;
+        return CoreWorkerRuntimeIdentity.installId(prefs());
     }
 
     private SharedPreferences prefs() {
         return getSharedPreferences(PREFS, MODE_PRIVATE);
     }
 
-    private static String normalizedServerUrl() {
-        String url = BuildConfig.CORE_WORKER_VPS_URL == null ? "" : BuildConfig.CORE_WORKER_VPS_URL.trim();
-        return url.replaceAll("/+$", "");
+    private String normalizedServerUrl() {
+        return CoreWorkerHttpTransport.serverUrl(prefs(), BuildConfig.CORE_WORKER_VPS_URL);
     }
 
     private HttpResult request(String method, String url, JSONObject payload) throws Throwable {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestMethod(method);
-        conn.setConnectTimeout(7000);
-        conn.setReadTimeout(9000);
-        conn.setRequestProperty("Accept", "application/json");
-        if (payload != null) {
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            OutputStream output = conn.getOutputStream();
-            output.write(payload.toString().getBytes(StandardCharsets.UTF_8));
-            output.flush();
-            output.close();
-        }
-        int status = conn.getResponseCode();
-        InputStream input = status >= 200 && status < 400 ? conn.getInputStream() : conn.getErrorStream();
-        String body = readAll(input);
-        conn.disconnect();
-        return new HttpResult(status, body == null ? "" : body);
+        CoreWorkerHttpTransport.Result result = CoreWorkerHttpTransport.request(
+                method, url, payload == null ? null : payload.toString(), null, 7000, 9000);
+        return new HttpResult(result.status, result.body);
     }
 
     private String readAll(InputStream input) throws Throwable {
-        if (input == null) {
-            return "";
-        }
-        BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
-        StringBuilder builder = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) {
-            if (builder.length() > 0) {
-                builder.append('\n');
-            }
-            builder.append(line);
-        }
-        reader.close();
-        return builder.toString();
+        return CoreWorkerHttpTransport.readBounded(input, CoreWorkerHttpTransport.MAX_RESPONSE_BYTES);
     }
 
     private static String str(Object value) {

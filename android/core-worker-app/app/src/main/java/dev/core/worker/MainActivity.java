@@ -2073,7 +2073,7 @@ public class MainActivity extends Activity {
                 show("A VPS não retornou o token do worker. O pareamento não foi salvo.");
                 return;
             }
-            prefs.edit()
+            SharedPreferences.Editor pairEditor = prefs.edit()
                     .putString("server_url", serverUrl)
                     .putString("device_name", name)
                     .putString("profile", profile)
@@ -2084,9 +2084,8 @@ public class MainActivity extends Activity {
                     .putBoolean("paired_via_native_apk", true)
                     .putBoolean("agent_enabled", true)
                     .remove("paired_via_local_agent")
-                    .remove("legacy_termux_online")
-                    .apply();
-            CoreWorkerRuntimeIdentity.markDedicatedApkPair(prefs, workerId);
+                    .remove("legacy_termux_online");
+            CoreWorkerRuntimeIdentity.markDedicatedApkPair(prefs, pairEditor, workerId);
             nativeWorkerOnline = true;
             nativeWorkerState = "pareado direto na VPS";
             nativeWorkerLastHeartbeatAt = System.currentTimeMillis();
@@ -2176,7 +2175,7 @@ public class MainActivity extends Activity {
         runBusy("Procurando atualização na VPS...", () -> checkForUpdateInternal(serverUrl, true));
     }
 
-    private void checkForUpdateInternal(String serverUrl, boolean userVisible) throws Exception {
+    private synchronized void checkForUpdateInternal(String serverUrl, boolean userVisible) throws Exception {
         HttpResult result = fetchLatestManifest(serverUrl);
         if (!result.ok()) {
             latestUpdateAvailable = false;
@@ -2189,10 +2188,13 @@ public class MainActivity extends Activity {
             return;
         }
         JSONObject body = new JSONObject(result.body);
+        String validatedHash = CoreWorkerUpdateArtifacts.requireSha256(body.optString("sha256", ""));
+        String validatedUrl = resolveUpdateUrl(serverUrl, body.optString("downloadUrl", body.optString("directApkUrl", body.optString("apkUrl", body.optString("url", "")))));
+        if (!serverUrl.equals(normalizedServerUrl())) return;
         latestVersionName = body.optString("versionName", body.optString("version", ""));
         latestVersionCode = body.optInt("versionCode", -1);
-        latestApkSha256 = body.optString("sha256", "");
-        latestApkUrl = resolveUpdateUrl(serverUrl, body.optString("downloadUrl", body.optString("directApkUrl", body.optString("apkUrl", body.optString("url", "")))));
+        latestApkSha256 = validatedHash;
+        latestApkUrl = validatedUrl;
         latestChangelog = changelogText(body.optJSONArray("changelog"));
         latestNotificationId = body.optString("notificationId", "");
         if (latestNotificationId.trim().isEmpty()) {
@@ -2290,56 +2292,29 @@ public class MainActivity extends Activity {
                     return;
                 }
 
-                String version = emptyFallback(latestVersionName, "nova versão");
+                final String version, downloadUrl, expectedHash, apkName;
+                synchronized (MainActivity.this) {
+                    version = emptyFallback(latestVersionName, "nova versão");
+                    downloadUrl = CoreWorkerUpdateArtifacts.resolve(serverUrl, latestApkUrl).toString();
+                    expectedHash = CoreWorkerUpdateArtifacts.requireSha256(latestApkSha256);
+                    apkName = safeLocalApkName();
+                }
                 setUpdateActionState("Baixando Core Worker " + version + " direto da VPS...\nSe falhar, o erro aparecerá aqui.", "Baixando...", true, true);
                 reportUpdateNotification(serverUrl, "download_started", true, "download direto iniciado pelo APK");
                 File updateDir = ensureWritableUpdateDir();
-                String apkName = safeLocalApkName();
                 cleanupUpdateArtifactsKeeping(apkName, "pre_download");
                 updateDir = ensureWritableUpdateDir();
                 File apkFile = new File(updateDir, apkName);
-                boolean reusedExisting = false;
-                if (apkFile.exists() && latestApkSha256 != null && latestApkSha256.trim().matches("(?i)[a-f0-9]{64}")) {
-                    setUpdateActionState("APK já baixado. Validando arquivo local antes de reutilizar...", "Validando...", true, true);
-                    String actual = sha256Of(apkFile);
-                    if (actual.equalsIgnoreCase(latestApkSha256.trim())) {
-                        reusedExisting = true;
-                    } else {
-                        apkFile.delete();
-                    }
-                }
+                boolean reusedExisting = apkFile.isFile() && apkFile.length() <= CoreWorkerUpdateArtifacts.MAX_APK_BYTES
+                        && expectedHash.equalsIgnoreCase(sha256Of(apkFile));
                 if (!reusedExisting) {
-                    updateDir = ensureWritableUpdateDir();
-                    File partFile = new File(updateDir, apkName + ".download");
-                    ensureParentDirectory(partFile);
-                    if (partFile.exists()) partFile.delete();
-                    downloadFile(latestApkUrl, partFile, (done, total) -> {
+                    CoreWorkerUpdateArtifacts.download(serverUrl, downloadUrl, expectedHash, apkFile, (done, total) -> {
                         String progress = total > 0
                                 ? "Baixando " + version + "... " + Math.max(0, Math.min(100, (int) ((done * 100L) / total))) + "% · " + formatBytes(done) + " / " + formatBytes(total)
                                 : "Baixando " + version + "... " + formatBytes(done);
                         setUpdateActionState(progress, "Baixando...", true, true);
                     });
-                    setUpdateActionState("Download concluído. Validando APK...", "Validando...", true, true);
-                    if (latestApkSha256 != null && !latestApkSha256.trim().isEmpty()) {
-                        String actual = sha256Of(partFile);
-                        if (!actual.equalsIgnoreCase(latestApkSha256.trim())) {
-                            partFile.delete();
-                            String detail = "Atualização baixada, mas o hash não confere. Instalação bloqueada por segurança.";
-                            show(detail);
-                            setUpdateActionState("Falha: hash SHA-256 diferente do latest.json.\nInstalação bloqueada por segurança.", "Tentar novamente", true, false);
-                            reportUpdateNotification(serverUrl, "download_failed", false, "sha256 divergente no APK baixado");
-                            return;
-                        }
-                    }
-                    if (apkFile.exists() && !apkFile.delete()) {
-                        throw new Exception("não consegui substituir APK local antigo");
-                    }
-                    if (!partFile.renameTo(apkFile)) {
-                        partFile.delete();
-                        throw new Exception("não consegui finalizar arquivo local de atualização");
-                    }
                 }
-                rememberPendingUpdateArtifact(apkFile);
                 reportUpdateNotification(serverUrl, "download_verified", true, reusedExisting ? "APK local validado e reutilizado" : "APK baixado direto e sha256 validado");
                 updateUpdateUi("Atualização pronta e verificada. Vou abrir o instalador do Android.\nArquivo: " + apkFile.getName() + "\nDepois de instalar, o APK novo limpará este instalador automaticamente.", true, true);
                 setUpdateActionState("APK pronto e validado. Abrindo instalador do Android...", "Abrindo...", true, true);
@@ -2741,9 +2716,9 @@ public class MainActivity extends Activity {
     private void migrateFcmSafetyStateForPatch52() {
         try {
             int migrated = prefs.getInt("fcm_patch52_migration_code", 0);
-            if (migrated < BuildConfig.VERSION_CODE) {
+            if (migrated < 52) {
                 prefs.edit()
-                        .putInt("fcm_patch52_migration_code", BuildConfig.VERSION_CODE)
+                        .putInt("fcm_patch52_migration_code", 52)
                         .putBoolean("fcm_kill_switch", false)
                         .remove("fcm_disabled_until")
                         .putString("fcm_state", "não verificado")
@@ -2963,13 +2938,12 @@ public class MainActivity extends Activity {
         Intent intent = new Intent(this, CoreWorkerRuntimeService.class);
         intent.setAction(CoreWorkerRuntimeService.ACTION_STOP);
         intent.putExtra("reason", reason == null ? "manual" : reason);
-        startService(intent);
-        prefs.edit()
+        CoreWorkerRuntimeIdentity.stopAgent(prefs, prefs.edit()
                 .putBoolean("agent_enabled", false)
                 .putBoolean("foreground_runtime_active", false)
                 .putString("foreground_runtime_state", "agente autônomo parado")
-                .putLong("foreground_runtime_last_requested_at", System.currentTimeMillis())
-                .apply();
+                .putLong("foreground_runtime_last_requested_at", System.currentTimeMillis()));
+        startService(intent);
         readForegroundRuntimeState();
         JSONObject out = foregroundRuntimeSnapshot("stop");
         out.put("stopped", true);
@@ -4339,6 +4313,7 @@ public class MainActivity extends Activity {
     }
 
     private void sendNativeWorkerHeartbeatInternal(boolean showResult, String reason) {
+        final long identityGeneration = CoreWorkerRuntimeIdentity.generation();
         try {
             String serverUrl = normalizedServerUrl();
             String token = prefs.getString("worker_token", "").trim();
@@ -4371,6 +4346,9 @@ public class MainActivity extends Activity {
                     .put("last_result_summary", internalLightJobsLastSummary == null ? "" : internalLightJobsLastSummary));
             safePutPayload(payload, "status", status);
             HttpResult result = request("POST", serverUrl + "/core-worker/heartbeat", payload, token);
+            synchronized (CoreWorkerRuntimeIdentity.LOCK) {
+            if (!CoreWorkerRuntimeIdentity.isCurrent(prefs, identityGeneration, token, workerId)
+                    || !serverUrl.equals(normalizedServerUrl())) return;
             if (result.ok()) {
                 JSONObject body = new JSONObject(result.body);
                 if (body.optBoolean("ok", false)) {
@@ -4394,6 +4372,7 @@ public class MainActivity extends Activity {
                 nativeWorkerOnline = false;
                 nativeWorkerState = "falha HTTP " + result.status;
                 if (showResult) show("Heartbeat nativo falhou: HTTP " + result.status + "\n" + compactResultBody(result.body));
+            }
             }
         } catch (Throwable exc) {
             nativeWorkerOnline = false;
@@ -4444,31 +4423,18 @@ public class MainActivity extends Activity {
     }
 
     private JSONObject runAllowedShellCommand(String label, String[] cmd) throws Exception {
-        JSONObject out = new JSONObject();
-        out.put("label", label);
-        Process process = null;
+        JSONObject out = new JSONObject().put("label", label);
         try {
-            ProcessBuilder builder = new ProcessBuilder(cmd);
-            builder.directory(getFilesDir());
-            process = builder.start();
-            boolean finished = process.waitFor(1800L, TimeUnit.MILLISECONDS);
-            if (!finished) {
-                process.destroy();
-                out.put("ok", false);
-                out.put("error", "timeout");
-                return out;
-            }
-            out.put("ok", process.exitValue() == 0);
-            out.put("exitCode", process.exitValue());
-            out.put("stdout", sanitizeCommandOutput(readAll(process.getInputStream()), 1200));
-            out.put("stderr", sanitizeCommandOutput(readAll(process.getErrorStream()), 600));
+            CoreWorkerProcessRunner.Result result = CoreWorkerProcessRunner.run(
+                    new ProcessBuilder(cmd).directory(getFilesDir()), 1800L, 4096);
+            out.put("ok", !result.timedOut && result.exitCode == 0);
+            if (result.timedOut) { out.put("error", "timeout"); return out; }
+            out.put("exitCode", result.exitCode);
+            out.put("stdout", sanitizeCommandOutput(result.stdout, 1200));
+            out.put("stderr", sanitizeCommandOutput(result.stderr, 600));
         } catch (Throwable exc) {
-            out.put("ok", false);
-            out.put("error", shortThrowable(exc));
-        } finally {
-            if (process != null) {
-                try { process.destroy(); } catch (Throwable ignored) {}
-            }
+            if (exc instanceof InterruptedException) Thread.currentThread().interrupt();
+            out.put("ok", false).put("error", shortThrowable(exc));
         }
         return out;
     }
@@ -5608,7 +5574,8 @@ public class MainActivity extends Activity {
         if (serverUrl == null || serverUrl.trim().isEmpty() || token == null || token.trim().isEmpty()) {
             return;
         }
-        new Thread(() -> {
+        CoreWorkerBackgroundIo.latestRegistration(() -> {
+            if (!token.trim().equals(prefs.getString("fcm_token", ""))) return;
             try {
                 JSONObject payload = statusSnapshot();
                 payload.put("appVersion", APP_VERSION);
@@ -5645,7 +5612,7 @@ public class MainActivity extends Activity {
             } catch (Throwable err) {
                 markFcmState("token local · falha ao registrar", shortThrowable(err), false);
             }
-        }, "core-worker-fcm-token").start();
+        });
     }
 
     private void refreshFcmTokenAfterServerReject(String serverUrl, String reason) {
@@ -5712,7 +5679,7 @@ public class MainActivity extends Activity {
     private void reportAppState(String state, String detail) {
         String serverUrl = normalizedServerUrl();
         if (serverUrl == null || serverUrl.trim().isEmpty()) return;
-        new Thread(() -> {
+        CoreWorkerBackgroundIo.report(() -> {
             try {
                 JSONObject payload = statusSnapshot();
                 payload.put("notificationId", "app-state-" + APP_VERSION);
@@ -5729,7 +5696,7 @@ public class MainActivity extends Activity {
                 request("POST", serverUrl + "/core-worker/app/notification", payload, null);
             } catch (Throwable ignored) {
             }
-        }).start();
+        });
     }
 
     private void reportUpdateNotification(String serverUrl, String state, boolean delivered, String detail) {
@@ -5779,65 +5746,7 @@ public class MainActivity extends Activity {
     }
 
     private String installId() {
-        String id = prefs.getString("install_id", "");
-        if (id == null || id.trim().isEmpty()) {
-            id = UUID.randomUUID().toString();
-            prefs.edit().putString("install_id", id).apply();
-        }
-        return id;
-    }
-
-    private interface DownloadProgress {
-        void onProgress(long done, long total);
-    }
-
-    private void downloadFile(String url, File target, DownloadProgress progress) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setConnectTimeout(9000);
-        conn.setReadTimeout(30000);
-        conn.setInstanceFollowRedirects(true);
-        conn.setRequestProperty("Accept", "application/vnd.android.package-archive,*/*");
-        int status = conn.getResponseCode();
-        if (status < 200 || status >= 300) {
-            String body = readAll(conn.getErrorStream());
-            conn.disconnect();
-            throw new Exception("HTTP " + status + " · " + compactResultBody(body));
-        }
-        long total = -1;
-        try {
-            total = conn.getContentLengthLong();
-        } catch (Throwable ignored) {
-            total = -1;
-        }
-        ensureParentDirectory(target);
-        InputStream input = conn.getInputStream();
-        FileOutputStream output;
-        try {
-            output = new FileOutputStream(target);
-        } catch (Throwable firstOpenError) {
-            ensureParentDirectory(target);
-            output = new FileOutputStream(target);
-        }
-        byte[] buffer = new byte[32 * 1024];
-        int read;
-        long done = 0;
-        long lastUi = 0;
-        while ((read = input.read(buffer)) >= 0) {
-            output.write(buffer, 0, read);
-            done += read;
-            long now = System.currentTimeMillis();
-            if (progress != null && (now - lastUi > 700 || (total > 0 && done >= total))) {
-                lastUi = now;
-                progress.onProgress(done, total);
-            }
-        }
-        output.flush();
-        output.close();
-        input.close();
-        conn.disconnect();
-        if (progress != null) {
-            progress.onProgress(done, total);
-        }
+        return CoreWorkerRuntimeIdentity.installId(prefs);
     }
 
     private String formatBytes(long value) {
@@ -5932,24 +5841,8 @@ public class MainActivity extends Activity {
         });
     }
 
-    private String resolveUpdateUrl(String serverUrl, String raw) {
-        raw = raw == null ? "" : raw.trim();
-        if (raw.startsWith("http://") || raw.startsWith("https://")) {
-            return raw;
-        }
-        try {
-            URL base = new URL(serverUrl);
-            String root = base.getProtocol() + "://" + base.getHost();
-            if (base.getPort() > 0) {
-                root += ":" + base.getPort();
-            }
-            if (!raw.startsWith("/")) {
-                raw = "/" + raw;
-            }
-            return root + raw;
-        } catch (Throwable ignored) {
-            return raw;
-        }
+    private String resolveUpdateUrl(String serverUrl, String raw) throws java.io.IOException {
+        return CoreWorkerUpdateArtifacts.resolve(serverUrl, raw).toString();
     }
 
     private String changelogText(JSONArray array) {
@@ -5968,20 +5861,7 @@ public class MainActivity extends Activity {
     }
 
     private String sha256Of(File file) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        FileInputStream input = new FileInputStream(file);
-        byte[] buffer = new byte[16 * 1024];
-        int read;
-        while ((read = input.read(buffer)) > 0) {
-            digest.update(buffer, 0, read);
-        }
-        input.close();
-        byte[] hash = digest.digest();
-        StringBuilder builder = new StringBuilder();
-        for (byte b : hash) {
-            builder.append(String.format(Locale.ROOT, "%02x", b));
-        }
-        return builder.toString();
+        return CoreWorkerUpdateArtifacts.sha256(file);
     }
 
     private void saveLocalFields(String profile) {
@@ -6240,47 +6120,15 @@ public class MainActivity extends Activity {
     }
 
     private HttpResult request(String method, String url, JSONObject payload, String token) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestMethod(method);
-        boolean localRequest = url.startsWith("http://127.0.0.1") || url.startsWith("http://localhost");
-        conn.setConnectTimeout(localRequest ? 900 : 6000);
-        conn.setReadTimeout(localRequest ? 1800 : 9000);
-        conn.setRequestProperty("Accept", "application/json");
-        if (token != null && !token.trim().isEmpty()) {
-            conn.setRequestProperty("Authorization", "Bearer " + token.trim());
-        }
-        if (payload != null) {
-            conn.setDoOutput(true);
-            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            OutputStream stream = conn.getOutputStream();
-            BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(stream, StandardCharsets.UTF_8));
-            writer.write(payload.toString());
-            writer.flush();
-            writer.close();
-            stream.close();
-        }
-        int status = conn.getResponseCode();
-        InputStream input = status >= 200 && status < 400 ? conn.getInputStream() : conn.getErrorStream();
-        String body = readAll(input);
-        conn.disconnect();
-        return new HttpResult(status, body == null ? "" : body);
+        String host = new URL(url).getHost();
+        boolean local = "127.0.0.1".equals(host) || "localhost".equalsIgnoreCase(host);
+        CoreWorkerHttpTransport.Result result = CoreWorkerHttpTransport.request(
+                method, url, payload == null ? null : payload.toString(), token, local ? 900 : 6000, local ? 1800 : 9000);
+        return new HttpResult(result.status, result.body);
     }
 
     private String readAll(InputStream input) throws Exception {
-        if (input == null) {
-            return "";
-        }
-        BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8));
-        StringBuilder builder = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) {
-            if (builder.length() > 0) {
-                builder.append('\n');
-            }
-            builder.append(line);
-        }
-        reader.close();
-        return builder.toString();
+        return CoreWorkerHttpTransport.readBounded(input, CoreWorkerHttpTransport.MAX_RESPONSE_BYTES);
     }
 
     private void checkLocalAgent(boolean userVisible) {
@@ -6434,18 +6282,16 @@ public class MainActivity extends Activity {
                 .setTitle("Esquecer conexão local?")
                 .setMessage("Isso remove a conexão salva neste APK. O registro na VPS não é apagado automaticamente.")
                 .setPositiveButton("Esquecer", (dialog, which) -> {
-                    SharedPreferences.Editor editor = prefs.edit()
-                            .remove("worker_token")
-                            .remove("direct_http_token")
-                            .remove("server_url")
-                            .remove("profile")
-                            .remove("paired_via_local_agent")
-                            .remove("paired_via_native_apk")
-                            .remove("legacy_termux_online")
-                            .remove("native_worker_id")
-                            .remove("worker_id");
-                    CoreWorkerRuntimeIdentity.clear(editor);
-                    editor.apply();
+                    try {
+                        CoreWorkerRuntimeIdentity.clear(prefs);
+                    } catch (RuntimeException error) {
+                        refreshLocalStatus("Não consegui persistir a desconexão: " + shortThrowable(error));
+                        return;
+                    }
+                    nativeWorkerOnline = false;
+                    nativeWorkerState = "aguardando pareamento direto";
+                    try { stopForegroundRuntime("clear_pairing"); }
+                    catch (Exception error) { appStatusLastError = shortThrowable(error); }
                     loadInputs();
                     updatePairingUi();
                     refreshLocalStatus("Conexão local removida.");
@@ -6818,7 +6664,7 @@ public class MainActivity extends Activity {
     }
 
     private String normalizedServerUrl() {
-        return emptyFallback(DEFAULT_VPS_URL, "").trim().replaceAll("/+$", "");
+        return CoreWorkerHttpTransport.serverUrl(prefs, DEFAULT_VPS_URL);
     }
 
     private String serverDisplayLabel() {

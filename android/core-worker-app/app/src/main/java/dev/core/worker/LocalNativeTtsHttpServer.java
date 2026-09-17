@@ -19,9 +19,8 @@ final class LocalNativeTtsHttpServer {
 
     private final NativeTtsManager ttsManager;
     private final int port;
-    private volatile boolean running = false;
-    private volatile ServerSocket serverSocket;
-    private volatile Thread serverThread;
+    private final CoreWorkerSocketListener listener =
+            new CoreWorkerSocketListener("core-worker-native-tts-http", 3, 3);
 
     LocalNativeTtsHttpServer(NativeTtsManager ttsManager) {
         this(ttsManager, DEFAULT_PORT);
@@ -32,42 +31,22 @@ final class LocalNativeTtsHttpServer {
         this.port = port <= 0 ? DEFAULT_PORT : port;
     }
 
-    void start() {
-        if (running) {
-            return;
-        }
-        running = true;
-        serverThread = new Thread(this::runLoop, "core-worker-native-tts-http");
-        serverThread.setDaemon(true);
-        serverThread.start();
-    }
-
-    void stop() {
-        running = false;
+    synchronized void start() throws java.io.IOException {
+        if (listener.isRunning()) return;
+        ServerSocket socket = new ServerSocket();
         try {
-            ServerSocket socket = serverSocket;
-            if (socket != null) {
-                socket.close();
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void runLoop() {
-        try (ServerSocket socket = new ServerSocket()) {
-            serverSocket = socket;
             socket.setReuseAddress(true);
             socket.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), port));
-            while (running) {
-                Socket client = socket.accept();
-                Thread handler = new Thread(() -> handleClient(client), "core-worker-native-tts-request");
-                handler.setDaemon(true);
-                handler.start();
-            }
-        } catch (Throwable ignored) {
-            running = false;
+            listener.start(socket, 16000, this::handleClient, error -> { });
+        } catch (Throwable error) {
+            try { socket.close(); } catch (Throwable ignored) { }
+            throw error;
         }
     }
+
+    void stop() { listener.stop(); }
+
+    boolean isRunning() { return listener.isRunning(); }
 
     private void handleClient(Socket socket) {
         try (Socket client = socket) {
@@ -143,6 +122,7 @@ final class LocalNativeTtsHttpServer {
                 matched = ((byte) b == end[0]) ? 1 : 0;
             }
         }
+        if (matched != end.length) throw new IllegalArgumentException("cabeçalho grande demais");
         String headerText = headerBuffer.toString(StandardCharsets.ISO_8859_1.name());
         String[] lines = headerText.split("\\r?\\n");
         if (lines.length == 0) {
@@ -168,9 +148,10 @@ final class LocalNativeTtsHttpServer {
             String value = line.substring(idx + 1).trim();
             if ("content-length".equals(name)) {
                 try {
-                    contentLength = Math.max(0, Integer.parseInt(value));
-                } catch (Throwable ignored) {
-                    contentLength = 0;
+                    contentLength = Integer.parseInt(value);
+                    if (contentLength < 0) throw new IllegalArgumentException("Content-Length negativo");
+                } catch (NumberFormatException error) {
+                    throw new IllegalArgumentException("Content-Length inválido", error);
                 }
             }
         }
@@ -181,9 +162,7 @@ final class LocalNativeTtsHttpServer {
         int offset = 0;
         while (offset < contentLength) {
             int read = input.read(bodyBytes, offset, contentLength - offset);
-            if (read < 0) {
-                break;
-            }
+            if (read < 0) throw new java.io.EOFException("corpo incompleto");
             offset += read;
         }
         String body = new String(bodyBytes, 0, offset, StandardCharsets.UTF_8);
