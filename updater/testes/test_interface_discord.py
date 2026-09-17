@@ -438,6 +438,9 @@ def test_large_zip_requires_human_confirmation_before_dispatch() -> None:
     assert '"state": "awaiting_confirmation" if confirmation_required else "queued"' in writer
     assert '"confirmation_required": confirmation_required' in writer
     assert '"confirmed_at": None' in writer
+    processor = _block(bot, "    def _process_zip_update_sync", "\nclass ProgressoUpdaterMixin")
+    assert '"confirmation_required": bool(candidate.get("confirmation_required"))' in processor
+    assert '"confirmation_reasons": list(candidate.get("confirmation_reasons") or [])' in processor
     assert '"⚠️ Atualização requer confirmação"' in handler
     assert "_zip_update_security_confirmation_control(candidate_id)" in handler
     assert 'if requested_mode == "approve":' in controls

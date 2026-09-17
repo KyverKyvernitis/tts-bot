@@ -1066,6 +1066,8 @@ class PreparacaoUpdaterMixin:
                 "candidate_dir": candidate.get("candidate_dir"),
                 "queue_position": candidate.get("queue_position"),
                 "queue_pending_count": candidate.get("queue_pending_count"),
+                "confirmation_required": bool(candidate.get("confirmation_required")),
+                "confirmation_reasons": list(candidate.get("confirmation_reasons") or []),
                 "triggered_update": False,
                 "trigger_detail": "aguardando acionamento após publicar a fila",
                 "branch": branch_name,
