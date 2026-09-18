@@ -37,7 +37,7 @@ def test_cleanup_release_versions_are_monotonic() -> None:
     phone = read(PHONE)
     assert 'versionCode 133' in gradle
     assert 'versionName "0.8.6"' in gradle
-    assert 'PHONE_WORKER_VERSION = "1.11.7"' in phone
+    assert 'PHONE_WORKER_VERSION = "1.11.8"' in phone
 
 
 def test_core_screen_hides_internal_runtime_noise_and_manual_recovery() -> None:
@@ -229,3 +229,44 @@ def test_apk_private_builder_cleanup_keeps_recent_artifacts(tmp_path: Path) -> N
     assert len(list(artifacts.glob("*.apk"))) == 3
     assert apks[-1].exists()
     assert len(list(logs.glob("*.log"))) == 8
+
+
+def test_phone_worker_repairs_persistent_launchers_to_active_release(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load("phone_worker_active_launcher_repair_test", PHONE)
+    runtime = tmp_path / "runtime"
+    active = runtime / "releases" / ("a" * 64)
+    worker_dir = tmp_path / "phone-worker"
+    active.mkdir(parents=True)
+    worker_dir.mkdir(parents=True)
+    (active / "phone_worker.py").write_text('PHONE_WORKER_VERSION = "1.11.8"\n', encoding="utf-8")
+    for name in ("start-phone-worker.sh", "start-phone-music-agent.sh", "watch-phone-worker.sh"):
+        path = active / name
+        path.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+        (worker_dir / name).write_text("#!/bin/bash\necho stale\n", encoding="utf-8")
+    current = runtime / "current"
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.symlink_to(active, target_is_directory=True)
+
+    monkeypatch.setenv("PHONE_WORKER_DIR", str(worker_dir))
+    monkeypatch.setenv("PHONE_WORKER_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("PHONE_WORKER_RELEASE_DIR", str(active))
+
+    result = module._repair_runtime_entrypoint_wrappers()
+    assert result["ok"] is True
+    assert set(result["changed"]) == {"start-phone-worker.sh", "start-phone-music-agent.sh", "watch-phone-worker.sh"}
+    assert module._best_script("start-phone-worker.sh") == active / "start-phone-worker.sh"
+    for name in result["changed"]:
+        wrapper = (worker_dir / name).read_text(encoding="utf-8")
+        assert "$RUNTIME_ROOT/$LINK/" + name in wrapper
+        assert "current previous" in wrapper
+        assert "echo stale" not in wrapper
+        assert (worker_dir / name).stat().st_mode & 0o777 == 0o755
+
+
+def test_watchdog_resolves_current_release_start_script_each_cycle() -> None:
+    source = read(ROOT / "deploy/termux/phone-worker/watch-phone-worker.sh")
+    assert 'active_start_script()' in source
+    assert 'candidate="$active/start-phone-worker.sh"' in source
+    assert 'current_start="$(active_start_script)"' in source
+    assert 'PHONE_WORKER_RELEASE_DIR="$(dirname "$current_start")"' in source

@@ -699,9 +699,12 @@ def _terminate_owned_agent() -> dict[str, Any]:
 def _start_runtime() -> subprocess.Popen[Any]:
     root = _install_root()
     active = _current_release()
+    # A release ativa é autoritativa. O diretório ~/phone-worker pode conter
+    # launchers legados de uma release anterior e nunca deve vencer o ponteiro
+    # atômico `current` depois de uma promoção.
     candidates = [
-        root / "start-phone-worker.sh",
         active / "start-phone-worker.sh" if active else Path("/__missing__"),
+        root / "start-phone-worker.sh",
     ]
     script = next((p for p in candidates if p.is_file()), None)
     if script is None:

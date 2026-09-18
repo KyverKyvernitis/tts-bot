@@ -18,6 +18,7 @@ fi
 INTERVAL="${PHONE_WORKER_WATCH_INTERVAL_SECONDS:-60}"
 WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
 START_SCRIPT="$WORKER_DIR/start-phone-worker.sh"
+RUNTIME_ROOT="${PHONE_WORKER_RUNTIME_ROOT:-$HOME/.core-worker-runtime}"
 WATCH_LOG="${PHONE_WORKER_WATCH_LOG_FILE:-$WORKER_DIR/phone-worker-watch.log}"
 WATCH_PID_FILE="${PHONE_WORKER_WATCH_PID_FILE:-$WORKER_DIR/phone-worker-watch.pid}"
 WATCH_LOCK_DIR="${PHONE_WORKER_WATCH_LOCK_DIR:-$WORKER_DIR/.phone-worker-watch.lock}"
@@ -48,6 +49,19 @@ now_iso() {
 write_status() {
   mkdir -p "$(dirname "$STATUS_FILE")"
   printf '%s\n' "$1" > "$STATUS_FILE" 2>/dev/null || true
+}
+
+active_start_script() {
+  local active="" candidate=""
+  if [[ -L "$RUNTIME_ROOT/current" || -d "$RUNTIME_ROOT/current" ]]; then
+    active="$(cd "$RUNTIME_ROOT/current" 2>/dev/null && pwd -P || true)"
+    candidate="$active/start-phone-worker.sh"
+    if [[ -n "$active" && -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$START_SCRIPT"
 }
 
 rotate_watch_log_if_needed() {
@@ -164,18 +178,22 @@ while true; do
     if [[ "$BOOTSTRAP_JITTER" =~ ^[0-9]+$ && "$BOOTSTRAP_JITTER" -gt 0 ]]; then jitter=$((RANDOM % (BOOTSTRAP_JITTER + 1))); fi
     next_bootstrap=$((now_epoch + backoff + jitter))
   fi
-  if [[ -x "$START_SCRIPT" ]]; then
-    if "$START_SCRIPT" >> "$WATCH_LOG" 2>&1; then
+  current_start="$(active_start_script)"
+  if [[ -f "$current_start" ]]; then
+    PHONE_WORKER_RELEASE_DIR="$(dirname "$current_start")" \
+      /data/data/com.termux/files/usr/bin/bash "$current_start" >> "$WATCH_LOG" 2>&1
+    start_rc=$?
+    if [[ "$start_rc" -eq 0 ]]; then
       failures=0
       write_status "watchdog_ok pid=$$ $(now_iso)"
     else
       failures=$((failures + 1))
-      log "start falhou; falhas=$failures; nova tentativa em ${INTERVAL}s"
+      log "start falhou; script=$current_start rc=$start_rc falhas=$failures; nova tentativa em ${INTERVAL}s"
       write_status "watchdog_start_failed failures=$failures $(now_iso)"
     fi
   else
     failures=$((failures + 1))
-    log "start script não encontrado: $START_SCRIPT"
+    log "start script não encontrado: $current_start"
     write_status "watchdog_missing_start failures=$failures $(now_iso)"
   fi
   sleep "$INTERVAL"

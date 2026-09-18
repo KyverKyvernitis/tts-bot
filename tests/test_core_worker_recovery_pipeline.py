@@ -763,3 +763,36 @@ def test_31_built_unpublished_apk_carries_original_builder_context(monkeypatch: 
     assert found["selected_builder_runtime_kind"] == "termux"
     assert found["required_agent_source_hash"] == "a" * 64
     assert found["toolchain_fingerprint"] == "b" * 64
+
+
+def test_bootstrap_runtime_start_prefers_current_release_over_legacy_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    module = load("bootstrap_active_start_preference_test", BOOTSTRAP)
+    root = tmp_path / "phone-worker"
+    active = tmp_path / "runtime" / "releases" / ("a" * 64)
+    state = tmp_path / "state"
+    root.mkdir(parents=True)
+    active.mkdir(parents=True)
+    for path in (root / "start-phone-worker.sh", active / "start-phone-worker.sh"):
+        path.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+
+    monkeypatch.setattr(module, "_install_root", lambda: root)
+    monkeypatch.setattr(module, "_current_release", lambda: active)
+    monkeypatch.setattr(module, "_runtime_root", lambda: tmp_path / "runtime")
+    monkeypatch.setattr(module, "_state_root", lambda: state)
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/bin/bash" if name == "bash" else None)
+    captured = {}
+
+    class DummyProcess:
+        pass
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return DummyProcess()
+
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    module._start_runtime()
+
+    assert captured["args"] == ["/bin/bash", str(active / "start-phone-worker.sh")]
+    assert captured["kwargs"]["env"]["PHONE_WORKER_RELEASE_DIR"] == str(active)

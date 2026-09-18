@@ -120,7 +120,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.7"
+PHONE_WORKER_VERSION = "1.11.8"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -7210,13 +7210,89 @@ def _home_script(name: str) -> Path:
     return (Path.home() / name).expanduser()
 
 
+def _active_release_dir() -> Path | None:
+    explicit = str(os.getenv("PHONE_WORKER_RELEASE_DIR") or "").strip()
+    candidates = [Path(explicit).expanduser()] if explicit else []
+    candidates.append(Path(os.getenv("PHONE_WORKER_RUNTIME_ROOT") or (Path.home() / ".core-worker-runtime")).expanduser() / "current")
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            continue
+        if resolved.is_dir() and (resolved / "phone_worker.py").is_file():
+            return resolved
+    return None
+
+
+def _runtime_entrypoint_wrapper(name: str) -> str:
+    return "\n".join([
+        '#!/data/data/com.termux/files/usr/bin/bash',
+        '# Wrapper autorreparado pelo Core Worker; a release `current` é autoritativa.',
+        'set -u',
+        'RUNTIME_ROOT="${PHONE_WORKER_RUNTIME_ROOT:-$HOME/.core-worker-runtime}"',
+        'WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"',
+        'for LINK in current previous; do',
+        f'  TARGET="$RUNTIME_ROOT/$LINK/{name}"',
+        '  if [ -f "$TARGET" ]; then',
+        '    RELEASE_DIR="$(cd "$(dirname "$TARGET")" 2>/dev/null && pwd -P || true)"',
+        '    if [ -n "$RELEASE_DIR" ]; then export PHONE_WORKER_RELEASE_DIR="$RELEASE_DIR"; fi',
+        '    export PHONE_WORKER_DIR="$WORKER_DIR"',
+        '    exec /data/data/com.termux/files/usr/bin/bash "$TARGET" "$@"',
+        '  fi',
+        'done',
+        f'echo "[core-worker-wrapper] {name} não encontrado em current/previous" >&2',
+        'exit 1',
+        '',
+    ])
+
+
+def _repair_runtime_entrypoint_wrappers() -> dict[str, Any]:
+    active = _active_release_dir()
+    root = _phone_worker_dir()
+    if active is None:
+        return {"ok": False, "changed": [], "reason": "release ativa ausente"}
+    try:
+        if root.resolve() == active.resolve():
+            return {"ok": True, "changed": [], "reason": "worker_dir já é release ativa"}
+    except Exception:
+        pass
+    changed: list[str] = []
+    errors: list[str] = []
+    root.mkdir(parents=True, exist_ok=True)
+    for name in ("start-phone-worker.sh", "start-phone-music-agent.sh", "watch-phone-worker.sh"):
+        if not (active / name).is_file():
+            errors.append(f"{name}: ausente na release ativa")
+            continue
+        path = root / name
+        content = _runtime_entrypoint_wrapper(name)
+        try:
+            previous = path.read_text(encoding="utf-8", errors="ignore") if path.exists() else ""
+            if previous != content:
+                tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+                tmp.write_text(content, encoding="utf-8")
+                os.chmod(tmp, 0o755)
+                tmp.replace(path)
+                changed.append(name)
+            else:
+                os.chmod(path, 0o755)
+        except Exception as exc:
+            errors.append(f"{name}: {type(exc).__name__}: {_short_text(exc, limit=100)}")
+    return {"ok": not errors, "changed": changed, "errors": errors[:4], "release": str(active)}
+
+
 def _script_candidates(name: str) -> list[Path]:
-    # Preferir scripts dentro de ~/phone-worker, mas manter compatibilidade com ~/script.sh.
+    # A release ativa é autoritativa; cópias em ~/phone-worker são apenas
+    # wrappers/compatibilidade e não podem vencer código recém-promovido.
+    candidates: list[Path] = []
+    active = _active_release_dir()
+    if active is not None:
+        candidates.append(active / name)
     worker_path = (_phone_worker_dir() / name).expanduser()
     home_path = _home_script(name)
-    if worker_path == home_path:
-        return [worker_path]
-    return [worker_path, home_path]
+    for path in (worker_path, home_path):
+        if path not in candidates:
+            candidates.append(path)
+    return candidates
 
 
 def _best_script(name: str) -> Path:
@@ -10932,6 +11008,18 @@ def main() -> int:
             timeout=8.0,
         )
         return 0 if ok else 1
+
+    # Releases imutáveis são autoritativas. Repare os launchers persistentes
+    # antes de iniciar threads para que Termux:Boot/watchdogs antigos não
+    # voltem a executar scripts/música de uma release anterior.
+    try:
+        entrypoints = _repair_runtime_entrypoint_wrappers()
+        if entrypoints.get("changed"):
+            print(f"[phone-worker-runtime] launchers reparados: {','.join(entrypoints['changed'])}", flush=True)
+        if not entrypoints.get("ok") and entrypoints.get("errors"):
+            print(f"[phone-worker-runtime] aviso reparando launchers: {entrypoints.get('errors')}", flush=True)
+    except Exception as exc:
+        print(f"[phone-worker-runtime] aviso reparando launchers: {type(exc).__name__}: {_short_text(exc, limit=120)}", flush=True)
 
     # Limpeza de housekeeping é feita antes de receber novos jobs. Mantemos
     # apenas os APKs recentes e nunca removemos o artifact atual durante build.
