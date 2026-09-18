@@ -14,8 +14,12 @@ MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE = str(
     or "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta"
 ).strip()
 MUSIC_WORKER_NO_CAPACITY_MESSAGE = str(
-    getattr(config, "MUSIC_WORKER_NO_CAPACITY_MESSAGE", "Sistema de música indisponível no momento: Nenhum worker disponível")
-    or "Sistema de música indisponível no momento: Nenhum worker disponível"
+    getattr(
+        config,
+        "MUSIC_WORKER_NO_CAPACITY_MESSAGE",
+        "Sistema de música indisponível no momento: Há worker online, mas nenhum está apto para música",
+    )
+    or "Sistema de música indisponível no momento: Há worker online, mas nenhum está apto para música"
 ).strip()
 
 
@@ -40,7 +44,13 @@ class MusicWorkerSelection:
         if self.available:
             return ""
         reason = str(self.reason or "").lower()
-        if "music_agent_full" in reason or "sem_capacidade" in reason or "capacity" in reason:
+        if (
+            "music_agent_full" in reason
+            or "sem_capacidade" in reason
+            or "capacity" in reason
+            or "não_turbo" in reason
+            or "nao_turbo" in reason
+        ):
             return MUSIC_WORKER_NO_CAPACITY_MESSAGE
         if "music_agent" in reason or "agent_" in reason or "dependency" in reason or "engine" in reason:
             return MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE

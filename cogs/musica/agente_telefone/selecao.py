@@ -148,44 +148,51 @@ def _select_music_worker_uncached() -> MusicWorkerSelection:
         missing_roles = sorted(required_roles - roles_caps)
         missing_caps = sorted(required_caps - roles_caps)
 
-        if cfg.exigir_turbo and not worker_e_turbo(worker, roles_caps):
-            rejected.append(f"{worker_id or name}:não_turbo")
-            continue
         if missing_roles or missing_caps:
             rejected.append(f"{worker_id or name}:sem_capacidade")
             continue
 
         # A seleção do reprodutor não depende de Lavalink/music_node. O agente do
         # telefone é a autoridade da reprodução; Lavalink serve apenas metadata.
+        #
+        # Importante: o perfil do *Core Worker* (APK/Termux/turbo/fallback) não deve
+        # invalidar um Music Agent que já está pronto. O requisito turbo só faz
+        # sentido quando precisamos preparar/bootstrapar o agente.
         if cfg.agente_ativo:
             agent_summary = resumo_agente_musica(worker, configuracao=cfg)
-            if not agent_summary.get("available"):
-                reason = str(agent_summary.get("reason") or "music_agent_indisponivel")
-                live = _configured_phone_worker_selection(reason=f"live_status_registry_stale:{reason}")
-                if live is not None:
-                    live_summary = resumo_agente_musica(live.worker, configuracao=cfg)
-                    if live_summary.get("available"):
-                        logger.info(
-                            "[music/worker] registry stale; usando status live do phone worker | worker=%s reason=%s",
-                            live.worker_id or live.name,
-                            reason,
-                        )
-                        return live
-                if not bootstrap_agente_permitido(reason, configuracao=cfg):
-                    rejected.append(f"{worker_id or name}:{reason}")
-                    continue
-                logger.info(
-                    "[music/worker] selecionando worker turbo para preparar Music Agent | worker=%s reason=%s",
-                    worker_id or name,
-                    reason,
-                )
-                return MusicWorkerSelection(
-                    True,
-                    worker_id=worker_id,
-                    name=name,
-                    worker=worker,
-                    reason=f"bootstrap:{reason}",
-                )
+            if agent_summary.get("available"):
+                return MusicWorkerSelection(True, worker_id=worker_id, name=name, worker=worker, reason="ok")
+
+            reason = str(agent_summary.get("reason") or "music_agent_indisponivel")
+            live = _configured_phone_worker_selection(reason=f"live_status_registry_stale:{reason}")
+            if live is not None:
+                live_summary = resumo_agente_musica(live.worker, configuracao=cfg)
+                if live_summary.get("available"):
+                    logger.info(
+                        "[music/worker] registry stale; usando status live do phone worker | worker=%s reason=%s",
+                        live.worker_id or live.name,
+                        reason,
+                    )
+                    return live
+
+            if not bootstrap_agente_permitido(reason, configuracao=cfg):
+                rejected.append(f"{worker_id or name}:{reason}")
+                continue
+            if cfg.exigir_turbo and not worker_e_turbo(worker, roles_caps):
+                rejected.append(f"{worker_id or name}:não_turbo_para_bootstrap")
+                continue
+            logger.info(
+                "[music/worker] preparando Music Agent no worker | worker=%s reason=%s",
+                worker_id or name,
+                reason,
+            )
+            return MusicWorkerSelection(
+                True,
+                worker_id=worker_id,
+                name=name,
+                worker=worker,
+                reason=f"bootstrap:{reason}",
+            )
 
         return MusicWorkerSelection(True, worker_id=worker_id, name=name, worker=worker, reason="ok")
 

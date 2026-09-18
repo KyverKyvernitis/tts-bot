@@ -111,3 +111,80 @@ def test_resolucao_do_phone_worker_nao_transporta_estado_de_player_lavalink() ->
     texto = arquivo.read_text(encoding="utf-8")
     for proibido in ("lavalink_query", "lavalink_resolved", "lavalink_playable", "lavalink_encoded"):
         assert proibido not in texto
+
+
+def test_worker_termux_fallback_com_music_agent_pronto_nao_precisa_ser_turbo(monkeypatch) -> None:
+    cfg = ConfiguracaoSelecaoWorker(
+        worker_only=True,
+        agente_ativo=True,
+        exigir_turbo=True,
+        papeis_obrigatorios=frozenset({"phone-worker"}),
+        capacidades_obrigatorias=frozenset({"ffmpeg", "ffprobe"}),
+        versao_minima_agente="0.3.8",
+        maximo_sessoes=2,
+        bootstrap_ao_tocar=True,
+        cache_segundos=0.0,
+    )
+    worker = {
+        "worker_id": "telefone-fallback",
+        "name": "Telefone fallback",
+        "enabled": True,
+        "online": True,
+        "profile": "completo",
+        "runtime_mode": "termux",
+        "roles": ["phone-worker", "music", "music-agent"],
+        "capabilities": ["phone-worker", "ffmpeg", "ffprobe", "music", "music-agent", "music-ytdlp"],
+        "status": {
+            "profile": "completo",
+            "runtime_mode": "termux",
+            "music_agent": {
+                "ok": True,
+                "available": True,
+                "discord_ready": True,
+                "version": "0.3.8",
+                "guilds": {},
+            },
+        },
+    }
+    monkeypatch.setattr(selecao, "carregar_configuracao_selecao", lambda: cfg)
+    monkeypatch.setattr(selecao, "carregar_workers_publicos", lambda: [worker])
+
+    escolhido = selecao._select_music_worker_uncached()
+
+    assert escolhido.available is True
+    assert escolhido.worker_id == "telefone-fallback"
+    assert escolhido.reason == "ok"
+
+
+def test_worker_nao_turbo_so_bloqueia_bootstrap_do_agente(monkeypatch) -> None:
+    cfg = ConfiguracaoSelecaoWorker(
+        worker_only=True,
+        agente_ativo=True,
+        exigir_turbo=True,
+        papeis_obrigatorios=frozenset({"phone-worker"}),
+        capacidades_obrigatorias=frozenset({"ffmpeg", "ffprobe"}),
+        versao_minima_agente="0.3.8",
+        maximo_sessoes=2,
+        bootstrap_ao_tocar=True,
+        cache_segundos=0.0,
+    )
+    worker = {
+        "worker_id": "telefone-fallback",
+        "name": "Telefone fallback",
+        "enabled": True,
+        "online": True,
+        "profile": "completo",
+        "roles": ["phone-worker"],
+        "capabilities": ["phone-worker", "ffmpeg", "ffprobe"],
+        "status": {"profile": "completo", "music_agent": {}},
+    }
+    monkeypatch.setattr(selecao, "carregar_configuracao_selecao", lambda: cfg)
+    monkeypatch.setattr(selecao, "carregar_workers_publicos", lambda: [worker])
+    monkeypatch.setattr(selecao, "_configured_phone_worker_selection", lambda *args, **kwargs: None)
+
+    escolhido = selecao._select_music_worker_uncached()
+
+    assert escolhido.available is False
+    assert "não_turbo_para_bootstrap" in escolhido.reason
+    assert "Nenhum worker online" not in escolhido.message
+    assert "worker online" in escolhido.message

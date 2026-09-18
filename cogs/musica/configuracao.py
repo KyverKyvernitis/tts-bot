@@ -270,8 +270,11 @@ MUSIC_WORKER_UNAVAILABLE_MESSAGE = (
     or "Sistema de música indisponível no momento: Nenhum worker online"
 ).strip()
 MUSIC_WORKER_NO_CAPACITY_MESSAGE = (
-    os.getenv("MUSIC_WORKER_NO_CAPACITY_MESSAGE", "Sistema de música indisponível no momento: Nenhum worker disponível")
-    or "Sistema de música indisponível no momento: Nenhum worker disponível"
+    os.getenv(
+        "MUSIC_WORKER_NO_CAPACITY_MESSAGE",
+        "Sistema de música indisponível no momento: Há worker online, mas nenhum está apto para música",
+    )
+    or "Sistema de música indisponível no momento: Há worker online, mas nenhum está apto para música"
 ).strip()
 MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE = (
     os.getenv("MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE", "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta")
