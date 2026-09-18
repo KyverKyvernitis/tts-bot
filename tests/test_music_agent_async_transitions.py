@@ -16,149 +16,28 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_concurrent_lavalink_pool_connects_once(music, monkeypatch):
-    async def scenario():
-        agent = music.MusicAgent()
-        agent.lavalink_password = "test-password"
-        calls = 0
-        entered = asyncio.Event()
-        release = asyncio.Event()
-
-        async def connect(**kwargs):
-            nonlocal calls
-            calls += 1
-            entered.set()
-            await release.wait()
-
-        monkeypatch.setattr(music.wavelink.Pool, "connect", staticmethod(connect))
-        first = asyncio.create_task(agent.ensure_lavalink_pool())
-        await entered.wait()
-        second = asyncio.create_task(agent.ensure_lavalink_pool())
-        await asyncio.sleep(0)
-        release.set()
-        await asyncio.gather(first, second)
-        assert calls == 1
-        assert agent._pool_connected is True
-
-    run(scenario())
+def test_resolved_http_track_always_uses_direct_voice(music):
+    agent = music.MusicAgent()
+    assert agent._should_use_direct_voice(
+        music.AgentTrack(title="x", query="x", stream_url="https://media.example/audio")
+    ) is True
 
 
-def test_stop_during_lavalink_connect_cannot_publish_or_play_stale_player(music):
-    async def scenario():
-        agent = music.MusicAgent()
-        agent._pool_connected = True
-        gid = 201
-        track = music.AgentTrack(title="old", query="old")
-        st = music.GuildMusicState(guild_id=gid, voice_channel_id=900, current=track)
-        agent.states[gid] = st
-        entered = asyncio.Event()
-        release = asyncio.Event()
-
-        class Player(music.wavelink.Player):
-            def __init__(self):
-                self.connected = True
-                self.channel = types.SimpleNamespace(id=900)
-                self.play_calls = 0
-                self.disconnect_calls = 0
-            def set_volume(self, value):
-                return None
-            async def play(self, playable):
-                self.play_calls += 1
-            async def stop(self):
-                return None
-            async def disconnect(self, *args, **kwargs):
-                self.disconnect_calls += 1
-                self.connected = False
-
-        player = Player()
-
-        class Channel:
-            async def connect(self, **kwargs):
-                entered.set()
-                await release.wait()
-                return player
-
-        guild = types.SimpleNamespace(voice_client=None)
-
-        async def resolve_guild_and_channel(*args, **kwargs):
-            return guild, Channel()
-
-        async def playable_for_track(_track):
-            return object()
-
-        agent._resolve_guild_and_channel = resolve_guild_and_channel
-        agent._playable_for_track = playable_for_track
-        playing = asyncio.create_task(agent._play_lavalink(gid, track))
-        await entered.wait()
-        await agent.cmd_stop({"guild_id": gid})
-        release.set()
-        await playing
-
-        assert st.current is None
-        assert st.player is None
-        assert player.play_calls == 0
-        assert player.disconnect_calls == 1
-
-    run(scenario())
+def test_track_without_resolved_stream_is_not_sent_to_player(music):
+    agent = music.MusicAgent()
+    assert agent._should_use_direct_voice(
+        music.AgentTrack(title="x", query="x", stream_url="")
+    ) is False
 
 
-def test_stale_lavalink_end_from_previous_playable_is_ignored(music):
-    async def scenario():
-        agent = music.MusicAgent()
-        agent._pool_connected = True
-        gid = 202
-        track = music.AgentTrack(title="new", query="new")
-        later = music.AgentTrack(title="later", query="later")
-        st = music.GuildMusicState(guild_id=gid, voice_channel_id=901, current=track, queue=[later])
-        agent.states[gid] = st
-
-        class Playable:
-            def __init__(self, identifier):
-                self.identifier = identifier
-
-        current_playable = Playable("new-id")
-        old_playable = Playable("old-id")
-
-        class Player(music.wavelink.Player):
-            def __init__(self):
-                self.connected = True
-                self.channel = types.SimpleNamespace(id=901)
-                self.guild = types.SimpleNamespace(id=gid)
-            def set_volume(self, value):
-                return None
-            async def play(self, playable):
-                self.playable = playable
-            async def stop(self):
-                return None
-            async def disconnect(self, *args, **kwargs):
-                self.connected = False
-
-        player = Player()
-        guild = types.SimpleNamespace(voice_client=player)
-        channel = types.SimpleNamespace()
-
-        async def resolve_guild_and_channel(*args, **kwargs):
-            return guild, channel
-
-        async def playable_for_track(_track):
-            return current_playable
-
-        agent._resolve_guild_and_channel = resolve_guild_and_channel
-        agent._playable_for_track = playable_for_track
-        await agent._play_lavalink(gid, track)
-
-        advanced = []
-        async def play_next(*args, **kwargs):
-            advanced.append(True)
-        agent._play_next = play_next
-        payload = types.SimpleNamespace(player=player, track=old_playable)
-        await agent.client.on_wavelink_track_end(payload)
-
-        assert st.current is track
-        assert st.queue == [later]
-        assert advanced == []
-
-    run(scenario())
+def test_status_declares_direct_discord_voice_backend_and_no_lavalink_fields(music):
+    agent = music.MusicAgent()
+    payload = agent.status_payload()
+    assert payload["playback_backend"] == "discord-voice-direct"
+    assert "lavalink_uri" not in payload
+    assert "lavalink_node" not in payload
+    assert "pool_connected" not in payload
+    assert "wavelink" not in payload["voice_dependencies"]
 
 
 def test_run_cleans_http_runner_when_client_start_returns(music, monkeypatch):

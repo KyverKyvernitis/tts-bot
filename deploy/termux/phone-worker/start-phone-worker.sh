@@ -704,21 +704,20 @@ PIPERWRAP
 }
 
 
-ensure_music_agent_for_turbo_if_needed() {
-  is_turbo_profile || return 0
-  autostart_enabled "$MUSIC_AGENT_AUTO_START" || { log "perfil turbo: Music Agent não será iniciado automaticamente (modo seguro/auto-start off)"; return 0; }
+ensure_music_agent_if_needed() {
+  autostart_enabled "$MUSIC_AGENT_AUTO_START" || { log "Music Agent não será iniciado automaticamente (modo seguro/auto-start off)"; return 0; }
   if [[ ! -x "$MUSIC_AGENT_START_COMMAND" ]]; then
-    log "perfil turbo: start do Music Agent não encontrado em $MUSIC_AGENT_START_COMMAND"
+    log "start do Music Agent não encontrado em $MUSIC_AGENT_START_COMMAND"
     return 0
   fi
   if [[ -z "${MUSIC_AGENT_BOT_TOKEN:-${DISCORD_TOKEN:-${BOT_TOKEN:-}}}" ]]; then
-    log "perfil turbo: Music Agent habilitado, mas token do bot não está configurado no worker"
+    log "Music Agent habilitado, mas token do bot não está configurado no worker"
     return 0
   fi
   if [[ -z "${MUSIC_AGENT_TOKEN:-}" && -n "${PHONE_WORKER_TOKEN:-}" ]]; then
     upsert_env_value MUSIC_AGENT_TOKEN "$PHONE_WORKER_TOKEN"
   fi
-  log "perfil turbo: garantindo Music Agent do worker"
+  log "garantindo Music Agent do worker"
   "$MUSIC_AGENT_START_COMMAND" >/dev/null 2>&1 || \
     log "não consegui iniciar Music Agent automaticamente; música direta no worker pode ficar indisponível"
 }
@@ -734,7 +733,6 @@ ensure_turbo_deps_if_needed() {
 }
 
 run_post_start_maintenance_async() {
-  is_turbo_profile || return 0
   mkdir -p "$(dirname "$MAINT_LOG_FILE")" 2>/dev/null || true
   (
     if ! mkdir "$MAINT_LOCK_DIR" 2>/dev/null; then
@@ -743,10 +741,12 @@ run_post_start_maintenance_async() {
     fi
     trap 'rm -rf "$MAINT_LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
     log "manutenção pós-start iniciada"
-    cleanup_stale_heavy_dependency_builds
-    cleanup_heavy_services_for_safe_mode
-    ensure_turbo_deps_if_needed
-    ensure_music_agent_for_turbo_if_needed
+    if is_turbo_profile; then
+      cleanup_stale_heavy_dependency_builds
+      cleanup_heavy_services_for_safe_mode
+      ensure_turbo_deps_if_needed
+    fi
+    ensure_music_agent_if_needed
     log "manutenção pós-start finalizada"
   ) >> "$MAINT_LOG_FILE" 2>&1 &
 }

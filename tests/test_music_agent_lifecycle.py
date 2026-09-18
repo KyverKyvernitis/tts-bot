@@ -26,20 +26,10 @@ def _load_music_agent(monkeypatch):
         def event(self, fn): setattr(self, fn.__name__, fn); return fn
         def get_guild(self, _): return None
         def get_channel(self, _): return None
+        def is_ready(self): return False
     discord.AudioSource=AudioSource; discord.VoiceClient=VoiceClient; discord.FFmpegPCMAudio=FFmpegPCMAudio
     discord.PCMVolumeTransformer=PCMVolumeTransformer; discord.Intents=Intents; discord.Client=Client
 
-    wavelink = types.ModuleType("wavelink")
-    class Player: pass
-    class Node:
-        def __init__(self, **kwargs): self.kwargs=kwargs
-    class Pool:
-        @classmethod
-        async def connect(cls, **kwargs): return None
-    class Playable:
-        @classmethod
-        async def search(cls, identifier): return []
-    wavelink.Player=Player; wavelink.Node=Node; wavelink.Pool=Pool; wavelink.Playable=Playable
 
     aiohttp = types.ModuleType("aiohttp")
     web = types.ModuleType("aiohttp.web")
@@ -57,7 +47,6 @@ def _load_music_agent(monkeypatch):
 
     monkeypatch.syspath_prepend(str(MUSIC.parent))
     monkeypatch.setitem(sys.modules, "discord", discord)
-    monkeypatch.setitem(sys.modules, "wavelink", wavelink)
     monkeypatch.setitem(sys.modules, "aiohttp", aiohttp)
     monkeypatch.setitem(sys.modules, "aiohttp.web", web)
     name = "music_agent_lifecycle_test"
@@ -126,14 +115,18 @@ def test_stop_failure_still_attempts_disconnect_direct(music):
     run(scenario())
 
 
-def test_stop_failure_still_attempts_disconnect_wavelink(music):
-    class Player(music.wavelink.Player):
-        def __init__(self): self.disconnected=False
-        async def stop(self): raise RuntimeError("stop")
-        async def disconnect(self): self.disconnected=True
-    async def scenario():
-        agent=music.MusicAgent(); p=Player(); await agent._stop_player_instance(p, disconnect=True); assert p.disconnected
-    run(scenario())
+def test_music_agent_source_has_no_wavelink_or_lavalink_runtime_dependency():
+    source = MUSIC.read_text(encoding="utf-8")
+    for marker in (
+        "import wavelink",
+        "ensure_lavalink_pool",
+        "_play_lavalink",
+        "MUSIC_AGENT_LAVALINK",
+        "LAVALINK_URI",
+        "wavelink.Player",
+    ):
+        assert marker not in source
+
 
 
 def test_cmd_stop_clears_player_before_disconnect_await(music):
@@ -213,3 +206,25 @@ def test_lifecycle_module_remove_requires_same_owner():
     assert registry["key"] is replacement
     assert mod.remove_owned_task(registry, "key", replacement) is True
     assert "key" not in registry
+
+
+def test_phone_worker_music_dependencies_do_not_require_wavelink():
+    source = (ROOT / "deploy/termux/phone-worker/phone_worker.py").read_text(encoding="utf-8")
+    block = source.split("def _music_voice_dependency_specs()", 1)[1].split("\n\ndef ", 1)[0]
+    assert '"wavelink"' not in block
+    assert '"yt-dlp"' in block
+
+
+def test_music_agent_safe_installer_uses_lightweight_ytdlp_package():
+    source = (ROOT / "deploy/termux/phone-worker/start-phone-music-agent.sh").read_text(encoding="utf-8")
+    assert 'safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp" light' in source
+    assert 'yt-dlp[default]' not in source
+
+
+def test_music_agent_autostart_is_not_turbo_only():
+    source = (ROOT / "deploy/termux/phone-worker/start-phone-worker.sh").read_text(encoding="utf-8")
+    assert "ensure_music_agent_for_turbo_if_needed" not in source
+    assert "ensure_music_agent_if_needed()" in source
+    maintenance = source.split("run_post_start_maintenance_async()", 1)[1].split("\n}\n", 1)[0]
+    assert "ensure_music_agent_if_needed" in maintenance
+    assert "is_turbo_profile || return 0" not in maintenance

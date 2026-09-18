@@ -41,16 +41,9 @@ async def cancel_tasks(tasks: Iterable[Any]) -> int:
     return len(pending)
 
 
-async def stop_player_instance(player: Any, *, disconnect: bool, wavelink_player_type: Any) -> None:
-    """Best-effort stop and disconnect as independent cleanup attempts."""
+async def stop_player_instance(player: Any, *, disconnect: bool) -> None:
+    """Best-effort stop and disconnect for discord.py voice clients."""
     if not player:
-        return
-    if isinstance(player, wavelink_player_type):
-        with contextlib.suppress(Exception):
-            await player.stop()
-        if disconnect:
-            with contextlib.suppress(Exception):
-                await player.disconnect()
         return
     with contextlib.suppress(Exception):
         if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():

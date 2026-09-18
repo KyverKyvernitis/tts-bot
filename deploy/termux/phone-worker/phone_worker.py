@@ -2779,7 +2779,6 @@ def _music_voice_dependency_specs() -> dict[str, dict[str, Any]]:
         "PyNaCl": {"module": "nacl", "pip": "PyNaCl"},
         "davey": {"module": "davey", "pip": "davey"},
         "yt-dlp": {"module": "yt_dlp", "pip": "yt-dlp"},
-        "wavelink": {"module": "wavelink", "pip": "wavelink"},
         "aiohttp": {"module": "aiohttp", "pip": "aiohttp"},
         "gTTS": {"module": "gtts", "pip": "gTTS==2.5.4"},
         "edge-tts": {"module": "edge_tts", "pip": "edge-tts==7.2.8"},

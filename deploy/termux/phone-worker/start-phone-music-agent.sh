@@ -289,7 +289,7 @@ ensure_deps() {
   safe_pip_install_module "discord.py" "discord" "discord.py>=2.7.1,<2.8" light || missing=1
   safe_pip_install_module "PyNaCl" "nacl" "PyNaCl" light || missing=1
   safe_pip_install_module "davey" "davey" "davey" light || missing=1
-  safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp[default]" light || missing=1
+  safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp" light || missing=1
   safe_pip_install_module "gTTS" "gtts" "gTTS==2.5.4" light || true
   safe_pip_install_module "edge-tts" "edge_tts" "edge-tts==7.2.8" light || true
   if "$PYTHON_BIN" - <<'PYDEPS' >/dev/null 2>&1; then
