@@ -346,6 +346,28 @@ class VoiceConnectionSourceRegressionTests(unittest.TestCase):
                 self.assertFalse(unknown, f"{rel} usa keyword inválido em _ensure_connected: {unknown}")
 
 
+
+    def test_music_agent_router_accepts_prebuilt_overlay_contract(self):
+        router_text = (ROOT / "cogs" / "musica" / "legado" / "roteador_audio.py").read_text(encoding="utf-8")
+        router_tree = ast.parse(router_text)
+        methods = [
+            node for node in ast.walk(router_tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "play_tts_via_music_agent"
+        ]
+        self.assertEqual(len(methods), 1)
+        accepted = {arg.arg for arg in methods[0].args.kwonlyargs}
+        self.assertIn("prebuilt_audio", accepted)
+        self.assertIn("prebuilt_audio_source", accepted)
+
+        audio_text = (ROOT / "cogs" / "tts" / "audio.py").read_text(encoding="utf-8")
+        self.assertIn("payload['prebuilt_audio'] = True", audio_text)
+        self.assertIn("payload['prebuilt_audio_source'] = 'vps-prebuilt'", audio_text)
+
+        method_source = ast.get_source_segment(router_text, methods[0]) or ""
+        self.assertIn("prebuilt_audio=bool(prebuilt_audio)", method_source)
+        self.assertIn('prebuilt_audio_source=str(prebuilt_audio_source or \"\")', method_source)
+
     def test_music_agent_overlay_prebuilds_audio_on_vps_when_cache_is_cold(self):
         text = (ROOT / "cogs" / "tts" / "audio.py").read_text(encoding="utf-8")
         tree = ast.parse(text)
