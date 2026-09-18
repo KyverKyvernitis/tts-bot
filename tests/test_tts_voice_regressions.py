@@ -346,5 +346,26 @@ class VoiceConnectionSourceRegressionTests(unittest.TestCase):
                 self.assertFalse(unknown, f"{rel} usa keyword inválido em _ensure_connected: {unknown}")
 
 
+    def test_music_agent_overlay_prebuilds_audio_on_vps_when_cache_is_cold(self):
+        text = (ROOT / "cogs" / "tts" / "audio.py").read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        helpers = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name == "_maybe_attach_prebuilt_direct_tts_audio"
+        ]
+        self.assertEqual(len(helpers), 1)
+        helper_source = ast.get_source_segment(text, helpers[0]) or ""
+        self.assertIn("generate_if_missing: bool = False", helper_source)
+        self.assertIn("_resolve_or_generate_singleflight_audio", helper_source)
+        self.assertIn("WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB", helper_source)
+        self.assertIn("payload['prebuilt_audio'] = True", helper_source)
+
+        self.assertIn(
+            "generate_if_missing=True",
+            text.split("deve_rotear_tts_para_agente", 1)[1],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

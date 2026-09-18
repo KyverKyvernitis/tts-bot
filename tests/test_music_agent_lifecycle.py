@@ -269,3 +269,11 @@ def test_phone_worker_duplicate_detection_has_proc_cwd_fallback():
     assert 'if [[ -n "$cwd" ]]' in block
     assert 'phone_worker.py --host' in block
     assert '/proc/<pid>/cwd' in block
+
+
+def test_music_agent_tts_missing_provider_fails_before_ffmpeg_pipe():
+    source = MUSIC.read_text(encoding="utf-8")
+    block = source.split("async def _prepare_tts_source", 1)[1].split("\n    async def cmd_tts", 1)[0]
+    assert "provider_module = {'gtts': 'gtts', 'edge': 'edge_tts'}.get(engine)" in block
+    assert "provider TTS {engine} indisponível no Music Agent; envie áudio pré-sintetizado" in block
+    assert block.index("importlib.import_module(provider_module)") < block.index("discord.FFmpegPCMAudio(reader, pipe=True")

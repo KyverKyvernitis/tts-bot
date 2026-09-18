@@ -3970,23 +3970,65 @@ class TTSAudioMixin(SharedSynthesisMixin):
                          'tts_request_id': item.request_id, 'timeout_seconds': 2},
                 timeout_seconds=2, max_audio_mb=1, raise_on_worker_error=False)
 
-    async def _maybe_attach_prebuilt_direct_tts_audio(self, payload: dict[str, Any], item: QueueItem) -> str | None:
-        # Reuse existing local audio without a new synthesis or a foreground cache probe.
-        path = self._try_get_cached_path(self._get_state(item.guild_id), item)
+    async def _maybe_attach_prebuilt_direct_tts_audio(
+        self,
+        payload: dict[str, Any],
+        item: QueueItem,
+        *,
+        generate_if_missing: bool = False,
+    ) -> str | None:
+        """Attach compressed TTS audio so the phone only has to mix/play it.
+
+        The Music Agent intentionally treats gTTS/edge-tts as optional music
+        dependencies. When music already owns the Discord voice connection,
+        prebuild compressed audio through the normal TTS pipeline if the cache
+        is cold instead of making the Music Agent require those providers.
+        """
+        state = self._get_state(item.guild_id)
+        path = self._try_get_cached_path(state, item)
+        cleanup = False
+        if path is None and generate_if_missing:
+            try:
+                path, cleanup = await self._resolve_or_generate_singleflight_audio(
+                    state,
+                    item,
+                    read_cache=True,
+                    store_in_cache=True,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "[tts_voice] pré-síntese para overlay musical falhou | guild=%s engine=%s erro=%s",
+                    item.guild_id,
+                    item.engine,
+                    exc,
+                )
+                return None
         if path is None:
             return None
         try:
+            max_bytes = WORKER_VOICE_AGENT_DIRECT_TTS_PREBUILD_MAX_MB * 1024 * 1024
+
             def read_cached():
                 with open(path, 'rb') as handle:
                     size = os.fstat(handle.fileno()).st_size
-                    return handle.read() if 0 < size <= 512 * 1024 else b''
+                    return handle.read() if 0 < size <= max_bytes else b''
+
             raw = await asyncio.to_thread(read_cached)
             if raw:
                 payload['audio_b64'] = base64.b64encode(raw).decode('ascii')
                 payload['audio_format'] = self._path_audio_format(path)
                 payload['cache_key'] = self._cache_key(item)
+                payload['prebuilt_audio'] = True
+                payload['prebuilt_audio_source'] = 'vps-prebuilt'
+                return None
         except OSError:
             pass
+        finally:
+            if cleanup and path:
+                with contextlib.suppress(OSError):
+                    os.remove(path)
         return None
 
     async def _worker_voice_agent_begin_transfer(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -6342,7 +6384,11 @@ class TTSAudioMixin(SharedSynthesisMixin):
                         try:
                             cached_payload = {}
                             if suporta_cache_tts_agente(self.bot):
-                                await self._maybe_attach_prebuilt_direct_tts_audio(cached_payload, item)
+                                await self._maybe_attach_prebuilt_direct_tts_audio(
+                                    cached_payload,
+                                    item,
+                                    generate_if_missing=True,
+                                )
                                 cached_payload.setdefault("cache_key", self._cache_key(item))
                                 cached_payload["tld"] = item.tld
                                 cached_payload["tts_request_id"] = item.request_id

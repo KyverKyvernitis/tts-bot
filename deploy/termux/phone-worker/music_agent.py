@@ -140,7 +140,7 @@ def _schedule_tts_prune(callback, path):
             _TTS_MAINTENANCE_PENDING = None
 
 
-AGENT_VERSION = "0.3.30"
+AGENT_VERSION = "0.3.31"
 STARTED_AT = time.time()
 
 
@@ -1778,6 +1778,16 @@ class MusicAgent:
             source = discord.FFmpegPCMAudio(str(target), executable=self.ffmpeg_executable,
                 before_options='-nostdin', options='-vn -sn -dn -loglevel warning')
             return _TimedTTSSource(source, started=started), engine
+
+        provider_module = {'gtts': 'gtts', 'edge': 'edge_tts'}.get(engine)
+        if provider_module:
+            try:
+                importlib.import_module(provider_module)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"provider TTS {engine} indisponível no Music Agent; envie áudio pré-sintetizado"
+                ) from exc
+
         stream = transport.AudioStream(engine=engine, text=text,
             voice=str(body.get('voice') or 'pt-BR-FranciscaNeural'),
             language=self._normalize_tts_language(body.get('language')),
