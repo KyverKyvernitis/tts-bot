@@ -126,3 +126,9 @@ def test_configuracao_da_musica_enxerga_phone_worker_direto_sem_flag_legado(monk
     assert modulo.PHONE_WORKER_TOKEN == "segredo"
     assert modulo.PHONE_WORKER_ENABLED is True
     assert modulo.MUSIC_PHONE_WORKER_DIRECT_ENABLED is True
+
+
+def test_roteador_importa_painel_do_modulo_interface_atual() -> None:
+    texto = _texto("cogs/musica/legado/roteador_audio.py")
+    assert "from ..interface.componentes import build_player_embeds, MusicPlayerView" in texto
+    assert "from .ui import build_player_embeds, MusicPlayerView" not in texto

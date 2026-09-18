@@ -3995,7 +3995,7 @@ class AudioRouter:
         if channel is None:
             return
         try:
-            from .ui import build_player_embeds, MusicPlayerView
+            from ..interface.componentes import build_player_embeds, MusicPlayerView
 
             has_player_content = bool(state.current or self._has_pending_track(state))
             if has_player_content:
