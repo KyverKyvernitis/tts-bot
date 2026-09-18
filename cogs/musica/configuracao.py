@@ -30,13 +30,6 @@ def _parse_float(value: str | None, default: float = 0.0) -> float:
         return default
 
 
-# Este sinal pertence ao runtime do Core Worker, mas altera se a VPS pode usar
-# o Music Agent Termux. Lemos o mesmo env diretamente para não criar dependência
-# circular entre a configuração global e o domínio de música.
-CORE_WORKER_APK_REPLACES_TERMUX = _parse_bool(
-    os.getenv("CORE_WORKER_APK_REPLACES_TERMUX", "true"), True
-)
-
 # -----------------------------------------------------------------------------
 # Música — configuração do domínio
 # -----------------------------------------------------------------------------
@@ -215,7 +208,7 @@ MUSIC_LAVASRC_MIRROR_PREFIXES = (os.getenv("MUSIC_LAVASRC_MIRROR_PREFIXES", "scs
 # Lavalink/phone worker — música agora deve rodar fora da VPS.
 # MUSIC_BACKEND fica aceitando valor antigo por compatibilidade, mas o fluxo
 # musical usa MUSIC_WORKER_ONLY_ENABLED para bloquear fallback local pesado.
-MUSIC_BACKEND = "local" if CORE_WORKER_APK_REPLACES_TERMUX else (os.getenv("MUSIC_BACKEND", "worker") or "worker").strip().lower()
+MUSIC_BACKEND = (os.getenv("MUSIC_BACKEND", "worker") or "worker").strip().lower()
 LAVALINK_ENABLED = _parse_bool(os.getenv("LAVALINK_ENABLED", "false"), False)
 LAVALINK_MODE = (os.getenv("LAVALINK_MODE", "off") or "off").strip().lower()
 LAVALINK_HOST = (os.getenv("LAVALINK_HOST", "") or "").strip()
@@ -239,8 +232,8 @@ AUX_LAVALINK_COOLDOWN_SECONDS = max(10.0, _parse_float(os.getenv("AUX_LAVALINK_C
 
 
 # Music Agent no phone worker — padrão da música. A VPS fica como plano de UI/status
-# e o worker assume voz/player/Lavalink/yt-dlp quando disponível.
-MUSIC_AGENT_ENABLED = (not CORE_WORKER_APK_REPLACES_TERMUX) and _parse_bool(os.getenv("MUSIC_AGENT_ENABLED", "true"), True)
+# e o Phone Worker assume voz/player/yt-dlp quando disponível. Lavalink fica só em metadados.
+MUSIC_AGENT_ENABLED = _parse_bool(os.getenv("MUSIC_AGENT_ENABLED", "true"), True)
 MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS", "18.0"), 18.0))
 MUSIC_AGENT_STATUS_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", "5.0"), 5.0))
 MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS = max(5.0, _parse_float(os.getenv("MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", "30.0"), 30.0))
@@ -268,10 +261,10 @@ MUSIC_AGENT_MISSING_TOKEN_MESSAGE = (
     or "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta"
 ).strip()
 
-# Phone-worker auxiliar — celular via Tailscale.
-# Para música, o modo atual é worker-only: a VPS não deve usar yt-dlp/FFmpeg local
-# nem fallback pesado. O worker turbo/phone-lavalink precisa estar online.
-MUSIC_WORKER_ONLY_ENABLED = (not CORE_WORKER_APK_REPLACES_TERMUX) and _parse_bool(os.getenv("MUSIC_WORKER_ONLY_ENABLED", "true"), True)
+# Phone Worker — celular via Tailscale.
+# Música é um domínio independente do Core Worker APK: substituir o Termux do Core
+# Worker não pode desligar o Music Agent. A VPS não reproduz música localmente.
+MUSIC_WORKER_ONLY_ENABLED = _parse_bool(os.getenv("MUSIC_WORKER_ONLY_ENABLED", "true"), True)
 MUSIC_WORKER_UNAVAILABLE_MESSAGE = (
     os.getenv("MUSIC_WORKER_UNAVAILABLE_MESSAGE", "Sistema de música indisponível no momento: Nenhum worker online")
     or "Sistema de música indisponível no momento: Nenhum worker online"
@@ -284,7 +277,7 @@ MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE = (
     os.getenv("MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE", "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta")
     or "Sistema de música indisponível no momento: O worker está online, mas a música ainda não está pronta"
 ).strip()
-MUSIC_WORKER_REQUIRE_TURBO = (not CORE_WORKER_APK_REPLACES_TERMUX) and _parse_bool(os.getenv("MUSIC_WORKER_REQUIRE_TURBO", "true"), True)
+MUSIC_WORKER_REQUIRE_TURBO = _parse_bool(os.getenv("MUSIC_WORKER_REQUIRE_TURBO", "true"), True)
 MUSIC_WORKER_REQUIRED_ROLES = (os.getenv("MUSIC_WORKER_REQUIRED_ROLES", "phone-worker") or "phone-worker").strip()
 MUSIC_WORKER_REQUIRED_CAPABILITIES = (os.getenv("MUSIC_WORKER_REQUIRED_CAPABILITIES", "ffmpeg,ffprobe") or "ffmpeg,ffprobe").strip()
 # Segredos/cookies do yt-dlp em modo worker-only ficam no phone worker, não na VPS.

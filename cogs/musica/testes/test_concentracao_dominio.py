@@ -82,3 +82,25 @@ def test_ferramenta_spotify_mora_na_cog() -> None:
 
 def test_stub_antigo_diagnostico_musica_foi_removido() -> None:
     assert not (ROOT / "utility/commands/diagnostico_musica.py").exists()
+
+
+def test_core_worker_apk_nao_desliga_phone_worker_de_musica(monkeypatch) -> None:
+    import importlib.util
+
+    monkeypatch.setenv("CORE_WORKER_APK_REPLACES_TERMUX", "true")
+    monkeypatch.delenv("MUSIC_AGENT_ENABLED", raising=False)
+    monkeypatch.delenv("MUSIC_WORKER_ONLY_ENABLED", raising=False)
+    monkeypatch.delenv("MUSIC_WORKER_REQUIRE_TURBO", raising=False)
+    monkeypatch.delenv("MUSIC_BACKEND", raising=False)
+
+    caminho = ROOT / "cogs/musica/configuracao.py"
+    spec = importlib.util.spec_from_file_location("_musica_config_isolada_teste", caminho)
+    assert spec is not None and spec.loader is not None
+    modulo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modulo)
+
+    assert modulo.MUSIC_AGENT_ENABLED is True
+    assert modulo.MUSIC_WORKER_ONLY_ENABLED is True
+    assert modulo.MUSIC_WORKER_REQUIRE_TURBO is True
+    assert modulo.MUSIC_BACKEND == "worker"
+    assert "CORE_WORKER_APK_REPLACES_TERMUX" not in caminho.read_text(encoding="utf-8")
