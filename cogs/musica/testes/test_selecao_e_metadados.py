@@ -188,3 +188,51 @@ def test_worker_nao_turbo_so_bloqueia_bootstrap_do_agente(monkeypatch) -> None:
     assert "não_turbo_para_bootstrap" in escolhido.reason
     assert "Nenhum worker online" not in escolhido.message
     assert "worker online" in escolhido.message
+
+
+def test_registry_da_musica_usa_o_mesmo_snapshot_publico_do_painel(monkeypatch) -> None:
+    from cogs.musica.agente_telefone import registro
+    from utility.commands import workers_registry
+
+    worker = _worker_sem_lavalink()
+    chamadas = []
+
+    class RegistryFake:
+        def snapshot(self, *, lock_timeout_seconds=None):
+            chamadas.append(lock_timeout_seconds)
+            return {
+                "ok": True,
+                "workers": [worker],
+                "summary": {"online": 1, "runtime_online": 1},
+            }
+
+    fake = RegistryFake()
+    monkeypatch.setattr(workers_registry, "get_core_workers_registry", lambda: fake)
+
+    encontrados = registro.carregar_workers_publicos()
+
+    assert encontrados == [worker]
+    assert chamadas and chamadas[0] is not None
+
+
+def test_snapshot_stale_ainda_preserva_worker_online(monkeypatch) -> None:
+    from cogs.musica.agente_telefone import registro
+    from utility.commands import workers_registry
+
+    worker = _worker_sem_lavalink()
+
+    class RegistryFake:
+        def snapshot(self, *, lock_timeout_seconds=None):
+            return {
+                "ok": False,
+                "stale": True,
+                "error": "registry_lock_timeout",
+                "workers": [worker],
+                "summary": {"online": 1, "runtime_online": 1},
+            }
+
+    monkeypatch.setattr(workers_registry, "get_core_workers_registry", lambda: RegistryFake())
+
+    encontrados = registro.carregar_workers_publicos()
+
+    assert encontrados and encontrados[0]["online"] is True

@@ -231,6 +231,18 @@ AUX_LAVALINK_TIMEOUT_SECONDS = max(1.0, _parse_float(os.getenv("AUX_LAVALINK_TIM
 AUX_LAVALINK_COOLDOWN_SECONDS = max(10.0, _parse_float(os.getenv("AUX_LAVALINK_COOLDOWN_SECONDS", "300"), 300.0))
 
 
+# Conexão direta com o Phone Worker usada exclusivamente pela música.
+# Não depende do modo APK/Termux do Core Worker: se host+token existem, a cog
+# pode consultar o agente como fallback do registry. Desative somente com
+# MUSIC_PHONE_WORKER_DIRECT_ENABLED=false.
+PHONE_WORKER_HOST = (os.getenv("PHONE_WORKER_HOST", "") or "").strip()
+PHONE_WORKER_PORT = _parse_int(os.getenv("PHONE_WORKER_PORT", "8766"), 8766)
+PHONE_WORKER_SCHEME = (os.getenv("PHONE_WORKER_SCHEME", "http") or "http").strip().lower() or "http"
+PHONE_WORKER_TOKEN = (os.getenv("PHONE_WORKER_TOKEN", "") or "").strip()
+MUSIC_PHONE_WORKER_DIRECT_ENABLED = _parse_bool(os.getenv("MUSIC_PHONE_WORKER_DIRECT_ENABLED", "true"), True)
+PHONE_WORKER_ENABLED = bool(MUSIC_PHONE_WORKER_DIRECT_ENABLED and PHONE_WORKER_HOST and PHONE_WORKER_TOKEN)
+
+
 # Music Agent no phone worker — padrão da música. A VPS fica como plano de UI/status
 # e o Phone Worker assume voz/player/yt-dlp quando disponível. Lavalink fica só em metadados.
 MUSIC_AGENT_ENABLED = _parse_bool(os.getenv("MUSIC_AGENT_ENABLED", "true"), True)

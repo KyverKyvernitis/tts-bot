@@ -104,3 +104,25 @@ def test_core_worker_apk_nao_desliga_phone_worker_de_musica(monkeypatch) -> None
     assert modulo.MUSIC_WORKER_REQUIRE_TURBO is True
     assert modulo.MUSIC_BACKEND == "worker"
     assert "CORE_WORKER_APK_REPLACES_TERMUX" not in caminho.read_text(encoding="utf-8")
+
+
+def test_configuracao_da_musica_enxerga_phone_worker_direto_sem_flag_legado(monkeypatch) -> None:
+    import importlib.util
+
+    monkeypatch.setenv("PHONE_WORKER_HOST", "100.64.0.10")
+    monkeypatch.setenv("PHONE_WORKER_PORT", "8766")
+    monkeypatch.setenv("PHONE_WORKER_SCHEME", "http")
+    monkeypatch.setenv("PHONE_WORKER_TOKEN", "segredo")
+    monkeypatch.setenv("PHONE_WORKER_ENABLED", "false")
+    monkeypatch.delenv("MUSIC_PHONE_WORKER_DIRECT_ENABLED", raising=False)
+
+    caminho = ROOT / "cogs/musica/configuracao.py"
+    spec = importlib.util.spec_from_file_location("_musica_config_phone_worker_teste", caminho)
+    assert spec is not None and spec.loader is not None
+    modulo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modulo)
+
+    assert modulo.PHONE_WORKER_HOST == "100.64.0.10"
+    assert modulo.PHONE_WORKER_TOKEN == "segredo"
+    assert modulo.PHONE_WORKER_ENABLED is True
+    assert modulo.MUSIC_PHONE_WORKER_DIRECT_ENABLED is True
