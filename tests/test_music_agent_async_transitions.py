@@ -40,6 +40,26 @@ def test_status_declares_direct_discord_voice_backend_and_no_lavalink_fields(mus
     assert "wavelink" not in payload["voice_dependencies"]
 
 
+def test_music_health_treats_tts_providers_as_optional(music, monkeypatch):
+    agent = music.MusicAgent()
+
+    real_import = music.importlib.import_module
+
+    def fake_import(name):
+        if name in {"gtts", "edge_tts"}:
+            raise ModuleNotFoundError(name)
+        return real_import(name)
+
+    monkeypatch.setattr(music.importlib, "import_module", fake_import)
+    payload = agent.voice_dependencies_payload()
+
+    assert "gTTS" not in payload["missing"]
+    assert "edge-tts" not in payload["missing"]
+    assert set(payload["optional_missing"]) == {"gTTS", "edge-tts"}
+    assert payload["checks"]["gTTS"]["optional"] is True
+    assert payload["checks"]["edge-tts"]["optional"] is True
+
+
 def test_run_cleans_http_runner_when_client_start_returns(music, monkeypatch):
     async def scenario():
         agent = music.MusicAgent()

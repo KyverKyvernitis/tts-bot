@@ -215,6 +215,13 @@ def test_phone_worker_music_dependencies_do_not_require_wavelink():
     assert '"yt-dlp"' in block
 
 
+def test_phone_worker_music_health_treats_tts_providers_as_optional():
+    source = (ROOT / "deploy/termux/phone-worker/phone_worker.py").read_text(encoding="utf-8")
+    block = source.split("def _music_voice_dependency_specs()", 1)[1].split("\n\ndef ", 1)[0]
+    assert '"gTTS": {"module": "gtts", "pip": "gTTS==2.5.4", "optional": True}' in block
+    assert '"edge-tts": {"module": "edge_tts", "pip": "edge-tts==7.2.8", "optional": True}' in block
+
+
 def test_music_agent_safe_installer_uses_lightweight_ytdlp_package():
     source = (ROOT / "deploy/termux/phone-worker/start-phone-music-agent.sh").read_text(encoding="utf-8")
     assert 'safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp" light' in source

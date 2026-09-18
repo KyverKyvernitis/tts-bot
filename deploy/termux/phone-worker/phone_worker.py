@@ -120,7 +120,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.8"
+PHONE_WORKER_VERSION = "1.11.9"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -2780,8 +2780,8 @@ def _music_voice_dependency_specs() -> dict[str, dict[str, Any]]:
         "davey": {"module": "davey", "pip": "davey"},
         "yt-dlp": {"module": "yt_dlp", "pip": "yt-dlp"},
         "aiohttp": {"module": "aiohttp", "pip": "aiohttp"},
-        "gTTS": {"module": "gtts", "pip": "gTTS==2.5.4"},
-        "edge-tts": {"module": "edge_tts", "pip": "edge-tts==7.2.8"},
+        "gTTS": {"module": "gtts", "pip": "gTTS==2.5.4", "optional": True},
+        "edge-tts": {"module": "edge_tts", "pip": "edge-tts==7.2.8", "optional": True},
     }
 
 

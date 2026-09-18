@@ -140,7 +140,7 @@ def _schedule_tts_prune(callback, path):
             _TTS_MAINTENANCE_PENDING = None
 
 
-AGENT_VERSION = "0.3.29"
+AGENT_VERSION = "0.3.30"
 STARTED_AT = time.time()
 
 
@@ -944,7 +944,7 @@ class MusicAgent:
             "gTTS": "gtts",
             "edge-tts": "edge_tts",
         }
-        optional_modules: set[str] = set()
+        optional_modules: set[str] = {"gTTS", "edge-tts"}
         for label, module in modules.items():
             try:
                 importlib.import_module(module)
