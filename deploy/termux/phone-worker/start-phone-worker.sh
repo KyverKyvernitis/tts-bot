@@ -41,7 +41,12 @@ SSHD_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
 # Para bloquear serviços, use PHONE_WORKER_SAFE_MODE=true ou START_* = off.
 # Lavalink/NodeLink não fazem mais parte do worker; música usa Music Agent + yt-dlp/ffmpeg.
 MUSIC_AGENT_AUTO_START="${PHONE_WORKER_START_MUSIC_AGENT:-${MUSIC_AGENT_ENABLED:-auto}}"
-MUSIC_AGENT_START_COMMAND="${MUSIC_AGENT_START_COMMAND:-$WORKER_DIR/start-phone-music-agent.sh}"
+MUSIC_AGENT_START_COMMAND_EXPLICIT=0
+if [[ -n "${MUSIC_AGENT_START_COMMAND:-}" ]]; then
+  MUSIC_AGENT_START_COMMAND_EXPLICIT=1
+else
+  MUSIC_AGENT_START_COMMAND="$WORKER_DIR/start-phone-music-agent.sh"
+fi
 MAINT_LOCK_DIR="${PHONE_WORKER_MAINT_LOCK_DIR:-$WORKER_DIR/.phone-worker-maintenance.lock}"
 MAINT_LOG_FILE="${PHONE_WORKER_MAINT_LOG_FILE:-$WORKER_DIR/phone-worker-maintenance.log}"
 DEPS_STATE_DIR="${PHONE_WORKER_DEPS_STATE_DIR:-$WORKER_DIR/.dependency-install}"
@@ -169,10 +174,17 @@ pid_is_official_worker() {
   # Processos de releases anteriores continuam sendo nossos. Antes, o
   # supervisor aceitava apenas o `current`, então agents antigos podiam ficar
   # vivos segurando 8766/8768 depois de uma promoção transacional.
-  [[ "$cwd" == "$WORKER_DIR" \
-    || "$cwd" == "$release" \
-    || "$cwd" == "$RUNTIME_ROOT"/releases/* \
-    || "$cwd" == "$WORKER_DIR"/.releases/* ]]
+  if [[ -n "$cwd" ]]; then
+    [[ "$cwd" == "$WORKER_DIR" \
+      || "$cwd" == "$release" \
+      || "$cwd" == "$RUNTIME_ROOT"/releases/* \
+      || "$cwd" == "$WORKER_DIR"/.releases/* ]]
+    return
+  fi
+  # Alguns Androids/Termux bloqueiam /proc/<pid>/cwd mesmo para processos do
+  # próprio app. Nessa situação, o cmdline específico do entrypoint ainda é
+  # suficiente para reconhecer e encerrar uma cópia antiga do phone-worker.
+  [[ "$cmdline" == *"phone_worker.py --host"* || "$cmdline" == *"phone_worker.py"* ]]
 }
 
 pid_from_file() {
@@ -573,19 +585,17 @@ ensure_turbo_python_tts_deps_if_needed() {
 }
 
 ensure_music_ytdlp_deps_if_needed() {
-  is_turbo_profile || return 0
-  safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp[default]" light || true
+  safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp" light || true
   safe_pip_install_module "yt-dlp-ejs" "yt_dlp_ejs" "yt-dlp-ejs" light || true
 }
 
 ensure_music_agent_deps_if_needed() {
-  is_turbo_profile || return 0
-  autostart_enabled "$MUSIC_AGENT_AUTO_START" || { log "perfil turbo: Music Agent não será iniciado automaticamente (modo seguro/auto-start off)"; return 0; }
+  autostart_enabled "$MUSIC_AGENT_AUTO_START" || { log "Music Agent não será iniciado automaticamente (modo seguro/auto-start off)"; return 0; }
   safe_pip_install_module "aiohttp" "aiohttp" "aiohttp" light || true
   safe_pip_install_module "discord.py" "discord" "discord.py>=2.7.1,<2.8" light || true
   safe_pip_install_module "PyNaCl" "nacl" "PyNaCl" light || true
   safe_pip_install_module "davey" "davey" "davey" light || true
-  safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp[default]" light || true
+  safe_pip_install_module "yt-dlp" "yt_dlp" "yt-dlp" light || true
   safe_pip_install_module "edge-tts" "edge_tts" "edge-tts==7.2.8" light || true
   safe_pip_install_module "gTTS" "gtts" "gTTS==2.5.4" light || true
   "$PYTHON_BIN" - <<'PYMUSICAGENTCHECK' >/dev/null 2>&1 && log "perfil turbo: dependências do Music Agent prontas" || log "perfil turbo: Music Agent ainda possui dependências ausentes; será reportado no health"
@@ -704,10 +714,27 @@ PIPERWRAP
 }
 
 
+active_music_agent_start_command() {
+  if [[ "$MUSIC_AGENT_START_COMMAND_EXPLICIT" == "1" && -x "$MUSIC_AGENT_START_COMMAND" ]]; then
+    printf '%s\n' "$MUSIC_AGENT_START_COMMAND"
+    return 0
+  fi
+  local release
+  release="$(active_release_dir)"
+  if [[ -x "$release/start-phone-music-agent.sh" ]]; then
+    printf '%s\n' "$release/start-phone-music-agent.sh"
+    return 0
+  fi
+  printf '%s\n' "$MUSIC_AGENT_START_COMMAND"
+}
+
 ensure_music_agent_if_needed() {
   autostart_enabled "$MUSIC_AGENT_AUTO_START" || { log "Music Agent não será iniciado automaticamente (modo seguro/auto-start off)"; return 0; }
-  if [[ ! -x "$MUSIC_AGENT_START_COMMAND" ]]; then
-    log "start do Music Agent não encontrado em $MUSIC_AGENT_START_COMMAND"
+  local release start_command
+  release="$(active_release_dir)"
+  start_command="$(active_music_agent_start_command)"
+  if [[ ! -x "$start_command" ]]; then
+    log "start do Music Agent não encontrado em $start_command"
     return 0
   fi
   if [[ -z "${MUSIC_AGENT_BOT_TOKEN:-${DISCORD_TOKEN:-${BOT_TOKEN:-}}}" ]]; then
@@ -717,16 +744,17 @@ ensure_music_agent_if_needed() {
   if [[ -z "${MUSIC_AGENT_TOKEN:-}" && -n "${PHONE_WORKER_TOKEN:-}" ]]; then
     upsert_env_value MUSIC_AGENT_TOKEN "$PHONE_WORKER_TOKEN"
   fi
-  log "garantindo Music Agent do worker"
-  "$MUSIC_AGENT_START_COMMAND" >/dev/null 2>&1 || \
+  log "garantindo Music Agent do worker; release=$release"
+  PHONE_WORKER_RELEASE_DIR="$release" \
+  PHONE_WORKER_DIR="$WORKER_DIR" \
+  MUSIC_AGENT_ENV="$MUSIC_AGENT_ENV_FILE" \
+    "$start_command" >/dev/null 2>&1 || \
     log "não consegui iniciar Music Agent automaticamente; música direta no worker pode ficar indisponível"
 }
 
 ensure_turbo_deps_if_needed() {
   ensure_turbo_termux_packages_if_needed
   ensure_turbo_python_tts_deps_if_needed
-  ensure_music_ytdlp_deps_if_needed
-  ensure_music_agent_deps_if_needed
   ensure_turbo_piper_cli_if_needed
   ensure_turbo_piper_model_if_needed
   ensure_turbo_piper_wrapper_if_needed
@@ -746,6 +774,10 @@ run_post_start_maintenance_async() {
       cleanup_heavy_services_for_safe_mode
       ensure_turbo_deps_if_needed
     fi
+    # Música é independente do perfil APK/turbo: o Termux fallback também
+    # resolve via yt-dlp e hospeda o Music Agent direto.
+    ensure_music_ytdlp_deps_if_needed
+    ensure_music_agent_deps_if_needed
     ensure_music_agent_if_needed
     log "manutenção pós-start finalizada"
   ) >> "$MAINT_LOG_FILE" 2>&1 &

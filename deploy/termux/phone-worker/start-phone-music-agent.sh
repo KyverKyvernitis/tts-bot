@@ -11,6 +11,11 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 WORKER_DIR="${PHONE_WORKER_DIR:-$HOME/phone-worker}"
+RUNTIME_DIR="${PHONE_WORKER_RELEASE_DIR:-$WORKER_DIR}"
+if [[ ! -f "$RUNTIME_DIR/music_agent.py" ]]; then
+  RUNTIME_DIR="$WORKER_DIR"
+fi
+AGENT_FILE="$RUNTIME_DIR/music_agent.py"
 MUSIC_AGENT_ENV_FILE="${MUSIC_AGENT_ENV:-$WORKER_DIR/secrets/music-agent.env}"
 if [[ -f "$MUSIC_AGENT_ENV_FILE" ]]; then
   set -a
@@ -189,8 +194,8 @@ cleanup_agent_for_safe_mode() {
 }
 
 
-if [[ ! -f "$WORKER_DIR/music_agent.py" ]]; then
-  log "music_agent.py não encontrado em $WORKER_DIR"
+if [[ ! -f "$AGENT_FILE" ]]; then
+  log "music_agent.py não encontrado em $RUNTIME_DIR"
   exit 1
 fi
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
@@ -222,7 +227,7 @@ except Exception: pass' 2>/dev/null || true
 }
 
 file_version() {
-  "$PYTHON_BIN" - "$WORKER_DIR/music_agent.py" <<'PYVER' 2>/dev/null || true
+  "$PYTHON_BIN" - "$AGENT_FILE" <<'PYVER' 2>/dev/null || true
 import re, sys
 try:
     text=open(sys.argv[1], encoding="utf-8", errors="ignore").read()
@@ -334,7 +339,8 @@ fi
 
 log "iniciando Music Agent em $HOST:$PORT"
 (
-  cd "$WORKER_DIR" || exit 1
+  cd "$RUNTIME_DIR" || exit 1
+  export PHONE_WORKER_RELEASE_DIR="$RUNTIME_DIR"
   exec "$PYTHON_BIN" music_agent.py
 ) >> "$LOG_FILE" 2>&1 &
 pid=$!

@@ -228,3 +228,37 @@ def test_music_agent_autostart_is_not_turbo_only():
     maintenance = source.split("run_post_start_maintenance_async()", 1)[1].split("\n}\n", 1)[0]
     assert "ensure_music_agent_if_needed" in maintenance
     assert "is_turbo_profile || return 0" not in maintenance
+
+
+def test_music_agent_supervisor_runs_agent_from_active_release():
+    source = (ROOT / "deploy/termux/phone-worker/start-phone-music-agent.sh").read_text(encoding="utf-8")
+    assert 'RUNTIME_DIR="${PHONE_WORKER_RELEASE_DIR:-$WORKER_DIR}"' in source
+    assert 'AGENT_FILE="$RUNTIME_DIR/music_agent.py"' in source
+    assert 'cd "$RUNTIME_DIR" || exit 1' in source
+    assert 'exec "$PYTHON_BIN" music_agent.py' in source
+
+
+def test_phone_worker_autostart_prefers_active_release_music_supervisor():
+    source = (ROOT / "deploy/termux/phone-worker/start-phone-worker.sh").read_text(encoding="utf-8")
+    assert "active_music_agent_start_command()" in source
+    assert '$release/start-phone-music-agent.sh' in source
+    assert 'PHONE_WORKER_RELEASE_DIR="$release"' in source
+    assert 'MUSIC_AGENT_ENV="$MUSIC_AGENT_ENV_FILE"' in source
+
+
+def test_phone_worker_music_dependency_bootstrap_is_profile_independent_and_lightweight():
+    source = (ROOT / "deploy/termux/phone-worker/start-phone-worker.sh").read_text(encoding="utf-8")
+    ytdlp = source.split("ensure_music_ytdlp_deps_if_needed()", 1)[1].split("\n}\n", 1)[0]
+    music_deps = source.split("ensure_music_agent_deps_if_needed()", 1)[1].split("\n}\n", 1)[0]
+    assert "is_turbo_profile || return 0" not in ytdlp
+    assert "is_turbo_profile || return 0" not in music_deps
+    assert '"yt-dlp" "yt_dlp" "yt-dlp" light' in ytdlp
+    assert 'yt-dlp[default]' not in ytdlp + music_deps
+
+
+def test_phone_worker_duplicate_detection_has_proc_cwd_fallback():
+    source = (ROOT / "deploy/termux/phone-worker/start-phone-worker.sh").read_text(encoding="utf-8")
+    block = source.split("pid_is_official_worker()", 1)[1].split("\n}\n", 1)[0]
+    assert 'if [[ -n "$cwd" ]]' in block
+    assert 'phone_worker.py --host' in block
+    assert '/proc/<pid>/cwd' in block
