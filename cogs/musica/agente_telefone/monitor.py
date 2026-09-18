@@ -8,6 +8,7 @@ from cogs.musica import configuracao as config
 
 from .comandos import music_agent_status
 from .conversao import estado_da_guild_no_payload
+from .roteamento import desvincular_guild_worker
 
 logger = logging.getLogger(__name__)
 
@@ -29,18 +30,31 @@ def iniciar_monitor_music_agent(
 
     async def _runner() -> None:
         idle_seen = 0
+        failure_seen = 0
         try:
             while True:
                 await asyncio.sleep(max(1.0, min(4.0, float(getattr(config, "MUSIC_AGENT_PANEL_POLL_SECONDS", 2.0) or 2.0))))
                 try:
-                    payload = await music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0))
+                    payload = await music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 5.0), guild_id=guild_id)
                 except Exception:
-                    logger.debug("[music/agent] monitor não conseguiu consultar status | guild=%s", guild_id, exc_info=True)
+                    failure_seen += 1
+                    logger.debug("[music/agent] monitor não conseguiu consultar status | guild=%s falhas=%s", guild_id, failure_seen, exc_info=True)
+                    if failure_seen >= 4:
+                        desvincular_guild_worker(guild_id)
+                        return
                     continue
+                if not bool(payload.get("ok", True)) or (payload.get("available") is False and payload.get("error")):
+                    failure_seen += 1
+                    if failure_seen >= 4:
+                        desvincular_guild_worker(guild_id)
+                        return
+                    continue
+                failure_seen = 0
                 remote = estado_da_guild_no_payload(payload, guild_id)
                 if not remote:
                     idle_seen += 1
                     if idle_seen >= 4:
+                        desvincular_guild_worker(guild_id)
                         return
                     continue
                 await router.sync_music_agent_state(
@@ -56,6 +70,7 @@ def iniciar_monitor_music_agent(
                 has_current = isinstance(remote.get("current"), dict) and bool(remote.get("current"))
                 idle_seen = idle_seen + 1 if status in {"idle", "stopped", "failed", "error"} and not has_current else 0
                 if idle_seen >= 3:
+                    desvincular_guild_worker(guild_id)
                     return
         except asyncio.CancelledError:
             raise

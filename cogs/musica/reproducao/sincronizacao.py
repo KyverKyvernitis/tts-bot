@@ -5,6 +5,7 @@ from collections import deque
 from typing import Any
 
 from ..agente_telefone.conversao import faixa_do_payload
+from ..agente_telefone.roteamento import desvincular_guild_worker
 from ..nucleo.modelos import MusicTrack
 
 
@@ -167,6 +168,7 @@ async def sincronizar_estado_agente(
                 router._set_current_status(state, "idle")
                 router._mark_internal_voice_disconnect(guild_id, seconds=8.0)
                 router._schedule_agent_session_finished_effects(guild_id, "agent_idle")
+                desvincular_guild_worker(guild_id)
             else:
                 if track is not None:
                     state.current = track

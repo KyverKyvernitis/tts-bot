@@ -14,8 +14,12 @@ from .modelos import (
     MusicWorkerUnavailable,
 )
 from .selecao import require_music_worker_available_async
+from .roteamento import (
+    destino_vinculado,
+    resolver_destino_worker,
+    vincular_guild_worker,
+)
 from .transporte_http import post_json_worker
-from .utilitarios import _phone_worker_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +41,15 @@ async def music_agent_command(
     This is the control-plane bridge for the future architecture where the VPS
     edits UI/status while the same-bot agent on the phone owns voice/playback.
     """
-    selection = await require_music_worker_available_async()
-    base = _phone_worker_base_url()
-    token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
-    if not base or not token:
+    destino = destino_vinculado(guild_id)
+    selection = None
+    if destino is None:
+        selection = await require_music_worker_available_async()
+        destino = resolver_destino_worker(selection, guild_id=guild_id, preferir_vinculo=False)
+    if destino is None:
         raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+    base = destino.base
+    token = destino.token
     payload = montar_comando(
         action,
         guild_id=guild_id,
@@ -65,7 +73,7 @@ async def music_agent_command(
         )
     except Exception as exc:
         message = str(exc or "").strip() or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE
-        logger.warning("[music/agent] comando remoto falhou | worker=%s action=%s erro=%s", selection.worker_id, action, message)
+        logger.warning("[music/agent] comando remoto falhou | worker=%s action=%s erro=%s", destino.worker_id or destino.name, action, message)
         lower = message.lower()
         if (
             "music agent" in lower
@@ -87,15 +95,21 @@ async def music_agent_command(
         if "music agent" in lower or "configure music_agent" in lower or "sem token" in lower:
             message = str(getattr(config, "MUSIC_AGENT_MISSING_TOKEN_MESSAGE", MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE) or MUSIC_WORKER_ENGINE_UNAVAILABLE_MESSAGE)
         raise MusicWorkerEngineUnavailable(message[:260])
-    logger.info("[music/agent] comando remoto enviado | worker=%s action=%s guild=%s", selection.worker_id or selection.name, action, guild_id)
+    if int(guild_id or 0) > 0 and str(action or "").strip().lower() in {"play", "enqueue_many"}:
+        vincular_guild_worker(int(guild_id), destino)
+    logger.info("[music/agent] comando remoto enviado | worker=%s action=%s guild=%s", destino.worker_id or destino.name, action, guild_id)
     return data
 
-async def music_agent_status(*, timeout_seconds: float | None = None) -> dict[str, Any]:
-    selection = await require_music_worker_available_async()
-    base = _phone_worker_base_url()
-    token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
-    if not base or not token:
+async def music_agent_status(*, timeout_seconds: float | None = None, guild_id: int = 0) -> dict[str, Any]:
+    destino = destino_vinculado(guild_id)
+    selection = None
+    if destino is None:
+        selection = await require_music_worker_available_async()
+        destino = resolver_destino_worker(selection, guild_id=guild_id, preferir_vinculo=False)
+    if destino is None:
         raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+    base = destino.base
+    token = destino.token
     payload = montar_consulta_status(timeout_seconds=timeout_seconds)
     total_timeout = max(1.0, float(payload["timeout_seconds"]) + 1.0)
     try:
@@ -107,7 +121,7 @@ async def music_agent_status(*, timeout_seconds: float | None = None) -> dict[st
             max_erro=220,
         )
     except Exception as exc:
-        logger.info("[music/agent] status remoto indisponível | worker=%s erro=%s", selection.worker_id, exc)
+        logger.info("[music/agent] status remoto indisponível | worker=%s guild=%s erro=%s", destino.worker_id or destino.name, guild_id, exc)
         return {"ok": False, "available": False, "error": str(exc)}
     data.setdefault("ok", True)
     data.setdefault("available", bool(data.get("discord_ready")))

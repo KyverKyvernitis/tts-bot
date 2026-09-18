@@ -49,7 +49,7 @@ async def atualizar_estado_controle_remoto(
                     or 5.0
                 ),
             )
-        payload = await music_agent_status(timeout_seconds=timeout)
+        payload = await music_agent_status(timeout_seconds=timeout, guild_id=int(guild_id))
     except Exception:
         return {}
 

@@ -206,7 +206,7 @@ class FluxoTocar:
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(poll)
             try:
-                payload = await music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 3.5))
+                payload = await music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 3.5), guild_id=guild_id)
                 state = self._music_agent_guild_state(payload, guild_id)
                 await self._sync_music_agent_panel(guild_id, track, {"state": state}, voice_channel_id=voice_channel_id, text_channel_id=text_channel_id)
                 status = str(state.get("status") or "").lower()
@@ -484,6 +484,7 @@ class FluxoTocar:
                             limit=max(1, int(getattr(config, "MUSIC_MAX_PLAYLIST_ITEMS", 100) or 100)),
                             metadata_only=True,
                             allow_playlist=True,
+                            guild_id=ctx.guild.id,
                         )
                         logger.info("[music/worker] playlist/link flat resolvido no worker | guild=%s tracks=%s elapsed_ms=%.1f", ctx.guild.id, len(batch.tracks), (time.monotonic() - resolve_started) * 1000.0)
                     elif input_profile.is_url and not youtube_text_search:
@@ -502,6 +503,7 @@ class FluxoTocar:
                             requester_name=requester_name,
                             limit=(max(1, min(10, int(getattr(config, "MUSIC_SEARCH_RESULTS", 5) or 5))) if youtube_text_search else 1),
                             metadata_only=youtube_text_search,
+                            guild_id=ctx.guild.id,
                         )
                         logger.info("[music/worker] resolve etapa concluída | guild=%s metadata_only=%s elapsed_ms=%.1f", ctx.guild.id, youtube_text_search, (time.monotonic() - resolve_started) * 1000.0)
                 except MusicExtractionError as exc:

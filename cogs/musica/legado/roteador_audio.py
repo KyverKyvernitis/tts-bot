@@ -2545,7 +2545,7 @@ class AudioRouter:
         state.next_resolve_task = asyncio.create_task(_prefetch())
         state.next_resolve_task.add_done_callback(_consume_expected_music_exception)
 
-    async def _resolve_current_track(self, state: MusicGuildState, track: MusicTrack) -> None:
+    async def _resolve_current_track(self, state: MusicGuildState, track: MusicTrack, *, guild_id: int = 0) -> None:
         if self._track_uses_worker_local_stream(track):
             # O stream já é um endpoint PCM do phone worker. Não chame o extractor
             # local da VPS, que acionaria yt-dlp/FFmpeg local e quebraria worker-only.
@@ -2563,6 +2563,7 @@ class AudioRouter:
                 requester_name=str(getattr(track, "requester_name", "") or ""),
                 limit=1,
                 metadata_only=False,
+                guild_id=guild_id,
             )
             if not batch.tracks:
                 raise MusicExtractionError("O worker não retornou stream para a música escolhida.")
@@ -3299,7 +3300,7 @@ class AudioRouter:
 
         try:
             local_resolve_started = time.monotonic()
-            await self._resolve_current_track(state, track)
+            await self._resolve_current_track(state, track, guild_id=guild.id)
             logger.info(
                 "[music.perf] local_track_ready guild=%s track=%r elapsed=%.2fs",
                 guild.id,

@@ -8,6 +8,7 @@ from cogs.musica import configuracao as config
 from cogs.musica.diagnostico.servico import cleanup_music_diagnostics_temp_artifacts
 from cogs.musica.legado.roteador_audio import AudioRouter
 from cogs.musica.agente_telefone.transporte_http import fechar_sessao_http
+from cogs.musica.agente_telefone.roteamento import limpar_vinculos_worker
 from cogs.musica.interface.tarefas import cancelar_tarefas_interface
 
 LOG = logging.getLogger("music")
@@ -73,6 +74,7 @@ class IntegracaoMusicaBot:
         if tarefa is not None:
             tarefa.cancel()
         await cancelar_tarefas_interface()
+        limpar_vinculos_worker()
         try:
             await self.router.close()
         except Exception as exc:

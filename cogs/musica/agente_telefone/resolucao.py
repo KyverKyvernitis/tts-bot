@@ -16,13 +16,13 @@ from .cache_resolucao import (
 from .conversao_resolucao import converter_resposta_resolucao
 from .modelos import MUSIC_WORKER_UNAVAILABLE_MESSAGE, MusicWorkerUnavailable
 from .selecao import require_music_worker_available_async
+from .roteamento import destino_vinculado, resolver_destino_worker
 from .solicitacao_resolucao import (
     limite_resolucao as _limite_resolucao,
     montar_tarefa_resolucao as _montar_tarefa_resolucao,
     timeout_resolucao as _timeout_resolucao,
 )
 from .transporte_resolucao import executar_tarefa_resolucao
-from .utilitarios import _phone_worker_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -37,17 +37,22 @@ async def resolve_music_tracks_on_worker(
     timeout_seconds: float | None = None,
     metadata_only: bool | None = None,
     allow_playlist: bool = False,
+    guild_id: int = 0,
 ) -> ExtractedBatch:
     """Resolve pesquisa/link usando o yt-dlp do Phone Worker.
 
     A VPS atua somente como plano de controle. Ela não executa yt-dlp local e
     não reproduz áudio; a resolução e a sessão de voz pertencem ao telefone.
     """
-    selection = await require_music_worker_available_async()
-    base = _phone_worker_base_url()
-    token = str(getattr(config, "PHONE_WORKER_TOKEN", "") or "").strip()
-    if not base or not token:
+    destino = destino_vinculado(guild_id)
+    selection = None
+    if destino is None:
+        selection = await require_music_worker_available_async()
+        destino = resolver_destino_worker(selection, guild_id=guild_id, preferir_vinculo=False)
+    if destino is None:
         raise MusicWorkerUnavailable(MUSIC_WORKER_UNAVAILABLE_MESSAGE)
+    base = destino.base
+    token = destino.token
 
     clean_query = str(query or "").strip()
     if not clean_query:
@@ -69,6 +74,7 @@ async def resolve_music_tracks_on_worker(
         max_limit,
         somente_metadados,
         allow_playlist,
+        worker_scope=(destino.worker_id or destino.base),
     )
     cached_batch = obter_cache_resolucao(
         cache_key,
@@ -79,7 +85,7 @@ async def resolve_music_tracks_on_worker(
     if cached_batch is not None:
         logger.info(
             "[music/worker] resolve cache hit | worker=%s query=%r tracks=%s metadata_only=%s",
-            selection.worker_id or selection.name,
+            destino.worker_id or destino.name,
             clean_query,
             len(cached_batch.tracks),
             somente_metadados,
@@ -108,7 +114,7 @@ async def resolve_music_tracks_on_worker(
     except Exception as exc:
         logger.warning(
             "[music/worker] yt-dlp remoto falhou | worker=%s query=%r erro=%s",
-            selection.worker_id,
+            destino.worker_id or destino.name,
             clean_query,
             exc,
         )
@@ -136,7 +142,7 @@ async def resolve_music_tracks_on_worker(
     elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
     logger.info(
         "[music/worker] yt-dlp remoto ok | worker=%s query=%r tracks=%s metadata_only=%s elapsed_ms=%.1f js=%s search=%s cli_rc=%s cli_error=%r",
-        selection.worker_id or selection.name,
+        destino.worker_id or destino.name,
         clean_query,
         len(batch.tracks),
         bool(data.get("metadata_only") or somente_metadados),

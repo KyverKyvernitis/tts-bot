@@ -6,7 +6,7 @@ from cogs.musica import configuracao as config
 
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
 
-_CHAVE_CACHE = tuple[str, int, bool, bool]
+_CHAVE_CACHE = tuple[str, int, bool, bool] | tuple[str, int, bool, bool, str]
 _CACHE_RESOLUCAO: dict[_CHAVE_CACHE, tuple[float, ExtractedBatch]] = {}
 _MAX_ITENS_CACHE = 96
 
@@ -90,13 +90,17 @@ def chave_cache_resolucao(
     limit: int,
     somente_metadados: bool,
     permitir_playlist: bool = False,
+    worker_scope: str = "",
 ) -> _CHAVE_CACHE:
-    return (
+    base = (
         str(query or "").strip().lower(),
         int(limit or 1),
         bool(somente_metadados),
         bool(permitir_playlist),
     )
+    if somente_metadados:
+        return base
+    return base + (str(worker_scope or "").strip().lower(),)
 
 
 def obter_cache_resolucao(

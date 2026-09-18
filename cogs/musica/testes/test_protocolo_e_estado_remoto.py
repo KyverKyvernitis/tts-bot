@@ -98,8 +98,8 @@ async def test_refresh_remoto_consulta_e_sincroniza(monkeypatch: pytest.MonkeyPa
         last_text_channel_id=55,
     )
 
-    async def status_fake(*, timeout_seconds=None):
-        chamadas.append(("status", timeout_seconds))
+    async def status_fake(*, timeout_seconds=None, guild_id=0):
+        chamadas.append(("status", timeout_seconds, guild_id))
         return {
             "guilds": {
                 "123": {
@@ -127,7 +127,7 @@ async def test_refresh_remoto_consulta_e_sincroniza(monkeypatch: pytest.MonkeyPa
     )
 
     assert remote["status"] == "playing"
-    assert chamadas[0] == ("status", 1.25)
+    assert chamadas[0] == ("status", 1.25, 123)
     assert chamadas[1][0:3] == ("sync", 123, "track-local")
     assert chamadas[1][4]["voice_channel_id"] == 77
     assert chamadas[1][4]["text_channel_id"] == 88
