@@ -250,6 +250,10 @@ MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_AGE
 MUSIC_AGENT_STATUS_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", "5.0"), 5.0))
 MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS = max(5.0, _parse_float(os.getenv("MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", "30.0"), 30.0))
 MUSIC_AGENT_STATUS_POLL_SECONDS = max(0.4, _parse_float(os.getenv("MUSIC_AGENT_STATUS_POLL_SECONDS", "0.75"), 0.75))
+# O monitor consulta o estado remoto com frequência, mas não precisa editar a
+# mesma mensagem do Discord a cada poll. Atualizações sem mudança ficam limitadas
+# a um refresh periódico para manter capacidade de autorreparo do painel.
+MUSIC_AGENT_PANEL_REFRESH_SECONDS = max(10.0, min(300.0, _parse_float(os.getenv("MUSIC_AGENT_PANEL_REFRESH_SECONDS", "30.0"), 30.0)))
 MUSIC_AGENT_IDLE_DISCONNECT_SECONDS = max(15.0, _parse_float(os.getenv("MUSIC_AGENT_IDLE_DISCONNECT_SECONDS", os.getenv("MUSIC_IDLE_DISCONNECT_SECONDS", "120")), 120.0))
 MUSIC_LOADING_REACTION_EMOJI = (os.getenv("MUSIC_LOADING_REACTION_EMOJI", "<a:areia:1496606578395189473>") or "<a:areia:1496606578395189473>").strip()
 MUSIC_AGENT_MIN_VERSION = (os.getenv("MUSIC_AGENT_MIN_VERSION", "0.3.23") or "0.3.23").strip()

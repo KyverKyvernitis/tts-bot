@@ -329,3 +329,159 @@ def test_phone_worker_music_status_forwards_compact_guild_query():
     assert '"compact": "1" if compact else "0"' in block
     assert 'urllib.parse.urlencode' in block
 
+
+
+def test_direct_seek_offset_is_not_counted_twice_in_reported_position(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 31
+        channel_id = 901
+        track = music.AgentTrack(
+            title="seeked",
+            query="seeked",
+            stream_url="https://media.example/audio",
+            duration=195.0,
+            start_offset_seconds=60.0,
+        )
+        st = music.GuildMusicState(
+            guild_id=gid,
+            voice_channel_id=channel_id,
+            current=track,
+            status="starting",
+        )
+        agent.states[gid] = st
+
+        class VoiceClient:
+            def __init__(self):
+                self.channel = types.SimpleNamespace(id=channel_id)
+                self.playing = False
+                self.source = None
+            def is_connected(self): return True
+            def is_playing(self): return self.playing
+            def is_paused(self): return False
+            def play(self, source, after=None):
+                self.source = source
+                self.playing = True
+            def stop(self): self.playing = False
+            async def move_to(self, channel): self.channel = channel
+
+        voice = VoiceClient()
+        guild = types.SimpleNamespace(voice_client=voice)
+        channel = types.SimpleNamespace(id=channel_id)
+
+        async def resolve_channel(*args, **kwargs):
+            return guild, channel
+        async def no_sleep(_seconds):
+            return None
+
+        agent._loop = asyncio.get_running_loop()
+        agent._resolve_guild_and_channel = resolve_channel
+        agent._build_ffmpeg_source = lambda *args, **kwargs: object()
+        agent._schedule_next_queue_prefetch = lambda *args, **kwargs: None
+        monkeypatch.setattr(music.asyncio, "sleep", no_sleep)
+
+        await agent._play_direct_voice(gid, track)
+        position = st.public()["position_ms"]
+        assert 59_000 <= position <= 61_500
+
+    run(scenario())
+
+
+def test_pause_freezes_position_and_resume_restarts_prefetch_clock(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 32
+        now = [110.0]
+        monkeypatch.setattr(music.time, "monotonic", lambda: now[0])
+
+        class Player:
+            def __init__(self): self.paused = False
+            def pause(self): self.paused = True
+            def resume(self): self.paused = False
+
+        st = music.GuildMusicState(
+            guild_id=gid,
+            current=music.AgentTrack(title="clock", query="clock", start_offset_seconds=10.0),
+            status="playing",
+            player=Player(),
+            started_monotonic=100.0,
+        )
+        agent.states[gid] = st
+        cancelled = []
+        scheduled = []
+        agent._cancel_prefetch_tasks = lambda value: cancelled.append(value) or 0
+        agent._schedule_next_queue_prefetch = lambda value, **kwargs: scheduled.append((value, kwargs.get("reason")))
+
+        await agent.cmd_pause({"guild_id": gid})
+        assert st.public()["position_ms"] == 20_000
+        now[0] = 210.0
+        assert st.public()["position_ms"] == 20_000
+
+        await agent.cmd_resume({"guild_id": gid})
+        assert st.started_monotonic == 200.0
+        assert st.public()["position_ms"] == 20_000
+        now[0] = 215.0
+        assert st.public()["position_ms"] == 25_000
+        assert cancelled == [gid]
+        assert scheduled == [(gid, "resume")]
+
+    run(scenario())
+
+
+def test_seek_invalidates_prefetch_generation_before_restarting_player(music):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 33
+        stopped = []
+        cancelled = []
+
+        class Player:
+            def is_playing(self): return True
+            def is_paused(self): return False
+            def stop(self): stopped.append(True)
+
+        track = music.AgentTrack(
+            title="seek",
+            query="seek",
+            stream_url="https://media.example/audio",
+            duration=180.0,
+        )
+        st = music.GuildMusicState(guild_id=gid, current=track, player=Player(), status="playing", playback_token=5)
+        agent.states[gid] = st
+        agent._cancel_prefetch_tasks = lambda value: cancelled.append(value) or 0
+        async def fake_play(_gid, _track):
+            return None
+        agent._play_direct_voice = fake_play
+
+        result = await agent.cmd_seek({"guild_id": gid, "position_seconds": 42})
+        assert result["ok"] is True
+        assert st.playback_token == 6
+        assert st.current.start_offset_seconds == 42
+        assert cancelled == [gid]
+        assert stopped == [True]
+
+    run(scenario())
+
+
+def test_short_expected_track_end_is_not_misclassified_as_failure(music, monkeypatch):
+    async def scenario():
+        agent = music.MusicAgent()
+        gid = 34
+        st = music.GuildMusicState(
+            guild_id=gid,
+            current=music.AgentTrack(title="short", query="short", duration=1.0),
+            status="playing",
+            playback_token=9,
+            started_monotonic=music.time.monotonic() - 1.0,
+        )
+        agent.states[gid] = st
+        scheduled = []
+        agent._schedule_idle_disconnect = lambda value: scheduled.append(value)
+
+        await agent._direct_after(gid, None, 9)
+        assert st.status == "idle"
+        assert st.last_error == ""
+        assert st.current is None
+        assert scheduled == [gid]
+
+    run(scenario())

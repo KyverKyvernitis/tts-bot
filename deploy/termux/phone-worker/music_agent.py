@@ -140,7 +140,7 @@ def _schedule_tts_prune(callback, path):
             _TTS_MAINTENANCE_PENDING = None
 
 
-AGENT_VERSION = "0.3.33"
+AGENT_VERSION = "0.3.34"
 STARTED_AT = time.time()
 
 
@@ -529,6 +529,7 @@ class GuildMusicState:
     preparing_since: float = 0.0
     playing_since: float = 0.0
     started_monotonic: float = 0.0
+    paused_monotonic: float = 0.0
     updated_at: float = field(default_factory=time.time)
     player: Any = None
     volume_percent: int = 55
@@ -562,7 +563,9 @@ class GuildMusicState:
         if position_ms <= 0 and self.current is not None and self.status in {"playing", "paused"} and self.started_monotonic:
             with contextlib.suppress(Exception):
                 base = max(0.0, float(getattr(self.current, "start_offset_seconds", 0.0) or 0.0))
-                position_ms = int(max(0.0, base + (time.monotonic() - float(self.started_monotonic))) * 1000)
+                clock = float(self.paused_monotonic or time.monotonic()) if self.paused else time.monotonic()
+                elapsed = max(0.0, clock - float(self.started_monotonic))
+                position_ms = int(max(0.0, base + elapsed) * 1000)
         status_age = max(0.0, time.time() - float(self.updated_at or time.time()))
         return {
             "guild_id": self.guild_id,
@@ -930,6 +933,7 @@ class MusicAgent:
         if status in {"preparing", "starting"}:
             st.preparing_since = now
             st.playing_since = 0.0
+            st.paused_monotonic = 0.0
         elif status == "playing":
             if not st.playing_since:
                 st.playing_since = now
@@ -941,6 +945,7 @@ class MusicAgent:
             if status != "playing":
                 st.playing_since = 0.0
                 st.started_monotonic = 0.0
+                st.paused_monotonic = 0.0
 
     async def handle_health(self, request: web.Request) -> web.Response:
         if not self._auth_ok(request):
@@ -1138,7 +1143,8 @@ class MusicAgent:
         current = st.current
         try:
             if current is not None and current.duration and st.started_monotonic:
-                elapsed = max(0.0, time.monotonic() - float(st.started_monotonic))
+                base = max(0.0, float(getattr(current, "start_offset_seconds", 0.0) or 0.0))
+                elapsed = base + max(0.0, time.monotonic() - float(st.started_monotonic))
                 remaining = max(0.0, float(current.duration) - elapsed)
                 delay = max(2.0, remaining - env_float("MUSIC_AGENT_PREFETCH_BEFORE_END_SECONDS", 45.0))
         except Exception:
@@ -1296,21 +1302,35 @@ class MusicAgent:
         return {"ok": True, "queued": False, "state": st.public()}
 
     async def cmd_pause(self, body: dict[str, Any]) -> dict[str, Any]:
-        st = self.states.setdefault(safe_id(body.get("guild_id")), GuildMusicState(guild_id=safe_id(body.get("guild_id"))))
+        guild_id = safe_id(body.get("guild_id"))
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         player = st.player
         if player and hasattr(player, "pause"):
             player.pause()
+            if not st.paused_monotonic and st.started_monotonic:
+                st.paused_monotonic = time.monotonic()
             st.paused = True
+            # Um prefetch programado com base no tempo restante perde validade
+            # enquanto a música está pausada. Recalcule apenas no resume.
+            self._cancel_prefetch_tasks(guild_id)
             self._set_status(st, "paused", event="pause")
         return {"ok": True, "state": st.public()}
 
     async def cmd_resume(self, body: dict[str, Any]) -> dict[str, Any]:
-        st = self.states.setdefault(safe_id(body.get("guild_id")), GuildMusicState(guild_id=safe_id(body.get("guild_id"))))
+        guild_id = safe_id(body.get("guild_id"))
+        st = self.states.setdefault(guild_id, GuildMusicState(guild_id=guild_id))
         player = st.player
         if player and hasattr(player, "resume"):
+            now = time.monotonic()
+            if st.started_monotonic and st.paused_monotonic:
+                # Desloque o relógio de início pelo tempo em pausa para a posição
+                # e o prefetch não avançarem enquanto o VoiceClient está parado.
+                st.started_monotonic += max(0.0, now - float(st.paused_monotonic))
+            st.paused_monotonic = 0.0
             player.resume()
             st.paused = False
             self._set_status(st, "playing", event="resume")
+            self._schedule_next_queue_prefetch(guild_id, reason="resume")
         return {"ok": True, "state": st.public()}
 
     def _track_key(self, track: AgentTrack | None) -> str:
@@ -1499,7 +1519,9 @@ class MusicAgent:
         track.start_offset_seconds = target
         st.current = track
         st.paused = False
-        st.playback_token += 1
+        st.paused_monotonic = 0.0
+        # O seek invalida callbacks e prefetches calculados para a posição antiga.
+        self._bump_playback_generation(st, reason="seek")
         if player is not None:
             with contextlib.suppress(Exception):
                 if getattr(player, "is_playing", lambda: False)() or getattr(player, "is_paused", lambda: False)():
@@ -2126,6 +2148,7 @@ class MusicAgent:
         request_token = int(getattr(st, "playback_token", 0) or 0)
         current_ref = st.current
         st.paused = False
+        st.paused_monotonic = 0.0
         st.transport = ""
         st.ducked = False
         st.normal_volume_percent = max(0, min(150, int(st.normal_volume_percent or self.default_volume_percent)))
@@ -2217,7 +2240,11 @@ class MusicAgent:
             raise RuntimeError("conectei no canal, mas a voz caiu antes do áudio")
         if not getattr(voice_client, "is_playing", lambda: False)() and not getattr(voice_client, "is_paused", lambda: False)():
             raise RuntimeError("ffmpeg iniciou, mas o áudio não ficou tocando")
-        st.started_monotonic = time.monotonic() - max(0.0, float(getattr(track, "start_offset_seconds", 0.0) or 0.0))
+        # O relógio monotônico representa apenas o tempo efetivamente tocado
+        # nesta instância. O offset do seek é somado separadamente em public().
+        # Subtraí-lo aqui fazia a posição reportada contar o seek duas vezes.
+        st.started_monotonic = time.monotonic()
+        st.paused_monotonic = 0.0
         self._set_status(st, "playing", event="direct_track_start_confirmed")
         self.log("play_started", guild_id=guild_id, transport="direct", title=track.title, confirm_delay=confirm_delay)
         self._schedule_next_queue_prefetch(guild_id, reason="direct_playing")
@@ -2280,7 +2307,20 @@ class MusicAgent:
             if st.queue:
                 await self._play_next(guild_id)
             return
-        if played_for < min_ok and st.current is not None:
+        remaining_expected: float | None = None
+        if st.current is not None and st.current.duration is not None:
+            with contextlib.suppress(Exception):
+                remaining_expected = max(
+                    0.0,
+                    float(st.current.duration)
+                    - max(0.0, float(getattr(st.current, "start_offset_seconds", 0.0) or 0.0)),
+                )
+        early_unexpected = bool(
+            played_for < min_ok
+            and st.current is not None
+            and (remaining_expected is None or remaining_expected > min_ok)
+        )
+        if early_unexpected:
             self._invalidate_track_stream_cache(st.current)
             self._set_status(st, "failed", event="direct_after_early_end", error=f"áudio encerrou cedo demais ({played_for:.1f}s)")
             self.log("play_failed", guild_id=guild_id, transport="direct", error=st.last_error, title=getattr(st.current, "title", ""))

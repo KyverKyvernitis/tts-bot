@@ -15,6 +15,10 @@ from cogs.musica.nucleo.fila import (
     tem_pendentes,
 )
 from cogs.musica.nucleo.modelos import MusicTrack
+from cogs.musica.agente_telefone.monitor import (
+    _assinatura_painel_remoto,
+    _deve_atualizar_painel,
+)
 from cogs.musica.reproducao.sincronizacao import sincronizar_estado_agente
 
 
@@ -125,3 +129,67 @@ async def test_sincronizacao_worker_nao_depende_de_player_local() -> None:
     assert state.current_source is None
     assert state.current_lavalink_player is None
     assert any(call[0] == "monitor" for call in calls)
+
+
+def test_monitor_ignora_telemetria_volatil_na_assinatura_do_painel() -> None:
+    base = {
+        "status": "playing",
+        "paused": False,
+        "confirmed_playing": True,
+        "voice_connected": True,
+        "player_present": True,
+        "position_ms": 10_000,
+        "status_age_seconds": 1.0,
+        "updated_at": 100.0,
+        "current": {
+            "title": "A",
+            "webpage_url": "https://example.invalid/a",
+            "duration": 120,
+            "uploader": "Artista",
+        },
+        "queue_size": 1,
+        "queue": [{"title": "B", "webpage_url": "https://example.invalid/b", "duration": 90}],
+    }
+    later = dict(base)
+    later.update(position_ms=80_000, status_age_seconds=71.0, updated_at=170.0)
+    assert _assinatura_painel_remoto(base) == _assinatura_painel_remoto(later)
+
+    changed = dict(later)
+    changed["queue_size"] = 2
+    assert _assinatura_painel_remoto(base) != _assinatura_painel_remoto(changed)
+
+
+def test_monitor_so_refresca_painel_sem_mudanca_no_intervalo_periodico() -> None:
+    assinatura = ("playing", "track")
+    assert _deve_atualizar_painel(
+        assinatura=assinatura,
+        assinatura_anterior=assinatura,
+        agora=20.0,
+        ultimo_refresh=10.0,
+        painel_existe=True,
+        refresh_seconds=30.0,
+    ) is False
+    assert _deve_atualizar_painel(
+        assinatura=assinatura,
+        assinatura_anterior=assinatura,
+        agora=41.0,
+        ultimo_refresh=10.0,
+        painel_existe=True,
+        refresh_seconds=30.0,
+    ) is True
+    assert _deve_atualizar_painel(
+        assinatura=("paused", "track"),
+        assinatura_anterior=assinatura,
+        agora=20.0,
+        ultimo_refresh=10.0,
+        painel_existe=True,
+        refresh_seconds=30.0,
+    ) is True
+    assert _deve_atualizar_painel(
+        assinatura=assinatura,
+        assinatura_anterior=assinatura,
+        agora=20.0,
+        ultimo_refresh=10.0,
+        painel_existe=False,
+        refresh_seconds=30.0,
+    ) is True
