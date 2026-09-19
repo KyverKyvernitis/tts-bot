@@ -327,6 +327,8 @@ def test_phone_worker_music_status_forwards_compact_guild_query():
     block = source.split("def _task_music_agent_proxy", 1)[1].split("\n    def ", 1)[0]
     assert 'guild_id = int(body.get("guild_id") or 0)' in block
     assert '"compact": "1" if compact else "0"' in block
+    assert 'known_revision = str(body.get("known_revision") or "").strip()' in block
+    assert 'params["known_revision"] = known_revision' in block
     assert 'urllib.parse.urlencode' in block
 
 

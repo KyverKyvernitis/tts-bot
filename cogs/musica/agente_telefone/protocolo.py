@@ -87,6 +87,7 @@ def montar_consulta_status(
     timeout_seconds: float | None = None,
     guild_id: int = 0,
     compact: bool | None = None,
+    known_revision: str = "",
 ) -> dict[str, Any]:
     guild_id = int(guild_id or 0)
     payload: dict[str, Any] = {
@@ -101,4 +102,6 @@ def montar_consulta_status(
     if guild_id > 0:
         payload["guild_id"] = guild_id
         payload["compact"] = True if compact is None else bool(compact)
+        if known_revision:
+            payload["known_revision"] = str(known_revision)
     return payload

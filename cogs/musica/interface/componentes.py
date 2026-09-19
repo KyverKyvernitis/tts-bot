@@ -15,6 +15,7 @@ from ..nucleo.erros import MusicExtractionError
 from ..nucleo.modelos import ExtractedBatch, MusicTrack
 from ..metadados.provedores import describe_url
 from ..agente_telefone.comandos import music_agent_command, music_agent_status
+from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_agent_ativo
 from ..reproducao.controle_remoto import enviar_controle_remoto
 from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
 from .carregamento import MusicLoadingReaction
@@ -210,16 +211,24 @@ async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, rou
     limit = float(seconds or getattr(config, "MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", 30.0) or 30.0)
     deadline = asyncio.get_running_loop().time() + max(5.0, limit)
     last_status = ""
-    poll = max(0.4, min(1.5, float(getattr(config, "MUSIC_AGENT_STATUS_POLL_SECONDS", 0.75) or 0.75)))
+    remote_poll = max(0.4, min(1.5, float(getattr(config, "MUSIC_AGENT_STATUS_POLL_SECONDS", 0.75) or 0.75)))
+    local_poll = max(0.08, min(0.25, remote_poll / 4.0))
     try:
         while asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(poll)
+            shared_monitor = bool(router is not None and monitor_music_agent_ativo(router, guild_id))
+            await asyncio.sleep(local_poll if shared_monitor else remote_poll)
             try:
-                payload = await music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 3.5), guild_id=guild_id)
-                state = _agent_guild_state(payload, guild_id)
+                if shared_monitor:
+                    state = estado_local_music_agent(router, guild_id)
+                else:
+                    payload = await music_agent_status(
+                        timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 3.5),
+                        guild_id=guild_id,
+                    )
+                    state = _agent_guild_state(payload, guild_id)
+                    if router is not None:
+                        await _sync_agent_panel(router, guild_id, voice_channel_id, text_channel_id, track, {"state": state})
                 status = str(state.get("status") or "").lower()
-                if router is not None:
-                    await _sync_agent_panel(router, guild_id, voice_channel_id, text_channel_id, track, {"state": state})
                 if not status or status == last_status:
                     continue
                 last_status = status
@@ -236,8 +245,6 @@ async def _watch_agent_message(message, guild_id: int, track: MusicTrack, *, rou
                     # Não envie erro público antes do timeout final.
                     continue
             except discord.NotFound:
-                # A mensagem foi apagada/expirou: continuar fazendo polling só gasta
-                # chamadas ao Phone Worker sem ter mais nada para atualizar.
                 return
             except Exception:
                 # Não quebra o fluxo do usuário se o acompanhamento não conseguir consultar o worker.

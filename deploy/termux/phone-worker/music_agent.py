@@ -591,6 +591,10 @@ class GuildMusicState:
     shuffle: bool = False
     loop_mode: str = "off"
 
+    def state_revision(self) -> str:
+        """Identifica mudanças estruturais sem depender da posição corrente."""
+        return f"{self.updated_at:.6f}:{self.playback_token}"
+
     def public(self) -> dict[str, Any]:
         player = self.player
         voice_connected = False
@@ -642,6 +646,11 @@ class GuildMusicState:
                 and voice_connected
                 and (playing or position_ms > 0)
             ),
+            # Revisão estrutural do snapshot. `updated_at` só muda quando o estado
+            # autoritativo muda; posição/status_age continuam voláteis e não
+            # invalidam a revisão a cada consulta. O playback_token evita colisão
+            # em transições rápidas dentro do mesmo relógio de parede.
+            "state_revision": self.state_revision(),
             "updated_at": self.updated_at,
             "current": self.current.public() if self.current else None,
             "queue_size": len(self.queue),
@@ -1108,7 +1117,8 @@ class MusicAgent:
         query = getattr(request, "query", {}) or {}
         guild_id = safe_id(query.get("guild_id")) if hasattr(query, "get") else 0
         compact = truthy(query.get("compact"), bool(guild_id)) if hasattr(query, "get") else False
-        return web.json_response(self.status_payload(guild_id=guild_id, compact=compact))
+        known_revision = str(query.get("known_revision") or "").strip() if hasattr(query, "get") else ""
+        return web.json_response(self.status_payload(guild_id=guild_id, compact=compact, known_revision=known_revision))
 
     async def handle_command(self, request: web.Request) -> web.Response:
         if not self._auth_ok(request):
@@ -1173,7 +1183,7 @@ class MusicAgent:
             "checks": {name: dict(info) for name, info in payload["checks"].items()},
         }
 
-    def status_payload(self, *, guild_id: int = 0, compact: bool = False) -> dict[str, Any]:
+    def status_payload(self, *, guild_id: int = 0, compact: bool = False, known_revision: str = "") -> dict[str, Any]:
         guild_id = int(guild_id or 0)
         base = {
             "ok": True,
@@ -1187,7 +1197,19 @@ class MusicAgent:
         }
         if compact and guild_id > 0:
             state = self.states.get(guild_id)
-            base["guilds"] = {str(guild_id): state.public()} if state is not None else {}
+            if state is None:
+                base["guilds"] = {}
+                return base
+            revision = state.state_revision()
+            base["state_revision"] = revision
+            if known_revision and str(known_revision) == revision:
+                # Resposta condicional pequena: o monitor da VPS já possui o
+                # snapshot completo desta revisão. Não serialize fila/faixa e
+                # telemetria volátil novamente até ocorrer uma mudança real.
+                base["unchanged"] = True
+                base["guilds"] = {}
+                return base
+            base["guilds"] = {str(guild_id): state.public()}
             return base
 
         base.update({
@@ -1207,7 +1229,11 @@ class MusicAgent:
         action = str(body.get("action") or body.get("command") or "status").strip().lower().replace("-", "_")
         if action in {"status", "get_state"}:
             guild_id = safe_id(body.get("guild_id"))
-            return self.status_payload(guild_id=guild_id, compact=truthy(body.get("compact"), bool(guild_id)))
+            return self.status_payload(
+                guild_id=guild_id,
+                compact=truthy(body.get("compact"), bool(guild_id)),
+                known_revision=str(body.get("known_revision") or "").strip(),
+            )
         if action in {"play", "enqueue", "play_direct", "enqueue_many", "queue_many", "add_many", "playlist"}:
             body = dict(body)
             body["_agent_action"] = action

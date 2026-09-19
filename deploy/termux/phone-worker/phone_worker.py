@@ -6230,10 +6230,14 @@ class WorkerHandler(BaseHTTPRequestHandler):
                     guild_id = 0
                 compact = _early_env_truthy(body.get("compact"), guild_id > 0)
                 if guild_id > 0:
-                    health_url += "?" + urllib.parse.urlencode({
+                    params = {
                         "guild_id": guild_id,
                         "compact": "1" if compact else "0",
-                    })
+                    }
+                    known_revision = str(body.get("known_revision") or "").strip()
+                    if known_revision:
+                        params["known_revision"] = known_revision
+                    health_url += "?" + urllib.parse.urlencode(params)
                 req = urllib.request.Request(health_url, headers=local_headers, method="GET")
                 with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
                     raw = resp.read(min(self.max_output_bytes, 1024 * 1024)).decode("utf-8", "replace")

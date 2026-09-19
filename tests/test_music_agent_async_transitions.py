@@ -545,3 +545,55 @@ def test_cancelled_resolve_waiter_does_not_leak_scheduler_slot(music):
         assert agent._resolve_active == 0
 
     run(scenario())
+
+
+def test_state_revision_ignores_volatile_playback_position(music):
+    class Player:
+        connected = True
+        playing = True
+        position = 1000
+
+        def is_connected(self):
+            return True
+
+        def is_playing(self):
+            return True
+
+    player = Player()
+    state = music.GuildMusicState(
+        guild_id=9,
+        current=music.AgentTrack(title="Faixa", query="q"),
+        status="playing",
+        player=player,
+        updated_at=123.456789,
+        playback_token=7,
+    )
+
+    first = state.public()
+    player.position = 9000
+    second = state.public()
+
+    assert first["position_ms"] != second["position_ms"]
+    assert first["state_revision"] == second["state_revision"]
+
+    state.updated_at += 0.001
+    assert state.public()["state_revision"] != first["state_revision"]
+
+
+def test_compact_status_can_return_unchanged_without_serializing_guild(music):
+    agent = music.MusicAgent()
+    state = music.GuildMusicState(
+        guild_id=91,
+        current=music.AgentTrack(title="Faixa", query="q"),
+        status="playing",
+        updated_at=222.25,
+        playback_token=4,
+    )
+    agent.states[91] = state
+    revision = state.state_revision()
+
+    payload = agent.status_payload(guild_id=91, compact=True, known_revision=revision)
+
+    assert payload["unchanged"] is True
+    assert payload["state_revision"] == revision
+    assert payload["guilds"] == {}

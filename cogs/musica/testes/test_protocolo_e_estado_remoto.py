@@ -87,6 +87,19 @@ def test_consulta_status_de_guild_pede_payload_compacto() -> None:
     }
 
 
+
+
+def test_consulta_status_condicional_envia_revisao_conhecida() -> None:
+    payload = montar_consulta_status(
+        timeout_seconds=1.5,
+        guild_id=927,
+        compact=True,
+        known_revision="123.456:7",
+    )
+    assert payload["known_revision"] == "123.456:7"
+    assert payload["guild_id"] == 927
+    assert payload["compact"] is True
+
 def test_estado_remoto_decide_controles_sem_conhecer_player_local(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(estado_remoto.config, "MUSIC_AGENT_ENABLED", True, raising=False)
     router = SimpleNamespace(music_worker_only_enabled=lambda: True)

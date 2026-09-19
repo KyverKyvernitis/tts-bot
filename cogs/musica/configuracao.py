@@ -250,6 +250,10 @@ MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS = max(2.0, _parse_float(os.getenv("MUSIC_AGE
 MUSIC_AGENT_STATUS_TIMEOUT_SECONDS = max(0.5, _parse_float(os.getenv("MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", "5.0"), 5.0))
 MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS = max(5.0, _parse_float(os.getenv("MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", "30.0"), 30.0))
 MUSIC_AGENT_STATUS_POLL_SECONDS = max(0.4, _parse_float(os.getenv("MUSIC_AGENT_STATUS_POLL_SECONDS", "0.75"), 0.75))
+# Poll adaptativo: preparação usa STATUS_POLL para confirmar início rápido;
+# reprodução estável pode usar um intervalo maior sem afetar a UX.
+MUSIC_AGENT_PANEL_POLL_SECONDS = max(1.0, min(4.0, _parse_float(os.getenv("MUSIC_AGENT_PANEL_POLL_SECONDS", "2.0"), 2.0)))
+MUSIC_AGENT_PAUSED_POLL_SECONDS = max(MUSIC_AGENT_PANEL_POLL_SECONDS, min(6.0, _parse_float(os.getenv("MUSIC_AGENT_PAUSED_POLL_SECONDS", "3.0"), 3.0)))
 # O monitor consulta o estado remoto com frequência, mas não precisa editar a
 # mesma mensagem do Discord a cada poll. Atualizações sem mudança ficam limitadas
 # a um refresh periódico para manter capacidade de autorreparo do painel.

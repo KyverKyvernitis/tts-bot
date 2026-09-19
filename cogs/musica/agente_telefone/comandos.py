@@ -100,7 +100,7 @@ async def music_agent_command(
     logger.info("[music/agent] comando remoto enviado | worker=%s action=%s guild=%s", destino.worker_id or destino.name, action, guild_id)
     return data
 
-async def music_agent_status(*, timeout_seconds: float | None = None, guild_id: int = 0) -> dict[str, Any]:
+async def music_agent_status(*, timeout_seconds: float | None = None, guild_id: int = 0, known_revision: str = "") -> dict[str, Any]:
     destino = destino_vinculado(guild_id)
     selection = None
     if destino is None:
@@ -114,6 +114,7 @@ async def music_agent_status(*, timeout_seconds: float | None = None, guild_id: 
         timeout_seconds=timeout_seconds,
         guild_id=guild_id,
         compact=bool(guild_id),
+        known_revision=known_revision,
     )
     total_timeout = max(1.0, float(payload["timeout_seconds"]) + 1.0)
     try:

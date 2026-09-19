@@ -135,3 +135,101 @@ async def test_monitor_para_e_libera_vinculo_de_worker_morto(monkeypatch) -> Non
     await asyncio.wait_for(task, timeout=1.0)
 
     assert roteamento.destino_vinculado(9) is None
+
+
+def test_poll_adaptativo_prioriza_inicio_e_relaxa_playing(monkeypatch) -> None:
+    monkeypatch.setattr(monitor.config, "MUSIC_AGENT_STATUS_POLL_SECONDS", 0.5, raising=False)
+    monkeypatch.setattr(monitor.config, "MUSIC_AGENT_PANEL_POLL_SECONDS", 2.0, raising=False)
+    monkeypatch.setattr(monitor.config, "MUSIC_AGENT_PAUSED_POLL_SECONDS", 3.0, raising=False)
+
+    assert monitor._intervalo_poll_music_agent("preparing") == 0.5
+    assert monitor._intervalo_poll_music_agent("starting") == 0.5
+    assert monitor._intervalo_poll_music_agent("playing") == 2.0
+    assert monitor._intervalo_poll_music_agent("paused") == 3.0
+
+
+def test_snapshot_local_do_watcher_nao_precisa_consultar_worker() -> None:
+    current = SimpleNamespace(
+        title="Faixa",
+        webpage_url="https://example.test/faixa",
+        duration=90,
+        uploader="Artista",
+        thumbnail="",
+        source="youtube",
+    )
+    state = SimpleNamespace(
+        current_status="playing",
+        current=current,
+        paused=False,
+        current_status_detail="playing",
+        agent_monitor_task=None,
+    )
+    router = SimpleNamespace(get_state=lambda guild_id: state)
+
+    snapshot = monitor.estado_local_music_agent(router, 33)
+
+    assert snapshot["status"] == "playing"
+    assert snapshot["confirmed_playing"] is True
+    assert snapshot["current"]["title"] == "Faixa"
+
+
+@pytest.mark.asyncio
+async def test_monitor_nao_resincroniza_snapshot_com_mesma_revisao(monkeypatch) -> None:
+    real_sleep = asyncio.sleep
+    state = SimpleNamespace(agent_monitor_task=None, now_message=object(), current_status="playing")
+    sync_calls: list[str] = []
+    known_revisions: list[str] = []
+    status_calls = 0
+
+    class Router:
+        def get_state(self, guild_id):
+            return state
+
+        async def sync_music_agent_state(self, guild_id, track, remote, **kwargs):
+            sync_calls.append(str(remote.get("state_revision") or ""))
+
+    async def status_fake(**kwargs):
+        nonlocal status_calls
+        status_calls += 1
+        known_revisions.append(str(kwargs.get("known_revision") or ""))
+        if status_calls == 1:
+            return {
+                "ok": True,
+                "available": True,
+                "guilds": {
+                    "9": {
+                        "status": "playing",
+                        "confirmed_playing": True,
+                        "voice_connected": True,
+                        "player_present": True,
+                        "state_revision": "rev-1",
+                        "current": {"title": "A", "webpage_url": "https://example.test/a"},
+                        "queue": [],
+                        "queue_size": 0,
+                    }
+                },
+            }
+        if status_calls <= 3:
+            return {
+                "ok": True,
+                "available": True,
+                "unchanged": True,
+                "state_revision": "rev-1",
+                "guilds": {},
+            }
+        return {"ok": False, "available": False, "error": "offline"}
+
+    async def yield_sleep(delay):
+        await real_sleep(0)
+
+    monkeypatch.setattr(monitor, "music_agent_status", status_fake)
+    monkeypatch.setattr(monitor.asyncio, "sleep", yield_sleep)
+    monkeypatch.setattr(monitor.config, "MUSIC_AGENT_PANEL_REFRESH_SECONDS", 300.0, raising=False)
+
+    monitor.iniciar_monitor_music_agent(Router(), 9)
+    task = state.agent_monitor_task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert sync_calls == ["rev-1"]
+    assert known_revisions[:3] == ["", "rev-1", "rev-1"]

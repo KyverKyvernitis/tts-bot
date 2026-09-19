@@ -9,6 +9,7 @@ import discord
 from discord.ext import commands
 
 from ..agente_telefone.comandos import music_agent_command, music_agent_status
+from ..agente_telefone.monitor import estado_local_music_agent, monitor_music_agent_ativo
 from ..agente_telefone.resolucao import resolve_music_tracks_on_worker
 from ..interface.carregamento import MusicLoadingReaction
 from ..interface.componentes import SearchResultView
@@ -202,13 +203,32 @@ class FluxoTocar:
         limit = float(seconds or getattr(config, "MUSIC_AGENT_PLAY_STATUS_WATCH_SECONDS", 30.0) or 30.0)
         deadline = asyncio.get_running_loop().time() + max(5.0, limit)
         last_status = ""
-        poll = max(0.4, min(1.5, float(getattr(config, "MUSIC_AGENT_STATUS_POLL_SECONDS", 0.75) or 0.75)))
+        remote_poll = max(0.4, min(1.5, float(getattr(config, "MUSIC_AGENT_STATUS_POLL_SECONDS", 0.75) or 0.75)))
+        local_poll = max(0.08, min(0.25, remote_poll / 4.0))
         while asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(poll)
+            shared_monitor = monitor_music_agent_ativo(self.router, guild_id)
+            await asyncio.sleep(local_poll if shared_monitor else remote_poll)
             try:
-                payload = await music_agent_status(timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 3.5), guild_id=guild_id)
-                state = self._music_agent_guild_state(payload, guild_id)
-                await self._sync_music_agent_panel(guild_id, track, {"state": state}, voice_channel_id=voice_channel_id, text_channel_id=text_channel_id)
+                if shared_monitor:
+                    # O monitor por guild é o único polling contínuo; este watcher
+                    # só observa o espelho local em memória.
+                    state = estado_local_music_agent(self.router, guild_id)
+                else:
+                    # Bootstrap/falha transitória: faça uma consulta de fallback.
+                    # Assim que houver estado ativo, o sync inicia o monitor e as
+                    # próximas iterações deixam de tocar na rede.
+                    payload = await music_agent_status(
+                        timeout_seconds=getattr(config, "MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 3.5),
+                        guild_id=guild_id,
+                    )
+                    state = self._music_agent_guild_state(payload, guild_id)
+                    await self._sync_music_agent_panel(
+                        guild_id,
+                        track,
+                        {"state": state},
+                        voice_channel_id=voice_channel_id,
+                        text_channel_id=text_channel_id,
+                    )
                 status = str(state.get("status") or "").lower()
                 if not status or status == last_status:
                     continue
