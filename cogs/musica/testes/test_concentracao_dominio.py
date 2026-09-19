@@ -132,3 +132,8 @@ def test_roteador_importa_painel_do_modulo_interface_atual() -> None:
     texto = _texto("cogs/musica/legado/roteador_audio.py")
     assert "from ..interface.componentes import build_player_embeds, MusicPlayerView" in texto
     assert "from .ui import build_player_embeds, MusicPlayerView" not in texto
+
+
+def test_prefetch_especulativo_padrao_limita_a_um_resultado():
+    from cogs.musica import configuracao
+    assert configuracao.MUSIC_AGENT_PREFETCH_TOP_RESULTS == 1

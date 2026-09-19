@@ -149,7 +149,7 @@ def test_payload_music_policy_limits_and_job_state_stay_live(control, monkeypatc
     assert result["profile_label"] == result["status"]["profile_label"] == "label-turbo"
 
 
-@pytest.mark.parametrize("probe", ["_system_status", "_music_node_snapshot", "_music_agent_snapshot"])
+@pytest.mark.parametrize("probe", ["_system_status", "_music_agent_snapshot"])
 @pytest.mark.parametrize("failure", ["raises", "non_object"])
 def test_partial_snapshot_failure_does_not_prevent_heartbeat_payload(control, monkeypatch, probe, failure):
     def fail():
@@ -160,8 +160,7 @@ def test_partial_snapshot_failure_does_not_prevent_heartbeat_payload(control, mo
     result = control._core_worker_payload(host="127.0.0.1", port=8766)
     assert result["health"]["control_plane_alive"] and result["battery"]["level"] == 42
     assert result["network"]["type"] == "unknown"
-    assert "error" in (result["status"]["music_node"] if probe == "_music_node_snapshot" else
-                       result["status"]["music_agent"] if probe == "_music_agent_snapshot" else {"error": "system is summarized"})
+    assert "error" in (result["status"]["music_agent"] if probe == "_music_agent_snapshot" else {"error": "system is summarized"})
 
 
 @pytest.mark.parametrize(("code", "data", "ok"), [(200, {}, True), (200, {"ok": False}, False), (503, {"ok": True}, False)])
@@ -327,6 +326,47 @@ def test_full_and_bootstrap_payloads_are_accepted_by_local_registry(control, mon
     assert "payload_mode" not in after["health"] and after["endpoint"] == "http://127.0.0.1:8768"
 
 
+
+def test_payload_never_probes_or_advertises_legacy_lavalink(control, monkeypatch):
+    monkeypatch.setattr(control, "_music_node_snapshot", lambda: pytest.fail("legacy Lavalink probe must stay inactive"))
+    monkeypatch.setattr(control, "_music_agent_snapshot", lambda: {"available": True})
+    result = control._core_worker_payload(host="127.0.0.1", port=8766)
+    node = result["status"]["music_node"]
+    assert node["state"] == "disabled" and node["deprecated"] is True
+    assert node["reason"] == "playback_owned_by_music_agent"
+    assert "music-node" not in result["roles"]
+    assert "music-lavalink" not in result["capabilities"]
+
+
+def test_turbo_profile_keeps_music_agent_capabilities_inside_wire_limit(control, monkeypatch):
+    monkeypatch.setattr(control, "_current_core_worker_profile", lambda: "turbo")
+    monkeypatch.setattr(control, "_current_core_worker_roles_and_capabilities", lambda: (
+        list(control.CORE_WORKER_PROFILE_PRESETS["turbo"]["roles"]),
+        list(control.CORE_WORKER_PROFILE_PRESETS["turbo"]["capabilities"]),
+    ))
+    monkeypatch.setattr(control, "_music_agent_snapshot", lambda: {"available": True})
+    result = control._core_worker_payload(host="127.0.0.1", port=8766)
+    assert len(result["roles"]) <= 16 and len(result["capabilities"]) <= 24
+    assert {"music", "music-agent", "music-ytdlp"} <= set(result["roles"])
+    assert {"music", "music-agent", "music-voice", "music-ytdlp", "music-ytdlp-resolve"} <= set(result["capabilities"])
+    assert "music-node" not in result["roles"]
+    assert "music-lavalink" not in result["capabilities"]
+
+
+def test_turbo_profile_does_not_claim_playback_without_music_agent(control, monkeypatch):
+    monkeypatch.setattr(control, "_current_core_worker_profile", lambda: "turbo")
+    monkeypatch.setattr(control, "_current_core_worker_roles_and_capabilities", lambda: (
+        list(control.CORE_WORKER_PROFILE_PRESETS["turbo"]["roles"]),
+        list(control.CORE_WORKER_PROFILE_PRESETS["turbo"]["capabilities"]),
+    ))
+    monkeypatch.setattr(control, "_music_agent_snapshot", lambda: {"available": False})
+    result = control._core_worker_payload(host="127.0.0.1", port=8766)
+    assert "music" not in result["roles"]
+    assert "music" not in result["capabilities"]
+    assert "music-node" not in result["capabilities"]
+    assert "music-lavalink" not in result["capabilities"]
+    assert "music-ytdlp-resolve" in result["capabilities"]
+
 def test_control_module_does_not_mutate_inputs(control):
     base = json.loads((PHONE.parents[3] / "tests/fixtures/phone_control_payload.json").read_text())
     snapshots = {"system": {"ffprobe": True}, "music_node": {"online": True}, "music_agent": {},
@@ -334,7 +374,12 @@ def test_control_module_does_not_mutate_inputs(control):
     before = copy.deepcopy((base, snapshots))
     result = control._phone_worker_control_plane_module().build_payload(base, **snapshots)
     assert (base, snapshots) == before
-    assert "music" in result["roles"] and "ffprobe" in result["capabilities"]
+    assert "music" not in result["roles"] and "ffprobe" in result["capabilities"]
+
+    ready = {**snapshots, "music_agent": {"available": True}}
+    result = control._phone_worker_control_plane_module().build_payload(base, **ready)
+    assert "music" in result["roles"] and "music-agent" in result["capabilities"]
+    assert "music-node" not in result["roles"] and "music-lavalink" not in result["capabilities"]
 
 
 def test_lone_entrypoint_and_control_module_import_have_no_startup_effects(tmp_path):

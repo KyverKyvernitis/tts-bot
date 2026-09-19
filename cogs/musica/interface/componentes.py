@@ -156,9 +156,9 @@ def _schedule_agent_prefetch(
     if not bool(getattr(config, "MUSIC_AGENT_PREFETCH_ENABLED", True)):
         return
     try:
-        limit = max(0, min(3, int(getattr(config, "MUSIC_AGENT_PREFETCH_TOP_RESULTS", 2) or 0)))
+        limit = max(0, min(3, int(getattr(config, "MUSIC_AGENT_PREFETCH_TOP_RESULTS", 1) or 0)))
     except Exception:
-        limit = 2
+        limit = 1
     if limit <= 0 or not tracks:
         return
 

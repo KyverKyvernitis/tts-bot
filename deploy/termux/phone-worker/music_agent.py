@@ -140,7 +140,7 @@ def _schedule_tts_prune(callback, path):
             _TTS_MAINTENANCE_PENDING = None
 
 
-AGENT_VERSION = "0.3.31"
+AGENT_VERSION = "0.3.32"
 STARTED_AT = time.time()
 
 
@@ -1020,11 +1020,19 @@ class MusicAgent:
             return await self.cmd_prefetch(body)
         raise ValueError("ação do Music Agent não suportada")
 
-    def _cancel_prefetch_tasks(self, guild_id: int | None = None) -> int:
+    def _cancel_prefetch_tasks(
+        self,
+        guild_id: int | None = None,
+        *,
+        keep_task_keys: set[str] | None = None,
+    ) -> int:
         cancelled = 0
         prefix = f"{int(guild_id)}:" if guild_id else ""
+        keep = set(keep_task_keys or ())
         for key, task in list(self._prefetch_tasks.items()):
             if prefix and not str(key).startswith(prefix):
+                continue
+            if key in keep:
                 continue
             if task is not None and not task.done():
                 task.cancel()
@@ -1199,6 +1207,14 @@ class MusicAgent:
             return {"ok": True, "queued": True, "added": len(tracks), "state": st.public()}
 
         query = self._query_from_track_meta(track_meta, fallback_query=query) or query
+        # Ao escolher um resultado, mantenha apenas o prefetch da faixa escolhida.
+        # Prefetches de candidatos alternativos não devem continuar disputando
+        # rede/CPU com o playback que o usuário acabou de selecionar.
+        selected_cache_key = self._resolve_cache_key(query, track_meta)
+        selected_task_key = self._guild_prefetch_key(guild_id, selected_cache_key)
+        pruned = self._cancel_prefetch_tasks(guild_id, keep_task_keys={selected_task_key})
+        if pruned:
+            self.log("prefetch_pruned_for_play", guild_id=guild_id, count=pruned, query=query[:90])
         track = await self.resolve_track(query, track_meta=track_meta, body=body)
         if int(getattr(st, "playback_token", 0) or 0) != command_generation or str(getattr(st, "last_action", "") or "").lower() == "stop":
             self.log("play_resolve_ignored", guild_id=guild_id, reason="stale_or_stopped", generation=command_generation, current_generation=getattr(st, "playback_token", 0), title=getattr(track, "title", ""))

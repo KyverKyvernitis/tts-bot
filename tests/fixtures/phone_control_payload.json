@@ -87,8 +87,15 @@
       "last_error": ""
     },
     "music_node": {
+      "kind": "lavalink",
+      "mode": "disabled",
       "ok": false,
-      "online": false
+      "online": false,
+      "state": "disabled",
+      "music_available": false,
+      "playback_modes": [],
+      "deprecated": true,
+      "reason": "playback_owned_by_music_agent"
     },
     "music_agent": {
       "available": false

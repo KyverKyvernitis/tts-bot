@@ -14,15 +14,22 @@ def build_payload(
     for capability in ("ffmpeg", "ffprobe"):
         if system.get(capability) and capability not in capabilities:
             capabilities.append(capability)
-    music_ready = (not base["safe_mode"]) and bool(
-        music_agent.get("available") or music_node.get("ok") or music_node.get("online") or base["profile"] == "turbo")
+    # Playback de música é propriedade exclusiva do Music Agent. Lavalink não
+    # participa mais do plano de áudio e o perfil turbo, sozinho, não prova que
+    # o agente está pronto. Isso evita anunciar capacidade de playback falsa.
+    music_ready = (not base["safe_mode"]) and bool(music_agent.get("available"))
     if music_ready:
-        for role in ("music", "music-agent", "music-node", "music-lavalink", "music-ytdlp"):
-            if role not in roles:
-                roles.append(role)
-        for capability in ("music", "music-agent", "music-voice", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve"):
-            if capability not in capabilities:
-                capabilities.append(capability)
+        # Perfis como ``turbo`` têm mais itens do que o contrato de heartbeat
+        # comporta. Promova as capacidades de reprodução antes do corte final
+        # para que ``music-agent``/``music-voice`` não desapareçam em [:24].
+        promoted_roles = ("music", "music-agent", "music-ytdlp")
+        promoted_capabilities = ("music", "music-agent", "music-voice", "music-ytdlp", "music-ytdlp-resolve")
+        roles = [item for item in roles if item not in promoted_roles]
+        capabilities = [item for item in capabilities if item not in promoted_capabilities]
+        role_at = 1 if roles else 0
+        cap_at = 1 if capabilities else 0
+        roles[role_at:role_at] = list(promoted_roles)
+        capabilities[cap_at:cap_at] = list(promoted_capabilities)
     health = dict(base["health"])
     health.update({key: system.get(key) for key in (
         "pid", "uptime_seconds", "jobs_started", "jobs_failed", "ffmpeg", "ffprobe")})

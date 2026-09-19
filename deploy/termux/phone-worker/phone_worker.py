@@ -120,7 +120,7 @@ PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
 DEFAULT_TIMEOUT_SECONDS = 45
-PHONE_WORKER_VERSION = "1.11.9"
+PHONE_WORKER_VERSION = "1.11.10"
 CORE_WORKER_RUNTIME_MODE = "termux"
 CORE_WORKER_INTERNAL_RUNTIME_STATE = "apk-preview-only"
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -357,7 +357,7 @@ CORE_WORKER_PROFILE_PRESETS: dict[str, dict[str, Any]] = {
     "turbo": {
         "label": "Turbo",
         "roles": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "voice-agent", "apk-builder", "vps-assist", "cache-worker"],
-        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "tts-gtts", "tts-edge", "tts-android-native", "tts-teto", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music", "music-node", "music-lavalink", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
+        "capabilities": ["phone-worker", "diagnostics", "log-summary", "maintenance-plan", "zip-validate", "ffmpeg", "ffprobe", "tts-convert", "tts-synth", "tts-benchmark", "tts-agent", "tts-gtts", "tts-edge", "tts-android-native", "tts-teto", "voice-agent", "worker-voice", "shared-voice-session", "apk-builder", "vps-assist", "cache-worker", "music-ytdlp", "music-ytdlp-resolve", "hash-worker", "endpoint-probe", "media-probe", "audio-convert", "emoji-recolor", "worker-logs", "network-probe", "tailscale-status", "service-control"],
     },
     "bedrock": {
         "label": "Bedrock",
@@ -1628,7 +1628,7 @@ def _core_worker_payload(*, host: str, port: int) -> dict[str, Any]:
         module = _phone_worker_control_plane_module()
         return module.build_payload(payload,
             system=_control_plane_snapshot("system", _system_status, {"ok": False}),
-            music_node=_control_plane_snapshot("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"}),
+            music_node=_inactive_music_node_snapshot(),
             music_agent=_control_plane_snapshot("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False}),
             battery=_control_plane_snapshot("battery", _battery_snapshot, _empty_battery_snapshot()),
             network=_control_plane_snapshot("network", _network_snapshot, {"type": "unknown", "source": "telemetry_failed"}),
@@ -2591,6 +2591,26 @@ def _ensure_phone_lavalink_started(reason: str = "health") -> dict[str, Any]:
             detail = _short_text(f"{type(exc).__name__}: {exc}", limit=160)
             print(f"[phone-worker] lavalink auto-start erro: {detail}", flush=True)
             return {"attempted": False, "error": detail}
+
+def _inactive_music_node_snapshot() -> dict[str, Any]:
+    """Compatibilidade de telemetria sem sondar/iniciar Lavalink.
+
+    O playback é feito exclusivamente pelo Music Agent. Mantemos a chave
+    ``music_node`` por compatibilidade de wire, mas ela não executa I/O nem
+    pode tornar o worker elegível para música.
+    """
+    return {
+        "kind": "lavalink",
+        "mode": "disabled",
+        "ok": False,
+        "online": False,
+        "state": "disabled",
+        "music_available": False,
+        "playback_modes": [],
+        "deprecated": True,
+        "reason": "playback_owned_by_music_agent",
+    }
+
 
 def _music_node_snapshot() -> dict[str, Any]:
     autostart = _ensure_phone_lavalink_started(reason="music_node_snapshot")
@@ -4050,7 +4070,7 @@ def _system_status() -> dict[str, Any]:
         "core_worker_heartbeat": _heartbeat_configured(),
         "core_worker_jobs": {"configured": _core_worker_jobs_configured(), **_core_job_runtime_snapshot()},
         "core_worker_network": _core_worker_network_runtime_snapshot(),
-        "music_node": _safe_telemetry("music_node", _music_node_snapshot, {"ok": False, "online": False, "state": "unknown"}),
+        "music_node": _inactive_music_node_snapshot(),
         "music_agent": music_agent_snapshot,
         "voice_agent": voice_agent_snapshot,
         "music_voice_dependencies": _safe_telemetry("music voice dependencies", _music_voice_dependencies_snapshot, {"ok": False, "missing": ["unknown"]}),

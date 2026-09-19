@@ -170,6 +170,49 @@ def test_cancel_prefetch_only_targets_requested_guild(music):
     run(scenario())
 
 
+def test_cancel_prefetch_can_preserve_selected_candidate(music):
+    async def scenario():
+        agent=music.MusicAgent()
+        selected=asyncio.create_task(asyncio.sleep(999))
+        other=asyncio.create_task(asyncio.sleep(999))
+        agent._prefetch_tasks={"1:selected":selected,"1:other":other}
+        assert agent._cancel_prefetch_tasks(1, keep_task_keys={"1:selected"}) == 1
+        await asyncio.sleep(0)
+        assert agent._prefetch_tasks.get("1:selected") is selected
+        assert "1:other" not in agent._prefetch_tasks and other.cancelled()
+        selected.cancel()
+        await asyncio.gather(selected, other, return_exceptions=True)
+    run(scenario())
+
+
+def test_cmd_play_prunes_unselected_search_prefetch(music):
+    async def scenario():
+        agent=music.MusicAgent(); gid=21
+        selected_meta={"title":"selected","webpage_url":"https://youtu.be/selected"}
+        selected_key=agent._guild_prefetch_key(gid, agent._resolve_cache_key("https://youtu.be/selected", selected_meta))
+        other_key=agent._guild_prefetch_key(gid, "https://youtu.be/other")
+        selected=asyncio.create_task(asyncio.sleep(999))
+        other=asyncio.create_task(asyncio.sleep(999))
+        agent._prefetch_tasks={selected_key:selected, other_key:other}
+        st=music.GuildMusicState(guild_id=gid, status="playing", current=music.AgentTrack(title="current", query="current"))
+        agent.states[gid]=st
+        async def resolve(query, **kwargs):
+            return music.AgentTrack(title="selected", query=query, webpage_url=query, stream_url="https://media.example/audio")
+        agent.resolve_track=resolve
+        agent._schedule_next_queue_prefetch=lambda *a, **kw: None
+        result=await agent.cmd_play({
+            "guild_id":gid, "voice_channel_id":99, "text_channel_id":100,
+            "query":"https://youtu.be/selected", "track":selected_meta,
+        })
+        await asyncio.sleep(0)
+        assert result["queued"] is True
+        assert agent._prefetch_tasks.get(selected_key) is selected
+        assert other_key not in agent._prefetch_tasks and other.cancelled()
+        selected.cancel()
+        await asyncio.gather(selected, other, return_exceptions=True)
+    run(scenario())
+
+
 def test_bump_generation_increments_and_cancels_prefetch(music):
     agent=music.MusicAgent(); st=music.GuildMusicState(guild_id=1); calls=[]; agent._cancel_prefetch_tasks=lambda gid: calls.append(gid) or 0
     assert agent._bump_playback_generation(st, reason="test") == 1; assert calls == [1]
