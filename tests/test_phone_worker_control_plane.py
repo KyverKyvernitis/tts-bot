@@ -33,7 +33,6 @@ def control(monkeypatch):
     worker = load_worker()
     monkeypatch.setattr(worker, "_system_status", lambda: {"ok": True, "pid": 123, "ffmpeg": True,
         "ffprobe": False, "scripts": {"complete": True}, "boot": {"ok": False}, "supervisor": {"supervisor_ok": True}})
-    monkeypatch.setattr(worker, "_music_node_snapshot", lambda: {"ok": False, "online": False})
     monkeypatch.setattr(worker, "_music_agent_snapshot", lambda: {"available": False})
     monkeypatch.setattr(worker, "_battery_snapshot", lambda: {"available": True, "level": 42})
     monkeypatch.setattr(worker, "_network_snapshot", lambda: {"type": "unknown", "source": "inferred"})
@@ -278,7 +277,7 @@ def test_bare_payload_recovers_after_module_arrival_without_optional_probes(cont
     monkeypatch.setattr(control, "_EFFECTIVE_HTTP_PORT", None)
     monkeypatch.setattr(control, "_PENDING_CORE_JOB_RESULTS", {"pending": {}})
     with monkeypatch.context() as patch:
-        for name in ["_system_status", "_music_node_snapshot", "_music_agent_snapshot", "_battery_snapshot", "_network_snapshot"]:
+        for name in ["_system_status", "_music_agent_snapshot", "_battery_snapshot", "_network_snapshot"]:
             patch.setattr(control, name, lambda: pytest.fail("probe before control module arrives"))
         for _ in range(2):
             payload = control._core_worker_payload(host="127.0.0.1", port=8766)
@@ -328,7 +327,7 @@ def test_full_and_bootstrap_payloads_are_accepted_by_local_registry(control, mon
 
 
 def test_payload_never_probes_or_advertises_legacy_lavalink(control, monkeypatch):
-    monkeypatch.setattr(control, "_music_node_snapshot", lambda: pytest.fail("legacy Lavalink probe must stay inactive"))
+    assert not hasattr(control, "_music_node_snapshot")
     monkeypatch.setattr(control, "_music_agent_snapshot", lambda: {"available": True})
     result = control._core_worker_payload(host="127.0.0.1", port=8766)
     node = result["status"]["music_node"]

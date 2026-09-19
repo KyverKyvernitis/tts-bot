@@ -54,6 +54,13 @@ PHONE_WORKER_FILES: tuple[tuple[str, int], ...] = (
     ("cogs/musica/runtime_telefone/agente/resolucao.py", 0o644),
     ("cogs/musica/runtime_telefone/agente/reproducao.py", 0o644),
     ("cogs/musica/runtime_telefone/agente/tts.py", 0o644),
+    ("cogs/musica/runtime_telefone/ponte_worker/__init__.py", 0o644),
+    ("cogs/musica/runtime_telefone/ponte_worker/configuracao.py", 0o644),
+    ("cogs/musica/runtime_telefone/ponte_worker/streams.py", 0o644),
+    ("cogs/musica/runtime_telefone/ponte_worker/resolucao.py", 0o644),
+    ("cogs/musica/runtime_telefone/ponte_worker/proxy.py", 0o644),
+    ("cogs/musica/runtime_telefone/ponte_worker/telemetria.py", 0o644),
+    ("cogs/musica/runtime_telefone/ponte_worker/servico.py", 0o644),
     ("start-phone-worker.sh", 0o755),
     ("start-phone-music-agent.sh", 0o755),
     ("watch-phone-worker.sh", 0o755),
@@ -95,6 +102,13 @@ PHONE_WORKER_DOMAIN_SOURCE_TARGETS = frozenset({
     "cogs/musica/runtime_telefone/agente/resolucao.py",
     "cogs/musica/runtime_telefone/agente/reproducao.py",
     "cogs/musica/runtime_telefone/agente/tts.py",
+    "cogs/musica/runtime_telefone/ponte_worker/__init__.py",
+    "cogs/musica/runtime_telefone/ponte_worker/configuracao.py",
+    "cogs/musica/runtime_telefone/ponte_worker/streams.py",
+    "cogs/musica/runtime_telefone/ponte_worker/resolucao.py",
+    "cogs/musica/runtime_telefone/ponte_worker/proxy.py",
+    "cogs/musica/runtime_telefone/ponte_worker/telemetria.py",
+    "cogs/musica/runtime_telefone/ponte_worker/servico.py",
 })
 PHONE_WORKER_SOURCE_HASH_EXCLUDED = frozenset({"README.md", "phone-worker.env.example"})
 PHONE_WORKER_SOURCE_FILES = tuple(

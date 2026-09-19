@@ -87,6 +87,38 @@ def inspect_apk_identity(*args: Any, **kwargs: Any) -> Any:
 def assert_expected_apk_identity(*args: Any, **kwargs: Any) -> Any:
     return _load_apk_identity_module().assert_expected_apk_identity(*args, **kwargs)
 
+
+def _phone_worker_music_bridge_module(name: str) -> Any:
+    """Load one music-domain bridge lazily so single-file recovery can boot."""
+    clean = str(name or "").strip().replace("-", "_")
+    if not clean or not re.fullmatch(r"[a-z_][a-z0-9_]*", clean):
+        raise ValueError("módulo musical inválido")
+    cached = _PHONE_WORKER_MUSIC_BRIDGE_MODULES.get(clean)
+    if cached is not None:
+        return cached
+    with _PHONE_WORKER_MUSIC_BRIDGE_LOCK:
+        cached = _PHONE_WORKER_MUSIC_BRIDGE_MODULES.get(clean)
+        if cached is not None:
+            return cached
+        here = Path(__file__).resolve()
+        worker_root = str(here.parent)
+        if worker_root not in sys.path:
+            sys.path.insert(0, worker_root)
+        for candidate in (here.parent, *here.parents):
+            if (candidate / "cogs" / "musica" / "runtime_telefone" / "ponte_worker").is_dir():
+                value = str(candidate)
+                if value not in sys.path:
+                    sys.path.insert(0, value)
+                break
+        try:
+            module = importlib.import_module(f"cogs.musica.runtime_telefone.ponte_worker.{clean}")
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                f"ponte musical {clean}.py ainda não foi instalada; aguarde o segundo estágio do auto-update"
+            ) from exc
+        _PHONE_WORKER_MUSIC_BRIDGE_MODULES[clean] = module
+        return module
+
 try:
     from PIL import Image, ImageSequence  # type: ignore
 except Exception:
@@ -108,14 +140,8 @@ _HEAVY_RESOURCE_LOCK = threading.Lock()
 _TETO_RENDERER_LOCK = threading.RLock()
 _TETO_RENDERER: Any = None
 _TETO_RENDERER_ERROR = ""
-_MUSIC_STREAM_LOCK = threading.RLock()
-_MUSIC_STREAMS: dict[str, dict[str, Any]] = {}
-_MUSIC_PCM_PREPARATIONS: dict[str, dict[str, Any]] = {}
-PCM_SAMPLE_RATE = 48000
-PCM_CHANNELS = 2
-PCM_SAMPLE_WIDTH_BYTES = 2
-PCM_FRAME_MS = 20
-PCM_FRAME_BYTES = int(PCM_SAMPLE_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH_BYTES * (PCM_FRAME_MS / 1000.0))
+_PHONE_WORKER_MUSIC_BRIDGE_MODULES: dict[str, Any] = {}
+_PHONE_WORKER_MUSIC_BRIDGE_LOCK = threading.Lock()
 
 DEFAULT_MAX_BODY_MB = 32
 DEFAULT_MAX_OUTPUT_MB = 32
@@ -173,46 +199,26 @@ def _load_env_file_once(path: Path, *, override: bool = False) -> dict[str, str]
 
 
 def _music_agent_env_file_early() -> Path:
-    worker_dir = Path(os.getenv("PHONE_WORKER_DIR") or Path.home() / "phone-worker").expanduser()
-    return Path(os.getenv("MUSIC_AGENT_ENV") or worker_dir / "secrets" / "music-agent.env").expanduser()
+    try:
+        return _phone_worker_music_bridge_module("configuracao").music_agent_env_file()
+    except RuntimeError:
+        worker_dir = Path(os.getenv("PHONE_WORKER_DIR") or Path.home() / "phone-worker").expanduser()
+        return Path(os.getenv("MUSIC_AGENT_ENV") or worker_dir / "secrets" / "music-agent.env").expanduser()
 
 
 def _ensure_music_agent_token_env(*, persist: bool = True) -> str:
-    env_file = _music_agent_env_file_early()
-    _load_env_file_once(env_file, override=False)
-    token = str(os.getenv("MUSIC_AGENT_TOKEN") or "").strip()
-    if token:
-        return token
-    token = secrets.token_urlsafe(32)
-    os.environ["MUSIC_AGENT_TOKEN"] = token
-    if persist:
-        try:
-            env_file.parent.mkdir(parents=True, exist_ok=True)
-            old = env_file.read_text("utf-8", errors="replace") if env_file.exists() else ""
-            lines: list[str] = []
-            replaced = False
-            for line in old.splitlines():
-                if re.match(r"^\s*MUSIC_AGENT_TOKEN\s*=", line):
-                    if not replaced:
-                        lines.append("MUSIC_AGENT_TOKEN=" + token)
-                        replaced = True
-                    continue
-                lines.append(line)
-            if not replaced:
-                lines.append("MUSIC_AGENT_TOKEN=" + token)
-            env_file.write_text("\n".join(lines).rstrip() + "\n", "utf-8")
-            with contextlib.suppress(Exception):
-                os.chmod(env_file, 0o600)
-        except Exception:
-            pass
-    return token
+    return _phone_worker_music_bridge_module("configuracao").ensure_music_agent_token(persist=persist)
 
 
 def _load_phone_worker_runtime_env() -> None:
-    _load_env_file_once(Path(os.getenv("PHONE_WORKER_ENV") or Path.home() / ".phone-worker.env"), override=False)
-    _load_env_file_once(_music_agent_env_file_early(), override=False)
-    if _early_env_truthy(os.getenv("MUSIC_AGENT_AUTO_TOKEN"), True):
-        _ensure_music_agent_token_env(persist=True)
+    phone_env = Path(os.getenv("PHONE_WORKER_ENV") or Path.home() / ".phone-worker.env")
+    _load_env_file_once(phone_env, override=False)
+    try:
+        module = _phone_worker_music_bridge_module("configuracao")
+    except RuntimeError:
+        # O bootstrap antigo pode iniciar primeiro só com phone_worker.py.
+        return
+    module.load_runtime_env(phone_worker_env=phone_env)
 
 
 SUPPORTED_DIRECT_TASKS = (
@@ -622,132 +628,52 @@ def _short_text(value: Any, *, limit: int = 120, default: str = "") -> str:
 
 
 def _music_stream_ttl_seconds() -> float:
-    return max(300.0, min(21600.0, _env_float("PHONE_WORKER_MUSIC_STREAM_TTL_SECONDS", 7200.0)))
+    return _phone_worker_music_bridge_module("streams").stream_ttl_seconds()
 
 
 def _cleanup_music_streams_unlocked(now: float | None = None) -> None:
-    current = time.time() if now is None else float(now)
-    expired = [key for key, item in _MUSIC_STREAMS.items() if float(item.get("expires_at") or 0.0) <= current]
-    for key in expired:
-        item = _MUSIC_STREAMS.pop(key, None)
-        if isinstance(item, dict):
-            _cleanup_music_prepared_file(item)
+    _phone_worker_music_bridge_module("streams").cleanup_streams_unlocked(now)
 
 
 def _register_music_stream(item: dict[str, Any]) -> str:
-    stream_url = str(item.get("stream_url") or item.get("direct_url") or "").strip()
-    if not stream_url:
-        return ""
-    seed = f"{time.time()}|{os.urandom(16).hex()}|{stream_url[:96]}".encode("utf-8", errors="ignore")
-    stream_id = hashlib.sha256(seed).hexdigest()[:32]
-    ttl = _music_stream_ttl_seconds()
-    stored = dict(item)
-    stored["id"] = stream_id
-    stored["created_at"] = time.time()
-    stored["expires_at"] = time.time() + ttl
-    with _MUSIC_STREAM_LOCK:
-        _cleanup_music_streams_unlocked()
-        _MUSIC_STREAMS[stream_id] = stored
-    return stream_id
+    return _phone_worker_music_bridge_module("streams").register_stream(item)
 
 
 def _music_stream_lookup(stream_id: str) -> dict[str, Any] | None:
-    stream_id = str(stream_id or "").strip()
-    if not stream_id:
-        return None
-    with _MUSIC_STREAM_LOCK:
-        _cleanup_music_streams_unlocked()
-        item = _MUSIC_STREAMS.get(stream_id)
-        return dict(item) if isinstance(item, dict) else None
+    return _phone_worker_music_bridge_module("streams").stream_lookup(stream_id)
 
 
 def _safe_ffmpeg_header_lines(headers: Any) -> str:
-    if not isinstance(headers, dict):
-        return ""
-    allowed = {"user-agent", "accept", "accept-language", "referer", "origin", "cookie", "range"}
-    lines: list[str] = []
-    for key, value in headers.items():
-        name = str(key or "").strip()
-        if not name or name.lower() not in allowed:
-            continue
-        text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
-        if not text:
-            continue
-        lines.append(f"{name}: {text}\r\n")
-    return "".join(lines)
+    return _phone_worker_music_bridge_module("streams").safe_ffmpeg_header_lines(headers)
 
 
 
 def _music_pcm_cache_dir() -> Path:
-    raw = str(os.getenv("PHONE_WORKER_MUSIC_PCM_CACHE_DIR") or "").strip()
-    path = Path(raw).expanduser() if raw else (Path.home() / "phone-worker" / "cache" / "music-pcm")
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return _phone_worker_music_bridge_module("streams").pcm_cache_dir()
 
 
 def _music_prepared_mode_enabled() -> bool:
-    raw = str(os.getenv("PHONE_WORKER_MUSIC_STREAM_MODE") or os.getenv("PHONE_WORKER_MUSIC_PREPARE_MODE") or "prepared").strip().lower()
-    return raw not in {"live", "passthrough", "stream", "realtime", "0", "false", "off", "no", "não", "nao"}
+    return _phone_worker_music_bridge_module("streams").prepared_mode_enabled()
 
 
 def _music_prepare_timeout_seconds(item: dict[str, Any]) -> float:
-    configured = _env_float("PHONE_WORKER_MUSIC_PREPARE_TIMEOUT_SECONDS", 0.0)
-    if configured > 0:
-        return max(20.0, min(1800.0, configured))
-    duration = float(item.get("duration") or 0.0)
-    if duration > 0:
-        return max(45.0, min(1800.0, duration * 2.5 + 45.0))
-    return 240.0
+    return _phone_worker_music_bridge_module("streams").prepare_timeout_seconds(item)
 
 
 def _music_prepare_max_duration_seconds() -> float:
-    return max(0.0, _env_float("PHONE_WORKER_MUSIC_PREPARE_MAX_DURATION_SECONDS", 1800.0))
+    return _phone_worker_music_bridge_module("streams").prepare_max_duration_seconds()
 
 
 def _music_pcm_cache_max_bytes() -> int:
-    mb = max(64.0, min(16384.0, _env_float("PHONE_WORKER_MUSIC_PCM_CACHE_MAX_MB", 2048.0)))
-    return int(mb * 1024 * 1024)
+    return _phone_worker_music_bridge_module("streams").pcm_cache_max_bytes()
 
 
 def _cleanup_music_prepared_file(item: dict[str, Any]) -> None:
-    path = str(item.get("prepared_pcm_path") or "").strip()
-    if not path:
-        return
-    with contextlib.suppress(Exception):
-        p = Path(path)
-        cache_dir = _music_pcm_cache_dir().resolve()
-        resolved = p.resolve()
-        if cache_dir in resolved.parents or resolved == cache_dir:
-            p.unlink(missing_ok=True)
+    _phone_worker_music_bridge_module("streams").cleanup_prepared_file(item)
 
 
 def _cleanup_music_pcm_cache() -> None:
-    try:
-        cache_dir = _music_pcm_cache_dir()
-        files = [p for p in cache_dir.glob("*.pcm") if p.is_file()]
-    except Exception:
-        return
-    now = time.time()
-    max_age = _music_stream_ttl_seconds() + 600.0
-    for p in files:
-        with contextlib.suppress(Exception):
-            if now - p.stat().st_mtime > max_age:
-                p.unlink(missing_ok=True)
-    try:
-        files = [p for p in cache_dir.glob("*.pcm") if p.is_file()]
-        total = sum(p.stat().st_size for p in files)
-    except Exception:
-        return
-    max_bytes = _music_pcm_cache_max_bytes()
-    if total <= max_bytes:
-        return
-    for p in sorted(files, key=lambda item: item.stat().st_mtime):
-        with contextlib.suppress(Exception):
-            size = p.stat().st_size
-            p.unlink(missing_ok=True)
-            total -= size
-        if total <= max_bytes:
-            break
+    _phone_worker_music_bridge_module("streams").cleanup_pcm_cache()
 
 
 def _phone_worker_pcm_io_module() -> Any:
@@ -770,90 +696,26 @@ def _phone_worker_pcm_io_module() -> Any:
 
 
 def _music_stream_build_ffmpeg_input_cmd(item: dict[str, Any], *, output: str) -> list[str]:
-    return _phone_worker_pcm_io_module().build_ffmpeg_input_cmd(item, output=output,
-        which=shutil.which, header_lines=_safe_ffmpeg_header_lines)
+    return _phone_worker_music_bridge_module("streams").build_ffmpeg_input_cmd(item, output=output)
 
 
 def _assert_music_preparation_owner_unlocked(stream_id: str, owner: dict[str, Any] | None) -> None:
-    if owner is not None and (_MUSIC_STREAMS.get(stream_id) is not owner or float(owner.get("expires_at") or 0.0) <= time.time()):
-        raise RuntimeError("stream expirou ou foi substituído durante preparo")
+    _phone_worker_music_bridge_module("streams").assert_preparation_owner_unlocked(stream_id, owner)
 
 
 def _prepare_music_pcm_file(stream_id: str, item: dict[str, Any]) -> dict[str, Any]:
-    """Prepare once per stream; unrelated tracks retain independent processes."""
-    with _MUSIC_STREAM_LOCK:
-        owner = _MUSIC_STREAMS.get(stream_id)
-        preparation = _MUSIC_PCM_PREPARATIONS.get(stream_id)
-        if preparation is None:
-            preparation = {"lock": threading.Lock(), "users": 0}
-            _MUSIC_PCM_PREPARATIONS[stream_id] = preparation
-        preparation["users"] += 1
-    try:
-        with preparation["lock"]:
-            with _MUSIC_STREAM_LOCK:
-                _assert_music_preparation_owner_unlocked(stream_id, owner)
-                if isinstance(owner, dict) and owner.get("prepared_pcm_path") and not item.get("prepared_pcm_path"):
-                    item = dict(owner)
-            return _prepare_music_pcm_file_owned(stream_id, item, owner)
-    finally:
-        with _MUSIC_STREAM_LOCK:
-            preparation["users"] -= 1
-            if preparation["users"] == 0 and _MUSIC_PCM_PREPARATIONS.get(stream_id) is preparation:
-                _MUSIC_PCM_PREPARATIONS.pop(stream_id, None)
+    return _phone_worker_music_bridge_module("streams").prepare_pcm_file(stream_id, item)
 
 
 def _prepare_music_pcm_file_owned(stream_id: str, item: dict[str, Any], owner: dict[str, Any] | None) -> dict[str, Any]:
-    def publish(tmp_path, out_path, updated):
-        with _MUSIC_STREAM_LOCK:
-            _assert_music_preparation_owner_unlocked(stream_id, owner)
-            tmp_path.replace(out_path)
-            current = _MUSIC_STREAMS.get(stream_id)
-            if isinstance(current, dict):
-                current.update(updated)
-    return _phone_worker_pcm_io_module().prepare_file(stream_id, item,
-        cleanup_cache=_cleanup_music_pcm_cache, cache_dir=_music_pcm_cache_dir,
-        max_duration_seconds=_music_prepare_max_duration_seconds, timeout_seconds=_music_prepare_timeout_seconds,
-        build_command=_music_stream_build_ffmpeg_input_cmd, wall_time=time.time,
-        temporary_directory=tempfile.TemporaryDirectory, path_type=Path, subprocess_api=subprocess,
-        publish=publish, short_text=_short_text)
+    return _phone_worker_music_bridge_module("streams")._prepare_pcm_file_owned(stream_id, item, owner)
 
 
 def _serve_prepared_music_pcm(handler: BaseHTTPRequestHandler, stream_id: str, item: dict[str, Any]) -> None:
-    _phone_worker_pcm_io_module().serve_prepared(handler, stream_id, item,
-        path_type=Path, fstat=os.fstat, frame_bytes=PCM_FRAME_BYTES, short_text=_short_text)
+    _phone_worker_music_bridge_module("streams").serve_prepared_pcm(handler, stream_id, item)
 
 def _stream_music_pcm(handler: BaseHTTPRequestHandler, stream_id: str) -> None:
-    item = _music_stream_lookup(stream_id)
-    if not item:
-        _error(handler, HTTPStatus.NOT_FOUND, "stream não encontrado ou expirado")
-        return
-    stream_url = str(item.get("stream_url") or item.get("direct_url") or "").strip()
-    if not stream_url.startswith(("http://", "https://")):
-        _error(handler, HTTPStatus.BAD_REQUEST, "stream inválido")
-        return
-
-    if _music_prepared_mode_enabled():
-        try:
-            prepared = _prepare_music_pcm_file(stream_id, item)
-            _serve_prepared_music_pcm(handler, stream_id, prepared)
-            return
-        except Exception as exc:
-            fallback_live = str(os.getenv("PHONE_WORKER_MUSIC_PREPARE_LIVE_FALLBACK") or "false").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
-            print(f"[music-stream] cache_failed id={stream_id} erro={type(exc).__name__}: {_short_text(exc, limit=180)}", flush=True)
-            if not fallback_live:
-                _error(handler, HTTPStatus.INTERNAL_SERVER_ERROR, f"preparo de áudio no worker falhou: {type(exc).__name__}")
-                return
-
-    # Fallback legado: PCM ao vivo. Mantido apenas para emergência; por padrão o
-    # modo prepared acima é usado para evitar travadas por jitter/rede.
-    try:
-        pcm_io = _phone_worker_pcm_io_module()
-    except Exception as exc:
-        _error(handler, HTTPStatus.INTERNAL_SERVER_ERROR, f"stream falhou: {type(exc).__name__}")
-        return
-    pcm_io.stream_live(handler, stream_id, item, build_command=_music_stream_build_ffmpeg_input_cmd,
-        subprocess_api=subprocess, path_type=Path, frame_bytes=PCM_FRAME_BYTES,
-        send_error=_error, short_text=_short_text)
+    _phone_worker_music_bridge_module("streams").stream_pcm(handler, stream_id, send_error=_error)
 
 def _format_bytes(value: Any) -> str:
     try:
@@ -2430,261 +2292,28 @@ def _cache_dir_snapshot(path: Path, *, max_scan_files: int = 20000) -> dict[str,
     return result
 
 
-def _phone_lavalink_env_value(name: str, default: str = "") -> str:
-    value = str(os.getenv(name) or "").strip()
-    if value:
-        return value
-    env_file = Path(os.getenv("PHONE_LAVALINK_ENV") or str(Path.home() / ".phone-lavalink.env")).expanduser()
-    try:
-        if not env_file.exists():
-            return default
-        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-            raw = line.strip()
-            if not raw or raw.startswith("#") or "=" not in raw:
-                continue
-            key, raw_value = raw.split("=", 1)
-            if key.strip() != name:
-                continue
-            return raw_value.strip().strip('"').strip("'")
-    except Exception:
-        return default
-    return default
 
 
 
-_LAVALINK_AUTOSTART_LOCK = threading.Lock()
-_LAVALINK_AUTOSTART_LAST_AT = 0.0
 
 
-def _truthy_env(name: str, default: bool = False) -> bool:
-    return _env_bool(name, default)
 
 
-def _phone_lavalink_port() -> int:
-    port_raw = _phone_lavalink_env_value("PHONE_LAVALINK_PORT", _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PORT", "2333")) or "2333"
-    try:
-        return max(1, min(65535, int(str(port_raw).strip())))
-    except Exception:
-        return 2333
 
 
-def _read_lavalink_application_password() -> str:
-    app_path = Path(_phone_lavalink_env_value("PHONE_LAVALINK_APPLICATION_YML", str(Path.home() / "lavalink" / "application.yml"))).expanduser()
-    try:
-        if not app_path.exists():
-            return ""
-        text = app_path.read_text(encoding="utf-8", errors="replace")
-        for line in text.splitlines():
-            raw = line.strip()
-            if not raw or raw.startswith("#") or ":" not in raw:
-                continue
-            key, value = raw.split(":", 1)
-            if key.strip().lower() != "password":
-                continue
-            value = value.strip().strip('"').strip("'")
-            if value.startswith("${") and value.endswith("}"):
-                env_key = value[2:-1].split(":", 1)[0].strip()
-                return str(os.getenv(env_key) or "").strip()
-            return value
-    except Exception:
-        return ""
-    return ""
 
 
-def _phone_lavalink_password() -> str:
-    return (
-        _phone_lavalink_env_value("PHONE_LAVALINK_PASSWORD", "")
-        or _phone_lavalink_env_value("AUX_LAVALINK_PASSWORD", "")
-        or _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PASSWORD", "")
-        or _read_lavalink_application_password()
-    )
 
 
-def _probe_local_lavalink_http(*, timeout: float = 2.5) -> tuple[bool, int, str]:
-    port = _phone_lavalink_port()
-    password = _phone_lavalink_password()
-    headers = {"Accept": "text/plain"}
-    if password:
-        headers["Authorization"] = password
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/version", headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=max(0.5, float(timeout))) as response:
-            body = response.read(512).decode("utf-8", errors="replace").strip()
-            status = int(getattr(response, "status", 0) or 0)
-        return (200 <= status < 300), status, body
-    except urllib.error.HTTPError as exc:
-        # 401 prova que existe Lavalink respondendo, mas a senha do probe não bateu
-        # ou não foi enviada. Para autostart isso é suficiente para não duplicar
-        # processos; para health completo, _music_node_snapshot usa a senha e marca
-        # saudável apenas quando der 2xx.
-        return (int(exc.code) == 401 and not password), int(exc.code), _short_text(exc.reason, limit=80)
-    except Exception as exc:
-        return False, 0, _short_text(f"{type(exc).__name__}: {exc}", limit=120)
 
 
-def _spawn_builtin_lavalink_proot_start() -> tuple[bool, str]:
-    if not shutil.which("tmux"):
-        return False, "tmux não encontrado"
-    if not shutil.which("proot-distro"):
-        return False, "proot-distro não encontrado"
-    host_dir = Path(_phone_lavalink_env_value("PHONE_LAVALINK_HOST_DIR", str(Path.home() / "lavalink"))).expanduser()
-    jar = host_dir / "Lavalink.jar"
-    if not jar.exists():
-        return False, f"Lavalink.jar não encontrado em {host_dir}"
-    session = _phone_lavalink_env_value("PHONE_LAVALINK_TMUX_SESSION", "lavalink-debian") or "lavalink-debian"
-    distro = _phone_lavalink_env_value("PHONE_LAVALINK_PROOT_DISTRO", "debian") or "debian"
-    proot_dir = _phone_lavalink_env_value("PHONE_LAVALINK_PROOT_DIR", "/root/lavalink") or "/root/lavalink"
-    java_xmx = _phone_lavalink_env_value("PHONE_LAVALINK_JAVA_XMX", "384m") or "768m"
-    log_name = _phone_lavalink_env_value("PHONE_LAVALINK_LOG_NAME", "lavalink-proot.log") or "lavalink-proot.log"
-    subprocess.run(["tmux", "kill-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
-    with contextlib.suppress(Exception):
-        subprocess.run(["pkill", "-f", "java.*Lavalink.jar"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
-    command = (
-        "cd " + shlex.quote(proot_dir) +
-        " && mkdir -p /tmp/lavalink" +
-        " && exec /usr/bin/java -Djava.io.tmpdir=/tmp/lavalink -Xmx" + shlex.quote(java_xmx) +
-        " -jar Lavalink.jar >> " + shlex.quote(log_name) + " 2>&1"
-    )
-    tmux_cmd = [
-        "tmux", "new-session", "-d", "-s", session,
-        "proot-distro", "login", distro,
-        "--bind", f"{host_dir}:{proot_dir}",
-        "--", "bash", "-lc", command,
-    ]
-    subprocess.Popen(tmux_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return True, f"sessão {session} iniciada"
 
 
-def _ensure_phone_lavalink_started(reason: str = "health") -> dict[str, Any]:
-    global _LAVALINK_AUTOSTART_LAST_AT
-    if not _env_autostart_enabled("PHONE_LAVALINK_AUTO_START", "auto"):
-        return {"attempted": False, "reason": "auto_start_disabled_or_safe_mode", "safe_mode": _phone_worker_safe_mode_enabled()}
-    roles, capabilities = _current_core_worker_roles_and_capabilities()
-    caps = {str(x).strip().lower() for x in (roles + capabilities)}
-    if not ({"music", "music-node", "music-lavalink"} & caps) and _current_core_worker_profile() != "turbo":
-        return {"attempted": False, "reason": "worker_sem_capacidade_music"}
-    alive, status, body = _probe_local_lavalink_http(timeout=1.5)
-    if alive or status == 401:
-        return {"attempted": False, "reason": "already_online", "http_status": status}
-    now = time.time()
-    cooldown = max(5.0, _env_float("PHONE_LAVALINK_AUTO_START_COOLDOWN_SECONDS", 30.0))
-    if now - _LAVALINK_AUTOSTART_LAST_AT < cooldown:
-        return {"attempted": False, "reason": "cooldown", "last_error": body}
-    with _LAVALINK_AUTOSTART_LOCK:
-        now = time.time()
-        if now - _LAVALINK_AUTOSTART_LAST_AT < cooldown:
-            return {"attempted": False, "reason": "cooldown", "last_error": body}
-        _LAVALINK_AUTOSTART_LAST_AT = now
-        script = Path(_phone_lavalink_env_value("PHONE_LAVALINK_START_COMMAND", str(Path.home() / "start-phone-lavalink.sh"))).expanduser()
-        try:
-            if script.exists() and os.access(script, os.X_OK):
-                subprocess.Popen([str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                print(f"[phone-worker] lavalink auto-start solicitado via {script} ({reason})", flush=True)
-                return {"attempted": True, "method": "script", "script": str(script)}
-            ok, detail = _spawn_builtin_lavalink_proot_start()
-            if ok:
-                print(f"[phone-worker] lavalink auto-start solicitado via proot/tmux ({reason})", flush=True)
-            else:
-                print(f"[phone-worker] lavalink auto-start falhou: {detail}", flush=True)
-            return {"attempted": bool(ok), "method": "builtin-proot", "detail": detail}
-        except Exception as exc:
-            detail = _short_text(f"{type(exc).__name__}: {exc}", limit=160)
-            print(f"[phone-worker] lavalink auto-start erro: {detail}", flush=True)
-            return {"attempted": False, "error": detail}
 
 def _inactive_music_node_snapshot() -> dict[str, Any]:
-    """Compatibilidade de telemetria sem sondar/iniciar Lavalink.
-
-    O playback é feito exclusivamente pelo Music Agent. Mantemos a chave
-    ``music_node`` por compatibilidade de wire, mas ela não executa I/O nem
-    pode tornar o worker elegível para música.
-    """
-    return {
-        "kind": "lavalink",
-        "mode": "disabled",
-        "ok": False,
-        "online": False,
-        "state": "disabled",
-        "music_available": False,
-        "playback_modes": [],
-        "deprecated": True,
-        "reason": "playback_owned_by_music_agent",
-    }
+    return _phone_worker_music_bridge_module("telemetria").inactive_music_node_snapshot()
 
 
-def _music_node_snapshot() -> dict[str, Any]:
-    autostart = _ensure_phone_lavalink_started(reason="music_node_snapshot")
-    port = _phone_lavalink_port()
-    password = _phone_lavalink_password()
-    bind_host = _phone_lavalink_env_value("PHONE_LAVALINK_BIND_HOST", "127.0.0.1") or "127.0.0.1"
-    public_host = (
-        _phone_lavalink_env_value("PHONE_LAVALINK_PUBLIC_HOST", "")
-        or _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_HOST", "")
-        or _phone_lavalink_env_value("PHONE_LAVALINK_HOST", "")
-    )
-    public_port_raw = _phone_lavalink_env_value("PHONE_LAVALINK_PUBLIC_PORT", _phone_lavalink_env_value("MUSIC_WORKER_LAVALINK_PORT", ""))
-    try:
-        public_port = max(1, min(65535, int(str(public_port_raw).strip()))) if str(public_port_raw or "").strip() else port
-    except Exception:
-        public_port = port
-    url = f"http://127.0.0.1:{port}/version"
-    headers = {"Accept": "text/plain"}
-    if password:
-        headers["Authorization"] = password
-    result: dict[str, Any] = {
-        "kind": "lavalink",
-        "mode": "lavalink",
-        "host": bind_host,
-        "port": port,
-        "public_host": public_host,
-        "public_port": public_port,
-        "connect_host": public_host,
-        "connect_port": public_port,
-        "ok": False,
-        "online": False,
-        "state": "offline",
-        "autostart": autostart,
-    }
-    start = time.time()
-    try:
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=2.5) as response:
-            body = response.read(512).decode("utf-8", errors="replace").strip()
-            status = int(getattr(response, "status", 0) or 0)
-        healthy = 200 <= status < 300
-        result.update({
-            "ok": healthy,
-            "online": healthy,
-            "state": "healthy" if healthy else f"http_{status}",
-            "http_status": status,
-            "version": _short_text(body, limit=80),
-            "latency_ms": round((time.time() - start) * 1000.0, 1),
-            "music_available": healthy,
-            "playback_modes": ["lavalink"] if healthy else [],
-        })
-    except urllib.error.HTTPError as exc:
-        status = int(exc.code or 0)
-        # 401 ainda prova que o Lavalink está vivo; a VPS/bot pode ter a senha
-        # correta mesmo quando o worker não conseguiu ler application.yml/env.
-        alive = status == 401
-        result.update({
-            "ok": alive,
-            "online": alive,
-            "state": "auth_required" if alive else f"http_{status}",
-            "http_status": status,
-            "error": "authorization_required" if alive else _short_text(exc.reason, limit=100),
-            "latency_ms": round((time.time() - start) * 1000.0, 1),
-            "music_available": alive,
-            "playback_modes": ["lavalink"] if alive else [],
-        })
-    except Exception as exc:
-        result.update({
-            "error": _short_text(f"{type(exc).__name__}: {exc}", limit=120),
-            "latency_ms": round((time.time() - start) * 1000.0, 1),
-            "music_available": False,
-            "playback_modes": [],
-        })
-    return result
 
 
 def _worker_turbo_cache_snapshot() -> dict[str, Any]:
@@ -2705,13 +2334,8 @@ def _worker_turbo_cache_snapshot() -> dict[str, Any]:
 
 
 def _read_music_agent_version_from_path(path: Path | None = None) -> str:
-    path = path or (_phone_worker_dir() / "music_agent.py")
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return ""
-    match = re.search(r'^AGENT_VERSION\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
-    return match.group(1) if match else ""
+    target = path or (_phone_worker_dir() / "music_agent.py")
+    return _phone_worker_music_bridge_module("telemetria").read_music_agent_version(target)
 
 
 def _version_tuple_loose(value: Any) -> tuple[int, ...]:
@@ -2732,18 +2356,29 @@ def _version_lt_loose(current: Any, target: Any) -> bool:
 
 
 def _music_agent_start_script() -> Path:
-    explicit = str(os.getenv("MUSIC_AGENT_START_COMMAND") or "").strip()
-    if explicit:
-        return Path(explicit).expanduser()
-    return _best_script("start-phone-music-agent.sh")
+    return _phone_worker_music_bridge_module("servico").start_script(best_script=_best_script)
 
 
 def _music_agent_pid_file() -> Path:
-    return Path(os.getenv("MUSIC_AGENT_PID_FILE") or (_phone_worker_dir() / "music_agent.pid")).expanduser()
+    return _phone_worker_music_bridge_module("servico").pid_file(phone_worker_dir=_phone_worker_dir)
 
 
 def _music_agent_log_file() -> Path:
-    return Path(os.getenv("MUSIC_AGENT_LOG_FILE") or (_phone_worker_dir() / "music_agent.log")).expanduser()
+    return _phone_worker_music_bridge_module("servico").log_file(phone_worker_dir=_phone_worker_dir)
+
+
+def _music_service_hooks() -> Any:
+    return SimpleNamespace(
+        phone_worker_dir=_phone_worker_dir,
+        best_script=_best_script,
+        read_pid_file=_read_pid_file,
+        safe_telemetry=_safe_telemetry,
+        snapshot=_music_agent_snapshot,
+        pid_alive=_pid_alive,
+        pgrep_count=_pgrep_count,
+        run_text_command=_run_text_command,
+        sanitize_log_text=_sanitize_log_text,
+    )
 
 
 _TTS_DEP_AUTOINSTALL_LOCK = threading.Lock()
@@ -2794,15 +2429,7 @@ def _submit_tts_cache_maintenance(callback, *args, **kwargs) -> bool:
 
 
 def _music_voice_dependency_specs() -> dict[str, dict[str, Any]]:
-    return {
-        "discord.py": {"module": "discord", "pip": "discord.py"},
-        "PyNaCl": {"module": "nacl", "pip": "PyNaCl"},
-        "davey": {"module": "davey", "pip": "davey"},
-        "yt-dlp": {"module": "yt_dlp", "pip": "yt-dlp"},
-        "aiohttp": {"module": "aiohttp", "pip": "aiohttp"},
-        "gTTS": {"module": "gtts", "pip": "gTTS==2.5.4", "optional": True},
-        "edge-tts": {"module": "edge_tts", "pip": "edge-tts==7.2.8", "optional": True},
-    }
+    return _phone_worker_music_bridge_module("telemetria").music_voice_dependency_specs()
 
 
 def _module_import_ok(module_name: str) -> tuple[bool, str]:
@@ -2998,121 +2625,31 @@ def _start_tts_dependency_autoinstall(missing: list[str], checks: dict[str, dict
 
 
 def _music_voice_dependencies_snapshot() -> dict[str, Any]:
-    checks: dict[str, dict[str, Any]] = {}
-    specs = _music_voice_dependency_specs()
-    for label, spec in specs.items():
-        ok, error = _module_import_ok(str(spec.get("module") or ""))
-        checks[label] = {"ok": ok, "optional": bool(spec.get("optional"))}
-        if error:
-            checks[label]["error"] = error
-    for binary in ("ffmpeg", "ffprobe"):
-        path = shutil.which(binary)
-        checks[binary] = {"ok": bool(path), "path": path or ""}
-    missing = [name for name, info in checks.items() if not bool(info.get("ok"))]
-    missing_critical = [name for name in missing if not bool(checks.get(name, {}).get("optional"))]
-    optional_missing = [name for name in missing if bool(checks.get(name, {}).get("optional"))]
-    # Tenta preparar o worker automaticamente sem bloquear o heartbeat/status.
-    auto_install = _start_tts_dependency_autoinstall(missing, checks) if missing else {"enabled": _env_bool("PHONE_WORKER_AUTO_INSTALL_TTS_DEPS", True), "started": False, "reason": "ok"}
-    return {
-        "ok": not missing_critical,
-        "missing": missing_critical,
-        "optional_missing": optional_missing,
-        "all_missing": missing,
-        "checks": checks,
-        "auto_install": auto_install,
-    }
+    hooks = SimpleNamespace(
+        module_import_ok=_module_import_ok,
+        which=shutil.which,
+        start_dependency_autoinstall=_start_tts_dependency_autoinstall,
+        env_bool=_env_bool,
+    )
+    return _phone_worker_music_bridge_module("telemetria").music_voice_dependencies_snapshot(hooks)
 
 
 def _music_agent_snapshot() -> dict[str, Any]:
-    """Small local health probe for the same-bot Music Agent.
-
-    This is intentionally best-effort and never exposes tokens. The VPS uses it
-    to know whether the worker can own voice/playback before falling back to any
-    legacy music route.
-    """
-    _load_phone_worker_runtime_env()
-    token = str(os.getenv("MUSIC_AGENT_TOKEN") or "").strip() or _ensure_music_agent_token_env(persist=True)
-    host = str(os.getenv("MUSIC_AGENT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
-    try:
-        port = int(float(os.getenv("MUSIC_AGENT_PORT") or 8780))
-    except Exception:
-        port = 8780
-    configured = bool(str(os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or "").strip())
-    safe_mode = _phone_worker_safe_mode_enabled()
-    deps = _music_voice_dependencies_snapshot()
-    file_version = _read_music_agent_version_from_path()
-    url = f"http://{host}:{port}/health"
-    headers = {"Accept": "application/json", "User-Agent": f"CorePhoneWorker/{PHONE_WORKER_VERSION}"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    started = time.perf_counter()
-    try:
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=max(0.5, min(5.0, _env_float("MUSIC_AGENT_STATUS_TIMEOUT_SECONDS", 2.5)))) as resp:
-            raw = resp.read(512 * 1024).decode("utf-8", "replace")
-            status = int(getattr(resp, "status", 200) or 200)
-        data = json.loads(raw or "{}") if raw.strip() else {}
-        if not isinstance(data, dict):
-            data = {}
-        runtime_version = str(data.get("version") or "").strip()
-        discord_ready = bool(data.get("discord_ready"))
-        # YouTube direto usa voz/ffmpeg do Music Agent e não precisa que o pool
-        # Lavalink esteja conectado. Pool conectado é detalhe técnico para
-        # playlists/Spotify/SoundCloud, não condição para o worker existir.
-        available = bool(data.get("available") or discord_ready)
-        needs_restart = bool(runtime_version and file_version and _version_lt_loose(runtime_version, file_version))
-        data.update({
-            "ok": available and bool(deps.get("ok", True)),
-            "available": available and bool(deps.get("ok", True)),
-            "configured": configured,
-            "safe_mode": safe_mode,
-            "auto_start_allowed": _env_autostart_enabled("MUSIC_AGENT_ENABLED", "auto"),
-            "file_version": file_version,
-            "runtime_version": runtime_version,
-            "needs_restart": needs_restart,
-            "host": host,
-            "port": port,
-            "http_status": status,
-            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-            "voice_dependencies": deps,
-            "dependency_missing": list(deps.get("missing") or []),
-            "optional_dependency_missing": list(deps.get("optional_missing") or []),
-        })
-        return data
-    except urllib.error.HTTPError as exc:
-        raw = ""
-        with contextlib.suppress(Exception):
-            raw = exc.read(1024).decode("utf-8", "replace")
-        return {
-            "ok": False,
-            "available": False,
-            "configured": configured,
-            "safe_mode": safe_mode,
-            "auto_start_allowed": _env_autostart_enabled("MUSIC_AGENT_ENABLED", "auto"),
-            "file_version": file_version,
-            "host": host,
-            "port": port,
-            "http_status": int(exc.code),
-            "error": _short_text(raw or exc.reason, limit=180),
-            "voice_dependencies": deps,
-            "dependency_missing": list(deps.get("missing") or []),
-            "optional_dependency_missing": list(deps.get("optional_missing") or []),
-        }
-    except Exception as exc:
-        return {
-            "ok": False,
-            "available": False,
-            "configured": configured,
-            "safe_mode": safe_mode,
-            "auto_start_allowed": _env_autostart_enabled("MUSIC_AGENT_ENABLED", "auto"),
-            "file_version": file_version,
-            "host": host,
-            "port": port,
-            "error": f"{type(exc).__name__}: {_short_text(exc, limit=160)}",
-            "voice_dependencies": deps,
-            "dependency_missing": list(deps.get("missing") or []),
-            "optional_dependency_missing": list(deps.get("optional_missing") or []),
-        }
+    hooks = SimpleNamespace(
+        module_import_ok=_module_import_ok,
+        which=shutil.which,
+        start_dependency_autoinstall=_start_tts_dependency_autoinstall,
+        env_bool=_env_bool,
+        load_runtime_env=_load_phone_worker_runtime_env,
+        ensure_token=_ensure_music_agent_token_env,
+        safe_mode_enabled=_phone_worker_safe_mode_enabled,
+        phone_worker_dir=_phone_worker_dir,
+        phone_worker_version=PHONE_WORKER_VERSION,
+        env_float=_env_float,
+        version_lt=_version_lt_loose,
+        env_autostart_enabled=_env_autostart_enabled,
+    )
+    return _phone_worker_music_bridge_module("telemetria").music_agent_snapshot(hooks)
 
 
 _VOICE_AGENT_SESSION_LOCK = threading.RLock()
@@ -6190,518 +5727,24 @@ class WorkerHandler(BaseHTTPRequestHandler):
         return {"ok": any(item.get("ok") for item in results), "summary": "endpoints testados pelo worker", "results": results}
 
     def _task_music_agent_proxy(self, body: dict[str, Any]) -> dict[str, Any]:
-        """Proxy authenticated /task requests to the local same-bot Music Agent."""
-        _load_phone_worker_runtime_env()
-        token = str(os.getenv("MUSIC_AGENT_TOKEN") or "").strip() or _ensure_music_agent_token_env(persist=True)
-        host = str(os.getenv("MUSIC_AGENT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
-        try:
-            port = int(float(os.getenv("MUSIC_AGENT_PORT") or 8780))
-        except Exception:
-            port = 8780
-        action = str(body.get("action") or body.get("command") or "status").strip().lower().replace("-", "_") or "status"
-        try:
-            timeout_seconds = float(body.get("timeout_seconds") or os.getenv("MUSIC_AGENT_COMMAND_TIMEOUT_SECONDS") or 18.0)
-        except Exception:
-            timeout_seconds = 18.0
-        timeout_seconds = max(1.0, min(90.0, timeout_seconds))
-        base = f"http://{host}:{port}"
-        agent_configured = bool(str(os.getenv("MUSIC_AGENT_BOT_TOKEN") or os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN") or "").strip())
-
-        if action not in {"status", "get_state"} and not agent_configured:
-            return {
-                "ok": False,
-                "available": False,
-                "error": "Music Agent sem token do bot no worker",
-                "message": "configure MUSIC_AGENT_BOT_TOKEN em ~/phone-worker/secrets/music-agent.env",
-                "agent": {"host": host, "port": port, "configured": False},
-            }
-
-        headers = {"Accept": "application/json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-
-        def _request_agent() -> dict[str, Any]:
-            local_headers = dict(headers)
-            if action in {"status", "get_state"}:
-                health_url = f"{base}/health"
-                try:
-                    guild_id = int(body.get("guild_id") or 0)
-                except Exception:
-                    guild_id = 0
-                compact = _early_env_truthy(body.get("compact"), guild_id > 0)
-                if guild_id > 0:
-                    params = {
-                        "guild_id": guild_id,
-                        "compact": "1" if compact else "0",
-                    }
-                    known_revision = str(body.get("known_revision") or "").strip()
-                    if known_revision:
-                        params["known_revision"] = known_revision
-                    health_url += "?" + urllib.parse.urlencode(params)
-                req = urllib.request.Request(health_url, headers=local_headers, method="GET")
-                with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-                    raw = resp.read(min(self.max_output_bytes, 1024 * 1024)).decode("utf-8", "replace")
-                parsed = json.loads(raw or "{}")
-            else:
-                payload = {k: v for k, v in body.items() if k not in {"task", "timeout_seconds"}}
-                payload.setdefault("action", action)
-                encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-                local_headers["Content-Type"] = "application/json"
-                req = urllib.request.Request(f"{base}/command", data=encoded, headers=local_headers, method="POST")
-                with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-                    raw = resp.read(min(self.max_output_bytes, 1024 * 1024)).decode("utf-8", "replace")
-                parsed = json.loads(raw or "{}")
-            return parsed if isinstance(parsed, dict) else {}
-
-        attempted_prepare: dict[str, Any] | None = None
-        try:
-            if action not in {"status", "get_state"}:
-                snapshot = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": agent_configured})
-                runtime_version = str(snapshot.get("version") or snapshot.get("runtime_version") or "").strip()
-                file_version = str(snapshot.get("file_version") or "").strip()
-                needs_restart = bool(snapshot.get("needs_restart") or (runtime_version and file_version and _version_lt_loose(runtime_version, file_version)))
-                if needs_restart:
-                    attempted_prepare = _run_service_action("music-agent", "restart")
-                elif not bool(snapshot.get("available")):
-                    attempted_prepare = _run_service_action("music-agent", "start")
-            data = _request_agent()
-        except urllib.error.HTTPError as exc:
-            raw = ""
-            with contextlib.suppress(Exception):
-                raw = exc.read(2048).decode("utf-8", "replace")
-            return {
-                "ok": False,
-                "available": False,
-                "error": f"Music Agent HTTP {exc.code}: {_short_text(raw or exc.reason, limit=260)}",
-                "agent": {"host": host, "port": port, "configured": agent_configured},
-                "prepare": attempted_prepare,
-            }
-        except Exception as exc:
-            # Uma queda de conexão no primeiro comando normalmente significa
-            # agent parado/desatualizado. Tenta um start uma vez antes de falhar.
-            if action not in {"status", "get_state"} and attempted_prepare is None and agent_configured:
-                try:
-                    attempted_prepare = _run_service_action("music-agent", "start")
-                    data = _request_agent()
-                except Exception as retry_exc:
-                    return {
-                        "ok": False,
-                        "available": False,
-                        "error": f"{type(retry_exc).__name__}: {_short_text(retry_exc, limit=260)}",
-                        "first_error": f"{type(exc).__name__}: {_short_text(exc, limit=180)}",
-                        "agent": {"host": host, "port": port, "configured": agent_configured},
-                        "prepare": attempted_prepare,
-                    }
-            else:
-                return {
-                    "ok": False,
-                    "available": False,
-                    "error": f"{type(exc).__name__}: {_short_text(exc, limit=260)}",
-                    "agent": {"host": host, "port": port, "configured": agent_configured},
-                    "prepare": attempted_prepare,
-                }
-        if isinstance(data, dict):
-            data.setdefault("ok", True)
-            data.setdefault("available", bool(data.get("discord_ready") or data.get("available") or data.get("ok")))
-            data.setdefault("agent", {"host": host, "port": port, "configured": agent_configured})
-            if attempted_prepare is not None:
-                data.setdefault("prepare", attempted_prepare)
-            return data
-        return {"ok": False, "available": False, "error": "resposta inválida do Music Agent", "agent": {"host": host, "port": port, "configured": agent_configured}, "prepare": attempted_prepare}
+        hooks = SimpleNamespace(
+            load_runtime_env=_load_phone_worker_runtime_env,
+            ensure_token=_ensure_music_agent_token_env,
+            truthy=lambda value, default=False: _phone_worker_music_bridge_module("configuracao").truthy(value, default),
+            safe_telemetry=_safe_telemetry,
+            snapshot=_music_agent_snapshot,
+            version_lt=_version_lt_loose,
+            run_service=_run_service_action,
+            short_text=_short_text,
+        )
+        return _phone_worker_music_bridge_module("proxy").proxy_music_agent(
+            body, max_output_bytes=self.max_output_bytes, hooks=hooks
+        )
 
     def _task_music_ytdlp_resolve(self, body: dict[str, Any]) -> dict[str, Any]:
-        query = str(body.get("query") or body.get("url") or body.get("q") or "").strip()
-        if not query:
-            raise ValueError("query vazia")
-        limit = max(1, min(10, int(float(body.get("limit") or body.get("max_results") or 5))))
-        timeout = max(5, min(self.job_timeout, int(float(body.get("timeout_seconds") or min(self.job_timeout, 30)))))
-        fmt = str(body.get("format") or os.getenv("PHONE_WORKER_MUSIC_YTDLP_FORMAT") or "bestaudio/best").strip() or "bestaudio/best"
-        is_url = bool(re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", query) or query.lower().startswith("www."))
-        metadata_only = str(body.get("metadata_only") if body.get("metadata_only") is not None else body.get("search_only") or "").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
-        allow_playlist = str(body.get("allow_playlist") or "").strip().lower() in {"1", "true", "yes", "y", "on", "sim"}
-
-        def _default_search_prefix() -> str:
-            raw = str(
-                body.get("default_search")
-                or os.getenv("PHONE_WORKER_MUSIC_YTDLP_DEFAULT_SEARCH")
-                or os.getenv("MUSIC_WORKER_YTDLP_DEFAULT_SEARCH")
-                or "ytsearch"
-            ).strip().lower()
-            raw = raw.rstrip(":")
-            if raw in {"ytsearch", "ytsearchdate", "ytsearchall", "ytmsearch"}:
-                raw = f"{raw}{limit}"
-            if not raw:
-                raw = f"ytsearch{limit}"
-            return raw
-
-        default_search = _default_search_prefix()
-        if is_url or query.lower().startswith(("ytsearch:", "ytsearch", "ytmsearch:")):
-            target = query
-        else:
-            # A pesquisa textual precisa ser explícita. Sem isso, o YouTube pode
-            # interpretar "megalovania" como ID/URL e retornar "Video unavailable".
-            target = f"{default_search}:{query}"
-
-        try:
-            import yt_dlp  # type: ignore
-        except Exception as exc:
-            raise RuntimeError("yt-dlp não está instalado no phone worker") from exc
-
-        def _split_csv(value: Any) -> list[str]:
-            items: list[str] = []
-            for part in re.split(r"[,;\s]+", str(value or "")):
-                clean = part.strip()
-                if clean:
-                    items.append(clean)
-            return items
-
-        def _safe_url_for_log(value: str) -> str:
-            if not value:
-                return ""
-            try:
-                parsed = urllib.parse.urlsplit(value)
-                if parsed.scheme and parsed.netloc:
-                    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path[:80], "", ""))
-            except Exception:
-                pass
-            return _short_text(value, limit=160)
-
-        def select_stream(entry: dict[str, Any]) -> str:
-            for item in entry.get("requested_downloads") or []:
-                if isinstance(item, dict):
-                    url = str(item.get("url") or "").strip()
-                    if url.startswith(("http://", "https://")):
-                        return url
-            url = str(entry.get("url") or "").strip()
-            if url.startswith(("http://", "https://")) and "youtube.com/watch" not in url and "youtu.be/" not in url:
-                return url
-            best_url = ""
-            best_score = -1.0
-            for fmt_item in entry.get("formats") or []:
-                if not isinstance(fmt_item, dict):
-                    continue
-                candidate = str(fmt_item.get("url") or "").strip()
-                if not candidate.startswith(("http://", "https://")):
-                    continue
-                acodec = str(fmt_item.get("acodec") or "").lower()
-                vcodec = str(fmt_item.get("vcodec") or "").lower()
-                if acodec in {"", "none"}:
-                    continue
-                score = float(fmt_item.get("abr") or fmt_item.get("tbr") or 0)
-                if vcodec in {"", "none"}:
-                    score += 10000
-                if score > best_score:
-                    best_score = score
-                    best_url = candidate
-            return best_url
-
-        configured_cookies = str(
-            os.getenv("PHONE_WORKER_MUSIC_YTDLP_COOKIES_FILE")
-            or os.getenv("MUSIC_WORKER_YTDLP_COOKIES_FILE")
-            or os.getenv("MUSIC_YTDLP_COOKIES_FILE")
-            or os.getenv("YTDLP_COOKIES_FILE")
-            or ""
-        ).strip()
-        default_cookies = Path.home() / "phone-worker" / "secrets" / "youtube-cookies.txt"
-        cookies_path = Path(configured_cookies).expanduser() if configured_cookies else default_cookies
-        cookies_ok = bool(cookies_path.exists() and cookies_path.is_file() and cookies_path.stat().st_size > 0)
-
-        js_runtime_raw = str(
-            body.get("js_runtimes")
-            or body.get("js_runtime")
-            or os.getenv("PHONE_WORKER_MUSIC_YTDLP_JS_RUNTIMES")
-            or os.getenv("MUSIC_WORKER_YTDLP_JS_RUNTIMES")
-            or "node"
-        ).strip()
-        js_runtimes = _split_csv(js_runtime_raw)
-        remote_components = str(
-            body.get("remote_components")
-            or os.getenv("PHONE_WORKER_MUSIC_YTDLP_REMOTE_COMPONENTS")
-            or os.getenv("MUSIC_WORKER_YTDLP_REMOTE_COMPONENTS")
-            or ""
-        ).strip()
-
-        ydl_opts: dict[str, Any] = {
-            "format": fmt,
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "noplaylist": not allow_playlist,
-            "ignoreerrors": True,
-            "socket_timeout": max(3, min(20, timeout - 1)),
-            "retries": max(0, int(float(os.getenv("PHONE_WORKER_MUSIC_YTDLP_RETRIES", "1") or 1))),
-            "fragment_retries": max(0, int(float(os.getenv("PHONE_WORKER_MUSIC_YTDLP_FRAGMENT_RETRIES", "1") or 1))),
-            "cachedir": str(Path(os.getenv("PHONE_WORKER_MUSIC_YTDLP_CACHE_DIR") or str(Path.home() / "phone-worker" / "cache" / "yt-dlp")).expanduser()),
-        }
-        if cookies_ok:
-            ydl_opts["cookiefile"] = str(cookies_path)
-        if metadata_only:
-            # Busca textual leve: retorna 5 candidatos sem resolver stream_url, sem
-            # ffmpeg e sem abrir endpoint de áudio. A resolução pesada acontece
-            # apenas depois que o usuário escolhe uma faixa.
-            ydl_opts["extract_flat"] = "in_playlist"
-            ydl_opts.pop("format", None)
-
-        # O suporte Python para js_runtimes pode variar por versão do yt-dlp.
-        # A chamada via API continua rápida quando funcionar; se retornar vazio
-        # por challenge/EJS, o fallback CLI abaixo usa exatamente os flags que
-        # funcionaram no Termux: --js-runtimes node + ytsearch1:<query>.
-        started = time.time()
-        info: Any = None
-        api_error = ""
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(target, download=False)
-        except Exception as exc:
-            api_error = f"{type(exc).__name__}: {_short_text(exc, limit=220)}"
-            info = None
-
-        entries: list[Any]
-        if isinstance(info, dict) and isinstance(info.get("entries"), list):
-            entries = list(info.get("entries") or [])
-            playlist_title = str(info.get("title") or "")
-            is_playlist = True
-        elif info is not None:
-            entries = [info]
-            playlist_title = ""
-            is_playlist = False
-        else:
-            entries = []
-            playlist_title = ""
-            is_playlist = False
-
-        tracks: list[dict[str, Any]] = []
-
-        def entry_webpage_url(entry: dict[str, Any], *, stream_url: str = "") -> str:
-            webpage_url = str(entry.get("webpage_url") or entry.get("original_url") or entry.get("url") or "").strip()
-            if webpage_url and webpage_url != stream_url and webpage_url.startswith(("http://", "https://")):
-                return webpage_url
-            entry_id = str(entry.get("id") or entry.get("display_id") or "").strip()
-            source_key = str(entry.get("extractor_key") or entry.get("extractor") or "").lower()
-            if entry_id and ("youtube" in source_key or target.lower().startswith(("ytsearch", "ytmsearch"))):
-                return f"https://www.youtube.com/watch?v={entry_id}"
-            return str(entry.get("webpage_url_basename") or entry.get("display_id") or query).strip() or query
-
-        def append_metadata_track(entry: dict[str, Any], *, source_label: str | None = None) -> bool:
-            if not isinstance(entry, dict):
-                return False
-            webpage_url = entry_webpage_url(entry)
-            if not webpage_url:
-                return False
-            title_value = entry.get("title") or entry.get("fulltitle") or entry.get("alt_title") or ""
-            title = _short_text(title_value, limit=160, default=query)
-            uploader = _short_text(entry.get("uploader") or entry.get("channel") or entry.get("creator") or entry.get("artist") or "", limit=120)
-            source_value = source_label or entry.get("extractor_key") or entry.get("extractor") or "worker-ytdlp-search"
-            tracks.append({
-                "title": title,
-                "uploader": uploader,
-                "duration": entry.get("duration"),
-                "thumbnail": _short_text(entry.get("thumbnail") or "", limit=500),
-                "webpage_url": webpage_url,
-                "original_url": webpage_url,
-                "original_query": query,
-                "source": _short_text(source_value, limit=80, default="worker-ytdlp-search"),
-                "extractor": "worker-ytdlp",
-                "is_live": bool(entry.get("is_live")),
-                "metadata_only": True,
-                "search_only": True,
-                "is_direct_stream": False,
-            })
-            return True
-
-        def append_entry_track(entry: dict[str, Any], *, source_label: str | None = None) -> bool:
-            if not isinstance(entry, dict):
-                return False
-            if metadata_only:
-                return append_metadata_track(entry, source_label=source_label)
-            stream_url = select_stream(entry)
-            if not stream_url:
-                return False
-            webpage_url = entry_webpage_url(entry, stream_url=stream_url)
-            title_value = entry.get("title") or entry.get("fulltitle") or entry.get("alt_title") or ""
-            title = _short_text(title_value, limit=160, default=(query if not is_url else "Música"))
-            uploader = _short_text(entry.get("uploader") or entry.get("channel") or entry.get("creator") or entry.get("artist") or "", limit=120)
-            source_value = source_label or entry.get("extractor_key") or entry.get("extractor") or "worker-ytdlp"
-            track_payload = {
-                "title": title,
-                "uploader": uploader,
-                "duration": entry.get("duration"),
-                "thumbnail": _short_text(entry.get("thumbnail") or "", limit=500),
-                "webpage_url": webpage_url,
-                "original_url": webpage_url,
-                "original_query": query,
-                "stream_url": stream_url,
-                "direct_url": stream_url,
-                "source": _short_text(source_value, limit=80, default="worker-ytdlp"),
-                "extractor": "worker-ytdlp",
-                "is_live": bool(entry.get("is_live")),
-                "ext": _short_text(entry.get("ext") or "", limit=20),
-                "format_id": _short_text(entry.get("format_id") or "", limit=80),
-                "http_headers": entry.get("http_headers") if isinstance(entry.get("http_headers"), dict) else {},
-                "is_direct_stream": True,
-            }
-            stream_id = _register_music_stream(track_payload)
-            if stream_id:
-                track_payload["worker_stream_id"] = stream_id
-                track_payload["worker_stream_path"] = f"/music/stream/{stream_id}"
-                track_payload["worker_stream_transport"] = "pcm_s16le_48k_stereo"
-            tracks.append(track_payload)
-            return True
-
-        for entry in entries:
-            append_entry_track(entry)
-            if len(tracks) >= limit:
-                break
-
-        cli_stderr = ""
-        cli_rc: int | None = None
-        if not tracks:
-            cmd_json = [shutil.which("python") or "python", "-m", "yt_dlp"]
-            if cookies_ok:
-                cmd_json += ["--cookies", str(cookies_path)]
-            if js_runtimes:
-                cmd_json += ["--js-runtimes", ",".join(js_runtimes)]
-            if remote_components:
-                cmd_json += ["--remote-components", remote_components]
-            if metadata_only:
-                cmd_json += ["--flat-playlist"]
-            cmd_json += [
-                "--no-warnings",
-                "--socket-timeout",
-                str(max(3, min(20, timeout - 1))),
-            ]
-            if not allow_playlist:
-                cmd_json += ["--no-playlist"]
-            if not metadata_only:
-                cmd_json += ["-f", fmt]
-            cmd_json += ["-J", target]
-            try:
-                proc_json = subprocess.run(
-                    cmd_json,
-                    cwd=str(Path.home() / "phone-worker"),
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=timeout,
-                )
-                cli_rc = int(proc_json.returncode)
-                cli_stderr = _short_text(proc_json.stderr or "", limit=800)
-                parsed: Any = json.loads(proc_json.stdout or "{}") if proc_json.stdout else {}
-                json_entries: list[Any]
-                if isinstance(parsed, dict) and isinstance(parsed.get("entries"), list):
-                    json_entries = list(parsed.get("entries") or [])
-                    playlist_title = playlist_title or str(parsed.get("title") or "")
-                    is_playlist = True
-                elif isinstance(parsed, dict) and parsed:
-                    json_entries = [parsed]
-                else:
-                    json_entries = []
-                for entry in json_entries:
-                    if isinstance(entry, dict):
-                        append_entry_track(entry, source_label="worker-ytdlp-cli-json")
-                    if len(tracks) >= limit:
-                        break
-            except Exception as exc:
-                cli_stderr = f"{type(exc).__name__}: {_short_text(exc, limit=500)}"
-
-        if not tracks and not metadata_only:
-            cmd = [shutil.which("python") or "python", "-m", "yt_dlp"]
-            if cookies_ok:
-                cmd += ["--cookies", str(cookies_path)]
-            for runtime in js_runtimes:
-                # yt-dlp aceita lista separada por vírgula em uma única opção.
-                # Mantemos uma opção para todos os runtimes para preservar sintaxe CLI.
-                pass
-            if js_runtimes:
-                cmd += ["--js-runtimes", ",".join(js_runtimes)]
-            if remote_components:
-                cmd += ["--remote-components", remote_components]
-            cmd += [
-                "--no-warnings",
-                "--socket-timeout",
-                str(max(3, min(20, timeout - 1))),
-            ]
-            if not allow_playlist:
-                cmd += ["--no-playlist"]
-            cmd += [
-                "-f",
-                fmt,
-                "-g",
-                target,
-            ]
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    cwd=str(Path.home() / "phone-worker"),
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=timeout,
-                )
-                cli_rc = int(proc.returncode)
-                cli_stderr = _short_text(proc.stderr or "", limit=800)
-                urls = [
-                    line.strip()
-                    for line in (proc.stdout or "").splitlines()
-                    if line.strip().startswith(("http://", "https://"))
-                ]
-                for idx, stream_url in enumerate(urls[:limit], start=1):
-                    track_payload = {
-                        "title": _short_text(query if not is_url else "Música", limit=160, default="Música"),
-                        "uploader": "",
-                        "duration": None,
-                        "thumbnail": "",
-                        "webpage_url": query,
-                        "original_url": query,
-                        "original_query": query,
-                        "stream_url": stream_url,
-                        "direct_url": stream_url,
-                        "source": "worker-ytdlp-cli",
-                        "extractor": "worker-ytdlp",
-                        "is_live": False,
-                        "ext": "",
-                        "format_id": "",
-                        "http_headers": {},
-                        "is_direct_stream": True,
-                    }
-                    stream_id = _register_music_stream(track_payload)
-                    if stream_id:
-                        track_payload["worker_stream_id"] = stream_id
-                        track_payload["worker_stream_path"] = f"/music/stream/{stream_id}"
-                        track_payload["worker_stream_transport"] = "pcm_s16le_48k_stereo"
-                    tracks.append(track_payload)
-            except Exception as exc:
-                cli_stderr = f"{type(exc).__name__}: {_short_text(exc, limit=500)}"
-
-        if not tracks:
-            reason = cli_stderr or api_error or "yt-dlp não retornou URL de áudio"
-            print(
-                "[music-ytdlp] tracks=0 "
-                f"target={_short_text(target, limit=120)!r} cookies={'on' if cookies_ok else 'off'} "
-                f"js={','.join(js_runtimes) or 'off'} rc={cli_rc} erro={_short_text(reason, limit=240)}",
-                flush=True,
-            )
-
-        return {
-            "ok": True,
-            "summary": ("busca leve resolvida pelo yt-dlp no worker" if metadata_only and tracks else "música resolvida pelo yt-dlp no worker" if tracks else "yt-dlp não encontrou áudio tocável no worker"),
-            "query": query,
-            "target": target,
-            "tracks": tracks,
-            "tracks_found": len(tracks),
-            "is_playlist": is_playlist,
-            "playlist_title": playlist_title,
-            "truncated": bool(len(entries) > len(tracks)),
-            "metadata_only": bool(metadata_only),
-            "allow_playlist": bool(allow_playlist),
-            "elapsed_ms": round((time.time() - started) * 1000.0, 1),
-            "cookies": "on" if cookies_ok else "off",
-            "js_runtime": ",".join(js_runtimes) if js_runtimes else "",
-            "default_search": default_search,
-            "api_error": _short_text(api_error, limit=240),
-            "cli_rc": cli_rc,
-            "cli_error": _short_text(cli_stderr, limit=240),
-        }
+        return _phone_worker_music_bridge_module("resolucao").resolve_ytdlp(
+            body, job_timeout=self.job_timeout
+        )
 
     def _task_ffprobe_media(self, body: dict[str, Any]) -> dict[str, Any]:
         ffprobe = shutil.which("ffprobe")
@@ -7542,27 +6585,8 @@ def _service_status(service: str) -> dict[str, Any]:
             "scripts": _script_inventory(),
         }
     if service == "music-agent":
-        pid = _read_pid_file(_music_agent_pid_file())
-        snapshot = _safe_telemetry("music_agent", _music_agent_snapshot, {"ok": False, "available": False, "configured": False})
-        running = bool(snapshot.get("available") or _pid_alive(pid) or _pgrep_count("music_agent.py") > 0)
-        return {
-            "ok": True,
-            "service": service,
-            "manageable": True,
-            "running": running,
-            "available": bool(snapshot.get("available")),
-            "configured": bool(snapshot.get("configured")),
-            "version": snapshot.get("version") or snapshot.get("runtime_version") or "",
-            "file_version": snapshot.get("file_version") or "",
-            "needs_restart": bool(snapshot.get("needs_restart")),
-            "pid_file": str(_music_agent_pid_file()),
-            "pid_file_pid": pid,
-            "pid_file_alive": _pid_alive(pid),
-            "processes": _pgrep_count("music_agent.py"),
-            "script": str(_music_agent_start_script()),
-            "log_file": str(_music_agent_log_file()),
-            "health": snapshot,
-        }
+        return _phone_worker_music_bridge_module("servico").service_status(_music_service_hooks())
+
     tailscale = _tailscale_snapshot(probe_vps=True)
     return {
         "ok": True,
@@ -7608,36 +6632,7 @@ def _run_service_action(service: str, action: str) -> dict[str, Any]:
         return _service_status(service) | {"action": action}
 
     if service == "music-agent":
-        start_script = _music_agent_start_script()
-        if action in {"stop", "restart"}:
-            pid = _read_pid_file(_music_agent_pid_file())
-            if pid:
-                with contextlib.suppress(Exception):
-                    os.kill(int(pid), 15)
-            with contextlib.suppress(Exception):
-                _music_agent_pid_file().unlink()
-            for _ in range(4):
-                if _pgrep_count("music_agent.py") <= 0:
-                    break
-                time.sleep(0.25)
-            if _pgrep_count("music_agent.py") > 0:
-                with contextlib.suppress(Exception):
-                    _run_text_command(["pkill", "-f", "music_agent.py"], timeout=2.0, max_bytes=4096)
-                time.sleep(0.5)
-        result_extra: dict[str, Any] = {}
-        if action in {"start", "restart"}:
-            if not start_script.exists():
-                raise FileNotFoundError(str(start_script))
-            proc = subprocess.run(["bash", str(start_script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90.0)
-            result_extra.update({
-                "returncode": int(proc.returncode),
-                "stdout": _sanitize_log_text(proc.stdout.decode("utf-8", errors="replace"), limit=3000),
-                "stderr": _sanitize_log_text(proc.stderr.decode("utf-8", errors="replace"), limit=3000),
-            })
-        status = _service_status(service) | {"action": action, **result_extra}
-        if result_extra.get("returncode") not in (None, 0) and not bool(status.get("available")):
-            status["ok"] = False
-        return status
+        return _phone_worker_music_bridge_module("servico").run_service_action(action, _music_service_hooks())
 
     # phone-worker é o próprio processo atual. Parar/reiniciar precisa ser deferido
     # para o resultado do job conseguir voltar para a VPS antes do tmux/pkill.
@@ -10269,6 +9264,13 @@ _WORKER_UPDATE_TARGETS: dict[str, tuple[str, str, int]] = {
     "cogs/musica/runtime_telefone/agente/resolucao.py": ("worker", "cogs/musica/runtime_telefone/agente/resolucao.py", 0o644),
     "cogs/musica/runtime_telefone/agente/reproducao.py": ("worker", "cogs/musica/runtime_telefone/agente/reproducao.py", 0o644),
     "cogs/musica/runtime_telefone/agente/tts.py": ("worker", "cogs/musica/runtime_telefone/agente/tts.py", 0o644),
+    "cogs/musica/runtime_telefone/ponte_worker/__init__.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/__init__.py", 0o644),
+    "cogs/musica/runtime_telefone/ponte_worker/configuracao.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/configuracao.py", 0o644),
+    "cogs/musica/runtime_telefone/ponte_worker/streams.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/streams.py", 0o644),
+    "cogs/musica/runtime_telefone/ponte_worker/resolucao.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/resolucao.py", 0o644),
+    "cogs/musica/runtime_telefone/ponte_worker/proxy.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/proxy.py", 0o644),
+    "cogs/musica/runtime_telefone/ponte_worker/telemetria.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/telemetria.py", 0o644),
+    "cogs/musica/runtime_telefone/ponte_worker/servico.py": ("worker", "cogs/musica/runtime_telefone/ponte_worker/servico.py", 0o644),
     "start-phone-worker.sh": ("worker", "start-phone-worker.sh", 0o755),
     "start-phone-music-agent.sh": ("worker", "start-phone-music-agent.sh", 0o755),
     "watch-phone-worker.sh": ("worker", "watch-phone-worker.sh", 0o755),

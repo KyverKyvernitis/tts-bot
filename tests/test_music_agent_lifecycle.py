@@ -257,15 +257,15 @@ def test_lifecycle_module_remove_requires_same_owner():
 
 
 def test_phone_worker_music_dependencies_do_not_require_wavelink():
-    source = (ROOT / "deploy/termux/phone-worker/phone_worker.py").read_text(encoding="utf-8")
-    block = source.split("def _music_voice_dependency_specs()", 1)[1].split("\n\ndef ", 1)[0]
+    source = (ROOT / "cogs/musica/runtime_telefone/ponte_worker/telemetria.py").read_text(encoding="utf-8")
+    block = source.split("def music_voice_dependency_specs()", 1)[1].split("\n\ndef ", 1)[0]
     assert '"wavelink"' not in block
     assert '"yt-dlp"' in block
 
 
 def test_phone_worker_music_health_treats_tts_providers_as_optional():
-    source = (ROOT / "deploy/termux/phone-worker/phone_worker.py").read_text(encoding="utf-8")
-    block = source.split("def _music_voice_dependency_specs()", 1)[1].split("\n\ndef ", 1)[0]
+    source = (ROOT / "cogs/musica/runtime_telefone/ponte_worker/telemetria.py").read_text(encoding="utf-8")
+    block = source.split("def music_voice_dependency_specs()", 1)[1].split("\n\ndef ", 1)[0]
     assert '"gTTS": {"module": "gtts", "pip": "gTTS==2.5.4", "optional": True}' in block
     assert '"edge-tts": {"module": "edge_tts", "pip": "edge-tts==7.2.8", "optional": True}' in block
 
@@ -328,13 +328,15 @@ def test_music_agent_tts_missing_provider_fails_before_ffmpeg_pipe():
 
 
 def test_phone_worker_music_status_forwards_compact_guild_query():
-    source = (ROOT / "deploy/termux/phone-worker/phone_worker.py").read_text(encoding="utf-8")
-    block = source.split("def _task_music_agent_proxy", 1)[1].split("\n    def ", 1)[0]
+    source = (ROOT / "cogs/musica/runtime_telefone/ponte_worker/proxy.py").read_text(encoding="utf-8")
+    block = source.split("def proxy_music_agent", 1)[1]
     assert 'guild_id = int(body.get("guild_id") or 0)' in block
     assert '"compact": "1" if compact else "0"' in block
     assert 'known_revision = str(body.get("known_revision") or "").strip()' in block
     assert 'params["known_revision"] = known_revision' in block
     assert 'urllib.parse.urlencode' in block
+    worker_source = (ROOT / "deploy/termux/phone-worker/phone_worker.py").read_text(encoding="utf-8")
+    assert '_phone_worker_music_bridge_module("proxy").proxy_music_agent' in worker_source
 
 
 

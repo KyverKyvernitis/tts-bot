@@ -117,7 +117,8 @@ def test_bootstrap_core_starts_before_optional_runtime_files_arrive(tmp_path: Pa
 
     assert module.PHONE_WORKER_VERSION == phone_worker_version()
     assert module._APK_IDENTITY_MODULE is None
-    assert bootstrap_core.stat().st_size > 512 * 1024
+    assert module._PHONE_WORKER_MUSIC_BRIDGE_MODULES == {}
+    assert module._PHONE_WORKER_PCM_IO_MODULE is None
     assert (ROOT / "deploy/termux/phone-worker/phone_worker_bootstrap.py").stat().st_size < 256 * 1024
     with pytest.raises(RuntimeError, match="segundo estágio"):
         module.inspect_apk_identity(tmp_path / "missing.apk")

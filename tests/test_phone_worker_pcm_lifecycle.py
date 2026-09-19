@@ -15,13 +15,16 @@ def pcm(monkeypatch, tmp_path):
     spec = importlib.util.spec_from_file_location("phone_pcm_test", PHONE)
     worker = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(worker)
+    music = worker._phone_worker_music_bridge_module("streams")
+    music._MUSIC_STREAMS.clear()
+    music._MUSIC_PCM_PREPARATIONS.clear()
     clock = [1000.0]
-    worker.time = SimpleNamespace(time=lambda: clock[0])
-    monkeypatch.setattr(worker, "_music_pcm_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(music, "time", SimpleNamespace(time=lambda: clock[0]))
+    monkeypatch.setattr(music, "_music_pcm_cache_dir", lambda: tmp_path)
     monkeypatch.delenv("PHONE_WORKER_MUSIC_STREAM_TTL_SECONDS", raising=False)
     monkeypatch.delenv("PHONE_WORKER_MUSIC_PREPARE_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("PHONE_WORKER_MUSIC_PREPARE_MAX_DURATION_SECONDS", raising=False)
-    return worker, clock, tmp_path
+    return music, clock, tmp_path
 
 
 @pytest.mark.parametrize(("configured", "ttl"), [("1", 300), ("999999", 21600), ("invalid", 7200)])

@@ -349,7 +349,7 @@ def test_pcm_command_preserves_input_headers_codec_and_audio_parameters(local, m
 
 def test_warm_pcm_service_observes_rebound_io_clock_registry_and_lock(local, monkeypatch):
     worker = local.worker
-    worker._phone_worker_pcm_io_module()
+    worker._pcm_io()
     directory = local.control / "rebound"
     directory.mkdir()
     monkeypatch.setattr(worker, "_music_pcm_cache_dir", lambda: directory)
@@ -392,7 +392,7 @@ def test_warm_pcm_service_observes_rebound_io_clock_registry_and_lock(local, mon
 
 def test_warm_prepared_service_uses_live_frame_size_and_file_descriptor(local, monkeypatch):
     worker = local.worker
-    worker._phone_worker_pcm_io_module()
+    worker._pcm_io()
     target = local.cache / "frames.pcm"
     target.write_bytes(b"a" * 1024)
     reads, descriptors = [], []
@@ -427,9 +427,9 @@ def test_warm_prepared_service_uses_live_frame_size_and_file_descriptor(local, m
 def test_missing_pcm_module_returns_one_live_error_without_starting_process(local, monkeypatch):
     worker = local.worker
     key, _ = register(local)
-    monkeypatch.setattr(worker, "__file__", str(local.control / "missing/phone_worker.py"))
     monkeypatch.setattr(worker, "_music_prepared_mode_enabled", lambda: False)
+    monkeypatch.setattr(worker, "_pcm_io", lambda: (_ for _ in ()).throw(RuntimeError("pcm_io ausente")))
     monkeypatch.setattr(local.api, "Popen", lambda *a, **kw: pytest.fail("missing module started process"))
     handler = Handler(io.BytesIO())
     worker._stream_music_pcm(handler, key)
-    assert handler.responses == [500] and worker._PHONE_WORKER_PCM_IO_MODULE is None
+    assert handler.responses == [500]

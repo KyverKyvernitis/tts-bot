@@ -29,7 +29,14 @@ NEW_FILES = {"phone_worker_runtime/__init__.py", "phone_worker_runtime/config.py
              "cogs/musica/runtime_telefone/agente/mixer_pcm.py",
              "cogs/musica/runtime_telefone/agente/resolucao.py",
              "cogs/musica/runtime_telefone/agente/reproducao.py",
-             "cogs/musica/runtime_telefone/agente/tts.py"}
+             "cogs/musica/runtime_telefone/agente/tts.py",
+             "cogs/musica/runtime_telefone/ponte_worker/__init__.py",
+             "cogs/musica/runtime_telefone/ponte_worker/configuracao.py",
+             "cogs/musica/runtime_telefone/ponte_worker/streams.py",
+             "cogs/musica/runtime_telefone/ponte_worker/resolucao.py",
+             "cogs/musica/runtime_telefone/ponte_worker/proxy.py",
+             "cogs/musica/runtime_telefone/ponte_worker/telemetria.py",
+             "cogs/musica/runtime_telefone/ponte_worker/servico.py"}
 
 
 def load(name, path):
@@ -119,7 +126,10 @@ assert worker._phone_worker_tts_cache_module().__file__.startswith(str(worker.Pa
 assert worker._phone_worker_tts_android_module().__file__.startswith(str(worker.Path(sys.argv[1]).parent))
 assert worker._phone_worker_tts_providers_module().__file__.startswith(str(worker.Path(sys.argv[1]).parent))
 assert worker._phone_worker_pcm_io_module().__file__.startswith(str(worker.Path(sys.argv[1]).parent))
-assert worker._MUSIC_PCM_PREPARATIONS == {}
+assert worker._PHONE_WORKER_MUSIC_BRIDGE_MODULES == {}
+music_streams = worker._phone_worker_music_bridge_module("streams")
+assert music_streams._MUSIC_PCM_PREPARATIONS == {}
+assert music_streams.__file__.startswith(str(worker.Path(sys.argv[1]).parent))
 assert worker._tts_agent_normalize_engine("google-cloud") == "gtts"
 assert worker._TETO_RENDERER is None and worker._APK_IDENTITY_MODULE is None
 '''

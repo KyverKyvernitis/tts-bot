@@ -208,3 +208,42 @@ def test_entrypoint_music_agent_nao_reimplementa_estado_mixer_e_utilitarios() ->
     assert "async def _play_next(" not in texto
     assert "async def cmd_voice_tts(" not in texto
     assert "async def _recover_current_stream(" not in texto
+
+
+def test_phone_worker_nao_reimplementa_dominio_musical() -> None:
+    ponte = ROOT / "cogs/musica/runtime_telefone/ponte_worker"
+    for nome in (
+        "configuracao.py",
+        "streams.py",
+        "resolucao.py",
+        "proxy.py",
+        "telemetria.py",
+        "servico.py",
+    ):
+        assert (ponte / nome).is_file(), nome
+
+    worker = _texto("deploy/termux/phone-worker/phone_worker.py")
+
+    # O worker genérico só mantém adaptadores lazy. Implementação do domínio
+    # de música precisa permanecer na ponte canônica dentro de cogs/musica.
+    assert 'import yt_dlp' not in worker
+    assert 'YoutubeDL(' not in worker
+    assert '_MUSIC_STREAMS =' not in worker
+    assert '_MUSIC_PCM_PREPARATIONS =' not in worker
+    assert 'def _probe_local_lavalink_http(' not in worker
+    assert 'def _ensure_phone_lavalink_started(' not in worker
+    assert 'def _phone_lavalink_port(' not in worker
+    assert '_phone_worker_music_bridge_module("streams")' in worker
+    assert '_phone_worker_music_bridge_module("resolucao")' in worker
+    assert '_phone_worker_music_bridge_module("proxy")' in worker
+    assert '_phone_worker_music_bridge_module("telemetria")' in worker
+    assert '_phone_worker_music_bridge_module("servico")' in worker
+
+    resolucao = _texto("cogs/musica/runtime_telefone/ponte_worker/resolucao.py")
+    streams = _texto("cogs/musica/runtime_telefone/ponte_worker/streams.py")
+    telemetria = _texto("cogs/musica/runtime_telefone/ponte_worker/telemetria.py")
+    servico = _texto("cogs/musica/runtime_telefone/ponte_worker/servico.py")
+    assert "yt_dlp" in resolucao
+    assert "_MUSIC_STREAMS" in streams
+    assert "music_agent_snapshot" in telemetria
+    assert "run_service_action" in servico
