@@ -285,3 +285,72 @@ def test_phone_worker_nao_reimplementa_dominio_musical() -> None:
     assert "_MUSIC_STREAMS" in streams
     assert "music_agent_snapshot" in telemetria
     assert "run_service_action" in servico
+
+
+def test_artefatos_legados_de_musica_nao_ficam_espalhados_no_repositorio() -> None:
+    proibidos = (
+        "deploy/systemd/lavalink.service",
+        "deploy/systemd/phone-lavalink-watch.service",
+        "deploy/systemd/phone-lavalink-watch.timer",
+        "deploy/systemd/vps/lavalink.service.disabled-reference",
+        "deploy/systemd/vps/lavalink.service.d.disabled-reference/README.md",
+        "deploy/systemd/vps/phone-lavalink-watch.service",
+        "deploy/systemd/vps/phone-lavalink-watch.timer",
+        "deploy/termux/phone-lavalink/phone-lavalink.env.example",
+        "deploy/termux/phone-lavalink/start-phone-lavalink.sh",
+        "deploy/termux/phone-lavalink/watch-phone-lavalink.sh",
+        "scripts/phone-lavalink-watch.sh",
+    )
+    for rel in proibidos:
+        assert not (ROOT / rel).exists(), rel
+
+    # Snapshot histórico duplicado continha outro phone_worker/music_agent e
+    # podia reintroduzir implementação musical fora do domínio canônico. O
+    # updater remove arquivos, mas pode deixar diretórios vazios no disco.
+    snapshot = ROOT / "tts-bot-main"
+    assert not snapshot.exists() or not any(p.is_file() for p in snapshot.rglob("*"))
+
+
+def test_aliases_do_antigo_phone_lavalink_nao_voltam_ao_runtime_generico() -> None:
+    fontes = (
+        "scripts/sync-phone-worker.sh",
+        "scripts/phone-worker-client.py",
+        "scripts/phone-worker-watch.sh",
+        "deploy/termux/phone-worker/phone_worker.py",
+        "updater/core/mudancas.sh",
+        "updater/core/aplicacao.sh",
+        "updater/core/atualizar.sh",
+        "updater/core/progresso.sh",
+        "updater/core/validacao.sh",
+        "updater/sistema/instalar.sh",
+    )
+    proibidos = (
+        "PHONE_LAVALINK",
+        "AUX_LAVALINK",
+        "phone-lavalink",
+        "phone_lavalink",
+        "PHONE_LAVALINK_WATCH_CHANGED",
+    )
+    for rel in fontes:
+        texto = _texto(rel)
+        for token in proibidos:
+            assert token not in texto, f"{token} reapareceu em {rel}"
+
+
+def test_updater_nao_pode_reativar_lavalink_local_da_vps() -> None:
+    updater = "\n".join(
+        _texto(rel)
+        for rel in (
+            "updater/core/mudancas.sh",
+            "updater/core/aplicacao.sh",
+            "updater/core/atualizar.sh",
+            "updater/core/validacao.sh",
+            "updater/sistema/instalar.sh",
+        )
+    )
+    assert "VPS_LAVALINK_ENABLED" not in updater
+    assert "INSTALL_LEGACY_VPS_LAVALINK" not in updater
+    assert "--install-legacy-vps-lavalink" not in updater
+    assert "deploy/systemd/lavalink.service" not in updater
+    assert "systemctl enable lavalink.service" not in updater
+    assert "systemctl restart lavalink.service" not in updater

@@ -965,7 +965,6 @@ zip_progress_only_site_changed() {
   (( REQUIREMENTS_CHANGED == 0 )) || return 1
   (( AUDIO_SYSTEMD_CHANGED == 0 )) || return 1
   (( CLEANUP_CHANGED == 0 )) || return 1
-  (( PHONE_LAVALINK_WATCH_CHANGED == 0 )) || return 1
   (( PHONE_WORKER_WATCH_CHANGED == 0 )) || return 1
   (( VPS_SYSTEMD_UNITS_CHANGED == 0 )) || return 1
   (( ALERT_CHANGED == 0 )) || return 1

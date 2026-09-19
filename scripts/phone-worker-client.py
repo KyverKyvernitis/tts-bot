@@ -47,7 +47,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Cliente simples do phone-worker.")
     parser.add_argument("command", choices=["health", "status", "sha256", "zip", "zip-validate", "maintenance-plan", "log-extract", "log-summary", "text-stats", "ffprobe", "ffmpeg-convert"])
     parser.add_argument("paths", nargs="*")
-    parser.add_argument("--host", default=env.get("PHONE_WORKER_HOST") or env.get("AUX_LAVALINK_HOST") or "")
+    parser.add_argument("--host", default=env.get("PHONE_WORKER_HOST") or "")
     parser.add_argument("--port", default=env.get("PHONE_WORKER_PORT", "8766"))
     parser.add_argument("--token", default=env.get("PHONE_WORKER_TOKEN", ""))
     parser.add_argument("--timeout", type=float, default=15.0)

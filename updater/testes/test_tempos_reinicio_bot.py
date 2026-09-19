@@ -61,13 +61,13 @@ def test_restart_verifier_uses_cached_ready_flag_instead_of_reparsing_json() -> 
     assert 'append_update_timing_ms "bot.verify_total"' in block
 
 
-def test_restart_command_and_optional_lavalink_wait_have_separate_timings() -> None:
+def test_restart_command_has_own_timing_without_legacy_lavalink_wait() -> None:
     source = UPDATER.read_text(encoding="utf-8")
     start = source.index("deploy_bot() {")
     end = source.index("\nfrontend_release_root_for_key() {", start)
     block = source[start:end]
     assert 'append_update_timing_ms "bot.restart_command"' in block
-    assert 'append_update_timing_ms "bot.lavalink_wait"' in block
+    assert 'bot.lavalink_wait' not in block
     assert block.index('append_update_timing_ms "bot.restart_command"') < block.index("verify_bot_after_restart")
 
 

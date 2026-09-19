@@ -509,15 +509,14 @@ def test_systemd_installer_change_does_not_restart_unrelated_subsystems() -> Non
 source <(awk '/^classify_changed_files[(][)]/{{flag=1}} /^fast_reload_modules_for_changed_files[(][)]/{{flag=0}} flag' {UPDATER!s})
 CHANGED_FILES_RAW='updater/sistema/instalar.sh'
 classify_changed_files
-printf '%s %s %s %s %s\n' \
+printf '%s %s %s %s\n' \
   "$VPS_SYSTEMD_UNITS_CHANGED" \
   "$AUDIO_SYSTEMD_CHANGED" \
   "$CLEANUP_CHANGED" \
-  "$PHONE_LAVALINK_WATCH_CHANGED" \
   "$PHONE_WORKER_WATCH_CHANGED"
 """
     result = _run_bash(harness)
-    assert result.stdout.strip() == "1 0 0 0 0"
+    assert result.stdout.strip() == "1 0 0 0"
 
 
 def test_terminal_refuses_self_stop_without_spawning_a_shutdown_process() -> None:

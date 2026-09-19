@@ -33,19 +33,16 @@ PY_SANITIZE_LAVALINK
       changed_any=1
     fi
   done
-  if ! env_truthy VPS_LAVALINK_ENABLED; then
-    systemctl stop lavalink.service >/dev/null 2>&1 || true
-    systemctl disable lavalink.service >/dev/null 2>&1 || true
-    systemctl reset-failed lavalink.service >/dev/null 2>&1 || true
-    # systemctl mask falha quando /etc/systemd/system/lavalink.service é um arquivo
-    # real. Fazemos a máscara idempotente manualmente para impedir restart-loop local.
-    if [[ -e /etc/systemd/system/lavalink.service && ! -L /etc/systemd/system/lavalink.service ]]; then
-      cp -a /etc/systemd/system/lavalink.service "/etc/systemd/system/lavalink.service.backup.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
-      mv /etc/systemd/system/lavalink.service "/etc/systemd/system/lavalink.service.disabled.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
-    fi
-    ln -sfn /dev/null /etc/systemd/system/lavalink.service 2>/dev/null || true
-    changed_any=1
+  systemctl stop lavalink.service >/dev/null 2>&1 || true
+  systemctl disable lavalink.service >/dev/null 2>&1 || true
+  systemctl reset-failed lavalink.service >/dev/null 2>&1 || true
+  # O serviço local é legado e não pode mais ser reativado pelo updater.
+  if [[ -e /etc/systemd/system/lavalink.service && ! -L /etc/systemd/system/lavalink.service ]]; then
+    cp -a /etc/systemd/system/lavalink.service "/etc/systemd/system/lavalink.service.backup.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    mv /etc/systemd/system/lavalink.service "/etc/systemd/system/lavalink.service.disabled.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
   fi
+  ln -sfn /dev/null /etc/systemd/system/lavalink.service 2>/dev/null || true
+  changed_any=1
   if (( changed_any == 1 )); then
     systemctl daemon-reload || true
   fi
@@ -261,46 +258,18 @@ deploy_alert_unit() {
 deploy_audio_services() {
   sanitize_vps_lavalink_units
   if (( AUDIO_SYSTEMD_CHANGED == 0 )); then
-    AUDIO_SERVICES_STATUS="não alterado; Lavalink VPS sanitizado"
+    AUDIO_SERVICES_STATUS="não alterado; serviço local legado de áudio sanitizado"
     return 0
   fi
 
   STAGE="configuração dos serviços de áudio"
-  local installed=0 lavalink_unit_changed=0
-
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^deploy/systemd/lavalink\.service$'; then
-    lavalink_unit_changed=1
-    if env_truthy VPS_LAVALINK_ENABLED && [[ -f "$REPO_DIR/deploy/systemd/lavalink.service" ]]; then
-      cp "$REPO_DIR/deploy/systemd/lavalink.service" /etc/systemd/system/lavalink.service
-      installed=1
-    fi
-  fi
-
-  if printf '%s\n' "$CHANGED_FILES_RAW" | grep -q '^deploy/systemd/tts-bot\.service$'; then
-    if [[ -f "$REPO_DIR/deploy/systemd/tts-bot.service" ]]; then
-      cp "$REPO_DIR/deploy/systemd/tts-bot.service" /etc/systemd/system/tts-bot.service
-      installed=1
-    fi
-  fi
-
-  if (( installed == 1 )); then
+  if printf '%s
+' "$CHANGED_FILES_RAW" | grep -q '^deploy/systemd/tts-bot\.service$'     && [[ -f "$REPO_DIR/deploy/systemd/tts-bot.service" ]]; then
+    cp "$REPO_DIR/deploy/systemd/tts-bot.service" /etc/systemd/system/tts-bot.service
     systemctl daemon-reload
-  fi
-
-  if (( lavalink_unit_changed == 1 )); then
-    if env_truthy VPS_LAVALINK_ENABLED; then
-      systemctl enable "$LAVALINK_SERVICE" >/dev/null 2>&1 || true
-      systemctl restart "$LAVALINK_SERVICE" || true
-      if systemctl is-active --quiet "$LAVALINK_SERVICE"; then
-        AUDIO_SERVICES_STATUS="Lavalink ativo"
-      else
-        AUDIO_SERVICES_STATUS="Lavalink configurado, mas não ficou ativo"
-      fi
-    else
-      AUDIO_SERVICES_STATUS="Lavalink VPS não iniciado; node de áudio roda no phone worker/Music Agent"
-    fi
+    AUDIO_SERVICES_STATUS="unit do bot atualizada; serviço local legado de áudio permanece desativado"
   else
-    AUDIO_SERVICES_STATUS="units atualizadas; Lavalink não alterado"
+    AUDIO_SERVICES_STATUS="nenhuma unit de áudio instalável alterada"
   fi
 }
 
@@ -343,21 +312,6 @@ deploy_cleanup_timer() {
   fi
 }
 
-
-deploy_phone_lavalink_watch() {
-  # Lavalink/NodeLink foi removido do worker. Esta etapa não instala mais unit
-  # nova; ela só desativa qualquer timer/service antigo que ainda exista na VPS.
-  if (( PHONE_LAVALINK_WATCH_CHANGED == 0 )); then
-    PHONE_LAVALINK_WATCH_STATUS="removido do fluxo"
-    return 0
-  fi
-
-  STAGE="desativando watcher legado do Lavalink"
-  systemctl disable --now phone-lavalink-watch.timer phone-lavalink-watch.service >/dev/null 2>&1 || true
-  systemctl reset-failed phone-lavalink-watch.timer phone-lavalink-watch.service >/dev/null 2>&1 || true
-  systemctl daemon-reload >/dev/null 2>&1 || true
-  PHONE_LAVALINK_WATCH_STATUS="desativado/removido do fluxo"
-}
 
 
 deploy_phone_worker_watch() {
@@ -615,9 +569,6 @@ deploy_bot() {
   if (( CLEANUP_CHANGED == 1 )); then
     deploy_cleanup_timer
   fi
-  if (( PHONE_LAVALINK_WATCH_CHANGED == 1 )); then
-    deploy_phone_lavalink_watch
-  fi
   if (( PHONE_WORKER_WATCH_CHANGED == 1 )); then
     deploy_phone_worker_watch
   fi
@@ -683,14 +634,6 @@ deploy_bot() {
     restart_bot_service_once
     bot_phase_finished_ms="$(update_now_ms)"
     append_update_timing_ms "bot.restart_command" "$((bot_phase_finished_ms - bot_phase_started_ms))"
-
-    if env_truthy LAVALINK_ENABLED; then
-      STAGE="espera curta do Lavalink"
-      bot_phase_started_ms="$(update_now_ms)"
-      wait_for_lavalink_ready || true
-      bot_phase_finished_ms="$(update_now_ms)"
-      append_update_timing_ms "bot.lavalink_wait" "$((bot_phase_finished_ms - bot_phase_started_ms))"
-    fi
 
     STAGE="validação fatal do bot"
     local health_profile

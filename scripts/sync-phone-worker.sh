@@ -15,7 +15,7 @@ if [ -f "$ROOT_DIR/.env" ]; then
   set +a
 fi
 
-PHONE_HOST="${PHONE_WORKER_HOST:-${PHONE_LAVALINK_HOST:-}}"
+PHONE_HOST="${PHONE_WORKER_HOST:-}"
 PHONE_USER="${PHONE_WORKER_SSH_USER:-}"
 PHONE_PORT="${PHONE_WORKER_SSH_PORT:-8022}"
 PHONE_START_COMMAND="${PHONE_WORKER_START_COMMAND:-/data/data/com.termux/files/home/phone-worker/start-phone-worker.sh}"

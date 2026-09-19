@@ -84,7 +84,6 @@ classify_changed_files() {
   REQUIREMENTS_CHANGED=0
   AUDIO_SYSTEMD_CHANGED=0
   CLEANUP_CHANGED=0
-  PHONE_LAVALINK_WATCH_CHANGED=0
   PHONE_WORKER_WATCH_CHANGED=0
   VPS_SYSTEMD_UNITS_CHANGED=0
   ALERT_CHANGED=0
@@ -156,7 +155,7 @@ classify_changed_files() {
     [[ "$file" == "requirements.txt" || "$file" == "requirements.lock" ]] && REQUIREMENTS_CHANGED=1
 
     case "$file" in
-      deploy/systemd/lavalink.service|deploy/systemd/tts-bot.service)
+      deploy/systemd/tts-bot.service)
         AUDIO_SYSTEMD_CHANGED=1
         ;;
     esac
@@ -173,11 +172,6 @@ classify_changed_files() {
     case "$file" in
       cleanup-audio-temp.sh|deploy/systemd/cleanup-audio-temp.service|deploy/systemd/cleanup-audio-temp.timer)
         CLEANUP_CHANGED=1
-        ;;
-    esac
-    case "$file" in
-      scripts/phone-lavalink-watch.sh|deploy/systemd/phone-lavalink-watch.service|deploy/systemd/phone-lavalink-watch.timer|deploy/termux/phone-lavalink/*)
-        PHONE_LAVALINK_WATCH_CHANGED=1
         ;;
     esac
     case "$file" in

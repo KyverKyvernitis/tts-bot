@@ -24,7 +24,6 @@ STATUS_FILE="${STATUS_FILE:-$REPO_DIR/data/vps-systemd-install-status.json}"
 DRY_RUN=0
 AUDIT_ONLY=0
 FROM_UPDATER=0
-INSTALL_LEGACY_VPS_LAVALINK=0
 NOW="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="$BACKUP_ROOT/$NOW"
 CHANGED=0
@@ -42,7 +41,6 @@ for arg in "$@"; do
     --dry-run) DRY_RUN=1 ;;
     --audit) AUDIT_ONLY=1; DRY_RUN=1 ;;
     --from-updater) FROM_UPDATER=1 ;;
-    --install-legacy-vps-lavalink) INSTALL_LEGACY_VPS_LAVALINK=1 ;;
     *) echo "argumento desconhecido: $arg" >&2; exit 2 ;;
   esac
 done
@@ -239,10 +237,6 @@ PY_SANITIZE
 }
 
 mask_vps_lavalink() {
-  if [[ "$INSTALL_LEGACY_VPS_LAVALINK" == "1" ]] || truthy_env VPS_LAVALINK_ENABLED; then
-    warn "VPS_LAVALINK_ENABLED ativo; não vou mascarar lavalink.service"
-    return 0
-  fi
   if [[ "$DRY_RUN" == "1" ]]; then
     action "dry-run: manteria lavalink.service local inativo/mascarado"
     return 0
@@ -770,8 +764,6 @@ apply_service_policy() {
     action "phone-worker-watch instalado, mas inativo por padrão"
   fi
 
-  systemctl disable --now phone-lavalink-watch.timer phone-lavalink-watch.service >/dev/null 2>&1 || true
-  action "phone-lavalink-watch removido do fluxo: Lavalink/NodeLink não é mais usado"
 }
 
 prune_systemd_backups() {

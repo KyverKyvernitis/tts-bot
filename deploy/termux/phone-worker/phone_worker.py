@@ -5642,7 +5642,7 @@ class WorkerHandler(BaseHTTPRequestHandler):
             "lavalink": r"lavalink|lavasrc|trackexception|loadexception",
             "yt_dlp": r"yt[-_ ]?dlp|youtube|googlevideo",
             "rate_limit": r"rate.?limit|too many requests|429",
-            "phone_worker": r"phone-worker|phone_lavalink|phone-lavalink",
+            "phone_worker": r"phone-worker|phone_worker",
         }
         compiled = {key: re.compile(pattern, re.IGNORECASE) for key, pattern in patterns.items()}
         counts = {key: 0 for key in compiled}
@@ -6052,7 +6052,7 @@ def _sshd_snapshot() -> dict[str, Any]:
     que a VPS tenta usar parece existir. Isso ajuda o painel a diferenciar
     "Tailscale ativo" de "SSHD/porta indisponível".
     """
-    configured_port = str(os.getenv("PHONE_WORKER_SSH_PORT") or os.getenv("PHONE_LAVALINK_SSH_PORT") or "8022").strip() or "8022"
+    configured_port = str(os.getenv("PHONE_WORKER_SSH_PORT") or "8022").strip() or "8022"
     result: dict[str, Any] = {
         "ok": False,
         "source": "termux-sshd",

@@ -600,7 +600,6 @@ recompute_update_warning_flag() {
   if has_real_warning_text "${ALERT_UNIT_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
   if has_real_warning_text "${CRONTAB_HEALTH_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
   if has_real_warning_text "${CLEANUP_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
-  if has_real_warning_text "${PHONE_LAVALINK_WATCH_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
   if has_real_warning_text "${PHONE_WORKER_WATCH_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
   if has_real_warning_text "${PHONE_WORKER_SYNC_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
   if has_real_warning_text "${CORE_WORKER_AGENT_UPDATE_STATUS:-}"; then UPDATE_HAS_WARNINGS=1; fi
@@ -620,19 +619,6 @@ env_truthy() {
   fi
   value="${value,,}"
   [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "y" || "$value" == "on" || "$value" == "sim" ]]
-}
-
-wait_for_lavalink_ready() {
-  # Arquitetura atual: Lavalink da VPS não é usado. Quando música usa phone worker,
-  # esperar lavalink.service local só cria travamento/restart-loop.
-  if ! env_truthy VPS_LAVALINK_ENABLED; then
-    return 0
-  fi
-  if [[ -x "$REPO_DIR/scripts/wait-audio-node-ready.py" ]]; then
-    sudo -u ubuntu -H "$REPO_DIR/scripts/wait-audio-node-ready.py" --timeout "${AUDIO_NODE_STARTUP_WAIT_SECONDS:-20}"
-    return $?
-  fi
-  return 0
 }
 
 short_commit() {
