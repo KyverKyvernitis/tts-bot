@@ -47,7 +47,33 @@ SENSITIVE_PATTERNS = (
     r"(?i)([A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET|COOKIE|CREDENTIAL|WEBHOOK|MONGODB_URI|MONGO_URI|ARL)[A-Z0-9_]*=).*",
 )
 
-REPO_ROOT = Path(getattr(config, "BASE_DIR", Path(__file__).resolve().parents[1])).resolve()
+def _discover_repo_root() -> Path:
+    """Descobre a raiz do projeto sem depender da configuração de música.
+
+    ``cogs.musica.configuracao`` é deliberadamente restrito ao domínio musical e
+    não expõe ``BASE_DIR``. Durante a modularização, usar ``parents[1]`` como
+    fallback passou a apontar para ``cogs/musica`` em vez da raiz do bot.
+
+    Mantemos compatibilidade caso uma configuração futura exponha ``BASE_DIR``,
+    mas só aceitamos candidatos que realmente tenham a estrutura do projeto.
+    """
+    candidates: list[Path] = []
+    configured = getattr(config, "BASE_DIR", None)
+    if configured:
+        candidates.append(Path(configured).expanduser())
+
+    # servico.py -> diagnostico -> musica -> cogs -> <repo>
+    candidates.append(Path(__file__).resolve().parents[3])
+
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if (resolved / "bot.py").is_file() and (resolved / "cogs").is_dir():
+            return resolved
+
+    return candidates[-1].resolve()
+
+
+REPO_ROOT = _discover_repo_root()
 DEFAULT_MUSICNODE_DB = REPO_ROOT / "data" / "musicnode" / "musicnode.db"
 
 VALID_SPOTIFY_TEST_URL = "https://open.spotify.com/track/3BxXcWY0ZYkNBhiOvy6vWr?si=I69KMQsjTB2g4La8tLAOCw"
@@ -1517,10 +1543,15 @@ BASE_ARCHIVE_MANIFEST_NAMES = {
 }
 
 
-def _git_cmd(args: list[str], *, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
+def _git_cmd(
+    args: list[str],
+    *,
+    timeout: float = 10.0,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
-        cwd=str(REPO_ROOT),
+        cwd=str(cwd or REPO_ROOT),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1611,7 +1642,14 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
     if root_check.returncode != 0:
         return None, filename, "Repo não parece ter .git acessível; não foi possível gerar a base rastreada pelo Git.", ""
 
-    ls = _git_cmd(["ls-files", "-z"], timeout=20.0)
+    repo_root_text = (root_check.stdout or "").strip()
+    if not repo_root_text:
+        return None, filename, "Git não retornou a raiz do repositório.", ""
+    repo_root = Path(repo_root_text).resolve()
+
+    # Importante: `git ls-files` executado a partir de um subdiretório limita a
+    # listagem àquele prefixo. Sempre rodar da raiz devolvida pelo próprio Git.
+    ls = _git_cmd(["ls-files", "-z"], timeout=20.0, cwd=repo_root)
     if ls.returncode != 0:
         return None, filename, f"git ls-files falhou: {redact(ls.stderr or ls.stdout)}", ""
 
@@ -1619,9 +1657,9 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
     if not rels:
         return None, filename, "git ls-files não retornou arquivos rastreados.", ""
 
-    status = _git_cmd(["status", "--short"], timeout=12.0)
-    commit = _git_cmd(["rev-parse", "HEAD"], timeout=8.0)
-    branch = _git_cmd(["rev-parse", "--abbrev-ref", "HEAD"], timeout=8.0)
+    status = _git_cmd(["status", "--short"], timeout=12.0, cwd=repo_root)
+    commit = _git_cmd(["rev-parse", "HEAD"], timeout=8.0, cwd=repo_root)
+    branch = _git_cmd(["rev-parse", "--abbrev-ref", "HEAD"], timeout=8.0, cwd=repo_root)
 
     skipped: list[str] = []
     added = 0
@@ -1631,7 +1669,7 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
             manifest_lines = [
                 "Base gerada pelo /vps",
                 f"Gerado em: {_now_stamp()}",
-                f"Repo root: {REPO_ROOT}",
+                f"Repo root: {repo_root}",
                 f"Branch: {(branch.stdout or '').strip() if branch.returncode == 0 else 'desconhecida'}",
                 f"Commit HEAD: {(commit.stdout or '').strip() if commit.returncode == 0 else 'desconhecido'}",
                 "Conteúdo: arquivos retornados por `git ls-files`, usando o conteúdo atual do disco.",
@@ -1651,7 +1689,7 @@ def build_git_tracked_base_archive_sync() -> tuple[bytes | None, str, str, str]:
                 if _is_sensitive_tracked_file(safe_rel):
                     skipped.append(f"{safe_rel} (sensível)")
                     continue
-                src = REPO_ROOT / safe_rel
+                src = repo_root / safe_rel
                 if not src.is_file():
                     skipped.append(f"{safe_rel} (não é arquivo regular)")
                     continue
